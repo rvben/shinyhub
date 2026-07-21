@@ -31,14 +31,42 @@ need_daemon_host() {
 copy_binary() {
   local src="$1" dest="$2" chunk_dir part
   chunk_dir="$(mktemp -d)"
+  # Host-side chunk scratch space is removed whenever this function returns,
+  # on the success path and on any failure. Self-clears after firing so it
+  # does not re-fire on a later, unrelated function return: RETURN traps are
+  # process-global in bash, not scoped to the function that set them.
+  trap 'rm -rf "$chunk_dir"; trap - RETURN' RETURN
+
   split -b 1000000 "$src" "$chunk_dir/part_"
   echo "==> copying $(basename "$src") in $(ls "$chunk_dir" | wc -l | tr -d ' ') chunks"
   husker exec "$VM" -- rm -f "$dest"
   for part in "$chunk_dir"/part_*; do
     husker cp "$part" "$VM:/tmp/$(basename "$part")" >/dev/null
-    husker exec "$VM" -- sh -c "cat /tmp/$(basename "$part") >> $dest && rm -f /tmp/$(basename "$part")"
+    husker exec "$VM" -- sh -c "cat /tmp/$(basename "$part") >> $dest && rm -f /tmp/$(basename "$part")" >/dev/null
   done
-  rm -rf "$chunk_dir"
+  # Best-effort sweep: a chunk whose cat/rm failed mid-loop above leaves its
+  # /tmp/part_* behind on the guest, since that iteration's own rm never ran.
+  # Runs regardless of how the loop went, so success and failure both leave
+  # the guest's /tmp clean.
+  husker exec "$VM" -- sh -c "rm -f /tmp/part_*" >/dev/null 2>&1 || true
+
+  echo "==> verifying transferred binary checksum"
+  local src_sum guest_sum
+  # macOS has no sha256sum; shasum -a 256 is the equivalent. Both tools print
+  # "<hex digest>  <filename>", differently padded, so only the hex field is
+  # compared, extracted by pattern rather than by column to stay robust to
+  # either tool's exact spacing.
+  if command -v sha256sum >/dev/null 2>&1; then
+    src_sum="$(sha256sum "$src" | grep -oE '[0-9a-f]{64}' | head -1)" || true
+  else
+    src_sum="$(shasum -a 256 "$src" | grep -oE '[0-9a-f]{64}' | head -1)" || true
+  fi
+  guest_sum="$(husker exec "$VM" -o text -- sha256sum "$dest" | grep -oE '[0-9a-f]{64}' | head -1)" || true
+  if [ -z "$src_sum" ] || [ "$src_sum" != "$guest_sum" ]; then
+    echo "checksum mismatch after transferring $(basename "$src"): host=${src_sum:-<empty>} guest=${guest_sum:-<empty>}" >&2
+    return 1
+  fi
+  echo "==> checksum verified ($src_sum)"
 }
 
 up() {
@@ -52,7 +80,32 @@ up() {
   echo "==> booting VM $VM (${CPUS} vCPU, ${MEM} MiB)"
   # --disk-size 8G: the catalog image's default rootfs (270 MiB) has no room
   # for the shinyhub binary (~90 MiB) plus the pip-installed shiny package.
-  husker run --name "$VM" --cpus "$CPUS" --memory "$MEM" --disk-size 8G "$IMAGE" >/dev/null
+  # Guard the assignment with if/else, not a bare "run_out=$(...); run_status=$?"
+  # pair: under set -e a bare failing assignment aborts the script before
+  # run_status=$? ever runs. A leftover VM of this name from a prior `up`
+  # (never destroyed by `down`) is a real, observed failure mode here, and
+  # husker's raw JSON error for it is worth translating into a plain message
+  # that points at the fix, rather than leaking husker internals.
+  local run_out run_status
+  if run_out="$(husker run --name "$VM" --cpus "$CPUS" --memory "$MEM" --disk-size 8G "$IMAGE" 2>&1)"; then
+    :
+  else
+    run_status=$?
+    if printf '%s' "$run_out" | grep -q '"kind":"vm_already_exists"'; then
+      echo "VM $VM already exists on the daemon; run '$0 down' first, or 'husker resume $VM' if it is suspended" >&2
+    else
+      echo "failed to boot VM $VM: $run_out" >&2
+    fi
+    exit "$run_status"
+  fi
+
+  # The VM now exists on the shared daemon. Any failure from here on must not
+  # leave it running: arm a trap that destroys it, disarmed only once this
+  # function reaches its successful return below. down/url/status never call
+  # up(), so this trap is never installed on those code paths, and it cannot
+  # fire during them.
+  trap 'echo "==> provisioning failed, destroying $VM" >&2; husker destroy "$VM" --yes >/dev/null 2>&1 || true' EXIT
+
   husker wait "$VM" >/dev/null
 
   echo "==> provisioning"
@@ -83,6 +136,7 @@ up() {
   echo "==> waiting for shinyhub to answer at $base"
   for _ in $(seq 1 60); do
     if curl -fsS -m 3 "$base/api/server-info" >/dev/null 2>&1; then
+      trap - EXIT
       echo "$base"
       return 0
     fi
@@ -103,8 +157,22 @@ status() {
 }
 
 down() {
-  husker destroy "$VM" --yes >/dev/null 2>&1 || true
-  echo "destroyed $VM"
+  local out status
+  # Guard the assignment with if/else, not a bare "out=$(...); status=$?"
+  # pair: under set -e a bare failing assignment aborts the script before
+  # status=$? ever runs, so the failure branch below would never be reached.
+  if out="$(husker destroy "$VM" --yes -o json 2>&1)"; then
+    echo "destroyed $VM"
+    return 0
+  else
+    status=$?
+  fi
+  if printf '%s' "$out" | grep -q '"kind":"vm_not_found"'; then
+    echo "no such VM $VM, nothing to do"
+    return 0
+  fi
+  echo "failed to destroy $VM: $out" >&2
+  return "$status"
 }
 
 case "${1:-}" in
