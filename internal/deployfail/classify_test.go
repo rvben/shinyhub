@@ -24,6 +24,38 @@ func TestClassify(t *testing.T) {
 		{"unclassified 5xx", `internal error: database is locked`, ServerError},
 		{"build timeout", `uv sync: build exceeded the build timeout: context deadline exceeded`, BuildFailed},
 		{"renv build timeout", `renv restore: build exceeded the build timeout: context deadline exceeded`, BuildFailed},
+
+		// A post-deploy hook runs app-controlled code, so its failure says
+		// nothing about the server. These are verbatim shapes from
+		// RunPostDeployHooks. The missing-executable case is the trap: it names
+		// a binary the *hook* invoked, and classifying it RuntimeMissing tells
+		// an operator to install a runtime that is already present and working.
+		{"hook missing executable is not a missing server runtime",
+			`hook[0] (python -c open('x','w')): exec: "python": executable file not found in $PATH`, HookFailed},
+		{"hook nonzero exit", `hook[1] (make assets): exit status 2`, HookFailed},
+		{"hook timeout", `hook[0] (python -m build) timed out after 5m0s`, HookFailed},
+		// A hook whose own command string contains a build-prefix substring must
+		// not be mistaken for a dependency-build failure.
+		{"hook command mentioning uv sync", `hook[0] (sh -c uv sync: check): exit status 1`, HookFailed},
+
+		// The hook marker is only trustworthy at the start of the message.
+		// deploy.Run returns hook errors verbatim, so a real one always begins
+		// with the prefix; anywhere else it is app-controlled text. An [app]
+		// command is chosen by the app author, so a mid-string match would let
+		// a failed *app launch* be reported as a hook failure - reintroducing
+		// the misattribution this kind exists to remove.
+		// A genuinely missing runtime must keep its kind even when a hook marker
+		// appears later in the text: the operator really does need to install R,
+		// and hook_failed would send them to edit a manifest instead.
+		{"missing runtime keeps its kind despite a later hook marker",
+			`all replicas failed health check: replica 0: start: exec: "Rscript": executable file not found in $PATH (ran hook[1] (setup))`,
+			RuntimeMissing},
+		// An app-chosen launch command that mimics the marker is not a hook.
+		{"app command that mimics the hook prefix is not a hook failure",
+			`all replicas failed health check: replica 0: start: exec: "hook[3] (evil)": executable file not found in $PATH`,
+			ServerError},
+		{"hook marker mid-message is not a hook failure",
+			`internal error: database is locked while writing hook[0] (x)`, ServerError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -46,5 +78,17 @@ func TestMentionsMissingExecutable(t *testing.T) {
 	}
 	if MentionsMissingExecutable(`uv sync: resolution failed`, "uv") {
 		t.Error("a build error that merely mentions uv is not a missing executable")
+	}
+}
+
+// TestHookFailedIsValidKind: the CLI trusts a server-supplied failure_kind only
+// when Valid() accepts it, so a new kind that is not registered there silently
+// degrades to the message-substring fallback on every client.
+func TestHookFailedIsValidKind(t *testing.T) {
+	if !HookFailed.Valid() {
+		t.Error("HookFailed must be a valid kind or clients will not trust it")
+	}
+	if HookFailed != "hook_failed" {
+		t.Errorf("HookFailed = %q, want hook_failed (public contract)", HookFailed)
 	}
 }

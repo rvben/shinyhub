@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -311,5 +312,53 @@ command = ["make", "assets"]
 	}
 	if res.HooksSkipped != 0 {
 		t.Errorf("HooksSkipped = %d, want 0", res.HooksSkipped)
+	}
+}
+
+// TestRun_HookFailureClassifiesAsHookFailed guards the property that lets
+// deployfail anchor its hook marker to the start of the message: deploy.Run
+// propagates a hook error verbatim, never wrapped with a prefix. If a future
+// change wraps it, the classifier would silently stop recognising hook failures
+// and start blaming the server runtime again, which is exactly the bug that
+// motivated the hook_failed kind. Both pool shapes are covered because each has
+// its own return path.
+func TestRun_HookFailureClassifiesAsHookFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		isolation string
+	}{
+		{"elastic pool", "grouped"},
+		{"multiplex pool", "multiplex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bundle := writeElasticBundle(t, `
+[[hook]]
+on = "post-deploy"
+command = ["python", "-c", "pass"]
+`)
+			defer stubBundleBuild(t)()
+			defer deploy.SetHookRunnerForTest(func(context.Context, string, []string, []string, io.Writer) error {
+				return errors.New(`exec: "python": executable file not found in $PATH`)
+			})()
+
+			p := elasticParams(t, "hook-kind-"+tc.isolation, bundle, process.NewNativeRuntime())
+			p.WorkerIsolation = tc.isolation
+			if tc.isolation == "multiplex" {
+				// A multiplex pool would boot replicas; the hook must fail first.
+				p.Command = []string{"sleep", "30"}
+				p.HealthCheck = func(string, time.Duration, http.RoundTripper) error {
+					t.Error("replicas must not boot when a post-deploy hook fails")
+					return nil
+				}
+			}
+
+			_, err := deploy.Run(p)
+			if err == nil {
+				t.Fatal("expected the hook failure to fail the deploy")
+			}
+			if got := deployfail.Classify(err); got != deployfail.HookFailed {
+				t.Errorf("Classify(%q) = %q, want hook_failed; deploy.Run must not wrap hook errors", err, got)
+			}
+		})
 	}
 }
