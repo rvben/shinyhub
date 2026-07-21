@@ -23,6 +23,14 @@ func deployFailureMessage(err error) string {
 	}
 	msg := err.Error()
 	switch {
+	case deployfail.Classify(err) == deployfail.HookFailed:
+		// Checked first, and by kind rather than substring: a hook echoes the
+		// app's own command into the message, so a hook calling a binary the
+		// host lacks is indistinguishable from a missing server runtime by text
+		// alone. Blaming the server would send the operator to install a runtime
+		// that is present and working.
+		return "deploy failed: a post-deploy hook from shinyhub.toml failed - " + msg +
+			". Fix the hook command or the bundle it runs from; the app was not started."
 	case deployfail.MentionsMissingExecutable(msg, "Rscript"):
 		return "deploy failed: R runtime not found on the server (Rscript is not in PATH). " +
 			"Install R, switch the app to a container runtime, or contact your administrator."

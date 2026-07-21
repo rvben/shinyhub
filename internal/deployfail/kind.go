@@ -13,6 +13,7 @@ const (
 	// Server-emitted kinds (computed by Classify from the deploy error).
 	RuntimeMissing   Kind = "runtime_missing"   // uv/python3/Rscript not in PATH
 	BuildFailed      Kind = "build_failed"      // uv sync / renv restore failed
+	HookFailed       Kind = "hook_failed"       // a manifest post-deploy hook failed
 	BundleInvalid    Kind = "bundle_invalid"    // server rejected bundle content
 	ReadinessTimeout Kind = "readiness_timeout" // started, never became healthy in time
 	Crashed          Kind = "crashed"           // process exited before healthy
@@ -29,7 +30,7 @@ const (
 // not a runtime gate (unrecognised kinds are treated as opaque text elsewhere).
 func (k Kind) Valid() bool {
 	switch k {
-	case RuntimeMissing, BuildFailed, BundleInvalid, ReadinessTimeout,
+	case RuntimeMissing, BuildFailed, HookFailed, BundleInvalid, ReadinessTimeout,
 		Crashed, ServerError, ZipError, TransportError, Unknown:
 		return true
 	}
