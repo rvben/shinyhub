@@ -20,14 +20,19 @@ class BurnTest(unittest.TestCase):
         cpu = time.process_time() - cpu_start
         return cpu / wall
 
-    def test_burn_spends_at_least_the_requested_wall_time(self):
+    def test_burn_spends_roughly_the_requested_wall_time(self):
+        requested_ms = 200
         start = time.perf_counter()
-        burn(200)
+        burn(requested_ms)
         elapsed_ms = (time.perf_counter() - start) * 1000
-        # Lower bound only. The loop exits at its deadline, but a preempted
-        # process can be rescheduled well past it, so an upper bound here
-        # would assert that the machine is idle rather than that burn works.
-        self.assertGreaterEqual(elapsed_ms, 190)
+        self.assertGreaterEqual(elapsed_ms, requested_ms * 0.95)
+        # The ceiling is deliberately loose. A preempted process can be
+        # rescheduled well past its deadline, so a tight bound would assert
+        # that the machine is idle. It must still exist: a scale error such as
+        # multiplying by 1000 instead of dividing keeps the CPU ratio at
+        # roughly 1.0, so the paired-control test below cannot catch it and
+        # only a duration bound can.
+        self.assertLess(elapsed_ms, requested_ms * 10)
 
     def test_burn_spends_cpu_where_sleep_does_not(self):
         # Paired controls, measured back to back so both see the same machine
