@@ -317,6 +317,14 @@ Hooks inherit the app's environment (including secrets injected via
 `shinyhub env set`), but not `PORT` (which is per-replica and only set
 when an app process starts).
 
+Hooks run after the dependency build and before any app process starts, for
+every worker-isolation mode: a `grouped` or `per_session` app gets the same
+preparation as a multiplex one, even though its workers spawn on demand later.
+The one case where a declared hook does not run is a container runtime, where
+dependencies are installed inside the image and the host has no view of the
+app's environment. That skip is reported: the deploy tells you how many hooks
+it did not run, so bake those steps into your image entrypoint instead.
+
 ## `[access]` - per-app group access rules
 
 Declare which IdP groups may view or manage this app. Groups come from the

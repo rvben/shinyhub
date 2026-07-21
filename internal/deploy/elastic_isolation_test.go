@@ -15,7 +15,11 @@ import (
 // (no fixed replicas booted) and does not spawn any OS processes. The proxy
 // pool is set up in elastic mode; workers are spawned on demand at request time.
 func TestRun_PerSession_NoReplicasBooted(t *testing.T) {
-	bundle := t.TempDir()
+	// A real bundle: the deploy prepares it (type detection, dependency build)
+	// before handing routing to the on-demand spawner, so an empty directory
+	// would legitimately fail here rather than exercising the boot skip.
+	bundle := writeElasticBundle(t, "")
+	defer stubBundleBuild(t)()
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	defer mgr.Stop("elastic-ps")
 	prx := proxy.New()
@@ -59,7 +63,8 @@ func TestRun_PerSession_NoReplicasBooted(t *testing.T) {
 // TestRun_Grouped_NoReplicasBooted verifies the same "skip boot loop" behavior
 // for WorkerIsolation="grouped".
 func TestRun_Grouped_NoReplicasBooted(t *testing.T) {
-	bundle := t.TempDir()
+	bundle := writeElasticBundle(t, "")
+	defer stubBundleBuild(t)()
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	defer mgr.Stop("elastic-gr")
 	prx := proxy.New()

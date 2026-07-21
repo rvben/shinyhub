@@ -380,13 +380,20 @@ restart. The elastic pool starts empty after every restart. Connected clients
 will cold-start a new worker on their next request.
 
 **Elastic apps skip fixed-replica booting at deploy.** For `grouped` and
-`per_session` apps, the deploy pipeline returns immediately without booting
-any replicas. The app is marked running, but there are no warm processes yet.
-Boot errors surface at first-session time, not at deploy time.
+`per_session` apps, the deploy pipeline boots no replicas. The app is marked
+running, but there are no warm processes yet. Boot errors surface at
+first-session time, not at deploy time.
 
-**Post-deploy manifest hooks are skipped for elastic apps in Phase 1.** The
-`[[hook]]` blocks in `shinyhub.toml` are not executed for elastic apps.
-Run setup steps as part of the app's own startup instead.
+**Elastic apps are still prepared at deploy.** The dependency build
+(`uv sync` / `renv::restore`) and the manifest's `[[hook]] on = "post-deploy"`
+blocks run once per deploy, before any worker can serve a request, exactly as
+they do for a multiplex pool. A failure in either fails the deploy. Preparation
+cannot be deferred to the workers: they launch with `uv run --frozen
+--no-sync`, which performs no dependency work of its own, and a worker spawn
+happens long after the deploy has reported its result, so a failure there would
+be unattributable. The same runtime rule applies as everywhere else: under a
+container runtime the host does not prepare deps, so hooks are skipped and the
+skipped count is reported back to the developer.
 
 **Compute-idle reclaim is Phase 3.** There is currently no mechanism to
 suspend or throttle a live-but-idle worker in between requests. An allocated

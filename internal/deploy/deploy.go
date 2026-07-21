@@ -688,45 +688,15 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 		return nil, "", false, nil, 0, fmt.Errorf("read manifest: %w", merr)
 	}
 
-	switch {
-	case len(p.Command) > 0:
-		baseCmd = p.Command
-	case m != nil && len(m.App.Command) > 0:
-		// Boot-time re-validation covers rollbacks to bundles deployed before
-		// stricter rules. The template is stored UNSUBSTITUTED: {port} is
-		// per-replica and substituted in bootReplicaAttempt.
-		if verr := validateCommandTemplate(m.App.Command); verr != nil {
-			return nil, "", false, nil, 0, fmt.Errorf("manifest [app] command: %w", verr)
-		}
-		baseCmd = m.App.Command
-	default:
-		appType = DetectAppType(p.BundleDir)
-		// Container runtimes prepare dependencies inside the image/container, so
-		// running uv sync / renv::restore on the host would leak host state into
-		// what is supposed to be an isolated boot path (and fail outright on
-		// hosts where uv/Rscript aren't installed). hostDeps is resolved by the
-		// caller from the tiers this boot touches.
-		switch appType {
-		case "python", "r":
-			// Convert a requirements.txt-only Python app into a uv project (best-
-			// effort), then sync deps - all under one build_timeout_seconds budget
-			// (default 900s) so a hung build cannot block the deploy forever. A
-			// build failure exits here, before the replica loop, so it is reported
-			// build_failed, distinct from the readiness window.
-			if hostDeps {
-				if err = buildEnvironment(p, appType, resolveBuildTimeout(m)); err != nil {
-					return nil, "", false, nil, 0, err
-				}
-			}
-			// Only inferred-command Python boots resolve auto-instrumentation:
-			// opentelemetry-instrument is Python-only, and user-supplied
-			// commands are never rewritten.
-			if appType == "python" {
-				autoInstrument = resolveAutoInstrument(p, m)
-			}
-		default:
-			return nil, "", false, nil, 0, fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", p.BundleDir)
-		}
+	baseCmd, appType, err = resolveBundleCommand(p, m, hostDeps)
+	if err != nil {
+		return nil, "", false, nil, 0, err
+	}
+	// Only inferred-command Python boots resolve auto-instrumentation:
+	// opentelemetry-instrument is Python-only, and user-supplied commands are
+	// never rewritten. appType is set only on the inferred path.
+	if appType == "python" {
+		autoInstrument = resolveAutoInstrument(p, m)
 	}
 	// baseCmd remains nil for inferred-command boots — bootReplica constructs
 	// the per-replica command using the real port once it is allocated.
@@ -747,6 +717,87 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 		}
 	}
 	return baseCmd, appType, autoInstrument, hc, timeout, nil
+}
+
+// resolveBundleCommand resolves a bundle's base launch command and, for
+// inferred-command bundles, builds its host-side environment. It is the single
+// place that decides both "what does this bundle launch" and "does the host
+// build it", shared by the fixed-replica boot and the elastic prepare path so
+// the two cannot drift apart.
+//
+// baseCmd is nil for inferred-command bundles: bootReplica constructs the
+// per-replica command once a port is allocated. appType is set only on that
+// inferred path, and is the caller's signal that the bundle was type-detected.
+func resolveBundleCommand(p Params, m *Manifest, hostDeps bool) (baseCmd []string, appType string, err error) {
+	switch {
+	case len(p.Command) > 0:
+		return p.Command, "", nil
+	case m != nil && len(m.App.Command) > 0:
+		// Boot-time re-validation covers rollbacks to bundles deployed before
+		// stricter rules. The template is stored UNSUBSTITUTED: {port} is
+		// per-replica and substituted in bootReplicaAttempt.
+		if verr := validateCommandTemplate(m.App.Command); verr != nil {
+			return nil, "", fmt.Errorf("manifest [app] command: %w", verr)
+		}
+		return m.App.Command, "", nil
+	default:
+		appType = DetectAppType(p.BundleDir)
+		// Container runtimes prepare dependencies inside the image/container, so
+		// running uv sync / renv::restore on the host would leak host state into
+		// what is supposed to be an isolated boot path (and fail outright on
+		// hosts where uv/Rscript aren't installed). hostDeps is resolved by the
+		// caller from the tiers this boot touches.
+		switch appType {
+		case "python", "r":
+			// Convert a requirements.txt-only Python app into a uv project (best-
+			// effort), then sync deps - all under one build_timeout_seconds budget
+			// (default 900s) so a hung build cannot block the deploy forever. A
+			// build failure exits here, before any process starts, so it is
+			// reported build_failed, distinct from the readiness window.
+			if hostDeps {
+				if berr := buildEnvironment(p, appType, resolveBuildTimeout(m)); berr != nil {
+					return nil, "", berr
+				}
+			}
+			return nil, appType, nil
+		default:
+			return nil, "", fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", p.BundleDir)
+		}
+	}
+}
+
+// prepareElasticPool runs the once-per-deploy preparation for an elastic
+// (grouped / per_session) pool, which has no fixed replicas to boot.
+//
+// Preparation cannot be deferred to the workers. They spawn on demand, minutes
+// or days after the deploy returns, and they launch with `uv run --frozen
+// --no-sync`, which performs no dependency work of its own: a build skipped here
+// never happens at all. A post-deploy hook skipped here is worse still, because
+// the app then serves without whatever the hook was declared to produce, and the
+// deploy that dropped it reported success. Running both here is also the only
+// way a failure can still fail the deploy rather than surfacing as a worker that
+// mysteriously never becomes healthy on a user's first request.
+//
+// The returned PoolResult carries no replicas: the caller marks the app running
+// and the proxy spawns workers on demand.
+func prepareElasticPool(p Params, hostDeps bool, mode config.WorkerIsolationMode) (*PoolResult, error) {
+	m, err := LoadManifest(p.BundleDir)
+	if err != nil {
+		return nil, fmt.Errorf("read manifest: %w", err)
+	}
+	// Discards the command: elastic workers re-resolve it per spawn via
+	// ResolveLaunch. Called for its build and its validation, so a bad command
+	// template fails the deploy instead of every future worker spawn.
+	if _, _, err := resolveBundleCommand(p, m, hostDeps); err != nil {
+		return nil, err
+	}
+	hooksSkipped, err := runManifestPostDeployHooks(p, hostDeps)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("deploy: elastic mode prepared; workers spawn on demand",
+		"slug", p.Slug, "mode", mode, "hooks_skipped", hooksSkipped)
+	return &PoolResult{HooksSkipped: hooksSkipped}, nil
 }
 
 // resolveAutoInstrument resolves the effective auto-instrumentation setting
@@ -784,21 +835,19 @@ func Run(p Params) (*PoolResult, error) {
 	resolvedMode := config.WorkerIsolationMode(ResolveWorkerIsolation(p.WorkerIsolation, p.DefaultWorkerIsolation))
 	p.Proxy.SetPoolMode(p.Slug, resolvedMode, p.WorkerGroupedSize, p.WorkerMaxWorkers)
 
-	// Phase 1: elastic apps (grouped or per_session) are demand-driven. Workers
-	// are spawned on first request via the proxy spawn callback; there are no
-	// fixed replicas to boot. Return an empty pool result so the caller marks the
-	// app running. Boot errors surface at session time, not at deploy time.
-	// Post-deploy manifest hooks are also skipped here; operators should bake any
-	// setup steps into the app's own startup command instead.
-	if resolvedMode == config.IsolationGrouped || resolvedMode == config.IsolationPerSession {
-		slog.Info("deploy: elastic mode; skipping fixed-replica boot and post-deploy hooks",
-			"slug", p.Slug, "mode", resolvedMode)
-		return &PoolResult{}, nil
-	}
-
 	// Host-side dep prep and post-deploy hooks are pool-wide: run them once if
 	// any assigned tier prepares deps on the host.
 	hostDeps := p.hostPreparesDeps(distinctTiers(asn)...)
+
+	// Phase 1: elastic apps (grouped or per_session) are demand-driven. Workers
+	// are spawned on first request via the proxy spawn callback; there are no
+	// fixed replicas to boot, so boot errors surface at session time. The
+	// preparation phase still runs here, because the deploy is the only moment
+	// that happens exactly once, before any worker can serve a request, and that
+	// can still fail the deploy.
+	if resolvedMode == config.IsolationGrouped || resolvedMode == config.IsolationPerSession {
+		return prepareElasticPool(p, hostDeps, resolvedMode)
+	}
 
 	baseCmd, appType, autoInstrument, hc, timeout, err := resolveBootParams(p, hostDeps)
 	if err != nil {
