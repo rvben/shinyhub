@@ -274,3 +274,42 @@ command = ["./serve", "--port", "{bogus_placeholder}"]
 		t.Errorf("expected a command-validation error, got %v", err)
 	}
 }
+
+// TestRun_ElasticZeroReplicasStillPrepared: hostPreparesDeps reports false when
+// handed no tiers, so an assignment set that came back empty would silently skip
+// the build and report the hooks as merely "skipped". Params.assignments clamps
+// to at least one replica, which is what keeps that unreachable; this pins it.
+func TestRun_ElasticZeroReplicasStillPrepared(t *testing.T) {
+	bundle := writeElasticBundle(t, `
+[[hook]]
+on = "post-deploy"
+command = ["make", "assets"]
+`)
+
+	var synced, hooked atomic.Bool
+	defer deploy.SetSyncHooksForTest(
+		func(context.Context, string, []string) error { synced.Store(true); return nil },
+		func(context.Context, string, []string) error { return nil },
+	)()
+	defer deploy.SetEnsureProjectForTest(func(context.Context, string) error { return nil })()
+	defer deploy.SetHookRunnerForTest(func(context.Context, string, []string, []string, io.Writer) error {
+		hooked.Store(true)
+		return nil
+	})()
+
+	p := elasticParams(t, "elastic-zero-replicas", bundle, process.NewNativeRuntime())
+	p.Replicas = 0
+	res, err := deploy.Run(p)
+	if err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	if !synced.Load() {
+		t.Error("environment must still be built when Replicas is 0")
+	}
+	if !hooked.Load() {
+		t.Error("post-deploy hook must still run when Replicas is 0")
+	}
+	if res.HooksSkipped != 0 {
+		t.Errorf("HooksSkipped = %d, want 0", res.HooksSkipped)
+	}
+}
