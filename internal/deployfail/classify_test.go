@@ -37,6 +37,25 @@ func TestClassify(t *testing.T) {
 		// A hook whose own command string contains a build-prefix substring must
 		// not be mistaken for a dependency-build failure.
 		{"hook command mentioning uv sync", `hook[0] (sh -c uv sync: check): exit status 1`, HookFailed},
+
+		// The hook marker is only trustworthy at the start of the message.
+		// deploy.Run returns hook errors verbatim, so a real one always begins
+		// with the prefix; anywhere else it is app-controlled text. An [app]
+		// command is chosen by the app author, so a mid-string match would let
+		// a failed *app launch* be reported as a hook failure - reintroducing
+		// the misattribution this kind exists to remove.
+		// A genuinely missing runtime must keep its kind even when a hook marker
+		// appears later in the text: the operator really does need to install R,
+		// and hook_failed would send them to edit a manifest instead.
+		{"missing runtime keeps its kind despite a later hook marker",
+			`all replicas failed health check: replica 0: start: exec: "Rscript": executable file not found in $PATH (ran hook[1] (setup))`,
+			RuntimeMissing},
+		// An app-chosen launch command that mimics the marker is not a hook.
+		{"app command that mimics the hook prefix is not a hook failure",
+			`all replicas failed health check: replica 0: start: exec: "hook[3] (evil)": executable file not found in $PATH`,
+			ServerError},
+		{"hook marker mid-message is not a hook failure",
+			`internal error: database is locked while writing hook[0] (x)`, ServerError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

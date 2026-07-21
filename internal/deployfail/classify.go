@@ -58,15 +58,22 @@ func MentionsMissingExecutable(msg, name string) bool {
 
 // mentionsHookFailure reports whether msg came from a manifest post-deploy hook.
 // RunPostDeployHooks prefixes every failure it returns with "hook[<index>] (",
-// both for a non-zero exit and for a timeout, so that prefix is the marker. The
-// prefix is server-generated and never contains app-controlled text, unlike the
-// command echo that follows it.
+// both for a non-zero exit and for a timeout, and deploy.Run propagates that
+// error verbatim, so a genuine hook failure always begins with the marker.
+//
+// The match is anchored to the start deliberately. Everything after the marker
+// is app-controlled: the message echoes the hook's own argv, and other deploy
+// errors echo an app-chosen [app] command. An unanchored search would let an
+// app name its launch command "hook[3] (x)" and have its own failed launch
+// reported as a hook failure, which is the misattribution this kind exists to
+// remove. TestRun_HookFailureClassifiesAsHookFailed in internal/deploy pins the
+// verbatim propagation that makes anchoring safe.
 func mentionsHookFailure(msg string) bool {
-	i := strings.Index(msg, "hook[")
-	if i < 0 {
+	const marker = "hook["
+	if !strings.HasPrefix(msg, marker) {
 		return false
 	}
-	rest := msg[i+len("hook["):]
+	rest := msg[len(marker):]
 	end := strings.Index(rest, "]")
 	if end <= 0 {
 		return false
