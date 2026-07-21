@@ -14,6 +14,12 @@ COST_MS="${RENDER_COST_MS:-1300}"
 IMAGE="python-3.12-slim-bookworm"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+# Host-side scratch directory created by copy_binary for its chunk splitting.
+# Script-scope, not local to copy_binary, so up()'s handle_up_exit trap can
+# find and remove it if copy_binary aborts mid-transfer without returning
+# normally. See the comment in copy_binary for why that case exists.
+CHUNK_DIR=""
+
 # The daemon host address is supplied by the environment, never committed.
 # Set RIG_DAEMON_HOST to the address the host machine uses to reach the
 # husker daemon, e.g. RIG_DAEMON_HOST=203.0.113.10
@@ -29,26 +35,29 @@ need_daemon_host() {
 # binary is split into chunks, copied individually, and reassembled in the
 # guest with cat.
 copy_binary() {
-  local src="$1" dest="$2" chunk_dir part
-  chunk_dir="$(mktemp -d)"
-  # Host-side chunk scratch space is removed whenever this function returns,
-  # on the success path and on any failure. Self-clears after firing so it
-  # does not re-fire on a later, unrelated function return: RETURN traps are
-  # process-global in bash, not scoped to the function that set them.
-  trap 'rm -rf "$chunk_dir"; trap - RETURN' RETURN
+  local src="$1" dest="$2" part
+  CHUNK_DIR="$(mktemp -d)"
+  # CHUNK_DIR is a script-scope variable rather than a local so up()'s
+  # handle_up_exit trap can find and remove it. That matters because this
+  # function only cleans up after itself on the two paths below that reach a
+  # real "return": falling off the end (success) and the explicit "return 1"
+  # on checksum mismatch. A bare command failing under set -e, such as split,
+  # husker cp, or husker exec inside the loop below, aborts the whole script
+  # immediately instead of returning from this function, so neither inline
+  # cleanup runs; handle_up_exit is what removes CHUNK_DIR in that case.
 
-  split -b 1000000 "$src" "$chunk_dir/part_"
-  echo "==> copying $(basename "$src") in $(ls "$chunk_dir" | wc -l | tr -d ' ') chunks"
+  split -b 1000000 "$src" "$CHUNK_DIR/part_"
+  echo "==> copying $(basename "$src") in $(ls "$CHUNK_DIR" | wc -l | tr -d ' ') chunks"
   husker exec "$VM" -- rm -f "$dest"
-  for part in "$chunk_dir"/part_*; do
+  for part in "$CHUNK_DIR"/part_*; do
     husker cp "$part" "$VM:/tmp/$(basename "$part")" >/dev/null
     husker exec "$VM" -- sh -c "cat /tmp/$(basename "$part") >> $dest && rm -f /tmp/$(basename "$part")" >/dev/null
   done
-  # Best-effort sweep: a chunk whose cat/rm failed mid-loop above leaves its
-  # /tmp/part_* behind on the guest, since that iteration's own rm never ran.
-  # Runs regardless of how the loop went, so success and failure both leave
-  # the guest's /tmp clean.
-  husker exec "$VM" -- sh -c "rm -f /tmp/part_*" >/dev/null 2>&1 || true
+  # A chunk whose cat/rm failed mid-loop above would leave its /tmp/part_*
+  # behind on the guest, but nothing here sweeps for that: on any failure the
+  # whole VM is destroyed by up()'s handle_up_exit trap, taking every stray
+  # guest-side /tmp file with it. That makes guest-side leakage moot rather
+  # than something this script needs to actively clean up.
 
   echo "==> verifying transferred binary checksum"
   local src_sum guest_sum
@@ -64,9 +73,39 @@ copy_binary() {
   guest_sum="$(husker exec "$VM" -o text -- sha256sum "$dest" | grep -oE '[0-9a-f]{64}' | head -1)" || true
   if [ -z "$src_sum" ] || [ "$src_sum" != "$guest_sum" ]; then
     echo "checksum mismatch after transferring $(basename "$src"): host=${src_sum:-<empty>} guest=${guest_sum:-<empty>}" >&2
+    rm -rf "$CHUNK_DIR"
+    CHUNK_DIR=""
     return 1
   fi
   echo "==> checksum verified ($src_sum)"
+  rm -rf "$CHUNK_DIR"
+  CHUNK_DIR=""
+}
+
+# EXIT trap installed by up() once the VM exists on the shared daemon (see
+# below). It is disarmed via "trap - EXIT" right before a successful return,
+# so in practice this only ever runs on a provisioning failure. It reuses
+# down() instead of calling husker destroy directly, so the true outcome
+# (destroyed, already absent, or genuinely failed) is reported rather than
+# assumed. The triggering exit status is captured first, as the very first
+# statement, and re-applied with an explicit "exit" at the end: without that,
+# the trap's own commands (down, rm) would determine the script's final exit
+# status instead of the provisioning failure that caused the trap to fire.
+handle_up_exit() {
+  local exit_status=$?
+  echo "==> provisioning failed, destroying $VM" >&2
+  local destroy_out
+  if destroy_out="$(down 2>&1)"; then
+    echo "$destroy_out" >&2
+  else
+    echo "WARNING: automatic teardown of $VM failed; run 'husker destroy $VM --yes' manually to avoid leaving it running on the shared daemon" >&2
+    echo "$destroy_out" >&2
+  fi
+  if [ -n "$CHUNK_DIR" ]; then
+    rm -rf "$CHUNK_DIR"
+    CHUNK_DIR=""
+  fi
+  exit "$exit_status"
 }
 
 up() {
@@ -100,11 +139,11 @@ up() {
   fi
 
   # The VM now exists on the shared daemon. Any failure from here on must not
-  # leave it running: arm a trap that destroys it, disarmed only once this
-  # function reaches its successful return below. down/url/status never call
-  # up(), so this trap is never installed on those code paths, and it cannot
-  # fire during them.
-  trap 'echo "==> provisioning failed, destroying $VM" >&2; husker destroy "$VM" --yes >/dev/null 2>&1 || true' EXIT
+  # leave it running: arm handle_up_exit, disarmed only once this function
+  # reaches its successful return below. down/url/status never call up(), so
+  # this trap is never installed on those code paths, and it cannot fire
+  # during them.
+  trap handle_up_exit EXIT
 
   husker wait "$VM" >/dev/null
 
