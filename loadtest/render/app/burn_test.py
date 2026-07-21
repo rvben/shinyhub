@@ -11,22 +11,36 @@ from app import burn
 
 
 class BurnTest(unittest.TestCase):
-    def test_burn_spends_the_requested_wall_time(self):
+    def _cpu_ratio(self, fn):
+        """Fraction of fn's wall time that was actually spent on CPU."""
+        wall_start = time.perf_counter()
+        cpu_start = time.process_time()
+        fn()
+        wall = time.perf_counter() - wall_start
+        cpu = time.process_time() - cpu_start
+        return cpu / wall
+
+    def test_burn_spends_at_least_the_requested_wall_time(self):
         start = time.perf_counter()
         burn(200)
         elapsed_ms = (time.perf_counter() - start) * 1000
+        # Lower bound only. The loop exits at its deadline, but a preempted
+        # process can be rescheduled well past it, so an upper bound here
+        # would assert that the machine is idle rather than that burn works.
         self.assertGreaterEqual(elapsed_ms, 190)
-        self.assertLess(elapsed_ms, 400)
 
-    def test_burn_spends_cpu_not_sleep(self):
-        wall_start = time.perf_counter()
-        cpu_start = time.process_time()
-        burn(200)
-        wall_ms = (time.perf_counter() - wall_start) * 1000
-        cpu_ms = (time.process_time() - cpu_start) * 1000
-        # A sleep-based implementation scores near 0.0 here. Require most of
-        # the wall time to be actual on-CPU time.
-        self.assertGreater(cpu_ms / wall_ms, 0.9)
+    def test_burn_spends_cpu_where_sleep_does_not(self):
+        # Paired controls, measured back to back so both see the same machine
+        # load. A fixed threshold alone would fail on a busy host, where a
+        # genuine busy loop can be preempted down to a third of the CPU it
+        # asks for. Sleep scores near zero under any load, so the comparison
+        # separates the two behaviours without asserting an idle machine.
+        sleep_ratio = self._cpu_ratio(lambda: time.sleep(0.2))
+        burn_ratio = self._cpu_ratio(lambda: burn(200))
+
+        self.assertLess(sleep_ratio, 0.1)
+        self.assertGreater(burn_ratio, 0.2)
+        self.assertGreater(burn_ratio, sleep_ratio * 10)
 
 
 if __name__ == "__main__":
