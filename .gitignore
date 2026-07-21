@@ -29,5 +29,5 @@ node_modules/
 /packaging/python/src/shinyhub.egg-info/
 /packaging/python/__pycache__/
 
-# Python bytecode from the render-rig test suites
+# Python bytecode (repo-wide; the render-rig test suites generate it)
 __pycache__/
