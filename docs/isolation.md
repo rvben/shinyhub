@@ -408,16 +408,18 @@ worker holds its full resource slice until the client disconnects (or
    shinyhub apps set myapp --isolation per_session --max-workers 20
    ```
 
-   New routing takes effect immediately, and any currently-connected
-   sessions cold-start in their new worker on their next request.
+   The new routing policy is applied immediately, and any
+   currently-connected sessions cold-start in their new worker on their
+   next request.
 
    On an app whose status is **running**, changing any worker dial also
-   triggers a redeploy in the background, which re-runs the dependency
-   build and the manifest's `[[hook]] on = "post-deploy"` steps before
-   workers serve again. Budget for that: it is a full build cycle, not a
-   routing tweak, and a failing hook or build will fail it. On a stopped
-   or hibernated app no redeploy is triggered and the change is a pure
-   metadata update.
+   triggers a redeploy in the background. That tears down and
+   re-registers the pool, and re-runs the dependency build and the
+   manifest's `[[hook]] on = "post-deploy"` steps before workers serve
+   again. Treat it as a full deploy, not a routing tweak: it drops the
+   current pool, and a failing build or hook will fail it and can leave
+   the app degraded. On a stopped or hibernated app no redeploy is
+   triggered and the change is a pure metadata update.
 
 2. **Or declare it in `shinyhub.toml`** (recommended for reproducible fleets):
 
