@@ -1,0 +1,18 @@
+# Dependencies that must not be bumped automatically.
+
+[pin]
+# cosign 4 defaults to the new bundle signature format, which ignores the
+# --output-signature / --output-certificate flags .goreleaser.yaml passes and
+# then fails writing an empty --bundle path:
+#
+#   Error: signing dist/checksums.txt: create bundle file: open : no such file
+#
+# Moving to v4 therefore means migrating the `signs:` block to --bundle, which
+# also changes the published artifacts from a .sig plus .pem pair to a single
+# bundle and breaks anyone verifying the current pair. That is a deliberate
+# migration, not a dependency bump.
+#
+# This is only exercised by the release workflow, so an unpinned bump passes CI
+# and fails at release time with the tag already pushed. Held at v3 until the
+# goreleaser signing config is migrated.
+"sigstore/cosign-installer" = "v3"
