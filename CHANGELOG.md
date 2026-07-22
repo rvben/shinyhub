@@ -82,6 +82,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.10](https://github.com/rvben/shinyhub/compare/v0.10.9...v0.10.10) - 2026-07-22
+
+### Fixed
+
+- **db**: scan the prepared column through an int so it works on both backends ([32363ba](https://github.com/rvben/shinyhub/commit/32363ba95f89202d323f857931a4017388dc8c42))
+- **deploy**: restore a previous bundle as an activation, not a promotion ([8338ba8](https://github.com/rvben/shinyhub/commit/8338ba8464b879c3e9ca6002831dd77d2ff6f33a))
+- **docs**: correct the worker-dial redeploy cost, and pin the failure_kind invariant ([8131632](https://github.com/rvben/shinyhub/commit/8131632e8d32b16ccf4525f29b1198ace74c5004))
+
 ## [0.10.9](https://github.com/rvben/shinyhub/compare/v0.10.8...v0.10.9) - 2026-07-22
 
 ### Fixed
