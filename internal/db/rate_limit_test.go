@@ -15,7 +15,10 @@ import (
 func TestRateLimitAllow_EnforcesLimit(t *testing.T) {
 	store := dbtest.New(t)
 	const bucket, key, limit = "login", "203.0.113.7", 3
-	window := time.Minute
+	// Fixed window bucketed on floor(now/window): a burst straddling a boundary
+	// starts a fresh count and the over-limit attempt is allowed. A window far
+	// longer than the burst makes that impossible without weakening the assertion.
+	window := 24 * time.Hour
 
 	for i := 0; i < limit; i++ {
 		ok, err := store.RateLimitAllow(bucket, key, limit, window)

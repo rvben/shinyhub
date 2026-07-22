@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestLoginRateLimit_BlocksAfterThreshold proves the login endpoint - the
@@ -14,6 +15,13 @@ import (
 // before credential validation, so failed logins still consume the budget.
 func TestLoginRateLimit_BlocksAfterThreshold(t *testing.T) {
 	srv, _ := newTestServer(t) // login limiter: 10 / minute
+	// The limiter is a FIXED window bucketed on floor(now/window). At the
+	// production one-minute window this burst can straddle a minute tick, get a
+	// fresh count, and legitimately allow the 11th attempt - which made this test
+	// flaky on Postgres, where each attempt pays a DB round trip. Widening the
+	// window keeps the limit, backend and code path identical while making the
+	// straddle impossible for a burst this short.
+	srv.SetLoginLimiterWindowForTest(24 * time.Hour)
 	h := srv.Router()
 
 	const attempts = 11

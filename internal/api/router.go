@@ -187,7 +187,7 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 		manager:         manager,
 		proxy:           prx,
 		sampler:         &process.GopsutilSampler{},
-		loginLimiter:    newLoginLimiter(store, 10, time.Minute),
+		loginLimiter:    newLoginLimiter(store, loginRateLimit, loginRateWindow),
 		deployLimiter:   newKeyedRateLimiter(10, time.Minute),
 		userLimiter:     newKeyedRateLimiter(5, time.Minute),
 		tokenLimiter:    newKeyedRateLimiter(20, time.Minute),
@@ -574,6 +574,24 @@ func (s *Server) ownerGuard(next http.Handler) http.Handler {
 		w.Header().Set("Retry-After", "2")
 		writeError(w, http.StatusServiceUnavailable, "control-plane handoff in progress, retry")
 	})
+}
+
+// SetLoginLimiterWindowForTest rebuilds the login limiter with a different
+// window, keeping the production limit.
+//
+// The limiter is a FIXED window bucketed on floor(now/window), not a sliding
+// one, so a burst of attempts that straddles a window boundary starts a fresh
+// count and the over-limit attempt is legitimately allowed. At the production
+// window of one minute, a test firing a burst of logins has a real chance of
+// crossing a minute tick - roughly the burst duration over sixty seconds. That
+// is what made TestLoginRateLimit_BlocksAfterThreshold flaky on Postgres, where
+// every attempt pays a database round trip on top of bcrypt.
+//
+// A long window removes the straddle without changing the behaviour under test:
+// the limit, the backend, and the code path are all still the production ones.
+// Must be called before the server begins handling requests.
+func (s *Server) SetLoginLimiterWindowForTest(window time.Duration) {
+	s.loginLimiter = newLoginLimiter(s.store, loginRateLimit, window)
 }
 
 // SetDeployRunForTest replaces the deploy.Run hook used by maybeRestartForChange.

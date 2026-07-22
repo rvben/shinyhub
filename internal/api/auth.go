@@ -104,6 +104,13 @@ func newLoginRateLimiter(limit int, window time.Duration) *loginRateLimiter {
 	return newKeyedRateLimiter(limit, window)
 }
 
+// loginRateLimit and loginRateWindow are the production login limits, named so
+// a test hook cannot drift from what actually ships.
+const (
+	loginRateLimit  = 10
+	loginRateWindow = time.Minute
+)
+
 // rateLimiter reports whether a request identified by key may proceed. Both the
 // in-memory keyedRateLimiter and the database-backed dbRateLimiter implement it,
 // so the login handler is oblivious to which is wired.
