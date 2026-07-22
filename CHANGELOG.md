@@ -83,6 +83,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.11](https://github.com/rvben/shinyhub/compare/v0.10.10...v0.10.11) - 2026-07-22
+
+### Fixed
+
+- **deploy**: treat a venv with an unresolvable interpreter as absent ([67bfc53](https://github.com/rvben/shinyhub/commit/67bfc53889309513d080704069f21a557fb6bb25))
+- **deploy**: rebuild when a skipped preparation would launch against nothing ([2bb2f22](https://github.com/rvben/shinyhub/commit/2bb2f223e6f29f7f5175fd021d86e6faa38116ec))
+- **api**: treat restart and rollback as activations and report why they failed ([a3ac0ba](https://github.com/rvben/shinyhub/commit/a3ac0ba68e37a7d4f4ea8c07153bf8129f69b70b))
+
 ## [0.10.10](https://github.com/rvben/shinyhub/compare/v0.10.9...v0.10.10) - 2026-07-22
 
 ### Fixed
