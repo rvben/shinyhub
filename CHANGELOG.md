@@ -85,6 +85,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.13](https://github.com/rvben/shinyhub/compare/v0.10.12...v0.10.13) - 2026-07-22
+
+### Fixed
+
+- **lifecycle**: refuse an elastic spawn whose built environment is gone ([3d30522](https://github.com/rvben/shinyhub/commit/3d305229493e0f3576fbeab18a0d85b21338a4bb))
+- **api**: treat a scaling or resource change as an activation ([949b09d](https://github.com/rvben/shinyhub/commit/949b09d478b4a43f097251891138c368610c22c3))
+
 ## [0.10.12](https://github.com/rvben/shinyhub/compare/v0.10.11...v0.10.12) - 2026-07-22
 
 ### Added
