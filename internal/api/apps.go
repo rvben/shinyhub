@@ -1077,6 +1077,26 @@ func patchAppAuditDetail(
 	return string(b)
 }
 
+// activationPreparation picks the preparation mode for bringing an
+// already-promoted bundle back up on a user-initiated path (restart, rollback).
+//
+// A bundle recorded as prepared has a built environment and has already run its
+// post-deploy hooks, so repeating either is wrong: hooks are app-controlled and
+// nothing guarantees a second run is safe. A bundle whose preparation state
+// predates the record gets the full treatment, which is exactly what it has been
+// getting until now.
+//
+// It differs from the restore path in the fallback only. Restore is unattended
+// recovery and must never fail, so it degrades to PrepareBestEffort. Restart and
+// rollback are deliberate actions with someone waiting on the result, so a
+// preparation failure should surface rather than be swallowed.
+func activationPreparation(prepared bool) deploy.PreparationMode {
+	if prepared {
+		return deploy.PrepareSkip
+	}
+	return deploy.PrepareRequired
+}
+
 // restorePreviousPool brings the previous live bundle back up after a failed
 // deploy/rollback that already tore down the running pool. prev is the
 // deployment that was authoritative before the attempt (nil if the app had
@@ -1785,13 +1805,26 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		ContentDigest:         prev.ContentDigest,
 		DeploymentID:          pendingDep.ID,
 		AppVersion:            prev.Version,
+		// Keyed off the historical row being rolled back TO, not the pending row
+		// created for this rollback: the pending row is new and never prepared,
+		// while prev is the deployment whose environment and hooks already ran.
+		Preparation: activationPreparation(prev.Prepared),
 	}, app))
 	if err != nil {
 		slog.Error("rollback_failed", "slug", slug, "err", err)
 		_ = s.store.FailDeployment(pendingDep.ID)
 		s.restorePreviousPool(slug, app, prevActive)
-		writeError(w, http.StatusInternalServerError, "rollback failed")
+		writeErrorWithKind(w, http.StatusInternalServerError, deployFailureMessage(err), deployfail.Classify(err))
 		return
+	}
+
+	// The pending row now represents a prepared bundle: either prev was already
+	// prepared and preparation was skipped, or it was not and we just ran it.
+	// Recording it keeps a future restore or rollback of THIS row on the fast
+	// path instead of silently rebuilding.
+	if err := s.store.MarkDeploymentPrepared(pendingDep.ID); err != nil {
+		slog.Warn("rollback: recording preparation state failed; a later restore will rebuild best-effort",
+			"slug", slug, "version", prev.Version, "err", err)
 	}
 
 	for _, r := range result.Replicas {
@@ -1942,14 +1975,26 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,
+		// A restart re-activates the deployment that is already live, so its
+		// hooks have run and its environment is built.
+		Preparation: activationPreparation(current.Prepared),
 	}, app))
 	if err != nil {
 		slog.Error("restart_failed", "slug", slug, "err", err)
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
 			slog.Error("restart_update_status_failed", "slug", slug, "err", err)
 		}
-		writeError(w, http.StatusInternalServerError, "restart failed")
+		writeErrorWithKind(w, http.StatusInternalServerError, deployFailureMessage(err), deployfail.Classify(err))
 		return
+	}
+
+	// A legacy row that has now been prepared for real converges to prepared, so
+	// the next restart skips the work instead of repeating it forever.
+	if !current.Prepared {
+		if err := s.store.MarkDeploymentPrepared(current.ID); err != nil {
+			slog.Warn("restart: recording preparation state failed; the next restart will prepare again",
+				"slug", slug, "version", current.Version, "err", err)
+		}
 	}
 
 	for _, r := range result.Replicas {
