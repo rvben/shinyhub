@@ -84,6 +84,43 @@ func TestRestorePreviousPool_IsAnActivation(t *testing.T) {
 	}
 }
 
+// TestFailedDeploy_DoesNotRecordPrepared is the dangerous direction. Marking a
+// bundle prepared when its preparation did not actually complete would make a
+// later restore skip the build for an environment that was never built, and the
+// app would come up against nothing. A failed deploy must leave the row
+// unprepared so a restore falls back to building it.
+func TestFailedDeploy_DoesNotRecordPrepared(t *testing.T) {
+	appsDir := t.TempDir()
+	srv, store := newQuotaTestServer(t, appsDir, 0)
+	srv.SetDeployRunForTest(func(deploy.Params) (*deploy.PoolResult, error) {
+		return nil, errors.New(`hook[0] (make assets): exit status 2`)
+	})
+
+	hash, _ := testHashPassword("pass")
+	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	u, _ := store.GetUserByUsername("admin")
+	_ = store.CreateApp(db.CreateAppParams{Slug: "fp", Name: "FP", OwnerID: u.ID})
+
+	body, ctype := buildBundleUpload(t, "app.py", "print(1)\n")
+	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	req := httptest.NewRequest("POST", "/api/apps/fp/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("deploy returned %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+
+	// A failed deploy's row is 'failed', which ListDeployments excludes, so
+	// assert over every row for this app rather than only the live ones.
+	for _, d := range allDeploymentsForApp(t, store, "fp") {
+		if d.Prepared {
+			t.Errorf("deployment %d recorded prepared despite the deploy failing", d.ID)
+		}
+	}
+}
+
 // TestDeploySuccess_RecordsPrepared: PrepareSkip above is only correct because a
 // successful deploy durably records that the bundle was prepared. If that record
 // stops being written, restores silently downgrade to rebuilding.
@@ -150,4 +187,28 @@ func TestDeployment_PreparedDefaultsFalse(t *testing.T) {
 	if len(deps) == 0 || !deps[0].Prepared {
 		t.Error("MarkDeploymentPrepared must persist and round-trip")
 	}
+}
+
+// allDeploymentsForApp returns every deployment row for an app, including the
+// failed ones ListDeployments filters out. Goes through the by-slug summary
+// listing (which does include failed rows) and re-reads each by id to get the
+// full record.
+func allDeploymentsForApp(t *testing.T, store *db.Store, slug string) []*db.Deployment {
+	t.Helper()
+	summaries, err := store.ListDeploymentsBySlug(slug)
+	if err != nil {
+		t.Fatalf("list deployments for %s: %v", slug, err)
+	}
+	if len(summaries) == 0 {
+		t.Fatalf("no deployment rows recorded for %s; the test would assert nothing", slug)
+	}
+	out := make([]*db.Deployment, 0, len(summaries))
+	for _, sum := range summaries {
+		d, err := store.GetDeploymentBySlugAndID(slug, sum.ID)
+		if err != nil {
+			t.Fatalf("get deployment %d: %v", sum.ID, err)
+		}
+		out = append(out, d)
+	}
+	return out
 }

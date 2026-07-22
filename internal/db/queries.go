@@ -1549,9 +1549,14 @@ func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 	for rows.Next() {
 		var d Deployment
 		var digest sql.NullString
-		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt, &d.Prepared); err != nil {
+		// prepared is INTEGER in both backends (see migration 047) so the scan
+		// works on sqlite and postgres alike; database/sql will not scan an
+		// integer column straight into a bool.
+		var preparedInt int
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt, &preparedInt); err != nil {
 			return nil, err
 		}
+		d.Prepared = preparedInt != 0
 		d.ContentDigest = digest.String
 		ds = append(ds, &d)
 	}
@@ -1659,9 +1664,14 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	for rows.Next() {
 		var d Deployment
 		var digest sql.NullString
-		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt, &d.Prepared); err != nil {
+		// prepared is INTEGER in both backends (see migration 047) so the scan
+		// works on sqlite and postgres alike; database/sql will not scan an
+		// integer column straight into a bool.
+		var preparedInt int
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt, &preparedInt); err != nil {
 			return nil, err
 		}
+		d.Prepared = preparedInt != 0
 		d.ContentDigest = digest.String
 		ds = append(ds, &d)
 	}
@@ -1693,12 +1703,14 @@ func (s *Store) GetDeploymentBySlugAndID(slug string, id int64) (*Deployment, er
 		WHERE d.id = ? AND a.slug = ?`, id, slug)
 	var dep Deployment
 	var digest sql.NullString
-	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &digest, &dep.CreatedAt, &dep.Prepared); err != nil {
+	var preparedInt int
+	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &digest, &dep.CreatedAt, &preparedInt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	dep.Prepared = preparedInt != 0
 	dep.ContentDigest = digest.String
 	return &dep, nil
 }
@@ -1716,12 +1728,14 @@ func (s *Store) GetDeploymentByDigest(digest string) (*Deployment, error) {
 		ORDER BY id DESC LIMIT 1`, digest)
 	var d Deployment
 	var dg sql.NullString
-	if err := row.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &dg, &d.CreatedAt, &d.Prepared); err != nil {
+	var preparedInt int
+	if err := row.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &dg, &d.CreatedAt, &preparedInt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	d.Prepared = preparedInt != 0
 	d.ContentDigest = dg.String
 	return &d, nil
 }
