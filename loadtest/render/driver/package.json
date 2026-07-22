@@ -1,0 +1,16 @@
+{
+  "name": "shinyhub-render-rig-driver",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless chromium driver for the ShinyHub render-saturation rig. Drives the real Shiny JS client so heartbeat semantics are genuine.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test detect.test.js"
+  },
+  "dependencies": {
+    "playwright": "1.50.1"
+  }
+}
