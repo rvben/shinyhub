@@ -100,6 +100,25 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		return
 	}
 
+	// The launch above performs no dependency work, so it needs the environment
+	// the deploy built. Elastic workers start on demand, potentially long after
+	// that deploy, and anything that removes the environment in between - a host
+	// reboot with an ephemeral apps dir, a cache wipe, a manual cleanup - leaves
+	// every spawn launching against nothing. Without this the failure surfaces as
+	// a readiness timeout, which reads as a slow app rather than a missing venv.
+	//
+	// It deliberately does NOT rebuild. A burst of demand spawns many workers at
+	// once against one shared bundle dir, so a self-healing rebuild here would be
+	// concurrent builds racing in the same directory. Refusing with a clear cause
+	// costs the same failed request and tells the operator what to do.
+	if s.Manager.HostPreparesDepsFor(tier) && !deploy.HostEnvironmentReady(dep.BundleDir, plan.AppType) {
+		slog.Error("elastic spawn: the app's built environment is missing; redeploy to rebuild it",
+			"slug", slug, "slotID", slotID, "bundle", dep.BundleDir,
+			"version", dep.Version, "type", plan.AppType)
+		s.Proxy.ReleaseReservation(slug, slotID)
+		return
+	}
+
 	// Start the worker process. slotID is the replica index so the cgroup is
 	// named app-<slug>-<slotID> and the Manager's entry is keyed by it.
 	info, err := s.Manager.Start(process.StartParams{

@@ -470,3 +470,94 @@ func TestRecoverProcesses_FleetDefaultElastic_SetsUpPoolAndStaysRunning(t *testi
 
 	_ = app // used for setup
 }
+
+// hostDepsRuntime is recordingRuntime with host-side dependency preparation
+// enabled, matching the native runtime. The elastic environment guard only
+// applies where the host owns the environment, so a test using the default
+// recordingRuntime (HostPreparesDeps false) would pass no matter what the guard
+// does.
+type hostDepsRuntime struct{ recordingRuntime }
+
+func (r *hostDepsRuntime) HostPreparesDeps() bool { return true }
+
+// mustProjectBundle writes a bundle in uv PROJECT mode, whose launch is
+// `uv run --frozen --no-sync` and therefore depends on a prebuilt .venv.
+func mustProjectBundle(t *testing.T, withVenv bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"app.py":         "# stub\n",
+		"pyproject.toml": "[project]\nname = \"x\"\nversion = \"0\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if withVenv {
+		bin := filepath.Join(dir, ".venv", "bin")
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			t.Fatalf("mkdir venv: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(bin, "python"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write interpreter: %v", err)
+		}
+	}
+	return dir
+}
+
+// TestSpawnElasticWorker_RefusesWhenEnvironmentIsMissing: an elastic worker
+// launches with `uv run --frozen --no-sync`, which does no dependency work, so
+// it needs the environment the deploy built. Workers spawn on demand long after
+// that deploy, and a host reboot with an ephemeral apps dir (or a cache wipe)
+// removes it in between. Starting anyway burns the request and reports a
+// readiness timeout, which reads as a slow app rather than a missing venv.
+func TestSpawnElasticWorker_RefusesWhenEnvironmentIsMissing(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateElasticApp(t, store, "noenv")
+	_ = mustCreateDeploymentInDir(t, store, app.ID, mustProjectBundle(t, false))
+
+	rt := &hostDepsRuntime{}
+	prx := proxy.New()
+	prx.SetPoolMode("noenv", config.IsolationPerSession, 1, 5)
+
+	spawner := &lifecycle.ElasticSpawner{
+		Store: store, Manager: process.NewManager(t.TempDir(), rt),
+		Proxy: prx, RuntimeCfg: config.RuntimeConfig{}, HealthCheck: noopHealthCheck,
+	}
+	spawner.Spawn("noenv", 3)
+
+	rt.mu.Lock()
+	started := len(rt.started)
+	rt.mu.Unlock()
+	if started != 0 {
+		t.Errorf("started %d worker(s) against a missing environment; want 0", started)
+	}
+	if prx.ElasticWorkerCount("noenv") != 0 {
+		t.Error("a worker that cannot run must not be registered with the proxy")
+	}
+}
+
+// TestSpawnElasticWorker_StartsWhenEnvironmentIsPresent is the control: the
+// guard must not block a normal spawn.
+func TestSpawnElasticWorker_StartsWhenEnvironmentIsPresent(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateElasticApp(t, store, "hasenv")
+	_ = mustCreateDeploymentInDir(t, store, app.ID, mustProjectBundle(t, true))
+
+	rt := &hostDepsRuntime{}
+	prx := proxy.New()
+	prx.SetPoolMode("hasenv", config.IsolationPerSession, 1, 5)
+
+	spawner := &lifecycle.ElasticSpawner{
+		Store: store, Manager: process.NewManager(t.TempDir(), rt),
+		Proxy: prx, RuntimeCfg: config.RuntimeConfig{}, HealthCheck: noopHealthCheck,
+	}
+	spawner.Spawn("hasenv", 4)
+
+	rt.mu.Lock()
+	started := len(rt.started)
+	rt.mu.Unlock()
+	if started != 1 {
+		t.Errorf("started %d worker(s) with a present environment; want 1", started)
+	}
+}

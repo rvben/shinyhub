@@ -320,10 +320,24 @@ when an app process starts).
 Hooks run after the dependency build and before any app process starts, for
 every worker-isolation mode: a `grouped` or `per_session` app gets the same
 preparation as a multiplex one, even though its workers spawn on demand later.
-The one case where a declared hook does not run is a container runtime, where
+
+**Hooks run when a bundle is promoted, not every time it starts.** Deploying,
+rolling forward, and changing an app's env vars all promote and therefore run
+them. Restarting, rolling back, scaling, and the automatic recovery after a
+failed deploy re-activate a bundle that already served, so they do not: your
+hooks already ran for it, and nothing guarantees a second run is safe. A
+restart is therefore not a way to re-run a hook - deploy again for that.
+
+The other case where a declared hook does not run is a container runtime, where
 dependencies are installed inside the image and the host has no view of the
 app's environment. That skip is reported: the deploy tells you how many hooks
 it did not run, so bake those steps into your image entrypoint instead.
+
+Because hooks are skipped on those paths, whatever they produce has to survive
+alongside the bundle. Write generated assets into the bundle directory (they are
+pruned with their version) or the persistent app data directory - not to a
+scratch location a host reboot can clear, which would leave a restarted app
+without them.
 
 ## `[access]` - per-app group access rules
 

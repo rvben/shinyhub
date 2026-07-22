@@ -760,6 +760,22 @@ func (m PreparationMode) buildsDeps() bool { return m != PrepareSkip }
 // buildIsFatal reports whether a failed dependency build should fail the deploy.
 func (m PreparationMode) buildIsFatal() bool { return m == PrepareRequired }
 
+// HostEnvironmentReady reports whether a bundle can be launched without first
+// building its dependencies. It is the exported form of the check the deploy
+// path applies before skipping preparation, for callers that launch a bundle
+// outside a deploy - notably the elastic worker spawner, which starts workers on
+// demand long after the deploy that prepared them.
+//
+// appType is the detected type (LaunchPlan.AppType); an empty value means the
+// bundle declares its own command and manages its own environment, so there is
+// nothing to verify.
+func HostEnvironmentReady(bundleDir, appType string) bool {
+	if appType == "" {
+		return true
+	}
+	return hostEnvironmentPresent(bundleDir, appType)
+}
+
 // hostEnvironmentPresent reports whether the built environment that a skipped
 // preparation would launch against actually exists in the bundle. It answers
 // "can this bundle start without building", not "was this bundle ever built" -
