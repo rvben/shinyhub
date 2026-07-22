@@ -84,6 +84,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.12](https://github.com/rvben/shinyhub/compare/v0.10.11...v0.10.12) - 2026-07-22
+
+### Added
+
+- **loadtest**: let the render rig drive an installed system browser ([f6444a7](https://github.com/rvben/shinyhub/commit/f6444a78898346ee67febfc147dc862118c9f08a))
+
+### Fixed
+
+- **deps**: upgrade google.golang.org/grpc to v1.82.1 for GHSA-hrxh-6v49-42gf ([121f3f0](https://github.com/rvben/shinyhub/commit/121f3f09d66dfb443a91549fadd910fe8ee7602f))
+- **loadtest**: remove dead RENDER_COST_MS read and install uv in the rig guest ([7a49890](https://github.com/rvben/shinyhub/commit/7a4989093c0700ee5aea0c0d0e4320e238c344f5))
+- **loadtest**: pass waitForFunction options as the third argument ([b382d1e](https://github.com/rvben/shinyhub/commit/b382d1e009008287f77d9a8d5ca3d34f11fb6862))
+- **loadtest**: count errored sessions and stop overwriting rig results ([9531a5b](https://github.com/rvben/shinyhub/commit/9531a5bcb23456d289ffdc8f40da960e5c8ce4c0))
+- **loadtest**: report rig teardown failures instead of swallowing them ([2be6e60](https://github.com/rvben/shinyhub/commit/2be6e6059823d6f9c6cff0d7f3e745056e75fca9))
+- **loadtest**: destroy the rig VM on provisioning failure and verify the binary transfer ([db981b0](https://github.com/rvben/shinyhub/commit/db981b03deb2ed662c4ded75cf73568927b527df))
+
 ## [0.10.11](https://github.com/rvben/shinyhub/compare/v0.10.10...v0.10.11) - 2026-07-22
 
 ### Fixed
