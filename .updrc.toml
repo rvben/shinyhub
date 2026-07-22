@@ -1,18 +1,14 @@
 # Dependencies that must not be bumped automatically.
 
 [pin]
-# cosign 4 defaults to the new bundle signature format, which ignores the
-# --output-signature / --output-certificate flags .goreleaser.yaml passes and
-# then fails writing an empty --bundle path:
+# sigstore/cosign-installer publishes concrete v4.x tags but NO floating `v4`
+# ref, unlike its `v2` and `v3`. An updater that shortens the latest version to
+# a major (`@v4`) writes a reference that does not resolve, which fails the
+# release workflow at the signing step - after the tag is already pushed, and
+# invisibly to CI, because this action runs only during a release.
 #
-#   Error: signing dist/checksums.txt: create bundle file: open : no such file
-#
-# Moving to v4 therefore means migrating the `signs:` block to --bundle, which
-# also changes the published artifacts from a .sig plus .pem pair to a single
-# bundle and breaks anyone verifying the current pair. That is a deliberate
-# migration, not a dependency bump.
-#
-# This is only exercised by the release workflow, so an unpinned bump passes CI
-# and fails at release time with the tag already pushed. Held at v3 until the
-# goreleaser signing config is migrated.
-"sigstore/cosign-installer" = "v3"
+# Held at a concrete version for that reason, not to avoid the major: the
+# goreleaser signing config was migrated to cosign 3's bundle format in
+# v0.10.14, so v4 is the intended version. Bump this deliberately, and check the
+# tag resolves (`git ls-remote --tags`) before trusting a shortened form.
+"sigstore/cosign-installer" = "v4.1.2"

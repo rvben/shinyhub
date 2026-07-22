@@ -41,13 +41,16 @@ sboms:
 signs:
   - cmd: cosign
     artifacts: checksum
-    signature: "${artifact}.sig"
-    certificate: "${artifact}.pem"
+    # cosign 3 (installed by cosign-installer v4) defaults to the Sigstore
+    # bundle format: one file carrying the signature and the certificate, and
+    # --output-signature / --output-certificate are ignored under it. scripts/
+    # install.sh verifies this bundle and still falls back to the old detached
+    # pair for releases published before the switch.
+    signature: "${artifact}.bundle"
     args:
       - sign-blob
       - "--yes"
-      - "--output-signature=${signature}"
-      - "--output-certificate=${certificate}"
+      - "--bundle=${signature}"
       - "${artifact}"
     output: true
 

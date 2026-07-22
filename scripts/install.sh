@@ -67,15 +67,34 @@ else
 fi
 
 # Step 2: optional signature verification of checksums.txt via cosign.
+#
+# Releases from v0.10.14 publish a Sigstore bundle (checksums.txt.bundle), which
+# carries the signature and the signing certificate in one file. Earlier releases
+# published a detached checksums.txt.sig plus checksums.txt.pem, so both are
+# accepted: pinning an older version must not quietly lose signature checking.
+#
+# Either way the identity is asserted, not just the maths - an unbound signature
+# proves only that somebody signed this, not that this repo's release workflow
+# did. A failed verification aborts the install (set -e); only the ABSENCE of any
+# signature downgrades to checksum-only trust.
 if command -v cosign >/dev/null 2>&1; then
-  if curl -fsSL "${BASE_URL}/checksums.txt.sig" -o "${TMP}/checksums.txt.sig" 2>/dev/null \
+  IDENTITY_RE="^https://github.com/${REPO}/\.github/workflows/.+@refs/tags/${VERSION}$"
+  OIDC_ISSUER="https://token.actions.githubusercontent.com"
+  if curl -fsSL "${BASE_URL}/checksums.txt.bundle" -o "${TMP}/checksums.txt.bundle" 2>/dev/null; then
+    printf 'Verifying checksums.txt signature with cosign (bundle)...\n'
+    cosign verify-blob \
+      --bundle "${TMP}/checksums.txt.bundle" \
+      --certificate-identity-regexp "${IDENTITY_RE}" \
+      --certificate-oidc-issuer "${OIDC_ISSUER}" \
+      "${TMP}/checksums.txt"
+  elif curl -fsSL "${BASE_URL}/checksums.txt.sig" -o "${TMP}/checksums.txt.sig" 2>/dev/null \
      && curl -fsSL "${BASE_URL}/checksums.txt.pem" -o "${TMP}/checksums.txt.pem" 2>/dev/null; then
-    printf 'Verifying checksums.txt signature with cosign...\n'
+    printf 'Verifying checksums.txt signature with cosign (detached, pre-v0.10.14)...\n'
     cosign verify-blob \
       --certificate "${TMP}/checksums.txt.pem" \
       --signature "${TMP}/checksums.txt.sig" \
-      --certificate-identity-regexp "^https://github.com/${REPO}/\.github/workflows/.+@refs/tags/${VERSION}$" \
-      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      --certificate-identity-regexp "${IDENTITY_RE}" \
+      --certificate-oidc-issuer "${OIDC_ISSUER}" \
       "${TMP}/checksums.txt"
   else
     printf 'Note: cosign present but no signature published for %s; relying on checksum only\n' "$VERSION" >&2
