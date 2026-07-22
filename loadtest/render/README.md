@@ -128,9 +128,25 @@ surprises" below for why the reported commit is not the one actually
 built), `RENDER_COST_MS=1300` (default), rig VM pinned to 2 vCPUs / 4096
 MiB, driver on a 12-core host with `RIG_BROWSER_CHANNEL=chrome`.
 
+**Negative control 1 was re-run and its number below is from the re-run, not
+the original Task 6 run.** The original run (`render-1s-2000ms-2026-07-22T11-07-42-607Z.json`)
+was captured before the `waitForFunction` timeout fix described below (every
+session-establishment check, including NC1's, goes through that call), so it
+was evidence gathered under a known-buggy harness even though its result
+happened to pass. It was re-run on a fresh rig VM under the fixed harness
+(`render-1s-2000ms-2026-07-22T11-53-59-678Z.json`, worktree HEAD
+`2b923ddafd4a805df2fab630c380bc471f9442f4`, which includes the fix) and
+produced the same gating result: `disconnectRate: 0`, `actionSuccessRate: 1`,
+session established (`firstRenderMs` 2725 ms vs. the original run's 4733 ms,
+both far under any timeout, as expected for two independent runs). See
+`.superpowers/sdd/task-6-report.md`, "Re-run: NC1 under the final harness",
+for the full before-and-after comparison. All other rows below are
+unaffected: the positive control and dose-response runs (11:20:42 onward)
+were already captured after the fix.
+
 | Run | N | Cadence | Disconnect rate | Action success rate |
 |---|---|---|---|---|
-| Negative control 1 | 1 | 2000 ms | 0 / 1 (0%) | 100% |
+| Negative control 1 (re-run under fixed harness) | 1 | 2000 ms | 0 / 1 (0%) | 100% |
 | Negative control 2 | 10 | 45000 ms | 0 / 10 (0%) | 100% |
 | Positive control | 5 | 2000 ms | 5 / 5 (100%) | 100% |
 | Dose-response | 3 | 2000 ms | 2 / 3 (66.7%) | 100% |
@@ -204,7 +220,14 @@ different phenomena.
   before installing the app's own requirements; without it, deploying the
   synthetic app fails with "Python runtime not found on the server
   (uv/python3 is not in PATH)" even though `pip install -r
-  requirements.txt` succeeds moments later.
+  requirements.txt` succeeds moments later. This line was ported into
+  `rig.sh` from a manual guest fix and, at the time, was only verified by
+  equivalence (the same command run by hand against an already-provisioned
+  guest), not by a fresh `up` cycle. It has since been exercised in-flow
+  from a clean image (the NC1 re-run below): `/api/server-info` reported
+  `runtimes.python: true` on the very first check after boot, with no
+  manual guest patching, and a deploy succeeded on the first attempt. The
+  fix is now confirmed to work end to end, not just by equivalence.
 - **A driver timeout bug produced false failed-to-establish results before
   it was fixed.** `drive.mjs` originally called
   `page.waitForFunction(fn, { timeout: 120000 })`. Playwright's real
