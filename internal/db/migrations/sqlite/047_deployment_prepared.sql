@@ -1,0 +1,15 @@
+-- prepared records that this deployment completed its host-side preparation:
+-- the dependency build and the manifest's post-deploy hooks. It distinguishes
+-- promoting a new bundle from re-activating one that already served.
+--
+-- Restoring the previous good bundle after a failed deploy is an activation,
+-- not a promotion, so it must not re-run app-controlled post-deploy hooks and
+-- must not fail because a rebuild hiccuped: that path is an unattended safety
+-- net and has to stay able to recover the app.
+--
+-- 0 = unknown/not prepared, which every row predating this column reports.
+-- Elastic (grouped/per_session) deployments made before v0.10.9 genuinely were
+-- never prepared, so "unknown" is the truthful default rather than a
+-- conservative one, and the restore path treats it as best-effort preparation
+-- instead of assuming either way.
+ALTER TABLE deployments ADD COLUMN prepared INTEGER NOT NULL DEFAULT 0;

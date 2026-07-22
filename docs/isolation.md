@@ -384,6 +384,17 @@ will cold-start a new worker on their next request.
 running, but there are no warm processes yet. Boot errors surface at
 first-session time, not at deploy time.
 
+**Recovering a previous bundle does not re-run preparation.** After a failed
+deploy, ShinyHub restores the previously-good bundle. That is an activation of a
+deployment that already served, not a promotion, so it skips the post-deploy
+hooks (they ran when that bundle was first deployed, and they are
+app-controlled) and skips the dependency build for any deployment recorded as
+prepared. A deployment whose preparation state predates that record - including
+an elastic bundle deployed before elastic apps were prepared at all - gets a
+best-effort build whose failure is logged but never aborts the recovery. The
+restore path is an unattended safety net; it must not be able to fail and leave
+the app down. A user-initiated `rollback` is a normal deploy and does prepare.
+
 **Elastic apps are still prepared at deploy.** The dependency build
 (`uv sync` / `renv::restore`) and the manifest's `[[hook]] on = "post-deploy"`
 blocks run once per deploy, before any worker can serve a request, exactly as

@@ -1391,6 +1391,12 @@ type Deployment struct {
 	Status        string
 	ContentDigest string // "" until SetDeploymentDigest records it
 	CreatedAt     time.Time
+	// Prepared reports that this deployment finished its host-side preparation
+	// (dependency build + post-deploy hooks). False on every row written before
+	// the column existed, and on elastic deployments made before preparation ran
+	// for them at all, so callers must treat false as "unknown" rather than
+	// "definitely unprepared".
+	Prepared bool
 }
 
 // Deployment status lifecycle. A deploy records DeploymentPending before any
@@ -1475,6 +1481,22 @@ func (s *Store) PromoteDeployment(id int64) error {
 	return nil
 }
 
+// MarkDeploymentPrepared records that this deployment completed its host-side
+// preparation: the dependency build and the manifest's post-deploy hooks. The
+// restore path reads it to decide whether bringing this bundle back is an
+// activation (skip preparation entirely) or a best-effort rebuild of a bundle
+// whose preparation state predates the column.
+//
+// Called after the deploy succeeds, so a deploy that fails partway leaves the
+// row unprepared and a later restore re-attempts the build rather than assuming
+// a half-built environment is usable.
+func (s *Store) MarkDeploymentPrepared(id int64) error {
+	if _, err := s.db.Exec(`UPDATE deployments SET prepared = 1 WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("mark deployment %d prepared: %w", id, err)
+	}
+	return nil
+}
+
 // FailDeployment marks an aborted pending deployment as failed so it is never
 // adopted as the live bundle. It is a no-op on a row that is not pending. The
 // failure reason is left empty; prefer FailDeploymentWithReason so the cause is
@@ -1517,7 +1539,7 @@ func (s *Store) SetDeploymentDigest(id int64, digest string) error {
 // good deployment.
 func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 	rows, err := s.db.Query(
-		`SELECT id, app_id, version, bundle_dir, status, content_digest, created_at
+		`SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared
 		FROM deployments WHERE status = ? ORDER BY id`, DeploymentPending)
 	if err != nil {
 		return nil, fmt.Errorf("list inflight deployments: %w", err)
@@ -1527,9 +1549,14 @@ func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 	for rows.Next() {
 		var d Deployment
 		var digest sql.NullString
-		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt); err != nil {
+		// prepared is INTEGER in both backends (see migration 047) so the scan
+		// works on sqlite and postgres alike; database/sql will not scan an
+		// integer column straight into a bool.
+		var preparedInt int
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt, &preparedInt); err != nil {
 			return nil, err
 		}
+		d.Prepared = preparedInt != 0
 		d.ContentDigest = digest.String
 		ds = append(ds, &d)
 	}
@@ -1625,7 +1652,7 @@ func (s *Store) CurrentRelease(appID int64) (number int, releasedAt time.Time, v
 // this pointer until PromoteDeployment confirms the new pool.
 func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	rows, err := s.db.Query(`
-		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at
+		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared
 		FROM deployments
 		WHERE app_id = ? AND status NOT IN ('pending', 'failed')
 		ORDER BY id DESC`, appID)
@@ -1637,9 +1664,14 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	for rows.Next() {
 		var d Deployment
 		var digest sql.NullString
-		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt); err != nil {
+		// prepared is INTEGER in both backends (see migration 047) so the scan
+		// works on sqlite and postgres alike; database/sql will not scan an
+		// integer column straight into a bool.
+		var preparedInt int
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt, &preparedInt); err != nil {
 			return nil, err
 		}
+		d.Prepared = preparedInt != 0
 		d.ContentDigest = digest.String
 		ds = append(ds, &d)
 	}
@@ -1665,18 +1697,20 @@ func (s *Store) HasAnyDeployment(appID int64) (bool, error) {
 // deployment does not exist or belongs to a different app.
 func (s *Store) GetDeploymentBySlugAndID(slug string, id int64) (*Deployment, error) {
 	row := s.db.QueryRow(`
-		SELECT d.id, d.app_id, d.version, d.bundle_dir, d.status, d.content_digest, d.created_at
+		SELECT d.id, d.app_id, d.version, d.bundle_dir, d.status, d.content_digest, d.created_at, d.prepared
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
 		WHERE d.id = ? AND a.slug = ?`, id, slug)
 	var dep Deployment
 	var digest sql.NullString
-	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &digest, &dep.CreatedAt); err != nil {
+	var preparedInt int
+	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &digest, &dep.CreatedAt, &preparedInt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	dep.Prepared = preparedInt != 0
 	dep.ContentDigest = digest.String
 	return &dep, nil
 }
@@ -1688,18 +1722,20 @@ func (s *Store) GetDeploymentBySlugAndID(slug string, id int64) (*Deployment, er
 // failed row is not.
 func (s *Store) GetDeploymentByDigest(digest string) (*Deployment, error) {
 	row := s.db.QueryRow(`
-		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at
+		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared
 		FROM deployments
 		WHERE content_digest = ? AND status != 'failed'
 		ORDER BY id DESC LIMIT 1`, digest)
 	var d Deployment
 	var dg sql.NullString
-	if err := row.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &dg, &d.CreatedAt); err != nil {
+	var preparedInt int
+	if err := row.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &dg, &d.CreatedAt, &preparedInt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	d.Prepared = preparedInt != 0
 	d.ContentDigest = dg.String
 	return &d, nil
 }

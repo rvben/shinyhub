@@ -1097,6 +1097,16 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		return
 	}
 	defaultMem, defaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
+	// Restoring is an activation, not a promotion: this bundle already served,
+	// so its hooks must not run again and a rebuild must not be able to fail the
+	// recovery. A deployment recorded as prepared skips preparation outright; one
+	// whose state predates that record (including an elastic bundle from before
+	// elastic apps were prepared at all) gets a best-effort build that is logged
+	// but never fatal.
+	preparation := deploy.PrepareBestEffort
+	if prev.Prepared {
+		preparation = deploy.PrepareSkip
+	}
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
@@ -1110,6 +1120,7 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		ContentDigest:         prev.ContentDigest,
 		DeploymentID:          prev.ID,
 		AppVersion:            prev.Version,
+		Preparation:           preparation,
 	}, app))
 	if err != nil {
 		slog.Error("restore: previous pool failed to start; app is down", "slug", slug, "err", err)
@@ -1538,6 +1549,15 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		s.recordDeploy("failure")
 		writeError(w, http.StatusInternalServerError, "deploy succeeded but recording it failed; retry to commit")
 		return
+	}
+
+	// Record that this bundle's environment is built and its post-deploy hooks
+	// have run, so restoring it later is an activation rather than a rebuild.
+	// Soft state: a failure here only costs a future restore its fast path,
+	// which then re-attempts the build best-effort instead of skipping it.
+	if err := s.store.MarkDeploymentPrepared(pendingDep.ID); err != nil {
+		slog.Warn("deploy: recording preparation state failed; a later restore will rebuild best-effort",
+			"slug", slug, "version", version, "err", err)
 	}
 
 	// Phase B: upsert [[schedule]] rows from the manifest. Runs after

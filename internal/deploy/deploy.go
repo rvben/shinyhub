@@ -464,6 +464,11 @@ type Params struct {
 	ContentDigest string
 	DeploymentID  int64
 	AppVersion    string
+	// Preparation selects how the deploy-time preparation phase behaves. The
+	// zero value (PrepareRequired) is normal promotion. Callers bringing an
+	// already-promoted bundle back up set an activation mode so recovery neither
+	// re-runs app-controlled hooks nor fails on a rebuild.
+	Preparation PreparationMode
 	// ColocateWorkers pins every replica of this pool to one of the named worker
 	// node ids, overriding least-loaded placement. The control plane sets it for
 	// a shared-mount consumer so each replica lands on a worker that also hosts
@@ -719,6 +724,42 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 	return baseCmd, appType, autoInstrument, hc, timeout, nil
 }
 
+// PreparationMode selects how a deploy treats the preparation phase: the
+// host-side dependency build and the manifest's post-deploy hooks.
+//
+// Promoting a new bundle and re-activating one that already served are
+// different operations. A promotion must prepare, and must fail when
+// preparation fails, or the app serves without its declared build steps. An
+// activation restores a bundle whose hooks already ran; re-running
+// app-controlled hooks there is wrong, and failing the whole operation because
+// a rebuild hiccuped turns an unattended safety net into a way to lose the app.
+type PreparationMode int
+
+const (
+	// PrepareRequired is normal promotion: build, run hooks, fail on either.
+	PrepareRequired PreparationMode = iota
+	// PrepareSkip activates a deployment already recorded as prepared. Its
+	// environment is built and its hooks have run, so neither is repeated.
+	PrepareSkip
+	// PrepareBestEffort activates a deployment whose preparation state is
+	// unknown - typically one predating the record, including an elastic bundle
+	// from before elastic apps were prepared at all. The build is attempted so a
+	// never-built bundle can still come up, but a failure is logged and the
+	// activation continues. Hooks are not run: they are app-controlled and this
+	// is a recovery path.
+	PrepareBestEffort
+)
+
+// runsHooks reports whether this mode should execute post-deploy hooks. Only a
+// promotion does.
+func (m PreparationMode) runsHooks() bool { return m == PrepareRequired }
+
+// buildsDeps reports whether this mode should attempt the dependency build.
+func (m PreparationMode) buildsDeps() bool { return m != PrepareSkip }
+
+// buildIsFatal reports whether a failed dependency build should fail the deploy.
+func (m PreparationMode) buildIsFatal() bool { return m == PrepareRequired }
+
 // resolveBundleCommand resolves a bundle's base launch command and, for
 // inferred-command bundles, builds its host-side environment. It is the single
 // place that decides both "what does this bundle launch" and "does the host
@@ -751,12 +792,17 @@ func resolveBundleCommand(p Params, m *Manifest, hostDeps bool) (baseCmd []strin
 		case "python", "r":
 			// Convert a requirements.txt-only Python app into a uv project (best-
 			// effort), then sync deps - all under one build_timeout_seconds budget
-			// (default 900s) so a hung build cannot block the deploy forever. A
-			// build failure exits here, before any process starts, so it is
-			// reported build_failed, distinct from the readiness window.
-			if hostDeps {
+			// (default 900s) so a hung build cannot block the deploy forever. On a
+			// promotion a build failure exits here, before any process starts, so
+			// it is reported build_failed, distinct from the readiness window; on
+			// an activation it is logged and the bundle comes back up anyway.
+			if hostDeps && p.Preparation.buildsDeps() {
 				if berr := buildEnvironment(p, appType, resolveBuildTimeout(m)); berr != nil {
-					return nil, "", berr
+					if p.Preparation.buildIsFatal() {
+						return nil, "", berr
+					}
+					slog.Warn("activation: dependency build failed; continuing with the existing environment",
+						"slug", p.Slug, "deployment_id", p.DeploymentID, "version", p.AppVersion, "err", berr)
 				}
 			}
 			return nil, appType, nil
@@ -930,6 +976,15 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 	}
 	hooks := manifest.PostDeploy()
 	if len(hooks) == 0 {
+		return 0, nil
+	}
+	// An activation brings back a bundle whose hooks already ran when it was
+	// promoted. They are app-controlled code with app-controlled side effects,
+	// so re-running them on a recovery path is not safe to assume idempotent -
+	// and this path exists to get the app serving again, not to rebuild it.
+	if !p.Preparation.runsHooks() {
+		slog.Info("activation: skipping post-deploy hooks for an already-promoted bundle",
+			"slug", p.Slug, "deployment_id", p.DeploymentID, "version", p.AppVersion, "hooks", len(hooks))
 		return 0, nil
 	}
 	if !hostDeps {
