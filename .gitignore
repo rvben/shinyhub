@@ -28,3 +28,9 @@ node_modules/
 /packaging/python/build/
 /packaging/python/src/shinyhub.egg-info/
 /packaging/python/__pycache__/
+
+# Python bytecode (repo-wide; the render-rig test suites generate it)
+__pycache__/
+
+# npm install artifact from the render-rig driver, not a deliverable
+loadtest/render/driver/package-lock.json
