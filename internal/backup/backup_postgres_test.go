@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/backup"
@@ -21,6 +23,51 @@ func requirePGTools(t *testing.T) {
 		if _, err := exec.LookPath(bin); err != nil {
 			t.Skipf("%s not on PATH; skipping Postgres backup test", bin)
 		}
+	}
+}
+
+// requirePGDumpNewerThanServer skips when the local pg_dump predates the server.
+// pg_dump refuses outright in that case ("aborting because of server version
+// mismatch"), which is an environment mismatch rather than a defect: CI runs
+// matching versions, while a developer machine commonly has an older Homebrew
+// client than the server container. Reporting it as a failure is worse than
+// useless - a suite that goes red for reasons unrelated to the code teaches
+// people to stop reading it.
+func requirePGDumpNewerThanServer(t *testing.T, store *db.Store) {
+	t.Helper()
+	var serverNum int
+	if err := store.DB().QueryRow(`SHOW server_version_num`).Scan(&serverNum); err != nil {
+		t.Fatalf("read server version: %v", err)
+	}
+	serverMajor := serverNum / 10000
+
+	out, err := exec.Command("pg_dump", "--version").Output()
+	if err != nil {
+		t.Fatalf("pg_dump --version: %v", err)
+	}
+	// "pg_dump (PostgreSQL) 16.14 (Homebrew)" -> 16
+	fields := strings.Fields(string(out))
+	clientMajor := 0
+	for _, f := range fields {
+		if n, err := strconv.Atoi(strings.SplitN(f, ".", 2)[0]); err == nil && n > 8 {
+			clientMajor = n
+			break
+		}
+	}
+	if clientMajor == 0 {
+		t.Fatalf("could not parse pg_dump version from %q", strings.TrimSpace(string(out)))
+	}
+	if clientMajor < serverMajor {
+		// In CI this is a provisioning error, not a developer's environment: the
+		// workflow installs a client chosen to be >= the server. Skipping there
+		// would silently drop this coverage the moment the distro default lags,
+		// which is exactly the kind of loss a green suite should never hide.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("pg_dump %d predates the server (%d); CI must install a client >= the server "+
+				"or this round-trip stops being tested", clientMajor, serverMajor)
+		}
+		t.Skipf("pg_dump %d predates the server (%d); pg_dump refuses to dump a newer server. "+
+			"Install client tools >= %d to run this test.", clientMajor, serverMajor, serverMajor)
 	}
 }
 
@@ -61,6 +108,7 @@ func TestPostgresRoundTrip(t *testing.T) {
 	requirePGTools(t)
 
 	srcStore, srcDSN := dbtest.NewPostgres(t)
+	requirePGDumpNewerThanServer(t, srcStore)
 	if _, err := srcStore.DB().Exec(
 		`INSERT INTO users (username, password_hash, role) VALUES ('alice','x','admin')`); err != nil {
 		t.Fatalf("seed user: %v", err)
