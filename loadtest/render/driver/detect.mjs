@@ -10,11 +10,15 @@
  *
  * disconnected dominates: a torn-down socket is the failure this rig exists
  * to detect, and a session that completed actions before dropping still
- * dropped. A session that attempted nothing is degraded rather than healthy,
- * because "did nothing" is not evidence of health.
+ * dropped. Next, a driver call that threw (error is set) is errored: it means
+ * the session's own control flow broke, even if the socket never reported a
+ * close, and hiding that behind a plain "healthy" or "degraded" would let a
+ * crashed session pass as fine. A session that attempted nothing is degraded
+ * rather than healthy, because "did nothing" is not evidence of health.
  */
-export function classifyOutcome({ disconnected, actionsAttempted, actionsSucceeded }) {
+export function classifyOutcome({ disconnected, error, actionsAttempted, actionsSucceeded }) {
   if (disconnected) return 'disconnected';
+  if (error !== null && error !== undefined && error !== '') return 'errored';
   if (actionsAttempted === 0) return 'degraded';
   return actionsSucceeded === actionsAttempted ? 'healthy' : 'degraded';
 }
@@ -29,6 +33,7 @@ export function summarize(sessions) {
   let disconnected = 0;
   let healthy = 0;
   let degraded = 0;
+  let errored = 0;
   let attempted = 0;
   let succeeded = 0;
 
@@ -36,6 +41,7 @@ export function summarize(sessions) {
     switch (classifyOutcome(s)) {
       case 'disconnected': disconnected++; break;
       case 'healthy': healthy++; break;
+      case 'errored': errored++; break;
       default: degraded++; break;
     }
     attempted += s.actionsAttempted;
@@ -47,6 +53,7 @@ export function summarize(sessions) {
     disconnected,
     healthy,
     degraded,
+    errored,
     disconnectRate: total === 0 ? null : disconnected / total,
     actionSuccessRate: attempted === 0 ? null : succeeded / attempted,
   };

@@ -21,7 +21,15 @@ const SESSIONS = Number(process.env.RIG_SESSIONS || '5');
 const CADENCE_MS = Number(process.env.RIG_CADENCE_MS || '2000');
 const DURATION_S = Number(process.env.RIG_DURATION_S || '120');
 const AUTH_COOKIE = process.env.RIG_AUTH_COOKIE || '';
-const OUT = process.env.RIG_OUT || `../results/render-${SESSIONS}s-${CADENCE_MS}ms.json`;
+// loadtest/render/driver -> ../../results resolves to loadtest/results, the
+// gitignored evidence directory shared by the whole loadtest suite. The
+// timestamp keeps two default-config runs from overwriting each other; ISO
+// 8601 with colons and the decimal point stripped sorts lexicographically by
+// run time and stays filesystem-safe on every OS this driver targets.
+const RUN_TIMESTAMP = new Date().toISOString().replace(/[:.]/g, '-');
+const OUT =
+  process.env.RIG_OUT ||
+  `../../results/render-${SESSIONS}s-${CADENCE_MS}ms-${RUN_TIMESTAMP}.json`;
 // The Playwright CDN that serves the pinned chromium build is not reliably
 // reachable from every network, and even where it is, real Chrome is a
 // higher-fidelity target since it is what users actually run. Set
@@ -35,6 +43,12 @@ if (!URL_BASE) {
 }
 
 const appUrl = `${URL_BASE}/app/${SLUG}/`;
+
+// Shiny's live-session websocket path always contains this fragment. A page
+// can open other sockets (browser tooling, third-party scripts) whose close
+// has nothing to do with the app's connection; without this filter, one of
+// those closing would be recorded as a fabricated session disconnect.
+const SHINY_WEBSOCKET_PATH = '/websocket/';
 
 /** Drive one session for the run duration, returning its record. */
 async function runSession(browser, index, deadline) {
@@ -60,8 +74,10 @@ async function runSession(browser, index, deadline) {
   const page = await context.newPage();
 
   // Two independent disconnect signals. The overlay is what a user sees; the
-  // socket close is what actually happened. Either one counts.
+  // socket close is what actually happened. Either one counts. Only Shiny's
+  // own websocket is a valid disconnect signal; see SHINY_WEBSOCKET_PATH.
   page.on('websocket', (ws) => {
+    if (!ws.url().includes(SHINY_WEBSOCKET_PATH)) return;
     ws.on('close', () => {
       if (record.established && !record.disconnected) {
         record.disconnected = true;

@@ -51,3 +51,53 @@ test('summarize on an empty fleet reports null rates, never zero', () => {
   assert.equal(s.disconnectRate, null);
   assert.equal(s.actionSuccessRate, null);
 });
+
+test('a session whose driver call threw is errored', () => {
+  assert.equal(
+    classifyOutcome({
+      disconnected: false,
+      error: 'TargetClosedError: Target closed',
+      actionsAttempted: 3,
+      actionsSucceeded: 3,
+    }),
+    'errored',
+  );
+});
+
+test('a disconnected and errored session is disconnected, since a torn-down socket outranks the error', () => {
+  assert.equal(
+    classifyOutcome({
+      disconnected: true,
+      error: 'TargetClosedError: Target closed',
+      actionsAttempted: 3,
+      actionsSucceeded: 1,
+    }),
+    'disconnected',
+  );
+});
+
+test('an empty-string error is not treated as an error', () => {
+  assert.equal(
+    classifyOutcome({ disconnected: false, error: '', actionsAttempted: 3, actionsSucceeded: 3 }),
+    'healthy',
+  );
+});
+
+test('a session with no error field behaves exactly as before', () => {
+  assert.equal(
+    classifyOutcome({ disconnected: false, actionsAttempted: 3, actionsSucceeded: 3 }),
+    'healthy',
+  );
+});
+
+test('summarize counts errored sessions separately, not as healthy or degraded', () => {
+  const s = summarize([
+    { disconnected: false, error: 'boom', actionsAttempted: 2, actionsSucceeded: 2 },
+    { disconnected: false, error: null, actionsAttempted: 2, actionsSucceeded: 2 },
+    { disconnected: false, error: null, actionsAttempted: 2, actionsSucceeded: 1 },
+  ]);
+  assert.equal(s.total, 3);
+  assert.equal(s.errored, 1);
+  assert.equal(s.healthy, 1);
+  assert.equal(s.degraded, 1);
+});
