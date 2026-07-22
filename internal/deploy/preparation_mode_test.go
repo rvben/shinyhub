@@ -160,3 +160,179 @@ func TestPreparationZeroValueIsPromotion(t *testing.T) {
 		t.Fatalf("zero-value Preparation = %v, want PrepareRequired", p.Preparation)
 	}
 }
+
+// prepProjectBundle writes a python bundle in PROJECT mode (a pyproject.toml),
+// which is the shape whose launch is `uv run --frozen --no-sync` and therefore
+// depends on a pre-built .venv existing on disk.
+func prepProjectBundle(t *testing.T, withVenv bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"app.py":         "",
+		"pyproject.toml": "[project]\nname = \"x\"\nversion = \"0\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if withVenv {
+		bin := filepath.Join(dir, ".venv", "bin")
+		if err := os.MkdirAll(bin, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// A venv is only usable if its interpreter resolves, so the fixture has to
+		// have one or "present" would not mean present.
+		if err := os.WriteFile(filepath.Join(bin, "python"), []byte("#!/bin/sh\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestPrepareSkip_RebuildsWhenEnvironmentIsMissing: `prepared` records that
+// preparation once succeeded, not that its output still exists. A wiped .venv, a
+// tmpfs-backed apps dir across a reboot, or a deployment prepared under a
+// container runtime and later moved to the native runtime all leave `prepared`
+// true with nothing on disk. Launch is `uv run --frozen --no-sync`, which does no
+// repair, so skipping would boot against nothing.
+func TestPrepareSkip_RebuildsWhenEnvironmentIsMissing(t *testing.T) {
+	bundle := prepProjectBundle(t, false) // project mode, no .venv
+	built, hooked := prepProbes(t, nil)
+
+	p := prepParams(t, "skip-missing-env", bundle, deploy.PrepareSkip, "multiplex")
+	p.Command = nil // inferred path
+	if _, err := deploy.Run(p); err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	if !built.Load() {
+		t.Error("a skipped preparation must still rebuild when the environment is absent")
+	}
+	if hooked.Load() {
+		t.Error("rebuilding a missing environment must not also re-run post-deploy hooks")
+	}
+}
+
+// TestPrepareSkip_SkipsWhenEnvironmentIsPresent is the other half: the recovery
+// path must not defeat the optimization. With the .venv present, nothing is
+// rebuilt.
+func TestPrepareSkip_SkipsWhenEnvironmentIsPresent(t *testing.T) {
+	bundle := prepProjectBundle(t, true) // project mode, .venv exists
+	built, _ := prepProbes(t, nil)
+
+	p := prepParams(t, "skip-present-env", bundle, deploy.PrepareSkip, "multiplex")
+	p.Command = nil
+	if _, err := deploy.Run(p); err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	if built.Load() {
+		t.Error("a present environment must not be rebuilt; the skip is the whole point")
+	}
+}
+
+// TestPrepareSkip_MissingEnvironmentRebuildFailureIsNotFatal: the recovery build
+// must not become a new way for the unattended restore path to fail. A failure
+// is logged and the boot proceeds, where the health check is the real gate.
+func TestPrepareSkip_MissingEnvironmentRebuildFailureIsNotFatal(t *testing.T) {
+	bundle := prepProjectBundle(t, false)
+	prepProbes(t, errors.New("index unreachable"))
+
+	p := prepParams(t, "skip-missing-env-fail", bundle, deploy.PrepareSkip, "multiplex")
+	p.Command = nil
+	if _, err := deploy.Run(p); err != nil {
+		t.Fatalf("a failed recovery build must not fail the activation, got: %v", err)
+	}
+}
+
+// TestHostEnvironmentPresent_RequirementsBundleNeedsNothing: a requirements.txt
+// bundle builds its dependencies at launch (`uv run --with-requirements`), so it
+// has no pre-built environment to miss and must not trigger a pointless rebuild.
+func TestHostEnvironmentPresent_RequirementsBundleNeedsNothing(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"app.py":           "",
+		"requirements.txt": "shiny>=1.0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	built, _ := prepProbes(t, nil)
+
+	p := prepParams(t, "skip-requirements", dir, deploy.PrepareSkip, "multiplex")
+	p.Command = nil
+	if _, err := deploy.Run(p); err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	if built.Load() {
+		t.Error("a launch-time-resolved bundle has no environment to miss; it must not be rebuilt")
+	}
+}
+
+// TestPrepareSkip_RebuildsWhenInterpreterIsDangling: a venv whose interpreter
+// symlink no longer resolves is the ordinary outcome of upgrading or removing
+// the host Python it pointed at. The directory survives, so a presence-only
+// check would skip the repair and launch something that cannot start.
+func TestPrepareSkip_RebuildsWhenInterpreterIsDangling(t *testing.T) {
+	bundle := prepProjectBundle(t, true)
+	venvBin := filepath.Join(bundle, ".venv", "bin")
+	if err := os.Remove(filepath.Join(venvBin, "python")); err != nil {
+		t.Fatal(err)
+	}
+	// Point at a Python that no longer exists, as a host upgrade would leave it.
+	if err := os.Symlink(filepath.Join(bundle, "no-such-python3"), filepath.Join(venvBin, "python")); err != nil {
+		t.Fatal(err)
+	}
+
+	built, _ := prepProbes(t, nil)
+	p := prepParams(t, "skip-dangling-interp", bundle, deploy.PrepareSkip, "multiplex")
+	p.Command = nil
+	if _, err := deploy.Run(p); err != nil {
+		t.Fatalf("deploy.Run: %v", err)
+	}
+	if !built.Load() {
+		t.Error("a venv whose interpreter does not resolve must be rebuilt, not launched")
+	}
+}
+
+// TestPrepareSkip_RebuildsWhenRenvLibraryIsMissing covers the R half: a bundle
+// with a lockfile needs its restored library, and a bundle without one manages
+// its own packages and must not be rebuilt pointlessly.
+func TestPrepareSkip_RebuildsWhenRenvLibraryIsMissing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		lockfile  bool
+		library   bool
+		wantBuild bool
+	}{
+		{"lockfile without restored library rebuilds", true, false, true},
+		{"lockfile with restored library skips", true, true, false},
+		{"no lockfile needs nothing", false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "app.R"), []byte(""), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.lockfile {
+				if err := os.WriteFile(filepath.Join(dir, "renv.lock"), []byte("{}"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.library {
+				if err := os.MkdirAll(filepath.Join(dir, "renv", "library"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			built, _ := prepProbes(t, nil)
+			p := prepParams(t, "skip-renv-"+tc.name, dir, deploy.PrepareSkip, "multiplex")
+			p.Command = nil
+			if _, err := deploy.Run(p); err != nil {
+				t.Fatalf("deploy.Run: %v", err)
+			}
+			if got := built.Load(); got != tc.wantBuild {
+				t.Errorf("rebuilt = %v, want %v", got, tc.wantBuild)
+			}
+		})
+	}
+}
