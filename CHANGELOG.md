@@ -86,6 +86,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.14](https://github.com/rvben/shinyhub/compare/v0.10.13...v0.10.14) - 2026-07-23
+
+### Added
+
+- **release**: sign releases with the Sigstore bundle format ([3c40770](https://github.com/rvben/shinyhub/commit/3c4077094af25f9f9b828402c0b7eecf5cee9046))
+
 ## [0.10.13](https://github.com/rvben/shinyhub/compare/v0.10.12...v0.10.13) - 2026-07-22
 
 ### Fixed
