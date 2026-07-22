@@ -402,15 +402,22 @@ worker holds its full resource slice until the client disconnects (or
 
 ### How to enable
 
-1. **Set the dial via CLI** (no redeploy needed for existing apps):
+1. **Set the dial via CLI**:
 
    ```bash
    shinyhub apps set myapp --isolation per_session --max-workers 20
    ```
 
-   The change takes effect immediately for new incoming sessions. Any
-   currently-connected sessions will cold-start in their new per-session
-   worker on their next request.
+   New routing takes effect immediately, and any currently-connected
+   sessions cold-start in their new worker on their next request.
+
+   On an app whose status is **running**, changing any worker dial also
+   triggers a redeploy in the background, which re-runs the dependency
+   build and the manifest's `[[hook]] on = "post-deploy"` steps before
+   workers serve again. Budget for that: it is a full build cycle, not a
+   routing tweak, and a failing hook or build will fail it. On a stopped
+   or hibernated app no redeploy is triggered and the change is a pure
+   metadata update.
 
 2. **Or declare it in `shinyhub.toml`** (recommended for reproducible fleets):
 
