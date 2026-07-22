@@ -161,6 +161,14 @@ func TestPreparationZeroValueIsPromotion(t *testing.T) {
 	}
 }
 
+// The environment-presence tests below all use the elastic (grouped) isolation
+// mode deliberately. They assert which BUILD decision was made, and the elastic
+// path runs preparation and then returns without booting any replica. A
+// fixed-replica boot would exec the real launch command, so an inferred-command
+// bundle would need `uv` (or `Rscript`) on PATH - present on a dev machine and
+// absent in CI, which is a test that passes locally and fails on the release
+// runner rather than one that tests anything extra.
+
 // prepProjectBundle writes a python bundle in PROJECT mode (a pyproject.toml),
 // which is the shape whose launch is `uv run --frozen --no-sync` and therefore
 // depends on a pre-built .venv existing on disk.
@@ -199,7 +207,7 @@ func TestPrepareSkip_RebuildsWhenEnvironmentIsMissing(t *testing.T) {
 	bundle := prepProjectBundle(t, false) // project mode, no .venv
 	built, hooked := prepProbes(t, nil)
 
-	p := prepParams(t, "skip-missing-env", bundle, deploy.PrepareSkip, "multiplex")
+	p := prepParams(t, "skip-missing-env", bundle, deploy.PrepareSkip, "grouped")
 	p.Command = nil // inferred path
 	if _, err := deploy.Run(p); err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -219,7 +227,7 @@ func TestPrepareSkip_SkipsWhenEnvironmentIsPresent(t *testing.T) {
 	bundle := prepProjectBundle(t, true) // project mode, .venv exists
 	built, _ := prepProbes(t, nil)
 
-	p := prepParams(t, "skip-present-env", bundle, deploy.PrepareSkip, "multiplex")
+	p := prepParams(t, "skip-present-env", bundle, deploy.PrepareSkip, "grouped")
 	p.Command = nil
 	if _, err := deploy.Run(p); err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -236,7 +244,7 @@ func TestPrepareSkip_MissingEnvironmentRebuildFailureIsNotFatal(t *testing.T) {
 	bundle := prepProjectBundle(t, false)
 	prepProbes(t, errors.New("index unreachable"))
 
-	p := prepParams(t, "skip-missing-env-fail", bundle, deploy.PrepareSkip, "multiplex")
+	p := prepParams(t, "skip-missing-env-fail", bundle, deploy.PrepareSkip, "grouped")
 	p.Command = nil
 	if _, err := deploy.Run(p); err != nil {
 		t.Fatalf("a failed recovery build must not fail the activation, got: %v", err)
@@ -258,7 +266,7 @@ func TestHostEnvironmentPresent_RequirementsBundleNeedsNothing(t *testing.T) {
 	}
 	built, _ := prepProbes(t, nil)
 
-	p := prepParams(t, "skip-requirements", dir, deploy.PrepareSkip, "multiplex")
+	p := prepParams(t, "skip-requirements", dir, deploy.PrepareSkip, "grouped")
 	p.Command = nil
 	if _, err := deploy.Run(p); err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -284,7 +292,7 @@ func TestPrepareSkip_RebuildsWhenInterpreterIsDangling(t *testing.T) {
 	}
 
 	built, _ := prepProbes(t, nil)
-	p := prepParams(t, "skip-dangling-interp", bundle, deploy.PrepareSkip, "multiplex")
+	p := prepParams(t, "skip-dangling-interp", bundle, deploy.PrepareSkip, "grouped")
 	p.Command = nil
 	if _, err := deploy.Run(p); err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -325,7 +333,7 @@ func TestPrepareSkip_RebuildsWhenRenvLibraryIsMissing(t *testing.T) {
 			}
 
 			built, _ := prepProbes(t, nil)
-			p := prepParams(t, "skip-renv-"+tc.name, dir, deploy.PrepareSkip, "multiplex")
+			p := prepParams(t, "skip-renv-"+tc.name, dir, deploy.PrepareSkip, "grouped")
 			p.Command = nil
 			if _, err := deploy.Run(p); err != nil {
 				t.Fatalf("deploy.Run: %v", err)
