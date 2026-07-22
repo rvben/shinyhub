@@ -89,8 +89,18 @@ async function runSession(browser, index, deadline) {
   const startedAt = Date.now();
   try {
     await page.goto(appUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    // waitForFunction's signature is (pageFunction, arg, options): a bare
+    // second positional argument is always bound to arg, never sniffed as
+    // options, even when it looks like one. Passing {timeout: 120000} as the
+    // second argument silently discards it (arg is unused by this predicate)
+    // and Playwright falls back to its default 30000ms timeout instead.
+    // Confirmed empirically: at N=10 concurrent sessions two legitimately
+    // slower-but-healthy connections were misreported as failed-to-establish
+    // by this default. The explicit `undefined` arg is required so the third
+    // positional argument is read as options.
     await page.waitForFunction(
       () => document.body && document.body.innerText.includes('RIG_READY'),
+      undefined,
       { timeout: 120000 },
     );
     record.established = true;
