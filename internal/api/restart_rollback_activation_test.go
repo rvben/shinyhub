@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -227,4 +228,52 @@ func mustAppID(t *testing.T, store *db.Store, slug string) int64 {
 		t.Fatalf("get app %s: %v", slug, err)
 	}
 	return app.ID
+}
+
+// TestWorkerDialChange_IsAnActivation: changing a scaling dial on a running app
+// triggers a background redeploy of the bundle that is already live. Nothing the
+// build or the hooks read has changed, so re-running app-controlled hooks to
+// apply a replica count is a side effect nobody asked for - the same reasoning
+// that makes restart an activation.
+func TestWorkerDialChange_IsAnActivation(t *testing.T) {
+	h := newActivationHarness(t, "wd")
+
+	// redeployApp only fires for an app whose prior status is "running"
+	// (apps.go workerChanged). The stubbed deploy does not leave it there, so
+	// set it explicitly - otherwise this test silently skips and proves nothing.
+	if err := h.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "wd", Status: "running"}); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	req := httptest.NewRequest("PATCH", "/api/apps/wd",
+		strings.NewReader(`{"worker_isolation":"grouped","worker_grouped_size":6,"worker_max_workers":40}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.token)
+	rec := httptest.NewRecorder()
+	h.srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH returned %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	// redeployApp runs in a goroutine; wait for it to reach deployRun.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		h.mu.Lock()
+		n := len(h.params)
+		h.mu.Unlock()
+		if n > 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	h.mu.Lock()
+	n := len(h.params)
+	h.mu.Unlock()
+	if n < 2 {
+		t.Fatal("a worker-dial change on a running app must trigger a redeploy")
+	}
+	if got := h.lastParams().Preparation; got != deploy.PrepareSkip {
+		t.Errorf("dial-change redeploy Preparation = %v, want PrepareSkip", got)
+	}
 }

@@ -173,6 +173,16 @@ func (s *Server) redeployApp(slug string) {
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,
+		// A scaling or resource change re-activates the deployment that is
+		// already live: same bundle, same env, nothing the build or the hooks
+		// read has changed. Re-running app-controlled hooks to apply a replica
+		// count would be a side effect nobody asked for.
+		//
+		// The env-change restart in env.go deliberately does NOT do this. There
+		// the app's env vars are what changed, and hooks receive that env (as do
+		// dependency builds, via private-index credentials), so its inputs really
+		// are different and re-preparing is the correct behaviour.
+		Preparation: activationPreparation(current.Prepared),
 	}, app))
 	if err != nil {
 		slog.Error("redeployApp: deploy failed", "slug", slug, "err", err)

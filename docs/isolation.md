@@ -437,13 +437,13 @@ worker holds its full resource slice until the client disconnects (or
    next request.
 
    On an app whose status is **running**, changing any worker dial also
-   triggers a redeploy in the background. That tears down and
-   re-registers the pool, and re-runs the dependency build and the
-   manifest's `[[hook]] on = "post-deploy"` steps before workers serve
-   again. Treat it as a full deploy, not a routing tweak: it drops the
-   current pool, and a failing build or hook will fail it and can leave
-   the app degraded. On a stopped or hibernated app no redeploy is
-   triggered and the change is a pure metadata update.
+   triggers a redeploy in the background, which tears down and
+   re-registers the pool. Treat it as a pool restart rather than a
+   routing tweak: current sessions are dropped. It does **not** re-run
+   the dependency build or the manifest's post-deploy hooks, because the
+   bundle and its environment are unchanged. On a stopped or hibernated
+   app no redeploy is triggered and the change is a pure metadata
+   update.
 
 2. **Or declare it in `shinyhub.toml`** (recommended for reproducible fleets):
 
