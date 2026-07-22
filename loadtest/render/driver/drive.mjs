@@ -22,6 +22,12 @@ const CADENCE_MS = Number(process.env.RIG_CADENCE_MS || '2000');
 const DURATION_S = Number(process.env.RIG_DURATION_S || '120');
 const AUTH_COOKIE = process.env.RIG_AUTH_COOKIE || '';
 const OUT = process.env.RIG_OUT || `../results/render-${SESSIONS}s-${CADENCE_MS}ms.json`;
+// The Playwright CDN that serves the pinned chromium build is not reliably
+// reachable from every network, and even where it is, real Chrome is a
+// higher-fidelity target since it is what users actually run. Set
+// RIG_BROWSER_CHANNEL (e.g. "chrome") to drive an already-installed system
+// browser instead of downloading the bundled chromium.
+const BROWSER_CHANNEL = process.env.RIG_BROWSER_CHANNEL || '';
 
 if (!URL_BASE) {
   console.error('RIG_URL is required, e.g. RIG_URL=$(./rig.sh url)');
@@ -100,7 +106,9 @@ async function runSession(browser, index, deadline) {
   return record;
 }
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch(
+  BROWSER_CHANNEL ? { headless: true, channel: BROWSER_CHANNEL } : { headless: true },
+);
 const deadline = Date.now() + DURATION_S * 1000;
 const sessions = await Promise.all(
   Array.from({ length: SESSIONS }, (_, i) => runSession(browser, i, deadline)),
@@ -109,7 +117,13 @@ await browser.close();
 
 const established = sessions.filter((s) => s.established);
 const result = {
-  config: { appUrl, sessions: SESSIONS, cadenceMs: CADENCE_MS, durationS: DURATION_S },
+  config: {
+    appUrl,
+    sessions: SESSIONS,
+    cadenceMs: CADENCE_MS,
+    durationS: DURATION_S,
+    browserChannel: BROWSER_CHANNEL || 'bundled',
+  },
   establishedCount: established.length,
   summary: summarize(established),
   sessions,
