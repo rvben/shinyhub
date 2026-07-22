@@ -10,9 +10,20 @@ VM="${RIG_VM_NAME:-shinyhub-render-rig}"
 CPUS="${RIG_CPUS:-2}"
 MEM="${RIG_MEMORY_MB:-4096}"
 HOST_PORT="${RIG_HOST_PORT:-18080}"
-COST_MS="${RENDER_COST_MS:-1300}"
 IMAGE="python-3.12-slim-bookworm"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# RENDER_COST_MS is deliberately NOT read here. up() boots the VM and starts
+# ShinyHub before the synthetic app is deployed, so there is no app process
+# yet whose environment this script could set; a variable read at this point
+# could only be forwarded nowhere. app.py reads RENDER_COST_MS from its own
+# process environment (default 1300 ms), and ShinyHub gives every deployed
+# app a per-app environment store that is applied at process start. So the
+# real, working way to tune the render cost is after deploy, via the
+# already-authenticated CLI:
+#   ./bin/shiny env set rig RENDER_COST_MS=<ms> --restart
+# See loadtest/render/README.md for the empirical check that this reaches
+# the app process.
 
 # Host-side scratch directory created by copy_binary for its chunk splitting.
 # Script-scope, not local to copy_binary, so up()'s handle_up_exit trap can
@@ -153,6 +164,14 @@ up() {
   husker cp "$REPO_ROOT/loadtest/render/app/app.py" "$VM:/opt/rig/app/app.py"
   husker cp "$REPO_ROOT/loadtest/render/app/requirements.txt" "$VM:/opt/rig/app/requirements.txt"
   husker exec "$VM" -- chmod +x /opt/rig/shinyhub
+  # ShinyHub's native build sandbox always deploys Python apps via
+  # "uv run"/"uv sync", never bare system Python, and its /api/server-info
+  # runtime probe (internal/api/serverinfo.go computeRuntimes()) reports the
+  # Python runtime as available strictly via "exec.LookPath(\"uv\")". The
+  # catalog image has python3 but not uv, so without this line every deploy
+  # of the synthetic app fails with "Python runtime not found on the server
+  # (uv/python3 is not in PATH)" even though the pip install below succeeds.
+  husker exec "$VM" -- pip install --quiet uv
   husker exec "$VM" -- pip install --quiet -r /opt/rig/app/requirements.txt
 
   echo "==> starting shinyhub"
