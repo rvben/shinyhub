@@ -781,7 +781,23 @@ func hostEnvironmentPresent(bundleDir, appType string) bool {
 		if !useProjectMode(bundleDir, true) {
 			return true
 		}
-		return isDir(".venv")
+		if !isDir(".venv") {
+			return false
+		}
+		// The directory existing is not enough. A venv's interpreter is a symlink
+		// to a system or managed Python; upgrading or removing that Python leaves
+		// the venv in place with a dangling link, which is the common way a
+		// previously-good environment stops working across a host change. Stat
+		// follows symlinks, so a broken one fails here and we rebuild instead of
+		// launching a venv that cannot start. A venv that is present and resolvable
+		// but subtly corrupt is out of scope: detecting that means executing it,
+		// and the boot health check is the backstop.
+		for _, interp := range [][]string{{".venv", "bin", "python"}, {".venv", "Scripts", "python.exe"}} {
+			if _, err := os.Stat(filepath.Join(append([]string{bundleDir}, interp...)...)); err == nil {
+				return true
+			}
+		}
+		return false
 	case "r":
 		// renv::restore is a no-op without a lockfile, so a bundle without one
 		// manages its own packages and has no restored library to check.
