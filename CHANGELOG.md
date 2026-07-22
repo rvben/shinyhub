@@ -81,6 +81,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.9](https://github.com/rvben/shinyhub/compare/v0.10.8...v0.10.9) - 2026-07-22
+
+### Fixed
+
+- **deploy**: anchor the hook-failure marker to the start of the message ([75503b9](https://github.com/rvben/shinyhub/commit/75503b9b278f40ff2c355fc6eb244e424ae04eb1))
+- **deploy**: classify a failed post-deploy hook as hook_failed, not a missing runtime ([9c51f4a](https://github.com/rvben/shinyhub/commit/9c51f4aaaabfa8c4ed337fff689907614f469d6a))
+- **deploy**: run the dependency build and post-deploy hooks for elastic apps ([acdf329](https://github.com/rvben/shinyhub/commit/acdf329c01eba6e3449106124b020f23fc6b5612))
+
 ## [0.10.8](https://github.com/rvben/shinyhub/compare/v0.10.7...v0.10.8) - 2026-07-10
 
 ### Added
