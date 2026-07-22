@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-race vuln scan-image test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance
+.PHONY: build clean test test-go test-race vuln scan-image test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -245,6 +245,51 @@ load-test-isolation: ## HOL-elimination acceptance scenario (LT_SLUG_MUX and/or 
 	K6_FLAGS="$$K6_FLAGS -e ASSERT=$(or $(ASSERT),0)"; \
 	echo "==> HOL isolation scenario (mux=$(or $(LT_SLUG_MUX),(none)), iso=$(or $(LT_SLUG_ISO),(none)), sessions=$(or $(LT_SESSIONS),50))"; \
 	k6 run $$K6_FLAGS loadtest/hol.js
+
+# render-rig-up boots the 2-vCPU husker microVM running ShinyHub plus the
+# synthetic render-cost app, and prints the reachable base URL.
+# RIG_DAEMON_HOST is required: the address this machine uses to reach the
+# husker daemon. It is never committed.
+render-rig-up: ## Boot the render-saturation rig VM (RIG_DAEMON_HOST required)
+	@test -n "$(RIG_DAEMON_HOST)" || { echo "RIG_DAEMON_HOST is required, e.g. make render-rig-up RIG_DAEMON_HOST=203.0.113.10"; exit 1; }
+	@./loadtest/render/rig.sh up
+
+render-rig-down: ## Destroy the render-saturation rig VM
+	@./loadtest/render/rig.sh down
+
+# test-render-rig runs the rig's own unit suites: the Python burn calibration
+# and the Node verdict helpers. Neither needs a VM or a browser, so this is
+# safe in CI. Kept out of the default `test` target because it needs uv.
+# burn_test.py imports app.py, which imports `shiny` (requirements.txt), so
+# the ambient python3 is not enough; uv run --with-requirements resolves and
+# runs against requirements.txt in one step, matching test-py-identity's
+# convention for the same reason.
+test-render-rig: ## Unit tests for the render rig (burn calibration + verdict helpers)
+	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python burn calibration tests)"; exit 1; }
+	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required)"; exit 1; }
+	cd loadtest/render/app && uv run --with-requirements requirements.txt --no-project python3 -m unittest burn_test -v
+	node --test loadtest/render/driver/detect.test.js
+
+# load-test-render drives the rig with real headless browsers.
+#   RIG_SESSIONS   number of concurrent browser sessions (default 5)
+#   RIG_CADENCE_MS interaction interval per session (default 2000 = aggressive)
+#   RIG_DURATION_S run length (default 120)
+# See loadtest/render/README.md for the control matrix and how to read results.
+load-test-render: ## Drive the render rig with headless browsers (RIG_DAEMON_HOST required)
+	@test -n "$(RIG_DAEMON_HOST)" || { echo "RIG_DAEMON_HOST is required"; exit 1; }
+	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required)"; exit 1; }
+	@if [ ! -d loadtest/render/driver/node_modules ]; then \
+	  ( cd loadtest/render/driver && npm install --no-audit --no-fund --silent && npx playwright install chromium ); \
+	fi
+	@mkdir -p loadtest/results
+	@cd loadtest/render/driver && \
+	  RIG_URL="$$(../rig.sh url)" \
+	  RIG_SLUG="$(or $(RIG_SLUG),rig)" \
+	  RIG_SESSIONS="$(or $(RIG_SESSIONS),5)" \
+	  RIG_CADENCE_MS="$(or $(RIG_CADENCE_MS),2000)" \
+	  RIG_DURATION_S="$(or $(RIG_DURATION_S),120)" \
+	  RIG_AUTH_COOKIE="$(or $(RIG_AUTH_COOKIE),)" \
+	  node drive.mjs
 
 # iac-validate runs terraform fmt -check, init -backend=false, and validate on
 # the aws-ecs module and its minimal example. No AWS credentials are required.
