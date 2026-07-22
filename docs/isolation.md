@@ -393,7 +393,20 @@ prepared. A deployment whose preparation state predates that record - including
 an elastic bundle deployed before elastic apps were prepared at all - gets a
 best-effort build whose failure is logged but never aborts the recovery. The
 restore path is an unattended safety net; it must not be able to fail and leave
-the app down. A user-initiated `rollback` is a normal deploy and does prepare.
+the app down.
+
+**Restart and rollback are activations too.** Both bring back a bundle that
+already served, so neither re-runs its post-deploy hooks. They differ from the
+restore path only in the fallback: a deployment whose preparation state predates
+the record is prepared for real and a failure surfaces, because someone is
+waiting on the result. Skipping is never blind - if the built environment is
+actually missing (a wiped `.venv`, an apps dir that did not survive a reboot, or
+a deployment prepared under a container runtime and later moved to the native
+runtime), it is rebuilt rather than launched against nothing.
+
+**A restart is therefore not a rebuild.** If you want a bundle's dependencies
+and hooks re-run from scratch, deploy it again; changing an app's env vars or a
+worker dial also triggers a full redeploy.
 
 **Elastic apps are still prepared at deploy.** The dependency build
 (`uv sync` / `renv::restore`) and the manifest's `[[hook]] on = "post-deploy"`

@@ -760,6 +760,39 @@ func (m PreparationMode) buildsDeps() bool { return m != PrepareSkip }
 // buildIsFatal reports whether a failed dependency build should fail the deploy.
 func (m PreparationMode) buildIsFatal() bool { return m == PrepareRequired }
 
+// hostEnvironmentPresent reports whether the built environment that a skipped
+// preparation would launch against actually exists in the bundle. It answers
+// "can this bundle start without building", not "was this bundle ever built" -
+// the `prepared` record answers the latter and cannot see a wiped or
+// never-created environment.
+//
+// A bundle that builds its dependencies at launch (the requirements.txt path,
+// `uv run --with-requirements`) needs nothing on disk beforehand, so it reports
+// true: there is no environment to miss.
+func hostEnvironmentPresent(bundleDir, appType string) bool {
+	isDir := func(parts ...string) bool {
+		fi, err := os.Stat(filepath.Join(append([]string{bundleDir}, parts...)...))
+		return err == nil && fi.IsDir()
+	}
+	switch appType {
+	case "python":
+		// hostDeps is true here by construction (the caller gates on it), which
+		// is the same value buildCommand uses to choose `--frozen --no-sync`.
+		if !useProjectMode(bundleDir, true) {
+			return true
+		}
+		return isDir(".venv")
+	case "r":
+		// renv::restore is a no-op without a lockfile, so a bundle without one
+		// manages its own packages and has no restored library to check.
+		if _, err := os.Stat(filepath.Join(bundleDir, "renv.lock")); err != nil {
+			return true
+		}
+		return isDir("renv", "library")
+	}
+	return true
+}
+
 // resolveBundleCommand resolves a bundle's base launch command and, for
 // inferred-command bundles, builds its host-side environment. It is the single
 // place that decides both "what does this bundle launch" and "does the host
@@ -796,9 +829,30 @@ func resolveBundleCommand(p Params, m *Manifest, hostDeps bool) (baseCmd []strin
 			// promotion a build failure exits here, before any process starts, so
 			// it is reported build_failed, distinct from the readiness window; on
 			// an activation it is logged and the bundle comes back up anyway.
-			if hostDeps && p.Preparation.buildsDeps() {
+			build, fatal := p.Preparation.buildsDeps(), p.Preparation.buildIsFatal()
+			// PrepareSkip is an optimization, not a promise. The `prepared` record
+			// says preparation once succeeded, not that its output still exists:
+			// the venv can be wiped, the apps dir can be tmpfs-backed across a
+			// host reboot, a managed interpreter can break under a host upgrade,
+			// and a deployment prepared under a container runtime never built a
+			// host environment at all - switching that app to the native runtime
+			// leaves `prepared` true with nothing on disk. An inferred host launch
+			// is `uv run --frozen --no-sync`, which does no repair, so skipping
+			// here would boot against nothing and surface as an unexplained
+			// readiness failure. Verify, and rebuild when the environment is
+			// actually absent.
+			//
+			// The recovery build is never fatal: the boot health check is the real
+			// gate, and making it fatal would re-break the unattended restore path
+			// this mode exists to protect.
+			if hostDeps && !build && !hostEnvironmentPresent(p.BundleDir, appType) {
+				slog.Warn("activation: prepared environment is missing; rebuilding it",
+					"slug", p.Slug, "deployment_id", p.DeploymentID, "version", p.AppVersion)
+				build, fatal = true, false
+			}
+			if hostDeps && build {
 				if berr := buildEnvironment(p, appType, resolveBuildTimeout(m)); berr != nil {
-					if p.Preparation.buildIsFatal() {
+					if fatal {
 						return nil, "", berr
 					}
 					slog.Warn("activation: dependency build failed; continuing with the existing environment",
