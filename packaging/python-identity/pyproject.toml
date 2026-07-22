@@ -21,7 +21,7 @@ classifiers = [
   "Topic :: Security",
 ]
 dependencies = [
-  "PyJWT>=2.0",
+  "PyJWT>=2.13",
 ]
 
 [project.urls]
@@ -30,7 +30,7 @@ Repository = "https://github.com/rvben/shinyhub"
 Issues     = "https://github.com/rvben/shinyhub/issues"
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+test = ["pytest>=9"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/shinyhub_identity"]

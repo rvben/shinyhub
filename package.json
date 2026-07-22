@@ -11,7 +11,7 @@
     "test": "node --test 'internal/ui/jstests/*.test.js'"
   },
   "devDependencies": {
-    "axe-core": "^4.10.2",
-    "jsdom": "^25.0.0"
+    "axe-core": "^4.12.1",
+    "jsdom": "^25.0.1"
   }
 }
