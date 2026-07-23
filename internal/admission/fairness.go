@@ -77,18 +77,67 @@ func (a *AppLimiter) sharedTokens() float64 {
 	return a.shared.tokens
 }
 
-// TryAdmit runs the two-stage check for principal. It returns true only when the
-// principal is within its own share AND the shared bucket grants a token. An
-// over-share principal is refused without debiting the shared bucket.
-func (a *AppLimiter) TryAdmit(principal string) bool {
+// principalTokens returns principal's current bucket token count, or -1 when it
+// has no bucket yet. Test-only.
+func (a *AppLimiter) principalTokens(principal string) float64 {
+	a.mu.Lock()
+	p, ok := a.buckets[principal]
+	a.mu.Unlock()
+	if !ok {
+		return -1
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.tokens
+}
+
+// AdmitResult reports which stage, if any, refused a two-stage admission attempt.
+type AdmitResult int
+
+const (
+	// Admitted means both the principal and the shared bucket granted a token.
+	Admitted AdmitResult = iota
+	// PrincipalExhausted means the principal is over its own share; the shared
+	// bucket was not touched and no token was spent.
+	PrincipalExhausted
+	// SharedExhausted means the principal was within its share (one principal
+	// token was spent) but the shared app bucket was empty. A caller that then
+	// waits for shared capacity must re-check with TrySharedOnly, not Admit, so it
+	// does not re-debit the principal bucket on every retry.
+	SharedExhausted
+)
+
+// Admit runs the two-stage check for principal and reports which stage refused.
+// A principal over its own share is refused without debiting the shared bucket
+// (PrincipalExhausted). A principal within its share whose app bucket is empty
+// has already spent one principal token (SharedExhausted).
+func (a *AppLimiter) Admit(principal string) AdmitResult {
 	a.mu.Lock()
 	p := a.principalPacerLocked(principal)
 	a.mu.Unlock()
 
 	if !p.TryTake() {
-		return false // over its own share; shared bucket untouched
+		return PrincipalExhausted // over its own share; shared bucket untouched
 	}
+	if !a.shared.TryTake() {
+		return SharedExhausted // within share, app at capacity; principal token spent
+	}
+	return Admitted
+}
+
+// TrySharedOnly takes a shared token without touching any principal bucket. It is
+// the park-retry primitive: the principal share was already charged by the Admit
+// call that returned SharedExhausted, so re-charging the principal on every retry
+// would drain a legitimate principal's small bucket and lock it out for as long
+// as its slow refill takes, long after shared capacity recovers.
+func (a *AppLimiter) TrySharedOnly() bool {
 	return a.shared.TryTake()
+}
+
+// TryAdmit is the boolean form of Admit: true only when the principal is within
+// its own share AND the shared bucket grants a token.
+func (a *AppLimiter) TryAdmit(principal string) bool {
+	return a.Admit(principal) == Admitted
 }
 
 // principalPacerLocked returns the pacer for principal, creating it (and

@@ -102,3 +102,63 @@ func TestAppLimiterEvictionTakesFullestNotSpent(t *testing.T) {
 		t.Fatal("spent p1 was reset by eviction; eviction must take the fuller bucket, not the spent one")
 	}
 }
+
+func TestAppLimiterAdmitReportsRefusingStage(t *testing.T) {
+	// rate 0 so nothing refills: token movements are exactly observable.
+	lim := NewAppLimiter(0, 1, 1, 3, 16) // shared burst 1; principal burst 3
+	if got := lim.Admit("a"); got != Admitted {
+		t.Fatalf("first Admit = %v, want Admitted", got)
+	}
+	// "a" again: its principal bucket still has tokens, but the shared bucket is
+	// now empty, so the shared stage is what refuses.
+	if got := lim.Admit("a"); got != SharedExhausted {
+		t.Fatalf("second Admit for a = %v, want SharedExhausted", got)
+	}
+	// Drain "b"'s own share so its principal stage refuses first, without ever
+	// touching the (already empty) shared bucket.
+	lim2 := NewAppLimiter(0, 1, 1, 1, 16) // principal burst 1
+	if got := lim2.Admit("b"); got != Admitted {
+		t.Fatalf("b first Admit = %v, want Admitted", got)
+	}
+	if got := lim2.Admit("b"); got != PrincipalExhausted {
+		t.Fatalf("b second Admit = %v, want PrincipalExhausted", got)
+	}
+}
+
+func TestAppLimiterParkRetryDoesNotDrainPrincipalShare(t *testing.T) {
+	// The park loop re-checks the shared bucket via TrySharedOnly, never the full
+	// Admit, so waiting out a shared-capacity dip must not spend the principal's
+	// own tokens. rate 0 means nothing refills, so every token move is exact.
+	lim := NewAppLimiter(0, 1, 1, 3, 16) // shared burst 1; principal burst 3
+	// A hog takes the single shared token, so the victim faces an empty shared
+	// bucket even though the victim is well within its own share.
+	if got := lim.Admit("hog"); got != Admitted {
+		t.Fatalf("hog Admit = %v, want Admitted", got)
+	}
+	// The victim spends exactly one principal token and gets SharedExhausted.
+	if got := lim.Admit("victim"); got != SharedExhausted {
+		t.Fatalf("victim Admit = %v, want SharedExhausted", got)
+	}
+	if spent := lim.principalTokens("victim"); spent != 2 {
+		t.Fatalf("victim principal after one Admit = %v, want 2 (spent 1 of 3)", spent)
+	}
+	// Twenty park retries against a still-empty shared bucket must leave the
+	// victim's principal bucket untouched.
+	for i := 0; i < 20; i++ {
+		if lim.TrySharedOnly() {
+			t.Fatalf("TrySharedOnly admitted with an empty shared bucket (retry %d)", i)
+		}
+	}
+	if after := lim.principalTokens("victim"); after != 2 {
+		t.Fatalf("victim principal after 20 shared-only retries = %v, want 2 (unchanged)", after)
+	}
+	// Negative control: re-running the full Admit per retry (the pre-fix park
+	// behaviour) drains the victim's burst to zero. That is exactly the multi-minute
+	// lockout the TrySharedOnly separation prevents.
+	for i := 0; i < 20; i++ {
+		lim.Admit("victim")
+	}
+	if drained := lim.principalTokens("victim"); drained != 0 {
+		t.Fatalf("control: repeated Admit should drain the burst to 0, got %v", drained)
+	}
+}

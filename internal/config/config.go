@@ -383,6 +383,14 @@ type ServerConfig struct {
 	MaxCPUPercent         *float64 `yaml:"max_cpu_percent"`
 	PrincipalShareDivisor *int     `yaml:"principal_share_divisor"`
 	PrincipalLRUCapacity  *int     `yaml:"principal_lru_capacity"`
+
+	// Render-admission park budget. Bounds how many in-flight requests may
+	// park waiting for render capacity before they are shed, and how long a
+	// parked request waits. Pointers so unset falls back to the accessor
+	// defaults below.
+	RenderParkMaxPerApp *int    `yaml:"render_park_max_per_app"`
+	RenderParkMaxTotal  *int    `yaml:"render_park_max_total"`
+	RenderParkTTL       *string `yaml:"render_park_ttl"`
 }
 
 // defaultMinAvailableMemoryMB is the runtime memory floor applied when
@@ -2634,4 +2642,39 @@ func (c *Config) PrincipalLRUCapacity() int {
 		return *c.Server.PrincipalLRUCapacity
 	}
 	return defaultPrincipalLRUCapacity
+}
+
+const (
+	defaultRenderParkMaxPerApp = 64
+	defaultRenderParkMaxTotal  = 512
+)
+
+// RenderParkTTL is how long a render-paced upgrade parks before it is shed.
+// Default 2s. Must stay below the client heartbeat timeout. An unset or
+// unparseable value falls back to the default rather than a zero duration.
+func (c *Config) RenderParkTTL() time.Duration {
+	if c.Server.RenderParkTTL != nil {
+		if d, err := time.ParseDuration(*c.Server.RenderParkTTL); err == nil {
+			return d
+		}
+	}
+	return 2 * time.Second
+}
+
+// RenderParkMaxPerApp returns the per-app cap on requests parked waiting for
+// render capacity. Default 64.
+func (c *Config) RenderParkMaxPerApp() int {
+	if c.Server.RenderParkMaxPerApp != nil {
+		return *c.Server.RenderParkMaxPerApp
+	}
+	return defaultRenderParkMaxPerApp
+}
+
+// RenderParkMaxTotal returns the process-wide cap on requests parked waiting
+// for render capacity. Default 512.
+func (c *Config) RenderParkMaxTotal() int {
+	if c.Server.RenderParkMaxTotal != nil {
+		return *c.Server.RenderParkMaxTotal
+	}
+	return defaultRenderParkMaxTotal
 }

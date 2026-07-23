@@ -35,6 +35,18 @@ func TestWatermarkShedsAboveThreshold(t *testing.T) {
 	}
 }
 
+func TestWatermarkSetReadingForTest(t *testing.T) {
+	w := NewWatermark(90, func() (float64, error) { return 0, nil })
+	w.SetReadingForTest(95)
+	if w.Admit() {
+		t.Fatal("SetReadingForTest(95) above the 90% threshold must shed")
+	}
+	w.SetReadingForTest(10)
+	if !w.Admit() {
+		t.Fatal("SetReadingForTest(10) below the 90% threshold must admit")
+	}
+}
+
 func TestWatermarkFailsOpenOnStaleReading(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
 	w := NewWatermark(90, func() (float64, error) { return 0, nil })

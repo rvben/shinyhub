@@ -50,6 +50,12 @@ func (w *Watermark) record(pct float64, at time.Time) {
 	w.hasValue = true
 }
 
+// SetReadingForTest seeds a fresh reading directly, bypassing the Run sampler
+// goroutine so tests can drive Admit deterministically.
+func (w *Watermark) SetReadingForTest(pct float64) {
+	w.record(pct, w.nowFn())
+}
+
 // Admit reports whether a new admission is allowed. It fails open on every
 // uncertain case so a broken or absent signal never takes the platform down.
 func (w *Watermark) Admit() bool {
