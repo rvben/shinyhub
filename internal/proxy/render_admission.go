@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/admission"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/proxytrust"
 )
@@ -115,14 +116,54 @@ func (p *Proxy) chargeRenderAdmission(rec http.ResponseWriter, r *http.Request, 
 	}
 	principal := p.renderPrincipal(r, slug)
 
-	// Fast path: CPU headroom AND a token both available now. The watermark is
-	// checked FIRST and TryAdmit second, and the order is load-bearing: TryAdmit
-	// CONSUMES a token, while Admit is a read-only check. Checking the limiter
-	// first would spend a token that a saturated watermark then blocks, and every
-	// park retry would burn another, leaking tokens for sessions never forwarded.
-	// Go's && short-circuits, so a blocking watermark never reaches TryAdmit.
-	if p.watermarkAdmits() && lim.TryAdmit(principal) {
+	// attempt runs the correct admission stage for this request's progress and
+	// reports one of three outcomes. The host CPU watermark is checked FIRST on
+	// every attempt, before the limiter is touched: the watermark's Admit is
+	// read-only while the limiter consumes a token, so a saturated watermark must
+	// never reach the limiter or it would spend a token for a session it blocks.
+	//
+	// The per-principal fairness stage is charged AT MOST ONCE per request. Once
+	// the principal has passed its own gate but the shared app bucket was empty
+	// (SharedExhausted), later attempts re-check the SHARED bucket only, via
+	// TrySharedOnly. Re-running the full two-stage Admit on every park tick would
+	// re-debit the principal's small bucket for capacity it never received, and
+	// with a low per-principal refill rate that would lock a legitimate principal
+	// out for minutes after shared capacity recovered.
+	const (
+		attemptWait    = 0
+		attemptForward = 1
+		attemptShed    = -1
+	)
+	charged := false
+	attempt := func() int {
+		if !p.watermarkAdmits() {
+			return attemptWait // watermark blocks; wait, no token spent
+		}
+		if charged {
+			if lim.TrySharedOnly() {
+				return attemptForward
+			}
+			return attemptWait
+		}
+		switch lim.Admit(principal) {
+		case admission.Admitted:
+			return attemptForward
+		case admission.PrincipalExhausted:
+			// Over its own fair share. Parking cannot refill the principal bucket
+			// within the TTL, so shed now rather than hold a slot uselessly.
+			return attemptShed
+		default: // admission.SharedExhausted: principal charged, app at capacity
+			charged = true
+			return attemptWait
+		}
+	}
+
+	// Fast path: admit or shed without parking when the outcome is already known.
+	switch attempt() {
+	case attemptForward:
 		return true
+	case attemptShed:
+		return p.shedRender(rec, slug, ReasonRenderPaced)
 	}
 
 	// Park: hold briefly under the budget, re-trying, up to the TTL. The budget
@@ -143,8 +184,11 @@ func (p *Proxy) chargeRenderAdmission(rec http.ResponseWriter, r *http.Request, 
 		case <-r.Context().Done():
 			return p.shedRender(rec, slug, ReasonRenderPaced)
 		case <-ticker.C:
-			if p.watermarkAdmits() && lim.TryAdmit(principal) {
+			switch attempt() {
+			case attemptForward:
 				return true
+			case attemptShed:
+				return p.shedRender(rec, slug, ReasonRenderPaced)
 			}
 			if time.Now().After(deadline) {
 				// Distinguish the two shed reasons: if the watermark is the
@@ -167,9 +211,15 @@ func (p *Proxy) watermarkAdmits() bool {
 
 // shedRender writes the 503 render-admission rejection and returns false so the
 // caller does not forward. It records the reject for the access log and metrics.
+// Retry-After advises the park TTL, rounded up to whole seconds with a floor of
+// 1, so the hint tracks the configured pacing window instead of a magic constant.
 func (p *Proxy) shedRender(rec http.ResponseWriter, slug string, reason RejectReason) bool {
 	p.recordReject(rec, slug, reason, true)
-	rec.Header().Set("Retry-After", "2")
+	retry := int((renderParkTTL + time.Second - 1) / time.Second)
+	if retry < 1 {
+		retry = 1
+	}
+	rec.Header().Set("Retry-After", strconv.Itoa(retry))
 	http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
 	return false
 }

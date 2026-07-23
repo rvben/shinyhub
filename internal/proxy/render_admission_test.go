@@ -147,6 +147,8 @@ func TestChargeRenderAdmission_ChargesAndSheds(t *testing.T) {
 	// bucket is what binds. One upgrade is admitted, the next is shed.
 	p.SetAppLimiter("demo", admission.NewAppLimiter(0, 1, 1, 5, 4096))
 	p.SetRenderParkBudget(0, 0) // unlimited budget; TTL is what ends the park
+	saveTTL, saveInterval := renderParkTTL, renderParkInterval
+	defer func() { renderParkTTL, renderParkInterval = saveTTL, saveInterval }()
 	renderParkTTL = 20 * time.Millisecond
 	renderParkInterval = 5 * time.Millisecond
 
@@ -178,6 +180,8 @@ func TestChargeRenderAdmission_WatermarkSheds(t *testing.T) {
 	wm := admission.NewWatermark(90, func() (float64, error) { return 0, nil })
 	wm.SetReadingForTest(95) // test hook: records a fresh 95% reading
 	p.SetCPUWatermark(wm)
+	saveTTL, saveInterval := renderParkTTL, renderParkInterval
+	defer func() { renderParkTTL, renderParkInterval = saveTTL, saveInterval }()
 	renderParkTTL = 20 * time.Millisecond
 	renderParkInterval = 5 * time.Millisecond
 	r := renderWSUpgradeRequest("/app/demo/")
@@ -197,5 +201,92 @@ func TestSetRenderParkTTL(t *testing.T) {
 	p.SetRenderParkTTL(7 * time.Second)
 	if renderParkTTL != 7*time.Second {
 		t.Fatalf("renderParkTTL = %v, want 7s", renderParkTTL)
+	}
+}
+
+func TestChargeRenderAdmission_WatermarkBlockSpendsNoToken(t *testing.T) {
+	// A request shed purely by the CPU watermark must not consume the app's scarce
+	// shared token; once the watermark clears, a later request still gets it. This
+	// pins the watermark-before-limiter ordering: a limiter-first charge would burn
+	// the token during the first request's park retries.
+	p := New()
+	p.SetAppLimiter("demo", admission.NewAppLimiter(0, 1, 1, 3, 4096)) // one shared token, no refill
+	wm := admission.NewWatermark(90, func() (float64, error) { return 0, nil })
+	wm.SetReadingForTest(95) // saturated: blocks admission
+	p.SetCPUWatermark(wm)
+	saveTTL, saveInterval := renderParkTTL, renderParkInterval
+	defer func() { renderParkTTL, renderParkInterval = saveTTL, saveInterval }()
+	renderParkTTL = 20 * time.Millisecond
+	renderParkInterval = 5 * time.Millisecond
+
+	// First upgrade: the watermark blocks it for the whole TTL, then it sheds with
+	// cpu-saturation. It must NOT have spent the single shared token.
+	rec1 := httptest.NewRecorder()
+	if p.chargeRenderAdmission(rec1, renderWSUpgradeRequest("/app/demo/"), "demo") {
+		t.Fatal("first upgrade should be shed by the saturated watermark")
+	}
+	if got := rec1.Header().Get("X-Shinyhub-Reject"); got != string(ReasonCPUSaturation) {
+		t.Fatalf("first shed reason = %q, want cpu-saturation", got)
+	}
+	// Clear the watermark; the untouched shared token is still available.
+	wm.SetReadingForTest(10)
+	rec2 := httptest.NewRecorder()
+	if !p.chargeRenderAdmission(rec2, renderWSUpgradeRequest("/app/demo/"), "demo") {
+		t.Fatalf("second upgrade should get the untouched shared token; got shed %q",
+			rec2.Header().Get("X-Shinyhub-Reject"))
+	}
+}
+
+func TestChargeRenderAdmission_NonWSNeverCharges(t *testing.T) {
+	// Non-WebSocket requests must never be charged. With a single shared token and
+	// no refill, a charged second request would shed; all must forward instead.
+	p := New()
+	p.SetAppLimiter("demo", admission.NewAppLimiter(0, 1, 1, 3, 4096))
+	for i := 0; i < 5; i++ {
+		r := httptest.NewRequest("GET", "/app/demo/", nil) // not a WS upgrade
+		rec := httptest.NewRecorder()
+		if !p.chargeRenderAdmission(rec, r, "demo") {
+			t.Fatalf("non-WS request %d must forward uncharged; got shed %d", i, rec.Code)
+		}
+	}
+}
+
+func TestChargeRenderAdmission_FullBudgetShedsImmediately(t *testing.T) {
+	// When the park budget is full, a would-be parker sheds immediately rather than
+	// waiting out the TTL. A long TTL makes the immediacy observable.
+	p := New()
+	p.SetAppLimiter("demo", admission.NewAppLimiter(0, 1, 1, 5, 4096)) // one shared token, then empty
+	p.SetRenderParkBudget(1, 1)                                        // a single park slot
+	saveTTL := renderParkTTL
+	defer func() { renderParkTTL = saveTTL }()
+	renderParkTTL = 10 * time.Second // long: proves the shed is budget-driven, not TTL-driven
+
+	// Take the one shared token so any later upgrade must park.
+	r0 := renderWSUpgradeRequest("/app/demo/")
+	r0.RemoteAddr = "203.0.113.1:1"
+	if !p.chargeRenderAdmission(httptest.NewRecorder(), r0, "demo") {
+		t.Fatal("first upgrade should take the shared token")
+	}
+	// Pre-occupy the single park slot, as a concurrent parker would.
+	budget := p.renderPark.Load()
+	if budget == nil || !budget.acquire("demo") {
+		t.Fatal("precondition: could not occupy the sole park slot")
+	}
+	defer budget.release("demo")
+
+	// A second upgrade (different principal) is within its share but finds the
+	// shared bucket empty and the park budget full: it must shed at once.
+	r := renderWSUpgradeRequest("/app/demo/")
+	r.RemoteAddr = "203.0.113.2:2"
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	if p.chargeRenderAdmission(rec, r, "demo") {
+		t.Fatal("second upgrade should shed: park budget full")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("shed took %v; a full-budget shed must be immediate, not TTL-driven", elapsed)
+	}
+	if got := rec.Header().Get("X-Shinyhub-Reject"); got != string(ReasonRenderPaced) {
+		t.Fatalf("shed reason = %q, want render-paced", got)
 	}
 }
