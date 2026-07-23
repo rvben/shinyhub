@@ -58,27 +58,31 @@ func TestAppLimiterOverShareDoesNotDebitShared(t *testing.T) {
 	}
 }
 
-func TestAppLimiterEvictionDoesNotResetShare(t *testing.T) {
+func TestAppLimiterEvictionTakesFullestNotSpent(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
-	// Tiny capacity equal to divisor to force eviction quickly. divisor 2,
-	// capacity 2, principal burst 1, shared rate high so shared never binds.
-	a := NewAppLimiter(1000, 1000, 2, 1, 2)
+	// Shared rate high (never binds). divisor 2, principal burst 2, capacity 2.
+	// principal rate = 4/2 = 2 per second, but no time advances so no refill:
+	// token counts are set purely by how many times each principal admits.
+	a := NewAppLimiter(4, 1000, 2, 2, 2)
 	a.setClock(clk.now)
 
-	// p1 spends its single-burst share.
-	if !a.TryAdmit("p1") {
-		t.Fatal("p1 first admit should succeed")
+	// p1 fully spends its burst of 2: p1 bucket ends at 0 tokens.
+	if !a.TryAdmit("p1") || !a.TryAdmit("p1") {
+		t.Fatal("p1 should get its full burst of 2")
 	}
 	if a.TryAdmit("p1") {
-		t.Fatal("p1 second admit should fail: share spent")
+		t.Fatal("p1 third admit should fail: burst spent")
 	}
-	// Churn other principals to force LRU eviction. An evicted-then-returning p1
-	// must NOT get a fresh burst; eviction prefers full (unspent) buckets, and
-	// p1's bucket is empty so it is not the eviction victim while others are full.
-	for _, name := range []string{"q1", "q2", "q3", "q4"} {
-		a.TryAdmit(name)
+	// q spends one of its burst of 2: q bucket ends at 1 token, strictly fuller
+	// than the spent p1. Capacity is now full (p1, q).
+	if !a.TryAdmit("q") {
+		t.Fatal("q first admit should succeed")
 	}
+	// A new principal r forces one eviction. The victim must be the FULLER bucket
+	// (q at 1), never the spent one (p1 at 0). If eviction took p1, a returning
+	// p1 would get a fresh full burst, which is the reset-by-churn attack.
+	a.TryAdmit("r")
 	if a.TryAdmit("p1") {
-		t.Fatal("p1 must not regain a fresh share via eviction churn")
+		t.Fatal("spent p1 was reset by eviction; eviction must take the fuller bucket, not the spent one")
 	}
 }

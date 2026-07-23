@@ -1,7 +1,6 @@
 package admission
 
 import (
-	"container/list"
 	"sync"
 	"time"
 )
@@ -12,10 +11,14 @@ import (
 // refused without touching the shared bucket, so one principal flooding real
 // sessions cannot starve the capacity other principals draw from.
 //
-// Per-principal state is a bounded LRU. Its capacity must be at least the
-// share divisor, and eviction prefers full (unspent) buckets, so an attacker
-// cannot reset a spent share by churning the LRU: a full bucket is
-// indistinguishable from a fresh one, so evicting it costs the attacker nothing.
+// Per-principal state is bounded. Its capacity must be at least the share
+// divisor, and when it is full the eviction victim is the bucket holding the
+// MOST tokens (closest to full). A spent bucket holds the fewest tokens, so it
+// is never the victim while a fuller bucket exists, and a share therefore cannot
+// be reset by churn at any capacity-to-divisor ratio. A full bucket is
+// indistinguishable from a fresh one, so evicting the fullest is also the
+// cheapest choice. No recency ordering is kept, because eviction is by token
+// count, not by access order.
 type AppLimiter struct {
 	mu             sync.Mutex
 	shared         *Pacer
@@ -23,15 +26,7 @@ type AppLimiter struct {
 	principalBurst float64
 	capacity       int
 	nowFn          func() time.Time
-
-	// LRU of principals. front is most-recently-used.
-	order   *list.List
-	buckets map[string]*principalEntry
-}
-
-type principalEntry struct {
-	pacer *Pacer
-	elem  *list.Element // position in order; elem.Value is the principal key
+	buckets        map[string]*Pacer
 }
 
 // NewAppLimiter builds a limiter whose shared bucket uses (rate, burst) and
@@ -52,8 +47,7 @@ func NewAppLimiter(rate, burst float64, divisor int, principalBurst float64, lru
 		principalBurst: principalBurst,
 		capacity:       lruCapacity,
 		nowFn:          nowFn,
-		order:          list.New(),
-		buckets:        make(map[string]*principalEntry),
+		buckets:        make(map[string]*Pacer),
 	}
 }
 
@@ -63,8 +57,8 @@ func (a *AppLimiter) setClock(fn func() time.Time) {
 	defer a.mu.Unlock()
 	a.nowFn = fn
 	a.shared.nowFn = fn
-	for _, e := range a.buckets {
-		e.pacer.nowFn = fn
+	for _, p := range a.buckets {
+		p.nowFn = fn
 	}
 }
 
@@ -90,55 +84,42 @@ func (a *AppLimiter) TryAdmit(principal string) bool {
 }
 
 // principalPacerLocked returns the pacer for principal, creating it (and
-// evicting a full bucket if at capacity) when absent. Caller holds a.mu.
+// evicting the fullest bucket if at capacity) when absent. Caller holds a.mu.
 func (a *AppLimiter) principalPacerLocked(principal string) *Pacer {
-	if e, ok := a.buckets[principal]; ok {
-		a.order.MoveToFront(e.elem)
-		return e.pacer
+	if p, ok := a.buckets[principal]; ok {
+		return p
 	}
 	if len(a.buckets) >= a.capacity {
-		a.evictOneLocked()
+		a.evictFullestLocked()
 	}
 	p := NewPacer(a.principalRate, a.principalBurst)
 	p.nowFn = a.nowFn
-	elem := a.order.PushFront(principal)
-	a.buckets[principal] = &principalEntry{pacer: p, elem: elem}
+	a.buckets[principal] = p
 	return p
 }
 
-// evictOneLocked removes one principal. It prefers a full (unspent) bucket,
-// which is indistinguishable from a fresh one so its eviction is free. When no
-// full bucket exists, every resident is at least partly spent, and it evicts
-// the most-recently-touched one instead of the least-recently-used one: an
-// attacker who churns brand-new identities to push an older, already-spent
-// principal toward the LRU tail only ever displaces its OWN previous churn
-// identity (which just took the front slot), never the older victim sitting at
-// the back, so a spent share survives arbitrary churn instead of being reset.
-// Caller holds a.mu.
-func (a *AppLimiter) evictOneLocked() {
-	// Scan for a full bucket; direction does not matter for correctness since
-	// evicting any full bucket is free.
-	for e := a.order.Back(); e != nil; e = e.Prev() {
-		key := e.Value.(string)
-		entry := a.buckets[key]
-		entry.pacer.mu.Lock()
-		full := entry.pacer.tokens >= entry.pacer.burst
-		entry.pacer.mu.Unlock()
-		if full {
-			a.order.Remove(e)
-			delete(a.buckets, key)
-			return
+// evictFullestLocked removes the bucket holding the most tokens. Because a spent
+// bucket holds the fewest, it is never chosen while a fuller bucket exists, so
+// eviction cannot reset a spent share; and a full bucket, being indistinguishable
+// from a fresh one, is the cheapest thing to drop. Caller holds a.mu. Ties (equal
+// token counts) resolve to whichever the map yields first, which is safe: equally
+// spent buckets mean the app is genuinely at capacity and the attacker has
+// already paid the cost the capacity floor imposes.
+func (a *AppLimiter) evictFullestLocked() {
+	var victim string
+	found := false
+	most := -1.0
+	for key, p := range a.buckets {
+		p.mu.Lock()
+		tokens := p.tokens
+		p.mu.Unlock()
+		if tokens > most {
+			most = tokens
+			victim = key
+			found = true
 		}
 	}
-	// No full bucket: evict the most-recently-used, not the least. Plain LRU
-	// eviction is exactly what a churn attacker weaponizes, since touching new
-	// identities naturally pushes the target to the tail; evicting the front
-	// instead sacrifices the attacker's own newest churn identity every time.
-	front := a.order.Front()
-	if front == nil {
-		return
+	if found {
+		delete(a.buckets, victim)
 	}
-	key := front.Value.(string)
-	a.order.Remove(front)
-	delete(a.buckets, key)
 }
