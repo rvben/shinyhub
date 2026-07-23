@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/rvben/shinyhub/internal/admission"
 	"github.com/rvben/shinyhub/internal/auth"
 )
 
@@ -105,5 +108,94 @@ func TestParkBudget_ConcurrentNeverExceedsGlobal(t *testing.T) {
 	wg.Wait()
 	if granted != 50 {
 		t.Fatalf("concurrent acquires granted %d, want exactly 50 (global ceiling)", granted)
+	}
+}
+
+// renderWSUpgradeRequest builds a bare WebSocket upgrade request for the
+// charge-admission tests. Named distinctly from elastic_ws_park_test.go's
+// wsUpgradeRequest (which also carries cookies and a fixed path), since both
+// live in the same test package.
+func renderWSUpgradeRequest(target string) *http.Request {
+	r := httptest.NewRequest("GET", target, nil)
+	r.Header.Set("Upgrade", "websocket")
+	r.Header.Set("Connection", "Upgrade")
+	return r
+}
+
+func TestChargeRenderAdmission_NonWSForwards(t *testing.T) {
+	p := New()
+	p.SetAppLimiter("demo", admission.NewAppLimiter(1, 1, 20, 3, 4096))
+	r := httptest.NewRequest("GET", "/app/demo/", nil) // not a WS upgrade
+	rec := httptest.NewRecorder()
+	if !p.chargeRenderAdmission(rec, r, "demo") {
+		t.Fatal("a non-WebSocket request must forward without charging")
+	}
+}
+
+func TestChargeRenderAdmission_DisabledForwards(t *testing.T) {
+	p := New() // no limiter for the slug: pacing disabled
+	r := renderWSUpgradeRequest("/app/demo/")
+	rec := httptest.NewRecorder()
+	if !p.chargeRenderAdmission(rec, r, "demo") {
+		t.Fatal("with no limiter (pacing disabled), a WS upgrade must forward")
+	}
+}
+
+func TestChargeRenderAdmission_ChargesAndSheds(t *testing.T) {
+	p := New()
+	// Shared burst of 1, rate 0 so no refill; per-app divisor high so the shared
+	// bucket is what binds. One upgrade is admitted, the next is shed.
+	p.SetAppLimiter("demo", admission.NewAppLimiter(0, 1, 1, 5, 4096))
+	p.SetRenderParkBudget(0, 0) // unlimited budget; TTL is what ends the park
+	renderParkTTL = 20 * time.Millisecond
+	renderParkInterval = 5 * time.Millisecond
+
+	r1 := renderWSUpgradeRequest("/app/demo/")
+	r1.RemoteAddr = "203.0.113.1:1"
+	if !p.chargeRenderAdmission(httptest.NewRecorder(), r1, "demo") {
+		t.Fatal("first upgrade should be admitted (burst 1)")
+	}
+	// Second upgrade from a DIFFERENT principal: its own bucket is fine, but the
+	// shared bucket is empty and never refills, so after the park TTL it sheds.
+	r2 := renderWSUpgradeRequest("/app/demo/")
+	r2.RemoteAddr = "203.0.113.2:2"
+	rec := httptest.NewRecorder()
+	if p.chargeRenderAdmission(rec, r2, "demo") {
+		t.Fatal("second upgrade should be shed: shared bucket empty, no refill")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("shed status = %d, want 503", rec.Code)
+	}
+	if got := rec.Header().Get("X-Shinyhub-Reject"); got != string(ReasonRenderPaced) {
+		t.Fatalf("reject reason = %q, want render-paced", got)
+	}
+}
+
+func TestChargeRenderAdmission_WatermarkSheds(t *testing.T) {
+	p := New()
+	p.SetAppLimiter("demo", admission.NewAppLimiter(1000, 1000, 20, 3, 4096)) // limiter never binds
+	// A watermark that is always over threshold sheds with cpu-saturation.
+	wm := admission.NewWatermark(90, func() (float64, error) { return 0, nil })
+	wm.SetReadingForTest(95) // test hook: records a fresh 95% reading
+	p.SetCPUWatermark(wm)
+	renderParkTTL = 20 * time.Millisecond
+	renderParkInterval = 5 * time.Millisecond
+	r := renderWSUpgradeRequest("/app/demo/")
+	rec := httptest.NewRecorder()
+	if p.chargeRenderAdmission(rec, r, "demo") {
+		t.Fatal("upgrade should be shed by the CPU watermark")
+	}
+	if got := rec.Header().Get("X-Shinyhub-Reject"); got != string(ReasonCPUSaturation) {
+		t.Fatalf("reject reason = %q, want cpu-saturation", got)
+	}
+}
+
+func TestSetRenderParkTTL(t *testing.T) {
+	orig := renderParkTTL
+	defer func() { renderParkTTL = orig }()
+	p := New()
+	p.SetRenderParkTTL(7 * time.Second)
+	if renderParkTTL != 7*time.Second {
+		t.Fatalf("renderParkTTL = %v, want 7s", renderParkTTL)
 	}
 }

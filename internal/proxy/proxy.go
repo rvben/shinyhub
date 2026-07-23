@@ -441,6 +441,10 @@ type Proxy struct {
 	// admission path can be extended without interacting with the pool lock.
 	appLimitersMu sync.Mutex
 	appLimiters   map[string]*admission.AppLimiter
+
+	// renderPark bounds parked render-paced upgrades; nil means unlimited (and
+	// is the default until wired). Guarded internally.
+	renderPark atomic.Pointer[parkBudget]
 }
 
 // memoryGuard pairs the configured floor with the probe that reads the host's
@@ -549,6 +553,13 @@ func (p *Proxy) SetAppLimiter(slug string, l *admission.AppLimiter) {
 		return
 	}
 	p.appLimiters[slug] = l
+}
+
+// SetRenderParkBudget installs the per-app and host-wide ceilings on parked
+// render-paced upgrades. A non-positive ceiling means that dimension is
+// unlimited. Safe to call at startup before serving.
+func (p *Proxy) SetRenderParkBudget(perApp, total int) {
+	p.renderPark.Store(newParkBudget(perApp, total))
 }
 
 // appLimiter returns slug's render-admission limiter, or nil when pacing is
