@@ -87,6 +87,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.10.15](https://github.com/rvben/shinyhub/compare/v0.10.14...v0.10.15) - 2026-07-23
+
+### Added
+
+- **admission**: fail-open host CPU watermark with background sampler ([cd87e33](https://github.com/rvben/shinyhub/commit/cd87e33441ff74dd4072d34340a37a6bfc14aca4))
+- **admission**: per-principal fairness with eviction-safe bounded LRU ([8f9c7c0](https://github.com/rvben/shinyhub/commit/8f9c7c04481a1f792db1757ab07100285c894854))
+- **admission**: effective-core detection with cgroup quota and affinity ([c3c5aec](https://github.com/rvben/shinyhub/commit/c3c5aec163c1638abae1462e7708f1d14247e5e9))
+- **admission**: token-bucket pacer with injected clock ([f2287cd](https://github.com/rvben/shinyhub/commit/f2287cd5262a89a5d47f156eeb7edd5f6d2f7e6f))
+
+### Fixed
+
+- **admission**: reject a non-positive divisor in NewAppLimiter ([82b0a3b](https://github.com/rvben/shinyhub/commit/82b0a3b2c190478445c49d6fdb232d310c3295e9))
+- **admission**: evict the fullest per-principal bucket, not the LRU ([07411bc](https://github.com/rvben/shinyhub/commit/07411bc539f23ab22f33245bc710afd7362785bd))
+
 ## [0.10.14](https://github.com/rvben/shinyhub/compare/v0.10.13...v0.10.14) - 2026-07-23
 
 ### Added
