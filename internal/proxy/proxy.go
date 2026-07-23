@@ -174,6 +174,14 @@ var deployingPage = waitPage("Deploying app…",
 	"A deployment is in progress. This can take a few minutes. This page will refresh automatically.",
 	deployingScript)
 
+// waitingPage is served when an app is up but at its render-admission limit: the
+// box is momentarily out of render capacity, not starting or deploying. It
+// reuses loadingScript's capped auto-reload so a paced client retries and lands
+// once a token frees, then gives up with a manual retry after ~60 s.
+var waitingPage = waitPage("Waiting for capacity…",
+	"This app is momentarily at capacity. This page will refresh automatically.",
+	loadingScript)
+
 // cookiePrefix is the prefix for the sticky-session cookie name.
 // The full cookie name is cookiePrefix + slug (e.g. "shinyhub_rep_myapp").
 const cookiePrefix = "shinyhub_rep_"

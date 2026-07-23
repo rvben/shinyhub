@@ -31,6 +31,15 @@ const (
 	// from pool-saturated so capacity automation does not scale up in response.
 	// Remedy: free host memory, lower per-app ceilings, or add hardware.
 	ReasonMemoryPressure RejectReason = "memory-pressure"
+	// ReasonRenderPaced: the app's render-admission token bucket is empty, so a
+	// new session is briefly deferred. Transient, self-clearing in under a
+	// second. Deliberately distinct from pool-saturated so capacity automation
+	// does not read it as a scale-up signal: adding a worker does not add cores.
+	ReasonRenderPaced RejectReason = "render-paced"
+	// ReasonCPUSaturation: the host CPU watermark is breached, so a new session
+	// is shed to protect the sessions already connected. Also distinct from
+	// pool-saturated for the same reason.
+	ReasonCPUSaturation RejectReason = "cpu-saturation"
 )
 
 // rejectSentinel is the metrics key substituted for any slug that is not a
