@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/proxytrust"
@@ -33,5 +34,52 @@ func (p *Proxy) renderPrincipal(r *http.Request, slug string) string {
 		return "u:" + strconv.FormatInt(uid, 10)
 	default:
 		return "ip:" + ip + "|u:" + strconv.FormatInt(uid, 10)
+	}
+}
+
+// parkBudget bounds how many render-paced WebSocket upgrades may be parked at
+// once, per app and host-wide. A parked upgrade holds a goroutine and a socket,
+// so an unbounded park queue under a stampede is itself a resource exhaustion;
+// the ceilings cap it. A non-positive ceiling means that dimension is unlimited.
+type parkBudget struct {
+	mu     sync.Mutex
+	perApp int
+	total  int
+	byApp  map[string]int
+	inUse  int
+}
+
+func newParkBudget(perApp, total int) *parkBudget {
+	return &parkBudget{perApp: perApp, total: total, byApp: make(map[string]int)}
+}
+
+// acquire takes a park slot for slug if both the per-app and global ceilings
+// allow it, returning whether it did. A refused acquire takes nothing.
+func (b *parkBudget) acquire(slug string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.total > 0 && b.inUse >= b.total {
+		return false
+	}
+	if b.perApp > 0 && b.byApp[slug] >= b.perApp {
+		return false
+	}
+	b.inUse++
+	b.byApp[slug]++
+	return true
+}
+
+// release returns a park slot for slug. It is a no-op guard against underflow.
+func (b *parkBudget) release(slug string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.inUse > 0 {
+		b.inUse--
+	}
+	if b.byApp[slug] > 0 {
+		b.byApp[slug]--
+		if b.byApp[slug] == 0 {
+			delete(b.byApp, slug)
+		}
 	}
 }
