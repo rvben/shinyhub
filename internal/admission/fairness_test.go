@@ -66,9 +66,14 @@ func TestAppLimiterEvictionTakesFullestNotSpent(t *testing.T) {
 	a := NewAppLimiter(4, 1000, 2, 2, 2)
 	a.setClock(clk.now)
 
-	// p1 fully spends its burst of 2: p1 bucket ends at 0 tokens.
-	if !a.TryAdmit("p1") || !a.TryAdmit("p1") {
-		t.Fatal("p1 should get its full burst of 2")
+	// p1 fully spends its burst of 2: p1 bucket ends at 0 tokens. Two separate
+	// admit calls, not one folded into a single boolean, since each has the side
+	// effect of consuming a token.
+	if !a.TryAdmit("p1") {
+		t.Fatal("p1 first admit should succeed (burst 2)")
+	}
+	if !a.TryAdmit("p1") {
+		t.Fatal("p1 second admit should succeed (burst 2)")
 	}
 	if a.TryAdmit("p1") {
 		t.Fatal("p1 third admit should fail: burst spent")
