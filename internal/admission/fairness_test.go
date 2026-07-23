@@ -14,6 +14,17 @@ func TestAppLimiterRejectsCapacityBelowDivisor(t *testing.T) {
 	NewAppLimiter(10, 10, 20, 3, 8) // capacity 8 < divisor 20
 }
 
+func TestAppLimiterRejectsNonPositiveDivisor(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewAppLimiter must panic when divisor <= 0")
+		}
+	}()
+	// A divisor of 0 would make principalRate +Inf, silently disabling
+	// per-principal fairness. It must be rejected, not accepted.
+	NewAppLimiter(10, 10, 0, 3, 4096)
+}
+
 func TestAppLimiterOneFloodDoesNotStarveAnother(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
 	// Shared rate 10/s burst 10, divisor 20 so each principal gets 0.5/s, burst 3.

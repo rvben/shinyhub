@@ -35,6 +35,14 @@ type AppLimiter struct {
 // the number of principals needed to consume the app rate below the divisor,
 // silently weakening the guarantee.
 func NewAppLimiter(rate, burst float64, divisor int, principalBurst float64, lruCapacity int) *AppLimiter {
+	if divisor <= 0 {
+		// A non-positive divisor would make principalRate = rate/divisor either
+		// +Inf (every principal bucket refills instantly, silently disabling
+		// per-principal fairness) or negative (tokens drift below zero, breaking
+		// the 0 <= tokens invariant the eviction scan relies on). Reject it the
+		// same way an out-of-range capacity is rejected.
+		panic("admission: divisor must be >= 1")
+	}
 	if lruCapacity < divisor {
 		panic("admission: lruCapacity must be >= divisor")
 	}
