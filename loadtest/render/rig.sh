@@ -41,10 +41,12 @@ need_daemon_host() {
   fi
 }
 
-# husker cp on this daemon enforces a 1 MiB max_file_write_bytes policy,
-# well under the cross-compiled shinyhub binary (roughly 90 MiB), so the
-# binary is split into chunks, copied individually, and reassembled in the
-# guest with cat.
+# husker cp caps a single transfer well below the cross-compiled shinyhub
+# binary (roughly 90 MiB), so the binary is split into chunks, copied
+# individually, and reassembled in the guest with cat. The chunk size is 450
+# KB: although the daemon's nominal policy is 1 MiB, a single cp of roughly
+# 500 KB or more returns a spurious vm_not_found on this daemon while the VM
+# stays up, so the chunk size is kept safely under that observed threshold.
 copy_binary() {
   local src="$1" dest="$2" part
   CHUNK_DIR="$(mktemp -d)"
@@ -57,7 +59,7 @@ copy_binary() {
   # immediately instead of returning from this function, so neither inline
   # cleanup runs; handle_up_exit is what removes CHUNK_DIR in that case.
 
-  split -b 1000000 "$src" "$CHUNK_DIR/part_"
+  split -b 450000 "$src" "$CHUNK_DIR/part_"
   echo "==> copying $(basename "$src") in $(ls "$CHUNK_DIR" | wc -l | tr -d ' ') chunks"
   husker exec "$VM" -- rm -f "$dest"
   for part in "$CHUNK_DIR"/part_*; do
