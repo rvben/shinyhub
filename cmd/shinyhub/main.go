@@ -1494,6 +1494,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		)
 		prx.SetAppLimiter(a.Slug, l) // nil for render_seconds 0 clears/leaves it unset
 	}
+	prx.SetRenderParkBudget(cfg.RenderParkMaxPerApp(), cfg.RenderParkMaxTotal())
+	prx.SetRenderParkTTL(cfg.RenderParkTTL())
 
 	// Let the proxy render a clear status page (instead of the endless loading
 	// spinner) when a request hits an app that is crashed or stopped, and the

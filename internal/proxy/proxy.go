@@ -2125,6 +2125,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if traceEnabled {
 				r = r.WithContext(context.WithValue(r.Context(), recorderCtxKey{}, rec))
 			}
+			if !p.chargeRenderAdmission(rec, r, slug) {
+				return // shed: 503 already written, defers unwind the accounting
+			}
 			wkr.rp.ServeHTTP(rec, r)
 			return
 
@@ -2287,6 +2290,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// wrapped, keeping the hot path allocation-free.
 	if traceEnabled {
 		r = r.WithContext(context.WithValue(r.Context(), recorderCtxKey{}, rec))
+	}
+	if !p.chargeRenderAdmission(rec, r, slug) {
+		return // shed: 503 already written, defer unwinds the accounting
 	}
 	picked.rp.ServeHTTP(rec, r)
 }
