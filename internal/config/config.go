@@ -373,6 +373,16 @@ type ServerConfig struct {
 	// MinAvailableMemoryMB accessor) because an elastic OOM takes out a whole
 	// worker plus every session bound to it. Negative values disable too.
 	MinAvailableMemoryMB *int `yaml:"min_available_memory_mb"`
+
+	// Render-aware admission knobs. All optional; pointer distinguishes unset
+	// (use the default) from an explicit value. See the accessors below for
+	// defaults. Every default is a no-op: pacing is disabled per-app via
+	// render_seconds, and MaxCPUPercent 0 disables the watermark.
+	RenderHeadroomPercent *int     `yaml:"render_headroom_percent"`
+	RenderCapacityCores   *float64 `yaml:"render_capacity_cores"`
+	MaxCPUPercent         *float64 `yaml:"max_cpu_percent"`
+	PrincipalShareDivisor *int     `yaml:"principal_share_divisor"`
+	PrincipalLRUCapacity  *int     `yaml:"principal_lru_capacity"`
 }
 
 // defaultMinAvailableMemoryMB is the runtime memory floor applied when
@@ -2571,4 +2581,57 @@ func (c *Config) MinAvailableMemoryMB() int {
 	default:
 		return *c.Server.MinAvailableMemoryMB
 	}
+}
+
+const (
+	defaultRenderHeadroomPercent = 75
+	defaultPrincipalShareDivisor = 20
+	defaultPrincipalLRUCapacity  = 4096
+)
+
+// RenderHeadroom returns the fraction of cores the pacer may use for first
+// renders, leaving the rest for interaction. render_headroom_percent is a
+// percent (0 to 100); the default is 75, i.e. 0.75.
+func (c *Config) RenderHeadroom() float64 {
+	pct := defaultRenderHeadroomPercent
+	if c.Server.RenderHeadroomPercent != nil {
+		pct = *c.Server.RenderHeadroomPercent
+	}
+	return float64(pct) / 100.0
+}
+
+// RenderCapacityCores returns the operator's core-count override for pacer
+// sizing, or 0 to autodetect via admission.Detect.
+func (c *Config) RenderCapacityCores() float64 {
+	if c.Server.RenderCapacityCores != nil {
+		return *c.Server.RenderCapacityCores
+	}
+	return 0
+}
+
+// MaxCPUPercent returns the host CPU watermark threshold. 0 (the default)
+// disables the watermark.
+func (c *Config) MaxCPUPercent() float64 {
+	if c.Server.MaxCPUPercent != nil {
+		return *c.Server.MaxCPUPercent
+	}
+	return 0
+}
+
+// PrincipalShareDivisor returns the minimum number of independent principals
+// needed to consume an app's full admission rate. Default 20.
+func (c *Config) PrincipalShareDivisor() int {
+	if c.Server.PrincipalShareDivisor != nil {
+		return *c.Server.PrincipalShareDivisor
+	}
+	return defaultPrincipalShareDivisor
+}
+
+// PrincipalLRUCapacity returns the per-app bound on tracked principals. Default
+// 4096. NewAppLimiter rejects a value below the divisor.
+func (c *Config) PrincipalLRUCapacity() int {
+	if c.Server.PrincipalLRUCapacity != nil {
+		return *c.Server.PrincipalLRUCapacity
+	}
+	return defaultPrincipalLRUCapacity
 }

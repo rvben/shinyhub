@@ -691,6 +691,10 @@ type App struct {
 	// deploying (and pushing data to) this app on a Fargate tier whose storage is
 	// ephemeral instead of blocking. Default false.
 	EphemeralDataAck bool `json:"ephemeral_data_ack"`
+	// RenderSeconds is the per-app render cost in seconds used to size the
+	// admission pacer. 0 disables pacing. Mirrors autoscale_target's float64
+	// round-tripping (REAL on SQLite, DOUBLE PRECISION on Postgres).
+	RenderSeconds float64 `json:"render_seconds"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -775,7 +779,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       last_autoscale_at, identity_headers, min_warm_replicas,
 		       last_error, crashed_at, description, icon_mime,
 		       worker_isolation, worker_grouped_size, worker_max_workers,
-		       worker_max_session_lifetime_secs, ephemeral_data_ack,`
+		       worker_max_session_lifetime_secs, ephemeral_data_ack, render_seconds,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -2978,6 +2982,23 @@ func (s *Store) SetAppAutoscale(p SetAppAutoscaleParams) error {
 	return nil
 }
 
+// SetAppRenderSeconds sets the per-app render cost used to size the admission
+// pacer. A value of 0 disables pacing for the app.
+func (s *Store) SetAppRenderSeconds(id int64, seconds float64) error {
+	res, err := s.db.Exec(
+		`UPDATE apps SET render_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		seconds, id,
+	)
+	if err != nil {
+		return fmt.Errorf("set render seconds: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ApplyAppManifestSettingsParams carries the subset of [app] manifest fields
 // to apply. Callers set the Set* booleans to true for each field they want
 // written; absent fields are left untouched.
@@ -3400,7 +3421,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
 		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime,
 		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
-		&a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt,
+		&a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
 	if err != nil {

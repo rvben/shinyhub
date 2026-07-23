@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/admission"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/proxytrust"
@@ -173,6 +174,14 @@ var loadingPage = waitPage("Starting app…",
 var deployingPage = waitPage("Deploying app…",
 	"A deployment is in progress. This can take a few minutes. This page will refresh automatically.",
 	deployingScript)
+
+// waitingPage is served when an app is up but at its render-admission limit: the
+// box is momentarily out of render capacity, not starting or deploying. It
+// reuses loadingScript's capped auto-reload so a paced client retries and lands
+// once a token frees, then gives up with a manual retry after ~60 s.
+var waitingPage = waitPage("Waiting for capacity…",
+	"This app is momentarily at capacity. This page will refresh automatically.",
+	loadingScript)
 
 // cookiePrefix is the prefix for the sticky-session cookie name.
 // The full cookie name is cookiePrefix + slug (e.g. "shinyhub_rep_myapp").
@@ -420,6 +429,18 @@ type Proxy struct {
 	// bindings keep routing. Atomic so the check runs lock-free on the
 	// allocate path; nil disables. Wire via SetMemoryGuard.
 	memGuard atomic.Pointer[memoryGuard]
+
+	// cpuWatermark is the optional host CPU shed signal for the render-aware
+	// admission path; nil disables it. Wired via SetCPUWatermark.
+	cpuWatermark atomic.Pointer[admission.Watermark]
+	// appAccessLookup returns an app's access mode ("public"/"private"/"shared")
+	// so per-principal fairness can key correctly. Wired via SetAppAccessLookup.
+	appAccessLookup atomic.Pointer[appAccessLookupFn]
+	// appLimiters holds the per-slug render-admission limiter; a slug with pacing
+	// disabled has no entry. Guarded by appLimitersMu, never p.mu, so the render-
+	// admission path can be extended without interacting with the pool lock.
+	appLimitersMu sync.Mutex
+	appLimiters   map[string]*admission.AppLimiter
 }
 
 // memoryGuard pairs the configured floor with the probe that reads the host's
@@ -450,6 +471,7 @@ func New() *Proxy {
 		rejects:       newRejectCounter(),
 		conns:         newConnTracker(),
 		clients:       make(map[string]map[string]*clientSlot),
+		appLimiters:   make(map[string]*admission.AppLimiter),
 	}
 }
 
@@ -487,6 +509,54 @@ func (p *Proxy) SetMemoryGuard(minAvailableMB int, probe func() (int, bool)) {
 		return
 	}
 	p.memGuard.Store(&memoryGuard{minAvailableMB: minAvailableMB, probe: probe})
+}
+
+// appAccessLookupFn resolves a slug to its access mode ("public"/"private"/
+// "shared") for the render-admission path's per-principal fairness key. Named
+// type so atomic.Pointer can hold it, matching the clientIPFn / accessLogFn
+// pattern.
+type appAccessLookupFn func(slug string) string
+
+// SetCPUWatermark wires (or clears, with nil) the host CPU watermark used by the
+// render-aware admission path. Atomic, safe to call concurrently with ServeHTTP.
+func (p *Proxy) SetCPUWatermark(w *admission.Watermark) {
+	if w == nil {
+		p.cpuWatermark.Store(nil)
+		return
+	}
+	p.cpuWatermark.Store(w)
+}
+
+// SetAppAccessLookup wires (or clears, with nil) the app-access-mode lookup used
+// by per-principal fairness to choose a principal key. Atomic.
+func (p *Proxy) SetAppAccessLookup(fn func(slug string) string) {
+	if fn == nil {
+		p.appAccessLookup.Store(nil)
+		return
+	}
+	f := appAccessLookupFn(fn)
+	p.appAccessLookup.Store(&f)
+}
+
+// SetAppLimiter installs (or, with nil, clears) the render-admission limiter for
+// slug. A nil limiter means pacing is disabled for the app. Safe to call
+// concurrently with ServeHTTP.
+func (p *Proxy) SetAppLimiter(slug string, l *admission.AppLimiter) {
+	p.appLimitersMu.Lock()
+	defer p.appLimitersMu.Unlock()
+	if l == nil {
+		delete(p.appLimiters, slug)
+		return
+	}
+	p.appLimiters[slug] = l
+}
+
+// appLimiter returns slug's render-admission limiter, or nil when pacing is
+// disabled for the app. Callers must not hold p.mu.
+func (p *Proxy) appLimiter(slug string) *admission.AppLimiter {
+	p.appLimitersMu.Lock()
+	defer p.appLimitersMu.Unlock()
+	return p.appLimiters[slug]
 }
 
 const (

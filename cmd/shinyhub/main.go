@@ -31,6 +31,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/access"
+	"github.com/rvben/shinyhub/internal/admission"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/appenv"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -60,6 +61,7 @@ import (
 	"github.com/rvben/shinyhub/internal/ui"
 	"github.com/rvben/shinyhub/internal/upgrade"
 	"github.com/rvben/shinyhub/internal/worker"
+	gopscpu "github.com/shirou/gopsutil/v4/cpu"
 	gopsmem "github.com/shirou/gopsutil/v4/mem"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/hkdf"
@@ -1445,6 +1447,52 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			return int(vm.Available / (1024 * 1024)), true
 		})
 		slog.Info("elastic admission memory floor active", "min_available_memory_mb", minMB)
+	}
+
+	// Render-aware admission. Detect the cores the pacer sizes against and log
+	// which source won so an operator can see the effective number.
+	renderCores, coreSource := admission.Detect(cfg.RenderCapacityCores())
+	slog.Info("render admission: effective cores", "cores", renderCores, "source", coreSource)
+
+	// Host CPU watermark, only when enabled. It samples on its own goroutine;
+	// cpu.Percent blocks, so it is never called from the admission path. Under
+	// runtime.mode docker this is sized against the ShinyHub process, not each
+	// worker's container quota (a known limitation).
+	if maxCPU := cfg.MaxCPUPercent(); maxCPU > 0 {
+		wm := admission.NewWatermark(maxCPU, func() (float64, error) {
+			pcts, err := gopscpu.Percent(0, false)
+			if err != nil {
+				return 0, err
+			}
+			if len(pcts) == 0 {
+				return 0, fmt.Errorf("cpu.Percent returned no samples")
+			}
+			return pcts[0], nil
+		})
+		go wm.Run(ctx)
+		prx.SetCPUWatermark(wm)
+	}
+
+	// Size a per-app limiter for every app that has opted into pacing
+	// (render_seconds > 0). Apps at the default 0 get no limiter, so this is a
+	// no-op today. The access-mode lookup lets per-principal fairness key
+	// correctly.
+	prx.SetAppAccessLookup(func(slug string) string {
+		if a, err := store.GetAppBySlug(slug); err == nil {
+			return a.Access
+		}
+		return "" // unknown: the charge-point plan treats this as the conservative case
+	})
+	renderApps, err := store.ListApps(0, 0) // limit <= 0 means all apps (queries.go ListApps)
+	if err != nil {
+		return fmt.Errorf("list apps for render-admission sizing: %w", err)
+	}
+	for _, a := range renderApps {
+		l := proxy.BuildAppLimiter(
+			a.RenderSeconds, renderCores, cfg.RenderHeadroom(), 3,
+			cfg.PrincipalShareDivisor(), cfg.PrincipalLRUCapacity(),
+		)
+		prx.SetAppLimiter(a.Slug, l) // nil for render_seconds 0 clears/leaves it unset
 	}
 
 	// Let the proxy render a clear status page (instead of the endless loading
