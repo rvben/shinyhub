@@ -237,6 +237,42 @@ func TestChargeRenderAdmission_WatermarkBlockSpendsNoToken(t *testing.T) {
 	}
 }
 
+func TestChargeRenderAdmission_ParkWaitsForSharedNotPrincipal(t *testing.T) {
+	// End-to-end proof through the real park loop: a request parked on a shared
+	// capacity dip is admitted once shared capacity returns, WITHOUT its principal
+	// bucket being drained by the park. If the park re-ran the full Admit each tick
+	// (the pre-fix bug), the principal's small burst would empty within a couple of
+	// ticks and the request would be shed before shared capacity recovered.
+	p := New()
+	// Shared burst 1, refilling one token about every 50ms (20/s). Principal burst 2
+	// with a negligible refill (divisor 1000), so a drained principal stays drained
+	// for the whole test: only re-checking the SHARED bucket (the fix) can admit here.
+	p.SetAppLimiter("demo", admission.NewAppLimiter(20, 1, 1000, 2, 4096))
+	p.SetRenderParkBudget(0, 0)
+	saveTTL, saveInterval := renderParkTTL, renderParkInterval
+	defer func() { renderParkTTL, renderParkInterval = saveTTL, saveInterval }()
+	renderParkTTL = 500 * time.Millisecond
+	renderParkInterval = 5 * time.Millisecond
+
+	// A hog drains the single shared token, so the victim must park.
+	hog := renderWSUpgradeRequest("/app/demo/")
+	hog.RemoteAddr = "203.0.113.9:9"
+	if !p.chargeRenderAdmission(httptest.NewRecorder(), hog, "demo") {
+		t.Fatal("hog should take the shared token")
+	}
+	// The victim parks (shared empty) and must be admitted once shared refills, well
+	// within the TTL. A pre-fix park (re-Admit per tick) would instead drain the
+	// victim's 2-token principal burst in a couple of ticks and shed it first.
+	victim := renderWSUpgradeRequest("/app/demo/")
+	victim.RemoteAddr = "203.0.113.10:10"
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	if !p.chargeRenderAdmission(rec, victim, "demo") {
+		t.Fatalf("victim should be admitted after shared capacity returns; got shed %d %q after %v",
+			rec.Code, rec.Header().Get("X-Shinyhub-Reject"), time.Since(start))
+	}
+}
+
 func TestChargeRenderAdmission_NonWSNeverCharges(t *testing.T) {
 	// Non-WebSocket requests must never be charged. With a single shared token and
 	// no refill, a charged second request would shed; all must forward instead.
