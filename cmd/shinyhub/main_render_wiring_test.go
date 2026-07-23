@@ -18,9 +18,10 @@ func TestMainWiresRenderAdmission(t *testing.T) {
 	for _, needle := range []string{
 		"admission.Detect(",       // effective cores are detected
 		"admission.NewWatermark(", // the watermark is constructed
-		".Run(",                   // and its background sampler is started
+		"wm.Run(ctx)",             // and its background sampler is started on the server ctx
 		"proxy.BuildAppLimiter(",  // per-app limiters are sized
 		"SetCPUWatermark(",        // and installed on the proxy
+		"SetAppAccessLookup(",     // the access-mode lookup is wired for per-principal fairness
 		"SetAppLimiter(",
 	} {
 		if !strings.Contains(s, needle) {
