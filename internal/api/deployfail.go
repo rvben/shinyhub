@@ -39,6 +39,16 @@ func deployFailureMessage(err error) string {
 		deployfail.MentionsMissingExecutable(msg, "python"):
 		return "deploy failed: Python runtime not found on the server (uv/python3 is not in PATH). " +
 			"Install it, switch the app to a container runtime, or contact your administrator."
+	case deployfail.Classify(err) == deployfail.InterpreterUnavailable:
+		// uv is installed but could not obtain a Python interpreter matching the
+		// app's requires-python: the managed-CPython download is blocked (no
+		// egress to GitHub's python-build-standalone releases) or no system
+		// interpreter matches. This is a host-provisioning fix, not a bundle fix,
+		// so the message names the server-level build.python* knobs rather than
+		// the raw uv output.
+		return "deploy failed: could not obtain a Python interpreter for this app. " +
+			"If this host cannot reach GitHub's python-build-standalone releases, set build.python_preference: only-system " +
+			"in the server config to use a preinstalled interpreter, or build.python_install_mirror to an internal mirror."
 	case strings.Contains(msg, "health check"):
 		return "deploy failed: the app did not pass its health check - it likely crashed on startup. " +
 			"Check the app logs for the cause."

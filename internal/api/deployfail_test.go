@@ -51,6 +51,19 @@ func TestDeployFailureMessage(t *testing.T) {
 			err:      errors.New(`hook[1] (make assets): exit status 2`),
 			contains: []string{"post-deploy hook", "make assets"},
 		},
+		{
+			// uv is present and working, but its managed-CPython download is
+			// blocked. The message must point at the build.python* knobs, not
+			// tell the operator to install a runtime that is already installed.
+			name:     "blocked managed interpreter download names the config knobs",
+			err:      errors.New(`uv sync: error: Failed to download https://github.com/astral-sh/python-build-standalone/releases/download/x.tar.gz (403 Forbidden)`),
+			contains: []string{"could not obtain a Python interpreter", "build.python_preference", "build.python_install_mirror"},
+		},
+		{
+			name:     "no matching interpreter names the config knobs",
+			err:      errors.New(`uv sync: error: No interpreter found for Python >=3.12 in managed installations or search path`),
+			contains: []string{"could not obtain a Python interpreter", "build.python_preference"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

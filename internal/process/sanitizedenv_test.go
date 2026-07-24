@@ -52,6 +52,25 @@ func TestSanitizedEnv_AllowsUvPythonInstallDir(t *testing.T) {
 	}
 }
 
+// The build interpreter knobs (uv's UV_PYTHON_PREFERENCE / UV_PYTHON /
+// UV_PYTHON_INSTALL_MIRROR) must reach uv on every app-controlled path so the
+// `build:` config section - which exports them into the process environment -
+// actually steers interpreter provisioning. Without the allow-list they are
+// scrubbed and the config (and the operator's own service-env value) is
+// silently dropped, which is exactly the trap this feature closes.
+func TestSanitizedEnv_AllowsBuildInterpreterVars(t *testing.T) {
+	vars := []string{"UV_PYTHON_PREFERENCE", "UV_PYTHON", "UV_PYTHON_INSTALL_MIRROR"}
+	for _, v := range vars {
+		t.Setenv(v, "only-system")
+	}
+	env := SanitizedEnv()
+	for _, v := range vars {
+		if !envHas(env, v) {
+			t.Errorf("allow-list dropped build interpreter var %s", v)
+		}
+	}
+}
+
 // Package-index configuration (private registries: corp Nexus/Artifactory
 // PyPI mirrors, private CRAN) is same-class as the proxy and TLS-trust vars
 // already allow-listed: its sole purpose is to be consumed by dependency

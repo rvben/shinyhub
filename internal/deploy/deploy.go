@@ -228,6 +228,7 @@ func runSandboxedBuildStep(ctx context.Context, dir string, argv []string, appEn
 		err = sandboxDenialHint(out, err, writePaths)
 	}
 	err = indexResolutionHint(out, err, cmd.Env)
+	err = interpreterResolutionHint(out, err)
 	return out, err
 }
 

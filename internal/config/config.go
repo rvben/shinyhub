@@ -117,6 +117,7 @@ type Config struct {
 	Maintenance      MaintenanceConfig
 	Branding         BrandingConfig
 	Worker           WorkerConfig
+	Build            BuildConfig
 	OAuth            OAuthConfig  `yaml:"-"`
 	TrustedProxyNets []*net.IPNet `yaml:"-"` // parsed from Server.TrustedProxies
 }
@@ -292,6 +293,93 @@ type WorkerConfig struct {
 	// When empty the certificate defaults to loopback addresses only, which
 	// is sufficient for local testing but will fail remote worker connections.
 	AdvertiseHosts []string `yaml:"advertise_hosts"`
+}
+
+// BuildConfig declares the host-level policy for the Python interpreter that
+// native app builds (and serve-time `uv run`) use. It is the interpreter
+// analogue of the private package-index support: a first-class, documented way
+// to steer uv's interpreter provisioning without depending on the operator
+// remembering to both set an env var AND allow-list it through SanitizedEnv.
+//
+// Interpreter provisioning is a property of the host, not the app: on one host
+// you would never want app A to fetch a managed CPython from GitHub while app B
+// uses the system interpreter. So this is server-scoped only (no per-app knob).
+//
+// The fields map one-to-one onto uv's own environment variables. ApplyToEnv
+// exports each non-empty field into the process environment at serve startup;
+// the three keys are allow-listed by process.SanitizedEnv, so the values then
+// reach every native build path (uv sync, the uv init/add project-synthesis
+// step) and serve-time `uv run` uniformly - the paths that have no injectable
+// env seam. An empty BuildConfig is inert: nothing is exported and uv keeps its
+// stock defaults.
+type BuildConfig struct {
+	// PythonPreference maps to UV_PYTHON_PREFERENCE. Accepted values mirror uv's:
+	// "only-managed", "managed" (uv's default), "system", "only-system". Empty
+	// leaves uv's default in place. On a host whose egress cannot reach GitHub's
+	// python-build-standalone releases, "only-system" makes uv use a preinstalled
+	// interpreter instead of attempting a managed download.
+	PythonPreference string `yaml:"python_preference"`
+	// Python maps to UV_PYTHON: an explicit interpreter request (a version like
+	// "3.12", or an absolute path to an interpreter). Empty lets each app's
+	// requires-python decide.
+	Python string `yaml:"python"`
+	// PythonInstallMirror maps to UV_PYTHON_INSTALL_MIRROR: a base URL for an
+	// internal mirror of the python-build-standalone releases, for hosts that
+	// permit managed downloads only from an approved host. Empty uses uv's
+	// default GitHub source.
+	PythonInstallMirror string `yaml:"python_install_mirror"`
+}
+
+// buildEnvVars pairs each BuildConfig field with the uv environment variable it
+// drives, in a fixed order so ApplyToEnv and UVBuildEnv agree.
+func (b BuildConfig) buildEnvVars() []struct{ key, val string } {
+	return []struct{ key, val string }{
+		{"UV_PYTHON_PREFERENCE", b.PythonPreference},
+		{"UV_PYTHON", b.Python},
+		{"UV_PYTHON_INSTALL_MIRROR", b.PythonInstallMirror},
+	}
+}
+
+// IsActive reports whether any interpreter policy is configured.
+func (b BuildConfig) IsActive() bool {
+	for _, v := range b.buildEnvVars() {
+		if v.val != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// UVBuildEnv returns the configured settings as KEY=value strings for the
+// non-empty fields, for diagnostics and tests. It does not mutate anything.
+func (b BuildConfig) UVBuildEnv() []string {
+	var out []string
+	for _, v := range b.buildEnvVars() {
+		if v.val != "" {
+			out = append(out, v.key+"="+v.val)
+		}
+	}
+	return out
+}
+
+// ApplyToEnv exports each configured (non-empty) interpreter setting into the
+// process environment so it reaches every uv invocation through
+// process.SanitizedEnv, which allow-lists these three keys. Config is
+// authoritative: a configured field overwrites any inherited service-env value,
+// while an unset field is left untouched so an operator-set service-env value
+// (also allow-listed) still applies. Called once at serve startup, before any
+// build runs; it is intentionally not called from Load so tests that parse
+// config do not mutate the global environment.
+func (b BuildConfig) ApplyToEnv() error {
+	for _, v := range b.buildEnvVars() {
+		if v.val == "" {
+			continue
+		}
+		if err := os.Setenv(v.key, v.val); err != nil {
+			return fmt.Errorf("set %s: %w", v.key, err)
+		}
+	}
+	return nil
 }
 
 // LifecycleConfig holds parsed lifecycle settings with ready-to-use durations.
@@ -886,6 +974,7 @@ type rawConfig struct {
 	Maintenance MaintenanceConfig  `yaml:"maintenance"`
 	Branding    BrandingConfig     `yaml:"branding"`
 	Worker      WorkerConfig       `yaml:"worker"`
+	Build       BuildConfig        `yaml:"build"`
 }
 
 // validTopLevelKeys is the set of accepted top-level YAML keys, mirroring the
@@ -896,7 +985,7 @@ var validTopLevelKeys = map[string]bool{
 	"database": true, "server": true, "auth": true, "storage": true,
 	"lifecycle": true, "oauth": true, "runtime": true, "scheduler": true,
 	"defaults": true, "tracing": true, "metrics": true, "maintenance": true,
-	"branding": true, "worker": true,
+	"branding": true, "worker": true, "build": true,
 }
 
 // runtimeSubKeys are the section names nested under `runtime:`. Placing one at
@@ -1196,6 +1285,7 @@ func loadRaw(path string) (*Config, error) {
 		Maintenance: raw.Maintenance,
 		Branding:    raw.Branding,
 		Worker:      raw.Worker,
+		Build:       raw.Build,
 		OAuth: OAuthConfig{
 			GitHub: GitHubOAuthConfig{
 				ClientID:     raw.OAuth.GitHub.ClientID,
@@ -1384,6 +1474,16 @@ func loadRaw(path string) (*Config, error) {
 	if !db.IsValidAppVisibility(cfg.Defaults.AppVisibility) {
 		return nil, fmt.Errorf("defaults.app_visibility: %q is not allowed; must be one of %s",
 			cfg.Defaults.AppVisibility, strings.Join(db.ValidAppVisibilities, ", "))
+	}
+	// build.python_preference mirrors uv's UV_PYTHON_PREFERENCE values. Empty
+	// leaves uv's stock default; a typo (e.g. "only_system") would otherwise be
+	// exported to uv verbatim and rejected only at build time, per app.
+	switch cfg.Build.PythonPreference {
+	case "", "only-managed", "managed", "system", "only-system":
+		// allowed
+	default:
+		return nil, fmt.Errorf("build.python_preference: %q is not allowed; must be one of only-managed, managed, system, only-system",
+			cfg.Build.PythonPreference)
 	}
 	switch cfg.Runtime.Mode {
 	case "native", "docker":
@@ -2568,6 +2668,15 @@ func applyEnv(cfg *Config) error {
 			}
 		}
 		cfg.Worker.AdvertiseHosts = hosts
+	}
+	if v := os.Getenv("SHINYHUB_BUILD_PYTHON_PREFERENCE"); v != "" {
+		cfg.Build.PythonPreference = v
+	}
+	if v := os.Getenv("SHINYHUB_BUILD_PYTHON"); v != "" {
+		cfg.Build.Python = v
+	}
+	if v := os.Getenv("SHINYHUB_BUILD_PYTHON_INSTALL_MIRROR"); v != "" {
+		cfg.Build.PythonInstallMirror = v
 	}
 	return nil
 }

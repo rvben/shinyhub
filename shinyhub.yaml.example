@@ -211,6 +211,17 @@ worker:
   advertise_hosts:                   # hostnames/IPs workers use to reach the control plane (become cert SANs)  # SHINYHUB_WORKER_ADVERTISE_HOSTS
     - shiny.internal                 # empty = loopback only (local testing; remote workers will fail TLS)
 
+# Optional: Python interpreter policy for native app builds (uv). By default uv
+# downloads a managed CPython from GitHub's python-build-standalone releases; on
+# a host without that egress, set python_preference: only-system to build against
+# a preinstalled interpreter, or python_install_mirror to an internal mirror.
+# Server-scoped (interpreter provisioning is a host property, not per-app).
+# See docs/environment.md#build-interpreter-provisioning.
+build:
+  python_preference: ""              # "" = uv default (managed). One of: only-managed, managed, system, only-system  # SHINYHUB_BUILD_PYTHON_PREFERENCE
+  python: ""                         # explicit interpreter: a version ("3.12") or an absolute path; "" lets requires-python decide  # SHINYHUB_BUILD_PYTHON
+  python_install_mirror: ""          # base URL of an internal python-build-standalone mirror; "" = GitHub  # SHINYHUB_BUILD_PYTHON_INSTALL_MIRROR
+
 # Optional: OAuth / OIDC login providers. Remove any block you don't use.
 oauth:
   github:

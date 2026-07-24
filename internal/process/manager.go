@@ -1266,6 +1266,13 @@ var appEnvAllowExact = map[string]struct{}{
 	"http_proxy": {}, "https_proxy": {}, "no_proxy": {}, "all_proxy": {},
 	"XDG_CACHE_HOME": {}, "XDG_DATA_HOME": {}, "XDG_CONFIG_HOME": {}, "XDG_RUNTIME_DIR": {},
 	"UV_CACHE_DIR": {}, "UV_PYTHON_INSTALL_DIR": {}, "PIP_CACHE_DIR": {},
+	// Build interpreter provisioning (uv's own knobs). Same class as the index
+	// vars below: consumed only by uv when selecting/obtaining the Python that
+	// builds and runs an app, never a control-plane secret. Allow-listing them
+	// lets the `build:` config section (and an operator-set service env value)
+	// steer uv's interpreter provisioning on a host whose egress cannot reach
+	// GitHub's python-build-standalone releases. None carry credentials.
+	"UV_PYTHON_PREFERENCE": {}, "UV_PYTHON": {}, "UV_PYTHON_INSTALL_MIRROR": {},
 	// Package-index configuration (private registries). Same class as the
 	// proxy and TLS-trust vars above: its sole purpose is to be consumed by
 	// dependency resolution in builds, unlike the control-plane secrets this
