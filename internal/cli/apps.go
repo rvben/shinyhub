@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -707,6 +708,7 @@ type appsSetFlags struct {
 	autoscaleMin          int
 	autoscaleMax          int
 	autoscaleTarget       float64
+	renderSeconds         float64
 	yes                   bool
 	wait                  bool
 	waitTimeout           time.Duration
@@ -752,6 +754,8 @@ func newAppsSetCmd() *cobra.Command {
 		"Autoscale ceiling: maximum replicas the controller may add (>= autoscale-min)")
 	cmd.Flags().Float64Var(&f.autoscaleTarget, "autoscale-target", 0,
 		"Target average fraction of the per-replica session cap, in (0,1] (0 = inherit the runtime default)")
+	cmd.Flags().Float64Var(&f.renderSeconds, "render-seconds", 0,
+		"Expected worst-case render time in seconds for this app's render callback, used to size a steady-state session cap advisory (0 = disable pacing; 0..600)")
 	cmd.Flags().BoolVar(&f.yes, "yes", false,
 		"Skip the confirmation prompt for a replica change (which restarts the app)")
 	cmd.Flags().BoolVar(&f.wait, "wait", false,
@@ -784,6 +788,7 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	autoscaleMaxChanged := cmd.Flags().Changed("autoscale-max")
 	autoscaleTargetChanged := cmd.Flags().Changed("autoscale-target")
 	anyAutoscaleChanged := autoscaleChanged || autoscaleMinChanged || autoscaleMaxChanged || autoscaleTargetChanged
+	renderSecondsChanged := cmd.Flags().Changed("render-seconds")
 	isolationChanged := cmd.Flags().Changed("isolation")
 	groupedSizeChanged := cmd.Flags().Changed("grouped-size")
 	maxWorkersChanged := cmd.Flags().Changed("max-workers")
@@ -791,8 +796,8 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	anyWorkerChanged := isolationChanged || groupedSizeChanged || maxWorkersChanged || maxSessionLifetimeChanged
 	ephemeralDataOkChanged := cmd.Flags().Changed("ephemeral-data-ok")
 
-	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged && !renderSecondsChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok, --render-seconds)")
 	}
 	if memoryLimitChanged && f.memoryLimitMB != -1 {
 		if err := deploy.ValidateMemoryLimitMB(f.memoryLimitMB); err != nil {
@@ -809,6 +814,11 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if capChanged && (f.maxSessionsPerReplica < 0 || f.maxSessionsPerReplica > 1000) {
 		return fmt.Errorf("--max-sessions-per-replica must be between 0 and 1000")
+	}
+	// Mirrors the server-side guard (Task 6) so an out-of-range or non-finite
+	// value fails fast without a round trip.
+	if renderSecondsChanged && (math.IsNaN(f.renderSeconds) || math.IsInf(f.renderSeconds, 0) || f.renderSeconds < 0 || f.renderSeconds > 600) {
+		return validationErr("--render-seconds must be a finite number between 0 and 600", "")
 	}
 	if minWarmReplicasChanged && (f.minWarmReplicas < 0 || f.minWarmReplicas > 1000) {
 		return fmt.Errorf("--min-warm-replicas must be between 0 and 1000")
@@ -906,6 +916,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	if capChanged {
 		payload["max_sessions_per_replica"] = f.maxSessionsPerReplica
 	}
+	if renderSecondsChanged {
+		payload["render_seconds"] = f.renderSeconds
+	}
 	if minWarmReplicasChanged {
 		payload["min_warm_replicas"] = f.minWarmReplicas
 	}
@@ -984,6 +997,21 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warn)
 	}
 
+	// render_pacing is present only when render_seconds > 0; a decode failure
+	// (or the field's absence) leaves patchResp.RenderPacing nil, which the
+	// advisory below treats as "nothing to suggest".
+	var patchResp struct {
+		RenderPacing *struct {
+			RenderSeconds                         float64 `json:"render_seconds"`
+			EffectiveCores                        float64 `json:"effective_cores"`
+			CoresSource                           string  `json:"cores_source"`
+			SuggestedMaxSessionsPerReplica        int     `json:"suggested_max_sessions_per_replica"`
+			CurrentEffectiveMaxSessionsPerReplica int     `json:"current_effective_max_sessions_per_replica"`
+			CadenceAssumptionSeconds              float64 `json:"cadence_assumption_seconds"`
+		} `json:"render_pacing"`
+	}
+	_ = json.Unmarshal(out, &patchResp)
+
 	var lines []string
 	if hibernateChanged {
 		minutes, _ := payload["hibernate_timeout_minutes"].(*int)
@@ -1017,6 +1045,13 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if minWarmReplicasChanged {
 		fmt.Printf("%s: min-warm-replicas set to %d\n", slug, f.minWarmReplicas)
+	}
+	if renderSecondsChanged {
+		if f.renderSeconds == 0 {
+			lines = append(lines, fmt.Sprintf("%s: render-seconds pacing disabled", slug))
+		} else {
+			lines = append(lines, fmt.Sprintf("%s: render-seconds set to %g", slug, f.renderSeconds))
+		}
 	}
 	if memoryLimitChanged {
 		switch f.memoryLimitMB {
@@ -1062,6 +1097,17 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if err := renderAction(cmd, "updated", map[string]any{"slug": slug}, strings.Join(lines, "\n")); err != nil {
 		return err
+	}
+
+	// Cap-sizing advisory: when render pacing suggests a lower per-replica
+	// session cap than what is currently in effect, surface it so the caller
+	// can decide whether to tighten --max-sessions-per-replica.
+	if block := patchResp.RenderPacing; block != nil && block.SuggestedMaxSessionsPerReplica < block.CurrentEffectiveMaxSessionsPerReplica {
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"Render pacing on (render_seconds=%g). For steady-state protection on ~%g cores, "+
+				"consider --max-sessions-per-replica %d (current effective: %d).\n",
+			block.RenderSeconds, block.EffectiveCores,
+			block.SuggestedMaxSessionsPerReplica, block.CurrentEffectiveMaxSessionsPerReplica)
 	}
 
 	if f.wait {
