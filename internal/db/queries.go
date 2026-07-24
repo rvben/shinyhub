@@ -2792,8 +2792,9 @@ func (s *Store) ListSuspendedReplicas() ([]SuspendedReplica, error) {
 // separate per-app lookup.
 type RoutableReplica struct {
 	Slug                  string
-	AppMaxSessionsPerRepl int   // apps.max_sessions_per_replica
-	AppIdentityHeaders    *bool // apps.identity_headers (nil = inherit global)
+	AppMaxSessionsPerRepl int     // apps.max_sessions_per_replica
+	AppRenderSeconds      float64 // apps.render_seconds (0 = pacing off)
+	AppIdentityHeaders    *bool   // apps.identity_headers (nil = inherit global)
 	Replica               *Replica
 }
 
@@ -2805,7 +2806,7 @@ type RoutableReplica struct {
 // index.
 func (s *Store) ListRoutableReplicas() ([]RoutableReplica, error) {
 	rows, err := s.db.Query(`
-		SELECT a.slug, a.max_sessions_per_replica, a.identity_headers,
+		SELECT a.slug, a.max_sessions_per_replica, a.render_seconds, a.identity_headers,
 		       r.app_id, r.idx, r.pid, r.port, r.status, r.provider, r.tier,
 		       r.endpoint_url, r.worker_id, r.app_version, r.desired_state,
 		       r.deployment_id, r.updated_at
@@ -2821,17 +2822,18 @@ func (s *Store) ListRoutableReplicas() ([]RoutableReplica, error) {
 	for rows.Next() {
 		var slug string
 		var maxSess int
+		var renderSeconds float64
 		var identityHeaders *bool
 		var r Replica
 		var updatedAt int64
-		if err := rows.Scan(&slug, &maxSess, &identityHeaders,
+		if err := rows.Scan(&slug, &maxSess, &renderSeconds, &identityHeaders,
 			&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
 			return nil, fmt.Errorf("list routable replicas scan: %w", err)
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
-		out = append(out, RoutableReplica{Slug: slug, AppMaxSessionsPerRepl: maxSess, AppIdentityHeaders: identityHeaders, Replica: &r})
+		out = append(out, RoutableReplica{Slug: slug, AppMaxSessionsPerRepl: maxSess, AppRenderSeconds: renderSeconds, AppIdentityHeaders: identityHeaders, Replica: &r})
 	}
 	if out == nil {
 		out = []RoutableReplica{}
