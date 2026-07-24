@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -377,6 +378,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setReplicas         bool
 		newMaxSessions      int
 		setMaxSessions      bool
+		newRenderSeconds    float64
+		setRenderSeconds    bool
 		newMinWarmReplicas  int
 		setMinWarmReplicas  bool
 		newManagedBy        *string
@@ -521,6 +524,23 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newMaxSessions, setMaxSessions = n, true
+	}
+
+	if rawVal, present := raw["render_seconds"]; present {
+		var v float64
+		if err := json.Unmarshal(rawVal, &v); err != nil {
+			writeError(w, http.StatusBadRequest, "render_seconds must be a number")
+			return
+		}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			writeError(w, http.StatusBadRequest, "render_seconds must be a finite number")
+			return
+		}
+		if v < 0 || v > 600 {
+			writeError(w, http.StatusBadRequest, "render_seconds must be between 0 and 600")
+			return
+		}
+		newRenderSeconds, setRenderSeconds = v, true
 	}
 
 	if rawVal, present := raw["min_warm_replicas"]; present {
@@ -836,6 +856,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		Replicas:                     newReplicas,
 		SetMaxSessions:               setMaxSessions,
 		MaxSessions:                  newMaxSessions,
+		SetRenderSeconds:             setRenderSeconds,
+		RenderSeconds:                newRenderSeconds,
 		SetMinWarmReplicas:           setMinWarmReplicas,
 		MinWarmReplicas:              newMinWarmReplicas,
 		SetWorkerIsolation:           setWorkerIsolation,
@@ -944,6 +966,9 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.SetPoolCap(slug,
 			deploy.ResolveMaxSessionsPerReplica(newMaxSessions, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
 	}
+	if setRenderSeconds && s.proxy != nil {
+		s.proxy.ApplyRenderPacing(slug, newRenderSeconds)
+	}
 	// SetPoolMode on any worker-field change so a live isolation reconfiguration
 	// reshapes the pool without requiring a full redeploy cycle. The isolation
 	// change will also trigger redeployApp (below), which calls deploy.Run and
@@ -988,13 +1013,14 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// an empty detail). For resource limits, audit only a real change, so a no-op
 	// resource-only PATCH neither redeploys nor logs a phantom update_app event.
 	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug ||
-		setReplicas || setMaxSessions || setMinWarmReplicas || setManagedBy ||
+		setReplicas || setMaxSessions || setRenderSeconds || setMinWarmReplicas || setManagedBy ||
 		setPlacement || clearPlacement || setAutoscale ||
 		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime ||
 		setEphemeralDataAck
 	if u := auth.UserFromContext(r.Context()); u != nil && (nonResourceTouched || memChanged || cpuChanged) {
 		detail := patchAppAuditDetail(
 			setMinWarmReplicas, newMinWarmReplicas,
+			setRenderSeconds, newRenderSeconds,
 			memChanged, oldMemoryLimitMB, memoryLimitMB,
 			cpuChanged, oldCPUQuotaPercent, cpuQuotaPercent,
 			setWorkerIsolation, oldWorkerIsolation, newWorkerIsolation,
@@ -1006,7 +1032,16 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r),
 		})
 	}
-	writeJSON(w, http.StatusOK, app)
+	effectiveRenderSeconds := app.RenderSeconds
+	if setRenderSeconds {
+		effectiveRenderSeconds = newRenderSeconds
+	}
+	effectiveCap := deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
+	resp := map[string]any{"app": app}
+	if block := s.buildRenderPacingBlock(effectiveRenderSeconds, effectiveCap); block != nil {
+		resp["render_pacing"] = block
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // intPtrEqual reports whether two *int hold the same nullness and value.
@@ -1041,6 +1076,7 @@ func orInt(newVal int, set bool, fallback int) int {
 // limits are recorded as {old,new} (nil renders as JSON null = inherit).
 func patchAppAuditDetail(
 	setMinWarmReplicas bool, minWarmReplicas int,
+	setRenderSeconds bool, renderSeconds float64,
 	setMemoryLimitMB bool, oldMem, newMem *int,
 	setCPUQuotaPercent bool, oldCPU, newCPU *int,
 	setWorkerIsolation bool, oldWorkerIsolation, newWorkerIsolation string,
@@ -1051,6 +1087,9 @@ func patchAppAuditDetail(
 	d := map[string]any{}
 	if setMinWarmReplicas {
 		d["min_warm_replicas"] = minWarmReplicas
+	}
+	if setRenderSeconds {
+		d["render_seconds"] = renderSeconds
 	}
 	if setMemoryLimitMB {
 		d["memory_limit_mb"] = map[string]any{"old": oldMem, "new": newMem}

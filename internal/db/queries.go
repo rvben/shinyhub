@@ -3222,6 +3222,9 @@ type PatchAppSettingsParams struct {
 	SetMaxSessions bool
 	MaxSessions    int
 
+	SetRenderSeconds bool
+	RenderSeconds    float64
+
 	SetMinWarmReplicas bool
 	MinWarmReplicas    int
 
@@ -3321,6 +3324,15 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			p.MaxSessions, appID,
 		); err != nil {
 			return "", 0, nil, nil, fmt.Errorf("update max_sessions_per_replica: %w", err)
+		}
+	}
+
+	if p.SetRenderSeconds {
+		if _, err := tx.Exec(
+			`UPDATE apps SET render_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.RenderSeconds, appID,
+		); err != nil {
+			return "", 0, nil, nil, fmt.Errorf("update render_seconds: %w", err)
 		}
 	}
 
