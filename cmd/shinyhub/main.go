@@ -684,6 +684,22 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	// Record the configured build interpreter policy (build.python_preference,
+	// build.python, build.python_install_mirror) so it is applied as the
+	// outermost env layer of every native build (uv sync, the uv init/add
+	// project-synthesis step), serve-time `uv run`, and host-side hooks -
+	// authoritative over any per-app UV_PYTHON_*. Held in process memory rather
+	// than exported to os.Environ, so a zero-downtime re-exec recomputes it from
+	// the freshly loaded config instead of inheriting a stale value. Done before
+	// the manager starts so no build can run without it.
+	process.SetBuildInterpreterPolicy(cfg.Build.UVBuildEnv())
+	if cfg.Build.IsActive() {
+		slog.Info("serve: build interpreter policy",
+			"python_preference", cfg.Build.PythonPreference,
+			"python", cfg.Build.Python,
+			"install_mirror_configured", cfg.Build.PythonInstallMirror != "")
+	}
+
 	if err := os.MkdirAll(cfg.Storage.AppsDir, 0o750); err != nil {
 		return fmt.Errorf("create apps dir: %w", err)
 	}

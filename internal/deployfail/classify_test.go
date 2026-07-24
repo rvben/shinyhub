@@ -25,6 +25,18 @@ func TestClassify(t *testing.T) {
 		{"build timeout", `uv sync: build exceeded the build timeout: context deadline exceeded`, BuildFailed},
 		{"renv build timeout", `renv restore: build exceeded the build timeout: context deadline exceeded`, BuildFailed},
 
+		// Interpreter provisioning: uv emits these from inside "uv sync", so the
+		// message carries the build prefix too. The interpreter cause must win
+		// over build_failed because it names distinct config knobs (a build
+		// failure would send the operator to edit dependencies instead). Both
+		// cases below deliberately include "uv sync:" to pin that ordering.
+		{"managed cpython download blocked",
+			`uv sync: error: Failed to download https://github.com/astral-sh/python-build-standalone/releases/download/20240101/cpython-3.12.0.tar.gz (status 403 Forbidden)`,
+			InterpreterUnavailable},
+		{"no matching interpreter with managed disabled",
+			`uv sync: error: No interpreter found for Python >=3.12 in managed installations or search path`,
+			InterpreterUnavailable},
+
 		// A post-deploy hook runs app-controlled code, so its failure says
 		// nothing about the server. These are verbatim shapes from
 		// RunPostDeployHooks. The missing-executable case is the trap: it names
@@ -69,6 +81,38 @@ func TestClassify(t *testing.T) {
 func TestClassifyNilIsEmpty(t *testing.T) {
 	if got := Classify(nil); got != "" {
 		t.Errorf("Classify(nil) = %q, want empty", got)
+	}
+}
+
+func TestMentionsInterpreterProvisioningFailure(t *testing.T) {
+	yes := []string{
+		`Failed to download https://github.com/astral-sh/python-build-standalone/releases/download/20240101/cpython.tar.gz`,
+		`No interpreter found for Python >=3.12 in managed installations or search path`,
+	}
+	for _, msg := range yes {
+		if !MentionsInterpreterProvisioningFailure(msg) {
+			t.Errorf("should detect interpreter provisioning failure in %q", msg)
+		}
+	}
+	no := []string{
+		`uv sync: error: failed to resolve dependencies for pandas`,
+		`exec: "uv": executable file not found in $PATH`,
+	}
+	for _, msg := range no {
+		if MentionsInterpreterProvisioningFailure(msg) {
+			t.Errorf("a plain build/runtime error is not an interpreter failure: %q", msg)
+		}
+	}
+}
+
+// TestInterpreterUnavailableIsValidKind mirrors TestHookFailedIsValidKind: the
+// CLI trusts a server-supplied failure_kind only when Valid() accepts it.
+func TestInterpreterUnavailableIsValidKind(t *testing.T) {
+	if !InterpreterUnavailable.Valid() {
+		t.Error("InterpreterUnavailable must be a valid kind or clients will not trust it")
+	}
+	if InterpreterUnavailable != "interpreter_unavailable" {
+		t.Errorf("InterpreterUnavailable = %q, want interpreter_unavailable (public contract)", InterpreterUnavailable)
 	}
 }
 

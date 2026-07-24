@@ -63,6 +63,8 @@ top of this inherited base. The allow-list covers, by category:
   lower-case).
 - **Tool directories:** `XDG_*`, `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`,
   `PIP_CACHE_DIR`, `R_LIBS*`, `RENV_PATHS_CACHE`.
+- **Build interpreter:** `UV_PYTHON_PREFERENCE`, `UV_PYTHON`,
+  `UV_PYTHON_INSTALL_MIRROR` - see [Build interpreter provisioning](#build-interpreter-provisioning).
 - **Package indexes:** see the next section.
 
 Anything else is dropped. To pass an additional variable through, name it in
@@ -113,6 +115,63 @@ shinyhub env set demo UV_INDEX_CORP_PASSWORD --secret --stdin
 
 `shinyhub run` mirrors this locally: variables passed via `--env`/`.env` reach
 the local dependency build the same way per-app vars reach a server build.
+
+## Build interpreter provisioning
+
+Native Python apps build with [uv](https://docs.astral.sh/uv/). By default uv
+provisions the Python interpreter an app's `requires-python` needs by
+downloading a managed CPython from GitHub's
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+releases. On a host whose egress cannot reach GitHub (an air-gapped or
+proxy-restricted network), that download is blocked and the deploy fails with
+`failure_kind: interpreter_unavailable` and a hint naming the knobs below.
+
+The `build:` section of the server config declares the interpreter policy for
+every native build (`uv sync`, and the `uv init`/`uv add` project-synthesis
+step for a `requirements.txt`-only app), for serve-time `uv run`, and for
+host-side post-deploy hooks. It is the interpreter analogue of the
+private-package-index support above, and is **server-scoped**: interpreter
+provisioning is a property of the host, not the app, so there is no per-app
+knob, and a configured field is **authoritative** - it overrides an app that
+sets the same `UV_PYTHON_*` variable as a per-app env var.
+
+```yaml
+build:
+  # UV_PYTHON_PREFERENCE. One of: only-managed, managed (uv's default),
+  # system, only-system. Use only-system on a host that cannot download a
+  # managed CPython, to build against a preinstalled interpreter.
+  python_preference: only-system
+  # UV_PYTHON. An explicit interpreter: a version ("3.12") or an absolute path.
+  # Leave empty to let each app's requires-python decide.
+  python: ""
+  # UV_PYTHON_INSTALL_MIRROR. Base URL of an internal mirror of the
+  # python-build-standalone releases, for hosts allowed to download managed
+  # interpreters only from an approved host.
+  python_install_mirror: ""
+```
+
+Each field maps one-to-one onto uv's own environment variable. The policy is
+recorded in memory at startup and applied as the outermost layer of every
+native uv invocation, so it reaches the paths that have no injectable env seam
+and wins over any per-app value. It is deliberately not written to the process
+environment: a zero-downtime re-exec hands the successor the current
+environment, so an exported value could never be un-set by emptying a `build:`
+field; recomputing from the freshly loaded config lets a removed key take
+effect on the next handoff. Equivalent env-var overrides
+(`SHINYHUB_BUILD_PYTHON_PREFERENCE`, `SHINYHUB_BUILD_PYTHON`,
+`SHINYHUB_BUILD_PYTHON_INSTALL_MIRROR`) take precedence over the YAML.
+
+Setting `UV_PYTHON_PREFERENCE` directly in the service environment also works -
+it is allow-listed and reaches every build - but it is not host-authoritative:
+it sits in the scrubbed base, so a per-app value overrides it. Prefer the
+`build:` section: it is validated at startup (a typo'd `python_preference` fails
+the load instead of every app's build), authoritative over per-app env,
+documented, and portable in a fleet manifest.
+
+This does not solve reachability. It selects a preinstalled interpreter or an
+approved mirror; a host with no suitable interpreter and no reachable source
+still cannot build. The Docker and Fargate runtimes are unaffected - they bake
+the interpreter into the image.
 
 ## Caveat: rotating `SHINYHUB_AUTH_SECRET`
 

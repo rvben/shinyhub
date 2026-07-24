@@ -23,6 +23,10 @@ func Classify(err error) Kind {
 //     hook command can contain any substring the later cases key on.
 //   - runtime_missing before build_failed, because a missing-uv error contains
 //     both the exec-not-found text and the "uv sync:" prefix.
+//   - interpreter_unavailable before build_failed, because uv emits its
+//     interpreter-provisioning failure from inside "uv sync", so the message
+//     carries the "uv sync:" prefix too; the more specific interpreter cause is
+//     the actionable one (it names distinct config knobs).
 //   - crashed before readiness_timeout, so a mixed multi-replica aggregate
 //     (one crashed, one timed out) surfaces the more actionable crash.
 func ClassifyMessage(msg string) Kind {
@@ -34,6 +38,8 @@ func ClassifyMessage(msg string) Kind {
 		MentionsMissingExecutable(msg, "python3"),
 		MentionsMissingExecutable(msg, "python"):
 		return RuntimeMissing
+	case MentionsInterpreterProvisioningFailure(msg):
+		return InterpreterUnavailable
 	case strings.Contains(msg, "uv sync:"),
 		strings.Contains(msg, "renv restore:"):
 		return BuildFailed
@@ -54,6 +60,25 @@ func ClassifyMessage(msg string) Kind {
 // named name, matching Go's exec "executable file not found" error text.
 func MentionsMissingExecutable(msg, name string) bool {
 	return strings.Contains(msg, `"`+name+`"`) && strings.Contains(msg, "executable file not found")
+}
+
+// MentionsInterpreterProvisioningFailure reports whether msg carries uv's
+// signature for being unable to obtain a Python interpreter that satisfies the
+// project's requires-python. Two distinct failures produce it, and both are
+// resolved by the same build.python* configuration rather than by editing
+// dependencies:
+//   - A managed-CPython download that is blocked (e.g. an egress proxy 403s the
+//     python-build-standalone release on GitHub). uv prints the release URL,
+//     which contains "python-build-standalone".
+//   - No installed interpreter matches and managed downloads are disabled or
+//     unavailable. uv prints "No interpreter found for Python ...".
+//
+// It is shared by the classifier (to assign InterpreterUnavailable) and by the
+// deploy package (to attach an actionable hint), so the detection stays in one
+// place.
+func MentionsInterpreterProvisioningFailure(msg string) bool {
+	return strings.Contains(msg, "python-build-standalone") ||
+		strings.Contains(msg, "No interpreter found")
 }
 
 // mentionsHookFailure reports whether msg came from a manifest post-deploy hook.
