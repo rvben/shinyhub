@@ -194,6 +194,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "slug", Type: "string"},
 	}, ArgEnums: map[string][]string{
 		"--isolation": {"multiplex", "grouped", "per_session"},
+	}, ArgTypes: map[string]string{
+		"--render-seconds": "number",
 	}},
 	"apps transfer": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "transferred"},

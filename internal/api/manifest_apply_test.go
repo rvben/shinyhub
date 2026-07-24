@@ -5,8 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/admission"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 func TestApplyManifestAppSettings_UpdatesAllThreeFieldsAtomically(t *testing.T) {
@@ -37,6 +39,43 @@ func TestApplyManifestAppSettings_UpdatesAllThreeFieldsAtomically(t *testing.T) 
 	events, _ := store.ListAuditEvents("", 10, 0)
 	if !auditEventsContain(events, "update_app", "alpha") {
 		t.Errorf("expected update_app audit event for alpha")
+	}
+}
+
+// TestApplyManifestAppSettings_RenderSecondsPersistsAndAppliesLive verifies
+// that a manifest [app] block declaring render_seconds persists the value to
+// the DB and applies it live to the proxy's render-admission limiter,
+// mirroring how max_sessions_per_replica calls SetPoolCap.
+// newServerWithOwnedApp wires a nil proxy, so a real one is installed
+// directly on the field (legal from within package api) with a limiter
+// factory that records the render_seconds value it is called with.
+func TestApplyManifestAppSettings_RenderSecondsPersistsAndAppliesLive(t *testing.T) {
+	srv, store, ownerID := newServerWithOwnedApp(t, "alpha")
+
+	prx := proxy.New()
+	var captured float64
+	callCount := 0
+	prx.SetRenderLimiterFactory(func(rs float64) *admission.AppLimiter {
+		captured = rs
+		callCount++
+		return nil
+	})
+	srv.proxy = prx
+
+	app, _ := store.GetAppBySlug("alpha")
+	r := newAuthedManifestRequest(t, ownerID, "POST", "/api/apps/alpha/deploy")
+
+	rs := 1.3
+	if err := srv.applyManifestAppSettings(r, app, deploy.AppSettings{RenderSeconds: &rs}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := store.GetAppBySlug("alpha")
+	if got.RenderSeconds != 1.3 {
+		t.Errorf("render_seconds = %v, want 1.3", got.RenderSeconds)
+	}
+	if callCount != 1 || captured != 1.3 {
+		t.Errorf("ApplyRenderPacing not applied live with 1.3 (callCount=%d, captured=%v)", callCount, captured)
 	}
 }
 

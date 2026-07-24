@@ -58,6 +58,13 @@ type Server struct {
 	tracer          *servertrace.Tracer // nil when server tracing is disabled
 	router          chi.Router
 
+	// renderPacingCores/renderPacingSource record the effective host cores (and
+	// the source that won) used to size the render-pacing cap suggestion
+	// returned by PATCH .../render_seconds. Set once at startup via
+	// SetRenderPacingCores; zero value until then.
+	renderPacingCores  float64
+	renderPacingSource string
+
 	// version is the binary version string advertised by GET /api/server-info,
 	// set by the parent binary via SetVersion. Empty until SetVersion is called
 	// (e.g. in test contexts that do not wire it).
@@ -616,6 +623,14 @@ func (s *Server) SetTraceBuffer(b *tracing.Buffer) { s.traceBuffer = b }
 // metrics disabled. Must be called before the server begins handling requests;
 // it is not safe to call concurrently with ServeHTTP.
 func (s *Server) SetMetrics(m *metrics.Registry) { s.metrics = m }
+
+// SetRenderPacingCores records the effective host cores (and the source that won)
+// used to compute the render-pacing cap suggestion. Called once at startup; Detect
+// is never invoked on the request path.
+func (s *Server) SetRenderPacingCores(cores float64, source string) {
+	s.renderPacingCores = cores
+	s.renderPacingSource = source
+}
 
 // recordDeploy increments the deploy-outcome counter when metrics are enabled.
 // result is "success" or "failure". A no-op when metrics are disabled.

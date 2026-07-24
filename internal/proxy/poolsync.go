@@ -160,6 +160,7 @@ func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
 	var maxIdx int
 	var appID int64
 	var maxSess int
+	var renderSeconds float64
 	var identityCol *bool
 	for _, rr := range rows {
 		r := rr.Replica
@@ -169,6 +170,7 @@ func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
 		if appID == 0 {
 			appID = r.AppID
 			maxSess = rr.AppMaxSessionsPerRepl
+			renderSeconds = rr.AppRenderSeconds
 			identityCol = rr.AppIdentityHeaders
 		}
 	}
@@ -179,6 +181,7 @@ func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
 	s.prx.SetPoolSize(slug, poolSize)
 	s.prx.SetPoolAppID(slug, appID)
 	s.prx.SetPoolCap(slug, maxSess)
+	s.prx.ApplyRenderPacing(slug, renderSeconds)
 	// SetPoolMode not called here: poolsync reconciles replica membership
 	// from the DB on recovery/attach. Mode is set by recovery.go on startup.
 	// Resolve the per-app tri-state column against this instance's global flag.

@@ -1012,6 +1012,16 @@ func TestAppSettings_IsZero_MinWarmReplicasAlone(t *testing.T) {
 	}
 }
 
+// TestAppSettings_IsZero_RenderSecondsAlone confirms that IsZero returns false
+// when only RenderSeconds is set.
+func TestAppSettings_IsZero_RenderSecondsAlone(t *testing.T) {
+	rs := 1.3
+	a := AppSettings{RenderSeconds: &rs}
+	if a.IsZero() {
+		t.Error("IsZero should be false when RenderSeconds is set")
+	}
+}
+
 // TestLoadManifest_WorkerGroupedRequiresGroupedSize asserts that declaring
 // [app.worker] with isolation="grouped" but no grouped_size is rejected at
 // parse time (shape-only validation; no server config needed).

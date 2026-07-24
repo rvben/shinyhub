@@ -176,8 +176,9 @@ func TestPatchApp_SetHibernateTimeout(t *testing.T) {
 	}
 	var resp map[string]any
 	json.NewDecoder(rec.Body).Decode(&resp)
-	if resp["hibernate_timeout_minutes"] != float64(60) {
-		t.Errorf("expected hibernate_timeout_minutes=60 in response, got %v", resp["hibernate_timeout_minutes"])
+	respApp := resp["app"].(map[string]any)
+	if respApp["hibernate_timeout_minutes"] != float64(60) {
+		t.Errorf("expected hibernate_timeout_minutes=60 in response, got %v", respApp["hibernate_timeout_minutes"])
 	}
 	app, _ := store.GetAppBySlug("myapp")
 	if app.HibernateTimeoutMinutes == nil || *app.HibernateTimeoutMinutes != 60 {
@@ -244,8 +245,9 @@ func TestPatchApp_NeverHibernate(t *testing.T) {
 	}
 	var resp map[string]any
 	json.NewDecoder(rec.Body).Decode(&resp)
-	if resp["hibernate_timeout_minutes"] != float64(0) {
-		t.Errorf("expected hibernate_timeout_minutes=0 in response, got %v", resp["hibernate_timeout_minutes"])
+	respApp := resp["app"].(map[string]any)
+	if respApp["hibernate_timeout_minutes"] != float64(0) {
+		t.Errorf("expected hibernate_timeout_minutes=0 in response, got %v", respApp["hibernate_timeout_minutes"])
 	}
 	app, _ := store.GetAppBySlug("myapp")
 	if app.HibernateTimeoutMinutes == nil || *app.HibernateTimeoutMinutes != 0 {
@@ -964,8 +966,9 @@ func TestPatchApp_UpdateName(t *testing.T) {
 	}
 	var resp map[string]any
 	json.NewDecoder(rec.Body).Decode(&resp)
-	if resp["name"] != "New Name" {
-		t.Errorf("name = %v, want 'New Name'", resp["name"])
+	respApp := resp["app"].(map[string]any)
+	if respApp["name"] != "New Name" {
+		t.Errorf("name = %v, want 'New Name'", respApp["name"])
 	}
 	app, _ := store.GetAppBySlug("myapp")
 	if app.Name != "New Name" {
@@ -3254,8 +3257,9 @@ func TestPatchApp_SetMinWarmReplicas(t *testing.T) {
 	}
 	var resp map[string]any
 	json.NewDecoder(rec.Body).Decode(&resp)
-	if resp["min_warm_replicas"] != float64(2) {
-		t.Errorf("expected min_warm_replicas=2 in response, got %v", resp["min_warm_replicas"])
+	respApp := resp["app"].(map[string]any)
+	if respApp["min_warm_replicas"] != float64(2) {
+		t.Errorf("expected min_warm_replicas=2 in response, got %v", respApp["min_warm_replicas"])
 	}
 	app, _ := store.GetAppBySlug("myapp")
 	if app.MinWarmReplicas != 2 {

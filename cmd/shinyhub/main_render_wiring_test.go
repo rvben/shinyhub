@@ -16,13 +16,15 @@ func TestMainWiresRenderAdmission(t *testing.T) {
 	}
 	s := string(src)
 	for _, needle := range []string{
-		"admission.Detect(",       // effective cores are detected
-		"admission.NewWatermark(", // the watermark is constructed
-		"wm.Run(ctx)",             // and its background sampler is started on the server ctx
-		"proxy.BuildAppLimiter(",  // per-app limiters are sized
-		"SetCPUWatermark(",        // and installed on the proxy
-		"SetAppAccessLookup(",     // the access-mode lookup is wired for per-principal fairness
-		"SetAppLimiter(",
+		"admission.Detect(",        // effective cores are detected
+		"admission.NewWatermark(",  // the watermark is constructed
+		"wm.Run(ctx)",              // and its background sampler is started on the server ctx
+		"proxy.BuildAppLimiter(",   // per-app limiters are sized (now inside the factory)
+		"SetCPUWatermark(",         // and installed on the proxy
+		"SetAppAccessLookup(",      // the access-mode lookup is wired for per-principal fairness
+		"SetRenderLimiterFactory(", // the limiter factory is installed
+		"ApplyRenderPacing(",       // every app is paced at startup through it
+		"SetRenderPacingCores(",    // the API server gets the cap-suggestion cores
 	} {
 		if !strings.Contains(s, needle) {
 			t.Errorf("main.go is missing the render-admission wiring call %q", needle)

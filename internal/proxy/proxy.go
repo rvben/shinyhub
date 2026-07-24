@@ -441,6 +441,14 @@ type Proxy struct {
 	// admission path can be extended without interacting with the pool lock.
 	appLimitersMu sync.Mutex
 	appLimiters   map[string]*admission.AppLimiter
+	// appliedRenderSeconds records the render_seconds currently applied for each
+	// paced slug, so ApplyRenderPacing rebuilds the limiter only on a real change
+	// and never resets a live token bucket. Guarded by appLimitersMu.
+	appliedRenderSeconds map[string]float64
+	// renderLimiterFactory builds a limiter for a render_seconds using host sizing
+	// captured once at startup, or returns nil when pacing is off. Set before
+	// serving via SetRenderLimiterFactory; read under appLimitersMu.
+	renderLimiterFactory func(renderSeconds float64) *admission.AppLimiter
 
 	// renderPark bounds parked render-paced upgrades; nil means unlimited (and
 	// is the default until wired). Guarded internally.
@@ -467,15 +475,16 @@ func New() *Proxy {
 	// opt-in, wired by main.go for production, so tests and embedders are not
 	// implicitly slowed by it (same pattern as SetWakeTrigger).
 	return &Proxy{
-		pools:         make(map[string]*backendPool),
-		lastSeen:      make(map[string]time.Time),
-		wsReady:       make(map[string]struct{}),
-		firstServedAt: make(map[string]time.Time),
-		wsWarned:      make(map[string]struct{}),
-		rejects:       newRejectCounter(),
-		conns:         newConnTracker(),
-		clients:       make(map[string]map[string]*clientSlot),
-		appLimiters:   make(map[string]*admission.AppLimiter),
+		pools:                make(map[string]*backendPool),
+		lastSeen:             make(map[string]time.Time),
+		wsReady:              make(map[string]struct{}),
+		firstServedAt:        make(map[string]time.Time),
+		wsWarned:             make(map[string]struct{}),
+		rejects:              newRejectCounter(),
+		conns:                newConnTracker(),
+		clients:              make(map[string]map[string]*clientSlot),
+		appLimiters:          make(map[string]*admission.AppLimiter),
+		appliedRenderSeconds: make(map[string]float64),
 	}
 }
 
@@ -548,6 +557,14 @@ func (p *Proxy) SetAppAccessLookup(fn func(slug string) string) {
 func (p *Proxy) SetAppLimiter(slug string, l *admission.AppLimiter) {
 	p.appLimitersMu.Lock()
 	defer p.appLimitersMu.Unlock()
+	p.setAppLimiterLocked(slug, l)
+}
+
+// setAppLimiterLocked installs or clears the limiter for slug. The caller MUST
+// hold appLimitersMu; this exists so ApplyRenderPacing can update the limiter and
+// the applied-seconds map in one critical section without the public method's
+// re-lock, which would self-deadlock on the non-reentrant mutex.
+func (p *Proxy) setAppLimiterLocked(slug string, l *admission.AppLimiter) {
 	if l == nil {
 		delete(p.appLimiters, slug)
 		return

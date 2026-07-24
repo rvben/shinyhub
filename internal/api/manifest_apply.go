@@ -161,6 +161,8 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		PreviousReplicas:             app.Replicas,
 		SetMaxSessionsPerReplica:     m.MaxSessionsPerReplica != nil,
 		MaxSessionsPerReplica:        derefOrZero(m.MaxSessionsPerReplica),
+		SetRenderSeconds:             m.RenderSeconds != nil,
+		RenderSeconds:                derefFloatOrZero(m.RenderSeconds),
 		SetIdentityHeaders:           true,
 		IdentityHeaders:              m.IdentityHeaders,
 		SetMinWarmReplicas:           m.MinWarmReplicas != nil,
@@ -189,6 +191,9 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 	if m.MaxSessionsPerReplica != nil && s.proxy != nil {
 		s.proxy.SetPoolCap(app.Slug,
 			deploy.ResolveMaxSessionsPerReplica(*m.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica))
+	}
+	if m.RenderSeconds != nil && s.proxy != nil {
+		s.proxy.ApplyRenderPacing(app.Slug, *m.RenderSeconds)
 	}
 	// SetPoolMode: propagate any worker-isolation change from the manifest so
 	// the live pool adopts the new routing strategy immediately. The subsequent
@@ -442,6 +447,13 @@ func derefOrZero(p *int) int {
 	return *p
 }
 
+func derefFloatOrZero(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
 // applyManifestAccessGroups flattens the manifest [access] block to desired
 // group rules (manager wins when a group appears in both lists) and reconciles
 // them into app_group_access as source='manifest', preserving any manual rules.
@@ -515,6 +527,9 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if m.MaxSessionsPerReplica != nil {
 		d["max_sessions_per_replica"] = *m.MaxSessionsPerReplica
 	}
+	if m.RenderSeconds != nil {
+		d["render_seconds"] = *m.RenderSeconds
+	}
 	if m.IdentityHeaders != nil {
 		d["identity_headers"] = *m.IdentityHeaders
 	}
@@ -569,6 +584,9 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if m.MaxSessionsPerReplica != nil {
 		d["max_sessions_per_replica"] = *m.MaxSessionsPerReplica
+	}
+	if m.RenderSeconds != nil {
+		d["render_seconds"] = *m.RenderSeconds
 	}
 	if m.IdentityHeaders != nil {
 		d["identity_headers"] = *m.IdentityHeaders
