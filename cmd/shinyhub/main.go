@@ -1487,13 +1487,20 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("list apps for render-admission sizing: %w", err)
 	}
+
+	// Build the limiter factory once, capturing the effective host sizing, so a
+	// render_seconds change (CLI/API/manifest, or poolsync convergence) can install
+	// or clear a limiter live without calling Detect again.
+	headroom := cfg.RenderHeadroom()
+	divisor := cfg.PrincipalShareDivisor()
+	lru := cfg.PrincipalLRUCapacity()
+	prx.SetRenderLimiterFactory(func(renderSeconds float64) *admission.AppLimiter {
+		return proxy.BuildAppLimiter(renderSeconds, renderCores, headroom, 3, divisor, lru)
+	})
 	for _, a := range renderApps {
-		l := proxy.BuildAppLimiter(
-			a.RenderSeconds, renderCores, cfg.RenderHeadroom(), 3,
-			cfg.PrincipalShareDivisor(), cfg.PrincipalLRUCapacity(),
-		)
-		prx.SetAppLimiter(a.Slug, l) // nil for render_seconds 0 clears/leaves it unset
+		prx.ApplyRenderPacing(a.Slug, a.RenderSeconds)
 	}
+	srv.SetRenderPacingCores(renderCores, coreSource)
 	prx.SetRenderParkBudget(cfg.RenderParkMaxPerApp(), cfg.RenderParkMaxTotal())
 	prx.SetRenderParkTTL(cfg.RenderParkTTL())
 
