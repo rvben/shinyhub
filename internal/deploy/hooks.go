@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,12 @@ type AppSettings struct {
 	HibernateTimeoutMinutes *int `toml:"hibernate_timeout_minutes"`
 	Replicas                *int `toml:"replicas"`
 	MaxSessionsPerReplica   *int `toml:"max_sessions_per_replica"`
+	// RenderSeconds sets the per-app render cost (seconds) used to size the
+	// render-admission pacer. nil = leave the stored value unchanged; 0
+	// explicitly disables pacing. Reconciled into apps.render_seconds on every
+	// deploy (declared-only, like MaxSessionsPerReplica) and applied live to the
+	// proxy's render limiter via proxy.ApplyRenderPacing.
+	RenderSeconds *float64 `toml:"render_seconds"`
 
 	// Autoscale declares the per-app session-saturation autoscale policy. A
 	// non-nil pointer means the block is present and reconciles atomically into
@@ -146,6 +153,7 @@ func (a AppSettings) IsZero() bool {
 	return a.HibernateTimeoutMinutes == nil &&
 		a.Replicas == nil &&
 		a.MaxSessionsPerReplica == nil &&
+		a.RenderSeconds == nil &&
 		a.IdentityHeaders == nil &&
 		a.MinWarmReplicas == nil &&
 		a.MemoryLimitMB == nil &&
@@ -311,6 +319,15 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	}
 	if a.MaxSessionsPerReplica != nil && (*a.MaxSessionsPerReplica < 0 || *a.MaxSessionsPerReplica > 1000) {
 		return fmt.Errorf("max_sessions_per_replica must be between 0 and 1000, got %d", *a.MaxSessionsPerReplica)
+	}
+	if a.RenderSeconds != nil {
+		v := *a.RenderSeconds
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("render_seconds must be a finite number, got %v", v)
+		}
+		if v < 0 || v > 600 {
+			return fmt.Errorf("render_seconds must be between 0 and 600, got %v", v)
+		}
 	}
 	if a.MinWarmReplicas != nil && (*a.MinWarmReplicas < 0 || *a.MinWarmReplicas > 1000) {
 		return fmt.Errorf("min_warm_replicas must be between 0 and 1000, got %d", *a.MinWarmReplicas)

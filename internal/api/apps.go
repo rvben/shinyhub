@@ -1524,12 +1524,21 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				AutoscaleMinReplicas: preManifestApp.AutoscaleMinReplicas,
 				AutoscaleMaxReplicas: preManifestApp.AutoscaleMaxReplicas,
 				AutoscaleTarget:      preManifestApp.AutoscaleTarget,
+				// Restore the pre-manifest render pacing. Unconditional like
+				// identity_headers/autoscale: a no-op when the failed manifest
+				// declared no render_seconds, correct when it did.
+				SetRenderSeconds: true,
+				RenderSeconds:    preManifestApp.RenderSeconds,
 			}); rerr != nil {
 				slog.Error("deploy: revert identity_headers after failed deploy", "slug", slug, "err", rerr)
 			}
 			if s.proxy != nil {
 				s.proxy.SetPoolIdentityHeaders(slug,
 					deploy.ResolveIdentityHeaders(preManifestApp.IdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()))
+				// Restore the pre-manifest render pacing on the live pool so the
+				// rolled-back bundle is governed by its own pacing, not the
+				// failed manifest's.
+				s.proxy.ApplyRenderPacing(slug, preManifestApp.RenderSeconds)
 			}
 		}
 		s.restorePreviousPool(slug, &preManifestApp, prevActive)

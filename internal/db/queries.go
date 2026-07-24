@@ -3018,6 +3018,9 @@ type ApplyAppManifestSettingsParams struct {
 	SetMaxSessionsPerReplica bool
 	MaxSessionsPerReplica    int
 
+	SetRenderSeconds bool
+	RenderSeconds    float64
+
 	// SetIdentityHeaders is true on every manifest apply (the field
 	// reconciles unconditionally: key removed => NULL => inherit global).
 	SetIdentityHeaders bool
@@ -3104,6 +3107,15 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			p.MaxSessionsPerReplica, p.AppID,
 		); err != nil {
 			return fmt.Errorf("update max_sessions_per_replica: %w", err)
+		}
+	}
+
+	if p.SetRenderSeconds {
+		if _, err := tx.Exec(
+			`UPDATE apps SET render_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.RenderSeconds, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update render_seconds: %w", err)
 		}
 	}
 
