@@ -221,8 +221,10 @@ func runSandboxedBuildStep(ctx context.Context, dir string, argv []string, appEn
 	// (including decrypted secrets, e.g. private package-index credentials) is
 	// layered on top - the build sees what the app will see at start - and the
 	// sandbox's redirects go last so they always win under os/exec's
-	// last-occurrence-wins dedup.
-	cmd.Env = append(append(process.SanitizedEnv(), appEnv...), extraEnv...)
+	// last-occurrence-wins dedup. The host build interpreter policy goes after
+	// all of them so it is authoritative over an app-set UV_PYTHON_* (its keys
+	// are disjoint from the sandbox redirects).
+	cmd.Env = process.WithBuildInterpreterPolicy(append(append(process.SanitizedEnv(), appEnv...), extraEnv...))
 	out, err := cmd.CombinedOutput()
 	if len(writePaths) > 0 {
 		err = sandboxDenialHint(out, err, writePaths)

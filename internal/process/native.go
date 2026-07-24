@@ -35,7 +35,11 @@ func nativeChildEnv(p StartParams) []string {
 	if p.AppDataPath != "" {
 		env = append(env, "SHINYHUB_APP_DATA="+p.AppDataPath)
 	}
-	return env
+	// The host build interpreter policy is authoritative over a per-app UV_PYTHON_*
+	// value, so it goes last (its keys are disjoint from the sandbox redirects the
+	// callers append after this). Native launches only: the Docker path builds its
+	// own env and bakes the interpreter into the image.
+	return WithBuildInterpreterPolicy(env)
 }
 
 // applySharedMounts symlinks each shared mount under p.Dir/data/shared/<slug>.

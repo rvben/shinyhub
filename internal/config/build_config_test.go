@@ -107,23 +107,3 @@ func TestBuild_EnvOverride(t *testing.T) {
 		t.Errorf("PythonInstallMirror = %q", cfg.Build.PythonInstallMirror)
 	}
 }
-
-// TestBuild_ApplyToEnv proves that a configured field overwrites the process
-// environment (config authoritative) while an unset field leaves an existing
-// service-env value untouched, so both mechanisms feed the same allow-list.
-func TestBuild_ApplyToEnv(t *testing.T) {
-	t.Setenv("UV_PYTHON_PREFERENCE", "managed") // inherited service env
-	t.Setenv("UV_PYTHON", "3.9")                // inherited, left alone by empty config field
-	t.Setenv("UV_PYTHON_INSTALL_MIRROR", "")    // unset
-
-	b := config.BuildConfig{PythonPreference: "only-system"} // only the preference is configured
-	if err := b.ApplyToEnv(); err != nil {
-		t.Fatalf("ApplyToEnv: %v", err)
-	}
-	if got := os.Getenv("UV_PYTHON_PREFERENCE"); got != "only-system" {
-		t.Errorf("configured field must overwrite env: UV_PYTHON_PREFERENCE = %q, want only-system", got)
-	}
-	if got := os.Getenv("UV_PYTHON"); got != "3.9" {
-		t.Errorf("unset config field must not touch env: UV_PYTHON = %q, want 3.9", got)
-	}
-}

@@ -23,7 +23,7 @@ func CheckUV() error {
 func uvSyncCmd(ctx context.Context, dir string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "uv", "sync")
 	cmd.Dir = dir
-	cmd.Env = SanitizedEnv()
+	cmd.Env = WithBuildInterpreterPolicy(SanitizedEnv())
 	return cmd
 }
 
@@ -31,7 +31,7 @@ func uvSyncCmd(ctx context.Context, dir string) *exec.Cmd {
 // scrubbed env, for the same reason as uvSyncCmd.
 func uvPythonInstallCmd(version string) *exec.Cmd {
 	cmd := exec.Command("uv", "python", "install", version)
-	cmd.Env = SanitizedEnv()
+	cmd.Env = WithBuildInterpreterPolicy(SanitizedEnv())
 	return cmd
 }
 
@@ -68,7 +68,7 @@ func uvInitCmd(ctx context.Context, dir string) *exec.Cmd {
 	// would otherwise use as the project name.
 	cmd := exec.CommandContext(ctx, "uv", "init", "--bare", "--name", "shinyhub-app")
 	cmd.Dir = dir
-	cmd.Env = SanitizedEnv()
+	cmd.Env = WithBuildInterpreterPolicy(SanitizedEnv())
 	return cmd
 }
 
@@ -77,7 +77,7 @@ func uvAddRequirementsCmd(ctx context.Context, dir string) *exec.Cmd {
 	// resolved deps into pyproject.toml plus a native uv.lock.
 	cmd := exec.CommandContext(ctx, "uv", "add", "--requirements", "requirements.txt")
 	cmd.Dir = dir
-	cmd.Env = SanitizedEnv()
+	cmd.Env = WithBuildInterpreterPolicy(SanitizedEnv())
 	return cmd
 }
 
@@ -85,7 +85,7 @@ func uvAddRequirementsCmd(ctx context.Context, dir string) *exec.Cmd {
 func uvAddCmd(ctx context.Context, dir string, pkgs ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "uv", append([]string{"add"}, pkgs...)...)
 	cmd.Dir = dir
-	cmd.Env = SanitizedEnv()
+	cmd.Env = WithBuildInterpreterPolicy(SanitizedEnv())
 	return cmd
 }
 

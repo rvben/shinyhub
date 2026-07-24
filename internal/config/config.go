@@ -305,13 +305,15 @@ type WorkerConfig struct {
 // you would never want app A to fetch a managed CPython from GitHub while app B
 // uses the system interpreter. So this is server-scoped only (no per-app knob).
 //
-// The fields map one-to-one onto uv's own environment variables. ApplyToEnv
-// exports each non-empty field into the process environment at serve startup;
-// the three keys are allow-listed by process.SanitizedEnv, so the values then
-// reach every native build path (uv sync, the uv init/add project-synthesis
-// step) and serve-time `uv run` uniformly - the paths that have no injectable
-// env seam. An empty BuildConfig is inert: nothing is exported and uv keeps its
-// stock defaults.
+// The fields map one-to-one onto uv's own environment variables. UVBuildEnv
+// projects the non-empty fields into KEY=value strings; serve startup hands
+// them to process.SetBuildInterpreterPolicy, which applies them as the
+// outermost env layer of every native uv invocation (uv sync, the uv init/add
+// project-synthesis step, serve-time `uv run`, and host-side hooks) - the paths
+// that have no injectable env seam - so the host policy is authoritative over
+// any per-app value. An empty BuildConfig is inert: no policy is recorded and
+// uv keeps its stock defaults. The Docker/Fargate runtimes are unaffected: they
+// bake the interpreter into the image and never see this policy.
 type BuildConfig struct {
 	// PythonPreference maps to UV_PYTHON_PREFERENCE. Accepted values mirror uv's:
 	// "only-managed", "managed" (uv's default), "system", "only-system". Empty
@@ -331,7 +333,7 @@ type BuildConfig struct {
 }
 
 // buildEnvVars pairs each BuildConfig field with the uv environment variable it
-// drives, in a fixed order so ApplyToEnv and UVBuildEnv agree.
+// drives, in a fixed order so IsActive and UVBuildEnv agree.
 func (b BuildConfig) buildEnvVars() []struct{ key, val string } {
 	return []struct{ key, val string }{
 		{"UV_PYTHON_PREFERENCE", b.PythonPreference},
@@ -360,26 +362,6 @@ func (b BuildConfig) UVBuildEnv() []string {
 		}
 	}
 	return out
-}
-
-// ApplyToEnv exports each configured (non-empty) interpreter setting into the
-// process environment so it reaches every uv invocation through
-// process.SanitizedEnv, which allow-lists these three keys. Config is
-// authoritative: a configured field overwrites any inherited service-env value,
-// while an unset field is left untouched so an operator-set service-env value
-// (also allow-listed) still applies. Called once at serve startup, before any
-// build runs; it is intentionally not called from Load so tests that parse
-// config do not mutate the global environment.
-func (b BuildConfig) ApplyToEnv() error {
-	for _, v := range b.buildEnvVars() {
-		if v.val == "" {
-			continue
-		}
-		if err := os.Setenv(v.key, v.val); err != nil {
-			return fmt.Errorf("set %s: %w", v.key, err)
-		}
-	}
-	return nil
 }
 
 // LifecycleConfig holds parsed lifecycle settings with ready-to-use durations.

@@ -496,8 +496,10 @@ func runHookExec(ctx context.Context, bundleDir string, argv []string, extraEnv 
 	// env (no SHINYHUB_* secrets), then layer the app's own env vars on top
 	// so the hook sees what the app will see at start, minus server secrets,
 	// then the sandbox's own extra vars (cache-dir redirects + the encoded
-	// spec) last so they always take effect under the sandbox.
-	cmd.Env = append(append(process.SanitizedEnv(), extraEnv...), sandboxEnv...)
+	// spec) last so they always take effect under the sandbox. A host-side hook
+	// runs against the host uv for every runtime, so the host build interpreter
+	// policy goes last, authoritative over an app-set UV_PYTHON_*.
+	cmd.Env = process.WithBuildInterpreterPolicy(append(append(process.SanitizedEnv(), extraEnv...), sandboxEnv...))
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
 	return cmd.Run()
