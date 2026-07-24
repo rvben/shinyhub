@@ -70,6 +70,57 @@ func TestAppsSet_RenderSecondsAdvisoryPrinted(t *testing.T) {
 	}
 }
 
+// TestAppsSet_RenderSecondsAdvisoryOnStderrKeepsJSONStdoutClean asserts that
+// the cap-sizing advisory goes to stderr, not stdout: in -o json mode stdout
+// must be exactly the machine-readable envelope (a single JSON document with
+// no trailing text) while the advisory line lands on stderr. This is the
+// regression check for the advisory being printed with cmd.OutOrStdout(),
+// which corrupted `apps set ... -o json` output.
+func TestAppsSet_RenderSecondsAdvisoryOnStderrKeepsJSONStdoutClean(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{
+		"app": {"slug": "demo"},
+		"render_pacing": {
+			"render_seconds": 1.3,
+			"effective_cores": 2,
+			"cores_source": "cgroup",
+			"suggested_max_sessions_per_replica": 4,
+			"current_effective_max_sessions_per_replica": 25,
+			"cadence_assumption_seconds": 5
+		}
+	}`)
+
+	stdout, stderr, err := execCLISplit(t, "apps", "set", "demo", "--render-seconds", "1.3", "-o", "json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (stdout=%q stderr=%q)", err, stdout, stderr)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+
+	if !strings.Contains(stderr, "Render pacing on (render_seconds=1.3)") {
+		t.Errorf("expected render pacing advisory on stderr, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "consider --max-sessions-per-replica 4 (current effective: 25)") {
+		t.Errorf("expected advisory to name the suggested and current caps on stderr, got %q", stderr)
+	}
+	if strings.Contains(stdout, "Render pacing on") {
+		t.Errorf("advisory must not appear on stdout, got %q", stdout)
+	}
+
+	var obj map[string]any
+	trimmed := strings.TrimSpace(stdout)
+	if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+		t.Fatalf("stdout is not a single JSON document: %q: %v", stdout, err)
+	}
+	if obj["status"] != "updated" {
+		t.Errorf("stdout status = %v, want %q", obj["status"], "updated")
+	}
+	if obj["slug"] != "demo" {
+		t.Errorf("stdout slug = %v, want %q", obj["slug"], "demo")
+	}
+}
+
 // TestAppsSet_RenderSecondsNoAdvisoryWhenCapNotLower is the negative control
 // for TestAppsSet_RenderSecondsAdvisoryPrinted: when the suggested cap is not
 // below the current effective cap, no advisory line is printed.

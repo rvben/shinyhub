@@ -1103,7 +1103,7 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	// session cap than what is currently in effect, surface it so the caller
 	// can decide whether to tighten --max-sessions-per-replica.
 	if block := patchResp.RenderPacing; block != nil && block.SuggestedMaxSessionsPerReplica < block.CurrentEffectiveMaxSessionsPerReplica {
-		fmt.Fprintf(cmd.OutOrStdout(),
+		fmt.Fprintf(cmd.ErrOrStderr(),
 			"Render pacing on (render_seconds=%g). For steady-state protection on ~%g cores, "+
 				"consider --max-sessions-per-replica %d (current effective: %d).\n",
 			block.RenderSeconds, block.EffectiveCores,
