@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -862,6 +863,54 @@ func TestBuildRCommand_HonorsBindHost(t *testing.T) {
 	}
 	if strings.Contains(full, "127.0.0.1") {
 		t.Errorf("did not expect 127.0.0.1 when bindHost is 0.0.0.0: %s", full)
+	}
+}
+
+// rLaunchFlagContract asserts the flags an R launch command must and must not
+// carry. renv publishes its project library by way of the bundle's .Rprofile,
+// which sources renv/activate.R and prepends renv/library/<platform>/R-<ver>/
+// <arch> to .libPaths(). An R process started with the init file disabled sees
+// only the system library, so every package renv restored is invisible and the
+// app dies at its first library() call. The non-interactive flags stay: a
+// launched app must never restore or save a workspace.
+func rLaunchFlagContract(t *testing.T, cmd []string) {
+	t.Helper()
+	full := strings.Join(cmd, " ")
+	for _, banned := range []string{"--vanilla", "--no-init-file"} {
+		if slices.Contains(cmd, banned) {
+			t.Errorf("R launch command carries %s, which skips .Rprofile and hides the renv project library: %s", banned, full)
+		}
+	}
+	for _, required := range []string{"--no-save", "--no-restore"} {
+		if !slices.Contains(cmd, required) {
+			t.Errorf("R launch command is missing %s: %s", required, full)
+		}
+	}
+}
+
+// TestBuildRCommand_ActivatesRenvProjectLibrary pins the launch flags for the
+// canonical (no-reload) builder.
+func TestBuildRCommand_ActivatesRenvProjectLibrary(t *testing.T) {
+	rLaunchFlagContract(t, deploy.BuildRCommand(t.TempDir(), 8080, "127.0.0.1"))
+}
+
+// TestResolveLaunch_RCommandActivatesRenvProjectLibrary pins the same contract
+// on the path the server and `shinyhub run` actually resolve through, for both
+// reload settings — the reload builder constructs its own argv, so it can drift
+// away from BuildRCommand independently.
+func TestResolveLaunch_RCommandActivatesRenvProjectLibrary(t *testing.T) {
+	for _, reload := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reload=%v", reload), func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "app.R"), []byte("# app\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := deploy.ResolveLaunch(dir, deploy.LaunchOptions{Port: 8080, Reload: reload})
+			if err != nil {
+				t.Fatalf("ResolveLaunch: %v", err)
+			}
+			rLaunchFlagContract(t, plan.Command)
+		})
 	}
 }
 
