@@ -1363,13 +1363,35 @@ func DetectAppType(bundleDir string) string {
 	return ""
 }
 
+// rLaunchFlags are the Rscript flags every R app launches with. They are
+// --vanilla minus --no-init-file: the workspace and host-environment isolation
+// --vanilla provides is kept, but the bundle's own .Rprofile is sourced.
+//
+// Sourcing it is what makes an renv app work. renv installs into a project
+// library under renv/library/<platform>/R-<ver>/<arch>, and the only thing that
+// puts that path on .libPaths() is the .Rprofile renv::init() writes, which
+// sources renv/activate.R. With the init file disabled the app starts against
+// the system library alone and dies at its first library() call on a package
+// the deploy just restored.
+//
+// A bundle that ships renv.lock without .Rprofile is unaffected: renv restores
+// into the ambient library there, and there is no .Rprofile to source.
+var rLaunchFlags = []string{"--no-save", "--no-restore", "--no-site-file", "--no-environ"}
+
 // BuildRCommand returns the command to start an R Shiny app on the given port.
 // bindHost is the address the app listens on inside its execution environment
 // (the host for native, the container for Docker bridge mode).
 func BuildRCommand(bundleDir string, port int, bindHost string) []string {
 	expr := fmt.Sprintf(
 		`shiny::runApp('.', host='%s', port=%d, launch.browser=FALSE)`, bindHost, port)
-	return []string{"Rscript", "--vanilla", "-e", expr}
+	return rscriptCommand(expr)
+}
+
+// rscriptCommand assembles an Rscript invocation for expr under rLaunchFlags,
+// so every R launch path shares one flag set.
+func rscriptCommand(expr string) []string {
+	argv := append([]string{"Rscript"}, rLaunchFlags...)
+	return append(argv, "-e", expr)
 }
 
 // useProjectMode reports whether to launch in uv project mode. An author-shipped
