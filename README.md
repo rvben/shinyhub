@@ -71,7 +71,8 @@ Beyond a quick trial, load it from a file or secrets manager (or set `auth.secre
 in `shinyhub.yaml`). The database, bundles, and per-app data land under `./data/`
 by default. Open `http://localhost:8080` and log in as `admin`.
 
-Then deploy an app (an `app.py` + `requirements.txt`, or an R `app.R`) from
+Then deploy an app (an `app.py` + `requirements.txt`, or an `app.R` +
+`renv.lock` - see [Deploy an R Shiny app](docs/recipes/r-shiny.md)) from
 another terminal:
 
 ```bash
