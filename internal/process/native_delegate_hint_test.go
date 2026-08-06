@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -25,8 +26,16 @@ func TestWithDelegateHint_NamesDelegateOnPermissionError(t *testing.T) {
 
 		got := withDelegateHint(in)
 		msg := got.Error()
-		if !strings.Contains(msg, "Delegate=cpu memory") {
+		// The hint is copy-pasted verbatim into a unit file, so it must name
+		// every controller: one omitted here becomes a limit that silently
+		// stops being enforced on the operator's host.
+		if !strings.Contains(msg, "Delegate="+RequiredDelegatedControllers) {
 			t.Errorf("errno %v: message does not name the fix; got %q", errno, msg)
+		}
+		for _, controller := range strings.Fields(RequiredDelegatedControllers) {
+			if !strings.Contains(msg, controller) {
+				t.Errorf("errno %v: remediation omits the %s controller; got %q", errno, controller, msg)
+			}
 		}
 		if !errors.Is(got, errno) {
 			t.Errorf("errno %v: wrapped error no longer unwraps to the cause", errno)
@@ -50,7 +59,23 @@ func TestWithDelegateHint_PassesThroughOtherErrors(t *testing.T) {
 	if got != in {
 		t.Fatalf("non-permission error was altered: got %q, want it returned unchanged", got.Error())
 	}
-	if strings.Contains(got.Error(), "Delegate=cpu memory") {
+	if strings.Contains(got.Error(), "Delegate="+RequiredDelegatedControllers) {
 		t.Errorf("non-permission error gained a spurious permission remediation: %q", got.Error())
+	}
+}
+
+// TestShippedUnitDelegatesEveryController pins the shipped systemd unit to the
+// controller set the code actually manages. The two drift silently: an operator
+// who installs a unit delegating only cpu and memory still gets both visible
+// limits enforced, so the missing pids delegation shows up only as a log line
+// nobody reads and every replica runs without a fork-bomb cap.
+func TestShippedUnitDelegatesEveryController(t *testing.T) {
+	unit, err := os.ReadFile(filepath.Join("..", "..", "deploy", "systemd", "shinyhub.service"))
+	if err != nil {
+		t.Fatalf("read shipped unit: %v", err)
+	}
+	want := "Delegate=" + RequiredDelegatedControllers
+	if !strings.Contains(string(unit), want) {
+		t.Fatalf("shipped unit does not contain %q", want)
 	}
 }

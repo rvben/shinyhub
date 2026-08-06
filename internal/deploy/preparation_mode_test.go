@@ -305,29 +305,59 @@ func TestPrepareSkip_RebuildsWhenInterpreterIsDangling(t *testing.T) {
 // TestPrepareSkip_RebuildsWhenRenvLibraryIsMissing covers the R half: a bundle
 // with a lockfile needs its restored library, and a bundle without one manages
 // its own packages and must not be rebuilt pointlessly.
+//
+// Where the restored library lives depends on who owns it, so each layout has
+// to be probed in its own place. Looking in the wrong one is silent and total:
+// a bundle judged not-ready is rebuilt on every single worker spawn.
 func TestPrepareSkip_RebuildsWhenRenvLibraryIsMissing(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		lockfile  bool
-		library   bool
+		files     map[string]string
+		dirs      []string
 		wantBuild bool
 	}{
-		{"lockfile without restored library rebuilds", true, false, true},
-		{"lockfile with restored library skips", true, true, false},
-		{"no lockfile needs nothing", false, false, false},
+		{
+			name:      "bare lockfile without a restored library rebuilds",
+			files:     map[string]string{"app.R": "", "renv.lock": "{}"},
+			wantBuild: true,
+		},
+		{
+			name:      "bare lockfile with the interposed library skips",
+			files:     map[string]string{"app.R": "", "renv.lock": "{}"},
+			dirs:      []string{process.RProjectLibraryDir},
+			wantBuild: false,
+		},
+		{
+			// renv's own layout: nothing of ShinyHub's is involved, and the
+			// interposed directory must not satisfy it.
+			name: "renv project without a restored library rebuilds",
+			files: map[string]string{
+				"app.R": "", "renv.lock": "{}",
+				".Rprofile": renvActivateProfile, "renv/activate.R": "# renv",
+			},
+			dirs:      []string{process.RProjectLibraryDir},
+			wantBuild: true,
+		},
+		{
+			name: "renv project with its restored library skips",
+			files: map[string]string{
+				"app.R": "", "renv.lock": "{}",
+				".Rprofile": renvActivateProfile, "renv/activate.R": "# renv",
+			},
+			dirs:      []string{filepath.Join("renv", "library")},
+			wantBuild: false,
+		},
+		{
+			name:      "no lockfile needs nothing",
+			files:     map[string]string{"app.R": ""},
+			wantBuild: false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "app.R"), []byte(""), 0644); err != nil {
-				t.Fatal(err)
-			}
-			if tc.lockfile {
-				if err := os.WriteFile(filepath.Join(dir, "renv.lock"), []byte("{}"), 0644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if tc.library {
-				if err := os.MkdirAll(filepath.Join(dir, "renv", "library"), 0755); err != nil {
+			writeFiles(t, dir, tc.files)
+			for _, d := range tc.dirs {
+				if err := os.MkdirAll(filepath.Join(dir, d), 0755); err != nil {
 					t.Fatal(err)
 				}
 			}

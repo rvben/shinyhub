@@ -163,6 +163,11 @@ func buildConfinement(absDir string) (sandbox.Spec, []string) {
 		"RENV_PATHS_ROOT=" + filepath.Join(absDir, ".renv-cache"),
 		"UV_PYTHON_INSTALL_DIR=" + pyDir,
 	}
+	// The renv policy (see process.RenvPolicyEnv) applies to the build for the
+	// same reason it applies to the launch: renv reads it while sourcing the
+	// project profile, and the sandbox it would otherwise create is a 0555
+	// tree inside the version dir that later blocks the app's own deletion.
+	env = append(env, process.RenvPolicyEnv()...)
 	return spec, env
 }
 
@@ -286,8 +291,11 @@ func sandboxedRSync(ctx context.Context, dir string, appEnv []string) error {
 	if _, err := os.Stat(lockfile); errors.Is(err, fs.ErrNotExist) {
 		return nil // no renv.lock — nothing to restore
 	}
-	argv := []string{"Rscript", "-e",
-		`options(renv.config.sandbox.enabled=FALSE); renv::restore(prompt=FALSE)`}
+	lib, err := process.EnsureInterposedRLibrary(dir)
+	if err != nil {
+		return err
+	}
+	argv := process.RenvRestoreArgv(lib)
 	out, err := runSandboxedBuildStep(ctx, dir, argv, appEnv)
 	if err != nil {
 		switch ctx.Err() {
@@ -823,6 +831,12 @@ func hostEnvironmentPresent(bundleDir, appType string) bool {
 		if _, err := os.Stat(filepath.Join(bundleDir, "renv.lock")); err != nil {
 			return true
 		}
+		// Where the restored packages live depends on who owns the project
+		// library: renv's own activation puts it under renv/library, while a
+		// bundle with a bare lockfile gets the one ShinyHub interposed.
+		if lib := process.InterposedRLibrary(bundleDir); lib != "" {
+			return isDir(lib)
+		}
 		return isDir("renv", "library")
 	}
 	return true
@@ -1211,7 +1225,11 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	}
 	cmd := plan.Command
 
-	env := append(append([]string{}, p.Env...), fmt.Sprintf("PORT=%d", port))
+	// plan.Env carries the launch-coupled environment (PORT, plus anything the
+	// bundle requires, e.g. the renv policy when it can activate renv). It goes
+	// after the deploy-supplied env so the plan wins on duplicate keys, matching the
+	// elastic spawner and `shinyhub run`, which consume plan.Env directly.
+	env := append(append([]string{}, p.Env...), plan.Env...)
 
 	info, err := p.Manager.Start(process.StartParams{
 		Slug:            p.Slug,
@@ -1374,8 +1392,9 @@ func DetectAppType(bundleDir string) string {
 // the system library alone and dies at its first library() call on a package
 // the deploy just restored.
 //
-// A bundle that ships renv.lock without .Rprofile is unaffected: renv restores
-// into the ambient library there, and there is no .Rprofile to source.
+// A bundle that ships renv.lock without those files gets its project library
+// from ShinyHub instead (process.InterposedRLibrary), put on the search path by
+// rscriptCommand.
 var rLaunchFlags = []string{"--no-save", "--no-restore", "--no-site-file", "--no-environ"}
 
 // BuildRCommand returns the command to start an R Shiny app on the given port.
@@ -1384,12 +1403,17 @@ var rLaunchFlags = []string{"--no-save", "--no-restore", "--no-site-file", "--no
 func BuildRCommand(bundleDir string, port int, bindHost string) []string {
 	expr := fmt.Sprintf(
 		`shiny::runApp('.', host='%s', port=%d, launch.browser=FALSE)`, bindHost, port)
-	return rscriptCommand(expr)
+	return rscriptCommand(bundleDir, expr)
 }
 
 // rscriptCommand assembles an Rscript invocation for expr under rLaunchFlags,
-// so every R launch path shares one flag set.
-func rscriptCommand(expr string) []string {
+// so every R launch path shares one flag set. When ShinyHub supplied the
+// bundle's project library at build time, the same library is put first on the
+// search path here - the restore is worthless if the launch cannot see it.
+func rscriptCommand(bundleDir, expr string) []string {
+	if lib := process.InterposedRLibrary(bundleDir); lib != "" {
+		expr = process.RLibPathsExpr(lib) + " " + expr
+	}
 	argv := append([]string{"Rscript"}, rLaunchFlags...)
 	return append(argv, "-e", expr)
 }

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/fsx"
 )
 
 // ErrSlugInUse is returned by RequireFreeSlug when a leftover directory exists
@@ -37,10 +38,14 @@ func RequireFreeSlug(cfg *config.Config, slug string) error {
 // OnAppDelete is the post-DB-delete filesystem cleanup. Failures are joined
 // and returned so the caller can attach them to the audit detail; they do
 // not invalidate the delete itself (the DB row is already gone).
+//
+// Removal goes through fsx.RemoveAll because a build leaves directories the
+// standard remove cannot descend into (renv's sandbox is mode 0555), and a
+// delete that cannot finish leaves the slug occupied forever.
 func OnAppDelete(cfg *config.Config, slug string) error {
 	var errs []error
 	for _, p := range slugPaths(cfg, slug) {
-		if err := os.RemoveAll(p); err != nil {
+		if err := fsx.RemoveAll(p); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
 		}
 	}

@@ -3,6 +3,8 @@ package deploy
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/rvben/shinyhub/internal/fsx"
 )
 
 // PruneOldVersions removes extracted version directories and bundle ZIPs beyond
@@ -65,7 +67,11 @@ func pruneDir(dir string, keep int, skipPath string, isFiles bool) error {
 				return err
 			}
 		} else {
-			if err := os.RemoveAll(c.path); err != nil {
+			// A version dir is a build tree, so it can contain directories the
+			// standard remove cannot descend into (renv's sandbox is mode
+			// 0555). Failing here would silently stop retention from ever
+			// reclaiming space for that app.
+			if err := fsx.RemoveAll(c.path); err != nil {
 				return err
 			}
 		}

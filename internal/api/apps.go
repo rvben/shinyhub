@@ -23,6 +23,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/deployfail"
+	"github.com/rvben/shinyhub/internal/fsx"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
@@ -1258,13 +1259,17 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// keepFiles is flipped to true only once deploy.Run succeeds and the new
 	// pool is actually serving the bundle. Any earlier failure — write,
 	// extract, quota, deploy — leaves the apps tree as we found it.
+	// Removal goes through fsx.RemoveAll: a failed deploy can leave build
+	// output the standard remove cannot descend into (renv's sandbox is mode
+	// 0555), which would leak the whole version dir against the app's quota.
 	keepFiles := false
-	defer func() {
+	dropUncommitted := func() {
 		if !keepFiles {
-			_ = os.RemoveAll(bundleDir)
+			_ = fsx.RemoveAll(bundleDir)
 			_ = os.Remove(bundleZip)
 		}
-	}()
+	}
+	defer dropUncommitted()
 
 	if err := os.MkdirAll(filepath.Dir(bundleZip), 0o750); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -1306,12 +1311,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// pre-lock failures; without this one a quota-rejected deploy's files
 	// would still be on disk, counted by DirSize against a concurrent
 	// same-slug deploy that takes the lock the instant we release it.
-	defer func() {
-		if !keepFiles {
-			_ = os.RemoveAll(bundleDir)
-			_ = os.Remove(bundleZip)
-		}
-	}()
+	defer dropUncommitted()
 
 	// Enforce per-app disk quota INSIDE the lock: the new extracted version
 	// has already been written, so DirSize now reflects the post-deploy

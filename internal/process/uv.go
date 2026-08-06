@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/rvben/shinyhub/internal/fsx"
 )
 
 // CheckUV verifies that the uv binary is available in PATH.
@@ -144,7 +146,7 @@ func EnsureProject(ctx context.Context, dir string) error {
 	if out, err := uvAddRequirementsCmd(ctx, dir).CombinedOutput(); err != nil {
 		_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
 		_ = os.Remove(filepath.Join(dir, "uv.lock"))
-		_ = os.RemoveAll(filepath.Join(dir, ".venv"))
+		_ = fsx.RemoveAll(filepath.Join(dir, ".venv"))
 		return fmt.Errorf("uv add requirements: %w\n%s", err, out)
 	}
 	// shiny's UI imports shinychat, which imports pydantic unconditionally while
@@ -154,7 +156,7 @@ func EnsureProject(ctx context.Context, dir string) error {
 		if out, err := uvAddCmd(ctx, dir, "pydantic").CombinedOutput(); err != nil {
 			_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
 			_ = os.Remove(filepath.Join(dir, "uv.lock"))
-			_ = os.RemoveAll(filepath.Join(dir, ".venv"))
+			_ = fsx.RemoveAll(filepath.Join(dir, ".venv"))
 			return fmt.Errorf("uv add pydantic (shiny chat dependency): %w\n%s", err, out)
 		}
 	}

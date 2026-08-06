@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 // DepPrepStep is one host-side preparation action (EnsureProject, uv sync,
@@ -64,6 +66,13 @@ func ResolveLaunch(bundleDir string, opts LaunchOptions) (*LaunchPlan, error) {
 		ReadyPath: "/",
 		Timeout:   defaultHealthTimeout,
 	}
+	// The renv policy is decided by the bundle, before the command is, because
+	// renv activates at R startup no matter which command started R - including
+	// a bundle's own [app] command, which returns below without ever reaching
+	// type detection. renv reads its configuration while the project profile is
+	// sourced, so it has to be environment: an options() call in the launch
+	// expression runs too late to affect activation.
+	plan.Env = append(plan.Env, process.RenvPolicyEnvFor(bundleDir)...)
 	if m != nil && m.App.StartupTimeoutSeconds != nil {
 		plan.Timeout = time.Duration(*m.App.StartupTimeoutSeconds) * time.Second
 	}
@@ -147,5 +156,5 @@ func buildRCommandReload(bundleDir string, port int, bindHost string, reload boo
 	expr := fmt.Sprintf(
 		"options(shiny.autoreload=TRUE); shiny::runApp('.', host='%s', port=%d, launch.browser=FALSE)",
 		bindHost, port)
-	return rscriptCommand(expr)
+	return rscriptCommand(bundleDir, expr)
 }
