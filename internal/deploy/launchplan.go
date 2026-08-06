@@ -66,6 +66,13 @@ func ResolveLaunch(bundleDir string, opts LaunchOptions) (*LaunchPlan, error) {
 		ReadyPath: "/",
 		Timeout:   defaultHealthTimeout,
 	}
+	// The renv policy is decided by the bundle, before the command is, because
+	// renv activates at R startup no matter which command started R - including
+	// a bundle's own [app] command, which returns below without ever reaching
+	// type detection. renv reads its configuration while the project profile is
+	// sourced, so it has to be environment: an options() call in the launch
+	// expression runs too late to affect activation.
+	plan.Env = append(plan.Env, process.RenvPolicyEnvFor(bundleDir)...)
 	if m != nil && m.App.StartupTimeoutSeconds != nil {
 		plan.Timeout = time.Duration(*m.App.StartupTimeoutSeconds) * time.Second
 	}
@@ -123,10 +130,6 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 				return rSyncFn(ctx, dir, opts.AppEnv)
 			}}}
 		}
-		// renv reads its configuration while R sources the project profile, so
-		// the policy has to be in the launch environment; an options() call in
-		// the -e expression runs too late to affect activation.
-		plan.Env = append(plan.Env, process.RenvPolicyEnv()...)
 		plan.Command = buildRCommandReload(bundleDir, opts.Port, bindHost, opts.Reload)
 	default:
 		return nil, fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", bundleDir)

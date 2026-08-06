@@ -1226,8 +1226,8 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	cmd := plan.Command
 
 	// plan.Env carries the launch-coupled environment (PORT, plus anything the
-	// resolved app type requires, e.g. the renv policy for R). It goes after
-	// the deploy-supplied env so the plan wins on duplicate keys, matching the
+	// bundle requires, e.g. the renv policy when it can activate renv). It goes
+	// after the deploy-supplied env so the plan wins on duplicate keys, matching the
 	// elastic spawner and `shinyhub run`, which consume plan.Env directly.
 	env := append(append([]string{}, p.Env...), plan.Env...)
 

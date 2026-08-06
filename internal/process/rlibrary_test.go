@@ -78,6 +78,18 @@ func TestInterposedRLibrary(t *testing.T) {
 			},
 			want: process.RProjectLibraryDir,
 		},
+		{
+			// A hand-written profile can call renv::activate() against a
+			// host-installed renv, with no activate.R in the bundle at all.
+			// renv still selects the project library, so interposing would
+			// restore into one library and launch against another.
+			name: "a profile calling renv::activate() owns its own library",
+			files: map[string]string{
+				"app.R": "", "renv.lock": "{}",
+				".Rprofile": "renv::activate()\n",
+			},
+			want: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -42,7 +42,8 @@ the app's working directory has in the runtime that started it.
 **Full renv project** (what `renv::init()` produces: `.Rprofile` sourcing
 `renv/activate.R`, plus `renv/`). renv's own activation selects the project
 library under `renv/library/…`, and ShinyHub does not interpose at all - the
-bundle behaves exactly as it does when you run it locally.
+bundle behaves exactly as it does when you run it locally. A hand-written
+`.Rprofile` calling `renv::activate()` counts as the same layout.
 
 Either way, generate the lockfile from a working local project:
 
@@ -54,6 +55,14 @@ renv::snapshot()  # afterwards: refresh the lockfile from the project library
 If you want the simplest possible bundle, keep `renv.lock` and drop the rest
 before deploying. `.Rprofile` and `renv/` are also safe to ship; they are what
 `renv::init()` wrote, and ShinyHub honours them.
+
+## Bundles with their own launch command
+
+A bundle that declares `[app] command` in `shinyhub.toml` (a plumber API, a
+custom `Rscript` entrypoint) skips detection entirely, and with it the
+deploy-time `renv::restore()` - the command owns its environment, so it also
+owns getting its packages installed. The renv sandbox is still disabled for it,
+because that is about being able to delete the app, not about how it launches.
 
 ## The renv sandbox is disabled
 

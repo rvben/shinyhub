@@ -142,6 +142,50 @@ func TestResolveLaunch_R_CarriesTheRenvPolicy(t *testing.T) {
 	}
 }
 
+// TestResolveLaunch_ManifestCommandR_CarriesTheRenvPolicy covers the path that
+// never reaches type detection. A bundle declaring its own [app] command (a
+// plumber API, a custom Rscript entrypoint) returns from ResolveLaunch before
+// the R branch, but renv still activates at R startup and still builds the
+// read-only sandbox that made the app undeletable - so the policy has to be
+// decided by the bundle, not by the resolved app type.
+func TestResolveLaunch_ManifestCommandR_CarriesTheRenvPolicy(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"plumber.R":     "#* @get /\nfunction() 'ok'\n",
+		"renv.lock":     `{"R":{"Version":"4.6.1"},"Packages":{}}`,
+		"shinyhub.toml": "[app]\ncommand = [\"Rscript\", \"api.R\", \"{port}\"]\n",
+	})
+	plan, err := deploy.ResolveLaunch(dir, deploy.LaunchOptions{Port: 9304, BindHost: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("ResolveLaunch: %v", err)
+	}
+	if joined := joinCmd(plan.Command); !strings.Contains(joined, "api.R") {
+		t.Fatalf("manifest command was not used: %s", joined)
+	}
+	for _, want := range process.RenvPolicyEnv() {
+		if !containsString(plan.Env, want) {
+			t.Fatalf("plan.Env = %q, want %q", plan.Env, want)
+		}
+	}
+}
+
+// TestResolveLaunch_RWithoutRenv_HasNoPolicy keeps the policy off a bundle that
+// cannot activate renv at all: with no lockfile and no activation script there
+// is no sandbox to suppress.
+func TestResolveLaunch_RWithoutRenv_HasNoPolicy(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{"app.R": "shiny::shinyApp(ui, server)\n"})
+	plan, err := deploy.ResolveLaunch(dir, deploy.LaunchOptions{Port: 9305, BindHost: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("ResolveLaunch: %v", err)
+	}
+	for _, kv := range plan.Env {
+		if strings.HasPrefix(kv, "RENV_") {
+			t.Fatalf("plan carries an renv setting for a bundle with no renv: %s", kv)
+		}
+	}
+}
+
 // TestResolveLaunch_Python_HasNoRenvPolicy keeps the policy scoped to the app
 // type that needs it.
 func TestResolveLaunch_Python_HasNoRenvPolicy(t *testing.T) {

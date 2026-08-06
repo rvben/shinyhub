@@ -51,6 +51,32 @@ func RenvPolicyEnv() []string {
 	return []string{"RENV_CONFIG_SANDBOX_ENABLED=FALSE"}
 }
 
+// RenvPolicyEnvFor returns RenvPolicyEnv for a bundle that can activate renv,
+// and nil for one that cannot.
+//
+// It is keyed on the bundle rather than on the resolved app type because the
+// sandbox is created by renv at R startup, whoever started R. A bundle that
+// declares its own [app] command - a plumber API, a custom Rscript entrypoint -
+// never goes through app.R detection, but still activates renv and still builds
+// the mode 0555 tree that made its app undeletable.
+func RenvPolicyEnvFor(bundleDir string) []string {
+	if !renvPresent(bundleDir) {
+		return nil
+	}
+	return RenvPolicyEnv()
+}
+
+// renvPresent reports whether anything in the bundle could bring renv up: a
+// lockfile to restore from, or renv's own activation script.
+func renvPresent(bundleDir string) bool {
+	for _, rel := range [][]string{{"renv.lock"}, {"renv", "activate.R"}} {
+		if _, err := os.Stat(filepath.Join(bundleDir, filepath.Join(rel...))); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // InterposedRLibrary returns RProjectLibraryDir when bundleDir needs ShinyHub
 // to supply the library renv restores into, and "" when it does not - either
 // because there is no lockfile to restore, or because the bundle activates
@@ -82,28 +108,37 @@ func EnsureInterposedRLibrary(bundleDir string) (string, error) {
 	return lib, nil
 }
 
-// renvActivates reports whether the bundle activates renv at R startup, which
-// is true only when renv/activate.R exists AND the bundle's .Rprofile sources
-// it. Either file alone does nothing: an activate.R that no profile sources is
-// never run, and a profile written for another purpose does not put renv's
-// project library on .libPaths().
+// renvActivates reports whether the bundle brings renv's own project library up
+// at R startup, in which case interposing would shadow it.
+//
+// Activation is a property of the .Rprofile, the only file R sources before the
+// app runs, and it has two spellings. renv::init() writes a source() of
+// renv/activate.R, which does nothing if that script is absent, so both parts
+// are required. A hand-written profile can instead call renv::activate()
+// against a host-installed renv, which needs no script in the bundle. An
+// activate.R that no profile sources is never run either way.
 func renvActivates(bundleDir string) bool {
-	if _, err := os.Stat(filepath.Join(bundleDir, "renv", "activate.R")); err != nil {
-		return false
-	}
 	f, err := os.Open(filepath.Join(bundleDir, ".Rprofile"))
 	if err != nil {
 		return false
 	}
 	defer f.Close()
 	// The profile is deployer-controlled, so the read is bounded. renv writes a
-	// single source() line; a profile that mentions activate.R past 64 KiB is
+	// single source() line; a profile that mentions activation past 64 KiB is
 	// not one renv wrote.
 	head, err := io.ReadAll(io.LimitReader(f, 64<<10))
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(head), "renv/activate.R")
+	profile := string(head)
+	if strings.Contains(profile, "renv::activate") {
+		return true
+	}
+	if !strings.Contains(profile, "renv/activate.R") {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(bundleDir, "renv", "activate.R"))
+	return err == nil
 }
 
 // RLibPathsExpr is the R expression that puts lib first on the library search
