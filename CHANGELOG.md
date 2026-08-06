@@ -4,89 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+## [0.10.16](https://github.com/rvben/shinyhub/compare/v0.10.15...v0.10.16) - 2026-08-06
+
+### Added
+
+- **deploy**: manifest render_seconds with apply, reporting, and failed-deploy revert ([506c8f5](https://github.com/rvben/shinyhub/commit/506c8f50ab5dae25c527201c7f9d4cc2c627b5c4))
+- **build**: first-class interpreter provisioning config + interpreter_unavailable diagnostic ([5027954](https://github.com/rvben/shinyhub/commit/50279540e5047db57d02e6d10dbf010b43dff943))
+- **cli**: apps set --render-seconds with a cap-sizing advisory ([a2ff47a](https://github.com/rvben/shinyhub/commit/a2ff47ab5cf2ec9354a3daa147dcf77d5e33c535))
+- **proxy**: poolsync reconciles render pacing from the joined row ([3596f26](https://github.com/rvben/shinyhub/commit/3596f26a3881e0d78c775e6a8b69e4d07977ab91))
+- apply render pacing via a startup factory and ApplyRenderPacing ([789e5da](https://github.com/rvben/shinyhub/commit/789e5daddbddd404563a822b4fe0a4ec57b040ff))
+- **api**: set render_seconds on PATCH, apply live, return a render_pacing block ([7dd9d4a](https://github.com/rvben/shinyhub/commit/7dd9d4a67f305eaf1643341ac37b5c977e57ebab))
+- **db**: carry render_seconds on the routable-replica JOIN ([ac47d5a](https://github.com/rvben/shinyhub/commit/ac47d5a54e7dd8a224cff5db7916e865f76d8ee1))
+- **proxy**: ApplyRenderPacing installs render limiters live, rebuild-on-change ([2ff41b3](https://github.com/rvben/shinyhub/commit/2ff41b37a849e029c5395108710bc64320bba584))
+- **admission**: conservative session-cap suggestion for render pacing ([17b0d0d](https://github.com/rvben/shinyhub/commit/17b0d0dc9f71d44ee771ea6287b7cce8eb95e43e))
+- **proxy**: charge render admission at the WebSocket forward on both paths ([6392703](https://github.com/rvben/shinyhub/commit/6392703a6c6c21704a1c59c3e092347931f9d010))
+- **config**: render-admission park TTL and budget knobs ([be4f145](https://github.com/rvben/shinyhub/commit/be4f1458b30abcf22d6059e8c21e3997f1ae8b00))
+- **proxy**: render-admission charge point with parking and watermark shed ([78ccad8](https://github.com/rvben/shinyhub/commit/78ccad81ef35c0f7135939b1bcfb7a7d79e430aa))
+- **proxy**: bounded per-app and global park budget ([f0ccf4e](https://github.com/rvben/shinyhub/commit/f0ccf4ec8103566a7fde5ff183b94a161c89efe5))
+- **proxy**: access-mode-keyed principal for render admission ([e5f0ef5](https://github.com/rvben/shinyhub/commit/e5f0ef5f29d62d284ef5075860726912219a739f))
+- wire render-aware admission at startup, sized from render_seconds ([87c33a9](https://github.com/rvben/shinyhub/commit/87c33a9831a57ba0f7076e88dc90fba44467939b))
+- **proxy**: app-limiter registry and render-admission DI setters, gated off ([496cb89](https://github.com/rvben/shinyhub/commit/496cb893d1daef0149c9cb8950027282676b1cbb))
+- **proxy**: render-paced and cpu-saturation reject reasons plus the capacity wait page ([d277537](https://github.com/rvben/shinyhub/commit/d27753706647a9e0b22ea50390c53e6481434d21))
+- **config**: render-aware admission server knobs with defaulting accessors ([e815685](https://github.com/rvben/shinyhub/commit/e81568559653474e561a08c87dd9aa3c0dbe315b))
+- **db**: read App.RenderSeconds and add a setter ([b820c1b](https://github.com/rvben/shinyhub/commit/b820c1ba54920e1ea43d7585be97ddf9b47b984c))
+- **db**: add apps.render_seconds column (migration 048) ([ee20066](https://github.com/rvben/shinyhub/commit/ee2006681178b620e176f798ee716f5ea38a604b))
+
+### Fixed
+
+- **deploy**: launch R apps with .Rprofile so the renv project library is visible ([63689c0](https://github.com/rvben/shinyhub/commit/63689c029bd80999b6fdf01e20addbb02f67659a))
+- **build**: make interpreter policy host-authoritative and reload-safe ([07c9dc3](https://github.com/rvben/shinyhub/commit/07c9dc3340eed6feebafd4cc9e06e7a8915d6479))
+- **cli**: print the render-pacing advisory to stderr so -o json stays parseable ([5b59889](https://github.com/rvben/shinyhub/commit/5b59889c030613016b4eb6147e64d6e520c46e13))
+- **loadtest**: chunk the rig binary at 450 KB to dodge a husker cp size limit ([7a63cd4](https://github.com/rvben/shinyhub/commit/7a63cd42eb545082d3df776c326fac3f3097fa7a))
+- **proxy**: park render admission on shared capacity without draining the principal ([5c2a8d4](https://github.com/rvben/shinyhub/commit/5c2a8d494721599cc2ef401935b25e1f2ad99c09))
 
 ## [0.10.15](https://github.com/rvben/shinyhub/compare/v0.10.14...v0.10.15) - 2026-07-23
 
