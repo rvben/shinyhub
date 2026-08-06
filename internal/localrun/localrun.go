@@ -153,7 +153,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 
 	// Step 5: Assemble the child env. Precedence (lowest to highest):
 	//   SanitizedEnv() base, then o.Env (--env/.env) with reserved keys
-	//   stripped, then plan.Env (PORT), then SHINYHUB_APP_DATA.
+	//   stripped, then plan.Env (PORT, the renv policy), then SHINYHUB_APP_DATA.
 	//   Platform vars always win over user-supplied env.
 	childEnv := append(process.SanitizedEnv(), userEnv...)
 	childEnv = append(childEnv, plan.Env...)

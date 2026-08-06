@@ -129,7 +129,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		Dir:             dep.BundleDir,
 		Command:         plan.Command,
 		Port:            port,
-		Env:             plan.Env, // ["PORT=<port>"] - per-app env added by Manager's envResolver
+		Env:             plan.Env, // launch-coupled only (PORT, the renv policy) - per-app env added by Manager's envResolver
 		MemoryLimitMB:   memMB,
 		CPUQuotaPercent: cpuPct,
 		AppVersion:      dep.Version,
