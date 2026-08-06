@@ -231,6 +231,23 @@ func TestEnsureDelegatedBase_Integration(t *testing.T) {
 	if _, err := appCgroupCurrentMemory(dir); err != nil {
 		t.Fatalf("appCgroupCurrentMemory: %v", err)
 	}
+	// The fork-bomb cap must actually land on that child. This is the production
+	// symptom in its original form: the write failed with "no such file or
+	// directory" because pids.max never existed, on a host whose unit delegated
+	// pids. Reading the value back distinguishes a real cap from a write that
+	// went somewhere harmless.
+	if delegation.Pids {
+		if err := setCgroupPidsMax(dir, defaultNativePidsMax); err != nil {
+			t.Errorf("setCgroupPidsMax on %s: %v", dir, err)
+		} else {
+			b, err := os.ReadFile(filepath.Join(dir, "pids.max"))
+			if err != nil {
+				t.Errorf("read pids.max: %v", err)
+			} else if got := strings.TrimSpace(string(b)); got != cgroupPidsMaxValue(defaultNativePidsMax) {
+				t.Errorf("pids.max = %q, want %q", got, cgroupPidsMaxValue(defaultNativePidsMax))
+			}
+		}
+	}
 	// setupAppCgroup moved this process into the app cgroup; move it back to
 	// _supervisor so the now-empty app cgroup can be torn down.
 	if err := writeCgroupProc(filepath.Join(base, "_supervisor"), os.Getpid()); err != nil {
