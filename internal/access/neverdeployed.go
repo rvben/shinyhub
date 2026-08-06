@@ -177,7 +177,7 @@ func renderNeverDeployedPage(app *db.App, user *auth.ContextUser, manager bool, 
         </button>
       </div>
     </div>
-    <p>R Shiny works too — use <code>app.R</code> at the root and list dependencies in <code>renv.lock</code> or <code>DESCRIPTION</code>.</p>
+    <p>R Shiny works too - use <code>app.R</code> at the root and list dependencies in <code>renv.lock</code>.</p>
   </div>
 </details>
 <script>
