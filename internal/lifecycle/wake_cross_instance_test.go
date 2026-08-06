@@ -113,30 +113,10 @@ func TestReconciler_DrivesWakingAppsInClusteredMode(t *testing.T) {
 	}
 }
 
-// TestReconciler_SkipsWakingAppsInSingleNodeMode verifies that when Clustered=false
-// (single-node), runOnce does NOT run the waking-apps reconciler. The inline
-// trigger drive handles single-node wakes; an orphaned 'waking' row (which
-// cannot occur in normal single-node operation) would be left alone.
-func TestReconciler_SkipsWakingAppsInSingleNodeMode(t *testing.T) {
-	st := newFakeStore(
-		// Simulate a hypothetical 'waking' app on a single-node instance.
-		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "waking", Replicas: 1}},
-		[]*db.Deployment{{ID: 10, BundleDir: "/bundles/v1"}},
-	)
-	var deployCount int32
-	w := newTestWatcher(Config{Clustered: false, RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
-			atomic.AddInt32(&deployCount, 1)
-			return &deploy.Result{Index: idx, PID: 11, Port: 20011}, nil
-		})
-
-	w.runOnce()
-
-	// No deploy must fire from the reconciler on single-node.
-	if n := atomic.LoadInt32(&deployCount); n != 0 {
-		t.Errorf("single-node: reconciler must not drive waking apps, got %d deploy calls", n)
-	}
-}
+// Single-node runOnce drives waking apps as well, the safety net for a wake
+// interrupted by a zero-downtime handoff. That case is asserted by
+// TestWakingReconcile_SingleNodeDrivesStuckWake, which waits for the drive to
+// finish instead of sampling the deploy counter while it is still in flight.
 
 // TestDriveWakingApp_DeploymentIDSet verifies that a woken replica's UpsertReplica
 // call carries the deployment ID from the latest deployment row.
