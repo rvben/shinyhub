@@ -287,7 +287,7 @@ func withDelegateHint(err error) error {
 // both features degrade gracefully for the process lifetime.
 func (r *NativeRuntime) ensureCgroupBase() {
 	r.cgroupOnce.Do(func() {
-		base, cpuAvailable, err := ensureDelegatedBase()
+		base, delegation, err := ensureDelegatedBase()
 		if err != nil {
 			slog.Warn("native: cgroup base unavailable; warm-wake and resource limits disabled", "err", withDelegateHint(err))
 			return
@@ -298,9 +298,13 @@ func (r *NativeRuntime) ensureCgroupBase() {
 		// Memory is required for the base to come up, so it is enforced on success;
 		// cpu is enforced only when its controller is also delegated (Delegate=cpu).
 		r.limitsMemoryEnforced = true
-		r.limitsCPUEnforced = cpuAvailable
+		r.limitsCPUEnforced = delegation.CPU
 		r.mu.Unlock()
-		slog.Info("native: cgroup base ready", "cgroup_base", base, "memory_enforced", true, "cpu_enforced", cpuAvailable)
+		// pids_cap is logged alongside the limits an operator configures because it
+		// is the one guard nothing else reports: an app never asks for it, so a
+		// host where it does not bind looks identical to one where it does.
+		slog.Info("native: cgroup base ready", "cgroup_base", base,
+			"memory_enforced", true, "cpu_enforced", delegation.CPU, "pids_cap_enforced", delegation.Pids)
 	})
 }
 
@@ -340,7 +344,7 @@ func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 	// Fork-bomb guard: cap processes/threads so one app cannot exhaust the host
 	// PID table. Applied whenever the cgroup exists, independent of memory/CPU.
 	if err := setCgroupPidsMax(dir, defaultNativePidsMax); err != nil {
-		slog.Warn("native: pids.max not applied; replica runs without a fork-bomb cap",
+		slog.Warn("native: pids.max not applied; replica runs without a fork-bomb cap (needs Delegate=pids)",
 			"slug", p.Slug, "idx", p.Index, "err", err)
 	}
 	if p.MemoryLimitMB > 0 {
@@ -665,7 +669,7 @@ func (r *NativeRuntime) placeJobInCgroup(p StartParams, pid int) func() {
 		return noop
 	}
 	if err := setCgroupPidsMax(dir, defaultNativePidsMax); err != nil {
-		slog.Warn("native: job pids.max not applied; job runs without a fork-bomb cap",
+		slog.Warn("native: job pids.max not applied; job runs without a fork-bomb cap (needs Delegate=pids)",
 			"slug", p.Slug, "run_id", p.JobRunID, "err", err)
 	}
 	if p.MemoryLimitMB > 0 {

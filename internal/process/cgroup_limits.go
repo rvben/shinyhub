@@ -54,6 +54,59 @@ func cgroupMemoryMaxValue(memMB int) string {
 // error, it is a limit that silently stops being enforced.
 const RequiredDelegatedControllers = "cpu memory pids"
 
+// cgroupDelegation reports which of the optional controllers ShinyHub manages
+// are delegated to the service, and therefore which per-app limits actually
+// bind. Memory is absent because it is required: the delegated base does not
+// come up without it.
+type cgroupDelegation struct {
+	// CPU is true when cpu.max can be set on an app cgroup.
+	CPU bool
+	// Pids is true when pids.max (the fork-bomb cap) can be set on an app cgroup.
+	Pids bool
+}
+
+// planDelegation derives a base cgroup's controller bookkeeping from its two
+// controller files: available is cgroup.controllers (what the parent delegated
+// to this cgroup) and enabled is cgroup.subtree_control (what this cgroup
+// already delegates to its children). It returns the "+controller" writes still
+// needed, whether the subtree is already fully prepared, and which optional
+// controllers will bind once those writes land.
+//
+// The two files answer different questions, and only the second one decides
+// whether a limit applies: a controller must be in the base's subtree_control
+// for its interface file to exist in a child. A unit that delegates pids
+// without a "+pids" write therefore produces app cgroups with no pids.max at
+// all - the fork-bomb cap is simply absent, which no configuration surface
+// reports, because from the unit's point of view the controller is delegated.
+func planDelegation(available, enabled string) (enable []string, prepared bool, d cgroupDelegation) {
+	d = cgroupDelegation{
+		CPU:  fieldsContain(available, "cpu"),
+		Pids: fieldsContain(available, "pids"),
+	}
+	// Memory is the one controller with no availability branch: a base missing
+	// it never reaches here (the caller fails first with its own message).
+	if !fieldsContain(enabled, "memory") {
+		enable = append(enable, "+memory")
+	}
+	if d.CPU && !fieldsContain(enabled, "cpu") {
+		enable = append(enable, "+cpu")
+	}
+	if d.Pids && !fieldsContain(enabled, "pids") {
+		enable = append(enable, "+pids")
+	}
+	return enable, len(enable) == 0, d
+}
+
+// fieldsContain reports whether the space-separated list in s contains field.
+func fieldsContain(s, field string) bool {
+	for _, f := range strings.Fields(s) {
+		if f == field {
+			return true
+		}
+	}
+	return false
+}
+
 // defaultNativePidsMax caps the number of processes/threads a native app cgroup
 // may hold, preventing a fork bomb in one app from exhausting the host PID table
 // and taking down ShinyHub and every co-located tenant. Generous enough for a

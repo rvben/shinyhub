@@ -186,7 +186,7 @@ func TestEnsureDelegatedBase_Integration(t *testing.T) {
 	if os.Getenv("WWC_DELEGATE_IT") == "" {
 		t.Skip("set WWC_DELEGATE_IT=1 and run under systemd Delegate=memory")
 	}
-	base, _, err := ensureDelegatedBase()
+	base, delegation, err := ensureDelegatedBase()
 	if err != nil {
 		t.Fatalf("ensureDelegatedBase: %v", err)
 	}
@@ -198,9 +198,25 @@ func TestEnsureDelegatedBase_Integration(t *testing.T) {
 	if !strings.HasSuffix(rel, "/_supervisor") {
 		t.Fatalf("self cgroup = %q, want it moved into .../_supervisor", rel)
 	}
-	// The base must delegate the memory controller to its children.
-	if !cgroupHasField(filepath.Join(base, "cgroup.subtree_control"), "memory") {
+	// The base must delegate to its children every controller its own parent
+	// delegated to it: availability without a subtree_control entry means the
+	// matching interface file never appears in an app cgroup.
+	subtree := filepath.Join(base, "cgroup.subtree_control")
+	if !cgroupHasField(subtree, "memory") {
 		t.Fatalf("base %s does not have +memory in subtree_control", base)
+	}
+	controllers := filepath.Join(base, "cgroup.controllers")
+	for _, c := range []struct {
+		name      string
+		delegated bool
+	}{{"cpu", delegation.CPU}, {"pids", delegation.Pids}} {
+		avail := cgroupHasField(controllers, c.name)
+		if avail != c.delegated {
+			t.Errorf("delegation.%s = %v, but cgroup.controllers says %v", c.name, c.delegated, avail)
+		}
+		if avail && !cgroupHasField(subtree, c.name) {
+			t.Errorf("base %s delegates %s but does not enable +%s in subtree_control", base, c.name, c.name)
+		}
 	}
 	// Idempotent: a second call returns the same base without error.
 	base2, _, err := ensureDelegatedBase()

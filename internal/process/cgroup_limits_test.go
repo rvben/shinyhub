@@ -1,6 +1,9 @@
 package process
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestParseCgroupOOMCounts verifies the cgroup v2 memory.events parser sums the
 // kernel OOM-kill counters (oom_kill + oom_group_kill) and ignores unrelated
@@ -51,6 +54,105 @@ func TestCgroupPidsMaxValue(t *testing.T) {
 	}
 	if defaultNativePidsMax <= 0 {
 		t.Errorf("defaultNativePidsMax must be a positive fork-bomb ceiling, got %d", defaultNativePidsMax)
+	}
+}
+
+// TestPlanDelegation verifies which controllers a base cgroup still has to
+// enable in its subtree, and which per-app limits bind as a result.
+//
+// The case that matters is a base whose parent delegated pids but whose subtree
+// only enables cpu and memory: the app cgroup then has no pids.max file at all,
+// so the fork-bomb cap is absent on a host whose unit says Delegate=pids. That
+// state must be reported unprepared and must produce a "+pids" write.
+func TestPlanDelegation(t *testing.T) {
+	cases := []struct {
+		name       string
+		available  string // cgroup.controllers
+		enabled    string // cgroup.subtree_control
+		wantEnable []string
+		wantReady  bool
+		want       cgroupDelegation
+	}{
+		{
+			name:       "fresh base delegating everything enables all three",
+			available:  "cpuset cpu io memory pids\n",
+			enabled:    "\n",
+			wantEnable: []string{"+memory", "+cpu", "+pids"},
+			want:       cgroupDelegation{CPU: true, Pids: true},
+		},
+		{
+			name:       "pids delegated but not enabled is not prepared",
+			available:  "cpu memory pids\n",
+			enabled:    "cpu memory\n",
+			wantEnable: []string{"+pids"},
+			want:       cgroupDelegation{CPU: true, Pids: true},
+		},
+		{
+			name:      "all three enabled is prepared",
+			available: "cpu memory pids\n",
+			enabled:   "cpu memory pids\n",
+			wantReady: true,
+			want:      cgroupDelegation{CPU: true, Pids: true},
+		},
+		{
+			name:      "memory-only delegation is prepared with both optional limits off",
+			available: "memory\n",
+			enabled:   "memory\n",
+			wantReady: true,
+			want:      cgroupDelegation{},
+		},
+		{
+			name:       "cpu delegated without pids enables only what exists",
+			available:  "cpu memory\n",
+			enabled:    "memory\n",
+			wantEnable: []string{"+cpu"},
+			want:       cgroupDelegation{CPU: true},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enable, prepared, got := planDelegation(tc.available, tc.enabled)
+			if prepared != tc.wantReady {
+				t.Errorf("prepared = %v, want %v", prepared, tc.wantReady)
+			}
+			if got != tc.want {
+				t.Errorf("delegation = %+v, want %+v", got, tc.want)
+			}
+			if len(enable) != len(tc.wantEnable) {
+				t.Fatalf("enable = %v, want %v", enable, tc.wantEnable)
+			}
+			for i := range tc.wantEnable {
+				if enable[i] != tc.wantEnable[i] {
+					t.Fatalf("enable = %v, want %v", enable, tc.wantEnable)
+				}
+			}
+		})
+	}
+}
+
+// TestPlanDelegationCoversEveryRequiredController verifies planDelegation
+// accounts for each controller the shipped unit's Delegate= line promises. A
+// controller added to RequiredDelegatedControllers without a matching clause
+// here would be delegated by systemd and then never enabled in the subtree,
+// which is exactly how pids.max came to be silently absent.
+func TestPlanDelegationCoversEveryRequiredController(t *testing.T) {
+	all := RequiredDelegatedControllers // "cpu memory pids"
+	enable, prepared, _ := planDelegation(all, "")
+	if prepared {
+		t.Fatal("a base with nothing enabled must not be reported prepared")
+	}
+	for _, c := range strings.Fields(all) {
+		want := "+" + c
+		found := false
+		for _, e := range enable {
+			if e == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("planDelegation does not enable %q for a base that delegates %q; enable = %v", want, all, enable)
+		}
 	}
 }
 

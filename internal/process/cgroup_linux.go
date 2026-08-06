@@ -112,19 +112,18 @@ func cgroupV2RelPath(pid int) (string, error) {
 // controller to its children may not itself hold processes. shinyhub's service
 // cgroup (base) initially holds shinyhub, so we (1) require the memory controller
 // to be delegated to base (systemd Delegate=memory), (2) move every process in
-// base into base/_supervisor, then (3) enable +memory (and +cpu when available
-// via Delegate=cpu) in base/cgroup.subtree_control so app children expose
-// memory.current / memory.reclaim and can set memory.max / cpu.max. Idempotent:
-// once memory is enabled (and cpu, when delegated) the subtree is prepared and
-// base is returned immediately.
-// ensureDelegatedBase returns the delegated base dir and whether the cpu
-// controller is delegated (so per-app cpu.max is enforceable; memory is always
-// enforceable on success, since it is required). The bool is meaningful only when
-// the error is nil.
-func ensureDelegatedBase() (string, bool, error) {
+// base into base/_supervisor, then (3) enable +memory (plus +cpu and +pids when
+// available via Delegate=) in base/cgroup.subtree_control so app children expose
+// memory.current / memory.reclaim and can set memory.max / cpu.max / pids.max.
+// Idempotent: once every available controller is enabled the subtree is prepared
+// and base is returned immediately.
+// ensureDelegatedBase returns the delegated base dir and which optional
+// controllers bind per app (memory is always enforceable on success, since it is
+// required). The delegation is meaningful only when the error is nil.
+func ensureDelegatedBase() (string, cgroupDelegation, error) {
 	rel, err := cgroupV2RelPath(os.Getpid())
 	if err != nil {
-		return "", false, err
+		return "", cgroupDelegation{}, err
 	}
 	selfDir := filepath.Join(cgroupV2Mount, rel)
 	// Resolve the base. On a first call shinyhub is still in its service cgroup,
@@ -139,47 +138,34 @@ func ensureDelegatedBase() (string, bool, error) {
 
 	subtreePath := filepath.Join(base, "cgroup.subtree_control")
 	controllersPath := filepath.Join(base, "cgroup.controllers")
-	memEnabled := cgroupHasField(subtreePath, "memory")
-	// cpu is delegated best-effort: it lets per-app cgroups set cpu.max for native
-	// CPU limits. It is absent without systemd Delegate=cpu, in which case CPU
-	// limits degrade to no enforcement (memory limits + warm-wake still work).
-	cpuAvail := cgroupHasField(controllersPath, "cpu")
-	cpuEnabled := cgroupHasField(subtreePath, "cpu")
+	// cpu and pids are delegated best-effort: they let per-app cgroups set cpu.max
+	// and pids.max. Either is absent without the matching systemd Delegate= entry,
+	// in which case that limit degrades to no enforcement (memory limits +
+	// warm-wake still work).
+	ctrls, prepared, delegation := planDelegation(readCgroupFile(controllersPath), readCgroupFile(subtreePath))
 	// Already prepared: memory in subtree_control implies base holds no procs and
-	// shinyhub already lives in _supervisor. Re-running is a no-op once memory is
-	// enabled and cpu is enabled (or unavailable).
-	if memEnabled && (cpuEnabled || !cpuAvail) {
-		return base, cpuAvail, nil
+	// shinyhub already lives in _supervisor.
+	if prepared {
+		return base, delegation, nil
 	}
 	// The memory controller must be available to base. Without systemd
 	// Delegate=memory it is absent, and warm-wake stays off (caller degrades).
 	if !cgroupHasField(controllersPath, "memory") {
-		return "", false, fmt.Errorf("cgroup %s: memory controller not delegated (need systemd Delegate=memory)", rel)
+		return "", cgroupDelegation{}, fmt.Errorf("cgroup %s: memory controller not delegated (need systemd Delegate=memory)", rel)
 	}
 	sup := filepath.Join(base, supervisorName)
 	if err := os.Mkdir(sup, 0o755); err != nil && !os.IsExist(err) {
-		return "", false, fmt.Errorf("mkdir %s: %w", sup, err)
+		return "", cgroupDelegation{}, fmt.Errorf("mkdir %s: %w", sup, err)
 	}
 	// Empty base of processes (including shinyhub itself) before delegating
 	// controllers; cgroup v2 rejects enabling a controller while procs remain.
 	if err := drainCgroupProcs(base, sup); err != nil {
-		return "", false, err
+		return "", cgroupDelegation{}, err
 	}
-	// Enable the controllers not yet delegated to children: memory (required) and
-	// cpu (when available).
-	var ctrls []string
-	if !memEnabled {
-		ctrls = append(ctrls, "+memory")
+	if err := writeCgroupFile(subtreePath, strings.Join(ctrls, " ")); err != nil {
+		return "", cgroupDelegation{}, fmt.Errorf("enable %s on %s: %w", strings.Join(ctrls, " "), base, err)
 	}
-	if cpuAvail && !cpuEnabled {
-		ctrls = append(ctrls, "+cpu")
-	}
-	if len(ctrls) > 0 {
-		if err := writeCgroupFile(subtreePath, strings.Join(ctrls, " ")); err != nil {
-			return "", false, fmt.Errorf("enable %s on %s: %w", strings.Join(ctrls, " "), base, err)
-		}
-	}
-	return base, cpuAvail, nil
+	return base, delegation, nil
 }
 
 // setupAppCgroup creates base/<name> and moves pid into it, returning the app
@@ -216,7 +202,8 @@ func setCgroupCPUMax(dir string, cpuPct int) error {
 
 // setCgroupPidsMax writes a pids.max limit to an app cgroup directory, capping
 // the number of processes/threads it may hold as a fork-bomb guard. The pids
-// controller is enabled by default in cgroup v2, so a write failure is surfaced
+// controller must be delegated to the base (systemd Delegate=pids) and enabled
+// in its subtree for the pids.max file to exist, so a write failure is surfaced
 // for the caller to warn on rather than silently dropping the guard.
 func setCgroupPidsMax(dir string, limit int) error {
 	return writeCgroupFile(filepath.Join(dir, "pids.max"), cgroupPidsMaxValue(limit))
@@ -300,16 +287,18 @@ func teardownAppCgroup(dir string) error {
 // cgroupHasField reports whether the space-separated list in path (e.g.
 // cgroup.controllers or cgroup.subtree_control) contains field.
 func cgroupHasField(path, field string) bool {
+	return fieldsContain(readCgroupFile(path), field)
+}
+
+// readCgroupFile returns the contents of a cgroup control file, or "" when it
+// cannot be read. An unreadable controller list means the same thing as an empty
+// one to every caller here: nothing is delegated.
+func readCgroupFile(path string) string {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return ""
 	}
-	for _, f := range strings.Fields(string(b)) {
-		if f == field {
-			return true
-		}
-	}
-	return false
+	return string(b)
 }
 
 // writeCgroupFile writes s to a cgroup control file (no trailing newline needed;

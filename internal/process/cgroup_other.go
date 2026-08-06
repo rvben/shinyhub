@@ -17,7 +17,9 @@ func reclaimPIDMemory(_ int, _ uint64) error { return errReclaimUnsupported }
 // Native per-app cgroup helpers are linux-only; the stubs keep NativeRuntime
 // (which is cross-platform) compiling on non-linux. ensureDelegatedBase failing
 // here is exactly how native warm-wake stays off on non-linux hosts.
-func ensureDelegatedBase() (string, bool, error) { return "", false, errReclaimUnsupported }
+func ensureDelegatedBase() (string, cgroupDelegation, error) {
+	return "", cgroupDelegation{}, errReclaimUnsupported
+}
 
 func setupAppCgroup(_, _ string, _ int) (string, error) { return "", errReclaimUnsupported }
 
