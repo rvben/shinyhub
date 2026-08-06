@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.17](https://github.com/rvben/shinyhub/compare/v0.10.16...v0.10.17) - 2026-08-06
+
+### Fixed
+
+- **deploy**: keep R bundles deletable whatever command starts them ([4a434c7](https://github.com/rvben/shinyhub/commit/4a434c76089021807ae0076c44bb7f1e1f1dfd40))
+- **process**: delegate the pids controller for the fork-bomb cap ([ad50c99](https://github.com/rvben/shinyhub/commit/ad50c99109efb9d0dd6117eb1b12e90f9869be72))
+- **deploy**: build R bundles that ship only renv.lock ([ea3a4b7](https://github.com/rvben/shinyhub/commit/ea3a4b7c36844dd45c25ab2d9d96e4b60bad1118))
+- **storage**: delete apps whose bundle holds read-only directories ([e91690e](https://github.com/rvben/shinyhub/commit/e91690e2977304717486546f148f5b175fef5894))
+
 ## [0.10.16](https://github.com/rvben/shinyhub/compare/v0.10.15...v0.10.16) - 2026-08-06
 
 ### Added
