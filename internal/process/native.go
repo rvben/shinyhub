@@ -271,9 +271,9 @@ func sandboxLaunchEnv(appDir, tmpDir, encSpec string) []string {
 // never overwritten.
 func withDelegateHint(err error) error {
 	if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EROFS) {
-		return fmt.Errorf("%w; add \"Delegate=cpu memory\" (or Delegate=yes) to the [Service] "+
+		return fmt.Errorf("%w; add \"Delegate=%s\" (or Delegate=yes) to the [Service] "+
 			"section of the systemd unit and reload so the service user can manage its cgroup "+
-			"subtree (see deploy/systemd/shinyhub.service)", err)
+			"subtree (see deploy/systemd/shinyhub.service)", err, RequiredDelegatedControllers)
 	}
 	return err
 }

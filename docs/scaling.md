@@ -268,21 +268,27 @@ reconciled on deploy), via `shinyhub apps set --memory-limit-mb N
 --cpu-quota-percent M`, or in the Configuration tab. Scheduled jobs inherit
 the same per-replica ceiling.
 
-Native enforcement uses cgroup v2 (`memory.max` / `cpu.max`) and is
+Native enforcement uses cgroup v2 (`memory.max` / `cpu.max` / `pids.max`) and is
 **best-effort**: it requires the relevant controller to be delegated to the
-service (systemd `Delegate=cpu memory`). Without delegation the limit is not
+service (systemd `Delegate=cpu memory pids`). Without delegation the limit is not
 enforced (the app runs uncapped) and a warning is logged; the Configuration
-tab shows whether enforcement is active. CPU enforcement additionally needs
-`Delegate=cpu`; memory works with `Delegate=memory` alone.
+tab shows whether enforcement is active. Each controller is independent: CPU
+enforcement needs `Delegate=cpu`, memory works with `Delegate=memory` alone, and
+the fork-bomb cap needs `Delegate=pids`.
 
 ### Native mode under systemd requires `Delegate=`
 
 When ShinyHub runs natively (`runtime.mode: native`) under a systemd unit with a
-non-root `User=`, the unit **must** set `Delegate=cpu memory` (or `Delegate=yes`).
-This is what makes systemd hand the service its own writable cgroup v2 subtree.
-Two native features build on that subtree:
+non-root `User=`, the unit **must** set `Delegate=cpu memory pids` (or
+`Delegate=yes`). This is what makes systemd hand the service its own writable
+cgroup v2 subtree. Three native features build on that subtree:
 
 - **Per-app resource limits** (`memory_limit_mb` / `cpu_quota_percent`), above.
+- **The per-replica `pids.max` cap** (1024 processes/threads), which stops a fork
+  bomb in one app from exhausting the host PID table and taking ShinyHub and
+  every co-located tenant down with it. This one is silent in the common case:
+  a unit that delegates only `cpu memory` enforces both visible limits, so the
+  missing cap surfaces only as a `pids.max not applied` warning in the log.
 - **Warm-wake** hibernation (freeze + memory reclaim instead of a cold stop).
 
 Without `Delegate=`, the service's cgroup directory stays root-owned, so the
@@ -291,7 +297,7 @@ first app start you will see:
 
 ```
 WARN native: cgroup base unavailable; warm-wake and resource limits disabled
-     err: mkdir /sys/fs/cgroup/system.slice/shinyhub.service/_supervisor: permission denied; add "Delegate=cpu memory" ...
+     err: mkdir /sys/fs/cgroup/system.slice/shinyhub.service/_supervisor: permission denied; add "Delegate=cpu memory pids" ...
 ```
 
 ShinyHub then **degrades gracefully**: apps still start and serve traffic

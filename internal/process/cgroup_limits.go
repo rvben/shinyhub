@@ -47,6 +47,13 @@ func cgroupMemoryMaxValue(memMB int) string {
 	return strconv.FormatInt(int64(memMB)*1024*1024, 10)
 }
 
+// RequiredDelegatedControllers is the cgroup v2 controller set ShinyHub manages
+// per app: cpu.max, memory.max (plus warm-wake reclaim) and pids.max. It is the
+// literal an operator copies into a systemd unit's Delegate=, so it is also
+// what the shipped unit must carry - a controller missing there is not an
+// error, it is a limit that silently stops being enforced.
+const RequiredDelegatedControllers = "cpu memory pids"
+
 // defaultNativePidsMax caps the number of processes/threads a native app cgroup
 // may hold, preventing a fork bomb in one app from exhausting the host PID table
 // and taking down ShinyHub and every co-located tenant. Generous enough for a
