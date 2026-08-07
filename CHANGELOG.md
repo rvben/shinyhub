@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.18](https://github.com/rvben/shinyhub/compare/v0.10.17...v0.10.18) - 2026-08-08
+
+### Fixed
+
+- **process**: enable the pids controller in the app cgroup subtree ([727ec0e](https://github.com/rvben/shinyhub/commit/727ec0e2a434e1bd9768a877f00bf5be4281589f))
+
 ## [0.10.17](https://github.com/rvben/shinyhub/compare/v0.10.16...v0.10.17) - 2026-08-06
 
 ### Fixed
