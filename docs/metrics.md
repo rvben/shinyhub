@@ -80,7 +80,7 @@ which is why they are not collapsed into one:
 | `pool-degraded` | Fewer replicas are registered than configured, and the survivors are at cap. | Check replica health first. Adding capacity on top of a crash loop hides it. |
 | `app-not-ready` | The app has no replica that has completed a WebSocket handshake yet. | Nothing during a normal cold start. Sustained means the app is failing to come up. |
 | `memory-pressure` | The host is below `server.min_available_memory_mb`, so no new elastic worker may start. | Free host memory, lower per-app ceilings, or add hardware. |
-| `render-paced` | A new session was deferred because the app's render-admission bucket was empty, then shed after the park window. | Raise the app's `render_seconds` accuracy or add cores. More replicas do not help: they do not add CPU. |
+| `render-paced` | A new session was deferred because the app's render-admission bucket was empty, then shed after the park window. | Raise the app's [`render_seconds`](scaling.md#render-pacing) accuracy or add cores. More replicas do not help: they do not add CPU. |
 | `cpu-saturation` | The host CPU watermark is breached, so a new session was shed to protect connected ones. | Add cores or move apps off this host. |
 | `render-deferred` | A page load was shown the "Waiting for capacity" page because the app had no render capacity at that instant. | Same as `render-paced`. See the caveat below before alerting on it. |
 

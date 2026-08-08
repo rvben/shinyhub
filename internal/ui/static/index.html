@@ -521,6 +521,29 @@
             </div>
           </section>
 
+          <section class="settings-block">
+            <h3 class="settings-block-title">Render pacing</h3>
+            <p class="settings-block-desc">Admit page loads at a rate this host can actually render, so a burst queues on a wait page instead of stalling every session at once.</p>
+            <div class="settings-block-body">
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Render cost (seconds)</span>
+                  <span class="scaling-option-help">Roughly how long one page render keeps a CPU busy. <code>0</code> turns pacing off. Above <code>0</code>, page loads beyond the sustainable rate get a wait page that retries by itself.</span>
+                </span>
+                <input id="render-seconds" type="number" min="0" max="600" step="0.1"
+                       inputmode="decimal" autocomplete="off" placeholder="0"
+                       aria-label="Render cost in seconds">
+              </label>
+              <p id="render-pacing-advice" class="scaling-ceiling" aria-live="polite"></p>
+              <div class="env-form-actions">
+                <button id="render-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
+                <span id="render-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+                <span id="render-status" class="hibernate-status" hidden></span>
+              </div>
+              <p id="render-error" class="error" hidden></p>
+            </div>
+          </section>
+
           <fieldset class="settings-block access-level autoscale-options" id="autoscale-options">
             <legend class="settings-block-title">Autoscale</legend>
             <p class="settings-block-desc">Let the controller grow and shrink the replica pool automatically based on observed session load.</p>

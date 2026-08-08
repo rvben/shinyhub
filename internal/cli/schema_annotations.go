@@ -142,6 +142,9 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "worker_max_workers", Type: "integer", Desc: "Demand-driven worker ceiling for grouped/per_session modes"},
 		{Name: "worker_max_session_lifetime_secs", Type: "integer", Desc: "Absolute worker lifetime in seconds (0 = unlimited)"},
 		{Name: "worker_pool", Type: "object", Desc: "Live elastic capacity view: {mode,sessions_per_worker,max_workers,ceiling,workers:[{slot_id,status,sessions,pid,port}]}; present only while a grouped/per_session pool exists"},
+		{Name: "render_seconds", Type: "number", Desc: "Cost of one page render in CPU-seconds; 0 disables render-aware admission pacing"},
+		{Name: "render_pacing", Type: "object", Desc: "Advisory pacing summary {render_seconds,effective_cores,cores_source,suggested_max_sessions_per_replica,current_effective_max_sessions_per_replica,cadence_assumption_seconds}; present only while render_seconds > 0"},
+		{Name: "rejects_by_reason", Type: "object", Desc: "Rolling 10-minute rejection rollup {window_seconds,counts:{reason:count}}; omitted when the app has had no rejections in the window"},
 	}},
 	"apps logs": {Mutating: ro, Streaming: true},
 	"apps metrics": {Mutating: ro, OutputFields: []fieldSpec{

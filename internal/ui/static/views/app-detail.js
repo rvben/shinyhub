@@ -228,7 +228,7 @@ export function mountAppDetail(ctx) {
       await renderDeployments(panels.deployments, app, ctx);
     }
     if (tab === 'configuration') {
-      renderConfiguration(panels.configuration, app, ctx);
+      renderConfiguration(panels.configuration, app, ctx, body);
     }
     if (tab === 'data') {
       renderData(panels.data, app, ctx);
@@ -631,9 +631,13 @@ function seedReplicasFromStatus(app, replicasStatus) {
   }
 }
 
-function renderConfiguration(panel, app, ctx) {
+// envelope is the raw GET /api/apps/:slug body, passed through because the
+// render-pacing advisory (render_pacing) is an envelope-level block, not an app
+// column: normalizeAppEnvelope deliberately folds only the fields that belong on
+// the app itself.
+function renderConfiguration(panel, app, ctx, envelope) {
   ctx.setSettingsSlug(app.slug);
-  ctx.populateGeneralTab(app);
+  ctx.populateGeneralTab(app, envelope);
   ctx.populateAutoscaleTab(app);
   ctx.refreshEnvList(app.slug);
   ctx.loadSchedules(app.slug);

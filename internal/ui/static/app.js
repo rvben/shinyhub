@@ -24,6 +24,7 @@ import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
 import { workerCapacityLine } from '/static/views/worker-isolation.js';
+import { parseRenderSeconds, renderPacingAdvice } from '/static/views/render-pacing.js';
 import { initTheme, getThemePreference, setThemePreference } from '/static/views/theme.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 import { formatStatus } from '/static/views/status-label.js';
@@ -1752,7 +1753,24 @@ document.addEventListener('DOMContentLoaded', () => {
     return 'custom';
   }
 
-  function populateGeneralTab(app) {
+  // renderPacingBlock holds the server's render_pacing advisory for the app
+  // currently open in Configuration, so the advice line can be recomputed on
+  // every keystroke without refetching. It describes the SAVED render_seconds
+  // (the server computes it from what is persisted), which is why
+  // renderPacingAdvice compares it against the typed value rather than assuming
+  // they agree. Null when pacing is off or no app is open.
+  let renderPacingBlock = null;
+
+  function updateRenderPacingAdvice() {
+    const el = document.getElementById('render-pacing-advice');
+    if (!el) return;
+    const raw = document.getElementById('render-seconds').value.trim();
+    // A blank field has no advice to give: saving it is a validation error, not
+    // a state the operator can be told the consequences of.
+    el.textContent = raw === '' ? '' : renderPacingAdvice(Number(raw), renderPacingBlock);
+  }
+
+  function populateGeneralTab(app, envelope) {
     const mode = hibernateModeFromValue(app.hibernate_timeout_minutes);
     document.querySelectorAll('input[name="hibernate-mode"]').forEach(r => {
       r.checked = r.value === mode;
@@ -1807,6 +1825,18 @@ document.addEventListener('DOMContentLoaded', () => {
     groupedSizeInput.disabled = !canEdit;
     maxWorkersInput.disabled = !canEdit;
     updateWorkerCapacity();
+
+    // Render pacing: one number, plus the server's advisory for what it implies
+    // on this host. The block is absent when the SAVED value is 0 (pacing off),
+    // which is exactly the state the advice line then reports.
+    const renderInput = document.getElementById('render-seconds');
+    renderPacingBlock = (envelope && envelope.render_pacing) || null;
+    renderInput.value = String(app.render_seconds ?? 0);
+    renderInput.disabled = !canEdit;
+    document.getElementById('render-save-btn').hidden = !canEdit;
+    setError(document.getElementById('render-error'), '');
+    setHidden(document.getElementById('render-status'), true);
+    updateRenderPacingAdvice();
 
     // General info: display name + description + project slug (rename / regroup).
     document.getElementById('general-name').value = app.name ?? '';
@@ -1867,6 +1897,7 @@ document.addEventListener('DOMContentLoaded', () => {
     snapshotSettingsSection('resources');
     snapshotSettingsSection('hibernate');
     snapshotSettingsSection('scaling');
+    snapshotSettingsSection('render');
   }
 
   // The icon picker uploads immediately (it is not tied to the General Save
@@ -2327,6 +2358,57 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(statusEl, false);
     snapshotSettingsSection('scaling');
     await loadApps();
+  }
+
+  async function saveRenderPacing() {
+    if (!settingsSlug) return;
+    const errEl = document.getElementById('render-error');
+    const statusEl = document.getElementById('render-status');
+    setError(errEl, '');
+    setHidden(statusEl, true);
+
+    const parsed = parseRenderSeconds(document.getElementById('render-seconds').value);
+    if (!parsed.ok) {
+      setError(errEl, parsed.error);
+      return;
+    }
+
+    // Pacing applies live (the PATCH calls proxy.ApplyRenderPacing), so this is
+    // not a restart-and-drop-sessions change and needs no confirmation.
+    const slug = settingsSlug;
+    const btn = document.getElementById('render-save-btn');
+    btn.disabled = true;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ render_seconds: parsed.value }),
+      });
+    } catch {
+      btn.disabled = false;
+      setError(errEl, 'Failed to save. Check your connection.');
+      return;
+    }
+    btn.disabled = false;
+
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    let body = null;
+    try { body = await resp.json(); } catch { /* non-JSON */ }
+    if (!resp.ok) {
+      setError(errEl, (body && body.error) || 'Failed to save.');
+      return;
+    }
+    // The user may have navigated to another app while the PATCH was in flight;
+    // that app's panel owns the controls now, so adopting this response's
+    // advisory would describe the wrong app.
+    if (settingsSlug !== slug) return;
+    // Adopt the advisory for the value just persisted: pacing is in effect from
+    // here on, and the block that described the previous setting is now stale.
+    renderPacingBlock = (body && body.render_pacing) || null;
+    updateRenderPacingAdvice();
+    statusEl.textContent = 'Saved.';
+    setHidden(statusEl, false);
+    snapshotSettingsSection('render');
   }
 
   // populateAutoscaleTab seeds the autoscale fieldset from the GET envelope
@@ -3089,6 +3171,10 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('scaling-replicas').addEventListener('input', updateScalingCeiling);
   document.getElementById('scaling-cap').addEventListener('input', updateScalingCeiling);
 
+  // Render pacing: save + live advisory line.
+  document.getElementById('render-save-btn').addEventListener('click', saveRenderPacing);
+  document.getElementById('render-seconds').addEventListener('input', updateRenderPacingAdvice);
+
   // Worker isolation: live capacity helper on any input change.
   document.getElementById('worker-isolation').addEventListener('change', updateWorkerCapacity);
   document.getElementById('worker-grouped-size').addEventListener('input', updateWorkerCapacity);
@@ -3137,6 +3223,9 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('worker-max-workers'),
     ],
     'scaling-save-btn', 'scaling-dirty');
+  registerSettingsSection('render',
+    () => [document.getElementById('render-seconds')],
+    'render-save-btn', 'render-dirty');
   registerSettingsSection('autoscale',
     () => [document.getElementById('autoscale-enabled'),
            document.getElementById('autoscale-min'),

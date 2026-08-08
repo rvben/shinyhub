@@ -1599,6 +1599,104 @@ func TestAppsShow_OmitsRejectsWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestAppsShow_RendersPacingOff pins the unpaced state as an explicit line
+// rather than an omission: "off" and "not reported" are different facts, and an
+// operator reading a truncated section cannot tell an absent line from a
+// missing feature.
+func TestAppsShow_RendersPacingOff(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":10,"deploy_count":1,"render_seconds":0},"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Pacing:      off") {
+		t.Errorf("expected pacing off line, got:\n%s", out)
+	}
+	// The advisory lines belong to a paced app; they must not appear here even
+	// though the server may still be able to compute host cores.
+	if strings.Contains(out, "paced for") || strings.Contains(out, "suggested max sess/r") {
+		t.Errorf("advisory lines must not render when pacing is off, got:\n%s", out)
+	}
+}
+
+// TestAppsShow_RendersPacingWithAdvisory covers the paced case where the app's
+// current cap exceeds what the host sustains: the value, the cores it was paced
+// for, and the suggestion with the cadence it assumes.
+func TestAppsShow_RendersPacingWithAdvisory(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":40,"deploy_count":1,"render_seconds":1.3},"effective_max_sessions_per_replica":40,"replicas_status":[],"render_pacing":{"render_seconds":1.3,"effective_cores":4,"cores_source":"cgroup-quota","suggested_max_sessions_per_replica":4,"current_effective_max_sessions_per_replica":40,"cadence_assumption_seconds":2}}`)
+
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"Pacing:      1.3s/render",
+		"  paced for ~4 cores via cgroup-quota",
+		"  suggested max sess/r: 4 (currently 40, assuming one render per session every 2s)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+// An unlimited current cap (0) exceeds any finite suggestion, so the advisory
+// fires and must name the cap as "unlimited" rather than printing a bare 0.
+func TestAppsShow_PacingAdvisoryNamesUnlimitedCap(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":0,"deploy_count":1,"render_seconds":2},"replicas_status":[],"render_pacing":{"render_seconds":2,"effective_cores":2,"cores_source":"affinity","suggested_max_sessions_per_replica":1,"current_effective_max_sessions_per_replica":0,"cadence_assumption_seconds":2}}`)
+
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "  suggested max sess/r: 1 (currently unlimited, assuming one render per session every 2s)") {
+		t.Errorf("expected the unlimited-cap advisory wording, got:\n%s", out)
+	}
+	if strings.Contains(out, "currently 0") {
+		t.Errorf("an unlimited cap must not render as 0, got:\n%s", out)
+	}
+}
+
+// A cap already at or below the suggestion is well tuned; firing the advisory
+// there trains operators to ignore it, so only the value and cores lines render.
+func TestAppsShow_PacingOmitsSuggestionWhenCapAlreadyTight(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":4,"deploy_count":1,"render_seconds":1.3},"effective_max_sessions_per_replica":4,"replicas_status":[],"render_pacing":{"render_seconds":1.3,"effective_cores":4,"cores_source":"cgroup-quota","suggested_max_sessions_per_replica":4,"current_effective_max_sessions_per_replica":4,"cadence_assumption_seconds":2}}`)
+
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Pacing:      1.3s/render") {
+		t.Errorf("expected the pacing value line, got:\n%s", out)
+	}
+	if strings.Contains(out, "suggested max sess/r") {
+		t.Errorf("suggestion must be omitted when the current cap is already at or below it, got:\n%s", out)
+	}
+}
+
+// A paced app whose server sent no advisory block (an older server, or a host
+// whose cores could not be determined) still reports the setting it has.
+func TestAppsShow_PacingWithoutAdvisoryBlock(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":10,"deploy_count":1,"render_seconds":0.25},"effective_max_sessions_per_replica":10,"replicas_status":[]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Pacing:      0.25s/render") {
+		t.Errorf("expected the pacing value line, got:\n%s", out)
+	}
+	if strings.Contains(out, "paced for") {
+		t.Errorf("cores line must not render without an advisory block, got:\n%s", out)
+	}
+}
+
 // TestAppsSet_MinWarmReplicas sends --min-warm-replicas 2 and asserts the PATCH
 // body contains min_warm_replicas=2 and no other fields.
 func TestAppsSet_MinWarmReplicas(t *testing.T) {

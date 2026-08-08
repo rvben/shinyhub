@@ -110,6 +110,108 @@ climbs from ~350 ms at 10 sessions to multi-second tails by 30+
 sessions on a single replica. Horizontal scaling fixes this;
 vertical cap-raising makes it worse.
 
+## Render pacing
+
+The session cap bounds how many sessions exist at once. It says nothing
+about how fast they arrive. Thirty users opening a CPU-heavy dashboard in
+the same second all land inside a cap of 50, and the host then tries to
+compute thirty first renders at once: every one of them is slow, including
+the sessions that were already connected and idle.
+
+`render_seconds` paces admission instead. It is your estimate of how long
+**one page render keeps a CPU busy**, and the platform derives a sustainable
+admission rate from it:
+
+```
+rate = (effective cores × render_headroom) / render_seconds   admissions per second
+burst = round(effective cores)                                instantaneous allowance
+```
+
+Page loads beyond that rate are shown a "Waiting for capacity" page that
+retries on its own, so a burst queues instead of stampeding. `0` (the
+default) turns pacing off entirely.
+
+The headroom fraction (`server.render_headroom_percent`, default `75`)
+reserves the rest of the host for interaction: renders that established
+sessions trigger while new ones are being admitted.
+
+### Setting it
+
+**Dashboard**: app detail → **Configuration** → **Render pacing**. Type the
+render cost and press Save. The advice line under the field reports what the
+value implies on this host, and updates as you type.
+
+**CLI:**
+
+```bash
+shinyhub apps set <slug> --render-seconds 1.3   # pace at ~1.3 s of CPU per render
+shinyhub apps set <slug> --render-seconds 0     # turn pacing off
+```
+
+**Bundle manifest** (`shinyhub.toml`, travels with the deploy):
+
+```toml
+[app]
+render_seconds = 1.3
+```
+
+Valid values are `0` to `600`. Changes apply live through every surface: the
+limiter is rebuilt in place, with no restart and no dropped sessions.
+
+### Picking a value
+
+Time one cold page load of the app on an otherwise idle host and use the CPU
+time it burns, not the wall-clock time it takes. An app that spends 4 s
+waiting on a database query and 0.2 s rendering is paced at `0.2`, not `4`:
+waiting costs no CPU, and over-stating the cost throttles admission for no
+reason. Over-stating is the more common mistake and the one that shows up as
+users on the wait page while the host sits half idle.
+
+### Reading the advice
+
+Once pacing is on, `GET /api/apps/<slug>` carries a `render_pacing` block,
+which the dashboard and `shinyhub apps show` both render:
+
+```
+Pacing:      1.3s/render
+  paced for ~4 cores via cgroup-quota
+  suggested max sess/r: 4 (currently 40, assuming one render per session every 2s)
+```
+
+`cores_source` names what determined the core count: `config` (you set
+`server.render_capacity_cores`), `cgroup-quota` (a container CPU limit binds
+below the host's core count), or `affinity` (the cores the process may run
+on).
+
+The suggested cap is what the same host sustains for *steady* interaction:
+N sessions each triggering a render every couple of seconds demand
+`N × render_seconds / cadence` cores. It is advisory and deliberately
+conservative, and it prints only when your current cap exceeds it, so an
+app that is already tuned stays quiet. It assumes a fixed interaction
+cadence (2 s), which is aggressive for most real dashboards; treat it as an
+upper bound worth investigating, not a number to apply blindly.
+
+### When it is working
+
+Pacing is visible in the rejection rollup, on the app detail page and in
+`shinyhub apps show`, and as the `reason` label on
+`shinyhub_admission_rejects_total`:
+
+- `render-deferred` — a page load was sent to the wait page. Expected during
+  bursts. One patient browser re-polls every ~1.75 s, so this counts waiting,
+  not refusal.
+- `render-paced` — a session waited out the park window and was shed. This is
+  the one to alert on.
+
+Sustained `render-paced` means the host cannot render as fast as users
+arrive. Adding replicas does not help: replicas do not add CPU. Add cores,
+make the render cheaper (see [app performance](app-performance.md)), or
+accept the queue.
+
+See [metrics](metrics.md#data-plane-admission) for the full reason vocabulary,
+and `server.render_park_ttl` / `render_park_max_per_app` /
+`render_park_max_total` for how long and how many requests may park.
+
 ## Pre-warming
 
 By default a hibernated app restarts on demand: the first request after an idle

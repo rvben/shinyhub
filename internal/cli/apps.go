@@ -169,7 +169,15 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			AutoscaleMinReplicas    int     `json:"autoscale_min_replicas"`
 			AutoscaleMaxReplicas    int     `json:"autoscale_max_replicas"`
 			AutoscaleTarget         float64 `json:"autoscale_target"`
+			RenderSeconds           float64 `json:"render_seconds"`
 		} `json:"app"`
+		RenderPacing *struct {
+			EffectiveCores                        float64 `json:"effective_cores"`
+			CoresSource                           string  `json:"cores_source"`
+			SuggestedMaxSessionsPerReplica        int     `json:"suggested_max_sessions_per_replica"`
+			CurrentEffectiveMaxSessionsPerReplica int     `json:"current_effective_max_sessions_per_replica"`
+			CadenceAssumptionSeconds              float64 `json:"cadence_assumption_seconds"`
+		} `json:"render_pacing"`
 		EffectiveMaxSessionsPerReplica *int     `json:"effective_max_sessions_per_replica"`
 		EffectiveAutoscaleTarget       *float64 `json:"effective_autoscale_target"`
 		ReplicasStatus                 []struct {
@@ -269,6 +277,36 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			a.AutoscaleMinReplicas, a.AutoscaleMaxReplicas, target*100)
 	} else {
 		fmt.Fprintln(w, "Autoscale:   off")
+	}
+	// Render pacing is the admission gate's only dial, and its effect is invisible
+	// until a burst arrives, so it is reported on every app (like autoscale)
+	// rather than only when on. When the server sends its advisory block, the cap
+	// suggestion is printed too, but only when the app's current cap actually
+	// exceeds what this host sustains: an advisory that fires on a well-tuned app
+	// is one an operator learns to ignore. A current cap of 0 is unlimited, which
+	// exceeds any finite suggestion.
+	if a.RenderSeconds > 0 {
+		fmt.Fprintf(w, "Pacing:      %gs/render\n", a.RenderSeconds)
+		if rp := resp2.RenderPacing; rp != nil {
+			if rp.EffectiveCores > 0 {
+				src := ""
+				if rp.CoresSource != "" {
+					src = " via " + rp.CoresSource
+				}
+				fmt.Fprintf(w, "  paced for ~%g cores%s\n", rp.EffectiveCores, src)
+			}
+			cur := rp.CurrentEffectiveMaxSessionsPerReplica
+			if rp.SuggestedMaxSessionsPerReplica > 0 && (cur == 0 || rp.SuggestedMaxSessionsPerReplica < cur) {
+				current := fmt.Sprintf("%d", cur)
+				if cur == 0 {
+					current = "unlimited"
+				}
+				fmt.Fprintf(w, "  suggested max sess/r: %d (currently %s, assuming one render per session every %gs)\n",
+					rp.SuggestedMaxSessionsPerReplica, current, rp.CadenceAssumptionSeconds)
+			}
+		}
+	} else {
+		fmt.Fprintln(w, "Pacing:      off")
 	}
 	if rr := resp2.RejectsByReason; rr != nil && len(rr.Counts) > 0 {
 		mins := rr.WindowSeconds / 60
