@@ -119,8 +119,10 @@ func waitPage(title, msg, script string) string {
 
 // loadingScript reloads the page every 3 s up to MAX times (~60 s) and then
 // switches to an error state with a manual retry button. The per-path retry
-// count is stored in sessionStorage; a fresh navigation (not a reload) resets
-// it so users can revisit after a previous give-up.
+// count is stored in sessionStorage, and is discarded at both ends of a wait:
+// a fresh navigation (not a reload) starts a new one, and giving up ends one.
+// Between those two the count must survive, because the reloads that spend it
+// are the wait.
 const loadingScript = `(function(){
   var MAX = 20;
   var INTERVAL_MS = 3000;
@@ -132,11 +134,13 @@ const loadingScript = `(function(){
   var title = document.getElementById('shinyhub-title');
   var msg = document.getElementById('shinyhub-msg');
   var retry = document.getElementById('shinyhub-retry');
-  retry.addEventListener('click', function(){
-    sessionStorage.removeItem(key);
-    window.location.reload();
-  });
+  retry.addEventListener('click', function(){ window.location.reload(); });
   if (n >= MAX) {
+    // Terminal: this branch schedules no reload, so the counter has done its
+    // job and clearing it is what makes the NEXT start in this tab a real
+    // wait. A count left at MAX would make a later load give up on arrival,
+    // reporting a 60-second wait that never happened.
+    sessionStorage.removeItem(key);
     box.classList.add('error');
     title.textContent = 'App did not start';
     msg.textContent = 'Gave up after ' + (MAX * INTERVAL_MS / 1000) +
