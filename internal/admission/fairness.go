@@ -140,6 +140,20 @@ func (a *AppLimiter) TryAdmit(principal string) bool {
 	return a.Admit(principal) == Admitted
 }
 
+// SharedAvailable reports whether the app's shared bucket currently holds a
+// token, without consuming one and without touching any principal bucket. It
+// answers "is this app out of render capacity right now" for advisory callers
+// that must not spend capacity to ask.
+//
+// It deliberately ignores the per-principal stage. A read-only peek at a
+// principal bucket would have to create that bucket to answer, so an advisory
+// caller keyed on client IP would let a scanner mint a bucket per source
+// address and churn the bounded map, turning a read into eviction pressure on
+// the fairness state it is meant to observe.
+func (a *AppLimiter) SharedAvailable() bool {
+	return a.shared.Available()
+}
+
 // principalPacerLocked returns the pacer for principal, creating it (and
 // evicting the fullest bucket if at capacity) when absent. Caller holds a.mu.
 func (a *AppLimiter) principalPacerLocked(principal string) *Pacer {

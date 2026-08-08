@@ -66,19 +66,41 @@ func (p *Pacer) TryTake() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.refillLocked()
+	if p.tokens >= 1 {
+		p.tokens--
+		return true
+	}
+	return false
+}
+
+// Available reports whether at least one token is available, without consuming
+// one. It refills first, exactly as TryTake does: a bucket that has not been
+// touched since its last take holds a stale count, because the tokens earned
+// since then exist only as elapsed time until something advances the clock.
+// Refilling is the bucket catching up to the present, not a side effect a
+// caller can observe as a lost token.
+func (p *Pacer) Available() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.refillLocked()
+	return p.tokens >= 1
+}
+
+// refillLocked credits the tokens earned since the last refill, capped at
+// burst. Caller holds p.mu.
+func (p *Pacer) refillLocked() {
 	now := p.nowFn()
 	if p.last.IsZero() {
 		p.last = now
-	} else if elapsed := now.Sub(p.last).Seconds(); elapsed > 0 {
+		return
+	}
+	if elapsed := now.Sub(p.last).Seconds(); elapsed > 0 {
 		p.tokens += elapsed * p.rate
 		if p.tokens > p.burst {
 			p.tokens = p.burst
 		}
 		p.last = now
 	}
-	if p.tokens >= 1 {
-		p.tokens--
-		return true
-	}
-	return false
 }

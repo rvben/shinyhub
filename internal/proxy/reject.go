@@ -40,6 +40,14 @@ const (
 	// is shed to protect the sessions already connected. Also distinct from
 	// pool-saturated for the same reason.
 	ReasonCPUSaturation RejectReason = "cpu-saturation"
+	// ReasonRenderDeferred: a top-level page load was shown the wait page because
+	// the app had no render capacity free at that instant. Distinct from
+	// render-paced, which counts sessions actually refused: this one counts page
+	// loads deferred, took no token, and refused nothing a later attempt would
+	// have been granted. Keeping them apart matters because the deferred count is
+	// inflated by design (one paced visit re-polls every ~1.75 s), so folding it
+	// into render-paced would make "sessions refused" unreadable.
+	ReasonRenderDeferred RejectReason = "render-deferred"
 )
 
 // rejectSentinel is the metrics key substituted for any slug that is not a
