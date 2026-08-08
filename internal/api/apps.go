@@ -269,6 +269,17 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		"redeploy_in_flight":                 s.isRedeployInFlight(slug),
 		"can_manage":                         canManage,
 	}
+	// render_pacing is the same advisory block PATCH returns, computed from the
+	// app's stored render_seconds. It is here so a client can show the cap
+	// suggestion on load rather than only as a side effect of saving: the
+	// dashboard's pacing control needs to tell an operator what the current
+	// setting implies before they change anything, and a suggestion that only
+	// appears after a write is a suggestion nobody sees until it is too late.
+	// Omitted when pacing is off, which is the same signal buildRenderPacingBlock
+	// gives PATCH.
+	if block := s.buildRenderPacingBlock(app.RenderSeconds, effectiveCap); block != nil {
+		envelope["render_pacing"] = block
+	}
 	// rejects_by_reason is a rolling 10-minute rollup of platform rejections for
 	// this app, keyed by reason. Omitted entirely when no proxy is wired or when
 	// the app has had no rejections in the window.

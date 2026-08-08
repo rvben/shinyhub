@@ -75,6 +75,82 @@ func TestPatchApp_RenderSecondsPersistsAndReturnsPacingBlock(t *testing.T) {
 	}
 }
 
+// TestGetApp_RenderPacingBlockPresenceFollowsSavedValue verifies that GET
+// carries the same advisory block PATCH returns, and only while pacing is on.
+//
+// The dashboard's pacing control needs the suggestion on LOAD, not merely as a
+// side effect of a write: a suggestion that first appears after saving is one
+// nobody sees until the change is already live. Its absence is equally
+// load-bearing, being the signal the control renders as "pacing is off".
+func TestGetApp_RenderPacingBlockPresenceFollowsSavedValue(t *testing.T) {
+	srv, store, _ := newInlineServerWithProxy(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	token := loginAsAdmin(t, srv)
+	createApp(t, srv, token, "my-app")
+
+	getEnvelope := func() map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/apps/my-app", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET: got %d, want 200: %s", rr.Code, rr.Body.String())
+		}
+		var env map[string]any
+		if err := json.NewDecoder(rr.Body).Decode(&env); err != nil {
+			t.Fatalf("decode GET: %v", err)
+		}
+		return env
+	}
+	patchRenderSeconds := func(v float64) {
+		t.Helper()
+		b, _ := json.Marshal(map[string]any{"render_seconds": v})
+		req := httptest.NewRequest(http.MethodPatch, "/api/apps/my-app", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PATCH render_seconds=%v: got %d: %s", v, rr.Code, rr.Body.String())
+		}
+	}
+
+	// A fresh app has render_seconds 0, so the block must be absent rather than
+	// present-and-zeroed: a zeroed block would render a cap suggestion derived
+	// from pacing that is not running.
+	if _, present := getEnvelope()["render_pacing"]; present {
+		t.Errorf("render_pacing present with render_seconds=0, want omitted")
+	}
+
+	patchRenderSeconds(1.3)
+	block, ok := getEnvelope()["render_pacing"].(map[string]any)
+	if !ok {
+		t.Fatalf("GET envelope missing render_pacing after enabling pacing: %v", getEnvelope())
+	}
+	if block["render_seconds"] != 1.3 {
+		t.Errorf("GET render_pacing.render_seconds = %v, want 1.3", block["render_seconds"])
+	}
+	// The advisory is only actionable if it carries the numbers the UI quotes:
+	// the suggested cap and the app's current effective one.
+	if suggested, ok := block["suggested_max_sessions_per_replica"].(float64); !ok || suggested < 1 {
+		t.Errorf("GET render_pacing.suggested_max_sessions_per_replica = %v, want >= 1", block["suggested_max_sessions_per_replica"])
+	}
+	if _, ok := block["current_effective_max_sessions_per_replica"].(float64); !ok {
+		t.Errorf("GET render_pacing missing current_effective_max_sessions_per_replica: %v", block)
+	}
+	if cadence, ok := block["cadence_assumption_seconds"].(float64); !ok || cadence <= 0 {
+		t.Errorf("GET render_pacing.cadence_assumption_seconds = %v, want > 0", block["cadence_assumption_seconds"])
+	}
+
+	// Turning pacing back off must withdraw the block, not leave a stale one.
+	patchRenderSeconds(0)
+	if _, present := getEnvelope()["render_pacing"]; present {
+		t.Errorf("render_pacing still present after pacing was turned off, want omitted")
+	}
+}
+
 // TestPatchApp_RenderSecondsRejectsNegative verifies a negative render_seconds
 // is rejected with 400 and never persisted.
 func TestPatchApp_RenderSecondsRejectsNegative(t *testing.T) {

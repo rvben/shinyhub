@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -241,6 +242,16 @@ func bootContractServer(t *testing.T) (host, token string) {
 
 	seedContractFixtures(t, store, cfg, dataDir, sysUser.ID)
 
+	// Drive one real rejection through the proxy so the rejects_by_reason rollup
+	// the schema declares is present in live output. The readiness probe for a
+	// registered-but-workerless pool is the cheapest production path that records
+	// under the app's own slug: an unregistered slug collapses to the sentinel key
+	// and would never reach `apps show demo`.
+	prx.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil))
+	if len(prx.RejectsByReason("demo", time.Minute)) == 0 {
+		t.Fatal("readiness probe recorded no rejection; the rejects_by_reason fixture is not producing the field it exists to cover")
+	}
+
 	ts := httptest.NewServer(srv.Router())
 	t.Cleanup(ts.Close)
 	return ts.URL, rawToken
@@ -297,6 +308,12 @@ func seedContractFixtures(t *testing.T, store *db.Store, cfg *config.Config, dat
 	}); err != nil {
 		t.Fatalf("insert schedule run: %v", err)
 	}
+
+	// Pace the fixture app so the render_pacing advisory block the schema declares
+	// is present in live output. Like worker_pool above, that block is emitted
+	// only in a specific state (render_seconds > 0), so an unpaced fixture would
+	// leave the declaration unverified.
+	mustNoErr(t, "set render_seconds", store.SetAppRenderSeconds(demo.ID, 1.3))
 
 	// Mark demo fleet-managed so `fleet status` returns it.
 	managedBy := "myfleet"

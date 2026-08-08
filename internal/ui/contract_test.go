@@ -989,6 +989,63 @@ func TestWorkerIsolationControlsWired(t *testing.T) {
 		"worker-isolation.js must export workerCapacityLine so it can be imported by app.js and unit-tested")
 }
 
+// TestRenderPacingControlWired guards the Configuration -> Render pacing
+// control, the dashboard surface for apps.render_seconds. Three wires carry it,
+// and each fails silently on its own:
+//
+//   - GET /api/apps/:slug must emit the envelope-level render_pacing block, and
+//     app.js must read it off the ENVELOPE. normalizeAppEnvelope folds only
+//     app-level fields, so reading app.render_pacing would be undefined forever
+//     and the advice line would silently degrade to the no-block wording.
+//   - the PATCH response's block must replace the stale one, or the advice keeps
+//     describing the value the operator just replaced.
+//   - the section must be registered with the dirty tracker, or Save stays
+//     disabled (it is hidden+disabled in the markup) and the control is inert.
+func TestRenderPacingControlWired(t *testing.T) {
+	assertContains(t, "app.js", "/static/views/render-pacing.js",
+		"app.js must import the render-pacing helper module")
+	assertContains(t, "app.js", "parseRenderSeconds",
+		"saveRenderPacing must validate through parseRenderSeconds so a blank field is rejected rather than persisted as 0 (pacing off)")
+	assertContains(t, "app.js", "renderPacingAdvice",
+		"app.js must render the advisory line through renderPacingAdvice so the mid-edit wording stays covered by unit tests")
+
+	// Populate path: the advisory is an ENVELOPE field, not an app column.
+	assertContains(t, "app.js", "envelope.render_pacing",
+		"populateGeneralTab must read render_pacing off the GET envelope (handleGetApp emits it alongside app, not on it)")
+	assertContains(t, "app.js", "app.render_seconds",
+		"populateGeneralTab must seed #render-seconds from app.render_seconds")
+	assertContains(t, "views/app-detail.js", "renderConfiguration(panels.configuration, app, ctx, body)",
+		"app-detail.js must pass the raw GET body into renderConfiguration, or the envelope-level render_pacing block never reaches the control")
+
+	// Save path: PATCH the single field and adopt the response's fresh advisory.
+	assertContains(t, "app.js", "render_seconds: parsed.value",
+		"saveRenderPacing must PATCH render_seconds with the parsed value")
+	assertContains(t, "app.js", "body.render_pacing",
+		"saveRenderPacing must adopt the PATCH response's render_pacing block, or the advice keeps describing the previous setting")
+	assertContains(t, "app.js", `registerSettingsSection('render'`,
+		"the render section must be registered with the dirty tracker, or its Save button never enables")
+
+	// HTML: the input, the advice slot, and the explicit-save controls.
+	assertContains(t, "index.html", `id="render-seconds"`,
+		"index.html must expose #render-seconds as the render cost input")
+	assertContains(t, "index.html", `id="render-pacing-advice"`,
+		"index.html must expose #render-pacing-advice as the slot renderPacingAdvice populates")
+	assertContains(t, "index.html", `id="render-save-btn"`,
+		"index.html must expose #render-save-btn for the explicit-save model every other settings section uses")
+	assertContains(t, "index.html", `id="render-dirty"`,
+		"index.html must expose #render-dirty so the unsaved-changes hint matches the other settings sections")
+	// The advice changes without a user gesture on the element (it updates as the
+	// operator types elsewhere in the section), so it must announce itself.
+	assertContains(t, "index.html", `id="render-pacing-advice" class="scaling-ceiling" aria-live="polite"`,
+		"the advice line must be an aria-live region, like the admission-ceiling helper it sits beside")
+
+	// The pure helper module must export what app.js and the unit tests import.
+	assertContains(t, "views/render-pacing.js", "export function parseRenderSeconds",
+		"render-pacing.js must export parseRenderSeconds so it can be imported by app.js and unit-tested")
+	assertContains(t, "views/render-pacing.js", "export function renderPacingAdvice",
+		"render-pacing.js must export renderPacingAdvice so it can be imported by app.js and unit-tested")
+}
+
 // assertFileContains reads an on-disk file (not embedded) by absolute path and
 // asserts it contains needle.
 func assertFileContains(t *testing.T, absPath, needle, contract string) {
