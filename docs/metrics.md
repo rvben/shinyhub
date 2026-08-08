@@ -68,6 +68,29 @@ series count.
 | `shinyhub_app_sessions` | gauge | `slug` | Active proxied sessions for an app, summed across live replicas (evaluated at scrape time). |
 | `shinyhub_app_sessions_limit` | gauge | `slug` | Admission ceiling for an app: the number of replicas that admit new sessions (live, not draining) times the per-replica session cap. Absent for uncapped apps, so `shinyhub_app_sessions / shinyhub_app_sessions_limit` is the saturation fraction wherever a cap applies. |
 
+The `reason` label is a closed vocabulary. The same value is returned on the
+`X-Shinyhub-Reject` response header, so a rejected request can be traced from the
+client back to this counter. Reasons differ in what they mean you should *do*,
+which is why they are not collapsed into one:
+
+| `reason` | What happened | Remedy |
+|---|---|---|
+| `unknown-slug` | No app with this slug is registered (404). | Nothing, unless you expected the app to exist. A rising rate is usually scanning. |
+| `pool-saturated` | Every replica is live and at its per-replica session cap. | Raise `--max-sessions-per-replica` and/or `--replicas`. This is the only scale-up signal here. |
+| `pool-degraded` | Fewer replicas are registered than configured, and the survivors are at cap. | Check replica health first. Adding capacity on top of a crash loop hides it. |
+| `app-not-ready` | The app has no replica that has completed a WebSocket handshake yet. | Nothing during a normal cold start. Sustained means the app is failing to come up. |
+| `memory-pressure` | The host is below `server.min_available_memory_mb`, so no new elastic worker may start. | Free host memory, lower per-app ceilings, or add hardware. |
+| `render-paced` | A new session was deferred because the app's render-admission bucket was empty, then shed after the park window. | Raise the app's `render_seconds` accuracy or add cores. More replicas do not help: they do not add CPU. |
+| `cpu-saturation` | The host CPU watermark is breached, so a new session was shed to protect connected ones. | Add cores or move apps off this host. |
+| `render-deferred` | A page load was shown the "Waiting for capacity" page because the app had no render capacity at that instant. | Same as `render-paced`. See the caveat below before alerting on it. |
+
+`render-deferred` counts **page loads deferred**, not sessions refused, and it is
+inflated by design: one waiting browser re-polls roughly every 1.75 s until
+capacity frees, so a single user can contribute dozens of increments. Use it to
+see *that* users are waiting; use `render-paced` to count sessions actually
+turned away. Alerting on `render-deferred` as if it were a refusal rate will
+page you for one patient user.
+
 Both session gauges are exported **per control-plane instance**, like every metric
 here. On a single-node deployment they are exact. In a clustered deployment,
 scrape every instance and aggregate in PromQL (`sum by (slug) (...)`) rather than

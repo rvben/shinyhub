@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -209,17 +210,96 @@ func (p *Proxy) watermarkAdmits() bool {
 	return wm == nil || wm.Admit()
 }
 
-// shedRender writes the 503 render-admission rejection and returns false so the
-// caller does not forward. It records the reject for the access log and metrics.
-// Retry-After advises the park TTL, rounded up to whole seconds with a floor of
-// 1, so the hint tracks the configured pacing window instead of a magic constant.
-func (p *Proxy) shedRender(rec http.ResponseWriter, slug string, reason RejectReason) bool {
-	p.recordReject(rec, slug, reason, true)
+// renderRetryAfter is the Retry-After advice, in whole seconds, for every
+// render-admission rejection. It tracks the configured park TTL rather than a
+// magic constant, rounded up with a floor of 1 because Retry-After has no
+// sub-second form and 0 would advise an immediate retry that is certain to fail.
+func renderRetryAfter() string {
 	retry := int((renderParkTTL + time.Second - 1) / time.Second)
 	if retry < 1 {
 		retry = 1
 	}
-	rec.Header().Set("Retry-After", strconv.Itoa(retry))
+	return strconv.Itoa(retry)
+}
+
+// shedRender writes the 503 render-admission rejection and returns false so the
+// caller does not forward. It records the reject for the access log and metrics.
+func (p *Proxy) shedRender(rec http.ResponseWriter, slug string, reason RejectReason) bool {
+	p.recordReject(rec, slug, reason, true)
+	rec.Header().Set("Retry-After", renderRetryAfter())
 	http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
 	return false
+}
+
+// isPageLoad reports whether r is a top-level browser navigation - the request
+// that would render the app shell - as opposed to a sub-resource, an XHR, or
+// the WebSocket upgrade.
+//
+// The distinction is load-bearing, not cosmetic: the capacity gate answers with
+// an HTML page, and handing that page to a stylesheet request, an image, or a
+// fetch() expecting JSON corrupts the very page the gate exists to protect,
+// turning a brief wait into a broken app.
+//
+// Sec-Fetch-Dest is authoritative when present (every current browser sends it
+// on every request, and it is a forbidden header name, so a page cannot forge
+// it). Clients that omit it fall back to Accept, which in practice distinguishes
+// a document request from a sub-resource: browsers ask for text/html on
+// navigations and for the specific type otherwise. A client matching neither
+// signal - curl, a health check, the readiness probe - is treated as not a page
+// load and passes through untouched, which is the safe default: the gate is
+// advisory, so declining to fire costs nothing but firing wrongly costs a
+// mangled response.
+func isPageLoad(r *http.Request) bool {
+	if r.Method != http.MethodGet || isWSUpgrade(r) {
+		return false
+	}
+	if dest := r.Header.Get("Sec-Fetch-Dest"); dest != "" {
+		return strings.EqualFold(dest, "document")
+	}
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html")
+}
+
+// renderGateBlocks reports whether slug is out of render capacity at this
+// instant, for a request that is a top-level page load.
+//
+// It is a read-only mirror of chargeRenderAdmission's fast path, and its whole
+// point is that it stays read-only: it takes no token, so a page load it defers
+// consumes nothing, and the session that page load later opens is charged
+// exactly once, at the WebSocket upgrade, as if the gate did not exist. That is
+// what makes the gate advisory - it can never refuse a session that the charge
+// point would have admitted.
+//
+// It checks the watermark and the app's shared bucket, in that order, mirroring
+// the charge point. It deliberately does not consult the per-principal bucket:
+// see AppLimiter.SharedAvailable for why a read-only principal peek would be
+// self-defeating.
+func (p *Proxy) renderGateBlocks(r *http.Request, slug string) bool {
+	if !isPageLoad(r) {
+		return false
+	}
+	lim := p.appLimiter(slug)
+	if lim == nil {
+		return false // pacing disabled for this app
+	}
+	if !p.watermarkAdmits() {
+		return true
+	}
+	return !lim.SharedAvailable()
+}
+
+// serveRenderWaitPage answers a deferred page load with the capacity wait page.
+//
+// 503 rather than 200 for three reasons: it is the honest status for "up but
+// momentarily busy"; it keeps the response out of shared caches and out of
+// search indexes, which a 200 splash would poison; and it lets a non-browser
+// client tell this apart from the app's own content without parsing HTML. The
+// browser still renders the body, so the auto-refresh works exactly as on the
+// starting and deploying pages.
+//
+// MUST NOT be called while holding p.mu: recordReject takes the reject-counter
+// mutex and may call an injected recorder.
+func (p *Proxy) serveRenderWaitPage(rec http.ResponseWriter, slug string) {
+	p.recordReject(rec, slug, ReasonRenderDeferred, true)
+	rec.Header().Set("Retry-After", renderRetryAfter())
+	writeWaitPage(rec, http.StatusServiceUnavailable, waitingPage)
 }

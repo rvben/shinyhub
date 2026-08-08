@@ -119,8 +119,10 @@ func waitPage(title, msg, script string) string {
 
 // loadingScript reloads the page every 3 s up to MAX times (~60 s) and then
 // switches to an error state with a manual retry button. The per-path retry
-// count is stored in sessionStorage; a fresh navigation (not a reload) resets
-// it so users can revisit after a previous give-up.
+// count is stored in sessionStorage, and is discarded at both ends of a wait:
+// a fresh navigation (not a reload) starts a new one, and giving up ends one.
+// Between those two the count must survive, because the reloads that spend it
+// are the wait.
 const loadingScript = `(function(){
   var MAX = 20;
   var INTERVAL_MS = 3000;
@@ -132,11 +134,13 @@ const loadingScript = `(function(){
   var title = document.getElementById('shinyhub-title');
   var msg = document.getElementById('shinyhub-msg');
   var retry = document.getElementById('shinyhub-retry');
-  retry.addEventListener('click', function(){
-    sessionStorage.removeItem(key);
-    window.location.reload();
-  });
+  retry.addEventListener('click', function(){ window.location.reload(); });
   if (n >= MAX) {
+    // Terminal: this branch schedules no reload, so the counter has done its
+    // job and clearing it is what makes the NEXT start in this tab a real
+    // wait. A count left at MAX would make a later load give up on arrival,
+    // reporting a 60-second wait that never happened.
+    sessionStorage.removeItem(key);
     box.classList.add('error');
     title.textContent = 'App did not start';
     msg.textContent = 'Gave up after ' + (MAX * INTERVAL_MS / 1000) +
@@ -175,13 +179,69 @@ var deployingPage = waitPage("Deploying app…",
 	"A deployment is in progress. This can take a few minutes. This page will refresh automatically.",
 	deployingScript)
 
+// waitingScript is the render-capacity counterpart of loadingScript. Three
+// things differ, each for its own reason.
+//
+// It keys its budget on 'shinyhub-capacity:' rather than 'shinyhub-retry:', so
+// a client held at the capacity gate does not spend the cold-boot budget. The
+// two waits are unrelated: an app that is up and paced is not an app that
+// failed to start, and burning the starting budget here would make a later
+// genuine cold boot give up early. For the same reason it clears the starting
+// budget outright, since being served this page proves the app is up and any
+// starting retries counted against it are stale.
+//
+// It retries at 1.5 s plus 0-500 ms of jitter instead of a flat 3 s. Paced
+// clients arrive as a crowd by construction (they are the overflow of one
+// burst), and a fixed interval would re-converge that crowd into a synchronized
+// retry every cycle, re-creating the burst the pacer just absorbed. The jitter
+// spreads them across the window.
+//
+// It bounds the wait by elapsed time rather than by a retry count, because a
+// jittered interval makes a count a poor proxy for duration, and the give-up
+// copy quotes that duration. Like the retry count, the deadline is discarded
+// at both ends of a wait and survives only the reloads in between.
+const waitingScript = `(function(){
+  var BUDGET_MS = 60000;
+  var INTERVAL_MS = 1500;
+  var JITTER_MS = 500;
+  var key = 'shinyhub-capacity:' + window.location.pathname;
+  sessionStorage.removeItem('shinyhub-retry:' + window.location.pathname);
+  var nav = (performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || {};
+  if (nav.type !== 'reload') { sessionStorage.removeItem(key); }
+  var box = document.getElementById('shinyhub-box');
+  var title = document.getElementById('shinyhub-title');
+  var msg = document.getElementById('shinyhub-msg');
+  var retry = document.getElementById('shinyhub-retry');
+  retry.addEventListener('click', function(){ window.location.reload(); });
+  var deadline = parseInt(sessionStorage.getItem(key) || '0', 10);
+  if (!deadline) {
+    deadline = Date.now() + BUDGET_MS;
+    sessionStorage.setItem(key, String(deadline));
+  }
+  if (Date.now() >= deadline) {
+    // Terminal: this branch schedules no reload, so the budget has done its
+    // job and clearing it is what makes the NEXT wait in this tab a real
+    // wait. An expired deadline left behind would make a later gated load
+    // give up on arrival, reporting a 60-second wait that never happened.
+    sessionStorage.removeItem(key);
+    box.classList.add('error');
+    title.textContent = 'Still at capacity';
+    msg.textContent = 'No render capacity freed up in ' + (BUDGET_MS / 1000) +
+      ' seconds. The app is running normally, it is just busy.';
+    retry.style.display = 'inline-block';
+    return;
+  }
+  setTimeout(function(){ window.location.reload(); },
+    INTERVAL_MS + Math.floor(Math.random() * JITTER_MS));
+})();`
+
 // waitingPage is served when an app is up but at its render-admission limit: the
-// box is momentarily out of render capacity, not starting or deploying. It
-// reuses loadingScript's capped auto-reload so a paced client retries and lands
-// once a token frees, then gives up with a manual retry after ~60 s.
+// box is momentarily out of render capacity, not starting or deploying. Its copy
+// says so, because telling a user their app failed to deploy when it is running
+// and merely busy sends them to debug a deployment that is fine.
 var waitingPage = waitPage("Waiting for capacity…",
 	"This app is momentarily at capacity. This page will refresh automatically.",
-	loadingScript)
+	waitingScript)
 
 // cookiePrefix is the prefix for the sticky-session cookie name.
 // The full cookie name is cookiePrefix + slug (e.g. "shinyhub_rep_myapp").
@@ -207,6 +267,12 @@ const LoadingPageSentinel = "Starting app"
 // LoadingPageSentinel: always present in the deploying wait page and in
 // neither of the other miss pages.
 const DeployingPageSentinel = "Deploying app"
+
+// WaitingPageSentinel is the waitingPage counterpart of LoadingPageSentinel:
+// always present in the render-capacity wait page and in neither of the other
+// wait pages. Tests assert on it to tell "busy" apart from "starting", which
+// the two pages otherwise render near-identically.
+const WaitingPageSentinel = "Waiting for capacity"
 
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
@@ -934,6 +1000,25 @@ func (p *Proxy) getAppStatusLookup() func(string) (string, string) {
 	return fn
 }
 
+// writeWaitPage writes one of the three auto-refreshing wait pages (loading,
+// deploying, waiting-for-capacity).
+//
+// Cache-Control: no-store is not hygiene here, it is required for correctness.
+// Two of these are served with 200, which RFC 9111 lists as heuristically
+// cacheable, so a response carrying no freshness information at all may be
+// stored and replayed by any shared cache or by the browser's back/forward
+// cache. The body is a page whose entire purpose is to stop being true: a
+// cached "Starting app…" survives the app starting, and the client then
+// refreshes into its own cached copy forever, never reaching the app that is by
+// then up. The terminal crashed/stopped pages do not need this, because 503 is
+// not heuristically cacheable.
+func writeWaitPage(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	w.Write([]byte(body)) //nolint:errcheck
+}
+
 // serveMissPage responds to a request for a slug with no live backend. A
 // crashed or stopped app gets a clear, static status page so the user sees why
 // it is unavailable; an app with a deployment in flight gets the deploying
@@ -961,18 +1046,14 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(s
 			// wake trigger itself: on the miss path holdForWake already fired
 			// it, and on the upstream-error path dead-replica recovery belongs
 			// to the watchdog.
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(deployingPage)) //nolint:errcheck
+			writeWaitPage(w, http.StatusOK, deployingPage)
 			return
 		}
 	}
 	if trigger != nil {
 		go trigger(slug)
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(loadingPage)) //nolint:errcheck
+	writeWaitPage(w, http.StatusOK, loadingPage)
 }
 
 // SetSlugExists registers a synchronous predicate that the proxy uses to
@@ -1997,6 +2078,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Pool is populated; fall through to the routing path below while still
 		// holding p.mu.RLock (matching the normal routing path).
+	}
+
+	// Render-capacity gate. Deliberately the LAST thing between a request and the
+	// routing path, because every branch above answers a question this one cannot:
+	// an unknown, crashed, stopped or deploying app is not "busy", and neither is
+	// a cold boot or a wake. Telling a user their app is at capacity while it is
+	// actually starting sends them to shed load that would not have helped.
+	//
+	// It runs only once the pool is known populated, so by construction it fires
+	// only for an app that is up and routable and merely out of render tokens.
+	// It binds no slot, spawns no worker and holds no goroutine: the check is
+	// arithmetic and the response is a static page, so a deferred page load costs
+	// the server strictly less than the render it defers.
+	if p.renderGateBlocks(r, slug) {
+		p.mu.RUnlock()
+		p.serveRenderWaitPage(rec, slug)
+		return
 	}
 
 	// Elastic path: demand-driven per-client routing (per_session or grouped mode).
