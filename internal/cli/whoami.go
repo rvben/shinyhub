@@ -17,7 +17,12 @@ func newWhoamiCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "whoami",
 		Short: "Show the current login: username, role, and server",
-		Args:  cobra.NoArgs,
+		Long: `Whoami asks the current server who the saved credential authenticates as.
+
+It needs the server to answer, so it reports a real role rather than a decoded
+guess. To see which servers are saved without contacting any of them - the
+question that matters when a server is down - use ` + "`shinyhub hosts`" + `.`,
+		Args: cobra.NoArgs,
 	}
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -33,7 +38,11 @@ func newWhoamiCmd() *cobra.Command {
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			return err
+			// Name the server that could not be reached. The whole point of
+			// whoami is "which server am I on", and an unadorned dial error
+			// answers everything except that.
+			return networkErr(fmt.Sprintf("contact %s: %v", cfg.Host, err),
+				"run `shinyhub hosts` to see saved servers, or `shinyhub use <name>` to switch to one that is up", err)
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)

@@ -72,14 +72,52 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"worker": {Mutating: mut, Streaming: true},
 
 	// ── auth ─────────────────────────────────────────────────────────────────
-	"login":  {Mutating: mut},
-	"logout": {Mutating: mut},
+	"login": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "added when the server was not saved before, refreshed when its credential was replaced"},
+		{Name: "host", Type: "string", Desc: "Normalized server URL the credential was saved under"},
+		{Name: "name", Type: "string", Desc: "Short alias for this server, usable as `shinyhub use <name>`; empty when unset"},
+		{Name: "user", Type: "string", Desc: "Username the saved credential authenticates as; empty when the server did not report one"},
+		{Name: "current", Type: "boolean", Desc: "Always true: logging in makes that server current"},
+		{Name: "switched_from", Type: "string", Desc: "Server that was current before this login; empty when it did not change"},
+		{Name: "credentials_path", Type: "string", Desc: "File the credential was written to"},
+	}},
+	"logout": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "logged_out"},
+		{Name: "host", Type: "string", Desc: "Server signed out of; absent with --all, which reports hosts instead"},
+		{Name: "hosts", Type: "array", Desc: "Servers signed out of; present only with --all"},
+		{Name: "current_host", Type: "string", Desc: "Server now current; empty when none are left"},
+		{Name: "remaining_hosts", Type: "number", Desc: "Count of servers still saved"},
+		{Name: "credentials_removed", Type: "boolean", Desc: "Whether the credentials file itself was deleted (true only when no servers remain)"},
+	}},
 	"whoami": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "ok"},
 		{Name: "username", Type: "string"},
 		{Name: "role", Type: "string"},
 		{Name: "host", Type: "string", Desc: "Server URL the credentials target"},
 		{Name: "can_create_apps", Type: "boolean"},
+	}},
+	"hosts": {Mutating: ro,
+		OutputFields: []fieldSpec{
+			{Name: "host", Type: "string", Desc: "Normalized server URL"},
+			{Name: "name", Type: "string", Desc: "Short alias, usable as `shinyhub use <name>`; empty when unset"},
+			{Name: "user", Type: "string", Desc: "Username the saved credential authenticates as; empty when not recorded"},
+			{Name: "current", Type: "boolean", Desc: "Whether commands target this server by default"},
+			{Name: "saved_at", Type: "string", Desc: "RFC 3339 timestamp of the last login to this server"},
+		},
+		EnvelopeFields: []fieldSpec{
+			{Name: "items", Type: "array"},
+			{Name: "total", Type: "number"},
+			{Name: "limit", Type: "number"},
+			{Name: "offset", Type: "number"},
+			{Name: "current_host", Type: "string", Desc: "Server commands target by default; empty when none is selected"},
+		},
+		Notes: "Reads the local credentials file only; contacts no server, so it still answers when every saved server is down. Tokens are never printed.",
+	},
+	"use": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "switched, or unchanged when that server was already current"},
+		{Name: "host", Type: "string", Desc: "Normalized server URL now current"},
+		{Name: "name", Type: "string", Desc: "Short alias for that server; empty when unset"},
+		{Name: "user", Type: "string", Desc: "Username the saved credential authenticates as; empty when not recorded"},
 	}},
 
 	// ── deploy ───────────────────────────────────────────────────────────────

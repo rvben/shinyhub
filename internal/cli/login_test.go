@@ -23,7 +23,7 @@ func TestVerifyToken_Unauthorized(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := verifyToken(srv.URL, "bad_token")
+	_, err := verifyToken(srv.URL, "bad_token")
 	if err == nil {
 		t.Fatal("expected error for 401, got nil")
 	}
@@ -39,7 +39,7 @@ func TestVerifyToken_Forbidden(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if err := verifyToken(srv.URL, "shk_forbidden"); err == nil {
+	if _, err := verifyToken(srv.URL, "shk_forbidden"); err == nil {
 		t.Fatal("expected error for 403, got nil")
 	}
 }
@@ -54,8 +54,14 @@ func TestVerifyToken_OK(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if err := verifyToken(srv.URL, "shk_good"); err != nil {
+	user, err := verifyToken(srv.URL, "shk_good")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	// The same round-trip that verifies the token reports who it belongs to, so
+	// `shinyhub hosts` can name the user without a second request.
+	if user != "admin" {
+		t.Errorf("verifyToken returned user %q, want %q from /api/auth/me", user, "admin")
 	}
 }
 
@@ -86,6 +92,9 @@ func TestRunLogin_PromptsForPasswordWhenStdinIsTTY(t *testing.T) {
 	// Redirect the config write to a temp dir so the test doesn't clobber
 	// the developer's real ~/.shinyhub/config.yaml.
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHINYHUB_CREDENTIALS", "")
+	t.Setenv("SHINYHUB_CONFIG", "")
+	configPathOverride = ""
 
 	// Stub the tty + ReadPassword seams.
 	origIsTTY, origReadPw := isStdinTTY, readPassword
@@ -124,6 +133,9 @@ func TestRunLogin_NoPromptWhenStdinIsPipe(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHINYHUB_CREDENTIALS", "")
+	t.Setenv("SHINYHUB_CONFIG", "")
+	configPathOverride = ""
 
 	origIsTTY, origReadPw := isStdinTTY, readPassword
 	t.Cleanup(func() { isStdinTTY, readPassword = origIsTTY, origReadPw })
@@ -183,6 +195,9 @@ func TestRunLogin_PromptsRouteThroughCobraStreams(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHINYHUB_CREDENTIALS", "")
+	t.Setenv("SHINYHUB_CONFIG", "")
+	configPathOverride = ""
 
 	origIsTTY, origReadPw := isStdinTTY, readPassword
 	t.Cleanup(func() { isStdinTTY, readPassword = origIsTTY, origReadPw })
@@ -219,19 +234,32 @@ func TestRunLogin_PromptsRouteThroughCobraStreams(t *testing.T) {
 		t.Errorf("stderr should contain `Password: ` prompt; got %q", errOut)
 	}
 
-	// Stdout must NOT carry the prompts and MUST carry the success message.
+	// Stdout must NOT carry the prompts and MUST carry the machine-readable
+	// result. Stdout is not a terminal under `go test`, so login renders the
+	// standard action envelope rather than prose; asserting on the envelope is
+	// what a caller piping login into another command actually depends on.
 	out := stdout.String()
 	if strings.Contains(out, "Username: ") || strings.Contains(out, "Password: ") {
 		t.Errorf("stdout must not contain prompt text (would corrupt downstream pipes); got %q", out)
 	}
-	if !strings.Contains(out, "Logged in.") {
-		t.Errorf("stdout should contain the `Logged in.` success message; got %q", out)
+	var res struct {
+		Status string `json:"status"`
+		Host   string `json:"host"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("stdout should be the JSON action envelope; got %q (%v)", out, err)
+	}
+	if res.Status != "added" {
+		t.Errorf("status = %q, want %q for a server not previously saved", res.Status, "added")
+	}
+	if res.Host != srv.URL {
+		t.Errorf("host = %q, want %q", res.Host, srv.URL)
 	}
 }
 
 func TestVerifyToken_ServerDown(t *testing.T) {
 	// Use a port unlikely to be listening.
-	err := verifyToken("http://127.0.0.1:1", "shk_test")
+	_, err := verifyToken("http://127.0.0.1:1", "shk_test")
 	if err == nil {
 		t.Fatal("expected error when server is unreachable, got nil")
 	}

@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -43,11 +41,18 @@ func silenceUsageOnError(cmd *cobra.Command) {
 // "use the default path (or SHINYHUB_CREDENTIALS / SHINYHUB_CONFIG)".
 var configPathOverride string
 
+// hostFlagOverride is set by the --host persistent flag: a one-off "run this
+// against that server" that does not change the saved current host. The value
+// is a selector, so it accepts either a saved host's name or a full URL.
+var hostFlagOverride string
+
 // AddCommandsTo registers every CLI subcommand onto the supplied root command
 // and attaches global persistent flags shared by all subcommands.
 func AddCommandsTo(root *cobra.Command) {
 	root.PersistentFlags().StringVar(&configPathOverride, "config", "",
 		"Path to client credentials file (overrides $SHINYHUB_CREDENTIALS, $SHINYHUB_CONFIG, and the default)")
+	root.PersistentFlags().StringVar(&hostFlagOverride, "host", "",
+		"Saved host name or server URL to target for this command (overrides the current host; does not change it)")
 	root.PersistentFlags().StringVarP(&outputFlagValue, "output", "o", "",
 		"Output format: table, json, or ndjson (default: table on a terminal, json/ndjson when piped)")
 	root.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false,
@@ -56,6 +61,8 @@ func AddCommandsTo(root *cobra.Command) {
 		newLoginCmd(),
 		newLogoutCmd(),
 		newWhoamiCmd(),
+		newHostsCmd(),
+		newUseCmd(),
 		newDeployCmd(),
 		newAppsCmd(),
 		newTokensCmd(),
@@ -103,38 +110,18 @@ func configPath() string {
 	return filepath.Join(home, ".config", "shinyhub", "config.json")
 }
 
-// loadConfig returns the effective credentials. The on-disk file is the
-// baseline; SHINYHUB_HOST and SHINYHUB_TOKEN env vars override individual
-// fields so a one-off command can target a different server (or use a CI
-// token) without clobbering the saved config. If the env vars supply both
-// fields the on-disk file is not required.
+// loadConfig returns the credentials for the server this command targets. The
+// server is chosen first (--host, then SHINYHUB_HOST, then the saved current
+// host) and the token is then read from that server's own entry, so a token is
+// only ever sent to the server it was issued by. SHINYHUB_TOKEN still overrides
+// the stored token, which is the CI path: host plus token from the environment
+// needs no credentials file at all.
 func loadConfig() (*cliConfig, error) {
-	cfg := cliConfig{
-		Host:  os.Getenv("SHINYHUB_HOST"),
-		Token: os.Getenv("SHINYHUB_TOKEN"),
-	}
-	f, err := os.Open(configPath())
+	st, err := loadStore()
 	if err != nil {
-		if cfg.Host != "" && cfg.Token != "" {
-			return &cfg, nil
-		}
-		return nil, fmt.Errorf("not logged in — run `shinyhub login` first")
-	}
-	defer f.Close()
-	var fileCfg cliConfig
-	if err := json.NewDecoder(f).Decode(&fileCfg); err != nil {
 		return nil, err
 	}
-	if cfg.Host == "" {
-		cfg.Host = fileCfg.Host
-	}
-	if cfg.Token == "" {
-		cfg.Token = fileCfg.Token
-	}
-	if cfg.Host == "" || cfg.Token == "" {
-		return nil, fmt.Errorf("incomplete credentials at %s — re-run `shinyhub login`", configPath())
-	}
-	return &cfg, nil
+	return st.resolve(hostFlagOverride, os.Getenv("SHINYHUB_HOST"), os.Getenv("SHINYHUB_TOKEN"))
 }
 
 // authHeader returns the correct Authorization header value for the stored
@@ -176,15 +163,20 @@ func looksLikeJWT(token string) bool {
 	return strings.HasPrefix(parts[0], "eyJ")
 }
 
+// saveConfig stores one server's credentials and makes it the current host,
+// leaving every other saved host intact. It is the single-host entry point onto
+// the multi-host store; use saveNamedConfig when the caller also has an alias.
 func saveConfig(cfg *cliConfig) error {
-	path := configPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	return saveNamedConfig(cfg, "", "")
+}
+
+// saveNamedConfig is saveConfig with the optional alias and the username the
+// credential belongs to, so `shinyhub hosts` can report both without a request.
+func saveNamedConfig(cfg *cliConfig, name, user string) error {
+	st, err := loadStore()
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return json.NewEncoder(f).Encode(cfg)
+	st.setCredential(normalizeHost(cfg.Host), name, cfg.Token, user)
+	return saveStore(st)
 }

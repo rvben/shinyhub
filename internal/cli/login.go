@@ -20,6 +20,7 @@ import (
 // or shuffled test runs cannot leak flag values between each other.
 type loginFlags struct {
 	host     string
+	name     string
 	token    string
 	username string
 	password string
@@ -27,34 +28,57 @@ type loginFlags struct {
 
 // newLoginCmd builds a fresh login command each time it is called, with its
 // flags bound to a per-instance loginFlags value.
+//
+// login declares its own --host rather than inheriting the root persistent one:
+// the root flag means "target this server for one command", while here the host
+// is the server being signed in to and saved. Cobra resolves the local flag for
+// this command, so the two never collide.
 func newLoginCmd() *cobra.Command {
 	f := &loginFlags{}
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Authenticate with a ShinyHub server",
+		Long: `Login authenticates with a ShinyHub server and saves the credential under
+that server's URL, keeping any other servers you are signed in to. The server
+you log in to becomes the current one.
+
+Omit --host to re-authenticate with the current server. Give --name to label a
+server so you can switch to it with ` + "`shinyhub use <name>`" + `.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runLogin(cmd, f)
 		},
 	}
-	cmd.Flags().StringVar(&f.host, "host", "", "ShinyHub server URL (e.g. https://shiny.example.com)")
+	cmd.Flags().StringVar(&f.host, "host", "", "ShinyHub server URL (e.g. https://shiny.example.com); defaults to the current host")
+	cmd.Flags().StringVar(&f.name, "name", "", "Short name for this server, usable as `shinyhub use <name>`")
 	cmd.Flags().StringVar(&f.token, "token", "", "API token (skips username/password)")
 	cmd.Flags().StringVar(&f.username, "username", "", "Username")
 	cmd.Flags().StringVar(&f.password, "password", "", "Password")
-	_ = cmd.MarkFlagRequired("host")
 	return cmd
 }
 
 func runLogin(cmd *cobra.Command, f *loginFlags) error {
+	st, err := loadStore()
+	if err != nil {
+		return err
+	}
+	host, err := loginTargetHost(st, f.host)
+	if err != nil {
+		return err
+	}
+	f.host = host
+	if err := validateHostName(st, host, f.name); err != nil {
+		return err
+	}
+
 	if f.token != "" {
-		// Verify the token is accepted by the server before persisting it.
-		if err := verifyToken(f.host, f.token); err != nil {
+		// Verify the token is accepted by the server before persisting it. The
+		// same round-trip reports who the token belongs to, so the saved entry
+		// can name its user without a second request.
+		user, err := verifyToken(f.host, f.token)
+		if err != nil {
 			return fmt.Errorf("token rejected by server: %w", err)
 		}
-		if err := saveConfig(&cliConfig{Host: f.host, Token: f.token}); err != nil {
-			return err
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Logged in. Saved credentials to %s\n", configPath())
-		return nil
+		return finishLogin(cmd, st, f, f.token, user)
 	}
 
 	// Prompt for missing fields when stdin is a terminal. Without this the
@@ -110,11 +134,96 @@ func runLogin(cmd *cobra.Command, f *loginFlags) error {
 	if result.Token == "" {
 		return fmt.Errorf("server returned empty token")
 	}
-	if err := saveConfig(&cliConfig{Host: f.host, Token: result.Token}); err != nil {
+	return finishLogin(cmd, st, f, result.Token, f.username)
+}
+
+// loginTargetHost resolves which server login signs in to: the --host value
+// when given, otherwise the current host. Re-authenticating with the server you
+// are already on is the common case, so requiring --host every time only forces
+// the URL to be retyped; requiring it when nothing is saved is the opposite,
+// because there is nothing to infer.
+func loginTargetHost(st *credentialStore, hostFlag string) (string, error) {
+	hostFlag = strings.TrimSpace(hostFlag)
+	if hostFlag == "" {
+		if st.CurrentHost == "" {
+			return "", validationErr("no server to log in to",
+				"pass --host <url>, e.g. --host https://shinyhub.example.com")
+		}
+		return st.CurrentHost, nil
+	}
+	if !hasScheme(hostFlag) {
+		return "", validationErr(fmt.Sprintf("--host %q is not a usable server URL", hostFlag),
+			"include a scheme, e.g. https://shinyhub.example.com")
+	}
+	return normalizeHost(hostFlag), nil
+}
+
+// validateHostName rejects a --name that could not be used as a selector or
+// that already points somewhere else. A name silently rebinding to a second
+// server would make `shinyhub use <name>` target whichever one was saved last.
+func validateHostName(st *credentialStore, host, name string) error {
+	if name == "" {
+		return nil
+	}
+	if strings.ContainsAny(name, " \t\r\n") {
+		return validationErr(fmt.Sprintf("--name %q may not contain whitespace", name),
+			"use a short single word, e.g. --name prod")
+	}
+	if looksLikeURL(name) {
+		return validationErr(fmt.Sprintf("--name %q looks like a URL", name),
+			"names must not contain `://`; a name is the short alias for a URL, e.g. --name prod")
+	}
+	if owner, taken := st.nameOwner(name); taken && owner != host {
+		return validationErr(fmt.Sprintf("--name %q is already used by %s", name, owner),
+			"choose a different name, or re-run `shinyhub login --host "+owner+" --name <other>` to rename that entry")
+	}
+	return nil
+}
+
+// finishLogin saves the credential under its own host and reports what changed:
+// whether the server was added or its credential refreshed, and whether the
+// current host moved. Naming the outcome is the point - the previous
+// single-slot file replaced a different server's credential with the same
+// "Logged in" message, so the one case worth noticing looked exactly like the
+// routine one.
+func finishLogin(cmd *cobra.Command, st *credentialStore, f *loginFlags, token, user string) error {
+	_, existed := st.Hosts[f.host]
+	previous := st.CurrentHost
+
+	st.setCredential(f.host, f.name, token, user)
+	if err := saveStore(st); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Logged in. Saved credentials to %s\n", configPath())
-	return nil
+	saved := st.Hosts[f.host]
+
+	status := "refreshed"
+	if !existed {
+		status = "added"
+	}
+	switchedFrom := ""
+	if previous != "" && previous != f.host {
+		switchedFrom = previous
+	}
+
+	var prose string
+	switch {
+	case switchedFrom != "":
+		prose = fmt.Sprintf("Logged in to %s. Saved credentials to %s; current host was %s, other saved hosts are unchanged.",
+			st.label(f.host), configPath(), switchedFrom)
+	case existed:
+		prose = fmt.Sprintf("Logged in to %s. Refreshed credentials in %s", st.label(f.host), configPath())
+	default:
+		prose = fmt.Sprintf("Logged in to %s. Saved credentials to %s", st.label(f.host), configPath())
+	}
+
+	return renderAction(cmd, status, map[string]any{
+		"host":             f.host,
+		"name":             saved.Name,
+		"user":             saved.User,
+		"current":          true,
+		"switched_from":    switchedFrom,
+		"credentials_path": configPath(),
+	}, prose)
 }
 
 // Indirection seams so tests can stub TTY-only behaviour without faking a real
@@ -168,24 +277,34 @@ func promptPassword(w io.Writer, prompt string) (string, error) {
 }
 
 // verifyToken does a GET /api/auth/me round-trip to confirm the token is
-// accepted by the server before it is persisted to the config file.
-func verifyToken(host, token string) error {
+// accepted by the server before it is persisted to the config file, and returns
+// the username it authenticates as. An unreadable or unexpected body is not an
+// error: the token is verified by the status code, and the username is only
+// used to label the saved entry. It comes back empty rather than guessed, so
+// `shinyhub hosts` shows an unknown user as unknown.
+func verifyToken(host, token string) (string, error) {
 	req, err := http.NewRequest("GET", host+"/api/auth/me", nil)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader(token))
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("connect to server: %w", err)
+		return "", fmt.Errorf("connect to server: %w", err)
 	}
 	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		out, _ := io.ReadAll(resp.Body)
-		return &httpStatusError{
+		return "", &httpStatusError{
 			Status: resp.StatusCode,
 			msg:    fmt.Sprintf("server returned %s: %s", resp.Status, out),
 		}
 	}
-	return nil
+	var me struct {
+		User struct {
+			Username string `json:"username"`
+		} `json:"user"`
+	}
+	_ = json.Unmarshal(out, &me)
+	return me.User.Username, nil
 }
