@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"path/filepath"
@@ -22,13 +23,32 @@ func TestConfigPath_UsesShinyhubDir(t *testing.T) {
 
 func TestLoadConfig_ErrorMentionsShinyhub(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHINYHUB_HOST", "")
+	t.Setenv("SHINYHUB_TOKEN", "")
+	t.Setenv("SHINYHUB_CREDENTIALS", "")
+	t.Setenv("SHINYHUB_CONFIG", "")
+	configPathOverride = ""
+
 	_, err := loadConfig()
 	if err == nil {
 		t.Fatal("expected error when config missing")
 	}
-	if !strings.Contains(err.Error(), "shinyhub login") {
-		t.Fatalf("error %q should mention `shinyhub login`", err.Error())
+	// The recovery command lives in the hint, which the error renderer prints
+	// alongside the message, so that is where the guarantee is asserted.
+	var he hintedError
+	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "shinyhub login") {
+		t.Fatalf("error %q (hint %q) should point at `shinyhub login`", err.Error(), hintOf(err))
 	}
+}
+
+// hintOf renders an error's hint for failure messages, returning "" when the
+// error carries none.
+func hintOf(err error) string {
+	var he hintedError
+	if errors.As(err, &he) {
+		return he.Hint()
+	}
+	return ""
 }
 
 func TestAddCommandsTo_RegistersAllSubcommands(t *testing.T) {
@@ -105,13 +125,19 @@ func TestLoadConfig_FromEnvOnly(t *testing.T) {
 	}
 }
 
-// SHINYHUB_HOST should override the host saved in the config while still
-// reusing the saved token. This is the "target a different server" case.
-func TestLoadConfig_EnvOverridesFileHost(t *testing.T) {
+// SHINYHUB_HOST retargets the CLI, but it must not drag another server's token
+// along with it. This previously asserted the opposite - that the saved token
+// "falls through" to whatever host the env var names - which meant a typo, an
+// inherited shell profile, or a stale export was enough to send a production
+// credential to an unrelated address. The token now comes from the entry for
+// the host actually being targeted, and a host with no saved credential is an
+// error naming that host rather than a silent substitution.
+func TestLoadConfig_EnvHostDoesNotBorrowAnotherHostsToken(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("SHINYHUB_HOST", "https://other.example.com")
 	t.Setenv("SHINYHUB_TOKEN", "")
+	t.Setenv("SHINYHUB_CREDENTIALS", "")
 	t.Setenv("SHINYHUB_CONFIG", "")
 	configPathOverride = ""
 
@@ -119,14 +145,54 @@ func TestLoadConfig_EnvOverridesFileHost(t *testing.T) {
 		t.Fatalf("save config: %v", err)
 	}
 	cfg, err := loadConfig()
+	if err == nil {
+		t.Fatalf("expected an error targeting a host with no saved credential; got host=%q token=%q",
+			cfg.Host, cfg.Token)
+	}
+	if !strings.Contains(err.Error(), "https://other.example.com") {
+		t.Errorf("error should name the host that has no credential, got: %v", err)
+	}
+	if kind, code := classify(err); kind != KindAuth || code != 3 {
+		t.Errorf("classify = (%q,%d), want (%q,3)", kind, code, KindAuth)
+	}
+	var he hintedError
+	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "shinyhub login --host https://other.example.com") {
+		t.Errorf("hint should name the login command for the targeted host, got: %v", err)
+	}
+}
+
+// The legitimate half of the case above: SHINYHUB_HOST plus a saved credential
+// for that exact host resolves normally, and other saved hosts are untouched.
+func TestLoadConfig_EnvHostSelectsThatHostsOwnToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHINYHUB_HOST", "https://other.example.com")
+	t.Setenv("SHINYHUB_TOKEN", "")
+	t.Setenv("SHINYHUB_CREDENTIALS", "")
+	t.Setenv("SHINYHUB_CONFIG", "")
+	configPathOverride = ""
+
+	if err := saveConfig(&cliConfig{Host: "https://saved.example.com", Token: "shk_saved"}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if err := saveConfig(&cliConfig{Host: "https://other.example.com", Token: "shk_other"}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	if cfg.Host != "https://other.example.com" {
-		t.Errorf("env should override host, got %q", cfg.Host)
+	if cfg.Host != "https://other.example.com" || cfg.Token != "shk_other" {
+		t.Errorf("got %+v, want the env-named host with its own token", cfg)
 	}
-	if cfg.Token != "shk_saved" {
-		t.Errorf("token should fall through from file, got %q", cfg.Token)
+
+	// Saving the second host must not have discarded the first - the whole
+	// reason the single-slot file was replaced.
+	st, err := loadStore()
+	if err != nil {
+		t.Fatalf("loadStore: %v", err)
+	}
+	if got := st.Hosts["https://saved.example.com"].Token; got != "shk_saved" {
+		t.Errorf("first host's token = %q, want it preserved as %q", got, "shk_saved")
 	}
 }
 

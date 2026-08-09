@@ -28,6 +28,7 @@ no external services to operate.
 ## Features
 
 - **Deploy from the CLI.** `shinyhub deploy` uploads a bundle and brings the app up.
+- **Several servers at once.** One saved credential per server, switched with `shinyhub use <name>` or targeted per command with `--host`. See [docs/hosts.md](docs/hosts.md).
 - **Reverse proxy.** One URL per app under `/app/<slug>/`, sticky-session aware.
 - **Hibernation.** Idle apps are stopped automatically and restarted on the next request.
 - **Authentication.** Username/password, GitHub OAuth, Google OAuth, or generic OIDC (Okta, Azure AD, Keycloak, Auth0).
@@ -165,6 +166,11 @@ The server resolves its config file in this order: the `--config` flag
 > simpler approach is to skip the credentials file entirely and supply
 > `SHINYHUB_HOST` and `SHINYHUB_TOKEN` directly.
 
+The credentials file holds one entry per server, so you can be signed in to a
+local hub and production at the same time and switch with `shinyhub use`. See
+[Working with several servers](docs/hosts.md) for how a command picks which
+server and which token to use.
+
 The one required setting is `auth.secret`: a random 32+ character string
 (`openssl rand -hex 32`). The server refuses to start with the placeholder
 value.
@@ -173,6 +179,7 @@ value.
 
 | Guide | Topic |
 |---|---|
+| [Working with several servers](docs/hosts.md) | Saving a credential per server, `hosts` / `use` / `--host`, which token a command sends, and the credentials file. |
 | [Environment and secrets](docs/environment.md) | Per-app env vars, encrypted secrets, what apps and builds inherit from the server environment, and private package indexes. |
 | [Persistent data dir](docs/data.md) | Pushing data, the app-visible path, authorization, quota, and concurrency. |
 | [Scheduled jobs and shared data](docs/schedules.md) | Per-app cron schedules and read-only cross-app data mounts. |

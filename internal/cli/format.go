@@ -57,6 +57,21 @@ func validationErr(msg, hint string) error {
 	return &ExitCodeError{Code: 1, Kind: KindValidation, Err: &hintedMsgError{msg: msg, hint: hint}}
 }
 
+// authErr reports a credential problem the CLI detected locally: no saved login
+// for the targeted server, or no server selected at all. It carries the same
+// kind and exit code as a server 401 so callers can branch on one condition.
+func authErr(msg, hint string) error {
+	return &ExitCodeError{Code: 3, Kind: KindAuth, Err: &hintedMsgError{msg: msg, hint: hint}}
+}
+
+// networkErr reports a server the CLI could not reach, with the advice in the
+// envelope's hint field rather than folded into the message. cause is unwrapped
+// so callers matching on net.Error or *url.Error still see it.
+func networkErr(msg, hint string, cause error) error {
+	return &ExitCodeError{Code: 3, Kind: KindNetwork,
+		Err: &hintedMsgError{msg: msg, hint: hint, cause: cause}}
+}
+
 // resolveFormat resolves the effective output format for a command. legacyJSON
 // is the command's --json alias value; streaming marks commands whose stdout is
 // a line stream. On success, resolvedFormat is updated so the error renderer

@@ -136,10 +136,15 @@ type hintedError interface{ Hint() string }
 type hintedMsgError struct {
 	msg  string
 	hint string
+	// cause, when set, is the underlying error. It is unwrapped rather than
+	// folded into msg so callers can still match on it with errors.As while the
+	// user-facing message stays a sentence about what to do.
+	cause error
 }
 
 func (e *hintedMsgError) Error() string { return e.msg }
 func (e *hintedMsgError) Hint() string  { return e.hint }
+func (e *hintedMsgError) Unwrap() error { return e.cause }
 
 // confirmationRequiredError returns a KindConfirmationRequired error for
 // interactive-only operations run without a TTY. bypassFlag names the flag
