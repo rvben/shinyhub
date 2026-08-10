@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/appmetaspec"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/spf13/cobra"
 )
@@ -751,6 +752,8 @@ type appsSetFlags struct {
 	maxSessionLifetime    int
 	ephemeralDataOk       bool
 	icon                  string
+	name                  string
+	description           string
 }
 
 func newAppsSetCmd() *cobra.Command {
@@ -808,6 +811,10 @@ func newAppsSetCmd() *cobra.Command {
 		"Accept ephemeral (task-local) app-data on a Fargate tier with no durable backend: allows deploying and pushing data even though it is lost on restart/hibernation and not shared across replicas")
 	cmd.Flags().StringVar(&f.icon, "icon", "",
 		"Emoji shown as the app's icon (a single emoji; \"\" clears the emoji and restores any uploaded image)")
+	cmd.Flags().StringVar(&f.name, "name", "",
+		"Friendly display name shown on the dashboard card and detail heading (1..128 characters; the slug is unchanged)")
+	cmd.Flags().StringVar(&f.description, "description", "",
+		"One-line description shown under the name (up to 280 characters; \"\" clears it)")
 	return cmd
 }
 
@@ -832,9 +839,28 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	anyWorkerChanged := isolationChanged || groupedSizeChanged || maxWorkersChanged || maxSessionLifetimeChanged
 	ephemeralDataOkChanged := cmd.Flags().Changed("ephemeral-data-ok")
 	iconChanged := cmd.Flags().Changed("icon")
+	nameChanged := cmd.Flags().Changed("name")
+	descriptionChanged := cmd.Flags().Changed("description")
 
-	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged && !renderSecondsChanged && !iconChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok, --render-seconds, --icon)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged && !renderSecondsChanged && !iconChanged && !nameChanged && !descriptionChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok, --render-seconds, --icon, --name, --description)")
+	}
+	// Validate against the same spec the server uses so a too-long or
+	// whitespace-only value fails locally with the identical message instead of
+	// costing a round trip.
+	if nameChanged {
+		v, err := appmetaspec.NormalizeName(f.name)
+		if err != nil {
+			return validationErr(err.Error(), "the display name is separate from the slug; the slug is set at deploy time and cannot be changed here")
+		}
+		f.name = v
+	}
+	if descriptionChanged {
+		v, err := appmetaspec.NormalizeDescription(f.description)
+		if err != nil {
+			return validationErr(err.Error(), "pass --description \"\" to clear the description")
+		}
+		f.description = v
 	}
 	if memoryLimitChanged && f.memoryLimitMB != -1 {
 		if err := deploy.ValidateMemoryLimitMB(f.memoryLimitMB); err != nil {
@@ -1015,6 +1041,14 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		// silent no-op.
 		payload["icon_emoji"] = f.icon
 	}
+	if nameChanged {
+		payload["name"] = f.name
+	}
+	if descriptionChanged {
+		// Same reason as the icon: "" clears the description, so the key is sent
+		// whenever the flag was passed rather than when it is non-empty.
+		payload["description"] = f.description
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1136,6 +1170,23 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 			} else {
 				lines = append(lines, fmt.Sprintf("%s: autoscale-target set to %.0f%%", slug, f.autoscaleTarget*100))
 			}
+		}
+	}
+	if nameChanged {
+		lines = append(lines, fmt.Sprintf("%s: name set to %q", slug, f.name))
+	}
+	if descriptionChanged {
+		if f.description == "" {
+			lines = append(lines, fmt.Sprintf("%s: description cleared", slug))
+		} else {
+			lines = append(lines, fmt.Sprintf("%s: description set to %q", slug, f.description))
+		}
+	}
+	if iconChanged {
+		if f.icon == "" {
+			lines = append(lines, fmt.Sprintf("%s: icon emoji cleared", slug))
+		} else {
+			lines = append(lines, fmt.Sprintf("%s: icon set to %s", slug, f.icon))
 		}
 	}
 	if err := renderAction(cmd, "updated", map[string]any{"slug": slug}, strings.Join(lines, "\n")); err != nil {

@@ -75,6 +75,14 @@ func summarizeManifest(m *deploy.Manifest) []string {
 	var lines []string
 
 	var appParts []string
+	// Display metadata leads the summary: it is what the operator recognizes the
+	// app by, so it belongs ahead of the sizing knobs.
+	if m.App.Name != nil {
+		appParts = append(appParts, fmt.Sprintf("name=%q", *m.App.Name))
+	}
+	if m.App.Description != nil {
+		appParts = append(appParts, fmt.Sprintf("description=%q", *m.App.Description))
+	}
 	if m.App.Replicas != nil {
 		appParts = append(appParts, fmt.Sprintf("replicas=%d", *m.App.Replicas))
 	}
