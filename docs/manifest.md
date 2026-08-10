@@ -74,6 +74,8 @@ starts.
 
 | Field | Type | Meaning |
 |---|---|---|
+| `name` | string 1..128 | Friendly display name shown on the dashboard card, the detail heading, and the launchpad tile. See [`[app] name` and `[app] description`](#app-name-and-app-description) below. |
+| `description` | string 0..280 | One-line description shown under the name. `""` clears it. See [`[app] name` and `[app] description`](#app-name-and-app-description) below. |
 | `hibernate_timeout_minutes` | int | Idle minutes before the watcher hibernates the app. `0` disables hibernation. `-1` resets the field to the server default (the same convention as `shinyhub apps set --hibernate-timeout -1`). |
 | `replicas` | int ≥ 1 | Number of identical replica processes serving this app. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int 0..1000 | Per-replica admission cap for new cookieless sessions. `0` means "use the runtime default". |
@@ -208,6 +210,38 @@ rejected, so an incomplete block can never silently persist an all-zero policy.
 Bounds are range-checked `0..1000` even when disabled, so a later re-enable never
 hits an out-of-range stored value. An unknown key inside the table fails the
 deploy under strict-mode parsing.
+
+### `[app] name` and `[app] description`
+
+Set the app's display metadata declaratively, so a bundle carries the label it
+is presented under instead of relying on someone typing it into the dashboard
+after the first deploy.
+
+```toml
+[app]
+name = "Quarterly Revenue"
+description = "Regional revenue roll-up, refreshed nightly"
+```
+
+`name` is the friendly label rendered on the dashboard card, the app detail
+heading, and the launchpad tile. It is **not** the slug: the slug is the URL
+identifier (`/app/<slug>/`), is fixed at deploy time, and is unaffected by this
+field. `name` is trimmed and must be 1..128 characters; an empty or
+whitespace-only value is rejected rather than stored, because every surface
+renders the name as the app's primary label and there is no sensible fallback.
+
+`description` is the one-line subtitle shown under the name, trimmed and capped
+at 280 characters. Unlike `name`, `""` is a meaningful value: it clears the
+description.
+
+Both follow the same declared-only rule as the rest of the table: an absent key
+leaves the stored value alone, so a name set in the dashboard survives deploys
+from a manifest that stays silent. Once declared, every deploy reasserts the
+manifest's value over a rename made in the UI - declaring the key is what makes
+the manifest the owner.
+
+Set the same values imperatively with `shinyhub apps set <slug> --name "..."
+--description "..."`.
 
 ### `[app] icon`
 
