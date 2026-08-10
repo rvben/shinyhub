@@ -578,6 +578,9 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 		}
 		d["worker"] = w
 	}
+	if m.Icon != nil {
+		d["icon"] = *m.Icon
+	}
 	return d
 }
 
@@ -635,6 +638,9 @@ func manifestAppDetail(m deploy.AppSettings) string {
 			w["max_session_lifetime_secs"] = *m.Worker.MaxSessionLifetimeSecs
 		}
 		d["worker"] = w
+	}
+	if m.Icon != nil {
+		d["icon"] = *m.Icon
 	}
 	b, _ := json.Marshal(d)
 	return string(b)

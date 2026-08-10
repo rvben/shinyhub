@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/spf13/cobra"
 )
 
@@ -184,5 +185,23 @@ func TestManifestValidate_NdjsonRejected(t *testing.T) {
 	}
 	if code := exitCode(err); code != 1 {
 		t.Errorf("exit code = %d, want 1 (validation)", code)
+	}
+}
+
+// A declared icon must show up in the `shinyhub manifest validate` summary
+// line, same as replicas or hibernate_timeout_minutes — otherwise the apply
+// is silent from the operator's point of view.
+func TestSummarizeManifestIncludesIcon(t *testing.T) {
+	icon := "\U0001F4CA"
+	lines := summarizeManifest(&deploy.Manifest{App: deploy.AppSettings{Icon: &icon}})
+
+	var found bool
+	for _, line := range lines {
+		if strings.Contains(line, "icon=") && strings.Contains(line, icon) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a line with icon=%s, got: %v", icon, lines)
 	}
 }

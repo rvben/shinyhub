@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -288,5 +289,69 @@ func TestManifestIconConcurrentWriteWins(t *testing.T) {
 	}
 	if app.IconEmoji != raceEmoji {
 		t.Errorf("icon_emoji = %q, want the concurrent write %q to survive the revert", app.IconEmoji, raceEmoji)
+	}
+}
+
+// TestManifestIconReportedEverywhere pins the two renderers that make an
+// applied [app] icon visible outside the DB (manifestAppliedSummary for the
+// deploy response, manifestAppDetail for the audit blob; the third renderer,
+// summarizeManifest, is covered in internal/cli), plus the IsZero oracle: a
+// manifest declaring ONLY icon must still produce a non-nil manifest.app in
+// the deploy response and an update_app audit event, which only holds if
+// AppSettings.IsZero() accounts for Icon.
+func TestManifestIconReportedEverywhere(t *testing.T) {
+	emoji := "\U0001F4CA"
+
+	summary := manifestAppliedSummary(deploy.AppSettings{Icon: &emoji})
+	if summary["icon"] != emoji {
+		t.Errorf("manifestAppliedSummary[\"icon\"] = %v, want %q", summary["icon"], emoji)
+	}
+
+	detail := manifestAppDetail(deploy.AppSettings{Icon: &emoji})
+	if !strings.Contains(detail, "icon") {
+		t.Errorf("manifestAppDetail = %q, want it to contain \"icon\"", detail)
+	}
+
+	srv, store, token := newManifestE2EServer(t)
+	admin, _ := store.GetUserByUsername("admin")
+	if err := store.CreateApp(db.CreateAppParams{
+		Slug: "iconreport", Name: "Icon Report", OwnerID: admin.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := "[app]\nicon = \"" + emoji + "\"\n"
+	body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":        "from shiny import App\n",
+		"shinyhub.toml": manifest,
+	})
+	req := httptest.NewRequest("POST", "/api/apps/iconreport/deploy", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	manifestResp, ok := resp["manifest"].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest missing from response: %s", rec.Body.String())
+	}
+	appSummary, ok := manifestResp["app"].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest.app missing from response (icon-only manifest treated as zero): %v", manifestResp)
+	}
+	if appSummary["icon"] != emoji {
+		t.Errorf("manifest.app.icon = %v, want %q", appSummary["icon"], emoji)
+	}
+
+	events, _ := store.ListAuditEvents("update_app", 10, 0)
+	if !auditEventsContain(events, "update_app", "iconreport") {
+		t.Error("expected an update_app audit event for an icon-only manifest deploy")
 	}
 }

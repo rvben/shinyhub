@@ -92,6 +92,9 @@ func summarizeManifest(m *deploy.Manifest) []string {
 	if m.App.CPUQuotaPercent != nil {
 		appParts = append(appParts, fmt.Sprintf("cpu_quota_percent=%d", *m.App.CPUQuotaPercent))
 	}
+	if m.App.Icon != nil {
+		appParts = append(appParts, fmt.Sprintf("icon=%s", *m.App.Icon))
+	}
 	if len(appParts) > 0 {
 		lines = append(lines, "app: "+strings.Join(appParts, ", "))
 	}
