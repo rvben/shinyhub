@@ -115,9 +115,11 @@ var cobraErrorPrefixes = []string{
 	"accepts ",
 }
 
-// errEnvelope is the structured failure record. Per clispec v0.2 it is
-// written as a single line of JSON, as the last line of stderr, on every
-// failure, in every output mode.
+// errEnvelope is the structured failure record read by scripts and agents.
+// Per clispec v0.2 it is written as a single line of JSON, as the last line of
+// stderr, on every failure of every machine-readable invocation: a redirected
+// stderr, --output json, --output ndjson. An interactive table is the one form
+// it is withheld from, because there the reader is a person.
 type errEnvelope struct {
 	Error struct {
 		Kind     string `json:"kind"`
@@ -166,6 +168,13 @@ func loginMissingCredsError() error {
 
 // reportTo renders err to w and returns the process exit code. Pure function
 // of its inputs for testability; Report wires the real stderr/TTY/format.
+//
+// A failure is written in one language, never two. A person at a terminal
+// reading table output gets a sentence and, when there is one, the remedy; a
+// machine gets the JSON envelope as the last line of stderr. Everything that is
+// not an interactive table - a redirected stderr, --output json, --output
+// ndjson - counts as a machine and gets the envelope, so nothing an agent or a
+// script reads has changed.
 func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int {
 	if err == nil {
 		return 0
@@ -178,8 +187,14 @@ func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int
 	reported := errors.As(err, &ece) && ece.Reported
 	var he hintedError
 	errors.As(err, &he)
-	s := stylerFor(w)
-	if stderrIsTTY && format == formatTable && !reported {
+
+	if stderrIsTTY && format == formatTable {
+		if reported {
+			// The command has already said what went wrong, in its own words and
+			// its own layout. Anything added here would say it a second time.
+			return code
+		}
+		s := stylerFor(w)
 		// The failure glyph and the word "Error" both carry the signal, so the
 		// line still reads correctly with color stripped.
 		fmt.Fprintf(w, "%s%s %s\n", s.failPrefix(), s.red("Error:"), err.Error())
@@ -189,7 +204,9 @@ func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int
 			// the failure made it read as a footnote to the failure.
 			fmt.Fprintf(w, "  %s %s\n", s.dim("hint:"), s.dim(he.Hint()))
 		}
+		return code
 	}
+
 	var env errEnvelope
 	env.Error.Kind = string(kind)
 	env.Error.Message = err.Error()
@@ -202,13 +219,6 @@ func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int
 	line, marshalErr := json.Marshal(env)
 	if marshalErr != nil {
 		fmt.Fprintf(w, `{"error":{"kind":"internal","message":"failed to encode error envelope"}}`+"\n")
-		return code
-	}
-	// The envelope is written on every failure in every mode, because it is the
-	// machine contract. On a terminal it is dimmed so it recedes behind the
-	// sentence written for the person, without ever being withheld from them.
-	if stderrIsTTY && format == formatTable && !reported {
-		fmt.Fprintln(w, s.dim(string(line)))
 		return code
 	}
 	fmt.Fprintln(w, string(line))

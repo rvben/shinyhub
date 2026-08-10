@@ -101,30 +101,74 @@ func TestReport_EnvelopeIsLastStderrLine(t *testing.T) {
 	}
 }
 
-func TestReport_TableTTYProseThenEnvelope(t *testing.T) {
+// A person reading an interactive table gets the failure as a sentence and
+// nothing else. The JSON envelope is written for machines, and handing it to
+// the reader as well makes them read the same failure twice, the second time in
+// a language they did not ask for.
+func TestReport_TableTTYIsProseOnly(t *testing.T) {
 	var stderr bytes.Buffer
 	code := reportTo(&stderr, true /* stderrIsTTY */, formatTable, errors.New("plain failure"))
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
 	lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("want prose line + envelope line, got %d lines: %q", len(lines), stderr.String())
+	if len(lines) != 1 {
+		t.Fatalf("want the prose line alone, got %d lines: %q", len(lines), stderr.String())
 	}
 	if !strings.Contains(lines[0], "plain failure") {
 		t.Errorf("prose line = %q", lines[0])
 	}
-	if !strings.HasPrefix(lines[1], `{"error":`) {
-		t.Errorf("last line is not the envelope: %q", lines[1])
+	if strings.Contains(stderr.String(), `{"error":`) {
+		t.Errorf("no JSON envelope belongs on an interactive table, got %q", stderr.String())
 	}
 }
 
-func TestReport_ReportedSkipsProseKeepsEnvelope(t *testing.T) {
-	var stderr bytes.Buffer
-	reportTo(&stderr, true, formatTable, &ExitCodeError{Code: 4, Err: errors.New("2 apps failed"), Reported: true})
-	lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
+// The envelope is withheld from an interactive table and from nothing else.
+// Every other combination is something reading the output rather than someone,
+// so each one keeps the machine contract: one JSON line, last on stderr.
+func TestReport_EnvelopeGoesToEveryMachineReadableForm(t *testing.T) {
+	cases := []struct {
+		name         string
+		stderrIsTTY  bool
+		format       outputFormat
+		wantEnvelope bool
+	}{
+		{"terminal, table", true, formatTable, false},
+		{"terminal, --output json", true, formatJSON, true},
+		{"terminal, --output ndjson", true, formatNDJSON, true},
+		{"redirected stderr, table", false, formatTable, true},
+		{"redirected stderr, json", false, formatJSON, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			reportTo(&stderr, tc.stderrIsTTY, tc.format, errors.New("plain failure"))
+			got := strings.Contains(stderr.String(), `{"error":`)
+			if got != tc.wantEnvelope {
+				t.Errorf("envelope present = %v, want %v; stderr = %q", got, tc.wantEnvelope, stderr.String())
+			}
+		})
+	}
+}
+
+// A Reported error is one the command has already explained in its own words
+// and its own layout. On a terminal that leaves reportTo nothing to add; a
+// machine still needs the envelope, which is the only record it can parse.
+func TestReport_ReportedIsSilentOnATerminalAndEnvelopedOffOne(t *testing.T) {
+	fail := func() error {
+		return &ExitCodeError{Code: 4, Err: errors.New("2 apps failed"), Reported: true}
+	}
+
+	var tty bytes.Buffer
+	if code := reportTo(&tty, true, formatTable, fail()); code != 4 || tty.Len() != 0 {
+		t.Errorf("a reported failure must add nothing on a terminal: code=%d stderr=%q", code, tty.String())
+	}
+
+	var piped bytes.Buffer
+	reportTo(&piped, false, formatJSON, fail())
+	lines := strings.Split(strings.TrimRight(piped.String(), "\n"), "\n")
 	if len(lines) != 1 || !strings.HasPrefix(lines[0], `{"error":`) {
-		t.Errorf("Reported error should emit envelope only, got %q", stderr.String())
+		t.Errorf("a reported failure must still emit the envelope off a terminal, got %q", piped.String())
 	}
 }
 
@@ -231,21 +275,18 @@ func TestReport_ValidationErrHintInEnvelopeAndProse(t *testing.T) {
 	}
 
 	// TTY table mode: the human-facing prose shows the message and, on the line
-	// under it, the hint. Both must precede the machine envelope, which is the
-	// last line in every mode.
+	// under it, the hint. The same hint the envelope carries reaches the person
+	// as a sentence, so neither reader has to go looking in the other's format.
 	var ttyStderr bytes.Buffer
 	reportTo(&ttyStderr, true, formatTable, err)
 	lines := strings.Split(strings.TrimRight(ttyStderr.String(), "\n"), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("want message + hint + envelope, got %d lines: %q", len(lines), ttyStderr.String())
+	if len(lines) != 2 {
+		t.Fatalf("want message + hint, got %d lines: %q", len(lines), ttyStderr.String())
 	}
 	if !strings.Contains(lines[0], "unknown output format") {
 		t.Errorf("first line must state the failure, got %q", lines[0])
 	}
 	if !strings.Contains(lines[1], "valid formats") {
 		t.Errorf("second line must carry the hint, got %q", lines[1])
-	}
-	if !strings.HasPrefix(strings.TrimSpace(lines[2]), "{") {
-		t.Errorf("last line must be the envelope, got %q", lines[2])
 	}
 }
