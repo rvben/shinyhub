@@ -4101,9 +4101,17 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 
 /* Emoji-icon variant: the glyph reuses the monogram box, but the monogram's
    bold weight and condensed letter-spacing are tuned for 1-2 letters, not a
-   glyph - reset them and size the glyph up to fill the box. */
+   glyph - reset them and size the glyph up to fill the box. overflow: hidden
+   is load-bearing: when the local font has no single glyph for a ZWJ
+   sequence (a skin-toned multi-person family, for example), it falls back to
+   rendering the parts side by side, so one "emoji" becomes a wide run of
+   glyphs. Without containment that run paints over the app name on the
+   Launchpad tile and over the page heading on the app-detail header. The box
+   is place-items: center, so an oversized run is center-cropped rather than
+   spilling out; a cropped glyph is the honest result when the font cannot
+   compose the sequence as one icon. */
 .lp-avatar--emoji, .app-detail-avatar--emoji, .icon-picker-preview--emoji {
-  font-size: 1.35em; font-weight: 400; letter-spacing: normal;
+  font-size: 1.35em; font-weight: 400; letter-spacing: normal; overflow: hidden;
 }
 
 .lp-tile-main { min-width: 0; flex: 1; }

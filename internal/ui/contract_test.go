@@ -2589,6 +2589,38 @@ func TestEmojiPickerUIContract(t *testing.T) {
 		"app.js builds the emoji grid via the shared renderEmojiPicker module")
 	assertContains(t, "app.js", "wireKebab(eBtn, ePopover",
 		"the emoji picker reuses wireKebab for open/close instead of reimplementing it")
+
+	// Live-surface fix: an uncomposable ZWJ sequence (a skin-toned
+	// multi-person family, for example) has no single glyph in the local
+	// font, so it renders as several glyphs side by side and overflows the
+	// fixed-size avatar box, painting over the app name on the Launchpad
+	// tile and over the h1 on the app-detail header. A bare
+	// assertContains(t, "style.css", "overflow: hidden", ...) would be
+	// vacuous here - that string already appears on .lp-tile-name and
+	// .lp-tile-desc, so it would pass even with the emoji rule's
+	// containment deleted. Locate the rule by its selector and assert
+	// inside that block only, failing loudly if the selector is not found
+	// so a rename cannot silently skip the check.
+	{
+		b, err := fs.ReadFile(ui.Static(), "style.css")
+		if err != nil {
+			t.Fatalf("read style.css: %v", err)
+		}
+		css := string(b)
+		sel := ".lp-avatar--emoji, .app-detail-avatar--emoji, .icon-picker-preview--emoji {"
+		start := strings.Index(css, sel)
+		if start < 0 {
+			t.Fatal("style.css: emoji-avatar variant rule not found by selector; a renamed selector must fail this test, not silently skip the containment check")
+		}
+		end := strings.Index(css[start:], "}")
+		if end < 0 {
+			t.Fatal("style.css: emoji-avatar variant rule has no closing brace")
+		}
+		block := css[start : start+end]
+		if !strings.Contains(block, "overflow: hidden") {
+			t.Fatal("style.css: the emoji-avatar variant rule must set overflow: hidden, or an uncomposable ZWJ sequence overflows the fixed-size avatar box and paints over adjacent text (the app name on the Launchpad tile, the page heading on the app-detail header)")
+		}
+	}
 }
 
 // TestCuratedEmojiValidatesAgainstServer is the cross-language guard the JS
