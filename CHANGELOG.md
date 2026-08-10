@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.0](https://github.com/rvben/shinyhub/compare/v0.10.18...v0.11.0) - 2026-08-10
+
+### Added
+
+- **cli**: keep a credential per server and switch between them ([aaf105f](https://github.com/rvben/shinyhub/commit/aaf105f2cafc5a5d258f5e752109b8ff052d91e4))
+- **render-pacing**: dashboard control, apps show output, and docs ([604330e](https://github.com/rvben/shinyhub/commit/604330e2a06e287614d8353dd35aa1cbcfa4bca9))
+- **proxy**: defer page loads when an app is out of render capacity ([a6b36f6](https://github.com/rvben/shinyhub/commit/a6b36f611c896e33ae468caa577b58f7758d8ee3))
+
+### Fixed
+
+- **proxy**: reset the wait-page retry count when the page gives up ([1d47044](https://github.com/rvben/shinyhub/commit/1d47044213be36f181cfd469762af4b552f1f013))
+
 ## [0.10.18](https://github.com/rvben/shinyhub/compare/v0.10.17...v0.10.18) - 2026-08-08
 
 ### Fixed
