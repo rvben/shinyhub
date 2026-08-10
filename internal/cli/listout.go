@@ -114,12 +114,23 @@ func listEnvelope(items []map[string]any, total, limit, offset int, extra map[st
 	return env
 }
 
-func sliceAndProject(items []map[string]any, f *listFlags) ([]map[string]any, error) {
+// validateWindow rejects a pagination window that cannot be satisfied. It is
+// separate from sliceAndProject so a command that pages something other than
+// the item maps - top pages typed rows, then projects - refuses the same flag
+// values with the same message instead of growing its own wording.
+func validateWindow(f *listFlags) error {
 	if f.offset < 0 {
-		return nil, validationErr("--offset must be >= 0", "")
+		return validationErr("--offset must be >= 0", "")
 	}
 	if f.limit < 0 {
-		return nil, validationErr("--limit must be >= 0", "")
+		return validationErr("--limit must be >= 0", "")
+	}
+	return nil
+}
+
+func sliceAndProject(items []map[string]any, f *listFlags) ([]map[string]any, error) {
+	if err := validateWindow(f); err != nil {
+		return nil, err
 	}
 	start := f.offset
 	if start > len(items) {
