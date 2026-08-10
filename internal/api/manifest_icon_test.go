@@ -355,3 +355,25 @@ func TestManifestIconReportedEverywhere(t *testing.T) {
 		t.Error("expected an update_app audit event for an icon-only manifest deploy")
 	}
 }
+
+// TestManifestIconReportedEverywhere_DeclaredEmpty covers the other half of
+// the tri-state contract: Icon is nil (absent, leave stored value alone),
+// non-empty (reconcile), or "" (declared-empty: deliberately clear the emoji
+// so a retained uploaded image resurfaces). manifestAppliedSummary and
+// manifestAppDetail must emit the icon key for a declared "" exactly as they
+// do for a non-empty value - checking the map's presence (via the ",ok" form),
+// not just the zero-value read, since a missing key and a present-but-empty
+// value are indistinguishable through a bare index.
+func TestManifestIconReportedEverywhere_DeclaredEmpty(t *testing.T) {
+	empty := ""
+
+	summary := manifestAppliedSummary(deploy.AppSettings{Icon: &empty})
+	if v, ok := summary["icon"]; !ok || v != "" {
+		t.Errorf("manifestAppliedSummary[\"icon\"] for declared-empty icon = (%v, present=%v), want (\"\", present=true)", v, ok)
+	}
+
+	detail := manifestAppDetail(deploy.AppSettings{Icon: &empty})
+	if !strings.Contains(detail, "icon") {
+		t.Errorf("manifestAppDetail for declared-empty icon = %q, want it to contain \"icon\"", detail)
+	}
+}

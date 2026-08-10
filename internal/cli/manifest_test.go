@@ -189,7 +189,7 @@ func TestManifestValidate_NdjsonRejected(t *testing.T) {
 }
 
 // A declared icon must show up in the `shinyhub manifest validate` summary
-// line, same as replicas or hibernate_timeout_minutes — otherwise the apply
+// line, same as replicas or hibernate_timeout_minutes, otherwise the apply
 // is silent from the operator's point of view.
 func TestSummarizeManifestIncludesIcon(t *testing.T) {
 	icon := "\U0001F4CA"
@@ -203,5 +203,24 @@ func TestSummarizeManifestIncludesIcon(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a line with icon=%s, got: %v", icon, lines)
+	}
+}
+
+// icon = "" is a deliberate "clear the emoji" declaration, not an absent key
+// (Icon is tri-state: nil means the key was omitted, "" means the operator
+// declared it empty on purpose). The summary must still show icon= so the
+// clear is visible, not silently indistinguishable from no icon key at all.
+func TestSummarizeManifestIncludesIcon_DeclaredEmpty(t *testing.T) {
+	empty := ""
+	lines := summarizeManifest(&deploy.Manifest{App: deploy.AppSettings{Icon: &empty}})
+
+	var found bool
+	for _, line := range lines {
+		if strings.Contains(line, "icon=") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a line with icon=, got: %v", lines)
 	}
 }
