@@ -5,18 +5,23 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"syscall"
+	"time"
 
 	gops "github.com/shirou/gopsutil/v4/process"
 )
 
-// Stats holds a point-in-time resource snapshot for one process.
+// Stats holds a point-in-time resource snapshot for one app replica.
 //
 // CPUPercent is a rate over the interval since the previous sample of the same
-// process, on the scale where 100 means one fully busy core. It is nil when no
-// rate can be computed yet, which is the case for the first sample of a process
+// replica, on the scale where 100 means one fully busy core. It is nil when no
+// rate can be computed yet, which is the case for the first sample of a replica
 // and after the sampler's cache has been purged: a rate needs two measurements,
 // and reporting the single measurement as 0 would be indistinguishable from an
 // app that is genuinely idle.
+//
+// Both figures cover the replica's whole process group, not just the PID the
+// runtime recorded. See GopsutilSampler.
 type Stats struct {
 	CPUPercent *float64
 	RSSBytes   int64
@@ -27,81 +32,242 @@ type Sampler interface {
 	Sample(handle RunHandle) (Stats, error)
 }
 
+// groupScanTTL bounds how stale the process-group membership map may be. One
+// sampling tick fans out across every replica in quick succession, so a TTL
+// longer than that burst but shorter than any polling interval means each tick
+// enumerates the host's processes exactly once. A child forked inside the window
+// is counted from the next tick.
+const groupScanTTL = time.Second
+
 // GopsutilSampler is the production Sampler that reads from the OS via gopsutil.
-// It caches process handles by PID because Percent(0) computes its rate against
-// the previous reading stored on the *Process, so a fresh handle per call would
-// have nothing to subtract from and report every process as idle forever.
+//
+// It measures a replica's entire process group rather than the single PID the
+// runtime recorded, because that PID is often a launcher rather than the app. A
+// Python app runs as `uv run ... shiny run app.py`, and uv forks the interpreter
+// instead of exec'ing it, so the recorded PID does no work and holds a few
+// megabytes no matter what the app is doing. NativeRuntime.Start already places
+// each replica in its own process group, which makes the group exactly the set
+// of processes belonging to that replica, and also picks up workers the app
+// forks for itself.
+//
+// It caches a gopsutil handle per member because Percent(0) computes its rate
+// against the previous reading stored on the *Process, so a fresh handle per
+// call would have nothing to subtract from and would report every process as
+// idle forever.
 type GopsutilSampler struct {
-	mu    sync.Mutex
-	procs map[int32]*gops.Process
+	mu     sync.Mutex
+	groups map[int32]*procGroup
+
+	scan      map[int32][]int32
+	scannedAt time.Time
+
+	// Test seams. Both default to the real implementations on first use, so the
+	// zero value is a working sampler.
+	nowFn  func() time.Time
+	scanFn func() (map[int32][]int32, error)
 }
 
-// Sample returns CPU rate and RSS for the process identified by handle.PID.
+// procGroup holds the cached gopsutil handles for one replica, keyed by member
+// PID. Presence of a member in this map means an earlier Sample got all the way
+// through Percent for it, which is what tells a primed process apart from one
+// whose baseline is only now being taken.
+type procGroup struct {
+	members map[int32]*gops.Process
+}
+
+// scanProcessGroups maps each process group id to the PIDs it contains.
 //
-// CPUPercent is nil on the first call for a PID. A cached handle is proof that
-// an earlier Sample got all the way through Percent, so presence in the cache
-// is what distinguishes a primed process from one whose baseline was just
-// taken. Both failure paths below evict the handle, which keeps that true: a
-// PID that failed mid-sample is re-primed rather than credited with a baseline
-// it never established.
+// It reads the process list once and asks the kernel for each PID's group,
+// rather than using gopsutil's Children: on Linux that walks all of /proc
+// reading every stat file and returns only direct children, so covering a whole
+// tree would cost one full scan per replica per level.
+func scanProcessGroups() (map[int32][]int32, error) {
+	pids, err := gops.Pids()
+	if err != nil {
+		return nil, fmt.Errorf("list pids: %w", err)
+	}
+	groups := make(map[int32][]int32, len(pids))
+	for _, pid := range pids {
+		pgid, err := syscall.Getpgid(int(pid))
+		if err != nil {
+			// Exited between listing and lookup. Normal on a busy host.
+			continue
+		}
+		groups[int32(pgid)] = append(groups[int32(pgid)], pid)
+	}
+	return groups, nil
+}
+
+// members returns the PIDs to sample for a replica rooted at pid, always
+// including the root itself.
+//
+// A non-empty group under the root's own PID means the root leads a process
+// group, which is how NativeRuntime starts every replica. When there is no such
+// group the root is not a group leader and its PGID belongs to something else
+// entirely, so the root alone is the only defensible answer: aggregating over
+// somebody else's group would bill this replica for unrelated processes.
+func (g *GopsutilSampler) members(root int32) []int32 {
+	found := g.scan[root]
+	out := make([]int32, 0, len(found)+1)
+	out = append(out, root)
+	for _, pid := range found {
+		if pid != root {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+// refreshScan re-reads process-group membership if the cached map has aged out.
+//
+// A failed scan keeps the previous map rather than falling back to the root
+// alone. Losing the ability to enumerate processes must not quietly turn a busy
+// app into an idle one; stale membership is a far smaller error than dropping
+// every child. With no previous map there is nothing to stand on and the error
+// is returned.
+func (g *GopsutilSampler) refreshScan() error {
+	now := g.nowFn()
+	if g.scan != nil && now.Sub(g.scannedAt) < groupScanTTL {
+		return nil
+	}
+	scan, err := g.scanFn()
+	if err != nil {
+		if g.scan != nil {
+			return nil
+		}
+		return err
+	}
+	g.scan = scan
+	g.scannedAt = now
+	return nil
+}
+
+// Sample returns the CPU rate and RSS of the process group led by handle.PID.
+//
+// CPU is the sum of the rates of the members that already had a baseline, and
+// is nil until the root has one. Gating on the root rather than on every member
+// keeps the rate reportable for an app that forks workers continuously, which
+// would otherwise never have a fully primed group; a member joining the group
+// contributes nothing for one tick and is counted from the next.
+//
+// A failure on the root is returned as an error, since the process the runtime
+// recorded is gone. A failure on any other member is skipped: members come from
+// a snapshot that may be up to groupScanTTL old, so one exiting mid-sample is
+// ordinary rather than a reason to report nothing for the replica.
+//
+// The whole body holds the lock. Beyond guarding the maps, this serialises
+// Percent on any one handle, which is not safe to call concurrently: it reads
+// and then overwrites the previous CPU times stored on the *Process, so two
+// samples racing on the same replica would corrupt each other's baseline.
 func (g *GopsutilSampler) Sample(handle RunHandle) (Stats, error) {
 	g.mu.Lock()
-	if g.procs == nil {
-		g.procs = make(map[int32]*gops.Process)
-	}
-	pid32 := int32(handle.PID)
-	p, primed := g.procs[pid32]
-	if !primed {
-		var err error
-		p, err = gops.NewProcess(pid32)
-		if err != nil {
-			g.mu.Unlock()
-			return Stats{}, fmt.Errorf("process %d not found: %w", handle.PID, err)
-		}
-		g.procs[pid32] = p
-	}
-	g.mu.Unlock()
+	defer g.mu.Unlock()
 
-	cpu, err := p.Percent(0)
-	if err != nil {
-		g.mu.Lock()
-		delete(g.procs, pid32)
-		g.mu.Unlock()
-		return Stats{}, fmt.Errorf("cpu percent: %w", err)
+	if g.nowFn == nil {
+		g.nowFn = time.Now
 	}
-	mem, err := p.MemoryInfo()
-	if err != nil {
-		g.mu.Lock()
-		delete(g.procs, pid32)
-		g.mu.Unlock()
-		return Stats{}, fmt.Errorf("memory info: %w", err)
+	if g.scanFn == nil {
+		g.scanFn = scanProcessGroups
 	}
-	if mem.RSS > math.MaxInt64 {
-		return Stats{}, fmt.Errorf("rss %d overflows int64", mem.RSS)
+	if g.groups == nil {
+		g.groups = make(map[int32]*procGroup)
 	}
-	stats := Stats{RSSBytes: int64(mem.RSS)}
-	if primed {
+	if err := g.refreshScan(); err != nil {
+		return Stats{}, err
+	}
+
+	root := int32(handle.PID)
+	grp, ok := g.groups[root]
+	if !ok {
+		grp = &procGroup{members: make(map[int32]*gops.Process)}
+		g.groups[root] = grp
+	}
+
+	live := g.members(root)
+	seen := make(map[int32]struct{}, len(live))
+
+	var (
+		cpu        float64
+		rss        uint64
+		rootPrimed bool
+	)
+	for _, pid := range live {
+		seen[pid] = struct{}{}
+
+		p, primed := grp.members[pid]
+		if !primed {
+			var err error
+			p, err = gops.NewProcess(pid)
+			if err != nil {
+				if pid == root {
+					return Stats{}, fmt.Errorf("process %d not found: %w", handle.PID, err)
+				}
+				continue
+			}
+			grp.members[pid] = p
+		}
+
+		pct, err := p.Percent(0)
+		if err != nil {
+			delete(grp.members, pid)
+			if pid == root {
+				return Stats{}, fmt.Errorf("cpu percent: %w", err)
+			}
+			continue
+		}
+		mem, err := p.MemoryInfo()
+		if err != nil {
+			delete(grp.members, pid)
+			if pid == root {
+				return Stats{}, fmt.Errorf("memory info: %w", err)
+			}
+			continue
+		}
+
+		rss += mem.RSS
+		if primed {
+			cpu += pct
+			if pid == root {
+				rootPrimed = true
+			}
+		}
+	}
+
+	// Drop handles for members that have left the group, so a replica that churns
+	// short-lived workers does not accumulate one handle per worker for its whole
+	// lifetime.
+	for pid := range grp.members {
+		if _, ok := seen[pid]; !ok {
+			delete(grp.members, pid)
+		}
+	}
+
+	if rss > math.MaxInt64 {
+		return Stats{}, fmt.Errorf("rss %d overflows int64", rss)
+	}
+	stats := Stats{RSSBytes: int64(rss)}
+	if rootPrimed {
 		stats.CPUPercent = &cpu
 	}
 	return stats, nil
 }
 
-// Purge evicts cached process handles for PIDs not present in alive. Purging a
-// live PID is safe but not free: its next sample reports CPU as unavailable
-// while a new baseline is taken.
+// Purge evicts cached state for replicas whose root PID is not present in alive.
+// Purging a live replica is safe but not free: its next sample reports CPU as
+// unavailable while a new baseline is taken.
 //
-// The GopsutilSampler caches a *gops.Process per PID so CPU% can be computed as
-// a delta across calls, and it only drops an entry when a Sample for that PID
-// fails. A long-running caller that samples only currently-running PIDs (the
-// metrics-history collector) never re-samples an exited PID, so without periodic
+// The sampler caches a gopsutil handle per process so CPU% can be computed as a
+// delta across calls, and it only drops one when a sample for that process
+// fails. A long-running caller that samples only currently-running replicas (the
+// metrics-history collector) never re-samples an exited one, so without periodic
 // pruning the cache grows unbounded as PIDs churn. Callers pass the set of live
-// PIDs each cycle; everything else is dropped.
+// root PIDs each cycle; everything else is dropped.
 func (g *GopsutilSampler) Purge(alive map[int32]struct{}) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for pid := range g.procs {
+	for pid := range g.groups {
 		if _, ok := alive[pid]; !ok {
-			delete(g.procs, pid)
+			delete(g.groups, pid)
 		}
 	}
 }
