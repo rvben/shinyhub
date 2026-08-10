@@ -38,11 +38,10 @@ question that matters when a server is down - use ` + "`shinyhub hosts`" + `.`,
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			// Name the server that could not be reached. The whole point of
-			// whoami is "which server am I on", and an unadorned dial error
-			// answers everything except that.
-			return networkErr(fmt.Sprintf("contact %s: %v", cfg.Host, err),
-				"run `shinyhub hosts` to see saved servers, or `shinyhub use <name>` to switch to one that is up", err)
+			// The client already names the server that could not be reached and
+			// carries the remedy in its hint, which is exactly what whoami owes
+			// the reader: "which server am I on" is the question it answers.
+			return err
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)

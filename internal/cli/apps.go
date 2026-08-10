@@ -468,9 +468,9 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 
 	// One-shot fetch uses the bounded-timeout client so a stalled server
-	// doesn't pin the CLI forever. The streaming path uses the default client
-	// (no timeout) since SSE connections are long-lived by design.
-	client := http.DefaultClient
+	// doesn't pin the CLI forever. The streaming path uses the untimed client
+	// since SSE connections are long-lived by design.
+	client := streamClient
 	if !stream {
 		req.Header.Set("Accept", "text/plain")
 		client = httpClient

@@ -16,8 +16,14 @@ var version = "dev"
 
 // httpClient is the shared HTTP client for all CLI commands.
 // A 30-second timeout prevents indefinite hangs. For SSE streaming
-// connections, use http.DefaultClient directly.
-var httpClient = &http.Client{Timeout: 30 * time.Second}
+// connections and deploys, use streamClient.
+var httpClient = &apiClient{&http.Client{Timeout: 30 * time.Second}}
+
+// streamClient is httpClient without a deadline, for the long-lived requests:
+// SSE log streams, and deploys that spend minutes building an environment.
+// It goes through the same wrapper so a server that cannot be reached reads the
+// same way whichever request found that out.
+var streamClient = &apiClient{http.DefaultClient}
 
 // SetVersion updates the version string reported by CLI subcommands.
 // Called by the parent binary's init() so both the server (`shinyhub serve`)

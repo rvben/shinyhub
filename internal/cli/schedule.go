@@ -740,8 +740,8 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 		req.Header.Set("Accept", "text/event-stream")
 	}
 
-	// Use http.DefaultClient — no timeout for streaming log connections.
-	resp, err := http.DefaultClient.Do(req)
+	// Use the untimed client: streaming log connections have no deadline.
+	resp, err := streamClient.Do(req)
 	if err != nil {
 		return err
 	}

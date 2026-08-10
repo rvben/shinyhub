@@ -82,8 +82,8 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	decorateFleetRequest(req, runID)
 	// Deploy can take several minutes on first run (uv downloads packages).
-	// Use http.DefaultClient (no timeout) to match the SSE logs command.
-	resp, err := http.DefaultClient.Do(req)
+	// Use the untimed client to match the SSE logs command.
+	resp, err := streamClient.Do(req)
 	if err != nil {
 		return "", false, nil, deployfail.TransportError, fmt.Errorf("deploy %s: %w", slug, err)
 	}

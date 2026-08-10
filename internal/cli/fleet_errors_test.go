@@ -85,8 +85,9 @@ func TestFleet_ParentFlagParseErrorNotDuplicated(t *testing.T) {
 // The fleet FlagErrorFunc prints "error: ..." to stderr then returns the
 // wrapped error. When main() then calls reportTo with TTY=true + table format,
 // it must NOT print a second prose line (Reported must be true on the error).
-// Combined stderr must contain "error:" exactly once; the envelope is last.
-func TestFleet_FlagParseErrorExactlyOneProseAndEnvelope(t *testing.T) {
+// Combined stderr must state the failure exactly once, and on a terminal that
+// is the whole of it: no JSON envelope follows.
+func TestFleet_FlagParseErrorExactlyOneProseOnATerminal(t *testing.T) {
 	_, _, _ = setupCLITest(t)
 	resetFormatState(t)
 
@@ -107,18 +108,22 @@ func TestFleet_FlagParseErrorExactlyOneProseAndEnvelope(t *testing.T) {
 	out := stderr.String()
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 
-	// The last line must be a JSON envelope.
-	lastLine := lines[len(lines)-1]
-	var env map[string]any
-	if jerr := json.Unmarshal([]byte(lastLine), &env); jerr != nil {
-		t.Fatalf("last stderr line must be the JSON envelope, got: %q\nfull: %s", lastLine, out)
+	// reportTo must NOT add a second prose line because Reported is set, and
+	// must not add an envelope either: the reader is a person.
+	if len(lines) != 1 {
+		t.Errorf("want exactly 1 line on a terminal, got %d:\n%s", len(lines), out)
+	}
+	if strings.Contains(out, `{"error":`) {
+		t.Errorf("no JSON envelope belongs on an interactive table, got:\n%s", out)
 	}
 
-	// There must be exactly one non-envelope line (the FlagErrorFunc prose).
-	// reportTo must NOT add a second prose line because Reported is set.
-	proseLines := lines[:len(lines)-1]
-	if len(proseLines) != 1 {
-		t.Errorf("want exactly 1 prose line before the envelope, got %d:\n%s", len(proseLines), out)
+	// Off a terminal the same failure is a machine record, and the envelope is
+	// the whole of it.
+	var piped bytes.Buffer
+	reportTo(&piped, false, formatJSON, runErr)
+	var env map[string]any
+	if jerr := json.Unmarshal([]byte(strings.TrimRight(piped.String(), "\n")), &env); jerr != nil {
+		t.Fatalf("piped stderr must be the JSON envelope, got: %q", piped.String())
 	}
 }
 
@@ -145,15 +150,20 @@ func TestRoot_FlagParseErrorExactlyOneProseViaReport(t *testing.T) {
 
 	out := stderr.String()
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	// Last line must be the envelope.
-	lastLine := lines[len(lines)-1]
-	var env map[string]any
-	if jerr := json.Unmarshal([]byte(lastLine), &env); jerr != nil {
-		t.Fatalf("last line must be the JSON envelope, got: %q\nfull: %s", lastLine, out)
+	// Exactly one prose line (from reportTo only, FlagErrorFunc silent), and on
+	// a terminal nothing else.
+	if len(lines) != 1 {
+		t.Errorf("want exactly 1 line on a terminal, got %d:\n%s", len(lines), out)
 	}
-	// There must be exactly one prose line (from reportTo only, FlagErrorFunc silent).
-	proseLines := lines[:len(lines)-1]
-	if len(proseLines) != 1 {
-		t.Errorf("want exactly 1 prose line before the envelope, got %d:\n%s", len(proseLines), out)
+	if strings.Contains(out, `{"error":`) {
+		t.Errorf("no JSON envelope belongs on an interactive table, got:\n%s", out)
+	}
+
+	// The same failure, read by a machine, is the envelope and nothing else.
+	var piped bytes.Buffer
+	reportTo(&piped, false, formatJSON, runErr)
+	var env map[string]any
+	if jerr := json.Unmarshal([]byte(strings.TrimRight(piped.String(), "\n")), &env); jerr != nil {
+		t.Fatalf("piped stderr must be the JSON envelope, got: %q", piped.String())
 	}
 }
