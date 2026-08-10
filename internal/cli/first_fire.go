@@ -71,6 +71,7 @@ func firstFireStatusOK(status string) bool {
 // aborts immediately.
 func waitForFirstFireLoop(poll func() (string, error), timeout, pollEvery, progressEvery time.Duration,
 	now func() time.Time, sleep func(time.Duration), out io.Writer, label string) (string, error) {
+	s := stylerFor(out)
 	start := now()
 	deadline := start.Add(timeout)
 	lastProgress := start
@@ -94,8 +95,11 @@ func waitForFirstFireLoop(poll func() (string, error), timeout, pollEvery, progr
 			return lastStatus, errFirstFireTimeout
 		}
 		if t.Sub(lastProgress) >= progressEvery {
-			fmt.Fprintf(out, "  %s: first-fire still running (%s/%s)\n",
-				label, t.Sub(start).Round(time.Second), timeout)
+			// Yellow rather than styler.status("running"): here the word means a
+			// job still in flight, not the steady healthy state that status()
+			// paints green. Green would read as "this finished successfully".
+			fmt.Fprintf(out, "  %s: first-fire still %s %s\n", label, s.yellow("running"),
+				s.dim(fmt.Sprintf("(%s/%s)", t.Sub(start).Round(time.Second), timeout)))
 			lastProgress = t
 		}
 		sleep(pollEvery)

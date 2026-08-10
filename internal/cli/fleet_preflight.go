@@ -36,6 +36,7 @@ type preflightResult struct {
 // (the EC2-churn case). On any error it removes temp clones itself and returns
 // a nil result; on success the caller owns cleanup via the returned closure.
 func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.Duration) (*preflightResult, error) {
+	s := stylerFor(errOut)
 	var cleanups []func()
 	runCleanups := func() {
 		for _, c := range cleanups {
@@ -82,10 +83,10 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 	if len(probs) > 0 || len(srcProbs) > 0 {
 		fmt.Fprintf(errOut, "shinyhub fleet %s: validating %s\n\n", cmdName, file)
 		for _, p := range probs {
-			fmt.Fprintf(errOut, "  ✗ %s\n", p.Error())
+			fmt.Fprintf(errOut, "  %s %s\n", s.failMark(), p.Error())
 		}
 		for _, sc := range srcProbs {
-			fmt.Fprintf(errOut, "  ✗ %s  app %q: %s\n", file, sc.slug, sc.msg)
+			fmt.Fprintf(errOut, "  %s %s  app %q: %s\n", s.failMark(), file, sc.slug, sc.msg)
 		}
 		total := len(probs) + len(srcProbs)
 		fmt.Fprintf(errOut, "\n%d problem(s) found. Nothing was changed. Fix these and re-run.\n", total)
@@ -94,12 +95,12 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
+		fmt.Fprintf(errOut, "  %s not authenticated: %v\n     run 'shinyhub login' or pass --config\n", s.failMark(), err)
 		return nil, &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	if waitFor > 0 {
 		if _, werr := waitForServerReady(cfg, waitFor, serverPollInterval, errOut, time.Now, time.Sleep); werr != nil {
-			fmt.Fprintf(errOut, "  ✗ %v\n", werr)
+			fmt.Fprintf(errOut, "  %s %v\n", s.failMark(), werr)
 			return nil, &ExitCodeError{Code: 6, Err: werr, Reported: true}
 		}
 	}
@@ -109,8 +110,8 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		// half-provisioned box answered) from a real transport/auth failure, so
 		// the operator is not sent chasing a credential problem that isn't there.
 		if nr := serverReadinessProblem(cfg); nr != nil {
-			fmt.Fprintf(errOut, "  ✗ %v\n     the shinyhub server is not up yet (a front proxy answered instead).\n"+
-				"     retry, or pass --wait-for-server=<duration> to block until it is ready.\n", nr)
+			fmt.Fprintf(errOut, "  %s %v\n     the shinyhub server is not up yet (a front proxy answered instead).\n"+
+				"     retry, or pass --wait-for-server=<duration> to block until it is ready.\n", s.failMark(), nr)
 			return nil, &ExitCodeError{Code: 6, Err: nr, Reported: true}
 		}
 		return nil, reportAppsFetchError(cfg, errOut, err)
@@ -147,7 +148,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 	if len(resolveProblems) > 0 {
 		fmt.Fprintf(errOut, "shinyhub fleet %s: resolving sources\n\n", cmdName)
 		for _, p := range resolveProblems {
-			fmt.Fprintf(errOut, "  ✗ %s\n", p)
+			fmt.Fprintf(errOut, "  %s %s\n", s.failMark(), p)
 		}
 		fmt.Fprintf(errOut, "\n%d source problem(s). Nothing was changed.\n", len(resolveProblems))
 		runCleanups()

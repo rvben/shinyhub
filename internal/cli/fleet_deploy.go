@@ -201,6 +201,7 @@ func waitForFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout tim
 // now and sleep are injected so the cadence is deterministic in tests.
 func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.Duration,
 	poll func() (bool, string, error), now func() time.Time, sleep func(time.Duration), out io.Writer) error {
+	s := stylerFor(out)
 	start := now()
 	deadline := start.Add(timeout)
 	lastProgress := start
@@ -209,7 +210,8 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 		t := now()
 		ready, status, err := poll()
 		if err == nil && ready {
-			fmt.Fprintf(out, "  %s: healthy after %s\n", slug, t.Sub(start).Round(time.Second))
+			fmt.Fprintf(out, "  %s: %s after %s\n",
+				slug, s.status("healthy"), s.dim(t.Sub(start).Round(time.Second).String()))
 			return nil
 		}
 		if err != nil {
@@ -226,8 +228,8 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 			break
 		}
 		if t.Sub(lastProgress) >= progressEvery {
-			fmt.Fprintf(out, "  %s: still starting (%s/%s)\n",
-				slug, t.Sub(start).Round(time.Second), timeout)
+			fmt.Fprintf(out, "  %s: still %s %s\n", slug, s.status("starting"),
+				s.dim(fmt.Sprintf("(%s/%s)", t.Sub(start).Round(time.Second), timeout)))
 			lastProgress = t
 		}
 		sleep(pollEvery)

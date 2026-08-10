@@ -198,3 +198,13 @@ func (s styler) failPrefix() string {
 	}
 	return s.red(s.glyphFail()) + " "
 }
+
+// failMark returns the failure glyph painted red. Unlike failPrefix it is
+// present for a non-terminal writer too: it marks an item in a problem list,
+// where the glyph is part of the list's shape rather than an ornament on a
+// sentence, and dropping it when piped would change the layout.
+//
+// Prefer this over composing glyphPaint with glyphFail. glyphPaint matches the
+// Unicode glyph literally, so in an ASCII locale it would be handed "x", fall
+// through its switch, and return it unpainted.
+func (s styler) failMark() string { return s.red(s.glyphFail()) }
