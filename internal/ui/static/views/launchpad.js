@@ -168,7 +168,7 @@ export function mountLaunchpad(ctx, opts = {}) {
     }
 
     node.appendChild(renderAppAvatar(document, {
-      iconUrl: t.iconUrl, initials: t.avatar.initials, hue: t.avatar.hue,
+      iconUrl: t.iconUrl, emoji: t.emoji, initials: t.avatar.initials, hue: t.avatar.hue,
     }, 'lp-avatar'));
 
     const main = el('div', 'lp-tile-main');

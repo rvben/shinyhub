@@ -184,6 +184,8 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		WorkerMaxWorkers:             workerMaxWorkers,
 		SetWorkerMaxSessionLifetime:  m.Worker != nil && m.Worker.MaxSessionLifetimeSecs != nil,
 		WorkerMaxSessionLifetimeSecs: workerMaxSessionLifetimeSecs,
+		SetIconEmoji:                 m.Icon != nil,
+		IconEmoji:                    derefStringOrEmpty(m.Icon),
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
 	}
@@ -454,6 +456,13 @@ func derefFloatOrZero(p *float64) float64 {
 	return *p
 }
 
+func derefStringOrEmpty(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
 // applyManifestAccessGroups flattens the manifest [access] block to desired
 // group rules (manager wins when a group appears in both lists) and reconciles
 // them into app_group_access as source='manifest', preserving any manual rules.
@@ -497,9 +506,10 @@ type ManifestAccessGroupResult struct {
 // Returned alongside the app in the deploy response so CLI / UI can show
 // the operator a concrete record of what landed.
 type ManifestApplied struct {
-	App          map[string]any              `json:"app,omitempty"`
-	Schedules    []ManifestScheduleResult    `json:"schedules,omitempty"`
-	AccessGroups []ManifestAccessGroupResult `json:"access_groups,omitempty"`
+	App                map[string]any              `json:"app,omitempty"`
+	Schedules          []ManifestScheduleResult    `json:"schedules,omitempty"`
+	AccessGroups       []ManifestAccessGroupResult `json:"access_groups,omitempty"`
+	IconShadowedUpload bool                        `json:"icon_shadowed_upload,omitempty"`
 }
 
 // IsEmpty reports whether nothing was applied. The handler omits the field
@@ -569,6 +579,9 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 		}
 		d["worker"] = w
 	}
+	if m.Icon != nil {
+		d["icon"] = *m.Icon
+	}
 	return d
 }
 
@@ -626,6 +639,9 @@ func manifestAppDetail(m deploy.AppSettings) string {
 			w["max_session_lifetime_secs"] = *m.Worker.MaxSessionLifetimeSecs
 		}
 		d["worker"] = w
+	}
+	if m.Icon != nil {
+		d["icon"] = *m.Icon
 	}
 	b, _ := json.Marshal(d)
 	return string(b)

@@ -30,18 +30,33 @@ export function appIconUrl(app) {
   return `/api/apps/${encodeURIComponent(app.slug)}/icon${v}`;
 }
 
+// appIconEmoji returns the app's emoji icon, or '' when none is set.
+export function appIconEmoji(app) {
+  return (app && app.icon_emoji) || '';
+}
+
 // avatarView normalizes a raw app into the shape renderAppAvatar consumes.
 export function avatarView(app) {
   const mono = appAvatar(app);
-  return { iconUrl: appIconUrl(app), initials: mono.initials, hue: mono.hue };
+  return { iconUrl: appIconUrl(app), emoji: appIconEmoji(app), initials: mono.initials, hue: mono.hue };
 }
 
-// renderAppAvatar returns a DOM node for the app's identity: an <img> of the
-// uploaded icon (with a monogram fallback if the image 404s/errors), or the
-// monogram directly. baseClass styles the box; the icon variant also gets
-// `${baseClass}--img` so CSS can drop the monogram background/letter styling.
-// view is {iconUrl, initials, hue} (use avatarView(app) to build it).
+// renderAppAvatar returns a DOM node for the app's identity: an emoji glyph,
+// an <img> of the uploaded icon (with a monogram fallback if the image
+// 404s/errors), or the monogram directly - in that order. The order is
+// deliberate and matches the server: setting an emoji clears the uploaded
+// icon (and vice versa), so a cached copy that somehow still carries both
+// must resolve the same way the server would. baseClass styles the box; the
+// emoji variant gets `${baseClass}--emoji`, the icon variant
+// `${baseClass}--img`, so CSS can adjust the monogram background/letter
+// styling per variant. view is {iconUrl, emoji, initials, hue} (use
+// avatarView(app) to build it).
 export function renderAppAvatar(doc, view, baseClass) {
+  if (view && view.emoji) {
+    const span = monogram(doc, { ...view, initials: view.emoji }, baseClass);
+    span.classList.add(`${baseClass}--emoji`);
+    return span;
+  }
   if (view && view.iconUrl) {
     const img = doc.createElement('img');
     img.className = `${baseClass} ${baseClass}--img`;

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { appAvatar, appIconUrl, avatarView, renderAppAvatar } from '../static/views/app-avatar.js';
+import { appAvatar, appIconUrl, appIconEmoji, avatarView, renderAppAvatar } from '../static/views/app-avatar.js';
 
 function doc() {
   return new JSDOM('<!DOCTYPE html><body></body>').window.document;
@@ -41,6 +41,36 @@ test('renderAppAvatar: <img> when an icon is set, with the --img modifier', () =
   assert.equal(node.getAttribute('src'), '/api/apps/churn/icon?v=2026-06-23T10%3A00%3A00Z');
   assert.equal(node.getAttribute('alt'), '');
   assert.equal(node.getAttribute('aria-hidden'), 'true');
+});
+
+test('appIconEmoji: the app emoji, or empty when absent', () => {
+  assert.equal(appIconEmoji({ icon_emoji: '🚀' }), '🚀');
+  assert.equal(appIconEmoji({}), '', 'no icon_emoji -> empty string');
+  assert.equal(appIconEmoji(null), '', 'defensive against a missing app');
+});
+
+test('emoji beats image beats monogram', () => {
+  // An app can carry both icon_emoji and icon_mime at once (e.g. a cached copy
+  // mid-transition); the emoji must win over the image, and the image over the
+  // bare monogram.
+  const emojiApp = {
+    name: 'Churn', slug: 'churn', icon_emoji: '🚀',
+    icon_mime: 'image/png', updated_at: '2026-06-23T10:00:00Z',
+  };
+  const emojiNode = renderAppAvatar(doc(), avatarView(emojiApp), 'lp-avatar');
+  assert.equal(emojiNode.tagName, 'SPAN', 'an emoji renders as a span, not the <img>');
+  assert.equal(emojiNode.textContent, '🚀');
+  assert.ok(emojiNode.classList.contains('lp-avatar--emoji'), 'carries the --emoji modifier class');
+  assert.match(emojiNode.getAttribute('style') || '', /--avatar-hue/, 'still carries the hue variable');
+
+  const imageApp = { name: 'Churn', slug: 'churn', icon_mime: 'image/png', updated_at: '2026-06-23T10:00:00Z' };
+  const imageNode = renderAppAvatar(doc(), avatarView(imageApp), 'lp-avatar');
+  assert.equal(imageNode.tagName, 'IMG', 'icon_mime alone renders the uploaded image');
+
+  const bareApp = { name: 'Churn Model', slug: 'churn' };
+  const monoNode = renderAppAvatar(doc(), avatarView(bareApp), 'lp-avatar');
+  assert.equal(monoNode.tagName, 'SPAN');
+  assert.equal(monoNode.textContent, 'CM', 'neither emoji nor image falls back to initials');
 });
 
 test('renderAppAvatar: a broken icon image falls back to the monogram in place', () => {

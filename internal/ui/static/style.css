@@ -4059,6 +4059,61 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 .icon-picker-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .icon-picker-controls .hibernate-status { margin: 0; }
 
+/* Emoji picker: a kebab-style popover (position:relative on the trigger's
+   wrapper, position:absolute on the popover), not a modal - it closes on
+   Escape/outside-click via the same wireKebab() every other popover uses. */
+.emoji-picker { position: relative; display: inline-flex; }
+.emoji-picker-popover {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 4px);
+  background: var(--bg-deep);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  padding: 10px;
+  width: 272px;
+  z-index: 10;
+}
+.emoji-picker-custom { display: flex; gap: 8px; margin-bottom: 8px; }
+.emoji-picker-text-input {
+  flex: 1; min-width: 0; font: inherit; font-size: 0.85rem;
+  color: var(--text); background: var(--surface-3);
+  border: 1px solid var(--line-2); border-radius: var(--radius);
+  padding: 6px 10px;
+}
+.emoji-picker-clear { display: block; width: 100%; margin-bottom: 8px; }
+.emoji-picker-grid-slot { display: block; }
+.emoji-picker-grid {
+  display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px;
+  max-height: 220px; overflow-y: auto;
+}
+.emoji-picker-cell {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.1rem; line-height: 1; padding: 6px 0;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  cursor: pointer; transition: border-color var(--ease), background var(--ease);
+}
+.emoji-picker-cell:hover,
+.emoji-picker-cell:focus-visible {
+  border-color: var(--cyan-bright); background: rgba(56,189,248,0.08);
+  outline: none;
+}
+
+/* Emoji-icon variant: the glyph reuses the monogram box, but the monogram's
+   bold weight and condensed letter-spacing are tuned for 1-2 letters, not a
+   glyph - reset them and size the glyph up to fill the box. overflow: hidden
+   is load-bearing: when the local font has no single glyph for a ZWJ
+   sequence (a skin-toned multi-person family, for example), it falls back to
+   rendering the parts side by side, so one "emoji" becomes a wide run of
+   glyphs. Without containment that run paints over the app name on the
+   Launchpad tile and over the page heading on the app-detail header. The box
+   is place-items: center, so an oversized run is center-cropped rather than
+   spilling out; a cropped glyph is the honest result when the font cannot
+   compose the sequence as one icon. */
+.lp-avatar--emoji, .app-detail-avatar--emoji, .icon-picker-preview--emoji {
+  font-size: 1.35em; font-weight: 400; letter-spacing: normal; overflow: hidden;
+}
+
 .lp-tile-main { min-width: 0; flex: 1; }
 .lp-tile-name { font-size: 0.98rem; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lp-tile-desc {

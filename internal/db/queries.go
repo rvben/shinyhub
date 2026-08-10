@@ -603,7 +603,11 @@ type App struct {
 	// IconMime is the MIME type of the app's uploaded icon, or "" when none is
 	// set (the UI then renders the generated monogram). The bytes themselves are
 	// never loaded into App; they are read on demand via GetAppIcon.
-	IconMime                string    `json:"icon_mime,omitempty"`
+	IconMime string `json:"icon_mime,omitempty"`
+	// IconEmoji is the emoji chosen as the app's icon, or "" when none is set.
+	// Separate from IconMime because IconMime is written verbatim as a
+	// Content-Type header. Display order is emoji > uploaded image > monogram.
+	IconEmoji               string    `json:"icon_emoji,omitempty"`
 	ProjectSlug             string    `json:"project_slug,omitempty"`
 	OwnerID                 int64     `json:"owner_id"`
 	Access                  string    `json:"access"`
@@ -777,7 +781,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       managed_by, replica_placement,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
 		       last_autoscale_at, identity_headers, min_warm_replicas,
-		       last_error, crashed_at, description, icon_mime,
+		       last_error, crashed_at, description, icon_mime, icon_emoji,
 		       worker_isolation, worker_grouped_size, worker_max_workers,
 		       worker_max_session_lifetime_secs, ephemeral_data_ack, render_seconds,`
 
@@ -1965,7 +1969,7 @@ func (s *Store) SetAppDescription(slug, description string) error {
 // immediately. Returns ErrNotFound if no app has the slug.
 func (s *Store) SetAppIcon(slug, mime string, data []byte) error {
 	result, err := s.db.Exec(
-		`UPDATE apps SET icon_mime = ?, icon_data = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		`UPDATE apps SET icon_mime = ?, icon_data = ?, icon_emoji = '', updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
 		mime, data, slug)
 	if err != nil {
 		return fmt.Errorf("set app icon: %w", err)
@@ -1980,12 +1984,12 @@ func (s *Store) SetAppIcon(slug, mime string, data []byte) error {
 	return nil
 }
 
-// ClearAppIcon removes the app's icon (reverting the UI to the monogram) and
-// bumps updated_at. Returns ErrNotFound if no app has the slug. Clearing an
-// already-iconless app is a no-op success.
+// ClearAppIcon removes the app's icon in every form (image and emoji),
+// reverting the UI to the monogram, and bumps updated_at. Returns ErrNotFound
+// if no app has the slug. Clearing an already-iconless app is a no-op success.
 func (s *Store) ClearAppIcon(slug string) error {
 	result, err := s.db.Exec(
-		`UPDATE apps SET icon_mime = '', icon_data = NULL, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		`UPDATE apps SET icon_mime = '', icon_data = NULL, icon_emoji = '', updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
 		slug)
 	if err != nil {
 		return fmt.Errorf("clear app icon: %w", err)
@@ -1993,6 +1997,51 @@ func (s *Store) ClearAppIcon(slug string) error {
 	n, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("clear app icon rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAppIconEmoji writes icon_emoji and nothing else, so a retained uploaded
+// image survives and resurfaces in the resolution order. This is the
+// "clear the emoji" path; it accepts "" deliberately. Use ClearAppIcon to
+// remove the icon in every form. Returns ErrNotFound if no app has the slug.
+func (s *Store) SetAppIconEmoji(slug, emoji string) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET icon_emoji = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		emoji, slug)
+	if err != nil {
+		return fmt.Errorf("set app icon emoji: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app icon emoji rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAppIconEmojiExclusive sets the emoji AND discards any uploaded image,
+// which is explicit user intent when choosing an emoji in the UI or CLI. It
+// rejects an empty emoji rather than trusting callers to route a clear to
+// SetAppIconEmoji: routing a clear here would silently destroy image bytes.
+func (s *Store) SetAppIconEmojiExclusive(slug, emoji string) error {
+	if emoji == "" {
+		return fmt.Errorf("set app icon emoji exclusive: empty emoji would discard the stored image; use SetAppIconEmoji to clear")
+	}
+	result, err := s.db.Exec(
+		`UPDATE apps SET icon_emoji = ?, icon_mime = '', icon_data = NULL, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		emoji, slug)
+	if err != nil {
+		return fmt.Errorf("set app icon emoji exclusive: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app icon emoji exclusive rows: %w", err)
 	}
 	if n == 0 {
 		return ErrNotFound
@@ -2243,6 +2292,7 @@ const (
 	AuditDataDelete     = "data.delete"
 	AuditAppIconSet     = "app.icon.set"
 	AuditAppIconCleared = "app.icon.clear"
+	AuditAppIconEmoji   = "app.icon.emoji"
 )
 
 // AuditEventParams holds the fields for a new audit event.
@@ -3057,6 +3107,14 @@ type ApplyAppManifestSettingsParams struct {
 	WorkerMaxWorkers             int
 	SetWorkerMaxSessionLifetime  bool
 	WorkerMaxSessionLifetimeSecs int
+
+	// SetIconEmoji / IconEmoji reconcile apps.icon_emoji inside this
+	// transaction. The deploy-failure revert must leave SetIconEmoji false: the
+	// icon governs nothing about how the restored pool runs, and writing it
+	// back would stomp an icon changed during the deploy window (the icon
+	// handlers do not take the deploy lock).
+	SetIconEmoji bool
+	IconEmoji    string
 }
 
 // ApplyAppManifestSettings applies any subset of (hibernate, replicas,
@@ -3081,6 +3139,18 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			p.HibernateMinutes, p.Slug,
 		); err != nil {
 			return fmt.Errorf("update hibernate: %w", err)
+		}
+	}
+
+	// Written before the replicas block so a CHECK violation there rolls this
+	// back. Moving it below that block makes TestManifestIconPhaseAAtomic pass
+	// without proving anything: the emoji would never be written at all.
+	if p.SetIconEmoji {
+		if _, err := tx.Exec(
+			`UPDATE apps SET icon_emoji = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.IconEmoji, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update icon_emoji: %w", err)
 		}
 	}
 
@@ -3445,7 +3515,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
-		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime,
+		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime, &a.IconEmoji,
 		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
 		&a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,

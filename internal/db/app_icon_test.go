@@ -91,3 +91,119 @@ func TestAppIconRoundTrip(t *testing.T) {
 		t.Errorf("GetAppIcon missing = %v, want ErrNotFound", err)
 	}
 }
+
+// newIconTestApp creates the owner and the app. CreateApp takes a real
+// OwnerID: the column is a foreign key, so a hardcoded 1 fails. Access is
+// omitted deliberately, matching TestAppIconRoundTrip; the column DEFAULTs to
+// 'private'.
+func newIconTestApp(t *testing.T) *db.Store {
+	t.Helper()
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "x", Role: "developer"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	u, err := store.GetUserByUsername("owner")
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "dash", Name: "Dash", OwnerID: u.ID}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	return store
+}
+
+// TestAppIconEmojiColumn pins that icon_emoji round-trips through the shared
+// appColumns/scanApp pair AND that icon_mime still lands in IconMime. The
+// second assertion is the one that catches a misaligned insertion: both are
+// strings, so a swapped pair scans cleanly and only shows up as an emoji in a
+// Content-Type header at runtime.
+func TestAppIconEmojiColumn(t *testing.T) {
+	store := newIconTestApp(t)
+	app, err := store.GetAppBySlug("dash")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.IconEmoji != "" {
+		t.Errorf("new app icon_emoji = %q, want empty", app.IconEmoji)
+	}
+	if err := store.SetAppIcon("dash", "image/png", []byte("PNG")); err != nil {
+		t.Fatalf("set icon: %v", err)
+	}
+	app, _ = store.GetAppBySlug("dash")
+	if app.IconMime != "image/png" {
+		t.Errorf("icon_mime = %q, want image/png (a swapped column list scans clean but lands here)", app.IconMime)
+	}
+}
+
+// TestSetAppIconEmojiNonDestructive pins that clearing the emoji keeps the
+// image. An implementation that routes the clear through the exclusive setter
+// passes every other test in this file while silently destroying the bytes.
+func TestSetAppIconEmojiNonDestructive(t *testing.T) {
+	store := newIconTestApp(t)
+	if err := store.SetAppIcon("dash", "image/png", []byte("PNG")); err != nil {
+		t.Fatalf("set icon: %v", err)
+	}
+	if err := store.SetAppIconEmoji("dash", ""); err != nil {
+		t.Fatalf("clear emoji: %v", err)
+	}
+	mime, data, err := store.GetAppIcon("dash")
+	if err != nil {
+		t.Fatalf("get icon after emoji clear: %v", err)
+	}
+	if mime != "image/png" || string(data) != "PNG" {
+		t.Errorf("image after emoji clear = %q/%q, want image/png/PNG", mime, string(data))
+	}
+}
+
+// TestSetAppIconEmojiExclusiveRejectsEmpty makes the destructive setter
+// structurally unreachable for a clear, rather than trusting call sites.
+func TestSetAppIconEmojiExclusiveRejectsEmpty(t *testing.T) {
+	store := newIconTestApp(t)
+	if err := store.SetAppIcon("dash", "image/png", []byte("PNG")); err != nil {
+		t.Fatalf("set icon: %v", err)
+	}
+	if err := store.SetAppIconEmojiExclusive("dash", ""); err == nil {
+		t.Fatal("SetAppIconEmojiExclusive(\"\") = nil, want error")
+	}
+	if mime, _, _ := store.GetAppIcon("dash"); mime != "image/png" {
+		t.Errorf("image destroyed by rejected call: mime = %q", mime)
+	}
+}
+
+// TestIconMutualExclusion pins both user-initiated directions.
+func TestIconMutualExclusion(t *testing.T) {
+	store := newIconTestApp(t)
+	if err := store.SetAppIconEmojiExclusive("dash", "\U0001F4CA"); err != nil {
+		t.Fatalf("set emoji: %v", err)
+	}
+	if err := store.SetAppIcon("dash", "image/png", []byte("PNG")); err != nil {
+		t.Fatalf("set icon: %v", err)
+	}
+	app, _ := store.GetAppBySlug("dash")
+	if app.IconEmoji != "" {
+		t.Errorf("upload left icon_emoji = %q, want cleared", app.IconEmoji)
+	}
+	if err := store.SetAppIconEmojiExclusive("dash", "\U0001F4CA"); err != nil {
+		t.Fatalf("set emoji again: %v", err)
+	}
+	if _, _, err := store.GetAppIcon("dash"); err != db.ErrNotFound {
+		t.Errorf("exclusive emoji left image: err = %v, want ErrNotFound", err)
+	}
+	// Remove-the-icon is the destructive one: it clears both.
+	if err := store.SetAppIcon("dash", "image/png", []byte("PNG")); err != nil {
+		t.Fatalf("re-set icon: %v", err)
+	}
+	if err := store.SetAppIconEmoji("dash", "\U0001F4CA"); err != nil {
+		t.Fatalf("set emoji non-exclusively: %v", err)
+	}
+	if err := store.ClearAppIcon("dash"); err != nil {
+		t.Fatalf("clear icon: %v", err)
+	}
+	app, _ = store.GetAppBySlug("dash")
+	if app.IconEmoji != "" {
+		t.Errorf("ClearAppIcon left icon_emoji = %q, want cleared", app.IconEmoji)
+	}
+	if _, _, err := store.GetAppIcon("dash"); err != db.ErrNotFound {
+		t.Errorf("ClearAppIcon left image: err = %v, want ErrNotFound", err)
+	}
+}

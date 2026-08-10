@@ -380,6 +380,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setName             bool
 		newDescription      string
 		setDescription      bool
+		newIconEmoji        string
+		setIconEmoji        bool
 		newProjectSlug      string
 		setProjectSlug      bool
 		memoryLimitMB       *int
@@ -463,6 +465,21 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newDescription, setDescription = desc, true
+	}
+
+	if rawVal, present := raw["icon_emoji"]; present {
+		if err := json.Unmarshal(rawVal, &newIconEmoji); err != nil {
+			writeError(w, http.StatusBadRequest, "icon_emoji must be a string")
+			return
+		}
+		// "" means clear; only a non-empty value is validated as an emoji.
+		if newIconEmoji != "" {
+			if verr := deploy.ValidateIconEmoji(newIconEmoji); verr != nil {
+				writeError(w, http.StatusBadRequest, verr.Error())
+				return
+			}
+		}
+		setIconEmoji = true
 	}
 
 	if rawVal, present := raw["project_slug"]; present {
@@ -910,6 +927,22 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
+	}
+
+	if setIconEmoji {
+		// Non-empty is explicit intent to replace any uploaded image; "" clears
+		// the emoji only, so a retained image resurfaces in the display order.
+		var ierr error
+		if newIconEmoji == "" {
+			ierr = s.store.SetAppIconEmoji(slug, "")
+		} else {
+			ierr = s.store.SetAppIconEmojiExclusive(slug, newIconEmoji)
+		}
+		if ierr != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		s.auditIcon(r, db.AuditAppIconEmoji, slug, map[string]any{"emoji": newIconEmoji})
 	}
 
 	if setEphemeralDataAck {
@@ -1471,6 +1504,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		manifestApplied = true
 		manifestSummary.App = manifestAppliedSummary(manifest.App)
+		// Read from preManifestApp, not the post-Phase-A refresh below: this
+		// must reflect whether an image was uploaded BEFORE this deploy, and
+		// the refresh could in principle observe a value the manifest write
+		// itself just changed.
+		manifestSummary.IconShadowedUpload = manifest.App.Icon != nil &&
+			*manifest.App.Icon != "" && preManifestApp.IconMime != ""
 		// Refresh so deploy.Run sees the updated replicas / max_sessions.
 		if fresh, ferr := s.store.GetAppBySlug(slug); ferr == nil {
 			app = fresh

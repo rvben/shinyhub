@@ -4,6 +4,7 @@ import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountOverview } from '/static/views/overview.js';
 import { mountLaunchpad } from '/static/views/launchpad.js';
 import { renderAppAvatar, avatarView } from '/static/views/app-avatar.js';
+import { isSingleEmoji, renderEmojiPicker } from '/static/views/emoji-picker.js';
 import { launchReadiness } from '/static/views/launchpad-model.js';
 import { mountUsers } from '/static/views/users.js';
 import { tokenListModels, renderTokenList } from '/static/views/tokens.js';
@@ -1921,12 +1922,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const removeBtn = document.getElementById('general-icon-remove');
     const fileInput = document.getElementById('general-icon-file');
     const statusEl = document.getElementById('general-icon-status');
+    const emojiBtn = document.getElementById('general-icon-emoji-btn');
+    const emojiClearBtn = document.getElementById('general-icon-emoji-clear-btn');
     if (!preview || !uploadBtn || !removeBtn || !fileInput) return;
 
     setHidden(statusEl, true);
     preview.replaceChildren(renderAppAvatar(document, avatarView(app), 'icon-picker-preview'));
     uploadBtn.hidden = !canEdit;
-    removeBtn.hidden = !canEdit || !app.icon_mime;
+    removeBtn.hidden = !canEdit || (!app.icon_mime && !app.icon_emoji);
+    // The emoji trigger and its Clear-emoji control are wired once (see the
+    // top-level setup block below); only their visibility changes per render.
+    if (emojiBtn) emojiBtn.hidden = !canEdit;
+    if (emojiClearBtn) emojiClearBtn.hidden = !canEdit || !app.icon_emoji;
 
     if (!canEdit) {
       uploadBtn.onclick = null;
@@ -1975,7 +1982,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     let body = {};
     try { body = await resp.json(); } catch { /* tolerate */ }
-    applyIconChange(app, body.icon_mime || file.type);
+    applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' });
     statusEl.textContent = 'Icon updated.';
     setHidden(statusEl, false);
   }
@@ -1993,25 +2000,113 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) { setError(errEl, 'Failed to remove icon.'); return; }
-    applyIconChange(app, '');
+    applyIconChange(app, { mime: '', emoji: '' });
     statusEl.textContent = 'Icon removed.';
+    setHidden(statusEl, false);
+  }
+
+  // setEmojiIcon PATCHes a single emoji as the app's icon (server-side this
+  // destroys any uploaded image - explicit user intent, mirrored by
+  // applyIconChange's mime: ''). The coarse client-side check (isSingleEmoji)
+  // only blocks the empty string, plain text, and a multi-emoji paste before
+  // a round trip; the server (deploy.ValidateIconEmoji) is the authority and
+  // its message is shown verbatim on a 400.
+  async function setEmojiIcon(app, rawValue) {
+    const errEl = document.getElementById('general-error');
+    const statusEl = document.getElementById('general-icon-status');
+    setError(errEl, '');
+    const value = (rawValue || '').trim();
+    if (!isSingleEmoji(value)) {
+      setError(errEl, 'Enter a single emoji.');
+      return;
+    }
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ icon_emoji: value }),
+      });
+    } catch {
+      setError(errEl, 'Failed to save. Check your connection.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let msg = 'Failed to save icon.';
+      try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
+      setError(errEl, msg);
+      return;
+    }
+    let body = {};
+    try { body = await resp.json(); } catch { /* tolerate */ }
+    applyIconChange(app, { mime: '', emoji: (body.app && body.app.icon_emoji) || '' });
+    const input = document.getElementById('general-icon-emoji-input');
+    if (input) input.value = '';
+    statusEl.textContent = 'Icon updated.';
+    setHidden(statusEl, false);
+  }
+
+  // clearEmojiIcon PATCHes icon_emoji back to empty. Unlike removeIcon (the
+  // Remove button, which destroys both the image and the emoji), this only
+  // clears the emoji: the server's clear path (SetAppIconEmoji) writes
+  // icon_emoji alone and never touches icon_mime, so an app whose emoji was
+  // set through manifest reconciliation (which also never touches icon_mime)
+  // keeps its image and it must resurface once the emoji is gone. So the mime
+  // written locally has to come from the server's own response, not a
+  // hardcoded '' - that would blank a retained image everywhere in the UI
+  // until a reload, contradicting the mutual-exclusivity contract this whole
+  // control follows. icon_mime is omitempty, so "no image" is an absent key,
+  // not ''; if the body itself fails to parse, keep the app's last-known mime
+  // rather than guessing blank.
+  async function clearEmojiIcon(app) {
+    const errEl = document.getElementById('general-error');
+    const statusEl = document.getElementById('general-icon-status');
+    setError(errEl, '');
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ icon_emoji: '' }),
+      });
+    } catch {
+      setError(errEl, 'Failed to clear icon. Check your connection.');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let msg = 'Failed to clear icon.';
+      try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
+      setError(errEl, msg);
+      return;
+    }
+    let body = {};
+    try { body = await resp.json(); } catch { /* tolerate */ }
+    const mime = body.app ? (body.app.icon_mime || '') : app.icon_mime;
+    applyIconChange(app, { mime, emoji: '' });
+    statusEl.textContent = 'Icon updated.';
     setHidden(statusEl, false);
   }
 
   // applyIconChange records the new icon state on the app and every cached copy
   // (detailApp, the sidebar/grid list) and bumps updated_at as the cache-buster,
   // then re-renders the picker preview and the detail-header avatar so the change
-  // shows everywhere without a reload.
-  function applyIconChange(app, iconMime) {
+  // shows everywhere without a reload. Both mime and emoji are written on every
+  // call, even the one that did not change, because the server enforces mutual
+  // exclusivity (setting one clears the other): the cached copy must mirror
+  // exactly what the server just did, or a stale emoji (which now renders ahead
+  // of the image) keeps winning until a reload.
+  function applyIconChange(app, { mime, emoji }) {
     const stamp = new Date().toISOString();
-    app.icon_mime = iconMime;
+    app.icon_mime = mime;
+    app.icon_emoji = emoji;
     app.updated_at = stamp;
     if (detailApp && detailApp.slug === app.slug && detailApp !== app) {
-      detailApp.icon_mime = iconMime;
+      detailApp.icon_mime = mime;
+      detailApp.icon_emoji = emoji;
       detailApp.updated_at = stamp;
     }
     const listed = (state.apps || []).find((a) => a && a.slug === app.slug);
-    if (listed) { listed.icon_mime = iconMime; listed.updated_at = stamp; }
+    if (listed) { listed.icon_mime = mime; listed.icon_emoji = emoji; listed.updated_at = stamp; }
     renderIconPicker(app, true);
     renderDetailHeaderAvatar(app);
     if (typeof syncSidebar === 'function') syncSidebar();
@@ -4354,6 +4449,35 @@ document.addEventListener('DOMContentLoaded', () => {
     const dRestart = document.getElementById('app-detail-restart');
     if (dRestart) {
       dRestart.addEventListener('click', () => { if (detailApp) restart(detailApp.slug); });
+    }
+  }
+
+  // Wire the emoji picker once, the same way: the trigger + popover are
+  // static markup, the grid is built once via renderEmojiPicker (a fresh grid
+  // on every render would stack listeners), and every handler acts on
+  // whichever app is currently on the detail page (detailApp) rather than
+  // re-wiring per render. renderIconPicker only ever toggles this markup's
+  // `hidden` state.
+  {
+    const eBtn = document.getElementById('general-icon-emoji-btn');
+    const ePopover = document.getElementById('general-icon-emoji-popover');
+    wireKebab(eBtn, ePopover, eBtn && eBtn.closest('.emoji-picker'));
+    const eGridSlot = document.getElementById('general-icon-emoji-grid');
+    if (eGridSlot) {
+      eGridSlot.replaceChildren(renderEmojiPicker(document, {
+        onPick: (emoji) => { if (detailApp) setEmojiIcon(detailApp, emoji); },
+      }));
+    }
+    const eInput = document.getElementById('general-icon-emoji-input');
+    const eUseBtn = document.getElementById('general-icon-emoji-use-btn');
+    if (eUseBtn) {
+      eUseBtn.addEventListener('click', () => {
+        if (detailApp && eInput) setEmojiIcon(detailApp, eInput.value);
+      });
+    }
+    const eClearBtn = document.getElementById('general-icon-emoji-clear-btn');
+    if (eClearBtn) {
+      eClearBtn.addEventListener('click', () => { if (detailApp) clearEmojiIcon(detailApp); });
     }
   }
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +73,48 @@ func TestFormatManifestSummary_FromServerShape(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestFormatManifestSummaryIconShadowWarning asserts formatManifestSummary
+// appends a recovery-pointing warning when the server reports a declared
+// manifest icon shadowed an already-uploaded image, and stays silent when the
+// flag is absent. The flag sits outside the "app" map (formatAppFields splats
+// every key of that map into the "Applied [app] settings:" line), so it must
+// never leak into that line.
+func TestFormatManifestSummaryIconShadowWarning(t *testing.T) {
+	emoji := "\U0001F4CA"
+	raw := map[string]any{
+		"icon_shadowed_upload": true,
+		"app":                  map[string]any{"icon": emoji},
+	}
+	lines := formatManifestSummary(raw)
+
+	var warning string
+	for _, line := range lines {
+		if strings.Contains(line, "still stored") {
+			warning = line
+		}
+	}
+	if warning == "" {
+		t.Fatalf("expected a warning line noting the retained image, got %q", lines)
+	}
+	if !strings.Contains(warning, `icon = ""`) {
+		t.Errorf("warning must name the recovery action (icon = \"\"), got %q", warning)
+	}
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Applied [app] settings:") && strings.Contains(line, "icon_shadowed_upload") {
+			t.Errorf("the [app] settings line must not leak icon_shadowed_upload, got %q", line)
+		}
+	}
+
+	// Absent flag: no warning line.
+	rawNoFlag := map[string]any{"app": map[string]any{"icon": emoji}}
+	for _, line := range formatManifestSummary(rawNoFlag) {
+		if strings.Contains(line, "still stored") {
+			t.Errorf("no warning expected when icon_shadowed_upload is absent, got %q", line)
+		}
 	}
 }
 

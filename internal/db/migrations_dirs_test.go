@@ -32,4 +32,29 @@ func TestMigrationDirsAligned(t *testing.T) {
 			t.Errorf("postgres migration %d has no sqlite counterpart", m.version)
 		}
 	}
+
+	// Reverse direction: every sqlite migration needs a postgres counterpart,
+	// or a sqlite-only migration is invisible in every gate (the suite runs
+	// sqlite only). Postgres folds everything below its first non-baseline
+	// version into 001_baseline.sql, so versions below that floor have no
+	// counterpart by design and are excluded rather than treated as gaps.
+	pgVersions := map[int]bool{}
+	pgFloor := 0
+	for _, m := range pg {
+		if m.version == 1 {
+			continue
+		}
+		pgVersions[m.version] = true
+		if pgFloor == 0 || m.version < pgFloor {
+			pgFloor = m.version
+		}
+	}
+	for _, m := range sq {
+		if pgFloor == 0 || m.version < pgFloor {
+			continue // folded into the postgres baseline
+		}
+		if !pgVersions[m.version] {
+			t.Errorf("sqlite migration %d has no postgres counterpart", m.version)
+		}
+	}
 }
