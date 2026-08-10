@@ -1969,7 +1969,7 @@ func (s *Store) SetAppDescription(slug, description string) error {
 // immediately. Returns ErrNotFound if no app has the slug.
 func (s *Store) SetAppIcon(slug, mime string, data []byte) error {
 	result, err := s.db.Exec(
-		`UPDATE apps SET icon_mime = ?, icon_data = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		`UPDATE apps SET icon_mime = ?, icon_data = ?, icon_emoji = '', updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
 		mime, data, slug)
 	if err != nil {
 		return fmt.Errorf("set app icon: %w", err)
@@ -1984,12 +1984,12 @@ func (s *Store) SetAppIcon(slug, mime string, data []byte) error {
 	return nil
 }
 
-// ClearAppIcon removes the app's icon (reverting the UI to the monogram) and
-// bumps updated_at. Returns ErrNotFound if no app has the slug. Clearing an
-// already-iconless app is a no-op success.
+// ClearAppIcon removes the app's icon in every form (image and emoji),
+// reverting the UI to the monogram, and bumps updated_at. Returns ErrNotFound
+// if no app has the slug. Clearing an already-iconless app is a no-op success.
 func (s *Store) ClearAppIcon(slug string) error {
 	result, err := s.db.Exec(
-		`UPDATE apps SET icon_mime = '', icon_data = NULL, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		`UPDATE apps SET icon_mime = '', icon_data = NULL, icon_emoji = '', updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
 		slug)
 	if err != nil {
 		return fmt.Errorf("clear app icon: %w", err)
@@ -1997,6 +1997,51 @@ func (s *Store) ClearAppIcon(slug string) error {
 	n, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("clear app icon rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAppIconEmoji writes icon_emoji and nothing else, so a retained uploaded
+// image survives and resurfaces in the resolution order. This is the
+// "clear the emoji" path; it accepts "" deliberately. Use ClearAppIcon to
+// remove the icon in every form. Returns ErrNotFound if no app has the slug.
+func (s *Store) SetAppIconEmoji(slug, emoji string) error {
+	result, err := s.db.Exec(
+		`UPDATE apps SET icon_emoji = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		emoji, slug)
+	if err != nil {
+		return fmt.Errorf("set app icon emoji: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app icon emoji rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAppIconEmojiExclusive sets the emoji AND discards any uploaded image,
+// which is explicit user intent when choosing an emoji in the UI or CLI. It
+// rejects an empty emoji rather than trusting callers to route a clear to
+// SetAppIconEmoji: routing a clear here would silently destroy image bytes.
+func (s *Store) SetAppIconEmojiExclusive(slug, emoji string) error {
+	if emoji == "" {
+		return fmt.Errorf("set app icon emoji exclusive: empty emoji would discard the stored image; use SetAppIconEmoji to clear")
+	}
+	result, err := s.db.Exec(
+		`UPDATE apps SET icon_emoji = ?, icon_mime = '', icon_data = NULL, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+		emoji, slug)
+	if err != nil {
+		return fmt.Errorf("set app icon emoji exclusive: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set app icon emoji exclusive rows: %w", err)
 	}
 	if n == 0 {
 		return ErrNotFound
