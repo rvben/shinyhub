@@ -2556,13 +2556,27 @@ func TestEmojiPickerUIContract(t *testing.T) {
 	// shape unpinned because every caller passed emoji: '' at the time, so
 	// undefined and '' read identically downstream. This task's set-emoji
 	// caller is the first to pass a NON-empty emoji, which makes
-	// `emoji: appIconEmoji(app)` a plausible copy-paste into the clear/remove
-	// paths - and that one is silently wrong, since it would re-assert an
-	// emoji the server has already cleared.
+	// `emoji: appIconEmoji(app)` a plausible copy-paste into the remove path
+	// - and that one is silently wrong, since it would re-assert an emoji the
+	// server has already cleared. removeIcon really does destroy both the
+	// image and the emoji server-side, so a literal empty mime is correct
+	// there; clearEmojiIcon does NOT share this literal (see the pin below) -
+	// its clear path leaves icon_mime untouched server-side, so hardcoding
+	// '' there would blank a retained image in the UI.
 	assertContains(t, "app.js", "applyIconChange(app, { mime: '', emoji: '' })",
-		"removeIcon (and any clear-emoji caller) must pass a literal empty emoji, not re-assert a stale one")
+		"removeIcon must pass a literal empty emoji and mime, since it destroys both the image and the emoji")
 	assertContains(t, "app.js", "applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' })",
 		"uploadIcon must clear the emoji (a new image and an emoji are mutually exclusive), not re-assert a stale one")
+
+	// Fix round 1: clearEmojiIcon's PATCH (icon_emoji: '') never touches
+	// icon_mime server-side (SetAppIconEmoji writes icon_emoji alone), so an
+	// app whose emoji coexisted with an uploaded/manifest image must keep
+	// that image once the emoji is cleared. Hardcoding mime: '' here (as the
+	// emoji-exclusive setEmojiIcon correctly does) blanked a retained image
+	// in the detail page, sidebar, and grid until a reload. The fix reads the
+	// server's own response for the authoritative mime.
+	assertContains(t, "app.js", "body.app ? (body.app.icon_mime || '') : app.icon_mime",
+		"clearEmojiIcon must read the authoritative icon_mime from the PATCH response (or keep the app's current value) instead of hardcoding an empty mime, or it blanks a retained image when only the emoji is cleared")
 
 	// Markup + module wiring.
 	assertContains(t, "index.html", `id="general-icon-emoji-btn"`,

@@ -2048,9 +2048,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // clearEmojiIcon PATCHes icon_emoji back to empty. Unlike removeIcon (the
   // Remove button, which destroys both the image and the emoji), this only
-  // clears the emoji, so an app that had an image before an exclusive emoji
-  // set has nothing to fall back to - but an app whose emoji was set through
-  // manifest reconciliation (which does not touch icon_mime) keeps its image.
+  // clears the emoji: the server's clear path (SetAppIconEmoji) writes
+  // icon_emoji alone and never touches icon_mime, so an app whose emoji was
+  // set through manifest reconciliation (which also never touches icon_mime)
+  // keeps its image and it must resurface once the emoji is gone. So the mime
+  // written locally has to come from the server's own response, not a
+  // hardcoded '' - that would blank a retained image everywhere in the UI
+  // until a reload, contradicting the mutual-exclusivity contract this whole
+  // control follows. icon_mime is omitempty, so "no image" is an absent key,
+  // not ''; if the body itself fails to parse, keep the app's last-known mime
+  // rather than guessing blank.
   async function clearEmojiIcon(app) {
     const errEl = document.getElementById('general-error');
     const statusEl = document.getElementById('general-icon-status');
@@ -2072,7 +2079,10 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(errEl, msg);
       return;
     }
-    applyIconChange(app, { mime: '', emoji: '' });
+    let body = {};
+    try { body = await resp.json(); } catch { /* tolerate */ }
+    const mime = body.app ? (body.app.icon_mime || '') : app.icon_mime;
+    applyIconChange(app, { mime, emoji: '' });
     statusEl.textContent = 'Icon updated.';
     setHidden(statusEl, false);
   }
