@@ -120,6 +120,13 @@ type AppSettings struct {
 	// previously-set value unchanged.
 	Worker *WorkerManifest `toml:"worker"`
 
+	// Icon declares the app's emoji icon and reconciles into apps.icon_emoji on
+	// every deploy (declared-only, like Replicas: nil leaves the stored value
+	// unchanged). "" clears the emoji, so a retained uploaded image resurfaces
+	// in the display order; it does not force the monogram. A declared icon
+	// shadows an uploaded image without destroying it.
+	Icon *string `toml:"icon"`
+
 	HibernateResetToDefault bool `toml:"-"`
 }
 
@@ -160,6 +167,7 @@ func (a AppSettings) IsZero() bool {
 		a.CPUQuotaPercent == nil &&
 		a.Autoscale == nil &&
 		a.Worker == nil &&
+		a.Icon == nil &&
 		!a.HibernateResetToDefault
 }
 
@@ -356,6 +364,13 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	if a.Autoscale != nil {
 		if err := validateAutoscale(*a.Autoscale); err != nil {
 			return err
+		}
+	}
+	// "" is the documented "uploads own this icon" clear, so only a non-empty
+	// value is validated.
+	if a.Icon != nil && *a.Icon != "" {
+		if err := ValidateIconEmoji(*a.Icon); err != nil {
+			return fmt.Errorf("icon: %w", err)
 		}
 	}
 	if a.Worker != nil {

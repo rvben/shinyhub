@@ -1061,3 +1061,28 @@ func TestAppSettings_IsZero_WorkerNonNil(t *testing.T) {
 		t.Error("IsZero should be false when Worker is non-nil")
 	}
 }
+
+// An invalid icon is rejected at manifest load, so `shiny manifest validate`
+// catches it locally instead of deferring to the server.
+func TestLoadManifestRejectsInvalidIcon(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[app]
+icon = "AB"
+`)
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "icon") {
+		t.Errorf("expected icon validation error, got %v", err)
+	}
+}
+
+// A manifest declaring only an icon must not be zero, or the deploy response
+// summary and the audit event are both skipped.
+func TestAppSettingsIsZeroWithIcon(t *testing.T) {
+	icon := "\U0001F4CA"
+	if (AppSettings{Icon: &icon}).IsZero() {
+		t.Error("AppSettings{Icon} reports zero; the apply would go unreported")
+	}
+	if !(AppSettings{}).IsZero() {
+		t.Error("empty AppSettings must still report zero")
+	}
+}

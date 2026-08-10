@@ -3107,6 +3107,14 @@ type ApplyAppManifestSettingsParams struct {
 	WorkerMaxWorkers             int
 	SetWorkerMaxSessionLifetime  bool
 	WorkerMaxSessionLifetimeSecs int
+
+	// SetIconEmoji / IconEmoji reconcile apps.icon_emoji inside this
+	// transaction. The deploy-failure revert must leave SetIconEmoji false: the
+	// icon governs nothing about how the restored pool runs, and writing it
+	// back would stomp an icon changed during the deploy window (the icon
+	// handlers do not take the deploy lock).
+	SetIconEmoji bool
+	IconEmoji    string
 }
 
 // ApplyAppManifestSettings applies any subset of (hibernate, replicas,
@@ -3131,6 +3139,18 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			p.HibernateMinutes, p.Slug,
 		); err != nil {
 			return fmt.Errorf("update hibernate: %w", err)
+		}
+	}
+
+	// Written before the replicas block so a CHECK violation there rolls this
+	// back. Moving it below that block makes TestManifestIconPhaseAAtomic pass
+	// without proving anything: the emoji would never be written at all.
+	if p.SetIconEmoji {
+		if _, err := tx.Exec(
+			`UPDATE apps SET icon_emoji = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.IconEmoji, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update icon_emoji: %w", err)
 		}
 	}
 

@@ -184,6 +184,8 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		WorkerMaxWorkers:             workerMaxWorkers,
 		SetWorkerMaxSessionLifetime:  m.Worker != nil && m.Worker.MaxSessionLifetimeSecs != nil,
 		WorkerMaxSessionLifetimeSecs: workerMaxSessionLifetimeSecs,
+		SetIconEmoji:                 m.Icon != nil,
+		IconEmoji:                    derefStringOrEmpty(m.Icon),
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
 	}
@@ -450,6 +452,13 @@ func derefOrZero(p *int) int {
 func derefFloatOrZero(p *float64) float64 {
 	if p == nil {
 		return 0
+	}
+	return *p
+}
+
+func derefStringOrEmpty(p *string) string {
+	if p == nil {
+		return ""
 	}
 	return *p
 }
