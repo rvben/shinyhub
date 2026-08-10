@@ -23,12 +23,12 @@ func TestSamplerInterface(t *testing.T) {
 }
 
 func TestSampler_ReturnsStats(t *testing.T) {
-	s := fakeSampler{stats: process.Stats{CPUPercent: 3.14, RSSBytes: 1 << 20}}
+	s := fakeSampler{stats: process.Stats{CPUPercent: process.Float(3.14), RSSBytes: 1 << 20}}
 	got, err := s.Sample(process.RunHandle{PID: 1})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.CPUPercent != 3.14 {
+	if got.CPUPercent == nil || *got.CPUPercent != 3.14 {
 		t.Errorf("CPUPercent = %v, want 3.14", got.CPUPercent)
 	}
 	if got.RSSBytes != 1<<20 {

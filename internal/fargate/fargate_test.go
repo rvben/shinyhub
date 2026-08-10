@@ -1074,17 +1074,21 @@ func TestWaitRespectsContextCancel(t *testing.T) {
 	}
 }
 
-func TestStatsReturnsZeroWithoutError(t *testing.T) {
+func TestStatsReportsCPUUnavailableWithoutError(t *testing.T) {
 	// A nil error is required: the status endpoint treats a sampler error as a
 	// dead replica, so erroring here would misreport a live Fargate task as
-	// stopped. Stats reports zero usage instead.
+	// stopped. The CPU rate is reported as absent rather than as 0, which would
+	// claim every Fargate replica is sitting idle.
 	r := fastRuntime(&fakeECS{})
 	cpu, rss, err := r.Stats(context.Background(), process.RunHandle{ContainerID: fgHandle("task-arn")})
 	if err != nil {
 		t.Fatalf("Stats err = %v, want nil", err)
 	}
-	if cpu != 0 || rss != 0 {
-		t.Errorf("Stats = (%v, %v), want (0, 0)", cpu, rss)
+	if cpu != nil {
+		t.Errorf("Stats cpu = %v, want nil (unavailable, not a measured 0)", *cpu)
+	}
+	if rss != 0 {
+		t.Errorf("Stats rss = %v, want 0", rss)
 	}
 }
 

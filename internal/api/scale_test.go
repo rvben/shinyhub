@@ -41,8 +41,8 @@ func (r *stopFailRuntime) Signal(process.RunHandle, syscall.Signal) error {
 	return errors.New("worker refused SIGTERM")
 }
 func (r *stopFailRuntime) Wait(context.Context, process.RunHandle) error { return nil }
-func (r *stopFailRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (r *stopFailRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (r *stopFailRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil

@@ -165,6 +165,15 @@ func (s styler) glyphFail() string {
 	return "✗"
 }
 
+// glyphEllipsis marks text that was cut short, so a clipped value cannot be
+// read as a shorter value that exists.
+func (s styler) glyphEllipsis() string {
+	if s.ascii {
+		return "~"
+	}
+	return "…"
+}
+
 // glyphPaint colors a fleet report glyph by what it stands for, leaving the
 // glyph itself untouched. The glyph set is fixed by the report's printed
 // legend, so it is matched literally rather than reinterpreted here; an

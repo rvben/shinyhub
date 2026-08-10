@@ -80,8 +80,8 @@ func (f *manifestFakeRuntime) Wait(_ context.Context, h process.RunHandle) error
 	return nil
 }
 
-func (f *manifestFakeRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (f *manifestFakeRuntime) Stats(_ context.Context, _ process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 
 func (f *manifestFakeRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {

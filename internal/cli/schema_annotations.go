@@ -313,6 +313,35 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "offset", Type: "integer"},
 	}},
 
+	// ── top ──────────────────────────────────────────────────────────────────
+	"top": {Mutating: ro,
+		ArgEnums: map[string][]string{
+			"--sort": topSortValues,
+		},
+		OutputFields: []fieldSpec{
+			{Name: "slug", Type: "string"},
+			{Name: "status", Type: "string", Desc: "App lifecycle state; deploying while a deploy is in flight"},
+			{Name: "replicas_running", Type: "integer", Desc: "Replicas currently running"},
+			{Name: "replicas_total", Type: "integer", Desc: "Replicas configured"},
+			{Name: "cpu_percent", Type: "number", Desc: "CPU summed across running replicas, 100 = one full core; null when none could be measured"},
+			{Name: "cpu_percent_partial", Type: "boolean", Desc: "True when a running replica has not reported yet, making cpu_percent a lower bound"},
+			{Name: "rss_bytes", Type: "integer", Desc: "Resident memory summed across running replicas; null when none could be measured"},
+			{Name: "rss_bytes_partial", Type: "boolean", Desc: "True when a running replica has not reported yet, making rss_bytes a lower bound"},
+			{Name: "sessions", Type: "integer", Desc: "Sessions bound to this app's replicas; null when the runtime does not track them"},
+			{Name: "sessions_ceiling", Type: "integer", Desc: "Sessions admitted before new ones are refused; 0 when uncapped"},
+		},
+		EnvelopeFields: []fieldSpec{
+			{Name: "items", Type: "array"},
+			{Name: "total", Type: "integer"},
+			{Name: "limit", Type: "integer"},
+			{Name: "offset", Type: "integer"},
+			{Name: "host", Type: "string", Desc: "Server the sample was read from"},
+			{Name: "captured_at", Type: "string", Desc: "RFC 3339 timestamp of the sample"},
+			{Name: "totals", Type: "object", Desc: "Fleet sums: apps, running, cpu_percent, rss_bytes, sessions, and the two *_partial flags"},
+		},
+		Notes: "Repaints in place on a terminal and exits on q; any other output form prints one snapshot and exits, so it is safe in a script. --interval sets the refresh rate (minimum 1s) and applies only to the live form. --fields applies to JSON output; the live table has a fixed layout. A figure the server could not measure is null rather than 0.",
+	},
+
 	// ── tokens ───────────────────────────────────────────────────────────────
 	"tokens": {Mutating: ro},
 

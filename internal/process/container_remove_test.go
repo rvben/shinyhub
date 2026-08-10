@@ -66,8 +66,8 @@ func (f *fakeContainerRuntime) Wait(_ context.Context, h process.RunHandle) erro
 	return nil
 }
 
-func (f *fakeContainerRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (f *fakeContainerRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 
 func (f *fakeContainerRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {

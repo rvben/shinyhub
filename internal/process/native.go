@@ -608,35 +608,42 @@ func waitForPIDExit(ctx context.Context, pid int) error {
 	}
 }
 
-func (r *NativeRuntime) Stats(_ context.Context, handle RunHandle) (float64, uint64, error) {
+// Stats reports the handle's CPU rate and RSS. The cached *gops.Process per PID
+// is what makes the rate possible: Percent(0) subtracts the reading it stored on
+// that handle last time, so the first call for a PID has no baseline and returns
+// a nil rate rather than 0.
+func (r *NativeRuntime) Stats(_ context.Context, handle RunHandle) (*float64, uint64, error) {
 	r.mu.Lock()
-	p, ok := r.procs[handle.PID]
-	if !ok {
+	p, primed := r.procs[handle.PID]
+	if !primed {
 		var err error
 		p, err = gops.NewProcess(int32(handle.PID))
 		if err != nil {
 			r.mu.Unlock()
-			return 0, 0, fmt.Errorf("process %d: %w", handle.PID, err)
+			return nil, 0, fmt.Errorf("process %d: %w", handle.PID, err)
 		}
 		r.procs[handle.PID] = p
 	}
 	r.mu.Unlock()
 
-	cpu, err := p.CPUPercent()
+	cpu, err := p.Percent(0)
 	if err != nil {
 		r.mu.Lock()
 		delete(r.procs, handle.PID)
 		r.mu.Unlock()
-		return 0, 0, fmt.Errorf("cpu percent: %w", err)
+		return nil, 0, fmt.Errorf("cpu percent: %w", err)
 	}
 	mem, err := p.MemoryInfo()
 	if err != nil {
 		r.mu.Lock()
 		delete(r.procs, handle.PID)
 		r.mu.Unlock()
-		return 0, 0, fmt.Errorf("memory info: %w", err)
+		return nil, 0, fmt.Errorf("memory info: %w", err)
 	}
-	return cpu, mem.RSS, nil
+	if !primed {
+		return nil, mem.RSS, nil
+	}
+	return &cpu, mem.RSS, nil
 }
 
 // jobHasLimit reports whether a one-shot job run carries a per-replica resource

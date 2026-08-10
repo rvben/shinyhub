@@ -50,8 +50,8 @@ func (r *recordingRuntime) Start(_ context.Context, p process.StartParams, _ io.
 
 func (r *recordingRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
 func (r *recordingRuntime) Wait(_ context.Context, _ process.RunHandle) error  { return nil }
-func (r *recordingRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (r *recordingRuntime) Stats(_ context.Context, _ process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (r *recordingRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil

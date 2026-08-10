@@ -2395,6 +2395,26 @@ func TestAppCardInstancesAndSummedMetrics(t *testing.T) {
 		"the instance-count chip needs styling")
 }
 
+// TestAbsentCPURateRendersAsUnknown pins the consumers of a null cpu_percent.
+// The server sends null when it has no rate to report (a replica's first poll
+// after it starts, or a tier with no local process to sample), and every one of
+// these files would otherwise turn that into a confident 0%: a flat idle line at
+// exactly the moments an operator is watching, on a restart or a scale-out.
+//
+// These are the render paths jsdom cannot import. The importable helpers
+// (sparklinePoints, headerStats, metricsText, buildOverviewModel) are unit-tested
+// against real nulls in internal/ui/jstests/.
+func TestAbsentCPURateRendersAsUnknown(t *testing.T) {
+	assertContains(t, "views/overview.js", "if (pct === null || pct === undefined) return",
+		"the Overview fleet CPU tile must render an absent total as a neutral glyph, not 0%")
+	assertContains(t, "views/replica-display.js", "typeof replica.cpu_percent === 'number'",
+		"a replica's CPU cell must type-check the rate so null renders as a dash instead of 0.0%")
+	assertContains(t, "views/stat-format.js", "cpuAvailable",
+		"headerStats must track whether every running replica reported a rate; a partial sum understates the app")
+	assertContains(t, "views/sparkline.js", "drawn",
+		"the sparkline must skip unmeasured points rather than plotting them at the floor")
+}
+
 // TestBatchMetricsPoll pins the metrics poll to the batch endpoint: the dashboard
 // must fetch every card's live data in one request (GET /api/apps/metrics) and
 // read the slug-keyed body.metrics, not loop one round-trip per app.

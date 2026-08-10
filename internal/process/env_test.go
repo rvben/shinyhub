@@ -39,8 +39,8 @@ func (r *captureRuntime) Wait(_ context.Context, _ RunHandle) error {
 	select {}
 }
 
-func (r *captureRuntime) Stats(_ context.Context, _ RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (r *captureRuntime) Stats(_ context.Context, _ RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 
 func (r *captureRuntime) RunOnce(_ context.Context, _ StartParams, _ io.Writer) (ExitInfo, error) {

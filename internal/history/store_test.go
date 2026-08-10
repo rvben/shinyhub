@@ -7,7 +7,7 @@ import (
 )
 
 func sample(ts int64, cpu float64, rss, sessions int64, instances int) Sample {
-	return Sample{TS: ts, CPU: cpu, RSS: rss, Sessions: sessions, Instances: instances}
+	return Sample{TS: ts, CPU: &cpu, RSS: rss, Sessions: sessions, Instances: instances}
 }
 
 func TestStoreAppendAndSeriesColumnar(t *testing.T) {
@@ -86,6 +86,33 @@ func TestStoreSeriesUnknownSlugReturnsEmptyNonNil(t *testing.T) {
 	}
 	if len(got.TS) != 0 {
 		t.Errorf("want empty series, got %d points", len(got.TS))
+	}
+}
+
+// TestStoreSeriesPreservesAbsentCPU checks the ring keeps an absent rate absent.
+// Series rebuilds the samples into parallel columns, and a column of plain
+// float64 would turn every gap into a measured 0 on the way out, which is the
+// one thing the pointer is there to prevent.
+func TestStoreSeriesPreservesAbsentCPU(t *testing.T) {
+	s := NewStore(time.Hour, 15*time.Second)
+	now := int64(1_000_000)
+	s.Append("demo", sample(now-30, 10, 100, 1, 1))
+	s.Append("demo", Sample{TS: now - 15, RSS: 200, Sessions: 2, Instances: 1}) // no rate this tick
+	s.Append("demo", sample(now, 30, 300, 3, 1))
+
+	got := s.Series("demo", now)
+	if len(got.CPU) != 3 {
+		t.Fatalf("cpu column = %v, want 3 entries", got.CPU)
+	}
+	if got.CPU[1] != nil {
+		t.Errorf("cpu[1] = %v, want nil to survive the round trip", *got.CPU[1])
+	}
+	if got.CPU[0] == nil || *got.CPU[0] != 10 || got.CPU[2] == nil || *got.CPU[2] != 30 {
+		t.Errorf("cpu = %v, want the surrounding measured points intact", got.CPU)
+	}
+	// The gap must not shift the other columns.
+	if !eqI64(got.RSS, []int64{100, 200, 300}) {
+		t.Errorf("rss = %v, want [100 200 300]", got.RSS)
 	}
 }
 
@@ -171,12 +198,15 @@ func eqI64(a, b []int64) bool {
 	return true
 }
 
-func eqF64(a, b []float64) bool {
+// eqF64 compares a CPU column against expected values. An absent rate never
+// matches a number, so a nil entry fails rather than being read as its zero
+// value. Tests that expect an absent entry assert on it directly.
+func eqF64(a []*float64, b []float64) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		if a[i] == nil || *a[i] != b[i] {
 			return false
 		}
 	}

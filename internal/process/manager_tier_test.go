@@ -23,8 +23,8 @@ func (s stubRuntime) Start(context.Context, process.StartParams, io.Writer) (pro
 }
 func (s stubRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
 func (s stubRuntime) Wait(context.Context, process.RunHandle) error  { return nil }
-func (s stubRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (s stubRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (s stubRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil

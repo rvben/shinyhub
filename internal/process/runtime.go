@@ -49,8 +49,13 @@ type Runtime interface {
 	Signal(handle RunHandle, sig syscall.Signal) error
 	// Wait blocks until the process or container identified by handle exits.
 	Wait(ctx context.Context, handle RunHandle) error
-	// Stats returns CPU usage (percent, 0–100+) and RSS bytes for the handle.
-	Stats(ctx context.Context, handle RunHandle) (cpuPercent float64, rssBytes uint64, err error)
+	// Stats returns CPU usage and RSS bytes for the handle. cpuPercent is a rate
+	// over the interval since this runtime's previous Stats call for the same
+	// handle, on the scale where 100 means one fully busy core. It is nil when
+	// no rate can be computed yet, which an implementation must report rather
+	// than rounding down to 0: a caller cannot otherwise tell a missing baseline
+	// from an idle process.
+	Stats(ctx context.Context, handle RunHandle) (cpuPercent *float64, rssBytes uint64, err error)
 	// RunOnce spawns a short-lived process from the same bundle/runtime context
 	// as Start, blocks until it exits or ctx is cancelled, and returns the
 	// exit info. Implementations MUST signal SIGTERM on ctx cancel and

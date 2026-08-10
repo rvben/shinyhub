@@ -17,22 +17,22 @@ const maxPointsPerApp = 8640
 // Sample is one aggregated, point-in-time resource snapshot for an app, summed
 // across the replicas running locally on this instance.
 type Sample struct {
-	TS        int64   // unix seconds
-	CPU       float64 // sum of replica CPU%
-	RSS       int64   // sum of replica RSS bytes
-	Sessions  int64   // sum of active sessions
-	Instances int     // count of running replicas
+	TS        int64    // unix seconds
+	CPU       *float64 // sum of replica CPU%; nil when no rate was available
+	RSS       int64    // sum of replica RSS bytes
+	Sessions  int64    // sum of active sessions
+	Instances int      // count of running replicas
 }
 
 // Series is the columnar form returned to API consumers. Parallel arrays keep
 // the JSON compact and map directly onto the sparkline renderer. All slices are
 // non-nil so they marshal as [] rather than null.
 type Series struct {
-	TS        []int64   `json:"ts"`
-	CPU       []float64 `json:"cpu"`
-	RSS       []int64   `json:"rss"`
-	Sessions  []int64   `json:"sessions"`
-	Instances []int     `json:"instances"`
+	TS        []int64    `json:"ts"`
+	CPU       []*float64 `json:"cpu"`
+	RSS       []int64    `json:"rss"`
+	Sessions  []int64    `json:"sessions"`
+	Instances []int      `json:"instances"`
 }
 
 // Store holds one bounded ring buffer per app slug. It is safe for one writer
@@ -71,7 +71,7 @@ func NewStore(window, interval time.Duration) *Store {
 // EmptySeries returns a Series with non-nil, empty slices so it marshals as []
 // arrays rather than null. Used for unknown slugs and when history is disabled.
 func EmptySeries() Series {
-	return Series{TS: []int64{}, CPU: []float64{}, RSS: []int64{}, Sessions: []int64{}, Instances: []int{}}
+	return Series{TS: []int64{}, CPU: []*float64{}, RSS: []int64{}, Sessions: []int64{}, Instances: []int{}}
 }
 
 // WindowSeconds returns the retention window in whole seconds (for the API).

@@ -89,6 +89,7 @@ func TestSchema_OutputFieldsAgainstLiveServer(t *testing.T) {
 		{"share ls", []string{"share", "ls", "demo"}, "items"},
 		{"users list", []string{"users", "list"}, "items"},
 		{"fleet status", []string{"fleet", "status"}, "items"},
+		{"top", []string{"top"}, "items"},
 	}
 
 	// Documented, deliberate exclusion (no silent caps): apps metrics needs live

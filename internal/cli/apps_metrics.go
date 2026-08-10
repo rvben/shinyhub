@@ -64,15 +64,15 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 		MaxWorkers       int    `json:"max_workers"`
 		MetricsAvailable bool   `json:"metrics_available"`
 		Replicas         []struct {
-			Index            int     `json:"index"`
-			Status           string  `json:"status"`
-			PID              *int    `json:"pid"`
-			CPUPercent       float64 `json:"cpu_percent"`
-			RSSBytes         int64   `json:"rss_bytes"`
-			Sessions         int     `json:"sessions"`
-			Tier             string  `json:"tier"`
-			Provider         string  `json:"provider"`
-			MetricsAvailable bool    `json:"metrics_available"`
+			Index            int      `json:"index"`
+			Status           string   `json:"status"`
+			PID              *int     `json:"pid"`
+			CPUPercent       *float64 `json:"cpu_percent"`
+			RSSBytes         int64    `json:"rss_bytes"`
+			Sessions         int      `json:"sessions"`
+			Tier             string   `json:"tier"`
+			Provider         string   `json:"provider"`
+			MetricsAvailable bool     `json:"metrics_available"`
 		} `json:"replicas"`
 	}
 	if err := json.Unmarshal(out, &m); err != nil {
@@ -104,9 +104,12 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 		if r.PID != nil {
 			pid = fmt.Sprintf("%d", *r.PID)
 		}
+		// A null cpu_percent means the server has no rate for this replica yet
+		// (first poll after a start, or a tier that cannot report one). Render it
+		// as "-" rather than 0.0, which would read as a genuinely idle replica.
 		cpu := "-"
-		if r.MetricsAvailable {
-			cpu = fmt.Sprintf("%.1f", r.CPUPercent)
+		if r.CPUPercent != nil {
+			cpu = fmt.Sprintf("%.1f", *r.CPUPercent)
 		}
 		placement := r.Tier
 		if r.Provider != "" {

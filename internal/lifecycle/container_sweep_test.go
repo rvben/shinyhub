@@ -33,8 +33,8 @@ func (b *blockingRuntime) Wait(ctx context.Context, _ process.RunHandle) error {
 	}
 	return nil
 }
-func (b *blockingRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (b *blockingRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (b *blockingRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil

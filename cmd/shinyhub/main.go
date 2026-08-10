@@ -665,10 +665,12 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 
 // hostSampler samples PID-backed replicas (native) via gopsutil and reports
 // PID-less replicas (docker/remote/fargate handles, whose RunHandle carries a
-// ContainerID rather than a PID) as zero usage without error. Returning no error
-// for the PID-less case is deliberate: the status endpoint treats a sampler error
-// as a dead replica, so a running replica on a container/fargate tier must not be
-// probed by PID (PID 0) and misreported as stopped.
+// ContainerID rather than a PID) as unmeasured without error: the zero Stats it
+// returns carries a nil CPU rate, so they render as "not available" rather than
+// as an idle app. Returning no error for the PID-less case is deliberate: the
+// status endpoint treats a sampler error as a dead replica, so a running replica
+// on a container/fargate tier must not be probed by PID (PID 0) and misreported
+// as stopped.
 type hostSampler struct{ gops process.GopsutilSampler }
 
 func (h *hostSampler) Sample(handle process.RunHandle) (process.Stats, error) {

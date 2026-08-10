@@ -37,9 +37,15 @@ type SignalRequest struct {
 }
 
 // StatsResult reports a replica's current resource usage.
+//
+// CPUPercent is null when the worker has no baseline to compute a rate against,
+// which is the case for the first stats call after a replica starts. A worker
+// running an older build sends a number there unconditionally; decoding that
+// yields a non-nil rate, which is what this field meant before, so the two
+// builds interoperate without a version check.
 type StatsResult struct {
-	CPUPercent float64 `json:"cpu_percent"`
-	RSSBytes   uint64  `json:"rss_bytes"`
+	CPUPercent *float64 `json:"cpu_percent"`
+	RSSBytes   uint64   `json:"rss_bytes"`
 }
 
 // ExitResult reports how a one-shot process exited. It is populated only by

@@ -94,8 +94,8 @@ func (r *evictRuntime) didSignal() bool {
 	return r.signaled
 }
 
-func (r *evictRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (r *evictRuntime) Stats(_ context.Context, _ process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (r *evictRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil

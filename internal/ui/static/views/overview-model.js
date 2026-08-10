@@ -64,6 +64,7 @@ export function buildOverviewModel(apps, metricsBySlug) {
   const counts = { healthy: 0, transient: 0, sleeping: 0, idle: 0, attention: 0 };
   const attention = [];
   let cpuPercent = 0;
+  let cpuAvailable = true;
   let rssBytes = 0;
   let running = 0;
   const nearLimit = [];
@@ -87,8 +88,12 @@ export function buildOverviewModel(apps, metricsBySlug) {
 
     const m = metrics[app.slug];
     if (m) {
-      const { cpu, rss, runningCount } = aggregateMetrics(m);
+      const agg = aggregateMetrics(m);
+      const { cpu, rss, runningCount } = agg;
       if (cpu > 0 || rss > 0) running += 1;
+      // One app without a rate yet makes the fleet total a partial sum, so the
+      // headline reports "not in yet" rather than a number that is quietly low.
+      if (!agg.cpuAvailable) cpuAvailable = false;
       cpuPercent += cpu;
       rssBytes += rss;
       // memory_limit_mb is the PER-REPLICA cgroup ceiling, while rss is summed
@@ -121,7 +126,7 @@ export function buildOverviewModel(apps, metricsBySlug) {
     segments,
     verdict: verdictFor(list.length, counts, attention),
     attention,
-    resources: { cpuPercent, rssBytes, running, nearLimit },
+    resources: { cpuPercent: cpuAvailable ? cpuPercent : null, rssBytes, running, nearLimit },
   };
 }
 

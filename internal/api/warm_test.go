@@ -39,7 +39,7 @@ func (r *recordingRuntime) Start(ctx context.Context, p process.StartParams, w i
 func (r *recordingRuntime) Wait(ctx context.Context, h process.RunHandle) error {
 	return r.inner.Wait(ctx, h)
 }
-func (r *recordingRuntime) Stats(ctx context.Context, h process.RunHandle) (float64, uint64, error) {
+func (r *recordingRuntime) Stats(ctx context.Context, h process.RunHandle) (*float64, uint64, error) {
 	return r.inner.Stats(ctx, h)
 }
 func (r *recordingRuntime) RunOnce(ctx context.Context, p process.StartParams, w io.Writer) (process.ExitInfo, error) {
@@ -391,7 +391,7 @@ func (r *blockOnWaitRuntime) Wait(ctx context.Context, h process.RunHandle) erro
 func (r *blockOnWaitRuntime) Start(ctx context.Context, p process.StartParams, w io.Writer) (process.ReplicaEndpoint, error) {
 	return r.inner.Start(ctx, p, w)
 }
-func (r *blockOnWaitRuntime) Stats(ctx context.Context, h process.RunHandle) (float64, uint64, error) {
+func (r *blockOnWaitRuntime) Stats(ctx context.Context, h process.RunHandle) (*float64, uint64, error) {
 	return r.inner.Stats(ctx, h)
 }
 func (r *blockOnWaitRuntime) RunOnce(ctx context.Context, p process.StartParams, w io.Writer) (process.ExitInfo, error) {
@@ -444,8 +444,8 @@ func (r *fakeBootRuntime) Start(_ context.Context, p process.StartParams, _ io.W
 }
 func (r *fakeBootRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
 func (r *fakeBootRuntime) Wait(_ context.Context, _ process.RunHandle) error  { return nil }
-func (r *fakeBootRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (r *fakeBootRuntime) Stats(_ context.Context, _ process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (r *fakeBootRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
