@@ -186,6 +186,10 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		WorkerMaxSessionLifetimeSecs: workerMaxSessionLifetimeSecs,
 		SetIconEmoji:                 m.Icon != nil,
 		IconEmoji:                    derefStringOrEmpty(m.Icon),
+		SetName:                      m.Name != nil,
+		Name:                         derefStringOrEmpty(m.Name),
+		SetDescription:               m.Description != nil,
+		Description:                  derefStringOrEmpty(m.Description),
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
 	}
@@ -582,6 +586,12 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if m.Icon != nil {
 		d["icon"] = *m.Icon
 	}
+	if m.Name != nil {
+		d["name"] = *m.Name
+	}
+	if m.Description != nil {
+		d["description"] = *m.Description
+	}
 	return d
 }
 
@@ -642,6 +652,12 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if m.Icon != nil {
 		d["icon"] = *m.Icon
+	}
+	if m.Name != nil {
+		d["name"] = *m.Name
+	}
+	if m.Description != nil {
+		d["description"] = *m.Description
 	}
 	b, _ := json.Marshal(d)
 	return string(b)
