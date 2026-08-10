@@ -2292,6 +2292,7 @@ const (
 	AuditDataDelete     = "data.delete"
 	AuditAppIconSet     = "app.icon.set"
 	AuditAppIconCleared = "app.icon.clear"
+	AuditAppIconEmoji   = "app.icon.emoji"
 )
 
 // AuditEventParams holds the fields for a new audit event.
