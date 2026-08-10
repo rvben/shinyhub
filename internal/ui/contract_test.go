@@ -2581,6 +2581,8 @@ func TestEmojiPickerUIContract(t *testing.T) {
 	// Markup + module wiring.
 	assertContains(t, "index.html", `id="general-icon-emoji-btn"`,
 		"Configuration > General has an emoji-picker trigger")
+	assertContains(t, "index.html", `maxlength="32"`,
+		"the emoji input's maxlength counts UTF-16 code units while the server's maxIconEmojiRunes counts runes, so it must stay at twice the 16-rune limit or a legitimate multi-rune sequence (a skin-toned family) silently truncates before the server ever sees it")
 	assertContains(t, "index.html", `id="general-icon-emoji-popover"`,
 		"the emoji picker is a popover, not a modal")
 	assertContains(t, "app.js", "renderEmojiPicker(document",

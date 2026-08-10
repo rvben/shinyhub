@@ -368,7 +368,8 @@
                       <button id="general-icon-emoji-btn" type="button" class="ov-btn" aria-haspopup="true" aria-expanded="false">Choose emoji</button>
                       <div id="general-icon-emoji-popover" class="emoji-picker-popover" hidden>
                         <div class="emoji-picker-custom">
-                          <input id="general-icon-emoji-input" type="text" class="emoji-picker-text-input" maxlength="16" placeholder="Paste an emoji" aria-label="Type or paste an emoji icon">
+                          <!-- maxlength is in UTF-16 code units, deliberately twice the server's 16-rune limit, so it cannot bind before the server validator does -->
+                          <input id="general-icon-emoji-input" type="text" class="emoji-picker-text-input" maxlength="32" placeholder="Paste an emoji" aria-label="Type or paste an emoji icon">
                           <button id="general-icon-emoji-use-btn" type="button" class="ov-btn">Use</button>
                         </div>
                         <button id="general-icon-emoji-clear-btn" type="button" class="ov-btn emoji-picker-clear" hidden>Clear emoji</button>
