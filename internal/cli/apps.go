@@ -750,6 +750,7 @@ type appsSetFlags struct {
 	maxWorkers            int
 	maxSessionLifetime    int
 	ephemeralDataOk       bool
+	icon                  string
 }
 
 func newAppsSetCmd() *cobra.Command {
@@ -805,6 +806,8 @@ func newAppsSetCmd() *cobra.Command {
 		"Absolute worker lifetime in seconds (0 = unlimited)")
 	cmd.Flags().BoolVar(&f.ephemeralDataOk, "ephemeral-data-ok", false,
 		"Accept ephemeral (task-local) app-data on a Fargate tier with no durable backend: allows deploying and pushing data even though it is lost on restart/hibernation and not shared across replicas")
+	cmd.Flags().StringVar(&f.icon, "icon", "",
+		"Emoji shown as the app's icon (a single emoji; \"\" clears the emoji and restores any uploaded image)")
 	return cmd
 }
 
@@ -828,9 +831,10 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	maxSessionLifetimeChanged := cmd.Flags().Changed("max-session-lifetime")
 	anyWorkerChanged := isolationChanged || groupedSizeChanged || maxWorkersChanged || maxSessionLifetimeChanged
 	ephemeralDataOkChanged := cmd.Flags().Changed("ephemeral-data-ok")
+	iconChanged := cmd.Flags().Changed("icon")
 
-	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged && !renderSecondsChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok, --render-seconds)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged && !renderSecondsChanged && !iconChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok, --render-seconds, --icon)")
 	}
 	if memoryLimitChanged && f.memoryLimitMB != -1 {
 		if err := deploy.ValidateMemoryLimitMB(f.memoryLimitMB); err != nil {
@@ -1004,6 +1008,12 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if ephemeralDataOkChanged {
 		payload["ephemeral_data_ack"] = f.ephemeralDataOk
+	}
+	if iconChanged {
+		// Built from Changed, not from a non-empty test: "" is a meaningful
+		// value here (clear the emoji), so a non-empty check makes clearing a
+		// silent no-op.
+		payload["icon_emoji"] = f.icon
 	}
 
 	body, err := json.Marshal(payload)

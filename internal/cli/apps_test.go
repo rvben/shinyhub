@@ -86,6 +86,69 @@ func TestAppsSet_MaxSessionsZeroResetsToDefault(t *testing.T) {
 	}
 }
 
+// --icon "" must actually send the field. This is the only test that fails
+// against a payload built from a non-empty check instead of Changed("icon"):
+// if the flag were a silent no-op, /icon would still serve the original bytes
+// and the image-preservation assertions would pass anyway.
+func TestAppsSetIconClear(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+
+	if _, err := execCLI(t, "apps", "set", "demo", "--icon", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	v, present := body["icon_emoji"]
+	if !present {
+		t.Fatalf("expected icon_emoji to be present (value \"\"), got absent")
+	}
+	if v != "" {
+		t.Errorf("expected icon_emoji=\"\", got %v", v)
+	}
+
+	// A different flag, no --icon: icon_emoji must be absent from the wire,
+	// not sent as "". max-sessions-per-replica is not a restartChange, so it
+	// reaches the wire without --yes (unlike --replicas, which would return
+	// confirmationRequiredError before any request is sent and make an
+	// "absent" assertion vacuous).
+	*reqs = nil
+	if _, err := execCLI(t, "apps", "set", "demo", "--max-sessions-per-replica", "25"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	body = nil
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if _, present := body["icon_emoji"]; present {
+		t.Errorf("expected icon_emoji to be absent, got %v", body["icon_emoji"])
+	}
+
+	// A non-empty emoji value reaches the wire as-is.
+	*reqs = nil
+	if _, err := execCLI(t, "apps", "set", "demo", "--icon", "\U0001F4CA"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	body = nil
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := body["icon_emoji"]; got != "\U0001F4CA" {
+		t.Errorf("expected icon_emoji=%q, got %v", "\U0001F4CA", got)
+	}
+}
+
 func TestAppsSet_MemoryLimitMB(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(200, `{}`)
