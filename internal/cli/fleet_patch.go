@@ -80,10 +80,18 @@ func patchManagedBy(cfg *cliConfig, slug string, value *string, ifDigest, ifMana
 	return patchApp(cfg, slug, map[string]any{"managed_by": value}, ifDigest, ifManagedBy, runID)
 }
 
-// fleetConfigBody builds the PATCH body for the reconcilable numeric keys
-// the manifest declares. A nil pointer = key not declared = not reconciled.
+// fleetConfigBody builds the PATCH body for the reconcilable keys the manifest
+// declares. A nil pointer = key not declared = not reconciled.
 func fleetConfigBody(c fleet.Config) map[string]any {
 	body := map[string]any{}
+	if c.Name != nil {
+		body["name"] = *c.Name
+	}
+	if c.Description != nil {
+		// Sent whenever declared, including "": an empty declared description
+		// means the fleet owns it and wants it cleared.
+		body["description"] = *c.Description
+	}
 	if c.HibernateTimeoutMinutes != nil {
 		body["hibernate_timeout_minutes"] = *c.HibernateTimeoutMinutes
 	}

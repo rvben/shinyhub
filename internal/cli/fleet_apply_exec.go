@@ -181,6 +181,12 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 				return fmt.Errorf("app %s: invalid desired %s=%q: %w", slug, c.Key, c.Desired, perr)
 			}
 			body[c.Key] = n
+		case "name", "description":
+			// Rebuilt from the declared config, like autoscale below: the drift
+			// item carries a quoted display string, not a value to send.
+			if v := declaredString(declared, c.Key); v != nil {
+				body[c.Key] = *v
+			}
 		case "autoscale":
 			// autoscale is a compound value: reconstruct the PATCH object from the
 			// declared config rather than parsing the human display string.
@@ -192,16 +198,42 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 	return patchApp(cfg, slug, body, ifD, ifMB, runID)
 }
 
-// reassertFleetAutoscale re-PATCHes the fleet-declared autoscale policy after a
-// bundle deploy, which may have overwritten the autoscale columns from the new
-// bundle's shinyhub.toml. Unlike replicas, an autoscale PATCH does not trigger a
-// redeploy, so this is safe to run after any deploy (and idempotent if the
-// policy was already applied via drift). No-op when the manifest declares none.
-func reassertFleetAutoscale(cfg *cliConfig, slug string, c fleet.Config, ifD, ifMB *string, runID string) error {
-	if c.Autoscale == nil {
+// declaredString returns the declared value for a string config key, or nil
+// when the manifest does not declare it. Keyed by the same strings the drift
+// items use so the two cannot drift apart.
+func declaredString(c fleet.Config, key string) *string {
+	switch key {
+	case "name":
+		return c.Name
+	case "description":
+		return c.Description
+	}
+	return nil
+}
+
+// reassertFleetConfig re-PATCHes the fleet-declared keys that a bundle deploy
+// may have overwritten from the new bundle's shinyhub.toml: the autoscale
+// policy and the display metadata (name, description), all of which the bundle
+// [app] block can also declare. The fleet manifest is the outer authority, so
+// it wins over the bundle. Every key here is one whose PATCH does NOT trigger a
+// redeploy (unlike replicas), so this is safe to run after any deploy, and it
+// is idempotent when the value was already applied via drift. No-op when the
+// manifest declares none of them.
+func reassertFleetConfig(cfg *cliConfig, slug string, c fleet.Config, ifD, ifMB *string, runID string) error {
+	body := map[string]any{}
+	if c.Autoscale != nil {
+		body["autoscale"] = autoscalePatchBody(c.Autoscale)
+	}
+	if c.Name != nil {
+		body["name"] = *c.Name
+	}
+	if c.Description != nil {
+		body["description"] = *c.Description
+	}
+	if len(body) == 0 {
 		return nil
 	}
-	return patchApp(cfg, slug, map[string]any{"autoscale": autoscalePatchBody(c.Autoscale)}, ifD, ifMB, runID)
+	return patchApp(cfg, slug, body, ifD, ifMB, runID)
 }
 
 // adoptBundleWentLive answers whether an adopt redeploy that returned an error
@@ -423,11 +455,12 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 			return fail(ffErr, attempts)
 		}
 		// A source-only diff means the pre-deploy config matched the manifest, but
-		// the new bundle's shinyhub.toml can overwrite the autoscale columns.
-		// Reassert just the autoscale (gated on the freshly promoted digest).
+		// the new bundle's shinyhub.toml can overwrite the autoscale columns and
+		// the display metadata. Reassert those (gated on the freshly promoted
+		// digest).
 		ifD, ifM := precondPtrs(opt, promoted, marker)
-		if err := reassertFleetAutoscale(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
-			res.note = "source updated; autoscale not reasserted, next plan corrects it: " + err.Error()
+		if err := reassertFleetConfig(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
+			res.note = "source updated; declared config not reasserted, next plan corrects it: " + err.Error()
 			return done(statusUpdated)
 		}
 		return done(statusUpdated)
@@ -456,12 +489,13 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		if err := applyConfigDrift(cfg, d.Slug, d.ConfigDrift, entry.Config, ifD, ifM, opt.runID); err != nil {
 			return fail(err, attempts)
 		}
-		// d.ConfigDrift was computed pre-deploy: if autoscale matched then but the
-		// new bundle overwrites it, it is not in the drift list. Reassert it (a
-		// no-op re-PATCH when it was already applied above; idempotent and
-		// non-redeploy-triggering) so the fleet manifest still wins.
-		if err := reassertFleetAutoscale(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
-			res.note = "updated; autoscale not fully reasserted, next plan corrects it: " + err.Error()
+		// d.ConfigDrift was computed pre-deploy: if autoscale or the display
+		// metadata matched then but the new bundle overwrites it, it is not in the
+		// drift list. Reassert those (a no-op re-PATCH when they were already
+		// applied above; idempotent and non-redeploy-triggering) so the fleet
+		// manifest still wins.
+		if err := reassertFleetConfig(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
+			res.note = "updated; declared config not fully reasserted, next plan corrects it: " + err.Error()
 			return done(statusUpdated)
 		}
 		return done(statusUpdated)

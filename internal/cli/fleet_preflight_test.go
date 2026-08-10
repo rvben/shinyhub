@@ -36,6 +36,40 @@ func TestFleetPreflight_ReturnsDiffSourcesAndHost(t *testing.T) {
 	}
 }
 
+// The seam the unit tests cannot reach: a real GET /api/apps payload mapped
+// into fleet.ObservedApp. A rename on the server must surface as name drift,
+// and an app the server reports with no description at all must NOT drift
+// against a declared "" - otherwise every plan would show a phantom clear.
+func TestFleetPreflight_MapsNameAndDescriptionDrift(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"ops","name":"Renamed In UI","access":"private","managed_by":"fleet:eu","content_digest":"sha256:LIVE"}]`)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a", "app.py"), "print(1)\n")
+	writeFleetManifest(t, dir, "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./a\"\nvisibility=\"private\"\n\n  [app.config]\n  name = \"Ops Dashboard\"\n  description = \"\"\n")
+
+	var errBuf bytes.Buffer
+	pf, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "plan", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v (stderr=%q)", err, errBuf.String())
+	}
+	if pf.cleanup != nil {
+		defer pf.cleanup()
+	}
+	if len(pf.diff) != 1 {
+		t.Fatalf("diff = %+v, want 1 app", pf.diff)
+	}
+	drift := map[string]string{}
+	for _, c := range pf.diff[0].ConfigDrift {
+		drift[c.Key] = c.Server + " -> " + c.Desired
+	}
+	if got := drift["name"]; got != `"Renamed In UI" -> "Ops Dashboard"` {
+		t.Errorf("name drift = %q, want the server rename reverting to the manifest", got)
+	}
+	if got, present := drift["description"]; present {
+		t.Errorf(`declared "" vs an app with no description must not drift, got %q`, got)
+	}
+}
+
 func TestFleetPreflight_NoManifestHelpful(t *testing.T) {
 	_, _, _ = setupCLITest(t)
 	dir := t.TempDir()
