@@ -379,28 +379,37 @@ func fetchCurrentEnv(cfg *cliConfig, slug string) ([]envServerVar, error) {
 // renderEnvPlanText writes a human-readable plan summary to w. Empty buckets
 // are omitted so a small change reads at a glance.
 func renderEnvPlanText(w io.Writer, plan envApplyPlan, dryRun bool, applied int) {
+	renderEnvPlanTextWith(w, stylerFor(w), plan, dryRun, applied)
+}
+
+// renderEnvPlanTextWith is renderEnvPlanText with the styler supplied. It exists
+// so a test can exercise the painted form: stylerFor can never return a painting
+// styler for the bytes.Buffer a test writes to.
+func renderEnvPlanTextWith(w io.Writer, s styler, plan envApplyPlan, dryRun bool, applied int) {
+	// The markers are the same set fleet plan prints against its legend, and are
+	// painted through the same helper so one change reads identically in both.
 	if dryRun {
-		fmt.Fprintln(w, "Plan (dry run — no changes applied):")
+		fmt.Fprintln(w, "Plan (dry run, no changes applied):")
 	}
 	for _, op := range plan.Adds {
 		flag := ""
 		if op.Secret {
-			flag = " (secret)"
+			flag = s.dim(" (secret)")
 		}
-		fmt.Fprintf(w, "  + %s%s\n", op.Key, flag)
+		fmt.Fprintf(w, "  %s %s%s\n", s.glyphPaint("+"), op.Key, flag)
 	}
 	for _, op := range plan.Updates {
 		flag := ""
 		if op.Secret {
-			flag = " (secret)"
+			flag = s.dim(" (secret)")
 		}
-		fmt.Fprintf(w, "  ~ %s%s [%s]\n", op.Key, flag, op.Reason)
+		fmt.Fprintf(w, "  %s %s%s %s\n", s.glyphPaint("~"), op.Key, flag, s.dim("["+op.Reason+"]"))
 	}
 	for _, op := range plan.Deletes {
-		fmt.Fprintf(w, "  - %s\n", op.Key)
+		fmt.Fprintf(w, "  %s %s\n", s.glyphPaint("-"), op.Key)
 	}
 	if len(plan.Adds)+len(plan.Updates)+len(plan.Deletes) == 0 {
-		fmt.Fprintln(w, "  (no changes)")
+		fmt.Fprintln(w, s.dim("  (no changes)"))
 	}
 	if !dryRun {
 		fmt.Fprintf(w, "Applied %d change(s); %d unchanged.\n", applied, len(plan.Skipped))

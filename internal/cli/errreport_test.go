@@ -230,11 +230,22 @@ func TestReport_ValidationErrHintInEnvelopeAndProse(t *testing.T) {
 		t.Errorf("hint = %q, want the hint string", env.Error.Hint)
 	}
 
-	// TTY table mode: prose line shows message AND hint for humans.
+	// TTY table mode: the human-facing prose shows the message and, on the line
+	// under it, the hint. Both must precede the machine envelope, which is the
+	// last line in every mode.
 	var ttyStderr bytes.Buffer
 	reportTo(&ttyStderr, true, formatTable, err)
 	lines := strings.Split(strings.TrimRight(ttyStderr.String(), "\n"), "\n")
-	if len(lines) < 1 || !strings.Contains(lines[0], "valid formats") {
-		t.Errorf("TTY prose line must contain hint, got %q", ttyStderr.String())
+	if len(lines) != 3 {
+		t.Fatalf("want message + hint + envelope, got %d lines: %q", len(lines), ttyStderr.String())
+	}
+	if !strings.Contains(lines[0], "unknown output format") {
+		t.Errorf("first line must state the failure, got %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "valid formats") {
+		t.Errorf("second line must carry the hint, got %q", lines[1])
+	}
+	if !strings.HasPrefix(strings.TrimSpace(lines[2]), "{") {
+		t.Errorf("last line must be the envelope, got %q", lines[2])
 	}
 }

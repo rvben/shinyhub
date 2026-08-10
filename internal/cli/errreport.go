@@ -178,11 +178,16 @@ func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int
 	reported := errors.As(err, &ece) && ece.Reported
 	var he hintedError
 	errors.As(err, &he)
+	s := stylerFor(w)
 	if stderrIsTTY && format == formatTable && !reported {
+		// The failure glyph and the word "Error" both carry the signal, so the
+		// line still reads correctly with color stripped.
+		fmt.Fprintf(w, "%s%s %s\n", s.failPrefix(), s.red("Error:"), err.Error())
 		if he != nil && he.Hint() != "" {
-			fmt.Fprintf(w, "Error: %s (%s)\n", err.Error(), he.Hint())
-		} else {
-			fmt.Fprintf(w, "Error: %s\n", err.Error())
+			// The hint goes on its own line rather than in parentheses: it is the
+			// sentence telling the reader what to do next, and burying it inside
+			// the failure made it read as a footnote to the failure.
+			fmt.Fprintf(w, "  %s %s\n", s.dim("hint:"), s.dim(he.Hint()))
 		}
 	}
 	var env errEnvelope
@@ -197,6 +202,13 @@ func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int
 	line, marshalErr := json.Marshal(env)
 	if marshalErr != nil {
 		fmt.Fprintf(w, `{"error":{"kind":"internal","message":"failed to encode error envelope"}}`+"\n")
+		return code
+	}
+	// The envelope is written on every failure in every mode, because it is the
+	// machine contract. On a terminal it is dimmed so it recedes behind the
+	// sentence written for the person, without ever being withheld from them.
+	if stderrIsTTY && format == formatTable && !reported {
+		fmt.Fprintln(w, s.dim(string(line)))
 		return code
 	}
 	fmt.Fprintln(w, string(line))

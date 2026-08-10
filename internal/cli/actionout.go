@@ -34,7 +34,10 @@ func renderActionTo(out io.Writer, format outputFormat, status string, fields ma
 		return json.NewEncoder(out).Encode(obj)
 	}
 	if !quietFlag && prose != "" {
-		fmt.Fprintln(out, prose)
+		// renderAction is only reached once the action succeeded, so the marker
+		// is unconditional here. It is added only for a terminal: piped output
+		// keeps the exact sentence a script may already be matching on.
+		fmt.Fprintln(out, stylerFor(out).okPrefix()+prose)
 	}
 	return nil
 }

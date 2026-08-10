@@ -64,6 +64,36 @@ func TestRenderApplyReport_TableSummaryAndNextCommand(t *testing.T) {
 	}
 }
 
+// TestRenderApplyReport_SlugColumnFitsTheLongestSlug pins the alignment a fixed
+// 24-character slug column silently broke: the status word must start at the
+// same offset on every row, including the row whose slug is longer than any
+// width that could have been picked in advance.
+func TestRenderApplyReport_SlugColumnFitsTheLongestSlug(t *testing.T) {
+	var out bytes.Buffer
+	res := []applyResult{
+		{slug: "sales", status: statusCreated},
+		{slug: "quarterly-revenue-reporting-dashboard", status: statusUnchanged},
+	}
+	_ = renderApplyReport(&out, "eu", res, false)
+
+	var short, long string
+	for _, ln := range strings.Split(out.String(), "\n") {
+		switch {
+		case strings.Contains(ln, "sales"):
+			short = ln
+		case strings.Contains(ln, "quarterly-revenue-reporting-dashboard"):
+			long = ln
+		}
+	}
+	if short == "" || long == "" {
+		t.Fatalf("both app rows must be printed:\n%s", out.String())
+	}
+	if got, want := strings.Index(short, "created"), strings.Index(long, "unchanged"); got != want {
+		t.Errorf("status column starts at %d for the short slug and %d for the long one:\n%s",
+			got, want, out.String())
+	}
+}
+
 func TestRenderApplyReport_QuietCollapses(t *testing.T) {
 	var out bytes.Buffer
 	_ = renderApplyReport(&out, "eu", []applyResult{{slug: "a", status: statusUnchanged}}, true)

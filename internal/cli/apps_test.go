@@ -1530,8 +1530,18 @@ func TestAppsShow_RendersLostReplicaReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "worker unavailable") {
-		t.Errorf("expected lost replica reason in output\nfull output:\n%s", out)
+	// The reason hangs under its own replica's row, indented past the INDEX
+	// column, so it reads as belonging to that replica and cannot widen the
+	// row's own columns.
+	for _, want := range []string{
+		"  INDEX  STATUS    PID   PORT",
+		"      0  running  1234  34567",
+		"      1  lost        -      -",
+		"         └ worker unavailable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
 	}
 	// The running replica must not gain a spurious reason annotation.
 	for _, line := range strings.Split(out, "\n") {

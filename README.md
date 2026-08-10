@@ -175,6 +175,28 @@ The one required setting is `auth.secret`: a random 32+ character string
 (`openssl rand -hex 32`). The server refuses to start with the placeholder
 value.
 
+### CLI output
+
+Client commands render a table on a terminal and JSON when their output is
+piped or redirected, so `shinyhub apps list` is readable by a person and
+parseable by a script without either having to ask. `-o table|json|ndjson`
+forces one, `-q` suppresses non-essential prose, and `shinyhub schema`
+describes every command, flag, and error kind as JSON.
+
+Color and glyphs are decoration only: a status is always spelled out as a word
+and a result always carries `✓` or `✗`, so nothing is lost when they are off.
+They are off automatically whenever output is not a terminal, and can be
+controlled explicitly:
+
+| Setting | Effect |
+|---|---|
+| `--no-color` | No ANSI color. Wins over everything below. |
+| `NO_COLOR=1` | No ANSI color ([no-color.org](https://no-color.org)). |
+| `CLICOLOR=0` | No ANSI color. |
+| `TERM=dumb` | No color, and no in-place redraw: the deploy progress line becomes one line per step. |
+| `CLICOLOR_FORCE=1` | Color even when piped, for a CI log that renders ANSI. `FORCE_COLOR` is an alias. |
+| `LANG=C` (any non-UTF-8 locale) | ASCII glyphs (`v`, `x`, `\|/-\`) instead of Unicode. |
+
 ## Guides
 
 | Guide | Topic |

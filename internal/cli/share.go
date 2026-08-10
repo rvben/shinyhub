@@ -53,12 +53,11 @@ func newShareLsCmd() *cobra.Command {
 				fmt.Fprintln(w, "No shared-data mounts.")
 				return
 			}
-			fmt.Fprintf(w, "%-32s  %s\n", "SOURCE SLUG", "SOURCE ID")
+			t := newTable("SOURCE SLUG", "SOURCE ID").alignRight(1)
 			for _, m := range items {
-				sourceSlug := fmt.Sprintf("%v", m["source_slug"])
-				sourceID := fmt.Sprintf("%v", m["source_id"])
-				fmt.Fprintf(w, "%-32s  %s\n", sourceSlug, sourceID)
+				t.row(txt(m["source_slug"]), dimTxt(m["source_id"]))
 			}
+			t.render(w)
 		})
 	}
 	return cmd

@@ -80,6 +80,7 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 	}
 
 	w := cmd.OutOrStdout()
+	s := stylerFor(w)
 	note := "available"
 	if !m.MetricsAvailable {
 		note = "unavailable"
@@ -88,16 +89,16 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 		// Elastic pool: sessions_cap is the per-worker cap, so the honest
 		// summary is the ceiling arithmetic, not the multiplex per-replica cap.
 		fmt.Fprintf(w, "App: %s · %s · ceiling %d (max %d workers × %d/worker) · metrics %s\n",
-			m.Status, m.WorkerIsolation, m.MaxWorkers*m.SessionsCap, m.MaxWorkers, m.SessionsCap, note)
+			s.status(m.Status), m.WorkerIsolation, m.MaxWorkers*m.SessionsCap, m.MaxWorkers, m.SessionsCap, note)
 	} else {
-		fmt.Fprintf(w, "App: %s · sessions cap %d · metrics %s\n", m.Status, m.SessionsCap, note)
+		fmt.Fprintf(w, "App: %s · sessions cap %d · metrics %s\n", s.status(m.Status), m.SessionsCap, note)
 	}
 	if len(m.Replicas) == 0 {
 		fmt.Fprintln(w, "No running replicas.")
 		return nil
 	}
-	fmt.Fprintf(w, "%-7s  %-10s  %-8s  %-7s  %-10s  %-8s  %s\n",
-		"REPLICA", "STATUS", "PID", "CPU%", "RSS", "SESSIONS", "PLACEMENT")
+	t := newTable("REPLICA", "STATUS", "PID", "CPU%", "RSS", "SESSIONS", "PLACEMENT").
+		alignRight(0, 2, 3, 4, 5)
 	for _, r := range m.Replicas {
 		pid := "-"
 		if r.PID != nil {
@@ -114,8 +115,9 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 			}
 			placement += r.Provider
 		}
-		fmt.Fprintf(w, "%-7d  %-10s  %-8s  %-7s  %-10s  %-8d  %s\n",
-			r.Index, r.Status, pid, cpu, humanBytes(r.RSSBytes), r.Sessions, placement)
+		t.row(txt(r.Index), statusTxt(r.Status), dimTxt(pid), txt(cpu),
+			txt(humanBytes(r.RSSBytes)), txt(r.Sessions), dimTxt(placement))
 	}
+	t.render(w)
 	return nil
 }

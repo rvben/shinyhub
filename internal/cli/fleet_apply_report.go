@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/fleet"
@@ -120,12 +121,26 @@ func statusGlyph(r applyResult) string {
 	return g
 }
 
+// slugColumnWidth sizes the slug column to the longest slug in the run. The
+// whole report is in hand before a line is printed, so the width comes from the
+// data rather than from a constant that a longer slug silently overflows.
+func slugColumnWidth(res []applyResult) int {
+	w := 0
+	for _, r := range res {
+		if n := utf8.RuneCountInString(r.slug); n > w {
+			w = n
+		}
+	}
+	return w
+}
+
 // renderApplyReport prints the final table + summary + exit reason and
 // returns the ExitCodeError implied by the results (nil for exit 0). Quiet
-// collapses to the summary + result line only. Color is intentionally never
-// emitted: the glyph + status word is always the signal, so --no-color needs
-// no special-casing here.
+// collapses to the summary + result line only. The glyph and the status word
+// always carry the signal on their own, so color only weights what is already
+// legible: strip it and the report reads identically.
 func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet bool) error {
+	s := stylerFor(out)
 	code, reason := applyExitCode(res)
 	t := tallyResults(res)
 	summary := fmt.Sprintf(
@@ -139,26 +154,29 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 	}
 
 	fmt.Fprintf(out, "shinyhub fleet apply  ·  fleet_id=%s\n\n", fleetID)
+	wSlug := slugColumnWidth(res)
 	for _, r := range res {
-		statusWord := string(r.status)
+		statusWord := s.status(string(r.status))
 		if r.status == statusFailed && r.deployFailed {
 			if k := finalFailureKind(r); k != "" {
-				statusWord += " [" + string(k) + "]"
+				statusWord += " " + s.dim("["+string(k)+"]")
 			}
 		}
-		line := fmt.Sprintf("  %s  %-24s %s", statusGlyph(r), r.slug, statusWord)
+		// The slug is the only padded field, and it is never painted, so no
+		// escape can enter a column width.
+		line := fmt.Sprintf("  %s  %-*s %s", s.glyphPaint(statusGlyph(r)), wSlug, r.slug, statusWord)
 		if r.attempts > 1 {
-			line += fmt.Sprintf(" (attempt %d)", r.attempts)
+			line += s.dim(fmt.Sprintf(" (attempt %d)", r.attempts))
 		}
 		if r.note != "" {
-			line += "  " + r.note
+			line += "  " + s.dim(r.note)
 		}
 		if r.duration > 0 {
-			line += fmt.Sprintf("   %s", r.duration.Round(100*time.Millisecond))
+			line += s.dim(fmt.Sprintf("   %s", r.duration.Round(100*time.Millisecond)))
 		}
 		fmt.Fprintln(out, line)
 		for _, a := range r.attemptsDetail {
-			fmt.Fprintf(out, "     attempt %d: %s\n", a.Attempt, a.Kind)
+			fmt.Fprintf(out, "     %s\n", s.dim(fmt.Sprintf("attempt %d: %s", a.Attempt, a.Kind)))
 		}
 		for _, ff := range r.firstFires {
 			if ff.Status == "" {
@@ -177,16 +195,17 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 	for _, r := range res {
 		switch r.status {
 		case statusFailed:
-			fmt.Fprintf(out, "  %s: %v\n", r.slug, r.err)
+			fmt.Fprintf(out, "  %s: %v\n", s.red(r.slug), r.err)
 			if len(r.logTail) > 0 {
-				fmt.Fprintf(out, "    last %d lines of app log:\n", len(r.logTail))
+				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("last %d lines of app log:", len(r.logTail))))
 				for _, l := range r.logTail {
-					fmt.Fprintf(out, "      %s\n", l)
+					fmt.Fprintf(out, "      %s\n", s.dim(l))
 				}
 			}
-			fmt.Fprintf(out, "    -> shinyhub apps logs %s --tail 200\n", r.slug)
+			fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub apps logs %s --tail 200", r.slug)))
 		case statusConflict:
-			fmt.Fprintf(out, "  %s: %v\n    -> shinyhub fleet plan   (re-review before re-applying)\n", r.slug, r.err)
+			fmt.Fprintf(out, "  %s: %v\n    %s\n", s.red(r.slug), r.err,
+				s.dim("-> shinyhub fleet plan   (re-review before re-applying)"))
 		}
 	}
 	return applyExitErr(code, reason)

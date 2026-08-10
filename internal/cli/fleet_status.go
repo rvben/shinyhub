@@ -94,10 +94,14 @@ func writeFleetStatusJSON(out io.Writer, st fleetStatusEnvelope) error {
 	return err
 }
 
-// renderFleetStatus prints the overview. Glyphs are stable ASCII so the
-// output is color-free and CI/log friendly: '*' = fleet-managed, '-' =
-// unmanaged. quiet collapses to just the one-line summary.
+// renderFleetStatus prints the overview. Glyphs are stable ASCII and carry the
+// signal on their own ('*' = fleet-managed, '-' = unmanaged), so the layout is
+// identical with or without color and stays CI/log friendly. Color is added
+// only on a terminal, and only to the marker and the status word, which are
+// already the two things the reader is scanning for. quiet collapses to just
+// the one-line summary.
 func renderFleetStatus(out io.Writer, st fleetStatusEnvelope, quiet bool) {
+	s := stylerFor(out)
 	summary := fmt.Sprintf("Fleet: %d app(s), %d fleet-managed, %d unmanaged.",
 		st.Summary.Total, st.Summary.FleetManaged, st.Summary.Unmanaged)
 	if quiet {
@@ -117,12 +121,14 @@ func renderFleetStatus(out io.Writer, st fleetStatusEnvelope, quiet bool) {
 		}
 	}
 	for _, a := range st.Apps {
-		glyph, owner := "-", "unmanaged"
+		// The glyph and the status are the only painted fields, and neither is
+		// padded here: the escapes cannot enter a width calculation.
+		glyph, owner := s.dim("-"), "unmanaged"
 		if a.FleetManaged {
-			glyph, owner = "*", a.ManagedBy
+			glyph, owner = s.green("*"), a.ManagedBy
 		}
 		fmt.Fprintf(out, "  %s  %-*s  %-*s  %s  %s\n",
-			glyph, wSlug, a.Slug, wOwner, owner, shortDigest(a.ContentDigest), a.Status)
+			glyph, wSlug, a.Slug, wOwner, owner, shortDigest(a.ContentDigest), s.status(a.Status))
 	}
 	fmt.Fprintf(out, "\n%s\n", summary)
 }
@@ -168,7 +174,9 @@ func runFleetStatus(cmd *cobra.Command, f *fleetStatusFlags) error {
 	errOut := cmd.ErrOrStderr()
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
+		es := stylerFor(errOut)
+		fmt.Fprintf(errOut, "  %s not authenticated: %v\n     %s\n",
+			es.red("✗"), err, es.dim("run 'shinyhub login' or pass --config"))
 		return &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	apps, err := fetchApps(cfg)

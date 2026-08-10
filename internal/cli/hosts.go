@@ -52,15 +52,16 @@ only, so no server is contacted.`,
 					fmt.Fprintln(w, "No saved hosts. Run `shinyhub login --host <url>` to add one.")
 					return
 				}
-				fmt.Fprintf(w, "%-2s %-16s %-40s %s\n", "", "NAME", "HOST", "USER")
+				t := newTable("", "NAME", "HOST", "USER")
 				for _, h := range items {
 					marker := ""
 					if h["current"] == true {
 						marker = "*"
 					}
-					fmt.Fprintf(w, "%-2s %-16s %-40s %s\n",
-						marker, dashIfEmpty(h["name"]), dashIfEmpty(h["host"]), dashIfEmpty(h["user"]))
+					t.row(markTxt(marker), txt(dashIfEmpty(h["name"])),
+						txt(dashIfEmpty(h["host"])), txt(dashIfEmpty(h["user"])))
 				}
+				t.render(w)
 			})
 	}
 	return cmd

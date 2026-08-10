@@ -218,7 +218,10 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		return err
 	}
 
-	fmt.Fprintf(errW, "Deploying %s to %s...\n", slug, cfg.Host)
+	// The deploy request is the longest blocking step (a first deploy installs
+	// dependencies server-side), so on a terminal it animates with its elapsed
+	// time rather than sitting on one static line for minutes.
+	deploying := newProgress(errW, fmt.Sprintf("Deploying %s to %s...", slug, cfg.Host))
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, _ := writer.CreateFormFile("bundle", "bundle.zip")
@@ -227,6 +230,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 
 	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/deploy", &body)
 	if err != nil {
+		deploying.stop()
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
@@ -234,7 +238,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 
 	// Deploy can take several minutes on first run (uv downloads packages).
 	// Use http.DefaultClient (no timeout) to match the SSE logs command.
+	deploying.start()
 	resp, err := http.DefaultClient.Do(req)
+	deploying.stop()
 	if err != nil {
 		return fmt.Errorf("deploy request: %w", err)
 	}
@@ -266,32 +272,30 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 
 	stdOut := cmd.OutOrStdout()
-	if format == formatJSON {
-		// In JSON mode, all prose goes to stderr; one result object on stdout.
-		if deployCount > 0 {
-			fmt.Fprintf(errW, "Deployed %s (deployment #%d)\nURL: %s/app/%s/\n", slug, deployCount, cfg.Host, slug)
-		} else {
-			fmt.Fprintf(errW, "Deployed %s\nURL: %s/app/%s/\n", slug, cfg.Host, slug)
-		}
-		for _, line := range formatManifestSummary(appResp["manifest"]) {
-			fmt.Fprintln(errW, line)
-		}
-	} else {
-		if deployCount > 0 {
-			fmt.Fprintf(stdOut, "Deployed %s (deployment #%d)\nURL: %s/app/%s/\n", slug, deployCount, cfg.Host, slug)
-		} else {
-			fmt.Fprintf(stdOut, "Deployed %s\nURL: %s/app/%s/\n", slug, cfg.Host, slug)
-		}
-		for _, line := range formatManifestSummary(appResp["manifest"]) {
-			fmt.Fprintln(stdOut, line)
-		}
-	}
-	// Surface visibility so the printed URL returning 401 for a brand-new private
-	// app is not a confusing surprise. Prose target matches the URL above.
+	// In JSON mode all prose goes to stderr; one result object on stdout.
 	noteW := stdOut
 	if format == formatJSON {
 		noteW = errW
 	}
+	// How long the deploy took is the question every developer asks next, and on
+	// a terminal it is the only place it is recorded. Piped output keeps the
+	// exact sentence it has always had, so anything matching on it is unaffected.
+	ps := stylerFor(noteW)
+	took := ""
+	if ps.tty {
+		took = " in " + humanElapsed(deploying.elapsed())
+	}
+	deployment := ""
+	if deployCount > 0 {
+		deployment = fmt.Sprintf(" (deployment #%d)", deployCount)
+	}
+	fmt.Fprintf(noteW, "%sDeployed %s%s%s\nURL: %s/app/%s/\n",
+		ps.okPrefix(), slug, deployment, took, cfg.Host, slug)
+	for _, line := range formatManifestSummary(appResp["manifest"]) {
+		fmt.Fprintln(noteW, line)
+	}
+	// Surface visibility so the printed URL returning 401 for a brand-new private
+	// app is not a confusing surprise. Prose target matches the URL above.
 	switch access, _ := appResp["access"].(string); access {
 	case "private":
 		fmt.Fprintf(noteW, "Access: private (only people you grant can open it) - add someone: shinyhub apps access grant %s <username>\n", slug)
@@ -378,13 +382,13 @@ func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
 // are treated as transient and keep the loop going.
 func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration, errOut io.Writer) error {
 	deadline := time.Now().Add(timeout)
-	fmt.Fprintf(errOut, "Waiting for %s to be healthy", slug)
+	p := newProgress(errOut, fmt.Sprintf("Waiting for %s to be healthy", slug))
 	var lastErr error
 	var lastPollOK bool
 	for time.Now().Before(deadline) {
 		ready, status, err := pollAppStatus(cfg, slug)
 		if err == nil && ready {
-			fmt.Fprintln(errOut, " ready.")
+			p.done(" ready.", slug+" is healthy")
 			return nil
 		}
 		lastPollOK = err == nil
@@ -392,19 +396,18 @@ func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration
 			lastErr = err
 			var he *deployHTTPError
 			if errors.As(err, &he) && he.fatal() {
-				fmt.Fprintln(errOut)
+				p.stop()
 				return fmt.Errorf("checking %s: %w", slug, err)
 			}
 		}
 		if isTerminalStatus(status) {
-			fmt.Fprintln(errOut)
+			p.stop()
 			printLogTail(cfg, slug, errOut)
 			return fmt.Errorf("%s %s during startup - check logs above or run: shinyhub apps logs %s", slug, status, slug)
 		}
-		fmt.Fprint(errOut, ".")
-		time.Sleep(healthPollInterval)
+		p.step(healthPollInterval)
 	}
-	fmt.Fprintln(errOut)
+	p.stop()
 	printLogTail(cfg, slug, errOut)
 	// If the most recent poll could not reach the app, surface that error: we
 	// have no fresh evidence the app is merely still booting, and a persistent
