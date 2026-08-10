@@ -64,14 +64,6 @@ func authErr(msg, hint string) error {
 	return &ExitCodeError{Code: 3, Kind: KindAuth, Err: &hintedMsgError{msg: msg, hint: hint}}
 }
 
-// networkErr reports a server the CLI could not reach, with the advice in the
-// envelope's hint field rather than folded into the message. cause is unwrapped
-// so callers matching on net.Error or *url.Error still see it.
-func networkErr(msg, hint string, cause error) error {
-	return &ExitCodeError{Code: 3, Kind: KindNetwork,
-		Err: &hintedMsgError{msg: msg, hint: hint, cause: cause}}
-}
-
 // resolveFormat resolves the effective output format for a command. legacyJSON
 // is the command's --json alias value; streaming marks commands whose stdout is
 // a line stream. On success, resolvedFormat is updated so the error renderer

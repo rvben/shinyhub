@@ -290,7 +290,9 @@ func verifyToken(host, token string) (string, error) {
 	req.Header.Set("Authorization", authHeader(token))
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("connect to server: %w", err)
+		// "connect to server:" in front of "cannot reach the ShinyHub server
+		// at ..." says the same thing twice.
+		return "", err
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)

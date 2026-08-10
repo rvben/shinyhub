@@ -263,7 +263,14 @@ func TestVerifyToken_ServerDown(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when server is unreachable, got nil")
 	}
-	if !strings.Contains(err.Error(), "connect to server") {
-		t.Errorf("error should mention connection failure, got: %v", err)
+	// A login that cannot reach the server has to say which server, in words:
+	// this is the first command a new user runs, and a mistyped address is the
+	// likeliest reason they are here.
+	want := "cannot reach the ShinyHub server at http://127.0.0.1:1 (connection refused)"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+	if hintOf(err) == "" {
+		t.Error("a login that could not connect must say what to check next")
 	}
 }

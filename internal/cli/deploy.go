@@ -237,12 +237,14 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	// Deploy can take several minutes on first run (uv downloads packages).
-	// Use http.DefaultClient (no timeout) to match the SSE logs command.
+	// Use the untimed client to match the SSE logs command.
 	deploying.start()
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := streamClient.Do(req)
 	deploying.stop()
 	if err != nil {
-		return fmt.Errorf("deploy request: %w", err)
+		// No prefix: the client's message already names the server that could
+		// not be reached, and which request it was is not in doubt.
+		return err
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
