@@ -37,6 +37,8 @@ func clientEnvVars() []schemaEnvVar {
 		{Name: "SHINYHUB_CREDENTIALS", Scope: "client", Description: "Path to the client credentials file (default ~/.config/shinyhub/config.json). Preferred over SHINYHUB_CONFIG; unambiguously refers to the CLI credentials, not the server-side serve --config."},
 		{Name: "SHINYHUB_CONFIG", Scope: "client", Description: "Legacy alias for SHINYHUB_CREDENTIALS. Still fully supported; SHINYHUB_CREDENTIALS takes precedence when both are set."},
 		{Name: "SHINYHUB_DEPLOY_TOKEN", Scope: "server", Description: "Configured on the server to enable pre-shared deploy-token auth; clients pass its value as SHINYHUB_TOKEN."},
+		{Name: "NO_COLOR", Scope: "client", Description: "Set to any non-empty value to disable colored output, equivalent to --no-color. Color is already off whenever output is not a terminal, so piped and redirected output is never colored."},
+		{Name: "CLICOLOR_FORCE", Scope: "client", Description: "Set to a non-zero value to emit color even when output is not a terminal (for CI logs that render ANSI). FORCE_COLOR is accepted as an alias; NO_COLOR and --no-color still win."},
 	}
 }
 
@@ -73,7 +75,7 @@ type schemaError struct {
 // globalArgNames are root persistent flags advertised once at the top level.
 // --config is deliberately excluded: serve/backup/restore shadow it with a
 // different meaning, so the walk emits it per command instead.
-var globalArgNames = map[string]bool{"output": true, "quiet": true}
+var globalArgNames = map[string]bool{"output": true, "quiet": true, "no-color": true}
 
 // GenerateSchemaDoc exposes schema generation for the cmd/shinyhub conformance
 // tests, which exercise the full tree including server commands. The return

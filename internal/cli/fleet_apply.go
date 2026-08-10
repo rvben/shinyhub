@@ -15,7 +15,6 @@ type fleetApplyFlags struct {
 	dryRun                   bool
 	yes                      bool
 	allowUnsafeDegradedPrune bool
-	noColor                  bool
 	jsonOutput               bool
 	retries                  int
 	healthTimeout            int
@@ -55,7 +54,6 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&f.yes, "yes", "y", false, "Skip the destructive-action confirmation prompt")
 	cmd.Flags().BoolVar(&f.allowUnsafeDegradedPrune, "allow-unsafe-degraded-prune", false,
 		"Allow prune against a server without precondition support (accepts a documented race)")
-	cmd.Flags().BoolVar(&f.noColor, "no-color", false, "Disable ANSI color (glyphs/words remain)")
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
 	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for deploy-bearing actions")
 	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app for healthy status after deploy")
@@ -99,7 +97,6 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 	if f.dryRun {
 		synthetic := &fleetPlanFlags{
 			file:       f.file,
-			noColor:    f.noColor,
 			jsonOutput: f.jsonOutput,
 		}
 		return renderFleetPlan(cmd, synthetic, "shinyhub fleet apply --dry-run", pf.manifest, pf.host, pf.caps, pf.diff)

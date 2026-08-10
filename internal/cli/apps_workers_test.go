@@ -25,9 +25,11 @@ func TestAppsShow_RendersWorkerPool(t *testing.T) {
 		"Isolation:   grouped (2 sessions/worker, max 5 workers)",
 		"Admission ceiling: 5 × 2 = 10 concurrent sessions",
 		"Workers:",
-		"SLOT   STATUS     SESSIONS  PID      PORT",
-		"0      running    2/2       4321     20101",
-		"1      booting    1/2       -        -",
+		// Columns are sized to their widest value and the numeric ones are
+		// right-aligned, so slot/session/pid/port digits line up on the right.
+		"  SLOT  STATUS   SESSIONS   PID   PORT",
+		"     0  running       2/2  4321  20101",
+		"     1  booting       1/2     -      -",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)

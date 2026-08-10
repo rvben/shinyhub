@@ -145,17 +145,11 @@ func newUsersListCmd() *cobra.Command {
 				fmt.Fprintln(w, "No users.")
 				return
 			}
-			idW, nameW, roleW := len("ID"), len("USERNAME"), len("ROLE")
+			t := newTable("ID", "USERNAME", "ROLE", "CREATED").alignRight(0)
 			for _, u := range items {
-				idW = max(idW, len(fmt.Sprintf("%v", u["id"])))
-				nameW = max(nameW, len(fmt.Sprintf("%v", u["username"])))
-				roleW = max(roleW, len(fmt.Sprintf("%v", u["role"])))
+				t.row(dimTxt(u["id"]), txt(u["username"]), txt(u["role"]), dimTxt(u["created_at"]))
 			}
-			fmt.Fprintf(w, "%-*s  %-*s  %-*s  %s\n", idW, "ID", nameW, "USERNAME", roleW, "ROLE", "CREATED")
-			for _, u := range items {
-				fmt.Fprintf(w, "%-*v  %-*v  %-*v  %v\n",
-					idW, u["id"], nameW, u["username"], roleW, u["role"], u["created_at"])
-			}
+			t.render(w)
 		})
 	}
 	return cmd

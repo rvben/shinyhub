@@ -57,6 +57,8 @@ func AddCommandsTo(root *cobra.Command) {
 		"Output format: table, json, or ndjson (default: table on a terminal, json/ndjson when piped)")
 	root.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false,
 		"Suppress non-essential output")
+	root.PersistentFlags().BoolVar(&noColorFlag, "no-color", false,
+		"Disable colored output (also honours $NO_COLOR; color is off by default when not writing to a terminal)")
 	root.AddCommand(
 		newLoginCmd(),
 		newLogoutCmd(),

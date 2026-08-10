@@ -30,19 +30,20 @@ func TestGenerateSchema_TopLevel(t *testing.T) {
 	if len(doc.Errors) != len(kindTable) {
 		t.Errorf("errors len = %d, want %d", len(doc.Errors), len(kindTable))
 	}
-	// global_args: -o/--output and -q/--quiet only; --config is per-command.
+	// global_args: -o/--output, -q/--quiet and --no-color only; --config is
+	// per-command.
 	var names []string
 	for _, a := range doc.GlobalArgs {
 		names = append(names, a.Name)
 	}
-	want := map[string]bool{"--output": true, "--quiet": true}
+	want := map[string]bool{"--output": true, "--quiet": true, "--no-color": true}
 	for _, n := range names {
 		if !want[n] {
 			t.Errorf("unexpected global arg %q", n)
 		}
 	}
-	if len(names) != 2 {
-		t.Errorf("global_args = %v", names)
+	if len(names) != len(want) {
+		t.Errorf("global_args = %v, want exactly %d", names, len(want))
 	}
 	// --output must carry its three valid values as an enum.
 	found := false

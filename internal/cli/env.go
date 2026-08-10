@@ -162,22 +162,23 @@ func newEnvCmd() *cobra.Command {
 		}
 
 		return renderServerList(cmd, lsF, vars, total, nil, func(w io.Writer, items []map[string]any) {
-			fmt.Fprintf(w, "%-24s %s\n", "KEY", "VALUE")
+			t := newTable("KEY", "VALUE")
 			for _, v := range items {
-				key := fmt.Sprintf("%v", v["key"])
 				value := fmt.Sprintf("%v", v["value"])
 				secret, _ := v["secret"].(bool)
 				set, _ := v["set"].(bool)
-				displayValue := value
+				// A masked or empty value is a statement about the value, not the
+				// value itself, so it is dimmed to read as such.
 				switch {
 				case secret:
-					displayValue = "••••••"
+					t.row(txt(v["key"]), dimTxt("••••••"))
 				case set && value == "":
-					displayValue = "(empty)"
+					t.row(txt(v["key"]), dimTxt("(empty)"))
+				default:
+					t.row(txt(v["key"]), txt(value))
 				}
-				row := fmt.Sprintf("%-24s %s", key, displayValue)
-				fmt.Fprintln(w, strings.TrimRight(row, " "))
 			}
+			t.render(w)
 		})
 	}
 

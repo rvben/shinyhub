@@ -54,6 +54,7 @@ func resetFormatState(t *testing.T) {
 	t.Cleanup(func() {
 		outputFlagValue = ""
 		quietFlag = false
+		noColorFlag = false
 		resolvedFormat = ""
 	})
 }

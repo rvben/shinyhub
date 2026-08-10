@@ -82,20 +82,15 @@ func runAppsList(cmd *cobra.Command, f *listFlags) error {
 	})
 }
 
-// writeAppsTable renders the apps list as a column-aligned table, sizing the
-// SLUG and STATUS columns to their widest value so a long slug no longer pushes
-// later columns out of alignment.
+// writeAppsTable renders the apps list, coloring each status by what it means
+// so a stopped or failed app is findable in a long list without reading every
+// row. The status word is printed either way; the color only weights it.
 func writeAppsTable(w io.Writer, items []map[string]any) {
-	slugW, statusW := len("SLUG"), len("STATUS")
+	t := newTable("SLUG", "STATUS", "DEPLOYS").alignRight(2)
 	for _, a := range items {
-		slugW = max(slugW, len(fmt.Sprintf("%v", a["slug"])))
-		statusW = max(statusW, len(fmt.Sprintf("%v", a["status"])))
+		t.row(txt(a["slug"]), statusTxt(a["status"]), txt(a["deploy_count"]))
 	}
-	fmt.Fprintf(w, "%-*s  %-*s  %s\n", slugW, "SLUG", statusW, "STATUS", "DEPLOYS")
-	for _, a := range items {
-		row := fmt.Sprintf("%-*s  %-*s  %v", slugW, a["slug"], statusW, a["status"], a["deploy_count"])
-		fmt.Fprintln(w, strings.TrimRight(row, " "))
-	}
+	t.render(w)
 }
 
 // ── apps show ───────────────────────────────────────────────────────────────
@@ -212,7 +207,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	a := resp2.App
 	fmt.Fprintf(w, "Slug:        %s\n", a.Slug)
 	fmt.Fprintf(w, "Name:        %s\n", a.Name)
-	fmt.Fprintf(w, "Status:      %s\n", a.Status)
+	fmt.Fprintf(w, "Status:      %s\n", stylerFor(w).status(a.Status))
 	fmt.Fprintf(w, "Access:      %s\n", a.Access)
 	fmt.Fprintf(w, "Owner:       user #%d\n", a.OwnerID)
 	if a.ProjectSlug != "" {
@@ -342,7 +337,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	if len(resp2.ReplicasStatus) > 0 && resp2.WorkerPool == nil {
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "Replicas:")
-		fmt.Fprintf(w, "  %-6s %-10s %-8s %s\n", "INDEX", "STATUS", "PID", "PORT")
+		t := newTable("INDEX", "STATUS", "PID", "PORT").alignRight(0, 2, 3).indent(2)
 		for _, r := range resp2.ReplicasStatus {
 			pid, port := "-", "-"
 			if r.PID != nil {
@@ -351,12 +346,9 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			if r.Port != nil {
 				port = fmt.Sprintf("%d", *r.Port)
 			}
-			reason := ""
-			if r.Reason != "" {
-				reason = "  (" + r.Reason + ")"
-			}
-			fmt.Fprintf(w, "  %-6d %-10s %-8s %s%s\n", r.Index, r.Status, pid, port, reason)
+			t.row(txt(r.Index), statusTxt(r.Status), dimTxt(pid), dimTxt(port)).note(r.Reason)
 		}
+		t.render(w)
 	}
 	if wp := resp2.WorkerPool; wp != nil {
 		fmt.Fprintln(w, "")
@@ -368,7 +360,8 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 				bound += wk.Sessions
 			}
 			fmt.Fprintf(w, "Workers:     %d live · %d/%d sessions\n", len(wp.Workers), bound, wp.Ceiling)
-			fmt.Fprintf(w, "  %-6s %-10s %-9s %-8s %s\n", "SLOT", "STATUS", "SESSIONS", "PID", "PORT")
+			t := newTable("SLOT", "STATUS", "SESSIONS", "PID", "PORT").
+				alignRight(0, 2, 3, 4).indent(2)
 			for _, wk := range wp.Workers {
 				pid, port := "-", "-"
 				if wk.PID != 0 {
@@ -377,9 +370,11 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 				if wk.Port != 0 {
 					port = fmt.Sprintf("%d", wk.Port)
 				}
-				fmt.Fprintf(w, "  %-6d %-10s %-9s %-8s %s\n",
-					wk.SlotID, wk.Status, fmt.Sprintf("%d/%d", wk.Sessions, wp.SessionsPerWorker), pid, port)
+				t.row(txt(wk.SlotID), statusTxt(wk.Status),
+					txt(fmt.Sprintf("%d/%d", wk.Sessions, wp.SessionsPerWorker)),
+					dimTxt(pid), dimTxt(port))
 			}
+			t.render(w)
 		}
 	}
 	return nil
@@ -1378,11 +1373,11 @@ func runAppsAccessList(cmd *cobra.Command, args []string, f *listFlags) error {
 			fmt.Fprintf(w, "%s: no members\n", slug)
 			return
 		}
+		t := newTable("USER", "ROLE")
 		for _, m := range items {
-			username := fmt.Sprintf("%v", m["username"])
-			role := fmt.Sprintf("%v", m["role"])
-			fmt.Fprintf(w, "%-20s %s\n", username, role)
+			t.row(txt(m["username"]), txt(m["role"]))
 		}
+		t.render(w)
 	})
 }
 
@@ -1502,11 +1497,11 @@ func runAppsAccessGroupList(cmd *cobra.Command, args []string, f *listFlags) err
 			fmt.Fprintf(w, "%s: no group rules\n", slug)
 			return
 		}
+		t := newTable("GROUP", "ROLE")
 		for _, r := range items {
-			group := fmt.Sprintf("%v", r["group"])
-			role := fmt.Sprintf("%v", r["role"])
-			fmt.Fprintf(w, "%-20s %s\n", group, role)
+			t.row(txt(r["group"]), txt(r["role"]))
 		}
+		t.render(w)
 	})
 }
 
@@ -1799,23 +1794,19 @@ func runAppsDeployments(cmd *cobra.Command, args []string, f *listFlags) error {
 			fmt.Fprintln(w, "No deployments.")
 			return
 		}
-		fmt.Fprintf(w, "%-6s %-20s %-12s %s\n", "ID", "VERSION", "STATUS", "CREATED")
+		t := newTable("ID", "VERSION", "STATUS", "CREATED").alignRight(0)
 		for _, d := range items {
-			id := fmt.Sprintf("%v", d["id"])
-			version := fmt.Sprintf("%v", d["version"])
-			status := fmt.Sprintf("%v", d["status"])
 			created := fmt.Sprintf("%v", d["created_at"])
 			if len(created) > 19 {
 				created = created[:19]
 			}
-			row := fmt.Sprintf("%-6s %-20s %-12s %s", id, version, status, created)
-			fmt.Fprintln(w, strings.TrimRight(row, " "))
+			t.row(dimTxt(d["id"]), txt(d["version"]), statusTxt(d["status"]), dimTxt(created))
 			// Surface why a failed deploy failed, indented under its row, so the
 			// cause is visible without re-querying or passing --fields.
-			if reason, ok := d["failure_reason"].(string); ok && reason != "" {
-				fmt.Fprintf(w, "       └ %s\n", reason)
-			}
+			reason, _ := d["failure_reason"].(string)
+			t.note(reason)
 		}
+		t.render(w)
 	})
 }
 
@@ -1909,26 +1900,23 @@ func runTokensList(cmd *cobra.Command, f *tokensListFlags) error {
 			fmt.Fprintln(w, "No tokens.")
 			return
 		}
+		headers := []string{"ID", "NAME", "CREATED", "EXPIRES", "LAST USED"}
 		if f.all {
-			fmt.Fprintf(w, "%-6s %-16s %-24s %-20s %-20s %s\n", "ID", "USER", "NAME", "CREATED", "EXPIRES", "LAST USED")
-		} else {
-			fmt.Fprintf(w, "%-6s %-24s %-20s %-20s %s\n", "ID", "NAME", "CREATED", "EXPIRES", "LAST USED")
+			headers = []string{"ID", "USER", "NAME", "CREATED", "EXPIRES", "LAST USED"}
 		}
+		tbl := newTable(headers...).alignRight(0)
 		for _, t := range items {
-			id := fmt.Sprintf("%v", t["id"])
-			name := fmt.Sprintf("%v", t["name"])
-			created := tokenTimeCell(t["created_at"])
-			expires := tokenTimeCell(t["expires_at"])
-			lastUsed := tokenTimeCell(t["last_used_at"])
-			var row string
+			row := []cell{dimTxt(t["id"])}
 			if f.all {
-				user := fmt.Sprintf("%v", t["username"])
-				row = fmt.Sprintf("%-6s %-16s %-24s %-20s %-20s %s", id, user, name, created, expires, lastUsed)
-			} else {
-				row = fmt.Sprintf("%-6s %-24s %-20s %-20s %s", id, name, created, expires, lastUsed)
+				row = append(row, txt(t["username"]))
 			}
-			fmt.Fprintln(w, strings.TrimRight(row, " "))
+			row = append(row, txt(t["name"]),
+				dimTxt(tokenTimeCell(t["created_at"])),
+				dimTxt(tokenTimeCell(t["expires_at"])),
+				dimTxt(tokenTimeCell(t["last_used_at"])))
+			tbl.row(row...)
 		}
+		tbl.render(w)
 	})
 }
 

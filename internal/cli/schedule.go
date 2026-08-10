@@ -138,25 +138,23 @@ func newScheduleLsCmd() *cobra.Command {
 				fmt.Fprintln(w, "No schedules.")
 				return
 			}
-			fmt.Fprintf(w, "%-6s  %-24s  %-20s  %-8s  %-28s  %s\n",
-				"ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "COMMAND")
+			t := newTable("ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "COMMAND").alignRight(0)
 			for _, item := range rendered {
-				id := fmt.Sprintf("%v", item["id"])
-				name := fmt.Sprintf("%v", item["name"])
-				cron := fmt.Sprintf("%v", item["cron_expr"])
-				enabled := "true"
+				// A disabled schedule is dimmed: it is still listed, but it is not
+				// going to run, and that is the thing worth seeing at a glance.
+				enabled := txt("true")
 				if b, ok := item["enabled"].(bool); ok && !b {
-					enabled = "false"
+					enabled = dimTxt("false")
 				}
 				tzDisplay := fmt.Sprintf("%v", item["effective_timezone"])
 				if inherited, ok := item["timezone_inherited"].(bool); ok && inherited {
 					tzDisplay += " (inherited)"
 				}
 				cmdParts, _ := item["command"].([]string)
-				cmdStr := strings.Join(cmdParts, " ")
-				fmt.Fprintf(w, "%-6s  %-24s  %-20s  %-8s  %-28s  %s\n",
-					id, name, cron, enabled, tzDisplay, cmdStr)
+				t.row(dimTxt(item["id"]), txt(item["name"]), txt(item["cron_expr"]),
+					enabled, dimTxt(tzDisplay), txt(strings.Join(cmdParts, " ")))
 			}
+			t.render(w)
 		})
 	}
 	return lsCmd
@@ -800,25 +798,26 @@ func newScheduleStatusCmd() *cobra.Command {
 				fmt.Fprintln(w, "No schedules.")
 				return
 			}
-			fmt.Fprintf(w, "%-12s  %-16s  %-11s  %-13s  %-8s  %s\n",
-				"APP", "SCHEDULE", "LAST RUN", "LAST SUCCESS", "AGE", "STALE")
+			t := newTable("APP", "SCHEDULE", "LAST RUN", "LAST SUCCESS", "AGE", "STALE")
 			for _, r := range rows {
-				lastRun := strOrDash(r["last_run_status"])
-				lastSuccess := "never"
-				age := "-"
+				lastSuccess := dimTxt("never")
+				age := dimTxt("-")
 				if r["last_success_at"] != nil {
-					lastSuccess = fmt.Sprintf("%v", r["last_success_at"])
+					lastSuccess = txt(r["last_success_at"])
 					if r["last_success_age_s"] != nil {
-						age = humanizeAgeSeconds(r["last_success_age_s"])
+						age = txt(humanizeAgeSeconds(r["last_success_age_s"]))
 					}
 				}
-				stale := "-"
+				// A stale schedule is the reason to read this table at all, so the
+				// "yes" is the one thing in the row allowed to shout.
+				stale := dimTxt("-")
 				if b, ok := r["stale"].(bool); ok && b {
-					stale = "yes"
+					stale = alertTxt("yes")
 				}
-				fmt.Fprintf(w, "%-12v  %-16v  %-11s  %-13s  %-8s  %s\n",
-					r["slug"], r["schedule"], lastRun, lastSuccess, age, stale)
+				t.row(txt(r["slug"]), txt(r["schedule"]),
+					statusTxt(strOrDash(r["last_run_status"])), lastSuccess, age, stale)
 			}
+			t.render(w)
 		})
 	}
 	return cmd

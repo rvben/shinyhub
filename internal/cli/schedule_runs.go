@@ -44,20 +44,25 @@ func newScheduleRunsCmd() *cobra.Command {
 				fmt.Fprintln(w, "No runs yet.")
 				return
 			}
-			fmt.Fprintf(w, "%-6s  %-10s  %-9s  %-5s  %-19s  %s\n",
-				"ID", "STATUS", "TRIGGER", "EXIT", "STARTED", "DURATION")
+			t := newTable("ID", "STATUS", "TRIGGER", "EXIT", "STARTED", "DURATION").
+				alignRight(0, 3, 5)
 			for _, r := range items {
 				finished, _ := r["finished_at"].(string)
 				// exit_code is null while running and stays null for an
 				// interrupted run, so show "-" unless a real code is present.
-				exit := "-"
+				exit := dimTxt("-")
 				if finished != "" && r["exit_code"] != nil {
-					exit = fmt.Sprintf("%v", r["exit_code"])
+					code := fmt.Sprintf("%v", r["exit_code"])
+					exit = txt(code)
+					if code != "0" {
+						exit = alertTxt(code)
+					}
 				}
-				fmt.Fprintf(w, "%-6v  %-10v  %-9v  %-5s  %-19s  %s\n",
-					r["id"], r["status"], r["trigger"], exit,
-					fmtRunTime(r["started_at"]), fmtRunDuration(r["started_at"], r["finished_at"]))
+				t.row(dimTxt(r["id"]), statusTxt(r["status"]), txt(r["trigger"]), exit,
+					dimTxt(fmtRunTime(r["started_at"])),
+					txt(fmtRunDuration(r["started_at"], r["finished_at"])))
 			}
+			t.render(w)
 		})
 	}
 	return cmd

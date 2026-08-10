@@ -114,14 +114,14 @@ func newDataLsCmd() *cobra.Command {
 		usedBytes, _ := extra["used_bytes"].(float64)
 
 		return renderServerList(cmd, f, files, total, extra, func(w io.Writer, items []map[string]any) {
-			fmt.Fprintf(w, "%-48s %6s  %s\n", "PATH", "SIZE", "MODIFIED")
+			t := newTable("PATH", "SIZE", "MODIFIED").alignRight(1)
 			for _, fi := range items {
-				path := fmt.Sprintf("%v", fi["path"])
 				sizeVal, _ := fi["size"].(float64)
 				modVal, _ := fi["modified_at"].(float64)
 				modTime := time.Unix(int64(modVal), 0).UTC().Format(time.RFC3339)
-				fmt.Fprintf(w, "%-48s %6s  %s\n", path, humanBytes(int64(sizeVal)), modTime)
+				t.row(txt(fi["path"]), txt(humanBytes(int64(sizeVal))), dimTxt(modTime))
 			}
+			t.render(w)
 			used := humanBytes(int64(usedBytes))
 			if quotaMB > 0 {
 				quota := humanBytes(int64(quotaMB) * 1024 * 1024)
