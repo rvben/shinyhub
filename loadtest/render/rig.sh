@@ -21,7 +21,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # app a per-app environment store that is applied at process start. So the
 # real, working way to tune the render cost is after deploy, via the
 # already-authenticated CLI:
-#   ./bin/shiny env set rig RENDER_COST_MS=<ms> --restart
+#   ./bin/shinyhub env set rig RENDER_COST_MS=<ms> --restart
 # See loadtest/render/README.md for the empirical check that this reaches
 # the app process.
 

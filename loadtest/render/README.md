@@ -52,7 +52,7 @@ start. So the working way to tune render cost is after deploy, through the
 already-authenticated CLI:
 
 ```bash
-./bin/shiny env set rig RENDER_COST_MS=<ms> --restart
+./bin/shinyhub env set rig RENDER_COST_MS=<ms> --restart
 ```
 
 This was verified empirically, not assumed: a single-session run at the
@@ -84,10 +84,10 @@ running app process rather than being silently ignored.
 RIG_DAEMON_HOST=203.0.113.10 make render-rig-up
 
 # Deploy the synthetic app once, then tune render cost as needed:
-./bin/shiny login --host http://203.0.113.10:18080 --username admin --password admin
-./bin/shiny deploy loadtest/render/app --slug rig
-./bin/shiny apps access set rig public   # avoids managing a session cookie in the driver
-./bin/shiny env set rig RENDER_COST_MS=1300 --restart
+./bin/shinyhub login --host http://203.0.113.10:18080 --username admin --password admin
+./bin/shinyhub deploy loadtest/render/app --slug rig
+./bin/shinyhub apps access set rig public   # avoids managing a session cookie in the driver
+./bin/shinyhub env set rig RENDER_COST_MS=1300 --restart
 
 # Unit tests for the rig itself (burn calibration + verdict classifier).
 # No VM or browser required; safe to run any time.
