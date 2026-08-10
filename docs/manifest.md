@@ -82,6 +82,7 @@ starts.
 | `command` | array of strings | Launch-command override. See [`[app] command`](#app-command) below. |
 | `identity_headers` | bool | Per-app identity-forwarding toggle. See [`[app] identity_headers`](#app-identity_headers) below. |
 | `autoscale` | inline table | Per-app session-saturation autoscale policy. See [`[app] autoscale`](#app-autoscale) below. |
+| `icon` | string | Single emoji app icon. See [`[app] icon`](#app-icon) below. |
 
 All fields are optional. Omitted fields are left untouched: the
 manifest does not assert a complete state, so existing values set via the
@@ -207,6 +208,34 @@ rejected, so an incomplete block can never silently persist an all-zero policy.
 Bounds are range-checked `0..1000` even when disabled, so a later re-enable never
 hits an out-of-range stored value. An unknown key inside the table fails the
 deploy under strict-mode parsing.
+
+### `[app] icon`
+
+Set the app's icon to a single emoji, declaratively.
+
+```toml
+[app]
+icon = "🚀"
+```
+
+The field states who owns the app's icon rather than encoding three
+mechanical outcomes:
+
+| Manifest | Meaning |
+|---|---|
+| `icon = "..."` | Config owns this app's icon. |
+| absent (key not in manifest) | Nobody is asserting ownership; leave whatever is stored. |
+| `icon = ""` | Uploads own this app's icon; config stands down. |
+
+Once the manifest declares an icon, every deploy reasserts it over an image
+uploaded through the dashboard. The image bytes are retained, so `icon = ""`
+in a later deploy brings the image back; removing the key entirely does not,
+because absent means "leave alone". This matches the declared-only semantics
+of every other field in this table, but is surprising if undocumented, since
+an uploaded image is otherwise the only way to set an icon.
+
+A deploy that shadows an uploaded image is reported back to the operator; see
+[Deploy response](#deploy-response) for the wire field and sample output.
 
 ### Sentinel: reset hibernate to default
 
@@ -410,6 +439,8 @@ print confirmation lines after `Deployed ...`:
 Deployed myapp (deployment #4)
 URL: https://hub.example.com/app/myapp/
 Applied [app] settings: max_sessions_per_replica=10; replicas=2
+Note: [app] icon "🚀" is now shown instead of this app's uploaded image.
+      The image is still stored. Set icon = "" in shinyhub.toml to use it.
 Schedules: 1 created, 0 updated
 ```
 
@@ -422,6 +453,7 @@ The wire shape:
   ...other app fields...,
   "manifest": {
     "app": { "replicas": 2, "max_sessions_per_replica": 10 },
+    "icon_shadowed_upload": true,
     "schedules": [
       { "name": "nightly", "action": "created", "schedule_id": 7, "first_fire": { "run_id": 42 } }
     ],
@@ -434,12 +466,14 @@ The wire shape:
 }
 ```
 
-`manifest.app` is omitted when no `[app]` field changed; `manifest.schedules`
-is omitted when no `[[schedule]]` was upserted; `manifest.access_groups` is
-omitted when the `[access]` block is empty (each entry has `skipped: true` when
-a manual rule preempted it); the entire `manifest` key is omitted when the
-bundle has no `shinyhub.toml`. Top-level app fields stay in place so scripts
-that read `deploy_count` keep working.
+`manifest.app` is omitted when no `[app]` field changed; `manifest.icon_shadowed_upload`
+is omitted unless the manifest's `icon` shadowed an uploaded image (present
+and `true` only in that case); `manifest.schedules` is omitted when no
+`[[schedule]]` was upserted; `manifest.access_groups` is omitted when the
+`[access]` block is empty (each entry has `skipped: true` when a manual rule
+preempted it); the entire `manifest` key is omitted when the bundle has no
+`shinyhub.toml`. Top-level app fields stay in place so scripts that read
+`deploy_count` keep working.
 
 Each schedule entry carries its `schedule_id`; a `first_fire` object with the
 dispatched `run_id` is present only when `run_on_register` fired a run on this
