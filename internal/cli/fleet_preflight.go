@@ -159,7 +159,12 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 	observedBySlug := make(map[string]fleet.ObservedApp, len(apps))
 	for _, a := range apps {
 		oa := fleet.ObservedApp{
-			Slug:                    a.Slug,
+			Slug: a.Slug,
+			// Taken by address so a stored empty description reads as the real
+			// value "" rather than "not observed"; the API omits the key when
+			// empty, which decodes to the same "".
+			Name:                    &a.Name,
+			Description:             &a.Description,
 			Access:                  a.Access,
 			HibernateTimeoutMinutes: a.HibernateTimeoutMinutes,
 			Replicas:                intPtrIfPositive(a.Replicas),

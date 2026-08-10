@@ -57,6 +57,8 @@ visibility = "public"
 
 | Field | Type | Meaning |
 |---|---|---|
+| `name` | string 1..128 | Friendly display name shown on the dashboard card and the detail heading. Trimmed; may not be empty. Distinct from `slug`, which is the URL identifier and is not settable here. |
+| `description` | string 0..280 | One-line description shown under the name. Trimmed; `""` is a real value that clears it. |
 | `hibernate_timeout_minutes` | int | Idle minutes before hibernation. `-1` resets the field to the server default (the same sentinel as the bundle `shinyhub.toml`). Otherwise must be `>= 1`. |
 | `replicas` | int `>= 1` | Number of replica processes. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int `>= 1` | Per-replica admission cap for new cookieless sessions. |
@@ -67,6 +69,15 @@ value set through the UI, the CLI, or the bundle's own `shinyhub.toml`
 survives untouched. The fleet manifest does not assert a complete config
 state, so drift protection covers exactly the keys it declares and nothing
 else.
+
+Declaring `name` or `description` therefore makes the manifest their owner: a
+rename in the dashboard shows up as drift on the next `fleet plan` and is
+reverted by `fleet apply`. `plan` renders both quoted, so an empty or
+space-padded value is visible rather than rendering as nothing:
+
+```
+  ~  update  reporting  name "Reporting" -> "Quarterly Revenue"
+```
 
 #### `[app.config]` autoscale
 

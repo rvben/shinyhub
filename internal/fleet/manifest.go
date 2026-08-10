@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/rvben/shinyhub/internal/appmetaspec"
 	"github.com/rvben/shinyhub/internal/autoscalespec"
 )
 
@@ -41,6 +42,12 @@ func (p Problem) Error() string {
 // Config mirrors the reconcilable subset of shinyhub.toml [app]. Pointers
 // distinguish "declared" (drift-protected) from "absent" (server/bundle wins).
 type Config struct {
+	// Name and Description are the app's display metadata. Declaring either
+	// makes the fleet manifest its owner: a rename in the dashboard then shows
+	// up as drift on the next plan and is reverted by apply. Leaving the key out
+	// keeps the dashboard authoritative.
+	Name                    *string          `toml:"name"`
+	Description             *string          `toml:"description"`
 	HibernateTimeoutMinutes *int             `toml:"hibernate_timeout_minutes"`
 	Replicas                *int             `toml:"replicas"`
 	MaxSessionsPerReplica   *int             `toml:"max_sessions_per_replica"`
@@ -86,6 +93,7 @@ var validVisibility = map[string]bool{"private": true, "shared": true, "public":
 // suggestions on unknown-key rejection.
 var knownKeys = []string{
 	"fleet_id", "app", "slug", "source", "visibility", "config",
+	"name", "description",
 	"hibernate_timeout_minutes", "replicas", "max_sessions_per_replica",
 	"autoscale", "enabled", "min_replicas", "max_replicas", "target",
 }
@@ -159,7 +167,7 @@ func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
 				"%s: invalid visibility %q (allowed: private, shared, public)", who, a.Visibility)})
 		}
-		probs = append(probs, validateConfig(file, who, a.Config)...)
+		probs = append(probs, validateConfig(file, who, &a.Config)...)
 		if a.Source == "" {
 			probs = append(probs, Problem{File: file, Msg: who + ": source is required"})
 		} else if strings.HasPrefix(a.Source, "git+") {
@@ -181,8 +189,28 @@ func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 	return &m, nil
 }
 
-func validateConfig(file, who string, c Config) []Problem {
+// validateConfig validates one [app.config] block and normalizes it in place:
+// c is a pointer so the trimmed name/description are what the diff later
+// compares against the server, rather than a padded copy that reports drift on
+// every plan.
+func validateConfig(file, who string, c *Config) []Problem {
 	var probs []Problem
+	if c.Name != nil {
+		v, err := appmetaspec.NormalizeName(*c.Name)
+		if err != nil {
+			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("%s: %v", who, err)})
+		} else {
+			c.Name = &v
+		}
+	}
+	if c.Description != nil {
+		v, err := appmetaspec.NormalizeDescription(*c.Description)
+		if err != nil {
+			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("%s: %v", who, err)})
+		} else {
+			c.Description = &v
+		}
+	}
 	// hibernate accepts the existing -1 "reset to default" sentinel (matches
 	// internal/deploy/hooks.go), otherwise must be >= 1.
 	if c.HibernateTimeoutMinutes != nil {

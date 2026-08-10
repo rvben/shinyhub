@@ -224,3 +224,29 @@ func TestSummarizeManifestIncludesIcon_DeclaredEmpty(t *testing.T) {
 		t.Errorf("expected a line with icon=, got: %v", lines)
 	}
 }
+
+// The display metadata is the most visible thing a manifest can change, so it
+// must appear in the validate summary too. A declared empty description is a
+// clear and stays visible for the same reason icon="" does.
+func TestSummarizeManifestIncludesNameAndDescription(t *testing.T) {
+	name := "Quarterly Revenue"
+	desc := "Regional roll-up"
+	lines := summarizeManifest(&deploy.Manifest{App: deploy.AppSettings{Name: &name, Description: &desc}})
+
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{`name="Quarterly Revenue"`, `description="Regional roll-up"`} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %s in the summary, got: %v", want, lines)
+		}
+	}
+
+	empty := ""
+	lines = summarizeManifest(&deploy.Manifest{App: deploy.AppSettings{Description: &empty}})
+	joined = strings.Join(lines, "\n")
+	if !strings.Contains(joined, "description=") {
+		t.Errorf("a declared empty description must stay visible, got: %v", lines)
+	}
+	if strings.Contains(joined, "name=") {
+		t.Errorf("an undeclared name must not appear, got: %v", lines)
+	}
+}

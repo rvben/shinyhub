@@ -3115,6 +3115,17 @@ type ApplyAppManifestSettingsParams struct {
 	// handlers do not take the deploy lock).
 	SetIconEmoji bool
 	IconEmoji    string
+
+	// SetName / SetDescription reconcile the display metadata. They follow the
+	// icon's revert rule for the same reason: a name governs nothing about how
+	// the restored pool runs, and the rename handlers do not take the deploy
+	// lock, so writing it back on failure would stomp a rename made during the
+	// deploy window. Name is validated non-empty upstream (appmetaspec);
+	// Description accepts "" as the clear.
+	SetName        bool
+	Name           string
+	SetDescription bool
+	Description    string
 }
 
 // ApplyAppManifestSettings applies any subset of (hibernate, replicas,
@@ -3151,6 +3162,26 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			p.IconEmoji, p.AppID,
 		); err != nil {
 			return fmt.Errorf("update icon_emoji: %w", err)
+		}
+	}
+
+	// Display metadata sits with the icon, above the replicas block, so a CHECK
+	// violation there rolls these back too.
+	if p.SetName {
+		if _, err := tx.Exec(
+			`UPDATE apps SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.Name, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update name: %w", err)
+		}
+	}
+
+	if p.SetDescription {
+		if _, err := tx.Exec(
+			`UPDATE apps SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.Description, p.AppID,
+		); err != nil {
+			return fmt.Errorf("update description: %w", err)
 		}
 	}
 

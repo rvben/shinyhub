@@ -99,6 +99,8 @@ func commentedAppTemplate() string {
 		"# visibility = \"private\"             # private | shared | public\n" +
 		"#\n" +
 		"#   [app.config]                     # optional per-app overrides\n" +
+		"#   name                      = \"My Dashboard\"  # friendly display name\n" +
+		"#   description               = \"What it shows\"\n" +
 		"#   replicas                  = 1\n" +
 		"#   max_sessions_per_replica  = 10\n" +
 		"#   hibernate_timeout_minutes = 30\n"

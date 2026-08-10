@@ -14,9 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rvben/shinyhub/internal/appmetaspec"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/config"
@@ -111,10 +111,12 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "slug must be "+slugpkg.HumanRule)
 		return
 	}
-	if len(req.Name) > 128 {
-		writeError(w, http.StatusBadRequest, "name must be 128 characters or fewer")
+	name, verr := appmetaspec.NormalizeName(req.Name)
+	if verr != nil {
+		writeError(w, http.StatusBadRequest, verr.Error())
 		return
 	}
+	req.Name = name
 
 	// Resolve effective access: explicit request body > config default > "private".
 	access := req.Access
@@ -442,12 +444,12 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "name must be a string")
 			return
 		}
-		name = strings.TrimSpace(name)
-		if len(name) < 1 || len(name) > 128 {
-			writeError(w, http.StatusBadRequest, "name must be between 1 and 128 characters")
+		normalized, verr := appmetaspec.NormalizeName(name)
+		if verr != nil {
+			writeError(w, http.StatusBadRequest, verr.Error())
 			return
 		}
-		newName, setName = name, true
+		newName, setName = normalized, true
 	}
 
 	if rawVal, present := raw["description"]; present {
@@ -456,15 +458,12 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "description must be a string")
 			return
 		}
-		desc = strings.TrimSpace(desc)
-		// Count runes, not bytes: the limit is advertised in characters, so an
-		// accented or emoji description under 280 characters must not be rejected
-		// because its UTF-8 encoding exceeds 280 bytes.
-		if utf8.RuneCountInString(desc) > 280 {
-			writeError(w, http.StatusBadRequest, "description must be 280 characters or fewer")
+		normalized, verr := appmetaspec.NormalizeDescription(desc)
+		if verr != nil {
+			writeError(w, http.StatusBadRequest, verr.Error())
 			return
 		}
-		newDescription, setDescription = desc, true
+		newDescription, setDescription = normalized, true
 	}
 
 	if rawVal, present := raw["icon_emoji"]; present {

@@ -21,7 +21,14 @@ const (
 // ObservedApp is the subset of GET /api/apps the diff needs. The CLI maps the
 // API payload into this; the diff stays I/O-free and API-shape-agnostic.
 type ObservedApp struct {
-	Slug                    string
+	Slug string
+	// Name and Description are the server's stored display metadata. They are
+	// pointers for the same reason the scalars below are: nil means "not
+	// observed" (as in DeclaredConfig's zero ObservedApp) and always asserts a
+	// declared value, while a non-nil "" is a real stored value - an app with no
+	// description - that a declared "" matches without drift.
+	Name                    *string
+	Description             *string
 	Access                  string
 	HibernateTimeoutMinutes *int
 	Replicas                *int
@@ -153,6 +160,8 @@ func configDrift(app AppEntry, o ObservedApp) []ConfigDriftItem {
 	if v := app.Visibility; v != "" && v != o.Access && o.Access != "" {
 		d = append(d, ConfigDriftItem{Key: "visibility", Server: o.Access, Desired: v})
 	}
+	d = appendStringDrift(d, "name", app.Config.Name, o.Name)
+	d = appendStringDrift(d, "description", app.Config.Description, o.Description)
 	d = appendIntDrift(d, "hibernate_timeout_minutes", app.Config.HibernateTimeoutMinutes, o.HibernateTimeoutMinutes)
 	d = appendIntDrift(d, "replicas", app.Config.Replicas, o.Replicas)
 	d = appendIntDrift(d, "max_sessions_per_replica", app.Config.MaxSessionsPerReplica, o.MaxSessionsPerReplica)
@@ -234,4 +243,21 @@ func appendIntDrift(d []ConfigDriftItem, key string, desired, server *int) []Con
 		srv = fmt.Sprintf("%d", *server)
 	}
 	return append(d, ConfigDriftItem{Key: key, Server: srv, Desired: fmt.Sprintf("%d", *desired)})
+}
+
+// appendStringDrift is appendIntDrift for a declared string key (name,
+// description). Values are quoted so an empty string and leading/trailing
+// spaces are visible in the plan output rather than rendering as nothing.
+func appendStringDrift(d []ConfigDriftItem, key string, desired, server *string) []ConfigDriftItem {
+	if desired == nil {
+		return d
+	}
+	if server != nil && *server == *desired {
+		return d
+	}
+	srv := "(unset)"
+	if server != nil {
+		srv = fmt.Sprintf("%q", *server)
+	}
+	return append(d, ConfigDriftItem{Key: key, Server: srv, Desired: fmt.Sprintf("%q", *desired)})
 }

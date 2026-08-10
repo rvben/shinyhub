@@ -16,6 +16,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/mattn/go-shellwords"
+	"github.com/rvben/shinyhub/internal/appmetaspec"
 	"github.com/rvben/shinyhub/internal/autoscalespec"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/process"
@@ -127,6 +128,18 @@ type AppSettings struct {
 	// shadows an uploaded image without destroying it.
 	Icon *string `toml:"icon"`
 
+	// Name and Description declare the app's display metadata and reconcile
+	// into apps.name / apps.description on every deploy (declared-only, like
+	// Replicas: nil leaves the stored value unchanged, so a name set in the
+	// dashboard survives a manifest that stays silent). Once declared, every
+	// deploy reasserts it over a rename made in the UI.
+	//
+	// Name may not be empty - apps.name is the app's primary label everywhere
+	// it is rendered. Description "" is a meaningful value: it clears the
+	// description.
+	Name        *string `toml:"name"`
+	Description *string `toml:"description"`
+
 	HibernateResetToDefault bool `toml:"-"`
 }
 
@@ -168,6 +181,8 @@ func (a AppSettings) IsZero() bool {
 		a.Autoscale == nil &&
 		a.Worker == nil &&
 		a.Icon == nil &&
+		a.Name == nil &&
+		a.Description == nil &&
 		!a.HibernateResetToDefault
 }
 
@@ -372,6 +387,22 @@ func normalizeAndValidateApp(a *AppSettings) error {
 		if err := ValidateIconEmoji(*a.Icon); err != nil {
 			return fmt.Errorf("icon: %w", err)
 		}
+	}
+	// Normalize in place so the trimmed value is what reconciles into the DB;
+	// a name of only whitespace is a validation error, not a silent "".
+	if a.Name != nil {
+		v, err := appmetaspec.NormalizeName(*a.Name)
+		if err != nil {
+			return err
+		}
+		a.Name = &v
+	}
+	if a.Description != nil {
+		v, err := appmetaspec.NormalizeDescription(*a.Description)
+		if err != nil {
+			return err
+		}
+		a.Description = &v
 	}
 	if a.Worker != nil {
 		ws := config.WorkerSettings{}
