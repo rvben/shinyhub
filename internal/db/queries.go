@@ -603,7 +603,11 @@ type App struct {
 	// IconMime is the MIME type of the app's uploaded icon, or "" when none is
 	// set (the UI then renders the generated monogram). The bytes themselves are
 	// never loaded into App; they are read on demand via GetAppIcon.
-	IconMime                string    `json:"icon_mime,omitempty"`
+	IconMime string `json:"icon_mime,omitempty"`
+	// IconEmoji is the emoji chosen as the app's icon, or "" when none is set.
+	// Separate from IconMime because IconMime is written verbatim as a
+	// Content-Type header. Display order is emoji > uploaded image > monogram.
+	IconEmoji               string    `json:"icon_emoji,omitempty"`
 	ProjectSlug             string    `json:"project_slug,omitempty"`
 	OwnerID                 int64     `json:"owner_id"`
 	Access                  string    `json:"access"`
@@ -777,7 +781,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       managed_by, replica_placement,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
 		       last_autoscale_at, identity_headers, min_warm_replicas,
-		       last_error, crashed_at, description, icon_mime,
+		       last_error, crashed_at, description, icon_mime, icon_emoji,
 		       worker_isolation, worker_grouped_size, worker_max_workers,
 		       worker_max_session_lifetime_secs, ephemeral_data_ack, render_seconds,`
 
@@ -3445,7 +3449,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
-		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime,
+		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime, &a.IconEmoji,
 		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
 		&a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
 		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,

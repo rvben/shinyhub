@@ -91,3 +91,46 @@ func TestAppIconRoundTrip(t *testing.T) {
 		t.Errorf("GetAppIcon missing = %v, want ErrNotFound", err)
 	}
 }
+
+// newIconTestApp creates the owner and the app. CreateApp takes a real
+// OwnerID: the column is a foreign key, so a hardcoded 1 fails. Access is
+// omitted deliberately, matching TestAppIconRoundTrip; the column DEFAULTs to
+// 'private'.
+func newIconTestApp(t *testing.T) *db.Store {
+	t.Helper()
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "x", Role: "developer"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	u, err := store.GetUserByUsername("owner")
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if err := store.CreateApp(db.CreateAppParams{Slug: "dash", Name: "Dash", OwnerID: u.ID}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	return store
+}
+
+// TestAppIconEmojiColumn pins that icon_emoji round-trips through the shared
+// appColumns/scanApp pair AND that icon_mime still lands in IconMime. The
+// second assertion is the one that catches a misaligned insertion: both are
+// strings, so a swapped pair scans cleanly and only shows up as an emoji in a
+// Content-Type header at runtime.
+func TestAppIconEmojiColumn(t *testing.T) {
+	store := newIconTestApp(t)
+	app, err := store.GetAppBySlug("dash")
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.IconEmoji != "" {
+		t.Errorf("new app icon_emoji = %q, want empty", app.IconEmoji)
+	}
+	if err := store.SetAppIcon("dash", "image/png", []byte("PNG")); err != nil {
+		t.Fatalf("set icon: %v", err)
+	}
+	app, _ = store.GetAppBySlug("dash")
+	if app.IconMime != "image/png" {
+		t.Errorf("icon_mime = %q, want image/png (a swapped column list scans clean but lands here)", app.IconMime)
+	}
+}
