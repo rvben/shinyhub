@@ -76,6 +76,23 @@ test('formatManifestSummary skips empty app object and empty schedules array', (
   assert.deepEqual(formatManifestSummary({ app: {}, schedules: [] }), []);
 });
 
+test('reports a shadowed upload', () => {
+  const lines = formatManifestSummary({
+    icon_shadowed_upload: true,
+    app: { icon: '\u{1F4CA}' },
+  });
+  const warning = lines.find((l) => l.includes('still stored'));
+  assert.ok(warning, `expected a warning line, got ${JSON.stringify(lines)}`);
+  assert.ok(warning.includes('icon = ""'));
+
+  const appLine = lines.find((l) => l.startsWith('Applied [app] settings:'));
+  assert.ok(!appLine.includes('icon_shadowed_upload'));
+
+  // Absent flag: no warning line.
+  const linesNoFlag = formatManifestSummary({ app: { icon: '\u{1F4CA}' } });
+  assert.ok(!linesNoFlag.some((l) => l.includes('still stored')));
+});
+
 test('renderDeployResult populates list and unhides container', () => {
   const dom = new JSDOM(`
     <div id="result" hidden>

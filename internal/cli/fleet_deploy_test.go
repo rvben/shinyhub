@@ -281,6 +281,86 @@ func TestDeployAppBundle_EmitsHooksSkippedWarning(t *testing.T) {
 	}
 }
 
+// The single-app `deploy` surfaces a warning when a manifest icon shadows an
+// already-uploaded image. The fleet deploy path must do the same: a fleet
+// operator, who is the most likely person to have uploaded that image, would
+// otherwise have no way to learn it is still retained.
+func TestDeployAppBundle_EmitsIconShadowWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/apps/demo/deploy":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "ok",
+				"manifest": map[string]any{
+					"icon_shadowed_upload": true,
+					"app":                  map[string]any{"icon": "\U0001F4CA"},
+				},
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"app": map[string]any{"status": "running"},
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"slug": "demo", "content_digest": "sha256:X"},
+			})
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+
+	var buf bytes.Buffer
+	if _, _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", &buf, "run-1", 5*time.Second); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "still stored") {
+		t.Fatalf("fleet deploy must surface the icon-shadow warning, got:\n%s", out)
+	}
+}
+
+// The counterpart to TestDeployAppBundle_EmitsIconShadowWarning: no manifest
+// icon was declared, so the flag is absent and no warning line should print.
+func TestDeployAppBundle_NoIconShadowWarningWhenFlagAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/apps/demo/deploy":
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"app": map[string]any{"status": "running"},
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"slug": "demo", "content_digest": "sha256:X"},
+			})
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+
+	var buf bytes.Buffer
+	if _, _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", &buf, "run-1", 5*time.Second); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if out := buf.String(); strings.Contains(out, "still stored") {
+		t.Fatalf("no icon-shadow warning expected when the flag is absent, got:\n%s", out)
+	}
+}
+
 func TestDeployAppBundle_ClientRejectionIsNotCommitted(t *testing.T) {
 	// A 4xx is a clean validation rejection: the server refused the request
 	// before promoting anything, so committed=false (caller may roll back).

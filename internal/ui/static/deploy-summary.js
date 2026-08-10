@@ -19,6 +19,13 @@ export function formatManifestSummary(manifest) {
       lines.push(`Applied [app] settings: ${parts.join('; ')}`);
     }
   }
+  if (manifest.icon_shadowed_upload) {
+    const icon = (manifest.app && manifest.app.icon) || '';
+    lines.push(
+      `Note: [app] icon "${icon}" is now shown instead of this app's uploaded image.\n` +
+        '      The image is still stored. Set icon = "" in shinyhub.toml to use it.'
+    );
+  }
   if (Array.isArray(manifest.schedules) && manifest.schedules.length > 0) {
     let created = 0, updated = 0;
     for (const s of manifest.schedules) {

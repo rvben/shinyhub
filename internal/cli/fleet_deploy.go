@@ -106,6 +106,13 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 		if warn := formatHooksSkippedWarning(deployResp["hooks_skipped"]); warn != "" {
 			fmt.Fprintf(out, "  %s: %s\n", slug, warn)
 		}
+		// Same reasoning as the hooks-skipped warning above: a fleet operator
+		// gets the same shadowed-upload notice the single-app `deploy` prints,
+		// since they are the most likely person to have uploaded the image a
+		// manifest icon now shadows.
+		if warn := formatIconShadowWarning(deployResp["manifest"]); warn != "" {
+			fmt.Fprintf(out, "  %s: %s\n", slug, warn)
+		}
 	}
 
 	// Bundle accepted: from here on the deploy is committed even if a

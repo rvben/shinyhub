@@ -25,6 +25,9 @@ func formatManifestSummary(raw any) []string {
 	if app, ok := m["app"].(map[string]any); ok && len(app) > 0 {
 		lines = append(lines, "Applied [app] settings: "+formatAppFields(app))
 	}
+	if warn := formatIconShadowWarning(raw); warn != "" {
+		lines = append(lines, warn)
+	}
 	if schedules, ok := m["schedules"].([]any); ok && len(schedules) > 0 {
 		created, updated := 0, 0
 		for _, s := range schedules {
@@ -59,6 +62,27 @@ func formatHooksSkippedWarning(raw any) string {
 		noun = "hooks"
 	}
 	return fmt.Sprintf("Warning: %d post-deploy %s skipped under the container runtime; bake setup into the image instead.", int(n), noun)
+}
+
+// formatIconShadowWarning turns the manifest block of a deploy response into a
+// warning that the declared icon is now displayed instead of this app's
+// uploaded image, or "" when it is not. The image is retained, so the message
+// names the recovery action: the whole point is that the user would otherwise
+// not know it still exists. Shaped like formatHooksSkippedWarning (a
+// consequence gets its own line) but reads manifest.icon_shadowed_upload
+// rather than a root-level field.
+func formatIconShadowWarning(raw any) string {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if shadowed, _ := m["icon_shadowed_upload"].(bool); !shadowed {
+		return ""
+	}
+	app, _ := m["app"].(map[string]any)
+	icon, _ := app["icon"].(string)
+	return fmt.Sprintf("Note: [app] icon %q is now shown instead of this app's uploaded image.\n"+
+		"      The image is still stored. Set icon = \"\" in shinyhub.toml to use it.", icon)
 }
 
 // formatAppFields renders the [app] summary map as `key=value; key=value` in

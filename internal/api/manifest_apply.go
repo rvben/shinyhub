@@ -506,9 +506,10 @@ type ManifestAccessGroupResult struct {
 // Returned alongside the app in the deploy response so CLI / UI can show
 // the operator a concrete record of what landed.
 type ManifestApplied struct {
-	App          map[string]any              `json:"app,omitempty"`
-	Schedules    []ManifestScheduleResult    `json:"schedules,omitempty"`
-	AccessGroups []ManifestAccessGroupResult `json:"access_groups,omitempty"`
+	App                map[string]any              `json:"app,omitempty"`
+	Schedules          []ManifestScheduleResult    `json:"schedules,omitempty"`
+	AccessGroups       []ManifestAccessGroupResult `json:"access_groups,omitempty"`
+	IconShadowedUpload bool                        `json:"icon_shadowed_upload,omitempty"`
 }
 
 // IsEmpty reports whether nothing was applied. The handler omits the field

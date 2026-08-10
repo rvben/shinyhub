@@ -1504,6 +1504,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		manifestApplied = true
 		manifestSummary.App = manifestAppliedSummary(manifest.App)
+		// Read from preManifestApp, not the post-Phase-A refresh below: this
+		// must reflect whether an image was uploaded BEFORE this deploy, and
+		// the refresh could in principle observe a value the manifest write
+		// itself just changed.
+		manifestSummary.IconShadowedUpload = manifest.App.Icon != nil &&
+			*manifest.App.Icon != "" && preManifestApp.IconMime != ""
 		// Refresh so deploy.Run sees the updated replicas / max_sessions.
 		if fresh, ferr := s.store.GetAppBySlug(slug); ferr == nil {
 			app = fresh

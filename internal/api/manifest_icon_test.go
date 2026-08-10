@@ -356,6 +356,69 @@ func TestManifestIconReportedEverywhere(t *testing.T) {
 	}
 }
 
+// TestIconShadowedUploadFlag pins the wire flag manifestSummary sets at the
+// apps.go Phase A call site: a non-empty declared icon shadows an existing
+// uploaded image (true), the same declaration on an app with no image does
+// not (false), and a declared "" is an ownership hand-off back to the image,
+// not a shadow, even when the image is present (false). Three cases because
+// an always-true or always-false flag would pass a single-case test.
+func TestIconShadowedUploadFlag(t *testing.T) {
+	emoji := "\U0001F4CA"
+
+	tests := []struct {
+		name      string
+		slug      string
+		seedImage bool
+		icon      string
+		want      bool
+	}{
+		{"declared icon shadows an existing image", "shadow-yes", true, emoji, true},
+		{"declared icon with no image does not shadow", "shadow-noimg", false, emoji, false},
+		{"declared empty on an app with an image is a hand-off, not a shadow", "shadow-empty", true, "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, store, token := newManifestE2EServer(t)
+			admin, _ := store.GetUserByUsername("admin")
+			if err := store.CreateApp(db.CreateAppParams{
+				Slug: tt.slug, Name: tt.slug, OwnerID: admin.ID,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.seedImage {
+				if err := store.SetAppIcon(tt.slug, "image/png", []byte("original-bytes")); err != nil {
+					t.Fatalf("seed image: %v", err)
+				}
+			}
+
+			manifest := "[app]\nicon = \"" + tt.icon + "\"\n"
+			body, ctype := buildMultiFileBundleUpload(t, map[string]string{
+				"app.py":        "from shiny import App\n",
+				"shinyhub.toml": manifest,
+			})
+			req := httptest.NewRequest("POST", "/api/apps/"+tt.slug+"/deploy", body)
+			req.Header.Set("Content-Type", ctype)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("deploy: expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+
+			var resp map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("parse response: %v", err)
+			}
+			manifestResp, _ := resp["manifest"].(map[string]any)
+			got, _ := manifestResp["icon_shadowed_upload"].(bool)
+			if got != tt.want {
+				t.Errorf("icon_shadowed_upload = %v, want %v (full response: %v)", got, tt.want, resp)
+			}
+		})
+	}
+}
+
 // TestManifestIconReportedEverywhere_DeclaredEmpty covers the other half of
 // the tri-state contract: Icon is nil (absent, leave stored value alone),
 // non-empty (reconcile), or "" (declared-empty: deliberately clear the emoji
