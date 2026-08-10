@@ -68,6 +68,26 @@ test('metricsText returns dash for genuinely-zero RAM when metrics_available is 
   assert.equal(got.note, null);
 });
 
+test('metricsText: a PID-backed replica with no rate yet shows a dash, not 0.0%', () => {
+  // A replica that just started is PID-backed, so metrics_available is true, but
+  // the server has nothing to compute a rate from until the next poll. Rendering
+  // that as 0.0% would put a confident idle reading on a starting replica. RSS
+  // needs no baseline and is still shown.
+  const got = metricsText({ metrics_available: true, cpu_percent: null, rss_bytes: 104857600 });
+  assert.equal(got.cpuText, '—');
+  assert.equal(got.ramText, '100 MB');
+  assert.equal(got.note, null);
+});
+
+test('metricsText: a null rate is distinct from an unsupported tier', () => {
+  const pending = metricsText({ metrics_available: true, cpu_percent: null, rss_bytes: 1 << 20 });
+  const unsupported = metricsText({ metrics_available: false, cpu_percent: null, rss_bytes: 0 });
+  assert.equal(pending.cpuText, '—');
+  assert.equal(pending.note, null, 'a pending rate is not a monitoring limitation');
+  assert.equal(unsupported.cpuText, 'n/a');
+  assert.ok(unsupported.note, 'an unsupported tier explains where to look instead');
+});
+
 test('metricsText returns KB when rss_bytes < 1MB', () => {
   const got = metricsText({ metrics_available: true, cpu_percent: 2.3, rss_bytes: 512 * 1024 });
   assert.equal(got.cpuText, '2.3%');

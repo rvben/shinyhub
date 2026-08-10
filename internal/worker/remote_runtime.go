@@ -391,27 +391,27 @@ func (r *remoteRuntime) Wait(ctx context.Context, h process.RunHandle) error {
 	return nil
 }
 
-func (r *remoteRuntime) Stats(ctx context.Context, h process.RunHandle) (float64, uint64, error) {
+func (r *remoteRuntime) Stats(ctx context.Context, h process.RunHandle) (*float64, uint64, error) {
 	w, containerID, err := r.workerForHandle(h)
 	if err != nil {
-		return 0, 0, err
+		return nil, 0, err
 	}
 	client, base, err := r.dialer.DialWorker(w)
 	if err != nil {
-		return 0, 0, err
+		return nil, 0, err
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/v1/replicas/%s/stats", base, containerID), nil)
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, 0, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, fmt.Errorf("worker stats returned %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("worker stats returned %d", resp.StatusCode)
 	}
 	var out api.StatsResult
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, 0, err
+		return nil, 0, err
 	}
 	return out.CPUPercent, out.RSSBytes, nil
 }

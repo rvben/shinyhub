@@ -49,8 +49,8 @@ func (f *fakeDockerRuntime) Start(context.Context, process.StartParams, io.Write
 }
 func (f *fakeDockerRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
 func (f *fakeDockerRuntime) Wait(context.Context, process.RunHandle) error  { return nil }
-func (f *fakeDockerRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (f *fakeDockerRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (f *fakeDockerRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
@@ -596,8 +596,8 @@ func (f *fakeRemoteRuntime) Start(context.Context, process.StartParams, io.Write
 }
 func (f *fakeRemoteRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
 func (f *fakeRemoteRuntime) Wait(context.Context, process.RunHandle) error  { return nil }
-func (f *fakeRemoteRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (f *fakeRemoteRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (f *fakeRemoteRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil

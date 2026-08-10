@@ -22,8 +22,8 @@ func (noopRuntime) Start(_ context.Context, _ process.StartParams, _ io.Writer) 
 }
 func (noopRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
 func (noopRuntime) Wait(_ context.Context, _ process.RunHandle) error  { return nil }
-func (noopRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (noopRuntime) Stats(_ context.Context, _ process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (noopRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil

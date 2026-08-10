@@ -23,15 +23,27 @@ export function aggregateMetrics(m) {
   // metrics_available is false when running replicas are PID-less (Fargate /
   // remote_docker); callers render "n/a" there.
   const metricsAvailable = !(m && m.metrics_available === false);
+  // cpu_percent is null when the server has no rate for a replica yet, which is
+  // the case on the first poll after it starts. Summing the rest would understate
+  // the fleet at exactly that moment, so a running replica without a rate makes
+  // the whole total unavailable and callers render a neutral dash until the next
+  // poll fills it in.
   let cpu = 0, rss = 0, sessions = 0, runningCount = 0;
+  let cpuAvailable = true;
   if (replicas !== null) {
     for (const r of replicas) {
-      if (r && r.status === 'running') runningCount++;
-      cpu += Number(r && r.cpu_percent) || 0;
+      const isRunning = !!(r && r.status === 'running');
+      if (isRunning) runningCount++;
+      if (r && (r.cpu_percent === null || r.cpu_percent === undefined)) {
+        if (isRunning) cpuAvailable = false;
+      } else {
+        cpu += Number(r && r.cpu_percent) || 0;
+      }
       rss += Number(r && r.rss_bytes) || 0;
       sessions += Number(r && r.sessions) || 0;
     }
   } else {
+    cpuAvailable = !!(m && m.cpu_percent !== null && m.cpu_percent !== undefined);
     cpu = Number(m && m.cpu_percent) || 0;
     rss = Number(m && m.rss_bytes) || 0;
     sessions = Number(m && m.sessions) || 0;
@@ -41,6 +53,7 @@ export function aggregateMetrics(m) {
     running,
     metricsAvailable,
     cpu,
+    cpuAvailable,
     rss,
     sessions,
     runningCount,
@@ -55,12 +68,14 @@ export function aggregateMetrics(m) {
 // running / configured so a hibernated app still reads "0 / N".
 export function headerStats(m, configured) {
   const agg = aggregateMetrics(m);
-  const { running, metricsAvailable, cpu, rss, sessions, runningCount } = agg;
+  const { running, metricsAvailable, cpu, cpuAvailable, rss, sessions, runningCount } = agg;
   const cfg = Number(configured) || agg.replicaCount || 1;
+  // The dash and "n/a" say different things: "n/a" is a tier that will never
+  // report live CPU, the dash is a number that is not in yet.
   return {
     running,
     metricsAvailable,
-    cpu: !running ? '—' : (metricsAvailable ? cpu.toFixed(1) + '%' : 'n/a'),
+    cpu: !running ? '—' : (!metricsAvailable ? 'n/a' : (cpuAvailable ? cpu.toFixed(1) + '%' : '—')),
     ram: !running ? '—' : (metricsAvailable ? formatBytes(rss) : 'n/a'),
     sessions: running ? String(sessions) : '—',
     replicas: runningCount + ' / ' + cfg,

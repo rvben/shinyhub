@@ -70,6 +70,31 @@ test('buildOverviewModel: sums live CPU/RAM and flags apps near their memory lim
   assert.ok(m.resources.nearLimit[0].fraction > 0.9);
 });
 
+test('buildOverviewModel: one app without a rate makes the fleet CPU unavailable', () => {
+  // The fleet total is a sum, so it is only as complete as its least-informed
+  // member. Reporting 12 while app b's usage is unknown states a total the
+  // dashboard cannot back up, and it would read as the fleet getting quieter
+  // during a deploy.
+  const apps = [
+    { slug: 'a', status: 'running' },
+    { slug: 'b', status: 'running' },
+  ];
+  const metrics = {
+    a: { cpu_percent: 12, rss_bytes: 100 * MIB },
+    b: { cpu_percent: null, rss_bytes: 100 * MIB },
+  };
+  const m = buildOverviewModel(apps, metrics);
+  assert.equal(m.resources.cpuPercent, null);
+  assert.equal(m.resources.rssBytes, 200 * MIB, 'memory needs no baseline and still totals');
+  assert.equal(m.resources.running, 2);
+});
+
+test('buildOverviewModel: a fleet genuinely at zero still reports 0', () => {
+  const apps = [{ slug: 'a', status: 'running' }];
+  const m = buildOverviewModel(apps, { a: { cpu_percent: 0, rss_bytes: 10 * MIB } });
+  assert.equal(m.resources.cpuPercent, 0);
+});
+
 test('buildOverviewModel: a scaled app is judged against per-replica capacity, not its single-replica limit', () => {
   // Two replicas each at 50% of a 256 MB limit: summed RSS = the limit, but the
   // fleet capacity is 512 MB, so the app is NOT near its limit.

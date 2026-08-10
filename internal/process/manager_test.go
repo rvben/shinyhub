@@ -82,8 +82,8 @@ func (f *fakeRuntime) Wait(_ context.Context, h process.RunHandle) error {
 	return nil
 }
 
-func (f *fakeRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (f *fakeRuntime) Stats(_ context.Context, _ process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 
 func (f *fakeRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
@@ -530,8 +530,8 @@ func (c *captureRuntime) Wait(_ context.Context, h process.RunHandle) error {
 	return nil
 }
 
-func (c *captureRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (c *captureRuntime) Stats(_ context.Context, _ process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 
 func (c *captureRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
@@ -900,8 +900,8 @@ func (f *fakeRemoteRuntime) Start(_ context.Context, p process.StartParams, _ io
 }
 func (f *fakeRemoteRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
 func (f *fakeRemoteRuntime) Wait(context.Context, process.RunHandle) error  { return nil }
-func (f *fakeRemoteRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (f *fakeRemoteRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (f *fakeRemoteRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
@@ -1076,8 +1076,8 @@ func (r *signalFailRuntime) triggerExit(pid int) {
 	}
 }
 
-func (r *signalFailRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (r *signalFailRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (r *signalFailRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil

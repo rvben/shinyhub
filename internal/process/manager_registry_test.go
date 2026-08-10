@@ -15,8 +15,8 @@ func (stubTierRuntime) Start(context.Context, StartParams, io.Writer) (ReplicaEn
 }
 func (stubTierRuntime) Signal(RunHandle, syscall.Signal) error { return nil }
 func (stubTierRuntime) Wait(context.Context, RunHandle) error  { return nil }
-func (stubTierRuntime) Stats(context.Context, RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (stubTierRuntime) Stats(context.Context, RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (stubTierRuntime) RunOnce(context.Context, StartParams, io.Writer) (ExitInfo, error) {
 	return ExitInfo{}, nil

@@ -79,8 +79,8 @@ func TestCollectAggregatesAcrossRunningReplicas(t *testing.T) {
 	}
 	sess := &fakeSessions{counts: map[string][]int64{"demo": {2, 3}}}
 	smp := &fakeSampler{byPID: map[int]process.Stats{
-		10: {CPUPercent: 5, RSSBytes: 100},
-		11: {CPUPercent: 7, RSSBytes: 200},
+		10: {CPUPercent: process.Float(5), RSSBytes: 100},
+		11: {CPUPercent: process.Float(7), RSSBytes: 200},
 	}}
 	st := NewStore(time.Hour, 15*time.Second)
 	c := newTestCollector(p, sess, smp, st)
@@ -91,7 +91,7 @@ func TestCollectAggregatesAcrossRunningReplicas(t *testing.T) {
 	if len(got.TS) != 1 {
 		t.Fatalf("want 1 snapshot, got %d", len(got.TS))
 	}
-	if got.CPU[0] != 12 {
+	if got.CPU[0] == nil || *got.CPU[0] != 12 {
 		t.Errorf("cpu = %v, want 12 (5+7)", got.CPU[0])
 	}
 	if got.RSS[0] != 300 {
@@ -112,7 +112,7 @@ func TestCollectSkipsNonRunningReplicas(t *testing.T) {
 		handles: map[rk]process.RunHandle{{"demo", 0}: {PID: 10}, {"demo", 1}: {PID: 11}},
 	}
 	sess := &fakeSessions{counts: map[string][]int64{"demo": {4}}}
-	smp := &fakeSampler{byPID: map[int]process.Stats{10: {CPUPercent: 3, RSSBytes: 50}}}
+	smp := &fakeSampler{byPID: map[int]process.Stats{10: {CPUPercent: process.Float(3), RSSBytes: 50}}}
 	st := NewStore(time.Hour, 15*time.Second)
 	c := newTestCollector(p, sess, smp, st)
 
@@ -147,8 +147,72 @@ func TestCollectPID0NotSampled(t *testing.T) {
 	if got.Instances[0] != 1 || got.Sessions[0] != 9 {
 		t.Errorf("instances/sessions = %d/%d, want 1/9 (counted even without cpu/rss)", got.Instances[0], got.Sessions[0])
 	}
-	if got.CPU[0] != 0 || got.RSS[0] != 0 {
-		t.Errorf("cpu/rss = %v/%v, want 0/0 for PID-0 replica", got.CPU[0], got.RSS[0])
+	// The CPU rate is absent, not zero. This replica runs somewhere the collector
+	// cannot see, so every tick would otherwise publish a confident 0% and draw a
+	// flat idle line for an app that may be working hard off-host.
+	if got.CPU[0] != nil {
+		t.Errorf("cpu = %v, want nil for a PID-0 replica (unmeasurable, not idle)", *got.CPU[0])
+	}
+	// RSS stays 0: the Sample field cannot express an absent value, which is a
+	// known gap for this tier rather than something this test blesses.
+	if got.RSS[0] != 0 {
+		t.Errorf("rss = %v, want 0 for PID-0 replica", got.RSS[0])
+	}
+}
+
+// TestCollectMixedTierReportsCPUUnavailable covers a bursting app: some replicas
+// local and sampleable, the rest on a tier with nothing to sample. Publishing the
+// local subtotal as if it were the app's usage would make the chart fall at the
+// exact moment the app scaled out, reading as a drop in load when load is what
+// caused the burst.
+func TestCollectMixedTierReportsCPUUnavailable(t *testing.T) {
+	p := &fakeProcs{
+		infos: []*process.ProcessInfo{running("demo", 0, 10), running("demo", 1, 0)},
+		handles: map[rk]process.RunHandle{
+			{"demo", 0}: {PID: 10},
+			{"demo", 1}: {PID: 0, ContainerID: ""},
+		},
+	}
+	sess := &fakeSessions{counts: map[string][]int64{"demo": {1, 1}}}
+	smp := &fakeSampler{byPID: map[int]process.Stats{10: {CPUPercent: process.Float(80), RSSBytes: 100}}}
+	st := NewStore(time.Hour, 15*time.Second)
+	c := newTestCollector(p, sess, smp, st)
+
+	c.collectOnce(1000)
+
+	got := st.Series("demo", 1000)
+	if got.CPU[0] != nil {
+		t.Errorf("cpu = %v, want nil: 80%% is one replica's usage, not the app's", *got.CPU[0])
+	}
+	if got.Instances[0] != 2 {
+		t.Errorf("instances = %v, want 2 (both replicas count)", got.Instances[0])
+	}
+}
+
+// TestCollectFirstTickReportsCPUUnavailable covers the newly-started replica: the
+// sampler has no baseline for it yet and says so. This lines up with every deploy
+// and restart, so getting it wrong would put a false idle reading at the busiest
+// moment in an app's life.
+func TestCollectFirstTickReportsCPUUnavailable(t *testing.T) {
+	p := &fakeProcs{
+		infos:   []*process.ProcessInfo{running("demo", 0, 10)},
+		handles: map[rk]process.RunHandle{{"demo", 0}: {PID: 10}},
+	}
+	sess := &fakeSessions{counts: map[string][]int64{"demo": {1}}}
+	// CPUPercent nil, RSS real: exactly what the sampler returns before it has a
+	// second reading to compute a rate against.
+	smp := &fakeSampler{byPID: map[int]process.Stats{10: {CPUPercent: nil, RSSBytes: 100}}}
+	st := NewStore(time.Hour, 15*time.Second)
+	c := newTestCollector(p, sess, smp, st)
+
+	c.collectOnce(1000)
+
+	got := st.Series("demo", 1000)
+	if got.CPU[0] != nil {
+		t.Errorf("cpu = %v, want nil on a replica's first tick", *got.CPU[0])
+	}
+	if got.RSS[0] != 100 {
+		t.Errorf("rss = %v, want 100: memory needs no baseline and is still reported", got.RSS[0])
 	}
 }
 
@@ -158,7 +222,7 @@ func TestCollectSessionMinusOneTreatedAsZero(t *testing.T) {
 		handles: map[rk]process.RunHandle{{"demo", 0}: {PID: 10}},
 	}
 	sess := &fakeSessions{counts: map[string][]int64{"demo": {2, -1}}} // -1 = empty slot sentinel
-	smp := &fakeSampler{byPID: map[int]process.Stats{10: {CPUPercent: 1, RSSBytes: 1}}}
+	smp := &fakeSampler{byPID: map[int]process.Stats{10: {CPUPercent: process.Float(1), RSSBytes: 1}}}
 	st := NewStore(time.Hour, 15*time.Second)
 	c := newTestCollector(p, sess, smp, st)
 
@@ -177,7 +241,7 @@ func TestCollectSampleErrorSkipsCPURSSButCountsInstance(t *testing.T) {
 	}
 	sess := &fakeSessions{counts: map[string][]int64{"demo": {1, 1}}}
 	smp := &fakeSampler{
-		byPID:    map[int]process.Stats{10: {CPUPercent: 5, RSSBytes: 100}},
+		byPID:    map[int]process.Stats{10: {CPUPercent: process.Float(5), RSSBytes: 100}},
 		errByPID: map[int]error{11: errSample},
 	}
 	st := NewStore(time.Hour, 15*time.Second)
@@ -189,7 +253,7 @@ func TestCollectSampleErrorSkipsCPURSSButCountsInstance(t *testing.T) {
 	if got.Instances[0] != 2 {
 		t.Errorf("instances = %v, want 2 (errored replica still counts)", got.Instances[0])
 	}
-	if got.CPU[0] != 5 || got.RSS[0] != 100 {
+	if got.CPU[0] == nil || *got.CPU[0] != 5 || got.RSS[0] != 100 {
 		t.Errorf("cpu/rss = %v/%v, want 5/100 (errored replica contributes nothing)", got.CPU[0], got.RSS[0])
 	}
 }
@@ -198,7 +262,7 @@ func TestCollectDropToZeroEdgeOnceThenPauses(t *testing.T) {
 	infos := []*process.ProcessInfo{running("demo", 0, 10)}
 	p := &fakeProcs{infos: infos, handles: map[rk]process.RunHandle{{"demo", 0}: {PID: 10}}}
 	sess := &fakeSessions{counts: map[string][]int64{"demo": {1}}}
-	smp := &fakeSampler{byPID: map[int]process.Stats{10: {CPUPercent: 5, RSSBytes: 100}}}
+	smp := &fakeSampler{byPID: map[int]process.Stats{10: {CPUPercent: process.Float(5), RSSBytes: 100}}}
 	st := NewStore(time.Hour, 15*time.Second)
 	c := newTestCollector(p, sess, smp, st)
 
@@ -216,7 +280,10 @@ func TestCollectDropToZeroEdgeOnceThenPauses(t *testing.T) {
 	if got.Instances[0] != 1 || got.Instances[1] != 0 {
 		t.Errorf("instances = %v, want [1 0]", got.Instances)
 	}
-	if got.CPU[1] != 0 || got.RSS[1] != 0 || got.Sessions[1] != 0 {
+	// The stop edge carries a measured 0, not an absent rate: an app that is not
+	// running is genuinely using no CPU, and the chart has to draw the line down
+	// to the floor rather than skip the point and join across the shutdown.
+	if got.CPU[1] == nil || *got.CPU[1] != 0 || got.RSS[1] != 0 || got.Sessions[1] != 0 {
 		t.Errorf("drop sample = cpu %v rss %v sess %v, want all 0", got.CPU[1], got.RSS[1], got.Sessions[1])
 	}
 }

@@ -44,6 +44,58 @@ test('non-finite values are coerced so points never contain NaN', () => {
   assert.deepEqual(pts, ['0,20', '50,0', '100,20']);
 });
 
+test('an absent point is skipped, not drawn as zero', () => {
+  // The middle tick had no measurement. Plotting it as 0 would drop the line to
+  // the floor and read as the app going idle, which is exactly what a restart
+  // (the usual cause of a missing sample) does not mean.
+  const pts = sparklinePoints([10, null, 10], { width: 100, height: 20 });
+  assert.deepEqual(pts, ['0,10', '100,10']);
+});
+
+test('an absent point is excluded from the min/max scale', () => {
+  // If null counted as 0 it would become the minimum and squash the real values
+  // into the top of the box.
+  const pts = sparklinePoints([5, null, 10], { width: 100, height: 20 });
+  assert.deepEqual(pts, ['0,20', '100,0']);
+});
+
+test('surviving points keep the x their index earns', () => {
+  // The gap still occupies time. Re-packing the remaining points would slide the
+  // series along the x axis and misdate every reading after the gap.
+  const pts = sparklinePoints([0, null, null, 10], { width: 90, height: 20 });
+  assert.deepEqual(pts, ['0,20', '90,0']);
+});
+
+test('undefined is treated as absent, like null', () => {
+  assert.deepEqual(sparklinePoints([10, undefined, 10], { width: 100, height: 20 }), [
+    '0,10',
+    '100,10',
+  ]);
+});
+
+test('an all-absent series yields no points', () => {
+  assert.deepEqual(sparklinePoints([null, null], { width: 100, height: 20 }), []);
+});
+
+test('a single absent point yields no points', () => {
+  assert.deepEqual(sparklinePoints([null], { width: 100, height: 20 }), []);
+});
+
+test('one surviving point sits at the middle, at its own x', () => {
+  const pts = sparklinePoints([null, 7, null], { width: 100, height: 20 });
+  assert.deepEqual(pts, ['50,10']);
+});
+
+test('step mode steps across a gap without dipping', () => {
+  const pts = sparklinePoints([0, null, 10], { width: 100, height: 20, step: true });
+  assert.deepEqual(pts, ['0,20', '100,20', '100,0']);
+});
+
+test('renderSparkline omits the polyline when every point is absent', () => {
+  const svg = renderSparkline(doc(), [null, null], { width: 100, height: 20 });
+  assert.equal(svg.querySelector('polyline'), null);
+});
+
 test('renderSparkline builds an accessible svg with a polyline', () => {
   const svg = renderSparkline(doc(), [0, 10], { width: 100, height: 20, ariaLabel: 'CPU 10%' });
   assert.equal(svg.tagName.toLowerCase(), 'svg');

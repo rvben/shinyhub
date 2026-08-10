@@ -50,8 +50,8 @@ func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, w io.Write
 }
 func (f *fakeRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
 func (f *fakeRuntime) Wait(context.Context, process.RunHandle) error  { return nil }
-func (f *fakeRuntime) Stats(context.Context, process.RunHandle) (float64, uint64, error) {
-	return 1.5, 2048, nil
+func (f *fakeRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return process.Float(1.5), 2048, nil
 }
 func (f *fakeRuntime) RunOnce(_ context.Context, p process.StartParams, w io.Writer) (process.ExitInfo, error) {
 	f.startParams = p
@@ -214,7 +214,7 @@ func TestReplicaServer_SignalWaitStats(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
 		t.Fatalf("decode stats: %v", err)
 	}
-	if stats.CPUPercent != 1.5 || stats.RSSBytes != 2048 {
+	if stats.CPUPercent == nil || *stats.CPUPercent != 1.5 || stats.RSSBytes != 2048 {
 		t.Errorf("stats = %+v, want {CPUPercent:1.5 RSSBytes:2048}", stats)
 	}
 

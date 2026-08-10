@@ -149,7 +149,7 @@ func TestGetMetrics_ElasticSessionsAndBootingSlots(t *testing.T) {
 	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, Status: db.ReplicaStatusLost}); err != nil {
 		t.Fatalf("seed lost replica: %v", err)
 	}
-	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: 1.5, RSSBytes: 1 << 20}})
+	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: process.Float(1.5), RSSBytes: 1 << 20}})
 
 	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
 	req := authedRequest(t, "GET", "/api/apps/grpapp/metrics", nil, token)

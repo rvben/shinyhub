@@ -401,7 +401,7 @@ func (r *DockerRuntime) Wait(ctx context.Context, handle RunHandle) error {
 	return err
 }
 
-func (r *DockerRuntime) Stats(ctx context.Context, handle RunHandle) (float64, uint64, error) {
+func (r *DockerRuntime) Stats(ctx context.Context, handle RunHandle) (*float64, uint64, error) {
 	return r.client.containerStats(ctx, handle.ContainerID)
 }
 

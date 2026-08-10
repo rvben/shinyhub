@@ -34,7 +34,7 @@ func TestGetMetrics_Running(t *testing.T) {
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
 
 	// Inject a fake sampler with known stats.
-	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: 2.5, RSSBytes: 134217728}})
+	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: process.Float(2.5), RSSBytes: 134217728}})
 
 	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
 	req := authedRequest(t, "GET", "/api/apps/myapp/metrics", nil, token)
@@ -158,7 +158,7 @@ func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 	// Inject two running replicas and a fake sampler with known stats.
 	mgr.ForceEntry("myapp", process.ProcessInfo{Slug: "myapp", Index: 0, PID: 1001, Status: process.StatusRunning})
 	mgr.ForceEntry("myapp", process.ProcessInfo{Slug: "myapp", Index: 1, PID: 1002, Status: process.StatusRunning})
-	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: 3.25, RSSBytes: 1 << 21}})
+	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: process.Float(3.25), RSSBytes: 1 << 21}})
 
 	// Register the proxy pool with two replicas and a known cap. The
 	// backend URLs are placeholders — the metrics endpoint only reads
@@ -258,7 +258,7 @@ func TestGetMetrics_StoppedReplicaSlot(t *testing.T) {
 	// Only replica index 1 is populated; index 0 left nil to simulate a
 	// crashed/not-yet-started slot.
 	mgr.ForceEntry("myapp", process.ProcessInfo{Slug: "myapp", Index: 1, PID: 2002, Status: process.StatusRunning})
-	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: 1.1, RSSBytes: 1 << 20}})
+	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: process.Float(1.1), RSSBytes: 1 << 20}})
 
 	prx.SetPoolSize("myapp", 2)
 	prx.SetPoolCap("myapp", 0) // uncapped
@@ -319,7 +319,7 @@ func TestGetMetrics_RunningWithStats(t *testing.T) {
 
 	// Inject a running entry and a fake sampler with known stats.
 	mgr.ForceEntry("myapp", process.ProcessInfo{Slug: "myapp", PID: 1234, Status: process.StatusRunning})
-	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: 2.5, RSSBytes: 1 << 20}})
+	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: process.Float(2.5), RSSBytes: 1 << 20}})
 
 	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
 	req := authedRequest(t, "GET", "/api/apps/myapp/metrics", nil, token)

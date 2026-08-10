@@ -17,11 +17,14 @@ type historyResp struct {
 	WindowSeconds   int64 `json:"window_seconds"`
 	IntervalSeconds int64 `json:"interval_seconds"`
 	Series          struct {
-		TS        []int64   `json:"ts"`
-		CPU       []float64 `json:"cpu"`
-		RSS       []int64   `json:"rss"`
-		Sessions  []int64   `json:"sessions"`
-		Instances []int     `json:"instances"`
+		TS []int64 `json:"ts"`
+		// Pointers, matching the wire: a null entry is a tick with no rate, not
+		// a tick that measured zero. Decoding into []float64 would turn every
+		// gap into a plausible idle reading and this test would bless it.
+		CPU       []*float64 `json:"cpu"`
+		RSS       []int64    `json:"rss"`
+		Sessions  []int64    `json:"sessions"`
+		Instances []int      `json:"instances"`
 	} `json:"series"`
 }
 
@@ -41,8 +44,9 @@ func TestGetMetricsHistory_ReturnsSeries(t *testing.T) {
 
 	st := history.NewStore(12*time.Hour, 15*time.Second)
 	now := time.Now().Unix()
-	st.Append("myapp", history.Sample{TS: now - 15, CPU: 10, RSS: 100, Sessions: 1, Instances: 1})
-	st.Append("myapp", history.Sample{TS: now, CPU: 20, RSS: 200, Sessions: 2, Instances: 2})
+	cpu10, cpu20 := 10.0, 20.0
+	st.Append("myapp", history.Sample{TS: now - 15, CPU: &cpu10, RSS: 100, Sessions: 1, Instances: 1})
+	st.Append("myapp", history.Sample{TS: now, CPU: &cpu20, RSS: 200, Sessions: 2, Instances: 2})
 	srv.SetHistory(st)
 
 	req := authedRequest(t, "GET", "/api/apps/myapp/metrics/history", nil, token)
@@ -62,7 +66,9 @@ func TestGetMetricsHistory_ReturnsSeries(t *testing.T) {
 	if resp.IntervalSeconds != 15 {
 		t.Errorf("interval_seconds = %d, want 15", resp.IntervalSeconds)
 	}
-	if len(resp.Series.CPU) != 2 || resp.Series.CPU[0] != 10 || resp.Series.CPU[1] != 20 {
+	if len(resp.Series.CPU) != 2 ||
+		resp.Series.CPU[0] == nil || *resp.Series.CPU[0] != 10 ||
+		resp.Series.CPU[1] == nil || *resp.Series.CPU[1] != 20 {
 		t.Errorf("series.cpu = %v, want [10 20]", resp.Series.CPU)
 	}
 	if len(resp.Series.Instances) != 2 || resp.Series.Instances[1] != 2 {

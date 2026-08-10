@@ -1016,15 +1016,17 @@ func (r *Runtime) Wait(ctx context.Context, handle process.RunHandle) error {
 	}
 }
 
-// Stats reports zero CPU/RSS with a nil error. Fargate task metrics are
+// Stats reports an absent CPU rate with a nil error. Fargate task metrics are
 // published to CloudWatch Container Insights, not reachable synchronously from
 // the control plane, so per-replica live figures are not collected here. The nil
 // error is deliberate: the status endpoint treats a sampler error as a dead
 // replica, so returning an error would misreport a healthy Fargate task as
-// stopped. The Manager already tracks task liveness; only the CPU/RSS numbers are
-// absent (shown as zero).
-func (r *Runtime) Stats(ctx context.Context, handle process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+// stopped. The Manager already tracks task liveness.
+//
+// RSS is still reported as 0 because the interface has no way to say otherwise,
+// which remains misleading for this tier.
+func (r *Runtime) Stats(ctx context.Context, handle process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 
 // RunOnce launches a one-shot task, blocks until it stops, and returns its exit

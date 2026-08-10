@@ -75,10 +75,28 @@ func (c *Collector) Run(ctx context.Context) {
 	}
 }
 
+// slugAgg accumulates one tick's replica samples for a single app.
+//
+// cpuMissing records that some replica contributed no CPU rate: either it could
+// not report one yet, which happens on a replica's first tick and so lines up
+// with every deploy and restart, or it runs on a tier with no local process to
+// sample. Summing only the replicas that did report would quietly understate the
+// app, so the whole point is published as unavailable instead.
 type slugAgg struct {
-	cpu       float64
-	rss       int64
-	instances int
+	cpu        float64
+	cpuMissing bool
+	rss        int64
+	instances  int
+}
+
+// cpuTotal returns the summed CPU rate, or nil when any sampled replica lacked
+// one.
+func (a *slugAgg) cpuTotal() *float64 {
+	if a.cpuMissing {
+		return nil
+	}
+	cpu := a.cpu
+	return &cpu
 }
 
 // collectOnce records one snapshot per locally-running app at time now (unix
@@ -104,11 +122,19 @@ func (c *Collector) collectOnce(now int64) {
 		handle, ok := c.procs.HandleReplica(info.Slug, info.Index)
 		if !ok || (handle.PID == 0 && handle.ContainerID == "") {
 			// No PID and no container: a Fargate/remote replica. It counts toward
-			// instances/sessions but has no local CPU/RAM to sample.
+			// instances/sessions but has no local CPU/RAM to sample. Its CPU is
+			// unknown rather than zero, and staying silent about that would
+			// publish a flat 0% line for an app running entirely off-host, or
+			// show a bursting app's usage dropping as it scales onto Fargate.
+			a.cpuMissing = true
 			continue
 		}
 		if stats, err := c.sampler.Sample(handle); err == nil {
-			a.cpu += stats.CPUPercent
+			if stats.CPUPercent == nil {
+				a.cpuMissing = true
+			} else {
+				a.cpu += *stats.CPUPercent
+			}
 			a.rss += stats.RSSBytes
 		}
 	}
@@ -117,7 +143,7 @@ func (c *Collector) collectOnce(now int64) {
 	for slug, a := range byslug {
 		c.store.Append(slug, Sample{
 			TS:        now,
-			CPU:       a.cpu,
+			CPU:       a.cpuTotal(),
 			RSS:       a.rss,
 			Sessions:  sumSessions(c.sessions.ReplicaSessionCounts(slug)),
 			Instances: a.instances,
@@ -127,9 +153,14 @@ func (c *Collector) collectOnce(now int64) {
 
 	// Record exactly one drop-to-zero edge for apps sampled last tick that have
 	// no running replicas now, then stop sampling them until they run again.
+	//
+	// The edge carries an explicit 0 rather than an absent rate: a stopped app
+	// really is using no CPU, which is a measurement and not a gap. Leaving it
+	// nil would make the chart skip the point and join the line straight across
+	// the shutdown, drawing the app as though it kept running.
 	for slug := range c.lastActive {
 		if _, ok := activeNow[slug]; !ok {
-			c.store.Append(slug, Sample{TS: now})
+			c.store.Append(slug, Sample{TS: now, CPU: process.Float(0)})
 		}
 	}
 	c.lastActive = activeNow

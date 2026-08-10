@@ -17,23 +17,40 @@ function fmt(n) {
 // middle, avoiding a divide-by-zero and a misleading full-height line. With
 // `step: true` it emits a stepped path (2n-1 points) for discrete signals like
 // instance count.
+//
+// A null or undefined entry means the server had no measurement for that
+// instant. Such a point is left out of the line and out of the min/max scale, so
+// the stroke joins its neighbours straight across the gap while every remaining
+// point keeps the x position its index earns. Plotting it as 0 instead would
+// draw a dip to the floor, which on a CPU series is indistinguishable from the
+// app going idle and lands exactly on restarts, when the first sample of a new
+// process has no rate yet. Other non-finite values (NaN, Infinity) are malformed
+// rather than absent and still collapse to 0.
 export function sparklinePoints(values, opts = {}) {
   const { width = 120, height = 28, step = false } = opts;
-  // Coerce non-finite values (NaN/Infinity/null) to 0 so a malformed point can
-  // never poison the polyline with a literal "NaN".
-  const vals = values.map((v) => (Number.isFinite(v) ? v : 0));
+  const vals = values.map((v) =>
+    v === null || v === undefined ? null : Number.isFinite(v) ? v : 0,
+  );
   const n = vals.length;
   if (n === 0) return [];
-  if (n === 1) return [`0,${fmt(height / 2)}`];
+  if (n === 1) return vals[0] === null ? [] : [`0,${fmt(height / 2)}`];
+
+  const drawn = [];
+  for (let i = 0; i < n; i++) {
+    if (vals[i] !== null) drawn.push(i);
+  }
+  if (drawn.length === 0) return [];
+
+  const stepX = width / (n - 1);
+  if (drawn.length === 1) return [`${fmt(drawn[0] * stepX)},${fmt(height / 2)}`];
 
   let min = Infinity;
   let max = -Infinity;
-  for (const v of vals) {
-    if (v < min) min = v;
-    if (v > max) max = v;
+  for (const i of drawn) {
+    if (vals[i] < min) min = vals[i];
+    if (vals[i] > max) max = vals[i];
   }
   const span = max - min;
-  const stepX = width / (n - 1);
   const coord = (i) => {
     const x = i * stepX;
     const y = span === 0 ? height / 2 : height - ((vals[i] - min) / span) * height;
@@ -41,10 +58,10 @@ export function sparklinePoints(values, opts = {}) {
   };
 
   const out = [];
-  for (let i = 0; i < n; i++) {
-    const [x, y] = coord(i);
-    if (step && i > 0) {
-      const [, yPrev] = coord(i - 1);
+  for (let k = 0; k < drawn.length; k++) {
+    const [x, y] = coord(drawn[k]);
+    if (step && k > 0) {
+      const [, yPrev] = coord(drawn[k - 1]);
       out.push(`${fmt(x)},${fmt(yPrev)}`);
     }
     out.push(`${fmt(x)},${fmt(y)}`);

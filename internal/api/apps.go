@@ -2820,11 +2820,17 @@ func (s *Server) buildWorkerPool(slug string, snap proxy.ElasticPoolSnapshot) wo
 }
 
 type replicaMetrics struct {
-	Index      int     `json:"index"`
-	Status     string  `json:"status"`
-	PID        int     `json:"pid,omitempty"`
-	CPUPercent float64 `json:"cpu_percent,omitempty"`
-	RSSBytes   int64   `json:"rss_bytes,omitempty"`
+	Index  int    `json:"index"`
+	Status string `json:"status"`
+	PID    int    `json:"pid,omitempty"`
+	// CPUPercent is the replica's CPU rate since the previous poll, where 100 is
+	// one fully busy core. It is null when no rate is available yet, which covers
+	// the first poll after a replica starts and every tier that cannot report one.
+	// The key is always present, and never omitempty: an app sitting at a true 0%
+	// is a different fact from an app whose usage is unknown, and omitempty would
+	// render both as an absent key.
+	CPUPercent *float64 `json:"cpu_percent"`
+	RSSBytes   int64    `json:"rss_bytes,omitempty"`
 	// Sessions is the proxy's best-effort live connection count for this
 	// replica. Omitted (and -1 internally) when the replica slot is empty.
 	Sessions int64  `json:"sessions"`
@@ -2879,9 +2885,9 @@ type metricsResponse struct {
 	// Legacy fields preserved so existing clients (dashboard card poller)
 	// keep working while they adopt the per-replica view. These mirror the
 	// first running replica.
-	PID        int     `json:"pid,omitempty"`
-	CPUPercent float64 `json:"cpu_percent,omitempty"`
-	RSSBytes   int64   `json:"rss_bytes,omitempty"`
+	PID        int      `json:"pid,omitempty"`
+	CPUPercent *float64 `json:"cpu_percent"`
+	RSSBytes   int64    `json:"rss_bytes,omitempty"`
 }
 
 // buildAutoscaleStatus computes the autoscale_status object from the latest

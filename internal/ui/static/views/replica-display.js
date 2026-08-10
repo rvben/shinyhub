@@ -66,9 +66,12 @@ export function metricsText(replica) {
   if (replica.metrics_available !== true) {
     return { cpuText: 'n/a', ramText: 'n/a', note: METRICS_NA_NOTE };
   }
-  const cpu = typeof replica.cpu_percent === 'number' ? replica.cpu_percent : 0;
+  // A null cpu_percent on a PID-backed replica means the rate is not in yet
+  // (first poll after it started), which the neutral dash already covers. Zero
+  // would claim the replica is doing nothing.
+  const cpuText =
+    typeof replica.cpu_percent === 'number' ? `${replica.cpu_percent.toFixed(1)}%` : '—';
   const rss = Number(replica.rss_bytes || 0);
-  const cpuText = `${cpu.toFixed(1)}%`;
   let ramText;
   if (rss <= 0) {
     ramText = '—'; // em-dash, matching existing zero-RAM treatment

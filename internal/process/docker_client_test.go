@@ -193,10 +193,57 @@ func TestDockerClientContainerStatsFormula(t *testing.T) {
 		t.Fatalf("containerStats: %v", err)
 	}
 	// cpuDelta=100M, systemDelta=100M, numCPU=2 → (100M/100M)*2*100 = 200%
-	if cpu != 200.0 {
-		t.Errorf("expected cpu=200.0, got %f", cpu)
+	if cpu == nil {
+		t.Fatalf("expected cpu=200.0, got nil")
+	}
+	if *cpu != 200.0 {
+		t.Errorf("expected cpu=200.0, got %f", *cpu)
 	}
 	// rss = 50MB - 10MB cache = 40MB
+	if rss != 40*1024*1024 {
+		t.Errorf("expected rss=40MB, got %d", rss)
+	}
+}
+
+func TestDockerClientContainerStatsWithoutBaseline(t *testing.T) {
+	// Some engine versions answer a one-shot (stream=false) stats query with a
+	// zeroed precpu_stats block. There is no previous reading to subtract, so
+	// there is no rate to report. Differencing against the zero would divide the
+	// container's total usage by the host's usage since boot: the container
+	// below has burned a full second of CPU, yet the old arithmetic called that
+	// 0.02% and every consumer drew a flat idle line for a container pinning a
+	// core.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/stats") {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"cpu_stats": map[string]any{
+					"cpu_usage":        map[string]any{"total_usage": uint64(1_000_000_000)},
+					"system_cpu_usage": uint64(5_000_000_000_000),
+					"online_cpus":      2,
+				},
+				"precpu_stats": map[string]any{
+					"cpu_usage":        map[string]any{"total_usage": uint64(0)},
+					"system_cpu_usage": uint64(0),
+				},
+				"memory_stats": map[string]any{
+					"usage": uint64(50 * 1024 * 1024),
+					"cache": uint64(10 * 1024 * 1024),
+				},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestDockerClient(srv)
+	cpu, rss, err := c.containerStats(context.Background(), "abc")
+	if err != nil {
+		t.Fatalf("containerStats: %v", err)
+	}
+	if cpu != nil {
+		t.Errorf("expected cpu=nil without a baseline, got %f", *cpu)
+	}
+	// RSS needs no baseline, so it is still reported.
 	if rss != 40*1024*1024 {
 		t.Errorf("expected rss=40MB, got %d", rss)
 	}

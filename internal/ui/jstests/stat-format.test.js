@@ -63,6 +63,58 @@ test('headerStats: falls back to top-level legacy fields when no replicas array'
   assert.equal(s.replicas, '1 / 1');
 });
 
+test('headerStats: a running replica with no rate yet makes the CPU total —', () => {
+  // Summing only the replicas that reported would show 10% for an app doing 10%
+  // plus an unknown amount, and it would happen on every deploy, when the number
+  // is being watched most closely. Memory needs no baseline and stays real.
+  const m = { status: 'running', replicas: [
+    { status: 'running', cpu_percent: 10, rss_bytes: 100 * (1 << 20), sessions: 2 },
+    { status: 'running', cpu_percent: null, rss_bytes: 100 * (1 << 20), sessions: 1 },
+  ] };
+  const s = headerStats(m, 2);
+  assert.equal(s.cpu, '—');
+  assert.equal(s.ram, '200 MB');
+  assert.equal(s.sessions, '3');
+});
+
+test('headerStats: a stopped replica without a rate does not blank the total', () => {
+  // A replica that is not running was never going to contribute CPU, so its
+  // missing rate says nothing about whether the running total is complete.
+  const m = { status: 'running', replicas: [
+    { status: 'running', cpu_percent: 12, rss_bytes: 1 << 20, sessions: 1 },
+    { status: 'stopped', cpu_percent: null, rss_bytes: 0, sessions: 0 },
+  ] };
+  assert.equal(headerStats(m, 2).cpu, '12.0%');
+});
+
+test('headerStats: — and n/a are different claims', () => {
+  // n/a: this tier never reports live CPU. —: the number is not in yet.
+  const pending = { status: 'running', replicas: [
+    { status: 'running', cpu_percent: null, rss_bytes: 1 << 20, sessions: 0 },
+  ] };
+  assert.equal(headerStats(pending, 1).cpu, '—');
+
+  const unsupported = { status: 'running', metrics_available: false, replicas: [
+    { status: 'running', cpu_percent: null, rss_bytes: 0, sessions: 0 },
+  ] };
+  assert.equal(headerStats(unsupported, 1).cpu, 'n/a');
+});
+
+test('headerStats: a null legacy cpu_percent reads as — , not 0.0%', () => {
+  const s = headerStats({ status: 'running', cpu_percent: null, rss_bytes: 50 * (1 << 20), sessions: 1 }, 1);
+  assert.equal(s.cpu, '—');
+  assert.equal(s.ram, '50 MB');
+});
+
+test('headerStats: a real zero is still reported as 0.0%', () => {
+  // The point of the dash is to stop unknown masquerading as idle. A genuinely
+  // idle app must still be able to say so.
+  const m = { status: 'running', replicas: [
+    { status: 'running', cpu_percent: 0, rss_bytes: 1 << 20, sessions: 0 },
+  ] };
+  assert.equal(headerStats(m, 1).cpu, '0.0%');
+});
+
 test('statusPillClass: running gets the is-live pulse, other states do not', () => {
   assert.equal(statusPillClass('running'), 'status-pill status-running is-live');
   assert.equal(statusPillClass('hibernated'), 'status-pill status-hibernated');

@@ -313,7 +313,10 @@ function el(tag, cls, text) {
   return n;
 }
 
+// A null total means at least one running app had no CPU rate this poll, which
+// is not the same as the fleet being idle.
 function formatCpu(pct) {
+  if (pct === null || pct === undefined) return '—';
   const p = Number(pct) || 0;
   if (p >= 100) return (p / 100).toFixed(1) + ' cores';
   return p.toFixed(0) + '%';

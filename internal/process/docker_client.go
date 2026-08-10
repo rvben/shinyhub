@@ -348,15 +348,15 @@ func (c *dockerClient) waitContainer(ctx context.Context, id string) (int, error
 
 // containerStats returns CPU percent and RSS bytes for a running container.
 // Uses the Docker one-shot stats endpoint (stream=false).
-func (c *dockerClient) containerStats(ctx context.Context, id string) (float64, uint64, error) {
+func (c *dockerClient) containerStats(ctx context.Context, id string) (*float64, uint64, error) {
 	url := fmt.Sprintf("%s/containers/%s/stats?stream=false", c.base, id)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0, 0, err
+		return nil, 0, err
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return 0, 0, fmt.Errorf("container stats: %w", err)
+		return nil, 0, fmt.Errorf("container stats: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -383,19 +383,28 @@ func (c *dockerClient) containerStats(ctx context.Context, id string) (float64, 
 		} `json:"memory_stats"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
-		return 0, 0, fmt.Errorf("decode stats: %w", err)
+		return nil, 0, fmt.Errorf("decode stats: %w", err)
 	}
 
-	// CPU percent calculation per Docker documentation.
-	cpuDelta := float64(stats.CPUStats.CPUUsage.TotalUsage) - float64(stats.PreCPUStats.CPUUsage.TotalUsage)
-	systemDelta := float64(stats.CPUStats.SystemUsage) - float64(stats.PreCPUStats.SystemUsage)
+	// CPU percent calculation per Docker documentation. The rate is meaningful
+	// only against a previous reading, which the daemon supplies as precpu_stats.
+	// Some engine versions send that block zeroed for a one-shot (stream=false)
+	// query; taking the difference anyway would divide this container's total
+	// usage by the host's usage since boot and report a fraction of a percent for
+	// a container pinning a core. An absent baseline is reported as an absent
+	// rate instead.
 	numCPU := stats.CPUStats.OnlineCPUs
 	if numCPU == 0 {
 		numCPU = 1
 	}
-	var cpuPercent float64
-	if systemDelta > 0 {
-		cpuPercent = (cpuDelta / systemDelta) * float64(numCPU) * 100.0
+	var cpuPercent *float64
+	if stats.PreCPUStats.SystemUsage > 0 {
+		cpuDelta := float64(stats.CPUStats.CPUUsage.TotalUsage) - float64(stats.PreCPUStats.CPUUsage.TotalUsage)
+		systemDelta := float64(stats.CPUStats.SystemUsage) - float64(stats.PreCPUStats.SystemUsage)
+		if systemDelta > 0 {
+			pct := (cpuDelta / systemDelta) * float64(numCPU) * 100.0
+			cpuPercent = &pct
+		}
 	}
 
 	// RSS excludes page cache (not real memory pressure).

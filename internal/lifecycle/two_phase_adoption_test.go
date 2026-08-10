@@ -22,8 +22,8 @@ func (stubRuntime) Start(_ context.Context, _ process.StartParams, _ io.Writer) 
 }
 func (stubRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
 func (stubRuntime) Wait(_ context.Context, _ process.RunHandle) error  { return nil }
-func (stubRuntime) Stats(_ context.Context, _ process.RunHandle) (float64, uint64, error) {
-	return 0, 0, nil
+func (stubRuntime) Stats(_ context.Context, _ process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
 }
 func (stubRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	return process.ExitInfo{}, nil
