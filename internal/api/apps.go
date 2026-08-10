@@ -3128,12 +3128,34 @@ func (s *Server) handleBatchMetrics(w http.ResponseWriter, r *http.Request) {
 			// unknown or not-viewable slugs are silently skipped
 		}
 	} else {
-		visible, err := s.store.ListAppsVisibleToUser(u.ID, 1_000_000, 0)
+		// What "every app" means depends on the caller, exactly as it does for
+		// GET /api/apps: a privileged operator sees the whole server, everyone
+		// else sees what they own or have been granted. Deriving both from the
+		// same rule keeps a card and its metrics from disagreeing about which
+		// apps exist, and keeps this branch consistent with ?slugs=, where an
+		// admin naming an app it does not own has always been answered.
+		var (
+			visible []*db.App
+			err     error
+		)
+		if isPrivilegedAppOperator(u) {
+			visible, err = s.store.ListApps(0, 0)
+		} else {
+			visible, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
+		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
-		apps = visible
+		// Neither query knows about token scope, and scope beats role and
+		// visibility both. Without this filter a token scoped to one app could
+		// read every public app's pids and resource usage by omitting ?slugs=,
+		// which naming those apps explicitly would have refused.
+		for _, app := range visible {
+			if u.AppInScope(app.Slug) {
+				apps = append(apps, app)
+			}
+		}
 	}
 
 	// Batch the two per-card DB reads (replicas, latest autoscale event) so the

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/auth"
@@ -147,6 +148,87 @@ func TestBatchMetrics_SurfacesLostReplicaAndAutoscale(t *testing.T) {
 	if demo.AutoscaleStatus == nil || demo.AutoscaleStatus.LastAction != "up" {
 		t.Errorf("batched autoscale status = %+v, want last_action up", demo.AutoscaleStatus)
 	}
+}
+
+// With no ?slugs=, an admin gets the whole server, matching what GET /api/apps
+// hands the same caller. The two disagreeing is not cosmetic: an operator's
+// dashboard lists every app, so a metrics set scoped to the operator's *own*
+// apps leaves every card it does not own permanently blank, and `shinyhub top`
+// would report an idle server to the one account able to see all of it.
+func TestBatchMetrics_NoSlugsGivesAnAdminEveryApp(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateUser(db.CreateUserParams{Username: "root", PasswordHash: hash, Role: "admin"})
+	admin, _ := store.GetUserByUsername("root")
+
+	// Owned by somebody else and private, so only the admin role can reach it.
+	store.CreateApp(db.CreateAppParams{Slug: "someone-elses", Name: "Theirs", OwnerID: owner.ID})
+
+	token, _ := auth.IssueJWT(admin.ID, "root", "admin", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/metrics", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Metrics map[string]json.RawMessage `json:"metrics"`
+	}
+	json.NewDecoder(rec.Body).Decode(&body)
+	if _, ok := body.Metrics["someone-elses"]; !ok {
+		t.Errorf("admin got %v, want someone-elses: naming it in ?slugs= is answered, "+
+			"so omitting ?slugs= must not hide it", keysOfRaw(body.Metrics))
+	}
+}
+
+// Scope beats role and visibility everywhere else, and it must beat them here
+// too. Omitting ?slugs= is the one path that never consults canViewApp, so
+// without an explicit filter a token scoped to one app could read every public
+// app's pids and resource usage simply by not naming them.
+func TestBatchMetrics_NoSlugsHonoursTokenScope(t *testing.T) {
+	srv, store := newTestServer(t)
+	ownerID, _ := mkUser(t, store, "owner", "developer")
+	for _, slug := range []string{"inscope", "outscope"} {
+		if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Public, so every visibility rule short of scope would admit it.
+	if err := store.SetAppAccess("outscope", "public"); err != nil {
+		t.Fatal(err)
+	}
+	tok := scopedDeployToken(t, srv, store, "admin", []string{"inscope"})
+
+	rec := doToken(t, srv, "GET", "/api/apps/metrics", tok, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Metrics map[string]json.RawMessage `json:"metrics"`
+	}
+	json.NewDecoder(rec.Body).Decode(&body)
+	if _, ok := body.Metrics["outscope"]; ok {
+		t.Errorf("an out-of-scope public app leaked its metrics: got %v; ?slugs=outscope "+
+			"refuses the same read", keysOfRaw(body.Metrics))
+	}
+	if _, ok := body.Metrics["inscope"]; !ok {
+		t.Errorf("the in-scope app is missing: got %v, so this test would pass even if the "+
+			"handler returned nothing at all", keysOfRaw(body.Metrics))
+	}
+}
+
+// keysOfRaw names the slugs a metrics response carried, so a failure says which
+// apps were reported rather than only how many.
+func keysOfRaw(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Unauthenticated callers are rejected.
