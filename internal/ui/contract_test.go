@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/rvben/shinyhub/internal/ui"
 )
@@ -2535,6 +2537,85 @@ func TestAppIconUIContract(t *testing.T) {
 	// not just an uploaded image.
 	assertContains(t, "app.js", "!app.icon_mime && !app.icon_emoji",
 		"the icon Remove button accounts for an emoji icon, not just an uploaded image")
+}
+
+// TestEmojiPickerUIContract pins the emoji-picker wiring added on top of
+// TestAppIconUIContract: the picker reads the PATCH envelope correctly, and
+// (per Task 9's review) the two pre-existing applyIconChange callers keep
+// passing a literal empty emoji rather than re-asserting a stale one.
+func TestEmojiPickerUIContract(t *testing.T) {
+	// The set-emoji caller is the first caller to read a non-empty emoji back
+	// from a PATCH response; IconEmoji is `json:"icon_emoji,omitempty"`, so a
+	// cleared emoji is an absent key, not "" - reading body.app.icon_emoji
+	// (with an || '' fallback) is the only correct way to unwrap it.
+	assertContains(t, "app.js", "body.app.icon_emoji",
+		"the emoji picker reads the new emoji from the wrapped PATCH response body.app, not a bare body.icon_emoji")
+
+	// Carried forward from Task 9's review: pin both pre-existing
+	// applyIconChange callers verbatim. Task 9 left their literal argument
+	// shape unpinned because every caller passed emoji: '' at the time, so
+	// undefined and '' read identically downstream. This task's set-emoji
+	// caller is the first to pass a NON-empty emoji, which makes
+	// `emoji: appIconEmoji(app)` a plausible copy-paste into the clear/remove
+	// paths - and that one is silently wrong, since it would re-assert an
+	// emoji the server has already cleared.
+	assertContains(t, "app.js", "applyIconChange(app, { mime: '', emoji: '' })",
+		"removeIcon (and any clear-emoji caller) must pass a literal empty emoji, not re-assert a stale one")
+	assertContains(t, "app.js", "applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' })",
+		"uploadIcon must clear the emoji (a new image and an emoji are mutually exclusive), not re-assert a stale one")
+
+	// Markup + module wiring.
+	assertContains(t, "index.html", `id="general-icon-emoji-btn"`,
+		"Configuration > General has an emoji-picker trigger")
+	assertContains(t, "index.html", `id="general-icon-emoji-popover"`,
+		"the emoji picker is a popover, not a modal")
+	assertContains(t, "app.js", "renderEmojiPicker(document",
+		"app.js builds the emoji grid via the shared renderEmojiPicker module")
+	assertContains(t, "app.js", "wireKebab(eBtn, ePopover",
+		"the emoji picker reuses wireKebab for open/close instead of reimplementing it")
+}
+
+// TestCuratedEmojiValidatesAgainstServer is the cross-language guard the JS
+// tests structurally cannot provide: a curated emoji the server rejects would
+// render as a normal grid cell and 400 on click, and every JS test would
+// still pass because JS never runs the Go validator. This reads the curated
+// list out of the embedded views/emoji-picker.js and runs every entry through
+// the real deploy.ValidateIconEmoji (Task 3), the same function the PATCH
+// handler calls.
+func TestCuratedEmojiValidatesAgainstServer(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "views/emoji-picker.js")
+	if err != nil {
+		t.Fatalf("read views/emoji-picker.js: %v", err)
+	}
+	src := string(b)
+
+	literalRe := regexp.MustCompile(`\{\s*emoji:\s*'([^']*)'`)
+	matches := literalRe.FindAllStringSubmatch(src, -1)
+	// A regexp that matches nothing would make every assertion below pass
+	// vacuously against an empty set - exactly the failure this test exists
+	// to prevent. Fail loudly instead.
+	if len(matches) == 0 {
+		t.Fatal("extracted zero `emoji: '...'` literals from CURATED_EMOJI; the regexp no longer matches the source, which would otherwise let this test pass vacuously")
+	}
+	// entryCount is an independently-counted expectation (occurrences of the
+	// entry-opening brace), so a literal the regexp cannot see (e.g. a
+	// reformatted or multi-line entry) is a hard failure, not a silent skip.
+	entryCount := strings.Count(src, "{ emoji:")
+	if len(matches) != entryCount {
+		t.Fatalf("regexp extracted %d emoji literals but CURATED_EMOJI has %d entries; a literal the regexp cannot see must fail, not be silently skipped", len(matches), entryCount)
+	}
+
+	seen := map[string]bool{}
+	for _, m := range matches {
+		emoji := m[1]
+		if err := deploy.ValidateIconEmoji(emoji); err != nil {
+			t.Errorf("CURATED_EMOJI entry %q fails deploy.ValidateIconEmoji: %v", emoji, err)
+		}
+		if seen[emoji] {
+			t.Errorf("CURATED_EMOJI has a duplicate entry: %q", emoji)
+		}
+		seen[emoji] = true
+	}
 }
 
 // TestAppDescriptionUIContract pins the Configuration > General description
