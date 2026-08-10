@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.1](https://github.com/rvben/shinyhub/compare/v0.11.0...v0.11.1) - 2026-08-10
+
+### Added
+
+- **cli**: add shinyhub top, a live view of CPU, memory and sessions per app ([af0360b](https://github.com/rvben/shinyhub/commit/af0360bafd6801dc82c2bed04776debf4be278d1))
+- **cli**: color, glyphs and a shared table renderer for terminal output ([13c3377](https://github.com/rvben/shinyhub/commit/13c3377c378676de8cd01f19001338ec29680154))
+
+### Fixed
+
+- **cli**: say which server could not be reached, and what to check ([8000c23](https://github.com/rvben/shinyhub/commit/8000c23d3b0d0d393bf3898431429bfd5d204053))
+- **cli**: print failures as prose, not JSON, on an interactive terminal ([a19c4f9](https://github.com/rvben/shinyhub/commit/a19c4f9f125f2df455a6a9af25924cd7c988b271))
+- **api**: scope GET /api/apps/metrics to the caller, not to every visible app ([8ee5374](https://github.com/rvben/shinyhub/commit/8ee53749875885e800edbed391affcd410421d40))
+- **metrics**: measure an app's whole process group, not just its launcher ([5eb87d5](https://github.com/rvben/shinyhub/commit/5eb87d55b2749841081f8b51069153a854b1045a))
+- **metrics**: report CPU as a rate, and as absent when unknown ([4858e92](https://github.com/rvben/shinyhub/commit/4858e927ec32a358096f05bdcb59f785c535ca8a))
+- **cli**: route fleet and env apply output through the styling layer ([4c9c0f2](https://github.com/rvben/shinyhub/commit/4c9c0f2bfe714ba4fc420e0b490b61da15ce180c))
+
 ## [0.11.0](https://github.com/rvben/shinyhub/compare/v0.10.18...v0.11.0) - 2026-08-10
 
 ### Added
