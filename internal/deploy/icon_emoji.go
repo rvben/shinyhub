@@ -15,8 +15,11 @@ func isEmojiBase(r rune) bool {
 	switch {
 	case r >= 0x1F600 && r <= 0x1F64F: // Emoticons
 		return true
-	case r >= 0x1F300 && r <= 0x1F5FF: // Misc Symbols & Pictographs
-		return true
+	case r >= 0x1F300 && r <= 0x1F5FF:
+		// Misc Symbols & Pictographs, excluding the Fitzpatrick skin-tone
+		// modifiers (0x1F3FB-0x1F3FF), which live inside this block but are
+		// combining characters handled by isEmojiModifier, never bases.
+		return r < 0x1F3FB || r > 0x1F3FF
 	case r >= 0x1F680 && r <= 0x1F6FF: // Transport & Map
 		return true
 	case r >= 0x1F900 && r <= 0x1F9FF: // Supplemental Symbols & Pictographs
