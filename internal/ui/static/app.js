@@ -1926,7 +1926,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(statusEl, true);
     preview.replaceChildren(renderAppAvatar(document, avatarView(app), 'icon-picker-preview'));
     uploadBtn.hidden = !canEdit;
-    removeBtn.hidden = !canEdit || !app.icon_mime;
+    removeBtn.hidden = !canEdit || (!app.icon_mime && !app.icon_emoji);
 
     if (!canEdit) {
       uploadBtn.onclick = null;
@@ -1975,7 +1975,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     let body = {};
     try { body = await resp.json(); } catch { /* tolerate */ }
-    applyIconChange(app, body.icon_mime || file.type);
+    applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' });
     statusEl.textContent = 'Icon updated.';
     setHidden(statusEl, false);
   }
@@ -1993,7 +1993,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) { setError(errEl, 'Failed to remove icon.'); return; }
-    applyIconChange(app, '');
+    applyIconChange(app, { mime: '', emoji: '' });
     statusEl.textContent = 'Icon removed.';
     setHidden(statusEl, false);
   }
@@ -2001,17 +2001,23 @@ document.addEventListener('DOMContentLoaded', () => {
   // applyIconChange records the new icon state on the app and every cached copy
   // (detailApp, the sidebar/grid list) and bumps updated_at as the cache-buster,
   // then re-renders the picker preview and the detail-header avatar so the change
-  // shows everywhere without a reload.
-  function applyIconChange(app, iconMime) {
+  // shows everywhere without a reload. Both mime and emoji are written on every
+  // call, even the one that did not change, because the server enforces mutual
+  // exclusivity (setting one clears the other): the cached copy must mirror
+  // exactly what the server just did, or a stale emoji (which now renders ahead
+  // of the image) keeps winning until a reload.
+  function applyIconChange(app, { mime, emoji }) {
     const stamp = new Date().toISOString();
-    app.icon_mime = iconMime;
+    app.icon_mime = mime;
+    app.icon_emoji = emoji;
     app.updated_at = stamp;
     if (detailApp && detailApp.slug === app.slug && detailApp !== app) {
-      detailApp.icon_mime = iconMime;
+      detailApp.icon_mime = mime;
+      detailApp.icon_emoji = emoji;
       detailApp.updated_at = stamp;
     }
     const listed = (state.apps || []).find((a) => a && a.slug === app.slug);
-    if (listed) { listed.icon_mime = iconMime; listed.updated_at = stamp; }
+    if (listed) { listed.icon_mime = mime; listed.icon_emoji = emoji; listed.updated_at = stamp; }
     renderIconPicker(app, true);
     renderDetailHeaderAvatar(app);
     if (typeof syncSidebar === 'function') syncSidebar();

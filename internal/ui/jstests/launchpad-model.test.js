@@ -39,6 +39,17 @@ test('appAvatar: deterministic initials and hue from name/slug', () => {
   assert.equal(appAvatar({ name: 'demo', slug: 'demo' }).initials, 'D');
 });
 
+test('tile model carries emoji', () => {
+  const apps = [
+    { slug: 'a', name: 'Alpha', project_slug: 'default', status: 'running', deploy_count: 1, icon_emoji: '🚀' },
+    { slug: 'b', name: 'Beta', project_slug: 'default', status: 'running', deploy_count: 1 },
+  ];
+  const m = buildLaunchpadModel(apps, []);
+  const tiles = m.groups[0].apps;
+  assert.equal(tiles.find((t) => t.slug === 'a').emoji, '🚀', 'an app with icon_emoji carries it on the tile');
+  assert.equal(tiles.find((t) => t.slug === 'b').emoji, '', 'an app without icon_emoji carries an empty string');
+});
+
 test('buildLaunchpadModel: groups by project; suppresses recently-opened for a small catalog', () => {
   const apps = [
     { slug: 'b', name: 'Beta', project_slug: 'team', status: 'running', deploy_count: 1, description: 'Beta app' },

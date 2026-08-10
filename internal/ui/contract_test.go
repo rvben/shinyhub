@@ -2505,8 +2505,12 @@ func TestAppIconUIContract(t *testing.T) {
 	// Launchpad tile renders the icon via the shared helper, fed by the model's iconUrl.
 	assertContains(t, "views/launchpad-model.js", "iconUrl: appIconUrl(app)",
 		"the Launchpad tile model carries the icon URL")
+	assertContains(t, "views/launchpad-model.js", "emoji: appIconEmoji(app)",
+		"the Launchpad tile model carries the emoji icon")
 	assertContains(t, "views/launchpad.js", "renderAppAvatar",
 		"the Launchpad tile renders the icon-or-monogram via the shared helper")
+	assertContains(t, "views/launchpad.js", "emoji: t.emoji",
+		"the Launchpad tile passes the emoji through to the shared avatar renderer")
 
 	// Detail header avatar is rendered for the current app.
 	assertContains(t, "index.html", `id="app-detail-icon"`,
@@ -2527,6 +2531,10 @@ func TestAppIconUIContract(t *testing.T) {
 	// actually hide when no icon is set.
 	assertContains(t, "style.css", ".ov-btn[hidden]",
 		"an .ov-btn with the hidden attribute is actually hidden (Remove when no icon)")
+	// The Remove button must stay visible for an emoji-only icon (no icon_mime),
+	// not just an uploaded image.
+	assertContains(t, "app.js", "!app.icon_mime && !app.icon_emoji",
+		"the icon Remove button accounts for an emoji icon, not just an uploaded image")
 }
 
 // TestAppDescriptionUIContract pins the Configuration > General description

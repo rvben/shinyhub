@@ -4059,6 +4059,13 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 .icon-picker-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .icon-picker-controls .hibernate-status { margin: 0; }
 
+/* Emoji-icon variant: the glyph reuses the monogram box, but the monogram's
+   bold weight and condensed letter-spacing are tuned for 1-2 letters, not a
+   glyph - reset them and size the glyph up to fill the box. */
+.lp-avatar--emoji, .app-detail-avatar--emoji, .icon-picker-preview--emoji {
+  font-size: 1.35em; font-weight: 400; letter-spacing: normal;
+}
+
 .lp-tile-main { min-width: 0; flex: 1; }
 .lp-tile-name { font-size: 0.98rem; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lp-tile-desc {

@@ -4,7 +4,7 @@
 // per-app launch readiness, a visual identity (uploaded icon or monogram), a
 // "recently opened" shortlist, and apps grouped by project. Kept DOM-free so it
 // is unit-testable and the view stays a thin renderer.
-import { appAvatar, appIconUrl } from './app-avatar.js';
+import { appAvatar, appIconUrl, appIconEmoji } from './app-avatar.js';
 
 // Re-export appAvatar so existing importers (and tests) keep their entry point
 // while the implementation lives in the shared app-avatar module.
@@ -67,6 +67,9 @@ export function buildLaunchpadModel(apps, recentSlugs) {
     // iconUrl is set when the app has an uploaded icon; the tile renders it in
     // place of the monogram (falling back to the monogram if it fails to load).
     iconUrl: appIconUrl(app),
+    // emoji is set when the app has an emoji icon; it renders ahead of both
+    // the uploaded icon and the monogram.
+    emoji: appIconEmoji(app),
   }));
 
   const bySlug = new Map(tiles.map((t) => [t.slug, t]));
