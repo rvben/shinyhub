@@ -543,6 +543,30 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "source_slug", Type: "string"},
 	}},
 
+	// ── projects ──────────────────────────────────────────────────────────────
+	"projects": {Mutating: ro},
+
+	"projects list": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "slug", Type: "string"},
+		{Name: "name", Type: "string"},
+		{Name: "description", Type: "string"},
+		{Name: "icon_emoji", Type: "string"},
+		{Name: "app_count", Type: "integer", Desc: "apps in this project that you can see"},
+	}, EnvelopeFields: []fieldSpec{
+		{Name: "items", Type: "array"},
+		{Name: "total", Type: "integer"},
+		{Name: "limit", Type: "integer"},
+		{Name: "offset", Type: "integer"},
+	}},
+	"projects set": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "created | updated"},
+		{Name: "slug", Type: "string"},
+	}},
+	"projects rm": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "deleted"},
+		{Name: "slug", Type: "string"},
+	}},
+
 	// ── users (admin) ─────────────────────────────────────────────────────────
 	"users": {Mutating: ro},
 
