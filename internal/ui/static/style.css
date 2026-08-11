@@ -860,6 +860,28 @@ body[data-auth="out"] {
   letter-spacing: normal;
 }
 
+/* Resets the heading's uppercase/weight so the edit control reads as a small
+   ghost button, not default button chrome wedged in the middle of an h2. */
+.app-grid-group-edit {
+  font: inherit;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+  font-size: 0.75rem;
+  color: var(--text-soft);
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.app-grid-group-edit:hover {
+  color: var(--text);
+  border-color: var(--cyan-bright);
+  background: var(--accent-dim);
+}
+
 @keyframes card-in {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }

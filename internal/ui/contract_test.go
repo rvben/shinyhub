@@ -3226,3 +3226,170 @@ func TestGridGroupHeadingSpansTheRow(t *testing.T) {
 	assertContains(t, "style.css", "grid-column: 1 / -1",
 		"the grid group heading must span the full grid row")
 }
+
+// readStatic returns an embedded asset as a string. The rest of this file
+// inlines this two-liner; the project tests read the same file repeatedly, so
+// it is worth a name.
+func readStatic(t *testing.T, path string) string {
+	t.Helper()
+	b, err := fs.ReadFile(ui.Static(), path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
+// inputTagByID returns the single <input> tag carrying id="<id>", so a per-input
+// assertion cannot be satisfied by a DIFFERENT input elsewhere in the file.
+// Asserting on the whole document would pass whenever either input had the
+// attribute, which is exactly the failure these tests exist to catch.
+func inputTagByID(t *testing.T, html, id string) string {
+	t.Helper()
+	needle := `id="` + id + `"`
+	i := strings.Index(html, needle)
+	if i < 0 {
+		t.Fatalf("no element with %s in index.html", needle)
+	}
+	start := strings.LastIndex(html[:i], "<input")
+	if start < 0 {
+		t.Fatalf("%s is not inside an <input> tag", needle)
+	}
+	end := strings.Index(html[start:], ">")
+	if end < 0 {
+		t.Fatalf("unterminated <input> tag for %s", needle)
+	}
+	return html[start : start+end+1]
+}
+
+// jsFunctionBody returns the source text of one function declaration inside a
+// static JS asset, located by the literal "function <name>(" and extended by
+// brace-matching from the first "{" to its balancing "}". Brace-matching -
+// not a line count or "until the next blank line" heuristic - is what makes
+// this survive the function moving or being reformatted: a heuristic would
+// silently return the wrong slice when that happens, where this fails loudly
+// instead. Used to scope an assertion to one function's body, so a call it
+// must make cannot be satisfied by an unrelated reference (e.g. a dangling
+// import) anywhere else in the file.
+func jsFunctionBody(t *testing.T, js, name string) string {
+	t.Helper()
+	needle := "function " + name + "("
+	start := strings.Index(js, needle)
+	if start < 0 {
+		t.Fatalf("no function named %s in the asset", name)
+	}
+	relBrace := strings.Index(js[start:], "{")
+	if relBrace < 0 {
+		t.Fatalf("function %s has no opening brace", name)
+	}
+	braceStart := start + relBrace
+	depth := 0
+	for i := braceStart; i < len(js); i++ {
+		switch js[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return js[start : i+1]
+			}
+		}
+	}
+	t.Fatalf("function %s: braces do not balance", name)
+	return ""
+}
+
+// Both project inputs, asserted one at a time. A single assertion that passes
+// on either would let the New app modal - the input where a typo actually
+// creates a duplicate project - ship without autocomplete.
+func TestBothProjectInputsShareTheProjectDatalist(t *testing.T) {
+	html := readStatic(t, "index.html")
+	for _, id := range []string{"general-project", "new-app-project"} {
+		input := inputTagByID(t, html, id)
+		if !strings.Contains(input, `list="project-slugs"`) {
+			t.Errorf("#%s must reference the shared project datalist, got: %s", id, input)
+		}
+		if !strings.Contains(input, `maxlength="63"`) {
+			t.Errorf("#%s must cap input at the 63-char slug limit, got: %s", id, input)
+		}
+		// The literal slug.Pattern, copied not re-derived: slug.go says this
+		// string is kept in sync with the SPA.
+		if !strings.Contains(input, `pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"`) {
+			t.Errorf("#%s must carry the slug pattern, got: %s", id, input)
+		}
+	}
+	if !strings.Contains(html, `<datalist id="project-slugs"`) {
+		t.Error("index.html must define the shared project datalist exactly once")
+	}
+	if strings.Count(html, `<datalist id="project-slugs"`) != 1 {
+		t.Error("the project datalist must be a single shared element, not one per input")
+	}
+}
+
+// Scoped per input on purpose: the document already contains this pattern on
+// #new-app-slug, so a document-wide search passes without either project input
+// carrying it.
+func TestProjectInputPatternMatchesSlugPattern(t *testing.T) {
+	html := readStatic(t, "index.html")
+	want := `pattern="` + slugpkg.Pattern + `"`
+	for _, id := range []string{"general-project", "new-app-project"} {
+		if input := inputTagByID(t, html, id); !strings.Contains(input, want) {
+			t.Errorf("#%s must carry the literal slug.Pattern %q, got: %s", id, slugpkg.Pattern, input)
+		}
+	}
+}
+
+func TestProjectEditModalWiring(t *testing.T) {
+	assertContains(t, "index.html", `id="project-edit-modal"`,
+		"index.html must define the project edit modal")
+	assertContains(t, "app.js", "/api/projects/",
+		"app.js must PATCH the project endpoint from the edit modal")
+	assertContains(t, "app.js", "app-grid-group-edit",
+		"the group heading must carry the edit control that opens the modal")
+	assertContains(t, "app.js", "populateProjectDatalist",
+		"app.js must populate the shared datalist from GET /api/projects")
+}
+
+// The edit modal must not send an empty description it never loaded.
+// group objects come from groupApps(), which carries no description field, so
+// an unconditional description key turns "open Edit, press Save" into
+// "delete the description" (internal/api/projects.go treats "" as an explicit
+// clear, nil as absent).
+//
+// This property is covered by two independent layers, and each check below
+// is labeled with which one it is:
+//
+//   - jstests/project-edit-body.test.js unit-tests buildProjectPatchBody's
+//     own behavior (does it include or omit the key). That is the layer that
+//     actually holds against a source-shape rewrite of the same bug - a
+//     reviewer defeated an earlier version of the check below by rewriting
+//     an unconditional-description body with assignment syntax instead of an
+//     object literal.
+//   - The checks in this test are a cheap, string-search-based second layer.
+//     They cannot verify behavior, only that saveProjectEdit still calls
+//     into the tested function rather than reconstructing the PATCH body
+//     itself. An earlier version of that call-site check asserted
+//     `buildProjectPatchBody` appeared anywhere in app.js, which a dangling,
+//     unused import satisfies even after saveProjectEdit stops calling it
+//     (this repo has no JS linter to flag the dead import). Scoping the
+//     assertion to saveProjectEdit's own function body via jsFunctionBody
+//     closes that hole: the string must appear where the call would actually
+//     be made, not merely somewhere in the file.
+func TestProjectEditModalDoesNotClearDescription(t *testing.T) {
+	appJS := readStatic(t, "app.js")
+	saveFn := jsFunctionBody(t, appJS, "saveProjectEdit")
+	if !strings.Contains(saveFn, "buildProjectPatchBody(") {
+		t.Error("saveProjectEdit must build its PATCH body by calling buildProjectPatchBody, not by reconstructing the body inline")
+	}
+	assertContains(t, "app.js", "views/project-edit-body.js",
+		"app.js must import buildProjectPatchBody from views/project-edit-body.js")
+	assertContains(t, "app.js", "descriptionKnown",
+		"saveProjectEdit must set/read the descriptionKnown flag it forwards to buildProjectPatchBody")
+
+	body := readStatic(t, "views/project-edit-body.js")
+	if !strings.Contains(body, "descriptionKnown") {
+		t.Error("buildProjectPatchBody must gate the description key on descriptionKnown")
+	}
+	if strings.Contains(body, "icon_emoji: iconEmoji, description") {
+		t.Error("buildProjectPatchBody must never include description unconditionally in the initial object literal: \"\" is an explicit clear")
+	}
+}
