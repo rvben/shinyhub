@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.3](https://github.com/rvben/shinyhub/compare/v0.11.2...v0.11.3) - 2026-08-12
+
+### Added
+
+- **ui**: autocomplete project slugs and edit project metadata inline ([3089304](https://github.com/rvben/shinyhub/commit/30893041a8b16c53c18262e921069cbbee43a5ad))
+- **ui**: group the operator dashboard grid by project ([ce3afc2](https://github.com/rvben/shinyhub/commit/ce3afc2c3641003dea3ea2af646f599820bcf352))
+- **ui**: show project names in the launchpad and sidebar group headings ([af38462](https://github.com/rvben/shinyhub/commit/af38462a908c66e31c461be6709d9a805cc89169))
+- **ui**: add the shared project group-ordering rule and grid grouper ([f91d819](https://github.com/rvben/shinyhub/commit/f91d8197b7904468e9ecce2000be759adb7906bb))
+- **fleet**: reconcile each app's project on create and on drift ([d9f4708](https://github.com/rvben/shinyhub/commit/d9f4708259afdf029f3621be214a35c612edfec9))
+- **fleet**: reconcile declared projects before apps ([7d46690](https://github.com/rvben/shinyhub/commit/7d4669084a399653968027f8bcb0dc5c3785363a))
+- **fleet**: diff declared projects and each app's project ([a7af843](https://github.com/rvben/shinyhub/commit/a7af843fa9ab0c0e652ece90fc070e2ce70d67a3))
+- **fleet**: declare projects and an app's project in the fleet manifest ([249cddc](https://github.com/rvben/shinyhub/commit/249cddc92f9cdfa9214b121a08e0628468dfa888))
+- **manifest**: declare an app's project in the bundle manifest ([e3d5d93](https://github.com/rvben/shinyhub/commit/e3d5d93d845c5791aa449b251a4d89ed732ee51e))
+- **cli**: add apps set --project and the projects command group ([3a05151](https://github.com/rvben/shinyhub/commit/3a05151fe048e9e85312c23b582f6608c71bd8ef))
+- **api**: expose project display metadata on app payloads ([9ed1beb](https://github.com/rvben/shinyhub/commit/9ed1beb172accf4301fae42d4110285ea62fed87))
+- **api**: add project CRUD endpoints scoped to app visibility ([61c00d5](https://github.com/rvben/shinyhub/commit/61c00d58ff21fb1594f476b22963afce7248fd85))
+- **api**: validate project_slug and audit project moves ([a58e0b4](https://github.com/rvben/shinyhub/commit/a58e0b4f15f594b504b3fa6bdba9a2e63b1e04ab))
+- **db**: create the project row lazily from every app writer ([778d2eb](https://github.com/rvben/shinyhub/commit/778d2ebd09bfd04c21cf311f16bfc3f5d4129033))
+- **db**: list projects scoped to the apps a user can see ([a238270](https://github.com/rvben/shinyhub/commit/a23827021c0655887ea8652bc9ebb72f70e53678))
+- **db**: add project CRUD with a non-clobbering upsert ([4061e0f](https://github.com/rvben/shinyhub/commit/4061e0f4a34ff13298c83a11b211209bbf8a26c6))
+- **appmetaspec**: add NormalizeProjectName with an optional-name bound ([1a0160c](https://github.com/rvben/shinyhub/commit/1a0160cc912188a209c29d33e842eaab2d708f94))
+- **db**: add projects and ungroup apps left in the legacy default project ([65ad754](https://github.com/rvben/shinyhub/commit/65ad7547c680d641b447272fa8f3faac080fc21e))
+- **ui**: add Sleep, Stop and Start controls to app cards and the detail header ([bdb4eda](https://github.com/rvben/shinyhub/commit/bdb4eda5a8d84ddcc3c3f4a4d40d86f639f4cb0f))
+- **ui**: make app card actions status-aware ([a81ac23](https://github.com/rvben/shinyhub/commit/a81ac238805ca863b722a30dcb91834ae5b3369e))
+- **cli**: add apps sleep ([a418f78](https://github.com/rvben/shinyhub/commit/a418f7890608eca7530b446df22166c7861e4638))
+- **api**: add POST /api/apps/{slug}/sleep for operator-requested hibernation ([1582860](https://github.com/rvben/shinyhub/commit/158286086a34bb4ff84f08c3833b435968d70e25))
+- **lifecycle**: add SleepNow for operator-requested hibernation ([c8cc849](https://github.com/rvben/shinyhub/commit/c8cc849cf26d5f2b4506e280e067d29b6c5ffbd1))
+- **ui**: add an About dialog with the server version and host runtimes ([0d29f64](https://github.com/rvben/shinyhub/commit/0d29f6438b0b120cafb393f9a2943391ea29f261))
+- **ui**: show a brand slot on the login card and finish the signed-out front door ([22f999a](https://github.com/rvben/shinyhub/commit/22f999a5c03531f7e142851fa53a777a99c64551))
+
+### Fixed
+
+- **ui,slug**: use a plain hyphen in the slug and display-name rule text ([5b8661e](https://github.com/rvben/shinyhub/commit/5b8661e4cb341bf4960d357f10cbd640ff8f589f))
+- **ui**: keep the fleet ownership marker inside the app card ([54fd601](https://github.com/rvben/shinyhub/commit/54fd601e91bbae99e19cfe8c3fc093f5b85c3f3e))
+- **deploy**: keep a stopped app stopped through a deploy ([54f12e7](https://github.com/rvben/shinyhub/commit/54f12e7adec0c79c983813ca6afd4f21efca8457))
+- **branding**: allow a remotely-hosted logo or favicon through the CSP ([4fad5ce](https://github.com/rvben/shinyhub/commit/4fad5ceed902039a72310de54b522a6ea894c48b))
+
 ## [0.11.2](https://github.com/rvben/shinyhub/compare/v0.11.1...v0.11.2) - 2026-08-11
 
 ### Added
