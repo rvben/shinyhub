@@ -65,6 +65,12 @@ type Server struct {
 	renderPacingCores  float64
 	renderPacingSource string
 
+	// sleepNow performs an operator-requested hibernation (lifecycle.Watcher's
+	// SleepNow). Injected via SetSleepOp because the teardown lives on the
+	// watcher, which is constructed after this Server. nil makes the sleep
+	// endpoint report 503 rather than silently succeed.
+	sleepNow func(slug string) error
+
 	// version is the binary version string advertised by GET /api/server-info,
 	// set by the parent binary via SetVersion. Empty until SetVersion is called
 	// (e.g. in test contexts that do not wire it).
@@ -534,6 +540,13 @@ func (s *Server) SetJobs(j *jobs.Manager, sc *scheduler.Scheduler) {
 	s.scheduler = sc
 }
 
+// SetSleepOp wires the operator-requested hibernation executor
+// (lifecycle.Watcher.SleepNow). Call once at startup after the watcher is built;
+// leaving it unset makes POST /api/apps/{slug}/sleep report 503.
+func (s *Server) SetSleepOp(fn func(slug string) error) {
+	s.sleepNow = fn
+}
+
 // SetOwnership wires the predicate reporting whether this instance holds the
 // control-plane ownership lease. Mutating API requests are rejected with 503 on
 // a non-owner so that during a zero-downtime handoff only the lease owner
@@ -753,6 +766,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.With(rateLimitByUser(s.actionLimiter)).Put("/api/apps/{slug}/rollback", s.handleRollbackApp)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/restart", s.handleRestartApp)
 		r.Post("/api/apps/{slug}/stop", s.handleStopApp)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/sleep", s.handleSleepApp)
 		r.Get("/api/apps/{slug}/logs", s.handleLogs)
 		r.Get("/api/apps/{slug}/metrics", s.handleMetrics)
 		r.Get("/api/apps/{slug}/metrics/history", s.handleMetricsHistory)

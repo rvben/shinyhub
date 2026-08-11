@@ -242,6 +242,65 @@ func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	}
 }
 
+// A fleet deploy to an app the operator stopped leaves it stopped, so it will
+// never report healthy. Waiting for health could only run to the deadline and
+// then fail - and, through deployWithRetry, re-run - a deploy the server
+// already accepted. TestDeployAppBundle_DeploysThenReadsPromotedDigest is the
+// positive control: it asserts the same poll DOES happen for a live deploy, so
+// an implementation that never polls cannot pass both.
+func TestDeployAppBundle_KeptStoppedSkipsHealthWait(t *testing.T) {
+	var deployHits, pollsAfterDeploy int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/apps/demo/deploy":
+			atomic.AddInt32(&deployHits, 1)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"status":"ok","kept_stopped":true}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			// Also the ensureApp existence check, so only GETs after the
+			// deploy landed can be health polls.
+			if atomic.LoadInt32(&deployHits) > 0 {
+				atomic.AddInt32(&pollsAfterDeploy, 1)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"app": map[string]any{"status": "stopped"},
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"slug": "demo", "content_digest": "sha256:X"},
+			})
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+
+	var buf bytes.Buffer
+	// readPromotedDigest re-GETs /api/apps, not /api/apps/demo, so a nonzero
+	// pollsAfterDeploy can only come from the health wait.
+	dg, committed, _, _, err := deployAppBundle(cfg, "demo", dir, "private", "", &buf, "run-1", time.Second)
+	if err != nil {
+		t.Fatalf("a kept-stopped deploy must succeed, got: %v", err)
+	}
+	if !committed {
+		t.Error("a kept-stopped deploy is still committed: the server accepted the bundle")
+	}
+	if dg != "sha256:X" {
+		t.Errorf("promoted digest = %q, want sha256:X", dg)
+	}
+	if n := atomic.LoadInt32(&pollsAfterDeploy); n != 0 {
+		t.Errorf("health polls after a kept-stopped deploy = %d, want 0", n)
+	}
+	if out := buf.String(); !strings.Contains(out, "not serving yet") || !strings.Contains(out, "apps start demo") {
+		t.Errorf("fleet deploy must report the app is stopped and name the start command, got:\n%s", out)
+	}
+}
+
 // The single-app `deploy` surfaces a hooks-skipped warning when the server
 // reports post-deploy hooks were skipped under the container runtime. The
 // fleet deploy path must do the same so a `fleet apply` operator is not left

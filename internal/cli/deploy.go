@@ -55,6 +55,7 @@ type deployFlags struct {
 	branch      string // branch/tag to check out (default: default branch)
 	subdir      string // subdirectory within the repo containing the app
 	visibility  string // app access level: private, shared, public (empty = use server default)
+	start       bool   // start the app even if it was stopped before this deploy
 
 	waitForServer time.Duration // poll /api/server-info until the server is ready before deploying
 }
@@ -88,6 +89,10 @@ startup_timeout_seconds (1-3600, default 120) to lengthen the readiness deadline
 for an app that warms up slowly at import; it travels with the bundle and also
 applies on wake, scale, and rollback.
 
+Stopped apps: an app that was stopped before the deploy stays stopped. The
+bundle is still built, validated and recorded, so 'shinyhub apps start <slug>'
+brings up the new version. Pass --start to deploy and start in one step.
+
 Slug and URL: the app is served at <host>/app/<slug>/. The slug defaults to the
 directory name (sanitized); override it with --slug. Slug rule: lowercase
 letters, digits, and single hyphens; it must not start or end with a hyphen.
@@ -113,6 +118,7 @@ server). See docs/reverse-proxy/deploying-behind-a-proxy.md for the full setup.`
 	cmd.Flags().StringVar(&f.subdir, "subdir", "", "Subdirectory within repo containing the app")
 	cmd.Flags().StringVar(&f.visibility, "visibility", "", "App visibility for new apps: private (members only), shared (every signed-in user; alias: internal), or public (anyone, no sign-in). Default: server config")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before deploying")
+	cmd.Flags().BoolVar(&f.start, "start", false, "Start the app after deploying even if it was stopped; without this a stopped app stays stopped")
 	return cmd
 }
 
@@ -228,7 +234,11 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	io.Copy(part, bundleBuf)
 	writer.Close()
 
-	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/deploy", &body)
+	deployURL := cfg.Host + "/api/apps/" + slug + "/deploy"
+	if f.start {
+		deployURL += "?start=true"
+	}
+	req, err := http.NewRequest("POST", deployURL, &body)
 	if err != nil {
 		deploying.stop()
 		return fmt.Errorf("build request: %w", err)
@@ -264,6 +274,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	var appResp map[string]any
 	deployCount := 0
 	currentVersion := ""
+	keptStopped := false
 	if err := json.Unmarshal(out, &appResp); err == nil {
 		if v, ok := appResp["deploy_count"].(float64); ok {
 			deployCount = int(v)
@@ -271,6 +282,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		if v, ok := appResp["current_version"].(string); ok {
 			currentVersion = v
 		}
+		keptStopped, _ = appResp["kept_stopped"].(bool)
 	}
 
 	stdOut := cmd.OutOrStdout()
@@ -293,6 +305,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 	fmt.Fprintf(noteW, "%sDeployed %s%s%s\nURL: %s/app/%s/\n",
 		ps.okPrefix(), slug, deployment, took, cfg.Host, slug)
+	if note := formatKeptStoppedNote(keptStopped, slug); note != "" {
+		fmt.Fprintln(noteW, note)
+	}
 	for _, line := range formatManifestSummary(appResp["manifest"]) {
 		fmt.Fprintln(noteW, line)
 	}
@@ -340,7 +355,10 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 	}
 
-	if f.wait {
+	// A deploy that deliberately left the app down will never report healthy, so
+	// waiting could only end in a timeout that failed a deploy which in fact
+	// succeeded. --start is how a caller asks for a running app to wait for.
+	if f.wait && !keptStopped {
 		if err := waitForHealthyWithOutput(cfg, slug, time.Duration(f.waitTimeout)*time.Second, errW); err != nil {
 			return err
 		}
@@ -350,11 +368,15 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		// deploy_count and version are always present so consumers can rely on
 		// these keys existing. deploy_count is 0 when the server omits it (older
 		// servers); version is "" when the server does not report one.
+		// kept_stopped is always present for the same reason: a consumer must be
+		// able to distinguish "deployed and live" from "deployed and still down"
+		// without matching on prose.
 		result := map[string]any{
 			"status":       "deployed",
 			"slug":         slug,
 			"deploy_count": deployCount,
 			"version":      currentVersion,
+			"kept_stopped": keptStopped,
 		}
 		if err := json.NewEncoder(stdOut).Encode(result); err != nil {
 			return err

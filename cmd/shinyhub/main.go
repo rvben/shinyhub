@@ -1428,6 +1428,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		srv.WarmExpand,
 	)
 
+	// Wire operator-requested sleep. The teardown lives on the watcher because it
+	// is the same path idle hibernation uses; the API server is constructed
+	// before the watcher, so the executor is injected here.
+	srv.SetSleepOp(watcher.SleepNow)
+
 	// Wire the wake trigger on every instance at startup, independent of
 	// ownership. A standby issues the BeginWake CAS (hibernated->waking) on a
 	// proxy miss so the DB reflects the pending wake immediately; the active's

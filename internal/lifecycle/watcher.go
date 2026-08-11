@@ -427,6 +427,85 @@ func (w *Watcher) hibernatePool(app *db.App) bool {
 	return true
 }
 
+// Sentinels returned by SleepNow. The API layer maps each to an HTTP status, so
+// they are part of this package's contract rather than internal detail.
+var (
+	// ErrAppNotRunning reports that sleep was requested for an app whose pool is
+	// not up. Sleep is an up -> hibernated transition; every other status is
+	// either already down or mid-transition.
+	ErrAppNotRunning = errors.New("app is not running")
+
+	// ErrElasticNotSleepable reports that sleep was requested for an app whose
+	// worker isolation resolves to grouped or per_session. Those pools hold their
+	// live backends in a workers map with no replica rows, so hibernatePool's
+	// replica loop cannot release them.
+	ErrElasticNotSleepable = errors.New("sleep is not supported for elastic worker isolation")
+
+	// ErrSleepTeardownFailed reports that the pool did not reach a terminal state
+	// because the manager's stop errored. The app status is deliberately left
+	// unchanged: persisting "hibernated" would assert a state that isn't real and
+	// would strand a live manager entry that trips ErrReplicaAlreadyRunning on the
+	// next wake.
+	ErrSleepTeardownFailed = errors.New("app did not stop")
+)
+
+// isUpStatus reports whether an app's status means at least one replica is
+// serving. Must stay in sync with UP_STATUSES in
+// internal/ui/static/views/app-card-actions.js, which decides whether the card
+// offers Stop and Sleep at all.
+func isUpStatus(status string) bool {
+	return status == "running" || status == "degraded"
+}
+
+// SleepNow puts a running app to sleep on operator request. It is the manual
+// counterpart to handleIdle: the same terminal state (pool removed from routing,
+// replicas suspended or stopped, status "hibernated", wakeable by the next
+// request), reached unconditionally instead of after an idle timeout.
+//
+// Three things handleIdle consults are deliberately skipped, because each
+// governs AUTOMATIC hibernation and an operator asking right now overrides it:
+//
+//   - BeginHibernate, whose CAS refuses while a request is in flight. Sleep is
+//     forceful and drops live sessions, matching what the stop handler already
+//     does. Honouring the CAS would make the control silently no-op on exactly
+//     the busy apps an operator most wants to act on.
+//   - hibernate_timeout_minutes, including the 0 that disables idle hibernation.
+//   - min_warm_replicas. Sleep means release the resources; the floor is
+//     restored on the next wake.
+//
+// Deregister is used rather than BeginHibernate because it removes the pool from
+// routing unconditionally, and is the same call the stop handler makes.
+func (w *Watcher) SleepNow(slug string) error {
+	app, err := w.store.GetAppBySlug(slug)
+	if err != nil {
+		return err
+	}
+	// "degraded" is accepted alongside "running": some replicas are still serving,
+	// so there are resources to release and the card offers Sleep for it. Rejecting
+	// it would make the control 409 on exactly the apps whose replicas an operator
+	// most wants to reclaim. hibernatePool works off the pool, not the status, so
+	// a partly-dead pool tears down the same way.
+	if !isUpStatus(app.Status) {
+		return fmt.Errorf("%w: app is %s", ErrAppNotRunning, app.Status)
+	}
+	resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+	if isElasticIsolation(resolvedIso) {
+		return ErrElasticNotSleepable
+	}
+
+	w.prx.Deregister(slug)
+
+	if !w.hibernatePool(app) {
+		slog.Warn("sleep: stop failed; leaving app status unchanged", "slug", slug)
+		return ErrSleepTeardownFailed
+	}
+	if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "hibernated"}); err != nil {
+		return fmt.Errorf("persist hibernated status: %w", err)
+	}
+	w.recordTransition("sleep")
+	return nil
+}
+
 // RestoreWarm re-boots and re-freezes apps that were hibernated before a server
 // restart, so their next access is a warm resume instead of a cold boot. A
 // frozen process does not survive a restart, so this re-creates the warm state
