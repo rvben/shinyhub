@@ -100,6 +100,12 @@
           </span>
           <svg class="identity-cog" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 4.4v1.8M12 17.8v1.8M4.4 12h1.8M17.8 12h1.8M6.7 6.7l1.3 1.3M16 16l1.3 1.3M17.3 6.7l-1.3 1.3M8 16l-1.3 1.3"/></svg>
         </button>
+        <!-- About: server identity, one click from anywhere. Neutral label so a
+             white-labeled instance gives nothing away until it is opened. -->
+        <button id="about-button" type="button" class="sidebar-about" aria-haspopup="dialog" aria-label="About this server">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16.5"/><line x1="12" y1="7.6" x2="12" y2="7.6"/></svg>
+          <span class="nav-label">About</span>
+        </button>
         <button id="sidebar-collapse" type="button" class="sidebar-collapse" aria-label="Collapse sidebar" aria-expanded="true">
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="14 7 9 12 14 17"/></svg>
           <span class="nav-label">Collapse</span>
@@ -992,6 +998,37 @@
               <button id="profile-submit" type="submit" class="btn-primary">Save changes</button>
             </div>
           </form>
+        </div>
+      </div>
+    </div>
+    <!-- About: which ShinyHub is this, and what can it run. Filled by
+         views/about.js from /api/server-info when the dialog opens.
+         The product name is static markup and none of this is a .brand slot,
+         on purpose: branding.js rewrites those, and an operator white-labeling
+         the front door must still leave a signed-in reader able to name the
+         software in a bug report. Behind a click and behind the login, so an
+         anonymous visitor sees only the operator's brand. -->
+    <div id="about-modal" class="modal-overlay" hidden
+         role="dialog" aria-modal="true" aria-labelledby="about-heading">
+      <div class="modal-card about-card">
+        <div class="modal-header">
+          <h2 id="about-heading" class="modal-title">About</h2>
+          <button id="about-close" type="button" aria-label="Close about"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+        </div>
+        <div class="modal-body">
+          <p class="about-wordmark">Shiny<span class="about-wordmark-accent">Hub</span></p>
+          <p id="about-version" class="about-version"></p>
+          <p id="about-build" class="about-build" hidden></p>
+
+          <section class="about-section" aria-labelledby="about-runtimes-heading">
+            <h3 id="about-runtimes-heading" class="about-section-title">App runtimes</h3>
+            <dl id="about-runtimes" class="about-runtimes"></dl>
+            <p class="about-hint">What this host can start right now.</p>
+          </section>
+
+          <p class="about-links">
+            <a href="https://github.com/rvben/shinyhub" target="_blank" rel="noopener noreferrer">Documentation and source</a>
+          </p>
         </div>
       </div>
     </div>

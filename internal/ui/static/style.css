@@ -4286,6 +4286,88 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 }
 .token-reveal .snippet code { overflow-wrap: anywhere; }
 
+/* About dialog. Narrow, because it is a reference card rather than a form: the
+   whole point is that one glance answers "which ShinyHub, and what can it run". */
+.about-card { max-width: 26rem; }
+.about-wordmark {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+/* The stock two-tone wordmark. Not a .brand slot: branding.js rewrites those,
+   and this line has to survive a white-label. */
+.about-wordmark-accent { color: var(--cyan-bright); }
+.about-version {
+  margin: 0.15rem 0 0;
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+  /* Selectable, because the point of the line is to be pasted into a report. */
+  user-select: text;
+}
+/* An unknown version is a caveat, not a version number. */
+.about-version.is-unknown { font-size: 0.85rem; color: var(--text-muted); }
+.about-build {
+  margin: 0.3rem 0 0;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  user-select: text;
+}
+
+.about-section {
+  margin-top: 1.4rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--line);
+}
+.about-section-title {
+  margin: 0 0 0.7rem;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.about-runtimes {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.45rem 1rem;
+  margin: 0;
+  align-items: baseline;
+}
+.about-runtime-name { color: var(--text-soft); font-size: 0.88rem; }
+/* The executable the server looked for, so "Not installed" says what to install. */
+.about-runtime-launcher {
+  margin-left: 0.45rem;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+.about-runtime-state {
+  margin: 0;
+  justify-self: end;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+}
+.about-runtime-state.is-ready { color: var(--green); }
+.about-runtime-state.is-missing { color: var(--text-muted); }
+/* Unknown is not "missing": the server never reported. Dimmest of the three. */
+.about-runtime-state.is-unknown { color: var(--text-dim); }
+.about-hint { margin: 0.75rem 0 0; color: var(--text-dim); font-size: 0.74rem; }
+
+.about-links { margin: 1.3rem 0 0; }
+.about-links a { color: var(--brand-primary); text-decoration: none; font-size: 0.84rem; }
+.about-links a:hover { text-decoration: underline; }
+
+/* Sidebar footer → About trigger. Reads as one of the quiet rail controls, not
+   a nav destination, so it borrows the collapse button's layout. */
+.sidebar-about { display: flex; align-items: center; gap: 0.6rem; width: 100%; }
+.sidebar-about .nav-ico { width: 16px; height: 16px; }
+body.sidebar-collapsed .sidebar-about { justify-content: center; }
+
 /* Profile modal → tokens link */
 .profile-tokens-link { margin: 0.25rem 0 0.5rem; }
 .profile-tokens-link a { color: var(--brand-primary); text-decoration: none; font-size: 0.9rem; }

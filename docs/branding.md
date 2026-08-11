@@ -56,6 +56,21 @@ The login card matters most: signed out, it is the only chrome a visitor sees.
 A logo sized around 40px tall reads well there; wider lockups are clamped to the
 card width.
 
+### What branding does not replace
+
+The About dialog, reached from the sidebar footer, names ShinyHub and its
+version, and branding never replaces it. It is the only place a signed-in
+operator can read which software and which release they are running, so it has
+to survive a full white-label: it is what makes a bug report actionable and what
+tells whoever inherits the server what it is. It also reports which app runtimes
+the host can start, which is the fastest answer to "why did my R app fail to
+deploy".
+
+It sits behind the login and behind a click, where the audience is people who
+run the platform rather than people who visit it. The trigger reads "About", so
+an anonymous visitor sees only your brand and a signed-in one gives nothing away
+until they open it.
+
 ## Environment overrides
 
 Each scalar field can be set or overridden via an environment variable. The

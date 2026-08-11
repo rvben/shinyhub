@@ -144,6 +144,45 @@ func TestLoginBrandSlot(t *testing.T) {
 		"the signed-out login view must be centred in the viewport, not hung from the top")
 }
 
+// TestAboutDialog pins the one surface that tells a signed-in operator which
+// ShinyHub they run and what the host can start. Nothing else in the UI reports
+// either: the other "version" fields are per-deployment app versions, and
+// runtime availability has no other display at all. It lives behind the login
+// and behind a click on purpose (the anonymous front door stays the operator's
+// brand), and nothing in it may be a .brand slot, or views/branding.js would
+// white-label away the software name a bug report needs. The rendering rules
+// are unit-tested (jstests/about.test.js); pin markup and wiring here.
+func TestAboutDialog(t *testing.T) {
+	assertContains(t, "index.html", `<div id="about-modal" class="modal-overlay" hidden`,
+		"index.html must carry the About dialog")
+	assertContains(t, "index.html", `<p class="about-wordmark">Shiny<span class="about-wordmark-accent">Hub</span></p>`,
+		"the product name must be static markup with no .brand class, so branding.js cannot swap the software name away")
+	assertContains(t, "index.html", `<p id="about-version" class="about-version"></p>`,
+		"the dialog must carry the version slot")
+	assertContains(t, "index.html", `<dl id="about-runtimes" class="about-runtimes"></dl>`,
+		"the dialog must carry the runtimes slot; /api/server-info reports them and no other view does")
+	assertContains(t, "index.html", `<button id="about-button" type="button" class="sidebar-about"`,
+		"the sidebar footer must carry the About trigger, or the dialog is unreachable")
+	assertContains(t, "app.js", "renderAbout(document",
+		"app.js must render the dialog via views/about.js so the label rules stay covered by jstests/about.test.js")
+	assertContains(t, "app.js", "createServerInfoLoader(",
+		"app.js must fetch server info through the caching loader, not a bare per-open fetch")
+	assertContains(t, "app.js", "aboutButton.addEventListener('click', openAboutModal)",
+		"the About trigger must be wired, or the button is inert")
+	assertContains(t, "app.js", "closeAboutModal();",
+		"Escape and the close button must dismiss the dialog like every other modal")
+	assertContains(t, "views/about.js", "/api/server-info",
+		"the loader must read the unauthenticated server-info endpoint")
+	assertContains(t, "views/about.js", "'Version unavailable'",
+		"an unreachable server must say the version is unknown, never render a blank that reads as 'no version'")
+	assertContains(t, "views/about.js", "unknown: 'Unknown'",
+		"a runtime the server never reported must read as unknown, never as 'Not installed'")
+	assertContains(t, "style.css", ".about-runtimes {",
+		"style.css must lay out the runtime rows, or the definition list falls back to browser defaults")
+	assertContains(t, "style.css", ".sidebar-about {",
+		"style.css must style the About trigger to match the other rail controls")
+}
+
 // TestThemeWiring guards the light/dark theme feature. The pure resolver is
 // unit-tested (jstests/theme.test.js); the wiring lives in the app.js IIFE and
 // index.html, so pin the load-bearing pieces by string search:
