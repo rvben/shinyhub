@@ -81,8 +81,10 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	}
 	// Light the per-card "Deploying" badge for apps whose deploy is executing
 	// right now (pending row + held deploy lock; see appDeploying).
+	disp := s.loadProjectDisplay()
 	for _, a := range apps {
 		a.Deploying = s.appDeploying(a)
+		a.ProjectName, a.ProjectIconEmoji = disp.decorate(a.ProjectSlug)
 	}
 	writeList(w, apps, limit, offset, nil)
 }
@@ -219,6 +221,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	// Same "Deploying" signal the list payload carries, so the detail-header
 	// pill agrees with the card badge.
 	app.Deploying = s.appDeploying(app)
+	app.ProjectName, app.ProjectIconEmoji = s.loadProjectDisplay().decorate(app.ProjectSlug)
 
 	replicas, err := s.store.ListReplicas(app.ID)
 	if err != nil {

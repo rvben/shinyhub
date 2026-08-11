@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -292,4 +293,34 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, db.AuditProjectDelete, "project", slug, "")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// projectDisplay is the slug -> display metadata map used to decorate app
+// payloads. It is loaded once per request: an N-app response must not become N
+// project lookups.
+type projectDisplay map[string]*db.ProjectListItem
+
+func (s *Server) loadProjectDisplay() projectDisplay {
+	out := projectDisplay{}
+	ps, err := s.store.ListProjects(0, 0)
+	if err != nil {
+		// Display metadata is decoration. A failure here degrades cards to
+		// their bare slug rather than failing the whole apps list.
+		slog.Warn("load project display metadata", "err", err)
+		return out
+	}
+	for _, p := range ps {
+		out[p.Slug] = p
+	}
+	return out
+}
+
+// decorate returns the two flat display keys for an app's project. Both keys
+// are always present, empty when there is no project or no metadata, so a
+// client never has to tell "absent" from "empty".
+func (d projectDisplay) decorate(projectSlug string) (name, iconEmoji string) {
+	if p, ok := d[projectSlug]; ok && projectSlug != "" {
+		return p.Name, p.IconEmoji
+	}
+	return "", ""
 }

@@ -169,3 +169,67 @@ func TestPatchAppAuditsProjectMoveAndProjectCreate(t *testing.T) {
 		t.Error("implicitly creating a project must emit project.create attributed to the acting user")
 	}
 }
+
+func TestAppsPayloadCarriesProjectDisplayMetadata(t *testing.T) {
+	srv, store, token := projectEnv(t)
+	owner, err := store.GetUserByUsername("owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertProject(db.Project{
+		Slug: "analytics", Name: "Analytics", IconEmoji: "\U0001F4CA",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{
+		Slug: "a", Name: "A", ProjectSlug: "analytics", OwnerID: owner.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{
+		Slug: "b", Name: "B", OwnerID: owner.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodGet, "/api/apps", nil, token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list apps: %d: %s", rec.Code, rec.Body.String())
+	}
+	items, ok := decodeEnvelope(t, rec)["items"].([]any)
+	if !ok {
+		t.Fatal("list envelope has no items array")
+	}
+	bySlug := map[string]map[string]any{}
+	for _, it := range items {
+		m := it.(map[string]any)
+		bySlug[m["slug"].(string)] = m
+	}
+	if got := bySlug["a"]["project_name"]; got != "Analytics" {
+		t.Errorf("project_name = %v, want Analytics", got)
+	}
+	if got := bySlug["a"]["project_icon_emoji"]; got != "\U0001F4CA" {
+		t.Errorf("project_icon_emoji = %v", got)
+	}
+	// An app with no project carries the keys as empty strings rather than
+	// omitting them, so the client never has to distinguish absent from empty.
+	// This is why the two new struct fields must NOT be omitempty.
+	if got, present := bySlug["b"]["project_name"]; !present || got != "" {
+		t.Errorf(`project_name for a project-less app = %v (present=%v), want ""`, got, present)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodGet, "/api/apps/a", nil, token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get app: %d: %s", rec.Code, rec.Body.String())
+	}
+	var envelope map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode app envelope: %v", err)
+	}
+	single := envelope["app"].(map[string]any)
+	if single["project_name"] != "Analytics" {
+		t.Errorf("GET /api/apps/{slug} missing project_name: %v", single["project_name"])
+	}
+}

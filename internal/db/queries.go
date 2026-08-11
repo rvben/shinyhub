@@ -649,6 +649,14 @@ type App struct {
 	// false. See api.Server.appDeploying for why it is stricter than the
 	// proxy's MissStatus.
 	Deploying bool `json:"deploying"`
+	// ProjectName and ProjectIconEmoji are the display metadata of the app's
+	// project, computed by the API layer per request and never persisted (there
+	// is no such column; see the projects table). Both are "" when the app has
+	// no project or the project row carries no metadata. Not omitempty, for the
+	// same reason as Deploying: the key is present in every payload, so a
+	// consumer never has to tell "absent" from "empty".
+	ProjectName      string `json:"project_name"`
+	ProjectIconEmoji string `json:"project_icon_emoji"`
 	// ReplicaPlacement is the per-app replica placement as a JSON object
 	// {"tier": count}, or "" when no placement is set (all Replicas on the
 	// default tier). The Replicas column remains the authoritative total.
