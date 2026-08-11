@@ -28,9 +28,9 @@ branding:
 
 | Field | Description |
 |---|---|
-| `site_title` | Replaces the `<title>` tag in the SPA shell. |
+| `site_title` | Replaces the `<title>` tag in the SPA shell, and the ShinyHub wordmark in every brand slot when no `logo` is set. |
 | `assets_dir` | Directory that backs all local asset references. Required when any field references a local file. |
-| `logo` | Brand logo: a filename inside `assets_dir` or an absolute `http(s)://` URL. |
+| `logo` | Brand logo: a filename inside `assets_dir` or an absolute `http(s)://` URL. Replaces the wordmark in every brand slot, including the login card. |
 | `favicon` | Favicon: a filename inside `assets_dir` or an absolute `http(s)://` URL. |
 | `theme.primary_color` | CSS hex color (`#rgb` or `#rrggbb`). Injected as the `--brand-primary` CSS variable. |
 | `landing_page` | Filename inside `assets_dir` that replaces the stock app catalog at `/`. `/login` always serves the SPA shell. |
@@ -39,6 +39,22 @@ branding:
 `assets_dir` is validated at startup: the directory must exist and every
 referenced local file must resolve inside it (a symlink-aware containment
 check).
+
+### Brand slots
+
+A brand slot is anywhere ShinyHub shows its own identity: the sidebar, the
+mobile top bar, the boot splash, and the login card. All four take the same
+value, so one `logo` (or one `site_title`) brands the whole product.
+
+Per slot, the first of these that is set wins:
+
+1. `logo` - rendered as an image, with `site_title` (or `ShinyHub`) as its alt text.
+2. `site_title` - rendered as text beside the mark.
+3. The stock ShinyHub wordmark.
+
+The login card matters most: signed out, it is the only chrome a visitor sees.
+A logo sized around 40px tall reads well there; wider lockups are clamped to the
+card width.
 
 ## Environment overrides
 
@@ -70,6 +86,21 @@ prefix:
 
 Relative paths in operator HTML resolve against `/`, not `/branding/`, so the
 prefix must be explicit (or add a `<base href="/branding/">` element).
+
+### Remotely hosted images
+
+When `logo` or `favicon` is an absolute `http(s)://` URL, its origin is added to
+the control-plane Content-Security-Policy `img-src` list automatically, so the
+browser will load it. Only `img-src` is widened, and only with the scheme, host
+and port of the images you configured; script, style and connect sources are
+untouched. Nothing is added for local assets, which are same-origin already.
+
+The origin is allowed, not the exact path, because asset CDNs redirect and a CSP
+path source is matched against the pre-redirect URL only.
+
+This applies to the SPA shell. An operator `landing_page` is served under a
+separate policy that does not widen `img-src`, so host landing-page images
+locally via `assets_dir`.
 
 The `landing_page` file is served directly at `/` (replacing the stock catalog)
 and is NOT exposed under `/branding/`. It is served as trusted same-origin

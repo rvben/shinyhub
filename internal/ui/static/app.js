@@ -20,6 +20,7 @@ import { headerStats } from '/static/views/stat-format.js';
 import { cardMetricsLabel, instanceCountLabel } from '/static/views/card-metrics.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
 import { applyLoginProviders } from '/static/views/login-providers.js';
+import { applyBranding } from '/static/views/branding.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
@@ -118,37 +119,9 @@ function wireKebab(button, list, container) {
 document.addEventListener('DOMContentLoaded', () => {
   // Branding: server injects window.__SHINYHUB_BRANDING__ (see
   // internal/ui/branding.go RenderIndex). Absent/empty in zero-branding mode.
-  (function applyBranding() {
-    const b = window.__SHINYHUB_BRANDING__;
-    if (!b || typeof b !== 'object') return;
-    if (b.logo) {
-      // Brand appears in the sidebar and the mobile top bar — replace every node.
-      for (const brand of document.querySelectorAll('.brand')) {
-        brand.innerHTML = '';
-        const img = document.createElement('img');
-        img.src = b.logo;
-        img.alt = b.site_title || 'Home';
-        img.className = 'brand-logo';
-        brand.appendChild(img);
-      }
-    }
-    if (Array.isArray(b.footer_links) && b.footer_links.length) {
-      let f = document.querySelector('footer.brand-footer');
-      if (!f) {
-        f = document.createElement('footer');
-        f.className = 'brand-footer';
-        document.body.appendChild(f);
-      }
-      f.innerHTML = '';
-      for (const link of b.footer_links) {
-        const a = document.createElement('a');
-        a.href = link.url;
-        a.textContent = link.label;
-        a.rel = 'noopener noreferrer';
-        f.appendChild(a);
-      }
-    }
-  })();
+  // Applied to every .brand slot (sidebar, mobile top bar, boot splash, and the
+  // login card) by the unit-tested views/branding.js.
+  applyBranding(document, window.__SHINYHUB_BRANDING__);
 
   const state = {
     user: null,
@@ -606,6 +579,9 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(appError, '');
     renderApps();
     syncSidebar();
+    // Land the caret in the first field: the login card is the whole page in
+    // this state, so there is nothing else to focus.
+    if (usernameInput.offsetParent !== null) usernameInput.focus();
   }
 
   function showLoggedIn(payload) {
@@ -4048,20 +4024,22 @@ document.addEventListener('DOMContentLoaded', () => {
           }),
         });
       } catch {
-        setError(loginError, 'Network error');
+        setError(loginError, "Can't reach the server. Check your connection and try again.");
         return;
       }
 
+      // Never say which of the two was wrong: that turns the form into a
+      // username oracle.
       if (response.status === 401) {
-        setError(loginError, 'Invalid credentials');
+        setError(loginError, 'Wrong username or password.');
         return;
       }
       if (response.status === 429) {
-        setError(loginError, 'Too many attempts - try again in a moment.');
+        setError(loginError, 'Too many attempts. Try again in a moment.');
         return;
       }
       if (!response.ok) {
-        setError(loginError, 'Login failed');
+        setError(loginError, 'Sign in failed. Try again in a moment.');
         return;
       }
 

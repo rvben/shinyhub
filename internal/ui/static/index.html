@@ -39,7 +39,7 @@
   <div id="boot-splash" aria-hidden="true">
     <span class="brand">
       <span class="sparkle sparkle-brand" aria-hidden="true"></span>
-      Shiny<span class="brand-hub">Hub</span>
+      <span class="brand-name">Shiny<span class="brand-hub">Hub</span></span>
     </span>
   </div>
 
@@ -49,7 +49,7 @@
     </button>
     <span class="brand">
       <span class="sparkle sparkle-brand" aria-hidden="true"></span>
-      Shiny<span class="brand-hub">Hub</span>
+      <span class="brand-name">Shiny<span class="brand-hub">Hub</span></span>
     </span>
   </header>
 
@@ -58,7 +58,7 @@
       <div class="sidebar-brand">
         <span class="brand">
           <span class="sparkle sparkle-brand" aria-hidden="true"></span>
-          Shiny<span class="brand-hub">Hub</span>
+          <span class="brand-name">Shiny<span class="brand-hub">Hub</span></span>
         </span>
       </div>
 
@@ -119,17 +119,30 @@
       </div>
     </section>
 
-    <section id="login-view">
+    <section id="login-view" aria-labelledby="login-heading">
       <div class="login-box">
-        <h2>Sign in</h2>
+        <!-- Brand slot: stock wordmark by default, replaced with the operator's
+             logo or site title by views/branding.js when branding is configured.
+             This is the only chrome an anonymous visitor sees, so it carries the
+             identity the sidebar carries once signed in. -->
+        <div class="login-brand">
+          <span class="brand">
+            <span class="sparkle sparkle-brand" aria-hidden="true"></span>
+            <span class="brand-name">Shiny<span class="brand-hub">Hub</span></span>
+          </span>
+        </div>
+        <!-- The lockup is the card's visible title; the heading is the view's
+             accessible name (the page has no other heading when signed out). -->
+        <h1 id="login-heading" class="sr-only">Sign in</h1>
         <form id="login-form" aria-describedby="login-error">
           <label for="login-username" class="login-label">Username</label>
           <input id="login-username" type="text" autocomplete="username" required>
           <label for="login-password" class="login-label">Password</label>
           <input id="login-password" type="password" autocomplete="current-password" required>
-          <button type="submit">Login</button>
+          <button type="submit">Sign in</button>
         </form>
-        <p id="login-error" class="error" hidden></p>
+        <!-- role=alert so a rejected sign-in is announced, not just painted. -->
+        <p id="login-error" class="error" role="alert" hidden></p>
         <!-- Hidden by default; login-providers.js reveals each only when the
              server reports it configured (/api/auth/providers), so a native-only
              install never shows a dead SSO button. -->

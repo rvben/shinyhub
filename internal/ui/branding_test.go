@@ -39,6 +39,46 @@ func TestPublicBrandingMapsResolvedURLs(t *testing.T) {
 	}
 }
 
+// TestImageSources covers the CSP allowance for remotely-hosted branding
+// images. `logo`/`favicon` accept an absolute http(s) URL, but the control-plane
+// CSP is `img-src 'self' data:`, so without this the browser blocks the
+// operator's logo and the front door renders a broken lockup.
+func TestImageSources(t *testing.T) {
+	// Local assets are served same-origin from /branding/, already covered by
+	// 'self' - no widening at all.
+	local := ui.PublicBranding(config.BrandingConfig{Logo: "logo.svg", Favicon: "fav.ico"},
+		map[string]string{"logo.svg": "/abs/logo.svg", "fav.ico": "/abs/fav.ico"})
+	if got := ui.ImageSources(local); len(got) != 0 {
+		t.Fatalf("local assets must not widen img-src, got %v", got)
+	}
+
+	// A remote logo contributes its origin, not the full URL: CDNs redirect, and
+	// a CSP path source would then fail to match.
+	remote := ui.PublicBranding(config.BrandingConfig{Logo: "https://cdn.example.com/a/logo.svg"}, nil)
+	if got := ui.ImageSources(remote); len(got) != 1 || got[0] != "https://cdn.example.com" {
+		t.Fatalf("remote logo must contribute its origin, got %v", got)
+	}
+
+	// Two assets on one host collapse to a single source.
+	same := ui.PublicBranding(config.BrandingConfig{
+		Logo:    "https://cdn.example.com/logo.svg",
+		Favicon: "https://cdn.example.com/fav.ico",
+	}, nil)
+	if got := ui.ImageSources(same); len(got) != 1 || got[0] != "https://cdn.example.com" {
+		t.Fatalf("shared origin must be listed once, got %v", got)
+	}
+
+	// Distinct hosts, an explicit port, and an uppercase scheme all normalise.
+	multi := ui.PublicBranding(config.BrandingConfig{
+		Logo:    "HTTPS://Cdn.Example.com:8443/logo.svg",
+		Favicon: "http://assets.example.org/fav.ico",
+	}, nil)
+	got := ui.ImageSources(multi)
+	if len(got) != 2 || got[0] != "https://cdn.example.com:8443" || got[1] != "http://assets.example.org" {
+		t.Fatalf("origins must be lowercased, port-preserving and deduped, got %v", got)
+	}
+}
+
 func TestRenderIndexInjectsHeadAndEscapesScript(t *testing.T) {
 	raw := []byte("<html><head><title>ShinyHub</title></head><body>X</body></html>")
 	b := config.BrandingConfig{SiteTitle: `Acme</script><script>alert(1)</script>`}

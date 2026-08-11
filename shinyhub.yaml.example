@@ -283,6 +283,13 @@ maintenance:
 #
 # assets_dir is required only when any field references a local file.
 # logo and favicon may be a filename inside assets_dir OR an absolute http(s):// URL.
+# A remote logo/favicon origin is added to the SPA's CSP img-src automatically, so
+# the browser loads it; no other CSP directive is widened.
+#
+# logo replaces the ShinyHub wordmark in every brand slot: the sidebar, mobile top
+# bar, boot splash, and the login card (the only chrome a signed-out visitor sees).
+# With no logo, site_title replaces the wordmark text. With neither, the stock
+# ShinyHub wordmark shows. A logo around 40px tall reads well on the login card.
 # landing_page is a filename inside assets_dir (or an absolute path that resolves
 # inside assets_dir); it replaces the stock app catalog at /.
 # /login always serves the SPA shell regardless of landing_page.

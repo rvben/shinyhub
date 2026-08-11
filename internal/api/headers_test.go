@@ -8,7 +8,7 @@ import (
 )
 
 func TestSecurityHeaders_ControlPlane(t *testing.T) {
-	h := SecurityHeaders(nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := SecurityHeaders(nil, nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	for _, path := range []string{"/", "/login", "/apps/foo/overview", "/api/apps", "/static/app.js"} {
@@ -51,10 +51,33 @@ func TestSecurityHeaders_ControlPlane(t *testing.T) {
 	}
 }
 
+// TestSecurityHeaders_BrandingImageSources pins the img-src widening that lets a
+// remotely-hosted operator logo actually load. Without it the default
+// `img-src 'self' data:` blocks the image the operator configured.
+func TestSecurityHeaders_BrandingImageSources(t *testing.T) {
+	h := SecurityHeaders(nil, nil, nil, []string{"https://cdn.example.com"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/login", nil))
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "img-src 'self' data: https://cdn.example.com;") {
+		t.Errorf("configured branding image origin must be allowed in img-src: %q", csp)
+	}
+	// The widening is scoped to images: nothing else may inherit the origin.
+	if strings.Contains(csp, "script-src 'self' https://cdn.example.com") ||
+		strings.Contains(csp, "connect-src 'self' https://cdn.example.com") {
+		t.Errorf("branding image origin must widen img-src only: %q", csp)
+	}
+}
+
 // TestBuildControlPlaneCSP asserts the policy is strict with no branding and
 // lists the exact inline hashes (never 'unsafe-inline') when branding is active.
 func TestBuildControlPlaneCSP(t *testing.T) {
-	plain := buildControlPlaneCSP(nil, nil)
+	plain := buildControlPlaneCSP(nil, nil, nil)
+	if !strings.Contains(plain, "img-src 'self' data:;") {
+		t.Errorf("with no branding the image policy must stay closed: %q", plain)
+	}
 	if strings.Contains(plain, "'unsafe-inline'") {
 		t.Errorf("inactive-branding CSP must not contain 'unsafe-inline': %q", plain)
 	}
@@ -62,7 +85,7 @@ func TestBuildControlPlaneCSP(t *testing.T) {
 		t.Errorf("inactive-branding script-src should be just 'self': %q", plain)
 	}
 
-	csp := buildControlPlaneCSP([]string{"'sha256-abc'"}, []string{"'sha256-def'"})
+	csp := buildControlPlaneCSP([]string{"'sha256-abc'"}, []string{"'sha256-def'"}, nil)
 	if !strings.Contains(csp, "script-src 'self' 'sha256-abc'") {
 		t.Errorf("script-src missing hash source: %q", csp)
 	}
@@ -87,7 +110,7 @@ func TestLandingPageCSP(t *testing.T) {
 }
 
 func TestSecurityHeaders_HSTSOverHTTPS(t *testing.T) {
-	h := SecurityHeaders(nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := SecurityHeaders(nil, nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	rec := httptest.NewRecorder()
@@ -103,7 +126,7 @@ func TestSecurityHeaders_HSTSOverHTTPS(t *testing.T) {
 }
 
 func TestSecurityHeaders_ProxiedAppsUntouched(t *testing.T) {
-	h := SecurityHeaders(nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := SecurityHeaders(nil, nil, nil, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	rec := httptest.NewRecorder()

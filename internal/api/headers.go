@@ -20,15 +20,21 @@ import (
 // inactive, in which case no inline is ever served. Hashing rather than nonces
 // keeps the shell cacheable.
 //
+// imgSources widens img-src by the origins of remotely-hosted branding images
+// (ui.ImageSources): branding.logo/favicon accept an absolute http(s) URL, which
+// the closed default would otherwise block. It is empty unless an operator
+// configures one, and never widens any other directive.
+//
 // frame-ancestors 'self', base-uri 'self', and form-action 'self' are the
 // defensive additions: they block cross-origin framing (clickjacking) and
 // limit where the page can post or rebase to.
-func buildControlPlaneCSP(scriptSources, styleSources []string) string {
+func buildControlPlaneCSP(scriptSources, styleSources, imgSources []string) string {
 	scriptSrc := append([]string{"'self'"}, scriptSources...)
 	styleSrc := append([]string{"'self'"}, styleSources...)
 	styleSrc = append(styleSrc, "https://fonts.googleapis.com")
+	imgSrc := append([]string{"'self'", "data:"}, imgSources...)
 	return "default-src 'self'; " +
-		"img-src 'self' data:; " +
+		"img-src " + strings.Join(imgSrc, " ") + "; " +
 		"font-src 'self' https://fonts.gstatic.com; " +
 		"style-src " + strings.Join(styleSrc, " ") + "; " +
 		"script-src " + strings.Join(scriptSrc, " ") + "; " +
@@ -45,7 +51,7 @@ func buildControlPlaneCSP(scriptSources, styleSources []string) string {
 // The landing handler sets it on that one response only; the SPA shell, assets,
 // and API keep the strict policy.
 func LandingPageCSP() string {
-	return buildControlPlaneCSP([]string{"'unsafe-inline'"}, []string{"'unsafe-inline'"})
+	return buildControlPlaneCSP([]string{"'unsafe-inline'"}, []string{"'unsafe-inline'"}, nil)
 }
 
 // controlPlanePermissionsPolicy disables powerful browser features the
@@ -65,8 +71,10 @@ const hstsValue = "max-age=63072000; includeSubDomains"
 // request scheme for HSTS the same way session cookies decide their Secure flag.
 // scriptSources/styleSources are the CSP hash allowances for the active
 // branding inline blocks (ui.CSPInlineSources); both empty when branding is off.
-func SecurityHeaders(trustedNets []*net.IPNet, scriptSources, styleSources []string, next http.Handler) http.Handler {
-	csp := buildControlPlaneCSP(scriptSources, styleSources)
+// imgSources are the origins of remotely-hosted branding images
+// (ui.ImageSources), empty unless an operator points logo/favicon at a URL.
+func SecurityHeaders(trustedNets []*net.IPNet, scriptSources, styleSources, imgSources []string, next http.Handler) http.Handler {
+	csp := buildControlPlaneCSP(scriptSources, styleSources, imgSources)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/app/") {
 			h := w.Header()
