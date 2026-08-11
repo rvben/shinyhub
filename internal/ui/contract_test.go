@@ -1330,8 +1330,27 @@ func TestDashboardFleetSurfaceWiring(t *testing.T) {
 		"apps grid imports the fleet-ui helper module")
 	assertContains(t, "app.js", "makeFleetBadge",
 		"apps grid cards show the fleet ownership badge")
+	assertContains(t, "app.js", "{ compact: true }",
+		"apps grid cards use the compact fleet badge; the full 'managed by <id>' text does not fit a 310px card header")
 	assertContains(t, "app.js", "segmentApps",
 		"apps grid filters by the All/Fleet-managed/Unmanaged segment")
+
+	// Card-header overflow guard. .app-card is overflow:visible (so the kebab
+	// dropdown can escape) and .app-header is a nowrap row, so a badge appended
+	// straight into it renders out past the card border. Two pieces have to
+	// stay together: the wrapping container app.js emits and its stylesheet
+	// rule.
+	assertContains(t, "app.js", "app-header-badges",
+		"card badges go in a wrapping container, not straight into the nowrap .app-header")
+	assertContains(t, "style.css", ".app-header-badges",
+		"style.css must style the badge container app.js emits, or badges overflow the card")
+	// The card label is a constant. That is what makes its width independent of
+	// an operator-chosen fleet id, so nothing here can overflow no matter how
+	// long the id is; the id lives in the tooltip instead.
+	assertContains(t, "views/fleet-ui.js", "FLEET_BADGE_COMPACT_LABEL = 'fleet'",
+		"the card fleet label is a fixed word, not the fleet id, so card width cannot depend on an operator-chosen id")
+	assertContains(t, "style.css", ".app-header-badges .badge-fleet",
+		"the card fleet chip is dressed down to metadata weight rather than competing with the status badge")
 	assertContains(t, "index.html", "apps-segment",
 		"apps toolbar exposes the All/Fleet-managed/Unmanaged control")
 

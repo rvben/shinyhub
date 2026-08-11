@@ -422,6 +422,15 @@ document.addEventListener('DOMContentLoaded', () => {
       name.textContent = app.name;
       header.appendChild(name);
 
+      // Every badge goes in one wrapping container rather than straight into
+      // the header row. The header is a nowrap flex row inside a ~310px grid
+      // column and .app-card is overflow:visible (so the kebab dropdown can
+      // escape), so a badge appended directly to it has nothing to stop it
+      // rendering out past the card border.
+      const badges = document.createElement('div');
+      badges.className = 'app-header-badges';
+      header.appendChild(badges);
+
       const badgeInfo = appCardBadge(app, formatStatus);
       const badge = document.createElement('span');
       badge.className = badgeInfo.cls;
@@ -430,10 +439,10 @@ document.addEventListener('DOMContentLoaded', () => {
       // (see onMetrics → updateCardStatusBadge); without this the badge would
       // freeze at its render-time status and miss wake/hibernate transitions.
       badge.dataset.slug = app.slug;
-      header.appendChild(badge);
+      badges.appendChild(badge);
 
-      const fleetBadge = makeFleetBadge(document, app);
-      if (fleetBadge) header.appendChild(fleetBadge);
+      const fleetBadge = makeFleetBadge(document, app, { compact: true });
+      if (fleetBadge) badges.appendChild(fleetBadge);
 
       // Autoscale badge: visible when per-app autoscale is enabled.
       // app.autoscale_enabled is already in the apps-list payload (db.App appColumns).
@@ -442,7 +451,7 @@ document.addEventListener('DOMContentLoaded', () => {
         autoBadge.className = 'badge badge-autoscale';
         autoBadge.textContent = 'auto';
         autoBadge.title = 'Autoscale enabled';
-        header.appendChild(autoBadge);
+        badges.appendChild(autoBadge);
       }
 
       const meta = document.createElement('div');

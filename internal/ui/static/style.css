@@ -905,6 +905,25 @@ body[data-auth="out"] {
   letter-spacing: -0.02em;
   color: var(--text);
   transition: color var(--ease);
+  /* min-width:0 overrides the flex default of min-content, so a long app name
+     wraps within its share of the row instead of forcing the badges outward. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Badge cluster: status, fleet ownership and autoscale, right-aligned beside
+   the app name. It wraps internally so badges stack in the right-hand column
+   rather than escaping the card, which .app-header alone cannot do (it is a
+   nowrap row and .app-card is overflow:visible for the kebab dropdown). Every
+   badge in it carries fixed-vocabulary text, so the cluster has a bounded
+   max-content width and needs no cap of its own. */
+.app-header-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
 }
 
 .app-meta {
@@ -1100,8 +1119,22 @@ body[data-auth="out"] {
 .badge-failed   { background: var(--red-bg);      color: var(--red); }
 .badge-pending  { background: var(--yellow-bg);   color: var(--yellow); }
 
-/* Fleet ownership */
+/* Fleet ownership. The detail header shows the full "managed by fleet:<id>";
+   a fleet id is capped at 64 chars of [a-z0-9-] (ValidFleetID), so the widest
+   possible badge is far narrower than the 1100px detail column and needs no
+   truncation. */
 .badge-fleet    { background: var(--accent-glow); color: var(--cyan-bright); }
+
+/* On a card the badge is the bare word "fleet", so it is dressed down to match
+   the autoscale chip beside it: this is metadata about how the app is governed,
+   not a state the operator should read as competing with the status badge. */
+.app-header-badges .badge-fleet {
+  background: var(--gray-bg);
+  color: var(--text-soft);
+  font-size: 0.65rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.4rem;
+}
 .app-detail-fleet {
   display: flex;
   flex-direction: column;

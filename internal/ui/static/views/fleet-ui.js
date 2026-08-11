@@ -19,12 +19,26 @@ export function fleetBadgeText(app) {
   return isFleetManaged(app) ? `managed by ${app.managed_by}` : null;
 }
 
+// Card label. Deliberately a constant, not the fleet id: the card only needs
+// to say "this app is governed by a manifest, do not hand-edit it", and WHICH
+// fleet is detail-page material. A fixed label also makes card overflow
+// structurally impossible, where an operator-chosen id is unbounded. The id
+// stays one hover away in fleetBadgeTooltip.
+export const FLEET_BADGE_COMPACT_LABEL = 'fleet';
+
 export const FLEET_BADGE_TOOLTIP =
   'Configuration for this app is governed by a fleet manifest. ' +
   'UI/CLI changes to fleet-declared fields will be reverted on the next ' +
   '`fleet apply`. ' +
   'Run `shinyhub fleet plan -f <your-manifest>` to check this app against ' +
   'its manifest.';
+
+// Tooltip for the compact badge. The card label omits the id entirely, so the
+// tooltip is the only place it appears on the dashboard and must lead with it.
+export function fleetBadgeTooltip(app) {
+  const full = fleetBadgeText(app);
+  return full ? `${full}. ${FLEET_BADGE_TOOLTIP}` : FLEET_BADGE_TOOLTIP;
+}
 
 const DIGEST_PREFIX = 'sha256:';
 const DIGEST_SHORT_LEN = 12;
@@ -57,12 +71,17 @@ export function segmentApps(apps, segment) {
 
 // Builds a fleet ownership badge for managed apps; null otherwise so callers
 // can do `const b = makeFleetBadge(...); if (b) parent.appendChild(b);`.
-export function makeFleetBadge(doc, app) {
+//
+// opts.compact selects the card form: the fixed "fleet" label plus the full
+// ownership sentence in the tooltip. The uncompacted form is the detail header,
+// which has room for the id and shows it inline.
+export function makeFleetBadge(doc, app, opts = {}) {
   if (!isFleetManaged(app)) return null;
+  const compact = opts.compact === true;
   const badge = doc.createElement('span');
   badge.className = 'badge badge-fleet';
-  badge.textContent = fleetBadgeText(app);
-  badge.title = FLEET_BADGE_TOOLTIP;
+  badge.textContent = compact ? FLEET_BADGE_COMPACT_LABEL : fleetBadgeText(app);
+  badge.title = compact ? fleetBadgeTooltip(app) : FLEET_BADGE_TOOLTIP;
   return badge;
 }
 
