@@ -776,6 +776,11 @@ func (s *Server) buildRouter() chi.Router {
 		r.With(rateLimitByUser(s.dataLimiter)).Put("/api/apps/{slug}/data/*", s.handleDataPut)
 		r.Delete("/api/apps/{slug}/data/*", s.handleDataDelete)
 
+		r.Get("/api/projects", s.handleListProjects)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/projects", s.handleCreateProject)
+		r.Patch("/api/projects/{slug}", s.handlePatchProject)
+		r.Delete("/api/projects/{slug}", s.handleDeleteProject)
+
 		r.Get("/api/apps/{slug}/icon", s.handleGetAppIcon)
 		r.With(rateLimitByUser(s.dataLimiter)).Put("/api/apps/{slug}/icon", s.handleSetAppIcon)
 		r.Delete("/api/apps/{slug}/icon", s.handleClearAppIcon)
