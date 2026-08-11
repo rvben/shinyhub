@@ -33,6 +33,7 @@ import { formatStatus } from '/static/views/status-label.js';
 import { userRowCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
+import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -402,16 +403,40 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // Renders apps into the provided grid and empty-state elements. Takes explicit
-  // DOM references so mountAppsGrid can call it from the view module without
-  // closing over the closure-level appGrid/emptyState constants.
-  function renderGridVerbatim(apps, gridEl, emptyEl) {
+  // Renders grouped apps into the provided grid and empty-state elements. Takes
+  // explicit DOM references so mountAppsGrid can call it from the view module
+  // without closing over the closure-level appGrid/emptyState constants.
+  function renderGridVerbatim(groups, gridEl, emptyEl) {
     gridEl.textContent = '';
-    const empty = apps.length === 0;
+    const total = groups.reduce((n, g) => n + g.apps.length, 0);
+    const empty = total === 0;
     emptyEl.hidden = !empty;
     if (empty) renderEmptyStateCopy();
 
-    for (const app of apps) {
+    // A lone ungrouped group needs no heading: it would label the whole grid
+    // "All apps", which is what the grid already is. This keeps the dashboard
+    // of an operator who uses no projects looking exactly as it does today.
+    const soleUngrouped = groups.length === 1 && groups[0].project === '';
+
+    for (const group of groups) {
+      if (!soleUngrouped) {
+        const heading = document.createElement('h2');
+        heading.className = 'app-grid-group-heading';
+        if (group.iconEmoji) {
+          const icon = document.createElement('span');
+          icon.className = 'app-grid-group-icon';
+          icon.textContent = group.iconEmoji;
+          // Decorative: the heading text already names the project.
+          icon.setAttribute('aria-hidden', 'true');
+          heading.appendChild(icon);
+        }
+        const label = document.createElement('span');
+        label.textContent = group.name || 'All apps';
+        heading.appendChild(label);
+        gridEl.appendChild(heading);
+      }
+
+    for (const app of group.apps) {
       const card = document.createElement('div');
       card.className = 'app-card';
 
@@ -547,6 +572,7 @@ document.addEventListener('DOMContentLoaded', () => {
       card.appendChild(actions);
       gridEl.appendChild(card);
     }
+    }
   }
 
   function renderApps() {
@@ -567,23 +593,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const segEl = document.getElementById('apps-segment');
     apps = segmentApps(apps, segEl ? segEl.value : 'all');
 
-    // Sort.
+    // Sort is applied WITHIN each project group, using the same comparators as
+    // before (they now live in app-grid-groups.js). Groups themselves keep the
+    // shared order: ungrouped first, then projects by display name. Ordering
+    // sections by "most recent deploy" would make headings jump between
+    // renders, which defeats the purpose of an index.
     const sortKey = sortEl ? sortEl.value : 'default';
-    if (sortKey === 'name') {
-      apps.sort((a, b) => a.name.localeCompare(b.name));
-    } else if (sortKey === 'deploy') {
-      apps.sort((a, b) => {
-        const ta = a.last_deployed_at ? new Date(a.last_deployed_at).getTime() : 0;
-        const tb = b.last_deployed_at ? new Date(b.last_deployed_at).getTime() : 0;
-        return tb - ta;
-      });
-    } else if (sortKey === 'status') {
-      const order = { crashed: 0, running: 1, stopped: 2, failed: 3 };
-      apps.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
-    }
-    // 'default' keeps server order.
-
-    renderGridVerbatim(apps, appGrid, emptyState);
+    renderGridVerbatim(groupAppsForGrid(apps, { sortKey }), appGrid, emptyState);
   }
 
   function showLoggedOut() {

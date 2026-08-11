@@ -3195,3 +3195,34 @@ func TestRollbackFailureUsesToastNotAlert(t *testing.T) {
 	assertContains(t, "views/app-detail.js", "ctx.flashToast(msg, 'error')",
 		"a non-OK rollback response must be reported via ctx.flashToast, not a blocking alert()")
 }
+
+// The grid grouping decision lives in a unit-tested module, and app.js only
+// calls it. jsdom cannot import the app.js IIFE, so these string assertions are
+// the only thing standing between "app-grid-groups.test.js is green" and "the
+// dashboard still renders one flat list".
+func TestGridGroupsByProject(t *testing.T) {
+	assertContains(t, "app.js", "groupAppsForGrid",
+		"renderApps must group through the unit-tested groupAppsForGrid helper, not inline")
+	assertContains(t, "app.js", "views/app-grid-groups.js",
+		"app.js must import the grid grouper module")
+	assertContains(t, "app.js", "app-grid-group-heading",
+		"renderGridVerbatim must emit a per-group heading, or grouping is computed and thrown away")
+	assertContains(t, "views/apps-grid.js", "groupAppsForGrid",
+		"the apps-grid fallback render path must group too, or a mount without applyGridFilters renders flat")
+	// The sort must reach the grouper rather than being applied across the whole
+	// list first; sorting before grouping silently makes the sort a no-op at the
+	// group level and reorders nothing the user can see.
+	assertContains(t, "app.js", "groupAppsForGrid(apps, { sortKey",
+		"renderApps must pass the selected sort key into the grouper so it applies within each group")
+	assertNotContains(t, "app.js", "apps.sort((a, b) => a.name.localeCompare(b.name))",
+		"the in-group name comparator must live in app-grid-groups.js, not be duplicated in renderApps")
+}
+
+// A heading inserted as a direct child of the CSS grid occupies one cell unless
+// it is told to span the row, which renders as a heading wedged beside a card.
+func TestGridGroupHeadingSpansTheRow(t *testing.T) {
+	assertContains(t, "style.css", ".app-grid-group-heading",
+		"style.css must style the grid group heading")
+	assertContains(t, "style.css", "grid-column: 1 / -1",
+		"the grid group heading must span the full grid row")
+}
