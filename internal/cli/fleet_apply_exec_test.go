@@ -870,6 +870,18 @@ func TestApplyConfigDriftSendsProjectSlug(t *testing.T) {
 	if _, wrong := got["project"]; wrong {
 		t.Error("body must not carry the manifest key name")
 	}
+
+	// A declared empty project is a real value (ungroup the app), not an
+	// absent key, so it must still be sent: keying off *Project != "" would
+	// silently drop this PATCH and leave the app grouped.
+	drift = []fleet.ConfigDriftItem{{Key: "project", Server: `"old"`, Desired: `""`}}
+	if err := applyConfigDrift(cfg, "a", drift, fleet.Config{Project: strp("")}, nil, nil, "run"); err != nil {
+		t.Fatalf("applyConfigDrift: %v", err)
+	}
+	v, present := got["project_slug"]
+	if !present || v != "" {
+		t.Errorf(`body = %#v (present=%v), want an explicit empty project_slug`, v, present)
+	}
 }
 
 func TestReassertFleetConfigIncludesProject(t *testing.T) {
@@ -887,6 +899,17 @@ func TestReassertFleetConfigIncludesProject(t *testing.T) {
 	}
 	if got["project_slug"] != "fleet-project" {
 		t.Errorf("body = %v, want project_slug=fleet-project", got)
+	}
+
+	// A fleet manifest declaring project = "" means the fleet wants the app
+	// ungrouped, and that must be reasserted like any other declared value;
+	// keying off *Project != "" would treat it as undeclared and skip it.
+	if err := reassertFleetConfig(cfg, "a", fleet.Config{Project: strp("")}, nil, nil, "run"); err != nil {
+		t.Fatalf("reassertFleetConfig: %v", err)
+	}
+	v, present := got["project_slug"]
+	if !present || v != "" {
+		t.Errorf(`body = %#v (present=%v), want an explicit empty project_slug`, v, present)
 	}
 }
 
