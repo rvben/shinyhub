@@ -14,6 +14,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      notes-drift: ${{ steps.verify-notes.outputs.drift }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -90,31 +92,44 @@ jobs:
 
       # The release-notes hand-off only runs at tag time, so no CI run before a
       # release can prove GoReleaser honored it. This checks it from the other
-      # side: read back the body GitHub actually published and fail if it is not
-      # the text we handed over. Like the attestation steps below, it runs after
-      # publish, so a mismatch is a loud signal to fix and re-run rather than a
-      # broken release. Without it, a silently ignored flag would publish an
-      # empty body (GoReleaser's own generation is disabled) and every check
-      # would still be green.
+      # side: read back the body GitHub actually published and compare it to the
+      # text we handed over. On a mismatch it rewrites the body from CHANGELOG.md
+      # and records drift for the notes-drift job, which fails the run without
+      # taking the publish jobs down with it. v0.11.3 is why: the flag was
+      # silently ignored, this step failed, and PyPI never got the version, so
+      # recovering cost a whole version number rather than a re-run.
       - name: Verify the published release body matches CHANGELOG.md
+        id: verify-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release view "$GITHUB_REF_NAME" --json body -q .body > tmp/published-body.md
           # GitHub round-trips neither line endings nor trailing blank lines
           # reliably, so normalize both before comparing.
           norm() {
             sed 's/\r$//' "$1" | awk 'NF {last = NR} {line[NR] = $0} END {for (i = 1; i <= last; i++) print line[i]}'
           }
+          published() {
+            gh release view "$GITHUB_REF_NAME" --json body -q .body > tmp/published-body.md
+            norm tmp/published-body.md > tmp/notes-published.md
+          }
           norm tmp/release-notes.md > tmp/notes-sent.md
-          norm tmp/published-body.md > tmp/notes-published.md
+          published
+          if cmp -s tmp/notes-sent.md tmp/notes-published.md; then
+            echo "Release body matches CHANGELOG.md ($(wc -l < tmp/notes-sent.md | tr -d ' ') lines)"
+            exit 0
+          fi
+          echo "::warning::Published release body is not the CHANGELOG.md section handed to GoReleaser; rewriting it"
+          diff -u tmp/notes-sent.md tmp/notes-published.md || true
+          echo "drift=true" >> "$GITHUB_OUTPUT"
+          gh release edit "$GITHUB_REF_NAME" --notes-file tmp/release-notes.md
+          published
           if ! cmp -s tmp/notes-sent.md tmp/notes-published.md; then
-            echo "::error::Published release body is not the CHANGELOG.md section handed to GoReleaser"
+            echo "::error::Rewriting the release body from CHANGELOG.md did not take"
             diff -u tmp/notes-sent.md tmp/notes-published.md || true
             exit 1
           fi
-          echo "Release body matches CHANGELOG.md ($(wc -l < tmp/notes-sent.md | tr -d ' ') lines)"
+          echo "Release body corrected from CHANGELOG.md"
 
       # SLSA build provenance. These run after publish: the artifacts are already
       # released, so an attestation hiccup is re-runnable and never blocks the
@@ -140,6 +155,19 @@ jobs:
           subject-name: ghcr.io/rvben/shinyhub
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
+
+  # Turns a corrected release body into a red run. Nothing depends on this job,
+  # so the failure is visible without stranding the PyPI and image publishing
+  # that the release job feeds.
+  notes-drift:
+    needs: release
+    if: needs.release.outputs.notes-drift == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report the release body drift
+        run: |
+          echo "::error::GoReleaser did not publish the CHANGELOG.md section; the release job rewrote it. Fix the release-notes hand-off before the next tag."
+          exit 1
 
   wheels:
     needs: release
