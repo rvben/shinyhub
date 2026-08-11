@@ -176,7 +176,7 @@ func TestEnsureFleetApp_NoVisibilityWarningForExistingApp(t *testing.T) {
 
 	var buf bytes.Buffer
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	if err := ensureFleetApp(cfg, "demo", "private", &buf); err != nil {
+	if err := ensureFleetApp(cfg, "demo", "private", "", &buf); err != nil {
 		t.Fatalf("ensureFleetApp: %v", err)
 	}
 	if buf.Len() != 0 {
@@ -224,7 +224,7 @@ func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 
-	dg, committed, _, _, err := deployAppBundle(cfg, "demo", dir, "private", io.Discard, "run-1", 5*time.Second)
+	dg, committed, _, _, err := deployAppBundle(cfg, "demo", dir, "private", "", io.Discard, "run-1", 5*time.Second)
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestDeployAppBundle_EmitsHooksSkippedWarning(t *testing.T) {
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 
 	var buf bytes.Buffer
-	if _, _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", &buf, "run-1", 5*time.Second); err != nil {
+	if _, _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", "", &buf, "run-1", 5*time.Second); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	out := buf.String()
@@ -316,7 +316,7 @@ func TestDeployAppBundle_EmitsIconShadowWarning(t *testing.T) {
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 
 	var buf bytes.Buffer
-	if _, _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", &buf, "run-1", 5*time.Second); err != nil {
+	if _, _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", "", &buf, "run-1", 5*time.Second); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	out := buf.String()
@@ -353,7 +353,7 @@ func TestDeployAppBundle_NoIconShadowWarningWhenFlagAbsent(t *testing.T) {
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 
 	var buf bytes.Buffer
-	if _, _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", &buf, "run-1", 5*time.Second); err != nil {
+	if _, _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", "", &buf, "run-1", 5*time.Second); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	if out := buf.String(); strings.Contains(out, "still stored") {
@@ -382,7 +382,7 @@ func TestDeployAppBundle_ClientRejectionIsNotCommitted(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, committed, _, _, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	_, committed, _, _, err := deployAppBundle(cfg, "demo", dir, "", "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure to propagate")
 	}
@@ -415,7 +415,7 @@ func TestDeployAppBundle_ServerErrorIsNotCommitted(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, committed, _, _, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	_, committed, _, _, err := deployAppBundle(cfg, "demo", dir, "", "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure to propagate")
 	}
@@ -448,7 +448,7 @@ func TestDeployAppBundle_ReturnsFirstFireRefs(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	var out bytes.Buffer
-	_, committed, refs, _, err := deployAppBundle(cfg, "warmapp", dir, "", &out, "run-1", time.Minute)
+	_, committed, refs, _, err := deployAppBundle(cfg, "warmapp", dir, "", "", &out, "run-1", time.Minute)
 	if err != nil {
 		t.Fatalf("deployAppBundle: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestDeployAppBundle_ReturnsFailureKindFromBody(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, _, _, kind, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	_, _, _, kind, err := deployAppBundle(cfg, "demo", dir, "", "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure")
 	}
@@ -507,7 +507,7 @@ func TestDeployAppBundle_FailureKindFallbackForOldServer(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, _, _, kind, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	_, _, _, kind, err := deployAppBundle(cfg, "demo", dir, "", "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure")
 	}
@@ -537,7 +537,7 @@ func TestDeployAppBundle_BundleRejectionClassifiedBundleInvalid(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	_, committed, _, kind, err := deployAppBundle(cfg, "demo", dir, "", io.Discard, "r", 5*time.Second)
+	_, committed, _, kind, err := deployAppBundle(cfg, "demo", dir, "", "", io.Discard, "r", 5*time.Second)
 	if err == nil {
 		t.Fatal("expected deploy failure")
 	}

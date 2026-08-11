@@ -109,19 +109,30 @@ func precondPtrs(opt convergeOpts, digest, managedBy string) (*string, *string) 
 	return &d, &m
 }
 
+// declaredProject flattens a manifest's declared project for the create path.
+// Both nil ("not declared") and a non-nil "" ("ungrouped") produce "", because
+// a new app is ungrouped by default either way; the distinction only matters on
+// the PATCH path, where the pointer preserves it.
+func declaredProject(c fleet.Config) string {
+	if c.Project == nil {
+		return ""
+	}
+	return *c.Project
+}
+
 // deployWithRetry runs the per-app deploy up to 1+retries times and returns
 // the freshly promoted digest. Deploy carries no precondition (last-writer-
 // wins); a transient failure is retried, the attempt count is reported.
 // committed is true if any attempt's bundle was accepted by the server, so
 // callers can tell a pre-commit failure (safe to roll back) from a post-commit
 // one (this fleet's source is already live).
-func deployWithRetry(cfg *cliConfig, slug, dir, visibility string, opt convergeOpts, out io.Writer) (promoted string, attempts int, committed bool, firstFires []firstFireRef, failed []attemptOutcome, err error) {
+func deployWithRetry(cfg *cliConfig, slug, dir, visibility, project string, opt convergeOpts, out io.Writer) (promoted string, attempts int, committed bool, firstFires []firstFireRef, failed []attemptOutcome, err error) {
 	total := 1 + opt.retries
 	for attempts = 1; attempts <= total; attempts++ {
 		var c bool
 		var ff []firstFireRef
 		var kind deployfail.Kind
-		promoted, c, ff, kind, err = deployAppBundle(cfg, slug, dir, visibility, out, opt.runID, opt.healthTimeout)
+		promoted, c, ff, kind, err = deployAppBundle(cfg, slug, dir, visibility, project, out, opt.runID, opt.healthTimeout)
 		committed = committed || c
 		// Keep the first-fire refs from whichever attempt actually fired them.
 		// A later retry of an already-created schedule returns none (the gate is
@@ -187,6 +198,14 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 			if v := declaredString(declared, c.Key); v != nil {
 				body[c.Key] = *v
 			}
+		case "project":
+			// The drift key is `project` (what the operator wrote in the
+			// manifest); the API field is `project_slug`. Rebuilt from the
+			// declared config like name and description above: the drift item
+			// carries a quoted display string, not a value to send.
+			if v := declaredString(declared, c.Key); v != nil {
+				body["project_slug"] = *v
+			}
 		case "autoscale":
 			// autoscale is a compound value: reconstruct the PATCH object from the
 			// declared config rather than parsing the human display string.
@@ -207,18 +226,20 @@ func declaredString(c fleet.Config, key string) *string {
 		return c.Name
 	case "description":
 		return c.Description
+	case "project":
+		return c.Project
 	}
 	return nil
 }
 
 // reassertFleetConfig re-PATCHes the fleet-declared keys that a bundle deploy
 // may have overwritten from the new bundle's shinyhub.toml: the autoscale
-// policy and the display metadata (name, description), all of which the bundle
-// [app] block can also declare. The fleet manifest is the outer authority, so
-// it wins over the bundle. Every key here is one whose PATCH does NOT trigger a
-// redeploy (unlike replicas), so this is safe to run after any deploy, and it
-// is idempotent when the value was already applied via drift. No-op when the
-// manifest declares none of them.
+// policy and the display metadata (name, description, project), all of which
+// the bundle [app] block can also declare. The fleet manifest is the outer
+// authority, so it wins over the bundle. Every key here is one whose PATCH
+// does NOT trigger a redeploy (unlike replicas), so this is safe to run after
+// any deploy, and it is idempotent when the value was already applied via
+// drift. No-op when the manifest declares none of them.
 func reassertFleetConfig(cfg *cliConfig, slug string, c fleet.Config, ifD, ifMB *string, runID string) error {
 	body := map[string]any{}
 	if c.Autoscale != nil {
@@ -229,6 +250,9 @@ func reassertFleetConfig(cfg *cliConfig, slug string, c fleet.Config, ifD, ifMB 
 	}
 	if c.Description != nil {
 		body["description"] = *c.Description
+	}
+	if c.Project != nil {
+		body["project_slug"] = *c.Project
 	}
 	if len(body) == 0 {
 		return nil
@@ -352,7 +376,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		// (2xx, or an ambiguous error whose readback shows the promoted digest
 		// advanced past the pre-deploy one), the reservation is KEPT because
 		// this fleet's source is now the app's bundle.
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attemptsDetail = failed
 		if err != nil {
 			if !committed && !adoptBundleWentLive(cfg, d.Slug, d.ServerDigest) {
@@ -392,7 +416,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		return done(statusDeleted)
 
 	case fleet.ActionCreate:
-		promoted, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		promoted, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
@@ -445,7 +469,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		return done(statusCreated)
 
 	case fleet.ActionUpdateSource:
-		promoted, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		promoted, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
@@ -476,7 +500,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		// Mandatory ordering: deploy first, then patch fleet config
 		// on top with a precondition built from the FRESHLY promoted digest -
 		// never the stale pre-deploy one.
-		promoted, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, opt, out)
+		promoted, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {

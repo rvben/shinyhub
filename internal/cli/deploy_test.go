@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1219,5 +1220,56 @@ func TestDeploy_FirstFire_FailureIsFatal(t *testing.T) {
 	cmd.SetArgs([]string{dir, "--slug", "warmapp", "--wait-for-warm"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatalf("expected non-nil error when first-fire fails under --wait-for-warm")
+	}
+}
+
+func TestEnsureAppCoreCreatesWithProject(t *testing.T) {
+	var created map[string]any
+	cfg := fleetProjectSrv(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		created = jsonBody(t, r)
+		w.WriteHeader(http.StatusCreated)
+	})
+	if err := ensureAppCore(cfg, "a", "private", "analytics", io.Discard, false); err != nil {
+		t.Fatalf("ensureAppCore: %v", err)
+	}
+	if created["project_slug"] != "analytics" {
+		t.Errorf("create body = %v, want project_slug=analytics", created)
+	}
+}
+
+func TestEnsureAppCoreOmitsEmptyProject(t *testing.T) {
+	var created map[string]any
+	cfg := fleetProjectSrv(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		created = jsonBody(t, r)
+		w.WriteHeader(http.StatusCreated)
+	})
+	if err := ensureAppCore(cfg, "a", "", "", io.Discard, false); err != nil {
+		t.Fatalf("ensureAppCore: %v", err)
+	}
+	if _, present := created["project_slug"]; present {
+		t.Errorf("create body = %v, want no project_slug key", created)
+	}
+}
+
+func TestEnsureAppCoreNeverChangesAnExistingAppsProject(t *testing.T) {
+	cfg := fleetProjectSrv(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		t.Errorf("an existing app must not be written, got %s", r.Method)
+	})
+	// Like visibility, the project is used only on create: reconciling an
+	// existing app's project is applyConfigDrift's job.
+	if err := ensureAppCore(cfg, "a", "public", "analytics", io.Discard, false); err != nil {
+		t.Fatalf("ensureAppCore: %v", err)
 	}
 }

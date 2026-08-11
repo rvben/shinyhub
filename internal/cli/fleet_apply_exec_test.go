@@ -851,3 +851,50 @@ func TestConvergeFleet_ExitCodeParityParallelSerial(t *testing.T) {
 		t.Fatalf("one failing app must yield exit 4, got %d (%q)", sCode, sReason)
 	}
 }
+
+func TestApplyConfigDriftSendsProjectSlug(t *testing.T) {
+	var got map[string]any
+	cfg := fleetProjectSrv(t, func(w http.ResponseWriter, r *http.Request) {
+		got = jsonBody(t, r)
+		w.WriteHeader(http.StatusOK)
+	})
+	drift := []fleet.ConfigDriftItem{{Key: "project", Server: `"old"`, Desired: `"new"`}}
+	if err := applyConfigDrift(cfg, "a", drift, fleet.Config{Project: strp("new")}, nil, nil, "run"); err != nil {
+		t.Fatalf("applyConfigDrift: %v", err)
+	}
+	// The API field is project_slug even though the drift key is project; the
+	// drift item's Desired is a quoted display string, never a value to send.
+	if got["project_slug"] != "new" {
+		t.Errorf("body = %v, want project_slug=new", got)
+	}
+	if _, wrong := got["project"]; wrong {
+		t.Error("body must not carry the manifest key name")
+	}
+}
+
+func TestReassertFleetConfigIncludesProject(t *testing.T) {
+	var got map[string]any
+	cfg := fleetProjectSrv(t, func(w http.ResponseWriter, r *http.Request) {
+		got = jsonBody(t, r)
+		w.WriteHeader(http.StatusOK)
+	})
+	// Without this, a bundle declaring [app] project = "bundle-project" wins
+	// over a fleet manifest declaring project = "fleet-project": the deploy
+	// applies the bundle's value and nothing corrects it, inverting the
+	// documented "fleet manifest is the outer authority" order.
+	if err := reassertFleetConfig(cfg, "a", fleet.Config{Project: strp("fleet-project")}, nil, nil, "run"); err != nil {
+		t.Fatalf("reassertFleetConfig: %v", err)
+	}
+	if got["project_slug"] != "fleet-project" {
+		t.Errorf("body = %v, want project_slug=fleet-project", got)
+	}
+}
+
+func TestDeclaredStringProject(t *testing.T) {
+	if v := declaredString(fleet.Config{Project: strp("p")}, "project"); v == nil || *v != "p" {
+		t.Errorf("declaredString(project) = %v, want p", v)
+	}
+	if v := declaredString(fleet.Config{}, "project"); v != nil {
+		t.Errorf("an undeclared project must return nil, got %v", v)
+	}
+}
