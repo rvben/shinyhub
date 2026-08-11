@@ -62,7 +62,7 @@ func newActivationHarness(t *testing.T, slug string) *activationHarness {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: u.ID})
 	h.token, _ = auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
 
 	body, ctype := buildBundleUpload(t, "app.py", "print(1)\n")

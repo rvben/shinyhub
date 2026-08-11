@@ -94,7 +94,7 @@ func applyExitCode(res []applyResult) (int, string) {
 	case t.conflicts > 0:
 		return 5, fmt.Sprintf("CONFLICTS - %d app(s) changed under us; re-run plan", t.conflicts)
 	case t.failed > 0:
-		return 4, fmt.Sprintf("PARTIAL - %d app(s) failed after retries", t.failed)
+		return 4, fmt.Sprintf("PARTIAL - %d failed after retries", t.failed)
 	default:
 		return 0, "OK - all converged"
 	}
@@ -134,27 +134,11 @@ func slugColumnWidth(res []applyResult) int {
 	return w
 }
 
-// renderApplyReport prints the final table + summary + exit reason and
-// returns the ExitCodeError implied by the results (nil for exit 0). Quiet
-// collapses to the summary + result line only. The glyph and the status word
-// always carry the signal on their own, so color only weights what is already
-// legible: strip it and the report reads identically.
-func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet bool) error {
-	s := stylerFor(out)
-	code, reason := applyExitCode(res)
-	t := tallyResults(res)
-	summary := fmt.Sprintf(
-		"Applied: %d created, %d updated, %d deleted, %d unchanged, %d adopted, %d skipped, %d failed, %d conflicts.",
-		t.created, t.updated, t.deleted, t.unchanged, t.adopted, t.skipped, t.failed, t.conflicts)
-
-	if quiet {
-		fmt.Fprintln(out, summary)
-		fmt.Fprintf(out, "Result: %s. Exit %d.\n", reason, code)
-		return applyExitErr(code, reason)
-	}
-
-	fmt.Fprintf(out, "shinyhub fleet apply  ·  fleet_id=%s\n\n", fleetID)
-	wSlug := slugColumnWidth(res)
+// renderResultRows prints one line per result plus its attempt/first-fire
+// detail lines. Shared by the projects and apps sections of renderApplyReport
+// so both use the same glyph and status-word rules; each section sizes its own
+// slug column since projects and apps are never aligned against each other.
+func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 	for _, r := range res {
 		statusWord := s.status(string(r.status))
 		if r.status == statusFailed && r.deployFailed {
@@ -188,11 +172,44 @@ func renderApplyReport(out io.Writer, fleetID string, res []applyResult, quiet b
 			}
 		}
 	}
+}
+
+// renderApplyReport prints the final table + summary + exit reason and
+// returns the ExitCodeError implied by the results (nil for exit 0). Quiet
+// collapses to the summary + result line only. The glyph and the status word
+// always carry the signal on their own, so color only weights what is already
+// legible: strip it and the report reads identically.
+func renderApplyReport(out io.Writer, fleetID string, o applyOutcome, quiet bool) error {
+	s := stylerFor(out)
+	all := o.all()
+	code, reason := applyExitCode(all)
+	t := tallyResults(all)
+	summary := fmt.Sprintf(
+		"Applied: %d created, %d updated, %d deleted, %d unchanged, %d adopted, %d skipped, %d failed, %d conflicts.",
+		t.created, t.updated, t.deleted, t.unchanged, t.adopted, t.skipped, t.failed, t.conflicts)
+
+	if quiet {
+		fmt.Fprintln(out, summary)
+		fmt.Fprintf(out, "Result: %s. Exit %d.\n", reason, code)
+		return applyExitErr(code, reason)
+	}
+
+	fmt.Fprintf(out, "shinyhub fleet apply  ·  fleet_id=%s\n\n", fleetID)
+
+	// Omitted entirely when the manifest declares no projects, so existing
+	// output stays byte-identical for manifests that do not use the feature.
+	if len(o.projects) > 0 {
+		fmt.Fprintf(out, "Projects (%d)\n", len(o.projects))
+		renderResultRows(out, s, o.projects, slugColumnWidth(o.projects))
+		fmt.Fprintln(out)
+	}
+
+	renderResultRows(out, s, o.apps, slugColumnWidth(o.apps))
 	fmt.Fprintf(out, "\n%s\nResult: %s. Exit %d.\n", summary, reason, code)
 
 	// Failures end with the single most useful next command; conflicts point
 	// back at plan.
-	for _, r := range res {
+	for _, r := range all {
 		switch r.status {
 		case statusFailed:
 			fmt.Fprintf(out, "  %s: %v\n", s.red(r.slug), r.err)
@@ -254,18 +271,52 @@ type applyJSONApp struct {
 	FirstFires    []firstFireOutcome `json:"first_fires,omitempty"`
 }
 
-type applyJSONEnvelope struct {
-	SchemaVersion int            `json:"schema_version"`
-	FleetID       string         `json:"fleet_id"`
-	Server        string         `json:"server"`
-	GeneratedAt   string         `json:"generated_at"`
-	Apps          []applyJSONApp `json:"apps"`
-	Summary       jsonSummary    `json:"summary"`
+// applyJSONProject is a project row in the apply JSON envelope: display
+// metadata plus its convergence result. It carries no digest, adopt or prune
+// fields - a project has none of those - which is why it is not applyJSONApp.
+type applyJSONProject struct {
+	Slug   string          `json:"slug"`
+	Action string          `json:"action"`
+	Drift  []jsonDriftItem `json:"drift"`
+	Result *jsonResult     `json:"result,omitempty"`
 }
 
-func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []fleet.AppDiff, res []applyResult, code int, reason string) error {
-	bySlug := make(map[string]applyResult, len(res))
-	for _, r := range res {
+type applyJSONEnvelope struct {
+	SchemaVersion int                `json:"schema_version"`
+	FleetID       string             `json:"fleet_id"`
+	Server        string             `json:"server"`
+	GeneratedAt   string             `json:"generated_at"`
+	Projects      []applyJSONProject `json:"projects"`
+	Apps          []applyJSONApp     `json:"apps"`
+	Summary       jsonSummary        `json:"summary"`
+}
+
+// resultToJSON maps one applyResult onto the shared jsonResult shape used by
+// both apps and projects.
+func resultToJSON(r applyResult) *jsonResult {
+	jr := &jsonResult{
+		Status:     string(r.status),
+		Attempts:   r.attempts,
+		DurationMS: r.duration.Milliseconds(),
+		LogTail:    r.logTail,
+	}
+	if r.err != nil {
+		jr.Error = r.err.Error()
+	}
+	for _, a := range r.attemptsDetail {
+		jr.AttemptDetails = append(jr.AttemptDetails, jsonAttempt{
+			Attempt: a.Attempt, FailureKind: string(a.Kind), Error: a.Err,
+		})
+	}
+	if r.status == statusFailed && r.deployFailed {
+		jr.FailureKind = string(finalFailureKind(r))
+	}
+	return jr
+}
+
+func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []fleet.AppDiff, projects []fleet.ProjectDiff, o applyOutcome, code int, reason string) error {
+	bySlug := make(map[string]applyResult, len(o.apps))
+	for _, r := range o.apps {
 		bySlug[r.slug] = r
 	}
 	sorted := append([]fleet.AppDiff(nil), diff...)
@@ -284,34 +335,39 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
 		}
 		if r, ok := bySlug[d.Slug]; ok {
-			jr := &jsonResult{
-				Status:     string(r.status),
-				Attempts:   r.attempts,
-				DurationMS: r.duration.Milliseconds(),
-				LogTail:    r.logTail,
-			}
-			if r.err != nil {
-				jr.Error = r.err.Error()
-			}
-			for _, a := range r.attemptsDetail {
-				jr.AttemptDetails = append(jr.AttemptDetails, jsonAttempt{
-					Attempt: a.Attempt, FailureKind: string(a.Kind), Error: a.Err,
-				})
-			}
-			if r.status == statusFailed && r.deployFailed {
-				jr.FailureKind = string(finalFailureKind(r))
-			}
-			aj.Result = jr
+			aj.Result = resultToJSON(r)
 			aj.FirstFires = r.firstFires
 		}
 		apps = append(apps, aj)
 	}
-	t := tallyResults(res)
+
+	projectsBySlug := make(map[string]applyResult, len(o.projects))
+	for _, r := range o.projects {
+		projectsBySlug[r.slug] = r
+	}
+	sortedProjects := append([]fleet.ProjectDiff(nil), projects...)
+	sort.Slice(sortedProjects, func(i, j int) bool { return sortedProjects[i].Slug < sortedProjects[j].Slug })
+
+	jsonProjects := make([]applyJSONProject, 0, len(sortedProjects))
+	for _, d := range sortedProjects {
+		drift := make([]jsonDriftItem, 0, len(d.Drift))
+		for _, c := range d.Drift {
+			drift = append(drift, jsonDriftItem{Key: c.Key, Server: c.Server, Desired: c.Desired})
+		}
+		pj := applyJSONProject{Slug: d.Slug, Action: string(d.Action), Drift: drift}
+		if r, ok := projectsBySlug[d.Slug]; ok {
+			pj.Result = resultToJSON(r)
+		}
+		jsonProjects = append(jsonProjects, pj)
+	}
+
+	t := tallyResults(o.all())
 	env := applyJSONEnvelope{
 		SchemaVersion: fleetPlanSchemaVersion,
 		FleetID:       m.FleetID,
 		Server:        host,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		Projects:      jsonProjects,
 		Apps:          apps,
 		Summary: jsonSummary{
 			Counts: map[string]int{

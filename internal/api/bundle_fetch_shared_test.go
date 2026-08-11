@@ -45,7 +45,7 @@ func TestBundleFetchCrossInstanceSharedAppsDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
-	if err := instanceA.store.CreateApp(db.CreateAppParams{
+	if _, err := instanceA.store.CreateApp(db.CreateAppParams{
 		Slug:    "shared-app",
 		Name:    "Shared App",
 		OwnerID: owner.ID,

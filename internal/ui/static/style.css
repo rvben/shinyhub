@@ -835,6 +835,53 @@ body[data-auth="out"] {
   gap: 1.15rem;
 }
 
+/* Spans the whole grid row: as a direct child of the grid, a heading would
+   otherwise occupy a single cell and sit beside the first card. */
+.app-grid-group-heading {
+  grid-column: 1 / -1;
+  margin: 1.25rem 0 0.25rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.app-grid-group-heading:first-child {
+  margin-top: 0;
+}
+
+.app-grid-group-icon {
+  font-size: 1rem;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* Resets the heading's uppercase/weight so the edit control reads as a small
+   ghost button, not default button chrome wedged in the middle of an h2. */
+.app-grid-group-edit {
+  font: inherit;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+  font-size: 0.75rem;
+  color: var(--text-soft);
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.app-grid-group-edit:hover {
+  color: var(--text);
+  border-color: var(--cyan-bright);
+  background: var(--accent-dim);
+}
+
 @keyframes card-in {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -4108,6 +4155,7 @@ footer.brand-footer a { color:inherit; }
 .lp-search:focus { outline: none; border-color: var(--cyan-bright); box-shadow: 0 0 0 3px var(--accent-dim); }
 
 .lp-section { font-size: 0.9rem; font-weight: 650; color: var(--text-soft); letter-spacing: -0.01em; margin: 6px 0 12px; }
+.lp-section-icon { margin-right: 6px; }
 .lp-results > .lp-grid:not(:last-child) { margin-bottom: 22px; }
 
 /* Responsive tile grid: fills the row, no media query needed. The 280px floor

@@ -62,7 +62,7 @@ func TestRotateSecretCmd_ReEncryptsEnvSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner, _ := store.GetUserByUsername("o")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	app, _ := store.GetAppBySlug("demo")

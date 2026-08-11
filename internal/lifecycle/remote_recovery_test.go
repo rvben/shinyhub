@@ -88,7 +88,7 @@ func TestRecoverRemoteReplica_PersistsLiveEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app", Name: "app", OwnerID: u.ID, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app", Name: "app", OwnerID: u.ID, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 	app, err := store.GetAppBySlug("app")

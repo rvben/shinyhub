@@ -193,7 +193,7 @@ func TestDeploy_AppliesManifestAppAndSchedules_EndToEnd(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "myapp", Name: "My App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -303,7 +303,7 @@ func TestDeploy_AppliesManifestAutoscale_EndToEnd(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "scaler", Name: "Scaler", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -371,7 +371,7 @@ func TestDeploy_ManifestAutoscaleExceedsMaxReplicas_Fails400(t *testing.T) {
 	srv, store, token := newManifestE2EServerCfg(t, config.RuntimeConfig{MaxReplicas: 2})
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "capped", Name: "Capped", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -407,7 +407,7 @@ func TestDeploy_ManifestBadAppSettingFails400(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "badapp", Name: "Bad App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -448,7 +448,7 @@ func TestDeploy_ResponseIncludesManifestSummary(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "summary", Name: "Summary App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -543,7 +543,7 @@ func TestDeploy_ResponseSurfacesHooksSkipped(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "hooked", Name: "Hooked App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -590,7 +590,7 @@ func TestDeploy_ResponseOmitsHooksSkippedWhenNone(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "nohooks", Name: "No Hooks", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -622,7 +622,7 @@ func TestDeploy_ResponseOmitsManifestWhenAbsent(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "plain", Name: "Plain App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -655,7 +655,7 @@ func TestDeploy_ManifestPolicyViolation_LeavesRunningPoolIntact(t *testing.T) {
 	srv, store, token := newManifestE2EServerCfg(t, config.RuntimeConfig{MaxReplicas: 2})
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "polapp", Name: "Policy App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -749,7 +749,7 @@ func TestDeployRecordsContentDigest(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "digest-e2e", Name: "Digest E2E", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -836,7 +836,7 @@ func waitForRegisterRunSucceeded(t *testing.T, store *db.Store, scheduleID int64
 // on subsequent deploys (once a succeeded run exists, the gate closes).
 func TestDeploy_RunOnRegister_FiresOnceThenSelfGates(t *testing.T) {
 	srv, store, token := newManifestE2EServerWithJobs(t)
-	if err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 	app, _ := store.GetAppBySlug("warmapp")
@@ -902,7 +902,7 @@ run_on_register = true
 // run_on_register = true and disabled = true is NOT first-fired on deploy.
 func TestDeploy_RunOnRegister_DisabledNotFired(t *testing.T) {
 	srv, store, token := newManifestE2EServerWithJobs(t)
-	if err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 	app, _ := store.GetAppBySlug("warmapp")
@@ -944,7 +944,7 @@ func TestDeploy_ManifestUnknownAppFieldFails400(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "strictapp", Name: "Strict App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -976,7 +976,7 @@ func TestDeploy_AppliesManifestAccessGroups(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "accgrp", Name: "Access Groups App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)

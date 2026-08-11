@@ -42,7 +42,7 @@ func TestCheckColocatedSharedWiring(t *testing.T) {
 	}
 
 	// Create source app.
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug:    "source",
 		Name:    "Source",
 		OwnerID: owner.ID,
@@ -56,7 +56,7 @@ func TestCheckColocatedSharedWiring(t *testing.T) {
 	}
 
 	// Create consumer app.
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug:    "consumer",
 		Name:    "Consumer",
 		OwnerID: owner.ID,
@@ -169,7 +169,7 @@ func multiWorkerColocationFixture(t *testing.T) (*Server, *db.App, *db.App, stri
 	}
 
 	for _, slug := range []string{"source", "consumer"} {
-		if err := store.CreateApp(db.CreateAppParams{
+		if _, err := store.CreateApp(db.CreateAppParams{
 			Slug: slug, Name: slug, OwnerID: owner.ID, Access: "private",
 		}); err != nil {
 			t.Fatalf("create app %q: %v", slug, err)
@@ -307,7 +307,7 @@ func TestResolveColocation_RejectsMultipleWorkerTiers(t *testing.T) {
 	}
 	owner, _ := store.GetUserByUsername("owner")
 	for _, slug := range []string{"source", "consumer"} {
-		if err := store.CreateApp(db.CreateAppParams{
+		if _, err := store.CreateApp(db.CreateAppParams{
 			Slug: slug, Name: slug, OwnerID: owner.ID, Access: "private",
 		}); err != nil {
 			t.Fatalf("create app %q: %v", slug, err)
@@ -401,7 +401,7 @@ func TestResolveColocation_ControlPlaneConsumerWithMultiWorkerSource(t *testing.
 	}
 	owner, _ := store.GetUserByUsername("owner")
 	for _, slug := range []string{"source", "consumer"} {
-		if err := store.CreateApp(db.CreateAppParams{
+		if _, err := store.CreateApp(db.CreateAppParams{
 			Slug: slug, Name: slug, OwnerID: owner.ID, Access: "private",
 		}); err != nil {
 			t.Fatalf("create app %q: %v", slug, err)
@@ -489,7 +489,7 @@ func TestMaybeRestartForChange_RejectsInfeasibleColocationBeforeTeardown(t *test
 	}
 	owner, _ := store.GetUserByUsername("owner")
 	for _, slug := range []string{"source", "consumer"} {
-		if err := store.CreateApp(db.CreateAppParams{
+		if _, err := store.CreateApp(db.CreateAppParams{
 			Slug: slug, Name: slug, OwnerID: owner.ID, Access: "private",
 		}); err != nil {
 			t.Fatalf("create app %q: %v", slug, err)

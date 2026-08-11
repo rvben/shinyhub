@@ -49,7 +49,7 @@ func deployThenFail(t *testing.T) (restoreParams deploy.Params, restored bool) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "ra", Name: "RA", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "ra", Name: "RA", OwnerID: u.ID})
 	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
 
 	postDeploy := func() *httptest.ResponseRecorder {
@@ -99,7 +99,7 @@ func TestFailedDeploy_DoesNotRecordPrepared(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "fp", Name: "FP", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "fp", Name: "FP", OwnerID: u.ID})
 
 	body, ctype := buildBundleUpload(t, "app.py", "print(1)\n")
 	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
@@ -134,7 +134,7 @@ func TestDeploySuccess_RecordsPrepared(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "pr", Name: "PR", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "pr", Name: "PR", OwnerID: u.ID})
 	app, _ := store.GetAppBySlug("pr")
 
 	body, ctype := buildBundleUpload(t, "app.py", "print(1)\n")
@@ -166,7 +166,7 @@ func TestDeployment_PreparedDefaultsFalse(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "df", Name: "DF", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "df", Name: "DF", OwnerID: u.ID})
 	app, _ := store.GetAppBySlug("df")
 
 	dep, err := store.CreateDeployment(db.CreateDeploymentParams{

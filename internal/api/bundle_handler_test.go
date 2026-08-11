@@ -32,7 +32,7 @@ func makeBundleTestDB(t *testing.T, appsDir string) (*db.Store, string) {
 		t.Fatalf("GetUserByUsername: %v", err)
 	}
 	// Create an app.
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug:    "myapp",
 		Name:    "My App",
 		OwnerID: owner.ID,

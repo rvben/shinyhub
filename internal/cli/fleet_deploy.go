@@ -49,8 +49,8 @@ func healthTimeoutDuration(seconds int) time.Duration {
 // apply), so the status alone cannot tell whether the new bundle went live -
 // callers that care (adopt) resolve that authoritatively with a digest
 // readback.
-func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, firstFires []firstFireRef, kind deployfail.Kind, err error) {
-	if err := ensureFleetApp(cfg, slug, visibility, out); err != nil {
+func deployAppBundle(cfg *cliConfig, slug, dir, visibility, project string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, firstFires []firstFireRef, kind deployfail.Kind, err error) {
+	if err := ensureFleetApp(cfg, slug, visibility, project, out); err != nil {
 		return "", false, nil, deployfail.Unknown, err
 	}
 	buf, summary, err := zipDir(dir)
@@ -188,9 +188,10 @@ func readPromotedDigest(cfg *cliConfig, slug string) (string, error) {
 // ensureFleetApp ensures the app exists with the requested visibility,
 // delegating to the existing per-app create/verify helper. That helper issues
 // GET /api/apps/{slug} then POST /api/apps with {"slug","name","access"} when
-// absent; visibility is forwarded as the access value.
-func ensureFleetApp(cfg *cliConfig, slug, visibility string, out io.Writer) error {
-	return ensureAppCore(cfg, slug, visibility, out, false)
+// absent; visibility is forwarded as the access value, and project as
+// project_slug.
+func ensureFleetApp(cfg *cliConfig, slug, visibility, project string, out io.Writer) error {
+	return ensureAppCore(cfg, slug, visibility, project, out, false)
 }
 
 // waitForFleetHealthy blocks until the app reports running or a terminal

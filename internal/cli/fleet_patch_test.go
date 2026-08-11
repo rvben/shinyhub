@@ -143,3 +143,19 @@ func TestApplyConfigDrift_Autoscale(t *testing.T) {
 		t.Fatalf("autoscale patch = %#v", as)
 	}
 }
+
+func TestFleetConfigBodyProject(t *testing.T) {
+	if got := fleetConfigBody(fleet.Config{Project: strp("p")}); got["project_slug"] != "p" {
+		t.Errorf("body = %v, want project_slug=p", got)
+	}
+	// Sent whenever declared, including "": an empty declared project means the
+	// fleet owns it and wants the app ungrouped.
+	got := fleetConfigBody(fleet.Config{Project: strp("")})
+	v, present := got["project_slug"]
+	if !present || v != "" {
+		t.Errorf(`body = %v, want an explicit empty project_slug`, got)
+	}
+	if _, present := fleetConfigBody(fleet.Config{})["project_slug"]; present {
+		t.Error("an undeclared project must not appear in the body")
+	}
+}

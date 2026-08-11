@@ -37,7 +37,7 @@ func TestPatchUser_AuditRecordsOldAndNewRole(t *testing.T) {
 func TestSetAppAccess_AuditRecordsFromAndTo(t *testing.T) {
 	srv, store := newTestServer(t)
 	token, adminID := seedUserAndJWT(t, store, "admin", "admin")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "dash", Name: "Dash", OwnerID: adminID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "dash", Name: "Dash", OwnerID: adminID}); err != nil {
 		t.Fatal(err)
 	}
 	// Establish a known starting visibility (the create-handler defaults to this

@@ -18,7 +18,7 @@ func TestMutatingLifecycleHandlers_RejectNonManager(t *testing.T) {
 	srv, store := newTestServer(t)
 	ownerID, _ := mkUser(t, store, "owner", "developer")
 	_, intruderTok := mkUser(t, store, "intruder", "developer")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app", Name: "App", OwnerID: ownerID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app", Name: "App", OwnerID: ownerID}); err != nil {
 		t.Fatal(err)
 	}
 

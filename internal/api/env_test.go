@@ -163,7 +163,7 @@ func setupEnvApp(t *testing.T) (*testEnvFixture, error) {
 	}
 	ownerToken, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
 
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo App", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo App", OwnerID: owner.ID}); err != nil {
 		return nil, err
 	}
 	app, err := store.GetApp("demo")

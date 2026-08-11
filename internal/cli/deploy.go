@@ -614,9 +614,10 @@ func ensureApp(cfg *cliConfig, slug, visibility string) error {
 }
 
 // ensureAppWithOutput is the testable core of ensureApp. errOut receives any
-// warnings emitted during the call.
+// warnings emitted during the call. The interactive `shinyhub deploy` path has
+// no fleet manifest, so it always passes "" for the new app's project.
 func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writer) error {
-	return ensureAppCore(cfg, slug, visibility, errOut, true)
+	return ensureAppCore(cfg, slug, visibility, "", errOut, true)
 }
 
 // ensureAppCore is the shared implementation. warnExisting controls whether a
@@ -624,7 +625,7 @@ func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writ
 // warning. The interactive `deploy` path sets it; the fleet path clears it,
 // because fleet reconciles visibility through its own config-drift mechanism
 // and the deploy-layer warning would otherwise leak once per retry.
-func ensureAppCore(cfg *cliConfig, slug, visibility string, errOut io.Writer, warnExisting bool) error {
+func ensureAppCore(cfg *cliConfig, slug, visibility, project string, errOut io.Writer, warnExisting bool) error {
 	checkReq, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -645,6 +646,13 @@ func ensureAppCore(cfg *cliConfig, slug, visibility string, errOut io.Writer, wa
 	createBody := map[string]string{"slug": slug, "name": slug}
 	if visibility != "" {
 		createBody["access"] = visibility
+	}
+	// Only on create, exactly like visibility: ensureAppCore returns early on
+	// HTTP 200, so an existing app's project is never changed here. Reconciling
+	// an existing app's project is applyConfigDrift's and reassertFleetConfig's
+	// job.
+	if project != "" {
+		createBody["project_slug"] = project
 	}
 	bodyBytes, err := json.Marshal(createBody)
 	if err != nil {

@@ -1,4 +1,4 @@
-package deploy
+package iconspec
 
 import (
 	"strings"
@@ -28,8 +28,8 @@ func TestValidateIconEmoji(t *testing.T) {
 	accept["exactly max runes"] = atLimit
 
 	for name, s := range accept {
-		if err := ValidateIconEmoji(s); err != nil {
-			t.Errorf("%s: ValidateIconEmoji(%q) = %v, want nil", name, s, err)
+		if err := Validate(s); err != nil {
+			t.Errorf("%s: Validate(%q) = %v, want nil", name, s, err)
 		}
 	}
 
@@ -54,8 +54,8 @@ func TestValidateIconEmoji(t *testing.T) {
 	reject["one over max runes"] = overLimit
 
 	for name, s := range reject {
-		if err := ValidateIconEmoji(s); err == nil {
-			t.Errorf("%s: ValidateIconEmoji(%q) = nil, want error", name, s)
+		if err := Validate(s); err == nil {
+			t.Errorf("%s: Validate(%q) = nil, want error", name, s)
 		}
 	}
 }

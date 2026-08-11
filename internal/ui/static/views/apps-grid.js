@@ -10,6 +10,8 @@
 // ready (e.g. handleDeployHash) await router.start() / router.navigate()
 // to get that guarantee. See contract_test.go and Codex review #1
 // (deploy-hash race) for the regression this prevents.
+import { groupAppsForGrid } from './app-grid-groups.js';
+
 export async function mountAppsGrid(ctx) {
   const appsView = document.getElementById('apps-view');
   const appGrid = document.getElementById('app-grid');
@@ -41,7 +43,9 @@ export async function mountAppsGrid(ctx) {
   if (typeof ctx.applyGridFilters === 'function') {
     ctx.applyGridFilters();
   } else {
-    ctx.renderGridVerbatim(apps, appGrid, emptyState);
+    // Same grouping as the primary path; only the persisted search/sort are
+    // missing here, and Default order is what an unfiltered mount shows anyway.
+    ctx.renderGridVerbatim(groupAppsForGrid(apps, { sortKey: 'default' }), appGrid, emptyState);
   }
   // Grid polls every app so status/metrics line stays live.
   ctx.metrics.setTargets(apps.map(a => a.slug));

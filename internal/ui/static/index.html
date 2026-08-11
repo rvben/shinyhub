@@ -408,7 +408,9 @@
                   <span class="scaling-option-title">Project</span>
                   <span class="scaling-option-help">Optional grouping label; apps that share it are grouped on the dashboard.</span>
                 </span>
-                <input id="general-project" type="text" maxlength="63" autocomplete="off" spellcheck="false" placeholder="(none)" aria-label="Project slug">
+                <input id="general-project" type="text" maxlength="63" list="project-slugs"
+                       pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                       autocomplete="off" spellcheck="false" placeholder="(none)" aria-label="Project slug">
               </label>
               <div class="env-form-actions">
                 <button id="general-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
@@ -829,7 +831,9 @@
               <p class="hint" id="new-app-slug-hint">1–63 chars, lowercase letters, digits and dashes. Must start and end with a letter or digit. Used in the URL: <code>/app/&lt;slug&gt;/</code>.</p>
 
               <label for="new-app-project">Project slug <span class="hint-inline">(optional)</span></label>
-              <input id="new-app-project" type="text" autocomplete="off" spellcheck="false">
+              <input id="new-app-project" type="text" maxlength="63" list="project-slugs"
+                     pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                     autocomplete="off" spellcheck="false">
 
               <p id="new-app-error" class="error" hidden></p>
 
@@ -1213,8 +1217,38 @@
         </div>
       </div>
     </div>
+    <div id="project-edit-modal" class="modal-overlay" hidden
+         role="dialog" aria-modal="true" aria-labelledby="project-edit-title">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="project-edit-title" class="modal-title">Edit project</h2>
+        </div>
+        <div class="modal-body">
+          <p class="hint">Slug <code id="project-edit-slug"></code> cannot be changed.</p>
+
+          <label for="project-edit-name">Name</label>
+          <input id="project-edit-name" type="text" maxlength="128" autocomplete="off">
+
+          <label for="project-edit-description">Description</label>
+          <input id="project-edit-description" type="text" maxlength="280" autocomplete="off">
+
+          <label for="project-edit-icon">Icon</label>
+          <input id="project-edit-icon" type="text" maxlength="16" autocomplete="off"
+                 aria-describedby="project-edit-icon-hint">
+          <p class="hint" id="project-edit-icon-hint">A single emoji. Leave empty for none.</p>
+
+          <div class="modal-actions">
+            <button type="button" data-close-project-edit>Cancel</button>
+            <button type="button" id="project-edit-save" class="btn-primary">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
     </div>
   </div>
+  <!-- Shared by #general-project and #new-app-project. Free text stays
+       accepted in both, which is what allows creating a project inline. -->
+  <datalist id="project-slugs"></datalist>
 </body>
 </html>

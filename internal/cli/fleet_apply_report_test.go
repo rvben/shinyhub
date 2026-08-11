@@ -48,7 +48,7 @@ func TestRenderApplyReport_TableSummaryAndNextCommand(t *testing.T) {
 		{slug: "weekly", action: fleet.ActionUpdateSource, status: statusFailed, attempts: 2,
 			duration: 2 * time.Second, err: errStub("health check timeout")},
 	}
-	err := renderApplyReport(&out, "prod-eu", res, false)
+	err := renderApplyReport(&out, "prod-eu", applyOutcome{apps: res}, false)
 	if err == nil || exitCode(err) != 4 {
 		t.Fatalf("want exit 4 error, got %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRenderApplyReport_SlugColumnFitsTheLongestSlug(t *testing.T) {
 		{slug: "sales", status: statusCreated},
 		{slug: "quarterly-revenue-reporting-dashboard", status: statusUnchanged},
 	}
-	_ = renderApplyReport(&out, "eu", res, false)
+	_ = renderApplyReport(&out, "eu", applyOutcome{apps: res}, false)
 
 	var short, long string
 	for _, ln := range strings.Split(out.String(), "\n") {
@@ -96,7 +96,7 @@ func TestRenderApplyReport_SlugColumnFitsTheLongestSlug(t *testing.T) {
 
 func TestRenderApplyReport_QuietCollapses(t *testing.T) {
 	var out bytes.Buffer
-	_ = renderApplyReport(&out, "eu", []applyResult{{slug: "a", status: statusUnchanged}}, true)
+	_ = renderApplyReport(&out, "eu", applyOutcome{apps: []applyResult{{slug: "a", status: statusUnchanged}}}, true)
 	s := out.String()
 	if strings.Contains(s, "fleet_id=") {
 		t.Fatalf("quiet must omit the header/table: %q", s)
@@ -111,7 +111,7 @@ func TestWriteFleetApplyJSON_HasResultAndSummary(t *testing.T) {
 	m := &fleet.Manifest{FleetID: "eu"}
 	diff := []fleet.AppDiff{{Slug: "a", Action: fleet.ActionCreate}}
 	res := []applyResult{{slug: "a", action: fleet.ActionCreate, status: statusCreated, attempts: 1, duration: time.Second}}
-	if err := writeFleetApplyJSON(&out, m, "https://h", diff, res, 0, "OK - all converged"); err != nil {
+	if err := writeFleetApplyJSON(&out, m, "https://h", diff, nil, applyOutcome{apps: res}, 0, "OK - all converged"); err != nil {
 		t.Fatalf("json: %v", err)
 	}
 	var env map[string]any
@@ -137,7 +137,7 @@ func TestWriteFleetApplyJSON_IncludesAppURL(t *testing.T) {
 	m := &fleet.Manifest{FleetID: "eu"}
 	diff := []fleet.AppDiff{{Slug: "reports", Action: fleet.ActionCreate}}
 	res := []applyResult{{slug: "reports", action: fleet.ActionCreate, status: statusCreated, attempts: 1, duration: time.Second}}
-	if err := writeFleetApplyJSON(&out, m, "https://h", diff, res, 0, "OK - all converged"); err != nil {
+	if err := writeFleetApplyJSON(&out, m, "https://h", diff, nil, applyOutcome{apps: res}, 0, "OK - all converged"); err != nil {
 		t.Fatalf("json: %v", err)
 	}
 	var env map[string]any
@@ -165,7 +165,7 @@ func TestRenderApplyReport_ShowsFailureKindAndPerAttempt(t *testing.T) {
 		},
 	}}
 	var buf bytes.Buffer
-	_ = renderApplyReport(&buf, "eu", res, false)
+	_ = renderApplyReport(&buf, "eu", applyOutcome{apps: res}, false)
 	out := buf.String()
 	if !strings.Contains(out, "failed [crashed]") {
 		t.Fatalf("failed line must show the final kind, got:\n%s", out)
@@ -181,7 +181,7 @@ func TestRenderApplyReport_RetriedSuccessShowsEarlierFailure(t *testing.T) {
 		attemptsDetail: []attemptOutcome{{Attempt: 1, Kind: deployfail.ReadinessTimeout, Err: "x"}},
 	}}
 	var buf bytes.Buffer
-	_ = renderApplyReport(&buf, "eu", res, false)
+	_ = renderApplyReport(&buf, "eu", applyOutcome{apps: res}, false)
 	out := buf.String()
 	if !strings.Contains(out, "attempt 1: readiness_timeout") {
 		t.Fatalf("a retried success must still surface attempt 1's reason, got:\n%s", out)
@@ -208,7 +208,7 @@ func TestWriteFleetApplyJSON_FailureKindAndAttemptDetails(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	m := &fleet.Manifest{FleetID: "eu"}
-	if err := writeFleetApplyJSON(&buf, m, "http://h", []fleet.AppDiff{d}, []applyResult{r}, 4, "PARTIAL"); err != nil {
+	if err := writeFleetApplyJSON(&buf, m, "http://h", []fleet.AppDiff{d}, nil, applyOutcome{apps: []applyResult{r}}, 4, "PARTIAL"); err != nil {
 		t.Fatalf("writeFleetApplyJSON: %v", err)
 	}
 	var env applyJSONEnvelope
@@ -237,7 +237,7 @@ func TestWriteFleetApplyJSON_RetriedSuccessHasDetailsButNoTopLevelKind(t *testin
 	}
 	var buf bytes.Buffer
 	m := &fleet.Manifest{FleetID: "eu"}
-	if err := writeFleetApplyJSON(&buf, m, "http://h", []fleet.AppDiff{d}, []applyResult{r}, 0, "OK"); err != nil {
+	if err := writeFleetApplyJSON(&buf, m, "http://h", []fleet.AppDiff{d}, nil, applyOutcome{apps: []applyResult{r}}, 0, "OK"); err != nil {
 		t.Fatalf("writeFleetApplyJSON: %v", err)
 	}
 	var env applyJSONEnvelope
@@ -266,7 +266,7 @@ func TestWriteFleetApplyJSON_PostDeployFailureOmitsFailureKind(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	m := &fleet.Manifest{FleetID: "eu"}
-	if err := writeFleetApplyJSON(&buf, m, "http://h", []fleet.AppDiff{d}, []applyResult{r}, 4, "PARTIAL"); err != nil {
+	if err := writeFleetApplyJSON(&buf, m, "http://h", []fleet.AppDiff{d}, nil, applyOutcome{apps: []applyResult{r}}, 4, "PARTIAL"); err != nil {
 		t.Fatalf("writeFleetApplyJSON: %v", err)
 	}
 	var env applyJSONEnvelope
@@ -293,7 +293,7 @@ func TestRenderApplyReport_PostDeployFailureNoKindTag(t *testing.T) {
 		attemptsDetail: []attemptOutcome{{Attempt: 1, Kind: deployfail.ReadinessTimeout, Err: "x"}},
 	}}
 	var buf bytes.Buffer
-	_ = renderApplyReport(&buf, "eu", res, false)
+	_ = renderApplyReport(&buf, "eu", applyOutcome{apps: res}, false)
 	out := buf.String()
 	if strings.Contains(out, "failed [") {
 		t.Fatalf("post-deploy failure must not tag the status with a deploy kind, got:\n%s", out)

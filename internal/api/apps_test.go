@@ -304,16 +304,16 @@ func TestListApps_FilteredByAccess(t *testing.T) {
 	owner, _ := store.GetUserByUsername("owner")
 	viewer, _ := store.GetUserByUsername("viewer")
 
-	if err := store.CreateApp(db.CreateAppParams{Slug: "public-app", Name: "Public App", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "public-app", Name: "Public App", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetAppAccess("public-app", "public"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "private-app", Name: "Private App", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "private-app", Name: "Private App", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "shared-app", Name: "Shared App", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "shared-app", Name: "Shared App", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetAppAccess("shared-app", "shared"); err != nil {
@@ -371,7 +371,7 @@ func TestGetApp_NotFoundWhenNoAccess(t *testing.T) {
 	store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: hash, Role: "viewer"})
 	owner, _ := store.GetUserByUsername("owner")
 	viewer, _ := store.GetUserByUsername("viewer")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "secret", Name: "Secret", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "secret", Name: "Secret", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -398,7 +398,7 @@ func TestGetApp_GrantedMemberCanView(t *testing.T) {
 	owner, _ := store.GetUserByUsername("owner")
 	member, _ := store.GetUserByUsername("member")
 
-	if err := store.CreateApp(db.CreateAppParams{Slug: "shared", Name: "Shared", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "shared", Name: "Shared", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetAppAccess("shared", "shared"); err != nil {
@@ -427,7 +427,7 @@ func TestPatchApp_ForbiddenForNonOwner(t *testing.T) {
 	owner, _ := store.GetUserByUsername("owner")
 	member, _ := store.GetUserByUsername("member")
 
-	if err := store.CreateApp(db.CreateAppParams{Slug: "shared", Name: "Shared", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "shared", Name: "Shared", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetAppAccess("shared", "shared"); err != nil {
@@ -833,7 +833,7 @@ func TestRollbackApp_ToSpecificDeployment(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner, _ := store.GetUserByUsername("owner")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	app, _ := store.GetAppBySlug("myapp")
@@ -866,7 +866,7 @@ func TestRollbackApp_ToInvalidDeployment(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner, _ := store.GetUserByUsername("owner")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2442,7 +2442,7 @@ func TestDeployToken_AppOwnershipAndAdminBypass(t *testing.T) {
 func seedAppWithPromotedDeploy(t *testing.T, store *db.Store, slug, digest string) (token string) {
 	t.Helper()
 	tok, userID := seedUserAndJWT(t, store, slug+"-owner", "admin")
-	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: userID, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: userID, Access: "private"}); err != nil {
 		t.Fatalf("seedAppWithPromotedDeploy create app: %v", err)
 	}
 	app, err := store.GetAppBySlug(slug)
@@ -2465,7 +2465,7 @@ func seedAppWithPromotedDeploy(t *testing.T, store *db.Store, slug, digest strin
 func TestPatchAppManagedByConflictOn409Header(t *testing.T) {
 	srv, store := newTestServer(t)
 	token, userID := seedUserAndJWT(t, store, "precond-user", "admin")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "precond", Name: "Precond", OwnerID: userID, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "precond", Name: "Precond", OwnerID: userID, Access: "private"}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	// current managed_by is NULL; precondition expects "fleet:other" -> 409
@@ -2481,7 +2481,7 @@ func TestPatchAppManagedByConflictOn409Header(t *testing.T) {
 func TestPatchAppManagedBySucceedsWhenPreconditionMatches(t *testing.T) {
 	srv, store := newTestServer(t)
 	token, userID := seedUserAndJWT(t, store, "precond2-user", "admin")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "precond2", Name: "Precond2", OwnerID: userID, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "precond2", Name: "Precond2", OwnerID: userID, Access: "private"}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	// no precondition header -> unconditional
@@ -2574,7 +2574,7 @@ func TestSetAppAccessPreconditionMismatch409(t *testing.T) {
 func TestPatchAppIfManagedByEmptyAssertsUnmanaged409(t *testing.T) {
 	srv, store := newTestServer(t)
 	token, userID := seedUserAndJWT(t, store, "managed-user", "admin")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "managed-app", Name: "Managed App", OwnerID: userID, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "managed-app", Name: "Managed App", OwnerID: userID, Access: "private"}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	// Mark the app as managed so the precondition (empty = unmanaged) will fail.
@@ -2629,7 +2629,7 @@ func TestHandleGetApp_IncludesRejectsByReason(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2690,7 +2690,7 @@ func TestDeleteApp_ForgetsRejects(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2730,7 +2730,7 @@ func TestHandleGetApp_RejectsByReason_MultipleReasons(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	owner, _ := store.GetUserByUsername("owner")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 

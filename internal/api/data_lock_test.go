@@ -42,7 +42,7 @@ func newDataLockTestServer(t *testing.T, quotaMB int) (*Server, string) {
 	if err != nil {
 		t.Fatalf("GetUserByUsername: %v", err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: u.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: u.ID}); err != nil {
 		t.Fatalf("CreateApp: %v", err)
 	}
 	token, err := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")

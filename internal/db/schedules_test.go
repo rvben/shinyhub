@@ -25,7 +25,7 @@ func newScheduleAppFixture(t *testing.T, store *db.Store, slug string) int64 {
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: slug, Name: slug, OwnerID: u.ID,
 	}); err != nil {
 		t.Fatalf("create app: %v", err)

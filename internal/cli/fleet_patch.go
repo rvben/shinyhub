@@ -92,6 +92,11 @@ func fleetConfigBody(c fleet.Config) map[string]any {
 		// means the fleet owns it and wants it cleared.
 		body["description"] = *c.Description
 	}
+	if c.Project != nil {
+		// Sent whenever declared, including "": an empty declared project means
+		// the fleet owns it and wants the app ungrouped.
+		body["project_slug"] = *c.Project
+	}
 	if c.HibernateTimeoutMinutes != nil {
 		body["hibernate_timeout_minutes"] = *c.HibernateTimeoutMinutes
 	}

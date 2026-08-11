@@ -189,7 +189,7 @@ func TestBundleFetchStreamsZipByDigest(t *testing.T) {
 
 	// Seed an app + deployment whose digest points at a real zip on disk.
 	// CreateApp returns only error, so fetch the app by slug afterwards.
-	if err := h.store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID, Access: "private"}); err != nil {
+	if _, err := h.store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID, Access: "private"}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	app, err := h.store.GetAppBySlug("demo")
@@ -277,7 +277,7 @@ func TestBundleFetchMissingArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
-	if err := h.store.CreateApp(db.CreateAppParams{Slug: "nozip", Name: "NoZip", OwnerID: owner.ID, Access: "private"}); err != nil {
+	if _, err := h.store.CreateApp(db.CreateAppParams{Slug: "nozip", Name: "NoZip", OwnerID: owner.ID, Access: "private"}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	app, err := h.store.GetAppBySlug("nozip")

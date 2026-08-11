@@ -24,7 +24,7 @@ func TestDeploy_FailureKindReadinessTimeout(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "ff", Name: "FF", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "ff", Name: "FF", OwnerID: u.ID})
 
 	body, ctype := buildBundleUpload(t, "app.py", "print(1)\n")
 	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
@@ -63,7 +63,7 @@ func TestDeploy_FailureKindHookFailed(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "hf", Name: "HF", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "hf", Name: "HF", OwnerID: u.ID})
 
 	body, ctype := buildBundleUpload(t, "app.py", "print(1)\n")
 	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")

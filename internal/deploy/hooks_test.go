@@ -1086,3 +1086,53 @@ func TestAppSettingsIsZeroWithIcon(t *testing.T) {
 		t.Error("empty AppSettings must still report zero")
 	}
 }
+
+// loadProjectManifest writes body as a bundle manifest into a fresh temp dir and
+// loads it, which is the only supported parse path (LoadManifest reads a bundle
+// directory). Mirrors the writeManifest + LoadManifest pair the rest of this
+// file uses.
+func loadProjectManifest(t *testing.T, body string) (*Manifest, error) {
+	t.Helper()
+	dir := t.TempDir()
+	writeManifest(t, dir, body)
+	return LoadManifest(dir)
+}
+
+func TestLoadManifest_ParsesAppProject(t *testing.T) {
+	m, err := loadProjectManifest(t, "[app]\nproject = \"analytics\"\n")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if m.App.Project == nil || *m.App.Project != "analytics" {
+		t.Fatalf("App.Project = %v, want analytics", m.App.Project)
+	}
+
+	// "" is a meaningful declared value: it clears the app's project.
+	m, err = loadProjectManifest(t, "[app]\nproject = \"\"\n")
+	if err != nil {
+		t.Fatalf("load empty: %v", err)
+	}
+	if m.App.Project == nil || *m.App.Project != "" {
+		t.Fatalf(`App.Project = %v, want declared ""`, m.App.Project)
+	}
+
+	// An illegal slug is a manifest error, not something the server has to
+	// catch: it fails at deploy time with a local message.
+	if _, err := loadProjectManifest(t, "[app]\nproject = \"Not A Slug\"\n"); err == nil {
+		t.Error("an invalid project slug must fail manifest validation")
+	}
+
+	// Whitespace is trimmed, so a padded legal value is accepted normalized.
+	m, err = loadProjectManifest(t, "[app]\nproject = \"  analytics  \"\n")
+	if err != nil {
+		t.Fatalf("load padded: %v", err)
+	}
+	if m.App.Project == nil || *m.App.Project != "analytics" {
+		t.Errorf("App.Project = %v, want trimmed analytics", m.App.Project)
+	}
+
+	// A manifest declaring ONLY a project is not zero: it must still reconcile.
+	if m.App.IsZero() {
+		t.Error("AppSettings with a declared project must not report IsZero")
+	}
+}

@@ -116,3 +116,29 @@ test('highlightSidebarApp: moves active in place on navigation, never more than 
   assert.equal(c.querySelectorAll('.sidebar-app.active').length, 1);
   assert.equal(c.querySelector('.sidebar-app.active').getAttribute('data-app-slug'), 'reports');
 });
+
+test('groupAppsByProject: heading uses the project display name and icon', () => {
+  const groups = groupAppsByProject([
+    { slug: 'a', name: 'A', project_slug: 'team', project_name: 'Team Tools', project_icon_emoji: '🧰' },
+  ]);
+  assert.equal(groups[0].project, 'team');
+  assert.equal(groups[0].name, 'Team Tools');
+  assert.equal(groups[0].iconEmoji, '🧰');
+});
+
+test('groupAppsByProject: named projects order by display name, not slug', () => {
+  const groups = groupAppsByProject([
+    { slug: 'a', name: 'A', project_slug: 'zzz', project_name: 'Aaa' },
+    { slug: 'b', name: 'B', project_slug: 'aaa', project_name: 'Zzz' },
+  ]);
+  assert.deepEqual(groups.map((g) => g.project), ['zzz', 'aaa']);
+});
+
+test('renderSidebarApps: the heading shows the display name, not the slug', () => {
+  const d = container();
+  renderSidebarApps(d.getElementById('c'), [
+    { slug: 'a', name: 'A', status: 'running', deploy_count: 1, project_slug: 'team', project_name: 'Team Tools' },
+  ], '/', badgeFor, d);
+  const headings = [...d.querySelectorAll('.sidebar-project')].map((e) => e.textContent);
+  assert.deepEqual(headings, ['Team Tools']);
+});

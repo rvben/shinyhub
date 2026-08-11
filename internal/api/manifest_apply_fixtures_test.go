@@ -51,7 +51,7 @@ func newServerWithOwnedAppCfg(t *testing.T, slug string, cfg manifestServerCfg) 
 	}
 
 	// Create the app.
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: slug, Name: slug, OwnerID: owner.ID,
 	}); err != nil {
 		t.Fatal(err)

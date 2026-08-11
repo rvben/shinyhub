@@ -21,6 +21,7 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/schedulespec"
+	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
 
 // ManifestFilename is the canonical bundle manifest name. It lives at the
@@ -140,6 +141,18 @@ type AppSettings struct {
 	Name        *string `toml:"name"`
 	Description *string `toml:"description"`
 
+	// Project declares which project groups this app on the dashboard and
+	// reconciles into apps.project_slug on every deploy (declared-only, like
+	// Name: nil leaves the stored value unchanged, so a project chosen in the
+	// dashboard survives a manifest that stays silent). "" is a meaningful
+	// declared value: it removes the app from any project.
+	//
+	// This names a project by slug only. The project's display name and icon
+	// live on the server (or in a fleet manifest's [[project]] block), because
+	// one app's bundle must not be able to rename a group it shares with apps
+	// it knows nothing about.
+	Project *string `toml:"project"`
+
 	HibernateResetToDefault bool `toml:"-"`
 }
 
@@ -183,6 +196,7 @@ func (a AppSettings) IsZero() bool {
 		a.Icon == nil &&
 		a.Name == nil &&
 		a.Description == nil &&
+		a.Project == nil &&
 		!a.HibernateResetToDefault
 }
 
@@ -403,6 +417,15 @@ func normalizeAndValidateApp(a *AppSettings) error {
 			return err
 		}
 		a.Description = &v
+	}
+	// Trim then validate, so the stored value is exactly what the slug rule
+	// allows. "" stays "" and means "no project".
+	if a.Project != nil {
+		v := strings.TrimSpace(*a.Project)
+		if v != "" && !slugpkg.Valid(v) {
+			return fmt.Errorf("project must be %s", slugpkg.HumanRule)
+		}
+		a.Project = &v
 	}
 	if a.Worker != nil {
 		ws := config.WorkerSettings{}

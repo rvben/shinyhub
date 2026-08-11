@@ -649,6 +649,14 @@ type App struct {
 	// false. See api.Server.appDeploying for why it is stricter than the
 	// proxy's MissStatus.
 	Deploying bool `json:"deploying"`
+	// ProjectName and ProjectIconEmoji are the display metadata of the app's
+	// project, computed by the API layer per request and never persisted (there
+	// is no such column; see the projects table). Both are "" when the app has
+	// no project or the project row carries no metadata. Not omitempty, for the
+	// same reason as Deploying: the key is present in every payload, so a
+	// consumer never has to tell "absent" from "empty".
+	ProjectName      string `json:"project_name"`
+	ProjectIconEmoji string `json:"project_icon_emoji"`
 	// ReplicaPlacement is the per-app replica placement as a JSON object
 	// {"tier": count}, or "" when no placement is set (all Replicas on the
 	// default tier). The Replicas column remains the authoritative total.
@@ -804,26 +812,23 @@ type CreateAppParams struct {
 	Access string
 }
 
-func (s *Store) CreateApp(p CreateAppParams) error {
-	var err error
-	if p.ProjectSlug == "" {
-		_, err = s.db.Exec(
-			`INSERT INTO apps (slug, name, owner_id, access) VALUES (?, ?, ?, ?)`,
-			p.Slug, p.Name, p.OwnerID, p.Access,
-		)
-	} else {
-		_, err = s.db.Exec(
-			`INSERT INTO apps (slug, name, project_slug, owner_id, access) VALUES (?, ?, ?, ?, ?)`,
-			p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access,
-		)
-	}
+// CreateApp inserts an app and lazily creates its project row. projectCreated
+// reports whether the project row was new, so the caller can audit it under
+// the acting user. project_slug is always written explicitly: the legacy
+// column DEFAULT 'default' (still present in the SQLite schema, see migration
+// 050) must never apply again.
+func (s *Store) CreateApp(p CreateAppParams) (bool, error) {
+	_, err := s.db.Exec(
+		`INSERT INTO apps (slug, name, project_slug, owner_id, access) VALUES (?, ?, ?, ?, ?)`,
+		p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access,
+	)
 	if err != nil {
 		if s.d.isUniqueViolation(err) {
-			return fmt.Errorf("create app: %w", ErrSlugTaken)
+			return false, fmt.Errorf("create app: %w", ErrSlugTaken)
 		}
-		return fmt.Errorf("create app: %w", err)
+		return false, fmt.Errorf("create app: %w", err)
 	}
-	return nil
+	return s.EnsureProject(p.ProjectSlug)
 }
 
 func (s *Store) GetAppBySlug(slug string) (*App, error) {
@@ -1151,18 +1156,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 	rows, err := s.db.Query(`
 		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
-		WHERE access = 'public'
-		   OR access = 'shared'
-		   OR owner_id = ?
-		   OR EXISTS (
-		       SELECT 1 FROM app_members
-		       WHERE app_slug = apps.slug AND user_id = ?
-		   )
-		   OR EXISTS (
-		       SELECT 1 FROM app_group_access aga
-		       JOIN user_groups ug ON ug.group_name = aga.group_name
-		       WHERE aga.app_slug = apps.slug AND ug.user_id = ?
-		   )
+		WHERE `+appVisibleToUserWhere+`
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, userID, userID, userID, limit, offset)
 	if err != nil {
@@ -2301,6 +2295,12 @@ const (
 	AuditAppIconSet     = "app.icon.set"
 	AuditAppIconCleared = "app.icon.clear"
 	AuditAppIconEmoji   = "app.icon.emoji"
+	// Project actions. An app CHANGING project is not one of these: it is
+	// recorded in the existing update_app event's detail blob, because the
+	// resource being mutated is the app, not the project.
+	AuditProjectCreate = "project.create"
+	AuditProjectUpdate = "project.update"
+	AuditProjectDelete = "project.delete"
 )
 
 // AuditEventParams holds the fields for a new audit event.
@@ -3134,6 +3134,9 @@ type ApplyAppManifestSettingsParams struct {
 	Name           string
 	SetDescription bool
 	Description    string
+
+	SetProjectSlug bool
+	ProjectSlug    string
 }
 
 // ApplyAppManifestSettings applies any subset of (hibernate, replicas,
@@ -3145,10 +3148,10 @@ type ApplyAppManifestSettingsParams struct {
 //
 // Caller contract: manager.Stop(slug) has already run; no live
 // process holds a replica index that may be deleted.
-func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error {
+func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) (bool, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return fmt.Errorf("begin: %w", err)
+		return false, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -3157,7 +3160,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET hibernate_timeout_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
 			p.HibernateMinutes, p.Slug,
 		); err != nil {
-			return fmt.Errorf("update hibernate: %w", err)
+			return false, fmt.Errorf("update hibernate: %w", err)
 		}
 	}
 
@@ -3169,7 +3172,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET icon_emoji = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.IconEmoji, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update icon_emoji: %w", err)
+			return false, fmt.Errorf("update icon_emoji: %w", err)
 		}
 	}
 
@@ -3180,7 +3183,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.Name, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update name: %w", err)
+			return false, fmt.Errorf("update name: %w", err)
 		}
 	}
 
@@ -3189,7 +3192,13 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.Description, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update description: %w", err)
+			return false, fmt.Errorf("update description: %w", err)
+		}
+	}
+
+	if p.SetProjectSlug {
+		if _, err := tx.Exec(`UPDATE apps SET project_slug = ?, updated_at = `+s.d.now()+` WHERE slug = ?`, p.ProjectSlug, p.Slug); err != nil {
+			return false, fmt.Errorf("apply app manifest settings: %w", err)
 		}
 	}
 
@@ -3199,14 +3208,14 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 				`DELETE FROM replicas WHERE app_id = ? AND idx >= ?`,
 				p.AppID, p.Replicas,
 			); err != nil {
-				return fmt.Errorf("prune replicas: %w", err)
+				return false, fmt.Errorf("prune replicas: %w", err)
 			}
 		}
 		if _, err := tx.Exec(
 			`UPDATE apps SET replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.Replicas, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update replicas: %w", err)
+			return false, fmt.Errorf("update replicas: %w", err)
 		}
 	}
 
@@ -3215,7 +3224,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET max_sessions_per_replica = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.MaxSessionsPerReplica, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update max_sessions_per_replica: %w", err)
+			return false, fmt.Errorf("update max_sessions_per_replica: %w", err)
 		}
 	}
 
@@ -3224,7 +3233,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET render_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.RenderSeconds, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update render_seconds: %w", err)
+			return false, fmt.Errorf("update render_seconds: %w", err)
 		}
 	}
 
@@ -3233,7 +3242,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET identity_headers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.IdentityHeaders, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update identity_headers: %w", err)
+			return false, fmt.Errorf("update identity_headers: %w", err)
 		}
 	}
 
@@ -3242,7 +3251,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET min_warm_replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.MinWarmReplicas, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update min_warm_replicas: %w", err)
+			return false, fmt.Errorf("update min_warm_replicas: %w", err)
 		}
 	}
 
@@ -3251,7 +3260,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET memory_limit_mb = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.MemoryLimitMB, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update memory_limit_mb: %w", err)
+			return false, fmt.Errorf("update memory_limit_mb: %w", err)
 		}
 	}
 
@@ -3260,7 +3269,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET cpu_quota_percent = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.CPUQuotaPercent, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update cpu_quota_percent: %w", err)
+			return false, fmt.Errorf("update cpu_quota_percent: %w", err)
 		}
 	}
 
@@ -3271,7 +3280,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			boolToInt(p.AutoscaleEnabled), p.AutoscaleMinReplicas, p.AutoscaleMaxReplicas, p.AutoscaleTarget, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update autoscale: %w", err)
+			return false, fmt.Errorf("update autoscale: %w", err)
 		}
 	}
 
@@ -3280,7 +3289,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET worker_isolation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerIsolation, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update worker_isolation: %w", err)
+			return false, fmt.Errorf("update worker_isolation: %w", err)
 		}
 	}
 	if p.SetWorkerGroupedSize {
@@ -3288,7 +3297,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET worker_grouped_size = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerGroupedSize, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update worker_grouped_size: %w", err)
+			return false, fmt.Errorf("update worker_grouped_size: %w", err)
 		}
 	}
 	if p.SetWorkerMaxWorkers {
@@ -3296,7 +3305,7 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET worker_max_workers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerMaxWorkers, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update worker_max_workers: %w", err)
+			return false, fmt.Errorf("update worker_max_workers: %w", err)
 		}
 	}
 	if p.SetWorkerMaxSessionLifetime {
@@ -3304,14 +3313,17 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) error
 			`UPDATE apps SET worker_max_session_lifetime_secs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerMaxSessionLifetimeSecs, p.AppID,
 		); err != nil {
-			return fmt.Errorf("update worker_max_session_lifetime_secs: %w", err)
+			return false, fmt.Errorf("update worker_max_session_lifetime_secs: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return false, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	if p.SetProjectSlug {
+		return s.EnsureProject(p.ProjectSlug)
+	}
+	return false, nil
 }
 
 // PatchAppSettingsParams carries the user-PATCHable app fields. Callers set
@@ -3364,10 +3376,10 @@ type PatchAppSettingsParams struct {
 // row half-updated. It returns the app's prior status and replica count
 // (read inside the same transaction) so the caller can decide whether a
 // running pool needs a redeploy. Returns ErrNotFound if no app has the slug.
-func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, priorReplicas int, priorMem, priorCPU *int, err error) {
+func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, priorReplicas int, priorMem, priorCPU *int, projectCreated bool, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return "", 0, nil, nil, fmt.Errorf("begin: %w", err)
+		return "", 0, nil, nil, false, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -3378,9 +3390,9 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 		p.Slug,
 	).Scan(&appID, &priorStatus, &priorReplicas, &curMem, &curCPU); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", 0, nil, nil, ErrNotFound
+			return "", 0, nil, nil, false, ErrNotFound
 		}
-		return "", 0, nil, nil, fmt.Errorf("load app: %w", err)
+		return "", 0, nil, nil, false, fmt.Errorf("load app: %w", err)
 	}
 
 	if p.SetHibernate {
@@ -3388,7 +3400,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET hibernate_timeout_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.HibernateMinutes, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update hibernate: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update hibernate: %w", err)
 		}
 	}
 	if p.SetName {
@@ -3396,7 +3408,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.Name, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update name: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update name: %w", err)
 		}
 	}
 	if p.SetProjectSlug {
@@ -3404,7 +3416,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET project_slug = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.ProjectSlug, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update project_slug: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update project_slug: %w", err)
 		}
 	}
 	if p.SetMemoryLimitMB || p.SetCPUQuotaPercent {
@@ -3420,7 +3432,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET memory_limit_mb = ?, cpu_quota_percent = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			newMem, newCPU, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update resource limits: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update resource limits: %w", err)
 		}
 	}
 	if p.SetReplicas {
@@ -3429,14 +3441,14 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 				`DELETE FROM replicas WHERE app_id = ? AND idx >= ?`,
 				appID, p.Replicas,
 			); err != nil {
-				return "", 0, nil, nil, fmt.Errorf("prune replicas: %w", err)
+				return "", 0, nil, nil, false, fmt.Errorf("prune replicas: %w", err)
 			}
 		}
 		if _, err := tx.Exec(
 			`UPDATE apps SET replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.Replicas, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update replicas: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update replicas: %w", err)
 		}
 	}
 	if p.SetMaxSessions {
@@ -3444,7 +3456,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET max_sessions_per_replica = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.MaxSessions, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update max_sessions_per_replica: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update max_sessions_per_replica: %w", err)
 		}
 	}
 
@@ -3453,7 +3465,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET render_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.RenderSeconds, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update render_seconds: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update render_seconds: %w", err)
 		}
 	}
 
@@ -3462,7 +3474,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET min_warm_replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.MinWarmReplicas, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update min_warm_replicas: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update min_warm_replicas: %w", err)
 		}
 	}
 	if p.SetWorkerIsolation {
@@ -3470,7 +3482,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET worker_isolation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerIsolation, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update worker_isolation: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update worker_isolation: %w", err)
 		}
 	}
 	if p.SetWorkerGroupedSize {
@@ -3478,7 +3490,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET worker_grouped_size = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerGroupedSize, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update worker_grouped_size: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update worker_grouped_size: %w", err)
 		}
 	}
 	if p.SetWorkerMaxWorkers {
@@ -3486,7 +3498,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET worker_max_workers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerMaxWorkers, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update worker_max_workers: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update worker_max_workers: %w", err)
 		}
 	}
 	if p.SetWorkerMaxSessionLifetime {
@@ -3494,17 +3506,22 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET worker_max_session_lifetime_secs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerMaxSessionLifetimeSecs, appID,
 		); err != nil {
-			return "", 0, nil, nil, fmt.Errorf("update worker_max_session_lifetime_secs: %w", err)
+			return "", 0, nil, nil, false, fmt.Errorf("update worker_max_session_lifetime_secs: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return "", 0, nil, nil, fmt.Errorf("commit: %w", err)
+		return "", 0, nil, nil, false, fmt.Errorf("commit: %w", err)
+	}
+	if p.SetProjectSlug {
+		if projectCreated, err = s.EnsureProject(p.ProjectSlug); err != nil {
+			return "", 0, nil, nil, false, fmt.Errorf("patch app settings: %w", err)
+		}
 	}
 	// priorMem/priorCPU are the resource columns read inside this transaction, so
 	// callers detect a real change (and audit the true old value) without a
 	// time-of-check/time-of-use race against a concurrent PATCH.
-	return priorStatus, priorReplicas, intPtrFromNull(curMem), intPtrFromNull(curCPU), nil
+	return priorStatus, priorReplicas, intPtrFromNull(curMem), intPtrFromNull(curCPU), projectCreated, nil
 }
 
 // intPtrFromNull maps a sql.NullInt64 to a *int (invalid ⇒ nil).

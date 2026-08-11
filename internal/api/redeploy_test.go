@@ -104,7 +104,7 @@ func TestHandleGetApp_AdvertisesRedeployInFlight(t *testing.T) {
 	if err := store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: 1}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -170,7 +170,7 @@ func newRedeployTestStore(t *testing.T, slug, status string) (*db.Store, *db.App
 	if err := store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: status}); err != nil {

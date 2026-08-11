@@ -33,6 +33,8 @@ import { formatStatus } from '/static/views/status-label.js';
 import { userRowCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
+import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
+import { buildProjectPatchBody } from '/static/views/project-edit-body.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -143,6 +145,12 @@ document.addEventListener('DOMContentLoaded', () => {
     resetPwTargetId: null,
     resetPwTargetUsername: '',
   };
+
+  // Project rows from GET /api/projects, keyed by slug. The grid group objects
+  // carry only what an app row can carry (slug, name, icon), so the edit modal
+  // reads the description from here. Without it the modal would show an empty
+  // Description for every project and saving would clear it.
+  const projectRows = new Map();
 
   const loginView = document.getElementById('login-view');
   const overviewView = document.getElementById('overview-view');
@@ -269,6 +277,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const newAppSnippetCopy  = document.getElementById('new-app-snippet-copy');
   const newAppDone         = document.getElementById('new-app-done');
   const newAppSubmit       = document.getElementById('new-app-submit');
+
+  const projectEditModal    = document.getElementById('project-edit-modal');
+  const projectEditSave     = document.getElementById('project-edit-save');
+  const projectEditCancel   = document.querySelector('[data-close-project-edit]');
 
   const deployModal        = document.getElementById('deploy-modal');
   const deployModalClose   = document.getElementById('deploy-modal-close');
@@ -402,16 +414,49 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // Renders apps into the provided grid and empty-state elements. Takes explicit
-  // DOM references so mountAppsGrid can call it from the view module without
-  // closing over the closure-level appGrid/emptyState constants.
-  function renderGridVerbatim(apps, gridEl, emptyEl) {
+  // Renders grouped apps into the provided grid and empty-state elements. Takes
+  // explicit DOM references so mountAppsGrid can call it from the view module
+  // without closing over the closure-level appGrid/emptyState constants.
+  function renderGridVerbatim(groups, gridEl, emptyEl) {
     gridEl.textContent = '';
-    const empty = apps.length === 0;
+    const total = groups.reduce((n, g) => n + g.apps.length, 0);
+    const empty = total === 0;
     emptyEl.hidden = !empty;
     if (empty) renderEmptyStateCopy();
 
-    for (const app of apps) {
+    // A lone ungrouped group needs no heading: it would label the whole grid
+    // "All apps", which is what the grid already is. This keeps the dashboard
+    // of an operator who uses no projects looking exactly as it does today.
+    const soleUngrouped = groups.length === 1 && groups[0].project === '';
+
+    for (const group of groups) {
+      if (!soleUngrouped) {
+        const heading = document.createElement('h2');
+        heading.className = 'app-grid-group-heading';
+        if (group.iconEmoji) {
+          const icon = document.createElement('span');
+          icon.className = 'app-grid-group-icon';
+          icon.textContent = group.iconEmoji;
+          // Decorative: the heading text already names the project.
+          icon.setAttribute('aria-hidden', 'true');
+          heading.appendChild(icon);
+        }
+        const label = document.createElement('span');
+        label.textContent = group.name || 'All apps';
+        heading.appendChild(label);
+        if (group.project && isOperatorRole(state.user)) {
+          const edit = document.createElement('button');
+          edit.type = 'button';
+          edit.className = 'app-grid-group-edit';
+          edit.textContent = 'Edit';
+          edit.setAttribute('aria-label', `Edit project ${group.name}`);
+          edit.addEventListener('click', () => { openProjectEditModal(group); });
+          heading.appendChild(edit);
+        }
+        gridEl.appendChild(heading);
+      }
+
+    for (const app of group.apps) {
       const card = document.createElement('div');
       card.className = 'app-card';
 
@@ -556,6 +601,7 @@ document.addEventListener('DOMContentLoaded', () => {
       card.appendChild(actions);
       gridEl.appendChild(card);
     }
+    }
   }
 
   function renderApps() {
@@ -576,23 +622,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const segEl = document.getElementById('apps-segment');
     apps = segmentApps(apps, segEl ? segEl.value : 'all');
 
-    // Sort.
+    // Sort is applied WITHIN each project group, using the same comparators as
+    // before (they now live in app-grid-groups.js). Groups themselves keep the
+    // shared order: ungrouped first, then projects by display name. Ordering
+    // sections by "most recent deploy" would make headings jump between
+    // renders, which defeats the purpose of an index.
     const sortKey = sortEl ? sortEl.value : 'default';
-    if (sortKey === 'name') {
-      apps.sort((a, b) => a.name.localeCompare(b.name));
-    } else if (sortKey === 'deploy') {
-      apps.sort((a, b) => {
-        const ta = a.last_deployed_at ? new Date(a.last_deployed_at).getTime() : 0;
-        const tb = b.last_deployed_at ? new Date(b.last_deployed_at).getTime() : 0;
-        return tb - ta;
-      });
-    } else if (sortKey === 'status') {
-      const order = { crashed: 0, running: 1, stopped: 2, failed: 3 };
-      apps.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
-    }
-    // 'default' keeps server order.
-
-    renderGridVerbatim(apps, appGrid, emptyState);
+    renderGridVerbatim(groupAppsForGrid(apps, { sortKey }), appGrid, emptyState);
   }
 
   function showLoggedOut() {
@@ -932,6 +968,89 @@ document.addEventListener('DOMContentLoaded', () => {
     syncSidebar();
     metrics.setTargets(state.apps.map(a => a.slug));
     loadFleetHealth();
+    populateProjectDatalist();
+  }
+
+  // Populates the shared project datalist and caches the full project rows for
+  // the edit modal. Failure is silent by design: the datalist is a convenience,
+  // and a typed project slug still works without it, so a projects fetch that
+  // fails must not block creating or editing an app.
+  async function populateProjectDatalist() {
+    const list = document.getElementById('project-slugs');
+    let projects = [];
+    try {
+      const resp = await api('/api/projects');
+      if (!resp.ok) return;
+      const body = (await resp.json()) || {};
+      projects = Array.isArray(body.items) ? body.items : [];
+    } catch {
+      return;
+    }
+    projectRows.clear();
+    for (const p of projects) {
+      if (p && p.slug) projectRows.set(p.slug, p);
+    }
+    if (!list) return;
+    list.textContent = '';
+    for (const p of projects) {
+      const opt = document.createElement('option');
+      opt.value = p.slug;
+      // The label shows the display name so an operator picking from the
+      // dropdown recognizes "Quarterly Reports", not just "qr".
+      if (p.name && p.name !== p.slug) opt.label = p.name;
+      list.appendChild(opt);
+    }
+  }
+
+  async function openProjectEditModal(group) {
+    const modal = document.getElementById('project-edit-modal');
+    // A row may be missing if the modal is opened before the first projects
+    // fetch, or if the project was created on another tab. Refetch once.
+    if (!projectRows.has(group.project)) await populateProjectDatalist();
+    const row = projectRows.get(group.project);
+    modal.dataset.slug = group.project;
+    document.getElementById('project-edit-slug').textContent = group.project;
+    // The heading falls back to the slug when the project is unnamed; showing
+    // that fallback in the Name field would silently turn a missing name into a
+    // real one on the next save.
+    document.getElementById('project-edit-name').value =
+      group.name === group.project ? '' : group.name;
+    // Only send a description back if we know the current one. A group object
+    // never carries a description, so an unconditional send would clear it.
+    modal.dataset.descriptionKnown = row ? '1' : '0';
+    document.getElementById('project-edit-description').value =
+      row ? row.description || '' : '';
+    document.getElementById('project-edit-description').disabled = !row;
+    document.getElementById('project-edit-icon').value = group.iconEmoji || '';
+    modal.hidden = false;
+    modalTrap(modal).activate();
+    document.getElementById('project-edit-name').focus();
+  }
+
+  async function saveProjectEdit() {
+    const modal = document.getElementById('project-edit-modal');
+    const slug = modal.dataset.slug;
+    const body = buildProjectPatchBody({
+      name: document.getElementById('project-edit-name').value,
+      iconEmoji: document.getElementById('project-edit-icon').value,
+      description: document.getElementById('project-edit-description').value,
+      descriptionKnown: modal.dataset.descriptionKnown === '1',
+    });
+    const resp = await api(`/api/projects/${encodeURIComponent(slug)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      setError(appError, 'Could not save the project. Check the name and icon and try again.');
+      return;
+    }
+    modal.hidden = true;
+    modalTrap(modal).release();
+    // Refetch rather than patching state in place: the grid, the sidebar and
+    // the datalist all carry a copy of the display metadata.
+    await loadApps();
+    populateProjectDatalist();
   }
 
   // syncSidebar renders the project->app quick-switch list from the FULL app
@@ -3363,6 +3482,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Without this branch, Escape left the modal open after the secret
         // token value was already revealed in the DOM once (tokenRevealValue).
         closeNewTokenModal();
+      } else if (!projectEditModal.hidden) {
+        closeProjectEditModal();
       } else if (!document.getElementById('log-pane').hidden) {
         closeLogs();
       }
@@ -4121,6 +4242,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target === e.currentTarget) closeNewAppModal();
   });
   newAppForm.addEventListener('submit', submitNewApp);
+
+  function closeProjectEditModal() {
+    projectEditModal.hidden = true;
+    modalTrap(projectEditModal).release();
+  }
+  projectEditSave.addEventListener('click', saveProjectEdit);
+  projectEditCancel.addEventListener('click', closeProjectEditModal);
+  projectEditModal.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeProjectEditModal();
+  });
+
   newAppName.addEventListener('input', () => {
     if (slugEdited) return;
     newAppSlug.value = slugify(newAppName.value);

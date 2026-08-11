@@ -5,6 +5,7 @@
 // "recently opened" shortlist, and apps grouped by project. Kept DOM-free so it
 // is unit-testable and the view stays a thin renderer.
 import { appAvatar, appIconUrl, appIconEmoji } from './app-avatar.js';
+import { groupApps, UNGROUPED } from './project-groups.js';
 
 // Re-export appAvatar so existing importers (and tests) keep their entry point
 // while the implementation lives in the shared app-avatar module.
@@ -50,7 +51,7 @@ export function launchReadiness(app) {
  * @returns {{
  *   total:number,
  *   recent:Array<object>,
- *   groups:Array<{project:string,apps:Array<object>}>,
+ *   groups:Array<{project:string,name:string,iconEmoji:string,apps:Array<object>,showHeading:boolean}>,
  * }}
  */
 export function buildLaunchpadModel(apps, recentSlugs) {
@@ -61,7 +62,11 @@ export function buildLaunchpadModel(apps, recentSlugs) {
     slug: app.slug,
     name: app.name || app.slug,
     description: app.description || '',
-    project: app.project_slug || 'default',
+    // The project fields are carried through verbatim so groupApps sees the
+    // same shape it sees on the grid; the synthetic 'default' fallback is gone.
+    project_slug: app.project_slug || '',
+    project_name: app.project_name || '',
+    project_icon_emoji: app.project_icon_emoji || '',
     readiness: launchReadiness(app),
     avatar: appAvatar(app),
     // iconUrl is set when the app has an uploaded icon; the tile renders it in
@@ -77,16 +82,14 @@ export function buildLaunchpadModel(apps, recentSlugs) {
     ? recent.map((slug) => bySlug.get(slug)).filter(Boolean).slice(0, 6)
     : [];
 
-  // Group by project, projects alphabetical, apps alphabetical within a project.
-  const byProject = new Map();
-  for (const t of tiles) {
-    if (!byProject.has(t.project)) byProject.set(t.project, []);
-    byProject.get(t.project).push(t);
-  }
-  const groups = [...byProject.keys()].sort().map((project) => ({
-    project,
-    apps: byProject.get(project).sort((a, b) => a.name.localeCompare(b.name)),
-  }));
+  // Ungrouped first, then named projects by display name (the shared rule).
+  // A lone ungrouped group needs no heading: it would label the entire page
+  // "All apps", which is what the page already is. Any other shape gets
+  // headings, including a lone NAMED project, whose heading is the
+  // organisation the operator asked for.
+  const raw = groupApps(tiles);
+  const soleUngrouped = raw.length === 1 && raw[0].project === UNGROUPED;
+  const groups = raw.map((g) => ({ ...g, showHeading: !soleUngrouped }));
 
   return { total: tiles.length, recent: recentTiles, groups };
 }

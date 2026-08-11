@@ -616,7 +616,7 @@ func TestPoolSyncer_RunOnce_NilDialerRemoteDocker(t *testing.T) {
 		t.Fatalf("get user: %v", err)
 	}
 	const slug = "remote-app"
-	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: "remote", OwnerID: owner.ID, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: "remote", OwnerID: owner.ID, Access: "private"}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	app, err := store.GetAppBySlug(slug)

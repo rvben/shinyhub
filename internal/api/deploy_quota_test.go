@@ -144,7 +144,7 @@ func TestDeployApp_RejectsWhenOverQuota(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "big", Name: "Big", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "big", Name: "Big", OwnerID: u.ID})
 
 	// Pre-populate 2 MiB of stale version data so any further extract pushes
 	// the slug above the 1 MiB quota.
@@ -195,7 +195,7 @@ func TestDeployApp_QuotaDisabled_DoesNotReject(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "big", Name: "Big", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "big", Name: "Big", OwnerID: u.ID})
 	seedOversizedAppDir(t, appsDir, "big", int(5*deploy.MiB))
 
 	body, ctype := buildBundleUpload(t, "app.py", "print('hi')\n")
@@ -223,7 +223,7 @@ func TestDeployApp_RejectsOversizedBundle(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
 
 	// Build a zip whose raw (stored) payload exceeds 1 MiB so the multipart
 	// body size surpasses the cap even before extraction.
@@ -259,7 +259,7 @@ func TestDeployApp_MaxBundleDisabled_DoesNotRejectBySize(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
 
 	// A 2 MiB upload that would be rejected with a 1 MiB cap.
 	body, ctype := buildOversizedBundleUpload(t, 2*1024*1024)

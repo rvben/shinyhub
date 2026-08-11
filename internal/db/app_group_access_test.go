@@ -18,7 +18,7 @@ func agaOwner(t *testing.T, store *db.Store) int64 {
 func TestAppGroupAccess_GrantListRevoke(t *testing.T) {
 	store := dbtest.New(t)
 	ownerID := agaOwner(t, store)
-	if err := store.CreateApp(db.CreateAppParams{Slug: "finance-dash", Name: "fd", OwnerID: ownerID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "finance-dash", Name: "fd", OwnerID: ownerID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.GrantAppGroupAccess("finance-dash", "finance", "viewer", "manual"); err != nil {

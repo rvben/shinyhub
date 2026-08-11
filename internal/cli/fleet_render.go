@@ -123,20 +123,45 @@ func countDiff(diff []fleet.AppDiff) planCounts {
 
 // pending reports whether the diff has any non-unchanged action (drives
 // --detailed-exitcode exit code 2).
-func pending(diff []fleet.AppDiff) bool {
+func pending(diff []fleet.AppDiff, projects []fleet.ProjectDiff) bool {
 	for _, d := range diff {
 		if d.Action != fleet.ActionUnchanged {
+			return true
+		}
+	}
+	for _, p := range projects {
+		if p.Action != fleet.ActionUnchanged {
 			return true
 		}
 	}
 	return false
 }
 
+// addProjectCounts folds project rows into the same create/update tally the
+// apps use, so the summary line and the exit code cover both passes.
+func addProjectCounts(c planCounts, projects []fleet.ProjectDiff) planCounts {
+	for _, p := range projects {
+		switch p.Action {
+		case fleet.ActionCreate:
+			c.Create++
+		case fleet.ActionUpdateConfig:
+			c.Update++
+		case fleet.ActionUnchanged:
+			c.Unchanged++
+		}
+	}
+	return c
+}
+
 // shellQuote returns s safe to paste as a single POSIX-shell argv word. A
 // string built only from unreserved characters (alphanumerics and the path
 // punctuation a manifest path normally uses) is returned bare; anything else is
-// wrapped in single quotes with embedded single quotes escaped as '\'' so a
-// path with spaces or shell metacharacters survives a copy-paste intact.
+// wrapped in single quotes, with every embedded single quote replaced by the
+// four-character sequence
+//
+//	'\''
+//
+// so a path with spaces or shell metacharacters survives a copy-paste intact.
 func shellQuote(s string) string {
 	if s == "" {
 		return "''"
@@ -198,29 +223,55 @@ func applySuggestion(file string, c planCounts) (cmd, desc string) {
 	return strings.Join(parts, " "), strings.Join(actions, ", ")
 }
 
-func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *fleet.Manifest, host string, caps serverCaps, diff []fleet.AppDiff) error {
+func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *fleet.Manifest, host string, caps serverCaps, diff []fleet.AppDiff, projects []fleet.ProjectDiff) error {
 	out := cmd.OutOrStdout()
 	_ = caps // threaded for fleet apply; the plan command is read-only and does not consume it
 
 	if f.jsonOutput {
-		code, reason := planExitInfo(f, diff)
-		if err := writeFleetPlanJSON(out, m, host, diff, code, reason); err != nil {
+		code, reason := planExitInfo(f, diff, projects)
+		if err := writeFleetPlanJSON(out, m, host, diff, projects, code, reason); err != nil {
 			return &ExitCodeError{Code: 1, Err: err}
 		}
-		return planExit(f, diff)
+		return planExit(f, diff, projects)
 	}
 
-	c := countDiff(diff)
+	c := addProjectCounts(countDiff(diff), projects)
 	summary := fmt.Sprintf(
 		"Plan: %d to create, %d to update, %d to adopt, %d to delete, %d unchanged.",
 		c.Create, c.Update, c.Adopt, c.Delete, c.Unchanged)
 
 	if quietFlag {
 		fmt.Fprintln(out, summary)
-		return planExit(f, diff)
+		return planExit(f, diff, projects)
 	}
 
 	fmt.Fprintf(out, "%s  ·  fleet_id=%s  ·  server=%s\n\n", cmdLabel, m.FleetID, host)
+
+	// Omitted entirely when the manifest declares no projects, so existing
+	// output stays byte-identical for manifests that do not use the feature.
+	if len(projects) > 0 {
+		fmt.Fprintf(out, "Projects (%d)\n", len(projects))
+		wSlug := 0
+		for _, p := range projects {
+			if len(p.Slug) > wSlug {
+				wSlug = len(p.Slug)
+			}
+		}
+		for _, p := range projects {
+			g, word := glyphWord(p.Action)
+			keys := make([]string, 0, len(p.Drift))
+			for _, it := range p.Drift {
+				keys = append(keys, it.Key)
+			}
+			reason := ""
+			if len(keys) > 0 {
+				reason = strings.Join(keys, ", ")
+			}
+			fmt.Fprintf(out, "  %s  %-*s  %-*s  %s\n", g, 9, word, wSlug, p.Slug, reason)
+		}
+		fmt.Fprintln(out)
+	}
+
 	fmt.Fprintf(out, "Apps (%d)   legend: %s\n", len(diff), planLegend)
 
 	// Aligned columns: glyph word slug reason.
@@ -246,7 +297,7 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *
 		applyCmd, desc := applySuggestion(f.file, c)
 		fmt.Fprintf(out, "\nNext:\n  %s\n      (%s)\n", applyCmd, desc)
 	}
-	return planExit(f, diff)
+	return planExit(f, diff, projects)
 }
 
 // planExitInfo computes the process exit code and a human reason for a plan
@@ -254,9 +305,9 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *
 // 2 ("changes are pending") when the diff has pending actions, else 0 ("no
 // changes"). The JSON summary and planExit both derive from this so the
 // reported exit_code always matches the process exit code.
-func planExitInfo(f *fleetPlanFlags, diff []fleet.AppDiff) (int, string) {
+func planExitInfo(f *fleetPlanFlags, diff []fleet.AppDiff, projects []fleet.ProjectDiff) (int, string) {
 	if f.detailedExitcode {
-		if pending(diff) {
+		if pending(diff, projects) {
 			return 2, "changes are pending"
 		}
 		return 0, "no changes"
@@ -265,8 +316,8 @@ func planExitInfo(f *fleetPlanFlags, diff []fleet.AppDiff) (int, string) {
 }
 
 // planExit maps the diff to the process exit code.
-func planExit(f *fleetPlanFlags, diff []fleet.AppDiff) error {
-	code, reason := planExitInfo(f, diff)
+func planExit(f *fleetPlanFlags, diff []fleet.AppDiff, projects []fleet.ProjectDiff) error {
+	code, reason := planExitInfo(f, diff, projects)
 	if code != 0 {
 		// Detailed-exitcode is a status signal (the plan was already printed),
 		// not an error to surface; flag Reported so the wrapper stays silent.
@@ -299,6 +350,12 @@ type jsonApp struct {
 	PruneEligible bool            `json:"prune_eligible"`
 }
 
+type jsonProject struct {
+	Slug   string          `json:"slug"`
+	Action string          `json:"action"`
+	Drift  []jsonDriftItem `json:"drift"`
+}
+
 type jsonSummary struct {
 	Counts     map[string]int `json:"counts"`
 	ExitCode   int            `json:"exit_code"`
@@ -306,15 +363,34 @@ type jsonSummary struct {
 }
 
 type jsonEnvelope struct {
-	SchemaVersion int         `json:"schema_version"`
-	FleetID       string      `json:"fleet_id"`
-	Server        string      `json:"server"`
-	GeneratedAt   string      `json:"generated_at"`
-	Apps          []jsonApp   `json:"apps"`
-	Summary       jsonSummary `json:"summary"`
+	SchemaVersion int           `json:"schema_version"`
+	FleetID       string        `json:"fleet_id"`
+	Server        string        `json:"server"`
+	GeneratedAt   string        `json:"generated_at"`
+	Projects      []jsonProject `json:"projects"`
+	Apps          []jsonApp     `json:"apps"`
+	Summary       jsonSummary   `json:"summary"`
 }
 
-func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Manifest, host string, diff []fleet.AppDiff, exitCode int, exitReason string) error {
+// jsonProjectsFromDiff maps the project diff to its JSON shape, sorted by slug
+// for the same stable-ordering reason the apps array is. Shared by the plan
+// and apply JSON envelopes so both sort and shape the projects array the same
+// way.
+func jsonProjectsFromDiff(projects []fleet.ProjectDiff) []jsonProject {
+	out := make([]jsonProject, 0, len(projects))
+	sorted := append([]fleet.ProjectDiff(nil), projects...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Slug < sorted[j].Slug })
+	for _, p := range sorted {
+		drift := make([]jsonDriftItem, 0, len(p.Drift))
+		for _, c := range p.Drift {
+			drift = append(drift, jsonDriftItem{Key: c.Key, Server: c.Server, Desired: c.Desired})
+		}
+		out = append(out, jsonProject{Slug: p.Slug, Action: string(p.Action), Drift: drift})
+	}
+	return out
+}
+
+func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Manifest, host string, diff []fleet.AppDiff, projects []fleet.ProjectDiff, exitCode int, exitReason string) error {
 	apps := make([]jsonApp, 0, len(diff))
 	// Stable ordering for machine consumers: by slug.
 	sorted := append([]fleet.AppDiff(nil), diff...)
@@ -331,12 +407,13 @@ func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Ma
 			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
 		})
 	}
-	c := countDiff(diff)
+	c := addProjectCounts(countDiff(diff), projects)
 	env := jsonEnvelope{
 		SchemaVersion: fleetPlanSchemaVersion,
 		FleetID:       m.FleetID,
 		Server:        host,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		Projects:      jsonProjectsFromDiff(projects),
 		Apps:          apps,
 		Summary: jsonSummary{
 			Counts: map[string]int{

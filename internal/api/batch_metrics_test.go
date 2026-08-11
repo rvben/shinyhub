@@ -192,7 +192,7 @@ func TestBatchMetrics_NoSlugsHonoursTokenScope(t *testing.T) {
 	srv, store := newTestServer(t)
 	ownerID, _ := mkUser(t, store, "owner", "developer")
 	for _, slug := range []string{"inscope", "outscope"} {
-		if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID}); err != nil {
+		if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID}); err != nil {
 			t.Fatal(err)
 		}
 	}

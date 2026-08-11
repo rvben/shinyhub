@@ -21,9 +21,13 @@ type preflightResult struct {
 	caps     serverCaps
 	host     string
 	diff     []fleet.AppDiff
-	sources  map[string]string
-	observed map[string]fleet.ObservedApp
-	cleanup  func()
+	// projectDiff is empty when the manifest declares no [[project]] blocks, in
+	// which case no GET /api/projects is issued at all, so a manifest that does
+	// not use the feature behaves exactly as before.
+	projectDiff []fleet.ProjectDiff
+	sources     map[string]string
+	observed    map[string]fleet.ObservedApp
+	cleanup     func()
 }
 
 // fleetPreflight runs manifest+local validation, one auth/server call, then
@@ -184,8 +188,28 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		observedBySlug[a.Slug] = oa
 	}
 	diff := fleet.Diff(m, localDigests, observed)
+
+	var projectDiff []fleet.ProjectDiff
+	if len(m.Projects) > 0 {
+		projects, perr := fetchProjects(cfg)
+		if perr != nil {
+			fmt.Fprintf(errOut, "  %s %v\n", s.failMark(), perr)
+			runCleanups()
+			return nil, &ExitCodeError{Code: 3, Err: perr, Reported: true}
+		}
+		observedProjects := make([]fleet.ObservedProject, 0, len(projects))
+		for _, p := range projects {
+			// Taken by address for the same reason the app fields are: a stored
+			// empty name reads as the real value "" rather than "not observed".
+			observedProjects = append(observedProjects, fleet.ObservedProject{
+				Slug: p.Slug, Name: &p.Name, Description: &p.Description, IconEmoji: &p.IconEmoji,
+			})
+		}
+		projectDiff = fleet.DiffProjects(m, observedProjects)
+	}
+
 	return &preflightResult{
-		manifest: m, caps: caps, host: cfg.Host, diff: diff,
+		manifest: m, caps: caps, host: cfg.Host, diff: diff, projectDiff: projectDiff,
 		sources: sources, observed: observedBySlug, cleanup: runCleanups,
 	}, nil
 }

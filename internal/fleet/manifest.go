@@ -14,6 +14,8 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/rvben/shinyhub/internal/appmetaspec"
 	"github.com/rvben/shinyhub/internal/autoscalespec"
+	"github.com/rvben/shinyhub/internal/iconspec"
+	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
 
 // Problem is a single, user-facing validation failure. File/Line/Col are
@@ -46,8 +48,17 @@ type Config struct {
 	// makes the fleet manifest its owner: a rename in the dashboard then shows
 	// up as drift on the next plan and is reverted by apply. Leaving the key out
 	// keeps the dashboard authoritative.
-	Name                    *string          `toml:"name"`
-	Description             *string          `toml:"description"`
+	Name        *string `toml:"name"`
+	Description *string `toml:"description"`
+	// Project groups this app on the dashboard. Declaring it makes the fleet
+	// manifest the owner, exactly as Name and Description above: a project
+	// changed in the dashboard shows as drift on the next plan and is reverted
+	// by apply. A declared "" ungroups the app.
+	//
+	// The TOML key is `project` and the drift key is `project`, but the API
+	// field is `project_slug`, so the patch layer maps it explicitly rather
+	// than using the body[key] shortcut. See internal/cli/fleet_apply_exec.go.
+	Project                 *string          `toml:"project"`
 	HibernateTimeoutMinutes *int             `toml:"hibernate_timeout_minutes"`
 	Replicas                *int             `toml:"replicas"`
 	MaxSessionsPerReplica   *int             `toml:"max_sessions_per_replica"`
@@ -74,10 +85,22 @@ type AppEntry struct {
 	Config     Config `toml:"config"`
 }
 
+// ProjectEntry is one [[project]] block after validation. It carries display
+// metadata only: a project has no bundle, no source and no visibility. Pointers
+// mean the same thing they do in Config: nil is "not declared, leave the
+// server's value alone", and a non-nil "" is an explicit clear.
+type ProjectEntry struct {
+	Slug        string  `toml:"slug"`
+	Name        *string `toml:"name"`
+	Description *string `toml:"description"`
+	Icon        *string `toml:"icon"`
+}
+
 // Manifest is a validated fleet.toml.
 type Manifest struct {
-	FleetID string     `toml:"fleet_id"`
-	Apps    []AppEntry `toml:"app"`
+	FleetID  string         `toml:"fleet_id"`
+	Projects []ProjectEntry `toml:"project"`
+	Apps     []AppEntry     `toml:"app"`
 }
 
 var fleetIDRe = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
@@ -92,8 +115,8 @@ var validVisibility = map[string]bool{"private": true, "shared": true, "public":
 // knownKeys is the set of accepted manifest keys, used for "did you mean"
 // suggestions on unknown-key rejection.
 var knownKeys = []string{
-	"fleet_id", "app", "slug", "source", "visibility", "config",
-	"name", "description",
+	"fleet_id", "app", "project", "slug", "source", "visibility", "config",
+	"name", "description", "icon",
 	"hibernate_timeout_minutes", "replicas", "max_sessions_per_replica",
 	"autoscale", "enabled", "min_replicas", "max_replicas", "target",
 }
@@ -179,6 +202,8 @@ func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 		}
 	}
 
+	probs = append(probs, validateProjects(file, &m)...)
+
 	if len(probs) > 0 {
 		// Return the partially-decoded manifest alongside the problems so
 		// callers can inspect what was parsed (e.g., to run additional local
@@ -211,6 +236,17 @@ func validateConfig(file, who string, c *Config) []Problem {
 			c.Description = &v
 		}
 	}
+	// Trimmed in place for the same reason Name is: an untrimmed value would
+	// report drift against the server's trimmed one on every plan.
+	if c.Project != nil {
+		v := strings.TrimSpace(*c.Project)
+		if v != "" && !slugpkg.Valid(v) {
+			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
+				"%s: project must be %s", who, slugpkg.HumanRule)})
+		} else {
+			c.Project = &v
+		}
+	}
 	// hibernate accepts the existing -1 "reset to default" sentinel (matches
 	// internal/deploy/hooks.go), otherwise must be >= 1.
 	if c.HibernateTimeoutMinutes != nil {
@@ -236,6 +272,82 @@ func validateConfig(file, who string, c *Config) []Problem {
 			Target:      c.Autoscale.Target,
 		}); err != nil {
 			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("%s: %v", who, err)})
+		}
+	}
+	return probs
+}
+
+// validateProjects validates the [[project]] blocks and normalizes them in
+// place, and rejects a project no app in this manifest references.
+//
+// The unreferenced check is not tidiness. Observed projects come from
+// GET /api/projects, which is access-scoped, and a project with no apps is
+// invisible to every non-privileged caller by construction. An unreferenced
+// project would therefore read as absent on every run, so `fleet plan` would
+// report a permanent "1 to create" and --detailed-exitcode would report drift
+// forever in CI. Requiring a referencing app means the identity that can
+// deploy the app can also see the project, so the diff converges.
+//
+// It runs after the app loop because it reads the apps' normalized projects.
+func validateProjects(file string, m *Manifest) []Problem {
+	var probs []Problem
+
+	referenced := map[string]bool{}
+	for _, a := range m.Apps {
+		if a.Config.Project != nil && *a.Config.Project != "" {
+			referenced[*a.Config.Project] = true
+		}
+	}
+
+	seen := map[string]bool{}
+	for i := range m.Projects {
+		p := &m.Projects[i]
+		who := fmt.Sprintf("project[%d]", i)
+		p.Slug = strings.TrimSpace(p.Slug)
+		switch {
+		case p.Slug == "":
+			probs = append(probs, Problem{File: file, Msg: who + " is missing slug"})
+		case !slugpkg.Valid(p.Slug):
+			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
+				"%s: slug %q invalid: must be %s", who, p.Slug, slugpkg.HumanRule)})
+		default:
+			who = fmt.Sprintf("project %q", p.Slug)
+			if seen[p.Slug] {
+				probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("duplicate project slug %q", p.Slug)})
+			}
+			seen[p.Slug] = true
+			if !referenced[p.Slug] {
+				probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
+					"%s: no app in this manifest sets project = %q; "+
+						"reference it from an [app.config] block or remove it", who, p.Slug)})
+			}
+		}
+		if p.Name != nil {
+			v, err := appmetaspec.NormalizeProjectName(*p.Name)
+			if err != nil {
+				probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("%s: name: %v", who, err)})
+			} else {
+				p.Name = &v
+			}
+		}
+		if p.Description != nil {
+			v, err := appmetaspec.NormalizeDescription(*p.Description)
+			if err != nil {
+				probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("%s: description: %v", who, err)})
+			} else {
+				p.Description = &v
+			}
+		}
+		if p.Icon != nil {
+			v := strings.TrimSpace(*p.Icon)
+			// "" is a declared clear, so it skips validation: iconspec.Validate
+			// rejects the empty string.
+			if v != "" {
+				if err := iconspec.Validate(v); err != nil {
+					probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("%s: icon: %v", who, err)})
+				}
+			}
+			p.Icon = &v
 		}
 	}
 	return probs

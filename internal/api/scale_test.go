@@ -63,7 +63,7 @@ func newScaleTestServer(t *testing.T, slug string, replicas int, cfg *config.Con
 	if err := store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); err != nil {

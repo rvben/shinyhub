@@ -16,6 +16,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/appmetaspec"
 	"github.com/rvben/shinyhub/internal/deploy"
+	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/spf13/cobra"
 )
 
@@ -755,6 +756,7 @@ type appsSetFlags struct {
 	icon                  string
 	name                  string
 	description           string
+	project               string
 }
 
 func newAppsSetCmd() *cobra.Command {
@@ -816,6 +818,8 @@ func newAppsSetCmd() *cobra.Command {
 		"Friendly display name shown on the dashboard card and detail heading (1..128 characters; the slug is unchanged)")
 	cmd.Flags().StringVar(&f.description, "description", "",
 		"One-line description shown under the name (up to 280 characters; \"\" clears it)")
+	cmd.Flags().StringVar(&f.project, "project", "",
+		"Project slug this app is grouped under on the dashboard (\"\" removes it from any project)")
 	return cmd
 }
 
@@ -842,9 +846,10 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	iconChanged := cmd.Flags().Changed("icon")
 	nameChanged := cmd.Flags().Changed("name")
 	descriptionChanged := cmd.Flags().Changed("description")
+	projectChanged := cmd.Flags().Changed("project")
 
-	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged && !renderSecondsChanged && !iconChanged && !nameChanged && !descriptionChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok, --render-seconds, --icon, --name, --description)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged && !renderSecondsChanged && !iconChanged && !nameChanged && !descriptionChanged && !projectChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok, --render-seconds, --icon, --name, --description, --project)")
 	}
 	// Validate against the same spec the server uses so a too-long or
 	// whitespace-only value fails locally with the identical message instead of
@@ -862,6 +867,13 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 			return validationErr(err.Error(), "pass --description \"\" to clear the description")
 		}
 		f.description = v
+	}
+	if projectChanged {
+		f.project = strings.TrimSpace(f.project)
+		if f.project != "" && !slugpkg.Valid(f.project) {
+			return validationErr("--project must be "+slugpkg.HumanRule,
+				"pass --project \"\" to remove the app from its project")
+		}
 	}
 	if memoryLimitChanged && f.memoryLimitMB != -1 {
 		if err := deploy.ValidateMemoryLimitMB(f.memoryLimitMB); err != nil {
@@ -1050,6 +1062,11 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		// whenever the flag was passed rather than when it is non-empty.
 		payload["description"] = f.description
 	}
+	if projectChanged {
+		// Keyed off Changed rather than a non-empty value so `--project ""`
+		// reaches the server as an explicit clear.
+		payload["project_slug"] = f.project
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1181,6 +1198,13 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 			lines = append(lines, fmt.Sprintf("%s: description cleared", slug))
 		} else {
 			lines = append(lines, fmt.Sprintf("%s: description set to %q", slug, f.description))
+		}
+	}
+	if projectChanged {
+		if f.project == "" {
+			lines = append(lines, fmt.Sprintf("%s: removed from its project", slug))
+		} else {
+			lines = append(lines, fmt.Sprintf("%s: project set to %s", slug, f.project))
 		}
 	}
 	if iconChanged {

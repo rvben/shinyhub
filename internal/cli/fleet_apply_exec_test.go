@@ -548,7 +548,7 @@ func TestConvergeApp_FailedDeployAttachesLogTail(t *testing.T) {
 	// cause without a second call.
 	var buf strings.Builder
 	m := &fleet.Manifest{FleetID: "eu"}
-	if err := writeFleetApplyJSON(&buf, m, cfg.Host, []fleet.AppDiff{d}, []applyResult{r}, 4, "PARTIAL"); err != nil {
+	if err := writeFleetApplyJSON(&buf, m, cfg.Host, []fleet.AppDiff{d}, nil, applyOutcome{apps: []applyResult{r}}, 4, "PARTIAL"); err != nil {
 		t.Fatalf("writeFleetApplyJSON: %v", err)
 	}
 	if !strings.Contains(buf.String(), crashLine) {
@@ -849,5 +849,75 @@ func TestConvergeFleet_ExitCodeParityParallelSerial(t *testing.T) {
 	}
 	if sCode != 4 {
 		t.Fatalf("one failing app must yield exit 4, got %d (%q)", sCode, sReason)
+	}
+}
+
+func TestApplyConfigDriftSendsProjectSlug(t *testing.T) {
+	var got map[string]any
+	cfg := fleetProjectSrv(t, func(w http.ResponseWriter, r *http.Request) {
+		got = jsonBody(t, r)
+		w.WriteHeader(http.StatusOK)
+	})
+	drift := []fleet.ConfigDriftItem{{Key: "project", Server: `"old"`, Desired: `"new"`}}
+	if err := applyConfigDrift(cfg, "a", drift, fleet.Config{Project: strp("new")}, nil, nil, "run"); err != nil {
+		t.Fatalf("applyConfigDrift: %v", err)
+	}
+	// The API field is project_slug even though the drift key is project; the
+	// drift item's Desired is a quoted display string, never a value to send.
+	if got["project_slug"] != "new" {
+		t.Errorf("body = %v, want project_slug=new", got)
+	}
+	if _, wrong := got["project"]; wrong {
+		t.Error("body must not carry the manifest key name")
+	}
+
+	// A declared empty project is a real value (ungroup the app), not an
+	// absent key, so it must still be sent: keying off *Project != "" would
+	// silently drop this PATCH and leave the app grouped.
+	drift = []fleet.ConfigDriftItem{{Key: "project", Server: `"old"`, Desired: `""`}}
+	if err := applyConfigDrift(cfg, "a", drift, fleet.Config{Project: strp("")}, nil, nil, "run"); err != nil {
+		t.Fatalf("applyConfigDrift: %v", err)
+	}
+	v, present := got["project_slug"]
+	if !present || v != "" {
+		t.Errorf(`body = %#v (present=%v), want an explicit empty project_slug`, v, present)
+	}
+}
+
+func TestReassertFleetConfigIncludesProject(t *testing.T) {
+	var got map[string]any
+	cfg := fleetProjectSrv(t, func(w http.ResponseWriter, r *http.Request) {
+		got = jsonBody(t, r)
+		w.WriteHeader(http.StatusOK)
+	})
+	// Without this, a bundle declaring [app] project = "bundle-project" wins
+	// over a fleet manifest declaring project = "fleet-project": the deploy
+	// applies the bundle's value and nothing corrects it, inverting the
+	// documented "fleet manifest is the outer authority" order.
+	if err := reassertFleetConfig(cfg, "a", fleet.Config{Project: strp("fleet-project")}, nil, nil, "run"); err != nil {
+		t.Fatalf("reassertFleetConfig: %v", err)
+	}
+	if got["project_slug"] != "fleet-project" {
+		t.Errorf("body = %v, want project_slug=fleet-project", got)
+	}
+
+	// A fleet manifest declaring project = "" means the fleet wants the app
+	// ungrouped, and that must be reasserted like any other declared value;
+	// keying off *Project != "" would treat it as undeclared and skip it.
+	if err := reassertFleetConfig(cfg, "a", fleet.Config{Project: strp("")}, nil, nil, "run"); err != nil {
+		t.Fatalf("reassertFleetConfig: %v", err)
+	}
+	v, present := got["project_slug"]
+	if !present || v != "" {
+		t.Errorf(`body = %#v (present=%v), want an explicit empty project_slug`, v, present)
+	}
+}
+
+func TestDeclaredStringProject(t *testing.T) {
+	if v := declaredString(fleet.Config{Project: strp("p")}, "project"); v == nil || *v != "p" {
+		t.Errorf("declaredString(project) = %v, want p", v)
+	}
+	if v := declaredString(fleet.Config{}, "project"); v != nil {
+		t.Errorf("an undeclared project must return nil, got %v", v)
 	}
 }

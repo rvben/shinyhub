@@ -24,7 +24,7 @@ func seedStoppedTestApp(t *testing.T, store *db.Store, slug, status string, depl
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: slug, Name: slug, OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)

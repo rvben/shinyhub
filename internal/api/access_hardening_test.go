@@ -38,7 +38,7 @@ func TestListAppEnv_RequiresManage(t *testing.T) {
 	srv, store := newTestServer(t)
 	ownerID, ownerTok := mkUser(t, store, "owner", "developer")
 	_, intruderTok := mkUser(t, store, "intruder", "developer")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Pub", OwnerID: ownerID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Pub", OwnerID: ownerID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetAppAccess("pub", "public"); err != nil {
@@ -64,7 +64,7 @@ func TestListSchedules_RequiresExplicitAccess(t *testing.T) {
 	srv, store := newTestServer(t)
 	ownerID, ownerTok := mkUser(t, store, "owner", "developer")
 	_, strangerTok := mkUser(t, store, "stranger", "developer")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Pub", OwnerID: ownerID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Pub", OwnerID: ownerID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetAppAccess("pub", "public"); err != nil {
@@ -85,7 +85,7 @@ func TestListAppEnv_MemberViewerDenied(t *testing.T) {
 	srv, store := newTestServer(t)
 	ownerID, _ := mkUser(t, store, "owner", "developer")
 	memberID, memberTok := mkUser(t, store, "member", "developer")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Priv", OwnerID: ownerID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "priv", Name: "Priv", OwnerID: ownerID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.GrantAppAccess("priv", memberID); err != nil { // viewer member
@@ -119,7 +119,7 @@ func TestGrantAppAccess_ByUsername(t *testing.T) {
 	srv, store := newTestServer(t)
 	ownerID, ownerTok := mkUser(t, store, "owner", "developer")
 	aliceID, _ := mkUser(t, store, "alice", "developer")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app", Name: "App", OwnerID: ownerID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app", Name: "App", OwnerID: ownerID}); err != nil {
 		t.Fatal(err)
 	}
 

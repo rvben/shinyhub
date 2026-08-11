@@ -42,10 +42,10 @@ func TestImportFrom_SQLiteToPostgresRoundTrip(t *testing.T) {
 	owner := mustUser("owner", "admin")
 	viewer := mustUser("viewer", "developer")
 
-	if err := src.CreateApp(db.CreateAppParams{Slug: "alpha", Name: "Alpha", OwnerID: owner.ID, Access: "private"}); err != nil {
+	if _, err := src.CreateApp(db.CreateAppParams{Slug: "alpha", Name: "Alpha", OwnerID: owner.ID, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := src.CreateApp(db.CreateAppParams{Slug: "bravo", Name: "Bravo", OwnerID: owner.ID}); err != nil {
+	if _, err := src.CreateApp(db.CreateAppParams{Slug: "bravo", Name: "Bravo", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	alpha, _ := src.GetAppBySlug("alpha")
@@ -135,7 +135,7 @@ func TestImportFrom_SQLiteToPostgresRoundTrip(t *testing.T) {
 
 	// Sequence reset: a new app on the target must get an id above the migrated
 	// max, not collide with a preserved id.
-	if err := target.CreateApp(db.CreateAppParams{Slug: "charlie", Name: "Charlie", OwnerID: owner.ID}); err != nil {
+	if _, err := target.CreateApp(db.CreateAppParams{Slug: "charlie", Name: "Charlie", OwnerID: owner.ID}); err != nil {
 		t.Fatalf("create app on migrated target (sequence not reset?): %v", err)
 	}
 	charlie, _ := target.GetAppBySlug("charlie")

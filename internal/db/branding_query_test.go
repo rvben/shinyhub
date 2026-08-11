@@ -18,7 +18,7 @@ func TestListPublicAppsExcludesSharedAndPrivate(t *testing.T) {
 		{"shr", "shared"},
 		{"prv", "private"},
 	} {
-		if err := s.CreateApp(db.CreateAppParams{
+		if _, err := s.CreateApp(db.CreateAppParams{
 			Slug:    tc.slug,
 			Name:    tc.slug,
 			OwnerID: owner.ID,
