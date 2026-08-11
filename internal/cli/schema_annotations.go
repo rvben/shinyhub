@@ -226,6 +226,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "status", Type: "string", Desc: "stopped"},
 		{Name: "slug", Type: "string"},
 	}},
+	"apps sleep": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "hibernated"},
+		{Name: "slug", Type: "string"},
+	}},
 	"apps delete": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "deleted | absent"},
 		{Name: "slug", Type: "string"},

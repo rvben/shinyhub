@@ -38,6 +38,7 @@ func newAppsCmd() *cobra.Command {
 		newAppsTransferCmd(),
 		newAppsDeleteCmd(),
 		newAppsStopCmd(),
+		newAppsSleepCmd(),
 		newAppsDeploymentsCmd(),
 	)
 	return cmd
@@ -1822,6 +1823,47 @@ func runAppsStop(cmd *cobra.Command, args []string) error {
 	return renderAction(cmd, "stopped",
 		map[string]any{"slug": slug},
 		fmt.Sprintf("%s: stopped", slug))
+}
+
+// ── apps sleep ──────────────────────────────────────────────────────────────
+
+func newAppsSleepCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sleep <slug>",
+		Short: "Put a running app to sleep (wakes on the next request)",
+		Long: "Put a running app to sleep. The app releases its resources and the next\n" +
+			"request wakes it transparently, so visitors see no error page.\n\n" +
+			"Use `apps stop` instead to take an app out of service until it is\n" +
+			"explicitly started again.\n\n" +
+			"Only apps using the default multiplex worker isolation can sleep.",
+		Args: cobra.ExactArgs(1),
+		RunE: runAppsSleep,
+	}
+}
+
+func runAppsSleep(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	slug := args[0]
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/sleep", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return httpError(cfg.Token, "sleep app", resp, out)
+	}
+	return renderAction(cmd, "hibernated",
+		map[string]any{"slug": slug},
+		fmt.Sprintf("%s: sleeping", slug))
 }
 
 // ── apps deployments ────────────────────────────────────────────────────────
