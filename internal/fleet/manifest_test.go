@@ -244,3 +244,146 @@ func repeatRune(r byte, n int) string {
 	}
 	return string(b)
 }
+
+func TestParseManifestProjects(t *testing.T) {
+	m, probs := ParseManifest([]byte(`
+fleet_id = "acme"
+
+[[project]]
+slug = "analytics"
+name = "  Acme Analytics  "
+description = "Revenue and forecasting."
+icon = "📊"
+
+[[app]]
+slug = "revenue"
+source = "./apps/revenue"
+
+  [app.config]
+  project = "analytics"
+`), "fleet.toml")
+	if len(probs) > 0 {
+		t.Fatalf("unexpected problems: %v", probs)
+	}
+	if len(m.Projects) != 1 || m.Projects[0].Slug != "analytics" {
+		t.Fatalf("Projects = %+v, want one analytics entry", m.Projects)
+	}
+	// Normalized in place, like Config.Name, so the diff compares the trimmed
+	// value instead of reporting drift on every plan.
+	if m.Projects[0].Name == nil || *m.Projects[0].Name != "Acme Analytics" {
+		t.Errorf("Projects[0].Name = %v, want trimmed", m.Projects[0].Name)
+	}
+	if m.Apps[0].Config.Project == nil || *m.Apps[0].Config.Project != "analytics" {
+		t.Errorf("Config.Project = %v, want analytics", m.Apps[0].Config.Project)
+	}
+}
+
+func TestParseManifestProjectProblems(t *testing.T) {
+	cases := []struct {
+		name, toml, want string
+	}{
+		{"missing slug", `
+fleet_id = "a"
+[[project]]
+name = "X"
+`, "missing slug"},
+		{"invalid slug", `
+fleet_id = "a"
+[[project]]
+slug = "Not A Slug"
+`, "invalid"},
+		{"duplicate slug", `
+fleet_id = "a"
+[[project]]
+slug = "p"
+[[project]]
+slug = "p"
+[[app]]
+slug = "x"
+source = "./x"
+  [app.config]
+  project = "p"
+`, "duplicate project"},
+		{"unreferenced project", `
+fleet_id = "a"
+[[project]]
+slug = "orphan"
+`, "no app in this manifest"},
+		{"name too long", `
+fleet_id = "a"
+[[project]]
+slug = "p"
+name = "` + strings.Repeat("x", 129) + `"
+`, "name"},
+		{"invalid icon", `
+fleet_id = "a"
+[[project]]
+slug = "p"
+icon = "not an emoji"
+`, "icon"},
+		{"invalid app project slug", `
+fleet_id = "a"
+[[app]]
+slug = "x"
+source = "./x"
+  [app.config]
+  project = "Not A Slug"
+`, "project"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, probs := ParseManifest([]byte(tc.toml), "fleet.toml")
+			if len(probs) == 0 {
+				t.Fatalf("want a problem containing %q, got none", tc.want)
+			}
+			joined := ""
+			for _, p := range probs {
+				joined += p.Msg + "\n"
+			}
+			if !strings.Contains(joined, tc.want) {
+				t.Errorf("problems %q must mention %q", joined, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseManifestProjectAllowsEmptyDeclarations(t *testing.T) {
+	// A declared "" is an explicit clear on every one of these, not a validation
+	// error: "" name falls back to the slug, "" icon clears the icon, and ""
+	// project ungroups the app.
+	m, probs := ParseManifest([]byte(`
+fleet_id = "a"
+[[project]]
+slug = "p"
+name = ""
+icon = ""
+[[app]]
+slug = "x"
+source = "./x"
+  [app.config]
+  project = "p"
+
+[[app]]
+slug = "y"
+source = "./y"
+  [app.config]
+  project = ""
+`), "fleet.toml")
+	if len(probs) > 0 {
+		t.Fatalf("unexpected problems: %v", probs)
+	}
+	if m.Apps[1].Config.Project == nil || *m.Apps[1].Config.Project != "" {
+		t.Errorf(`app y Config.Project = %v, want a declared ""`, m.Apps[1].Config.Project)
+	}
+}
+
+func TestKnownKeysSuggestsProjectKeys(t *testing.T) {
+	// The did-you-mean list must cover the new keys, or a typo'd "porject"
+	// reports "unknown key" with no suggestion.
+	if s := suggest("porject", knownKeys); s != "project" {
+		t.Errorf("suggest(porject) = %q, want project", s)
+	}
+	if s := suggest("icno", knownKeys); s != "icon" {
+		t.Errorf("suggest(icno) = %q, want icon", s)
+	}
+}
