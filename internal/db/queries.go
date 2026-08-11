@@ -689,6 +689,14 @@ type App struct {
 	WorkerGroupedSize            int    `json:"worker_grouped_size"`
 	WorkerMaxWorkers             int    `json:"worker_max_workers"`
 	WorkerMaxSessionLifetimeSecs int    `json:"worker_max_session_lifetime_secs"`
+	// EffectiveWorkerIsolation is WorkerIsolation resolved against the fleet
+	// default (runtime.default_worker_isolation), so it is never empty. Computed
+	// by the API layer per request, never persisted; WorkerIsolation stays raw
+	// because the config form renders an empty value as "inherit". A consumer
+	// deciding what an app can DO (the dashboard hiding Sleep for elastic pools)
+	// must read this one: an app that inherits per_session has an empty
+	// WorkerIsolation but an elastic pool.
+	EffectiveWorkerIsolation string `json:"effective_worker_isolation,omitempty"`
 
 	// EphemeralDataAck records that the operator explicitly accepted ephemeral,
 	// task-local app-data for this app. When true, the durable-data guard allows

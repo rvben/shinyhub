@@ -131,6 +131,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 			{Name: "slug", Type: "string"},
 			{Name: "deploy_count", Type: "integer", Desc: "Cumulative deployment number; 0 when the server does not report one"},
 			{Name: "version", Type: "string", Desc: "Version string from the deployment; empty when the server does not report one"},
+			{Name: "kept_stopped", Type: "boolean", Desc: "True when the app was stopped before this deploy and was left stopped; start it with 'apps start <slug>' or deploy with --start"},
 		},
 		Notes: "shinyhub.toml [app] startup_timeout_seconds (1-3600, default 120) sets the readiness deadline the deploy health check allows before declaring the app crashed; it travels with the bundle and also applies on wake, scale, and rollback. shinyhub.toml [app] build_timeout_seconds (30-7200, default 900) bounds the host-side environment build (uv sync / renv restore) that runs before readiness; a build that exceeds it fails build_failed, distinct from startup_timeout_seconds, and is inert under the docker runtime. shinyhub.toml [app] also accepts memory_limit_mb (0 or 16-1048576) and cpu_quota_percent (0 or 1-6400; 100 = 1 core) - per-replica cgroup v2 ceilings reconciled into the app on deploy (declared-only, like replicas); 0 = explicit unlimited, omitted = unchanged. Clear back to inherit-global with `shinyhub apps set --memory-limit-mb -1` / `--cpu-quota-percent -1`.",
 	},
@@ -175,7 +176,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "global_autoscale_enabled", Type: "boolean"},
 		{Name: "runtime_mode", Type: "string", Desc: "native | docker"},
 		{Name: "resource_enforcement", Type: "object", Desc: "{memory,cpu} booleans: whether each per-app limit is actually enforced (native is best-effort, gated on cgroup delegation)"},
-		{Name: "worker_isolation", Type: "string", Desc: "Session isolation mode: multiplex (default) | grouped | per_session"},
+		{Name: "worker_isolation", Type: "string", Desc: "Session isolation mode as stored: multiplex | grouped | per_session, or empty when the app inherits the fleet default"},
+		{Name: "effective_worker_isolation", Type: "string", Desc: "worker_isolation resolved against the fleet default, so never empty; read this to decide what the app's pool supports"},
 		{Name: "worker_grouped_size", Type: "integer", Desc: "Clients per grouped worker (>= 1 when isolation is grouped)"},
 		{Name: "worker_max_workers", Type: "integer", Desc: "Demand-driven worker ceiling for grouped/per_session modes"},
 		{Name: "worker_max_session_lifetime_secs", Type: "integer", Desc: "Absolute worker lifetime in seconds (0 = unlimited)"},
@@ -224,6 +226,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	}},
 	"apps stop": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "stopped"},
+		{Name: "slug", Type: "string"},
+	}},
+	"apps sleep": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "hibernated"},
 		{Name: "slug", Type: "string"},
 	}},
 	"apps delete": {Mutating: mut, OutputFields: []fieldSpec{

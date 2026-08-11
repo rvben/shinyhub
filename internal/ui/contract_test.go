@@ -1174,6 +1174,132 @@ func TestAppsGridUsesAppCardActions(t *testing.T) {
 		"app.js must not reference a bare `neverDeployed`; that undeclared variable threw ReferenceError and broke the whole grid. Use appCardActions(app, canManage) instead")
 }
 
+// TestLifecycleControlsWiring pins the Sleep / Stop / Start wiring that jsdom
+// cannot reach: appCardActions is unit-tested, but the code that turns its
+// booleans into menu items and HTTP calls lives inside the app.js IIFE, which
+// is not importable. Without these pins the decision module and the render can
+// drift apart silently - the menu would keep showing an item the module hides,
+// or call an endpoint that does not exist.
+func TestLifecycleControlsWiring(t *testing.T) {
+	assertContains(t, "app.js", "/sleep",
+		"the Sleep control must POST /api/apps/{slug}/sleep")
+	assertContains(t, "app.js", "syncCardActions(kebab, cardActions)",
+		"the card menu's visible rows must come from appCardActions, not from an inline status check that would drift from the tested module")
+	for _, field := range []string{"acts.showSleep", "acts.showStop", "acts.showStart"} {
+		assertContains(t, "app.js", field,
+			"syncCardActions must decide each lifecycle row from the appCardActions result")
+	}
+	assertContains(t, "app.js", "if_not_running=true",
+		"Start must use the idempotent restart form so a second click does not cycle an app another operator already brought up")
+	assertContains(t, "app.js", "'stop', 'sleep',",
+		"the audit-log filter must list the sleep action or sleep events render as an unknown action and cannot be filtered")
+
+	// The detail header shows the same actions as the card, driven by the same
+	// appCardActions result so the two surfaces cannot disagree about what is
+	// offered for a given app.
+	for _, id := range []string{"app-detail-sleep", "app-detail-stop", "app-detail-start"} {
+		assertContains(t, "index.html", id,
+			"the app detail header kebab must offer the same lifecycle actions as the card")
+		assertContains(t, "app.js", id,
+			"each detail-header lifecycle item must be wired and shown/hidden from appCardActions")
+	}
+
+	// The Sleep decision must read the RESOLVED isolation the API computes
+	// (db.App.EffectiveWorkerIsolation), not the raw column, which is empty for
+	// an app inheriting runtime.default_worker_isolation. Reading it raw on an
+	// elastic-by-default server offers Sleep on every inheriting app and every
+	// click 409s.
+	assertContains(t, "views/app-card-actions.js", "app.effective_worker_isolation",
+		"appCardActions must decide elastic-ness from the server-resolved effective_worker_isolation, not the raw per-app column")
+
+	// deploy_count is denormalized and its post-deploy increment is
+	// log-and-continue, so it can read 0 for an app that is deployed and running.
+	// Lifecycle eligibility has to key off the durable deployments row instead, or
+	// a lost increment hides Start on a stopped app with no way back up.
+	assertContains(t, "views/app-card-actions.js", "app.last_deployment_status === 'succeeded'",
+		"appCardActions must gate lifecycle actions on the durable deployment row, not on the denormalized deploy_count alone")
+
+	// Isolation is saved from the Configuration tab while the detail header is on
+	// screen, and the metrics poller only merges status and deploying. The save
+	// path therefore has to fold the reloaded app back into detailApp, or the
+	// header keeps offering Sleep for an app that just became elastic.
+	assertContains(t, "app.js", "Object.assign(detailApp, fresh)",
+		"saveScalingSettings must merge the reloaded app into detailApp so the header menu follows a saved isolation change")
+}
+
+// TestLifecycleMenusFollowPolledStatus guards the staleness bug the live check
+// caught: the 10s metrics poll rewrites the stored app model and repaints the
+// status badge and detail pill in place, without re-rendering the grid. Before
+// this, an app that hibernated on the idle watchdog (or woke on a visitor's
+// request) showed its new badge while its menu still offered the actions of the
+// state it had left - a "Running" card whose only menu item was Start.
+//
+// Both re-syncs must sit inside the onMetrics handler, so the assertions pin
+// the call sites rather than merely the existence of the two functions.
+func TestLifecycleMenusFollowPolledStatus(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	start := strings.Index(src, "onMetrics:")
+	if start < 0 {
+		t.Fatal("app.js: could not find the metrics poller's onMetrics handler")
+	}
+	handler := src[start:]
+	if i := strings.Index(handler, "\n    },\n"); i > 0 {
+		handler = handler[:i]
+	}
+	for _, call := range []string{
+		"syncCardActions(kebabEl, appCardActions(gridApp, canManageApp(state.user, gridApp)))",
+		"syncDetailHeaderActions(detailApp)",
+	} {
+		if !strings.Contains(handler, call) {
+			t.Errorf("expected the metrics poller's onMetrics handler to call %q so a status\n"+
+				"change it observes updates the lifecycle menu, not just the badge", call)
+		}
+	}
+
+	// Order matters as much as presence. The badge merge is what writes the
+	// polled status and the transient deploying flag onto the stored app model,
+	// and appCardActions reads both. Re-syncing the menu before the merge would
+	// derive it from the previous tick's model, so a deploy that just started
+	// would keep offering Sleep and Stop for another 10 seconds.
+	for _, pair := range []struct{ merge, resync string }{
+		{"updateCardStatusBadge(badgeEl, gridApp, liveStatus, formatStatus)", "syncCardActions(kebabEl,"},
+		{"updateStatusPill(pillEl, detailApp, liveStatus, formatStatus)", "syncDetailHeaderActions(detailApp)"},
+	} {
+		mergeAt := strings.Index(handler, pair.merge)
+		resyncAt := strings.Index(handler, pair.resync)
+		if mergeAt < 0 {
+			t.Errorf("expected the metrics poller's onMetrics handler to call %q", pair.merge)
+			continue
+		}
+		if resyncAt < 0 {
+			t.Errorf("expected the metrics poller's onMetrics handler to call %q", pair.resync)
+			continue
+		}
+		if mergeAt > resyncAt {
+			t.Errorf("expected %q to run before %q: the merge writes the polled status and the\n"+
+				"deploying flag that the menu is derived from, so re-syncing first leaves the menu\n"+
+				"one tick behind the badge", pair.merge, pair.resync)
+		}
+	}
+
+	// A lifecycle action taken from the detail header must repaint the pill from
+	// the same merge, not wait for the next tick: otherwise the header reads
+	// "Sleeping" directly above a Stop item until the poller catches up.
+	assertContains(t, "app.js", "updateStatusPill(pillEl, detailApp, live, formatStatus)",
+		"lifecycleAction must repaint the detail status pill from the response status, on the same merge the poller uses")
+
+	// The rows have to exist in the DOM to be toggled: a menu built from only
+	// the currently-applicable actions cannot be re-synced in place.
+	assertContains(t, "app.js", "kebab.dataset.slug = app.slug",
+		"the card kebab needs its slug so the poller can find the right card's menu")
+	assertNotContains(t, "app.js", "].filter(([, , show]) => show)",
+		"the card menu must render all lifecycle rows and hide them per state; filtering at build time leaves nothing for the poller to re-sync")
+}
+
 // TestGrantByUsernameUsesServerResolution guards the access-grant security fix:
 // the Access tab must grant by POSTing { username } to /members (the server
 // resolves it under manage-app authorization) and must NOT pre-resolve via
@@ -1842,10 +1968,16 @@ func TestKebabMenusAreWired(t *testing.T) {
 		"the app-detail header kebab must be wired (it previously had no handler)")
 	assertContains(t, "app.js", "getElementById('app-detail-restart')",
 		"the app-detail header Restart item must be wired to restart the current app")
-	// The header kebab's only action (Restart) is manager-only; it must be hidden
-	// for viewers so they can't trigger a forbidden POST (mirrors the card).
-	assertContains(t, "views/app-detail.js", "headerKebab.hidden = !canManage",
-		"the app-detail header kebab must be hidden for non-managers")
+	// The header kebab's items are all manager actions, so the whole menu must be
+	// hidden for viewers (mirrors the card). That is one of the things
+	// syncDetailHeaderActions decides, from the same appCardActions helper the
+	// cards use: it reports every action false when canManage is false, and hides
+	// the menu when no item applies. app-detail.js must not set the same flag
+	// again, because the later writer would silently win.
+	assertContains(t, "app.js", "function syncDetailHeaderActions",
+		"the app-detail header kebab's per-app visibility must be decided in one place, from appCardActions")
+	assertNotContains(t, "views/app-detail.js", "headerKebab",
+		"app-detail.js must not also set the header kebab's visibility; ctx.setDetailApp already drives it through syncDetailHeaderActions")
 }
 
 // TestCardKebabNotClippedByOverflow guards the card-kebab clip fix: .app-card
@@ -3019,6 +3151,7 @@ func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
 	checkGuard("async function revokeToken(id, name, btn)", "revokeToken", "btn.disabled = true", "btn.disabled = false")
 	checkGuard("async function submitNewUser(event)", "submitNewUser", "submitBtn.disabled = true", "submitBtn.disabled = false")
 	checkGuard("async function restart(slug, btn)", "the card Restart handler", "btn.disabled = true", "btn.disabled = false")
+	checkGuard("async function lifecycleAction(slug, path, btn, failureMessage)", "the Sleep/Stop/Start handler", "btn.disabled = true", "btn.disabled = false")
 
 	// Each guarded function must actually receive the triggering button at its
 	// call site, not just declare an unused parameter.
@@ -3028,8 +3161,22 @@ func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
 	if !strings.Contains(src, "revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'), btn)") {
 		t.Fatal("the Revoke token button click handler must pass its own button through to revokeToken for the disable guard")
 	}
-	if !strings.Contains(src, "restart(app.slug, e.currentTarget)") {
-		t.Fatal("the card Restart button click handler must pass its own button through to restart for the disable guard")
+	// Restart, Sleep, Stop and Start are wired from one table in the card kebab,
+	// so a single call site carries the button through for all four. Dropping the
+	// argument there would remove the guard from every one of them at once.
+	if !strings.Contains(src, "handler(app.slug, e.currentTarget)") {
+		t.Fatal("each card lifecycle button (Restart, Sleep, Stop, Start) must pass its own button through for the disable guard")
+	}
+	// Each lifecycle handler must accept that button, or the shared call site
+	// above would hand it to a function that ignores it.
+	for _, sig := range []string{
+		"async function sleepApp(slug, btn)",
+		"async function stopApp(slug, btn)",
+		"async function startApp(slug, btn)",
+	} {
+		if !strings.Contains(src, sig) {
+			t.Fatalf("expected %q so the lifecycle handler can disable its trigger button", sig)
+		}
 	}
 }
 

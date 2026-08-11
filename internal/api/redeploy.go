@@ -77,6 +77,15 @@ func (s *Server) appDeploying(app *db.App) bool {
 	return app.LastDeploymentStatus == db.DeploymentPending && s.DeployInFlight(app.Slug)
 }
 
+// decorateApp fills the transient, per-request fields on an app payload that are
+// computed rather than stored. Every handler returning an app to a client calls
+// it, so a consumer sees the same derived view whichever endpoint it read.
+func (s *Server) decorateApp(app *db.App) {
+	app.Deploying = s.appDeploying(app)
+	app.EffectiveWorkerIsolation = deploy.ResolveWorkerIsolation(
+		app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
+}
+
 // dataLockFor returns the per-slug mutex used to serialize the quota check
 // and disk write inside handleDataPut. Without it two concurrent uploads can
 // each read the same pre-write usage, both pass the quota check, and the

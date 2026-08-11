@@ -102,7 +102,9 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	// prints, so a fleet operator is not left unaware that setup hooks did not
 	// run under the container runtime.
 	var deployResp map[string]any
+	var keptStopped bool
 	if err := json.Unmarshal(rb, &deployResp); err == nil {
+		keptStopped, _ = deployResp["kept_stopped"].(bool)
 		if warn := formatHooksSkippedWarning(deployResp["hooks_skipped"]); warn != "" {
 			fmt.Fprintf(out, "  %s: %s\n", slug, warn)
 		}
@@ -118,7 +120,14 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility string, out io.Writer
 	// Bundle accepted: from here on the deploy is committed even if a
 	// post-deploy step fails. A failure past this point is not the deploy's own
 	// cause (the server already returned 2xx), so it is reported as Unknown.
-	if err := waitForFleetHealthy(cfg, slug, out, timeout); err != nil {
+	//
+	// An app the operator stopped is left stopped by the deploy, so it will
+	// never report healthy. Polling it could only run to the deadline and then
+	// fail - and be retried - a deploy the server already accepted, so the wait
+	// is skipped and the state is reported instead.
+	if keptStopped {
+		fmt.Fprintf(out, "  %s: stopped, so the new version is not serving yet; start it with `shinyhub apps start %s`\n", slug, slug)
+	} else if err := waitForFleetHealthy(cfg, slug, out, timeout); err != nil {
 		return "", true, firstFires, deployfail.Unknown, err
 	}
 	promoted, derr := readPromotedDigest(cfg, slug)

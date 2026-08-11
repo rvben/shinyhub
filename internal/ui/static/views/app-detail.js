@@ -192,11 +192,12 @@ export function mountAppDetail(ctx) {
     openLink.href = `/app/${app.slug}/`;
     openLink.hidden = app.status !== 'running';
 
-    // The header kebab's only action is Restart, a manager action. Hide the
-    // whole kebab for non-managers (mirrors the dashboard card, which only shows
-    // Restart when canManage) so a viewer can't trigger a forbidden POST.
-    const headerKebab = document.querySelector('.app-detail-actions .kebab-menu');
-    if (headerKebab) headerKebab.hidden = !canManage;
+    // The header kebab holds only manager actions, so a viewer must not see it
+    // at all. That decision, and which individual items apply to this app, is
+    // made once in app.js (syncDetailHeaderActions, driven by the same
+    // appCardActions helper the dashboard cards use) and applied through
+    // ctx.setDetailApp above. Setting it here as well would give one flag two
+    // writers, and whichever ran last would silently win.
 
     const fleetSlot = document.getElementById('app-detail-fleet-badge');
     if (fleetSlot) {

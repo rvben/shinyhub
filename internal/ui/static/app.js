@@ -84,8 +84,17 @@ function relativeTime(date) {
 // dropdown is intentionally allowed to overflow its card). This is the single
 // wiring path for BOTH the dashboard card kebab and the app-detail header kebab
 // (the latter previously had no handler at all, so its menu never opened).
+// kebabControls maps a .kebab-menu element to the handle wireKebab returned for
+// it, so code holding only the element (the metrics poller, re-syncing a card
+// whose app changed state) can close the menu without re-implementing its
+// open/closed bookkeeping.
+const kebabControls = new WeakMap();
+
+// Returns a handle so a caller that hides the menu (because the app's state no
+// longer offers any action) can close it through the same setOpen that opened
+// it, instead of writing `hidden`/aria-expanded/kebab-open a second time.
 function wireKebab(button, list, container) {
-  if (!button || !list) return;
+  if (!button || !list) return null;
   function onDocClick(e) {
     if (!list.contains(e.target) && !button.contains(e.target)) setOpen(false);
   }
@@ -111,6 +120,7 @@ function wireKebab(button, list, container) {
   list.addEventListener('click', (e) => {
     if (e.target.closest('button')) setOpen(false);
   });
+  return { close: () => setOpen(false) };
 }
 
 // formatStatus (status → display label) is imported from views/status-label.js
@@ -486,22 +496,40 @@ document.addEventListener('DOMContentLoaded', () => {
         deployButton.addEventListener('click', () => openDeployModal(app));
         actions.appendChild(deployButton);
 
-        if (cardActions.showRestart) {
-          const kebab = document.createElement('div');
-          kebab.className = 'kebab-menu';
-          kebab.innerHTML = `
-            <button type="button" aria-haspopup="menu" aria-expanded="false">⋯</button>
-            <ul class="kebab-list" role="menu" hidden>
-              <li role="menuitem"><button type="button" data-kebab="restart">Restart</button></li>
-            </ul>
-          `;
-          const kebabBtn = kebab.querySelector('button');
-          kebabBtn.setAttribute('aria-label', `More actions for ${app.name}`);
-          const kebabList = kebab.querySelector('.kebab-list');
-          wireKebab(kebabBtn, kebabList, card);
-          kebabList.querySelector('[data-kebab="restart"]').addEventListener('click', (e) => restart(app.slug, e.currentTarget));
-          actions.appendChild(kebab);
+        // The menu lists whichever lifecycle actions apply to this app right
+        // now, so a stopped app still gets a menu (holding Start) where a
+        // running one holds Restart, Sleep and Stop. All four rows are always
+        // rendered and hidden per state rather than built from the current
+        // state, so the metrics poller can re-sync them in place when an app
+        // hibernates or wakes between grid loads.
+        const lifecycleItems = [
+          ['restart', 'Restart', restart],
+          ['sleep', 'Sleep', sleepApp],
+          ['stop', 'Stop', stopApp],
+          ['start', 'Start', startApp],
+        ];
+        const kebab = document.createElement('div');
+        kebab.className = 'kebab-menu';
+        kebab.dataset.slug = app.slug;
+        const rows = lifecycleItems
+          .map(([action, label]) => `<li role="menuitem" hidden><button type="button" data-kebab="${action}">${label}</button></li>`)
+          .join('\n              ');
+        kebab.innerHTML = `
+          <button type="button" aria-haspopup="menu" aria-expanded="false">⋯</button>
+          <ul class="kebab-list" role="menu" hidden>
+            ${rows}
+          </ul>
+        `;
+        const kebabBtn = kebab.querySelector('button');
+        kebabBtn.setAttribute('aria-label', `More actions for ${app.name}`);
+        const kebabList = kebab.querySelector('.kebab-list');
+        kebabControls.set(kebab, wireKebab(kebabBtn, kebabList, card));
+        for (const [action, , handler] of lifecycleItems) {
+          kebabList.querySelector(`[data-kebab="${action}"]`)
+            .addEventListener('click', (e) => handler(app.slug, e.currentTarget));
         }
+        actions.appendChild(kebab);
+        syncCardActions(kebab, cardActions);
       }
 
       const metricsLine = document.createElement('div');
@@ -1059,7 +1087,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // Auth actions
       'login', 'login_failed', 'logout',
       // App lifecycle (blue - config)
-      'create_app', 'update_app', 'delete_app', 'stop', 'set_access',
+      'create_app', 'update_app', 'delete_app', 'stop', 'sleep', 'set_access',
       // User management (blue - config)
       'create_user', 'update_user', 'delete_user', 'reset_user_password',
       // Token management (amber - security)
@@ -1566,6 +1594,77 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     window.setTimeout(loadApps, 1000);
+  }
+
+  // lifecycleAction is the shared POST-then-refresh path behind Sleep, Stop and
+  // Start. It mirrors restart(): clear the error region, disable the control,
+  // post, then refresh so the card badge reflects the new state. The server's
+  // message wins over the generic one, because a refused lifecycle call answers
+  // 409 with the actual reason (the app is not running, the app uses elastic
+  // worker isolation) and that reason is what tells the operator what to do.
+  async function lifecycleAction(slug, path, btn, failureMessage) {
+    setError(appError, '');
+    if (btn) btn.disabled = true;
+
+    let response;
+    try {
+      response = await api(`/api/apps/${encodeURIComponent(slug)}${path}`, {method: 'POST'});
+    } catch {
+      setError(appError, 'Network error');
+      return;
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+
+    if (response.status === 401) {
+      await handleUnauthorized();
+      return;
+    }
+
+    let body = null;
+    try { body = await response.json(); } catch { /* non-JSON */ }
+
+    if (!response.ok) {
+      setError(appError, (body && body.error) || failureMessage);
+      return;
+    }
+
+    // The detail header renders once per navigation, so an action taken there
+    // has to fold the new status back in or the menu keeps offering Sleep for an
+    // app that is already asleep. Repaint the pill from the same merge the
+    // metrics poller uses and derive the menu from the merged model, so the two
+    // cannot disagree during the window before the next tick - waiting for that
+    // tick left the header reading "Sleeping" above a Stop item.
+    if (detailApp && detailApp.slug === slug && body && body.status) {
+      const live = {status: body.status, deploying: false};
+      const pillEl = document.getElementById('app-detail-status');
+      if (pillEl) {
+        updateStatusPill(pillEl, detailApp, live, formatStatus);
+      } else {
+        detailApp.status = live.status;
+      }
+      syncDetailHeaderActions(detailApp);
+    }
+    loadApps();
+  }
+
+  // Sleep releases the app's resources and leaves it wakeable: the next visitor
+  // request brings it back transparently, so there is nothing to confirm.
+  async function sleepApp(slug, btn) {
+    await lifecycleAction(slug, '/sleep', btn, 'Sleep failed');
+  }
+
+  // Stop is terminal. Visitors get a stopped page until an operator starts the
+  // app again, which is user-visible, so it is confirmed first.
+  async function stopApp(slug, btn) {
+    if (!window.confirm('Stop this app? Visitors will see a "stopped" page until you start it again.')) return;
+    await lifecycleAction(slug, '/stop', btn, 'Stop failed');
+  }
+
+  // Start uses the idempotent restart form so a second click cannot cycle an app
+  // that another operator already brought up.
+  async function startApp(slug, btn) {
+    await lifecycleAction(slug, '/restart?if_not_running=true', btn, 'Start failed');
   }
 
   function openLogs(slug) {
@@ -2455,6 +2554,18 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(statusEl, false);
     snapshotSettingsSection('scaling');
     await loadApps();
+    // Isolation is the one saved field the header menu is derived from, and the
+    // metrics poller only ever merges status and deploying. Without folding the
+    // reloaded app back into detailApp, switching multiplex to grouped leaves
+    // Sleep in the header until the next navigation, and every click 409s; the
+    // reverse switch hides Sleep on an app that can now take it.
+    if (detailApp && detailApp.slug === settingsSlug) {
+      const fresh = state.apps && state.apps.find(a => a.slug === settingsSlug);
+      if (fresh) {
+        Object.assign(detailApp, fresh);
+        syncDetailHeaderActions(detailApp);
+      }
+    }
   }
 
   async function saveRenderPacing() {
@@ -4217,6 +4328,18 @@ document.addEventListener('DOMContentLoaded', () => {
       if (badgeEl && gridApp) {
         updateCardStatusBadge(badgeEl, gridApp, liveStatus, formatStatus);
       }
+      // The badge merge above rewrites gridApp.status AND gridApp.deploying, so
+      // re-derive the card's lifecycle menu from it, and only after it. Without
+      // this an app that hibernated on the idle watchdog, or woke on a visitor's
+      // request, would show its new badge while the menu still offered the
+      // previous state's actions; run before the merge and the menu trails the
+      // badge by one tick, offering Sleep and Stop on a deploy already in flight.
+      if (gridApp) {
+        const kebabEl = appGrid.querySelector(`.kebab-menu[data-slug="${slug}"]`);
+        if (kebabEl) {
+          syncCardActions(kebabEl, appCardActions(gridApp, canManageApp(state.user, gridApp)));
+        }
+      }
       // Grid card.
       const gridEl = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
       if (gridEl) {
@@ -4238,6 +4361,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const pillEl = document.getElementById('app-detail-status');
         if (pillEl && detailApp && detailApp.slug === slug) {
           updateStatusPill(pillEl, detailApp, liveStatus, formatStatus);
+          // Same reason as the card menu above: the pill merge refreshes
+          // detailApp.status, so the header kebab has to follow it.
+          syncDetailHeaderActions(detailApp);
         }
         // Header metric tiles show fleet aggregates (per-replica detail lives in
         // the Overview replicas panel below). Set bare values; the labels are
@@ -4437,7 +4563,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // setDetailApp records the app currently shown on the detail page so the
     // static header kebab (wired once below) knows which app to act on, and
     // renders the header's icon/monogram avatar for that app.
-    setDetailApp: (app) => { detailApp = app; renderDetailHeaderAvatar(app); },
+    setDetailApp: (app) => { detailApp = app; renderDetailHeaderAvatar(app); syncDetailHeaderActions(app); },
     // restart triggers POST /api/apps/:slug/restart (the same action as the
     // header kebab), exposed so the crash banner's Restart button can reuse it.
     restart: (slug) => restart(slug),
@@ -4452,6 +4578,60 @@ document.addEventListener('DOMContentLoaded', () => {
     openDeployModal,
   });
 
+  // syncCardActions shows exactly the lifecycle rows that apply to a card's
+  // current state, and hides the whole kebab when none do (a viewer, or an app
+  // with nothing to act on). Called at render and again from the metrics
+  // poller, so a card whose badge flips to "Sleeping" or "Running" on its own
+  // does not keep offering the actions of the state it just left.
+  function syncCardActions(kebab, acts) {
+    if (!kebab) return;
+    let anyShown = false;
+    for (const [action, show] of [
+      ['restart', acts.showRestart],
+      ['sleep', acts.showSleep],
+      ['stop', acts.showStop],
+      ['start', acts.showStart],
+    ]) {
+      const btn = kebab.querySelector(`[data-kebab="${action}"]`);
+      if (!btn) continue;
+      (btn.closest('li') || btn).hidden = !show;
+      if (show) anyShown = true;
+    }
+    kebab.hidden = !anyShown;
+    // A poll can empty the menu while it is open (an app that starts deploying
+    // or waking offers nothing), so close it rather than leaving an open menu
+    // inside a hidden container.
+    if (!anyShown) {
+      const ctl = kebabControls.get(kebab);
+      if (ctl) ctl.close();
+    }
+  }
+
+  // The detail header's kebab is static markup listing every lifecycle action,
+  // so it has to be filtered per app. The decision comes from the same
+  // appCardActions helper the grid cards use, which is what keeps the two
+  // surfaces from disagreeing about what an app offers. The whole menu is
+  // hidden when nothing applies, rather than opening onto an empty list.
+  function syncDetailHeaderActions(app) {
+    const acts = app ? appCardActions(app, canManageApp(state.user, app)) : null;
+    const items = [
+      ['app-detail-restart', !!acts && acts.showRestart],
+      ['app-detail-sleep', !!acts && acts.showSleep],
+      ['app-detail-stop', !!acts && acts.showStop],
+      ['app-detail-start', !!acts && acts.showStart],
+    ];
+    let anyShown = false;
+    for (const [id, show] of items) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      (el.closest('li') || el).hidden = !show;
+      if (show) anyShown = true;
+    }
+    const kebabBtn = document.getElementById('app-detail-kebab');
+    const menu = kebabBtn && kebabBtn.closest('.kebab-menu');
+    if (menu) menu.hidden = !anyShown;
+  }
+
   // Wire the app-detail header kebab once. The button + menu are static markup
   // in index.html; before this they had no handler, so the menu never opened
   // and "Restart" was unreachable from the detail page.
@@ -4461,7 +4641,19 @@ document.addEventListener('DOMContentLoaded', () => {
     wireKebab(dBtn, dList, dBtn && dBtn.closest('.kebab-menu'));
     const dRestart = document.getElementById('app-detail-restart');
     if (dRestart) {
-      dRestart.addEventListener('click', () => { if (detailApp) restart(detailApp.slug); });
+      dRestart.addEventListener('click', () => { if (detailApp) restart(detailApp.slug, dRestart); });
+    }
+    const dSleep = document.getElementById('app-detail-sleep');
+    if (dSleep) {
+      dSleep.addEventListener('click', () => { if (detailApp) sleepApp(detailApp.slug, dSleep); });
+    }
+    const dStop = document.getElementById('app-detail-stop');
+    if (dStop) {
+      dStop.addEventListener('click', () => { if (detailApp) stopApp(detailApp.slug, dStop); });
+    }
+    const dStart = document.getElementById('app-detail-start');
+    if (dStart) {
+      dStart.addEventListener('click', () => { if (detailApp) startApp(detailApp.slug, dStart); });
     }
   }
 
