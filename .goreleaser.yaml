@@ -61,13 +61,14 @@ release:
   draft: false
   prerelease: auto
 
+# Release notes come from CHANGELOG.md, not from GoReleaser. The release
+# workflow extracts the tag's section with `make release-notes` and passes it as
+# `release --release-notes`, so the GitHub release body and the changelog in the
+# repo are the same authored text. Generating here as well produced a second,
+# unfiltered set of notes (a raw git log, including test/docs commits and the
+# version-bump commit) that no edit to CHANGELOG.md could reach.
 changelog:
-  use: git
-  sort: asc
-  filters:
-    exclude:
-      - "^chore\\(release\\)"
-      - "^style"
+  disable: true
 
 dockers:
   - id: shinyhub-amd64

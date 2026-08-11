@@ -1,4 +1,4 @@
-.PHONY: build clean test test-go test-race vuln scan-image test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev goreleaser-check build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: build clean test test-go test-race vuln scan-image test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -183,6 +183,38 @@ dev:
 
 goreleaser-check:
 	goreleaser check
+
+# release-notes extracts one version's section from CHANGELOG.md into
+# tmp/release-notes.md, which the release workflow hands to GoReleaser as
+# `release --release-notes`. CHANGELOG.md is the single authored source for
+# release notes: vership generates it at bump time and it stays editable until
+# the tag lands, so the GitHub release body and the file in the repo cannot
+# drift. GoReleaser's own changelog generation is off (.goreleaser.yaml).
+#
+# VERSION defaults to package.json, which vership bumps in the same commit as
+# CHANGELOG.md; the workflow passes the tag instead. The section is matched
+# literally rather than by regex so a version's dots cannot match other
+# characters. An empty extraction fails the build: blank release notes would
+# publish as a normal-looking release and nothing downstream would flag it.
+#
+# The output lives under tmp/ rather than dist/ because `goreleaser --clean`
+# wipes dist/ before it reads the file.
+RELEASE_NOTES_FILE ?= tmp/release-notes.md
+VERSION ?= $(shell sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -1)
+
+release-notes:
+	@mkdir -p $(dir $(RELEASE_NOTES_FILE))
+	@awk -v ver="$(VERSION)" ' \
+		index($$0, "## [" ver "]") == 1 { inblock = 1; print; next } \
+		inblock && index($$0, "## ") == 1 { exit } \
+		inblock { print } \
+	' CHANGELOG.md > $(RELEASE_NOTES_FILE)
+	@test -s $(RELEASE_NOTES_FILE) || { \
+		rm -f $(RELEASE_NOTES_FILE); \
+		echo "release-notes: CHANGELOG.md has no '## [$(VERSION)]' section"; \
+		exit 1; \
+	}
+	@echo "release-notes: $(VERSION) -> $(RELEASE_NOTES_FILE) ($$(wc -l < $(RELEASE_NOTES_FILE) | tr -d ' ') lines)"
 
 # build-runner-image builds the reference Python Fargate runner image. The
 # image is not required for local development but is needed for ECS-based

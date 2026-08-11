@@ -75,12 +75,46 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
+      # The release body is CHANGELOG.md's section for this tag, not a generated
+      # commit list. Fails the release if the tag has no section, rather than
+      # publishing empty notes.
+      - name: Extract release notes from CHANGELOG.md
+        run: make release-notes VERSION="${GITHUB_REF_NAME#v}"
+
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes=tmp/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The release-notes hand-off only runs at tag time, so no CI run before a
+      # release can prove GoReleaser honored it. This checks it from the other
+      # side: read back the body GitHub actually published and fail if it is not
+      # the text we handed over. Like the attestation steps below, it runs after
+      # publish, so a mismatch is a loud signal to fix and re-run rather than a
+      # broken release. Without it, a silently ignored flag would publish an
+      # empty body (GoReleaser's own generation is disabled) and every check
+      # would still be green.
+      - name: Verify the published release body matches CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" --json body -q .body > tmp/published-body.md
+          # GitHub round-trips neither line endings nor trailing blank lines
+          # reliably, so normalize both before comparing.
+          norm() {
+            sed 's/\r$//' "$1" | awk 'NF {last = NR} {line[NR] = $0} END {for (i = 1; i <= last; i++) print line[i]}'
+          }
+          norm tmp/release-notes.md > tmp/notes-sent.md
+          norm tmp/published-body.md > tmp/notes-published.md
+          if ! cmp -s tmp/notes-sent.md tmp/notes-published.md; then
+            echo "::error::Published release body is not the CHANGELOG.md section handed to GoReleaser"
+            diff -u tmp/notes-sent.md tmp/notes-published.md || true
+            exit 1
+          fi
+          echo "Release body matches CHANGELOG.md ($(wc -l < tmp/notes-sent.md | tr -d ' ') lines)"
 
       # SLSA build provenance. These run after publish: the artifacts are already
       # released, so an attestation hiccup is re-runnable and never blocks the
