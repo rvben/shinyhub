@@ -71,6 +71,21 @@ prefix:
 Relative paths in operator HTML resolve against `/`, not `/branding/`, so the
 prefix must be explicit (or add a `<base href="/branding/">` element).
 
+### Remotely hosted images
+
+When `logo` or `favicon` is an absolute `http(s)://` URL, its origin is added to
+the control-plane Content-Security-Policy `img-src` list automatically, so the
+browser will load it. Only `img-src` is widened, and only with the scheme, host
+and port of the images you configured; script, style and connect sources are
+untouched. Nothing is added for local assets, which are same-origin already.
+
+The origin is allowed, not the exact path, because asset CDNs redirect and a CSP
+path source is matched against the pre-redirect URL only.
+
+This applies to the SPA shell. An operator `landing_page` is served under a
+separate policy that does not widen `img-src`, so host landing-page images
+locally via `assets_dir`.
+
 The `landing_page` file is served directly at `/` (replacing the stock catalog)
 and is NOT exposed under `/branding/`. It is served as trusted same-origin
 platform HTML. Only trusted operators should author it; it is not sandboxed.

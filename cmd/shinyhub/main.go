@@ -1877,7 +1877,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// active; the strict CSP allows exactly those blocks by SHA-256 hash (both
 	// slices stay empty when branding is off, so no inline is served). Computed
 	// from the same resolved branding the renderer uses so they cannot drift.
-	var cspScriptSrc, cspStyleSrc []string
+	var cspScriptSrc, cspStyleSrc, cspImgSrc []string
 	if cfg.Branding.IsActive() {
 		brandPub := ui.PublicBranding(cfg.Branding, cfg.Branding.ResolvedAssets())
 		s, st, cspErr := ui.CSPInlineSources(brandPub)
@@ -1885,6 +1885,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			return fmt.Errorf("compute branding CSP sources: %w", cspErr)
 		}
 		cspScriptSrc, cspStyleSrc = s, st
+		// A logo/favicon hosted off-origin needs its origin in img-src, or the
+		// browser blocks the operator's own image.
+		cspImgSrc = ui.ImageSources(brandPub)
 	} else {
 		// Branding off: the raw shell is served, but its static inline
 		// scripts (the pre-paint theme bootstrap) still need CSP hashes.
@@ -1907,7 +1910,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// default (which bypasses structured logging). /api/* already has chi.Recoverer.
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           api.SecurityHeaders(cfg.TrustedProxyNets, cspScriptSrc, cspStyleSrc, api.RecoverPanic(slog.Default(), deadlineExemptions(rootHandler))),
+		Handler:           api.SecurityHeaders(cfg.TrustedProxyNets, cspScriptSrc, cspStyleSrc, cspImgSrc, api.RecoverPanic(slog.Default(), deadlineExemptions(rootHandler))),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      120 * time.Second,

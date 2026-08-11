@@ -9,6 +9,7 @@ import (
 	"html"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"path"
 	"regexp"
 	"strings"
@@ -50,6 +51,35 @@ func PublicBranding(b config.BrandingConfig, resolved map[string]string) Public 
 		PrimaryColor: b.Theme.PrimaryColor,
 		FooterLinks:  b.FooterLinks,
 	}
+}
+
+// ImageSources returns the CSP img-src origins needed for p's images to load:
+// the scheme://host[:port] of every logo/favicon that points at an absolute
+// http(s) URL. Local assets are served same-origin from /branding/ and are
+// already covered by 'self', so they contribute nothing.
+//
+// An origin, not the full URL: asset CDNs redirect, and a CSP path source is
+// matched against the pre-redirect URL only, so a path source would block the
+// very image it was meant to allow.
+func ImageSources(p Public) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, ref := range []string{p.Logo, p.Favicon} {
+		u, err := url.Parse(ref)
+		if err != nil || u.Host == "" {
+			continue
+		}
+		scheme := strings.ToLower(u.Scheme)
+		if scheme != "http" && scheme != "https" {
+			continue
+		}
+		origin := scheme + "://" + strings.ToLower(u.Host)
+		if !seen[origin] {
+			seen[origin] = true
+			out = append(out, origin)
+		}
+	}
+	return out
 }
 
 var (
