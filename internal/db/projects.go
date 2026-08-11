@@ -196,6 +196,44 @@ func (s *Store) DeleteProject(slug string) error {
 	return nil
 }
 
+// ListProjectsVisibleToUser returns every project referenced by at least one
+// app the user can see, joined to its display metadata, with AppCount counting
+// only those visible apps. The LEFT JOIN is what makes an un-named project (an
+// app naming a slug nobody has described yet) still appear, with empty
+// metadata. project_slug = "" means "no project" and is excluded. Ordering is
+// by slug so the client renders a stable list.
+//
+// GROUP BY apps.project_slug is what produces the count; the grouped
+// COALESCE(p.*) values are constant within a group because the join is on that
+// same slug, so no aggregate is needed around them. A project every one of
+// whose apps is invisible produces no rows at all and so is absent, which is
+// the access-control requirement.
+func (s *Store) ListProjectsVisibleToUser(userID int64) ([]*ProjectListItem, error) {
+	rows, err := s.db.Query(`
+		SELECT apps.project_slug,
+		       COALESCE(p.name, ''), COALESCE(p.description, ''), COALESCE(p.icon_emoji, ''),
+		       COUNT(*)
+		FROM apps
+		LEFT JOIN projects p ON p.slug = apps.project_slug
+		WHERE apps.project_slug <> ''
+		  AND (`+appVisibleToUserWhere+`)
+		GROUP BY apps.project_slug, p.name, p.description, p.icon_emoji
+		ORDER BY apps.project_slug`, userID, userID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list visible projects: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []*ProjectListItem
+	for rows.Next() {
+		var it ProjectListItem
+		if err := rows.Scan(&it.Slug, &it.Name, &it.Description, &it.IconEmoji, &it.AppCount); err != nil {
+			return nil, err
+		}
+		out = append(out, &it)
+	}
+	return out, rows.Err()
+}
+
 // CountAppsInProject counts apps referencing slug, across ALL apps regardless
 // of the caller's visibility. The delete guard must see apps the caller cannot,
 // or a viewer-invisible app would be silently orphaned.

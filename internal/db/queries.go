@@ -1143,18 +1143,7 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 	rows, err := s.db.Query(`
 		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
-		WHERE access = 'public'
-		   OR access = 'shared'
-		   OR owner_id = ?
-		   OR EXISTS (
-		       SELECT 1 FROM app_members
-		       WHERE app_slug = apps.slug AND user_id = ?
-		   )
-		   OR EXISTS (
-		       SELECT 1 FROM app_group_access aga
-		       JOIN user_groups ug ON ug.group_name = aga.group_name
-		       WHERE aga.app_slug = apps.slug AND ug.user_id = ?
-		   )
+		WHERE `+appVisibleToUserWhere+`
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, userID, userID, userID, limit, offset)
 	if err != nil {

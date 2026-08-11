@@ -225,3 +225,100 @@ func TestListProjectsOrderedBySlugWithAppCounts(t *testing.T) {
 		t.Errorf("empty project app_count = %d, want 0", counts["zeta"])
 	}
 }
+
+func TestListProjectsVisibleToUserFollowsAppVisibility(t *testing.T) {
+	s := mustOpenDB(t)
+	owner := mustCreateUser(t, s, "owner", "developer")
+	other := mustCreateUser(t, s, "other", "developer")
+
+	// mkApp is Task 3's helper in this same file: it guarantees an empty project
+	// stays empty instead of picking up the legacy 'default' column default.
+	mkApp(t, s, "pub", "open", "public", owner.ID)
+	mkApp(t, s, "buried", "open", "private", owner.ID)
+	mkApp(t, s, "mine", "owned", "private", other.ID)
+	mkApp(t, s, "hidden", "secret", "private", owner.ID)
+	mkApp(t, s, "loose", "", "public", owner.ID)
+
+	if _, err := s.UpsertProject(db.Project{Slug: "open", Name: "Open Project"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ps, err := s.ListProjectsVisibleToUser(other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	counts := map[string]int{}
+	for _, p := range ps {
+		got[p.Slug] = p.Name
+		counts[p.Slug] = p.AppCount
+	}
+	if _, ok := got["secret"]; ok {
+		t.Error("a project whose only app is invisible must not be listed")
+	}
+	if name, ok := got["open"]; !ok || name != "Open Project" {
+		t.Errorf("public app's project missing or unnamed: %v", got)
+	}
+	// "owned" has no projects row: it must still list, with an empty name, so
+	// grouping works before anyone names the project.
+	if name, ok := got["owned"]; !ok || name != "" {
+		t.Errorf("unnamed project must list with an empty name, got %q ok=%v", name, ok)
+	}
+	if _, ok := got[""]; ok {
+		t.Error(`the empty project slug is "no project" and must never be listed`)
+	}
+	// "open" holds two apps but only one is visible to "other". Counting the
+	// invisible one would tell this user a private app exists.
+	if counts["open"] != 1 {
+		t.Errorf("app_count for open = %d, want 1 (the private sibling must not count)", counts["open"])
+	}
+	if counts["owned"] != 1 {
+		t.Errorf("app_count for owned = %d, want 1", counts["owned"])
+	}
+}
+
+// SCOPE-4: the predicate has four independent paths to visibility, and a query
+// implementing three of them looks entirely correct from the outside. Each path
+// gets its own project holding exactly ONE app, so app_count == 1 proves that
+// path fired and nothing else did. The group-grant path is the one a narrower
+// hand-written query silently drops.
+func TestListProjectsVisibleToUserCoversAllFourPaths(t *testing.T) {
+	s := mustOpenDB(t)
+	owner := mustCreateUser(t, s, "pathowner", "developer")
+	u := mustCreateUser(t, s, "pathuser", "developer")
+
+	mkApp(t, s, "by-owner", "p-owner", "private", u.ID)       // path 1: apps.owner_id
+	mkApp(t, s, "by-member", "p-member", "private", owner.ID) // path 2: app_members
+	mkApp(t, s, "by-group", "p-group", "private", owner.ID)   // path 3: app_group_access
+	mkApp(t, s, "by-shared", "p-shared", "shared", owner.ID)  // path 4: access = 'shared'
+	mkApp(t, s, "by-none", "p-none", "private", owner.ID)     // negative control
+
+	if err := s.GrantAppAccessWithRole("by-member", u.ID, "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceUserGroups(u.ID, []string{"analysts"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.GrantAppGroupAccess("by-group", "analysts", "viewer", "manual"); err != nil {
+		t.Fatal(err)
+	}
+
+	ps, err := s.ListProjectsVisibleToUser(u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, p := range ps {
+		counts[p.Slug] = p.AppCount
+	}
+	for _, want := range []string{"p-owner", "p-member", "p-group", "p-shared"} {
+		if counts[want] != 1 {
+			t.Errorf("%s: app_count = %d, want 1 - this visibility path did not fire", want, counts[want])
+		}
+	}
+	// Without this control the four assertions above would also pass on a query
+	// that returns every project unconditionally.
+	if _, ok := counts["p-none"]; ok {
+		t.Error("p-none: a project the user reaches by no path must not be listed")
+	}
+}
