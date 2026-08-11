@@ -32,6 +32,7 @@ import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-di
 import { formatStatus } from '/static/views/status-label.js';
 import { userRowCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
+import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -167,6 +168,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const profileNewPw       = document.getElementById('profile-new-password');
   const profileError    = document.getElementById('profile-error');
   const profileSuccess  = document.getElementById('profile-success');
+  // About dialog: server identity + host runtimes. Fetched at most once per
+  // session; /api/server-info is unauthenticated, so this needs no credentials.
+  const aboutModal   = document.getElementById('about-modal');
+  const aboutButton  = document.getElementById('about-button');
+  const aboutClose   = document.getElementById('about-close');
+  const loadServerInfo = createServerInfoLoader((url) => fetch(url));
   const appGrid = document.getElementById('app-grid');
   const emptyState = document.getElementById('empty-state');
   const emptyStateHeading = document.getElementById('empty-state-heading');
@@ -611,6 +618,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Populate the sidebar app list regardless of which view the router mounts
     // (fire-and-forget; renders when it resolves, self-guards on state.user).
     loadAppsIndex();
+    // Warm the server-info cache so the About dialog paints on first open
+    // rather than filling in a beat late. One small request per session.
+    loadServerInfo();
     // The router (started by the caller) will mount the view that matches
     // the current URL — do not pre-show apps-view here, it leaks through
     // on direct loads of /users, /audit-log, /apps/<slug>.
@@ -678,6 +688,22 @@ document.addEventListener('DOMContentLoaded', () => {
     modalTrap(profileModal).release();
     setError(profileError, '');
     setHidden(profileSuccess, true);
+  }
+
+  // openAboutModal paints from the cached server info when there is one, so a
+  // reopen is instant; the first open fills in as soon as the fetch lands.
+  function openAboutModal() {
+    if (!aboutModal) return;
+    loadServerInfo().then((info) => renderAbout(document, info));
+    aboutModal.hidden = false;
+    modalTrap(aboutModal).activate();
+    if (aboutClose) aboutClose.focus();
+  }
+
+  function closeAboutModal() {
+    if (!aboutModal || aboutModal.hidden) return;
+    aboutModal.hidden = true;
+    modalTrap(aboutModal).release();
   }
 
   async function submitProfile(event) {
@@ -3131,6 +3157,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target === e.currentTarget) closeProfileModal();
   });
 
+  // About modal: open from the sidebar footer.
+  if (aboutButton) aboutButton.addEventListener('click', openAboutModal);
+  if (aboutClose)  aboutClose.addEventListener('click', closeAboutModal);
+  if (aboutModal)  aboutModal.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeAboutModal();
+  });
+
   if (newUserSnippetCopy) {
     const copyLabel  = newUserSnippetCopy.querySelector('.copy-label');
     const copyStatus = document.getElementById('new-user-snippet-status');
@@ -3200,6 +3233,8 @@ document.addEventListener('DOMContentLoaded', () => {
         closeNewUserModal();
       } else if (profileModal && !profileModal.hidden) {
         closeProfileModal();
+      } else if (aboutModal && !aboutModal.hidden) {
+        closeAboutModal();
       } else if (!resetPwModal.hidden) {
         closeResetPasswordModal();
       } else if (scheduleModal && !scheduleModal.hidden) {
