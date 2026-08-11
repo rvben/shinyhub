@@ -190,6 +190,8 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		Name:                         derefStringOrEmpty(m.Name),
 		SetDescription:               m.Description != nil,
 		Description:                  derefStringOrEmpty(m.Description),
+		SetProjectSlug:               m.Project != nil,
+		ProjectSlug:                  derefStringOrEmpty(m.Project),
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
 	}
@@ -592,6 +594,9 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if m.Description != nil {
 		d["description"] = *m.Description
 	}
+	if m.Project != nil {
+		d["project"] = *m.Project
+	}
 	return d
 }
 
@@ -658,6 +663,9 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if m.Description != nil {
 		d["description"] = *m.Description
+	}
+	if m.Project != nil {
+		d["project"] = *m.Project
 	}
 	b, _ := json.Marshal(d)
 	return string(b)

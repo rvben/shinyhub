@@ -571,3 +571,46 @@ func TestValidateManifestForServer_WorkerBudgetMergesStoredState(t *testing.T) {
 		t.Errorf("expected the fitting manifest to pass, got %v", ve)
 	}
 }
+
+func TestApplyManifestAppSettings_SetsProject(t *testing.T) {
+	srv, store, ownerID := newServerWithOwnedApp(t, "alpha")
+	app, err := store.GetAppBySlug("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newAuthedManifestRequest(t, ownerID, "POST", "/api/apps/alpha/deploy")
+
+	project := "analytics"
+	if err := srv.applyManifestAppSettings(r, app, deploy.AppSettings{Project: &project}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	got, err := store.GetAppBySlug("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ProjectSlug != "analytics" {
+		t.Errorf("project_slug = %q, want analytics", got.ProjectSlug)
+	}
+	// The project row is created lazily by the same write (Task 5).
+	if _, err := store.GetProject("analytics"); err != nil {
+		t.Errorf("manifest apply must create the project row: %v", err)
+	}
+
+	// A silent manifest leaves the stored project alone. This is the whole point
+	// of Project being a *string: absent and "" are different instructions.
+	if err := srv.applyManifestAppSettings(r, app, deploy.AppSettings{}); err != nil {
+		t.Fatalf("apply empty: %v", err)
+	}
+	if got, _ = store.GetAppBySlug("alpha"); got.ProjectSlug != "analytics" {
+		t.Errorf("a manifest with no project key must not clear it, got %q", got.ProjectSlug)
+	}
+
+	// A declared "" clears it.
+	empty := ""
+	if err := srv.applyManifestAppSettings(r, app, deploy.AppSettings{Project: &empty}); err != nil {
+		t.Fatalf("apply clear: %v", err)
+	}
+	if got, _ = store.GetAppBySlug("alpha"); got.ProjectSlug != "" {
+		t.Errorf(`project_slug = %q, want "" after a declared empty project`, got.ProjectSlug)
+	}
+}

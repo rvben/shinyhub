@@ -188,3 +188,34 @@ func TestManifestAppMetaReportedEverywhere(t *testing.T) {
 		t.Error("expected an update_app audit event for a name-only manifest deploy")
 	}
 }
+
+// The same two renderers must report a declared project, matching the
+// Name/Description/Icon precedent above. A declared "" (ungroup the app)
+// must still emit the key: presence is checked with the two-value map read,
+// not a bare index, since a missing key and a present-but-empty value are
+// indistinguishable through a bare index.
+func TestManifestAppProjectReportedEverywhere(t *testing.T) {
+	project := "analytics"
+
+	summary := manifestAppliedSummary(deploy.AppSettings{Project: &project})
+	if summary["project"] != project {
+		t.Errorf("manifestAppliedSummary[\"project\"] = %v, want %q", summary["project"], project)
+	}
+
+	detail := manifestAppDetail(deploy.AppSettings{Project: &project})
+	if !strings.Contains(detail, "project") {
+		t.Errorf("manifestAppDetail = %q, want it to mention project", detail)
+	}
+
+	empty := ""
+
+	summaryEmpty := manifestAppliedSummary(deploy.AppSettings{Project: &empty})
+	if v, ok := summaryEmpty["project"]; !ok || v != "" {
+		t.Errorf("manifestAppliedSummary[\"project\"] for declared-empty project = (%v, present=%v), want (\"\", present=true)", v, ok)
+	}
+
+	detailEmpty := manifestAppDetail(deploy.AppSettings{Project: &empty})
+	if !strings.Contains(detailEmpty, "project") {
+		t.Errorf("manifestAppDetail for declared-empty project = %q, want it to contain \"project\"", detailEmpty)
+	}
+}
