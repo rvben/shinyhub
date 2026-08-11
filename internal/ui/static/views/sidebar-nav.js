@@ -4,30 +4,28 @@
 // Pure + DOM-free-by-default so the grouping and active-state logic are
 // unit-testable; renderSidebarApps takes an explicit document. The status badge
 // is INJECTED (badgeFor) rather than imported so this module stays a leaf with
-// no /static import (matching the codebase's testable-module convention). app.js
-// injects the shared appCardBadge model, so a failed-only deploy shows "Failed"
-// and a never-deployed app shows "Awaiting deploy" — never mislabelled.
+// no DOM-module /static import (matching the codebase's testable-module
+// convention); it does still import the pure, DOM-free project-groups.js
+// comparator, the same class of dependency as launchpad-model.js importing
+// app-avatar.js. app.js injects the shared appCardBadge model, so a
+// failed-only deploy shows "Failed" and a never-deployed app shows "Awaiting
+// deploy" - never mislabelled.
+import { groupApps, UNGROUPED } from './project-groups.js';
 
 // Group apps by project_slug. Apps with no project_slug render UNGROUPED at the
-// top (project: null); named projects follow under their heading, sorted by
-// name; apps are sorted by display name within each group.
+// top (project: null); named projects follow under their display-name heading;
+// apps are sorted by display name within each group. The ordering is the shared
+// rule in project-groups.js, so the sidebar, the Launchpad and the operator
+// grid cannot disagree about group order.
 export function groupAppsByProject(apps) {
-  const ungrouped = [];
-  const byProject = new Map();
-  for (const app of apps || []) {
-    const proj = (app && app.project_slug ? String(app.project_slug) : '').trim();
-    if (!proj) { ungrouped.push(app); continue; }
-    if (!byProject.has(proj)) byProject.set(proj, []);
-    byProject.get(proj).push(app);
-  }
-  const label = (a) => String((a && (a.name || a.slug)) || '');
-  const byName = (a, b) => label(a).localeCompare(label(b));
-  const groups = [];
-  if (ungrouped.length) groups.push({ project: null, apps: ungrouped.slice().sort(byName) });
-  for (const proj of [...byProject.keys()].sort((a, b) => a.localeCompare(b))) {
-    groups.push({ project: proj, apps: byProject.get(proj).slice().sort(byName) });
-  }
-  return groups;
+  return groupApps(apps).map((g) => ({
+    // null rather than "" for the ungrouped group: the renderer below and this
+    // module's callers already branch on it.
+    project: g.project === UNGROUPED ? null : g.project,
+    name: g.name,
+    iconEmoji: g.iconEmoji,
+    apps: g.apps,
+  }));
 }
 
 // An app row is active for its own page and any nested tab. The trailing-slash
@@ -80,8 +78,8 @@ export function renderSidebarApps(container, apps, currentPath, badgeFor, doc) {
     if (group.project) {
       const gh = d.createElement('p');
       gh.className = 'sidebar-project';
-      gh.textContent = group.project;
-      gh.title = group.project;
+      gh.textContent = group.iconEmoji ? `${group.iconEmoji} ${group.name}` : group.name;
+      gh.title = group.name === group.project ? group.project : `${group.name} (${group.project})`;
       container.appendChild(gh);
     }
     for (const app of group.apps) {

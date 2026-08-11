@@ -4075,6 +4075,7 @@ footer.brand-footer a { color:inherit; }
 .lp-search:focus { outline: none; border-color: var(--cyan-bright); box-shadow: 0 0 0 3px var(--accent-dim); }
 
 .lp-section { font-size: 0.9rem; font-weight: 650; color: var(--text-soft); letter-spacing: -0.01em; margin: 6px 0 12px; }
+.lp-section-icon { margin-right: 6px; }
 .lp-results > .lp-grid:not(:last-child) { margin-bottom: 22px; }
 
 /* Responsive tile grid: fills the row, no media query needed. The 280px floor
