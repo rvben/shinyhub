@@ -123,14 +123,32 @@ func TestPatchAppAuditsProjectMoveAndProjectCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Decode the project_slug entry and check BOTH bounds: old must be the
+	// app's prior (empty) project and new must be "analytics". A substring
+	// check on the raw JSON cannot tell a real move from a stale capture that
+	// records old == new == "analytics", since both render the same substrings.
 	var sawMove bool
+	var seenDetails []string
 	for _, e := range updates {
-		if strings.Contains(e.Detail, `"project_slug"`) && strings.Contains(e.Detail, `"analytics"`) {
+		if !strings.Contains(e.Detail, `"project_slug"`) {
+			continue
+		}
+		var parsed struct {
+			ProjectSlug struct {
+				Old string `json:"old"`
+				New string `json:"new"`
+			} `json:"project_slug"`
+		}
+		if err := json.Unmarshal([]byte(e.Detail), &parsed); err != nil {
+			t.Fatalf("decode update_app detail %q: %v", e.Detail, err)
+		}
+		seenDetails = append(seenDetails, e.Detail)
+		if parsed.ProjectSlug.Old == "" && parsed.ProjectSlug.New == "analytics" {
 			sawMove = true
 		}
 	}
 	if !sawMove {
-		t.Error("moving an app between projects must appear in the update_app detail blob")
+		t.Errorf("moving an app between projects must record project_slug old=%q new=%q in the update_app detail blob; saw %v", "", "analytics", seenDetails)
 	}
 
 	// The literal action string, not db.AuditProjectCreate: this pins the value
