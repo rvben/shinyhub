@@ -36,6 +36,13 @@ func TestDeployApp_FailedDeployRestoresPreviousPool(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Serving that deployment. The state under test is a redeploy over a live
+	// pool, so the app must actually be running: a deploy onto an app an operator
+	// stopped deliberately leaves it stopped and never boots a pool to restore
+	// (TestDeploy_FailedDeployLeavesAStoppedAppStopped covers that path).
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "demo", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
 
 	// The new deploy fails; the restore of v1 (different bundle dir) succeeds.
 	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.PoolResult, error) {

@@ -1257,6 +1257,22 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 	slog.Info("restore: rolled back to previous deployment after failed attempt", "slug", slug, "version", prev.Version)
 }
 
+// restoreAfterFailedDeploy recovers from a failed deploy, except for an app the
+// operator had stopped. Booting the previous bundle to recover from a bad new
+// one would put a deliberately withdrawn app back into service on the old
+// version, which is the exact outcome stopping it was meant to prevent - and a
+// failing CI pipeline would be the thing that did it. Nothing was serving for a
+// kept-stopped deploy, so the recovery is to record that it is still down.
+func (s *Server) restoreAfterFailedDeploy(slug string, app *db.App, prev *db.Deployment, keepStopped bool) {
+	if keepStopped {
+		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
+			slog.Error("deploy: persist stopped status after failed deploy", "slug", slug, "err", err)
+		}
+		return
+	}
+	s.restorePreviousPool(slug, app, prev)
+}
+
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
@@ -1269,6 +1285,15 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "process manager not available")
 		return
 	}
+
+	// A stopped app stays stopped through a deploy: the operator took it out of
+	// service and a deploy must not silently override that. ?start=true is the
+	// explicit override for a pipeline that wants deploy to mean "make it live".
+	// Read before the upload so the decision reflects the state the caller
+	// deployed against, not one a concurrent start changed mid-upload. Whether
+	// the app was ever successfully deployed is resolved further down, from the
+	// deployments table.
+	stoppedByOperator := app.Status == "stopped" && r.URL.Query().Get("start") != "true"
 
 	maxSize := maxBundleUploadSize
 	if cap := int64(s.cfg.Storage.MaxBundleMB); cap > 0 {
@@ -1433,6 +1458,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if existing, lerr := s.store.ListDeployments(app.ID); lerr == nil && len(existing) > 0 {
 		prevActive = existing[0]
 	}
+	// An app that has never deployed successfully is "stopped" by default
+	// rather than by anyone's decision, so a deploy starts it. The test is the
+	// durable deployments row, which ListDeployments already filters to
+	// succeeded ones: deploy_count is soft state a failed increment can leave
+	// at zero, and a first deploy that FAILED must not make the retry that
+	// fixes it leave the app down.
+	keepStopped := stoppedByOperator && prevActive != nil
+
 	pendingDep, err := s.store.BeginDeployment(app.ID, version, bundleDir)
 	if err != nil {
 		slog.Error("deploy: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
@@ -1496,7 +1529,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if err := s.applyManifestAppSettings(r, app, manifest.App); err != nil {
 			slog.Error("manifest [app] apply failed", "slug", slug, "err", err)
 			_ = s.store.FailDeployment(pendingDep.ID)
-			s.restorePreviousPool(slug, app, prevActive)
+			s.restoreAfterFailedDeploy(slug, app, prevActive, keepStopped)
 			writeError(w, http.StatusInternalServerError, "manifest apply failed")
 			return
 		}
@@ -1528,6 +1561,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		ContentDigest:         digest,
 		DeploymentID:          pendingDep.ID,
 		AppVersion:            version,
+		// A stopped app is built and validated but not booted, so a broken
+		// bundle is still rejected here rather than at start time.
+		PrepareOnly: keepStopped,
 	}, app))
 	if err != nil {
 		reason := deployFailureMessage(err)
@@ -1589,7 +1625,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				s.proxy.ApplyRenderPacing(slug, preManifestApp.RenderSeconds)
 			}
 		}
-		s.restorePreviousPool(slug, &preManifestApp, prevActive)
+		s.restoreAfterFailedDeploy(slug, &preManifestApp, prevActive, keepStopped)
 		s.recordDeploy("failure")
 		writeErrorWithKind(w, http.StatusInternalServerError, reason, kind)
 		return
@@ -1634,11 +1670,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// Bookkeeping after the proxy switch. Two writes here are different
 	// kinds of important and are handled differently:
 	//
-	//  1. UpdateAppStatus("running") and IncrementDeployCount are
+	//  1. UpdateAppStatus and IncrementDeployCount are
 	//     soft state. The watchdog reconciles status; the never-deployed
 	//     gate keys off the durable deployments row (HasAnyDeployment),
 	//     not deploy_count. Log+continue is safe — neither failure traps
-	//     the user out of an app whose pool is already live.
+	//     the user out of an app whose bundle is already deployed.
 	//
 	//  2. PromoteDeployment is authoritative: it flips the pre-recorded
 	//     pending row to 'succeeded', which is the pointer the scheduler,
@@ -1649,15 +1685,23 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	//     fail closed (500). The bundle stays on disk (keepFiles=true) so a
 	//     follow-up deploy succeeds without re-uploading; PruneOldVersions
 	//     sweeps any duplicate after the retry succeeds.
+	//
+	// A kept-stopped deploy booted nothing, so it writes back "stopped": the
+	// bundle is on disk and promoted, and the app comes up on the new version
+	// when an operator starts it.
+	deployedStatus := "running"
+	if keepStopped {
+		deployedStatus = "stopped"
+	}
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,
-		Status: "running",
+		Status: deployedStatus,
 	}); err != nil {
-		slog.Error("deploy: persist running status failed; pool is live", "slug", slug, "err", err)
+		slog.Error("deploy: persist status failed", "slug", slug, "status", deployedStatus, "err", err)
 	}
 
 	if err := s.store.IncrementDeployCount(slug); err != nil {
-		slog.Error("deploy: increment deploy_count failed; pool is live", "slug", slug, "err", err)
+		slog.Error("deploy: increment deploy_count failed; bundle is deployed", "slug", slug, "err", err)
 	}
 
 	if err := s.store.PromoteDeployment(pendingDep.ID); err != nil {
@@ -1763,7 +1807,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// container and post-deploy hooks were therefore not run. omitempty
 		// keeps the wire shape clean for the common case.
 		HooksSkipped int `json:"hooks_skipped,omitempty"`
-	}{App: updatedApp, HooksSkipped: result.HooksSkipped}
+		// KeptStopped reports that the app was left down because it was stopped
+		// before this deploy. Stated outright so the CLI does not have to infer
+		// it from a status field a concurrent start could have changed.
+		KeptStopped bool `json:"kept_stopped,omitempty"`
+	}{App: updatedApp, HooksSkipped: result.HooksSkipped, KeptStopped: keepStopped}
 	if !manifestSummary.IsEmpty() {
 		resp.Manifest = &manifestSummary
 	}

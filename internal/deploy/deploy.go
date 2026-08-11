@@ -497,6 +497,12 @@ type Params struct {
 	// mode is grouped or per_session; ignored for multiplex.
 	WorkerGroupedSize int
 	WorkerMaxWorkers  int
+	// PrepareOnly builds the bundle and runs its post-deploy hooks without
+	// booting anything and without registering a pool with the proxy. It is how
+	// a deploy to an app the operator stopped still rejects a broken bundle at
+	// deploy time while leaving the app down. The returned PoolResult carries no
+	// replicas.
+	PrepareOnly bool
 }
 
 // Result contains identifiers for a single successfully deployed replica.
@@ -930,13 +936,29 @@ func resolveBundleCommand(p Params, m *Manifest, hostDeps bool) (baseCmd []strin
 // The returned PoolResult carries no replicas: the caller marks the app running
 // and the proxy spawns workers on demand.
 func prepareElasticPool(p Params, hostDeps bool, mode config.WorkerIsolationMode) (*PoolResult, error) {
+	res, err := prepareBundle(p, hostDeps)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("deploy: elastic mode prepared; workers spawn on demand",
+		"slug", p.Slug, "mode", mode, "hooks_skipped", res.HooksSkipped)
+	return res, nil
+}
+
+// prepareBundle runs the once-per-deploy preparation - dependency build,
+// command validation, post-deploy hooks - and returns a PoolResult with no
+// replicas. Shared by the elastic path (whose workers spawn later, on demand)
+// and the prepare-only path (where nothing is meant to spawn at all), so a
+// bundle that cannot be built fails the deploy in both.
+func prepareBundle(p Params, hostDeps bool) (*PoolResult, error) {
 	m, err := LoadManifest(p.BundleDir)
 	if err != nil {
 		return nil, fmt.Errorf("read manifest: %w", err)
 	}
 	// Discards the command: elastic workers re-resolve it per spawn via
-	// ResolveLaunch. Called for its build and its validation, so a bad command
-	// template fails the deploy instead of every future worker spawn.
+	// ResolveLaunch, and a prepare-only deploy resolves it again at start.
+	// Called for its build and its validation, so a bad command template fails
+	// the deploy instead of every future worker spawn.
 	if _, _, err := resolveBundleCommand(p, m, hostDeps); err != nil {
 		return nil, err
 	}
@@ -944,8 +966,6 @@ func prepareElasticPool(p Params, hostDeps bool, mode config.WorkerIsolationMode
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("deploy: elastic mode prepared; workers spawn on demand",
-		"slug", p.Slug, "mode", mode, "hooks_skipped", hooksSkipped)
 	return &PoolResult{HooksSkipped: hooksSkipped}, nil
 }
 
@@ -974,6 +994,20 @@ func Run(p Params) (*PoolResult, error) {
 		return nil, fmt.Errorf("expand placement: %w", err)
 	}
 	total := len(asn)
+
+	// A prepare-only deploy stops here: build the bundle, run its hooks, boot
+	// nothing. The proxy pool is deliberately left as the caller deregistered
+	// it, so no request can reach a worker for an app that is meant to be down;
+	// the pool is rebuilt by the start that brings the app back up.
+	if p.PrepareOnly {
+		res, perr := prepareBundle(p, p.hostPreparesDeps(distinctTiers(asn)...))
+		if perr != nil {
+			return nil, perr
+		}
+		slog.Info("deploy: bundle prepared without starting it",
+			"slug", p.Slug, "hooks_skipped", res.HooksSkipped)
+		return res, nil
+	}
 
 	p.Proxy.SetPoolSize(p.Slug, total)
 	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)

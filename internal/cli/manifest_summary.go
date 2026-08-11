@@ -64,6 +64,19 @@ func formatHooksSkippedWarning(raw any) string {
 	return fmt.Sprintf("Warning: %d post-deploy %s skipped under the container runtime; bake setup into the image instead.", int(n), noun)
 }
 
+// formatKeptStoppedNote turns the "kept_stopped" field of a deploy response
+// into the line that tells the developer the new version is on the server but
+// not serving, or "" when the app is live. Without it a successful-looking
+// "Deployed" would be the only output for a deploy nobody can reach, and the
+// next question ("how do I bring it up?") is answered in the same line.
+func formatKeptStoppedNote(keptStopped bool, slug string) string {
+	if !keptStopped {
+		return ""
+	}
+	return fmt.Sprintf("This app is stopped, so the new version is not serving yet.\n"+
+		"      Bring it up with: shinyhub apps start %s", slug)
+}
+
 // formatIconShadowWarning turns the manifest block of a deploy response into a
 // warning that the declared icon is now displayed instead of this app's
 // uploaded image, or "" when it is not. The image is retained, so the message
