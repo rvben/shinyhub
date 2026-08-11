@@ -38,7 +38,7 @@ func seedTracesApp(t *testing.T, store *db.Store, slug, ownerName string) (token
 		t.Fatalf("create user: %v", err)
 	}
 	owner, _ := store.GetUserByUsername(ownerName)
-	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: owner.ID}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	tok, _ := auth.IssueJWT(owner.ID, ownerName, "developer", "test-secret")

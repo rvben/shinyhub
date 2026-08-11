@@ -86,11 +86,11 @@ func TestDeployApp_FailedDeployRevertsResourceLimits(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
 	app, _ := store.GetAppBySlug("demo")
 
 	// Pre-manifest resource policy.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "demo",
 		SetMemoryLimitMB: true, MemoryLimitMB: resInt(256),
 		SetCPUQuotaPercent: true, CPUQuotaPercent: resInt(50),
@@ -156,11 +156,11 @@ func TestDeployApp_FailedDeployRevertsAutoscale(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
 	app, _ := store.GetAppBySlug("demo")
 
 	// Pre-manifest autoscale policy: enabled, bounds [1,2], target 0.5.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "demo",
 		SetAutoscale: true, AutoscaleEnabled: true,
 		AutoscaleMinReplicas: 1, AutoscaleMaxReplicas: 2, AutoscaleTarget: 0.5,
@@ -238,11 +238,11 @@ func TestDeployApp_FailedDeployRevertsRenderSeconds(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
 	app, _ := store.GetAppBySlug("demo")
 
 	// Pre-manifest render pacing.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "demo",
 		SetRenderSeconds: true, RenderSeconds: 0.8,
 	}); err != nil {

@@ -18,7 +18,7 @@ func TestManifestIconDeclaredOnly(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "iconapp", Name: "Icon App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestManifestIconSurvivesFailedDeploy(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "failicon", Name: "Fail Icon App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -195,7 +195,7 @@ func TestManifestIconSurvivesFailedDeploy(t *testing.T) {
 func TestManifestIconPhaseAAtomic(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "atomic", Name: "Atomic", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -253,7 +253,7 @@ func TestManifestIconConcurrentWriteWins(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "raceicon", Name: "Race Icon App", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -314,7 +314,7 @@ func TestManifestIconReportedEverywhere(t *testing.T) {
 
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "iconreport", Name: "Icon Report", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -381,7 +381,7 @@ func TestIconShadowedUploadFlag(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, store, token := newManifestE2EServer(t)
 			admin, _ := store.GetUserByUsername("admin")
-			if err := store.CreateApp(db.CreateAppParams{
+			if _, err := store.CreateApp(db.CreateAppParams{
 				Slug: tt.slug, Name: tt.slug, OwnerID: admin.ID,
 			}); err != nil {
 				t.Fatal(err)

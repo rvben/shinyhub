@@ -60,7 +60,7 @@ func TestDeployingFlag_InListAndBatchMetricsPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID}); err != nil {
 		t.Fatal(err)
 	}
 	app, err := store.GetAppBySlug("demo")

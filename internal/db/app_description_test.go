@@ -19,7 +19,7 @@ func TestAppDescriptionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "dash", Name: "Dash", OwnerID: u.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "dash", Name: "Dash", OwnerID: u.ID}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 

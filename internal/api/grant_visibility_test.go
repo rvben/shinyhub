@@ -18,7 +18,7 @@ func TestGrantAppAccess_WarnsWhenVisibilityAlreadyOpen(t *testing.T) {
 	srv, store := newTestServer(t)
 	ownerID, ownerTok := mkUser(t, store, "owner", "developer")
 	mkUser(t, store, "alice", "developer")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app", Name: "App", OwnerID: ownerID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app", Name: "App", OwnerID: ownerID}); err != nil {
 		t.Fatal(err)
 	}
 

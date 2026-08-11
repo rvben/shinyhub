@@ -20,14 +20,14 @@ func crossAppScheduleFixture(t *testing.T, srv interface {
 	t.Helper()
 	hashA, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
 		t.Fatalf("create app-a: %v", err)
 	}
 	tokenA, _ := auth.IssueJWT(1, "owner-a", "developer", "test-secret")
 
 	hashB, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
 		t.Fatalf("create app-b: %v", err)
 	}
 	tokenB, _ = auth.IssueJWT(2, "owner-b", "developer", "test-secret")

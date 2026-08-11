@@ -53,7 +53,7 @@ func TestDeployTokenScope_RestrictsAppSurface(t *testing.T) {
 	srv, store := newTestServer(t)
 	ownerID, _ := mkUser(t, store, "owner", "developer")
 	for _, slug := range []string{"inscope", "outscope"} {
-		if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID}); err != nil {
+		if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -109,7 +109,7 @@ func TestDeployTokenScope_RestrictsAppSurface(t *testing.T) {
 func TestDeployTokenScope_EmptyScopeUnrestricted(t *testing.T) {
 	srv, store := newTestServer(t)
 	ownerID, _ := mkUser(t, store, "owner", "developer")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "anyapp", Name: "Any", OwnerID: ownerID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "anyapp", Name: "Any", OwnerID: ownerID}); err != nil {
 		t.Fatal(err)
 	}
 	tok := scopedDeployToken(t, srv, store, "admin", nil)

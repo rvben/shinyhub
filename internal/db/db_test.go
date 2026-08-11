@@ -120,7 +120,7 @@ func TestCreateAndGetApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get owner: %v", err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug:        "my-app",
 		Name:        "My App",
 		ProjectSlug: "default",
@@ -179,7 +179,7 @@ func mustCreateUser(t *testing.T, s *db.Store, name, role string) *db.User {
 
 func mustCreateApp(t *testing.T, s *db.Store, slug string, ownerID int64) *db.App {
 	t.Helper()
-	if err := s.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID, Access: "private"}); err != nil {
+	if _, err := s.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID, Access: "private"}); err != nil {
 		t.Fatalf("create app %q: %v", slug, err)
 	}
 	app, err := s.GetAppBySlug(slug)
@@ -235,12 +235,12 @@ func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
 		t.Fatal(err)
 	}
 
 	mins := 45
-	if _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: "myapp", SetHibernate: true, HibernateMinutes: &mins,
 	}); err != nil {
 		t.Fatalf("PatchAppSettings hibernate: %v", err)
@@ -254,7 +254,7 @@ func TestMigrate_HibernateTimeoutColumn(t *testing.T) {
 	}
 
 	// Reset to NULL (global default).
-	if _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: "myapp", SetHibernate: true, HibernateMinutes: nil,
 	}); err != nil {
 		t.Fatalf("PatchAppSettings hibernate nil: %v", err)
@@ -280,7 +280,7 @@ func TestAppMembers_GrantRevoke(t *testing.T) {
 	owner, _ := store.GetUserByUsername("owner")
 	alice, _ := store.GetUserByUsername("alice")
 
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -312,7 +312,7 @@ func TestAppAccess_OwnerAlwaysHasAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner, _ := store.GetUserByUsername("owner")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -464,7 +464,7 @@ func TestGetDeploymentBySlugAndID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
 		t.Fatal(err)
 	}
 	app, err := store.GetAppBySlug("myapp")
@@ -559,7 +559,7 @@ func TestPatchAppSettings_ResourceLimits(t *testing.T) {
 	}
 	user, _ := store.GetUserByUsername("owner")
 
-	err = store.CreateApp(db.CreateAppParams{
+	_, err = store.CreateApp(db.CreateAppParams{
 		Slug: "test-app", Name: "Test", OwnerID: user.ID,
 	})
 	if err != nil {
@@ -568,7 +568,7 @@ func TestPatchAppSettings_ResourceLimits(t *testing.T) {
 
 	memMB := 512
 	cpuPct := 75
-	if _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:               "test-app",
 		SetMemoryLimitMB:   true,
 		MemoryLimitMB:      &memMB,
@@ -591,7 +591,7 @@ func TestPatchAppSettings_ResourceLimits(t *testing.T) {
 
 	// Updating only memory must preserve the existing CPU limit.
 	memMB2 := 256
-	if _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:             "test-app",
 		SetMemoryLimitMB: true,
 		MemoryLimitMB:    &memMB2,
@@ -607,7 +607,7 @@ func TestPatchAppSettings_ResourceLimits(t *testing.T) {
 	}
 
 	// Setting to nil should clear the limits.
-	if _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:               "test-app",
 		SetMemoryLimitMB:   true,
 		MemoryLimitMB:      nil,
@@ -622,7 +622,7 @@ func TestPatchAppSettings_ResourceLimits(t *testing.T) {
 	}
 
 	// PatchAppSettings on a non-existent slug must return ErrNotFound.
-	_, _, _, _, err = store.PatchAppSettings(db.PatchAppSettingsParams{Slug: "no-such-app"})
+	_, _, _, _, _, err = store.PatchAppSettings(db.PatchAppSettingsParams{Slug: "no-such-app"})
 	if !errors.Is(err, db.ErrNotFound) {
 		t.Errorf("expected ErrNotFound for missing slug, got %v", err)
 	}
@@ -675,7 +675,7 @@ func TestAppEnvVars_UpsertListDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner, _ := store.GetUserByUsername("owner")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	app, _ := store.GetAppBySlug("demo")
@@ -758,7 +758,7 @@ func TestAppEnvVars_CascadeOnAppDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner, _ := store.GetUserByUsername("owner")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	app, _ := store.GetAppBySlug("demo")
@@ -888,14 +888,14 @@ func TestPatchAppSettings_ReplicaShrinkPrune(t *testing.T) {
 		}
 	}
 	// Record a target of 3 so the subsequent shrink is a true shrink.
-	if _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: "demo", SetReplicas: true, Replicas: 3,
 	}); err != nil {
 		t.Fatalf("PatchAppSettings grow to 3: %v", err)
 	}
 
 	// Shrink to 2 removes idx >= 2, leaving [0, 1].
-	if _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: "demo", SetReplicas: true, Replicas: 2,
 	}); err != nil {
 		t.Fatalf("PatchAppSettings shrink to 2: %v", err)
@@ -912,7 +912,7 @@ func TestPatchAppSettings_ReplicaShrinkPrune(t *testing.T) {
 	}
 
 	// Shrink to 1 prunes idx >= 1, leaving only replica 0.
-	if _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: "demo", SetReplicas: true, Replicas: 1,
 	}); err != nil {
 		t.Fatalf("PatchAppSettings shrink to 1: %v", err)
@@ -1270,7 +1270,7 @@ func TestGrantAppAccessWithRole(t *testing.T) {
 	}
 	owner, _ := store.GetUserByUsername("owner")
 	mgr, _ := store.GetUserByUsername("mgr")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1301,7 +1301,7 @@ func TestSetMemberRole_NotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner, _ := store.GetUserByUsername("owner")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: owner.ID}); err != nil {
 		t.Fatal(err)
 	}
 	// owner has no explicit app_members row; updating its role must report not-found.

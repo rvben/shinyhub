@@ -154,7 +154,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateApp(db.CreateAppParams{
+	if _, err := s.store.CreateApp(db.CreateAppParams{
 		Slug:        req.Slug,
 		Name:        req.Name,
 		ProjectSlug: req.ProjectSlug,
@@ -868,7 +868,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// never leaves the row half-updated. The managed_by marker is a separate
 	// follow-up write (SetAppManagedBy) that runs after this transaction commits;
 	// the post-patch refetch exposes the final consistent state to the caller.
-	priorStatus, _, priorMemoryLimitMB, priorCPUQuotaPercent, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
+	priorStatus, _, priorMemoryLimitMB, priorCPUQuotaPercent, _, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:                         slug,
 		SetHibernate:                 setHibernateTimeout,
 		HibernateMinutes:             hibernateTimeout,
@@ -1538,7 +1538,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// Revert manifest [app] settings so the restored old pool runs under
 		// the settings it was deployed with, not the failed bundle's.
 		if manifestApplied {
-			if _, _, _, _, rerr := s.store.PatchAppSettings(db.PatchAppSettingsParams{
+			if _, _, _, _, _, rerr := s.store.PatchAppSettings(db.PatchAppSettingsParams{
 				Slug:               slug,
 				SetHibernate:       true,
 				HibernateMinutes:   preManifestApp.HibernateTimeoutMinutes,
@@ -1562,7 +1562,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 					config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(preManifestApp.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
 					preManifestApp.WorkerGroupedSize, preManifestApp.WorkerMaxWorkers)
 			}
-			if rerr := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+			if _, rerr := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 				AppID: preManifestApp.ID, Slug: slug,
 				SetIdentityHeaders: true, IdentityHeaders: preManifestApp.IdentityHeaders,
 				// Restore the pre-manifest autoscale policy. Unconditional like

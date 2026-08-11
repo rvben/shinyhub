@@ -10,7 +10,7 @@
 -- to '' so "no project" has exactly ONE representation from here on. SQLite
 -- cannot alter a column default without a full table rebuild, so the old
 -- DEFAULT 'default' stays in the schema and is made unreachable by the
--- application layer instead (internal/db always writes project_slug
+-- application layer instead (internal/db must always write project_slug
 -- explicitly). The Postgres counterpart does drop the default, so the two
 -- schemas diverge here by design.
 CREATE TABLE IF NOT EXISTS projects (

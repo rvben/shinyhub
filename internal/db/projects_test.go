@@ -10,20 +10,18 @@ import (
 // mkApp creates an app whose project_slug is EXACTLY what the caller asked for,
 // including "".
 //
-// CreateApp still omits the project_slug column entirely when ProjectSlug is ""
-// (queries.go:801-805), which lets migration 001's legacy `DEFAULT 'default'`
-// apply. On SQLite that default survives migration 050 (SQLite cannot alter a
-// column default in place), so a fixture written as "ungrouped" would silently
-// land in a project literally named "default" - and every assertion about "" in
-// this file would pass while testing nothing. Task 5 deletes that branch; this
-// helper is what makes "" mean "" until then, and it stays correct afterwards.
+// CreateApp now always writes project_slug explicitly (Task 5), so migration
+// 001's legacy `DEFAULT 'default'` can no longer apply to a fresh insert. The
+// PatchAppSettings round-trip below is kept as a belt-and-braces positive
+// control: if that column default ever resurfaces, this helper still catches it
+// instead of every "" assertion in this file silently testing nothing.
 //
 // PatchAppSettings is used rather than raw SQL because s.DB() returns the
 // unrebound handle: a literal `?` placeholder breaks when the suite runs against
 // SHINYHUB_TEST_POSTGRES_DSN.
 func mkApp(t *testing.T, s *db.Store, slug, project, access string, ownerID int64) {
 	t.Helper()
-	if err := s.CreateApp(db.CreateAppParams{
+	if _, err := s.CreateApp(db.CreateAppParams{
 		Slug: slug, Name: slug, ProjectSlug: project, OwnerID: ownerID, Access: access,
 	}); err != nil {
 		t.Fatalf("create app %s: %v", slug, err)
@@ -31,7 +29,7 @@ func mkApp(t *testing.T, s *db.Store, slug, project, access string, ownerID int6
 	if project != "" {
 		return
 	}
-	if _, _, _, _, err := s.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, _, _, _, _, err := s.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: slug, SetProjectSlug: true, ProjectSlug: "",
 	}); err != nil {
 		t.Fatalf("clear project on %s: %v", slug, err)
@@ -154,7 +152,7 @@ func TestDeleteProjectAndCountApps(t *testing.T) {
 	if _, err := s.UpsertProject(db.Project{Slug: "p"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateApp(db.CreateAppParams{Slug: "a", Name: "A", ProjectSlug: "p", OwnerID: u.ID, Access: "private"}); err != nil {
+	if _, err := s.CreateApp(db.CreateAppParams{Slug: "a", Name: "A", ProjectSlug: "p", OwnerID: u.ID, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 	n, err := s.CountAppsInProject("p")
@@ -231,6 +229,13 @@ func TestListProjectsVisibleToUserFollowsAppVisibility(t *testing.T) {
 	owner := mustCreateUser(t, s, "owner", "developer")
 	other := mustCreateUser(t, s, "other", "developer")
 
+	// Name "open" before any app references it: CreateApp now creates the project
+	// row lazily (Task 5), and UpsertProject never overwrites an existing row, so
+	// naming it after mkApp would silently no-op and leave it blank.
+	if _, err := s.UpsertProject(db.Project{Slug: "open", Name: "Open Project"}); err != nil {
+		t.Fatal(err)
+	}
+
 	// mkApp is Task 3's helper in this same file: it guarantees an empty project
 	// stays empty instead of picking up the legacy 'default' column default.
 	mkApp(t, s, "pub", "open", "public", owner.ID)
@@ -238,10 +243,6 @@ func TestListProjectsVisibleToUserFollowsAppVisibility(t *testing.T) {
 	mkApp(t, s, "mine", "owned", "private", other.ID)
 	mkApp(t, s, "hidden", "secret", "private", owner.ID)
 	mkApp(t, s, "loose", "", "public", owner.ID)
-
-	if _, err := s.UpsertProject(db.Project{Slug: "open", Name: "Open Project"}); err != nil {
-		t.Fatal(err)
-	}
 
 	ps, err := s.ListProjectsVisibleToUser(other.ID)
 	if err != nil {
@@ -320,5 +321,66 @@ func TestListProjectsVisibleToUserCoversAllFourPaths(t *testing.T) {
 	// that returns every project unconditionally.
 	if _, ok := counts["p-none"]; ok {
 		t.Error("p-none: a project the user reaches by no path must not be listed")
+	}
+}
+
+func TestAppWritersCreateProjectLazily(t *testing.T) {
+	s := mustOpenDB(t)
+	u := mustCreateUser(t, s, "owner", "developer")
+
+	created, err := s.CreateApp(db.CreateAppParams{Slug: "a", Name: "A", ProjectSlug: "fresh", OwnerID: u.ID, Access: "private"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Error("CreateApp with an unknown project must report projectCreated=true")
+	}
+	if _, err := s.GetProject("fresh"); err != nil {
+		t.Errorf("CreateApp must create the project row: %v", err)
+	}
+
+	// A second app in the same project does not re-create it.
+	created, err = s.CreateApp(db.CreateAppParams{Slug: "b", Name: "B", ProjectSlug: "fresh", OwnerID: u.ID, Access: "private"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Error("CreateApp into an existing project must report projectCreated=false")
+	}
+
+	// Empty project: no row, no create.
+	created, err = s.CreateApp(db.CreateAppParams{Slug: "c", Name: "C", ProjectSlug: "", OwnerID: u.ID, Access: "private"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Error("CreateApp with no project must report projectCreated=false")
+	}
+	app, err := s.GetAppBySlug("c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.ProjectSlug != "" {
+		t.Errorf(`project_slug = %q, want "" (the 'default' sentinel is retired)`, app.ProjectSlug)
+	}
+
+	_, _, _, _, pcreated, err := s.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug: "c", SetProjectSlug: true, ProjectSlug: "via-patch",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pcreated {
+		t.Error("PatchAppSettings moving an app into an unknown project must report projectCreated=true")
+	}
+
+	mcreated, err := s.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+		Slug: "c", SetProjectSlug: true, ProjectSlug: "viaManifest",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mcreated {
+		t.Error("ApplyAppManifestSettings must report projectCreated=true for an unknown project")
 	}
 }

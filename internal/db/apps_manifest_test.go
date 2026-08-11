@@ -16,7 +16,7 @@ func TestApplyAppManifestSettings_AllThreeFields(t *testing.T) {
 	u := mustCreateUser(t, store, "owner", "developer")
 	app := mustCreateApp(t, store, "alpha", u.ID)
 
-	err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	_, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID:                    app.ID,
 		Slug:                     "alpha",
 		SetHibernate:             true,
@@ -55,7 +55,7 @@ func TestApplyAppManifestSettings_HibernateResetToNull(t *testing.T) {
 	app := mustCreateApp(t, store, "alpha", u.ID)
 
 	// First set a concrete value.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetHibernate: true, HibernateMinutes: ptrInt(30),
 	}); err != nil {
@@ -63,7 +63,7 @@ func TestApplyAppManifestSettings_HibernateResetToNull(t *testing.T) {
 	}
 
 	// Then reset to NULL.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetHibernate: true, HibernateMinutes: nil,
 	}); err != nil {
@@ -102,7 +102,7 @@ func TestApplyAppManifestSettings_ReplicaShrink(t *testing.T) {
 	}
 
 	// Set apps.replicas = 2 so PreviousReplicas is accurate.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetReplicas: true, Replicas: 2, PreviousReplicas: 1,
 	}); err != nil {
@@ -110,7 +110,7 @@ func TestApplyAppManifestSettings_ReplicaShrink(t *testing.T) {
 	}
 
 	// Shrink to 1 replica — idx=1 must be pruned.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetReplicas: true, Replicas: 1, PreviousReplicas: 2,
 	}); err != nil {
@@ -145,7 +145,7 @@ func TestApplyAppManifestSettings_AbsentFieldsUntouched(t *testing.T) {
 	app := mustCreateApp(t, store, "alpha", u.ID)
 
 	// Set all three fields.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetHibernate: true, HibernateMinutes: ptrInt(7),
 		SetReplicas: true, Replicas: 2, PreviousReplicas: app.Replicas,
@@ -155,7 +155,7 @@ func TestApplyAppManifestSettings_AbsentFieldsUntouched(t *testing.T) {
 	}
 
 	// Apply only replicas change — other fields must survive.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetReplicas: true, Replicas: 4, PreviousReplicas: 2,
 	}); err != nil {
@@ -187,7 +187,7 @@ func TestApplyAppManifestSettings_ResourceLimits(t *testing.T) {
 	app := mustCreateApp(t, store, "alpha", u.ID)
 
 	// Set both limits.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetMemoryLimitMB: true, MemoryLimitMB: ptrInt(2048),
 		SetCPUQuotaPercent: true, CPUQuotaPercent: ptrInt(150),
@@ -206,7 +206,7 @@ func TestApplyAppManifestSettings_ResourceLimits(t *testing.T) {
 	}
 
 	// Change only memory; cpu must survive (declared-only, like replicas).
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetMemoryLimitMB: true, MemoryLimitMB: ptrInt(512),
 	}); err != nil {
@@ -224,7 +224,7 @@ func TestApplyAppManifestSettings_ResourceLimits(t *testing.T) {
 	}
 
 	// Revert path: a nil pointer with Set=true clears the column to NULL.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetMemoryLimitMB: true, MemoryLimitMB: nil,
 		SetCPUQuotaPercent: true, CPUQuotaPercent: nil,
@@ -252,7 +252,7 @@ func TestApplyAppManifestSettings_Autoscale(t *testing.T) {
 	app := mustCreateApp(t, store, "alpha", u.ID)
 
 	// Declare the full policy.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetAutoscale:         true,
 		AutoscaleEnabled:     true,
@@ -272,7 +272,7 @@ func TestApplyAppManifestSettings_Autoscale(t *testing.T) {
 	}
 
 	// A later apply that does NOT declare autoscale must leave it intact.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetReplicas: true, Replicas: 4, PreviousReplicas: app.Replicas,
 	}); err != nil {
@@ -284,7 +284,7 @@ func TestApplyAppManifestSettings_Autoscale(t *testing.T) {
 	}
 
 	// Re-declaring disabled writes all four columns; bounds persist for re-enable.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, Slug: "alpha",
 		SetAutoscale: true, AutoscaleEnabled: false, AutoscaleMinReplicas: 1, AutoscaleMaxReplicas: 3, AutoscaleTarget: 0,
 	}); err != nil {
@@ -310,7 +310,7 @@ func TestApplyAppManifestSettings_IdentityHeadersTriState(t *testing.T) {
 	app := mustCreateApp(t, store, "alpha", u.ID)
 
 	// Set to explicit false.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID:              app.ID,
 		Slug:               "alpha",
 		SetIdentityHeaders: true,
@@ -327,7 +327,7 @@ func TestApplyAppManifestSettings_IdentityHeadersTriState(t *testing.T) {
 	}
 
 	// Reset to NULL (key removed from manifest => inherit global).
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID:              app.ID,
 		Slug:               "alpha",
 		SetIdentityHeaders: true,
@@ -345,7 +345,7 @@ func TestApplyAppManifestSettings_IdentityHeadersTriState(t *testing.T) {
 
 	// With SetIdentityHeaders=false the column must not be touched.
 	// First write a known value, then call without the flag, then verify.
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID:              app.ID,
 		Slug:               "alpha",
 		SetIdentityHeaders: true,
@@ -353,7 +353,7 @@ func TestApplyAppManifestSettings_IdentityHeadersTriState(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID:              app.ID,
 		Slug:               "alpha",
 		SetIdentityHeaders: false,
@@ -379,7 +379,7 @@ func TestListRoutableReplicas_CarriesIdentityHeaders(t *testing.T) {
 
 	// appWith: identity_headers = false (explicit override via reconcile)
 	appWith := mustCreateApp(t, store, "with-identity", owner.ID)
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID:              appWith.ID,
 		Slug:               "with-identity",
 		SetIdentityHeaders: true,

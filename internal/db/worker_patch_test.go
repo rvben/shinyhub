@@ -11,7 +11,7 @@ func TestPatchAppSettings_Worker(t *testing.T) {
 	owner := mustCreateUser(t, s, "patch-owner", "developer")
 	app := mustCreateApp(t, s, "iso-patch", owner.ID)
 
-	if _, _, _, _, err := s.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, _, _, _, _, err := s.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:                app.Slug,
 		SetWorkerIsolation:  true,
 		WorkerIsolation:     "per_session",
@@ -39,7 +39,7 @@ func TestApplyAppManifestSettings_Worker(t *testing.T) {
 		t.Fatalf("GetAppBySlug before: %v", err)
 	}
 
-	if err := s.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := s.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID:                        got0.ID,
 		Slug:                         app.Slug,
 		SetWorkerIsolation:           true,

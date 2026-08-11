@@ -53,7 +53,7 @@ func TestDeploy_RecordsSuccessMetric(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "ok", Name: "OK", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "ok", Name: "OK", OwnerID: u.ID})
 	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
 
 	if rec := deployForMetrics(t, srv, token, "ok"); rec.Code != http.StatusOK {
@@ -80,7 +80,7 @@ func TestDeploy_RecordsFailureMetric(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "bad", Name: "Bad", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "bad", Name: "Bad", OwnerID: u.ID})
 	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
 
 	if rec := deployForMetrics(t, srv, token, "bad"); rec.Code != http.StatusInternalServerError {

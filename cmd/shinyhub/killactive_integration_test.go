@@ -221,7 +221,7 @@ func seedRunningFargateApp(t *testing.T, store *db.Store, slug string, endpoints
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: owner.ID, Access: "public"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: owner.ID, Access: "public"}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); err != nil {

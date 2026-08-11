@@ -85,7 +85,7 @@ func mustCreateApp(t *testing.T, store *db.Store, slug string) *db.App {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: u.ID, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: u.ID, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 	app, err := store.GetAppBySlug(slug)
@@ -342,7 +342,7 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 
 	// Create two apps both marked as running in the DB.
 	for _, slug := range []string{"alive-app", "orphan-app"} {
-		if err := store.CreateApp(db.CreateAppParams{
+		if _, err := store.CreateApp(db.CreateAppParams{
 			Slug: slug, Name: slug, OwnerID: user.ID,
 		}); err != nil {
 			t.Fatal(err)

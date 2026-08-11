@@ -270,8 +270,10 @@ func seedContractFixtures(t *testing.T, store *db.Store, cfg *config.Config, dat
 	bob := mustUser(t, store, "bob")
 
 	// Primary app + a source app to share into it.
-	mustNoErr(t, "create demo", store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo App", OwnerID: alice.ID, Access: "private"}))
-	mustNoErr(t, "create srcapp", store.CreateApp(db.CreateAppParams{Slug: "srcapp", Name: "Source", OwnerID: alice.ID, Access: "private"}))
+	_, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo App", OwnerID: alice.ID, Access: "private"})
+	mustNoErr(t, "create demo", err)
+	_, err = store.CreateApp(db.CreateAppParams{Slug: "srcapp", Name: "Source", OwnerID: alice.ID, Access: "private"})
+	mustNoErr(t, "create srcapp", err)
 	demo := mustApp(t, store, "demo")
 	src := mustApp(t, store, "srcapp")
 

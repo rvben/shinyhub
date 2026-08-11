@@ -585,7 +585,7 @@ func TestRegistryRebuildsFromStore(t *testing.T) {
 func seedRunningReplica(t *testing.T, store *db.Store, ownerID int64, slug string, idx int, workerID string) {
 	t.Helper()
 	if _, err := store.GetAppBySlug(slug); err != nil {
-		if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID, Access: "private"}); err != nil {
+		if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: ownerID, Access: "private"}); err != nil {
 			t.Fatalf("create app %q: %v", slug, err)
 		}
 	}

@@ -37,7 +37,7 @@ func TestDeployStampsDeploymentMetadataOnReplicas(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "meta", Name: "Meta", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "meta", Name: "Meta", OwnerID: u.ID})
 	app, _ := store.GetAppBySlug("meta")
 
 	body, ctype := buildBundleUpload(t, "app.py", "print('v1')\n")
@@ -114,7 +114,7 @@ func TestRollbackUsesPendingIDAndTargetDigest(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "rbtgt", Name: "RBTgt", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "rbtgt", Name: "RBTgt", OwnerID: u.ID})
 	app, _ := store.GetAppBySlug("rbtgt")
 
 	// v1 bundle dir must exist on disk (rollback validates before tearing down the pool).

@@ -54,7 +54,7 @@ func seedOwnerAndApp(t *testing.T, store *db.Store, username, slug string) (*db.
 	if err != nil {
 		t.Fatalf("GetUserByUsername: %v", err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: u.ID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: u.ID}); err != nil {
 		t.Fatalf("CreateApp: %v", err)
 	}
 	token, err := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")

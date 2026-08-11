@@ -544,7 +544,7 @@ func TestValidateManifestForServer_WorkerBudgetMergesStoredState(t *testing.T) {
 	app, _ := store.GetAppBySlug("alpha")
 	// Clear the stored isolation to "" so the app inherits the fleet default
 	// (created apps start at the explicit 'multiplex' column default).
-	if err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID: app.ID, SetWorkerIsolation: true, WorkerIsolation: "",
 	}); err != nil {
 		t.Fatal(err)

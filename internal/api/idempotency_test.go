@@ -19,7 +19,7 @@ func setupIdempotencyApp(t *testing.T, store *db.Store, slug string) string {
 	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
-	if err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: "Test App", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: "Test App", OwnerID: 1}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	return token
@@ -243,7 +243,7 @@ func TestShareAdd_DuplicateMount_Returns200NoOp(t *testing.T) {
 	token := setupIdempotencyApp(t, store, "consumer-app")
 
 	// Create a second app as the data source.
-	if err := store.CreateApp(db.CreateAppParams{Slug: "source-app", Name: "Source", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "source-app", Name: "Source", OwnerID: 1}); err != nil {
 		t.Fatalf("create source app: %v", err)
 	}
 
@@ -280,7 +280,7 @@ func TestRevokeSharedData_NotMounted_Returns200(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
 	token := setupIdempotencyApp(t, store, "consumer-app")
 
-	if err := store.CreateApp(db.CreateAppParams{Slug: "source-app", Name: "Source", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "source-app", Name: "Source", OwnerID: 1}); err != nil {
 		t.Fatalf("create source app: %v", err)
 	}
 

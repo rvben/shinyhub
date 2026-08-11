@@ -35,7 +35,7 @@ func TestManifestAppMetaDeclaredOnly(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "metaapp", Name: "Original Name", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -113,7 +113,7 @@ func TestManifestAppMetaInvalidNameRejected(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "metabad", Name: "Keep Me", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestManifestAppMetaReportedEverywhere(t *testing.T) {
 
 	srv, store, token := newManifestE2EServer(t)
 	admin, _ := store.GetUserByUsername("admin")
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "metareport", Name: "Meta Report", OwnerID: admin.ID,
 	}); err != nil {
 		t.Fatal(err)

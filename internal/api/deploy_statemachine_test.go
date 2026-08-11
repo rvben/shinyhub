@@ -23,7 +23,7 @@ func TestDeployApp_FailedDeployRestoresPreviousPool(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
 	app, _ := store.GetAppBySlug("demo")
 
 	// A previous good deployment that exists on disk.

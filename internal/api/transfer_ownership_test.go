@@ -18,7 +18,7 @@ func TestTransferOwnership_Gate(t *testing.T) {
 	aliceID, _ := mkUser(t, store, "alice", "developer")
 	mgrID, mgrTok := mkUser(t, store, "mgr", "developer")
 	_, adminTok := mkUser(t, store, "boss", "admin")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "xfer", Name: "Xfer", OwnerID: ownerID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "xfer", Name: "Xfer", OwnerID: ownerID}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.GrantAppAccessWithRole("xfer", mgrID, "manager"); err != nil {
@@ -71,7 +71,7 @@ func TestTransferOwnership_Gate(t *testing.T) {
 func TestTransferOwnership_TargetValidation(t *testing.T) {
 	srv, store := newTestServer(t)
 	ownerID, ownerTok := mkUser(t, store, "owner", "developer")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "xfer", Name: "Xfer", OwnerID: ownerID}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "xfer", Name: "Xfer", OwnerID: ownerID}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer"); err != nil {

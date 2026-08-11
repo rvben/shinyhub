@@ -39,7 +39,7 @@ func TestDeleteStaleWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: owner.ID, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: owner.ID, Access: "private"}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	app, err := store.GetAppBySlug("demo")

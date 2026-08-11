@@ -151,7 +151,7 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		asMax = m.Autoscale.MaxReplicas
 		asTarget = m.Autoscale.Target
 	}
-	if err := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
+	if _, err := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 		AppID:                        app.ID,
 		Slug:                         app.Slug,
 		SetHibernate:                 m.HibernateTimeoutMinutes != nil || m.HibernateResetToDefault,

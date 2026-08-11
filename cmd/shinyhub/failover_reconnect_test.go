@@ -83,7 +83,7 @@ func TestFailoverReconnect_StandbyServesSameReplica(t *testing.T) {
 	}
 
 	const slug = "demo-app"
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug:    slug,
 		Name:    slug,
 		OwnerID: owner.ID,

@@ -51,7 +51,7 @@ func TestSchedules_CreateAndList_HappyPath(t *testing.T) {
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
 
 	// Create app owned by user ID 1.
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug:    "my-app",
 		Name:    "My App",
 		OwnerID: 1,
@@ -107,7 +107,7 @@ func TestSchedules_Create_SurfacesDSTAdvisory(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "my-app", Name: "My App", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "my-app", Name: "My App", OwnerID: 1}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 
@@ -171,7 +171,7 @@ func TestSchedules_Create_ValidationRejected(t *testing.T) {
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug:    "my-app",
 		Name:    "My App",
 		OwnerID: 1,
@@ -206,7 +206,7 @@ func TestSchedules_Create_ViewerCannotCreate(t *testing.T) {
 	// Owner creates the app.
 	ownerHash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: ownerHash, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug:    "my-app",
 		Name:    "My App",
 		OwnerID: 1, // owner user ID
@@ -241,7 +241,7 @@ func TestSchedules_Patch_RejectsCrossAppSchedule(t *testing.T) {
 	// User 1 owns app-a.
 	hashA, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
 		t.Fatalf("create app-a: %v", err)
 	}
 	tokenA, _ := auth.IssueJWT(1, "owner-a", "developer", "test-secret")
@@ -249,7 +249,7 @@ func TestSchedules_Patch_RejectsCrossAppSchedule(t *testing.T) {
 	// User 2 owns app-b.
 	hashB, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
 		t.Fatalf("create app-b: %v", err)
 	}
 	tokenB, _ := auth.IssueJWT(2, "owner-b", "developer", "test-secret")
@@ -284,7 +284,7 @@ func TestSchedules_RunDetail_ReturnsRow(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "developer"})
 	user, _ := store.GetUserByUsername("alice")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: user.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: user.ID})
 	app, _ := store.GetAppBySlug("fetch")
 
 	schedID, _ := store.CreateSchedule(db.CreateScheduleParams{
@@ -340,7 +340,7 @@ func TestSchedules_Cancel_RejectsCrossAppRun(t *testing.T) {
 	// User 1 owns app-a.
 	hashA, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
 		t.Fatalf("create app-a: %v", err)
 	}
 	tokenA, _ := auth.IssueJWT(1, "owner-a", "developer", "test-secret")
@@ -348,7 +348,7 @@ func TestSchedules_Cancel_RejectsCrossAppRun(t *testing.T) {
 	// User 2 owns app-b.
 	hashB, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
 		t.Fatalf("create app-b: %v", err)
 	}
 	tokenB, _ := auth.IssueJWT(2, "owner-b", "developer", "test-secret")
@@ -395,13 +395,13 @@ func TestSchedules_RunDetail_RejectsCrossAppRun(t *testing.T) {
 
 	hashA, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
 		t.Fatalf("create app-a: %v", err)
 	}
 
 	hashB, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
 		t.Fatalf("create app-b: %v", err)
 	}
 	tokenB, _ := auth.IssueJWT(2, "owner-b", "developer", "test-secret")
@@ -439,13 +439,13 @@ func TestSchedules_RunLogs_RejectsCrossAppRun(t *testing.T) {
 
 	hashA, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-a", PasswordHash: hashA, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app-a", Name: "App A", OwnerID: 1}); err != nil {
 		t.Fatalf("create app-a: %v", err)
 	}
 
 	hashB, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner-b", PasswordHash: hashB, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "app-b", Name: "App B", OwnerID: 2}); err != nil {
 		t.Fatalf("create app-b: %v", err)
 	}
 	tokenB, _ := auth.IssueJWT(2, "owner-b", "developer", "test-secret")
@@ -485,7 +485,7 @@ func TestSchedules_RunLogs_PlainTextWhenNotFollowing(t *testing.T) {
 
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: 1}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	app, _ := store.GetAppBySlug("fetch")
@@ -545,7 +545,7 @@ func TestSchedules_RunLogs_FollowStopsWhenRunFinishes(t *testing.T) {
 
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "fetch", Name: "fetch", OwnerID: 1}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	app, _ := store.GetAppBySlug("fetch")
@@ -612,7 +612,7 @@ func TestSchedules_RunLogs_RejectsPublicViewer(t *testing.T) {
 
 	hashOwner, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hashOwner, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Public", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Public", OwnerID: 1}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 	if err := store.SetAppAccess("pub", "public"); err != nil {
@@ -670,7 +670,7 @@ func TestSchedules_GrantSharedData_RequiresExplicitAccessOnSource(t *testing.T) 
 	// Source app: public visibility, owned by someone else.
 	hashOwner, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "src-owner", PasswordHash: hashOwner, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "src", Name: "Source", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "src", Name: "Source", OwnerID: 1}); err != nil {
 		t.Fatalf("create src: %v", err)
 	}
 	if err := store.SetAppAccess("src", "public"); err != nil {
@@ -681,7 +681,7 @@ func TestSchedules_GrantSharedData_RequiresExplicitAccessOnSource(t *testing.T) 
 	hashCaller, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
 	tokenCaller, _ := auth.IssueJWT(2, "caller", "developer", "test-secret")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 2}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 2}); err != nil {
 		t.Fatalf("create mine: %v", err)
 	}
 
@@ -707,7 +707,7 @@ func TestSchedules_Create_DuplicateName_DifferentConfig_Returns409(t *testing.T)
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
 
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug:    "my-app",
 		Name:    "My App",
 		OwnerID: 1,
@@ -761,7 +761,7 @@ func scheduleWithTimezone(t *testing.T, store *db.Store, storedTZ string) (sched
 	t.Helper()
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "tz-owner", PasswordHash: hash, Role: "developer"})
-	_ = store.CreateApp(db.CreateAppParams{Slug: "tz-app", Name: "TZ App", OwnerID: 1})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "tz-app", Name: "TZ App", OwnerID: 1})
 	app, _ := store.GetAppBySlug("tz-app")
 	var tzPtr *string
 	if storedTZ != "" {
@@ -910,14 +910,14 @@ func TestSchedules_GrantSharedData_AllowedForExplicitMember(t *testing.T) {
 
 	hashOwner, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "src-owner", PasswordHash: hashOwner, Role: "developer"})
-	if err := store.CreateApp(db.CreateAppParams{Slug: "src", Name: "Source", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "src", Name: "Source", OwnerID: 1}); err != nil {
 		t.Fatalf("create src: %v", err)
 	}
 
 	hashCaller, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
 	tokenCaller, _ := auth.IssueJWT(2, "caller", "developer", "test-secret")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 2}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 2}); err != nil {
 		t.Fatalf("create mine: %v", err)
 	}
 	// Make caller an explicit member of src (default role = viewer).
@@ -944,10 +944,10 @@ func grantSharedDataFixture(t *testing.T) (srv *api.Server, store *db.Store, tok
 	hashCaller, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
 	token, _ = auth.IssueJWT(1, "caller", "developer", "test-secret")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
 		t.Fatalf("create mine: %v", err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
 		t.Fatalf("create other: %v", err)
 	}
 	return srv, store, token
@@ -962,10 +962,10 @@ func TestSchedules_GrantSharedData_NativeRuntimeWarnsReadOnlyConvention(t *testi
 	hashCaller, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "caller", "developer", "test-secret")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
 		t.Fatalf("create mine: %v", err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
 		t.Fatalf("create other: %v", err)
 	}
 
@@ -997,10 +997,10 @@ func TestSchedules_GrantSharedData_DockerRuntimeOmitsWarning(t *testing.T) {
 	hashCaller, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "caller", PasswordHash: hashCaller, Role: "developer"})
 	token, _ := auth.IssueJWT(1, "caller", "developer", "test-secret")
-	if err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "mine", Name: "Mine", OwnerID: 1}); err != nil {
 		t.Fatalf("create mine: %v", err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: 1}); err != nil {
 		t.Fatalf("create other: %v", err)
 	}
 
@@ -1166,7 +1166,7 @@ func TestCreateSchedule_SchedulerNotStarted_Returns201(t *testing.T) {
 	srv, store, token, jm := buildScheduleE2EServer(t)
 	// A real scheduler that is NOT started: Reload returns scheduler.ErrNotStarted.
 	srv.SetJobs(jm, scheduler.New(jm, store, time.UTC))
-	if err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1207,7 +1207,7 @@ func scheduleIDBySlugAndName(t *testing.T, store *db.Store, appID int64, name st
 // run id in the response as first_fire_run_id.
 func TestCreateSchedule_RunOnRegister_FiresOnce(t *testing.T) {
 	srv, store, token := newScheduleE2EServerWithJobs(t)
-	if err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 	app, _ := store.GetAppBySlug("warmapp")

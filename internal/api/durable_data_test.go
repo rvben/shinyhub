@@ -38,7 +38,7 @@ func mustGuardApp(t *testing.T, store *db.Store) *db.App {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 	app, err := store.GetAppBySlug("myapp")
@@ -116,7 +116,7 @@ func TestEphemeralDataBlockForTiers_BlocksDataOnEphemeralNewTiers(t *testing.T) 
 	}
 
 	// A stateless app (no data, no command) is allowed.
-	if err := store.CreateApp(db.CreateAppParams{Slug: "stateless", Name: "S", OwnerID: app.OwnerID, Access: "private"}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "stateless", Name: "S", OwnerID: app.OwnerID, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 	s2, _ := store.GetAppBySlug("stateless")

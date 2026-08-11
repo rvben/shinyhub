@@ -22,7 +22,7 @@ func stageColocationConflict(t *testing.T, srv interface {
 	SetNodeForTier(func(tier string) string)
 }, store *db.Store, ownerID int64, slug string) {
 	t.Helper()
-	if err := store.CreateApp(db.CreateAppParams{
+	if _, err := store.CreateApp(db.CreateAppParams{
 		Slug: "colo-source", Name: "Source", OwnerID: ownerID, Access: "private",
 	}); err != nil {
 		t.Fatalf("create source app: %v", err)
@@ -79,7 +79,7 @@ func TestDeployApp_ColocatedConflictLeavesNoDeploymentRecord(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
 	stageColocationConflict(t, srv, store, u.ID, "demo")
 
 	body, ctype := buildBundleUpload(t, "app.py", "print('hi')\n")
@@ -119,7 +119,7 @@ func TestRollbackApp_ColocatedConflictLeavesNoDeploymentRecord(t *testing.T) {
 	hash, _ := testHashPassword("pass")
 	_ = store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
 	u, _ := store.GetUserByUsername("admin")
-	_ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: u.ID})
 	app, _ := store.GetAppBySlug("demo")
 
 	// Two succeeded deployments with real bundle dirs so the rollback target

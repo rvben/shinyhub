@@ -20,7 +20,7 @@ func seedWarmApp(t *testing.T) (*db.Store, *db.App) {
 	if err := store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: hash, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: 1}); err != nil {
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: 1}); err != nil {
 		t.Fatal(err)
 	}
 	app, err := store.GetAppBySlug("demo")
