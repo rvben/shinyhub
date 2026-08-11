@@ -123,6 +123,27 @@ func TestLoginProvidersGated(t *testing.T) {
 		"style.css must override the form display:grid with a [hidden] rule so the SSO-only hidden form is actually hidden")
 }
 
+// TestLoginBrandSlot pins the login card's brand slot. Signed out, the sidebar
+// and top bar are display:none, so before this the front door carried no
+// identity at all: no ShinyHub mark by default, and an operator's configured
+// branding.logo reached every slot EXCEPT the only one an anonymous visitor
+// sees. The pure swap logic is unit-tested (jstests/branding.test.js); the
+// markup and wiring live in index.html and the app.js IIFE, so pin them here.
+func TestLoginBrandSlot(t *testing.T) {
+	assertContains(t, "index.html", `<div class="login-brand">`,
+		"the login card must carry a brand slot, or the signed-out page shows no identity (sidebar/top bar are display:none when out)")
+	assertContains(t, "index.html", `<span class="brand-name">Shiny<span class="brand-hub">Hub</span></span>`,
+		"the wordmark must be one .brand-name node, or .brand's flex gap splits it into 'Shiny Hub'")
+	assertContains(t, "app.js", "applyBranding(document",
+		"app.js must delegate branding to views/branding.js so the swap stays covered by jstests/branding.test.js")
+	assertContains(t, "views/branding.js", `doc.querySelectorAll('.brand')`,
+		"applyBranding must brand every .brand slot, including the login card")
+	assertContains(t, "style.css", ".login-brand .brand-logo",
+		"style.css must size an operator logo for the login card, or a full-size asset blows out the box")
+	assertContains(t, "style.css", `[data-auth="out"] #login-view`,
+		"the signed-out login view must be centred in the viewport, not hung from the top")
+}
+
 // TestThemeWiring guards the light/dark theme feature. The pure resolver is
 // unit-tested (jstests/theme.test.js); the wiring lives in the app.js IIFE and
 // index.html, so pin the load-bearing pieces by string search:
@@ -2047,16 +2068,18 @@ func TestSidebarActiveScoping(t *testing.T) {
 	assertContains(t, "views/sidebar-nav.js", "startsWith(href + '/')", "sidebar active must use a segment-boundary slug-prefix match")
 }
 
-// TestBrandingUpdatesAllNodes pins logo replacement hitting every .brand node
-// (sidebar + mobile top bar), not just the first.
+// TestBrandingUpdatesAllNodes pins logo replacement hitting every .brand node,
+// not just the first. The slot set has grown from sidebar + mobile top bar to
+// include the boot splash and the login card, and the walk itself moved out of
+// the app.js IIFE into the unit-tested views/branding.js.
 func TestBrandingUpdatesAllNodes(t *testing.T) {
-	assertContains(t, "app.js", "querySelectorAll('.brand')", "branding must replace every .brand node (sidebar + mobile)")
-	b, err := fs.ReadFile(ui.Static(), "app.js")
+	assertContains(t, "views/branding.js", "querySelectorAll('.brand')", "branding must replace every .brand node, not just the first")
+	b, err := fs.ReadFile(ui.Static(), "views/branding.js")
 	if err != nil {
-		t.Fatalf("read app.js: %v", err)
+		t.Fatalf("read views/branding.js: %v", err)
 	}
 	if strings.Contains(string(b), "querySelector('nav .brand')") {
-		t.Fatal("app.js: branding selector must not require 'nav .brand' after the sidebar move")
+		t.Fatal("views/branding.js: branding selector must not require 'nav .brand' after the sidebar move")
 	}
 }
 

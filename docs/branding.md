@@ -28,9 +28,9 @@ branding:
 
 | Field | Description |
 |---|---|
-| `site_title` | Replaces the `<title>` tag in the SPA shell. |
+| `site_title` | Replaces the `<title>` tag in the SPA shell, and the ShinyHub wordmark in every brand slot when no `logo` is set. |
 | `assets_dir` | Directory that backs all local asset references. Required when any field references a local file. |
-| `logo` | Brand logo: a filename inside `assets_dir` or an absolute `http(s)://` URL. |
+| `logo` | Brand logo: a filename inside `assets_dir` or an absolute `http(s)://` URL. Replaces the wordmark in every brand slot, including the login card. |
 | `favicon` | Favicon: a filename inside `assets_dir` or an absolute `http(s)://` URL. |
 | `theme.primary_color` | CSS hex color (`#rgb` or `#rrggbb`). Injected as the `--brand-primary` CSS variable. |
 | `landing_page` | Filename inside `assets_dir` that replaces the stock app catalog at `/`. `/login` always serves the SPA shell. |
@@ -39,6 +39,22 @@ branding:
 `assets_dir` is validated at startup: the directory must exist and every
 referenced local file must resolve inside it (a symlink-aware containment
 check).
+
+### Brand slots
+
+A brand slot is anywhere ShinyHub shows its own identity: the sidebar, the
+mobile top bar, the boot splash, and the login card. All four take the same
+value, so one `logo` (or one `site_title`) brands the whole product.
+
+Per slot, the first of these that is set wins:
+
+1. `logo` - rendered as an image, with `site_title` (or `ShinyHub`) as its alt text.
+2. `site_title` - rendered as text beside the mark.
+3. The stock ShinyHub wordmark.
+
+The login card matters most: signed out, it is the only chrome a visitor sees.
+A logo sized around 40px tall reads well there; wider lockups are clamped to the
+card width.
 
 ## Environment overrides
 
