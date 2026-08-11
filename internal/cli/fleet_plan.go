@@ -79,7 +79,7 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 		return err
 	}
 	defer pf.cleanup()
-	return renderFleetPlan(cmd, f, "shinyhub fleet plan", pf.manifest, pf.host, pf.caps, pf.diff)
+	return renderFleetPlan(cmd, f, "shinyhub fleet plan", pf.manifest, pf.host, pf.caps, pf.diff, pf.projectDiff)
 }
 
 // fetchApps issues the single read-only GET /api/apps the plan needs.
@@ -112,6 +112,43 @@ func fetchApps(cfg *cliConfig) ([]db.App, error) {
 		return nil, &protocolError{op: "decode apps", err: err}
 	}
 	return apps, nil
+}
+
+// fetchProjects issues the read-only GET /api/projects the project pass needs.
+// A 404 means the server predates projects; that is reported as a usable
+// message rather than an opaque decode failure, because the manifest is valid
+// and only the server is behind.
+//
+// It decodes into db.ProjectListItem, the type that endpoint actually returns.
+// db.Project would also decode, but it carries timestamps the payload does not
+// have, so every project would silently arrive with a zero CreatedAt - an
+// absent value in the shape of a real one.
+func fetchProjects(cfg *cliConfig) ([]db.ProjectListItem, error) {
+	req, err := http.NewRequest("GET", cfg.Host+"/api/projects", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("this server does not support projects; " +
+			"upgrade it, or remove the [[project]] blocks from the manifest")
+	}
+	if resp.StatusCode >= 400 {
+		return nil, httpError(cfg.Token, "list projects", resp, body)
+	}
+	var env struct {
+		Items []db.ProjectListItem `json:"items"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, &protocolError{op: "decode projects", err: err}
+	}
+	return env.Items, nil
 }
 
 // protocolHint diagnoses a protocol (decode) failure against the server's

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -17,7 +18,7 @@ func renderPlanToString(t *testing.T, f *fleetPlanFlags, label string, m *fleet.
 	var buf bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
-	_ = renderFleetPlan(cmd, f, label, m, "http://srv", serverCaps{}, diff)
+	_ = renderFleetPlan(cmd, f, label, m, "http://srv", serverCaps{}, diff, nil)
 	return buf.String()
 }
 
@@ -28,6 +29,65 @@ func fullPlanDiff() []fleet.AppDiff {
 		{Slug: "takeover", Action: fleet.ActionAdopt},
 		{Slug: "retired", Action: fleet.ActionDelete},
 		{Slug: "stable", Action: fleet.ActionUnchanged},
+	}
+}
+
+// A manifest with no [[project]] blocks must render byte-identical to the
+// pre-project-support plan: no empty "Projects (0)" header, no stray section.
+func TestRenderFleetPlan_NoProjectsOmitsSection(t *testing.T) {
+	f := &fleetPlanFlags{file: defaultFleetManifest}
+	out := renderPlanToString(t, f, "shinyhub fleet plan", &fleet.Manifest{FleetID: "eu"}, fullPlanDiff())
+	if strings.Contains(out, "Projects") {
+		t.Fatalf("a plan with no declared projects must omit the Projects section entirely:\n%s", out)
+	}
+}
+
+// Declared project drift must print in its own "Projects (%d)" section, ahead
+// of the Apps table, so a project rename is visible without reaching for
+// -o json.
+func TestRenderFleetPlan_ProjectsSectionPrintedAboveApps(t *testing.T) {
+	f := &fleetPlanFlags{file: defaultFleetManifest}
+	projects := []fleet.ProjectDiff{
+		{Slug: "sales", Action: fleet.ActionUpdateConfig, Drift: []fleet.ConfigDriftItem{{Key: "name"}}},
+	}
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+	_ = renderFleetPlan(cmd, f, "shinyhub fleet plan", &fleet.Manifest{FleetID: "eu"}, "http://srv", serverCaps{}, nil, projects)
+	out := buf.String()
+	if !strings.Contains(out, "Projects (1)") {
+		t.Fatalf("plan output missing the Projects section:\n%s", out)
+	}
+	if !strings.Contains(out, "sales") || !strings.Contains(out, "name") {
+		t.Fatalf("project row must show its slug and drifted key:\n%s", out)
+	}
+	if i, j := strings.Index(out, "Projects (1)"), strings.Index(out, "Apps ("); i < 0 || j < 0 || i > j {
+		t.Fatalf("Projects section must print before the Apps table:\n%s", out)
+	}
+}
+
+// The plan JSON envelope must carry a projects array alongside apps, so a CI
+// consumer can detect a pending project rename the same way it detects an app
+// change, without falling back to the human-readable text.
+func TestWriteFleetPlanJSON_IncludesProjectsArray(t *testing.T) {
+	projects := []fleet.ProjectDiff{
+		{Slug: "sales", Action: fleet.ActionCreate, Drift: []fleet.ConfigDriftItem{{Key: "name", Desired: `"Sales"`}}},
+	}
+	var buf bytes.Buffer
+	if err := writeFleetPlanJSON(&buf, &fleet.Manifest{FleetID: "eu"}, "http://s", nil, projects, 0, "report only"); err != nil {
+		t.Fatalf("writeFleetPlanJSON: %v", err)
+	}
+	var env map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	projs, ok := env["projects"].([]any)
+	if !ok || len(projs) != 1 {
+		t.Fatalf("projects array missing or wrong length: %v", env["projects"])
+	}
+	p0 := projs[0].(map[string]any)
+	if p0["slug"] != "sales" || p0["action"] != "create" {
+		t.Errorf("project entry = %v, want slug=sales action=create", p0)
 	}
 }
 
@@ -82,7 +142,7 @@ func TestPlanJSON_ExposesAdoptFrom(t *testing.T) {
 		{Slug: "b", Action: fleet.ActionAdopt, AdoptRequired: true}, // unmanaged
 	}
 	var buf bytes.Buffer
-	if err := writeFleetPlanJSON(&buf, &fleet.Manifest{FleetID: "eu"}, "http://s", diff, 0, "report only"); err != nil {
+	if err := writeFleetPlanJSON(&buf, &fleet.Manifest{FleetID: "eu"}, "http://s", diff, nil, 0, "report only"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), `"adopt_from":"fleet:us"`) {
@@ -146,11 +206,11 @@ func TestApplySuggestion_ManifestPathWithSpaceIsShellQuoted(t *testing.T) {
 
 func TestShellQuote(t *testing.T) {
 	cases := map[string]string{
-		"shinyhub-fleet.toml": "shinyhub-fleet.toml",   // bare-safe, unquoted
-		"envs/eu/fleet.toml":  "envs/eu/fleet.toml",     // slashes are safe
-		"my fleet.toml":       "'my fleet.toml'",        // space -> quote
-		"a'b.toml":            `'a'\''b.toml'`,           // embedded quote escaped
-		"x;rm -rf.toml":       "'x;rm -rf.toml'",         // metacharacters -> quote
+		"shinyhub-fleet.toml": "shinyhub-fleet.toml", // bare-safe, unquoted
+		"envs/eu/fleet.toml":  "envs/eu/fleet.toml",  // slashes are safe
+		"my fleet.toml":       "'my fleet.toml'",     // space -> quote
+		"a'b.toml":            `'a'\''b.toml'`,       // embedded quote escaped
+		"x;rm -rf.toml":       "'x;rm -rf.toml'",     // metacharacters -> quote
 	}
 	for in, want := range cases {
 		if got := shellQuote(in); got != want {

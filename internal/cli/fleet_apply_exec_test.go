@@ -548,7 +548,7 @@ func TestConvergeApp_FailedDeployAttachesLogTail(t *testing.T) {
 	// cause without a second call.
 	var buf strings.Builder
 	m := &fleet.Manifest{FleetID: "eu"}
-	if err := writeFleetApplyJSON(&buf, m, cfg.Host, []fleet.AppDiff{d}, []applyResult{r}, 4, "PARTIAL"); err != nil {
+	if err := writeFleetApplyJSON(&buf, m, cfg.Host, []fleet.AppDiff{d}, nil, applyOutcome{apps: []applyResult{r}}, 4, "PARTIAL"); err != nil {
 		t.Fatalf("writeFleetApplyJSON: %v", err)
 	}
 	if !strings.Contains(buf.String(), crashLine) {

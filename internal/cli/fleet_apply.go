@@ -99,7 +99,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 			file:       f.file,
 			jsonOutput: f.jsonOutput,
 		}
-		return renderFleetPlan(cmd, synthetic, "shinyhub fleet apply --dry-run", pf.manifest, pf.host, pf.caps, pf.diff)
+		return renderFleetPlan(cmd, synthetic, "shinyhub fleet apply --dry-run", pf.manifest, pf.host, pf.caps, pf.diff, pf.projectDiff)
 	}
 
 	if w := foreignAdoptWarning(pf.diff, f.adopt); w != "" {
@@ -171,14 +171,19 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 	if f.jsonOutput {
 		progressOut = errOut
 	}
-	results := convergeFleet(cfg, pf, opt, progressOut)
+	// Projects first: an app referencing a declared project must find it
+	// already named, or the dashboard shows the raw slug until the next apply.
+	outcome := applyOutcome{
+		projects: convergeProjects(cfg, pf, opt, progressOut),
+	}
+	outcome.apps = convergeFleet(cfg, pf, opt, progressOut)
 
 	if f.jsonOutput {
-		code, reason := applyExitCode(results)
-		if jerr := writeFleetApplyJSON(out, pf.manifest, pf.host, pf.diff, results, code, reason); jerr != nil {
+		code, reason := applyExitCode(outcome.all())
+		if jerr := writeFleetApplyJSON(out, pf.manifest, pf.host, pf.diff, pf.projectDiff, outcome, code, reason); jerr != nil {
 			return &ExitCodeError{Code: 1, Err: jerr}
 		}
 		return applyExitErr(code, reason)
 	}
-	return renderApplyReport(out, pf.manifest.FleetID, results, quietFlag)
+	return renderApplyReport(out, pf.manifest.FleetID, outcome, quietFlag)
 }
