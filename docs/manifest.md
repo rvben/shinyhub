@@ -76,6 +76,7 @@ starts.
 |---|---|---|
 | `name` | string 1..128 | Friendly display name shown on the dashboard card, the detail heading, and the launchpad tile. See [`[app] name` and `[app] description`](#app-name-and-app-description) below. |
 | `description` | string 0..280 | One-line description shown under the name. `""` clears it. See [`[app] name` and `[app] description`](#app-name-and-app-description) below. |
+| `project` | string | Project slug grouping this app on the dashboard. Must match `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`; `""` ungroups. The project row is created automatically. Only the slug is settable here: a project's name, description and icon belong to the server (`shinyhub projects set`) or a fleet manifest's `[[project]]` block, because they describe a namespace shared by apps from many bundles. |
 | `hibernate_timeout_minutes` | int | Idle minutes before the watcher hibernates the app. `0` disables hibernation. `-1` resets the field to the server default (the same convention as `shinyhub apps set --hibernate-timeout -1`). |
 | `replicas` | int ≥ 1 | Number of identical replica processes serving this app. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int 0..1000 | Per-replica admission cap for new cookieless sessions. `0` means "use the runtime default". |

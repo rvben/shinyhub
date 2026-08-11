@@ -43,6 +43,7 @@ visibility = "public"
 |---|---|---|
 | `fleet_id` | yes | Ownership scope. Must match `[a-z0-9-]`, 1-64 chars. Stamped onto every app this manifest manages as `managed_by = fleet:<fleet_id>`. |
 | `[[app]]` | yes (>=1) | One block per app the fleet should own. |
+| `[[project]]` | no | One block per project the fleet should name. Optional: an app can declare a `project` without a matching block, and the project is then created unnamed. |
 
 ### `[[app]]`
 
@@ -59,6 +60,7 @@ visibility = "public"
 |---|---|---|
 | `name` | string 1..128 | Friendly display name shown on the dashboard card and the detail heading. Trimmed; may not be empty. Distinct from `slug`, which is the URL identifier and is not settable here. |
 | `description` | string 0..280 | One-line description shown under the name. Trimmed; `""` is a real value that clears it. |
+| `project` | string | Project slug that groups this app on the dashboard, the launchpad and the sidebar. Must match `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`. `""` is a real value that ungroups the app. The project row is created automatically if it does not exist. |
 | `hibernate_timeout_minutes` | int | Idle minutes before hibernation. `-1` resets the field to the server default (the same sentinel as the bundle `shinyhub.toml`). Otherwise must be `>= 1`. |
 | `replicas` | int `>= 1` | Number of replica processes. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int `>= 1` | Per-replica admission cap for new cookieless sessions. |
@@ -100,6 +102,53 @@ plan` shows a single line (e.g. `autoscale off -> on(1-8 @ 0.80)`) when the
 server policy differs from the manifest. It is the same policy the bundle
 `shinyhub.toml [app] autoscale` block sets; per [config precedence](#config-precedence)
 the fleet manifest wins. See [Autoscaling](scaling.md#autoscaling) for behaviour.
+
+### `[[project]]` - project display metadata
+
+A project is created automatically the first time an app declares it, with no
+name and no icon. A `[[project]]` block declares that metadata so a fleet
+manifest can produce a fully labelled dashboard on its own:
+
+```toml
+fleet_id = "acme"
+
+[[project]]
+slug = "reporting"
+name = "Quarterly Reporting"
+description = "Finance-facing dashboards"
+icon = "📊"
+
+[[app]]
+slug = "revenue"
+source = "./apps/revenue"
+
+  [app.config]
+  project = "reporting"
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `slug` | yes | Project slug. Unique within the manifest; a duplicate is a validation error. Same charset as an app slug. |
+| `name` | no | Display name, up to 128 characters. Trimmed. `""` is a real value that clears it. |
+| `description` | no | One-line description, up to 280 characters. Trimmed. |
+| `icon` | no | A single emoji shown beside the group heading. `""` clears it. |
+
+Only the keys you declare are reconciled, matching `[app.config]`: an omitted
+key is not asserted, so a name set through the dashboard survives a manifest
+that declares only an icon.
+
+A `[[project]]` block that no `[[app]]` references is a validation error. The
+fleet manifest reconciles what it declares; a project that no app joins would
+be created and then never converge, since nothing in the manifest can restore
+it if someone deletes it.
+
+Projects are reconciled **before** apps in a single `fleet apply`, so an app
+that creates its project lands in one that is already named.
+
+`fleet apply --prune` never deletes a project. Projects are a shared namespace
+that apps outside this fleet can also be in, and a project holding no apps is
+a valid state an operator may be preparing. Remove one with
+`shinyhub projects rm <slug>`.
 
 ## Source resolution
 
