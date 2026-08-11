@@ -43,6 +43,19 @@ func NormalizeName(s string) (string, error) {
 	return s, nil
 }
 
+// NormalizeProjectName trims s and validates it as a project display name.
+// Unlike NormalizeName, "" is valid: a project always has a slug, and the
+// name is optional metadata the UI falls back from to the slug, so callers
+// cannot distinguish "clear the name" from "no name given" and do not need
+// to.
+func NormalizeProjectName(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if n := utf8.RuneCountInString(s); n > MaxNameRunes {
+		return "", fmt.Errorf("project name must be %d characters or fewer (got %d)", MaxNameRunes, n)
+	}
+	return s, nil
+}
+
 // NormalizeDescription trims s and validates it as an app description. Unlike
 // the name, "" is valid and means "no description"; callers use it to clear.
 func NormalizeDescription(s string) (string, error) {

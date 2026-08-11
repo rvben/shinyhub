@@ -81,3 +81,38 @@ func TestNormalizeDescription(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeProjectName(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		// Unlike an app name, an empty project name is legal: it means "no
+		// display name", and the UI falls back to the slug.
+		{"", "", false},
+		{"   ", "", false},
+		{"  Analytics  ", "Analytics", false},
+		{"Analytics", "Analytics", false},
+		{strings.Repeat("a", 128), strings.Repeat("a", 128), false},
+		{strings.Repeat("a", 129), "", true},
+		// Trimming happens before the length check, so a padded 128 is legal.
+		{"  " + strings.Repeat("a", 128) + "  ", strings.Repeat("a", 128), false},
+	}
+	for _, tc := range cases {
+		got, err := NormalizeProjectName(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("NormalizeProjectName(%q) = %q, want error", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("NormalizeProjectName(%q): unexpected error %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("NormalizeProjectName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
