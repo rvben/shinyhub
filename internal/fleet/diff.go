@@ -27,8 +27,13 @@ type ObservedApp struct {
 	// observed" (as in DeclaredConfig's zero ObservedApp) and always asserts a
 	// declared value, while a non-nil "" is a real stored value - an app with no
 	// description - that a declared "" matches without drift.
-	Name                    *string
-	Description             *string
+	Name        *string
+	Description *string
+	// ProjectSlug is the server's stored project. Pointer-typed for the same
+	// reason as Name and Description: nil means "not observed" and always
+	// asserts a declared value, while a non-nil "" is a real stored value (an
+	// ungrouped app) that a declared "" matches without drift.
+	ProjectSlug             *string
 	Access                  string
 	HibernateTimeoutMinutes *int
 	Replicas                *int
@@ -162,6 +167,7 @@ func configDrift(app AppEntry, o ObservedApp) []ConfigDriftItem {
 	}
 	d = appendStringDrift(d, "name", app.Config.Name, o.Name)
 	d = appendStringDrift(d, "description", app.Config.Description, o.Description)
+	d = appendStringDrift(d, "project", app.Config.Project, o.ProjectSlug)
 	d = appendIntDrift(d, "hibernate_timeout_minutes", app.Config.HibernateTimeoutMinutes, o.HibernateTimeoutMinutes)
 	d = appendIntDrift(d, "replicas", app.Config.Replicas, o.Replicas)
 	d = appendIntDrift(d, "max_sessions_per_replica", app.Config.MaxSessionsPerReplica, o.MaxSessionsPerReplica)
