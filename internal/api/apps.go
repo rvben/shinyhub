@@ -24,6 +24,7 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/fsx"
+	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
@@ -2286,6 +2287,57 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "stop",
+			ResourceType: "app",
+			ResourceID:   slug,
+			IPAddress:    s.ClientIP(r),
+		})
+	}
+	writeJSON(w, http.StatusOK, app)
+}
+
+// handleSleepApp puts a running app to sleep: the pool is released and the app
+// becomes "hibernated", so the next request transparently wakes it. That is the
+// difference from stop, which is terminal and serves visitors a stopped page
+// until an operator starts the app again.
+func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	if _, ok := s.requireManageApp(w, r, slug); !ok {
+		return
+	}
+	if s.sleepNow == nil {
+		writeError(w, http.StatusServiceUnavailable, "sleep is unavailable on this server")
+		return
+	}
+
+	// Serialize with any in-flight deploy/restart/stop on this slug.
+	release := s.acquireDeployLock(slug)
+	defer release()
+
+	if err := s.sleepNow(slug); err != nil {
+		switch {
+		case errors.Is(err, lifecycle.ErrAppNotRunning):
+			writeError(w, http.StatusConflict, "app is not running")
+		case errors.Is(err, lifecycle.ErrElasticNotSleepable):
+			writeError(w, http.StatusConflict, "sleep is not supported for grouped or per-session worker isolation")
+		case errors.Is(err, lifecycle.ErrSleepTeardownFailed):
+			writeError(w, http.StatusConflict, "app did not stop; try again or use stop")
+		default:
+			slog.Error("sleep app", "slug", slug, "err", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+		}
+		return
+	}
+
+	app, err := s.store.GetAppBySlug(slug)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		s.store.LogAuditEvent(db.AuditEventParams{
+			UserID:       &u.ID,
+			Action:       "sleep",
 			ResourceType: "app",
 			ResourceID:   slug,
 			IPAddress:    s.ClientIP(r),
