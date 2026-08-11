@@ -267,6 +267,12 @@ Env vars: `SHINYHUB_RUNTIME_DEFAULT_WORKER_ISOLATION`,
 `worker_isolation` is empty. The default is `multiplex`, preserving backward
 compatibility for every existing app.
 
+An app payload therefore carries both values: `worker_isolation` as stored
+(empty means "inherit") and `effective_worker_isolation`, the resolved mode,
+which is never empty. Tooling deciding what an app's pool supports must read the
+effective one, since an inheriting app on an elastic fleet runs an elastic pool
+while its stored column says nothing.
+
 `host_budget_mb` enables the host-capacity guard (see below). Leave it at 0
 to disable the guard.
 

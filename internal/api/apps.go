@@ -80,10 +80,8 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		}
 		apps = scoped
 	}
-	// Light the per-card "Deploying" badge for apps whose deploy is executing
-	// right now (pending row + held deploy lock; see appDeploying).
 	for _, a := range apps {
-		a.Deploying = s.appDeploying(a)
+		s.decorateApp(a)
 	}
 	writeList(w, apps, limit, offset, nil)
 }
@@ -204,9 +202,9 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// Same "Deploying" signal the list payload carries, so the detail-header
-	// pill agrees with the card badge.
-	app.Deploying = s.appDeploying(app)
+	// Same derived fields the list payload carries, so the detail header agrees
+	// with the card.
+	s.decorateApp(app)
 
 	replicas, err := s.store.ListReplicas(app.ID)
 	if err != nil {
