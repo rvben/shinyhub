@@ -18,7 +18,7 @@ const AnchoredPattern = `^` + Pattern + `$`
 
 // HumanRule is the user-facing description of the rule, suitable for error
 // messages and UI hints.
-const HumanRule = "1–63 lowercase letters, digits, or hyphens; must start and end with a letter or digit"
+const HumanRule = "1-63 lowercase letters, digits, or hyphens; must start and end with a letter or digit"
 
 // MaxLen is the maximum slug length, mirroring the regex bound.
 const MaxLen = 63

@@ -307,7 +307,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const deployCliCopyLabel = deployCliCopy.querySelector('.copy-label');
   const deployCliCopyStatus = document.getElementById('deploy-cli-snippet-status');
 
-  // Mirrors internal/slug.Pattern. RFC-1123 hostname label: 1–63 chars,
+  // Mirrors internal/slug.Pattern. RFC-1123 hostname label: 1-63 chars,
   // lowercase alphanumerics and hyphens, must start and end with an alphanumeric.
   const SLUG_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
@@ -3745,12 +3745,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const projectSlug = newAppProject.value.trim();
 
     if (!SLUG_RE.test(slug)) {
-      setError(newAppError, 'Slug must be 1–63 lowercase letters, digits, or hyphens, starting and ending with a letter or digit.');
+      setError(newAppError, 'Slug must be 1-63 lowercase letters, digits, or hyphens, starting and ending with a letter or digit.');
       newAppSlug.focus();
       return;
     }
     if (name.length < 1 || name.length > 128) {
-      setError(newAppError, 'Display name must be 1–128 characters.');
+      setError(newAppError, 'Display name must be 1-128 characters.');
       newAppName.focus();
       return;
     }
