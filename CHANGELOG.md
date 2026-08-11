@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.2](https://github.com/rvben/shinyhub/compare/v0.11.1...v0.11.2) - 2026-08-11
+
+### Added
+
+- **fleet**: reconcile app name and description from the manifest ([e542003](https://github.com/rvben/shinyhub/commit/e542003040ad715119ee86059983b01f4584d48f))
+- **cli**: set an app's name and description with apps set ([b010a32](https://github.com/rvben/shinyhub/commit/b010a32c93e30b2516115aef1e43cce4ccfeb46c))
+- **manifest**: declare an app's name and description in [app] ([0afdf13](https://github.com/rvben/shinyhub/commit/0afdf13d26e5c5729c77d0b5c7593efdb7b32fe0))
+- **ui**: add emoji picker to the app icon control ([42590d5](https://github.com/rvben/shinyhub/commit/42590d5f01955d01ec2e44741b948b7b3d43757c))
+- **ui**: render emoji app icons ahead of uploaded images ([a1266fc](https://github.com/rvben/shinyhub/commit/a1266fc277a2407e45a073ce4da9c90670e9b5a7))
+- **cli**: add apps set --icon for emoji app icons ([9e7e302](https://github.com/rvben/shinyhub/commit/9e7e30283283abae5bafa7d356003f5b73875e99))
+- **deploy**: warn when a manifest icon shadows an uploaded image ([59e958c](https://github.com/rvben/shinyhub/commit/59e958cb39935203d4b65aa842f0461872b81fb0))
+- **manifest**: report the declared icon in validate, deploy response, and audit detail ([23b81eb](https://github.com/rvben/shinyhub/commit/23b81eb10bd8aa5f50396a98b5d24cc9bcfabd68))
+- **manifest**: reconcile [app] icon into icon_emoji in Phase A ([37623fa](https://github.com/rvben/shinyhub/commit/37623fa0f89c29cacc8951548c5f8ff08ad1c48a))
+- **api**: accept icon_emoji on PATCH /api/apps/{slug} ([061d3ad](https://github.com/rvben/shinyhub/commit/061d3adec9510fede8fb89439d6a0e7c4363637f))
+- **deploy**: add single-grapheme emoji validator ([f26eb12](https://github.com/rvben/shinyhub/commit/f26eb1252282929b59e97acf97ea4d0b90ace572))
+- **db**: add emoji icon setters with non-destructive clear ([6775c7f](https://github.com/rvben/shinyhub/commit/6775c7f4331fc0d6bde4f8e2c894e167540ec3bb))
+- **db**: add icon_emoji column to apps ([e63ac14](https://github.com/rvben/shinyhub/commit/e63ac14ab90f4aaef040a9b3092dc60a1dd89235))
+
 ## [0.11.1](https://github.com/rvben/shinyhub/compare/v0.11.0...v0.11.1) - 2026-08-10
 
 ### Added
