@@ -4,6 +4,8 @@ import { JSDOM } from 'jsdom';
 import {
   isFleetManaged,
   fleetBadgeText,
+  fleetBadgeTooltip,
+  FLEET_BADGE_COMPACT_LABEL,
   FLEET_BADGE_TOOLTIP,
   shortContentDigest,
   DIGEST_LABEL,
@@ -28,6 +30,31 @@ test('isFleetManaged: empty string / missing / null / non-object is unmanaged', 
 test('fleetBadgeText: prefixed managed_by, null when unmanaged', () => {
   assert.equal(fleetBadgeText({ managed_by: 'fleet:eu' }), 'managed by fleet:eu');
   assert.equal(fleetBadgeText({ managed_by: '' }), null);
+});
+
+test('FLEET_BADGE_COMPACT_LABEL: a fixed word, carrying no fleet id', () => {
+  assert.equal(FLEET_BADGE_COMPACT_LABEL, 'fleet');
+  // The whole point of the card label is that its width cannot depend on an
+  // operator-chosen id. A 64-char fleet id (ValidFleetID's ceiling) must not
+  // make the card label one character wider.
+  const { document } = new JSDOM('<body></body>').window;
+  const short = makeFleetBadge(document, { managed_by: 'fleet:eu' }, { compact: true });
+  const long = makeFleetBadge(
+    document,
+    { managed_by: 'fleet:' + 'a'.repeat(64) },
+    { compact: true },
+  );
+  assert.equal(short.textContent, long.textContent);
+});
+
+test('fleetBadgeTooltip: leads with the full ownership sentence', () => {
+  const t = fleetBadgeTooltip({ managed_by: 'fleet:production-eu-west-1' });
+  // The card label omits the id entirely, so the tooltip is the only way to it
+  // on the dashboard: it must lead with it, not bury it behind the generic
+  // explanation.
+  assert.ok(t.startsWith('managed by fleet:production-eu-west-1.'));
+  assert.ok(t.includes(FLEET_BADGE_TOOLTIP));
+  assert.equal(fleetBadgeTooltip({ managed_by: '' }), FLEET_BADGE_TOOLTIP);
 });
 
 test('FLEET_BADGE_TOOLTIP states the revert contract and the plan command', () => {
@@ -70,6 +97,26 @@ test('makeFleetBadge: builds a titled badge for managed apps, null otherwise', (
   assert.equal(el.textContent, 'managed by fleet:eu');
   assert.equal(el.title, FLEET_BADGE_TOOLTIP);
   assert.equal(makeFleetBadge(document, { managed_by: '' }), null);
+});
+
+test('makeFleetBadge: compact variant is the bare label, id only in the tooltip', () => {
+  const { document } = new JSDOM('<body></body>').window;
+  const app = { managed_by: 'fleet:production-eu-west-1' };
+  const el = makeFleetBadge(document, app, { compact: true });
+  assert.equal(el.className, 'badge badge-fleet');
+  assert.equal(el.textContent, 'fleet');
+  assert.ok(!el.textContent.includes('production-eu-west-1'));
+  assert.equal(el.title, fleetBadgeTooltip(app));
+  assert.equal(makeFleetBadge(document, { managed_by: '' }, { compact: true }), null);
+});
+
+test('makeFleetBadge: compact defaults to off, so the detail header keeps the full text', () => {
+  const { document } = new JSDOM('<body></body>').window;
+  const app = { managed_by: 'fleet:eu' };
+  // A truthy-but-not-true opts.compact must not silently switch variants.
+  for (const opts of [undefined, {}, { compact: false }, { compact: 'yes' }]) {
+    assert.equal(makeFleetBadge(document, app, opts).textContent, 'managed by fleet:eu');
+  }
 });
 
 test('renderFleetDigest: populates + reveals for managed app with digest', () => {
