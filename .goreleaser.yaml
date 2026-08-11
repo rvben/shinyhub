@@ -67,8 +67,13 @@ release:
 # repo are the same authored text. Generating here as well produced a second,
 # unfiltered set of notes (a raw git log, including test/docs commits and the
 # version-bump commit) that no edit to CHANGELOG.md could reach.
+#
+# `--release-notes` is what suppresses generation: the changelog step loads the
+# file and returns before it walks the git log. Do NOT set `changelog.disable`
+# here. Disabling skips the whole step, including the load, so the flag is
+# ignored in silence and the release publishes an empty body (v0.11.3).
 changelog:
-  disable: true
+  use: git
 
 dockers:
   - id: shinyhub-amd64
