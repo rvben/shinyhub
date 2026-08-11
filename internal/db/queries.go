@@ -2279,6 +2279,12 @@ const (
 	AuditAppIconSet     = "app.icon.set"
 	AuditAppIconCleared = "app.icon.clear"
 	AuditAppIconEmoji   = "app.icon.emoji"
+	// Project actions. An app CHANGING project is not one of these: it is
+	// recorded in the existing update_app event's detail blob, because the
+	// resource being mutated is the app, not the project.
+	AuditProjectCreate = "project.create"
+	AuditProjectUpdate = "project.update"
+	AuditProjectDelete = "project.delete"
 )
 
 // AuditEventParams holds the fields for a new audit event.

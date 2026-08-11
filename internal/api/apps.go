@@ -118,6 +118,15 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Name = name
 
+	// project_slug is optional: "" means the app belongs to no project. A
+	// non-empty value must be a legal slug, because it becomes a projects row
+	// and appears in URLs and manifests.
+	req.ProjectSlug = strings.TrimSpace(req.ProjectSlug)
+	if req.ProjectSlug != "" && !slugpkg.Valid(req.ProjectSlug) {
+		writeError(w, http.StatusBadRequest, "project_slug must be "+slugpkg.HumanRule)
+		return
+	}
+
 	// Resolve effective access: explicit request body > config default > "private".
 	access := req.Access
 	if access == "" {
@@ -154,19 +163,23 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.store.CreateApp(db.CreateAppParams{
+	projectCreated, err := s.store.CreateApp(db.CreateAppParams{
 		Slug:        req.Slug,
 		Name:        req.Name,
 		ProjectSlug: req.ProjectSlug,
 		OwnerID:     u.ID,
 		Access:      access,
-	}); err != nil {
+	})
+	if err != nil {
 		if errors.Is(err, db.ErrSlugTaken) {
 			writeError(w, http.StatusConflict, "slug already taken")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
+	}
+	if projectCreated {
+		s.audit(r, db.AuditProjectCreate, "project", req.ProjectSlug, `{"implicit":true}`)
 	}
 
 	// Apply the operator-configured default replica count when it exceeds the
@@ -488,6 +501,13 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newProjectSlug, setProjectSlug = strings.TrimSpace(projectSlug), true
+		// Same rule as create: "" clears the project, anything else must be a
+		// legal slug. Without this the PATCH path is a hole through which any
+		// free text reaches the grouping key and the projects table.
+		if newProjectSlug != "" && !slugpkg.Valid(newProjectSlug) {
+			writeError(w, http.StatusBadRequest, "project_slug must be "+slugpkg.HumanRule)
+			return
+		}
 	}
 
 	if rawVal, present := raw["memory_limit_mb"]; present {
@@ -863,12 +883,13 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	oldWorkerGroupedSize := app.WorkerGroupedSize
 	oldWorkerMaxWorkers := app.WorkerMaxWorkers
 	oldWorkerMaxSessionLifetime := app.WorkerMaxSessionLifetimeSecs
+	oldProjectSlug := app.ProjectSlug
 
 	// Apply core settings in a single transaction so a storage failure mid-write
 	// never leaves the row half-updated. The managed_by marker is a separate
 	// follow-up write (SetAppManagedBy) that runs after this transaction commits;
 	// the post-patch refetch exposes the final consistent state to the caller.
-	priorStatus, _, priorMemoryLimitMB, priorCPUQuotaPercent, _, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
+	priorStatus, _, priorMemoryLimitMB, priorCPUQuotaPercent, projectCreated, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:                         slug,
 		SetHibernate:                 setHibernateTimeout,
 		HibernateMinutes:             hibernateTimeout,
@@ -1070,11 +1091,15 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			setWorkerIsolation, oldWorkerIsolation, newWorkerIsolation,
 			setWorkerGroupedSize, oldWorkerGroupedSize, newWorkerGroupedSize,
 			setWorkerMaxWorkers, oldWorkerMaxWorkers, newWorkerMaxWorkers,
-			setWorkerMaxSessionLifetime, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime)
+			setWorkerMaxSessionLifetime, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime,
+			setProjectSlug, oldProjectSlug, newProjectSlug)
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
 			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r),
 		})
+	}
+	if projectCreated {
+		s.audit(r, db.AuditProjectCreate, "project", newProjectSlug, `{"implicit":true}`)
 	}
 	effectiveRenderSeconds := app.RenderSeconds
 	if setRenderSeconds {
@@ -1127,6 +1152,7 @@ func patchAppAuditDetail(
 	setWorkerGroupedSize bool, oldWorkerGroupedSize, newWorkerGroupedSize int,
 	setWorkerMaxWorkers bool, oldWorkerMaxWorkers, newWorkerMaxWorkers int,
 	setWorkerMaxSessionLifetime bool, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime int,
+	setProjectSlug bool, oldProject, newProject string,
 ) string {
 	d := map[string]any{}
 	if setMinWarmReplicas {
@@ -1152,6 +1178,9 @@ func patchAppAuditDetail(
 	}
 	if setWorkerMaxSessionLifetime {
 		d["worker_max_session_lifetime_secs"] = map[string]any{"old": oldWorkerMaxSessionLifetime, "new": newWorkerMaxSessionLifetime}
+	}
+	if setProjectSlug {
+		d["project_slug"] = map[string]any{"old": oldProject, "new": newProject}
 	}
 	if len(d) == 0 {
 		return ""
