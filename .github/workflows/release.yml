@@ -54,6 +54,21 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      # Re-run the cross-release contract against the exact tagged tree before
+      # publishing. The pin must advance deliberately when a new compatibility
+      # baseline is chosen; its checked-in checksums prevent artifact drift.
+      - name: Previous/current CLI-server compatibility E2E
+        run: make test-cli-compatibility-e2e
+
+      - name: Install completion test shells
+        run: sudo apt-get update && sudo apt-get install -y bash zsh fish
+
+      - name: Verify PowerShell is available on the runner
+        run: command -v pwsh
+
+      - name: Shell completion lifecycle E2E
+        run: make test-shell-completion-e2e
+
       - name: Build-provisioning gate (sandboxed uv sync)
         run: make test-provisioning
 

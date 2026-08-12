@@ -159,6 +159,52 @@ jobs:
       - name: Browser onboarding E2E (installed wheel)
         run: make test-browser-onboarding-e2e
 
+  # Long-lived remote CLI contract. The previous release is a checksum-pinned
+  # shipped binary, not a rebuild of an old tag: current connect/doctor/deploy/
+  # recovery run against that server, then its CLI logs in to and deploys on the
+  # current server. Protocol rejection is also asserted before authentication.
+  test-cli-compatibility-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Previous/current CLI-server compatibility E2E
+        run: make test-cli-compatibility-e2e
+
+  # Generated completion is only useful if the real shells can load and invoke
+  # it. Exercise idempotent install + byte-exact uninstall under every supported
+  # shell rather than limiting coverage to generated-script snapshots.
+  test-shell-completion-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install bash, zsh, and fish
+        run: sudo apt-get update && sudo apt-get install -y bash zsh fish
+
+      - name: Verify PowerShell is available on the runner
+        run: command -v pwsh
+
+      - name: Shell completion lifecycle E2E
+        run: make test-shell-completion-e2e
+
   # Kill-the-active HA failover: two real shinyhub processes against one Postgres;
   # SIGKILL the active and assert the standby keeps serving the same live replica
   # and then acquires the control-plane lease. Its own job because it needs a

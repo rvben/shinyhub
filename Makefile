@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -113,6 +113,25 @@ test-onboarding-e2e:
 # cannot find the browser.
 test-browser-onboarding-e2e:
 	./scripts/browser-onboarding-e2e.sh
+
+# test-cli-compatibility-e2e downloads the checksum-pinned previous release and
+# proves both supported upgrade directions with real servers: current CLI ->
+# released server (connect, doctor, deploy, credential recovery) and released
+# CLI -> current server (login, whoami, deploy). The focused tests also enforce
+# intentional protocol rejection before an authenticated request is sent.
+test-cli-compatibility-e2e:
+	go test ./internal/api -run TestServerInfoMatchesVersionedProtocolContract -count=1
+	go test ./internal/cli -run 'TestConnectRejectsNewerProtocolBeforeRequestingAuthorization|TestDoctorReportsAndStopsOnIncompatibleProtocol' -count=1
+	./scripts/cli-compatibility-e2e.sh
+
+# test-shell-completion-e2e installs, loads, reinstalls, and uninstalls the
+# generated completion in real bash, zsh, fish, and PowerShell processes. CI
+# provisions all four; local callers may narrow with SHINYHUB_COMPLETION_SHELLS.
+test-shell-completion-e2e:
+	./scripts/completion-e2e.sh
+
+# Complete long-lived CLI contract gate. Requires uv, curl, and all four shells.
+test-cli-release-contract: test-cli-compatibility-e2e test-shell-completion-e2e
 
 # test-remote-e2e launches a control plane and a real `shinyhub worker` against
 # the local Docker daemon, deploys an app onto the remote tier with two
