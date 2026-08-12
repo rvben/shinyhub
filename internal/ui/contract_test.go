@@ -3344,6 +3344,35 @@ func TestBothProjectInputsShareTheProjectDatalist(t *testing.T) {
 	}
 }
 
+// The first-app path is an activation flow, not a resource-creation dead end:
+// after the app row is created the same modal must advance to deployment and
+// offer the browser uploader immediately. These source-level wiring assertions
+// complement the document-wide accessibility test without coupling to styling.
+func TestFirstAppOnboardingAdvancesDirectlyToDeploy(t *testing.T) {
+	html := readStatic(t, "index.html")
+	for _, want := range []string{
+		`id="empty-state-cta" class="emptystate-btn emptystate-btn-primary">Deploy your first app`,
+		`id="new-app-step"`,
+		`id="new-app-deploy-now"`,
+		`Step 1 of 2`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("first-app onboarding markup missing %q", want)
+		}
+	}
+
+	js := readStatic(t, "app.js")
+	showHandoff := jsFunctionBody(t, js, "showNewAppHandoff")
+	for _, want := range []string{"Step 2 of 2", "newAppDeployNow", "app.slug"} {
+		if !strings.Contains(showHandoff, want) {
+			t.Errorf("showNewAppHandoff must advance the real app into deploy step; missing %q", want)
+		}
+	}
+	if !strings.Contains(js, "closeNewAppModal();\n    openDeployModal(app);") {
+		t.Error("Upload app must close the creation modal and open the browser deploy modal")
+	}
+}
+
 // Scoped per input on purpose: the document already contains this pattern on
 // #new-app-slug, so a document-wide search passes without either project input
 // carrying it.

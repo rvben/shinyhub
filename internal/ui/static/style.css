@@ -1051,10 +1051,7 @@ body[data-auth="out"] {
 
 .dashboard-emptystate h2 strong {
   font-weight: 700;
-  background: linear-gradient(100deg, var(--text) 0%, var(--cyan-bright) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--cyan-bright);
 }
 
 /* ── Badges ── */
@@ -2436,6 +2433,35 @@ fieldset.settings-block { min-width: 0; }
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
+}
+
+.onboarding-step {
+  margin: 0 0 0.75rem;
+  color: var(--text-soft);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.new-app-optional {
+  margin-top: 0.8rem;
+}
+
+.new-app-optional summary {
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.new-app-optional[open] summary {
+  margin-bottom: 0.7rem;
+}
+
+.handoff-success {
+  margin: 1rem 0 0.25rem;
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 700;
 }
 
 .handoff-card-divider {

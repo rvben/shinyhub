@@ -203,7 +203,7 @@
         <h2 id="empty-state-heading"></h2>
         <p class="lead" id="empty-state-lead"></p>
         <div class="emptystate-actions" id="empty-state-actions" hidden>
-          <button type="button" id="empty-state-cta" class="emptystate-btn emptystate-btn-primary">Create your first app</button>
+          <button type="button" id="empty-state-cta" class="emptystate-btn emptystate-btn-primary">Deploy your first app</button>
         </div>
       </div>
     </section>
@@ -815,6 +815,7 @@
           <button id="new-app-close" type="button" aria-label="Close new app modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
         </div>
         <div class="modal-body">
+          <p id="new-app-step" class="onboarding-step" aria-live="polite">Step 1 of 2 · App details</p>
           <div class="handoff-card">
             <form id="new-app-form">
               <label for="new-app-name">Display name</label>
@@ -830,10 +831,13 @@
                      aria-describedby="new-app-slug-hint">
               <p class="hint" id="new-app-slug-hint">1-63 chars, lowercase letters, digits and dashes. Must start and end with a letter or digit. Used in the URL: <code>/app/&lt;slug&gt;/</code>.</p>
 
-              <label for="new-app-project">Project slug <span class="hint-inline">(optional)</span></label>
-              <input id="new-app-project" type="text" maxlength="63" list="project-slugs"
-                     pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-                     autocomplete="off" spellcheck="false">
+              <details class="new-app-optional">
+                <summary>Add to a project <span class="hint-inline">(optional)</span></summary>
+                <label for="new-app-project">Project slug</label>
+                <input id="new-app-project" type="text" maxlength="63" list="project-slugs"
+                       pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                       autocomplete="off" spellcheck="false">
+              </details>
 
               <p id="new-app-error" class="error" hidden></p>
 
@@ -870,10 +874,11 @@
           </div>
 
           <section id="new-app-handoff" hidden>
-            <p>App created.</p>
-            <p class="hint">Run the commands above, or use the <strong>Deploy</strong> button on the card to push a bundle from this browser.</p>
+            <p class="handoff-success">Your app is ready for code.</p>
+            <p class="hint">Upload a folder or <code>.zip</code> now, or copy the commands above to deploy from your terminal.</p>
             <div class="modal-actions">
-              <button type="button" id="new-app-done" class="btn-primary">Done</button>
+              <button type="button" id="new-app-done">Done for now</button>
+              <button type="button" id="new-app-deploy-now" class="btn-primary">Upload app</button>
             </div>
           </section>
         </div>

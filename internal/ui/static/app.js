@@ -264,18 +264,22 @@ document.addEventListener('DOMContentLoaded', () => {
   const resetPwError    = document.getElementById('reset-password-error');
   const newAppButton       = document.getElementById('new-app-button');
   const newAppModal        = document.getElementById('new-app-modal');
+  const newAppHeading      = document.getElementById('new-app-heading');
+  const newAppStep         = document.getElementById('new-app-step');
   const newAppClose        = document.getElementById('new-app-close');
   const newAppCancel       = document.getElementById('new-app-cancel');
   const newAppForm         = document.getElementById('new-app-form');
   const newAppSlug         = document.getElementById('new-app-slug');
   const newAppName         = document.getElementById('new-app-name');
   const newAppProject      = document.getElementById('new-app-project');
+  const newAppOptional     = newAppProject.closest('details');
   const newAppError        = document.getElementById('new-app-error');
   const newAppHandoff      = document.getElementById('new-app-handoff');
   const newAppSnippet      = document.getElementById('new-app-snippet');
   const newAppSnippetLabel = document.getElementById('new-app-snippet-label');
   const newAppSnippetCopy  = document.getElementById('new-app-snippet-copy');
   const newAppDone         = document.getElementById('new-app-done');
+  const newAppDeployNow    = document.getElementById('new-app-deploy-now');
   const newAppSubmit       = document.getElementById('new-app-submit');
 
   const projectEditModal    = document.getElementById('project-edit-modal');
@@ -403,7 +407,7 @@ document.addEventListener('DOMContentLoaded', () => {
       emptyStateEyebrow.textContent = 'Ready when you are';
       emptyStateHeading.innerHTML = 'Deploy your <strong>first Shiny app</strong>.';
       emptyStateLead.textContent =
-        'Apps you create will appear here as cards. Start by naming your app — you can hand off to the CLI or drop a bundle straight into the browser.';
+        'Name it, upload a folder or .zip, and ShinyHub will take you straight to the live logs. You can use the CLI instead whenever you prefer.';
       emptyStateActions.hidden = false;
     } else {
       emptyStateEyebrow.textContent = 'Nothing here yet';
@@ -3704,9 +3708,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (newAppDivider) newAppDivider.hidden = false;
     newAppHandoff.hidden = true;
     newAppSnippetLabel.textContent = 'Deploy from your machine after creating';
+    newAppStep.textContent = 'Step 1 of 2 · App details';
     newAppSlug.value = '';
     newAppName.value = '';
     newAppProject.value = '';
+    if (newAppOptional) newAppOptional.open = false;
     setError(newAppError, '');
     newAppSubmit.disabled = false;
     newAppSubmit.textContent = 'Create';
@@ -3716,6 +3722,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function openNewAppModal() {
     resetNewAppModal();
+    const firstApp = !state.apps || state.apps.length === 0;
+    newAppHeading.textContent = firstApp ? 'Deploy your first app' : 'New app';
     newAppModal.hidden = false;
     modalTrap(newAppModal).activate();
     newAppName.focus();
@@ -3727,13 +3735,16 @@ document.addEventListener('DOMContentLoaded', () => {
     resetNewAppModal();
   }
 
-  function showNewAppHandoff(slug) {
+  function showNewAppHandoff(app) {
     newAppForm.hidden = true;
     if (newAppDivider) newAppDivider.hidden = true;
     newAppHandoff.hidden = false;
+    newAppStep.textContent = 'Step 2 of 2 · Deploy';
     newAppSnippetLabel.textContent = 'Deploy from your machine';
-    renderNewAppSnippet(slug);
-    newAppDone.focus();
+    renderNewAppSnippet(app.slug);
+    newAppDeployNow.dataset.slug = app.slug;
+    newAppDeployNow.dataset.name = app.name || app.slug;
+    newAppDeployNow.focus();
   }
 
   async function submitNewApp(event) {
@@ -3796,7 +3807,14 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    showNewAppHandoff(slug);
+    let createdApp = { slug, name };
+    try {
+      const body = await resp.json();
+      if (body && typeof body.slug === 'string' && body.slug) {
+        createdApp = body;
+      }
+    } catch { /* the submitted values are a complete fallback */ }
+    showNewAppHandoff(createdApp);
     await loadApps();
   }
 
@@ -4238,6 +4256,14 @@ document.addEventListener('DOMContentLoaded', () => {
   newAppClose.addEventListener('click', closeNewAppModal);
   newAppCancel.addEventListener('click', closeNewAppModal);
   newAppDone.addEventListener('click', closeNewAppModal);
+  newAppDeployNow.addEventListener('click', () => {
+    const app = {
+      slug: newAppDeployNow.dataset.slug,
+      name: newAppDeployNow.dataset.name,
+    };
+    closeNewAppModal();
+    openDeployModal(app);
+  });
   newAppModal.addEventListener('click', e => {
     if (e.target === e.currentTarget) closeNewAppModal();
   });
