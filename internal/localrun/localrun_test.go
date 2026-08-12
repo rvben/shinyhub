@@ -294,6 +294,91 @@ func waitForBody(t *testing.T, url, want string, timeout time.Duration) {
 // process group. We spawn a manifest command that backgrounds a long-lived
 // grandchild (sleep), then exits normally. After Run returns the grandchild
 // must be gone.
+// stopChild must treat "Wait has already returned" as exited even when another
+// select (waitUntilReady, waitForExit, the reload loop) consumed the value from
+// exitCh first, and even when the leader died from a signal rather than a call
+// to exit(). Otherwise it signals a group whose leader is already reaped and
+// then blocks for the whole shutdown grace waiting for a value that can never
+// arrive.
+func TestStopChild_DoesNotWaitOutGraceWhenExitChAlreadyDrained(t *testing.T) {
+	skipIfNoPython3(t)
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+
+	// The leader spawns a grandchild that outlives it, then sleeps. Keeping the
+	// grandchild alive keeps the process group alive, so the SIGTERM below
+	// succeeds instead of failing with ESRCH.
+	script := fmt.Sprintf(`import subprocess, time
+p = subprocess.Popen(["sleep", "60"])
+with open(%q, "w") as f:
+    f.write(str(p.pid))
+time.sleep(60)
+`, pidFile)
+	if err := os.WriteFile(filepath.Join(dir, "leader.py"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("python3", filepath.Join(dir, "leader.py"))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Reap through the same helper production uses, so this pins the real
+	// exit-signalling contract rather than a reimplementation of it.
+	exitCh := watchExit(cmd)
+
+	grandchildPID := waitForPIDFile(t, pidFile)
+
+	// SIGKILL the leader alone (not the group) so ProcessState reports a signal
+	// death rather than a normal exit, then consume exitCh the way a concurrent
+	// select in Run would.
+	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	<-exitCh
+
+	done := make(chan struct{})
+	go func() {
+		stopChild(cmd, exitCh, io.Discard)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stopChild blocked on an exitCh that was already drained; it waited out the 5 s shutdown grace instead of noticing the leader was reaped")
+	}
+
+	// The surviving grandchild must still be torn down.
+	proc, err := os.FindProcess(grandchildPID)
+	if err != nil {
+		return
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sigErr := proc.Signal(syscall.Signal(0)); sigErr != nil {
+			return // reaped
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("grandchild (pid %d) survived stopChild", grandchildPID)
+}
+
+func waitForPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(path); err == nil {
+			var pid int
+			if _, err := fmt.Sscan(strings.TrimSpace(string(b)), &pid); err == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("grandchild PID file %s never appeared", path)
+	return 0
+}
+
 func TestRun_ChildGroupKilledOnSelfExit(t *testing.T) {
 	skipIfNoPython3(t)
 	dir := t.TempDir()

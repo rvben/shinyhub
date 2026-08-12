@@ -352,9 +352,19 @@ func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []st
 	if err := c.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", slug, err)
 	}
+	return &childProcess{cmd: c, exitCh: watchExit(c), port: port, plan: plan}, nil
+}
+
+// watchExit reaps c in the background and reports its exit over the returned
+// channel. The buffered send hands the exit error to whichever select receives
+// first; the close then makes "the leader has been reaped" observable to every
+// later receiver, including a stopChild whose channel another select already
+// drained. Consulting cmd.ProcessState for that instead would race with Wait,
+// which owns that field until it returns.
+func watchExit(c *exec.Cmd) <-chan error {
 	exitCh := make(chan error, 1)
-	go func() { exitCh <- c.Wait() }()
-	return &childProcess{cmd: c, exitCh: exitCh, port: port, plan: plan}, nil
+	go func() { exitCh <- c.Wait(); close(exitCh) }()
+	return exitCh
 }
 
 func waitUntilReady(ctx context.Context, child *childProcess, changes <-chan struct{}) error {
@@ -472,21 +482,15 @@ func joinReadyURL(base, readyPath string) string {
 // stopChild sends SIGTERM to the child's process group, waits up to 5 s for a
 // clean exit, then sends SIGKILL. It is safe to call against an already-dead
 // process or when exitCh has already been drained (e.g. by the early-exit
-// select in Run): a non-blocking pre-drain and a non-blocking final receive
-// prevent the caller from hanging.
+// select in Run): the channel is closed once Wait returns, so every receive
+// below completes rather than hanging, whether the leader exited normally or
+// died from a signal.
 func stopChild(cmd *exec.Cmd, exitCh <-chan error, stderr io.Writer) {
 	if cmd.Process == nil {
 		return
 	}
-	if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-		// Wait has already reaped the leader (and another select may have drained
-		// exitCh). Kill any surviving grandchildren in its process group, then
-		// return without spending the shutdown grace period on an empty channel.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		return
-	}
-	// If the process already exited (exitCh drained by caller), there is
-	// nothing left to do but ensure the group is gone.
+	// If the leader has already been reaped, there is nothing left to do but
+	// ensure any surviving grandchildren in its group are gone.
 	select {
 	case <-exitCh:
 		// Already exited; group is done.
