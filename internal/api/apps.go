@@ -23,6 +23,7 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/deployevent"
 	"github.com/rvben/shinyhub/internal/deployfail"
 	"github.com/rvben/shinyhub/internal/fsx"
 	"github.com/rvben/shinyhub/internal/lifecycle"
@@ -1601,6 +1602,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deployDefaultMem, deployDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
+	deployResponse := newDeployResponder(w, r)
 	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             bundleDir,
@@ -1617,6 +1619,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// A stopped app is built and validated but not booted, so a broken
 		// bundle is still rejected here rather than at start time.
 		PrepareOnly: keepStopped,
+		Progress:    deployResponse.event,
 	}, app))
 	if err != nil {
 		reason := deployFailureMessage(err)
@@ -1678,15 +1681,29 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				s.proxy.ApplyRenderPacing(slug, preManifestApp.RenderSeconds)
 			}
 		}
+		deployResponse.event(deployevent.Phase("recovery", deployevent.StatusStarted, "Restoring the previous deployment"))
 		s.restoreAfterFailedDeploy(slug, &preManifestApp, prevActive, keepStopped)
+		recoveryMessage := "Recovery finished"
+		if recovered, rerr := s.store.GetAppBySlug(slug); rerr == nil {
+			switch recovered.Status {
+			case "running":
+				recoveryMessage = "Previous deployment restored and running"
+			case "stopped":
+				recoveryMessage = "App remains safely stopped"
+			case "degraded", "failed", "crashed":
+				recoveryMessage = "Previous deployment could not be fully restored; app is " + recovered.Status
+			}
+		}
+		deployResponse.event(deployevent.Phase("recovery", deployevent.StatusCompleted, recoveryMessage))
 		s.recordDeploy("failure")
-		writeErrorWithKind(w, http.StatusInternalServerError, reason, kind)
+		deployResponse.fail(http.StatusInternalServerError, reason, kind, "deploy")
 		return
 	}
 	// The pool is now serving the new bundle; from here onwards the on-disk
 	// artefacts must survive any subsequent error so a follow-up rollback or
 	// recovery still has the directory to point at.
 	keepFiles = true
+	deployResponse.event(deployevent.Phase("commit", deployevent.StatusStarted, "Recording the new deployment"))
 
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
@@ -1760,7 +1777,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.PromoteDeployment(pendingDep.ID); err != nil {
 		slog.Error("deploy: promote deployment failed; pool is live but next restart/wake/schedule would silently revert to the previous bundle — failing the request so the caller retries", "slug", slug, "version", version, "err", err)
 		s.recordDeploy("failure")
-		writeError(w, http.StatusInternalServerError, "deploy succeeded but recording it failed; retry to commit")
+		deployResponse.fail(http.StatusInternalServerError, "deploy succeeded but recording it failed; retry to commit", "", "commit")
 		return
 	}
 
@@ -1771,6 +1788,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.MarkDeploymentPrepared(pendingDep.ID); err != nil {
 		slog.Warn("deploy: recording preparation state failed; a later restore will rebuild best-effort",
 			"slug", slug, "version", version, "err", err)
+	}
+	deployResponse.event(deployevent.Phase("commit", deployevent.StatusCompleted, "Deployment recorded"))
+	if manifest != nil {
+		deployResponse.event(deployevent.Phase("configuration", deployevent.StatusStarted, "Applying manifest configuration"))
 	}
 
 	// Phase B: upsert [[schedule]] rows from the manifest. Runs after
@@ -1785,7 +1806,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			// deploy metric records failure to match the client-visible result.
 			slog.Error("manifest [[schedule]] apply failed", "slug", slug, "err", err)
 			s.recordDeploy("failure")
-			writeError(w, http.StatusInternalServerError, "manifest schedule apply failed")
+			deployResponse.fail(http.StatusInternalServerError, "manifest schedule apply failed", "", "configuration")
 			return
 		}
 		manifestSummary.Schedules = scheduleResults
@@ -1799,7 +1820,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Error("manifest [access] apply failed", "slug", slug, "err", err)
 			s.recordDeploy("failure")
-			writeError(w, http.StatusInternalServerError, "manifest access apply failed")
+			deployResponse.fail(http.StatusInternalServerError, "manifest access apply failed", "", "configuration")
 			return
 		}
 		if len(agResults) > 0 {
@@ -1822,20 +1843,25 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	if manifest != nil {
+		deployResponse.event(deployevent.Phase("configuration", deployevent.StatusCompleted, "Manifest configuration applied"))
+	}
 
 	// Prune old version directories beyond the retention limit. Run synchronously
 	// while the per-slug deploy lock is still held (via defer release above) so a
 	// concurrent redeploy or rollback for the same slug cannot scan and delete the
 	// same version/bundle directories at the same time. A detached goroutine would
 	// outlive the handler's lock release and race the next lock holder.
+	deployResponse.event(deployevent.Phase("cleanup", deployevent.StatusStarted, "Cleaning up old deployment files"))
 	if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir); err != nil {
 		slog.Error("prune_old_versions_failed", "slug", slug, "err", err)
 	}
+	deployResponse.event(deployevent.Phase("cleanup", deployevent.StatusCompleted, "Cleanup complete"))
 
 	updatedApp, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		s.recordDeploy("failure")
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		deployResponse.fail(http.StatusInternalServerError, "internal server error", "", "commit")
 		return
 	}
 
@@ -1871,7 +1897,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// Record success only here, after every remaining error path has passed, so
 	// shinyhub_deploys_total{result} matches the client-visible HTTP result.
 	s.recordDeploy("success")
-	writeJSON(w, http.StatusOK, resp)
+	deployResponse.result(resp)
 }
 
 func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {

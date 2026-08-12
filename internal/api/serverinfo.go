@@ -40,6 +40,7 @@ type serverCapabilities struct {
 	FleetPreconditions bool `json:"fleet_preconditions"`
 	ContentDigest      bool `json:"content_digest"`
 	CLIConnect         bool `json:"cli_connect"`
+	DeployEvents       bool `json:"deploy_events"`
 }
 
 // handleServerInfo advertises server capability flags so a fleet-aware CLI
@@ -54,6 +55,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			FleetPreconditions: true,
 			ContentDigest:      true,
 			CLIConnect:         true,
+			DeployEvents:       true,
 		},
 		Runtimes: detectRuntimes(),
 	})

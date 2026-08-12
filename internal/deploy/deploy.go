@@ -21,6 +21,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/deployevent"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/sandbox"
@@ -503,6 +504,15 @@ type Params struct {
 	// deploy time while leaving the app down. The returned PoolResult carries no
 	// replicas.
 	PrepareOnly bool
+	// Progress receives safe, user-facing lifecycle updates. Run may call it
+	// concurrently while replicas boot; callers must serialize their sink.
+	Progress func(deployevent.Event)
+}
+
+func (p Params) report(event deployevent.Event) {
+	if p.Progress != nil {
+		p.Progress(event)
+	}
 }
 
 // Result contains identifiers for a single successfully deployed replica.
@@ -646,6 +656,8 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) erro
 	}
 
 	start := time.Now()
+	p.report(deployevent.Phase("dependencies", deployevent.StatusStarted,
+		fmt.Sprintf("Building %s dependencies (budget %s)", appType, buildTimeout)))
 	slog.Info("deploy: building environment", "slug", p.Slug, "type", appType, "budget_s", buildTimeout.Seconds())
 	// State the effective package-index configuration up front (redacted) so
 	// the build log answers "which indexes did this build see" - the silent
@@ -654,7 +666,7 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) erro
 	if indexes := collectIndexEnv(append(process.SanitizedEnv(), appEnv...)); len(indexes) > 0 {
 		slog.Info("deploy: package index configuration", "slug", p.Slug, "indexes", strings.Join(indexes, ", "))
 	}
-	stop := startBuildProgress(p.Slug, start)
+	stop := startBuildProgress(p, start)
 	defer stop()
 
 	switch appType {
@@ -663,14 +675,19 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) erro
 			slog.Warn("deploy: project conversion failed; using requirements.txt", "slug", p.Slug, "err", cerr)
 		}
 		if err := pythonSyncFn(ctx, p.BundleDir, appEnv); err != nil {
+			p.report(deployevent.Phase("dependencies", deployevent.StatusFailed, "Python dependency build failed"))
 			return fmt.Errorf("uv sync: %w", err)
 		}
 	case "r":
 		if err := rSyncFn(ctx, p.BundleDir, appEnv); err != nil {
+			p.report(deployevent.Phase("dependencies", deployevent.StatusFailed, "R dependency build failed"))
 			return fmt.Errorf("renv restore: %w", err)
 		}
 	}
 	slog.Info("deploy: environment built", "slug", p.Slug, "elapsed", time.Since(start).Round(time.Second))
+	e := deployevent.Phase("dependencies", deployevent.StatusCompleted, "Dependencies ready")
+	e.ElapsedSeconds = int64(time.Since(start).Seconds())
+	p.report(e)
 	return nil
 }
 
@@ -678,7 +695,7 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) erro
 // returned stop func is called, so a long build is visibly alive in the log.
 // stop blocks until the goroutine has exited, so no heartbeat can fire after
 // buildEnvironment returns (keeps the slog default and tests deterministic).
-func startBuildProgress(slug string, start time.Time) (stop func()) {
+func startBuildProgress(p Params, start time.Time) (stop func()) {
 	done := make(chan struct{})
 	finished := make(chan struct{})
 	go func() {
@@ -690,7 +707,11 @@ func startBuildProgress(slug string, start time.Time) (stop func()) {
 			case <-done:
 				return
 			case <-t.C:
-				slog.Info("deploy: still building environment", "slug", slug, "elapsed", time.Since(start).Round(time.Second))
+				elapsed := time.Since(start)
+				slog.Info("deploy: still building environment", "slug", p.Slug, "elapsed", elapsed.Round(time.Second))
+				e := deployevent.Phase("dependencies", deployevent.StatusProgress, "Still building dependencies")
+				e.ElapsedSeconds = int64(elapsed.Seconds())
+				p.report(e)
 			}
 		}
 	}()
@@ -1016,6 +1037,7 @@ func Run(p Params) (*PoolResult, error) {
 		if perr != nil {
 			return nil, perr
 		}
+		p.report(deployevent.Phase("replicas", deployevent.StatusCompleted, "Bundle prepared; app remains stopped"))
 		slog.Info("deploy: bundle prepared without starting it",
 			"slug", p.Slug, "hooks_skipped", res.HooksSkipped)
 		return res, nil
@@ -1041,7 +1063,11 @@ func Run(p Params) (*PoolResult, error) {
 	// that happens exactly once, before any worker can serve a request, and that
 	// can still fail the deploy.
 	if resolvedMode == config.IsolationGrouped || resolvedMode == config.IsolationPerSession {
-		return prepareElasticPool(p, hostDeps, resolvedMode)
+		res, err := prepareElasticPool(p, hostDeps, resolvedMode)
+		if err == nil {
+			p.report(deployevent.Phase("replicas", deployevent.StatusCompleted, "Workers will start on demand"))
+		}
+		return res, err
 	}
 
 	baseCmd, appType, autoInstrument, hc, timeout, err := resolveBootParams(p, hostDeps)
@@ -1068,12 +1094,25 @@ func Run(p Params) (*PoolResult, error) {
 	}
 	results := make(chan bootResult, total)
 	var wg sync.WaitGroup
+	var finished atomic.Int64
+	started := deployevent.Phase("replicas", deployevent.StatusStarted, fmt.Sprintf("Starting %d replica(s)", total))
+	started.Total = total
+	p.report(started)
 
 	for _, a := range asn {
 		wg.Add(1)
 		go func(a process.TierAssignment) {
 			defer wg.Done()
 			r, err := bootReplica(p, a.Index, a.Tier, targets[a.Index], baseCmd, appType, autoInstrument, hc, timeout)
+			current := int(finished.Add(1))
+			replica := a.Index + 1
+			message := fmt.Sprintf("Replica %d ready", replica)
+			if err != nil {
+				message = fmt.Sprintf("Replica %d failed readiness", replica)
+			}
+			e := deployevent.Phase("replicas", deployevent.StatusProgress, message)
+			e.Current, e.Total, e.Replica = current, total, &replica
+			p.report(e)
 			results <- bootResult{idx: a.Index, res: r, err: err}
 		}(a)
 	}
@@ -1095,11 +1134,20 @@ func Run(p Params) (*PoolResult, error) {
 	sort.Ints(failed)
 
 	if len(ok) == 0 {
+		p.report(deployevent.Phase("replicas", deployevent.StatusFailed, "No replicas became ready"))
 		return nil, fmt.Errorf("all replicas failed health check: %w", errors.Join(bootErrs...))
 	}
 	for _, e := range bootErrs {
 		slog.Warn("replica boot failed", "slug", p.Slug, "err", e)
 	}
+	status := deployevent.StatusCompleted
+	message := fmt.Sprintf("%d/%d replicas ready", len(ok), total)
+	if len(failed) > 0 {
+		status = deployevent.StatusWarning
+	}
+	e := deployevent.Phase("replicas", status, message)
+	e.Current, e.Total = len(ok), total
+	p.report(e)
 	return &PoolResult{Replicas: ok, Failed: failed, HooksSkipped: hooksSkipped}, nil
 }
 
@@ -1139,6 +1187,10 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 	if !hostDeps {
 		slog.Warn("skipping post-deploy hooks under non-host runtime; bake them into the image entrypoint instead",
 			"slug", p.Slug, "hooks", len(hooks))
+		e := deployevent.Phase("hooks", deployevent.StatusWarning,
+			fmt.Sprintf("Skipped %d post-deploy hook(s): this runtime prepares inside its container", len(hooks)))
+		e.Total = len(hooks)
+		p.report(e)
 		return len(hooks), nil
 	}
 
@@ -1162,10 +1214,27 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := RunPostDeployHooks(ctx, p.BundleDir, hooks, hookEnv, logFile); err != nil {
+	started := time.Now()
+	e := deployevent.Phase("hooks", deployevent.StatusStarted, fmt.Sprintf("Running %d post-deploy hook(s)", len(hooks)))
+	e.Total = len(hooks)
+	p.report(e)
+	if err := runPostDeployHooks(ctx, p.BundleDir, hooks, hookEnv, logFile, func(index int, hook Hook, completed bool) {
+		status := deployevent.StatusProgress
+		message := fmt.Sprintf("Running hook %d/%d", index+1, len(hooks))
+		if completed {
+			message = fmt.Sprintf("Hook %d/%d completed", index+1, len(hooks))
+		}
+		e := deployevent.Phase("hooks", status, message)
+		e.Current, e.Total = index+1, len(hooks)
+		p.report(e)
+	}); err != nil {
 		slog.Warn("post-deploy hook failed", "slug", p.Slug, "log", logPath, "err", err)
+		p.report(deployevent.Phase("hooks", deployevent.StatusFailed, "Post-deploy hook failed"))
 		return 0, err
 	}
+	e = deployevent.Phase("hooks", deployevent.StatusCompleted, fmt.Sprintf("%d post-deploy hook(s) completed", len(hooks)))
+	e.Current, e.Total, e.ElapsedSeconds = len(hooks), len(hooks), int64(time.Since(started).Seconds())
+	p.report(e)
 	return 0, nil
 }
 
@@ -1297,6 +1366,10 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	if err != nil {
 		return Result{}, fmt.Errorf("start: %w", err)
 	}
+	replica := idx + 1
+	e := deployevent.Phase("replicas", deployevent.StatusProgress, fmt.Sprintf("Replica %d started; checking readiness", replica))
+	e.Replica = &replica
+	p.report(e)
 
 	// Resolve the route transport for the worker Start actually placed on, so a
 	// replica on any of a tier's workers is dialed with that worker's mTLS

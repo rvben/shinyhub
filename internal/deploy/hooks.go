@@ -561,12 +561,19 @@ var hookRunner = runHookExec
 // parent process env so callers can inject the same variables the app will
 // see at start (PORT excluded — that's per-replica).
 func RunPostDeployHooks(ctx context.Context, bundleDir string, hooks []Hook, extraEnv []string, logOut io.Writer) error {
+	return runPostDeployHooks(ctx, bundleDir, hooks, extraEnv, logOut, nil)
+}
+
+func runPostDeployHooks(ctx context.Context, bundleDir string, hooks []Hook, extraEnv []string, logOut io.Writer, progress func(index int, hook Hook, completed bool)) error {
 	for i, h := range hooks {
 		timeout := h.Timeout
 		if timeout == 0 {
 			timeout = defaultHookTimeout
 		}
 		fmt.Fprintf(logOut, "▶ hook[%d]: %s (timeout %s)\n", i, strings.Join(h.Command, " "), timeout)
+		if progress != nil {
+			progress(i, h, false)
+		}
 		hookCtx, cancel := context.WithTimeout(ctx, timeout)
 		err := hookRunner(hookCtx, bundleDir, h.Command, extraEnv, logOut)
 		cancel()
@@ -575,6 +582,9 @@ func RunPostDeployHooks(ctx context.Context, bundleDir string, hooks []Hook, ext
 				return fmt.Errorf("hook[%d] (%s) timed out after %s", i, strings.Join(h.Command, " "), timeout)
 			}
 			return fmt.Errorf("hook[%d] (%s): %w", i, strings.Join(h.Command, " "), err)
+		}
+		if progress != nil {
+			progress(i, h, true)
 		}
 	}
 	return nil
