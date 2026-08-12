@@ -108,3 +108,9 @@ ShinyHub contributors can replay this entire journey against a fresh temporary
 server with `make test-onboarding-e2e`. The test also performs an intentionally
 broken redeploy and asserts that its app log is shown inline. Set `E2E_KEEP=1`
 to retain its temporary configuration and logs after a failure.
+
+Changes to the distributable or remote onboarding flow should additionally run
+`make test-browser-onboarding-e2e`. That gate installs the built Python wheel,
+completes sign-in and pairing in real headless Chrome, deploys, revokes the
+credential in the dashboard, verifies the CLI's recovery guidance, and pairs
+again through the still-authenticated browser session.

@@ -46,19 +46,21 @@ func loginFailedError(resp *http.Response) error {
 // op names the action being attempted (e.g. "list apps", "rollback") so the
 // non-session message keeps its context.
 //
-// A JWT minted by `shinyhub login` lives for one hour; once it lapses every
-// command 401s with the server's bare "unauthorized", which gives no hint that
-// the credential simply expired. When the stored credential is a JWT and the
-// status is 401, this returns a message that points the developer at
-// `shinyhub login` to re-authenticate. API keys and opaque deploy tokens do
-// not expire, so their 401s are reported verbatim (a revoked or wrong key is a
-// different problem than a lapsed session). All other failures are reported as
-// the operation, the server's status, and its error envelope.
+// A rejected saved credential should always lead to a concrete recovery. JWTs
+// can expire, while shk_ CLI keys can expire or be revoked. Opaque deploy tokens
+// retain the server's response because `connect` cannot replace them. All other
+// failures report the operation, status, and server error envelope.
 func httpError(token, op string, resp *http.Response, body []byte) error {
 	if resp.StatusCode == http.StatusUnauthorized && looksLikeJWT(token) {
 		return &httpStatusError{
 			Status: resp.StatusCode,
 			msg:    "session expired - run `shinyhub connect` to sign in again",
+		}
+	}
+	if resp.StatusCode == http.StatusUnauthorized && strings.HasPrefix(token, "shk_") {
+		return &httpStatusError{
+			Status: resp.StatusCode,
+			msg:    "CLI credential was rejected - it may have expired or been revoked; run `shinyhub connect` to reconnect",
 		}
 	}
 	return &httpStatusError{

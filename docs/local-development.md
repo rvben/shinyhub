@@ -116,3 +116,16 @@ make check
 That deterministic gate checks formatting, Go vet, skill metadata, Go tests,
 and dashboard JavaScript tests. Specialized integration targets remain
 separate because they require Docker, uv, R, or cloud infrastructure.
+
+For changes to packaging, remote connection, login, tokens, or first deploy,
+run the release-shaped onboarding gate too:
+
+```bash
+make test-browser-onboarding-e2e
+```
+
+It builds and installs the Python wheel in isolation, starts the installed
+server, pairs the installed CLI through a real headless Chrome session, deploys
+an app, revokes the credential in the dashboard, and reconnects without a
+second sign-in. Set `SHINYHUB_E2E_BROWSER` to a Chrome/Chromium executable when
+auto-detection cannot find one. Set `E2E_KEEP=1` to retain logs and screenshots.

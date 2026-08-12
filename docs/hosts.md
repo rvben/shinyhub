@@ -16,8 +16,14 @@ shinyhub connect https://shiny.example.com --name prod
 It verifies the server and its runtimes, opens the browser for password or SSO
 sign-in, asks you to approve a matching verification code, then saves a private
 90-day credential. The raw credential is generated in the CLI and never passes
-through the browser. A headless machine can use `--token-file`; CI can use
-`SHINYHUB_HOST` and `SHINYHUB_TOKEN` without writing a credentials file.
+through the browser. On SSH or a workstation without a local browser, pass
+`--no-browser` and open the printed pairing URL on any signed-in device. A
+headless service can use `--token-file`; CI can use `SHINYHUB_HOST` and
+`SHINYHUB_TOKEN` without writing a credentials file.
+
+If a saved CLI credential expires or is revoked, the next authenticated command
+explains what happened and points back to `shinyhub connect`. Reconnecting
+replaces only that server's credential and preserves every other saved host.
 
 Run `shinyhub login` when you want a short-lived username/password session or
 need to refresh an existing session.

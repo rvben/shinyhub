@@ -58,7 +58,7 @@ func TestHTTPError_ExpiredJWTSurfacesConnectHint(t *testing.T) {
 	}
 }
 
-func TestHTTPError_401WithAPIKeyIsNotSessionExpired(t *testing.T) {
+func TestHTTPError_401WithAPIKeyExplainsRecovery(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized"}
 	err := httpError("shk_abc123", "rollback", resp, []byte(`{"error":"invalid token"}`))
 	if err == nil {
@@ -68,8 +68,10 @@ func TestHTTPError_401WithAPIKeyIsNotSessionExpired(t *testing.T) {
 	if strings.Contains(msg, "session expired") {
 		t.Errorf("API-key 401 must not claim session expiry, got %q", msg)
 	}
-	if !strings.Contains(msg, "invalid token") {
-		t.Errorf("expected server envelope to be surfaced, got %q", msg)
+	for _, want := range []string{"expired or been revoked", "shinyhub connect"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected API-key recovery message to contain %q, got %q", want, msg)
+		}
 	}
 }
 

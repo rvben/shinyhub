@@ -17,7 +17,7 @@ pip install shinyhub
 ```bash
 shinyhub --help                       # list subcommands
 shinyhub serve                        # run the server
-shinyhub login --host https://...     # authenticate against a server
+shinyhub connect https://...          # pair through browser or SSO
 shinyhub deploy ./my-app --slug demo  # deploy an app
 ```
 

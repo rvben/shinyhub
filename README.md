@@ -105,6 +105,8 @@ is saved in the owner-readable client credentials file.
 If you run `shinyhub deploy .` before connecting, an interactive terminal offers
 to start this flow in place. Automation never prompts: use
 `SHINYHUB_HOST`/`SHINYHUB_TOKEN` or `shinyhub connect <url> --token-file <path>`.
+On an SSH session or a terminal without a local browser, add `--no-browser`;
+ShinyHub prints a safe pairing URL that you can open on any signed-in device.
 Use `shinyhub login` when you specifically want a short-lived password session
 or need to refresh one; `connect` is the recommended first-time workstation
 flow.

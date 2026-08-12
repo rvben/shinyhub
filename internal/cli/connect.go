@@ -135,9 +135,12 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 	}
 
 	if token == "" {
-		if !isStdinTTY() {
+		// --no-browser is an explicit request for the copy/paste pairing flow.
+		// Keep it usable over SSH and when a terminal multiplexer or test harness
+		// captures output: neither case necessarily exposes stdin as a TTY.
+		if !isStdinTTY() && !f.noBrowser {
 			return authErr("browser authorization requires a terminal",
-				"pass --token-file <path>, or set SHINYHUB_HOST and SHINYHUB_TOKEN")
+				"rerun with --no-browser to copy the authorization URL, pass --token-file <path>, or set SHINYHUB_HOST and SHINYHUB_TOKEN")
 		}
 		if !info.Capabilities.CLIConnect {
 			return authErr("this ShinyHub does not support browser CLI authorization",

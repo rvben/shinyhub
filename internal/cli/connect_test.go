@@ -166,6 +166,45 @@ func TestConnect_NonInteractiveRequiresCredential(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requires a terminal") {
 		t.Fatalf("error = %v, want non-interactive credential guidance", err)
 	}
+	if hint := hintOf(err); !strings.Contains(hint, "--no-browser") {
+		t.Errorf("hint = %q, want copy/paste pairing guidance", hint)
+	}
+}
+
+func TestConnect_NoBrowserSupportsRedirectedOutput(t *testing.T) {
+	isolatedCredentials(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/server-info":
+			_, _ = io.WriteString(w, `{"version":"1.4.0","capabilities":{"cli_connect":true},"runtimes":{"python":true}}`)
+		case "/api/auth/cli-connect/status":
+			_, _ = io.WriteString(w, `{"status":"approved"}`)
+		case "/api/auth/me":
+			_, _ = io.WriteString(w, `{"user":{"username":"ssh-user","role":"developer"},"can_create_apps":true}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	origTTY, origOpen := isStdinTTY, openBrowserURL
+	t.Cleanup(func() { isStdinTTY, openBrowserURL = origTTY, origOpen })
+	isStdinTTY = func() bool { return false }
+	openBrowserURL = func(string) error {
+		t.Fatal("--no-browser must not try to open a local browser")
+		return nil
+	}
+
+	cmd, out, progress := connectTestCommand()
+	if err := runConnect(cmd, []string{srv.URL}, &connectFlags{noBrowser: true, timeout: defaultConnectTimeout}); err != nil {
+		t.Fatalf("runConnect: %v", err)
+	}
+	if !strings.Contains(progress.String(), srv.URL+"/tokens?") || !strings.Contains(progress.String(), "Browser approval received") {
+		t.Errorf("copy/paste pairing progress = %q", progress.String())
+	}
+	if !strings.Contains(out.String(), `"status":"connected"`) {
+		t.Errorf("connect output = %q", out.String())
+	}
 }
 
 func TestConnect_OlderServerExplainsTokenFallback(t *testing.T) {

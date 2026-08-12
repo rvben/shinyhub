@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -104,6 +104,15 @@ test-identity-conformance:
 # run downloads Python dependencies.
 test-onboarding-e2e:
 	./scripts/onboarding-e2e.sh
+
+# test-browser-onboarding-e2e exercises what is actually shipped and what a
+# workstation user actually sees: build + uv-tool-install the wheel, start its
+# embedded server, sign in and pair through Chrome, deploy, revoke the token in
+# the dashboard, then recover through the existing browser session. Requires
+# uv, Node 20+, and Chrome/Chromium; set SHINYHUB_E2E_BROWSER when auto-detection
+# cannot find the browser.
+test-browser-onboarding-e2e:
+	./scripts/browser-onboarding-e2e.sh
 
 # test-remote-e2e launches a control plane and a real `shinyhub worker` against
 # the local Docker daemon, deploys an app onto the remote tier with two

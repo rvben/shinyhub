@@ -128,6 +128,37 @@ jobs:
       - name: Zero-downtime handoff E2E
         run: make test-handoff
 
+  # Release-real developer onboarding: builds and uv-tool-installs the wheel,
+  # starts the embedded binary, drives the hosted Chrome already present on the
+  # runner through sign-in + CLI pairing, deploys, revokes, and reconnects.
+  # This guards packaging and browser session restoration in one user journey.
+  test-browser-onboarding-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Browser onboarding E2E (installed wheel)
+        run: make test-browser-onboarding-e2e
+
   # Kill-the-active HA failover: two real shinyhub processes against one Postgres;
   # SIGKILL the active and assert the standby keeps serving the same live replica
   # and then acquires the control-plane lease. Its own job because it needs a
