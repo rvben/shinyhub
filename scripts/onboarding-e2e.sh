@@ -106,6 +106,14 @@ echo "==> deploying the first app and waiting for health"
 body="$(curl -fsS "${HOST}/app/app/" || true)"
 echo "${body}" | grep -q 'shinyhub remote-worker E2E' || fail "deployed app did not serve its body"
 
+echo "==> resolving the deployed app through the headless open flow"
+open_result="$("${BIN}" apps open app --no-browser --config "${WORK}/client.json" --output json)" \
+  || fail "headless app open"
+echo "${open_result}" | grep -Fq '"url":"'"${HOST}"'/app/app/"' \
+  || fail "app open did not return the canonical URL"
+echo "${open_result}" | grep -Fq '"opened":false' \
+  || fail "headless app open did not report opened=false"
+
 echo "==> proving the deployed bundle now plans as unchanged"
 "${BIN}" plan "${WORK}/app" --detailed-exitcode \
   --config "${WORK}/client.json" --output table \

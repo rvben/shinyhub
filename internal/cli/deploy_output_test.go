@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,6 +50,9 @@ func TestDeploy_JSONModeKeepsStdoutClean(t *testing.T) {
 	}
 	if obj["slug"] != "demo" {
 		t.Errorf("stdout slug = %v, want %q", obj["slug"], "demo")
+	}
+	if obj["url"] != srv.URL+"/app/demo/" || obj["opened"] != false {
+		t.Errorf("stdout should always carry canonical URL and browser state; got %#v", obj)
 	}
 
 	// Progress text must go to stderr.
@@ -223,5 +227,132 @@ func TestDeploy_TableModeKeepsProseOnStdout(t *testing.T) {
 
 	if !strings.Contains(stdout, "Deployed") {
 		t.Errorf("table mode should print Deployed prose on stdout; got %q", stdout)
+	}
+}
+
+func TestDeploy_OpenStartsWaitsVerifiesAndLaunches(t *testing.T) {
+	var deployQuery string
+	var routeHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/demo", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"app":{"slug":"demo","status":"running","access":"public","deploy_count":4}}`))
+	})
+	mux.HandleFunc("/api/apps/demo/deploy", func(w http.ResponseWriter, r *http.Request) {
+		deployQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"slug":"demo","status":"running","access":"public","deploy_count":5,"current_version":"v5"}`))
+	})
+	mux.HandleFunc("/app/demo/", func(w http.ResponseWriter, r *http.Request) {
+		routeHits++
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("route check leaked CLI auth header: %q", got)
+		}
+		_, _ = w.Write([]byte("ready"))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	writeTestCLIConfig(t, srv.URL)
+	var opened string
+	stubBrowser(t, func(target string) error { opened = target; return nil })
+
+	stdout, stderr, err := execCLISplit(t, "deploy", deployTestBundleDir(t), "--slug", "demo", "--open", "-o", "json")
+	if err != nil {
+		t.Fatalf("deploy --open: %v (stdout=%q stderr=%q)", err, stdout, stderr)
+	}
+	wantURL := srv.URL + "/app/demo/"
+	if deployQuery != "start=true" {
+		t.Errorf("deploy query = %q, want start=true", deployQuery)
+	}
+	if routeHits != 1 || opened != wantURL {
+		t.Errorf("route hits = %d, opened = %q, want verified and opened %q", routeHits, opened, wantURL)
+	}
+	result := decodeOpenResult(t, stdout)
+	if result["status"] != "deployed" || result["url"] != wantURL || result["opened"] != true || result["kept_stopped"] != false {
+		t.Errorf("result = %#v", result)
+	}
+	if !strings.Contains(stderr, "Waiting for demo to be healthy ready") || !strings.Contains(stderr, "Opened in your browser") {
+		t.Errorf("stderr should narrate readiness and browser success: %q", stderr)
+	}
+}
+
+func TestDeploy_OpenBrowserFailureKeepsSuccessfulDeploy(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/demo", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"app":{"slug":"demo","status":"running","access":"private","deploy_count":1}}`))
+	})
+	mux.HandleFunc("/api/apps/demo/deploy", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"slug":"demo","status":"running","access":"private","deploy_count":2}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	writeTestCLIConfig(t, srv.URL)
+	stubBrowser(t, func(string) error { return errors.New("browser unavailable") })
+
+	stdout, stderr, err := execCLISplit(t, "deploy", deployTestBundleDir(t), "--slug", "demo", "--open", "-o", "json")
+	if err != nil {
+		t.Fatalf("browser failure should not undo a successful deploy: %v", err)
+	}
+	if result := decodeOpenResult(t, stdout); result["opened"] != false {
+		t.Errorf("opened = %v, want false", result["opened"])
+	}
+	if !strings.Contains(stderr, "browser unavailable") || !strings.Contains(stderr, srv.URL+"/app/demo/") {
+		t.Errorf("fallback should include cause and copyable URL: %q", stderr)
+	}
+}
+
+func TestDeploy_OpenRecoversWhenServerKeepsAppStopped(t *testing.T) {
+	var restartHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/demo", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"app":{"slug":"demo","status":"running","access":"private","deploy_count":2}}`))
+	})
+	mux.HandleFunc("/api/apps/demo/deploy", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"slug":"demo","status":"stopped","access":"private","deploy_count":3,"kept_stopped":true}`))
+	})
+	mux.HandleFunc("/api/apps/demo/restart", func(w http.ResponseWriter, r *http.Request) {
+		restartHits++
+		if r.URL.Query().Get("if_not_running") != "true" {
+			t.Errorf("restart query = %q", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"status":"running"}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	writeTestCLIConfig(t, srv.URL)
+	stubBrowser(t, func(string) error { return nil })
+
+	stdout, stderr, err := execCLISplit(t, "deploy", deployTestBundleDir(t), "--slug", "demo", "--open", "-o", "json")
+	if err != nil {
+		t.Fatalf("deploy --open recovery: %v", err)
+	}
+	if restartHits != 1 || !strings.Contains(stderr, "starting it now") {
+		t.Errorf("restart hits = %d, stderr = %q", restartHits, stderr)
+	}
+	if result := decodeOpenResult(t, stdout); result["kept_stopped"] != false || result["opened"] != true {
+		t.Errorf("final result should reflect recovered live state: %#v", result)
+	}
+}
+
+func TestDeploy_OpenPublicRouteFailureExplainsDeploySucceeded(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/demo", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"app":{"slug":"demo","status":"running","access":"public","deploy_count":1}}`))
+	})
+	mux.HandleFunc("/api/apps/demo/deploy", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"slug":"demo","status":"running","access":"public","deploy_count":2}`))
+	})
+	mux.HandleFunc("/app/demo/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	writeTestCLIConfig(t, srv.URL)
+	stubBrowser(t, func(string) error { t.Fatal("browser launched despite failed route check"); return nil })
+
+	_, _, err := execCLISplit(t, "deploy", deployTestBundleDir(t), "--slug", "demo", "--open", "-o", "json")
+	if err == nil || !strings.Contains(err.Error(), "deployed and became healthy") {
+		t.Fatalf("error = %v, want successful-deploy distinction", err)
+	}
+	if !strings.Contains(hintOf(err), "deployment succeeded") || !strings.Contains(hintOf(err), "apps open demo") {
+		t.Errorf("hint = %q", hintOf(err))
 	}
 }

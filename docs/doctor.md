@@ -19,7 +19,7 @@ shinyhub run . --check
 shinyhub connect https://hub.example.com --name prod
 shinyhub doctor .
 shinyhub plan .
-shinyhub deploy . --wait
+shinyhub deploy . --open
 ```
 
 The first doctor invocation needs no configuration, credentials, or network.
@@ -116,7 +116,8 @@ shinyhub doctor . --output json
 
 Follow a successful doctor run with `shinyhub run . --check` for a real local
 boot, `shinyhub plan .` for an exact read-only deployment preview, and
-`shinyhub deploy . --wait` for the real remote build and readiness check.
+`shinyhub deploy . --open` for the real remote build, readiness check, route
+verification, and browser handoff.
 Doctor is deliberately fast and non-mutating; those commands are the
 end-to-end proof. See [Deployment plan](deployment-plan.md).
 

@@ -10,14 +10,16 @@ The recommended remote workflow is:
 ```bash
 shinyhub doctor .
 shinyhub plan .
-shinyhub deploy . --wait
+shinyhub deploy . --open
 ```
 
 Pass `.` explicitly. Like deploy, plan never assumes that the current directory
 is safe to bundle. `--slug`, `--git`, `--branch`, `--subdir`, `--visibility`,
 `--start`, `--host`, and `--wait-for-server` have the same meaning as they do
 for deploy. The final line is a copy-pasteable deploy command containing the
-source choices that produced the plan.
+source choices that produced the plan. It uses `--wait` because the plan is also
+an automation primitive; for an interactive browser handoff, replace it with
+`--open` (which already implies `--wait` and `--start`).
 
 ## What the plan shows
 

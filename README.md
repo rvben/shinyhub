@@ -79,7 +79,7 @@ another terminal:
 ```bash
 shinyhub connect http://localhost:8080 --name local
 shinyhub plan ./my-app --slug demo
-shinyhub deploy ./my-app --slug demo --wait   # live at /app/demo/
+shinyhub deploy ./my-app --slug demo --open   # healthy and open at /app/demo/
 ```
 
 ### Connect to a remote ShinyHub
@@ -95,7 +95,7 @@ shinyhub run . --check
 shinyhub connect https://hub.example.com --name prod
 shinyhub doctor .
 shinyhub plan .
-shinyhub deploy . --wait
+shinyhub deploy . --open
 ```
 
 `connect` verifies that the URL is a healthy ShinyHub, reports its available
@@ -142,6 +142,13 @@ replica-readiness, commit, configuration, cleanup, and recovery phases. A
 terminal gets compact elapsed-time progress; CI can use `--output ndjson` for a
 stable event stream while `--output json` remains one final document. See
 [Deployment progress](docs/deploy-progress.md).
+
+`deploy --open` is the complete interactive finish: it starts an app even when
+it was previously stopped, waits for health, verifies the real user-facing
+route for a public app, and launches the canonical URL. If the machine has no
+browser, the successful deployment stays successful and the CLI prints a URL
+to copy. Later, use `shinyhub apps open <slug>` to return to any running or
+sleeping app; add `--no-browser` on SSH or in scripts.
 
 > Tip: run the bundle locally first with `shinyhub run ./my-app`. It keeps your
 > source tree untouched, serves the production-shaped `/app/<slug>/` route, and

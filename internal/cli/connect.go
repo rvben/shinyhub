@@ -13,8 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -407,20 +405,6 @@ func cliCredentialName(hash string) string {
 	return "cli-" + device + "-" + hash[:6]
 }
 
-var openBrowserURL = func(target string) error {
-	var command string
-	var args []string
-	switch runtime.GOOS {
-	case "darwin":
-		command, args = "open", []string{target}
-	case "windows":
-		command, args = "rundll32", []string{"url.dll,FileProtocolHandler", target}
-	default:
-		command, args = "xdg-open", []string{target}
-	}
-	return exec.Command(command, args...).Start()
-}
-
 func tryRemoteIdentity(host, token string) (remoteIdentity, int, error) {
 	var identity remoteIdentity
 	req, err := http.NewRequest(http.MethodGet, host+"/api/auth/me", nil)
@@ -476,7 +460,7 @@ func finishConnect(cmd *cobra.Command, st *credentialStore, host, name, token st
 	if identity.CanCreateApps {
 		permission = "Yes"
 	}
-	next := "Next: run `shinyhub deploy . --wait` from your app directory."
+	next := "Next: run `shinyhub deploy . --open` from your app directory."
 	if !identity.CanCreateApps {
 		next = "Next: ask a ShinyHub administrator to grant developer access, then run `shinyhub whoami` to verify it."
 	} else if refresh {

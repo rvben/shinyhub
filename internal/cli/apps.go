@@ -29,6 +29,7 @@ func newAppsCmd() *cobra.Command {
 	cmd.AddCommand(
 		newAppsListCmd(),
 		newAppsShowCmd(),
+		newAppsOpenCmd(),
 		newAppsMetricsCmd(),
 		newAppsLogsCmd(),
 		newAppsRollbackCmd(),
@@ -696,34 +697,50 @@ func runAppsStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	slug := args[0]
-	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/restart?if_not_running=true", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	result, err := startAppIfNotRunning(cfg, slug)
 	if err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "start app", resp, body)
 	}
 	// The server returns {"status":"running","note":"already running"} when the
 	// app was already up. Surface the note field so the caller can distinguish
 	// a fresh start from a no-op.
-	var result map[string]any
-	if err := json.Unmarshal(body, &result); err == nil {
-		if note, _ := result["note"].(string); note != "" {
-			return renderAction(cmd, "running",
-				map[string]any{"slug": slug, "note": note},
-				fmt.Sprintf("%s: %s", slug, note))
-		}
+	if note, _ := result["note"].(string); note != "" {
+		return renderAction(cmd, "running",
+			map[string]any{"slug": slug, "note": note},
+			fmt.Sprintf("%s: %s", slug, note))
 	}
 	return renderAction(cmd, "running",
 		map[string]any{"slug": slug},
 		fmt.Sprintf("%s: started", slug))
+}
+
+// startAppIfNotRunning is the output-free primitive shared by `apps start`
+// and `deploy --open`. The idempotency query makes it safe to use as recovery
+// when an older server accepts deploy's start request but still reports that it
+// kept the app stopped.
+func startAppIfNotRunning(cfg *cliConfig, slug string) (map[string]any, error) {
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/restart?if_not_running=true", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, httpError(cfg.Token, "start app", resp, body)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		// Preserve compatibility with older servers that returned an empty 2xx
+		// response. The HTTP status is sufficient evidence that the idempotent
+		// start request was accepted; callers do not require response fields.
+		return map[string]any{}, nil
+	}
+	return result, nil
 }
 
 // callRestartAs hits POST /api/apps/{slug}/restart and reports the action using

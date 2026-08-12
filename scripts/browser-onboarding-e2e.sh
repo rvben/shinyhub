@@ -115,7 +115,7 @@ finish_connect() {
   grep -q 'Connected to' "${log}" || fail "connect did not report a clear success state"
   # The backticks are literal CLI guidance.
   # shellcheck disable=SC2016
-  grep -q 'Next: run `shinyhub deploy . --wait`' "${log}" || fail "connect did not provide the first deploy continuation"
+  grep -q 'Next: run `shinyhub deploy . --open`' "${log}" || fail "connect did not provide the first deploy continuation"
   if grep -q 'shk_' "${log}"; then
     fail "raw CLI credential leaked into connect output"
   fi
@@ -232,6 +232,12 @@ grep -q 'READY' "${WORK}/doctor.log" || fail "doctor did not report READY"
   || fail "first deploy"
 body="$(curl -fsS "${HOST}/app/app/" || true)"
 echo "${body}" | grep -q 'shinyhub remote-worker E2E' || fail "deployed app did not serve its body"
+open_result="$("${BIN}" apps open app --no-browser --config "${WORK}/client.json" --output json)" \
+  || fail "headless app open"
+echo "${open_result}" | grep -Fq '"url":"'"${HOST}"'/app/app/"' \
+  || fail "app open did not return the canonical URL"
+echo "${open_result}" | grep -Fq '"opened":false' \
+  || fail "headless app open did not report opened=false"
 
 echo "==> proactively rotating the healthy credential through browser approval"
 start_refresh "${WORK}/connect-refresh.log"

@@ -4,6 +4,38 @@ ShinyHub's CLI is designed to remain discoverable after the first successful
 deploy and predictable when a workstation and remote server are upgraded at
 different times.
 
+## Go from deployment to the app
+
+For an interactive deployment, use the complete success-to-use flow:
+
+```bash
+shinyhub deploy . --open
+```
+
+`--open` implies `--start` and `--wait`. ShinyHub waits for the deployed version
+to become healthy, smoke-tests the actual `/app/<slug>/` route when the app is
+public, then opens the canonical URL in the default browser. Private and shared
+apps enter the normal browser sign-in flow; the CLI credential is never sent to
+an app route.
+
+A missing browser or graphical session does not turn a healthy deployment into
+a failure. The command prints a copyable URL and structured JSON reports
+`"opened": false`. A failed public route check does exit non-zero, but states
+clearly that the deployment itself succeeded and points to the app logs.
+
+Open an existing app without redeploying it:
+
+```bash
+shinyhub apps open sales
+shinyhub apps open sales --no-browser  # SSH, containers, and scripts
+```
+
+Running, sleeping, waking, deploying, and degraded apps follow the same launch
+behavior as the dashboard. Sleeping apps wake through the route. Stopped,
+crashed, and never-deployed apps are not launched; the CLI gives the exact
+start, log, or deploy command that resolves their state. `--output json` always
+includes `url`, `opened`, and the observed `app_status`.
+
 ## Install shell completion
 
 The installer detects zsh, bash, fish, or PowerShell from the current shell:

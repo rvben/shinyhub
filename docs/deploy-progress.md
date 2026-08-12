@@ -22,6 +22,13 @@ Secrets, environment values, package-index credentials, and hook output are not
 copied into the progress stream. App logs and `deploy-hooks.log` remain the
 detailed diagnostic sources.
 
+For the interactive end-to-end path, run `shinyhub deploy . --open`. It implies
+`--start` and `--wait`, then verifies a public app through its actual routed URL
+and opens it. Browser-launch failure is a convenience failure, not a deployment
+failure: the URL remains visible and JSON reports `opened: false`. A route-check
+failure is different—it exits non-zero while explicitly preserving the fact
+that the deployment became healthy.
+
 ## Automation
 
 The default for redirected stdout remains one JSON result document:

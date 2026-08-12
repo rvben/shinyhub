@@ -198,8 +198,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 			{Name: "deploy_count", Type: "integer", Desc: "Cumulative deployment number; 0 when the server does not report one"},
 			{Name: "version", Type: "string", Desc: "Version string from the deployment; empty when the server does not report one"},
 			{Name: "kept_stopped", Type: "boolean", Desc: "True when the app was stopped before this deploy and was left stopped; start it with 'apps start <slug>' or deploy with --start"},
+			{Name: "url", Type: "string", Desc: "Canonical user-facing app URL"},
+			{Name: "opened", Type: "boolean", Desc: "True when --open successfully launched the default browser; false otherwise"},
 		},
-		Notes: "--output json emits one final result document. --output ndjson emits ordered phase records followed by exactly one result or error event; event types are phase, result, and error, and phase statuses are started, progress, completed, warning, and failed. Older servers fall back to a synthetic terminal event. shinyhub.toml [app] startup_timeout_seconds (1-3600, default 120) sets the readiness deadline the deploy health check allows before declaring the app crashed; readiness_path (absolute path, default /) selects the GET endpoint and readiness_status (100-599, omitted accepts 2xx/3xx) can require an exact response. These travel with the bundle and also apply on local run, wake, scale, and rollback. build_timeout_seconds (30-7200, default 900) bounds the host-side environment build (uv sync / renv restore) that runs before readiness; a build that exceeds it fails build_failed, distinct from startup_timeout_seconds, and is inert under the docker runtime. shinyhub.toml [app] also accepts memory_limit_mb (0 or 16-1048576) and cpu_quota_percent (0 or 1-6400; 100 = 1 core) - per-replica cgroup v2 ceilings reconciled into the app on deploy (declared-only, like replicas); 0 = explicit unlimited, omitted = unchanged. Clear back to inherit-global with `shinyhub apps set --memory-limit-mb -1` / `--cpu-quota-percent -1`.",
+		Notes: "--open implies --start and --wait, verifies public apps through their user-facing route, and launches the default browser; browser-launch failure is non-fatal and leaves opened=false with a copyable URL. --output json emits one final result document. --output ndjson emits ordered phase records followed by exactly one result or error event; event types are phase, result, and error, and phase statuses are started, progress, completed, warning, and failed. Older servers fall back to a synthetic terminal event. shinyhub.toml [app] startup_timeout_seconds (1-3600, default 120) sets the readiness deadline the deploy health check allows before declaring the app crashed; readiness_path (absolute path, default /) selects the GET endpoint and readiness_status (100-599, omitted accepts 2xx/3xx) can require an exact response. These travel with the bundle and also apply on local run, wake, scale, and rollback. build_timeout_seconds (30-7200, default 900) bounds the host-side environment build (uv sync / renv restore) that runs before readiness; a build that exceeds it fails build_failed, distinct from startup_timeout_seconds, and is inert under the docker runtime. shinyhub.toml [app] also accepts memory_limit_mb (0 or 16-1048576) and cpu_quota_percent (0 or 1-6400; 100 = 1 core) - per-replica cgroup v2 ceilings reconciled into the app on deploy (declared-only, like replicas); 0 = explicit unlimited, omitted = unchanged. Clear back to inherit-global with `shinyhub apps set --memory-limit-mb -1` / `--cpu-quota-percent -1`.",
 	},
 
 	// ── apps (container) ─────────────────────────────────────────────────────
@@ -252,6 +254,13 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "render_pacing", Type: "object", Desc: "Advisory pacing summary {render_seconds,effective_cores,cores_source,suggested_max_sessions_per_replica,current_effective_max_sessions_per_replica,cadence_assumption_seconds}; present only while render_seconds > 0"},
 		{Name: "rejects_by_reason", Type: "object", Desc: "Rolling 10-minute rejection rollup {window_seconds,counts:{reason:count}}; omitted when the app has had no rejections in the window"},
 	}},
+	"apps open": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "ready"},
+		{Name: "slug", Type: "string"},
+		{Name: "url", Type: "string", Desc: "Canonical user-facing app URL"},
+		{Name: "opened", Type: "boolean", Desc: "True when the default browser launched; false with --no-browser or when no browser is available"},
+		{Name: "app_status", Type: "string", Desc: "App lifecycle status observed before opening"},
+	}, Notes: "May wake a sleeping app through its user-facing route. Public running routes are smoke-tested first; private/shared routes use the browser's normal sign-in session and never receive the CLI token."},
 	"apps logs": {Mutating: ro, Streaming: true},
 	"apps metrics": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string"},

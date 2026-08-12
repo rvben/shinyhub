@@ -57,6 +57,7 @@ type deployFlags struct {
 	subdir      string // subdirectory within the repo containing the app
 	visibility  string // app access level: private, shared, public (empty = use server default)
 	start       bool   // start the app even if it was stopped before this deploy
+	open        bool   // start, wait for health, verify the route, and open it
 
 	waitForServer time.Duration // poll /api/server-info until the server is ready before deploying
 }
@@ -92,7 +93,9 @@ applies on wake, scale, and rollback.
 
 Stopped apps: an app that was stopped before the deploy stays stopped. The
 bundle is still built, validated and recorded, so 'shinyhub apps start <slug>'
-brings up the new version. Pass --start to deploy and start in one step.
+brings up the new version. Pass --start to deploy and start in one step. Pass
+--open for the complete interactive flow: start, wait for health, verify the
+user-facing route when it is public, and open it in your default browser.
 
 Slug and URL: the app is served at <host>/app/<slug>/. The slug defaults to the
 directory name (sanitized); override it with --slug. Slug rule: lowercase
@@ -125,10 +128,18 @@ back to the legacy response when deploying to an older server.`,
 	cmd.Flags().StringVar(&f.visibility, "visibility", "", "App visibility for new apps: private (members only), shared (every signed-in user; alias: internal), or public (anyone, no sign-in). Default: server config")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before deploying")
 	cmd.Flags().BoolVar(&f.start, "start", false, "Start the app after deploying even if it was stopped; without this a stopped app stays stopped")
+	cmd.Flags().BoolVar(&f.open, "open", false, "Start the app, wait until it is healthy, verify its public route, and open it in the default browser")
 	return cmd
 }
 
 func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
+	// Opening a stopped or still-starting app is a broken promise. Treat --open
+	// as the complete success-to-use workflow, including the two prerequisites
+	// a person would otherwise have to discover and spell out themselves.
+	if f.open {
+		f.start = true
+		f.wait = true
+	}
 	source, err := resolveDeploymentSource(args, f)
 	if err != nil {
 		return err
@@ -340,6 +351,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	deployCount := 0
 	currentVersion := ""
 	keptStopped := false
+	deployStatus := ""
 	if err := json.Unmarshal(out, &appResp); err == nil {
 		if v, ok := appResp["deploy_count"].(float64); ok {
 			deployCount = int(v)
@@ -348,6 +360,18 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 			currentVersion = v
 		}
 		keptStopped, _ = appResp["kept_stopped"].(bool)
+		deployStatus, _ = appResp["status"].(string)
+	}
+	if f.open && (keptStopped || deployStatus == "stopped") {
+		fmt.Fprintf(errW, "%s remained stopped after deployment; starting it now...\n", slug)
+		if _, err := startAppIfNotRunning(cfg, slug); err != nil {
+			return &hintedMsgError{
+				msg:   fmt.Sprintf("%s deployed successfully, but could not be started for --open: %v", slug, err),
+				hint:  fmt.Sprintf("the deployment succeeded; retry with `shinyhub apps start %s`, then `shinyhub apps open %s`", slug, slug),
+				cause: err,
+			}
+		}
+		keptStopped = false
 	}
 
 	// In JSON mode all prose goes to stderr; one result object on stdout.
@@ -369,8 +393,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	if deployCount > 0 {
 		deployment = fmt.Sprintf(" (deployment #%d)", deployCount)
 	}
-	fmt.Fprintf(noteW, "%sDeployed %s%s%s\nURL: %s/app/%s/\n",
-		ps.okPrefix(), slug, deployment, took, cfg.Host, slug)
+	target := remoteAppURL(cfg.Host, slug)
+	fmt.Fprintf(noteW, "%sDeployed %s%s%s\nURL: %s\n",
+		ps.okPrefix(), slug, deployment, took, target)
 	if note := formatKeptStoppedNote(keptStopped, slug); note != "" {
 		fmt.Fprintln(noteW, note)
 	}
@@ -430,6 +455,28 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 	}
 
+	opened := false
+	if f.open {
+		// Only public routes can be checked anonymously. Private/shared app routes
+		// authenticate through a browser cookie and deliberately do not consume
+		// the CLI Authorization header, because embedded apps may use that header
+		// for their own protocols.
+		access, _ := appResp["access"].(string)
+		if access == "public" {
+			if err := verifyPublicAppRoute(target); err != nil {
+				return &hintedMsgError{
+					msg:   fmt.Sprintf("%s deployed and became healthy, but its public route check failed: %v", slug, err),
+					hint:  fmt.Sprintf("the deployment succeeded; inspect `shinyhub apps logs %s --no-follow`, then retry `shinyhub apps open %s`", slug, slug),
+					cause: err,
+				}
+			}
+		}
+		opened = openAppURL(target, false, errW)
+		if opened {
+			fmt.Fprintf(errW, "Opened in your browser: %s\n", target)
+		}
+	}
+
 	if format == formatJSON {
 		// deploy_count and version are always present so consumers can rely on
 		// these keys existing. deploy_count is 0 when the server omits it (older
@@ -443,6 +490,8 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 			"deploy_count": deployCount,
 			"version":      currentVersion,
 			"kept_stopped": keptStopped,
+			"url":          target,
+			"opened":       opened,
 		}
 		if err := json.NewEncoder(stdOut).Encode(result); err != nil {
 			return err
