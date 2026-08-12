@@ -137,6 +137,12 @@ start/stop lifecycle—without making a change. Its final line is the exact
 deploy command to run. Use `--detailed-exitcode` or `--fail-on-changes` for a CI
 gate. See [Deployment plan](docs/deployment-plan.md).
 
+During the deploy, the CLI follows the server's real dependency-build, hook,
+replica-readiness, commit, configuration, cleanup, and recovery phases. A
+terminal gets compact elapsed-time progress; CI can use `--output ndjson` for a
+stable event stream while `--output json` remains one final document. See
+[Deployment progress](docs/deploy-progress.md).
+
 > Tip: run the bundle locally first with `shinyhub run ./my-app`. It keeps your
 > source tree untouched, serves the production-shaped `/app/<slug>/` route, and
 > swaps in edits only after they pass readiness. Add `--check` for a CI-friendly
@@ -268,6 +274,7 @@ controlled explicitly:
 | [App startup performance](docs/app-performance.md) | Why data lags the page shell, and the startup-scope and caching patterns that fix it. |
 | [Fleet reconcile](docs/fleet.md) | Declaring and converging a whole set of apps from one file. |
 | [Deploy manifest](docs/manifest.md) | The `shinyhub.toml` bundle manifest. |
+| [Deployment progress](docs/deploy-progress.md) | Live deploy phases, rollback diagnostics, NDJSON automation, and compatibility with older servers. |
 | [Local development](docs/local-development.md) | Delightful control-plane and app-author workflows. |
 | [Tracing](docs/tracing.md) | OpenTelemetry propagation, app spans, and control-plane spans. |
 | [Metrics and logs](docs/metrics.md) | The `/metrics` endpoint, exposed series, and the structured access log. |

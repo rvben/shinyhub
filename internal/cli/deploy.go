@@ -22,6 +22,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deployevent"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/spf13/cobra"
 )
@@ -103,7 +104,12 @@ browser redirect that the proxy requires, so interactive 'shinyhub login' does
 not work from a CI runner. Instead, deploy directly to the app port using
 SHINYHUB_HOST set to the internal address and SHINYHUB_TOKEN set to a
 pre-shared deploy token (the SHINYHUB_DEPLOY_TOKEN value configured on the
-server). See docs/reverse-proxy/deploying-behind-a-proxy.md for the full setup.`,
+server). See docs/reverse-proxy/deploying-behind-a-proxy.md for the full setup.
+
+Progress: interactive deploys show each server-side phase and its elapsed time.
+Use --output json for one final result document, or --output ndjson for a stable
+event stream suitable for CI logs and automation. New CLIs automatically fall
+back to the legacy response when deploying to an older server.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDeploy(cmd, args, f)
@@ -157,18 +163,40 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 	}
 
-	format, err := resolveFormat(false, false)
+	format, err := resolveDeployFormat()
 	if err != nil {
 		return err
 	}
 	errW := cmd.ErrOrStderr()
+	stdOut := cmd.OutOrStdout()
 
-	fmt.Fprintf(errW, "Bundling %s...\n", abs)
+	if !quietFlag && format != formatNDJSON {
+		fmt.Fprintf(errW, "Bundling %s...\n", abs)
+	}
 	bundlePlan, _, err := prepareDeployment(abs)
 	if err != nil {
+		if format == formatNDJSON {
+			e := deployevent.Event{Type: deployevent.TypeError, Phase: "bundle", Message: err.Error(), FailureKind: "unknown"}
+			if writeErr := writeDeployEvent(stdOut, e); writeErr != nil {
+				return writeErr
+			}
+			return &ExitCodeError{Code: 1, Err: err, Reported: true}
+		}
 		return err
 	}
 	bundleBuf := bundlePlan.Buffer
+	bundleEvent := deployevent.Phase("bundle", deployevent.StatusCompleted, "Bundle ready")
+	bundleEvent.FileCount = bundlePlan.FileCount
+	bundleEvent.Bytes = int64(bundlePlan.CompressedBytes)
+	bundleEvent.Digest = bundlePlan.Digest
+	if format == formatNDJSON {
+		if err := writeDeployEvent(stdOut, bundleEvent); err != nil {
+			return err
+		}
+	} else if !quietFlag {
+		fmt.Fprintf(errW, "  ✓ Bundle ready: %d files, %s upload, %s\n",
+			bundlePlan.FileCount, humanBytes(int64(bundlePlan.CompressedBytes)), bundlePlan.Digest)
+	}
 	summary := summarizeDeploymentRejections(bundlePlan.ProtectedPaths)
 	if summary != "" {
 		fmt.Fprintln(errW, summary)
@@ -191,12 +219,24 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	// The deploy request is the longest blocking step (a first deploy installs
 	// dependencies server-side), so on a terminal it animates with its elapsed
 	// time rather than sitting on one static line for minutes.
-	deploying := newProgress(errW, fmt.Sprintf("Deploying %s to %s...", slug, cfg.Host))
+	deployStarted := time.Now()
+	var deploying *progress
+	if format != formatNDJSON && !quietFlag {
+		deploying = newProgress(errW, fmt.Sprintf("Uploading and deploying %s to %s...", slug, cfg.Host))
+	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	part, _ := writer.CreateFormFile("bundle", "bundle.zip")
-	io.Copy(part, bundleBuf)
-	writer.Close()
+	part, err := writer.CreateFormFile("bundle", "bundle.zip")
+	if err != nil {
+		return fmt.Errorf("build upload: %w", err)
+	}
+	if _, err := io.Copy(part, bundleBuf); err != nil {
+		return fmt.Errorf("build upload: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("build upload: %w", err)
+	}
+	uploadBytes := int64(body.Len())
 
 	deployURL := cfg.Host + "/api/apps/" + slug + "/deploy"
 	if f.start {
@@ -204,24 +244,71 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 	req, err := http.NewRequest("POST", deployURL, &body)
 	if err != nil {
-		deploying.stop()
+		if deploying != nil {
+			deploying.stop()
+		}
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", deployevent.MediaType)
 
 	// Deploy can take several minutes on first run (uv downloads packages).
 	// Use the untimed client to match the SSE logs command.
-	deploying.start()
+	if format == formatNDJSON {
+		upload := deployevent.Phase("upload", deployevent.StatusStarted, "Uploading and validating bundle")
+		upload.Bytes = uploadBytes
+		if err := writeDeployEvent(stdOut, upload); err != nil {
+			return err
+		}
+	} else if deploying != nil {
+		deploying.start()
+	}
 	resp, err := streamClient.Do(req)
-	deploying.stop()
 	if err != nil {
+		if deploying != nil {
+			deploying.stop()
+		}
+		if format == formatNDJSON {
+			e := deployevent.Event{Type: deployevent.TypeError, Phase: "upload", Message: err.Error(), FailureKind: "transport_error"}
+			if writeErr := writeDeployEvent(stdOut, e); writeErr != nil {
+				return writeErr
+			}
+			return &ExitCodeError{Code: 3, Err: err, Reported: true}
+		}
 		// No prefix: the client's message already names the server that could
 		// not be reached, and which request it was is not in doubt.
 		return err
 	}
 	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
+	streamed := isDeployEventResponse(resp)
+	if format == formatNDJSON && resp.StatusCode < http.StatusBadRequest {
+		upload := deployevent.Phase("upload", deployevent.StatusCompleted, "Bundle uploaded and validated")
+		upload.Bytes = uploadBytes
+		if err := writeDeployEvent(stdOut, upload); err != nil {
+			return err
+		}
+	} else if deploying != nil {
+		if streamed {
+			deploying.done(" done", "Bundle uploaded and validated")
+		} else {
+			deploying.stop()
+		}
+	}
+
+	var out []byte
+	if streamed {
+		out, err = consumeDeployEvents(resp, format, stdOut, errW, quietFlag)
+		if err != nil {
+			var status *httpStatusError
+			if errors.As(err, &status) && status.Status >= 500 {
+				printLogTail(cfg, slug, errW)
+			}
+			return err
+		}
+	} else {
+		out, _ = io.ReadAll(resp.Body)
+	}
 	if resp.StatusCode >= 400 {
 		// A startup/deploy failure (HTTP 5xx "deploy failed: ...") is diagnosed
 		// fastest from the app's own logs - the health-check message even tells
@@ -231,7 +318,21 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		if resp.StatusCode >= 500 && bytes.Contains(out, []byte("deploy failed")) {
 			printLogTail(cfg, slug, cmd.ErrOrStderr())
 		}
-		return httpError(cfg.Token, "deploy", resp, out)
+		httpErr := httpError(cfg.Token, "deploy", resp, out)
+		if format == formatNDJSON {
+			e := deployevent.Event{Type: deployevent.TypeError, Phase: "upload", Message: httpErr.Error(), StatusCode: resp.StatusCode}
+			if err := writeDeployEvent(stdOut, e); err != nil {
+				return err
+			}
+			_, code := statusKind(resp.StatusCode)
+			return &ExitCodeError{Code: code, Err: httpErr, Reported: true}
+		}
+		return httpErr
+	}
+	if !streamed && format == formatNDJSON {
+		if err := writeDeployEvent(stdOut, deployevent.Event{Type: deployevent.TypeResult, Result: json.RawMessage(out)}); err != nil {
+			return err
+		}
 	}
 
 	// Extract fields from the response for the result envelope and human summary.
@@ -249,11 +350,12 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		keptStopped, _ = appResp["kept_stopped"].(bool)
 	}
 
-	stdOut := cmd.OutOrStdout()
 	// In JSON mode all prose goes to stderr; one result object on stdout.
 	noteW := stdOut
 	if format == formatJSON {
 		noteW = errW
+	} else if format == formatNDJSON {
+		noteW = io.Discard
 	}
 	// How long the deploy took is the question every developer asks next, and on
 	// a terminal it is the only place it is recorded. Piped output keeps the
@@ -261,7 +363,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	ps := stylerFor(noteW)
 	took := ""
 	if ps.tty {
-		took = " in " + humanElapsed(deploying.elapsed())
+		took = " in " + humanElapsed(time.Since(deployStarted))
 	}
 	deployment := ""
 	if deployCount > 0 {
@@ -283,7 +385,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	case "shared", "public":
 		fmt.Fprintf(noteW, "Access: %s\n", access)
 	}
-	if warn := formatHooksSkippedWarning(appResp["hooks_skipped"]); warn != "" {
+	if warn := formatHooksSkippedWarning(appResp["hooks_skipped"]); warn != "" && format != formatNDJSON {
 		fmt.Fprintln(errW, warn)
 	}
 

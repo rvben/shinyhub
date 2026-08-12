@@ -52,6 +52,9 @@ func TestDeployAnnotation_DocumentsBuildTimeout(t *testing.T) {
 	if !strings.Contains(ann.Notes, "build_timeout_seconds") {
 		t.Fatalf("deploy Notes must document build_timeout_seconds, got %q", ann.Notes)
 	}
+	if !ann.Streaming || !strings.Contains(ann.Notes, "--output ndjson") || !strings.Contains(ann.Notes, "error event") {
+		t.Fatalf("deploy annotation must document its optional event stream, got %+v", ann)
+	}
 }
 
 func TestFleetApplyAnnotation_DocumentsConcurrency(t *testing.T) {

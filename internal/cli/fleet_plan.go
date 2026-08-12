@@ -196,6 +196,7 @@ type serverCaps struct {
 	FleetPreconditions bool `json:"fleet_preconditions"`
 	ContentDigest      bool `json:"content_digest"`
 	CLIConnect         bool `json:"cli_connect"`
+	DeployEvents       bool `json:"deploy_events"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just
