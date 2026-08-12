@@ -70,6 +70,32 @@ func TestFleetPreflight_MapsNameAndDescriptionDrift(t *testing.T) {
 	}
 }
 
+func TestFleetPreflight_MapsProjectSlugAndBundleWorkerDrift(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[{"slug":"ops","project_slug":"analytics","worker_isolation":"multiplex","worker_grouped_size":6,"worker_max_workers":40,"access":"private","managed_by":"fleet:eu","content_digest":"sha256:LIVE"}]`)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a", "app.py"), "print(1)\n")
+	mustWrite(t, filepath.Join(dir, "a", "shinyhub.toml"), "[app.worker]\nisolation=\"grouped\"\ngrouped_size=6\nmax_workers=40\n")
+	writeFleetManifest(t, dir, "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./a\"\nvisibility=\"private\"\n\n  [app.config]\n  project=\"analytics\"\n")
+
+	var errBuf bytes.Buffer
+	pf, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "plan", 0)
+	if err != nil {
+		t.Fatalf("preflight: %v (%s)", err, errBuf.String())
+	}
+	defer pf.cleanup()
+	keys := map[string]bool{}
+	for _, d := range pf.diff[0].ConfigDrift {
+		keys[d.Key] = true
+	}
+	if keys["project"] {
+		t.Fatalf("stored project_slug must round-trip, drift=%+v", pf.diff[0].ConfigDrift)
+	}
+	if !keys["worker_isolation"] {
+		t.Fatalf("bundle worker drift missing: %+v", pf.diff[0].ConfigDrift)
+	}
+}
+
 func TestFleetPreflight_NoManifestHelpful(t *testing.T) {
 	_, _, _ = setupCLITest(t)
 	dir := t.TempDir()

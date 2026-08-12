@@ -169,11 +169,13 @@ source = "./a"
 	for _, want := range []string{
 		"replicas must be >= 1",
 		"max_sessions_per_replica must be >= 1",
-		"hibernate_timeout_minutes must be >= 1",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q\n--- got ---\n%s", want, joined)
 		}
+	}
+	if strings.Contains(joined, "hibernate_timeout_minutes") {
+		t.Fatalf("hibernate_timeout_minutes=0 disables hibernation and must be accepted:\n%s", joined)
 	}
 
 	// -1 is the accepted reset sentinel for hibernate only.

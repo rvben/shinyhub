@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
 
@@ -125,7 +126,8 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 	localDigests := map[string]string{}
 	sources := map[string]string{}
 	var resolveProblems []string
-	for _, app := range m.Apps {
+	for i := range m.Apps {
+		app := &m.Apps[i]
 		ps, sp := fleet.ParseSource(app.Source, manifestDir)
 		if sp != nil {
 			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %s", app.Slug, sp.Msg))
@@ -148,6 +150,14 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		}
 		localDigests[app.Slug] = dg
 		sources[app.Slug] = dir
+		bm, merr := deploy.LoadManifest(dir)
+		if merr != nil {
+			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, merr))
+			continue
+		}
+		if bm != nil {
+			app.Bundle = bundleFleetConfig(bm.App)
+		}
 	}
 	if len(resolveProblems) > 0 {
 		fmt.Fprintf(errOut, "shinyhub fleet %s: resolving sources\n\n", cmdName)
@@ -167,14 +177,25 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			// Taken by address so a stored empty description reads as the real
 			// value "" rather than "not observed"; the API omits the key when
 			// empty, which decodes to the same "".
-			Name:                    &a.Name,
-			Description:             &a.Description,
-			Access:                  a.Access,
-			HibernateTimeoutMinutes: a.HibernateTimeoutMinutes,
-			Replicas:                intPtrIfPositive(a.Replicas),
-			MaxSessionsPerReplica:   intPtrIfPositive(a.MaxSessionsPerReplica),
-			ContentDigest:           a.ContentDigest,
-			ManagedBy:               a.ManagedBy,
+			Name:                         &a.Name,
+			Description:                  &a.Description,
+			Icon:                         &a.IconEmoji,
+			ProjectSlug:                  &a.ProjectSlug,
+			Access:                       a.Access,
+			HibernateTimeoutMinutes:      a.HibernateTimeoutMinutes,
+			Replicas:                     intPtrIfPositive(a.Replicas),
+			MaxSessionsPerReplica:        intPtr(a.MaxSessionsPerReplica),
+			RenderSeconds:                floatPtr(a.RenderSeconds),
+			IdentityHeaders:              a.IdentityHeaders,
+			MinWarmReplicas:              intPtr(a.MinWarmReplicas),
+			MemoryLimitMB:                a.MemoryLimitMB,
+			CPUQuotaPercent:              a.CPUQuotaPercent,
+			WorkerIsolation:              stringPtr(a.WorkerIsolation),
+			WorkerGroupedSize:            intPtr(a.WorkerGroupedSize),
+			WorkerMaxWorkers:             intPtr(a.WorkerMaxWorkers),
+			WorkerMaxSessionLifetimeSecs: intPtr(a.WorkerMaxSessionLifetimeSecs),
+			ContentDigest:                a.ContentDigest,
+			ManagedBy:                    a.ManagedBy,
 			// A live GET /api/apps observation is always populated (never nil),
 			// so an on-server off policy stays distinct from "not observed".
 			Autoscale: &fleet.ObservedAutoscale{
@@ -212,4 +233,36 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		manifest: m, caps: caps, host: cfg.Host, diff: diff, projectDiff: projectDiff,
 		sources: sources, observed: observedBySlug, cleanup: runCleanups,
 	}, nil
+}
+
+func intPtr(v int) *int           { return &v }
+func floatPtr(v float64) *float64 { return &v }
+func stringPtr(v string) *string  { return &v }
+
+// bundleFleetConfig maps the durable, PATCHable subset of shinyhub.toml [app]
+// into the fleet differ's desired config. Command/timeouts are boot-time-only
+// and intentionally absent; every field here has a stored API counterpart.
+func bundleFleetConfig(a deploy.AppSettings) fleet.Config {
+	c := fleet.Config{
+		Name: a.Name, Description: a.Description, Project: a.Project, Icon: a.Icon,
+		HibernateTimeoutMinutes: a.HibernateTimeoutMinutes,
+		HibernateResetToDefault: a.HibernateResetToDefault,
+		Replicas:                a.Replicas, MaxSessionsPerReplica: a.MaxSessionsPerReplica,
+		RenderSeconds: a.RenderSeconds, IdentityHeaders: a.IdentityHeaders,
+		MinWarmReplicas: a.MinWarmReplicas, MemoryLimitMB: a.MemoryLimitMB,
+		CPUQuotaPercent: a.CPUQuotaPercent,
+	}
+	if a.Autoscale != nil {
+		c.Autoscale = &fleet.AutoscaleConfig{
+			Enabled: a.Autoscale.Enabled, MinReplicas: a.Autoscale.MinReplicas,
+			MaxReplicas: a.Autoscale.MaxReplicas, Target: a.Autoscale.Target,
+		}
+	}
+	if a.Worker != nil {
+		c.WorkerIsolation = a.Worker.Isolation
+		c.WorkerGroupedSize = a.Worker.GroupedSize
+		c.WorkerMaxWorkers = a.Worker.MaxWorkers
+		c.WorkerMaxSessionLifetimeSecs = a.Worker.MaxSessionLifetimeSecs
+	}
+	return c
 }

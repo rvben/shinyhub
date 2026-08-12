@@ -1067,12 +1067,32 @@ func (w *Watcher) reconcileStatuses(apps []*db.App, repMap map[int64][]*db.Repli
 	}
 }
 
-// reconcileAppStatus marks an app running iff every desired slot is running,
-// else degraded. It only moves an app between running and degraded; it never
-// touches hibernated/deploying/stopped apps. reps is app's current replica
-// snapshot.
+// reconcileAppStatus is isolation-aware: a multiplex app is running iff every
+// desired slot is running, while an elastic app with a successful deployment
+// is healthy with zero demand-driven workers. It only moves an app between
+// running and degraded; it never touches hibernated/deploying/stopped apps.
+// reps is the app's current multiplex replica snapshot.
 func (w *Watcher) reconcileAppStatus(app *db.App, reps []*db.Replica) {
 	if app.Status != "running" && app.Status != "degraded" {
+		return
+	}
+	// Elastic apps are demand-driven and intentionally have no durable replica
+	// rows. Their healthy idle state is an empty worker pool, so applying the
+	// multiplex replica-count rule below would mechanically mark every grouped
+	// or per-session app degraded. Worker spawn failures are surfaced by the
+	// elastic admission path; replica rows are not a health signal here.
+	if isElasticIsolation(deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)) {
+		// Preserve a real deploy/restore failure. The special case below only
+		// repairs the false replica-derived degradation of a successfully deployed
+		// demand-driven app; it must not erase an independent failure signal.
+		if app.Status == "degraded" && (app.LastDeploymentStatus == db.DeploymentFailed || app.LastError != "") {
+			return
+		}
+		if app.Status != "running" {
+			if err := w.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: "running"}); err != nil {
+				slog.Warn("watcher: reconcile elastic app status failed", "slug", app.Slug, "err", err)
+			}
+		}
 		return
 	}
 	running, warm := 0, 0

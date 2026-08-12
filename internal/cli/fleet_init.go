@@ -20,8 +20,41 @@ import (
 // "source is required" check (a precise message, never a confusing parse
 // error) until the operator sets each path.
 func emitFleetManifest(fleetID, sourceRoot string, apps []db.App) string {
+	return emitFleetManifestWithProjects(fleetID, sourceRoot, apps, projectsFromApps(apps))
+}
+
+// projectsFromApps reconstructs the project catalogue carried on app list
+// rows. GET /api/apps resolves project_name/project_icon_emoji for every app,
+// so fleet init can round-trip grouping without a second API call. A project
+// shared by several apps is emitted once, in slug order by the renderer.
+func projectsFromApps(apps []db.App) []db.ProjectListItem {
+	bySlug := make(map[string]db.ProjectListItem)
+	for _, a := range apps {
+		if a.ProjectSlug == "" {
+			continue
+		}
+		p := bySlug[a.ProjectSlug]
+		p.Slug = a.ProjectSlug
+		if p.Name == "" {
+			p.Name = a.ProjectName
+		}
+		if p.IconEmoji == "" {
+			p.IconEmoji = a.ProjectIconEmoji
+		}
+		bySlug[a.ProjectSlug] = p
+	}
+	out := make([]db.ProjectListItem, 0, len(bySlug))
+	for _, p := range bySlug {
+		out = append(out, p)
+	}
+	return out
+}
+
+func emitFleetManifestWithProjects(fleetID, sourceRoot string, apps []db.App, projects []db.ProjectListItem) string {
 	sorted := append([]db.App(nil), apps...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Slug < sorted[j].Slug })
+	sortedProjects := append([]db.ProjectListItem(nil), projects...)
+	sort.Slice(sortedProjects, func(i, j int) bool { return sortedProjects[i].Slug < sortedProjects[j].Slug })
 
 	marker := "fleet:" + fleetID
 
@@ -43,6 +76,23 @@ func emitFleetManifest(fleetID, sourceRoot string, apps []db.App) string {
 	}
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, "fleet_id = %s\n\n", tomlString(fleetID))
+	for _, p := range sortedProjects {
+		if p.Slug == "" {
+			continue
+		}
+		b.WriteString("[[project]]\n")
+		fmt.Fprintf(&b, "slug = %s\n", tomlString(p.Slug))
+		if p.Name != "" {
+			fmt.Fprintf(&b, "name = %s\n", tomlString(p.Name))
+		}
+		if p.Description != "" {
+			fmt.Fprintf(&b, "description = %s\n", tomlString(p.Description))
+		}
+		if p.IconEmoji != "" {
+			fmt.Fprintf(&b, "icon = %s\n", tomlString(p.IconEmoji))
+		}
+		b.WriteByte('\n')
+	}
 
 	root := strings.TrimRight(sourceRoot, "/")
 	for _, a := range sorted {
@@ -64,6 +114,9 @@ func emitFleetManifest(fleetID, sourceRoot string, apps []db.App) string {
 		fmt.Fprintf(&b, "visibility = %s\n", tomlString(vis))
 
 		var cfg []string
+		if a.ProjectSlug != "" {
+			cfg = append(cfg, fmt.Sprintf("project                   = %s", tomlString(a.ProjectSlug)))
+		}
 		if a.HibernateTimeoutMinutes != nil {
 			cfg = append(cfg, fmt.Sprintf("hibernate_timeout_minutes = %d", *a.HibernateTimeoutMinutes))
 		}

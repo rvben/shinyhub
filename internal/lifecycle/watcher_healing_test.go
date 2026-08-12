@@ -243,6 +243,35 @@ func TestReconcileAppStatus_RunningWhenAllRunning(t *testing.T) {
 	}
 }
 
+func TestReconcileAppStatus_ElasticEmptyPoolIsHealthy(t *testing.T) {
+	st := newFakeStore(map[string]*db.App{
+		"app": {ID: 1, Slug: "app", Status: "degraded", Replicas: 1, WorkerIsolation: "grouped"},
+	}, nil)
+	w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
+	w.reconcileAppStatus(st.apps["app"], nil)
+	if st.appStatus["app"] != "running" {
+		t.Fatalf("grouped app with an idle empty pool = %q, want running", st.appStatus["app"])
+	}
+
+	st = newFakeStore(map[string]*db.App{
+		"app": {ID: 1, Slug: "app", Status: "degraded", Replicas: 1},
+	}, nil)
+	w = newTestWatcher(Config{DefaultWorkerIsolation: "per_session"}, &fakeManager{}, newFakeProxy(), st, nil)
+	w.reconcileAppStatus(st.apps["app"], nil)
+	if st.appStatus["app"] != "running" {
+		t.Fatalf("inherited elastic app = %q, want running", st.appStatus["app"])
+	}
+
+	st = newFakeStore(map[string]*db.App{
+		"app": {ID: 1, Slug: "app", Status: "degraded", Replicas: 1, WorkerIsolation: "grouped", LastDeploymentStatus: db.DeploymentFailed},
+	}, nil)
+	w = newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st, nil)
+	w.reconcileAppStatus(st.apps["app"], nil)
+	if st.appStatus["app"] != "degraded" {
+		t.Fatalf("real elastic deployment failure was erased: %q", st.appStatus["app"])
+	}
+}
+
 func TestReconcileAppStatus_IgnoresHibernatedAndDeploying(t *testing.T) {
 	for _, status := range []string{"hibernated", "deploying", "stopped"} {
 		st := newFakeStore(map[string]*db.App{"app": {ID: 1, Slug: "app", Status: status, Replicas: 2}}, nil)

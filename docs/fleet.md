@@ -61,16 +61,14 @@ visibility = "public"
 | `name` | string 1..128 | Friendly display name shown on the dashboard card and the detail heading. Trimmed; may not be empty. Distinct from `slug`, which is the URL identifier and is not settable here. |
 | `description` | string 0..280 | One-line description shown under the name. Trimmed; `""` is a real value that clears it. |
 | `project` | string | Project slug that groups this app on the dashboard, the launchpad and the sidebar. Must match `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`. `""` is a real value that ungroups the app. The project row is created automatically if it does not exist. |
-| `hibernate_timeout_minutes` | int | Idle minutes before hibernation. `-1` resets the field to the server default (the same sentinel as the bundle `shinyhub.toml`). Otherwise must be `>= 1`. |
+| `hibernate_timeout_minutes` | int | Idle minutes before hibernation. `-1` resets to the server default, `0` disables hibernation, and a positive value sets the timeout. |
 | `replicas` | int `>= 1` | Number of replica processes. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int `>= 1` | Per-replica admission cap for new cookieless sessions. |
 | `autoscale` | inline table | Session-saturation autoscale policy. Reconciled atomically and drift-protected as one unit. See [autoscale](#appconfig-autoscale) below. |
 
-Only the keys you declare are reconciled. An omitted key is not asserted: a
-value set through the UI, the CLI, or the bundle's own `shinyhub.toml`
-survives untouched. The fleet manifest does not assert a complete config
-state, so drift protection covers exactly the keys it declares and nothing
-else.
+Only the keys you declare here are owned by the fleet manifest. An omitted key
+may still be owned by the source bundle's `shinyhub.toml`; if neither manifest
+declares it, a value set through the UI or CLI survives untouched.
 
 Declaring `name` or `description` therefore makes the manifest their owner: a
 rename in the dashboard shows up as drift on the next `fleet plan` and is
@@ -170,13 +168,14 @@ wins:
 
 1. **Fleet manifest `[app.config]`** - highest. A declared key is enforced on
    every apply; out-of-band drift is corrected back.
-2. **Bundle `shinyhub.toml` `[app]`** - applies on deploy for keys the fleet
-   manifest does not declare.
+2. **Bundle `shinyhub.toml` `[app]`** - durable settings are checked on every
+   plan/apply and corrected with a config PATCH even when the bundle digest is
+   unchanged. Boot-only settings such as `command` and startup/build timeouts
+   continue to take effect when the bundle is deployed or started.
 3. **Server default** - lowest.
 
-Because the manifest only declares the keys you write, a setting you manage
-elsewhere (UI, CLI, or bundle) keeps working as long as the fleet manifest
-stays silent about that key.
+If neither manifest declares a durable key, a setting managed through the UI
+or CLI remains outside fleet reconciliation.
 
 ## Strict-mode parsing
 
@@ -197,7 +196,9 @@ shinyhub fleet init --fleet-id prod-eu --source-root ./apps
 ```
 
 Writes `fleet.toml` containing `fleet_id` and one `[[app]]` block per
-existing app, slug-sorted, with each app's current visibility and config.
+existing app, slug-sorted, with each app's current visibility, config, and
+project membership. Referenced projects are emitted once as `[[project]]`
+blocks so grouping survives an init/plan/apply round trip.
 With `--source-root <dir>` each `source` is set to `<dir>/<slug>` and the file
 is immediately plan-able. Without it the `source` line is left commented so
 you set each path explicitly; an unset source trips the pre-flight check with
@@ -228,8 +229,9 @@ shinyhub fleet apply --prune --yes
 ```
 
 `apply` recomputes the same diff as `plan` (a prior plan is never replayed),
-then for each app, in order: deploys changed apps, reconciles fleet-declared
-config drift, and stamps ownership. Convergence is non-atomic and
+then for each app, in order: deploys changed apps, reconciles durable config
+declared by either manifest (with `[app.config]` taking precedence), and stamps
+ownership. Convergence is non-atomic and
 continue-on-error: one failing app does not abort the rest, and the exit code
 reflects the worst outcome.
 
@@ -239,7 +241,7 @@ reflects the worst outcome.
 | `--adopt` | Take ownership of in-scope apps that exist but are not yet fleet-managed. Without it, an un-owned app in scope is reported, not modified. |
 | `--prune` | Delete fleet-owned apps that are absent from the manifest. **This also removes their persistent data directory and all bundles.** |
 | `-y/--yes` | Skip the interactive destructive-action confirmation. `--prune` in a non-interactive shell requires `--yes`. |
-| `--retries N` | Retry attempts *after* the first for deploy-bearing actions. Default 1 (so two attempts total). |
+| `--retries N` | Retry attempts *after* the first for deploys and transient config PATCH failures. Default 1 (so two attempts total). |
 | `--allow-unsafe-degraded-prune` | Permit prune against a server without precondition support, accepting a documented race (see [Degraded mode](#degraded-mode)). |
 | `--json` | Emit the machine-readable result envelope. |
 | `-q/--quiet` | Collapse to the summary plus result line. |

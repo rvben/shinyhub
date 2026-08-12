@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -413,6 +414,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setMaxSessions      bool
 		newRenderSeconds    float64
 		setRenderSeconds    bool
+		newIdentityHeaders  *bool
+		setIdentityHeaders  bool
 		newMinWarmReplicas  int
 		setMinWarmReplicas  bool
 		newManagedBy        *string
@@ -593,6 +596,15 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newRenderSeconds, setRenderSeconds = v, true
+	}
+
+	if rawVal, present := raw["identity_headers"]; present {
+		var v *bool
+		if err := json.Unmarshal(rawVal, &v); err != nil {
+			writeError(w, http.StatusBadRequest, "identity_headers must be a boolean or null")
+			return
+		}
+		newIdentityHeaders, setIdentityHeaders = v, true
 	}
 
 	if rawVal, present := raw["min_warm_replicas"]; present {
@@ -911,6 +923,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		MaxSessions:                  newMaxSessions,
 		SetRenderSeconds:             setRenderSeconds,
 		RenderSeconds:                newRenderSeconds,
+		SetIdentityHeaders:           setIdentityHeaders,
+		IdentityHeaders:              newIdentityHeaders,
 		SetMinWarmReplicas:           setMinWarmReplicas,
 		MinWarmReplicas:              newMinWarmReplicas,
 		SetWorkerIsolation:           setWorkerIsolation,
@@ -927,6 +941,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
+		reqLog(r).Error("patch app settings failed", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -1038,6 +1053,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	if setRenderSeconds && s.proxy != nil {
 		s.proxy.ApplyRenderPacing(slug, newRenderSeconds)
 	}
+	if setIdentityHeaders && s.proxy != nil {
+		s.proxy.SetPoolIdentityHeaders(slug,
+			deploy.ResolveIdentityHeaders(newIdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()))
+	}
 	// SetPoolMode on any worker-field change so a live isolation reconfiguration
 	// reshapes the pool without requiring a full redeploy cycle. The isolation
 	// change will also trigger redeployApp (below), which calls deploy.Run and
@@ -1081,7 +1100,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// Audit any non-resource field touch exactly as before (these log even with
 	// an empty detail). For resource limits, audit only a real change, so a no-op
 	// resource-only PATCH neither redeploys nor logs a phantom update_app event.
-	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug ||
+	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug || setIdentityHeaders ||
 		setReplicas || setMaxSessions || setRenderSeconds || setMinWarmReplicas || setManagedBy ||
 		setPlacement || clearPlacement || setAutoscale ||
 		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime ||
@@ -2986,6 +3005,24 @@ func (s *Server) buildWorkerPool(slug string, snap proxy.ElasticPoolSnapshot) wo
 		}
 		out.Workers = append(out.Workers, entry)
 	}
+	// A process can briefly outlive its proxy slot while asynchronous teardown
+	// runs (or expose an invariant violation if it persists). Do not make that
+	// real host process disappear from observability: surface it as draining,
+	// which truthfully says it is not admission capacity. This also makes a
+	// manager/proxy divergence diagnosable without a host-level ps trace.
+	seen := make(map[int]bool, len(out.Workers))
+	for _, w := range out.Workers {
+		seen[w.SlotID] = true
+	}
+	for idx, info := range live {
+		if info == nil || seen[idx] {
+			continue
+		}
+		out.Workers = append(out.Workers, workerPoolWorker{
+			SlotID: idx, Status: "draining", PID: info.PID, Port: info.Port,
+		})
+	}
+	sort.Slice(out.Workers, func(i, j int) bool { return out.Workers[i].SlotID < out.Workers[j].SlotID })
 	return out
 }
 

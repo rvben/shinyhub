@@ -85,13 +85,13 @@ func TestDiff_AllActions(t *testing.T) {
 		AppEntry{Slug: "adopt-other", Source: "./f", Visibility: "private"},
 	)
 	local := map[string]string{
-		"owned-same": "sha256:aaa",
-		"owned-src":  "sha256:NEW",
-		"owned-cfg":  "sha256:ccc",
-		"owned-both": "sha256:NEW",
-		"adopt-null": "sha256:zzz",
+		"owned-same":  "sha256:aaa",
+		"owned-src":   "sha256:NEW",
+		"owned-cfg":   "sha256:ccc",
+		"owned-both":  "sha256:NEW",
+		"adopt-null":  "sha256:zzz",
 		"adopt-other": "sha256:zzz",
-		"newapp":     "sha256:zzz",
+		"newapp":      "sha256:zzz",
 	}
 	observed := []ObservedApp{
 		{Slug: "owned-same", ManagedBy: sp("fleet:eu"), ContentDigest: "sha256:aaa", Replicas: ptr(1)},
@@ -192,5 +192,40 @@ func TestDiff_DigestEmptyServerCountsAsSourceChange(t *testing.T) {
 	got := byslug(Diff(m, local, obs))
 	if got["x"].Action != ActionUpdateSource {
 		t.Fatalf("legacy NULL digest must yield update(source), got %q", got["x"].Action)
+	}
+}
+
+func TestDiff_BundleDeclaredWorkerDriftIsReconciled(t *testing.T) {
+	app := AppEntry{
+		Slug: "dash", Source: "./dash", Visibility: "private",
+		Bundle: Config{
+			WorkerIsolation: sp("grouped"), WorkerGroupedSize: ptr(6), WorkerMaxWorkers: ptr(40),
+		},
+	}
+	got := Diff(mani("eu", app), map[string]string{"dash": "sha256:same"}, []ObservedApp{{
+		Slug: "dash", ManagedBy: sp("fleet:eu"), ContentDigest: "sha256:same", Access: "private",
+		WorkerIsolation: sp("multiplex"), WorkerGroupedSize: ptr(6), WorkerMaxWorkers: ptr(40),
+	}})[0]
+	if got.Action != ActionUpdateConfig {
+		t.Fatalf("action = %q, want update(config): %+v", got.Action, got.ConfigDrift)
+	}
+	if len(got.ConfigDrift) != 1 || got.ConfigDrift[0].Key != "worker_isolation" ||
+		got.ConfigDrift[0].Server != `"multiplex"` || got.ConfigDrift[0].Desired != `"grouped"` {
+		t.Fatalf("worker drift = %+v", got.ConfigDrift)
+	}
+}
+
+func TestEffectiveConfig_FleetOverridesBundleAndCreateDoesNotRepatchBundle(t *testing.T) {
+	app := AppEntry{
+		Bundle: Config{Name: sp("Bundle name"), WorkerIsolation: sp("grouped")},
+		Config: Config{Name: sp("Fleet name")},
+	}
+	eff := EffectiveConfig(app)
+	if eff.Name == nil || *eff.Name != "Fleet name" || eff.WorkerIsolation == nil || *eff.WorkerIsolation != "grouped" {
+		t.Fatalf("effective config = %+v", eff)
+	}
+	declared := DeclaredConfig(app)
+	if len(declared) != 1 || declared[0].Key != "name" {
+		t.Fatalf("create follow-up must contain fleet config only, got %+v", declared)
 	}
 }

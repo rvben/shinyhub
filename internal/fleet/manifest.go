@@ -63,6 +63,22 @@ type Config struct {
 	Replicas                *int             `toml:"replicas"`
 	MaxSessionsPerReplica   *int             `toml:"max_sessions_per_replica"`
 	Autoscale               *AutoscaleConfig `toml:"autoscale"`
+
+	// The fields below are populated from the source bundle's shinyhub.toml by
+	// fleet preflight. They are deliberately not TOML-decodable here: the fleet
+	// manifest keeps its existing public schema, while bundle-declared durable
+	// app settings become part of the observed-vs-desired reconcile set.
+	Icon                         *string  `toml:"-"`
+	RenderSeconds                *float64 `toml:"-"`
+	IdentityHeaders              *bool    `toml:"-"`
+	MinWarmReplicas              *int     `toml:"-"`
+	MemoryLimitMB                *int     `toml:"-"`
+	CPUQuotaPercent              *int     `toml:"-"`
+	WorkerIsolation              *string  `toml:"-"`
+	WorkerGroupedSize            *int     `toml:"-"`
+	WorkerMaxWorkers             *int     `toml:"-"`
+	WorkerMaxSessionLifetimeSecs *int     `toml:"-"`
+	HibernateResetToDefault      bool     `toml:"-"`
 }
 
 // AutoscaleConfig mirrors the [app.config] autoscale inline table. It matches
@@ -83,6 +99,39 @@ type AppEntry struct {
 	Source     string `toml:"source"`
 	Visibility string `toml:"visibility"`
 	Config     Config `toml:"config"`
+	// Bundle is the durable [app] state declared by source/shinyhub.toml. It is
+	// filled after source resolution and never decoded from fleet.toml.
+	Bundle Config `toml:"-"`
+}
+
+// EffectiveConfig overlays the fleet manifest's [app.config] on the source
+// bundle's [app] declarations. The outer fleet manifest wins for fields both
+// layers can declare; bundle-only durable fields remain managed by the bundle.
+func EffectiveConfig(app AppEntry) Config {
+	c := app.Bundle
+	if app.Config.Name != nil {
+		c.Name = app.Config.Name
+	}
+	if app.Config.Description != nil {
+		c.Description = app.Config.Description
+	}
+	if app.Config.Project != nil {
+		c.Project = app.Config.Project
+	}
+	if app.Config.HibernateTimeoutMinutes != nil {
+		c.HibernateTimeoutMinutes = app.Config.HibernateTimeoutMinutes
+		c.HibernateResetToDefault = *app.Config.HibernateTimeoutMinutes == -1
+	}
+	if app.Config.Replicas != nil {
+		c.Replicas = app.Config.Replicas
+	}
+	if app.Config.MaxSessionsPerReplica != nil {
+		c.MaxSessionsPerReplica = app.Config.MaxSessionsPerReplica
+	}
+	if app.Config.Autoscale != nil {
+		c.Autoscale = app.Config.Autoscale
+	}
+	return c
 }
 
 // ProjectEntry is one [[project]] block after validation. It carries display
@@ -247,13 +296,13 @@ func validateConfig(file, who string, c *Config) []Problem {
 			c.Project = &v
 		}
 	}
-	// hibernate accepts the existing -1 "reset to default" sentinel (matches
-	// internal/deploy/hooks.go), otherwise must be >= 1.
+	// hibernate accepts -1 (reset to default), 0 (disable), or a positive
+	// timeout, matching the bundle manifest and apps set.
 	if c.HibernateTimeoutMinutes != nil {
 		v := *c.HibernateTimeoutMinutes
-		if v != -1 && v < 1 {
+		if v < -1 {
 			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
-				"%s: hibernate_timeout_minutes must be >= 1 (or -1 to reset to default), got %d", who, v)})
+				"%s: hibernate_timeout_minutes must be -1 (reset), 0 (disable), or positive, got %d", who, v)})
 		}
 	}
 	if c.Replicas != nil && *c.Replicas < 1 {

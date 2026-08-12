@@ -52,6 +52,21 @@ func TestEmitFleetManifest_SourceRootIsParseClean(t *testing.T) {
 	}
 }
 
+func TestEmitFleetManifest_RoundTripsProjects(t *testing.T) {
+	apps := []db.App{
+		{Slug: "a", Access: "private", ProjectSlug: "analytics", ProjectName: "Analytics", ProjectIconEmoji: "📊"},
+		{Slug: "b", Access: "private", ProjectSlug: "analytics", ProjectName: "Analytics", ProjectIconEmoji: "📊"},
+	}
+	doc := emitFleetManifest("prod", "./apps", apps)
+	if strings.Count(doc, "[[project]]") != 1 || !strings.Contains(doc, `project                   = "analytics"`) {
+		t.Fatalf("project grouping was not round-tripped:\n%s", doc)
+	}
+	m, probs := fleet.ParseManifest([]byte(doc), "fleet.toml")
+	if len(probs) != 0 || len(m.Projects) != 1 || m.Projects[0].Slug != "analytics" {
+		t.Fatalf("generated project manifest invalid: projects=%+v problems=%v", m.Projects, probs)
+	}
+}
+
 func TestEmitFleetManifest_NoSourceRootIsHonestlyIncomplete(t *testing.T) {
 	doc := emitFleetManifest("prod-eu", "", initApps())
 

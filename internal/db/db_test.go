@@ -3,7 +3,9 @@ package db_test
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -923,6 +925,46 @@ func TestPatchAppSettings_ReplicaShrinkPrune(t *testing.T) {
 	}
 	if len(reps) != 1 || reps[0].Index != 0 {
 		t.Fatalf("want single replica index 0 after shrink to 1, got %+v", reps)
+	}
+}
+
+func TestPatchAppSettings_ConcurrentSQLiteWritersDoNotBusySnapshot(t *testing.T) {
+	dbtest.SkipIfPostgres(t)
+	store, err := db.Open(t.TempDir() + "/concurrent-patch.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	user := mustCreateUser(t, store, "fleet-owner", "developer")
+	const n = 12
+	for i := 0; i < n; i++ {
+		mustCreateApp(t, store, fmt.Sprintf("app-%02d", i), user.ID)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+				Slug: fmt.Sprintf("app-%02d", i), SetProjectSlug: true, ProjectSlug: "analytics",
+			})
+			errs <- err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent PATCH failed: %v", err)
+		}
 	}
 }
 

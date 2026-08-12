@@ -149,25 +149,30 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 
 	var resp2 struct {
 		App struct {
-			Slug                    string  `json:"slug"`
-			Name                    string  `json:"name"`
-			OwnerID                 int64   `json:"owner_id"`
-			Access                  string  `json:"access"`
-			Status                  string  `json:"status"`
-			Replicas                int     `json:"replicas"`
-			MaxSessionsPerReplica   int     `json:"max_sessions_per_replica"`
-			DeployCount             int     `json:"deploy_count"`
-			HibernateTimeoutMinutes *int    `json:"hibernate_timeout_minutes"`
-			MemoryLimitMB           *int    `json:"memory_limit_mb"`
-			CPUQuotaPercent         *int    `json:"cpu_quota_percent"`
-			ProjectSlug             string  `json:"project_slug,omitempty"`
-			CreatedAt               string  `json:"created_at"`
-			UpdatedAt               string  `json:"updated_at"`
-			AutoscaleEnabled        bool    `json:"autoscale_enabled"`
-			AutoscaleMinReplicas    int     `json:"autoscale_min_replicas"`
-			AutoscaleMaxReplicas    int     `json:"autoscale_max_replicas"`
-			AutoscaleTarget         float64 `json:"autoscale_target"`
-			RenderSeconds           float64 `json:"render_seconds"`
+			Slug                         string  `json:"slug"`
+			Name                         string  `json:"name"`
+			OwnerID                      int64   `json:"owner_id"`
+			Access                       string  `json:"access"`
+			Status                       string  `json:"status"`
+			Replicas                     int     `json:"replicas"`
+			MaxSessionsPerReplica        int     `json:"max_sessions_per_replica"`
+			DeployCount                  int     `json:"deploy_count"`
+			HibernateTimeoutMinutes      *int    `json:"hibernate_timeout_minutes"`
+			MemoryLimitMB                *int    `json:"memory_limit_mb"`
+			CPUQuotaPercent              *int    `json:"cpu_quota_percent"`
+			ProjectSlug                  string  `json:"project_slug,omitempty"`
+			CreatedAt                    string  `json:"created_at"`
+			UpdatedAt                    string  `json:"updated_at"`
+			AutoscaleEnabled             bool    `json:"autoscale_enabled"`
+			AutoscaleMinReplicas         int     `json:"autoscale_min_replicas"`
+			AutoscaleMaxReplicas         int     `json:"autoscale_max_replicas"`
+			AutoscaleTarget              float64 `json:"autoscale_target"`
+			RenderSeconds                float64 `json:"render_seconds"`
+			WorkerIsolation              string  `json:"worker_isolation"`
+			EffectiveWorkerIsolation     string  `json:"effective_worker_isolation"`
+			WorkerGroupedSize            int     `json:"worker_grouped_size"`
+			WorkerMaxWorkers             int     `json:"worker_max_workers"`
+			WorkerMaxSessionLifetimeSecs int     `json:"worker_max_session_lifetime_secs"`
 		} `json:"app"`
 		RenderPacing *struct {
 			EffectiveCores                        float64 `json:"effective_cores"`
@@ -215,6 +220,27 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	fmt.Fprintf(w, "Owner:       user #%d\n", a.OwnerID)
 	if a.ProjectSlug != "" {
 		fmt.Fprintf(w, "Project:     %s\n", a.ProjectSlug)
+	}
+	effectiveIsolation := a.EffectiveWorkerIsolation
+	if effectiveIsolation == "" {
+		effectiveIsolation = a.WorkerIsolation
+	}
+	if effectiveIsolation == "" {
+		effectiveIsolation = "multiplex"
+	}
+	if resp2.WorkerPool == nil {
+		fmt.Fprintf(w, "Isolation:   %s", effectiveIsolation)
+		if a.WorkerIsolation == "" {
+			fmt.Fprint(w, " (inherited)")
+		}
+		fmt.Fprintln(w)
+		if effectiveIsolation == "grouped" || effectiveIsolation == "per_session" {
+			fmt.Fprintf(w, "Worker cap:  %d", a.WorkerMaxWorkers)
+			if effectiveIsolation == "grouped" {
+				fmt.Fprintf(w, " × %d sessions", a.WorkerGroupedSize)
+			}
+			fmt.Fprintln(w)
+		}
 	}
 	fmt.Fprintf(w, "Deploys:     %d\n", a.DeployCount)
 	if wp := resp2.WorkerPool; wp != nil {

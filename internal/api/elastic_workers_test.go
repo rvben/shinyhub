@@ -97,6 +97,36 @@ func TestAppsAPI_GetIncludesWorkerPool(t *testing.T) {
 	}
 }
 
+func TestAppsAPI_WorkerPoolSurfacesManagerOnlyProcessAsDraining(t *testing.T) {
+	srv, store, mgr, prx := newMetricsTestServerWithProxy(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "grpapp", Name: "Grp", OwnerID: u.ID})
+	prx.SetPoolMode("grpapp", config.IsolationGrouped, 2, 5)
+	mgr.ForceEntry("grpapp", process.ProcessInfo{Slug: "grpapp", Index: 3, PID: 7654, Port: 20103, Status: process.StatusRunning})
+
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps/grpapp", nil, token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		WorkerPool *workerPoolResp `json:"worker_pool"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.WorkerPool == nil || len(resp.WorkerPool.Workers) != 1 {
+		t.Fatalf("worker pool = %+v, want manager-only process surfaced", resp.WorkerPool)
+	}
+	w := resp.WorkerPool.Workers[0]
+	if w.SlotID != 3 || w.Status != "draining" || w.PID != 7654 || w.Port != 20103 {
+		t.Fatalf("manager-only worker = %+v", w)
+	}
+}
+
 // TestAppsAPI_GetOmitsWorkerPoolForMultiplex pins that multiplex apps carry
 // no worker_pool key: absence of the capacity view must be distinguishable
 // from an elastic pool with zero workers.

@@ -91,6 +91,27 @@ func TestSendFleetMutation_500IsPlainError(t *testing.T) {
 	}
 }
 
+func TestApplyConfigDriftWithRetry_Retries500AndCountsAttempts(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if hits == 1 {
+			writeError := `{"error":"transient"}`
+			http.Error(w, writeError, http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	attempts, err := applyConfigDriftWithRetry(cfg, "demo",
+		[]fleet.ConfigDriftItem{{Key: "worker_isolation", Desired: `"grouped"`}},
+		fleet.Config{WorkerIsolation: strp("grouped")}, nil, nil, "r", 1)
+	if err != nil || attempts != 2 || hits != 2 {
+		t.Fatalf("attempts=%d hits=%d err=%v, want 2/2/nil", attempts, hits, err)
+	}
+}
+
 func TestFleetConfigBody_OnlyDeclaredKeys(t *testing.T) {
 	h := 30
 	body := fleetConfigBody(fleet.Config{HibernateTimeoutMinutes: &h})
@@ -99,6 +120,19 @@ func TestFleetConfigBody_OnlyDeclaredKeys(t *testing.T) {
 	}
 	if len(fleetConfigBody(fleet.Config{})) != 0 {
 		t.Fatal("empty config must yield empty body")
+	}
+}
+
+func TestFleetConfigBody_BundleDurableKeys(t *testing.T) {
+	iso, icon, ident := "grouped", "🧪", true
+	grouped, workers := 6, 40
+	body := fleetConfigBody(fleet.Config{
+		Icon: &icon, IdentityHeaders: &ident, WorkerIsolation: &iso,
+		WorkerGroupedSize: &grouped, WorkerMaxWorkers: &workers,
+	})
+	if body["icon_emoji"] != "🧪" || body["identity_headers"] != true ||
+		body["worker_isolation"] != "grouped" || body["worker_grouped_size"] != 6 || body["worker_max_workers"] != 40 {
+		t.Fatalf("bundle config body = %#v", body)
 	}
 }
 

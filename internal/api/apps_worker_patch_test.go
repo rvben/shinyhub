@@ -82,6 +82,19 @@ func TestPatchApp_WorkerIsolationPerSessionSucceeds(t *testing.T) {
 	}
 }
 
+func TestPatchApp_IdentityHeadersSupportsBundleReconcile(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+	rec := patchWorkerApp(t, srv, token, []byte(`{"identity_headers":false}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, _ := store.GetAppBySlug("wapp")
+	if app.IdentityHeaders == nil || *app.IdentityHeaders {
+		t.Fatalf("identity_headers = %v, want explicit false", app.IdentityHeaders)
+	}
+}
+
 // TestPatchApp_GroupedIsolationRequiresGroupedSize verifies that a PATCH with
 // grouped isolation but no grouped_size is rejected with a 400 that mentions
 // "grouped_size".

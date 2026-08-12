@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -25,7 +26,7 @@ type convergeOpts struct {
 	prune              bool
 	allowDegradedPrune bool
 	preconditions      bool // server supports If-Match-style headers
-	retries            int  // attempts AFTER the first for deploy-bearing actions
+	retries            int  // attempts AFTER the first for deploys/transient config PATCHes
 	healthTimeout      time.Duration
 	waitForWarm        bool
 	concurrency        int // max apps converged in parallel; <=1 means serial
@@ -186,18 +187,52 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 			if err := patchAppAccess(cfg, slug, c.Desired, ifD, ifMB, runID); err != nil {
 				return err
 			}
-		case "hibernate_timeout_minutes", "replicas", "max_sessions_per_replica":
+		case "hibernate_timeout_minutes":
+			if c.Desired == "(default)" {
+				body[c.Key] = nil
+				continue
+			}
+			n, perr := strconv.Atoi(c.Desired)
+			if perr != nil {
+				return fmt.Errorf("app %s: invalid desired %s=%q: %w", slug, c.Key, c.Desired, perr)
+			}
+			// The fleet manifest's -1 sentinel has the same meaning as the
+			// bundle parser's reset flag and PATCH's JSON null.
+			if n == -1 {
+				body[c.Key] = nil
+			} else {
+				body[c.Key] = n
+			}
+		case "replicas", "max_sessions_per_replica", "min_warm_replicas",
+			"memory_limit_mb", "cpu_quota_percent", "worker_grouped_size",
+			"worker_max_workers", "worker_max_session_lifetime_secs":
 			n, perr := strconv.Atoi(c.Desired)
 			if perr != nil {
 				return fmt.Errorf("app %s: invalid desired %s=%q: %w", slug, c.Key, c.Desired, perr)
 			}
 			body[c.Key] = n
-		case "name", "description":
+		case "name", "description", "worker_isolation":
 			// Rebuilt from the declared config, like autoscale below: the drift
 			// item carries a quoted display string, not a value to send.
 			if v := declaredString(declared, c.Key); v != nil {
 				body[c.Key] = *v
 			}
+		case "icon":
+			if declared.Icon != nil {
+				body["icon_emoji"] = *declared.Icon
+			}
+		case "render_seconds":
+			v, perr := strconv.ParseFloat(c.Desired, 64)
+			if perr != nil {
+				return fmt.Errorf("app %s: invalid desired %s=%q: %w", slug, c.Key, c.Desired, perr)
+			}
+			body[c.Key] = v
+		case "identity_headers":
+			v, perr := strconv.ParseBool(c.Desired)
+			if perr != nil {
+				return fmt.Errorf("app %s: invalid desired %s=%q: %w", slug, c.Key, c.Desired, perr)
+			}
+			body[c.Key] = v
 		case "project":
 			// The drift key is `project` (what the operator wrote in the
 			// manifest); the API field is `project_slug`. Rebuilt from the
@@ -217,6 +252,23 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 	return patchApp(cfg, slug, body, ifD, ifMB, runID)
 }
 
+// applyConfigDriftWithRetry gives transient server failures on the config-only
+// path the same retry budget deploy-bearing actions already receive. 4xx
+// validation/precondition responses are deterministic and never retried.
+func applyConfigDriftWithRetry(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem, declared fleet.Config, ifD, ifMB *string, runID string, retries int) (int, error) {
+	for attempt := 1; ; attempt++ {
+		err := applyConfigDrift(cfg, slug, drift, declared, ifD, ifMB, runID)
+		if err == nil || attempt > retries || !retryableFleetPatch(err) {
+			return attempt, err
+		}
+	}
+}
+
+func retryableFleetPatch(err error) bool {
+	var hs *httpStatusError
+	return errors.As(err, &hs) && hs.Status >= 500
+}
+
 // declaredString returns the declared value for a string config key, or nil
 // when the manifest does not declare it. Keyed by the same strings the drift
 // items use so the two cannot drift apart.
@@ -228,6 +280,8 @@ func declaredString(c fleet.Config, key string) *string {
 		return c.Description
 	case "project":
 		return c.Project
+	case "worker_isolation":
+		return c.WorkerIsolation
 	}
 	return nil
 }
@@ -491,9 +545,11 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 
 	case fleet.ActionUpdateConfig:
 		ifD, ifM := precondPtrs(opt, d.ServerDigest, marker)
-		if err := applyConfigDrift(cfg, d.Slug, d.ConfigDrift, entry.Config, ifD, ifM, opt.runID); err != nil {
-			return fail(err, 1)
+		attempts, err := applyConfigDriftWithRetry(cfg, d.Slug, d.ConfigDrift, fleet.EffectiveConfig(entry), ifD, ifM, opt.runID, opt.retries)
+		if err != nil {
+			return fail(err, attempts)
 		}
+		res.attempts = attempts
 		return done(statusUpdated)
 
 	case fleet.ActionUpdateSourceConfig:
@@ -510,7 +566,11 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 			return fail(ffErr, attempts)
 		}
 		ifD, ifM := precondPtrs(opt, promoted, marker)
-		if err := applyConfigDrift(cfg, d.Slug, d.ConfigDrift, entry.Config, ifD, ifM, opt.runID); err != nil {
+		// The deploy has just asserted every bundle-declared [app] value. Apply
+		// only the outer fleet config on top: it is the higher-precedence layer,
+		// and avoiding a second bundle PATCH prevents redundant worker/resource
+		// redeploys for fields the deploy already converged.
+		if err := patchApp(cfg, d.Slug, fleetConfigBody(entry.Config), ifD, ifM, opt.runID); err != nil {
 			return fail(err, attempts)
 		}
 		// d.ConfigDrift was computed pre-deploy: if autoscale or the display

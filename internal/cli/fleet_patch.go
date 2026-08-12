@@ -98,7 +98,11 @@ func fleetConfigBody(c fleet.Config) map[string]any {
 		body["project_slug"] = *c.Project
 	}
 	if c.HibernateTimeoutMinutes != nil {
-		body["hibernate_timeout_minutes"] = *c.HibernateTimeoutMinutes
+		if *c.HibernateTimeoutMinutes == -1 {
+			body["hibernate_timeout_minutes"] = nil
+		} else {
+			body["hibernate_timeout_minutes"] = *c.HibernateTimeoutMinutes
+		}
 	}
 	if c.Replicas != nil {
 		body["replicas"] = *c.Replicas
@@ -108,6 +112,36 @@ func fleetConfigBody(c fleet.Config) map[string]any {
 	}
 	if c.Autoscale != nil {
 		body["autoscale"] = autoscalePatchBody(c.Autoscale)
+	}
+	if c.Icon != nil {
+		body["icon_emoji"] = *c.Icon
+	}
+	if c.RenderSeconds != nil {
+		body["render_seconds"] = *c.RenderSeconds
+	}
+	if c.IdentityHeaders != nil {
+		body["identity_headers"] = *c.IdentityHeaders
+	}
+	if c.MinWarmReplicas != nil {
+		body["min_warm_replicas"] = *c.MinWarmReplicas
+	}
+	if c.MemoryLimitMB != nil {
+		body["memory_limit_mb"] = *c.MemoryLimitMB
+	}
+	if c.CPUQuotaPercent != nil {
+		body["cpu_quota_percent"] = *c.CPUQuotaPercent
+	}
+	if c.WorkerIsolation != nil {
+		body["worker_isolation"] = *c.WorkerIsolation
+	}
+	if c.WorkerGroupedSize != nil {
+		body["worker_grouped_size"] = *c.WorkerGroupedSize
+	}
+	if c.WorkerMaxWorkers != nil {
+		body["worker_max_workers"] = *c.WorkerMaxWorkers
+	}
+	if c.WorkerMaxSessionLifetimeSecs != nil {
+		body["worker_max_session_lifetime_secs"] = *c.WorkerMaxSessionLifetimeSecs
 	}
 	return body
 }

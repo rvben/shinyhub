@@ -29,17 +29,27 @@ type ObservedApp struct {
 	// description - that a declared "" matches without drift.
 	Name        *string
 	Description *string
+	Icon        *string
 	// ProjectSlug is the server's stored project. Pointer-typed for the same
 	// reason as Name and Description: nil means "not observed" and always
 	// asserts a declared value, while a non-nil "" is a real stored value (an
 	// ungrouped app) that a declared "" matches without drift.
-	ProjectSlug             *string
-	Access                  string
-	HibernateTimeoutMinutes *int
-	Replicas                *int
-	MaxSessionsPerReplica   *int
-	ContentDigest           string
-	ManagedBy               *string
+	ProjectSlug                  *string
+	Access                       string
+	HibernateTimeoutMinutes      *int
+	Replicas                     *int
+	MaxSessionsPerReplica        *int
+	RenderSeconds                *float64
+	IdentityHeaders              *bool
+	MinWarmReplicas              *int
+	MemoryLimitMB                *int
+	CPUQuotaPercent              *int
+	WorkerIsolation              *string
+	WorkerGroupedSize            *int
+	WorkerMaxWorkers             *int
+	WorkerMaxSessionLifetimeSecs *int
+	ContentDigest                string
+	ManagedBy                    *string
 
 	// Autoscale is the server's stored policy, or nil when not observed (as in
 	// DeclaredConfig's zero ObservedApp). nil is distinct from an all-zero
@@ -162,16 +172,33 @@ func Diff(m *Manifest, localDigests map[string]string, observed []ObservedApp) [
 // compared (drift covers only fleet-declared keys).
 func configDrift(app AppEntry, o ObservedApp) []ConfigDriftItem {
 	var d []ConfigDriftItem
+	c := EffectiveConfig(app)
 	if v := app.Visibility; v != "" && v != o.Access && o.Access != "" {
 		d = append(d, ConfigDriftItem{Key: "visibility", Server: o.Access, Desired: v})
 	}
-	d = appendStringDrift(d, "name", app.Config.Name, o.Name)
-	d = appendStringDrift(d, "description", app.Config.Description, o.Description)
-	d = appendStringDrift(d, "project", app.Config.Project, o.ProjectSlug)
-	d = appendIntDrift(d, "hibernate_timeout_minutes", app.Config.HibernateTimeoutMinutes, o.HibernateTimeoutMinutes)
-	d = appendIntDrift(d, "replicas", app.Config.Replicas, o.Replicas)
-	d = appendIntDrift(d, "max_sessions_per_replica", app.Config.MaxSessionsPerReplica, o.MaxSessionsPerReplica)
-	d = appendAutoscaleDrift(d, app.Config.Autoscale, o.Autoscale)
+	d = appendStringDrift(d, "name", c.Name, o.Name)
+	d = appendStringDrift(d, "description", c.Description, o.Description)
+	d = appendStringDrift(d, "icon", c.Icon, o.Icon)
+	d = appendStringDrift(d, "project", c.Project, o.ProjectSlug)
+	if c.HibernateResetToDefault {
+		if o.HibernateTimeoutMinutes != nil {
+			d = append(d, ConfigDriftItem{Key: "hibernate_timeout_minutes", Server: fmt.Sprintf("%d", *o.HibernateTimeoutMinutes), Desired: "(default)"})
+		}
+	} else {
+		d = appendIntDrift(d, "hibernate_timeout_minutes", c.HibernateTimeoutMinutes, o.HibernateTimeoutMinutes)
+	}
+	d = appendIntDrift(d, "replicas", c.Replicas, o.Replicas)
+	d = appendIntDrift(d, "max_sessions_per_replica", c.MaxSessionsPerReplica, o.MaxSessionsPerReplica)
+	d = appendFloatDrift(d, "render_seconds", c.RenderSeconds, o.RenderSeconds)
+	d = appendBoolDrift(d, "identity_headers", c.IdentityHeaders, o.IdentityHeaders)
+	d = appendIntDrift(d, "min_warm_replicas", c.MinWarmReplicas, o.MinWarmReplicas)
+	d = appendIntDrift(d, "memory_limit_mb", c.MemoryLimitMB, o.MemoryLimitMB)
+	d = appendIntDrift(d, "cpu_quota_percent", c.CPUQuotaPercent, o.CPUQuotaPercent)
+	d = appendStringDrift(d, "worker_isolation", c.WorkerIsolation, o.WorkerIsolation)
+	d = appendIntDrift(d, "worker_grouped_size", c.WorkerGroupedSize, o.WorkerGroupedSize)
+	d = appendIntDrift(d, "worker_max_workers", c.WorkerMaxWorkers, o.WorkerMaxWorkers)
+	d = appendIntDrift(d, "worker_max_session_lifetime_secs", c.WorkerMaxSessionLifetimeSecs, o.WorkerMaxSessionLifetimeSecs)
+	d = appendAutoscaleDrift(d, c.Autoscale, o.Autoscale)
 	return d
 }
 
@@ -230,6 +257,10 @@ func autoscaleDisplay(enabled bool, min, max int, target float64) string {
 // created app (which starts at server defaults). Visibility is excluded because
 // the deploy that creates the app already sets it.
 func DeclaredConfig(app AppEntry) []ConfigDriftItem {
+	// A create/adopt deploy has just applied the bundle manifest itself. Only
+	// the outer fleet config needs a follow-up assertion here; including Bundle
+	// would cause an unnecessary second worker/resource redeploy.
+	app.Bundle = Config{}
 	return configDrift(app, ObservedApp{})
 }
 
@@ -266,4 +297,26 @@ func appendStringDrift(d []ConfigDriftItem, key string, desired, server *string)
 		srv = fmt.Sprintf("%q", *server)
 	}
 	return append(d, ConfigDriftItem{Key: key, Server: srv, Desired: fmt.Sprintf("%q", *desired)})
+}
+
+func appendFloatDrift(d []ConfigDriftItem, key string, desired, server *float64) []ConfigDriftItem {
+	if desired == nil || (server != nil && *server == *desired) {
+		return d
+	}
+	srv := "(unset)"
+	if server != nil {
+		srv = fmt.Sprintf("%g", *server)
+	}
+	return append(d, ConfigDriftItem{Key: key, Server: srv, Desired: fmt.Sprintf("%g", *desired)})
+}
+
+func appendBoolDrift(d []ConfigDriftItem, key string, desired, server *bool) []ConfigDriftItem {
+	if desired == nil || (server != nil && *server == *desired) {
+		return d
+	}
+	srv := "(unset)"
+	if server != nil {
+		srv = fmt.Sprintf("%t", *server)
+	}
+	return append(d, ConfigDriftItem{Key: key, Server: srv, Desired: fmt.Sprintf("%t", *desired)})
 }

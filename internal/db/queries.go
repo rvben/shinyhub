@@ -3236,7 +3236,6 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) (bool
 			return false, fmt.Errorf("update render_seconds: %w", err)
 		}
 	}
-
 	if p.SetIdentityHeaders {
 		if _, err := tx.Exec(
 			`UPDATE apps SET identity_headers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -3358,6 +3357,9 @@ type PatchAppSettingsParams struct {
 	SetRenderSeconds bool
 	RenderSeconds    float64
 
+	SetIdentityHeaders bool
+	IdentityHeaders    *bool
+
 	SetMinWarmReplicas bool
 	MinWarmReplicas    int
 
@@ -3377,7 +3379,14 @@ type PatchAppSettingsParams struct {
 // (read inside the same transaction) so the caller can decide whether a
 // running pool needs a redeploy. Returns ErrNotFound if no app has the slug.
 func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, priorReplicas int, priorMem, priorCPU *int, projectCreated bool, err error) {
-	tx, err := s.db.Begin()
+	// This transaction reads the current row before writing it. A deferred
+	// SQLite transaction can deadlock during that read-to-write upgrade when
+	// fleet apply PATCHes several apps concurrently: one writer advances the
+	// WAL while the others still hold read snapshots, and those upgrades fail
+	// immediately with SQLITE_BUSY_SNAPSHOT despite busy_timeout. beginWrite
+	// takes BEGIN IMMEDIATE on SQLite, serializing writers before the read; on
+	// Postgres it remains a normal transaction.
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return "", 0, nil, nil, false, fmt.Errorf("begin: %w", err)
 	}
@@ -3466,6 +3475,14 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			p.RenderSeconds, appID,
 		); err != nil {
 			return "", 0, nil, nil, false, fmt.Errorf("update render_seconds: %w", err)
+		}
+	}
+	if p.SetIdentityHeaders {
+		if _, err := tx.Exec(
+			`UPDATE apps SET identity_headers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.IdentityHeaders, appID,
+		); err != nil {
+			return "", 0, nil, nil, false, fmt.Errorf("update identity_headers: %w", err)
 		}
 	}
 

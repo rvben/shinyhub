@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
@@ -713,7 +712,7 @@ func (s *Server) revocationChecker() auth.RevocationChecker {
 func (s *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Use(s.accessLog)
-	r.Use(middleware.Recoverer)
+	r.Use(recoverAPI(slog.Default()))
 
 	// Public endpoints
 	r.Post("/api/auth/login", s.handleLogin)
