@@ -55,6 +55,10 @@ var hostFlagOverride string
 // AddCommandsTo registers every CLI subcommand onto the supplied root command
 // and attaches global persistent flags shared by all subcommands.
 func AddCommandsTo(root *cobra.Command) {
+	// Register our completion command explicitly. Cobra's generated command can
+	// print scripts, but stops short of installing them; ShinyHub adds a safe,
+	// idempotent install/uninstall flow while preserving raw generation.
+	root.CompletionOptions.DisableDefaultCmd = true
 	root.PersistentFlags().StringVar(&configPathOverride, "config", "",
 		"Path to client credentials file (overrides $SHINYHUB_CREDENTIALS, $SHINYHUB_CONFIG, and the default)")
 	root.PersistentFlags().StringVar(&hostFlagOverride, "host", "",
@@ -66,6 +70,7 @@ func AddCommandsTo(root *cobra.Command) {
 	root.PersistentFlags().BoolVar(&noColorFlag, "no-color", false,
 		"Disable colored output (also honours $NO_COLOR; color is off by default when not writing to a terminal)")
 	root.AddCommand(
+		newCompletionCmd(root),
 		newConnectCmd(),
 		newDoctorCmd(),
 		newLoginCmd(),
@@ -88,6 +93,7 @@ func AddCommandsTo(root *cobra.Command) {
 		newSchemaCmd(),
 		newRunCmd(),
 	)
+	_ = root.RegisterFlagCompletionFunc("host", completeSavedHosts)
 	// Wrap flag-parse errors as KindValidation so the error envelope carries
 	// kind=validation instead of the internal fallback. This applies to all
 	// subcommands unless a subcommand sets its own FlagErrorFunc (e.g. fleet).

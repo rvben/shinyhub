@@ -146,5 +146,28 @@ first to add one.`,
 				fmt.Sprintf("Now using %s", st.label(host)))
 		},
 	}
+	cmd.ValidArgsFunction = completeSavedHosts
 	return cmd
+}
+
+// completeSavedHosts keeps the highest-value dynamic completion local and
+// instant. It offers both friendly aliases and URLs from the credential store,
+// never contacts a server, and never exposes credentials.
+func completeSavedHosts(_ *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	st, err := loadStore()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	values := make([]string, 0, len(st.Hosts)*2)
+	for _, host := range st.sortedHosts() {
+		cred := st.Hosts[host]
+		if cred.Name != "" {
+			values = append(values, cred.Name+"\t"+host)
+		}
+		values = append(values, host+"\t"+dashIfEmpty(cred.Name))
+	}
+	return values, cobra.ShellCompDirectiveNoFileComp
 }

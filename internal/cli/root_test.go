@@ -69,6 +69,8 @@ func TestAddCommandsTo_RegistersAllSubcommands(t *testing.T) {
 
 func TestSetVersion_PropagatesToRootCmd(t *testing.T) {
 	// SetVersion should update the internal version for commands that read it.
+	previous := version
+	t.Cleanup(func() { SetVersion(previous) })
 	SetVersion("v9.9.9-test")
 	if version != "v9.9.9-test" {
 		t.Fatalf("SetVersion did not update version, got %q", version)
@@ -358,4 +360,13 @@ func TestAddCommandsTo_RegistersLogout(t *testing.T) {
 		}
 	}
 	t.Fatalf("AddCommandsTo did not register `logout` subcommand")
+}
+
+func TestAddCommandsTo_RegistersCompletionInstaller(t *testing.T) {
+	parent := &cobra.Command{Use: "parent"}
+	AddCommandsTo(parent)
+	completion, _, err := parent.Find([]string{"completion", "install"})
+	if err != nil || completion == nil || completion.Name() != "install" {
+		t.Fatalf("completion installer is not reachable: command=%v err=%v", completion, err)
+	}
 }

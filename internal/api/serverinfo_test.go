@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/protocol"
 )
 
 func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
@@ -15,7 +17,8 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 		t.Fatalf("status %d", rr.Code)
 	}
 	var got struct {
-		Capabilities struct {
+		ProtocolVersion int `json:"protocol_version"`
+		Capabilities    struct {
 			FleetPreconditions bool `json:"fleet_preconditions"`
 			ContentDigest      bool `json:"content_digest"`
 			CLIConnect         bool `json:"cli_connect"`
@@ -23,6 +26,9 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ProtocolVersion != protocol.CurrentVersion {
+		t.Errorf("protocol_version = %d, want %d", got.ProtocolVersion, protocol.CurrentVersion)
 	}
 	if !got.Capabilities.FleetPreconditions {
 		t.Errorf("fleet_preconditions not advertised")

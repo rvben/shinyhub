@@ -155,8 +155,11 @@ func fetchProjects(cfg *cliConfig) ([]db.ProjectListItem, error) {
 // advertised version: when it differs from this CLI's, the near-certain
 // cause is version skew and the guidance names both versions.
 func protocolHint(cfg *cliConfig) string {
-	if info, err := probeServer(cfg); err == nil && info.Version != "" && info.Version != version {
-		return fmt.Sprintf("this CLI is version %s but the server runs %s - upgrade the CLI to match", version, info.Version)
+	if info, err := probeServer(cfg); err == nil {
+		diagnosis := diagnoseCompatibility(version, info)
+		if diagnosis.Level != compatibilityCompatible && diagnosis.Fix != "" {
+			return diagnosis.Detail + "; " + diagnosis.Fix
+		}
 	}
 	return "the response shape is not one this CLI understands; the CLI and server versions may have drifted apart"
 }

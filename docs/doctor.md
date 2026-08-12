@@ -41,6 +41,7 @@ Remote checks:
 - a saved credentials file is owner-only (`0600`);
 - a non-loopback remote uses HTTPS;
 - `/api/server-info` identifies a ready ShinyHub and reports its runtimes;
+- the CLI and server API protocols are compatible, with the lagging side named;
 - the credential authenticates and the server identifies its user and role;
 - the identity may update the target app, or create it when it is new;
 - the server reports the runtime required by the local app.
@@ -48,6 +49,12 @@ Remote checks:
 Checks that depend on a failed prerequisite are marked `skip`, not `fail`, so
 one root cause does not masquerade as several unrelated problems. Warnings do
 not make the command fail; blocking problems do.
+
+Patch-level drift is compatible. Before 1.0, a minor-version difference is
+shown as a warning; from 1.0 onward, that boundary is the major version. The
+advertised API protocol is authoritative: a server with a newer protocol than
+the CLI supports blocks remote checks before credentials are used. See
+[CLI completion and compatibility](cli.md).
 
 ## Focused checks
 
@@ -87,7 +94,7 @@ Exit codes:
 | Code | Meaning |
 |---:|---|
 | `0` | Ready; warnings may still be present |
-| `1` | Local app, manifest, runtime, or configuration blocker |
+| `1` | Local app, manifest, runtime, configuration, or CLI/server compatibility blocker |
 | `3` | Authentication, authorization, or network blocker |
 | `6` | The host answered, but ShinyHub is not ready |
 

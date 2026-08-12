@@ -87,6 +87,7 @@ On your workstation, connect once and deploy from any app directory:
 
 ```bash
 uv tool install shinyhub
+shinyhub completion install             # detect your shell; safe to rerun
 cd ./my-app
 shinyhub doctor . --local
 shinyhub run . --check
@@ -101,6 +102,11 @@ server supports—including SSO—and confirm the matching verification code. Th
 CLI creates its credential locally, so the secret never appears in browser
 history or server logs. The resulting personal token expires after 90 days and
 is saved in the owner-readable client credentials file.
+
+It also checks the CLI/server API protocol before using the credential. Safe
+release drift remains usable with precise upgrade guidance; an unsupported
+newer protocol stops before an authenticated request. `shinyhub doctor --remote`
+shows the same check at any time. See [CLI completion and compatibility](docs/cli.md).
 
 If you run `shinyhub deploy .` before connecting, an interactive terminal offers
 to start this flow in place. Automation never prompts: use
@@ -239,6 +245,7 @@ controlled explicitly:
 | Guide | Topic |
 |---|---|
 | [Working with several servers](docs/hosts.md) | Saving a credential per server, `hosts` / `use` / `--host`, which token a command sends, and the credentials file. |
+| [CLI completion and compatibility](docs/cli.md) | One-command shell completion, saved-host suggestions, version-skew diagnostics, and upgrade behavior. |
 | [Environment and secrets](docs/environment.md) | Per-app env vars, encrypted secrets, what apps and builds inherit from the server environment, and private package indexes. |
 | [Persistent data dir](docs/data.md) | Pushing data, the app-visible path, authorization, quota, and concurrency. |
 | [Scheduled jobs and shared data](docs/schedules.md) | Per-app cron schedules and read-only cross-app data mounts. |

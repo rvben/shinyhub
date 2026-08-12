@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"runtime/debug"
 	"sync"
+
+	"github.com/rvben/shinyhub/internal/protocol"
 )
 
 // serverInfoResponse is the JSON shape returned by GET /api/server-info.
@@ -17,8 +19,12 @@ type serverInfoResponse struct {
 	// Commit is the git SHA the binary was built from (short form), present only
 	// when built with VCS stamping. More precise than the semver tag for support
 	// and for confirming a hotfix actually reached production.
-	Commit       string             `json:"commit,omitempty"`
-	Capabilities serverCapabilities `json:"capabilities"`
+	Commit string `json:"commit,omitempty"`
+	// ProtocolVersion is the compatibility contract spoken by the HTTP API.
+	// It changes only for a breaking response/request change; additive features
+	// continue to use the capability flags below.
+	ProtocolVersion int                `json:"protocol_version"`
+	Capabilities    serverCapabilities `json:"capabilities"`
 	// Runtimes reports which app runtimes the host can actually start, keyed by
 	// language ("python", "r"). A developer (or the CLI) reads this to learn
 	// that, e.g., an R deploy will fail because R is not installed - instead of
@@ -41,8 +47,9 @@ type serverCapabilities struct {
 // older servers. Unauthenticated and side-effect free.
 func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, serverInfoResponse{
-		Version: s.version,
-		Commit:  buildCommit(),
+		Version:         s.version,
+		Commit:          buildCommit(),
+		ProtocolVersion: protocol.CurrentVersion,
 		Capabilities: serverCapabilities{
 			FleetPreconditions: true,
 			ContentDigest:      true,

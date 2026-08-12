@@ -290,6 +290,16 @@ func runRemoteDoctor(checks []doctorCheck, slug, appType string) ([]doctorCheck,
 		return appendRemoteAfterServerSkipped(checks), host
 	}
 	checks = append(checks, doctorPass("server", fmt.Sprintf("ShinyHub %s is ready%s", displayVersion(info.Version), runtimeSummary(info.Runtimes))))
+	compatibility := diagnoseCompatibility(version, info)
+	switch compatibility.Level {
+	case compatibilityIncompatible:
+		checks = append(checks, doctorFail("version-compatibility", compatibility.Detail, compatibility.Fix, KindValidation, 1))
+		return appendRemoteAfterCompatibilitySkipped(checks), host
+	case compatibilityWarning:
+		checks = append(checks, doctorWarn("version-compatibility", compatibility.Detail, compatibility.Fix))
+	default:
+		checks = append(checks, doctorPass("version-compatibility", compatibility.Detail))
+	}
 
 	identity, authErr := doctorIdentity(cfg)
 	if authErr != nil {
@@ -411,6 +421,7 @@ func appendRemoteSkipped(checks []doctorCheck, reason string) []doctorCheck {
 	return append(checks,
 		doctorSkip("transport-security", reason),
 		doctorSkip("server", reason),
+		doctorSkip("version-compatibility", reason),
 		doctorSkip("authentication", reason),
 		doctorSkip("deploy-permission", reason),
 		doctorSkip("remote-runtime", reason))
@@ -418,9 +429,17 @@ func appendRemoteSkipped(checks []doctorCheck, reason string) []doctorCheck {
 
 func appendRemoteAfterServerSkipped(checks []doctorCheck) []doctorCheck {
 	return append(checks,
+		doctorSkip("version-compatibility", "the server is unavailable"),
 		doctorSkip("authentication", "the server is unavailable"),
 		doctorSkip("deploy-permission", "the server is unavailable"),
 		doctorSkip("remote-runtime", "the server is unavailable"))
+}
+
+func appendRemoteAfterCompatibilitySkipped(checks []doctorCheck) []doctorCheck {
+	return append(checks,
+		doctorSkip("authentication", "the server API protocol is incompatible"),
+		doctorSkip("deploy-permission", "the server API protocol is incompatible"),
+		doctorSkip("remote-runtime", "the server API protocol is incompatible"))
 }
 
 func doctorPass(name, detail string) doctorCheck {

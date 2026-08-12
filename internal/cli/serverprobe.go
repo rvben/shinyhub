@@ -15,9 +15,10 @@ const serverPollInterval = 2 * time.Second
 
 // serverInfo is the parsed GET /api/server-info response.
 type serverInfo struct {
-	Version      string          `json:"version"`
-	Capabilities serverCaps      `json:"capabilities"`
-	Runtimes     map[string]bool `json:"runtimes"`
+	Version         string          `json:"version"`
+	ProtocolVersion int             `json:"protocol_version"`
+	Capabilities    serverCaps      `json:"capabilities"`
+	Runtimes        map[string]bool `json:"runtimes"`
 }
 
 // looksLikeShinyhub reports whether the parsed server-info carries a
@@ -26,7 +27,7 @@ type serverInfo struct {
 // advertises capabilities. This keeps arbitrary 200-OK JSON from a front proxy
 // from being mistaken for a healthy shinyhub.
 func (i serverInfo) looksLikeShinyhub() bool {
-	return i.Version != "" || i.Capabilities != (serverCaps{})
+	return i.Version != "" || i.ProtocolVersion > 0 || i.Capabilities != (serverCaps{})
 }
 
 // serverNotReadyError marks a host that answered but is not (yet) a shinyhub

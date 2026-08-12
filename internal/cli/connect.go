@@ -101,6 +101,10 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 		return &ExitCodeError{Code: 6, Err: fmt.Errorf("could not verify ShinyHub at %s: %w", host, err)}
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "✓ ShinyHub %s is ready%s\n", displayVersion(info.Version), runtimeSummary(info.Runtimes))
+	compatibility := diagnoseCompatibility(version, info)
+	if err := reportConnectCompatibility(cmd.ErrOrStderr(), compatibility); err != nil {
+		return err
+	}
 
 	token := strings.TrimSpace(f.token)
 	if f.tokenFile != "" {
@@ -434,11 +438,13 @@ func finishConnect(cmd *cobra.Command, st *credentialStore, host, name, token st
 	if !identity.CanCreateApps {
 		next = "Next: ask a ShinyHub administrator to grant developer access, then run `shinyhub whoami` to verify it."
 	}
-	prose := fmt.Sprintf("Connected to %s\n  Identity: %s (%s)\n  Can deploy apps: %s\n  Runtimes: %s\n  Credentials: %s\n\n%s",
-		st.label(host), identity.Username, identity.Role, permission, strings.Join(runtimes, ", "), configPath(), next)
+	compatibility := diagnoseCompatibility(version, info)
+	prose := fmt.Sprintf("Connected to %s\n  Identity: %s (%s)\n  Can deploy apps: %s\n  Runtimes: %s\n  Compatibility: %s\n  Credentials: %s\n\n%s",
+		st.label(host), identity.Username, identity.Role, permission, strings.Join(runtimes, ", "), compatibility.Detail, configPath(), next)
 	return renderAction(cmd, "connected", map[string]any{
 		"host": host, "name": saved.Name, "user": identity.Username, "role": identity.Role,
-		"can_create_apps": identity.CanCreateApps, "server_version": info.Version,
+		"can_create_apps": identity.CanCreateApps, "cli_version": version, "server_version": info.Version,
+		"protocol_version": info.ProtocolVersion, "compatibility": compatibility.Level,
 		"runtimes": runtimes, "credentials_path": configPath(), "switched_from": switchedFrom(previous, host),
 	}, prose)
 }

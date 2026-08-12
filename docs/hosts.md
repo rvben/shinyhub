@@ -62,6 +62,11 @@ pointed?" is usually asked. `hosts` never prints a token, in any output format.
 `shinyhub whoami` is the counterpart that does make a request: it asks the
 current server who the saved credential authenticates as.
 
+Installed shell completion suggests saved aliases and URLs for `shinyhub use`
+and `--host` entirely from this local store. It never contacts a server or puts
+tokens into the completion stream. Install it with `shinyhub completion install`;
+see [CLI completion and compatibility](cli.md).
+
 `shinyhub doctor --remote` goes further: it verifies the selected credential,
 transport, server, identity, create-app permission, and reported runtimes. Add
 `--slug sales` to check whether the identity can update that exact existing app
