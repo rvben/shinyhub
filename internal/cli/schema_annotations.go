@@ -82,7 +82,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 
 	// ── auth ─────────────────────────────────────────────────────────────────
 	"connect": {Mutating: mut, ArgTypes: map[string]string{"--token-file": "path"}, OutputFields: []fieldSpec{
-		{Name: "status", Type: "string", Desc: "connected"},
+		{Name: "status", Type: "string", Desc: "connected or refreshed"},
 		{Name: "host", Type: "string", Desc: "Normalized server URL the credential was saved under"},
 		{Name: "name", Type: "string", Desc: "Short alias for the server; empty when unset"},
 		{Name: "user", Type: "string", Desc: "Authenticated username"},
@@ -95,6 +95,9 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "runtimes", Type: "array", Desc: "App runtimes the server reports as available"},
 		{Name: "credentials_path", Type: "string", Desc: "Private file the credential was written to"},
 		{Name: "switched_from", Type: "string", Desc: "Previously-current server; empty when unchanged"},
+		{Name: "credential", Type: "object", Desc: "Safe lifecycle metadata for the newly saved credential"},
+		{Name: "previous_credential_revoked", Type: "boolean", Desc: "With --refresh, whether the previous server-side API key was revoked automatically"},
+		{Name: "revoke_warning", Type: "string", Desc: "With --refresh, manual revocation guidance when automatic revocation failed"},
 	}},
 	"doctor": {Mutating: ro, ArgTypes: map[string]string{"dir": "path"}, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "ready or not_ready"},
@@ -102,7 +105,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "app_dir", Type: "string", Desc: "Absolute app directory when local checks run"},
 		{Name: "host", Type: "string", Desc: "Selected remote server URL when remote checks run"},
 		{Name: "slug", Type: "string", Desc: "Deployment target checked for access"},
-		{Name: "checks", Type: "array", Desc: "Ordered checks with name, status, detail, and optional fix"},
+		{Name: "checks", Type: "array", Desc: "Ordered checks with name, status, detail, optional fix, and structured credential metadata for credential-lifecycle"},
 		{Name: "summary", Type: "object", Desc: "Counts of passed, warned, failed, and skipped checks"},
 		{Name: "next_steps", Type: "array", Desc: "Exact commands or actions to continue"},
 	}, Notes: "Read-only aggregate preflight. Exits 0 when ready (warnings do not fail), 1 for local/configuration blockers, 3 for auth/network blockers, and 6 when the selected host is reachable but ShinyHub is not ready."},
@@ -129,6 +132,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "role", Type: "string"},
 		{Name: "host", Type: "string", Desc: "Server URL the credentials target"},
 		{Name: "can_create_apps", Type: "boolean"},
+		{Name: "credential", Type: "object", Desc: "Credential type, name, creation/last-use/expiry timestamps, lifecycle status, and seconds remaining"},
 	}},
 	"hosts": {Mutating: ro,
 		OutputFields: []fieldSpec{

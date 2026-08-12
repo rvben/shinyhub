@@ -25,6 +25,21 @@ If a saved CLI credential expires or is revoked, the next authenticated command
 explains what happened and points back to `shinyhub connect`. Reconnecting
 replaces only that server's credential and preserves every other saved host.
 
+Refresh a still-working credential before it expires:
+
+```bash
+shinyhub connect --refresh
+shinyhub connect --refresh --host prod
+```
+
+Refresh always uses browser approval, even when `SHINYHUB_TOKEN` is set. It
+preserves the server alias and all other saved hosts. The old local value is not
+changed until the new credential has authenticated successfully; after the
+atomic save, ShinyHub revokes the previous API key. If that last cleanup cannot
+be completed, the new credential remains usable and the command prints the
+exact `tokens revoke` command to finish it manually. Add `--no-browser` to open
+the pairing URL on another device.
+
 Run `shinyhub login` when you want a short-lived username/password session or
 need to refresh an existing session.
 
@@ -60,7 +75,10 @@ still work when every server in the list is down - which is when "where am I
 pointed?" is usually asked. `hosts` never prints a token, in any output format.
 
 `shinyhub whoami` is the counterpart that does make a request: it asks the
-current server who the saved credential authenticates as.
+current server who the saved credential authenticates as and reports the
+credential type, name, creation time, prior last use, expiry, and lifecycle
+status. JSON output puts those fields under `credential` without exposing the
+token or hash.
 
 Installed shell completion suggests saved aliases and URLs for `shinyhub use`
 and `--host` entirely from this local store. It never contacts a server or puts
@@ -68,7 +86,8 @@ tokens into the completion stream. Install it with `shinyhub completion install`
 see [CLI completion and compatibility](cli.md).
 
 `shinyhub doctor --remote` goes further: it verifies the selected credential,
-transport, server, identity, create-app permission, and reported runtimes. Add
+warns when it expires within 14 days, and checks transport, server, identity,
+create-app permission, and reported runtimes. Add
 `--slug sales` to check whether the identity can update that exact existing app
 or create it if it is new. See [Doctor](doctor.md).
 

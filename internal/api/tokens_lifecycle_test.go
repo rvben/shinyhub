@@ -88,6 +88,26 @@ func TestConnectCLI_WithBrowserApprovedHash(t *testing.T) {
 	if connected.Code != http.StatusOK {
 		t.Fatalf("browser-approved CLI token did not authenticate: %d %s", connected.Code, connected.Body.String())
 	}
+	var me struct {
+		Credential struct {
+			Type       string     `json:"type"`
+			ID         int64      `json:"id"`
+			Name       string     `json:"name"`
+			CreatedAt  *time.Time `json:"created_at"`
+			LastUsedAt *time.Time `json:"last_used_at"`
+			ExpiresAt  *time.Time `json:"expires_at"`
+		} `json:"credential"`
+	}
+	if err := json.Unmarshal(connected.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me.Credential.Type != "api_key" || me.Credential.ID == 0 || me.Credential.Name != "cli-workstation-a1b2c3" ||
+		me.Credential.CreatedAt == nil || me.Credential.ExpiresAt == nil {
+		t.Fatalf("safe credential lifecycle missing from /api/auth/me: %+v", me.Credential)
+	}
+	if strings.Contains(connected.Body.String(), raw) || strings.Contains(connected.Body.String(), hash) {
+		t.Fatalf("/api/auth/me leaked credential material: %s", connected.Body.String())
+	}
 
 	keys, err := store.ListAPIKeys(uid)
 	if err != nil || len(keys) != 1 {

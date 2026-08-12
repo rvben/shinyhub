@@ -666,30 +666,37 @@ func (s *Server) SetTracer(t *servertrace.Tracer) { s.tracer = t }
 // keys owned by system users are refused: those accounts authenticate only
 // through their bootstrap-provisioned mechanism (the env token), never through
 // a persisted api_keys row.
-func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, error) {
+func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, *auth.CredentialInfo, error) {
 	if s.deployToken != nil && s.deployToken.Matches(keyHash) {
 		u := s.deployToken.User()
 		if u == nil {
-			return nil, fmt.Errorf("deploy token has no associated user")
+			return nil, nil, fmt.Errorf("deploy token has no associated user")
 		}
-		return u, nil
+		return u, &auth.CredentialInfo{Type: "deploy_token"}, nil
 	}
-	u, keyID, lastUsed, err := s.store.AuthenticateAPIKey(keyHash)
+	u, key, err := s.store.AuthenticateAPIKey(keyHash)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if db.IsSystemUser(u.Username) {
-		return nil, fmt.Errorf("api key owned by system user is not honored")
+		return nil, nil, fmt.Errorf("api key owned by system user is not honored")
 	}
 	// Refresh the usage stamp at most about once a minute per key: coarse
 	// enough to keep the write off the auth hot path, fresh enough for a
 	// credential inventory. Best-effort - a failed touch never fails auth.
-	if lastUsed == nil || time.Since(*lastUsed) >= time.Minute {
-		if err := s.store.TouchAPIKey(keyID, time.Now().UTC()); err != nil {
-			slog.Warn("api key touch failed", "key_id", keyID, "err", err)
+	if key.LastUsedAt == nil || time.Since(*key.LastUsedAt) >= time.Minute {
+		if err := s.store.TouchAPIKey(key.ID, time.Now().UTC()); err != nil {
+			slog.Warn("api key touch failed", "key_id", key.ID, "err", err)
 		}
 	}
-	return u.ContextUser(), nil
+	return u.ContextUser(), &auth.CredentialInfo{
+		Type:       "api_key",
+		ID:         key.ID,
+		Name:       key.Name,
+		CreatedAt:  &key.CreatedAt,
+		LastUsedAt: key.LastUsedAt,
+		ExpiresAt:  key.ExpiresAt,
+	}, nil
 }
 
 // userLookup satisfies auth.UserLookup by re-resolving the user against the

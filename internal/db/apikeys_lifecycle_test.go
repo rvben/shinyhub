@@ -46,7 +46,7 @@ func TestAuthenticateAPIKey_ExpiryFiltered(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("%s: create: %v", tc.name, err)
 		}
-		u, _, _, err := store.AuthenticateAPIKey(hash)
+		u, _, err := store.AuthenticateAPIKey(hash)
 		if tc.wantOK {
 			if err != nil {
 				t.Errorf("%s: expected success, got %v", tc.name, err)
@@ -70,27 +70,30 @@ func TestTouchAPIKey_RecordsLastUsed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, gotID, lastUsed, err := store.AuthenticateAPIKey("h1")
+	_, key, err := store.AuthenticateAPIKey("h1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotID != keyID {
-		t.Errorf("key id = %d, want %d", gotID, keyID)
+	if key.ID != keyID {
+		t.Errorf("key id = %d, want %d", key.ID, keyID)
 	}
-	if lastUsed != nil {
-		t.Errorf("fresh key lastUsed = %v, want nil", lastUsed)
+	if key.Name != "ci" || key.CreatedAt.IsZero() {
+		t.Errorf("key lifecycle metadata = %+v", key)
+	}
+	if key.LastUsedAt != nil {
+		t.Errorf("fresh key lastUsed = %v, want nil", key.LastUsedAt)
 	}
 
 	stamp := time.Now().UTC().Truncate(time.Second)
 	if err := store.TouchAPIKey(keyID, stamp); err != nil {
 		t.Fatal(err)
 	}
-	_, _, lastUsed, err = store.AuthenticateAPIKey("h1")
+	_, key, err = store.AuthenticateAPIKey("h1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lastUsed == nil || lastUsed.Unix() != stamp.Unix() {
-		t.Errorf("lastUsed = %v, want %v", lastUsed, stamp)
+	if key.LastUsedAt == nil || key.LastUsedAt.Unix() != stamp.Unix() {
+		t.Errorf("lastUsed = %v, want %v", key.LastUsedAt, stamp)
 	}
 
 	keys, err := store.ListAPIKeys(uid)

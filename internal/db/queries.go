@@ -441,32 +441,35 @@ func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
 
 // AuthenticateAPIKey resolves an API key hash to its owning user, skipping
 // expired keys (an expired key misses exactly like an unknown one, so the
-// caller's 401 does not leak which). It also returns the key's ID and current
-// last_used_at so the caller can decide whether to refresh the usage stamp
-// without a second lookup.
-func (s *Store) AuthenticateAPIKey(hash string) (*User, int64, *time.Time, error) {
+// caller's 401 does not leak which). The safe key metadata lets the auth path
+// report the lifecycle of the credential used for this specific request; the
+// secret hash never leaves this query.
+func (s *Store) AuthenticateAPIKey(hash string) (*User, APIKeyInfo, error) {
 	row := s.db.QueryRow(`
 		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch,
-		       k.id, k.last_used_at
+		       k.id, k.name, k.created_at, k.expires_at, k.last_used_at
 		FROM users u JOIN api_keys k ON k.user_id = u.id
 		WHERE k.key_hash = ? AND (k.expires_at IS NULL OR k.expires_at > ?)`,
 		hash, time.Now().UTC())
 	var u User
-	var keyID int64
-	var lastUsed sql.NullTime
+	var key APIKeyInfo
+	var expires, lastUsed sql.NullTime
 	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
-		&keyID, &lastUsed); err != nil {
+		&key.ID, &key.Name, &key.CreatedAt, &expires, &lastUsed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, 0, nil, ErrNotFound
+			return nil, APIKeyInfo{}, ErrNotFound
 		}
-		return nil, 0, nil, err
+		return nil, APIKeyInfo{}, err
 	}
-	var lu *time.Time
+	if expires.Valid {
+		t := expires.Time
+		key.ExpiresAt = &t
+	}
 	if lastUsed.Valid {
 		t := lastUsed.Time
-		lu = &t
+		key.LastUsedAt = &t
 	}
-	return &u, keyID, lu, nil
+	return &u, key, nil
 }
 
 // APIKeyHashExists reports whether a non-expired API key hash exists. It is

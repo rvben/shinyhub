@@ -33,7 +33,7 @@ trap cleanup EXIT
 
 fail() {
   echo "BROWSER ONBOARDING E2E FAIL: $*" >&2
-  for log in build.log install.log server.log chrome.log connect-first.log whoami.log doctor.log deploy.log revoked.log connect-recovery.log; do
+  for log in build.log install.log server.log chrome.log connect-first.log whoami.log doctor.log deploy.log connect-refresh.log tokens-after-refresh.log revoked.log connect-recovery.log; do
     if [ -s "${WORK}/${log}" ]; then
       echo "----- ${log} (last 100 lines) -----" >&2
       tail -100 "${WORK}/${log}" >&2
@@ -98,6 +98,13 @@ start_connect() {
   CONNECT_PID=$!
 }
 
+start_refresh() {
+  local log="$1"
+  "${BIN}" connect --refresh --no-browser --timeout 45s \
+    --config "${WORK}/client.json" --output table >"${log}" 2>&1 &
+  CONNECT_PID=$!
+}
+
 finish_connect() {
   local log="$1"
   if ! wait "${CONNECT_PID}"; then
@@ -106,9 +113,24 @@ finish_connect() {
   fi
   CONNECT_PID=""
   grep -q 'Connected to' "${log}" || fail "connect did not report a clear success state"
+  # The backticks are literal CLI guidance.
+  # shellcheck disable=SC2016
   grep -q 'Next: run `shinyhub deploy . --wait`' "${log}" || fail "connect did not provide the first deploy continuation"
   if grep -q 'shk_' "${log}"; then
     fail "raw CLI credential leaked into connect output"
+  fi
+}
+
+finish_refresh() {
+  local log="$1"
+  if ! wait "${CONNECT_PID}"; then
+    CONNECT_PID=""
+    fail "browser credential refresh did not finish"
+  fi
+  CONNECT_PID=""
+  grep -q 'Refreshed credential for' "${log}" || fail "refresh did not report a clear success state"
+  if grep -q 'shk_' "${log}"; then
+    fail "raw CLI credential leaked into refresh output"
   fi
 }
 
@@ -211,9 +233,26 @@ grep -q 'READY' "${WORK}/doctor.log" || fail "doctor did not report READY"
 body="$(curl -fsS "${HOST}/app/app/" || true)"
 echo "${body}" | grep -q 'shinyhub remote-worker E2E' || fail "deployed app did not serve its body"
 
+echo "==> proactively rotating the healthy credential through browser approval"
+start_refresh "${WORK}/connect-refresh.log"
+REFRESH_URL="$(wait_for_pairing_url "${WORK}/connect-refresh.log" "${CONNECT_PID}")" \
+  || fail "refresh CLI did not print a pairing URL"
+REFRESH_TOKEN_NAME="$(node --experimental-websocket "${ROOT}/scripts/browser-onboarding-cdp.mjs" approve \
+  "${DEBUG_URL}" "${REFRESH_URL}" "" "" "${WORK}/refreshed.png")" \
+  || fail "returning-browser refresh approval"
+finish_refresh "${WORK}/connect-refresh.log"
+[ -n "${REFRESH_TOKEN_NAME}" ] || fail "refresh approval did not identify its token"
+[ "${REFRESH_TOKEN_NAME}" != "${TOKEN_NAME}" ] || fail "refresh unexpectedly reused the old credential"
+"${BIN}" tokens list --config "${WORK}/client.json" --output table \
+  >"${WORK}/tokens-after-refresh.log" 2>&1 || fail "list tokens after refresh"
+grep -q "${REFRESH_TOKEN_NAME}" "${WORK}/tokens-after-refresh.log" || fail "refreshed token is missing from inventory"
+if grep -q "${TOKEN_NAME}" "${WORK}/tokens-after-refresh.log"; then
+  fail "refresh did not revoke the previous API key"
+fi
+
 echo "==> revoking in the browser and checking actionable CLI recovery"
 node --experimental-websocket "${ROOT}/scripts/browser-onboarding-cdp.mjs" revoke \
-  "${DEBUG_URL}" "${TOKEN_NAME}" "" "" "${WORK}/revoked.png" \
+  "${DEBUG_URL}" "${REFRESH_TOKEN_NAME}" "" "" "${WORK}/revoked.png" \
   || fail "browser token revocation"
 if "${BIN}" whoami --config "${WORK}/client.json" --output table >"${WORK}/revoked.log" 2>&1; then
   fail "revoked credential unexpectedly remained valid"
@@ -230,7 +269,7 @@ RECOVERY_TOKEN_NAME="$(node --experimental-websocket "${ROOT}/scripts/browser-on
   || fail "returning-browser approval"
 finish_connect "${WORK}/connect-recovery.log"
 [ -n "${RECOVERY_TOKEN_NAME}" ] || fail "recovery approval did not identify its token"
-[ "${RECOVERY_TOKEN_NAME}" != "${TOKEN_NAME}" ] || fail "recovery unexpectedly reused the revoked credential"
+[ "${RECOVERY_TOKEN_NAME}" != "${REFRESH_TOKEN_NAME}" ] || fail "recovery unexpectedly reused the revoked credential"
 "${BIN}" whoami --config "${WORK}/client.json" --output table >"${WORK}/whoami.log" 2>&1 \
   || fail "recovered whoami"
 grep -q "${ADMIN_USER}" "${WORK}/whoami.log" || fail "recovered identity was not preserved"

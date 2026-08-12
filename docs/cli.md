@@ -80,6 +80,34 @@ The connection's JSON result includes `cli_version`, `server_version`,
 `protocol_version`, and `compatibility`, so automation can record the decision
 without parsing prose.
 
+## Keep workstation credentials healthy
+
+The server reports safe metadata about the credential used for each identity
+request: its type, optional name, creation time, prior last use, and expiry. It
+never returns the credential value or hash. Inspect it directly with:
+
+```bash
+shinyhub whoami
+shinyhub whoami --output json
+shinyhub doctor --remote
+```
+
+Doctor warns when 14 days or less remain. Rotate a saved workstation credential
+through the same browser pairing flow without waiting for an outage:
+
+```bash
+shinyhub connect --refresh
+# remote terminal:
+shinyhub connect --refresh --no-browser
+```
+
+The new credential must authenticate before the owner-only credentials file is
+atomically replaced. Other hosts and the current alias are preserved. ShinyHub
+then revokes the old API key; if only that cleanup fails, the new credential is
+kept and the command provides a manual revocation command. `--refresh` ignores
+`SHINYHUB_TOKEN` by design so an inherited CI secret cannot be written into the
+workstation store.
+
 ## Upgrade the side that is behind
 
 For the Python-distributed CLI:

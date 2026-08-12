@@ -198,7 +198,31 @@ type sessionResponse struct {
 	// CanReadAudit advertises audit-log access (admin, or operator behind
 	// auth.operator_audit_access) so the UI shows the Audit tab and the
 	// Overview activity feed to exactly the users who can load them.
-	CanReadAudit bool `json:"can_read_audit"`
+	CanReadAudit bool                `json:"can_read_audit"`
+	Credential   *credentialResponse `json:"credential,omitempty"`
+}
+
+// credentialResponse is safe to return to the authenticated caller. It names
+// the credential used for this request and its lifecycle, but never includes
+// the raw value or hash.
+type credentialResponse struct {
+	Type       string     `json:"type"`
+	ID         int64      `json:"id,omitempty"`
+	Name       string     `json:"name,omitempty"`
+	CreatedAt  *time.Time `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+	ExpiresAt  *time.Time `json:"expires_at"`
+}
+
+func requestCredential(r *http.Request) *credentialResponse {
+	info := auth.CredentialInfoFromContext(r.Context())
+	if info == nil {
+		return nil
+	}
+	return &credentialResponse{
+		Type: info.Type, ID: info.ID, Name: info.Name, CreatedAt: info.CreatedAt,
+		LastUsedAt: info.LastUsedAt, ExpiresAt: info.ExpiresAt,
+	}
 }
 
 func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
@@ -400,6 +424,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		User:          su,
 		CanCreateApps: canCreateApps(u),
 		CanReadAudit:  s.canReadAudit(u),
+		Credential:    requestCredential(r),
 	})
 }
 

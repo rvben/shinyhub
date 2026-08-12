@@ -1,10 +1,11 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -49,25 +50,36 @@ question that matters when a server is down - use ` + "`shinyhub hosts`" + `.`,
 			return httpError(cfg.Token, "whoami", resp, body)
 		}
 
-		var me struct {
-			User struct {
-				Username string `json:"username"`
-				Role     string `json:"role"`
-			} `json:"user"`
-			CanCreateApps bool `json:"can_create_apps"`
-		}
-		if err := json.Unmarshal(body, &me); err != nil {
+		me, err := decodeRemoteIdentity(body)
+		if err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
 
-		prose := fmt.Sprintf("Username: %s\nRole:     %s\nServer:   %s",
-			me.User.Username, me.User.Role, cfg.Host)
+		now := time.Now()
+		credential := credentialLifecycleAt(me.Credential, now)
+		lines := []string{
+			fmt.Sprintf("Username:   %s", me.Username),
+			fmt.Sprintf("Role:       %s", me.Role),
+			fmt.Sprintf("Server:     %s", cfg.Host),
+			fmt.Sprintf("Credential: %s", credentialSummary(credential)),
+		}
+		if credential.CreatedAt != nil {
+			lines = append(lines, "Created:    "+credential.CreatedAt.UTC().Format(time.RFC3339))
+		}
+		if credential.LastUsedAt != nil {
+			lines = append(lines, "Last used:  "+credential.LastUsedAt.UTC().Format(time.RFC3339))
+		}
+		lines = append(lines, "Expires:    "+credentialExpirySummary(credential, now))
+		if credential.Status == "expiring" {
+			lines = append(lines, "Action:     Refresh now with `shinyhub connect --refresh`.")
+		}
 		return renderAction(cmd, "ok", map[string]any{
-			"username":        me.User.Username,
-			"role":            me.User.Role,
+			"username":        me.Username,
+			"role":            me.Role,
 			"host":            cfg.Host,
 			"can_create_apps": me.CanCreateApps,
-		}, prose)
+			"credential":      credential,
+		}, strings.Join(lines, "\n"))
 	}
 	return cmd
 }

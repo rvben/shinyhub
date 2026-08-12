@@ -43,12 +43,19 @@ Remote checks:
 - `/api/server-info` identifies a ready ShinyHub and reports its runtimes;
 - the CLI and server API protocols are compatible, with the lagging side named;
 - the credential authenticates and the server identifies its user and role;
+- the credential type and lifecycle are known, warning 14 days before expiry;
 - the identity may update the target app, or create it when it is new;
 - the server reports the runtime required by the local app.
 
 Checks that depend on a failed prerequisite are marked `skip`, not `fail`, so
 one root cause does not masquerade as several unrelated problems. Warnings do
 not make the command fail; blocking problems do.
+
+An expiring saved credential points to `shinyhub connect --refresh`. For an
+environment-provided credential, Doctor instead tells automation to replace
+`SHINYHUB_TOKEN`; it never writes an environment credential into the local
+store. Servers predating lifecycle metadata receive a non-blocking upgrade
+warning rather than a guessed expiry.
 
 Patch-level drift is compatible. Before 1.0, a minor-version difference is
 shown as a warning; from 1.0 onward, that boundary is the major version. The

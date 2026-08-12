@@ -160,6 +160,11 @@ func TestBearerMiddleware(t *testing.T) {
 			http.Error(w, "no user", 500)
 			return
 		}
+		credential := auth.CredentialInfoFromContext(r.Context())
+		if credential == nil || credential.Type != "session_token" {
+			http.Error(w, "no credential metadata", 500)
+			return
+		}
 		w.Write([]byte(u.Username))
 	})
 	handler := auth.BearerMiddleware(secret, nil, nil, nil)(next)
@@ -181,17 +186,22 @@ func TestBearerMiddleware_TokenScheme(t *testing.T) {
 	rawKey := "shk_testkey123"
 	keyHash := auth.HashAPIKey(rawKey)
 
-	keyLookup := func(hash string) (*auth.ContextUser, error) {
+	keyLookup := func(hash string) (*auth.ContextUser, *auth.CredentialInfo, error) {
 		if hash == keyHash {
-			return &auth.ContextUser{ID: 99, Username: "bot", Role: "developer"}, nil
+			return &auth.ContextUser{ID: 99, Username: "bot", Role: "developer"}, &auth.CredentialInfo{Type: "api_key"}, nil
 		}
-		return nil, fmt.Errorf("not found")
+		return nil, nil, fmt.Errorf("not found")
 	}
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u := auth.UserFromContext(r.Context())
 		if u == nil {
 			http.Error(w, "no user", 500)
+			return
+		}
+		credential := auth.CredentialInfoFromContext(r.Context())
+		if credential == nil || credential.Type != "api_key" {
+			http.Error(w, "no credential metadata", 500)
 			return
 		}
 		w.Write([]byte(u.Username))

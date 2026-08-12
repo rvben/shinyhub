@@ -103,6 +103,12 @@ CLI creates its credential locally, so the secret never appears in browser
 history or server logs. The resulting personal token expires after 90 days and
 is saved in the owner-readable client credentials file.
 
+`shinyhub whoami` shows the active credential's type, name, creation time, last
+use, and expiry. `doctor` warns 14 days before expiry without blocking a deploy.
+Rotate early with `shinyhub connect --refresh`: it approves a fresh credential
+in the browser, verifies and atomically saves it, then revokes the previous API
+key. A failed pairing leaves the working local credential byte-for-byte intact.
+
 It also checks the CLI/server API protocol before using the credential. Safe
 release drift remains usable with precise upgrade guidance; an unsupported
 newer protocol stops before an authenticated request. `shinyhub doctor --remote`

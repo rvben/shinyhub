@@ -276,11 +276,11 @@ func TestAuthHeader_OpaqueDeployTokenAcceptedByServerAuth(t *testing.T) {
 		t.Run(raw, func(t *testing.T) {
 			deployUser := &auth.ContextUser{ID: -1, Username: "__deploy__", Role: "developer"}
 			dt := auth.NewDeployToken(raw, deployUser)
-			keyLookup := func(hash string) (*auth.ContextUser, error) {
+			keyLookup := func(hash string) (*auth.ContextUser, *auth.CredentialInfo, error) {
 				if dt.Matches(hash) {
-					return dt.User(), nil
+					return dt.User(), &auth.CredentialInfo{Type: "deploy_token"}, nil
 				}
-				return nil, fmt.Errorf("api key not found")
+				return nil, nil, fmt.Errorf("api key not found")
 			}
 
 			req := httptest.NewRequest("GET", "/api/auth/me", nil)

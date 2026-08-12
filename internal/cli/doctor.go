@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/deploy"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
@@ -25,10 +26,11 @@ type doctorFlags struct {
 }
 
 type doctorCheck struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	Detail string `json:"detail"`
-	Fix    string `json:"fix,omitempty"`
+	Name       string               `json:"name"`
+	Status     string               `json:"status"`
+	Detail     string               `json:"detail"`
+	Fix        string               `json:"fix,omitempty"`
+	Credential *credentialLifecycle `json:"credential,omitempty"`
 
 	kind Kind `json:"-"`
 	code int  `json:"-"`
@@ -306,11 +308,13 @@ func runRemoteDoctor(checks []doctorCheck, slug, appType string) ([]doctorCheck,
 		kind, code := classify(authErr)
 		checks = append(checks, doctorFail("authentication", authErr.Error(), "Reconnect with `shinyhub connect "+host+"`.", kind, code))
 		checks = append(checks,
+			doctorSkip("credential-lifecycle", "authentication failed"),
 			doctorSkip("deploy-permission", "authentication failed"),
 			doctorSkip("remote-runtime", "authentication failed"))
 		return checks, host
 	}
 	checks = append(checks, doctorPass("authentication", fmt.Sprintf("signed in as %s (%s)", identity.Username, identity.Role)))
+	checks = append(checks, doctorCredentialLifecycle(identity.Credential, os.Getenv("SHINYHUB_TOKEN") != "", time.Now()))
 
 	permission := doctorDeployPermission(cfg, identity.CanCreateApps, slug)
 	checks = append(checks, permission)
@@ -318,11 +322,7 @@ func runRemoteDoctor(checks []doctorCheck, slug, appType string) ([]doctorCheck,
 	return checks, host
 }
 
-type doctorIdentityResult struct {
-	Username      string
-	Role          string
-	CanCreateApps bool
-}
+type doctorIdentityResult = remoteIdentity
 
 func doctorIdentity(cfg *cliConfig) (doctorIdentityResult, error) {
 	var result doctorIdentityResult
@@ -340,20 +340,44 @@ func doctorIdentity(cfg *cliConfig) (doctorIdentityResult, error) {
 	if resp.StatusCode >= 400 {
 		return result, httpError(cfg.Token, "doctor authentication", resp, body)
 	}
-	var payload struct {
-		User struct {
-			Username string `json:"username"`
-			Role     string `json:"role"`
-		} `json:"user"`
-		CanCreateApps bool `json:"can_create_apps"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
+	identity, err := decodeRemoteIdentity(body)
+	if err != nil {
 		return result, fmt.Errorf("decode authentication response: %w", err)
 	}
-	if payload.User.Username == "" {
-		return result, errors.New("authentication response did not identify a user")
+	return identity, nil
+}
+
+func doctorCredentialLifecycle(credential *remoteCredential, fromEnvironment bool, now time.Time) doctorCheck {
+	report := credentialLifecycleAt(credential, now)
+	detail := credentialSummary(report) + "; expires " + credentialExpirySummary(report, now)
+	if report.CreatedAt != nil {
+		detail += "; created " + report.CreatedAt.UTC().Format(time.RFC3339)
 	}
-	return doctorIdentityResult{Username: payload.User.Username, Role: payload.User.Role, CanCreateApps: payload.CanCreateApps}, nil
+	if report.LastUsedAt != nil {
+		detail += "; previously used " + report.LastUsedAt.UTC().Format(time.RFC3339)
+	}
+	refresh := "Run `shinyhub connect --refresh` to rotate it through browser authorization."
+	if fromEnvironment {
+		refresh = "Replace SHINYHUB_TOKEN with a fresh credential before it expires."
+	}
+	switch report.Status {
+	case "healthy", "non_expiring":
+		check := doctorPass("credential-lifecycle", detail)
+		check.Credential = &report
+		return check
+	case "expiring":
+		check := doctorWarn("credential-lifecycle", detail, refresh)
+		check.Credential = &report
+		return check
+	case "expired":
+		check := doctorFail("credential-lifecycle", detail, refresh, KindAuth, 3)
+		check.Credential = &report
+		return check
+	default:
+		check := doctorWarn("credential-lifecycle", detail, "Upgrade the ShinyHub server to report credential lifecycle metadata.")
+		check.Credential = &report
+		return check
+	}
 }
 
 func doctorDeployPermission(cfg *cliConfig, canCreate bool, slug string) doctorCheck {
@@ -423,6 +447,7 @@ func appendRemoteSkipped(checks []doctorCheck, reason string) []doctorCheck {
 		doctorSkip("server", reason),
 		doctorSkip("version-compatibility", reason),
 		doctorSkip("authentication", reason),
+		doctorSkip("credential-lifecycle", reason),
 		doctorSkip("deploy-permission", reason),
 		doctorSkip("remote-runtime", reason))
 }
@@ -431,6 +456,7 @@ func appendRemoteAfterServerSkipped(checks []doctorCheck) []doctorCheck {
 	return append(checks,
 		doctorSkip("version-compatibility", "the server is unavailable"),
 		doctorSkip("authentication", "the server is unavailable"),
+		doctorSkip("credential-lifecycle", "the server is unavailable"),
 		doctorSkip("deploy-permission", "the server is unavailable"),
 		doctorSkip("remote-runtime", "the server is unavailable"))
 }
@@ -438,6 +464,7 @@ func appendRemoteAfterServerSkipped(checks []doctorCheck) []doctorCheck {
 func appendRemoteAfterCompatibilitySkipped(checks []doctorCheck) []doctorCheck {
 	return append(checks,
 		doctorSkip("authentication", "the server API protocol is incompatible"),
+		doctorSkip("credential-lifecycle", "the server API protocol is incompatible"),
 		doctorSkip("deploy-permission", "the server API protocol is incompatible"),
 		doctorSkip("remote-runtime", "the server API protocol is incompatible"))
 }

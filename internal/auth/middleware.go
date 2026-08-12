@@ -11,8 +11,9 @@ import (
 type contextKey string
 
 const (
-	userContextKey  contextKey = "user"
-	tokenContextKey contextKey = "token"
+	userContextKey       contextKey = "user"
+	tokenContextKey      contextKey = "token"
+	credentialContextKey contextKey = "credential"
 )
 
 const SessionCookieName = "shiny_session"
@@ -69,8 +70,21 @@ type TokenInfo struct {
 	AuthTime time.Time
 }
 
-// APIKeyLookup looks up a user by API key hash. Injected to avoid import cycles.
-type APIKeyLookup func(keyHash string) (*ContextUser, error)
+// CredentialInfo is the non-secret lifecycle view of the credential that
+// authenticated one request. It deliberately contains neither the raw token
+// nor its hash.
+type CredentialInfo struct {
+	Type       string
+	ID         int64
+	Name       string
+	CreatedAt  *time.Time
+	LastUsedAt *time.Time
+	ExpiresAt  *time.Time
+}
+
+// APIKeyLookup looks up a user and safe credential metadata by API key hash.
+// It is injected to avoid import cycles.
+type APIKeyLookup func(keyHash string) (*ContextUser, *CredentialInfo, error)
 
 // UserLookup looks up a user by ID so JWT-authenticated requests can be
 // revalidated against the live database on every request. Returning a
@@ -83,8 +97,9 @@ type UserLookup func(userID int64) (*ContextUser, error)
 // authResult carries the authenticated identity plus (for JWT paths) the token
 // metadata needed by the logout handler to revoke the current session.
 type authResult struct {
-	User  *ContextUser
-	Token *TokenInfo
+	User       *ContextUser
+	Token      *TokenInfo
+	Credential *CredentialInfo
 }
 
 func userFromClaims(c *Claims) *ContextUser {
@@ -98,6 +113,22 @@ func tokenFromClaims(c *Claims) *TokenInfo {
 	}
 	if c.AuthTime != nil {
 		info.AuthTime = c.AuthTime.Time
+	}
+	return info
+}
+
+func credentialFromToken(kind string, token *TokenInfo) *CredentialInfo {
+	info := &CredentialInfo{Type: kind}
+	if token == nil {
+		return info
+	}
+	if !token.AuthTime.IsZero() {
+		t := token.AuthTime
+		info.CreatedAt = &t
+	}
+	if !token.ExpiresAt.IsZero() {
+		t := token.ExpiresAt
+		info.ExpiresAt = &t
 	}
 	return info
 }
@@ -145,16 +176,17 @@ func authenticateHeader(header, secret string, keyLookup APIKeyLookup, userLooku
 		if err != nil {
 			return nil, err
 		}
-		return &authResult{User: user, Token: tokenFromClaims(claims)}, nil
+		tokenInfo := tokenFromClaims(claims)
+		return &authResult{User: user, Token: tokenInfo, Credential: credentialFromToken("session_token", tokenInfo)}, nil
 	case "token":
 		if keyLookup == nil {
 			return nil, fmt.Errorf("api key lookup unavailable")
 		}
-		user, err := keyLookup(HashAPIKey(token))
+		user, credential, err := keyLookup(HashAPIKey(token))
 		if err != nil {
 			return nil, err
 		}
-		return &authResult{User: user}, nil
+		return &authResult{User: user, Credential: credential}, nil
 	default:
 		return nil, fmt.Errorf("unsupported authorization scheme")
 	}
@@ -173,7 +205,8 @@ func authenticateSessionCookie(r *http.Request, secret string, userLookup UserLo
 	if err != nil {
 		return nil, err
 	}
-	return &authResult{User: user, Token: tokenFromClaims(claims)}, nil
+	tokenInfo := tokenFromClaims(claims)
+	return &authResult{User: user, Token: tokenInfo, Credential: credentialFromToken("browser_session", tokenInfo)}, nil
 }
 
 // AuthenticateBrowserSession authenticates a request strictly from the
@@ -196,6 +229,14 @@ func AuthenticateBrowserSession(r *http.Request, secret string, userLookup UserL
 // revalidate the user against userLookup when supplied so role changes and
 // account deletions take effect without waiting for the token to expire.
 func AuthenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup, userLookup UserLookup, revoked RevocationChecker) (*ContextUser, *TokenInfo, error) {
+	res, err := authenticateRequest(r, secret, keyLookup, userLookup, revoked)
+	if err != nil || res == nil {
+		return nil, nil, err
+	}
+	return res.User, res.Token, nil
+}
+
+func authenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup, userLookup UserLookup, revoked RevocationChecker) (*authResult, error) {
 	var (
 		res *authResult
 		err error
@@ -206,9 +247,9 @@ func AuthenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup,
 		res, err = authenticateSessionCookie(r, secret, userLookup, revoked)
 	}
 	if err != nil || res == nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return res.User, res.Token, nil
+	return res, nil
 }
 
 // BearerMiddleware authenticates the request from an Authorization header or
@@ -229,15 +270,18 @@ func BearerMiddleware(secret string, keyLookup APIKeyLookup, userLookup UserLook
 				return
 			}
 
-			user, token, err := AuthenticateRequest(r, secret, keyLookup, userLookup, revoked)
-			if err != nil || user == nil {
+			result, err := authenticateRequest(r, secret, keyLookup, userLookup, revoked)
+			if err != nil || result == nil || result.User == nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 
-			ctx := WithUser(r.Context(), user)
-			if token != nil {
-				ctx = context.WithValue(ctx, tokenContextKey, token)
+			ctx := WithUser(r.Context(), result.User)
+			if result.Token != nil {
+				ctx = context.WithValue(ctx, tokenContextKey, result.Token)
+			}
+			if result.Credential != nil {
+				ctx = context.WithValue(ctx, credentialContextKey, result.Credential)
 			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -256,6 +300,13 @@ func TokenInfoFromContext(ctx context.Context) *TokenInfo {
 // tests that pre-populate the token context without running the middleware.
 func WithTokenInfo(ctx context.Context, t *TokenInfo) context.Context {
 	return context.WithValue(ctx, tokenContextKey, t)
+}
+
+// CredentialInfoFromContext returns safe metadata about the credential that
+// authenticated this request, or nil for auth methods without lifecycle data.
+func CredentialInfoFromContext(ctx context.Context) *CredentialInfo {
+	info, _ := ctx.Value(credentialContextKey).(*CredentialInfo)
+	return info
 }
 
 func UserFromContext(ctx context.Context) *ContextUser {

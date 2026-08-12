@@ -30,6 +30,7 @@ type connectFlags struct {
 	username  string
 	password  string
 	noBrowser bool
+	refresh   bool
 	timeout   time.Duration
 }
 
@@ -39,6 +40,7 @@ type remoteIdentity struct {
 	Username      string
 	Role          string
 	CanCreateApps bool
+	Credential    *remoteCredential
 }
 
 func newConnectCmd() *cobra.Command {
@@ -53,7 +55,11 @@ you can use any configured sign-in method—including SSO—and approve a privat
 
 For a headless machine or CI, pass --token-file or set SHINYHUB_HOST and
 SHINYHUB_TOKEN. Username/password is available with --username; a missing
-password is prompted for without echoing it.`,
+password is prompted for without echoing it.
+
+Use --refresh to rotate the current saved credential through browser approval.
+The existing credential remains untouched unless the replacement authenticates
+successfully; ShinyHub then revokes the previous API key.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runConnect(cmd, args, f)
@@ -65,11 +71,18 @@ password is prompted for without echoing it.`,
 	cmd.Flags().StringVar(&f.username, "username", "", "Use local username/password login instead of browser authorization")
 	cmd.Flags().StringVar(&f.password, "password", "", "Password for non-interactive local login")
 	cmd.Flags().BoolVar(&f.noBrowser, "no-browser", false, "Print the authorization URL instead of opening it")
+	cmd.Flags().BoolVar(&f.refresh, "refresh", false, "Rotate the saved credential through browser authorization")
 	cmd.Flags().DurationVar(&f.timeout, "timeout", defaultConnectTimeout, "How long to wait for browser authorization")
 	return cmd
 }
 
 func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
+	if f.refresh && (f.token != "" || f.tokenFile != "" || f.username != "" || f.password != "") {
+		return validationErr("--refresh uses browser authorization and cannot be combined with another credential source", "drop --token, --token-file, --username, and --password")
+	}
+	if f.refresh && f.name != "" {
+		return validationErr("--name cannot be combined with --refresh", "refresh preserves the saved server name; use `shinyhub connect --name <name>` separately to rename it")
+	}
 	if f.token != "" && f.tokenFile != "" {
 		return validationErr("--token and --token-file cannot be used together", "choose one credential source")
 	}
@@ -94,6 +107,10 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 	if err := validateHostName(st, host, f.name); err != nil {
 		return err
 	}
+	previousCredential, hadPreviousCredential := st.Hosts[host]
+	if f.refresh && (!hadPreviousCredential || previousCredential.Token == "") {
+		return authErr("no saved credential to refresh for "+host, "connect first with `shinyhub connect "+host+"`")
+	}
 
 	fmt.Fprintf(cmd.ErrOrStderr(), "Checking %s…\n", host)
 	info, err := probeServer(&cliConfig{Host: host})
@@ -104,6 +121,12 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 	compatibility := diagnoseCompatibility(version, info)
 	if err := reportConnectCompatibility(cmd.ErrOrStderr(), compatibility); err != nil {
 		return err
+	}
+	var previousIdentity *remoteIdentity
+	if f.refresh {
+		if existing, identityErr := fetchRemoteIdentity(host, previousCredential.Token); identityErr == nil {
+			previousIdentity = &existing
+		}
 	}
 
 	token := strings.TrimSpace(f.token)
@@ -117,11 +140,11 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 			return validationErr(fmt.Sprintf("token file %s is empty", f.tokenFile), "write the API token to the file without surrounding text")
 		}
 	}
-	if token == "" {
+	if token == "" && !f.refresh {
 		token = strings.TrimSpace(os.Getenv("SHINYHUB_TOKEN"))
 	}
 
-	if token == "" && f.username != "" {
+	if token == "" && f.username != "" && !f.refresh {
 		password := f.password
 		if password == "" {
 			if !isStdinTTY() {
@@ -160,7 +183,18 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 	if err != nil {
 		return fmt.Errorf("verify connection: %w", err)
 	}
-	return finishConnect(cmd, st, host, f.name, token, identity, info)
+	if f.refresh && previousIdentity != nil && previousIdentity.Username != identity.Username {
+		// Browser state can belong to a different account than the CLI. Do not
+		// silently replace a working identity during what was requested as a
+		// rotation. Best-effort cleanup keeps the just-approved key from becoming
+		// an orphan while the saved credential remains untouched.
+		if identity.Credential != nil && identity.Credential.Type == "api_key" && identity.Credential.ID != 0 {
+			_ = revokeCredential(host, token, identity.Credential.ID)
+		}
+		return authErr(fmt.Sprintf("browser approved %s, but the saved credential belongs to %s", identity.Username, previousIdentity.Username),
+			"sign into the browser as "+previousIdentity.Username+" and rerun `shinyhub connect --refresh`")
+	}
+	return finishConnect(cmd, st, host, f.name, token, identity, info, f.refresh, previousCredential.Token, previousIdentity)
 }
 
 // offerConnectForFirstDeploy turns the most common discovery path—running
@@ -403,17 +437,14 @@ func tryRemoteIdentity(host, token string) (remoteIdentity, int, error) {
 		return identity, resp.StatusCode, &httpStatusError{Status: resp.StatusCode,
 			msg: fmt.Sprintf("%s: %s", resp.Status, unwrapServerError(body, "authorization pending"))}
 	}
-	var payload struct {
-		User struct {
-			Username string `json:"username"`
-			Role     string `json:"role"`
-		} `json:"user"`
-		CanCreateApps bool `json:"can_create_apps"`
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return identity, resp.StatusCode, fmt.Errorf("read identity: %w", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	identity, err = decodeRemoteIdentity(body)
+	if err != nil {
 		return identity, resp.StatusCode, fmt.Errorf("decode identity: %w", err)
 	}
-	identity = remoteIdentity{Username: payload.User.Username, Role: payload.User.Role, CanCreateApps: payload.CanCreateApps}
 	return identity, resp.StatusCode, nil
 }
 
@@ -422,11 +453,21 @@ func fetchRemoteIdentity(host, token string) (remoteIdentity, error) {
 	return identity, err
 }
 
-func finishConnect(cmd *cobra.Command, st *credentialStore, host, name, token string, identity remoteIdentity, info serverInfo) error {
+func finishConnect(cmd *cobra.Command, st *credentialStore, host, name, token string, identity remoteIdentity, info serverInfo, refresh bool, previousToken string, previousIdentity *remoteIdentity) error {
 	previous := st.CurrentHost
 	st.setCredential(host, name, token, identity.Username)
 	if err := saveStore(st); err != nil {
 		return err
+	}
+	status := "connected"
+	previousRevoked := false
+	var revokeWarning string
+	if refresh {
+		status = "refreshed"
+		previousRevoked, revokeWarning = retirePreviousCredential(host, token, previousToken, previousIdentity)
+		if revokeWarning != "" {
+			fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+revokeWarning)
+		}
 	}
 	saved := st.Hosts[host]
 	runtimes := availableRuntimes(info.Runtimes)
@@ -437,16 +478,90 @@ func finishConnect(cmd *cobra.Command, st *credentialStore, host, name, token st
 	next := "Next: run `shinyhub deploy . --wait` from your app directory."
 	if !identity.CanCreateApps {
 		next = "Next: ask a ShinyHub administrator to grant developer access, then run `shinyhub whoami` to verify it."
+	} else if refresh {
+		next = "Next: run `shinyhub doctor --remote` to verify the refreshed connection."
 	}
 	compatibility := diagnoseCompatibility(version, info)
-	prose := fmt.Sprintf("Connected to %s\n  Identity: %s (%s)\n  Can deploy apps: %s\n  Runtimes: %s\n  Compatibility: %s\n  Credentials: %s\n\n%s",
-		st.label(host), identity.Username, identity.Role, permission, strings.Join(runtimes, ", "), compatibility.Detail, configPath(), next)
-	return renderAction(cmd, "connected", map[string]any{
+	verb := "Connected to"
+	if refresh {
+		verb = "Refreshed credential for"
+	}
+	prose := fmt.Sprintf("%s %s\n  Identity: %s (%s)\n  Can deploy apps: %s\n  Runtimes: %s\n  Compatibility: %s\n  Credentials: %s\n\n%s",
+		verb, st.label(host), identity.Username, identity.Role, permission, strings.Join(runtimes, ", "), compatibility.Detail, configPath(), next)
+	result := map[string]any{
 		"host": host, "name": saved.Name, "user": identity.Username, "role": identity.Role,
 		"can_create_apps": identity.CanCreateApps, "cli_version": version, "server_version": info.Version,
 		"protocol_version": info.ProtocolVersion, "compatibility": compatibility.Level,
 		"runtimes": runtimes, "credentials_path": configPath(), "switched_from": switchedFrom(previous, host),
-	}, prose)
+		"credential": credentialLifecycleAt(identity.Credential, time.Now()),
+	}
+	if refresh {
+		result["previous_credential_revoked"] = previousRevoked
+		result["revoke_warning"] = revokeWarning
+	}
+	return renderAction(cmd, status, result, prose)
+}
+
+func revokeCredential(host, token string, id int64) error {
+	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/tokens/%d", host, id), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", authHeader(token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return httpError(token, "revoke previous credential", resp, body)
+	}
+	return nil
+}
+
+func retirePreviousCredential(host, newToken, previousToken string, previousIdentity *remoteIdentity) (bool, string) {
+	if previousIdentity == nil || previousIdentity.Credential == nil {
+		return false, "New credential saved, but this server did not identify the previous credential. Review `shinyhub tokens list` and revoke the old entry if it remains."
+	}
+	credential := previousIdentity.Credential
+	switch credential.Type {
+	case "api_key":
+		if credential.ID == 0 {
+			return false, "New credential saved, but this server did not report the previous API key ID. Review `shinyhub tokens list` and revoke the old entry if it remains."
+		}
+		if err := revokeCredential(host, newToken, credential.ID); err != nil {
+			return false, fmt.Sprintf("New credential saved, but the previous API key could not be revoked automatically: %v. Revoke it with `shinyhub tokens revoke %d`.", err, credential.ID)
+		}
+		return true, ""
+	case "session_token":
+		if err := revokeSessionCredential(host, previousToken); err != nil {
+			return false, fmt.Sprintf("New credential saved, but the previous session could not be revoked automatically: %v. It will remain valid until its reported expiry.", err)
+		}
+		return true, ""
+	case "deploy_token":
+		return false, "New personal credential saved. The previous deploy token is server-configured and cannot be revoked by the CLI; remove it from server configuration if it should no longer be valid."
+	default:
+		return false, fmt.Sprintf("New credential saved, but credential type %q cannot be revoked automatically. Review the server's credential inventory.", credential.Type)
+	}
+}
+
+func revokeSessionCredential(host, token string) error {
+	req, err := http.NewRequest(http.MethodPost, host+"/api/auth/logout", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", authHeader(token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return httpError(token, "revoke previous session", resp, body)
+	}
+	return nil
 }
 
 func switchedFrom(previous, current string) string {
