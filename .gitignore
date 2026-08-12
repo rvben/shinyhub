@@ -17,6 +17,7 @@ node_modules/
 
 # Runtime artifacts created when running the server from a checkout
 # (default config writes the SQLite DB and per-app data under ./data).
+/shinyhub.yaml
 /data/
 *.db
 *.db-shm

@@ -50,6 +50,15 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		}},
 
 	// ── server-side commands ─────────────────────────────────────────────────
+	"init": {Mutating: mut, ArgTypes: map[string]string{"--config": "path", "--admin-password-file": "path"}, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "initialized"},
+		{Name: "config_path", Type: "string"},
+		{Name: "database_dsn", Type: "string"},
+		{Name: "url", Type: "string"},
+		{Name: "username", Type: "string"},
+		{Name: "created_config", Type: "boolean"},
+		{Name: "created_admin", Type: "boolean"},
+	}},
 	"serve": {Mutating: mut, Streaming: true},
 	"backup": {Mutating: mut, ArgTypes: map[string]string{"--out": "path"}, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "written"},

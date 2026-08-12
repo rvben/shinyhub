@@ -91,6 +91,9 @@ var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Run the ShinyHub server",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := maybeRunInteractiveSetup(cmd); err != nil {
+			return err
+		}
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
 		logger := logging.New()
@@ -331,7 +334,7 @@ var buildRootOnce sync.Once
 // tests to call; registration happens exactly once per process.
 func buildRoot() *cobra.Command {
 	buildRootOnce.Do(func() {
-		rootCmd.AddCommand(serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, newWorkerCmd(), newSandboxCmd())
+		rootCmd.AddCommand(newInitCmd(), serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, newWorkerCmd(), newSandboxCmd())
 		cli.AddCommandsTo(rootCmd)
 	})
 	return rootCmd
@@ -871,6 +874,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		if warning := auth.DeployTokenRoleWarning(sysUser.Role); warning != "" {
 			slog.Warn(warning)
 		}
+	}
+
+	// A local-login server without a password-backed administrator can render a
+	// perfectly normal sign-in page while leaving the installation impossible to
+	// administer. Refuse that deceptive half-start and point directly at the safe
+	// recovery command. SSO-backed installations may provision an admin from IdP
+	// group mappings, so they are allowed to begin empty.
+	if err := ensureUsableFirstLogin(cfg, store, serverConfigPath()); err != nil {
+		return err
 	}
 
 	// Refuse local-only runtimes in a clustered (Postgres) deployment before

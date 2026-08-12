@@ -43,7 +43,7 @@ func TestSchema_EveryCommandHasExplicitMutating(t *testing.T) {
 	doc := schemaJSON(t)
 	paths := map[string]map[string]any{}
 	collectPaths("", doc["commands"].([]any), paths)
-	for _, required := range []string{"serve", "backup", "restore", "worker", "schema", "apps list", "fleet status"} {
+	for _, required := range []string{"init", "serve", "backup", "restore", "worker", "schema", "apps list", "fleet status"} {
 		if _, ok := paths[required]; !ok {
 			t.Errorf("command %q missing from schema document", required)
 		}

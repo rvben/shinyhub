@@ -59,26 +59,25 @@ deployment use [Docker](#docker); for a standalone server binary see
 
 ```bash
 uv tool install shinyhub
-
-SHINYHUB_AUTH_SECRET="$(openssl rand -hex 32)" \
-  SHINYHUB_ADMIN_USER=admin SHINYHUB_ADMIN_PASSWORD=change-me \
-  shinyhub serve
+shinyhub serve
 ```
 
-`SHINYHUB_AUTH_SECRET` (a random 32+ character string) is the only required
-setting; no YAML file is needed for a basic run. **Generate it once and reuse the
-same value on every restart**: it signs sessions and derives the key that
-encrypts app secrets, so changing it makes existing encrypted data unreadable.
-Beyond a quick trial, load it from a file or secrets manager (or set `auth.secret`
-in `shinyhub.yaml`). The database, bundles, and per-app data land under `./data/`
-by default. Open `http://localhost:8080` and log in as `admin`.
+On the first run, ShinyHub asks for an administrator username and password,
+creates a private `shinyhub.yaml` with a cryptographically random secret, prepares
+the SQLite database, and then starts normally. Nothing sensitive is echoed. The
+database, bundles, and per-app data land under `./data/` by default. Open
+`http://localhost:8080` and sign in with the administrator you just created.
+
+Prefer setup and startup as separate steps? Run `shinyhub init`, inspect the
+summary, and then run `shinyhub serve`. Both paths are safe to rerun: existing
+configuration, secrets, and users are never overwritten.
 
 Then deploy an app (an `app.py` + `requirements.txt`, or an `app.R` +
 `renv.lock` - see [Deploy an R Shiny app](docs/recipes/r-shiny.md)) from
 another terminal:
 
 ```bash
-shinyhub login --host http://localhost:8080 --username admin
+shinyhub login --host http://localhost:8080
 shinyhub deploy ./my-app --slug demo --wait   # live at /app/demo/
 ```
 
@@ -115,7 +114,7 @@ docker run -d \
   -v "$PWD/data:/data" \
   -e SHINYHUB_AUTH_SECRET="$secret" \
   -e SHINYHUB_ADMIN_USER=admin \
-  -e SHINYHUB_ADMIN_PASSWORD=change-me \
+  -e SHINYHUB_ADMIN_PASSWORD='choose-a-strong-password' \
   ghcr.io/rvben/shinyhub:latest
 ```
 
@@ -132,10 +131,7 @@ For a host without Python, install the standalone server binary:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rvben/shinyhub/main/scripts/install.sh | sh
 # Or download from https://github.com/rvben/shinyhub/releases
-
-SHINYHUB_AUTH_SECRET="$(openssl rand -hex 32)" \
-  SHINYHUB_ADMIN_USER=admin SHINYHUB_ADMIN_PASSWORD=change-me \
-  shinyhub serve
+shinyhub serve
 ```
 
 > The binary is the server only. Python apps are launched with `uv`, so install
@@ -147,6 +143,7 @@ SHINYHUB_AUTH_SECRET="$(openssl rand -hex 32)" \
 git clone https://github.com/rvben/shinyhub.git
 cd shinyhub
 go build -o bin/shinyhub ./cmd/shinyhub
+bin/shinyhub serve
 ```
 
 ## Configuration
@@ -156,8 +153,8 @@ Every key is documented inline in
 (prefixed `SHINYHUB_`) override the YAML.
 
 The server resolves its config file in this order: the `--config` flag
-(`shinyhub serve --config /path/to/shinyhub.yaml`, also honored by `backup` and
-`restore`), then the `SHINYHUB_CONFIG` environment variable, then
+(`shinyhub serve --config /path/to/shinyhub.yaml`, also honored by `init`,
+`backup`, and `restore`), then the `SHINYHUB_CONFIG` environment variable, then
 `./shinyhub.yaml`.
 
 > **`SHINYHUB_CONFIG` has two distinct roles.** On the SERVER it selects the
@@ -173,9 +170,11 @@ local hub and production at the same time and switch with `shinyhub use`. See
 [Working with several servers](docs/hosts.md) for how a command picks which
 server and which token to use.
 
-The one required setting is `auth.secret`: a random 32+ character string
-(`openssl rand -hex 32`). The server refuses to start with the placeholder
-value.
+For interactive use, `shinyhub init` generates the required `auth.secret` and
+stores it in an owner-readable configuration file. For unattended deployments,
+provide a stable random 32+ character `SHINYHUB_AUTH_SECRET` together with
+`SHINYHUB_ADMIN_USER` and `SHINYHUB_ADMIN_PASSWORD`. Keep the same secret across
+restarts: it signs sessions and derives the key used to encrypt app secrets.
 
 ### CLI output
 
