@@ -56,6 +56,11 @@ pointed?" is usually asked. `hosts` never prints a token, in any output format.
 `shinyhub whoami` is the counterpart that does make a request: it asks the
 current server who the saved credential authenticates as.
 
+`shinyhub doctor --remote` goes further: it verifies the selected credential,
+transport, server, identity, create-app permission, and reported runtimes. Add
+`--slug sales` to check whether the identity can update that exact existing app
+or create it if it is new. See [Doctor](doctor.md).
+
 ## Target one server for a single command
 
 The global `--host` flag overrides the current server for one command:
@@ -108,7 +113,7 @@ second URL for the same server (a direct IP behind a proxy, say).
 
 ## The credentials file
 
-Written by `login`, owner-readable only (`0600`), at
+Written by `connect` or `login`, owner-readable only (`0600`), at
 `~/.config/shinyhub/config.json` unless `--config`, `SHINYHUB_CREDENTIALS`, or
 `SHINYHUB_CONFIG` points elsewhere.
 

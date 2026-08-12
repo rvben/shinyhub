@@ -87,8 +87,11 @@ On your workstation, connect once and deploy from any app directory:
 
 ```bash
 uv tool install shinyhub
-shinyhub connect https://hub.example.com --name prod
 cd ./my-app
+shinyhub doctor . --local
+shinyhub run . --check
+shinyhub connect https://hub.example.com --name prod
+shinyhub doctor .
 shinyhub deploy . --wait
 ```
 
@@ -105,6 +108,12 @@ to start this flow in place. Automation never prompts: use
 Use `shinyhub login` when you specifically want a short-lived password session
 or need to refresh one; `connect` is the recommended first-time workstation
 flow.
+
+`shinyhub doctor .` checks the complete path before a deploy: bundle and
+manifest, local launcher, credential-file safety, server connectivity,
+authentication, exact app permission, and remote runtime availability. It
+lists every problem with a concrete fix in one run, emits JSON when piped, and
+does not change local or remote state. See [Doctor](docs/doctor.md).
 
 > Tip: run the bundle locally first with `shinyhub run ./my-app`. It keeps your
 > source tree untouched, serves the production-shaped `/app/<slug>/` route, and
@@ -185,7 +194,7 @@ The server resolves its config file in this order: the `--config` flag
 > **`SHINYHUB_CONFIG` has two distinct roles.** On the SERVER it selects the
 > `shinyhub.yaml` config file. On CLIENT commands (`deploy`, `env`, `apps`, ...)
 > it selects the credentials file (`~/.config/shinyhub/config.json` by default,
-> written by `shinyhub login`). The `--config` flag on client commands likewise
+> written by `shinyhub connect` or `shinyhub login`). The `--config` flag on client commands likewise
 > points to the credentials file, not the server YAML. For CI pipelines the
 > simpler approach is to skip the credentials file entirely and supply
 > `SHINYHUB_HOST` and `SHINYHUB_TOKEN` directly.

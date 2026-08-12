@@ -100,7 +100,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintf(errOut, "  %s not authenticated: %v\n     run 'shinyhub login' or pass --config\n", s.failMark(), err)
+		fmt.Fprintf(errOut, "  %s not authenticated: %v\n     run 'shinyhub connect <url>' or pass --config\n", s.failMark(), err)
 		return nil, &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	if waitFor > 0 {

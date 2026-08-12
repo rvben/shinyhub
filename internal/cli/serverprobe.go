@@ -33,7 +33,7 @@ func (i serverInfo) looksLikeShinyhub() bool {
 // server: a half-provisioned box where a front proxy is up but the shinyhub
 // binary is not, so /api/server-info does not return the expected JSON. It is
 // deliberately distinct from a transport/auth failure so the CLI can avoid the
-// misleading "run shinyhub login" hint when the real problem is "the server
+// misleading "run shinyhub connect" hint when the real problem is "the server
 // isn't up yet".
 type serverNotReadyError struct {
 	host   string

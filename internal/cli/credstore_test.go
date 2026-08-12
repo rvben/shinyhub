@@ -420,7 +420,7 @@ func TestResolve_EnvTokenIsTheExplicitCrossHostOptIn(t *testing.T) {
 		t.Fatal("expected a refusal when targeting a host with no saved credential")
 	} else {
 		hint := hintOf(err)
-		if !strings.Contains(hint, "shinyhub login --host https://other.example.com") {
+		if !strings.Contains(hint, "shinyhub connect https://other.example.com") {
 			t.Errorf("hint should offer logging in to the target, got %q", hint)
 		}
 		if !strings.Contains(hint, "SHINYHUB_TOKEN") {
@@ -457,9 +457,9 @@ func TestResolve_RejectsSelectorWithoutAScheme(t *testing.T) {
 	}
 }
 
-// With nothing saved and nothing in the environment, the answer is "log in",
+// With nothing saved and nothing in the environment, the answer is "connect",
 // not "pick a host".
-func TestResolve_EmptyStoreSaysLogIn(t *testing.T) {
+func TestResolve_EmptyStoreSaysConnect(t *testing.T) {
 	isolatedCredentials(t)
 	st := &credentialStore{Hosts: map[string]hostCredential{}}
 
@@ -471,8 +471,8 @@ func TestResolve_EmptyStoreSaysLogIn(t *testing.T) {
 		t.Errorf("classify = (%q,%d), want (%q,3)", kind, code, KindAuth)
 	}
 	hint := hintOf(err)
-	if !strings.Contains(hint, "shinyhub login") {
-		t.Errorf("hint should name login, got %q", hint)
+	if !strings.Contains(hint, "shinyhub connect") {
+		t.Errorf("hint should name connect, got %q", hint)
 	}
 	if strings.Contains(hint, "shinyhub use") {
 		t.Errorf("hint should not offer `use` when nothing is saved, got %q", hint)
@@ -660,7 +660,7 @@ func TestLoadStore_UnreadableFileIsActionable(t *testing.T) {
 			t.Errorf("got kind=%q code=%d, want %q/1", kind, code, KindValidation)
 		}
 		hint := hintOf(err)
-		if !strings.Contains(hint, "shinyhub login") {
+		if !strings.Contains(hint, "shinyhub connect") {
 			t.Errorf("hint should name the command that rewrites the file, got %q", hint)
 		}
 		// Deleting the file is destructive when several hosts are saved, so the

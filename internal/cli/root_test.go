@@ -36,8 +36,8 @@ func TestLoadConfig_ErrorMentionsShinyhub(t *testing.T) {
 	// The recovery command lives in the hint, which the error renderer prints
 	// alongside the message, so that is where the guarantee is asserted.
 	var he hintedError
-	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "shinyhub login") {
-		t.Fatalf("error %q (hint %q) should point at `shinyhub login`", err.Error(), hintOf(err))
+	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "shinyhub connect") {
+		t.Fatalf("error %q (hint %q) should point at `shinyhub connect`", err.Error(), hintOf(err))
 	}
 }
 
@@ -156,7 +156,7 @@ func TestLoadConfig_EnvHostDoesNotBorrowAnotherHostsToken(t *testing.T) {
 		t.Errorf("classify = (%q,%d), want (%q,3)", kind, code, KindAuth)
 	}
 	var he hintedError
-	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "shinyhub login --host https://other.example.com") {
+	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "shinyhub connect https://other.example.com") {
 		t.Errorf("hint should name the login command for the targeted host, got: %v", err)
 	}
 }

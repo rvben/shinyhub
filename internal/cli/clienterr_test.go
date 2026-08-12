@@ -40,7 +40,7 @@ func TestUnwrapServerError(t *testing.T) {
 // "eyJ" header. Only the shape matters here, not the signature.
 const testJWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln"
 
-func TestHTTPError_ExpiredJWTSurfacesLoginHint(t *testing.T) {
+func TestHTTPError_ExpiredJWTSurfacesConnectHint(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized"}
 	err := httpError(testJWT, "list apps", resp, []byte(`{"error":"unauthorized"}`))
 	if err == nil {
@@ -50,8 +50,8 @@ func TestHTTPError_ExpiredJWTSurfacesLoginHint(t *testing.T) {
 	if !strings.Contains(msg, "session expired") {
 		t.Errorf("expected message to mention session expiry, got %q", msg)
 	}
-	if !strings.Contains(msg, "shinyhub login") {
-		t.Errorf("expected message to suggest `shinyhub login`, got %q", msg)
+	if !strings.Contains(msg, "shinyhub connect") {
+		t.Errorf("expected message to suggest `shinyhub connect`, got %q", msg)
 	}
 	if strings.Contains(msg, "—") || strings.Contains(msg, "–") {
 		t.Errorf("message must not contain em/en dashes, got %q", msg)
@@ -144,8 +144,8 @@ func TestAppsList_ExpiredSessionSurfacesLoginHint(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "session expired") || !strings.Contains(msg, "shinyhub login") {
-		t.Errorf("expected session-expired login hint, got %q", msg)
+	if !strings.Contains(msg, "session expired") || !strings.Contains(msg, "shinyhub connect") {
+		t.Errorf("expected session-expired connect hint, got %q", msg)
 	}
 }
 
@@ -180,7 +180,7 @@ func TestHTTPError_SessionExpiredKeepsTypedStatus(t *testing.T) {
 	if hse.Status != 401 {
 		t.Errorf("Status = %d, want 401", hse.Status)
 	}
-	if got := err.Error(); got != "session expired - run `shinyhub login` to sign in again" {
+	if got := err.Error(); got != "session expired - run `shinyhub connect` to sign in again" {
 		t.Errorf("Error() = %q", got)
 	}
 }

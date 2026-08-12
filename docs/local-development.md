@@ -8,8 +8,15 @@ control plane itself and running an app exactly as ShinyHub expects it to run.
 From an app bundle containing `app.py`, `app.R`, or a `shinyhub.toml` command:
 
 ```bash
+shinyhub doctor . --local
 shinyhub run .
 ```
+
+The doctor preflight validates the directory, deployment slug, manifest,
+resolved entrypoint, and required executable without starting a process or
+contacting a server. It reports all blockers together. After connecting to a
+remote, run `shinyhub doctor .` without `--local` to verify the complete deploy
+path. See [Doctor](doctor.md).
 
 The command installs dependencies when needed, prints the source, workspace,
 data, app type, and readiness contract it selected, then serves the app at a

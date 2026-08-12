@@ -152,7 +152,7 @@ func TestHostsCmd_EmptyStoreExplainsHowToAddOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hosts on an empty store should not be an error: %v", err)
 	}
-	if !strings.Contains(stdout, "shinyhub login") {
+	if !strings.Contains(stdout, "shinyhub connect") {
 		t.Errorf("empty listing should name the command that adds a host, got %q", stdout)
 	}
 }
@@ -345,7 +345,7 @@ func TestUseCmd_RefusesAHostWithNoSavedCredential(t *testing.T) {
 	if kind, code := classify(err); kind != KindAuth || code != 3 {
 		t.Errorf("classify = (%q,%d), want (%q,3)", kind, code, KindAuth)
 	}
-	if hint := hintOf(err); !strings.Contains(hint, "shinyhub login --host https://never-logged-in.example.com") {
+	if hint := hintOf(err); !strings.Contains(hint, "shinyhub connect https://never-logged-in.example.com") {
 		t.Errorf("hint should offer logging in to that host, got %q", hint)
 	}
 

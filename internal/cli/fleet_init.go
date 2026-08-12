@@ -244,7 +244,7 @@ func runFleetInit(cmd *cobra.Command, f *fleetInitFlags) error {
 
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub login' or pass --config\n", err)
+		fmt.Fprintf(errOut, "  ✗ not authenticated: %v\n     run 'shinyhub connect <url>' or pass --config\n", err)
 		return &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	apps, err := fetchApps(cfg)

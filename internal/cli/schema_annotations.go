@@ -93,6 +93,16 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "credentials_path", Type: "string", Desc: "Private file the credential was written to"},
 		{Name: "switched_from", Type: "string", Desc: "Previously-current server; empty when unchanged"},
 	}},
+	"doctor": {Mutating: ro, ArgTypes: map[string]string{"dir": "path"}, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "ready or not_ready"},
+		{Name: "scope", Type: "string", Desc: "all, local, or remote"},
+		{Name: "app_dir", Type: "string", Desc: "Absolute app directory when local checks run"},
+		{Name: "host", Type: "string", Desc: "Selected remote server URL when remote checks run"},
+		{Name: "slug", Type: "string", Desc: "Deployment target checked for access"},
+		{Name: "checks", Type: "array", Desc: "Ordered checks with name, status, detail, and optional fix"},
+		{Name: "summary", Type: "object", Desc: "Counts of passed, warned, failed, and skipped checks"},
+		{Name: "next_steps", Type: "array", Desc: "Exact commands or actions to continue"},
+	}, Notes: "Read-only aggregate preflight. Exits 0 when ready (warnings do not fail), 1 for local/configuration blockers, 3 for auth/network blockers, and 6 when the selected host is reachable but ShinyHub is not ready."},
 	"login": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "added when the server was not saved before, refreshed when its credential was replaced"},
 		{Name: "host", Type: "string", Desc: "Normalized server URL the credential was saved under"},

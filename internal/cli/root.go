@@ -67,6 +67,7 @@ func AddCommandsTo(root *cobra.Command) {
 		"Disable colored output (also honours $NO_COLOR; color is off by default when not writing to a terminal)")
 	root.AddCommand(
 		newConnectCmd(),
+		newDoctorCmd(),
 		newLoginCmd(),
 		newLogoutCmd(),
 		newWhoamiCmd(),

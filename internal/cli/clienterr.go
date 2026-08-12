@@ -58,7 +58,7 @@ func httpError(token, op string, resp *http.Response, body []byte) error {
 	if resp.StatusCode == http.StatusUnauthorized && looksLikeJWT(token) {
 		return &httpStatusError{
 			Status: resp.StatusCode,
-			msg:    "session expired - run `shinyhub login` to sign in again",
+			msg:    "session expired - run `shinyhub connect` to sign in again",
 		}
 	}
 	return &httpStatusError{

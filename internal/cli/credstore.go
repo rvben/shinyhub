@@ -145,7 +145,7 @@ func loadStore() (*credentialStore, error) {
 // server config on the server and the client credentials file on the client.
 // A file that does start with `{` is a real credentials file that got damaged.
 func unreadableCredentialsError(path string, raw []byte, cause error) error {
-	hint := fmt.Sprintf("the file is damaged; repair the JSON, or delete it and run `shinyhub login --host <url>` again (deleting it drops every saved host in %s)", path)
+	hint := fmt.Sprintf("the file is damaged; repair the JSON, or delete it and run `shinyhub connect <url>` again (deleting it drops every saved host in %s)", path)
 	if trimmed := strings.TrimSpace(string(raw)); !strings.HasPrefix(trimmed, "{") {
 		hint = "this does not look like a credentials file; --config and $SHINYHUB_CREDENTIALS/$SHINYHUB_CONFIG select the CLIENT credentials file (default ~/.config/shinyhub/config.json), not the server's shinyhub.yaml"
 	}
@@ -257,7 +257,7 @@ func (st *credentialStore) resolve(hostFlag, envHost, envToken string) (*cliConf
 				"run `shinyhub use <name|url>` to pick one; "+st.knownHostsHint())
 		}
 		return nil, authErr("not logged in",
-			"run `shinyhub login --host <url>` first, or set SHINYHUB_HOST and SHINYHUB_TOKEN")
+			"run `shinyhub connect <url>` first, or set SHINYHUB_HOST and SHINYHUB_TOKEN")
 	}
 	if explicit && !hasScheme(host) {
 		return nil, validationErr(fmt.Sprintf("%s value %q is not a usable server URL", from, selector),
@@ -270,7 +270,7 @@ func (st *credentialStore) resolve(hostFlag, envHost, envToken string) (*cliConf
 	cred, ok := st.Hosts[host]
 	if !ok || cred.Token == "" {
 		return nil, authErr(fmt.Sprintf("not logged in to %s", host),
-			fmt.Sprintf("run `shinyhub login --host %s`, or set SHINYHUB_TOKEN to reuse a credential you know is valid there; %s",
+			fmt.Sprintf("run `shinyhub connect %s`, or set SHINYHUB_TOKEN to reuse a credential you know is valid there; %s",
 				host, st.knownHostsHint()))
 	}
 	return &cliConfig{Host: host, Token: cred.Token}, nil
@@ -280,7 +280,7 @@ func (st *credentialStore) resolve(hostFlag, envHost, envToken string) (*cliConf
 // selector does not send them to --help to find out what exists.
 func (st *credentialStore) knownHostsHint() string {
 	if len(st.Hosts) == 0 {
-		return "no hosts are saved yet; run `shinyhub login --host <url>` first"
+		return "no hosts are saved yet; run `shinyhub connect <url>` first"
 	}
 	labels := make([]string, 0, len(st.Hosts))
 	for host, cred := range st.Hosts {

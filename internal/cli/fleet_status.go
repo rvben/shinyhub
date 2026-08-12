@@ -176,7 +176,7 @@ func runFleetStatus(cmd *cobra.Command, f *fleetStatusFlags) error {
 	if err != nil {
 		es := stylerFor(errOut)
 		fmt.Fprintf(errOut, "  %s not authenticated: %v\n     %s\n",
-			es.red("✗"), err, es.dim("run 'shinyhub login' or pass --config"))
+			es.red("✗"), err, es.dim("run 'shinyhub connect <url>' or pass --config"))
 		return &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
 	apps, err := fetchApps(cfg)

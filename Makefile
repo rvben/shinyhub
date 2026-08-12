@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -96,6 +96,14 @@ test-r-identity:
 # when its toolchain (uv / Rscript) is absent.
 test-identity-conformance:
 	SHINYHUB_CONFORMANCE=1 go test ./internal/identity/ -run TestConformance -count=1 -v
+
+# test-onboarding-e2e dogfoods the complete first-app path against a fresh real
+# server: init, local preflight + boot, token-file connect, doctor, first deploy,
+# readiness, exact update permission, redeploy, and inline diagnosis of a
+# deliberate startup failure. Requires uv; kept outside `check` because a clean
+# run downloads Python dependencies.
+test-onboarding-e2e:
+	./scripts/onboarding-e2e.sh
 
 # test-remote-e2e launches a control plane and a real `shinyhub worker` against
 # the local Docker daemon, deploys an app onto the remote tier with two

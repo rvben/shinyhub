@@ -75,7 +75,7 @@ func TestClassify_DetailedExitCodeIsNotAnError(t *testing.T) {
 func TestReport_EnvelopeIsLastStderrLine(t *testing.T) {
 	var stderr bytes.Buffer
 	code := reportTo(&stderr, false /* stderrIsTTY */, formatJSON,
-		&httpStatusError{Status: 401, msg: "session expired - run `shinyhub login` to sign in again"})
+		&httpStatusError{Status: 401, msg: "session expired - run `shinyhub connect` to sign in again"})
 	if code != 3 {
 		t.Fatalf("exit code = %d, want 3", code)
 	}

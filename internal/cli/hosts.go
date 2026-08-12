@@ -16,7 +16,7 @@ func newHostsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "hosts",
 		Short: "List saved ShinyHub servers and show which one is current",
-		Long: `Hosts lists the servers ` + "`shinyhub login`" + ` has saved credentials for and
+		Long: `Hosts lists the servers ` + "`shinyhub connect`" + ` or ` + "`shinyhub login`" + ` has saved credentials for and
 marks the one commands target by default. Switch with ` + "`shinyhub use`" + `, or
 target a different one for a single command with ` + "`--host`" + `.
 
@@ -49,7 +49,7 @@ only, so no server is contacted.`,
 			map[string]any{"current_host": st.CurrentHost},
 			func(w io.Writer, items []map[string]any) {
 				if len(items) == 0 {
-					fmt.Fprintln(w, "No saved hosts. Run `shinyhub login --host <url>` to add one.")
+					fmt.Fprintln(w, "No saved hosts. Run `shinyhub connect <url>` to add one.")
 					return
 				}
 				t := newTable("", "NAME", "HOST", "USER")
@@ -97,8 +97,8 @@ func newUseCmd() *cobra.Command {
 		Use:   "use <host>",
 		Short: "Switch the current ShinyHub server to a saved host",
 		Long: `Use selects which saved server subsequent commands target. The argument is
-either a server's short name (set with ` + "`shinyhub login --name`" + `) or its
-URL. The server must already have saved credentials; run ` + "`shinyhub login`" + `
+either a server's short name (set with ` + "`shinyhub connect --name`" + `) or its
+URL. The server must already have saved credentials; run ` + "`shinyhub connect`" + `
 first to add one.`,
 		// A custom arity check so the most likely mistake - reaching for the
 		// global --host, which every other command uses to pick a server - is
@@ -130,7 +130,7 @@ first to add one.`,
 			cred, ok := st.Hosts[host]
 			if !ok {
 				return authErr(fmt.Sprintf("not logged in to %s", host),
-					fmt.Sprintf("run `shinyhub login --host %s` first; %s", host, st.knownHostsHint()))
+					fmt.Sprintf("run `shinyhub connect %s` first; %s", host, st.knownHostsHint()))
 			}
 			if st.CurrentHost == host {
 				return renderAction(cmd, "unchanged",

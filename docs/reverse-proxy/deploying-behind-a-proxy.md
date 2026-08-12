@@ -79,7 +79,7 @@ SHINYHUB_TOKEN=your-deploy-token-here \
 ```
 
 The two env vars can also be written to the CLI credentials file
-(`shinyhub login --host http://10.0.1.5:8080`), but for CI pipelines injecting
+(`shinyhub connect http://10.0.1.5:8080`), but for CI pipelines injecting
 them as environment variables is simpler and avoids storing credentials on disk.
 
 ## CI pipeline example
@@ -146,7 +146,7 @@ ShinyHub has two distinct config concepts:
   <file>` or the `SHINYHUB_CONFIG` env var on the SERVER process.
 
 - **Client credentials file** (`~/.config/shinyhub/config.json`): stores the
-  host URL and API token written by `shinyhub login`. Selected with the
+  host URL and API token written by `shinyhub connect` or `shinyhub login`. Selected with the
   `--config` flag on CLIENT commands, or the `SHINYHUB_CONFIG` env var on the
   CLIENT side. When using `SHINYHUB_HOST` and `SHINYHUB_TOKEN` directly, the
   credentials file is not read.

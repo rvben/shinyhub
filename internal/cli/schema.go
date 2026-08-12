@@ -32,7 +32,7 @@ type schemaEnvVar struct {
 // the one server-side var clients need to know about).
 func clientEnvVars() []schemaEnvVar {
 	return []schemaEnvVar{
-		{Name: "SHINYHUB_HOST", Scope: "client", Description: "Server URL; overrides the saved host. Set together with SHINYHUB_TOKEN for non-interactive (CI) auth - no `shinyhub login` needed."},
+		{Name: "SHINYHUB_HOST", Scope: "client", Description: "Server URL; overrides the saved host. Set together with SHINYHUB_TOKEN for non-interactive (CI) auth - no `shinyhub connect` needed."},
 		{Name: "SHINYHUB_TOKEN", Scope: "client", Description: "API key or pre-shared deploy token; overrides the saved token. Skips interactive login."},
 		{Name: "SHINYHUB_CREDENTIALS", Scope: "client", Description: "Path to the client credentials file (default ~/.config/shinyhub/config.json). Preferred over SHINYHUB_CONFIG; unambiguously refers to the CLI credentials, not the server-side serve --config."},
 		{Name: "SHINYHUB_CONFIG", Scope: "client", Description: "Legacy alias for SHINYHUB_CREDENTIALS. Still fully supported; SHINYHUB_CREDENTIALS takes precedence when both are set."},

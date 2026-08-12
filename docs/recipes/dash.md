@@ -82,7 +82,7 @@ boot time.
 
 ```bash
 # Authenticate once (stores a token in ~/.config/shinyhub/)
-shinyhub login --host https://hub.example.com
+shinyhub connect https://hub.example.com
 
 # Deploy from the bundle directory
 shinyhub deploy . --slug hello-dash

@@ -11,7 +11,7 @@ my-r-app/
 ```
 
 ```bash
-shinyhub login --host https://hub.example.com
+shinyhub connect https://hub.example.com
 shinyhub deploy . --slug hello-r
 ```
 
