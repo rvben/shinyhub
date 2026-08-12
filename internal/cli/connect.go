@@ -37,10 +37,11 @@ type connectFlags struct {
 const defaultConnectTimeout = 5 * time.Minute
 
 type remoteIdentity struct {
-	Username      string
-	Role          string
-	CanCreateApps bool
-	Credential    *remoteCredential
+	Username           string
+	Role               string
+	CanCreateApps      bool
+	CanCreateAppsKnown bool
+	Credential         *remoteCredential
 }
 
 func newConnectCmd() *cobra.Command {

@@ -98,10 +98,11 @@ test-identity-conformance:
 	SHINYHUB_CONFORMANCE=1 go test ./internal/identity/ -run TestConformance -count=1 -v
 
 # test-onboarding-e2e dogfoods the complete first-app path against a fresh real
-# server: init, local preflight + boot, token-file connect, doctor, first deploy,
-# readiness, exact update permission, redeploy, and inline diagnosis of a
-# deliberate startup failure. Requires uv; kept outside `check` because a clean
-# run downloads Python dependencies.
+# server: init, local preflight + boot, token-file connect, doctor, read-only
+# create/unchanged plans with detailed exit codes, first deploy, readiness,
+# exact update permission, redeploy, and inline diagnosis of a deliberate
+# startup failure. Requires uv; kept outside `check` because a clean run
+# downloads Python dependencies.
 test-onboarding-e2e:
 	./scripts/onboarding-e2e.sh
 

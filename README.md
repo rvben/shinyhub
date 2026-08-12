@@ -78,6 +78,7 @@ another terminal:
 
 ```bash
 shinyhub connect http://localhost:8080 --name local
+shinyhub plan ./my-app --slug demo
 shinyhub deploy ./my-app --slug demo --wait   # live at /app/demo/
 ```
 
@@ -93,6 +94,7 @@ shinyhub doctor . --local
 shinyhub run . --check
 shinyhub connect https://hub.example.com --name prod
 shinyhub doctor .
+shinyhub plan .
 shinyhub deploy . --wait
 ```
 
@@ -128,6 +130,12 @@ manifest, local launcher, credential-file safety, server connectivity,
 authentication, exact app permission, and remote runtime availability. It
 lists every problem with a concrete fix in one run, emits JSON when piped, and
 does not change local or remote state. See [Doctor](docs/doctor.md).
+
+`shinyhub plan .` then shows the exact archive, content digest, ignored paths,
+launch and manifest effects, remote create-or-update state, permissions, and
+start/stop lifecycle—without making a change. Its final line is the exact
+deploy command to run. Use `--detailed-exitcode` or `--fail-on-changes` for a CI
+gate. See [Deployment plan](docs/deployment-plan.md).
 
 > Tip: run the bundle locally first with `shinyhub run ./my-app`. It keeps your
 > source tree untouched, serves the production-shaped `/app/<slug>/` route, and

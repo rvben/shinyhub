@@ -46,9 +46,16 @@ SHINYHUB_AUTH_SECRET="$(openssl rand -hex 32)" \
 Then push an app directory:
 
 ```bash
-shinyhub login --host http://localhost:8080 --username admin
+shinyhub connect http://localhost:8080 --name local
+shinyhub doctor ./my-app
+shinyhub plan ./my-app --slug demo
 shinyhub deploy ./my-app --slug demo --wait   # live at /app/demo/
 ```
+
+`doctor` reports all local, connection, runtime, and permission blockers in one
+read-only pass. `plan` builds the exact upload and shows its digest, included and
+excluded paths, launch and manifest effects, and remote create-or-update action
+without changing the server. Its final line is the deploy command to run.
 
 `--wait` blocks until the app is healthy (the first run installs dependencies,
 which can take minutes). Apps are **private by default**, so the URL returns 401
@@ -65,7 +72,7 @@ binary. The CLI is the agent contract:
   fields, error `kind`s, and exit codes. Authoritative.
 - **`shinyhub <command> --help`** - the same, per command, human-readable.
 
-That is how you discover `login`, `deploy`, `apps`
+That is how you discover `connect`, `doctor`, `plan`, `deploy`, `apps`
 (list/logs/metrics/restart/rollback/deployments/access), `env` (+ encrypted
 secrets), `data`, `schedule` (+ `runs`), `share`, `users`, and `fleet`
 (declarative multi-app apply). For running the server in production (Docker,

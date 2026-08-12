@@ -158,7 +158,35 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "user", Type: "string", Desc: "Username the saved credential authenticates as; empty when not recorded"},
 	}},
 
-	// ── deploy ───────────────────────────────────────────────────────────────
+	// ── plan / deploy ────────────────────────────────────────────────────────
+	"plan": {
+		Mutating: ro,
+		ArgTypes: map[string]string{"dir": "path"},
+		ArgEnums: map[string][]string{
+			"--visibility": {"private", "shared", "public", "internal"},
+		},
+		OutputFields: []fieldSpec{
+			{Name: "status", Type: "string", Desc: "planned"},
+			{Name: "action", Type: "string", Desc: "create, update, or redeploy"},
+			{Name: "change_status", Type: "string", Desc: "new, changed, unchanged, or unknown"},
+			{Name: "changes", Type: "boolean|null", Desc: "Null when the remote server has no comparable live digest"},
+			{Name: "host", Type: "string"},
+			{Name: "app_url", Type: "string"},
+			{Name: "slug", Type: "string"},
+			{Name: "source", Type: "string"},
+			{Name: "permission", Type: "string"},
+			{Name: "visibility", Type: "string"},
+			{Name: "lifecycle", Type: "string"},
+			{Name: "remote", Type: "object"},
+			{Name: "bundle", Type: "object", Desc: "Exact digest, sizes, files, and excluded paths"},
+			{Name: "launch", Type: "object"},
+			{Name: "manifest", Type: "object"},
+			{Name: "warnings", Type: "array"},
+			{Name: "deploy_command", Type: "string", Desc: "Copy-pasteable command that executes the planned deployment"},
+			{Name: "exit_code", Type: "integer", Desc: "Process exit code for this plan invocation"},
+		},
+		Notes: "Read-only: builds the local archive and makes only GET requests. --detailed-exitcode and --fail-on-changes exit 2 for new, changed, or unknown content; unchanged content exits 0.",
+	},
 	"deploy": {
 		Mutating: mut,
 		ArgEnums: map[string][]string{

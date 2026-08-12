@@ -55,7 +55,7 @@ func TestAddCommandsTo_RegistersAllSubcommands(t *testing.T) {
 	parent := &cobra.Command{Use: "parent"}
 	AddCommandsTo(parent)
 
-	wantSubcommands := []string{"connect", "login", "logout", "deploy", "apps", "tokens", "env", "data", "schedule", "share", "fleet", "manifest", "schema"}
+	wantSubcommands := []string{"connect", "login", "logout", "plan", "deploy", "apps", "tokens", "env", "data", "schedule", "share", "fleet", "manifest", "schema"}
 	have := make(map[string]bool)
 	for _, sub := range parent.Commands() {
 		have[sub.Name()] = true

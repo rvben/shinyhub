@@ -39,7 +39,7 @@ func decodeRemoteIdentity(body []byte) (remoteIdentity, error) {
 			Username string `json:"username"`
 			Role     string `json:"role"`
 		} `json:"user"`
-		CanCreateApps bool              `json:"can_create_apps"`
+		CanCreateApps *bool             `json:"can_create_apps"`
 		Credential    *remoteCredential `json:"credential,omitempty"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -48,10 +48,15 @@ func decodeRemoteIdentity(body []byte) (remoteIdentity, error) {
 	if payload.User.Username == "" {
 		return remoteIdentity{}, fmt.Errorf("authentication response did not identify a user")
 	}
-	return remoteIdentity{
+	identity := remoteIdentity{
 		Username: payload.User.Username, Role: payload.User.Role,
-		CanCreateApps: payload.CanCreateApps, Credential: payload.Credential,
-	}, nil
+		Credential: payload.Credential,
+	}
+	if payload.CanCreateApps != nil {
+		identity.CanCreateApps = *payload.CanCreateApps
+		identity.CanCreateAppsKnown = true
+	}
+	return identity, nil
 }
 
 func credentialLifecycleAt(credential *remoteCredential, now time.Time) credentialLifecycle {

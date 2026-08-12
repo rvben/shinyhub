@@ -26,7 +26,7 @@ trap cleanup EXIT
 
 fail() {
   echo "ONBOARDING E2E FAIL: $*" >&2
-  for log in server.log local.log connect.log doctor.log deploy.log broken.log; do
+  for log in server.log local.log connect.log doctor.log plan.log deploy.log broken.log; do
     if [ -s "${WORK}/${log}" ]; then
       echo "----- ${log} (last 80 lines) -----" >&2
       tail -80 "${WORK}/${log}" >&2
@@ -87,12 +87,32 @@ echo "==> verifying the complete deploy path"
   >"${WORK}/doctor.log" 2>&1 || fail "complete doctor"
 grep -q 'READY' "${WORK}/doctor.log" || fail "doctor did not report READY"
 
+echo "==> planning the new app without changing the server"
+if "${BIN}" plan "${WORK}/app" --visibility public --detailed-exitcode \
+  --config "${WORK}/client.json" --output json \
+  >"${WORK}/plan.log" 2>&1; then
+  fail "new-app plan should exit 2 under --detailed-exitcode"
+else
+  plan_code=$?
+fi
+test "${plan_code}" = "2" || fail "new-app plan exited ${plan_code}, want 2"
+grep -q '"action":"create"' "${WORK}/plan.log" || fail "new-app plan did not report create"
+grep -q '"exit_code":2' "${WORK}/plan.log" || fail "new-app JSON did not mirror exit code 2"
+
 echo "==> deploying the first app and waiting for health"
 "${BIN}" deploy "${WORK}/app" --visibility public --wait \
   --config "${WORK}/client.json" --output table \
   >"${WORK}/deploy.log" 2>&1 || fail "first deploy"
 body="$(curl -fsS "${HOST}/app/app/" || true)"
 echo "${body}" | grep -q 'shinyhub remote-worker E2E' || fail "deployed app did not serve its body"
+
+echo "==> proving the deployed bundle now plans as unchanged"
+"${BIN}" plan "${WORK}/app" --detailed-exitcode \
+  --config "${WORK}/client.json" --output table \
+  >"${WORK}/plan.log" 2>&1 || fail "unchanged deployment plan"
+grep -q 'No content change' "${WORK}/plan.log" || fail "plan did not report unchanged content"
+grep -q 'would still record a deployment' "${WORK}/plan.log" \
+  || fail "unchanged plan did not explain redeploy behavior"
 
 echo "==> verifying exact update permission"
 "${BIN}" doctor --remote --slug app --config "${WORK}/client.json" --output table \

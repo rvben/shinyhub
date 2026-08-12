@@ -123,57 +123,13 @@ server). See docs/reverse-proxy/deploying-behind-a-proxy.md for the full setup.`
 }
 
 func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
-	var dir string
-
-	if f.git != "" {
-		cloned, err := gitClone(f.git, f.branch, f.subdir)
-		if err != nil {
-			return fmt.Errorf("git clone: %w", err)
-		}
-		defer os.RemoveAll(cloned)
-		dir = cloned
-	} else {
-		// Require an explicit directory argument so a stray `shinyhub deploy`
-		// from the wrong working directory cannot silently bundle whatever
-		// happens to be in $PWD (e.g. /tmp, the project root with data/apps/,
-		// $HOME). Pass `.` to opt in to the current directory.
-		if len(args) == 0 {
-			return fmt.Errorf("missing directory argument: pass `.` to deploy the current directory or a path like `./app`")
-		}
-		dir = args[0]
-	}
-
-	abs, err := filepath.Abs(dir)
+	source, err := resolveDeploymentSource(args, f)
 	if err != nil {
 		return err
 	}
-
-	slug := f.slug
-	derived := false
-	if slug == "" {
-		derived = true
-		if f.git != "" {
-			// Derive slug from the repo name (last path component, strip .git suffix).
-			repoName := filepath.Base(f.git)
-			repoName = strings.TrimSuffix(repoName, ".git")
-			slug = sanitizeSlug(repoName)
-		} else {
-			slug = sanitizeSlug(filepath.Base(abs))
-		}
-	}
-	// Validate locally before any network call. The derived path matters
-	// just as much as the user-supplied path: sanitizeSlug can collapse a
-	// non-ASCII directory name (e.g. an emoji-only repo, "---", a single
-	// `.`) to an empty or otherwise invalid string, which would otherwise
-	// hit `/api/apps/` with a malformed URL and surface a confusing 404
-	// instead of a clear local error.
-	if !slugpkg.Valid(slug) {
-		if derived {
-			return fmt.Errorf("could not derive a valid slug from %q (got %q): pass --slug explicitly. Slug rule: %s",
-				filepath.Base(abs), slug, slugpkg.HumanRule)
-		}
-		return fmt.Errorf("invalid slug %q: must be %s", slug, slugpkg.HumanRule)
-	}
+	defer source.cleanup()
+	abs, slug := source.Dir, source.Slug
+	f.visibility = source.Visibility
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -201,10 +157,6 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 	}
 
-	if f.visibility, err = resolveVisibilityFlag(f.visibility); err != nil {
-		return err
-	}
-
 	format, err := resolveFormat(false, false)
 	if err != nil {
 		return err
@@ -212,10 +164,12 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	errW := cmd.ErrOrStderr()
 
 	fmt.Fprintf(errW, "Bundling %s...\n", abs)
-	bundleBuf, summary, err := zipDir(abs)
+	bundlePlan, _, err := prepareDeployment(abs)
 	if err != nil {
-		return fmt.Errorf("bundle: %w", err)
+		return err
 	}
+	bundleBuf := bundlePlan.Buffer
+	summary := summarizeDeploymentRejections(bundlePlan.ProtectedPaths)
 	if summary != "" {
 		fmt.Fprintln(errW, summary)
 	}
@@ -711,10 +665,20 @@ func gitClone(repoURL, branch, subdir string) (string, error) {
 	}
 
 	if subdir != "" {
-		appDir := filepath.Join(dir, subdir)
-		if _, err := os.Stat(appDir); err != nil {
+		appDir := filepath.Clean(filepath.Join(dir, subdir))
+		rel, relErr := filepath.Rel(dir, appDir)
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(subdir) {
+			os.RemoveAll(dir)
+			return "", fmt.Errorf("subdir %q must stay inside the repository", subdir)
+		}
+		info, err := os.Stat(appDir)
+		if err != nil {
 			os.RemoveAll(dir) // dir still holds the root clone path
 			return "", fmt.Errorf("subdir %q not found in repo", subdir)
+		}
+		if !info.IsDir() {
+			os.RemoveAll(dir)
+			return "", fmt.Errorf("subdir %q is not a directory", subdir)
 		}
 		dir = appDir
 	}
@@ -722,15 +686,51 @@ func gitClone(repoURL, branch, subdir string) (string, error) {
 	return dir, nil
 }
 
+// bundlePreview is the exact archive deploy uploads plus deterministic,
+// non-secret metadata used by `shinyhub plan`. Buffer is deliberately omitted
+// from JSON. Digest uses the server's bundle digest algorithm.
+type bundlePreview struct {
+	Digest            string               `json:"digest"`
+	FileCount         int                  `json:"file_count"`
+	UncompressedBytes int64                `json:"uncompressed_bytes"`
+	CompressedBytes   int                  `json:"compressed_bytes"`
+	Files             []string             `json:"files"`
+	IgnoreFile        string               `json:"ignore_file,omitempty"`
+	IgnoredPaths      []string             `json:"ignored_paths,omitempty"`
+	ProtectedPaths    []bundleSkippedPaths `json:"protected_paths,omitempty"`
+	Buffer            *bytes.Buffer        `json:"-"`
+}
+
+type bundleSkippedPaths struct {
+	Reason string   `json:"reason"`
+	Paths  []string `json:"paths"`
+}
+
 func zipDir(dir string) (*bytes.Buffer, string, error) {
+	preview, err := buildBundlePreview(dir)
+	if err != nil {
+		return nil, "", err
+	}
+	return preview.Buffer, summarizeDeploymentRejections(preview.ProtectedPaths), nil
+}
+
+func buildBundlePreview(dir string) (*bundlePreview, error) {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
 	rules := bundle.DefaultRules()
 	rejected := map[bundle.FilterDecision][]string{}
+	preview := &bundlePreview{Files: []string{}, Buffer: &buf}
 
 	matcher, ignoreHasNegation, matcherErr := loadIgnoreMatcher(dir)
 	if matcherErr != nil {
-		return nil, "", fmt.Errorf("load ignore file: %w", matcherErr)
+		return nil, fmt.Errorf("load ignore file: %w", matcherErr)
+	}
+	if matcher != nil {
+		if _, err := os.Stat(filepath.Join(dir, ".shinyhubignore")); err == nil {
+			preview.IgnoreFile = ".shinyhubignore"
+		} else {
+			preview.IgnoreFile = ".gitignore"
+		}
 	}
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -755,6 +755,7 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 				query = relSlash + "/"
 			}
 			if matcher.MatchesPath(query) {
+				preview.IgnoredPaths = append(preview.IgnoredPaths, query)
 				if info.IsDir() {
 					// Only prune the subtree when no negation pattern could
 					// re-include a descendant; otherwise descend and let
@@ -777,6 +778,7 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 		case bundle.FilterAccept:
 			// fall through to include
 		case bundle.FilterSkipCacheDir:
+			rejected[decision] = append(rejected[decision], relSlash)
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -792,6 +794,8 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 		if info.IsDir() {
 			return nil
 		}
+		preview.Files = append(preview.Files, relSlash)
+		preview.UncompressedBytes += info.Size()
 		f, err := os.Open(path)
 		if err != nil {
 			return err
@@ -813,12 +817,57 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, "", err
+		_ = w.Close()
+		return nil, err
 	}
 	if err := w.Close(); err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return &buf, summarizeRejections(rejected), nil
+	preview.FileCount = len(preview.Files)
+	preview.CompressedBytes = buf.Len()
+	sort.Strings(preview.Files)
+	sort.Strings(preview.IgnoredPaths)
+	for decision, paths := range rejected {
+		sort.Strings(paths)
+		preview.ProtectedPaths = append(preview.ProtectedPaths, bundleSkippedPaths{
+			Reason: fmt.Sprint(decision), Paths: paths,
+		})
+	}
+	sort.Slice(preview.ProtectedPaths, func(i, j int) bool {
+		return preview.ProtectedPaths[i].Reason < preview.ProtectedPaths[j].Reason
+	})
+	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		return nil, fmt.Errorf("read bundle: %w", err)
+	}
+	preview.Digest, err = bundle.DigestZipReader(zr)
+	if err != nil {
+		return nil, err
+	}
+	return preview, nil
+}
+
+func summarizeSkippedPaths(groups []bundleSkippedPaths) string {
+	parts := make([]string, 0, len(groups))
+	for _, group := range groups {
+		if len(group.Paths) > 0 {
+			parts = append(parts, fmt.Sprintf("%s: %s", group.Reason, strings.Join(group.Paths, ", ")))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Skipped from bundle (push with `shinyhub data push`): " + strings.Join(parts, "; ")
+}
+
+func summarizeDeploymentRejections(groups []bundleSkippedPaths) string {
+	filtered := make([]bundleSkippedPaths, 0, len(groups))
+	for _, group := range groups {
+		if group.Reason != bundle.FilterSkipCacheDir.String() {
+			filtered = append(filtered, group)
+		}
+	}
+	return summarizeSkippedPaths(filtered)
 }
 
 // loadIgnoreMatcher returns a gitignore-style matcher built from the first

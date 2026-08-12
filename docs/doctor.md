@@ -18,6 +18,7 @@ shinyhub run . --check
 
 shinyhub connect https://hub.example.com --name prod
 shinyhub doctor .
+shinyhub plan .
 shinyhub deploy . --wait
 ```
 
@@ -114,9 +115,10 @@ shinyhub doctor . --output json
 ```
 
 Follow a successful doctor run with `shinyhub run . --check` for a real local
-boot and `shinyhub deploy . --wait` for the real remote build and readiness
-check. Doctor is deliberately fast and non-mutating; those two commands are the
-end-to-end proof.
+boot, `shinyhub plan .` for an exact read-only deployment preview, and
+`shinyhub deploy . --wait` for the real remote build and readiness check.
+Doctor is deliberately fast and non-mutating; those commands are the
+end-to-end proof. See [Deployment plan](deployment-plan.md).
 
 ShinyHub contributors can replay this entire journey against a fresh temporary
 server with `make test-onboarding-e2e`. The test also performs an intentionally
