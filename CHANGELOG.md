@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.4](https://github.com/rvben/shinyhub/compare/v0.11.3...v0.11.4) - 2026-08-12
+
+### Fixed
+
+- **release**: publish the PyPI artifacts when the release body needs correcting ([5b56242](https://github.com/rvben/shinyhub/commit/5b56242617e8898d9ee13ec11569f1b027fea86e))
+
 ## [0.11.3](https://github.com/rvben/shinyhub/compare/v0.11.2...v0.11.3) - 2026-08-12
 
 ### Added
