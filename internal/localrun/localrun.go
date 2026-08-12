@@ -229,6 +229,12 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		case err := <-proxyErrCh:
 			return err
 		case exitErr := <-current.exitCh:
+			// exec.CommandContext kills the child when ctx is cancelled. The
+			// process exit and ctx.Done become ready concurrently, so select may
+			// observe the killed child first. A requested shutdown is still clean.
+			if ctx.Err() != nil {
+				return nil
+			}
 			if exitErr != nil {
 				return fmt.Errorf("app exited: %w", exitErr)
 			}
@@ -376,6 +382,9 @@ func waitForExit(ctx context.Context, child *childProcess, proxyErrCh <-chan err
 	case err := <-proxyErrCh:
 		return err
 	case exitErr := <-child.exitCh:
+		if ctx.Err() != nil {
+			return nil
+		}
 		if exitErr != nil {
 			return fmt.Errorf("app exited: %w", exitErr)
 		}
