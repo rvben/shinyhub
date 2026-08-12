@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -145,16 +146,20 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	transport := s.Manager.TransportForWorker(tier, info.WorkerID)
 
 	// Health-check the started process (fast-fail on crash, bounded timeout).
+	healthTimeout := defaultElasticHealthTimeout
+	if plan.Manifest != nil && plan.Manifest.App.StartupTimeoutSeconds != nil {
+		healthTimeout = plan.Timeout
+	}
 	hc := s.HealthCheck
 	if hc == nil {
 		hc = func(url string, timeout time.Duration, tr http.RoundTripper) error {
-			return waitElasticHealthy(url, timeout, tr, func() bool {
+			return waitElasticHealthy(url, plan.ReadyPath, plan.ReadyStatus, timeout, tr, func() bool {
 				inf, ok := s.Manager.GetReplica(slug, slotID)
 				return ok && inf.Status == process.StatusRunning
 			})
 		}
 	}
-	if healthErr := hc(info.EndpointURL, defaultElasticHealthTimeout, transport); healthErr != nil {
+	if healthErr := hc(info.EndpointURL, healthTimeout, transport); healthErr != nil {
 		slog.Warn("elastic spawn: health check failed", "slug", slug, "slotID", slotID, "err", healthErr)
 		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
 			slog.Warn("elastic spawn: stop after health failure", "slug", slug, "slotID", slotID, "err", stopErr)
@@ -275,21 +280,24 @@ func isElasticIsolation(mode string) bool {
 	return mode == string(config.IsolationGrouped) || mode == string(config.IsolationPerSession)
 }
 
-// waitElasticHealthy polls endpointURL until a non-5xx status is received,
-// the timeout expires, or alive() returns false (process exited). It mirrors
-// deploy.waitHealthyOrExit but is an unexported lifecycle-package helper so
-// the elastic spawn path reuses the same probe logic without importing a
-// private deploy function.
-func waitElasticHealthy(endpointURL string, timeout time.Duration, transport http.RoundTripper, alive func() bool) error {
-	client := &http.Client{Timeout: 5 * time.Second}
+// waitElasticHealthy applies the bundle's readiness path/status contract until
+// it succeeds, the timeout expires, or alive reports that the process exited.
+func waitElasticHealthy(endpointURL, readyPath string, readyStatus int, timeout time.Duration, transport http.RoundTripper, alive func() bool) error {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	if transport != nil {
 		client.Transport = transport
 	}
-	healthURL := endpointURL
-	if len(healthURL) > 0 && healthURL[len(healthURL)-1] != '/' {
-		healthURL += "/"
+	if readyPath == "" {
+		readyPath = "/"
 	}
+	healthURL := strings.TrimSuffix(endpointURL, "/") + "/" + strings.TrimPrefix(readyPath, "/")
 	deadline := time.Now().Add(timeout)
+	lastStatus := 0
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
@@ -301,7 +309,8 @@ func waitElasticHealthy(endpointURL string, timeout time.Duration, transport htt
 		cancel()
 		if err == nil {
 			resp.Body.Close()
-			if resp.StatusCode < 500 {
+			lastStatus = resp.StatusCode
+			if readyStatus > 0 && resp.StatusCode == readyStatus || readyStatus == 0 && resp.StatusCode >= 200 && resp.StatusCode < 400 {
 				return nil
 			}
 		}
@@ -310,5 +319,8 @@ func waitElasticHealthy(endpointURL string, timeout time.Duration, transport htt
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("elastic worker at %s did not become healthy within %s", endpointURL, timeout)
+	if lastStatus != 0 {
+		return fmt.Errorf("elastic worker at %s did not become healthy within %s (last readiness status %d)", healthURL, timeout, lastStatus)
+	}
+	return fmt.Errorf("elastic worker at %s did not become healthy within %s", healthURL, timeout)
 }

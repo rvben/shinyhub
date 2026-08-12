@@ -1,4 +1,18 @@
-.PHONY: build clean test test-go test-race vuln scan-image test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
+
+AIR_VERSION ?= v1.67.4
+AIR_BIN := $(CURDIR)/tmp/tools/air
+
+# bootstrap installs the exact project dependencies and a repo-local, pinned
+# live-reload binary. Nothing is written to a developer's global Go bin.
+bootstrap:
+	@command -v go >/dev/null 2>&1 || { echo "Go 1.26.5+ is required"; exit 1; }
+	@command -v node >/dev/null 2>&1 || { echo "Node 20+ is required for dashboard tests"; exit 1; }
+	go mod download
+	npm ci --no-audit --no-fund
+	@mkdir -p tmp/tools
+	GOBIN=$(CURDIR)/tmp/tools go install github.com/air-verse/air@$(AIR_VERSION)
+	@echo "Ready. Start the server with: make dev"
 
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
@@ -7,6 +21,9 @@ clean:
 	rm -rf bin tmp
 
 test: test-go test-js
+
+# check is the fast, deterministic pre-PR gate contributors should run.
+check: fmt-check lint skill-lint test
 
 test-go:
 	go test ./... -count=1
@@ -172,14 +189,38 @@ fmt-check:
 	if [ -n "$$unformatted" ]; then echo "gofmt needed (run make fmt):"; echo "$$unformatted"; exit 1; fi
 
 run: build
-	SHINYHUB_AUTH_SECRET=dev-secret-do-not-use-in-production ./bin/shinyhub serve
+	SHINYHUB_DEV_STATIC=./internal/ui/static \
+	SHINYHUB_AUTH_SECRET=dev-secret-do-not-use-in-production \
+	SHINYHUB_LOG_FORMAT=text \
+	SHINYHUB_ADMIN_USER=admin \
+	SHINYHUB_ADMIN_PASSWORD=admin \
+	./bin/shinyhub serve
 
 # dev runs the server with live reload via air. Go changes trigger a rebuild;
 # edits to internal/ui/static/ are served from disk (no rebuild) thanks to
-# SHINYHUB_DEV_STATIC. Install air with: go install github.com/air-verse/air@latest
+# SHINYHUB_DEV_STATIC. `make bootstrap` installs the pinned Air binary locally.
 dev:
-	@command -v air >/dev/null 2>&1 || { echo "air not found. install: go install github.com/air-verse/air@latest"; exit 1; }
-	air
+	@test -x $(AIR_BIN) || { echo "Development tools are missing. Run: make bootstrap"; exit 1; }
+	SHINYHUB_DEV_STATIC=./internal/ui/static \
+	SHINYHUB_AUTH_SECRET=dev-secret-do-not-use-in-production \
+	SHINYHUB_LOG_FORMAT=text \
+	SHINYHUB_ADMIN_USER=admin \
+	SHINYHUB_ADMIN_PASSWORD=admin \
+	$(AIR_BIN)
+
+# dev-reset archives the local control-plane state instead of deleting it. The
+# timestamped backup under tmp/ can be moved back until `make clean` removes it.
+dev-reset:
+	@mkdir -p tmp
+	@if [ -e data ]; then \
+		backup="tmp/dev-data-backup-$$(date +%Y%m%d-%H%M%S)"; \
+		mv data "$$backup"; \
+		echo "Archived local state to $$backup"; \
+	else \
+		echo "No local data directory to reset"; \
+	fi
+	@mkdir -p data
+	@echo "Fresh local state is ready; log in with admin / admin after make dev"
 
 goreleaser-check:
 	goreleaser check

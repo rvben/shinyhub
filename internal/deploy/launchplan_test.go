@@ -109,6 +109,20 @@ func TestResolveLaunch_RunSuppressesManifestTracing(t *testing.T) {
 	}
 }
 
+func TestResolveLaunch_ReadinessContractFromManifest(t *testing.T) {
+	dir := writeRunBundle(t, map[string]string{
+		"app.py":        "x=1\n",
+		"shinyhub.toml": "[app]\nreadiness_path = \"/health/ready\"\nreadiness_status = 204\n",
+	})
+	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9007})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.ReadyPath != "/health/ready" || plan.ReadyStatus != 204 {
+		t.Fatalf("readiness = %q/%d", plan.ReadyPath, plan.ReadyStatus)
+	}
+}
+
 func TestResolveLaunch_PrepHostDeps_GatesDepPrep(t *testing.T) {
 	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
 	with, _ := ResolveLaunch(dir, LaunchOptions{Port: 9008, PrepHostDeps: true})

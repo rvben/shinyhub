@@ -2,7 +2,10 @@ package localrun
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/deploy"
 )
 
 func skipIfNoPython3(t *testing.T) {
@@ -41,7 +46,7 @@ func TestRun_Check_HealthyExitsZero(t *testing.T) {
 	dir := writeHealthyFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := Run(ctx, Options{BundleDir: dir, Slug: "fixture", Check: true, NoReload: true}, os.Stdout, os.Stderr)
+	err := Run(ctx, Options{BundleDir: dir, StateDir: t.TempDir(), Slug: "fixture", Check: true, NoReload: true}, os.Stdout, os.Stderr)
 	if err != nil {
 		t.Fatalf("--check on a healthy app should exit 0, got %v", err)
 	}
@@ -56,16 +61,16 @@ func TestRun_Check_BrokenExitsNonZero(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := Run(ctx, Options{BundleDir: dir, Slug: "broken", Check: true, NoReload: true}, os.Stdout, os.Stderr); err == nil {
+	if err := Run(ctx, Options{BundleDir: dir, StateDir: t.TempDir(), Slug: "broken", Check: true, NoReload: true}, os.Stdout, os.Stderr); err == nil {
 		t.Fatal("--check on a crashing app must return a non-nil error")
 	}
 }
 
-func TestRun_DataSymlink_CreatedThenCleaned(t *testing.T) {
+func TestRun_DataSymlinkNeverAppearsInSource(t *testing.T) {
 	dir := writeHealthyFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_ = Run(ctx, Options{BundleDir: dir, Slug: "fixture", Check: true, NoReload: true}, os.Stdout, os.Stderr)
+	_ = Run(ctx, Options{BundleDir: dir, StateDir: t.TempDir(), Slug: "fixture", Check: true, NoReload: true}, os.Stdout, os.Stderr)
 	if _, err := os.Lstat(filepath.Join(dir, "data")); !os.IsNotExist(err) {
 		t.Fatalf("<bundle>/data symlink must be removed after run, lstat err=%v", err)
 	}
@@ -73,8 +78,7 @@ func TestRun_DataSymlink_CreatedThenCleaned(t *testing.T) {
 
 // TestRun_DataDir_Absolutized verifies that a relative --data-dir is resolved
 // to an absolute path so the symlink target and SHINYHUB_APP_DATA agree.
-// We verify this at the dropReservedKeys / Options layer, not via a live
-// subprocess, because the absolutizing happens before any process is spawned.
+// The workspace output and created directory must use the same absolute path.
 func TestRun_DataDir_Absolutized(t *testing.T) {
 	skipIfNoPython3(t)
 	dir := writeHealthyFixture(t)
@@ -90,9 +94,10 @@ func TestRun_DataDir_Absolutized(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	state := t.TempDir()
 
 	_ = Run(ctx, Options{
-		BundleDir: dir, Slug: "abs-check", DataDir: relDataDir,
+		BundleDir: dir, StateDir: state, Slug: "abs-check", DataDir: relDataDir,
 		Check: true, NoReload: true,
 	}, os.Stdout, os.Stderr)
 
@@ -100,92 +105,188 @@ func TestRun_DataDir_Absolutized(t *testing.T) {
 	if _, err := os.Stat(expectedAbs); err != nil {
 		t.Fatalf("absolute data dir %q was not created (relative path was not absolutized): %v", expectedAbs, err)
 	}
-	// The relative path must NOT have been created as a directory.
-	if _, err := os.Stat(relDataDir); err == nil {
-		// It might be the same path if cwd == dir, skip in that case.
-		absRel, _ := filepath.Abs(relDataDir)
-		if absRel != expectedAbs {
-			t.Fatalf("relative data dir %q was created as a directory; absolutizing failed", relDataDir)
-		}
+	target, err := os.Readlink(filepath.Join(state, "bundles", "0", "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalExpected, err := canonicalPath(expectedAbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != canonicalExpected {
+		t.Fatalf("workspace data link = %q, want absolute %q", target, canonicalExpected)
 	}
 }
 
-// TestRun_ReservedEnvKeysDropped verifies that user-supplied PORT or
-// SHINYHUB_APP_DATA values in --env are silently dropped, and the child sees
-// the platform-allocated port, not the user-supplied one.
-func TestRun_ReservedEnvKeysDropped(t *testing.T) {
+// Platform-managed values are rejected explicitly rather than being silently
+// ignored or allowed to diverge from a deployed app.
+func TestValidateUserEnv_RejectsReservedKeys(t *testing.T) {
+	for _, assignment := range []string{"PORT=1", "SHINYHUB_APP_DATA=/bogus", "SHINYHUB_APP_SLUG=wrong"} {
+		if _, err := validateUserEnv([]string{assignment}); err == nil || !strings.Contains(err.Error(), "managed by ShinyHub") {
+			t.Fatalf("%q: expected actionable reserved-key error, got %v", assignment, err)
+		}
+	}
+	got, err := validateUserEnv([]string{"HOME=/home/user", "MY_VAR=ok"})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("ordinary env rejected: got=%v err=%v", got, err)
+	}
+}
+
+func TestRun_MissingSourceDoesNotCreateIt(t *testing.T) {
+	parent := t.TempDir()
+	missing := filepath.Join(parent, "typo")
+	err := Run(context.Background(), Options{BundleDir: missing, Check: true}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing source error = %v", err)
+	}
+	if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
+		t.Fatalf("missing source was materialized: %v", statErr)
+	}
+}
+
+func TestRun_RejectsGeneratedStateInsideSourceWithoutCreatingIt(t *testing.T) {
+	source := writeHealthyFixture(t)
+	for _, tc := range []struct {
+		name string
+		opts Options
+		path string
+	}{
+		{name: "state", opts: Options{StateDir: filepath.Join(source, ".state")}, path: filepath.Join(source, ".state")},
+		{name: "data", opts: Options{StateDir: t.TempDir(), DataDir: filepath.Join(source, "dev-data")}, path: filepath.Join(source, "dev-data")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.opts.BundleDir = source
+			tc.opts.Check = true
+			err := Run(context.Background(), tc.opts, io.Discard, io.Discard)
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) {
+				t.Fatalf("error = %v, want ValidationError", err)
+			}
+			if _, statErr := os.Stat(tc.path); !os.IsNotExist(statErr) {
+				t.Fatalf("rejected path was still created: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRun_CheckDoesNotMutateSource(t *testing.T) {
+	dir := writeHealthyFixture(t)
+	before, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err = Run(ctx, Options{
+		BundleDir: dir,
+		StateDir:  t.TempDir(),
+		Check:     true,
+		Fresh:     true,
+		NoReload:  true,
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(entryNames(before)) != fmt.Sprint(entryNames(after)) {
+		t.Fatalf("source tree changed: before=%v after=%v", entryNames(before), entryNames(after))
+	}
+}
+
+func entryNames(entries []os.DirEntry) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+func TestRun_ReloadKeepsLastHealthyAppAndRecovers(t *testing.T) {
 	skipIfNoPython3(t)
-	dir := t.TempDir()
-
-	// Server that echoes back PORT and SHINYHUB_APP_DATA from its own env.
-	app := `import http.server, os, json
-
+	source := t.TempDir()
+	server := `import http.server, os, sys
+if open("version.txt").read().strip() == "bad":
+    sys.exit(3)
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        body = json.dumps({"port": os.environ.get("PORT",""), "data": os.environ.get("SHINYHUB_APP_DATA","")}).encode()
+        body = open("version.txt").read().strip().encode()
         self.send_response(200)
-        self.send_header("Content-Type","application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
     def log_message(self, fmt, *args): pass
-
 http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 `
-	if err := os.WriteFile(filepath.Join(dir, "server.py"), []byte(app), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "shinyhub.toml"),
-		[]byte("[app]\ncommand = [\"python3\", \"server.py\"]\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for name, body := range map[string]string{
+		"server.py":     server,
+		"version.txt":   "v1\n",
+		"shinyhub.toml": "[app]\ncommand = [\"python3\", \"server.py\"]\n",
+	} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	port := deploy.AllocatePort()
+	state := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			BundleDir: source,
+			StateDir:  state,
+			Slug:      "reload-test",
+			Port:      port,
+		}, io.Discard, io.Discard)
+	}()
+	url := fmt.Sprintf("http://127.0.0.1:%d/app/reload-test/", port)
+	waitForBody(t, url, "v1", 5*time.Second)
 
-	err := Run(ctx, Options{
-		BundleDir: dir,
-		Slug:      "reserved-env",
-		Check:     true,
-		NoReload:  true,
-		// Attempt to inject bogus PORT and SHINYHUB_APP_DATA via user env.
-		Env: []string{"PORT=1", "SHINYHUB_APP_DATA=/bogus/path"},
-	}, os.Stdout, os.Stderr)
-	// If dropReservedKeys is broken, the server would try to bind port 1 (a
-	// privileged port) and fail to start -> Run returns an error. A clean run
-	// means the platform PORT was used, not port 1.
-	if err != nil {
-		t.Fatalf("reserved-env check failed: server likely received PORT=1 from user env: %v", err)
+	if err := os.WriteFile(filepath.Join(source, "version.txt"), []byte("bad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("runner exited after a bad save: %v", err)
+	default:
+	}
+	waitForBody(t, url, "v1", 2*time.Second)
+
+	if err := os.WriteFile(filepath.Join(source, "version.txt"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitForBody(t, url, "v2", 6*time.Second)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runner shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not stop")
 	}
 }
 
-// TestDropReservedKeys_Unit is a fast unit test for the key-stripping helper.
-func TestDropReservedKeys_Unit(t *testing.T) {
-	input := []string{
-		"HOME=/home/user",
-		"PORT=1234",
-		"SHINYHUB_APP_DATA=/evil",
-		"MY_VAR=ok",
-		"PORTLIKE=fine",
-	}
-	got := dropReservedKeys(input)
-	for _, kv := range got {
-		for _, banned := range []string{"PORT=", "SHINYHUB_APP_DATA="} {
-			if strings.HasPrefix(kv, banned) {
-				t.Errorf("reserved key leaked into result: %q", kv)
+func waitForBody(t *testing.T, url, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url) //nolint:noctx
+		if err == nil {
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr == nil && resp.StatusCode == http.StatusOK && string(body) == want {
+				return
 			}
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	// Non-reserved keys must still be present.
-	var found int
-	for _, kv := range got {
-		if kv == "HOME=/home/user" || kv == "MY_VAR=ok" || kv == "PORTLIKE=fine" {
-			found++
-		}
-	}
-	if found != 3 {
-		t.Errorf("expected 3 non-reserved keys, got entries: %v", got)
-	}
+	t.Fatalf("%s did not return %q within %s", url, want, timeout)
 }
 
 // TestRun_ChildGroupKilledOnSelfExit verifies that when the foreground app
@@ -222,7 +323,7 @@ time.sleep(0.1)  # let the grandchild start
 	defer cancel()
 
 	// Run will exit with an error (process exits before healthy) which is fine.
-	_ = Run(ctx, Options{BundleDir: dir, Slug: "orphan-test", NoReload: true, Check: false}, os.Stdout, os.Stderr)
+	_ = Run(ctx, Options{BundleDir: dir, StateDir: t.TempDir(), Slug: "orphan-test", NoReload: true, Check: false}, os.Stdout, os.Stderr)
 
 	// Give the OS a moment to reap.
 	time.Sleep(200 * time.Millisecond)

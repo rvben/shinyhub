@@ -83,14 +83,18 @@ starts.
 | `render_seconds` | float 0..600 | CPU cost of one page render, used to pace admission so a burst queues on a wait page instead of stalling every session. `0` disables pacing. Applied live on deploy (no restart). See [Render pacing](scaling.md#render-pacing). |
 | `min_warm_replicas` | int 0..1000 | Minimum number of replicas kept running when the app idles. `0` (default) allows full hibernation. When set above `0`, the watcher stops only enough replicas to reach this floor so the first post-idle request hits a warm process. If the stored `replicas` value is less than `min_warm_replicas`, the floor self-clamps to `replicas`. Absent key leaves the stored value unchanged (same declared-only semantics as `replicas`). See [Pre-warming](scaling.md#pre-warming). |
 | `command` | array of strings | Launch-command override. See [`[app] command`](#app-command) below. |
+| `startup_timeout_seconds` | int 1..3600 | Readiness deadline for deploy, wake, scale, rollback, and `shinyhub run`; default 120 seconds. Read at boot and not stored in the database. |
+| `build_timeout_seconds` | int 30..7200 | Host-side uv/renv dependency-build deadline; default 900 seconds. Read at build time and inert for Docker runtimes. |
+| `readiness_path` | absolute HTTP path | Path polled before a process becomes routable; default `/`. Queries and fragments are rejected. See [Readiness](#app-readiness). |
+| `readiness_status` | int 100..599 | Require this exact response status. When omitted, any 2xx or 3xx response is healthy. See [Readiness](#app-readiness). |
 | `identity_headers` | bool | Per-app identity-forwarding toggle. See [`[app] identity_headers`](#app-identity_headers) below. |
 | `autoscale` | inline table | Per-app session-saturation autoscale policy. See [`[app] autoscale`](#app-autoscale) below. |
 | `icon` | string | Single emoji app icon. See [`[app] icon`](#app-icon) below. |
 
-All fields are optional. Omitted fields are left untouched: the
-manifest does not assert a complete state, so existing values set via the
-UI or CLI survive across deploys unless the manifest explicitly overrides
-them.
+All fields are optional. Omitted database-backed fields are left untouched:
+the manifest does not assert a complete stored state, so existing values set
+via the UI or CLI survive unless the manifest explicitly overrides them.
+Omitted boot-time fields use their documented platform defaults.
 
 This bundle `shinyhub.toml` is the per-deploy layer. A [fleet
 manifest](fleet.md) sits above it: when an app is fleet-managed, a key
@@ -101,6 +105,28 @@ and wins over the value set here. The full order is fleet manifest > bundle
 Settings are applied in a single SQLite transaction. Shrinking `replicas`
 removes the now-out-of-range rows from the `replicas` table in the same
 transaction; no half-applied state is reachable.
+
+The command, startup/build timeouts, and readiness fields are boot-time
+settings rather than database state. They travel with each bundle and are
+re-read for every process start, including local runs and rollbacks.
+
+### `[app]` readiness
+
+By default, ShinyHub polls `GET /` without following redirects and accepts a
+2xx or 3xx response. Apps whose root route is not a reliable health signal can
+declare a dedicated path and, when useful, one exact status:
+
+```toml
+[app]
+readiness_path = "/health/ready"
+readiness_status = 204
+startup_timeout_seconds = 180
+```
+
+The contract is shared by deployed processes and `shinyhub run`, preventing a
+local smoke test from passing under looser rules than production. Avoid checks
+that depend on authentication or external services unless those dependencies
+must genuinely block the app from receiving traffic.
 
 ### `[app] command`
 
@@ -146,8 +172,8 @@ the offending token rather than passing a silent mistyping through.
   the fleet default have no effect on command-mode apps. Add the
   `opentelemetry-instrument` wrapper explicitly in your command if you want
   instrumentation.
-- **Health check is unchanged.** The platform polls `GET /` and waits for a
-  non-5xx response, same as for inferred-command apps.
+- **Health check is shared.** The platform uses the same 2xx/3xx default and
+  optional `readiness_path` / `readiness_status` contract as inferred apps.
 - **The command versions with the bundle.** Rolling back to an earlier
   deployment boots the command that was in that deployment's `shinyhub.toml`.
 - **Commands are exec'd without a shell.** No environment-variable expansion

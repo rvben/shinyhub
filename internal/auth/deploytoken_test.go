@@ -22,8 +22,8 @@ func TestValidateDeployTokenFormat(t *testing.T) {
 	}
 
 	rejected := map[string]string{
-		"empty":     "",
-		"too short": strings.Repeat("a", 31),
+		"empty":                      "",
+		"too short":                  strings.Repeat("a", 31),
 		"shk-prefixed but too short": "shk_" + strings.Repeat("a", 16),
 	}
 	for name, tok := range rejected {

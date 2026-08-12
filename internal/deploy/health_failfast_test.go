@@ -45,3 +45,26 @@ func TestWaitHealthyOrExit_AliveButUnreadyTimesOut(t *testing.T) {
 		t.Fatalf("err = %v, want a timeout error", err)
 	}
 }
+
+func TestWaitHealthyContract_RejectsFalsePositive404(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	err := waitHealthyContract(srv.URL, "/", 0, 350*time.Millisecond, nil, func() bool { return true })
+	if err == nil || !strings.Contains(err.Error(), "last readiness status 404") {
+		t.Fatalf("404 must not pass default readiness: %v", err)
+	}
+}
+
+func TestWaitHealthyContract_CustomPathAndExactStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health/ready" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	if err := waitHealthyContract(srv.URL, "/health/ready", http.StatusNoContent, time.Second, nil, func() bool { return true }); err != nil {
+		t.Fatalf("custom readiness failed: %v", err)
+	}
+}

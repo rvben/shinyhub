@@ -25,8 +25,10 @@ type LaunchPlan struct {
 	Env       []string // launch-coupled only ("PORT"); platform/per-app env layered by the consumer
 	BindHost  string
 	ReadyPath string
-	DepPrep   []DepPrepStep
-	Timeout   time.Duration
+	// ReadyStatus 0 accepts 2xx/3xx; otherwise the exact status is required.
+	ReadyStatus int
+	DepPrep     []DepPrepStep
+	Timeout     time.Duration
 }
 
 // LaunchOptions are the Manager-free inputs both consumers supply. See the
@@ -75,6 +77,14 @@ func ResolveLaunch(bundleDir string, opts LaunchOptions) (*LaunchPlan, error) {
 	plan.Env = append(plan.Env, process.RenvPolicyEnvFor(bundleDir)...)
 	if m != nil && m.App.StartupTimeoutSeconds != nil {
 		plan.Timeout = time.Duration(*m.App.StartupTimeoutSeconds) * time.Second
+	}
+	if m != nil {
+		if m.App.ReadinessPath != "" {
+			plan.ReadyPath = m.App.ReadinessPath
+		}
+		if m.App.ReadinessStatus != nil {
+			plan.ReadyStatus = *m.App.ReadinessStatus
+		}
 	}
 
 	switch {

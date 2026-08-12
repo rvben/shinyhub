@@ -41,7 +41,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 
 	// ── local dev runner ─────────────────────────────────────────────────────
 	"run": {Mutating: ro, Streaming: true,
-		ArgTypes: map[string]string{"--data-dir": "path", "--env-file": "path"},
+		ArgTypes: map[string]string{"--data-dir": "path", "--env-file": "path", "--state-dir": "path"},
 		OutputFields: []fieldSpec{
 			{Name: "slug", Type: "string"},
 			{Name: "url", Type: "string"},
@@ -133,7 +133,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 			{Name: "version", Type: "string", Desc: "Version string from the deployment; empty when the server does not report one"},
 			{Name: "kept_stopped", Type: "boolean", Desc: "True when the app was stopped before this deploy and was left stopped; start it with 'apps start <slug>' or deploy with --start"},
 		},
-		Notes: "shinyhub.toml [app] startup_timeout_seconds (1-3600, default 120) sets the readiness deadline the deploy health check allows before declaring the app crashed; it travels with the bundle and also applies on wake, scale, and rollback. shinyhub.toml [app] build_timeout_seconds (30-7200, default 900) bounds the host-side environment build (uv sync / renv restore) that runs before readiness; a build that exceeds it fails build_failed, distinct from startup_timeout_seconds, and is inert under the docker runtime. shinyhub.toml [app] also accepts memory_limit_mb (0 or 16-1048576) and cpu_quota_percent (0 or 1-6400; 100 = 1 core) - per-replica cgroup v2 ceilings reconciled into the app on deploy (declared-only, like replicas); 0 = explicit unlimited, omitted = unchanged. Clear back to inherit-global with `shinyhub apps set --memory-limit-mb -1` / `--cpu-quota-percent -1`.",
+		Notes: "shinyhub.toml [app] startup_timeout_seconds (1-3600, default 120) sets the readiness deadline the deploy health check allows before declaring the app crashed; readiness_path (absolute path, default /) selects the GET endpoint and readiness_status (100-599, omitted accepts 2xx/3xx) can require an exact response. These travel with the bundle and also apply on local run, wake, scale, and rollback. build_timeout_seconds (30-7200, default 900) bounds the host-side environment build (uv sync / renv restore) that runs before readiness; a build that exceeds it fails build_failed, distinct from startup_timeout_seconds, and is inert under the docker runtime. shinyhub.toml [app] also accepts memory_limit_mb (0 or 16-1048576) and cpu_quota_percent (0 or 1-6400; 100 = 1 core) - per-replica cgroup v2 ceilings reconciled into the app on deploy (declared-only, like replicas); 0 = explicit unlimited, omitted = unchanged. Clear back to inherit-global with `shinyhub apps set --memory-limit-mb -1` / `--cpu-quota-percent -1`.",
 	},
 
 	// ── apps (container) ─────────────────────────────────────────────────────

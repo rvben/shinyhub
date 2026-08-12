@@ -17,8 +17,8 @@ const (
 	ReservedPrefix = ".shinyhub-"
 	// UploadTempDir is the per-app subdir under which atomic-rename tempfiles
 	// are written.
-	UploadTempDir  = ".shinyhub-upload-tmp"
-	maxRelPathLen  = 512
+	UploadTempDir = ".shinyhub-upload-tmp"
+	maxRelPathLen = 512
 )
 
 // ErrInvalidPath is returned for any rel path that fails sanitization.

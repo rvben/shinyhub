@@ -725,7 +725,19 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 
 	hc = p.HealthCheck
 	if hc == nil {
-		hc = waitHealthy
+		readyPath := "/"
+		readyStatus := 0
+		if m != nil {
+			if m.App.ReadinessPath != "" {
+				readyPath = m.App.ReadinessPath
+			}
+			if m.App.ReadinessStatus != nil {
+				readyStatus = *m.App.ReadinessStatus
+			}
+		}
+		hc = func(endpointURL string, timeout time.Duration, transport http.RoundTripper) error {
+			return waitHealthyContract(endpointURL, readyPath, readyStatus, timeout, transport, nil)
+		}
 	}
 	timeout = p.HealthTimeout
 	if timeout == 0 {
@@ -1521,26 +1533,42 @@ func buildCommand(bundleDir string, port, workers int, bindHost string, autoInst
 	)
 }
 
-// waitHealthy polls the app's root endpoint until it responds with a non-5xx
+// waitHealthy polls the app's root endpoint until it responds with a 2xx/3xx
 // status or the deadline is exceeded. Each HTTP attempt is capped at 5 seconds.
 // When transport is non-nil it is installed on the client (required for mTLS endpoints).
 func waitHealthy(endpointURL string, timeout time.Duration, transport http.RoundTripper) error {
-	return waitHealthyOrExit(endpointURL, timeout, transport, nil)
+	return waitHealthyContract(endpointURL, "/", 0, timeout, transport, nil)
 }
 
 // waitHealthyOrExit polls the app's root endpoint until it responds with a
-// non-5xx status, the deadline is exceeded, or - when alive is non-nil - the
+// 2xx/3xx status, the deadline is exceeded, or - when alive is non-nil - the
 // process has exited before becoming healthy. Detecting the exit via alive()
 // lets a crash-on-startup fail fast with a clear error instead of burning the
 // full health timeout polling a dead endpoint (and muddying the failure as a
 // timeout). A nil alive disables the liveness check (the plain HTTP poller).
 func waitHealthyOrExit(endpointURL string, timeout time.Duration, transport http.RoundTripper, alive func() bool) error {
-	client := &http.Client{Timeout: 5 * time.Second}
+	return waitHealthyContract(endpointURL, "/", 0, timeout, transport, alive)
+}
+
+// waitHealthyContract polls a bundle-declared path and status contract. A
+// readyStatus of zero accepts 2xx/3xx. This rejects false-positive 4xx roots
+// while still allowing redirects for frameworks with a canonical landing URL.
+func waitHealthyContract(endpointURL, readyPath string, readyStatus int, timeout time.Duration, transport http.RoundTripper, alive func() bool) error {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	if transport != nil {
 		client.Transport = transport
 	}
-	healthURL := strings.TrimSuffix(endpointURL, "/") + "/"
+	if readyPath == "" {
+		readyPath = "/"
+	}
+	healthURL := strings.TrimSuffix(endpointURL, "/") + "/" + strings.TrimPrefix(readyPath, "/")
 	deadline := time.Now().Add(timeout)
+	lastStatus := 0
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
@@ -1552,7 +1580,8 @@ func waitHealthyOrExit(endpointURL string, timeout time.Duration, transport http
 		cancel()
 		if err == nil {
 			resp.Body.Close()
-			if resp.StatusCode < 500 {
+			lastStatus = resp.StatusCode
+			if readyStatus > 0 && resp.StatusCode == readyStatus || readyStatus == 0 && resp.StatusCode >= 200 && resp.StatusCode < 400 {
 				return nil
 			}
 		}
@@ -1561,7 +1590,10 @@ func waitHealthyOrExit(endpointURL string, timeout time.Duration, transport http
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("app at %s did not become healthy within %s", endpointURL, timeout)
+	if lastStatus != 0 {
+		return fmt.Errorf("app at %s did not become healthy within %s (last readiness status %d)", healthURL, timeout, lastStatus)
+	}
+	return fmt.Errorf("app at %s did not become healthy within %s", healthURL, timeout)
 }
 
 // ErrBundleTooLarge is returned by ExtractBundle when a single entry, or the

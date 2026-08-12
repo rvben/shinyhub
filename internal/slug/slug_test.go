@@ -29,7 +29,7 @@ func TestValid(t *testing.T) {
 		{string(make([]byte, 0)), false},
 		{repeat("a", 63), true},
 		{repeat("a", 64), false},
-		{"a" + repeat("b", 61) + "c", true}, // 63 chars
+		{"a" + repeat("b", 61) + "c", true},  // 63 chars
 		{"a" + repeat("b", 62) + "c", false}, // 64 chars
 	}
 	for _, tc := range cases {

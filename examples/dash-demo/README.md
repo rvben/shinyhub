@@ -12,6 +12,16 @@ See [`docs/recipes/dash.md`](../../docs/recipes/dash.md) for the full
 walkthrough including the `requests_pathname_prefix` explanation and
 persistent-data usage.
 
+## Run locally
+
+From the repository root:
+
+```bash
+shinyhub run examples/dash-demo --open
+```
+
+The default slug is `dash-demo`, matching the prefix declared by the app.
+
 ## Deploy
 
 ```bash

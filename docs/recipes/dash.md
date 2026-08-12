@@ -102,14 +102,14 @@ shinyhub deploy . --slug hello-dash \
 2. Because `[app] command` is set, type detection and `uv sync` are
    skipped. Dependencies are installed by `uv run --with-requirements`
    at process start.
-3. The health check polls `GET /` until Dash responds with a non-5xx
+3. The health check polls `GET /` until Dash responds with a 2xx or 3xx
    status (up to 120 seconds by default).
 4. The app is live at `https://hub.example.com/app/hello-dash/`.
 
 View logs from the dashboard (Logs tab) or via the CLI:
 
 ```bash
-shinyhub logs hello-dash --follow
+shinyhub apps logs hello-dash --follow
 ```
 
 ## Changing the slug

@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/rvben/shinyhub/internal/localrun"
+	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +24,8 @@ func newRunCmd() *cobra.Command {
 		env      []string
 		envFile  string
 		dataDir  string
+		stateDir string
+		fresh    bool
 		slug     string
 		open     bool
 		check    bool
@@ -34,14 +37,23 @@ func newRunCmd() *cobra.Command {
 		Long: `Boot a Shiny app bundle on localhost without a ShinyHub server.
 
 The bundle directory defaults to the current directory ("."). The command
-resolves the same launch plan the hub would use (uv/renv dep prep, framework
-flags, hot reload), streams all app output to the terminal, and shuts down
-cleanly on Ctrl-C.
+resolves the same launch plan the hub would use, mirrors the source into a
+ShinyHub-owned cache, and serves it through the production proxy route at
+/app/<slug>/. The source directory is never modified. Changes are staged and
+health-checked before the running app is replaced, so a broken save leaves the
+last healthy version online. App output streams to the terminal and Ctrl-C
+shuts everything down cleanly.
 
 Use --check to run a preflight: boot, verify the app becomes healthy, then
 stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			for _, name := range []string{"config", "host", "output", "quiet", "no-color"} {
+				if cmd.Flags().Changed(name) {
+					return &ExitCodeError{Code: 1, Kind: KindValidation,
+						Err: fmt.Errorf("--%s does not apply to local app runs", name)}
+				}
+			}
 			dir := "."
 			if len(args) > 0 {
 				dir = args[0]
@@ -50,7 +62,7 @@ stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 			// Resolve env vars from --env-file. If the user passed an explicit
 			// path that does not exist, error. If not passed, default to
 			// <dir>/.env and load it only when present (missing default is fine).
-			var fileEnv []string
+			var fileEnv []envFileEntry
 			if envFile != "" {
 				// Explicit path: error if missing.
 				fe, err := readRunEnvFile(envFile)
@@ -70,8 +82,34 @@ stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 				}
 			}
 
-			// Combine file env (lower priority) with --env flags (higher priority).
-			combined := append(fileEnv, env...)
+			// File values are the base layer; repeatable --env flags replace a
+			// matching key. Both paths use the exact parser used by `env apply`.
+			combinedEntries := append([]envFileEntry(nil), fileEnv...)
+			positions := make(map[string]int, len(combinedEntries))
+			for i, entry := range combinedEntries {
+				positions[entry.Key] = i
+			}
+			for _, assignment := range env {
+				parsed, err := parseEnvFile(strings.NewReader(assignment + "\n"))
+				if err != nil || len(parsed) != 1 {
+					if err == nil {
+						err = fmt.Errorf("expected KEY=VALUE")
+					}
+					return &ExitCodeError{Code: 1, Kind: KindValidation,
+						Err: fmt.Errorf("--env %q: %w", assignment, err)}
+				}
+				entry := parsed[0]
+				if i, ok := positions[entry.Key]; ok {
+					combinedEntries[i] = entry
+				} else {
+					positions[entry.Key] = len(combinedEntries)
+					combinedEntries = append(combinedEntries, entry)
+				}
+			}
+			combined := make([]string, 0, len(combinedEntries))
+			for _, entry := range combinedEntries {
+				combined = append(combined, entry.Key+"="+entry.Value)
+			}
 
 			// Default slug to the dir's base name.
 			effectiveSlug := slug
@@ -80,17 +118,25 @@ stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 				if err != nil {
 					abs = dir
 				}
-				effectiveSlug = filepath.Base(abs)
+				effectiveSlug = sanitizeSlug(filepath.Base(abs))
+				if effectiveSlug == "" {
+					effectiveSlug = "app"
+				}
+			} else if !slugpkg.Valid(effectiveSlug) {
+				return &ExitCodeError{Code: 1, Kind: KindValidation,
+					Err: fmt.Errorf("invalid slug %q: must be %s", effectiveSlug, slugpkg.HumanRule)}
 			}
 
 			opts := localrun.Options{
 				BundleDir: dir,
 				Slug:      effectiveSlug,
 				DataDir:   dataDir,
+				StateDir:  stateDir,
 				Port:      port,
 				Env:       combined,
 				NoSync:    noSync,
 				NoReload:  noReload,
+				Fresh:     fresh,
 				Open:      open,
 				Check:     check,
 			}
@@ -102,48 +148,48 @@ stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 			defer stop()
 
 			if err := localrun.Run(ctx, opts, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
-				return &ExitCodeError{Code: 1, Kind: KindInternal, Err: err}
+				kind := KindInternal
+				var validationErr *localrun.ValidationError
+				if errors.As(err, &validationErr) {
+					kind = KindValidation
+				}
+				return &ExitCodeError{Code: 1, Kind: kind, Err: err}
 			}
 			return nil
 		},
 	}
+	// Server-selection and structured-output globals do not affect a foreground
+	// local process. Keep them out of this command's help instead of presenting
+	// controls that are silently ignored; RunE also rejects them if supplied.
+	cmd.SetUsageTemplate(`Usage:
+  {{.UseLine}}{{if .HasAvailableLocalFlags}}
+
+Flags:
+{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}
+`)
 
 	cmd.Flags().IntVarP(&port, "port", "p", 0, "Local TCP port to bind (0 = auto-allocate)")
 	cmd.Flags().BoolVar(&noSync, "no-sync", false, "Skip dep-prep steps (uv sync / renv restore)")
-	cmd.Flags().BoolVar(&noReload, "no-reload", false, "Disable framework hot reload and file-watch restart")
+	cmd.Flags().BoolVar(&noReload, "no-reload", false, "Disable staged reload when source files change")
+	cmd.Flags().BoolVar(&fresh, "fresh", false, "Rebuild generated workspace state from scratch (preserves app data)")
 	cmd.Flags().StringArrayVar(&env, "env", nil, "Extra environment variables in KEY=VALUE form (repeatable)")
 	cmd.Flags().StringVar(&envFile, "env-file", "", "Load environment variables from a file (default: <dir>/.env if present)")
-	cmd.Flags().StringVar(&dataDir, "data-dir", "", "Host path for app data dir (default: <dir>/.shinyhub-run/data)")
-	cmd.Flags().StringVar(&slug, "slug", "", "Human label used in log output (default: dir base name)")
+	cmd.Flags().StringVar(&dataDir, "data-dir", "", "Host path for app data dir (default: ShinyHub user cache)")
+	cmd.Flags().StringVar(&stateDir, "state-dir", "", "Local workspace/state directory (default: ShinyHub user cache keyed by app path)")
+	cmd.Flags().StringVar(&slug, "slug", "", "App slug used by the local /app/<slug>/ proxy (default: sanitized dir name)")
 	cmd.Flags().BoolVar(&open, "open", false, "Open the serving URL in the default browser after readiness")
 	cmd.Flags().BoolVar(&check, "check", false, "Preflight mode: boot, verify healthy, stop, exit 0/1")
 
 	return cmd
 }
 
-// readRunEnvFile reads a file of KEY=VALUE lines and returns them as a slice
-// of raw KEY=VALUE strings suitable for os/exec environment passing. It skips
-// blank lines, '#'-prefixed comment lines, and lines that have no '=' (so bare
-// variable names without values are ignored). A leading "export " prefix is
-// stripped to support shell-sourced .env files. It returns the raw os.Open
-// error if the file does not exist, so callers can distinguish "file missing"
-// from "file malformed".
-func readRunEnvFile(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
+// readRunEnvFile deliberately shares env apply's parser so local and deployed
+// values have identical quoting, comment, validation, and duplicate semantics.
+func readRunEnvFile(path string) ([]envFileEntry, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	var lines []string
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		if !strings.Contains(line, "=") {
-			continue
-		}
-		lines = append(lines, line)
-	}
-	return lines, nil
+	defer f.Close()
+	return parseEnvFile(f)
 }

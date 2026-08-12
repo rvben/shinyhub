@@ -60,6 +60,27 @@ func TestWatchAndRestart_NoFireOnExcluded(t *testing.T) {
 	}
 }
 
+func TestWatchAndRestart_FiresOnDeletion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "helper.py")
+	if err := os.WriteFile(path, []byte("value = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fired := make(chan struct{}, 1)
+	go watchAndRestart(ctx, dir, nil, func() { fired <- struct{}{} })
+	time.Sleep(600 * time.Millisecond)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not fire when a source file was deleted")
+	}
+}
+
 func TestWatchAndRestart_Debounce(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "app.py")

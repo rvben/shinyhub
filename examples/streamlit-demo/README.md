@@ -8,6 +8,14 @@ image is needed.
 See [`docs/recipes/streamlit.md`](../../docs/recipes/streamlit.md) for the
 full walkthrough including CORS/XSRF notes and persistent-data usage.
 
+## Run locally
+
+From the repository root:
+
+```bash
+shinyhub run examples/streamlit-demo --open
+```
+
 ## Deploy
 
 ```bash

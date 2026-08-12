@@ -14,11 +14,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
+	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
 
 // Options configures a local foreground run.
@@ -27,9 +29,12 @@ type Options struct {
 	BundleDir string
 	// Slug is a human label for log output. Defaults to the basename of BundleDir.
 	Slug string
-	// DataDir is the host path used as SHINYHUB_APP_DATA and symlinked to
-	// <BundleDir>/data. When empty, defaults to <BundleDir>/.shinyhub-run/data.
+	// DataDir is the host path used as SHINYHUB_APP_DATA. When empty, it lives
+	// in ShinyHub's per-app local state directory, outside the source checkout.
 	DataDir string
+	// StateDir is the ShinyHub-owned workspace and state directory. Empty uses
+	// the OS user cache, keyed by the absolute source path.
+	StateDir string
 	// Port is the local TCP port to bind. When 0, a free port is allocated.
 	Port int
 	// Env is additional environment in KEY=VALUE form, layered above the
@@ -37,364 +42,422 @@ type Options struct {
 	Env []string
 	// NoSync skips the explicit dep-prep steps (uv sync / renv restore).
 	NoSync bool
-	// NoReload disables framework hot reload and the file-watch fallback.
+	// NoReload disables ShinyHub's staged file-watch reload loop.
 	NoReload bool
+	// Fresh discards the generated dependency mirror before starting while
+	// preserving the app's durable data directory.
+	Fresh bool
 	// Open opens the serving URL in the default browser after readiness.
 	Open bool
 	// Check runs in preflight mode: boot, verify healthy, stop, exit 0/1.
 	Check bool
 }
 
-// reservedEnvKeys are env keys that localrun always controls; user-supplied
-// values for these keys are silently dropped to prevent them from shadowing
-// the platform-authoritative values appended later.
-var reservedEnvKeys = []string{"PORT", "SHINYHUB_APP_DATA"}
+// ValidationError marks user-correctable preflight failures so the CLI emits
+// a validation error envelope instead of misclassifying them as internals.
+type ValidationError struct{ Err error }
 
-// dropReservedKeys returns a copy of env with every "KEY=VALUE" entry whose
-// key appears in reserved removed.
-func dropReservedKeys(env []string) []string {
+func (e *ValidationError) Error() string { return e.Err.Error() }
+func (e *ValidationError) Unwrap() error { return e.Err }
+
+func validationErrorf(format string, args ...any) error {
+	return &ValidationError{Err: fmt.Errorf(format, args...)}
+}
+
+// reservedEnvKeys are platform-authoritative in local and deployed apps.
+var reservedEnvKeys = []string{"PORT", "SHINYHUB_APP_DATA", "SHINYHUB_APP_SLUG"}
+
+func validateUserEnv(env []string) ([]string, error) {
 	reserved := make(map[string]struct{}, len(reservedEnvKeys))
 	for _, k := range reservedEnvKeys {
 		reserved[k] = struct{}{}
 	}
-	out := make([]string, 0, len(env))
+	out := append([]string(nil), env...)
 	for _, kv := range env {
-		key := kv
-		if i := len(key); i > 0 {
-			for j, c := range kv {
-				if c == '=' {
-					key = kv[:j]
-					break
-				}
-			}
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok || key == "" {
+			return nil, fmt.Errorf("invalid environment assignment %q: expected KEY=VALUE", kv)
 		}
-		if _, blocked := reserved[key]; !blocked {
-			out = append(out, kv)
+		if _, blocked := reserved[key]; blocked {
+			return nil, fmt.Errorf("environment key %s is managed by ShinyHub and cannot be overridden", key)
 		}
 	}
-	return out
+	return out, nil
+}
+
+type childProcess struct {
+	cmd    *exec.Cmd
+	exitCh <-chan error
+	port   int
+	plan   *deploy.LaunchPlan
 }
 
 // Run boots the app bundle and blocks until the context is cancelled (or, in
 // --check mode, until the first healthy poll or crash). It streams all app
 // output to stdout/stderr and returns a non-nil error on any failure.
 func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
-	bundleDir, err := filepath.Abs(o.BundleDir)
+	sourceDir, err := filepath.Abs(o.BundleDir)
 	if err != nil {
-		return fmt.Errorf("resolve bundle dir: %w", err)
+		return validationErrorf("resolve bundle dir: %v", err)
 	}
-
+	info, err := os.Stat(sourceDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return validationErrorf("bundle directory does not exist: %s", sourceDir)
+		}
+		return fmt.Errorf("inspect bundle directory: %w", err)
+	}
+	if !info.IsDir() {
+		return validationErrorf("bundle path is not a directory: %s", sourceDir)
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(sourceDir); resolveErr == nil {
+		sourceDir = resolved
+	} else {
+		return validationErrorf("resolve bundle directory symlinks: %v", resolveErr)
+	}
+	if _, err := os.Lstat(filepath.Join(sourceDir, "data")); err == nil {
+		return validationErrorf("bundle contains reserved 'data' entry; move seed data outside the bundle and use --data-dir")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect reserved data path: %w", err)
+	}
 	slug := o.Slug
 	if slug == "" {
-		slug = filepath.Base(bundleDir)
+		slug = normalizeLocalSlug(filepath.Base(sourceDir))
 	}
-
-	// Step 1: Resolve the data dir and set up <bundle>/data symlink.
-	// Absolutize so that the symlink target and SHINYHUB_APP_DATA agree
-	// regardless of which working directory the caller used.
-	dataDir := o.DataDir
-	if dataDir == "" {
-		dataDir = filepath.Join(bundleDir, ".shinyhub-run", "data")
-	} else {
-		abs, err := filepath.Abs(dataDir)
-		if err != nil {
-			return fmt.Errorf("resolve data dir: %w", err)
-		}
-		dataDir = abs
+	if !slugpkg.Valid(slug) {
+		return validationErrorf("invalid slug %q: must be %s", slug, slugpkg.HumanRule)
 	}
-	if err := os.MkdirAll(dataDir, 0o750); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
-	}
-
-	linkPath := filepath.Join(bundleDir, "data")
-	if err := ensureDataSymlink(linkPath, dataDir); err != nil {
-		return err
-	}
-	// Deferred cleanup: remove the symlink only if it still points at our dataDir.
-	defer removeDataSymlinkIfOwned(linkPath, dataDir, stderr)
-
-	// Step 2: Allocate a free port unless one was provided.
-	port := o.Port
-	if port == 0 {
-		port = deploy.AllocatePort()
-	}
-
-	// Step 3: Resolve the launch plan via the shared seam. The user's --env/.env
-	// vars reach the dep-prep builds too (AppEnv), so a local run against e.g. a
-	// private package index behaves like a server deploy with the same vars.
-	userEnv := dropReservedKeys(o.Env)
-	launchOpts := deploy.LaunchOptions{
-		Port:                  port,
-		Workers:               1,
-		BindHost:              "127.0.0.1",
-		Reload:                !o.NoReload,
-		PrepHostDeps:          !o.NoSync,
-		CommandHostDeps:       !o.NoSync,
-		AutoInstrumentDefault: false,
-		HonorManifestTracing:  false,
-		AppEnv:                userEnv,
-	}
-	plan, err := deploy.ResolveLaunch(bundleDir, launchOpts)
+	userEnv, err := validateUserEnv(o.Env)
 	if err != nil {
-		return fmt.Errorf("resolve launch: %w", err)
+		return &ValidationError{Err: err}
+	}
+	if o.Port < 0 || o.Port > 65535 {
+		return validationErrorf("port must be between 0 and 65535, got %d", o.Port)
+	}
+	// Read-only source preflight. This deliberately runs before workspace or
+	// data creation, so a typo or invalid manifest leaves no filesystem state.
+	if _, err := deploy.ResolveLaunch(sourceDir, deploy.LaunchOptions{
+		Port: 1, BindHost: "127.0.0.1", Reload: false,
+	}); err != nil {
+		return &ValidationError{Err: fmt.Errorf("resolve launch: %w", err)}
 	}
 
-	// Step 4: Run each dep-prep step, streaming output to the terminal.
-	for _, step := range plan.DepPrep {
-		fmt.Fprintf(stdout, "==> %s\n", step.Label)
-		// Pass the run's context so a Ctrl-C / cancellation kills an in-flight
-		// build (uv sync / renv restore) promptly. It carries no build deadline,
-		// so local runs remain un-timeout-bounded; the build_timeout budget is
-		// server-deploy-only.
-		if err := step.Run(ctx, bundleDir); err != nil {
-			return fmt.Errorf("dep prep (%s): %w", step.Label, err)
-		}
-	}
-
-	// Step 5: Assemble the child env. Precedence (lowest to highest):
-	//   SanitizedEnv() base, then o.Env (--env/.env) with reserved keys
-	//   stripped, then plan.Env (PORT, the renv policy), then SHINYHUB_APP_DATA.
-	//   Platform vars always win over user-supplied env.
-	childEnv := append(process.SanitizedEnv(), userEnv...)
-	childEnv = append(childEnv, plan.Env...)
-	childEnv = append(childEnv, "SHINYHUB_APP_DATA="+dataDir)
-
-	readyPath := plan.ReadyPath
-	if readyPath == "" {
-		readyPath = "/"
-	}
-	readyURL := fmt.Sprintf("http://127.0.0.1:%d%s", port, readyPath)
-
-	// spawnChild starts the app process and returns the cmd + its exit channel.
-	spawnChild := func() (*exec.Cmd, <-chan error, error) {
-		c := exec.CommandContext(ctx, plan.Command[0], plan.Command[1:]...) //nolint:gosec
-		c.Dir = bundleDir
-		c.Env = childEnv
-		c.Stdout = stdout
-		c.Stderr = stderr
-		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		if err := c.Start(); err != nil {
-			return nil, nil, fmt.Errorf("start %s: %w", slug, err)
-		}
-		ch := make(chan error, 1)
-		go func() { ch <- c.Wait() }()
-		return c, ch, nil
-	}
-
-	// Step 6: First spawn.
-	cmd, exitCh, err := spawnChild()
+	w, err := workspaceFor(sourceDir, o.StateDir, o.DataDir)
 	if err != nil {
 		return err
 	}
-	// Ensure the child group is always torn down when Run returns.
-	defer func() { stopChild(cmd, exitCh, stderr) }()
+	if err := w.validateLocations(sourceDir); err != nil {
+		return &ValidationError{Err: err}
+	}
+	releaseWorkspace, err := w.acquireLock()
+	if err != nil {
+		return &ValidationError{Err: err}
+	}
+	defer releaseWorkspace()
+	if o.Fresh {
+		if err := w.resetAllBundles(); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "==> cleared generated workspace (app data preserved)")
+	}
+	depsChanged, err := w.syncSource(sourceDir)
+	if err != nil {
+		return err
+	}
 
-	// Step 7: Poll for readiness concurrently with watching for early exit.
-	// pollCtx is cancelled when Run returns so the poller never outlives Run.
-	pollCtx, pollCancel := context.WithCancel(ctx)
-	defer pollCancel()
+	lp, err := newLocalProxy(o.Port, slug)
+	if err != nil {
+		return err
+	}
+	defer lp.close()
+	proxyErrCh := make(chan error, 1)
 
-	readyCh := make(chan struct{}, 1)
-	go pollReady(pollCtx, readyURL, plan.Timeout, readyCh)
+	fmt.Fprintf(stdout, "==> source: %s\n", sourceDir)
+	fmt.Fprintf(stdout, "==> workspace: %s\n", w.BundleDir)
+	fmt.Fprintf(stdout, "==> data: %s\n", w.DataDir)
+	if len(userEnv) > 0 {
+		fmt.Fprintf(stdout, "==> environment: %s\n", strings.Join(environmentKeys(userEnv), ", "))
+	}
 
-	startTimer := time.NewTimer(plan.Timeout)
-	defer startTimer.Stop()
-
-	select {
-	case exitErr := <-exitCh:
-		// The process exited before becoming healthy.
-		code := exitCode(exitErr)
-		msg := fmt.Sprintf("app exited during startup (exit %d)", code)
-		fmt.Fprintln(stderr, msg)
-		return errors.New(msg)
-
-	case <-readyCh:
-		// App is healthy.
-		fmt.Fprintf(stdout, "serving on http://127.0.0.1:%d\n", port)
-
-		if o.Check {
-			// --check: signal the child group and wait for it to finish.
-			// The deferred stopChild above handles teardown; return nil to
-			// indicate success.
+	current, err := startCandidate(ctx, w, slug, userEnv, o.NoSync, depsChanged, stdout, stderr)
+	if err != nil {
+		return err
+	}
+	defer func() { stopChild(current.cmd, current.exitCh, stderr) }()
+	if err := waitUntilReady(ctx, current, nil); err != nil {
+		if ctx.Err() != nil {
 			return nil
 		}
-
-		// Open browser if requested.
-		if o.Open {
-			openBrowser(fmt.Sprintf("http://127.0.0.1:%d", port))
-		}
-
-	case <-startTimer.C:
-		return fmt.Errorf("app did not become healthy within %s", plan.Timeout)
-
-	case <-ctx.Done():
+		return err
+	}
+	if err := lp.routeTo(current.port); err != nil {
+		return err
+	}
+	lp.serve(proxyErrCh)
+	publicReadyURL := joinReadyURL(lp.URL(), current.plan.ReadyPath)
+	if err := pollReady(ctx, publicReadyURL, current.plan.Timeout, current.plan.ReadyStatus); err != nil {
+		return fmt.Errorf("local proxy readiness: %w", err)
+	}
+	fmt.Fprintf(stdout, "serving on %s\n", lp.URL())
+	if o.Check {
 		return nil
 	}
+	if o.Open {
+		openBrowser(lp.URL())
+	}
 
-	// Long-run: manifest-command apps (AppType == "") get a file-watch restart
-	// loop when reload is enabled. Inferred python/r apps self-reload via their
-	// framework flags and do not need the watcher.
-	useWatcher := plan.AppType == "" && !o.NoReload
-	if useWatcher {
-		// changeCh buffers one signal; the loop drains it before re-spawning.
-		changeCh := make(chan struct{}, 1)
-		watchCtx, watchCancel := context.WithCancel(ctx)
-		defer watchCancel()
+	if o.NoReload {
+		return waitForExit(ctx, current, proxyErrCh)
+	}
+	currentWorkspace := w
+	stagingWorkspace := w.alternate()
 
-		excludeDirs := []string{".shinyhub-run", ".venv", ".git", "__pycache__", "node_modules"}
-		go func() {
-			_ = watchAndRestart(watchCtx, bundleDir, excludeDirs, func() {
+	changeCh := make(chan struct{}, 1)
+	go func() {
+		_ = watchAndRestart(ctx, sourceDir, []string{".shinyhub-run", ".venv", ".git", "__pycache__", "node_modules", ".renv", ".Rproj.user"}, func() {
+			select {
+			case changeCh <- struct{}{}:
+			default:
+			}
+		})
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-proxyErrCh:
+			return err
+		case exitErr := <-current.exitCh:
+			if exitErr != nil {
+				return fmt.Errorf("app exited: %w", exitErr)
+			}
+			return errors.New("app exited unexpectedly")
+		case <-changeCh:
+			fmt.Fprintln(stdout, "==> change detected; staging reload")
+			depsChanged, syncErr := stagingWorkspace.syncSource(sourceDir)
+			if syncErr != nil {
+				fmt.Fprintf(stderr, "reload failed; keeping the current app: %v\n", syncErr)
+				continue
+			}
+			candidate, startErr := startCandidate(ctx, stagingWorkspace, slug, userEnv, o.NoSync, depsChanged, stdout, stderr)
+			if startErr != nil {
+				fmt.Fprintf(stderr, "reload failed; keeping the current app: %v\n", startErr)
+				continue
+			}
+
+			readyErr := waitUntilReady(ctx, candidate, changeCh)
+			if errors.Is(readyErr, errReloadSuperseded) {
+				stopChild(candidate.cmd, candidate.exitCh, stderr)
+				fmt.Fprintln(stdout, "==> newer change detected; replacing staged reload")
 				select {
 				case changeCh <- struct{}{}:
-				default: // already queued; debounce
+				default:
 				}
-			})
-		}()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-
-			case exitErr := <-exitCh:
-				if exitErr != nil {
-					return fmt.Errorf("app exited: %w", exitErr)
-				}
-				return nil
-
-			case <-changeCh:
-				fmt.Fprintln(stdout, "==> file change detected; restarting")
-				// Re-resolve the launch plan so manifest [app] command changes
-				// are picked up and the new spawn gets a fresh readiness check.
-				stopChild(cmd, exitCh, stderr)
-				newPlan, resolveErr := deploy.ResolveLaunch(bundleDir, launchOpts)
-				if resolveErr != nil {
-					return fmt.Errorf("re-resolve launch after change: %w", resolveErr)
-				}
-				plan = newPlan
-				// ReadyPath comes from the re-resolved plan; recompute the probe
-				// URL so a changed readiness path is honored on restart.
-				restartReadyPath := plan.ReadyPath
-				if restartReadyPath == "" {
-					restartReadyPath = "/"
-				}
-				readyURL = fmt.Sprintf("http://127.0.0.1:%d%s", port, restartReadyPath)
-				newCmd, newCh, spawnErr := spawnChild()
-				if spawnErr != nil {
-					return spawnErr
-				}
-				cmd, exitCh = newCmd, newCh
-
-				// Wait for the restarted process to become ready.
-				restartPollCtx, restartPollCancel := context.WithCancel(ctx)
-				restartReadyCh := make(chan struct{}, 1)
-				go pollReady(restartPollCtx, readyURL, plan.Timeout, restartReadyCh)
-				restartTimer := time.NewTimer(plan.Timeout)
-				select {
-				case <-ctx.Done():
-					restartTimer.Stop()
-					restartPollCancel()
-					return nil
-				case restartExitErr := <-exitCh:
-					restartTimer.Stop()
-					restartPollCancel()
-					code := exitCode(restartExitErr)
-					return fmt.Errorf("restarted app exited before becoming healthy (exit %d)", code)
-				case <-restartReadyCh:
-					restartTimer.Stop()
-					restartPollCancel()
-					fmt.Fprintf(stdout, "==> restarted and healthy\n")
-				case <-restartTimer.C:
-					restartPollCancel()
-					return fmt.Errorf("restarted app did not become healthy within %s", plan.Timeout)
-				}
+				continue
 			}
+			if readyErr != nil {
+				stopChild(candidate.cmd, candidate.exitCh, stderr)
+				fmt.Fprintf(stderr, "reload failed; keeping the current app: %v\n", readyErr)
+				continue
+			}
+			if err := lp.routeTo(candidate.port); err != nil {
+				stopChild(candidate.cmd, candidate.exitCh, stderr)
+				fmt.Fprintf(stderr, "reload failed; keeping the current app: %v\n", err)
+				continue
+			}
+			if err := pollReady(ctx, joinReadyURL(lp.URL(), candidate.plan.ReadyPath), 5*time.Second, candidate.plan.ReadyStatus); err != nil {
+				_ = lp.routeTo(current.port)
+				stopChild(candidate.cmd, candidate.exitCh, stderr)
+				fmt.Fprintf(stderr, "reload failed through local proxy; keeping the current app: %v\n", err)
+				continue
+			}
+			old := current
+			current = candidate
+			currentWorkspace, stagingWorkspace = stagingWorkspace, currentWorkspace
+			stopChild(old.cmd, old.exitCh, stderr)
+			fmt.Fprintln(stdout, "==> reloaded and healthy")
+		}
+	}
+}
+
+var errReloadSuperseded = errors.New("reload superseded by a newer change")
+
+func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []string, noSync, depsChanged bool, stdout, stderr io.Writer) (*childProcess, error) {
+	port := deploy.AllocatePort()
+	baseOpts := deploy.LaunchOptions{
+		Port: port, Workers: 1, BindHost: "127.0.0.1", Reload: false,
+		CommandHostDeps: !noSync, AutoInstrumentDefault: false,
+		HonorManifestTracing: false, AppEnv: userEnv,
+	}
+	plan, err := deploy.ResolveLaunch(w.BundleDir, baseOpts)
+	if err != nil {
+		return nil, fmt.Errorf("resolve launch: %w", err)
+	}
+	needsPrep := !noSync && (depsChanged || !deploy.HostEnvironmentReady(w.BundleDir, plan.AppType))
+	if needsPrep {
+		if err := w.markDependenciesDirty(); err != nil {
+			return nil, err
+		}
+		prepOpts := baseOpts
+		prepOpts.PrepHostDeps = true
+		plan, err = deploy.ResolveLaunch(w.BundleDir, prepOpts)
+		if err != nil {
+			return nil, fmt.Errorf("resolve dependency preparation: %w", err)
+		}
+		for _, step := range plan.DepPrep {
+			fmt.Fprintf(stdout, "==> %s\n", step.Label)
+			if err := step.Run(ctx, w.BundleDir); err != nil {
+				return nil, fmt.Errorf("dependency preparation (%s): %w", step.Label, err)
+			}
+		}
+		// Preparation may synthesize a project, changing the canonical command.
+		plan, err = deploy.ResolveLaunch(w.BundleDir, baseOpts)
+		if err != nil {
+			return nil, fmt.Errorf("resolve prepared launch: %w", err)
+		}
+		if err := w.markDependenciesReady(); err != nil {
+			return nil, err
 		}
 	}
 
-	// Long-run without watcher: block until context is cancelled or process exits.
+	appType := plan.AppType
+	if appType == "" {
+		appType = "manifest command"
+	}
+	readyContract := "2xx or 3xx"
+	if plan.ReadyStatus != 0 {
+		readyContract = fmt.Sprintf("HTTP %d", plan.ReadyStatus)
+	}
+	fmt.Fprintf(stdout, "==> starting %s; readiness GET %s expects %s\n", appType, plan.ReadyPath, readyContract)
+
+	childEnv := append(process.SanitizedEnv(), userEnv...)
+	childEnv = append(childEnv, plan.Env...)
+	childEnv = append(childEnv,
+		"SHINYHUB_APP_DATA="+w.DataDir,
+		"SHINYHUB_APP_SLUG="+slug,
+	)
+	c := exec.CommandContext(ctx, plan.Command[0], plan.Command[1:]...) //nolint:gosec
+	c.Dir = w.BundleDir
+	c.Env = childEnv
+	c.Stdout = stdout
+	c.Stderr = stderr
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := c.Start(); err != nil {
+		return nil, fmt.Errorf("start %s: %w", slug, err)
+	}
+	exitCh := make(chan error, 1)
+	go func() { exitCh <- c.Wait() }()
+	return &childProcess{cmd: c, exitCh: exitCh, port: port, plan: plan}, nil
+}
+
+func waitUntilReady(ctx context.Context, child *childProcess, changes <-chan struct{}) error {
+	readyURL := joinReadyURL(fmt.Sprintf("http://127.0.0.1:%d/", child.port), child.plan.ReadyPath)
+	readyCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	readyCh := make(chan error, 1)
+	go func() { readyCh <- pollReady(readyCtx, readyURL, child.plan.Timeout, child.plan.ReadyStatus) }()
+	select {
+	case exitErr := <-child.exitCh:
+		return fmt.Errorf("app exited during startup (exit %d)", exitCode(exitErr))
+	case err := <-readyCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-changes:
+		return errReloadSuperseded
+	}
+}
+
+func waitForExit(ctx context.Context, child *childProcess, proxyErrCh <-chan error) error {
 	select {
 	case <-ctx.Done():
 		return nil
-	case exitErr := <-exitCh:
+	case err := <-proxyErrCh:
+		return err
+	case exitErr := <-child.exitCh:
 		if exitErr != nil {
 			return fmt.Errorf("app exited: %w", exitErr)
 		}
-		return nil
+		return errors.New("app exited unexpectedly")
 	}
 }
 
-// ensureDataSymlink creates the <bundle>/data symlink pointing at dataDir, or
-// accepts it if it already points at the right target (idempotent restart).
-// Any other occupant at the path is rejected to prevent silent corruption.
-func ensureDataSymlink(linkPath, dataDir string) error {
-	switch info, err := os.Lstat(linkPath); {
-	case err == nil:
-		if info.Mode()&os.ModeSymlink != 0 {
-			if existing, readErr := os.Readlink(linkPath); readErr == nil && existing == dataDir {
-				return nil // already correct
-			}
+func normalizeLocalSlug(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	lastHyphen := false
+	for _, r := range name {
+		valid := r >= 'a' && r <= 'z' || r >= '0' && r <= '9'
+		if valid {
+			b.WriteRune(r)
+			lastHyphen = false
+		} else if !lastHyphen && b.Len() > 0 {
+			b.WriteByte('-')
+			lastHyphen = true
 		}
-		return fmt.Errorf("bundle already contains a 'data' entry (%s); remove it before running", info.Mode())
-	case !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("lstat %s: %w", linkPath, err)
+		if b.Len() >= slugpkg.MaxLen {
+			break
+		}
 	}
-	if err := os.Symlink(dataDir, linkPath); err != nil {
-		return fmt.Errorf("symlink data: %w", err)
-	}
-	return nil
+	return strings.Trim(b.String(), "-")
 }
 
-// removeDataSymlinkIfOwned removes the <bundle>/data symlink only when it
-// still points at this run's dataDir. A foreign or replaced entry is left
-// alone; a warning is emitted to stderr.
-func removeDataSymlinkIfOwned(linkPath, dataDir string, stderr io.Writer) {
-	info, err := os.Lstat(linkPath)
-	if err != nil {
-		return // already gone or unreadable; nothing to do
+func environmentKeys(env []string) []string {
+	keys := make([]string, 0, len(env))
+	for _, assignment := range env {
+		key, _, _ := strings.Cut(assignment, "=")
+		keys = append(keys, key)
 	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		// Not a symlink - someone replaced it. Leave it alone.
-		fmt.Fprintf(stderr, "warning: <bundle>/data is not a symlink after run; leaving it in place\n")
-		return
-	}
-	existing, err := os.Readlink(linkPath)
-	if err != nil || existing != dataDir {
-		// Points elsewhere. Leave it alone.
-		fmt.Fprintf(stderr, "warning: <bundle>/data symlink points to unexpected target; leaving it in place\n")
-		return
-	}
-	if err := os.Remove(linkPath); err != nil {
-		fmt.Fprintf(stderr, "warning: could not remove <bundle>/data symlink: %v\n", err)
-	}
+	return keys
 }
 
-// pollReady polls readyURL every 200 ms until it gets a non-5xx response,
-// ctx is cancelled, or timeout elapses. On success it sends to readyCh.
-func pollReady(ctx context.Context, readyURL string, timeout time.Duration, readyCh chan<- struct{}) {
-	client := &http.Client{Timeout: 2 * time.Second}
+// pollReady polls readyURL until the configured readiness contract succeeds.
+// ReadyStatus 0 accepts 2xx/3xx; a positive value requires that exact status.
+func pollReady(ctx context.Context, readyURL string, timeout time.Duration, readyStatus int) error {
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	lastStatus := 0
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-deadline.C:
-			return
+			if lastStatus != 0 {
+				return fmt.Errorf("app did not satisfy readiness at %s within %s (last status %d)", readyURL, timeout, lastStatus)
+			}
+			return fmt.Errorf("app did not satisfy readiness at %s within %s", readyURL, timeout)
 		case <-ticker.C:
-			resp, err := client.Get(readyURL) //nolint:noctx
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, readyURL, nil)
+			if err != nil {
+				return fmt.Errorf("build readiness request: %w", err)
+			}
+			resp, err := client.Do(req)
 			if err != nil {
 				continue
 			}
 			resp.Body.Close()
-			if resp.StatusCode < 500 {
-				readyCh <- struct{}{}
-				return
+			lastStatus = resp.StatusCode
+			if readyStatus > 0 && resp.StatusCode == readyStatus || readyStatus == 0 && resp.StatusCode >= 200 && resp.StatusCode < 400 {
+				return nil
 			}
 		}
 	}
+}
+
+func joinReadyURL(base, readyPath string) string {
+	if readyPath == "" || readyPath == "/" {
+		return strings.TrimSuffix(base, "/") + "/"
+	}
+	return strings.TrimSuffix(base, "/") + "/" + strings.TrimPrefix(readyPath, "/")
 }
 
 // stopChild sends SIGTERM to the child's process group, waits up to 5 s for a
@@ -404,6 +467,13 @@ func pollReady(ctx context.Context, readyURL string, timeout time.Duration, read
 // prevent the caller from hanging.
 func stopChild(cmd *exec.Cmd, exitCh <-chan error, stderr io.Writer) {
 	if cmd.Process == nil {
+		return
+	}
+	if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+		// Wait has already reaped the leader (and another select may have drained
+		// exitCh). Kill any surviving grandchildren in its process group, then
+		// return without spending the shutdown grace period on an empty channel.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return
 	}
 	// If the process already exited (exitCh drained by caller), there is
@@ -417,7 +487,9 @@ func stopChild(cmd *exec.Cmd, exitCh <-chan error, stderr io.Writer) {
 	}
 
 	// Signal the entire process group.
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); errors.Is(err, syscall.ESRCH) {
+		return
+	}
 
 	select {
 	case <-exitCh:

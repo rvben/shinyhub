@@ -10,9 +10,9 @@ import (
 
 // tracesResponse is the JSON shape returned by GET /api/apps/{slug}/traces.
 type tracesResponse struct {
-	Enabled           bool            `json:"enabled"`
-	TraceLinkTemplate string          `json:"trace_link_template,omitempty"`
-	Spans             []tracing.Span  `json:"spans"`
+	Enabled           bool           `json:"enabled"`
+	TraceLinkTemplate string         `json:"trace_link_template,omitempty"`
+	Spans             []tracing.Span `json:"spans"`
 }
 
 // handleTraces returns the ring buffer of recent slow/error proxy spans for

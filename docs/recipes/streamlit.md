@@ -82,13 +82,13 @@ shinyhub deploy . --slug hello-streamlit \
    skipped. Dependencies are installed by `uv run --with-requirements`
    at process start.
 3. The health check polls `GET /` until Streamlit responds with a
-   non-5xx status (up to 120 seconds by default).
+   2xx or 3xx status (up to 120 seconds by default).
 4. The app is live at `https://hub.example.com/app/hello-streamlit/`.
 
 View logs from the dashboard (Logs tab) or via the CLI:
 
 ```bash
-shinyhub logs hello-streamlit --follow
+shinyhub apps logs hello-streamlit --follow
 ```
 
 ## Identity forwarding

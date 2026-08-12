@@ -82,9 +82,11 @@ shinyhub login --host http://localhost:8080 --username admin
 shinyhub deploy ./my-app --slug demo --wait   # live at /app/demo/
 ```
 
-> Tip: run the bundle locally first with `shinyhub run ./my-app` (add `--check`
-> for a dependency preflight) to catch missing packages before a multi-minute
-> deploy.
+> Tip: run the bundle locally first with `shinyhub run ./my-app`. It keeps your
+> source tree untouched, serves the production-shaped `/app/<slug>/` route, and
+> swaps in edits only after they pass readiness. Add `--check` for a CI-friendly
+> boot smoke test or `--fresh` to rebuild cached dependencies. See
+> [Local development](docs/local-development.md).
 
 > `uvx shinyhub <cmd>` runs any subcommand one-shot, without installing first.
 > `pip install shinyhub` installs the server too, but native Python apps launch
@@ -210,6 +212,7 @@ controlled explicitly:
 | [App startup performance](docs/app-performance.md) | Why data lags the page shell, and the startup-scope and caching patterns that fix it. |
 | [Fleet reconcile](docs/fleet.md) | Declaring and converging a whole set of apps from one file. |
 | [Deploy manifest](docs/manifest.md) | The `shinyhub.toml` bundle manifest. |
+| [Local development](docs/local-development.md) | Delightful control-plane and app-author workflows. |
 | [Tracing](docs/tracing.md) | OpenTelemetry propagation, app spans, and control-plane spans. |
 | [Metrics and logs](docs/metrics.md) | The `/metrics` endpoint, exposed series, and the structured access log. |
 | [Branding](docs/branding.md) | White-label title, logo, theme, landing page, and footer links. |

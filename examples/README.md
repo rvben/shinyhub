@@ -4,6 +4,15 @@ Runnable demo bundles that you can deploy to any ShinyHub instance with a single
 command. Each bundle is self-contained: `app.py`, `requirements.txt`, and
 (where needed) a `shinyhub.toml` manifest.
 
+Try any bundle locally before deploying it:
+
+```bash
+shinyhub run examples/identity-demo --open
+```
+
+The source remains untouched and the app is served through the same
+`/app/<slug>/` proxy shape used after deployment.
+
 ## streamlit-demo
 
 Shows how to deploy a Streamlit app using a manifest `[app] command`. Streamlit

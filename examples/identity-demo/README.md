@@ -5,6 +5,17 @@ verifies the signed `X-Shinyhub-Identity-Token` JWT on every request and
 displays the caller's username, display name, platform role, and group
 memberships. An admins-only panel appears when the verified role is `admin`.
 
+## Run locally
+
+From the repository root:
+
+```bash
+shinyhub run examples/identity-demo --open
+```
+
+Without a signed-in ShinyHub session, the local proxy intentionally exercises
+the app's anonymous branch.
+
 ## Deploy
 
 ```bash

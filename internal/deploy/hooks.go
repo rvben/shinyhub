@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,6 +99,13 @@ type AppSettings struct {
 	// reconciled into the DB.
 	StartupTimeoutSeconds *int `toml:"startup_timeout_seconds"`
 
+	// ReadinessPath is the HTTP path polled before a process becomes routable.
+	// It must begin with '/'. ReadinessStatus, when declared, requires one exact
+	// HTTP status; otherwise any 2xx or 3xx response is ready. Both are read from
+	// the bundle on every boot and are not reconciled into the database.
+	ReadinessPath   string `toml:"readiness_path"`
+	ReadinessStatus *int   `toml:"readiness_status"`
+
 	// BuildTimeoutSeconds bounds the environment build (uv sync / renv::restore)
 	// the host runs before the app process starts. nil = inherit the platform
 	// default. Read from the bundle at every boot and never reconciled into the
@@ -179,9 +187,9 @@ type AutoscaleSettings struct {
 	Target      float64 `toml:"target"`
 }
 
-// Command and StartupTimeoutSeconds are not part of IsZero: they are read at
-// boot, not reconciled into the DB. MemoryLimitMB / CPUQuotaPercent ARE
-// reconciled into the DB (like Replicas), so they count.
+// Command, startup/build timeouts, and readiness settings are not part of
+// IsZero: they are read at boot, not reconciled into the DB. MemoryLimitMB /
+// CPUQuotaPercent ARE reconciled into the DB (like Replicas), so they count.
 func (a AppSettings) IsZero() bool {
 	return a.HibernateTimeoutMinutes == nil &&
 		a.Replicas == nil &&
@@ -371,6 +379,20 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	}
 	if a.StartupTimeoutSeconds != nil && (*a.StartupTimeoutSeconds < 1 || *a.StartupTimeoutSeconds > 3600) {
 		return fmt.Errorf("startup_timeout_seconds must be between 1 and 3600, got %d", *a.StartupTimeoutSeconds)
+	}
+	if a.ReadinessPath != "" {
+		if !strings.HasPrefix(a.ReadinessPath, "/") {
+			return fmt.Errorf("readiness_path must start with '/', got %q", a.ReadinessPath)
+		}
+		if strings.ContainsAny(a.ReadinessPath, "?#") {
+			return fmt.Errorf("readiness_path must not contain a query or fragment, got %q", a.ReadinessPath)
+		}
+		if _, err := url.ParseRequestURI(a.ReadinessPath); err != nil {
+			return fmt.Errorf("readiness_path is not a valid HTTP request path: %q", a.ReadinessPath)
+		}
+	}
+	if a.ReadinessStatus != nil && (*a.ReadinessStatus < 100 || *a.ReadinessStatus > 599) {
+		return fmt.Errorf("readiness_status must be between 100 and 599, got %d", *a.ReadinessStatus)
 	}
 	if a.BuildTimeoutSeconds != nil && (*a.BuildTimeoutSeconds < 30 || *a.BuildTimeoutSeconds > 7200) {
 		return fmt.Errorf("build_timeout_seconds must be between 30 and 7200, got %d", *a.BuildTimeoutSeconds)

@@ -27,16 +27,16 @@ func TestParseTraceparent_Valid(t *testing.T) {
 
 func TestParseTraceparent_Invalid(t *testing.T) {
 	cases := map[string]string{
-		"empty":            "",
-		"too short":        "00-abc-def-01",
-		"wrong version":    "01-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
-		"bad trace len":    "00-0af7651916cd43dd-b7ad6b7169203331-01",
-		"bad span len":    "00-0af7651916cd43dd8448eb211c80319c-b7ad6b71-01",
-		"bad flags len":   "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-1",
-		"non-hex trace":    "00-zz7651916cd43dd8448eb211c80319c0-b7ad6b7169203331-01",
-		"zero trace id":   "00-00000000000000000000000000000000-b7ad6b7169203331-01",
-		"zero span id":    "00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01",
-		"too many parts":  "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-extra",
+		"empty":          "",
+		"too short":      "00-abc-def-01",
+		"wrong version":  "01-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+		"bad trace len":  "00-0af7651916cd43dd-b7ad6b7169203331-01",
+		"bad span len":   "00-0af7651916cd43dd8448eb211c80319c-b7ad6b71-01",
+		"bad flags len":  "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-1",
+		"non-hex trace":  "00-zz7651916cd43dd8448eb211c80319c0-b7ad6b7169203331-01",
+		"zero trace id":  "00-00000000000000000000000000000000-b7ad6b7169203331-01",
+		"zero span id":   "00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01",
+		"too many parts": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-extra",
 	}
 	for name, v := range cases {
 		t.Run(name, func(t *testing.T) {

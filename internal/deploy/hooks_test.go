@@ -233,6 +233,8 @@ hibernate_timeout_minutes = 0
 replicas = 2
 max_sessions_per_replica = 10
 startup_timeout_seconds = 600
+readiness_path = "/health/ready"
+readiness_status = 204
 `)
 	m, err := LoadManifest(dir)
 	if err != nil {
@@ -249,6 +251,28 @@ startup_timeout_seconds = 600
 	}
 	if m.App.StartupTimeoutSeconds == nil || *m.App.StartupTimeoutSeconds != 600 {
 		t.Errorf("startup_timeout_seconds = %v, want 600", m.App.StartupTimeoutSeconds)
+	}
+	if m.App.ReadinessPath != "/health/ready" || m.App.ReadinessStatus == nil || *m.App.ReadinessStatus != 204 {
+		t.Errorf("readiness = %q/%v, want /health/ready/204", m.App.ReadinessPath, m.App.ReadinessStatus)
+	}
+}
+
+func TestLoadManifest_RejectsInvalidReadinessContract(t *testing.T) {
+	for name, manifest := range map[string]string{
+		"relative path": "[app]\nreadiness_path = \"health\"\n",
+		"query":         "[app]\nreadiness_path = \"/health?full=1\"\n",
+		"bad escape":    "[app]\nreadiness_path = \"/health/%zz\"\n",
+		"zero status":   "[app]\nreadiness_status = 0\n",
+		"low status":    "[app]\nreadiness_status = 99\n",
+		"high status":   "[app]\nreadiness_status = 600\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeManifest(t, dir, manifest)
+			if _, err := LoadManifest(dir); err == nil {
+				t.Fatal("expected readiness validation error")
+			}
+		})
 	}
 }
 

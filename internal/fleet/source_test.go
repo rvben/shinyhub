@@ -83,4 +83,3 @@ func TestParseSource_GitRequiresScheme(t *testing.T) {
 		}
 	}
 }
-

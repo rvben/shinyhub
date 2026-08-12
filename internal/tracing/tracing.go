@@ -14,8 +14,8 @@ package tracing
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -159,10 +159,10 @@ type Span struct {
 // Buffer is a per-app fixed-size FIFO of slow/error spans. The zero value is
 // not usable; construct with NewBuffer.
 type Buffer struct {
-	mu          sync.Mutex
-	size        int
-	slowThresh  time.Duration
-	byApp       map[string]*ringPerApp
+	mu         sync.Mutex
+	size       int
+	slowThresh time.Duration
+	byApp      map[string]*ringPerApp
 }
 
 type ringPerApp struct {
