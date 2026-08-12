@@ -192,6 +192,7 @@ func reportAppsFetchError(cfg *cliConfig, errOut io.Writer, err error) error {
 type serverCaps struct {
 	FleetPreconditions bool `json:"fleet_preconditions"`
 	ContentDigest      bool `json:"content_digest"`
+	CLIConnect         bool `json:"cli_connect"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just

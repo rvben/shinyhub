@@ -35,6 +35,12 @@ import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
 import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
 import { buildProjectPatchBody } from '/static/views/project-edit-body.js';
+import {
+  CLI_CONNECT_STORAGE_KEY,
+  cliConnectDeviceLabel,
+  cliConnectRequestFromSearch,
+  validCLIConnectRequest,
+} from '/static/views/cli-connect.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
@@ -255,6 +261,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const tokenRevealDone = document.getElementById('token-reveal-done');
   const tokenRevealStatus = document.getElementById('token-reveal-status');
   const profileTokensLink = document.getElementById('profile-tokens-link');
+  const cliConnectPanel   = document.getElementById('cli-connect-panel');
+  const cliConnectUser    = document.getElementById('cli-connect-user');
+  const cliConnectDevice  = document.getElementById('cli-connect-device');
+  const cliConnectCode    = document.getElementById('cli-connect-code');
+  const cliConnectError   = document.getElementById('cli-connect-error');
+  const cliConnectSuccess = document.getElementById('cli-connect-success');
+  const cliConnectCancel  = document.getElementById('cli-connect-cancel');
+  const cliConnectApprove = document.getElementById('cli-connect-approve');
   const resetPwModal    = document.getElementById('reset-password-modal');
   const resetPwClose    = document.getElementById('reset-password-close');
   const resetPwCancel   = document.getElementById('reset-password-cancel');
@@ -1624,6 +1638,95 @@ document.addEventListener('DOMContentLoaded', () => {
     // array for resilience across versions.
     const tokens = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : []);
     renderTokenList(tokensList, tokenListModels(tokens), document);
+  }
+
+  function persistCLIConnectRequest() {
+    const request = cliConnectRequestFromSearch(window.location.search);
+    if (!request) return null;
+    try { sessionStorage.setItem(CLI_CONNECT_STORAGE_KEY, JSON.stringify(request)); } catch { /* storage may be blocked */ }
+    return request;
+  }
+
+  function pendingCLIConnectRequest() {
+    const current = cliConnectRequestFromSearch(window.location.search);
+    if (current) return current;
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(CLI_CONNECT_STORAGE_KEY) || 'null');
+      if (validCLIConnectRequest(saved)) return saved;
+    } catch { /* absent, malformed, or blocked storage */ }
+    return null;
+  }
+
+  function clearCLIConnectRequest() {
+    try { sessionStorage.removeItem(CLI_CONNECT_STORAGE_KEY); } catch { /* storage may be blocked */ }
+  }
+
+  function restoreCLIConnectRoute() {
+    const request = pendingCLIConnectRequest();
+    if (!request || cliConnectRequestFromSearch(window.location.search)) return;
+    const params = new URLSearchParams({
+      connect_hash: request.tokenHash,
+      connect_name: request.name,
+      connect_code: request.code,
+    });
+    history.replaceState(null, '', `/tokens?${params}`);
+  }
+
+  function renderCLIConnectRequest() {
+    if (!cliConnectPanel) return;
+    const request = pendingCLIConnectRequest();
+    cliConnectPanel.hidden = !request;
+    if (!request) return;
+    cliConnectUser.textContent = (state.user && (state.user.display_name || state.user.username)) || 'your account';
+    cliConnectDevice.textContent = cliConnectDeviceLabel(request.name);
+    cliConnectCode.textContent = request.code;
+    setError(cliConnectError, '');
+    cliConnectSuccess.hidden = true;
+    cliConnectApprove.hidden = false;
+    cliConnectCancel.hidden = false;
+    cliConnectApprove.disabled = false;
+    cliConnectApprove.textContent = 'Connect CLI';
+  }
+
+  async function approveCLIConnect() {
+    const request = pendingCLIConnectRequest();
+    if (!request) return;
+    cliConnectApprove.disabled = true;
+    cliConnectApprove.textContent = 'Connecting…';
+    setError(cliConnectError, '');
+    let resp;
+    try {
+      resp = await api('/api/tokens/connect', {
+        method: 'POST',
+        body: JSON.stringify({ token_hash: request.tokenHash, name: request.name }),
+      });
+    } catch {
+      setError(cliConnectError, 'Network error. The terminal is still waiting; try again.');
+      cliConnectApprove.disabled = false;
+      cliConnectApprove.textContent = 'Connect CLI';
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Could not connect this CLI';
+      try { const body = await resp.json(); if (body && body.error) message = body.error; } catch {}
+      setError(cliConnectError, message);
+      cliConnectApprove.disabled = false;
+      cliConnectApprove.textContent = 'Connect CLI';
+      return;
+    }
+    clearCLIConnectRequest();
+    cliConnectSuccess.hidden = false;
+    cliConnectApprove.hidden = true;
+    cliConnectCancel.textContent = 'Done';
+    history.replaceState(null, '', '/tokens');
+    loadTokens();
+  }
+
+  function cancelCLIConnect() {
+    clearCLIConnectRequest();
+    if (cliConnectPanel) cliConnectPanel.hidden = true;
+    router.navigate('/tokens', { replace: true });
   }
 
   function openNewTokenModal() {
@@ -3365,6 +3468,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // The data-nav link navigates to /tokens; close the profile modal behind it.
     closeProfileModal();
   });
+  if (cliConnectApprove) cliConnectApprove.addEventListener('click', approveCLIConnect);
+  if (cliConnectCancel) cliConnectCancel.addEventListener('click', cancelCLIConnect);
   if (tokenRevealCopy) {
     const copyLabel = tokenRevealCopy.querySelector('.copy-label');
     tokenRevealCopy.addEventListener('click', async () => {
@@ -3694,11 +3799,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderNewAppSnippet(slug) {
     const origin = window.location.origin;
-    const username = (state.user && state.user.username) || '<your-name>';
     const effectiveSlug = slug && slug.length > 0 ? slug : '<slug>';
     newAppSnippet.textContent =
-      `shinyhub login --host ${origin} --username ${username}\n` +
-      `shinyhub deploy --slug ${effectiveSlug} .`;
+      `uv tool install shinyhub\n` +
+      `shinyhub connect ${origin}\n` +
+      `shinyhub deploy . --slug ${effectiveSlug} --wait`;
   }
 
   const newAppDivider = document.querySelector('#new-app-modal .handoff-card-divider');
@@ -3858,10 +3963,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderDeployCliSnippet(slug) {
     const origin = window.location.origin;
-    const username = (state.user && state.user.username) || '<your-name>';
     deployCliSnippet.textContent =
-      `shinyhub login --host ${origin} --username ${username}\n` +
-      `shinyhub deploy --slug ${slug} .`;
+      `uv tool install shinyhub\n` +
+      `shinyhub connect ${origin}\n` +
+      `shinyhub deploy . --slug ${slug} --wait`;
   }
 
   function closeDeployModal() {
@@ -4908,6 +5013,7 @@ document.addEventListener('DOMContentLoaded', () => {
   router.register('/tokens', () => {
     hideAllPageViews();
     if (tokensView) tokensView.hidden = false;
+    renderCLIConnectRequest();
     loadTokens();
     return { unmount() { if (tokensView) tokensView.hidden = true; } };
   });
@@ -4932,6 +5038,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // Persist any /#deploy=<slug> hash before the auth check so the slug
     // survives the login redirect in case the user is not authenticated.
     persistDeployHash();
+    // Keep a CLI pairing request in this tab across an OAuth/OIDC redirect.
+    // Those callbacks intentionally return to `/`; the pending request restores
+    // `/tokens` only after the browser session has been verified.
+    persistCLIConnectRequest();
     loadProviders();
     setError(loginError, '');
 
@@ -4956,6 +5066,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const payload = await response.json();
     showLoggedIn(payload);
+    restoreCLIConnectRoute();
     await router.start();
     consumeNextParam();
     await handleDeployHash();

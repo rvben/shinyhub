@@ -238,6 +238,24 @@
           <button id="tokens-refresh" type="button">Refresh</button>
         </div>
       </div>
+      <section id="cli-connect-panel" class="cli-connect-panel" hidden aria-labelledby="cli-connect-heading">
+        <div class="cli-connect-icon" aria-hidden="true">›_</div>
+        <div class="cli-connect-content">
+          <p class="cli-connect-context">CLI connection request</p>
+          <h2 id="cli-connect-heading">Connect this terminal?</h2>
+          <p>A terminal is waiting to connect as <strong id="cli-connect-user"></strong>. Approving creates a personal token that expires in 90 days. The credential itself stays private in your terminal.</p>
+          <dl class="cli-connect-details">
+            <div><dt>Device</dt><dd id="cli-connect-device"></dd></div>
+            <div><dt>Verification code</dt><dd><code id="cli-connect-code"></code></dd></div>
+          </dl>
+          <p id="cli-connect-error" class="error" hidden></p>
+          <p id="cli-connect-success" class="cli-connect-success" role="status" hidden>Connected. You can return to your terminal.</p>
+          <div class="cli-connect-actions">
+            <button id="cli-connect-cancel" type="button">Not now</button>
+            <button id="cli-connect-approve" type="button" class="btn-primary">Connect CLI</button>
+          </div>
+        </div>
+      </section>
       <p class="tokens-intro">Personal tokens for the CLI and API. Use with <code>Authorization: token &lt;value&gt;</code> or <code>SHINYHUB_TOKEN</code>. A token is shown once at creation — store it somewhere safe.</p>
       <p id="tokens-error" class="error" hidden></p>
       <div id="tokens-list" class="tokens-list"></div>

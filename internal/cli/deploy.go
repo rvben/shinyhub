@@ -78,9 +78,9 @@ directories are excluded automatically; add a .shinyhubignore (or .gitignore)
 to exclude more. Validate the optional manifest first with
 'shinyhub manifest validate'.
 
-Server: the target server comes from 'shinyhub login' (saved credentials);
-deploy has no --host flag. To target a different server, log in again or set
-SHINYHUB_HOST and SHINYHUB_TOKEN.
+Server: connect once with 'shinyhub connect https://hub.example.com'. The saved
+current server is used by default; the global --host flag targets a different
+saved name or URL for one command. CI can set SHINYHUB_HOST and SHINYHUB_TOKEN.
 
 Manifest: if the bundle contains a shinyhub.toml at its root, ShinyHub applies
 it on deploy - [app] scaling/hibernate overrides, [[hook]] post-deploy commands,
@@ -177,7 +177,17 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 
 	cfg, err := loadConfig()
 	if err != nil {
-		return err
+		connected, connectErr := offerConnectForFirstDeploy(cmd)
+		if connectErr != nil {
+			return connectErr
+		}
+		if !connected {
+			return err
+		}
+		cfg, err = loadConfig()
+		if err != nil {
+			return err
+		}
 	}
 
 	// When the target host may still be coming up (e.g. a freshly recycled EC2

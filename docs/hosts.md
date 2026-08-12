@@ -1,33 +1,45 @@
 # Working with several servers
 
-The CLI keeps one credential per server. Logging in to a second ShinyHub adds it
+The CLI keeps one credential per server. Connecting to a second ShinyHub adds it
 alongside the first instead of replacing it, so a laptop can hold a local hub, a
 staging server, and production at the same time and switch between them without
 re-authenticating.
 
+## Connect to a server
+
+For a workstation, `connect` is the recommended first-time flow:
+
+```bash
+shinyhub connect https://shiny.example.com --name prod
+```
+
+It verifies the server and its runtimes, opens the browser for password or SSO
+sign-in, asks you to approve a matching verification code, then saves a private
+90-day credential. The raw credential is generated in the CLI and never passes
+through the browser. A headless machine can use `--token-file`; CI can use
+`SHINYHUB_HOST` and `SHINYHUB_TOKEN` without writing a credentials file.
+
+Run `shinyhub login` when you want a short-lived username/password session or
+need to refresh an existing session.
+
 ## Sign in to more than one server
 
 ```bash
-shinyhub login --host https://shiny.example.com --name prod --username alice
-shinyhub login --host http://localhost:8080  --name dev  --username admin
+shinyhub connect https://shiny.example.com --name prod
+shinyhub connect http://localhost:8080 --name dev
 ```
 
 `--name` is optional and gives the server a short alias. It has to be unique and
 must not look like a URL, so `shinyhub use <name>` can never be a coin flip
-between two servers. Re-running `login` without `--name` keeps the alias the
-entry already had.
+between two servers. Reconnecting without `--name` keeps the alias the entry
+already had.
 
-The server you just logged in to becomes the current one. `login` says which of
-the two things happened, because they are easy to confuse:
+The server you just connected to becomes the current one. The completion summary
+names the authenticated identity, role, deploy permission, available runtimes,
+credentials path, and previous server when the current selection changed.
 
-- `added` - a server that had no saved credential.
-- `refreshed` - a server that did, whose token was replaced.
-
-If the current server changed as a side effect, the message names the one you
-came from.
-
-Omit `--host` to re-authenticate with the current server; you only have to type
-the URL the first time.
+Omit the URL to reconnect with the current server. Likewise, omit `--host` from
+`login` to refresh a short-lived session for the current server.
 
 ## See what is saved, and switch
 

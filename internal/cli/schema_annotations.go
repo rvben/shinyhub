@@ -81,6 +81,18 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"worker": {Mutating: mut, Streaming: true},
 
 	// ── auth ─────────────────────────────────────────────────────────────────
+	"connect": {Mutating: mut, ArgTypes: map[string]string{"--token-file": "path"}, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "connected"},
+		{Name: "host", Type: "string", Desc: "Normalized server URL the credential was saved under"},
+		{Name: "name", Type: "string", Desc: "Short alias for the server; empty when unset"},
+		{Name: "user", Type: "string", Desc: "Authenticated username"},
+		{Name: "role", Type: "string", Desc: "Server role for the authenticated user"},
+		{Name: "can_create_apps", Type: "boolean", Desc: "Whether this identity may deploy a new app"},
+		{Name: "server_version", Type: "string", Desc: "Version reported by the remote server"},
+		{Name: "runtimes", Type: "array", Desc: "App runtimes the server reports as available"},
+		{Name: "credentials_path", Type: "string", Desc: "Private file the credential was written to"},
+		{Name: "switched_from", Type: "string", Desc: "Previously-current server; empty when unchanged"},
+	}},
 	"login": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "added when the server was not saved before, refreshed when its credential was replaced"},
 		{Name: "host", Type: "string", Desc: "Normalized server URL the credential was saved under"},

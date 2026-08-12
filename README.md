@@ -77,9 +77,34 @@ Then deploy an app (an `app.py` + `requirements.txt`, or an `app.R` +
 another terminal:
 
 ```bash
-shinyhub login --host http://localhost:8080
+shinyhub connect http://localhost:8080 --name local
 shinyhub deploy ./my-app --slug demo --wait   # live at /app/demo/
 ```
+
+### Connect to a remote ShinyHub
+
+On your workstation, connect once and deploy from any app directory:
+
+```bash
+uv tool install shinyhub
+shinyhub connect https://hub.example.com --name prod
+cd ./my-app
+shinyhub deploy . --wait
+```
+
+`connect` verifies that the URL is a healthy ShinyHub, reports its available
+app runtimes, and opens a browser authorization page. Sign in with whatever the
+server supports—including SSO—and confirm the matching verification code. The
+CLI creates its credential locally, so the secret never appears in browser
+history or server logs. The resulting personal token expires after 90 days and
+is saved in the owner-readable client credentials file.
+
+If you run `shinyhub deploy .` before connecting, an interactive terminal offers
+to start this flow in place. Automation never prompts: use
+`SHINYHUB_HOST`/`SHINYHUB_TOKEN` or `shinyhub connect <url> --token-file <path>`.
+Use `shinyhub login` when you specifically want a short-lived password session
+or need to refresh one; `connect` is the recommended first-time workstation
+flow.
 
 > Tip: run the bundle locally first with `shinyhub run ./my-app`. It keeps your
 > source tree untouched, serves the production-shaped `/app/<slug>/` route, and

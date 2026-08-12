@@ -15,8 +15,9 @@ const serverPollInterval = 2 * time.Second
 
 // serverInfo is the parsed GET /api/server-info response.
 type serverInfo struct {
-	Version      string     `json:"version"`
-	Capabilities serverCaps `json:"capabilities"`
+	Version      string          `json:"version"`
+	Capabilities serverCaps      `json:"capabilities"`
+	Runtimes     map[string]bool `json:"runtimes"`
 }
 
 // looksLikeShinyhub reports whether the parsed server-info carries a

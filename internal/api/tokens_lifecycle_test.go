@@ -57,6 +57,63 @@ func TestCreateToken_WithExpiry(t *testing.T) {
 	}
 }
 
+// TestConnectCLI_WithBrowserApprovedHash proves the browser pairing contract:
+// only the hash crosses the browser/API boundary, while the raw token created
+// by the CLI becomes usable after the signed-in user approves it. The response
+// must never echo either value back into browser-visible JSON.
+func TestConnectCLI_WithBrowserApprovedHash(t *testing.T) {
+	srv, store := newTestServer(t)
+	uid, session := mkUser(t, store, "dev", "developer")
+	raw := "shk_" + strings.Repeat("c", 64)
+	hash := auth.HashAPIKey(raw)
+	pending := do(t, srv, "GET", "/api/auth/cli-connect/status?token_hash="+hash, "", nil)
+	if pending.Code != http.StatusOK || !strings.Contains(pending.Body.String(), `"status":"pending"`) {
+		t.Fatalf("pre-approval status = %d %s", pending.Code, pending.Body.String())
+	}
+
+	rec := do(t, srv, "POST", "/api/tokens/connect", session,
+		[]byte(fmt.Sprintf(`{"name":"cli-workstation-a1b2c3","token_hash":%q}`, hash)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("connect = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), raw) || strings.Contains(rec.Body.String(), hash) {
+		t.Fatalf("connect response leaked credential material: %s", rec.Body.String())
+	}
+	approved := do(t, srv, "GET", "/api/auth/cli-connect/status?token_hash="+hash, "", nil)
+	if approved.Code != http.StatusOK || !strings.Contains(approved.Body.String(), `"status":"approved"`) {
+		t.Fatalf("post-approval status = %d %s", approved.Code, approved.Body.String())
+	}
+
+	connected := doToken(t, srv, "GET", "/api/auth/me", raw, nil)
+	if connected.Code != http.StatusOK {
+		t.Fatalf("browser-approved CLI token did not authenticate: %d %s", connected.Code, connected.Body.String())
+	}
+
+	keys, err := store.ListAPIKeys(uid)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("saved keys = %+v, err=%v", keys, err)
+	}
+	if keys[0].ExpiresAt == nil {
+		t.Fatal("browser-approved CLI token must expire")
+	}
+	want := time.Now().Add(90 * 24 * time.Hour)
+	if d := keys[0].ExpiresAt.Sub(want); d < -time.Hour || d > time.Hour {
+		t.Errorf("expiry = %v, want about %v", keys[0].ExpiresAt, want)
+	}
+}
+
+func TestConnectCLI_RejectsMalformedHash(t *testing.T) {
+	srv, store := newTestServer(t)
+	_, session := mkUser(t, store, "dev", "developer")
+	for _, hash := range []string{"short", strings.Repeat("z", 64)} {
+		rec := do(t, srv, "POST", "/api/tokens/connect", session,
+			[]byte(fmt.Sprintf(`{"name":"laptop","token_hash":%q}`, hash)))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("hash %q = %d, want 400", hash, rec.Code)
+		}
+	}
+}
+
 // TestExpiredToken_Rejected pins enforcement: an expired key is a 401 on any
 // authenticated endpoint, indistinguishable from an unknown key.
 func TestExpiredToken_Rejected(t *testing.T) {

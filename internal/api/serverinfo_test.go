@@ -18,6 +18,7 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 		Capabilities struct {
 			FleetPreconditions bool `json:"fleet_preconditions"`
 			ContentDigest      bool `json:"content_digest"`
+			CLIConnect         bool `json:"cli_connect"`
 		} `json:"capabilities"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
@@ -28,6 +29,9 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 	if !got.Capabilities.ContentDigest {
 		t.Errorf("content_digest not advertised")
+	}
+	if !got.Capabilities.CLIConnect {
+		t.Errorf("cli_connect not advertised")
 	}
 }
 

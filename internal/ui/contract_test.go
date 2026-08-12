@@ -3373,6 +3373,37 @@ func TestFirstAppOnboardingAdvancesDirectlyToDeploy(t *testing.T) {
 	}
 }
 
+// Remote CLI onboarding is initiated in the terminal and approved in the
+// signed-in dashboard. The browser receives only a SHA-256 hash, never the raw
+// credential, and the request survives SSO redirects in per-tab storage.
+func TestRemoteCLIConnectionOnboardingContract(t *testing.T) {
+	html := readStatic(t, "index.html")
+	for _, want := range []string{
+		`id="cli-connect-panel"`, `id="cli-connect-code"`,
+		`id="cli-connect-approve"`, `id="cli-connect-success"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("CLI connection onboarding markup missing %q", want)
+		}
+	}
+	js := readStatic(t, "app.js")
+	for _, want := range []string{
+		"sessionStorage.setItem(CLI_CONNECT_STORAGE_KEY",
+		"/api/tokens/connect",
+		"token_hash: request.tokenHash",
+		"restoreCLIConnectRoute()",
+		"shinyhub connect ${origin}",
+		"shinyhub deploy . --slug ${slug} --wait",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("remote CLI onboarding wiring missing %q", want)
+		}
+	}
+	if strings.Contains(js, "connect_hash: raw") || strings.Contains(js, "connect_token") {
+		t.Fatal("browser pairing must never carry the raw CLI credential")
+	}
+}
+
 // Scoped per input on purpose: the document already contains this pattern on
 // #new-app-slug, so a document-wide search passes without either project input
 // carrying it.

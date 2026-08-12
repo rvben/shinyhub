@@ -4329,6 +4329,71 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 }
 
 /* ── API tokens page ──────────────────────────────────────────────────────── */
+.cli-connect-panel {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  max-width: 48rem;
+  margin: 0 0 1.5rem;
+  padding: 1.15rem 1.2rem;
+  background: var(--surface);
+  border: 1px solid var(--cyan-bright);
+  border-radius: var(--radius-lg);
+}
+.cli-connect-panel[hidden] { display: none; }
+.cli-connect-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 10px;
+  background: var(--accent-dim);
+  color: var(--cyan);
+  font: 700 0.85rem/1 var(--mono);
+}
+.cli-connect-content { min-width: 0; flex: 1; }
+.cli-connect-context {
+  margin: 0 0 0.2rem;
+  color: var(--cyan);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.cli-connect-content h2 {
+  margin: 0 0 0.45rem;
+  color: var(--text);
+  font-size: 1.12rem;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+.cli-connect-content > p:not(.cli-connect-context):not(.error):not(.cli-connect-success) {
+  max-width: 65ch;
+  color: var(--text-soft);
+  line-height: 1.55;
+}
+.cli-connect-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem 1.5rem;
+  margin: 0.9rem 0;
+}
+.cli-connect-details div { display: flex; align-items: baseline; gap: 0.45rem; }
+.cli-connect-details dt { color: var(--text-muted); font-size: 0.78rem; }
+.cli-connect-details dd { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.cli-connect-details code {
+  color: var(--cyan);
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+}
+.cli-connect-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 1rem; }
+.cli-connect-actions button { min-height: 2.35rem; padding: 0.45rem 0.85rem; }
+.cli-connect-success { color: var(--green); font-weight: 600; }
+@media (max-width: 540px) {
+  .cli-connect-panel { flex-direction: column; }
+  .cli-connect-actions { justify-content: stretch; }
+  .cli-connect-actions button { flex: 1; }
+}
+
 .tokens-intro {
   color: var(--text-soft);
   max-width: 62ch;

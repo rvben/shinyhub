@@ -469,6 +469,24 @@ func (s *Store) AuthenticateAPIKey(hash string) (*User, int64, *time.Time, error
 	return &u, keyID, lu, nil
 }
 
+// APIKeyHashExists reports whether a non-expired API key hash exists. It is
+// used by browser-approved CLI pairing so a waiting CLI can distinguish
+// pending from approved without repeatedly presenting an invalid credential
+// to the authenticated middleware (and consuming the failed-auth budget).
+// The caller must supply a full 256-bit hash; this method reveals no owner or
+// token metadata.
+func (s *Store) APIKeyHashExists(hash string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > ?)`,
+		hash, time.Now().UTC(),
+	).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("check api key hash: %w", err)
+	}
+	return n > 0, nil
+}
+
 // TouchAPIKey stamps the key's last_used_at. Callers throttle (the auth path
 // touches at most about once a minute per key) so this write stays off the
 // hot path.

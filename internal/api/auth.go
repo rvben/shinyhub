@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -562,6 +563,110 @@ type createTokenResponse struct {
 	CreatedAt time.Time `json:"created_at"`
 	// ExpiresAt is null for a never-expiring token.
 	ExpiresAt *time.Time `json:"expires_at"`
+}
+
+// connectCLITokenRequest completes a browser-approved CLI connection. The CLI
+// creates the raw credential locally and sends only its SHA-256 hash through
+// the browser. This means the secret never appears in a URL, browser history,
+// server response, or application log: after the signed-in user approves this
+// request, the waiting CLI can authenticate with the raw value it alone knows.
+type connectCLITokenRequest struct {
+	TokenHash string `json:"token_hash"`
+	Name      string `json:"name"`
+}
+
+type connectCLITokenResponse struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+const cliConnectionExpiryDays = 90
+
+// handleCLIConnectStatus lets a waiting CLI observe only whether its random
+// credential hash has been approved. It is public because the CLI has no valid
+// credential yet; a dedicated per-IP limiter bounds database work, and the
+// 256-bit hash makes probing someone else's request infeasible. No identity or
+// token metadata is returned.
+func (s *Server) handleCLIConnectStatus(w http.ResponseWriter, r *http.Request) {
+	hash := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("token_hash")))
+	if len(hash) != sha256.Size*2 {
+		writeError(w, http.StatusBadRequest, "token_hash must be a SHA-256 hex digest")
+		return
+	}
+	if _, err := hex.DecodeString(hash); err != nil {
+		writeError(w, http.StatusBadRequest, "token_hash must be a SHA-256 hex digest")
+		return
+	}
+	approved, err := s.store.APIKeyHashExists(hash)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	status := "pending"
+	if approved {
+		status = "approved"
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]string{"status": status})
+}
+
+func (s *Server) handleConnectCLIToken(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if db.IsSystemUser(u.Username) {
+		writeError(w, http.StatusForbidden, "system users cannot connect a CLI")
+		return
+	}
+
+	var req connectCLITokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" || len(req.Name) > 64 {
+		writeError(w, http.StatusBadRequest, "name must be between 1 and 64 characters")
+		return
+	}
+	if len(req.TokenHash) != sha256.Size*2 {
+		writeError(w, http.StatusBadRequest, "token_hash must be a SHA-256 hex digest")
+		return
+	}
+	if _, err := hex.DecodeString(req.TokenHash); err != nil {
+		writeError(w, http.StatusBadRequest, "token_hash must be a SHA-256 hex digest")
+		return
+	}
+
+	exists, err := s.store.APIKeyNameExists(u.ID, req.Name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if exists {
+		writeError(w, http.StatusConflict, "token name already in use")
+		return
+	}
+
+	expiresAt := time.Now().UTC().Add(cliConnectionExpiryDays * 24 * time.Hour)
+	keyID, createdAt, err := s.store.CreateAPIKey(db.CreateAPIKeyParams{
+		UserID: u.ID, KeyHash: strings.ToLower(req.TokenHash), Name: req.Name, ExpiresAt: &expiresAt,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	s.store.LogAuditEvent(db.AuditEventParams{
+		UserID: &u.ID, Action: "connect_cli", ResourceType: "token", ResourceID: req.Name,
+		Detail: fmt.Sprintf("expires_in_days=%d", cliConnectionExpiryDays), IPAddress: s.ClientIP(r),
+	})
+	writeJSON(w, http.StatusCreated, connectCLITokenResponse{
+		ID: keyID, Name: req.Name, CreatedAt: createdAt, ExpiresAt: expiresAt,
+	})
 }
 
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
