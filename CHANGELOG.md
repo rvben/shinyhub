@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.6](https://github.com/rvben/shinyhub/compare/v0.11.5...v0.11.6) - 2026-08-13
+
+### Added
+
+- **cli**: make connect idempotent for a valid saved credential ([953c0c0](https://github.com/rvben/shinyhub/commit/953c0c0a6b3febc87ffee155e4489cdf3a0d8537))
+
 ## [0.11.5](https://github.com/rvben/shinyhub/compare/v0.11.4...v0.11.5) - 2026-08-13
 
 ### Added
