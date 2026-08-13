@@ -31,6 +31,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# file_mode prints a file's permission bits as octal. The flag that selects the
+# mode differs by platform: -c is GNU/uutils, -f is BSD/macOS. GNU is tried
+# first because passing its format to BSD stat fails outright, whereas passing
+# the BSD format to GNU stat reads '%Lp' as a second operand and prints a whole
+# filesystem block on stdout, which a fallback would then concatenate with the
+# real answer. Returns non-zero unless the result is octal permission bits, so
+# an unreadable or missing file never masquerades as a wrong mode.
+file_mode() {
+  local path="$1" mode
+  mode="$(stat -c '%a' "${path}" 2>/dev/null)" || mode="$(stat -f '%Lp' "${path}" 2>/dev/null)" || return 1
+  case "${mode}" in
+    [0-7][0-7][0-7] | [0-7][0-7][0-7][0-7]) printf '%s\n' "${mode}" ;;
+    *) return 1 ;;
+  esac
+}
+
 fail() {
   echo "BROWSER ONBOARDING E2E FAIL: $*" >&2
   for log in build.log install.log server.log chrome.log connect-first.log whoami.log doctor.log deploy.log connect-refresh.log tokens-after-refresh.log revoked.log connect-recovery.log; do
@@ -217,8 +233,9 @@ TOKEN_NAME="$(node --experimental-websocket "${ROOT}/scripts/browser-onboarding-
   || fail "browser sign-in and approval"
 finish_connect "${WORK}/connect-first.log"
 [ -n "${TOKEN_NAME}" ] || fail "browser approval did not identify its token"
-MODE="$(stat -f '%Lp' "${WORK}/client.json" 2>/dev/null || stat -c '%a' "${WORK}/client.json")"
-[ "${MODE}" = "600" ] || fail "client credentials are not mode 0600"
+MODE="$(file_mode "${WORK}/client.json")" \
+  || fail "could not read the mode of ${WORK}/client.json; connect may not have written it"
+[ "${MODE}" = "600" ] || fail "client credentials are mode ${MODE}, want 0600"
 
 echo "==> proving the paired wheel can diagnose and deploy an app"
 "${BIN}" whoami --config "${WORK}/client.json" --output table >"${WORK}/whoami.log" 2>&1 \
