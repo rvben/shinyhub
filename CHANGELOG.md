@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.5](https://github.com/rvben/shinyhub/compare/v0.11.4...v0.11.5) - 2026-08-13
+
+### Added
+
+- **cli**: open apps after deployment ([338699c](https://github.com/rvben/shinyhub/commit/338699cca212bb4fea435997c34bbc3e98bd0c90))
+- **cli**: show live deployment progress ([77402c9](https://github.com/rvben/shinyhub/commit/77402c995d2bb97eab53781078afbd023b66e798))
+- **deploy**: stream lifecycle progress events ([ee4e885](https://github.com/rvben/shinyhub/commit/ee4e88505a6438fd5b28a2fef61fd7629e7bb16f))
+- **cli**: add single-app deployment planning ([036bd05](https://github.com/rvben/shinyhub/commit/036bd0551c8d9bdbfa9a3af9f6fe1497f619a569))
+- **cli**: add proactive credential rotation ([35c3400](https://github.com/rvben/shinyhub/commit/35c34000ffc5f25b7dc69903d5c449e463b4f550))
+- **cli**: add completions and compatibility checks ([6bbd583](https://github.com/rvben/shinyhub/commit/6bbd5839c80ae1150b8687243162132337da0eb4))
+- **onboarding**: harden browser pairing journey ([04c6514](https://github.com/rvben/shinyhub/commit/04c6514c324007c77358424de102140d009e9ce7))
+- **cli**: add end-to-end doctor preflight ([50dd6e7](https://github.com/rvben/shinyhub/commit/50dd6e73ddd05b16309788f5d4b3ae3c261454ad))
+- **onboarding**: add secure remote CLI connection ([4113afd](https://github.com/rvben/shinyhub/commit/4113afdb72b487c907533acdfa272264c3c6beea))
+- **onboarding**: streamline first app deployment ([9098be1](https://github.com/rvben/shinyhub/commit/9098be1da69cf28a460bd5f653c715396854ed07))
+- **setup**: add secure first-run initialization ([2546f0b](https://github.com/rvben/shinyhub/commit/2546f0b548c8842fe480e65cf29c344e73ac976e))
+- **local-dev**: overhaul local app workflow ([65527f0](https://github.com/rvben/shinyhub/commit/65527f06b74acb29a6ea8c8631cc7e86e149d322))
+
+### Fixed
+
+- **localrun**: remove data race between shutdown and child reaping ([85e6ef4](https://github.com/rvben/shinyhub/commit/85e6ef415a2da0f8305b27cb5d70003c5a2bf0ef))
+- **localrun**: treat cancellation as clean shutdown ([4157e74](https://github.com/rvben/shinyhub/commit/4157e742fc9d58a93f818486ba7e7acf4e9af9aa))
+- **fleet**: reconcile config and grouped app health ([232da8a](https://github.com/rvben/shinyhub/commit/232da8af39c569192e850804e6cc9a7ebc048a1e))
+
 ## [0.11.4](https://github.com/rvben/shinyhub/compare/v0.11.3...v0.11.4) - 2026-08-12
 
 ### Fixed
