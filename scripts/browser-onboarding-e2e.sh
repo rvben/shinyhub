@@ -49,7 +49,7 @@ file_mode() {
 
 fail() {
   echo "BROWSER ONBOARDING E2E FAIL: $*" >&2
-  for log in build.log install.log server.log chrome.log connect-first.log whoami.log doctor.log deploy.log connect-refresh.log tokens-after-refresh.log revoked.log connect-recovery.log; do
+  for log in build.log install.log server.log chrome.log connect-first.log connect-current.json connect-current.log whoami.log doctor.log deploy.log connect-refresh.log tokens-after-refresh.log revoked.log connect-recovery.log; do
     if [ -s "${WORK}/${log}" ]; then
       echo "----- ${log} (last 100 lines) -----" >&2
       tail -100 "${WORK}/${log}" >&2
@@ -236,6 +236,30 @@ finish_connect "${WORK}/connect-first.log"
 MODE="$(file_mode "${WORK}/client.json")" \
   || fail "could not read the mode of ${WORK}/client.json; connect may not have written it"
 [ "${MODE}" = "600" ] || fail "client credentials are mode ${MODE}, want 0600"
+
+echo "==> proving ordinary connect is a credential-preserving no-op"
+cp "${WORK}/client.json" "${WORK}/client-before-current.json"
+BEFORE_CREDENTIAL_ID="$(
+  "${BIN}" whoami --config "${WORK}/client.json" --output json |
+    node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).credential.id'
+)" || fail "read credential ID before idempotent connect"
+"${BIN}" connect "${HOST}" --config "${WORK}/client.json" --output json \
+  >"${WORK}/connect-current.json" 2>"${WORK}/connect-current.log" \
+  || fail "idempotent second connect"
+grep -Fq '"status":"current"' "${WORK}/connect-current.json" \
+  || fail "second connect did not report status current"
+if grep -Eq '/tokens\?.*connect_hash=|Authorize this CLI|Waiting for approval' \
+  "${WORK}/connect-current.log"; then
+  fail "second connect unexpectedly entered browser authorization"
+fi
+cmp -s "${WORK}/client-before-current.json" "${WORK}/client.json" \
+  || fail "second connect rewrote the credentials file"
+CURRENT_CREDENTIAL_ID="$(
+  node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).credential.id' \
+    <"${WORK}/connect-current.json"
+)" || fail "read credential ID after idempotent connect"
+[ "${CURRENT_CREDENTIAL_ID}" = "${BEFORE_CREDENTIAL_ID}" ] \
+  || fail "second connect changed credential ID (${BEFORE_CREDENTIAL_ID} -> ${CURRENT_CREDENTIAL_ID})"
 
 echo "==> proving the paired wheel can diagnose and deploy an app"
 "${BIN}" whoami --config "${WORK}/client.json" --output table >"${WORK}/whoami.log" 2>&1 \
