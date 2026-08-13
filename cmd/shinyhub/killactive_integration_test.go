@@ -21,7 +21,11 @@ import (
 	"github.com/rvben/shinyhub/internal/fargate"
 )
 
-const authSecret = "killactive-e2e-secret-killactive-e2e-secret"
+const (
+	authSecret    = "killactive-e2e-secret-killactive-e2e-secret"
+	adminUsername = "killactive-admin"
+	adminPassword = "killactive-admin-password"
+)
 
 var testBin string // path to the built shinyhub binary; set by TestMain.
 
@@ -131,9 +135,14 @@ func startInstance(t *testing.T, id string, port int, dsn, tmp string) *instance
 	cmd.Stderr = &stderr
 	// Auth secret is shared so both instances derive the SAME sticky-cookie key
 	// (cross-instance affinity). Dummy AWS env keeps the owner's ECS reconcile a
-	// fast, hermetic no-op (connection-refused in ms, single attempt).
+	// fast, hermetic no-op (connection-refused in ms, single attempt). The admin
+	// credentials satisfy the guard that refuses to start a local-login server with
+	// no password-backed administrator; both instances share one database, so
+	// whichever boots second finds the row already there and leaves it alone.
 	cmd.Env = append(os.Environ(),
 		"SHINYHUB_AUTH_SECRET="+authSecret,
+		"SHINYHUB_ADMIN_USER="+adminUsername,
+		"SHINYHUB_ADMIN_PASSWORD="+adminPassword,
 		"AWS_ACCESS_KEY_ID=dummy",
 		"AWS_SECRET_ACCESS_KEY=dummy",
 		"AWS_REGION=us-east-1",

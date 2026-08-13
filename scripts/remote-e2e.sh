@@ -88,6 +88,12 @@ ADVERTISE_IP="$(ipconfig getifaddr en0 2>/dev/null || true)"
 [ -n "${ADVERTISE_IP}" ] || ADVERTISE_IP="127.0.0.1"
 
 DEPLOY_TOKEN="e2e-deploy-token-0123456789abcdef"
+# A local-login server refuses to start without a password-backed administrator,
+# because a deploy token alone leaves the installation impossible to administer.
+# This harness drives everything through the deploy token, so the admin exists
+# only to model the real operator setup and satisfy that guard; nothing logs in
+# as it.
+ADMIN_PASSWORD="remote-e2e-admin-password"
 export SHINYHUB_HOST="http://127.0.0.1:${CP_PORT}"
 export SHINYHUB_TOKEN="${DEPLOY_TOKEN}"
 
@@ -125,7 +131,10 @@ worker:
 YAML
 
 start_cp() {
-  SHINYHUB_DEPLOY_TOKEN="${DEPLOY_TOKEN}" "${BIN}" serve --config "${WORKDIR}/shinyhub.yaml" \
+  SHINYHUB_DEPLOY_TOKEN="${DEPLOY_TOKEN}" \
+  SHINYHUB_ADMIN_USER=remote-e2e-admin \
+  SHINYHUB_ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+    "${BIN}" serve --config "${WORKDIR}/shinyhub.yaml" \
     >>"${WORKDIR}/cp.log" 2>&1 &
   CP_PID=$!
   "${ROOT}/scripts/wait-http.sh" "http://127.0.0.1:${CP_PORT}/healthz" 30 || fail "control plane did not start"
