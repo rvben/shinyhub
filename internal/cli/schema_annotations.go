@@ -82,7 +82,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 
 	// ── auth ─────────────────────────────────────────────────────────────────
 	"connect": {Mutating: mut, ArgTypes: map[string]string{"--token-file": "path"}, OutputFields: []fieldSpec{
-		{Name: "status", Type: "string", Desc: "connected or refreshed"},
+		{Name: "status", Type: "string", Desc: "connected, current, or refreshed"},
 		{Name: "host", Type: "string", Desc: "Normalized server URL the credential was saved under"},
 		{Name: "name", Type: "string", Desc: "Short alias for the server; empty when unset"},
 		{Name: "user", Type: "string", Desc: "Authenticated username"},
@@ -93,9 +93,9 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "protocol_version", Type: "integer", Desc: "API protocol version reported by the remote server; zero for a legacy server"},
 		{Name: "compatibility", Type: "string", Desc: "compatible or warning; incompatible servers are rejected before credentials are used"},
 		{Name: "runtimes", Type: "array", Desc: "App runtimes the server reports as available"},
-		{Name: "credentials_path", Type: "string", Desc: "Private file the credential was written to"},
+		{Name: "credentials_path", Type: "string", Desc: "Private file holding saved credentials"},
 		{Name: "switched_from", Type: "string", Desc: "Previously-current server; empty when unchanged"},
-		{Name: "credential", Type: "object", Desc: "Safe lifecycle metadata for the newly saved credential"},
+		{Name: "credential", Type: "object", Desc: "Safe lifecycle metadata for the authenticated credential"},
 		{Name: "previous_credential_revoked", Type: "boolean", Desc: "With --refresh, whether the previous server-side API key was revoked automatically"},
 		{Name: "revoke_warning", Type: "string", Desc: "With --refresh, manual revocation guidance when automatic revocation failed"},
 	}},

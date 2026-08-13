@@ -98,12 +98,15 @@ shinyhub plan .
 shinyhub deploy . --open
 ```
 
-`connect` verifies that the URL is a healthy ShinyHub, reports its available
-app runtimes, and opens a browser authorization page. Sign in with whatever the
-server supports—including SSO—and confirm the matching verification code. The
-CLI creates its credential locally, so the secret never appears in browser
-history or server logs. The resulting personal token expires after 90 days and
-is saved in the owner-readable client credentials file.
+`connect` verifies that the URL is a healthy ShinyHub and reports its available
+app runtimes. If a saved credential still authenticates, it returns `current`
+without opening a browser or rotating the key, so it is safe to run at the top
+of an entrypoint or Make target. Otherwise it opens a browser authorization
+page. Sign in with whatever the server supports—including SSO—and confirm the
+matching verification code. The CLI creates its credential locally, so the
+secret never appears in browser history or server logs. The resulting personal
+token expires after 90 days and is saved in the owner-readable client
+credentials file.
 
 `shinyhub whoami` shows the active credential's type, name, creation time, last
 use, and expiry. `doctor` warns 14 days before expiry without blocking a deploy.
@@ -117,8 +120,9 @@ newer protocol stops before an authenticated request. `shinyhub doctor --remote`
 shows the same check at any time. See [CLI completion and compatibility](docs/cli.md).
 
 If you run `shinyhub deploy .` before connecting, an interactive terminal offers
-to start this flow in place. Automation never prompts: use
-`SHINYHUB_HOST`/`SHINYHUB_TOKEN` or `shinyhub connect <url> --token-file <path>`.
+to start this flow in place. Automation never prompts: use a valid saved
+credential, `SHINYHUB_HOST`/`SHINYHUB_TOKEN`, or
+`shinyhub connect <url> --token-file <path>`.
 On an SSH session or a terminal without a local browser, add `--no-browser`;
 ShinyHub prints a safe pairing URL that you can open on any signed-in device.
 Use `shinyhub login` when you specifically want a short-lived password session

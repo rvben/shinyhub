@@ -13,17 +13,21 @@ For a workstation, `connect` is the recommended first-time flow:
 shinyhub connect https://shiny.example.com --name prod
 ```
 
-It verifies the server and its runtimes, opens the browser for password or SSO
-sign-in, asks you to approve a matching verification code, then saves a private
-90-day credential. The raw credential is generated in the CLI and never passes
-through the browser. On SSH or a workstation without a local browser, pass
-`--no-browser` and open the printed pairing URL on any signed-in device. A
-headless service can use `--token-file`; CI can use `SHINYHUB_HOST` and
-`SHINYHUB_TOKEN` without writing a credentials file.
+It verifies the server and its runtimes. When that URL already has a saved
+credential that still authenticates, `connect` reports `current` and performs
+no browser authorization or key rotation. Otherwise it opens the browser for
+password or SSO sign-in, asks you to approve a matching verification code, then
+saves a private 90-day credential. The raw credential is generated in the CLI
+and never passes through the browser. On SSH or a workstation without a local
+browser, pass `--no-browser` and open the printed pairing URL on any signed-in
+device. A headless service can use `--token-file`; CI can use `SHINYHUB_HOST`
+and `SHINYHUB_TOKEN` without writing a credentials file.
 
 If a saved CLI credential expires or is revoked, the next authenticated command
 explains what happened and points back to `shinyhub connect`. Reconnecting
 replaces only that server's credential and preserves every other saved host.
+Failures other than a credential rejection—such as rate limiting, an unavailable
+server, or a network error—are reported directly and never trigger rotation.
 
 Refresh a still-working credential before it expires:
 
@@ -53,7 +57,8 @@ shinyhub connect http://localhost:8080 --name dev
 `--name` is optional and gives the server a short alias. It has to be unique and
 must not look like a URL, so `shinyhub use <name>` can never be a coin flip
 between two servers. Reconnecting without `--name` keeps the alias the entry
-already had.
+already had. Reusing a valid credential still applies `--name` and makes that
+server current, but leaves the token and its `saved_at` value unchanged.
 
 The server you just connected to becomes the current one. The completion summary
 names the authenticated identity, role, deploy permission, available runtimes,

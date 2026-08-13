@@ -112,6 +112,14 @@ The connection's JSON result includes `cli_version`, `server_version`,
 `protocol_version`, and `compatibility`, so automation can record the decision
 without parsing prose.
 
+Ordinary `shinyhub connect <url>` is idempotent. It validates an existing saved
+credential first and returns `status: current` without browser authorization or
+key rotation when that credential is usable. Explicit command-line credentials
+take precedence over `SHINYHUB_TOKEN`, which takes precedence over the saved
+credential. Only a rejected saved credential falls through to authorization;
+network, rate-limit, and server failures remain errors. `--refresh` is the
+explicit exception and always rotates through browser approval.
+
 ## Keep workstation credentials healthy
 
 The server reports safe metadata about the credential used for each identity

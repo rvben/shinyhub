@@ -47,14 +47,18 @@ func newConnectCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "connect [url]",
 		Short: "Connect this CLI to a ShinyHub server",
-		Long: `Connect verifies a remote ShinyHub, authorizes this CLI, and saves it as
-the current server. In a terminal it opens the server in your browser, where
-you can use any configured sign-in method—including SSO—and approve a private
-90-day CLI credential. The credential itself never passes through the browser.
+		Long: `Connect verifies a remote ShinyHub and makes it the current server. A
+saved credential that still authenticates is reused without opening a browser
+or rotating the key, so this command is safe to run unconditionally. When no
+valid credential exists, a terminal opens the server in your browser, where you
+can use any configured sign-in method—including SSO—and approve a private 90-day
+CLI credential. The credential itself never passes through the browser.
 
 For a headless machine or CI, pass --token-file or set SHINYHUB_HOST and
 SHINYHUB_TOKEN. Username/password is available with --username; a missing
-password is prompted for without echoing it.
+password is prompted for without echoing it. Without a credential or terminal,
+connect fails immediately; --no-browser explicitly enables copy/paste approval
+from another device.
 
 Use --refresh to rotate the current saved credential through browser approval.
 The existing credential remains untouched unless the replacement authenticates
@@ -111,6 +115,37 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 		return authErr("no saved credential to refresh for "+host, "connect first with `shinyhub connect "+host+"`")
 	}
 
+	// Resolve local credential sources before contacting the server. Explicit
+	// command-line inputs outrank inherited environment variables, and both
+	// outrank a saved credential. A saved credential is handled separately below
+	// because a successful validation is the idempotent `current` outcome.
+	token := strings.TrimSpace(f.token)
+	if f.tokenFile != "" {
+		b, readErr := os.ReadFile(f.tokenFile)
+		if readErr != nil {
+			return fmt.Errorf("read token file %s: %w", f.tokenFile, readErr)
+		}
+		token = strings.TrimSpace(string(b))
+		if token == "" {
+			return validationErr(fmt.Sprintf("token file %s is empty", f.tokenFile), "write the API token to the file without surrounding text")
+		}
+	}
+	if token == "" && f.username == "" && !f.refresh {
+		token = strings.TrimSpace(os.Getenv("SHINYHUB_TOKEN"))
+	}
+	useSavedCredential := token == "" && f.username == "" && !f.refresh && hadPreviousCredential && previousCredential.Token != ""
+	if f.username != "" && f.password == "" && !isStdinTTY() {
+		return loginMissingCredsError()
+	}
+
+	// With no possible non-interactive source, a normal connect cannot make
+	// progress without either a terminal or the explicit copy/paste flow. Fail
+	// before even probing the server so CI never waits on a network timeout for a
+	// credential problem already knowable from local state.
+	if token == "" && f.username == "" && !f.refresh && !useSavedCredential && !isStdinTTY() && !f.noBrowser {
+		return connectMissingCredentialError()
+	}
+
 	fmt.Fprintf(cmd.ErrOrStderr(), "Checking %s…\n", host)
 	info, err := probeServer(&cliConfig{Host: host})
 	if err != nil {
@@ -128,19 +163,18 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 		}
 	}
 
-	token := strings.TrimSpace(f.token)
-	if f.tokenFile != "" {
-		b, readErr := os.ReadFile(f.tokenFile)
-		if readErr != nil {
-			return fmt.Errorf("read token file %s: %w", f.tokenFile, readErr)
+	if useSavedCredential {
+		identity, status, identityErr := tryRemoteIdentity(host, previousCredential.Token)
+		if identityErr == nil {
+			return finishCurrentConnect(cmd, st, host, f.name, identity, info)
 		}
-		token = strings.TrimSpace(string(b))
-		if token == "" {
-			return validationErr(fmt.Sprintf("token file %s is empty", f.tokenFile), "write the API token to the file without surrounding text")
+		// A 401 is the one result that means this credential is no longer
+		// usable and an interactive replacement is appropriate. Rate limits,
+		// authorization policy, server failures, and transport errors must stay
+		// visible instead of unexpectedly minting another credential.
+		if status != http.StatusUnauthorized {
+			return fmt.Errorf("verify saved connection: %w", identityErr)
 		}
-	}
-	if token == "" && !f.refresh {
-		token = strings.TrimSpace(os.Getenv("SHINYHUB_TOKEN"))
 	}
 
 	if token == "" && f.username != "" && !f.refresh {
@@ -165,8 +199,7 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 		// Keep it usable over SSH and when a terminal multiplexer or test harness
 		// captures output: neither case necessarily exposes stdin as a TTY.
 		if !isStdinTTY() && !f.noBrowser {
-			return authErr("browser authorization requires a terminal",
-				"rerun with --no-browser to copy the authorization URL, pass --token-file <path>, or set SHINYHUB_HOST and SHINYHUB_TOKEN")
+			return connectMissingCredentialError()
 		}
 		if !info.Capabilities.CLIConnect {
 			return authErr("this ShinyHub does not support browser CLI authorization",
@@ -194,6 +227,11 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 			"sign into the browser as "+previousIdentity.Username+" and rerun `shinyhub connect --refresh`")
 	}
 	return finishConnect(cmd, st, host, f.name, token, identity, info, f.refresh, previousCredential.Token, previousIdentity)
+}
+
+func connectMissingCredentialError() error {
+	return authErr("browser authorization requires a terminal",
+		"rerun with --no-browser to copy the authorization URL, pass --token-file <path>, set SHINYHUB_HOST and SHINYHUB_TOKEN, or pass --username <name> --password <password>")
 }
 
 // offerConnectForFirstDeploy turns the most common discovery path—running
@@ -485,6 +523,54 @@ func finishConnect(cmd *cobra.Command, st *credentialStore, host, name, token st
 		result["revoke_warning"] = revokeWarning
 	}
 	return renderAction(cmd, status, result, prose)
+}
+
+// finishCurrentConnect reports a valid saved credential without replacing it.
+// `connect` still fulfils its local selection contract: targeting another saved
+// host makes it current, and --name may update its alias. When neither changes,
+// the credentials file is left byte-for-byte untouched (including saved_at).
+func finishCurrentConnect(cmd *cobra.Command, st *credentialStore, host, name string, identity remoteIdentity, info serverInfo) error {
+	previous := st.CurrentHost
+	saved := st.Hosts[host]
+	changed := false
+	if name != "" && saved.Name != name {
+		saved.Name = name
+		changed = true
+	}
+	if identity.Username != "" && saved.User != identity.Username {
+		saved.User = identity.Username
+		changed = true
+	}
+	if st.CurrentHost != host {
+		st.CurrentHost = host
+		changed = true
+	}
+	if changed {
+		st.Hosts[host] = saved
+		if err := saveStore(st); err != nil {
+			return err
+		}
+	}
+
+	runtimes := availableRuntimes(info.Runtimes)
+	permission := "No — ask a server administrator for developer access"
+	if identity.CanCreateApps {
+		permission = "Yes"
+	}
+	next := "Next: run `shinyhub deploy . --open` from your app directory."
+	if !identity.CanCreateApps {
+		next = "Next: ask a ShinyHub administrator to grant developer access, then run `shinyhub whoami` to verify it."
+	}
+	compatibility := diagnoseCompatibility(version, info)
+	prose := fmt.Sprintf("Already connected to %s\n  Identity: %s (%s)\n  Can deploy apps: %s\n  Runtimes: %s\n  Compatibility: %s\n  Credentials: %s\n\n%s",
+		st.label(host), identity.Username, identity.Role, permission, strings.Join(runtimes, ", "), compatibility.Detail, configPath(), next)
+	return renderAction(cmd, "current", map[string]any{
+		"host": host, "name": saved.Name, "user": identity.Username, "role": identity.Role,
+		"can_create_apps": identity.CanCreateApps, "cli_version": version, "server_version": info.Version,
+		"protocol_version": info.ProtocolVersion, "compatibility": compatibility.Level,
+		"runtimes": runtimes, "credentials_path": configPath(), "switched_from": switchedFrom(previous, host),
+		"credential": credentialLifecycleAt(identity.Credential, time.Now()),
+	}, prose)
 }
 
 func revokeCredential(host, token string, id int64) error {
