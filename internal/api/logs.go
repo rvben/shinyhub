@@ -24,6 +24,7 @@ const defaultLogTail = 200
 const maxLogTail = 10000
 
 type appLogReader interface {
+	ReadAll() ([]byte, error)
 	Tail(int) ([]string, error)
 	Follow(context.Context, chan<- string)
 }
@@ -231,6 +232,9 @@ func applyCurrentLogSourceState(src *logSourceResponse, rep *db.Replica, live *p
 //     the tailed lines and closes the connection. The plain-text shape is
 //     the kubectl/docker `--no-follow` style, suitable for one-shot
 //     scripted fetches without an SSE parser.
+//   - ?download=BOOL (default false) — when true returns every byte currently
+//     retained for the selected run as an attachment. This takes precedence
+//     over tail/follow and is intended for authoritative UI exports.
 //
 // Access is restricted to app managers (owners, admins, operators).
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -271,6 +275,19 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			follow = false
 		default:
 			writeError(w, http.StatusBadRequest, "follow must be true or false")
+			return
+		}
+	}
+
+	download := false
+	if raw := q.Get("download"); raw != "" {
+		switch raw {
+		case "true", "1":
+			download = true
+		case "false", "0":
+			download = false
+		default:
+			writeError(w, http.StatusBadRequest, "download must be true or false")
 			return
 		}
 	}
@@ -320,12 +337,38 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no log available")
 		return
 	}
+	if download {
+		runName := q.Get("run")
+		if runName == "" {
+			runName = "current"
+		}
+		writeLogsDownload(w, lr, fmt.Sprintf("%s-replica-%d-%s.log", slug, idx, runName))
+		return
+	}
 
 	if !follow {
 		writeLogsPlain(w, lr, tail)
 		return
 	}
 	streamLogReader(w, r, lr, tail, true)
+}
+
+// writeLogsDownload emits a byte-exact retained snapshot. Unlike the plain
+// one-shot endpoint, it neither normalizes line endings nor adds a trailing
+// newline, and it is not constrained by the interactive tail limit.
+func writeLogsDownload(w http.ResponseWriter, lr appLogReader, filename string) {
+	data, err := lr.ReadAll()
+	if err != nil {
+		slog.Warn("logs download", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not download log")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 // writeLogsPlain emits a one-shot, plain-text response: the last `tail` lines

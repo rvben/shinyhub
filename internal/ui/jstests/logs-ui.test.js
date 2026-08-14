@@ -9,6 +9,7 @@ import {
   isFollowableLogSource,
   isLiveLogSource,
   normalizeLogSources,
+  retainedLogDownloadURL,
   serializeLogEntries,
 } from '../static/views/logs-ui.js';
 
@@ -57,6 +58,71 @@ test('bounded buffer drops the oldest entries', () => {
   assert.equal(appendBoundedLogEntry(entries, { line: 'b' }, 2), 0);
   assert.equal(appendBoundedLogEntry(entries, { line: 'c' }, 2), 1);
   assert.deepEqual(entries.map((e) => e.line), ['b', 'c']);
+});
+
+test('retained downloads target one exact run', () => {
+  assert.equal(
+    retainedLogDownloadURL('demo app', { replica: 2, run_id: 'run-2', has_log: true }),
+    '/api/apps/demo%20app/logs?replica=2&download=true&run=run-2',
+  );
+  assert.equal(
+    retainedLogDownloadURL('demo', { replica: 4, legacy: true, has_log: true }),
+    '/api/apps/demo/logs?replica=4&download=true&run=legacy',
+  );
+  assert.equal(retainedLogDownloadURL('demo', { replica: 0, has_log: false }), '');
+});
+
+test('selected source downloads its complete retained run while all scope exports visible output', async (t) => {
+  const old = {
+    source_id: 'old-run', run_id: 'old-run', replica: 4, status: 'stopped',
+    current: false, has_log: true,
+  };
+  const current = {
+    source_id: 'current-run', run_id: 'current-run', replica: 0, status: 'running',
+    current: true, has_log: true,
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs?log_source=old-run',
+    pretendToBeVisual: true,
+  });
+  class FakeEventSource { close() {} }
+  const requested = [];
+  const api = async (url) => {
+    requested.push(url);
+    if (url.endsWith('/logs/sources')) return { ok: true, json: async () => ({ sources: [current, old] }) };
+    if (url.includes('download=true')) return { ok: true, blob: async () => new dom.window.Blob(['complete retained log']) };
+    return { ok: true, text: async () => 'visible historical line\n' };
+  };
+  const saved = [];
+  dom.window.URL.createObjectURL = (blob) => { saved.push({ blob }); return 'blob:test'; };
+  dom.window.URL.revokeObjectURL = () => {};
+  dom.window.HTMLAnchorElement.prototype.click = function click() {
+    saved[saved.length - 1].filename = this.download;
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({
+    panel, app: { slug: 'demo' }, api, EventSourceClass: FakeEventSource, refreshEveryMs: 60_000,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await tick();
+
+  const download = panel.querySelector('#logs-download');
+  assert.equal(download.textContent, 'Download retained run');
+  download.click();
+  await tick();
+  assert.match(requested.at(-1), /replica=4&download=true&run=old-run/);
+  assert.equal(saved.at(-1).filename, 'demo-replica-4-old-run.log');
+  assert.match(panel.querySelector('#logs-announcement').textContent, /complete retained run/i);
+
+  const source = panel.querySelector('#logs-source');
+  source.value = 'all';
+  source.dispatchEvent(new dom.window.Event('change'));
+  assert.equal(download.textContent, 'Download visible');
+  const requestsBeforeVisibleExport = requested.length;
+  download.click();
+  await tick();
+  assert.equal(requested.length, requestsBeforeVisibleExport, 'visible export should use the bounded browser buffer');
+  assert.equal(saved.at(-1).filename, 'demo-logs-visible.log');
 });
 
 test('viewer merges live replicas, identifies every line, and loads ended logs once', async () => {

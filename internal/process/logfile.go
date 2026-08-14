@@ -334,6 +334,13 @@ func NewLogReader(path string) *LogReader {
 	return &LogReader{path: path}
 }
 
+// ReadAll returns the byte-exact contents of the currently retained primary
+// log. LogFile bounds this file to DefaultLogMaxSize; callers that need a
+// human-oriented tail should continue to use Tail so they avoid reading it all.
+func (r *LogReader) ReadAll() ([]byte, error) {
+	return os.ReadFile(r.path)
+}
+
 // Tail returns the last n lines from the log file in chronological order. It
 // reads backward from the end in chunks, so the work is proportional to the
 // size of the returned tail rather than the whole (up to multi-MB) file - the

@@ -76,6 +76,17 @@ export function appendBoundedLogEntry(entries, entry, max = MAX_RENDERED_LOG_ENT
   return removed;
 }
 
+export function retainedLogDownloadURL(slug, source) {
+  if (!source || !Number.isInteger(source.replica) || source.replica < 0 || !source.has_log) return '';
+  const params = new URLSearchParams({
+    replica: String(source.replica),
+    download: 'true',
+  });
+  const run = source.legacy ? 'legacy' : source.run_id;
+  if (run) params.set('run', run);
+  return `/api/apps/${encodeURIComponent(slug)}/logs?${params.toString()}`;
+}
+
 function sameSourceState(a, b) {
   return a && b && a.status === b.status && a.has_log === b.has_log &&
     a.provider === b.provider && a.tier === b.tier && a.size_bytes === b.size_bytes &&
@@ -117,7 +128,7 @@ export function createLogsViewer({
         <div class="logs-toolbar-actions">
           <button id="logs-pause" type="button" class="btn-row" aria-pressed="false">Pause live</button>
           <button id="logs-copy" type="button" class="btn-row">Copy visible</button>
-          <button id="logs-download" type="button" class="btn-row">Download</button>
+          <button id="logs-download" type="button" class="btn-row">Download visible</button>
         </div>
       </div>
       <div class="logs-stream-bar">
@@ -348,7 +359,18 @@ export function createLogsViewer({
     sourceSelect.replaceChildren(...options);
     selected = prior === 'all' || sources.some((s) => s.source_id === prior) ? prior : 'all';
     sourceSelect.value = selected;
+    updateDownloadControl();
     return selected !== prior;
+  }
+
+  function updateDownloadControl() {
+    const source = sources.find((item) => item.source_id === selected);
+    const retainedURL = selected === 'all' ? '' : retainedLogDownloadURL(app.slug, source);
+    downloadButton.disabled = selected !== 'all' && !retainedURL;
+    downloadButton.textContent = selected === 'all' ? 'Download visible' : 'Download retained run';
+    downloadButton.title = selected === 'all'
+      ? 'Save the currently buffered and filtered merged output'
+      : (retainedURL ? 'Save every byte retained for this run' : 'This source has no ShinyHub-retained output');
   }
 
   function updateConnectionStatus() {
@@ -512,6 +534,7 @@ export function createLogsViewer({
 
   sourceSelect.addEventListener('change', () => {
     selected = sourceSelect.value;
+    updateDownloadControl();
     updateURL();
     resetScope();
     const source = sources.find((item) => item.source_id === selected);
@@ -555,19 +578,40 @@ export function createLogsViewer({
       announce('Could not copy logs.');
     }
   });
-  downloadButton.addEventListener('click', () => {
-    const text = serializeLogEntries(filterLogEntries(entries, searchInput.value));
+  function saveBlob(blob, filename) {
+    const url = win.URL.createObjectURL(blob);
+    const a = doc.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    win.URL.revokeObjectURL(url);
+  }
+
+  downloadButton.addEventListener('click', async () => {
     try {
+      if (selected !== 'all') {
+        const source = sources.find((item) => item.source_id === selected);
+        const url = retainedLogDownloadURL(app.slug, source);
+        if (!url) throw new Error('no retained log');
+        downloadButton.disabled = true;
+        downloadButton.textContent = 'Downloading…';
+        const resp = await api(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        if (destroyed) return;
+        const identity = source.run_id || (source.legacy ? 'legacy' : source.source_id);
+        saveBlob(blob, `${app.slug}-replica-${source.replica}-${identity}.log`);
+        announce('Complete retained run downloaded.');
+        return;
+      }
+      const text = serializeLogEntries(filterLogEntries(entries, searchInput.value));
       const blob = new win.Blob([text + (text ? '\n' : '')], { type: 'text/plain;charset=utf-8' });
-      const url = win.URL.createObjectURL(blob);
-      const a = doc.createElement('a');
-      a.href = url;
-      a.download = `${app.slug}-logs-${selected === 'all' ? 'current' : selected}.log`;
-      a.click();
-      win.URL.revokeObjectURL(url);
-      announce('Log download started.');
+      saveBlob(blob, `${app.slug}-logs-visible.log`);
+      announce('Visible merged logs downloaded.');
     } catch {
       announce('Could not download logs.');
+    } finally {
+      if (!destroyed) updateDownloadControl();
     }
   });
 

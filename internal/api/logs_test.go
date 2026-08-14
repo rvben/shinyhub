@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -346,6 +347,38 @@ func TestHandleLogs_NoFollowReturnsPlainText(t *testing.T) {
 	}
 	if body != "hello\nworld\n" {
 		t.Errorf("body = %q, want %q", body, "hello\nworld\n")
+	}
+}
+
+func TestHandleLogs_DownloadReturnsEveryRetainedByte(t *testing.T) {
+	srv, store, appsDir := newLogsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	// More lines than the interactive 10,000-line ceiling, plus a partial final
+	// line, proves download is both complete and byte-exact.
+	content := []byte("first\n" + strings.Repeat("middle\n", 10_001) + "last without newline")
+	writeCurrentLogsTestOutput(t, store, appsDir, content)
+
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	req := httptest.NewRequest("GET", "/api/apps/myapp/logs?download=true", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="myapp-replica-0-current.log"` {
+		t.Errorf("Content-Disposition = %q", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Body.Bytes(); !bytes.Equal(got, content) {
+		t.Errorf("downloaded %d bytes, want exact %d-byte retained log", len(got), len(content))
 	}
 }
 

@@ -439,6 +439,11 @@ func (s *Store) NewAppLogReader(runID string) *AppLogReader {
 	return &AppLogReader{store: s, runID: runID}
 }
 
+// ReadAll returns the byte-exact retained snapshot for this immutable run.
+func (r *AppLogReader) ReadAll() ([]byte, error) {
+	return r.store.ReadAppLog(r.runID)
+}
+
 func (r *AppLogReader) Tail(n int) ([]string, error) {
 	if n <= 0 {
 		return nil, nil
