@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.8](https://github.com/rvben/shinyhub/compare/v0.11.7...v0.11.8) - 2026-08-14
+
+### Fixed
+
+- **build**: require Go 1.26.6 ([dcc47e5](https://github.com/rvben/shinyhub/commit/dcc47e559cdeb336d2a47dab1f18a99478029713))
+
 ## [0.11.7](https://github.com/rvben/shinyhub/compare/v0.11.6...v0.11.7) - 2026-08-14
 
 ### Added
