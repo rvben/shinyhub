@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.7](https://github.com/rvben/shinyhub/compare/v0.11.6...v0.11.7) - 2026-08-14
+
+### Added
+
+- **ui**: refine app cards and project groups ([34b9cda](https://github.com/rvben/shinyhub/commit/34b9cda3b6645358c64eb7e5871ab1d05750057b))
+
 ## [0.11.6](https://github.com/rvben/shinyhub/compare/v0.11.5...v0.11.6) - 2026-08-13
 
 ### Added
