@@ -9,7 +9,7 @@ Small fixes and doc improvements can go straight to a PR.
 
 ## Dev setup
 
-You need Go 1.26.5+ (see `go.mod` for the exact version) and Node 20+ for the
+You need Go 1.26.6+ (see `go.mod` for the exact version) and Node 20+ for the
 dashboard tests. Python app development additionally needs
 [uv](https://docs.astral.sh/uv/); R app development needs R and renv.
 

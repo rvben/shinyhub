@@ -6,7 +6,7 @@ AIR_BIN := $(CURDIR)/tmp/tools/air
 # bootstrap installs the exact project dependencies and a repo-local, pinned
 # live-reload binary. Nothing is written to a developer's global Go bin.
 bootstrap:
-	@command -v go >/dev/null 2>&1 || { echo "Go 1.26.5+ is required"; exit 1; }
+	@command -v go >/dev/null 2>&1 || { echo "Go 1.26.6+ is required"; exit 1; }
 	@command -v node >/dev/null 2>&1 || { echo "Node 20+ is required for dashboard tests"; exit 1; }
 	go mod download
 	npm ci --no-audit --no-fund
