@@ -369,16 +369,19 @@ func TestGridStatusBadgeRefreshesFromMetricsPoll(t *testing.T) {
 		"app-card-badge.js must export updateCardStatusBadge for the live badge refresh")
 }
 
-// TestAppCardTitleHasNoLinkUnderline guards issue-1's fix: the whole card body
-// is an <a>, so underlining the title on hover made it read like a text link.
-// The card already signals it is clickable (lift + cyan border + accent dot);
-// the title shifts to the brand cyan instead. Pin that the underline rule is
-// gone so it cannot creep back.
-func TestAppCardTitleHasNoLinkUnderline(t *testing.T) {
-	assertNotContains(t, "style.css", ".app-card-body-link:hover strong { text-decoration: underline; }",
-		"the card title must not be underlined on hover (it reads as a text link); use the cyan accent shift instead")
-	assertContains(t, "style.css", ".app-card-body-link:hover strong { color: var(--cyan-bright); }",
-		"the card title hover affordance must be the brand cyan accent shift, not a link underline")
+// TestAppCardHasExplicitManageLink pins the card's two destinations. The app
+// name leads to administration and says so to assistive technology; Open app
+// launches the active release in a new tab. The rest of the card is not a
+// nested/oversized link, leaving text selectable and actions unambiguous.
+func TestAppCardHasExplicitManageLink(t *testing.T) {
+	assertContains(t, "app.js", "titleLink.setAttribute('aria-label', `Manage ${app.name}`)",
+		"the app-name link must identify its management destination")
+	assertContains(t, "app.js", "openLink.setAttribute('aria-label', `Open ${app.name} app in a new tab`)",
+		"the launch action must identify its new-tab destination")
+	assertNotContains(t, "app.js", "app-card-body-link",
+		"the whole card must not be a link when it contains independent actions")
+	assertContains(t, "style.css", ".app-card-title:focus-visible",
+		"the explicit app-name link needs a visible keyboard focus state")
 }
 
 // TestAuditUnwrapsEnvelope guards the audit-log consumer.
@@ -1325,13 +1328,14 @@ func TestDashboardFleetSurfaceWiring(t *testing.T) {
 	assertContains(t, "views/fleet-ui.js", "content_digest",
 		"the live deployment digest derives from the content_digest API field")
 
-	// Apps grid wiring: imports the helpers, badges cards, segments the list.
+	// Apps grid wiring: imports the helper, preserves fleet context as a quiet
+	// card fact, and segments the list.
 	assertContains(t, "app.js", "/static/views/fleet-ui.js",
 		"apps grid imports the fleet-ui helper module")
-	assertContains(t, "app.js", "makeFleetBadge",
-		"apps grid cards show the fleet ownership badge")
-	assertContains(t, "app.js", "{ compact: true }",
-		"apps grid cards use the compact fleet badge; the full 'managed by <id>' text does not fit a 310px card header")
+	assertContains(t, "views/app-card-facts.js", "Fleet managed",
+		"apps grid cards preserve fleet ownership without adding another header badge")
+	assertContains(t, "views/app-card-facts.js", "Managed by ${app.managed_by}",
+		"the fleet fact tooltip must retain the specific fleet id")
 	assertContains(t, "app.js", "segmentApps",
 		"apps grid filters by the All/Fleet-managed/Unmanaged segment")
 
@@ -1595,15 +1599,14 @@ func TestFleetHealthBannerWiring(t *testing.T) {
 		"loadApps must refresh the fleet-health banner")
 }
 
-// TestMetricsAvailableWiring pins the top-level metrics_available field
-// consumed by the grid card path. The grid card reads m.cpu_percent /
-// m.rss_bytes from the legacy top-level scalars (not m.replicas), so the
-// PID-less signal for the grid path is the top-level m.metrics_available flag
-// added in plan 01 (Contract 5). Without this pin a refactor could silently
-// revert to showing "0.0% CPU / 0 KB RAM" for Fargate apps on the grid.
+// TestMetricsAvailableWiring pins the PID-less metrics contract to the detail
+// surface. Routine CPU/RAM was deliberately removed from the scan-first app
+// cards, while replica details must still distinguish unavailable from zero.
 func TestMetricsAvailableWiring(t *testing.T) {
-	assertContains(t, "app.js", "m.metrics_available",
-		"app.js onMetrics grid card must read m.metrics_available to gate CPU/RAM display; see plan-01 Contract 5")
+	assertContains(t, "views/replica-display.js", "metrics_available",
+		"the replica detail must honor metrics_available for PID-less backends")
+	assertNotContains(t, "app.js", "m.metrics_available",
+		"the app index must not bring routine CPU/RAM telemetry back onto cards")
 }
 
 // TestAutoscaleStatusWiring pins the autoscale_status and global_autoscale_enabled
@@ -1662,15 +1665,16 @@ func TestKnownActionsAutoscale(t *testing.T) {
 	}
 }
 
-// TestGridAutoscaleBadge pins the autoscale badge on the grid card.
-// app.autoscale_enabled is already in the apps-list payload (no server change).
-// The badge renders a small "auto" indicator when true so operators can see
-// at a glance which apps have autoscale active.
-func TestGridAutoscaleBadge(t *testing.T) {
-	assertContains(t, "app.js", "autoscale_enabled",
-		"app.js renderGridVerbatim must read app.autoscale_enabled to conditionally render the autoscale badge on grid cards")
-	assertContains(t, "app.js", "badge-autoscale",
-		"app.js grid card must apply badge-autoscale class (or similar) to the autoscale indicator badge")
+// TestGridAutoscaleFact pins useful autoscale context without a second header
+// badge. A hibernated app with min=0 explains that state as policy, while all
+// other autoscale detail stays on the app overview.
+func TestGridAutoscaleFact(t *testing.T) {
+	assertContains(t, "views/app-card-facts.js", "app.autoscale_enabled",
+		"card facts must read autoscale state when it explains a sleeping app")
+	assertContains(t, "views/app-card-facts.js", "Scales to zero",
+		"a hibernated scale-to-zero app must describe its policy")
+	assertNotContains(t, "app.js", "badge-autoscale",
+		"autoscale must not add another variably-sized badge to every card header")
 }
 
 // TestModalFocusManagementWiring pins the modal focus-trap wiring. The trap
@@ -1987,6 +1991,12 @@ func TestKebabMenusAreWired(t *testing.T) {
 		"the app-detail header kebab must be wired (it previously had no handler)")
 	assertContains(t, "app.js", "getElementById('app-detail-restart')",
 		"the app-detail header Restart item must be wired to restart the current app")
+	assertContains(t, "app.js", "setOpen(opening, opening ? 'first' : '')",
+		"keyboard activation must move focus into an opened role=menu")
+	assertContains(t, "app.js", "if (e.key === 'Tab')",
+		"Tab must close an open role=menu while allowing focus to continue")
+	assertContains(t, "app.js", `role="menuitem" data-kebab`,
+		"card action buttons, not their list wrappers, must own menuitem semantics")
 	// The header kebab's items are all manager actions, so the whole menu must be
 	// hidden for viewers (mirrors the card). That is one of the things
 	// syncDetailHeaderActions decides, from the same appCardActions helper the
@@ -2338,10 +2348,10 @@ func TestAppDetailHeaderTiles(t *testing.T) {
 		"onMetrics must feed the tiles from headerStats fleet aggregates")
 	assertContains(t, "views/app-detail.js", "statusPillClass(statusView.state)",
 		"the status pill class must come from statusPillClass, fed the shared appStatusView state")
-	// The grid metrics line is a separate path; it renders via cardMetricsLabel,
-	// which sums CPU/RAM across replicas (see TestAppCardInstancesAndSummedMetrics).
-	assertContains(t, "views/card-metrics.js", "CPU ${s.cpu} · ${s.ram} RAM",
-		"the grid metrics line renders CPU/RAM via cardMetricsLabel")
+	// CPU and RAM stay on this detail surface rather than competing with release
+	// and readiness facts on every index card.
+	assertNotContains(t, "app.js", "cardMetricsLabel",
+		"the app index must not duplicate routine CPU/RAM from the detail header")
 	// CSS: tiles, the running pulse, and a reduced-motion off-switch.
 	assertContains(t, "style.css", ".app-detail-stats .stat", "metric tiles must be styled")
 	assertContains(t, "style.css", ".app-detail-header .status-pill.is-live::before { animation: none; }",
@@ -2565,49 +2575,22 @@ func TestCrashedAppUX(t *testing.T) {
 		"renderFleetHealth must surface the stale schedule list in the banner tooltip/aria")
 }
 
-// TestAppCardMetricsReserveSpace guards against the layout shift where the app
-// card's action buttons jumped down when the CPU/RAM line appeared on start: the
-// metrics line must reserve its height even when empty (not running), so the
-// buttons below never move. Scoped to the .app-metrics:empty rule so it catches
-// a re-collapse (zeroing height/padding) without matching the same declarations
-// elsewhere in the stylesheet.
-func TestAppCardMetricsReserveSpace(t *testing.T) {
-	b, err := fs.ReadFile(ui.Static(), "style.css")
-	if err != nil {
-		t.Fatalf("read style.css: %v", err)
-	}
-	css := string(b)
-	i := strings.Index(css, ".app-metrics:empty {")
-	if i < 0 {
-		t.Fatal(".app-metrics:empty rule not found")
-	}
-	end := strings.Index(css[i:], "}")
-	if end < 0 {
-		t.Fatal(".app-metrics:empty rule has no closing brace")
-	}
-	rule := css[i : i+end]
-	for _, collapse := range []string{"min-height: 0", "height: 0", "padding: 0"} {
-		if strings.Contains(rule, collapse) {
-			t.Errorf(".app-metrics:empty contains %q, which collapses the line to zero height and shifts the card buttons down when CPU/RAM appears on start", collapse)
-		}
-	}
-}
-
-// TestAppCardInstancesAndSummedMetrics pins that the dashboard card reports a
-// scaled app honestly: CPU/RAM summed across replicas (matching the detail
-// header) and an instance-count chip, rather than the first-replica scalar that
-// under-reported a multi-replica app's usage.
-func TestAppCardInstancesAndSummedMetrics(t *testing.T) {
-	assertContains(t, "app.js", "cardMetricsLabel",
-		"the grid card must render CPU/RAM via cardMetricsLabel (summed across replicas), not the first-replica m.cpu_percent scalar")
-	assertContains(t, "app.js", "instanceCountLabel",
-		"the grid card must show the instance count via instanceCountLabel for scaled apps")
-	assertNotContains(t, "app.js", "m.cpu_percent.toFixed",
-		"the grid card must not render the first-replica m.cpu_percent scalar; it under-reports a scaled app's total")
-	assertContains(t, "views/card-metrics.js", "headerStats",
-		"cardMetricsLabel must reuse headerStats so the card's total matches the detail header's per-replica sum")
-	assertContains(t, "style.css", ".app-instances",
-		"the instance-count chip needs styling")
+// TestAppCardFactsStayOperational pins the deliberately small information
+// budget: release, deploy recency, and readiness are scan-worthy; routine
+// CPU/RAM belongs on the app detail page. The live poll still refreshes facts.
+func TestAppCardFactsStayOperational(t *testing.T) {
+	assertContains(t, "app.js", "appCardFacts",
+		"the grid card must derive its concise facts from the shared helper")
+	assertContains(t, "app.js", ".app-card-facts[data-slug=",
+		"the metrics poll must locate and refresh the card facts")
+	assertContains(t, "views/app-card-facts.js", "Release #${releaseNumber}",
+		"cards must expose the current successful release number")
+	assertContains(t, "views/app-card-facts.js", "${ready}/${configured} ready",
+		"scaled cards must expose live replica readiness")
+	assertNotContains(t, "app.js", "app-metrics",
+		"routine CPU/RAM must not clutter the app index")
+	assertNotContains(t, "style.css", ".app-metrics",
+		"removed index metrics must not retain dead layout styling")
 }
 
 // TestAbsentCPURateRendersAsUnknown pins the consumers of a null cpu_percent.
@@ -3224,8 +3207,10 @@ func TestGridGroupsByProject(t *testing.T) {
 		"renderApps must group through the unit-tested groupAppsForGrid helper, not inline")
 	assertContains(t, "app.js", "views/app-grid-groups.js",
 		"app.js must import the grid grouper module")
-	assertContains(t, "app.js", "app-grid-group-heading",
-		"renderGridVerbatim must emit a per-group heading, or grouping is computed and thrown away")
+	assertContains(t, "app.js", "createGroupDisclosure",
+		"renderGridVerbatim must emit a project disclosure, or grouping is computed and thrown away")
+	assertContains(t, "app.js", "classPrefix: 'app-grid'",
+		"the grid disclosure must use the app-grid component vocabulary")
 	assertContains(t, "views/apps-grid.js", "groupAppsForGrid",
 		"the apps-grid fallback render path must group too, or a mount without applyGridFilters renders flat")
 	// The sort must reach the grouper rather than being applied across the whole
@@ -3237,13 +3222,16 @@ func TestGridGroupsByProject(t *testing.T) {
 		"the in-group name comparator must live in app-grid-groups.js, not be duplicated in renderApps")
 }
 
-// A heading inserted as a direct child of the CSS grid occupies one cell unless
-// it is told to span the row, which renders as a heading wedged beside a card.
-func TestGridGroupHeadingSpansTheRow(t *testing.T) {
+// Each disclosure is a full-width section. Its body, rather than the outer
+// section list, owns the responsive card grid so cards cannot sit beside their
+// project heading.
+func TestGridGroupBodyOwnsTheCardGrid(t *testing.T) {
 	assertContains(t, "style.css", ".app-grid-group-heading",
 		"style.css must style the grid group heading")
-	assertContains(t, "style.css", "grid-column: 1 / -1",
-		"the grid group heading must span the full grid row")
+	assertContains(t, "style.css", ".app-grid-group-body",
+		"style.css must give each project disclosure its own card-grid body")
+	assertContains(t, "style.css", "grid-template-columns: repeat(auto-fill, minmax(340px, 1fr))",
+		"project disclosure bodies must retain the responsive card grid")
 }
 
 // readStatic returns an embedded asset as a string. The rest of this file
@@ -3424,6 +3412,10 @@ func TestProjectEditModalWiring(t *testing.T) {
 		"app.js must PATCH the project endpoint from the edit modal")
 	assertContains(t, "app.js", "app-grid-group-edit",
 		"the group heading must carry the edit control that opens the modal")
+	assertContains(t, "app.js", "edit.setAttribute('aria-label', `Edit project ${group.name}`)",
+		"the compact icon-only edit control must retain an accessible name")
+	assertContains(t, "app.js", "editIcon.setAttribute('aria-hidden', 'true')",
+		"the decorative pencil icon must be hidden from assistive technology")
 	assertContains(t, "app.js", "populateProjectDatalist",
 		"app.js must populate the shared datalist from GET /api/projects")
 }

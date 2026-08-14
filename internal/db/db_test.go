@@ -151,7 +151,7 @@ func openTestStore(t *testing.T) *db.Store {
 }
 
 // TestDeploymentsAppIndexExists guards idx_deployments_app_created (migration
-// 042). deploymentSummarySQL runs four correlated subqueries keyed on
+// 042). deploymentSummarySQL runs correlated subqueries keyed on
 // deployments(app_id, created_at DESC, id DESC) on the watchdog, autoscaler,
 // and dashboard hot paths; without the index each is a full table scan. If a
 // future migration drops it the regression is silent, so pin its existence.
@@ -969,9 +969,9 @@ func TestPatchAppSettings_ConcurrentSQLiteWritersDoNotBusySnapshot(t *testing.T)
 }
 
 // TestApp_DeploymentSummaryFields asserts that GetAppBySlug, GetAppByID and
-// ListApps populate LastDeployedAt + CurrentVersion from the most recent
-// deployment row. The grid sort and the detail-card "Deployed" line both
-// depend on these fields; the SPA has no other source for either value.
+// ListApps populate the attempt summary plus the current successful release.
+// The grid sort and card metadata depend on these fields; the SPA has no other
+// source for either value.
 //
 // Regression guard: SQLite's MAX(created_at) aggregate strips column type
 // metadata, so the driver returns a string. scanApp must parse it via
@@ -987,6 +987,9 @@ func TestApp_DeploymentSummaryFields(t *testing.T) {
 	}
 	if never.CurrentVersion != "" {
 		t.Errorf("never-deployed app: CurrentVersion = %q, want empty", never.CurrentVersion)
+	}
+	if never.ReleaseNumber != 0 || never.ReleasedAt != nil {
+		t.Errorf("never-deployed app: release = %d at %v, want zero/nil", never.ReleaseNumber, never.ReleasedAt)
 	}
 
 	// App with two deployments — fields should reflect the most recent one.
@@ -1018,6 +1021,9 @@ func TestApp_DeploymentSummaryFields(t *testing.T) {
 	if got.LastDeployedAt.IsZero() {
 		t.Errorf("GetAppBySlug: LastDeployedAt is zero, want a parsed time")
 	}
+	if got.ReleaseNumber != 2 || got.ReleasedAt == nil || got.ReleasedAt.IsZero() {
+		t.Errorf("GetAppBySlug: release = %d at %v, want 2 and non-zero", got.ReleaseNumber, got.ReleasedAt)
+	}
 
 	// GetAppByID must return the same fields.
 	byID, err := store.GetAppByID(app.ID)
@@ -1029,6 +1035,9 @@ func TestApp_DeploymentSummaryFields(t *testing.T) {
 	}
 	if byID.LastDeployedAt == nil || byID.LastDeployedAt.IsZero() {
 		t.Errorf("GetAppByID: LastDeployedAt = %v, want non-zero", byID.LastDeployedAt)
+	}
+	if byID.ReleaseNumber != 2 || byID.ReleasedAt == nil || byID.ReleasedAt.IsZero() {
+		t.Errorf("GetAppByID: release = %d at %v, want 2 and non-zero", byID.ReleaseNumber, byID.ReleasedAt)
 	}
 
 	// ListApps must populate fields for every row.
@@ -1054,11 +1063,17 @@ func TestApp_DeploymentSummaryFields(t *testing.T) {
 	if listedDemo.LastDeployedAt == nil || listedDemo.LastDeployedAt.IsZero() {
 		t.Errorf("ListApps demo: LastDeployedAt = %v, want non-zero", listedDemo.LastDeployedAt)
 	}
+	if listedDemo.ReleaseNumber != 2 || listedDemo.ReleasedAt == nil || listedDemo.ReleasedAt.IsZero() {
+		t.Errorf("ListApps demo: release = %d at %v, want 2 and non-zero", listedDemo.ReleaseNumber, listedDemo.ReleasedAt)
+	}
 	if listedNever.LastDeployedAt != nil {
 		t.Errorf("ListApps never: LastDeployedAt = %v, want nil", listedNever.LastDeployedAt)
 	}
 	if listedNever.CurrentVersion != "" {
 		t.Errorf("ListApps never: CurrentVersion = %q, want empty", listedNever.CurrentVersion)
+	}
+	if listedNever.ReleaseNumber != 0 || listedNever.ReleasedAt != nil {
+		t.Errorf("ListApps never: release = %d at %v, want zero/nil", listedNever.ReleaseNumber, listedNever.ReleasedAt)
 	}
 }
 

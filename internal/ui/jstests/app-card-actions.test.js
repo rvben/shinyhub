@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { appCardActions } from '../static/views/app-card-actions.js';
 
 // renderGridVerbatim (app.js) decides, per app card, whether to show the
-// "Open" link, style "Deploy" as the primary CTA, and show the Restart
-// kebab. All three are keyed off whether the app has ever successfully
+// "Open" link, show a direct first-deploy action, and populate the overflow
+// menu. All three are keyed off whether the app has ever successfully
 // deployed. deploy_count only increments on a successful deploy (see
 // app-card-badge.js), so deploy_count 0 means "never deployed".
 //
@@ -16,25 +16,40 @@ test('a never-deployed app hides Open, makes Deploy primary, hides Restart', () 
   const a = appCardActions({ deploy_count: 0 }, true);
   assert.equal(a.showOpen, false);
   assert.equal(a.deployIsPrimary, true);
+  assert.equal(a.showRedeploy, false);
   assert.equal(a.showRestart, false);
 });
 
-test('a deployed app shows Open, de-emphasizes Deploy, shows Restart when manageable', () => {
+test('a deployed app shows Open and moves redeploy into the overflow menu', () => {
   const a = appCardActions({ deploy_count: 2, status: 'running' }, true);
   assert.equal(a.showOpen, true);
   assert.equal(a.deployIsPrimary, false);
+  assert.equal(a.showRedeploy, true);
   assert.equal(a.showRestart, true);
 });
 
 test('a user who cannot manage never sees Restart, even on a deployed app', () => {
   const a = appCardActions({ deploy_count: 2, status: 'running' }, false);
   assert.equal(a.showRestart, false);
+  assert.equal(a.showRedeploy, false);
 });
 
 test('a missing deploy_count is treated as never deployed', () => {
   const a = appCardActions({}, true);
   assert.equal(a.showOpen, false);
   assert.equal(a.deployIsPrimary, true);
+});
+
+test('an earlier successful release keeps Open when the latest attempt failed', () => {
+  const a = appCardActions({
+    deploy_count: 0,
+    release_number: 2,
+    last_deployment_status: 'failed',
+    status: 'running',
+  }, true);
+  assert.equal(a.showOpen, true);
+  assert.equal(a.deployIsPrimary, false);
+  assert.equal(a.showRedeploy, true);
 });
 
 // Sleep, Stop and Start are lifecycle controls, so they depend on what the app
@@ -168,6 +183,7 @@ test('a degraded app offers Restart, Sleep and Stop', () => {
 test('a redeploying app offers no lifecycle actions', () => {
   const a = appCardActions({ deploy_count: 5, status: 'running', deploying: true }, true);
   assert.equal(a.showRestart, false);
+  assert.equal(a.showRedeploy, false);
   assert.equal(a.showSleep, false);
   assert.equal(a.showStop, false);
   assert.equal(a.showStart, false);
@@ -200,6 +216,9 @@ test('a stopped app whose deploy_count increment was lost still offers Start', (
     true,
   );
   assert.equal(a.showStart, true);
+  assert.equal(a.showOpen, true);
+  assert.equal(a.deployIsPrimary, false);
+  assert.equal(a.showRedeploy, true);
 });
 
 test('a running app whose deploy_count increment was lost still offers Sleep and Stop', () => {

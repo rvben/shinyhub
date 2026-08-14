@@ -102,6 +102,17 @@ test('a later failed deploy on a live app keeps the live status', () => {
   assert.equal(b.text, 'S:running');
 });
 
+test('release summary keeps live status when the legacy deploy counter drifted', () => {
+  const b = appCardBadge({
+    deploy_count: 0,
+    release_number: 2,
+    last_deployment_status: 'failed',
+    status: 'running',
+  }, fmt);
+  assert.equal(b.text, 'S:running');
+  assert.equal(b.cls, 'badge badge-running');
+});
+
 test('updateCardStatusBadge refreshes a stale badge from a fresh poll status', () => {
   // Card opened while the app was hibernating (stopped); the wake transition
   // arrives via the next /metrics tick as running.

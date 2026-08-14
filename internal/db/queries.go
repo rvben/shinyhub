@@ -645,6 +645,14 @@ type App struct {
 	// or nil if the app has never been deployed. Joined in via the
 	// deploymentSummarySQL fragment below.
 	LastDeployedAt *time.Time `json:"last_deployed_at,omitempty"`
+	// ReleaseNumber is the count of succeeded deployment rows. It is the
+	// human-facing release sequence used by the app detail and card surfaces;
+	// unlike DeployCount it includes a successful rollback as a new release.
+	ReleaseNumber int `json:"release_number,omitempty"`
+	// ReleasedAt is the timestamp of the newest succeeded deployment row. It
+	// deliberately ignores a newer failed attempt so "Deployed …" always dates
+	// the bundle that can actually be opened.
+	ReleasedAt *time.Time `json:"released_at,omitempty"`
 	// CurrentVersion is the version string of the most-recent deployment,
 	// or empty if the app has never been deployed.
 	CurrentVersion string `json:"current_version,omitempty"`
@@ -794,11 +802,16 @@ func (a *App) MissStatus(deployInFlight bool) (status, reason string) {
 }
 
 // deploymentSummarySQL is the SELECT fragment that adds the deployment-derived
-// columns (last_deployed_at, current_version, content_digest,
-// last_deployment_status) to an apps query. Kept as a constant so every App
-// query stays in sync; append it wherever appColumns is selected.
+// columns (last_deployed_at, release_number, released_at, current_version,
+// content_digest, last_deployment_status) to an apps query. Kept as a constant
+// so every App query stays in sync; append it wherever appColumns is selected.
 const deploymentSummarySQL = `
 		(SELECT MAX(created_at) FROM deployments WHERE app_id = apps.id) AS last_deployed_at,
+		(SELECT COUNT(*) FROM deployments
+		   WHERE app_id = apps.id AND status = 'succeeded') AS release_number,
+		(SELECT created_at FROM deployments
+		   WHERE app_id = apps.id AND status = 'succeeded'
+		   ORDER BY id DESC LIMIT 1) AS released_at,
 		(SELECT version FROM deployments WHERE app_id = apps.id ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version,
 		(SELECT content_digest FROM deployments
 		   WHERE app_id = apps.id AND status = 'succeeded'
@@ -809,7 +822,7 @@ const deploymentSummarySQL = `
 // appColumns is the plain apps.* column list shared by every App SELECT, in the
 // exact order scanApp expects. It is kept as a single constant so the column
 // list and scanApp never drift across the queries below; each query appends
-// deploymentSummarySQL for the joined last_deployed_at/current_version/digest.
+// deploymentSummarySQL for the joined release/deployment summary fields.
 const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       replicas, max_sessions_per_replica, deploy_count,
 		       hibernate_timeout_minutes,
@@ -3598,7 +3611,7 @@ func scanApp(s scanner) (*App, error) {
 	// last_deployed_at is the result of MAX(deployments.created_at). SQLite
 	// aggregates lose the original column type, so the driver returns the
 	// value as a string. We parse it manually below.
-	var lastDeployedAtRaw sql.NullString
+	var lastDeployedAtRaw, releasedAtRaw sql.NullString
 	var autoscaleEnabledInt int
 	var ephemeralDataAckInt int
 	err := s.Scan(
@@ -3612,7 +3625,8 @@ func scanApp(s scanner) (*App, error) {
 		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime, &a.IconEmoji,
 		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
 		&a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
-		&lastDeployedAtRaw, &currentVersion, &contentDigest, &lastDeploymentStatus,
+		&lastDeployedAtRaw, &a.ReleaseNumber, &releasedAtRaw,
+		&currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -3628,6 +3642,11 @@ func scanApp(s scanner) (*App, error) {
 	if lastDeployedAtRaw.Valid {
 		if t, ok := parseSQLiteTime(lastDeployedAtRaw.String); ok {
 			a.LastDeployedAt = &t
+		}
+	}
+	if releasedAtRaw.Valid {
+		if t, ok := parseSQLiteTime(releasedAtRaw.String); ok {
+			a.ReleasedAt = &t
 		}
 	}
 	if currentVersion.Valid {

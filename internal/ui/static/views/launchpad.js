@@ -6,6 +6,7 @@
 // is the only action.
 import { buildLaunchpadModel } from './launchpad-model.js';
 import { renderAppAvatar } from './app-avatar.js';
+import { createGroupDisclosure } from './group-disclosure.js';
 
 const RECENT_KEY = 'shinyhub.recent-apps';
 const RECENT_MAX = 6;
@@ -140,14 +141,23 @@ export function mountLaunchpad(ctx, opts = {}) {
     }
     for (const g of model.groups) {
       if (g.showHeading) {
-        container.appendChild(groupHead(g));
+        const disclosure = createGroupDisclosure(document, {
+          view: 'launchpad',
+          groupKey: g.project,
+          label: g.name || 'Other apps',
+          count: g.apps.length,
+          iconEmoji: g.iconEmoji,
+          classPrefix: 'lp',
+        });
+        disclosure.body.appendChild(grid(g.apps));
+        container.appendChild(disclosure.root);
       } else if (model.recent.length > 0) {
         // The lone ungrouped group needs no name of its own, but with a
         // "Recently opened" block above it the tiles below would otherwise run
         // on with no label saying what they are.
         container.appendChild(sectionHead('All apps'));
       }
-      container.appendChild(grid(g.apps));
+      if (!g.showHeading) container.appendChild(grid(g.apps));
     }
   }
 
@@ -248,20 +258,6 @@ export function mountLaunchpad(ctx, opts = {}) {
 
   function sectionHead(text) {
     return el('h2', 'lp-section', text);
-  }
-
-  // A project heading is sectionHead plus an optional leading emoji. The emoji
-  // is decorative: the text beside it already names the project, so a screen
-  // reader announcing it would just read a character name.
-  function groupHead(g) {
-    const h = el('h2', 'lp-section');
-    if (g.iconEmoji) {
-      const ico = el('span', 'lp-section-icon', g.iconEmoji);
-      ico.setAttribute('aria-hidden', 'true');
-      h.appendChild(ico);
-    }
-    h.appendChild(el('span', null, g.name || 'All apps'));
-    return h;
   }
 
   load(true);

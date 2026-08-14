@@ -3,9 +3,11 @@
 // Two independent inputs drive it.
 //
 // deploy_count only increments on a successful deploy (see app-card-badge.js),
-// so deploy_count 0 means "never deployed". Such an app has nothing to open yet
-// (the /app/<slug>/ URL would 404), so the grid hides "Open" and makes "Deploy"
-// the primary call to action.
+// so an app with no successful deployment has nothing to open yet (the
+// /app/<slug>/ URL would 404). The grid hides "Open" and shows a direct
+// first-deploy action only in that state. Once a bundle exists, redeploy moves
+// into the overflow menu: it remains available without looking like unfinished
+// setup on every card.
 //
 // Whether any LIFECYCLE action applies is a separate question, and it is not
 // answered by the counter. deploy_count is denormalized and the deploy handler
@@ -62,7 +64,10 @@ export function appCardActions(app, canManage) {
   // last_deployment_status is the status of the newest deployment row, so
   // "succeeded" proves a bundle was deployed even when the counter missed it.
   // The counter stays as the fallback for a payload from an older server.
-  const hasDeployment = app.last_deployment_status === 'succeeded' || !neverDeployed;
+  const hasDeployment = (Number(app.release_number) || 0) > 0
+    || !!app.released_at
+    || app.last_deployment_status === 'succeeded'
+    || !neverDeployed;
   const manageable = !!canManage && hasDeployment && !app.deploying;
   const status = app.status || '';
   const isUp = UP_STATUSES.has(status);
@@ -74,8 +79,9 @@ export function appCardActions(app, canManage) {
   const isElastic = ELASTIC_ISOLATION.has(isolation);
 
   return {
-    showOpen: !neverDeployed,
-    deployIsPrimary: neverDeployed,
+    showOpen: hasDeployment,
+    deployIsPrimary: !hasDeployment,
+    showRedeploy: !!canManage && hasDeployment && !app.deploying,
     showRestart: manageable && isUp,
     showSleep: manageable && isUp && !isElastic,
     showStop: manageable && isUp,

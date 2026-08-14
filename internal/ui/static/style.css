@@ -307,6 +307,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .nav-item:hover { color: var(--text-soft); background: var(--surface-2); }
 .nav-item:focus-visible,
 .sidebar-app:focus-visible,
+.group-disclosure-toggle:focus-visible,
 .sidebar-collapse:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px rgba(56, 189, 248, 0.55);
@@ -336,16 +337,56 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   font-size: 0.75rem;
   font-weight: 600;
   color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
-.sidebar-project {
-  margin: 0.55rem 0 0.2rem;
-  padding: 0 0.7rem;
-  font-size: 0.72rem;
-  font-weight: 600;
+.sidebar-apps-count,
+.sidebar-project-group-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.45rem;
+  min-width: 1.45rem;
+  height: 1.15rem;
+  padding: 0;
+  box-sizing: border-box;
+  border-radius: 999px;
   color: var(--text-soft);
-  white-space: nowrap;
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  line-height: 1.35;
+  text-align: center;
+}
+.sidebar-project-group { margin-top: 0.4rem; }
+.sidebar-project-group-header { display: flex; align-items: center; }
+.sidebar-project-group-heading { flex: 1 1 auto; min-width: 0; }
+.sidebar-project-group-toggle {
+  width: 100%;
+  min-height: 30px;
+  padding: 0.28rem 0.42rem;
+  border-radius: 6px;
+  color: var(--text-soft);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+}
+.sidebar-project-group-toggle:hover { color: var(--text); background: var(--surface-2); }
+.sidebar-project-group-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-project-group-icon { flex: none; font-size: 0.88rem; line-height: 1; }
+.sidebar-project-group-count { margin-left: auto; margin-right: 0.28rem; }
+.sidebar-project-group-body {
+  display: flex;
+  flex-direction: column;
+  margin: 0.08rem 0 0 0.72rem;
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--line);
 }
 .sidebar-app {
   display: flex;
@@ -376,6 +417,30 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .sb-dot-ok { background: var(--text-soft); }
 .sb-dot-unavailable { background: var(--text-muted); }
 .sidebar-apps-empty { padding: 0.3rem 0.7rem; color: var(--text-muted); font-size: 0.8rem; }
+
+/* Shared project disclosure behavior. Surface-specific rules above/below own
+   the typography and spacing; these rules keep the affordance consistent. */
+.group-disclosure-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.group-disclosure-chevron {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--text-muted);
+  transform: rotate(90deg);
+  transition: transform var(--ease), color var(--ease);
+}
+.group-disclosure-toggle:hover .group-disclosure-chevron { color: var(--cyan-bright); }
+.group-disclosure-toggle[aria-expanded="false"] .group-disclosure-chevron { transform: rotate(0); }
+.group-disclosure-body[hidden] { display: none; }
 
 /* Footer: host badge, user, logout, collapse toggle */
 .sidebar-footer {
@@ -566,6 +631,7 @@ main {
 }
 @media (prefers-reduced-motion: reduce) {
   #sidebar { transition: none; }
+  .group-disclosure-chevron { transition: none; }
 }
 
 /* ── Login ── */
@@ -830,78 +896,120 @@ body[data-auth="out"] {
 
 /* ── App Grid ── */
 .app-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.4rem;
+}
+
+.app-grid-flat,
+.app-grid-group-body {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 1.15rem;
 }
 
-/* Spans the whole grid row: as a direct child of the grid, a heading would
-   otherwise occupy a single cell and sit beside the first card. */
-.app-grid-group-heading {
-  grid-column: 1 / -1;
-  margin: 1.25rem 0 0.25rem;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-muted);
+.app-grid-group { min-width: 0; }
+.app-grid-group-header {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.7rem;
+  min-height: 44px;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--line);
 }
+.app-grid-group-heading { flex: 0 1 auto; min-width: 0; margin: 0; }
+.app-grid-group-toggle {
+  /* The negative margin lets the chevron align with the section edge. Give
+     that offset back to the button so short project names never ellipsize. */
+  max-width: calc(100% + 0.4rem);
+  color: var(--text-soft);
+  font-size: 0.9rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  border-radius: 6px;
+  padding: 0.3rem 0.4rem;
+  margin-left: -0.4rem;
+}
+.app-grid-group-toggle:hover { color: var(--text); background: var(--surface-2); }
+.app-grid-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.app-grid-group-heading:first-child {
-  margin-top: 0;
+.app-grid-group-heading {
+  color: var(--text-soft);
 }
 
 .app-grid-group-icon {
   font-size: 1rem;
-  text-transform: none;
-  letter-spacing: normal;
+  line-height: 1;
 }
-
-/* Resets the heading's uppercase/weight so the edit control reads as a small
-   ghost button, not default button chrome wedged in the middle of an h2. */
-.app-grid-group-edit {
-  font: inherit;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-  font-size: 0.75rem;
+.app-grid-group-count {
+  flex: none;
   color: var(--text-soft);
-  background: transparent;
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius);
-  padding: 2px 8px;
-  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  padding: 0.12rem 0.42rem;
+  border-radius: 999px;
+  background: var(--surface-2);
 }
+.app-grid-group-body { padding-top: 0.9rem; }
 
+/* Project editing is secondary. Keep it beside the count as a quiet contextual
+   action instead of repeating a labelled toolbar button at the far edge of
+   every section. Keyboard focus and touch always reveal it. */
+.app-grid-group-edit {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateX(-3px);
+  transition: opacity var(--ease), transform var(--ease), color var(--ease), background var(--ease);
+}
+.app-grid-group-edit svg { width: 15px; height: 15px; }
+.app-grid-group-header:hover .app-grid-group-edit,
+.app-grid-group-header:focus-within .app-grid-group-edit {
+  opacity: 1;
+  transform: translateX(0);
+}
 .app-grid-group-edit:hover {
   color: var(--text);
-  border-color: var(--cyan-bright);
   background: var(--accent-dim);
 }
+.app-grid-group-edit:focus-visible { opacity: 1; transform: translateX(0); }
 
-@keyframes card-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
+@media (hover: none), (pointer: coarse), (max-width: 700px) {
+  .group-disclosure-toggle { min-height: 44px; }
+  .app-card-title { min-height: 44px; align-items: center; }
+  .app-grid-group-edit { width: 44px; height: 44px; opacity: 0.78; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-grid-group-edit { transition: none; transform: none; }
 }
 
 .app-card {
-  background:
-    linear-gradient(180deg, rgba(var(--surface-2-rgb),0.75) 0%, rgba(var(--surface-rgb),0.55) 100%);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  padding: 1.3rem 1.4rem 1.15rem;
+  padding: 0.875rem 1rem;
+  max-width: 640px;
+  min-height: 148px;
   position: relative;
   /* overflow stays visible so the card's kebab dropdown can escape the card
      bounds instead of being clipped at the bottom edge. The decorative
      ::before accent is inset from the rounded corners so it does not poke out. */
   overflow: visible;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  animation: card-in 0.28s ease both;
-  transition: transform var(--ease), border-color var(--ease), box-shadow var(--ease);
+  transition: background var(--ease), border-color var(--ease);
 }
 
 /* Raise a card (and its open dropdown) above its grid neighbours so the menu
@@ -909,99 +1017,131 @@ body[data-auth="out"] {
 .app-card.kebab-open { z-index: 30; }
 
 .app-card::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 16px; right: 16px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent 0%, var(--cyan-bright) 50%, transparent 100%);
-  opacity: 0.25;
-  transition: opacity var(--ease);
+  content: none;
 }
 
 .app-card::after {
-  content: '';
-  position: absolute;
-  top: 16px; right: 16px;
-  width: 5px; height: 5px;
-  background: var(--cyan-bright);
-  border-radius: 50%;
-  box-shadow: 0 0 10px var(--cyan-bright);
-  opacity: 0;
-  transition: opacity var(--ease);
+  content: none;
 }
 
 .app-card:hover {
-  transform: translateY(-3px);
-  border-color: var(--cyan-bright);
-  box-shadow: 0 18px 50px -12px rgba(56,189,248,0.30), 0 0 0 1px rgba(56,189,248,0.35);
+  background: var(--surface-3);
+  border-color: var(--line-2);
 }
-.app-card:hover::before { opacity: 1; }
-.app-card:hover::after  { opacity: 1; animation: pulse-glow 2.4s ease-in-out infinite; }
 
 .app-header {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: flex-start;
   gap: 0.75rem;
-  margin-bottom: 0.55rem;
 }
 
-.app-header strong {
-  font-size: 1.05rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  color: var(--text);
-  transition: color var(--ease);
-  /* min-width:0 overrides the flex default of min-content, so a long app name
-     wraps within its share of the row instead of forcing the badges outward. */
+.app-card-identity {
   min-width: 0;
+}
+
+.app-card-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  min-height: 32px;
+  max-width: 100%;
+  color: var(--text);
+  text-decoration: none;
+  border-radius: 4px;
+}
+
+.app-card-title strong {
+  min-width: 0;
+  font-size: 0.95rem;
+  line-height: 1.35;
+  font-weight: 650;
+  letter-spacing: -0.02em;
   overflow-wrap: anywhere;
 }
 
-/* Badge cluster: status, fleet ownership and autoscale, right-aligned beside
-   the app name. It wraps internally so badges stack in the right-hand column
-   rather than escaping the card, which .app-header alone cannot do (it is a
-   nowrap row and .app-card is overflow:visible for the kebab dropdown). Every
-   badge in it carries fixed-vocabulary text, so the cluster has a bounded
-   max-content width and needs no cap of its own. */
+.app-card-manage-arrow {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 1rem;
+  transform: translateX(0);
+  transition: color var(--ease), transform var(--ease);
+}
+
+.app-card-title:hover { color: var(--cyan-bright); }
+.app-card-title:hover .app-card-manage-arrow { color: currentColor; transform: translateX(2px); }
+.app-card-title:focus-visible { outline: 2px solid var(--cyan-bright); outline-offset: 3px; }
+
+.app-card-slug {
+  margin-top: 0.1rem;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
 .app-header-badges {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
   align-items: center;
-  gap: 0.35rem;
-  min-width: 0;
+  justify-content: flex-end;
 }
 
-.app-meta {
+/* Status is information, not decoration. A dot-and-label reads consistently
+   without creating a row of differently sized capsules. */
+.app-header-badges > .badge:first-child {
+  padding: 0.1rem 0;
+  border-radius: 0;
+  background: transparent;
+  letter-spacing: 0;
   font-size: 0.72rem;
-  color: var(--text-muted);
-  margin-bottom: 0.95rem;
-  display: flex;
-  gap: 0.85rem;
-  font-family: var(--mono);
-  letter-spacing: -0.01em;
+  line-height: 1.35;
+  font-weight: 600;
 }
 
-/* Instance-count chip: shown only for scaled apps (>1 replica), a subtle hint
-   that the card's CPU/RAM total is across this many instances. */
-.app-instances {
-  color: var(--cyan-bright);
-  background: var(--accent-glow);
-  border-radius: 999px;
-  padding: 0 0.45rem;
+.app-card-facts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem 0;
+  min-height: 1.2rem;
+  margin-top: 0.65rem;
+  color: var(--text-soft);
+  font-size: 0.72rem;
+  line-height: 1.5;
 }
+
+.app-card-fact + .app-card-fact::before {
+  content: '·';
+  padding: 0 0.42rem;
+  color: var(--text-muted);
+}
+.app-card-fact.is-attention { color: var(--yellow); }
+.app-card-fact.is-danger { color: var(--red); font-weight: 600; }
 
 .app-actions {
   display: flex;
-  gap: 0.35rem;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  min-height: 40px;
+  margin-top: auto;
+  padding-top: 0.65rem;
+  flex-wrap: nowrap;
 }
 
 .app-actions a,
 .app-actions button {
-  font-size: 0.73rem;
-  padding: 0.38rem 0.8rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 40px;
+  font-size: 0.76rem;
+  padding: 0 0.8rem;
   border-radius: var(--radius);
   cursor: pointer;
   border: 1px solid var(--line-2);
@@ -1010,8 +1150,10 @@ body[data-auth="out"] {
   text-decoration: none;
   font-family: var(--font);
   font-weight: 600;
-  transition: all var(--ease);
+  transition: background var(--ease), border-color var(--ease), color var(--ease);
 }
+
+.app-actions .kebab-menu > button { width: 40px; height: 40px; padding: 0; }
 
 .app-actions a:hover,
 .app-actions button:hover {
@@ -1020,19 +1162,21 @@ body[data-auth="out"] {
   background: rgba(56,189,248,0.08);
 }
 
-/* Open link — primary style */
-.app-actions a {
-  background: linear-gradient(135deg, var(--brand-primary), var(--electric));
-  border-color: transparent;
-  color: var(--bg-deep);
-  font-weight: 700;
-  box-shadow: 0 0 12px rgba(56,189,248,0.3);
+/* Opening an app is the preferred card action, but the page-level CTA remains
+   primary. A restrained tint keeps the hierarchy local to the card. */
+.app-actions > a {
+  gap: 0.35rem;
+  background: rgba(56,189,248,0.08);
+  border-color: rgba(56,189,248,0.28);
+  color: var(--cyan-bright);
+  font-weight: 650;
+  box-shadow: none;
 }
-.app-actions a:hover {
-  filter: brightness(1.1);
-  color: var(--bg-deep);
-  background: linear-gradient(135deg, var(--brand-primary), var(--electric));
-  border-color: transparent;
+.app-actions > a:hover {
+  filter: none;
+  color: var(--cyan-bright);
+  background: rgba(56,189,248,0.13);
+  border-color: rgba(56,189,248,0.48);
 }
 
 .dashboard-emptystate {
@@ -1088,9 +1232,9 @@ body[data-auth="out"] {
 .badge-degraded  { background: var(--red-bg);      color: var(--red); }
 .badge-crashed   { background: var(--red-bg);      color: var(--red); }
 .badge-hibernated { background: var(--standby-bg); color: var(--standby); }
-.badge-stopped   { background: var(--gray-bg);     color: var(--text-muted); }
-.badge-suspended { background: var(--gray-bg);     color: var(--text-muted); }
-.badge-unknown   { background: var(--gray-bg);     color: var(--text-muted); }
+.badge-stopped   { background: var(--gray-bg);     color: var(--text-soft); }
+.badge-suspended { background: var(--gray-bg);     color: var(--text-soft); }
+.badge-unknown   { background: var(--gray-bg);     color: var(--text-soft); }
 .badge-new       { background: var(--accent-glow); color: var(--cyan-bright); }
 
 /* Live: a gently breathing dot, mirroring the detail-header pill. */
@@ -1259,28 +1403,6 @@ body[data-auth="out"] {
   background: var(--yellow-bg);
   color: var(--yellow);
   font-size: 0.8rem;
-}
-
-/* ── Metrics ── */
-.app-metrics {
-  font-size: 0.72rem;
-  color: var(--text-soft);
-  margin-top: 0.1rem;
-  margin-bottom: 0.85rem;
-  padding: 0.7rem 0;
-  min-height: 1em;
-  font-family: var(--mono);
-  letter-spacing: -0.01em;
-  border-top: 1px dashed var(--line);
-  border-bottom: 1px dashed var(--line);
-}
-
-.app-metrics:empty {
-  /* The CPU/RAM line is empty until an app is running. Keep its reserved height
-     (from the base rule) so the action buttons below do NOT shift down when the
-     line fills in on start; just hide the dashed frame so a stopped card shows a
-     blank gap rather than an empty box. */
-  border-color: transparent;
 }
 
 /* ── Audit table ── */
@@ -1880,18 +2002,20 @@ fieldset.settings-block { min-width: 0; }
   cursor: not-allowed;
 }
 
-/* Primary CTA on app cards — used on the empty-state "Deploy" button */
+/* On an undeployed card, Deploy is the recommended next action. Keep it tonal:
+   it should not compete with the page-level New app button. */
 .app-actions .btn-primary {
-  background: var(--brand-primary);
-  color: var(--bg-deep);
-  border-color: var(--brand-primary);
-  font-weight: 700;
+  background: rgba(56,189,248,0.08);
+  color: var(--cyan-bright);
+  border-color: rgba(56,189,248,0.28);
+  font-weight: 650;
+  box-shadow: none;
 }
 
 .app-actions .btn-primary:hover {
-  background: var(--cyan);
-  color: var(--bg-deep);
-  border-color: var(--cyan);
+  background: rgba(56,189,248,0.13);
+  color: var(--cyan-bright);
+  border-color: rgba(56,189,248,0.48);
 }
 
 /* ── Buttons inside any modal-actions row ── */
@@ -2164,13 +2288,16 @@ fieldset.settings-block { min-width: 0; }
     font-size: 2rem;
   }
 
-  .app-grid {
-    grid-template-columns: 1fr;
-  }
+  .app-grid-flat,
+  .app-grid-group-body { grid-template-columns: minmax(0, 1fr); }
 
   .app-actions {
     flex-wrap: wrap;
   }
+
+  .app-actions a,
+  .app-actions button,
+  .app-actions .kebab-menu > button { min-height: 44px; height: 44px; }
 
   /* Search field shrinks instead of pushing the toolbar buttons off-screen. */
   .apps-search { width: auto; min-width: 0; flex: 1 1 8rem; }
@@ -3642,7 +3769,7 @@ fieldset.settings-block { min-width: 0; }
   background: rgba(var(--surface-rgb),0.5);
   color: var(--text-soft);
   font-family: var(--font);
-  transition: all var(--ease);
+  transition: background var(--ease), border-color var(--ease), color var(--ease);
 }
 .kebab-menu > button:hover,
 .kebab-menu > button[aria-expanded="true"] {
@@ -3666,13 +3793,20 @@ fieldset.settings-block { min-width: 0; }
 .kebab-list button {
   display: block;
   width: 100%;
-  padding: 6px 10px;
+  min-height: 40px;
+  padding: 8px 10px;
   background: transparent;
   border: none;
   text-align: left;
   color: var(--text-soft);
   cursor: pointer;
   border-radius: 4px;
+}
+.kebab-list button:focus-visible {
+  outline: 2px solid var(--cyan-bright);
+  outline-offset: -2px;
+  background: rgba(56, 189, 248, 0.1);
+  color: var(--cyan-bright);
 }
 
 /* ── App detail: Overview tab ─────────────────────────────────────────────── */
@@ -3720,11 +3854,6 @@ fieldset.settings-block { min-width: 0; }
 .fleet-health-chip { color: var(--danger, #f87171); font-size: 0.8rem; padding: 2px 8px; border: 1px solid var(--line); border-radius: 12px; }
 .fleet-health-lost { border-color: var(--danger, #f87171); }
 .replica-cpu, .replica-ram { color: var(--text-muted); font-variant-numeric: tabular-nums; }
-.app-card-body-link { display: block; color: inherit; text-decoration: none; }
-/* No underline on hover: the card already signals it is clickable (lift +
-   cyan border + accent dot). The title shifts to the brand cyan instead, an
-   affordance that ties into that hover system without reading as a text link. */
-.app-card-body-link:hover strong { color: var(--cyan-bright); }
 .kebab-list button:hover { background: rgba(56, 189, 248, 0.1); color: var(--cyan-bright); }
 
 /* ── App detail: Logs tab ─────────────────────────────────────────────────── */
@@ -4183,6 +4312,41 @@ footer.brand-footer a { color:inherit; }
 .lp-section { font-size: 0.9rem; font-weight: 650; color: var(--text-soft); letter-spacing: -0.01em; margin: 6px 0 12px; }
 .lp-section-icon { margin-right: 6px; }
 .lp-results > .lp-grid:not(:last-child) { margin-bottom: 22px; }
+
+.lp-group + .lp-group { margin-top: 22px; }
+.lp-results > .lp-grid + .lp-group,
+.lp-results > .lp-section + .lp-grid + .lp-group { margin-top: 22px; }
+.lp-group-header {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.lp-group-heading { flex: 1 1 auto; min-width: 0; }
+.lp-group-toggle {
+  max-width: 100%;
+  margin-left: -0.35rem;
+  padding: 0.28rem 0.35rem;
+  border-radius: 6px;
+  color: var(--text-soft);
+  font-size: 0.9rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.lp-group-toggle:hover { color: var(--text); background: var(--surface-2); }
+.lp-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-group-icon { flex: none; line-height: 1; }
+.lp-group-count {
+  flex: none;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  color: var(--text-soft);
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+}
 
 /* Responsive tile grid: fills the row, no media query needed. The 280px floor
    keeps tiles wide enough that a one-line description renders without clipping. */

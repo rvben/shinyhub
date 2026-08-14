@@ -21,7 +21,9 @@ export function appStatusView(app, formatStatus) {
   if (app.deploying) {
     return { state: 'deploying', text: 'Deploying' };
   }
-  const neverSucceeded = (app.deploy_count || 0) === 0;
+  const neverSucceeded = (app.deploy_count || 0) === 0
+    && (Number(app.release_number) || 0) === 0
+    && !app.released_at;
   if (neverSucceeded && app.last_deployment_status === 'failed') {
     return { state: 'failed', text: 'Failed' };
   }

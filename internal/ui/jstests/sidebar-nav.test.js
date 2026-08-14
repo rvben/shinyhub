@@ -84,7 +84,10 @@ test('renderSidebarApps: builds grouped rows and marks exactly one active from c
   assert.equal(active.length, 1);
   assert.equal(active[0].getAttribute('data-app-slug'), 'demo');
   assert.equal(active[0].getAttribute('aria-current'), 'page');
-  assert.ok([...c.querySelectorAll('.sidebar-project')].some((e) => e.textContent === 'default'));
+  const projectToggle = c.querySelector('.sidebar-project-group-toggle');
+  assert.equal(projectToggle.querySelector('.sidebar-project-group-name').textContent, 'default');
+  assert.equal(projectToggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(projectToggle.getAttribute('aria-label'), 'default, 2 apps');
 });
 
 test('renderSidebarApps: deep-link race — the renderer marks active even when run after the mount', () => {
@@ -134,11 +137,41 @@ test('groupAppsByProject: named projects order by display name, not slug', () =>
   assert.deepEqual(groups.map((g) => g.project), ['zzz', 'aaa']);
 });
 
-test('renderSidebarApps: the heading shows the display name, not the slug', () => {
+test('renderSidebarApps: the project disclosure shows the display name, not the slug', () => {
   const d = container();
   renderSidebarApps(d.getElementById('c'), [
     { slug: 'a', name: 'A', status: 'running', deploy_count: 1, project_slug: 'team', project_name: 'Team Tools' },
   ], '/', badgeFor, d);
-  const headings = [...d.querySelectorAll('.sidebar-project')].map((e) => e.textContent);
+  const headings = [...d.querySelectorAll('.sidebar-project-group-name')].map((e) => e.textContent);
   assert.deepEqual(headings, ['Team Tools']);
+});
+
+test('renderSidebarApps: projects collapse independently and remember their state', () => {
+  const d = container();
+  const c = d.getElementById('c');
+  renderSidebarApps(c, [
+    { slug: 'a', name: 'A', status: 'running', project_slug: 'alpha' },
+    { slug: 'b', name: 'B', status: 'running', project_slug: 'beta' },
+  ], '/', badgeFor, d);
+  const toggles = c.querySelectorAll('.sidebar-project-group-toggle');
+  toggles[0].click();
+  assert.equal(toggles[0].getAttribute('aria-expanded'), 'false');
+  assert.equal(toggles[1].getAttribute('aria-expanded'), 'true');
+  assert.equal(c.querySelectorAll('.sidebar-project-group-body')[0].hidden, true);
+});
+
+test('highlightSidebarApp reopens the active app project without changing other groups', () => {
+  const d = container();
+  const c = d.getElementById('c');
+  renderSidebarApps(c, [
+    { slug: 'a', name: 'A', status: 'running', project_slug: 'alpha' },
+    { slug: 'b', name: 'B', status: 'running', project_slug: 'beta' },
+  ], '/', badgeFor, d);
+  const toggles = c.querySelectorAll('.sidebar-project-group-toggle');
+  toggles[0].click();
+  toggles[1].click();
+  highlightSidebarApp(c, '/apps/a/logs');
+  assert.equal(toggles[0].getAttribute('aria-expanded'), 'true');
+  assert.equal(toggles[1].getAttribute('aria-expanded'), 'false');
+  assert.equal(c.querySelector('.sidebar-app.active').dataset.appSlug, 'a');
 });

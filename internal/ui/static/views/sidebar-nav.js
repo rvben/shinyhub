@@ -11,6 +11,7 @@
 // failed-only deploy shows "Failed" and a never-deployed app shows "Awaiting
 // deploy" - never mislabelled.
 import { groupApps, UNGROUPED } from './project-groups.js';
+import { createGroupDisclosure } from './group-disclosure.js';
 
 // Group apps by project_slug. Apps with no project_slug render UNGROUPED at the
 // top (project: null); named projects follow under their display-name heading;
@@ -71,16 +72,40 @@ export function renderSidebarApps(container, apps, currentPath, badgeFor, doc) {
 
   const heading = d.createElement('p');
   heading.className = 'sidebar-apps-heading';
-  heading.textContent = 'Apps';
+  const headingLabel = d.createElement('span');
+  headingLabel.textContent = 'Apps';
+  const headingCount = d.createElement('span');
+  headingCount.className = 'sidebar-apps-count';
+  headingCount.textContent = String(list.length);
+  headingCount.setAttribute('aria-hidden', 'true');
+  heading.appendChild(headingLabel);
+  heading.appendChild(headingCount);
   container.appendChild(heading);
 
-  for (const group of groupAppsByProject(list)) {
-    if (group.project) {
-      const gh = d.createElement('p');
-      gh.className = 'sidebar-project';
-      gh.textContent = group.iconEmoji ? `${group.iconEmoji} ${group.name}` : group.name;
-      gh.title = group.name === group.project ? group.project : `${group.name} (${group.project})`;
-      container.appendChild(gh);
+  const groups = groupAppsByProject(list);
+  for (const group of groups) {
+    // Keep a lone ungrouped list quiet. Once projects exist, name the loose
+    // bucket "Other apps" so its place in the tree is unambiguous.
+    const grouped = !!group.project || groups.length > 1;
+    let groupBody = container;
+    if (grouped) {
+      const label = group.project ? group.name : 'Other apps';
+      const active = group.apps.some((app) =>
+        isSidebarAppActive(`/apps/${app.slug}`, currentPath || ''));
+      const disclosure = createGroupDisclosure(d, {
+        view: 'sidebar',
+        groupKey: group.project || UNGROUPED,
+        label,
+        count: group.apps.length,
+        iconEmoji: group.iconEmoji,
+        classPrefix: 'sidebar-project',
+        forceExpanded: active,
+      });
+      disclosure.toggle.title = group.project && group.name !== group.project
+        ? `${group.name} (${group.project})`
+        : label;
+      container.appendChild(disclosure.root);
+      groupBody = disclosure.body;
     }
     for (const app of group.apps) {
       const m = sidebarAppModel(app, currentPath, badgeFor);
@@ -108,7 +133,7 @@ export function renderSidebarApps(container, apps, currentPath, badgeFor, doc) {
 
       a.appendChild(dot);
       a.appendChild(name);
-      container.appendChild(a);
+      groupBody.appendChild(a);
     }
   }
 }
@@ -124,5 +149,15 @@ export function highlightSidebarApp(container, currentPath) {
     a.classList.toggle('active', active);
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
+    if (active) {
+      const group = a.closest('.group-disclosure');
+      if (group) {
+        const body = group.querySelector('.group-disclosure-body');
+        const toggle = group.querySelector('.group-disclosure-toggle');
+        if (body) body.hidden = false;
+        if (toggle) toggle.setAttribute('aria-expanded', 'true');
+        group.classList.remove('is-collapsed');
+      }
+    }
   }
 }

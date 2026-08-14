@@ -17,12 +17,12 @@ import { appCardBadge, updateCardStatusBadge, updateStatusPill } from '/static/v
 import { renderSidebarApps, highlightSidebarApp } from '/static/views/sidebar-nav.js';
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { headerStats } from '/static/views/stat-format.js';
-import { cardMetricsLabel, instanceCountLabel } from '/static/views/card-metrics.js';
+import { appCardFacts } from '/static/views/app-card-facts.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
 import { applyLoginProviders } from '/static/views/login-providers.js';
 import { applyBranding } from '/static/views/branding.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
-import { makeFleetBadge, segmentApps } from '/static/views/fleet-ui.js';
+import { segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
 import { workerCapacityLine } from '/static/views/worker-isolation.js';
@@ -34,6 +34,7 @@ import { userRowCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
 import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
+import { createGroupDisclosure } from '/static/views/group-disclosure.js';
 import { buildProjectPatchBody } from '/static/views/project-edit-body.js';
 import {
   CLI_CONNECT_STORAGE_KEY,
@@ -103,19 +104,45 @@ const kebabControls = new WeakMap();
 // it, instead of writing `hidden`/aria-expanded/kebab-open a second time.
 function wireKebab(button, list, container) {
   if (!button || !list) return null;
+  const availableItems = () => [...list.querySelectorAll('button:not([disabled])')]
+    .filter(item => !item.closest('[hidden]'));
   function onDocClick(e) {
     if (!list.contains(e.target) && !button.contains(e.target)) setOpen(false);
   }
   function onKey(e) {
-    if (e.key === 'Escape') { setOpen(false); button.focus(); }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      setOpen(false);
+      button.focus();
+      return;
+    }
+    if (e.key === 'Tab') {
+      setOpen(false);
+      return;
+    }
+    const items = availableItems();
+    if (!items.length || !list.contains(document.activeElement)) return;
+    const current = Math.max(0, items.indexOf(document.activeElement));
+    let next = null;
+    if (e.key === 'ArrowDown') next = items[(current + 1) % items.length];
+    if (e.key === 'ArrowUp') next = items[(current - 1 + items.length) % items.length];
+    if (e.key === 'Home') next = items[0];
+    if (e.key === 'End') next = items.at(-1);
+    if (next) {
+      e.preventDefault();
+      next.focus();
+    }
   }
-  function setOpen(open) {
+  function setOpen(open, focus = '') {
     list.hidden = !open;
     button.setAttribute('aria-expanded', String(open));
     if (container) container.classList.toggle('kebab-open', open);
     if (open) {
       document.addEventListener('click', onDocClick, true);
       document.addEventListener('keydown', onKey, true);
+      const items = availableItems();
+      if (focus === 'first') items[0]?.focus();
+      if (focus === 'last') items.at(-1)?.focus();
     } else {
       document.removeEventListener('click', onDocClick, true);
       document.removeEventListener('keydown', onKey, true);
@@ -123,7 +150,13 @@ function wireKebab(button, list, container) {
   }
   button.addEventListener('click', (e) => {
     e.stopPropagation();
-    setOpen(list.hidden);
+    const opening = list.hidden;
+    setOpen(opening, opening ? 'first' : '');
+  });
+  button.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    setOpen(true, e.key === 'ArrowDown' ? 'first' : 'last');
   });
   list.addEventListener('click', (e) => {
     if (e.target.closest('button')) setOpen(false);
@@ -435,7 +468,18 @@ document.addEventListener('DOMContentLoaded', () => {
   // Renders grouped apps into the provided grid and empty-state elements. Takes
   // explicit DOM references so mountAppsGrid can call it from the view module
   // without closing over the closure-level appGrid/emptyState constants.
-  function renderGridVerbatim(groups, gridEl, emptyEl) {
+  function renderCardFacts(container, app, live = null) {
+    container.textContent = '';
+    for (const item of appCardFacts(app, live)) {
+      const el = document.createElement('span');
+      el.className = `app-card-fact${item.tone ? ` is-${item.tone}` : ''}`;
+      el.textContent = item.text;
+      if (item.title) el.title = item.title;
+      container.appendChild(el);
+    }
+  }
+
+  function renderGridVerbatim(groups, gridEl, emptyEl, options = {}) {
     gridEl.textContent = '';
     const total = groups.reduce((n, g) => n + g.apps.length, 0);
     const empty = total === 0;
@@ -448,42 +492,73 @@ document.addEventListener('DOMContentLoaded', () => {
     const soleUngrouped = groups.length === 1 && groups[0].project === '';
 
     for (const group of groups) {
-      if (!soleUngrouped) {
-        const heading = document.createElement('h2');
-        heading.className = 'app-grid-group-heading';
-        if (group.iconEmoji) {
-          const icon = document.createElement('span');
-          icon.className = 'app-grid-group-icon';
-          icon.textContent = group.iconEmoji;
-          // Decorative: the heading text already names the project.
-          icon.setAttribute('aria-hidden', 'true');
-          heading.appendChild(icon);
-        }
-        const label = document.createElement('span');
-        label.textContent = group.name || 'All apps';
-        heading.appendChild(label);
+      let cardHost;
+      if (soleUngrouped) {
+        cardHost = document.createElement('div');
+        cardHost.className = 'app-grid-flat';
+        gridEl.appendChild(cardHost);
+      } else {
+        const disclosure = createGroupDisclosure(document, {
+          view: 'apps',
+          groupKey: group.project,
+          label: group.name || 'Other apps',
+          count: group.apps.length,
+          iconEmoji: group.iconEmoji,
+          classPrefix: 'app-grid',
+          forceExpanded: !!options.forceExpanded,
+        });
         if (group.project && isOperatorRole(state.user)) {
           const edit = document.createElement('button');
           edit.type = 'button';
           edit.className = 'app-grid-group-edit';
-          edit.textContent = 'Edit';
           edit.setAttribute('aria-label', `Edit project ${group.name}`);
+          edit.title = `Edit ${group.name}`;
+          const editIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          editIcon.setAttribute('viewBox', '0 0 20 20');
+          editIcon.setAttribute('fill', 'none');
+          editIcon.setAttribute('stroke', 'currentColor');
+          editIcon.setAttribute('stroke-width', '1.65');
+          editIcon.setAttribute('stroke-linecap', 'round');
+          editIcon.setAttribute('stroke-linejoin', 'round');
+          editIcon.setAttribute('aria-hidden', 'true');
+          const editPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          editPath.setAttribute('d', 'M12.9 3.1a1.7 1.7 0 0 1 2.4 2.4L7 13.8l-3.2.8.8-3.2 8.3-8.3Z');
+          editIcon.appendChild(editPath);
+          edit.appendChild(editIcon);
           edit.addEventListener('click', () => { openProjectEditModal(group); });
-          heading.appendChild(edit);
+          disclosure.header.appendChild(edit);
         }
-        gridEl.appendChild(heading);
+        gridEl.appendChild(disclosure.root);
+        cardHost = disclosure.body;
       }
 
     for (const app of group.apps) {
       const card = document.createElement('div');
       card.className = 'app-card';
+      card.dataset.slug = app.slug;
 
       const header = document.createElement('div');
       header.className = 'app-header';
 
+      const identity = document.createElement('div');
+      identity.className = 'app-card-identity';
+      const titleLink = document.createElement('a');
+      titleLink.href = `/apps/${app.slug}`;
+      titleLink.setAttribute('data-nav', '');
+      titleLink.className = 'app-card-title';
+      titleLink.setAttribute('aria-label', `Manage ${app.name}`);
       const name = document.createElement('strong');
       name.textContent = app.name;
-      header.appendChild(name);
+      const manageArrow = document.createElement('span');
+      manageArrow.className = 'app-card-manage-arrow';
+      manageArrow.setAttribute('aria-hidden', 'true');
+      manageArrow.textContent = '›';
+      titleLink.append(name, manageArrow);
+      const slug = document.createElement('div');
+      slug.className = 'app-card-slug';
+      slug.textContent = `/${app.slug}`;
+      identity.append(titleLink, slug);
+      header.appendChild(identity);
 
       // Every badge goes in one wrapping container rather than straight into
       // the header row. The header is a nowrap flex row inside a ~310px grid
@@ -504,44 +579,10 @@ document.addEventListener('DOMContentLoaded', () => {
       badge.dataset.slug = app.slug;
       badges.appendChild(badge);
 
-      const fleetBadge = makeFleetBadge(document, app, { compact: true });
-      if (fleetBadge) badges.appendChild(fleetBadge);
-
-      // Autoscale badge: visible when per-app autoscale is enabled.
-      // app.autoscale_enabled is already in the apps-list payload (db.App appColumns).
-      if (app.autoscale_enabled) {
-        const autoBadge = document.createElement('span');
-        autoBadge.className = 'badge badge-autoscale';
-        autoBadge.textContent = 'auto';
-        autoBadge.title = 'Autoscale enabled';
-        badges.appendChild(autoBadge);
-      }
-
-      const meta = document.createElement('div');
-      meta.className = 'app-meta';
-
-      const slugWrap = document.createElement('span');
-      slugWrap.className = 'app-slug-wrap';
-      const slug = document.createElement('span');
-      slug.textContent = `/${app.slug}`;
-      slugWrap.appendChild(slug);
-      slugWrap.appendChild(makeCopyButton(app.slug, `Copy slug ${app.slug}`));
-      meta.appendChild(slugWrap);
-
-      const deployCount = document.createElement('span');
-      const n = app.deploy_count || 0;
-      deployCount.textContent = `${n} ${n === 1 ? 'deploy' : 'deploys'}`;
-      meta.appendChild(deployCount);
-
-      // Instance count: shown only for scaled apps (>1 replica), so the card's
-      // summed CPU/RAM below reads as a total across this many instances.
-      const instances = instanceCountLabel(app);
-      if (instances) {
-        const instancesEl = document.createElement('span');
-        instancesEl.className = 'app-instances';
-        instancesEl.textContent = instances;
-        meta.appendChild(instancesEl);
-      }
+      const facts = document.createElement('div');
+      facts.className = 'app-card-facts';
+      facts.dataset.slug = app.slug;
+      renderCardFacts(facts, app);
 
       const actions = document.createElement('div');
       actions.className = 'app-actions';
@@ -554,19 +595,28 @@ document.addEventListener('DOMContentLoaded', () => {
         openLink.href = `/app/${app.slug}/`;
         openLink.target = '_blank';
         openLink.rel = 'noopener noreferrer';
-        openLink.textContent = 'Open';
-        openLink.setAttribute('aria-label', `Open ${app.name}`);
+        openLink.append(document.createTextNode('Open app'));
+        const externalArrow = document.createElement('span');
+        externalArrow.setAttribute('aria-hidden', 'true');
+        externalArrow.textContent = '↗';
+        openLink.appendChild(externalArrow);
+        openLink.setAttribute('aria-label', `Open ${app.name} app in a new tab`);
         actions.appendChild(openLink);
       }
 
       if (canManage) {
-        const deployButton = document.createElement('button');
-        deployButton.type = 'button';
-        deployButton.textContent = 'Deploy';
-        if (cardActions.deployIsPrimary) deployButton.className = 'btn-primary';
-        deployButton.setAttribute('aria-label', `Deploy new bundle to ${app.name}`);
-        deployButton.addEventListener('click', () => openDeployModal(app));
-        actions.appendChild(deployButton);
+        // First deploy is required activation, so it stays visible. Once the
+        // app has a bundle, manual redeploy remains available in the overflow
+        // menu without occupying every card (CI/CLI may own that workflow).
+        if (cardActions.deployIsPrimary) {
+          const deployButton = document.createElement('button');
+          deployButton.type = 'button';
+          deployButton.textContent = 'Deploy first release';
+          deployButton.className = 'btn-primary';
+          deployButton.setAttribute('aria-label', `Deploy first bundle to ${app.name}`);
+          deployButton.addEventListener('click', () => openDeployModal(app));
+          actions.appendChild(deployButton);
+        }
 
         // The menu lists whichever lifecycle actions apply to this app right
         // now, so a stopped app still gets a menu (holding Start) where a
@@ -575,6 +625,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // state, so the metrics poller can re-sync them in place when an app
         // hibernates or wakes between grid loads.
         const lifecycleItems = [
+          ['redeploy', 'Deploy new bundle', () => openDeployModal(app)],
           ['restart', 'Restart', restart],
           ['sleep', 'Sleep', sleepApp],
           ['stop', 'Stop', stopApp],
@@ -584,7 +635,7 @@ document.addEventListener('DOMContentLoaded', () => {
         kebab.className = 'kebab-menu';
         kebab.dataset.slug = app.slug;
         const rows = lifecycleItems
-          .map(([action, label]) => `<li role="menuitem" hidden><button type="button" data-kebab="${action}">${label}</button></li>`)
+          .map(([action, label]) => `<li role="none" hidden><button type="button" role="menuitem" data-kebab="${action}">${label}</button></li>`)
           .join('\n              ');
         kebab.innerHTML = `
           <button type="button" aria-haspopup="menu" aria-expanded="false">⋯</button>
@@ -604,20 +655,10 @@ document.addEventListener('DOMContentLoaded', () => {
         syncCardActions(kebab, cardActions);
       }
 
-      const metricsLine = document.createElement('div');
-      metricsLine.className = 'app-metrics';
-      metricsLine.dataset.slug = app.slug;
-
-      const link = document.createElement('a');
-      link.href = `/apps/${app.slug}`;
-      link.setAttribute('data-nav', '');
-      link.className = 'app-card-body-link';
-      link.appendChild(header);
-      link.appendChild(meta);
-      link.appendChild(metricsLine);
-      card.appendChild(link);
+      card.appendChild(header);
+      card.appendChild(facts);
       card.appendChild(actions);
-      gridEl.appendChild(card);
+      cardHost.appendChild(card);
     }
     }
   }
@@ -646,7 +687,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // sections by "most recent deploy" would make headings jump between
     // renders, which defeats the purpose of an index.
     const sortKey = sortEl ? sortEl.value : 'default';
-    renderGridVerbatim(groupAppsForGrid(apps, { sortKey }), appGrid, emptyState);
+    renderGridVerbatim(
+      groupAppsForGrid(apps, { sortKey }),
+      appGrid,
+      emptyState,
+      { forceExpanded: !!q },
+    );
   }
 
   function showLoggedOut() {
@@ -4612,18 +4658,10 @@ document.addEventListener('DOMContentLoaded', () => {
           syncCardActions(kebabEl, appCardActions(gridApp, canManageApp(state.user, gridApp)));
         }
       }
-      // Grid card.
-      const gridEl = appGrid.querySelector(`.app-metrics[data-slug="${slug}"]`);
-      if (gridEl) {
-        // CPU/RAM are summed across replicas (matching the detail header) so a
-        // scaled app shows its true total, not just the first replica's slice.
-        // Empty while not running (the line keeps its reserved height); "n/a"
-        // for PID-less backends (Fargate / remote_docker).
-        gridEl.textContent = cardMetricsLabel(m, (gridApp && gridApp.replicas) || 1);
-        gridEl.title = (m.status === 'running' && m.metrics_available === false)
-          ? 'Live CPU/RAM not collected for this backend (Fargate/remote tasks: see CloudWatch / the worker host)'
-          : '';
-      }
+      // The index stays scan-first: refresh release/readiness facts from live
+      // replica state, while detailed CPU/RAM remains on the app overview.
+      const factsEl = appGrid.querySelector(`.app-card-facts[data-slug="${slug}"]`);
+      if (factsEl && gridApp) renderCardFacts(factsEl, gridApp, m);
       // Detail header (only when the detail view for this slug is visible).
       const detailView = document.getElementById('app-detail-view');
       if (!detailView.hidden && location.pathname.startsWith(`/apps/${slug}`)) {
@@ -4850,7 +4888,7 @@ document.addEventListener('DOMContentLoaded', () => {
     openDeployModal,
   });
 
-  // syncCardActions shows exactly the lifecycle rows that apply to a card's
+  // syncCardActions shows exactly the secondary rows that apply to a card's
   // current state, and hides the whole kebab when none do (a viewer, or an app
   // with nothing to act on). Called at render and again from the metrics
   // poller, so a card whose badge flips to "Sleeping" or "Running" on its own
@@ -4859,6 +4897,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!kebab) return;
     let anyShown = false;
     for (const [action, show] of [
+      ['redeploy', acts.showRedeploy],
       ['restart', acts.showRestart],
       ['sleep', acts.showSleep],
       ['stop', acts.showStop],
@@ -5179,9 +5218,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     // Only consume the stored slug once we've confirmed we can act on it.
     try { sessionStorage.removeItem('pendingDeploy'); } catch { /* ignore */ }
-    const card = [...appGrid.querySelectorAll('.app-card')].find(
-      c => c.querySelector('.app-meta span')?.textContent === `/${slug}`
-    );
+    const card = appGrid.querySelector(`.app-card[data-slug="${slug}"]`);
     if (card) card.scrollIntoView({behavior: 'smooth', block: 'center'});
     openDeployModal(app);
   }
