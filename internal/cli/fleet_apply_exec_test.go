@@ -954,6 +954,13 @@ func TestResolveFirstFires_RestartAfterWarm(t *testing.T) {
 	}
 }
 
+func TestFleetFirstFireLabelQualifiesScheduleWithApp(t *testing.T) {
+	got := fleetFirstFireLabel("reporting", "refresh-database")
+	if got != "reporting/refresh-database" {
+		t.Fatalf("fleetFirstFireLabel = %q, want %q", got, "reporting/refresh-database")
+	}
+}
+
 func TestResolveFirstFires_DoesNotRestartWhileOverlapStillWarms(t *testing.T) {
 	var restartHits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

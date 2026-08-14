@@ -164,7 +164,11 @@ func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt con
 		oc := firstFireOutcome{Schedule: ref.Schedule, RunID: ref.RunID}
 		if opt.waitForWarm || opt.restartAfterWarm {
 			poll := func() (string, error) { return pollScheduleRunStatus(cfg, slug, ref.ScheduleID, ref.RunID) }
-			status, werr := waitForFirstFireLoop(poll, opt.healthTimeout, 2*time.Second, fleetHealthProgressInterval, time.Now, time.Sleep, out, ref.Schedule)
+			// Fleet apps converge concurrently, and schedule names are only unique
+			// within an app. Include the slug in live progress so two apps with a
+			// same-named schedule remain distinguishable when their lines interleave.
+			label := fleetFirstFireLabel(slug, ref.Schedule)
+			status, werr := waitForFirstFireLoop(poll, opt.healthTimeout, 2*time.Second, fleetHealthProgressInterval, time.Now, time.Sleep, out, label)
 			oc.Status = status
 			res.firstFires = append(res.firstFires, oc)
 			if werr == nil && !firstFireStatusOK(status) {
@@ -190,6 +194,10 @@ func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt con
 		res.warmRestarted = restarted
 	}
 	return nil
+}
+
+func fleetFirstFireLabel(slug, schedule string) string {
+	return slug + "/" + schedule
 }
 
 // applyConfigDrift patches exactly the drifted fleet-declared keys. A
