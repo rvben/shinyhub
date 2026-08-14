@@ -122,6 +122,57 @@ func TestManagerStartStop(t *testing.T) {
 	}
 }
 
+func TestManagerCreatesImmutableLogRunPerStart(t *testing.T) {
+	appsDir := t.TempDir()
+	rt := newFakeRuntime()
+	m := process.NewManager(appsDir, rt)
+	var mu sync.Mutex
+	var begun, running, finished []process.LogRun
+	m.SetLogRunRecorder(process.LogRunRecorder{
+		Begin:   func(run process.LogRun) error { mu.Lock(); begun = append(begun, run); mu.Unlock(); return nil },
+		Running: func(run process.LogRun) error { mu.Lock(); running = append(running, run); mu.Unlock(); return nil },
+		Finish:  func(run process.LogRun) error { mu.Lock(); finished = append(finished, run); mu.Unlock(); return nil },
+	})
+	start := func() *process.ProcessInfo {
+		info, err := m.Start(process.StartParams{
+			Slug: "demo", AppID: 42, Index: 1, Dir: t.TempDir(), Command: []string{"app"},
+			Port: 19001, AppVersion: "v7", DeploymentID: 70,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	first := start()
+	if err := m.StopReplica("demo", 1); err != nil {
+		t.Fatal(err)
+	}
+	second := start()
+	if err := m.StopReplica("demo", 1); err != nil {
+		t.Fatal(err)
+	}
+	if first.LogRunID == "" || second.LogRunID == "" || first.LogRunID == second.LogRunID {
+		t.Fatalf("run IDs = %q, %q", first.LogRunID, second.LogRunID)
+	}
+	runs, err := m.LogRuns("demo")
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("LogRuns = %+v, %v", runs, err)
+	}
+	for _, id := range []string{first.LogRunID, second.LogRunID} {
+		if _, ok := m.LogRunReader("demo", 1, id); !ok {
+			t.Errorf("missing reader for %s", id)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(begun) != 2 || len(running) != 2 || len(finished) != 2 {
+		t.Fatalf("callbacks begin=%d running=%d finish=%d", len(begun), len(running), len(finished))
+	}
+	if begun[0].Status != process.StatusStarting || running[0].Provider != "native" || finished[0].Status != process.StatusStopped {
+		t.Fatalf("lifecycle = begin %+v, running %+v, finish %+v", begun[0], running[0], finished[0])
+	}
+}
+
 // TestManagerStopAll verifies StopAll terminates every tracked app across
 // slugs, backing the server.shutdown_apps=stop path.
 func TestManagerStopAll(t *testing.T) {

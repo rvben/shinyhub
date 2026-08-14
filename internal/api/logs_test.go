@@ -116,6 +116,87 @@ func TestHandleLogSources_MergesLiveRowsAndRetainedScaledDownLogs(t *testing.T) 
 	}
 }
 
+func TestHandleLogSourcesAndLogsExposeImmutableRunHistory(t *testing.T) {
+	srv, store, appsDir := newLogsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+	app, _ := store.GetAppBySlug("myapp")
+	olderID := "11111111-1111-4111-8111-111111111111"
+	newerID := "22222222-2222-4222-8222-222222222222"
+	base := time.Unix(1_700_000_000, 0)
+	for _, p := range []db.CreateAppLogRunParams{
+		{RunID: olderID, AppID: app.ID, ReplicaIndex: 0, AppVersion: "v1", Tier: "local", Status: "starting", StartedAt: base},
+		{RunID: newerID, AppID: app.ID, ReplicaIndex: 0, AppVersion: "v2", Tier: "local", Status: "starting", StartedAt: base.Add(time.Minute)},
+	} {
+		if err := store.CreateAppLogRun(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.FinishAppLogRun(olderID, "stopped", base.Add(30*time.Second), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkAppLogRunRunning(newerID, "native"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, Status: "running", Provider: "native", Tier: "local", AppVersion: "v2"}); err != nil {
+		t.Fatal(err)
+	}
+	logDir := filepath.Join(appsDir, "myapp", "logs")
+	if err := os.MkdirAll(logDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "replica-0-"+olderID+".log"), []byte("old run only\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "replica-0-"+newerID+".log"), []byte("new run only\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	request := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+	rec := request("/api/apps/myapp/logs/sources")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sources status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Sources []struct {
+			SourceID string `json:"source_id"`
+			RunID    string `json:"run_id"`
+			Current  bool   `json:"current"`
+			Replica  int    `json:"replica"`
+			Status   string `json:"status"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Sources) != 2 {
+		t.Fatalf("sources=%+v", body.Sources)
+	}
+	if body.Sources[0].RunID != newerID || !body.Sources[0].Current || body.Sources[0].Status != "running" {
+		t.Errorf("current=%+v", body.Sources[0])
+	}
+	if body.Sources[1].RunID != olderID || body.Sources[1].Current || body.Sources[1].Status != "stopped" {
+		t.Errorf("history=%+v", body.Sources[1])
+	}
+	rec = request("/api/apps/myapp/logs?replica=0&run=" + olderID + "&follow=false")
+	if rec.Code != http.StatusOK || rec.Body.String() != "old run only\n" {
+		t.Fatalf("old run status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	rec = request("/api/apps/myapp/logs?replica=1&run=" + olderID + "&follow=false")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("mismatched replica status=%d", rec.Code)
+	}
+}
+
 // TestHandleLogs_TailLimitsInitialBurst verifies that ?tail=N caps the number
 // of initial lines emitted. With a 5-line file and ?tail=2, only the last two
 // lines should appear.

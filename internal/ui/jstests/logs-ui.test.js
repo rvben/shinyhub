@@ -14,18 +14,18 @@ import {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
 
-test('normalizeLogSources accepts API and replica-status shapes, deduplicates, and sorts', () => {
+test('normalizeLogSources keeps distinct runs of one replica and sorts current first', () => {
   const got = normalizeLogSources([
-    { index: 3, status: 'STOPPED', tier: 'worker' },
+    { source_id: 'old-3', index: 3, status: 'STOPPED', tier: 'worker', current: false, started_at: '2026-01-01T00:00:00Z' },
     { replica: 0, status: 'running', provider: 'native' },
-    { replica: 3, status: 'lost', has_log: true },
+    { source_id: 'new-3', replica: 3, status: 'lost', has_log: true, current: true },
     { replica: -1, status: 'running' },
   ]);
-  assert.deepEqual(got.map((s) => s.replica), [0, 3]);
+  assert.deepEqual(got.map((s) => s.source_id), ['replica-0', 'new-3', 'old-3']);
   assert.equal(got[0].status, 'running');
   assert.equal(got[1].status, 'lost');
-  assert.equal(got[1].tier, 'worker');
   assert.equal(got[1].has_log, true);
+  assert.equal(got[2].tier, 'worker');
 });
 
 test('source labels and liveness are explicit', () => {
@@ -97,7 +97,7 @@ test('viewer merges live replicas, identifies every line, and loads ended logs o
   await tick();
 
   const panel = dom.window.document.querySelector('#panel');
-  assert.match(panel.querySelector('#logs-source').textContent, /All replicas \(2 live, 3 retained\)/);
+  assert.match(panel.querySelector('#logs-source').textContent, /All current replicas \(2 live, 3 total\)/);
   assert.deepEqual(
     [...panel.querySelectorAll('.log-entry-source')].map((el) => el.textContent),
     ['#4', '#4', '#0', '#1'],

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
 )
 
@@ -22,13 +23,20 @@ const defaultLogTail = 200
 const maxLogTail = 10000
 
 type logSourceResponse struct {
+	SourceID     string     `json:"source_id"`
+	RunID        string     `json:"run_id,omitempty"`
 	Replica      int        `json:"replica"`
+	Current      bool       `json:"current"`
+	Legacy       bool       `json:"legacy,omitempty"`
 	Status       string     `json:"status"`
 	Provider     string     `json:"provider,omitempty"`
 	Tier         string     `json:"tier,omitempty"`
 	AppVersion   string     `json:"app_version,omitempty"`
 	DeploymentID *int64     `json:"deployment_id,omitempty"`
 	UpdatedAt    time.Time  `json:"updated_at"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	OOMKilled    bool       `json:"oom_killed,omitempty"`
 	LogUpdatedAt *time.Time `json:"log_updated_at,omitempty"`
 	SizeBytes    int64      `json:"size_bytes"`
 	HasLog       bool       `json:"has_log"`
@@ -57,24 +65,120 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	byIndex := make(map[int]*logSourceResponse, len(replicas))
+	replicaByIndex := make(map[int]*db.Replica, len(replicas))
 	for _, rep := range replicas {
-		byIndex[rep.Index] = &logSourceResponse{
-			Replica: rep.Index, Status: rep.Status, Provider: rep.Provider,
-			Tier: rep.Tier, AppVersion: rep.AppVersion,
-			DeploymentID: rep.DeploymentID, UpdatedAt: rep.UpdatedAt,
-		}
+		replicaByIndex[rep.Index] = rep
 	}
-	// The in-memory manager is authoritative for local live status.
+	liveByIndex := make(map[int]*process.ProcessInfo)
 	for _, live := range s.manager.AllForSlug(slug) {
 		if live == nil {
 			continue
 		}
-		src := byIndex[live.Index]
-		if src == nil {
-			src = &logSourceResponse{Replica: live.Index}
-			byIndex[live.Index] = src
+		liveByIndex[live.Index] = live
+	}
+
+	files, err := s.manager.LogRuns(slug)
+	if err != nil {
+		slog.Warn("list log runs", "slug", slug, "err", err)
+		writeError(w, http.StatusInternalServerError, "could not list log sources")
+		return
+	}
+	fileByRun := make(map[string]process.LogSource, len(files))
+	for _, file := range files {
+		fileByRun[file.RunID] = file
+	}
+
+	runs, err := s.store.ListAppLogRuns(app.ID, 100)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	out := make([]*logSourceResponse, 0, len(runs)+len(replicas))
+	seenCurrent := make(map[int]bool)
+	for _, run := range runs {
+		current := !seenCurrent[run.ReplicaIndex]
+		seenCurrent[run.ReplicaIndex] = true
+		started := run.StartedAt
+		src := &logSourceResponse{
+			SourceID: run.RunID, RunID: run.RunID, Replica: run.ReplicaIndex,
+			Current: current, Status: run.Status, Provider: run.Provider,
+			Tier: run.Tier, AppVersion: run.AppVersion,
+			DeploymentID: run.DeploymentID, UpdatedAt: run.StartedAt,
+			StartedAt: &started, FinishedAt: run.FinishedAt, OOMKilled: run.OOMKilled,
 		}
+		if file, ok := fileByRun[run.RunID]; ok {
+			modified := file.ModifiedAt
+			src.HasLog = true
+			src.SizeBytes = file.SizeBytes
+			src.LogUpdatedAt = &modified
+		}
+		if current {
+			applyCurrentLogSourceState(src, replicaByIndex[run.ReplicaIndex], liveByIndex[run.ReplicaIndex])
+		}
+		src.StreamAvailable = src.Provider != "fargate"
+		out = append(out, src)
+	}
+
+	legacy, err := s.manager.LogSources(slug)
+	if err != nil {
+		slog.Warn("list legacy log sources", "slug", slug, "err", err)
+		writeError(w, http.StatusInternalServerError, "could not list log sources")
+		return
+	}
+	for _, log := range legacy {
+		modified := log.ModifiedAt
+		current := !seenCurrent[log.Index]
+		src := &logSourceResponse{
+			SourceID: fmt.Sprintf("legacy-%d", log.Index), Replica: log.Index,
+			Current: current, Legacy: true, Status: "stopped", UpdatedAt: modified,
+			LogUpdatedAt: &modified, SizeBytes: log.SizeBytes, HasLog: true,
+			StreamAvailable: true,
+		}
+		if current {
+			applyCurrentLogSourceState(src, replicaByIndex[log.Index], liveByIndex[log.Index])
+		}
+		out = append(out, src)
+	}
+
+	// A provider may expose a live replica before its first local byte or run
+	// record (notably externally-retained Fargate output). Keep it visible.
+	for index, rep := range replicaByIndex {
+		if seenCurrent[index] {
+			continue
+		}
+		foundLegacy := false
+		for _, src := range out {
+			if src.Replica == index && src.Current {
+				foundLegacy = true
+				break
+			}
+		}
+		if foundLegacy {
+			continue
+		}
+		src := &logSourceResponse{SourceID: fmt.Sprintf("replica-%d", index), Replica: index, Current: true}
+		applyCurrentLogSourceState(src, rep, liveByIndex[index])
+		src.StreamAvailable = src.Provider != "fargate"
+		out = append(out, src)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Current != out[j].Current {
+			return out[i].Current
+		}
+		if out[i].Current && out[i].Replica != out[j].Replica {
+			return out[i].Replica < out[j].Replica
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"sources": out})
+}
+
+func applyCurrentLogSourceState(src *logSourceResponse, rep *db.Replica, live *process.ProcessInfo) {
+	if rep != nil {
+		src.Status, src.Provider, src.Tier = rep.Status, rep.Provider, rep.Tier
+		src.AppVersion, src.DeploymentID, src.UpdatedAt = rep.AppVersion, rep.DeploymentID, rep.UpdatedAt
+	}
+	if live != nil {
 		src.Status = string(live.Status)
 		if live.Provider != "" {
 			src.Provider = live.Provider
@@ -90,44 +194,16 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 			src.DeploymentID = &id
 		}
 	}
-
-	logs, err := s.manager.LogSources(slug)
-	if err != nil {
-		slog.Warn("list log sources", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "could not list log sources")
-		return
+	if src.Status == "" {
+		src.Status = "unknown"
 	}
-	for _, log := range logs {
-		src := byIndex[log.Index]
-		if src == nil {
-			src = &logSourceResponse{Replica: log.Index, Status: "stopped"}
-			byIndex[log.Index] = src
-		}
-		modified := log.ModifiedAt
-		src.HasLog = true
-		src.SizeBytes = log.SizeBytes
-		src.LogUpdatedAt = &modified
-		if src.UpdatedAt.IsZero() {
-			src.UpdatedAt = modified
-		}
-	}
-
-	out := make([]*logSourceResponse, 0, len(byIndex))
-	for _, src := range byIndex {
-		if src.Status == "" {
-			src.Status = "unknown"
-		}
-		src.StreamAvailable = src.Provider != "fargate"
-		out = append(out, src)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Replica < out[j].Replica })
-	writeJSON(w, http.StatusOK, map[string]any{"sources": out})
 }
 
 // handleLogs returns log lines for the given app.
 //
 // The optional query params are:
-//   - ?replica=N    (default 0) — which replica's log to read.
+//   - ?replica=N    (default 0) — which replica's latest log to read.
+//   - ?run=UUID     — an immutable execution, or "legacy" for pre-upgrade logs.
 //   - ?tail=N       (default 200, 1..10000) — initial-burst line count.
 //   - ?follow=BOOL  (default true) — when true emits SSE and follows new
 //     output; when false returns a single plain-text response containing
@@ -138,7 +214,8 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 // Access is restricted to app managers (owners, admins, operators).
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 
@@ -181,8 +258,23 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no log available")
 		return
 	}
-	lr, ok := s.manager.LogReader(slug, idx)
-	if !ok {
+	var lr *process.LogReader
+	var hasReader bool
+	if runID := q.Get("run"); runID != "" {
+		if runID == "legacy" {
+			lr, hasReader = s.manager.LegacyLogReader(slug, idx)
+		} else {
+			run, err := s.store.GetAppLogRun(app.ID, runID)
+			if err != nil || run.ReplicaIndex != idx {
+				writeError(w, http.StatusNotFound, "no log available")
+				return
+			}
+			lr, hasReader = s.manager.LogRunReader(slug, idx, runID)
+		}
+	} else {
+		lr, hasReader = s.manager.LogReader(slug, idx)
+	}
+	if !hasReader {
 		writeError(w, http.StatusNotFound, "no log available")
 		return
 	}

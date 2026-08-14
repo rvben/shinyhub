@@ -108,9 +108,86 @@ type LogReader struct {
 // files outlive their process-manager entries (for example after scale-down),
 // so discovery deliberately comes from disk rather than the live process pool.
 type LogSource struct {
+	RunID      string
 	Index      int
 	SizeBytes  int64
 	ModifiedAt time.Time
+}
+
+const logRunsDir = "logs"
+
+func logRunFilename(index int, runID string) string {
+	return "replica-" + strconv.Itoa(index) + "-" + runID + ".log"
+}
+
+func logRunPath(appsDir, slug string, index int, runID string) string {
+	return filepath.Join(appsDir, slug, logRunsDir, logRunFilename(index, runID))
+}
+
+// ListLogRuns returns immutable run files newest-first. The UUID is kept in the
+// filename so history remains readable even while the database is unavailable,
+// and the replica index allows latest-run compatibility lookup after restart.
+func ListLogRuns(appsDir, slug string) ([]LogSource, error) {
+	dir := filepath.Join(appsDir, slug, logRunsDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []LogSource{}, nil
+		}
+		return nil, err
+	}
+	sources := make([]LogSource, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "replica-") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		body := strings.TrimSuffix(strings.TrimPrefix(name, "replica-"), ".log")
+		cut := strings.IndexByte(body, '-')
+		if cut <= 0 {
+			continue
+		}
+		index, err := strconv.Atoi(body[:cut])
+		runID := body[cut+1:]
+		if err != nil || index < 0 || index > 255 || !validLogRunID(runID) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		sources = append(sources, LogSource{
+			RunID: runID, Index: index, SizeBytes: info.Size(), ModifiedAt: info.ModTime(),
+		})
+	}
+	sort.Slice(sources, func(i, j int) bool {
+		if sources[i].ModifiedAt.Equal(sources[j].ModifiedAt) {
+			return sources[i].RunID > sources[j].RunID
+		}
+		return sources[i].ModifiedAt.After(sources[j].ModifiedAt)
+	})
+	return sources, nil
+}
+
+func validLogRunID(runID string) bool {
+	if len(runID) != 36 {
+		return false
+	}
+	for i, r := range runID {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if r != '-' {
+				return false
+			}
+			continue
+		}
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // ListLogSources returns the primary replica log files retained for an app,

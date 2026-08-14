@@ -917,6 +917,37 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	mgr.SetDefaultTier(defaultTier)
 	mgr.SetStopGrace(cfg.Server.StopGrace)
+	mgr.SetLogRunRecorder(process.LogRunRecorder{
+		Begin: func(run process.LogRun) error {
+			// AppID is absent only in local/test-style starts that are not backed by
+			// an app row. They still get immutable files, but cannot have DB history.
+			if run.AppID == 0 {
+				return nil
+			}
+			var deploymentID *int64
+			if run.DeploymentID != 0 {
+				id := run.DeploymentID
+				deploymentID = &id
+			}
+			return store.CreateAppLogRun(db.CreateAppLogRunParams{
+				RunID: run.RunID, AppID: run.AppID, ReplicaIndex: run.ReplicaIndex,
+				DeploymentID: deploymentID, AppVersion: run.AppVersion,
+				Tier: run.Tier, Status: string(run.Status), StartedAt: run.StartedAt,
+			})
+		},
+		Running: func(run process.LogRun) error {
+			if run.AppID == 0 {
+				return nil
+			}
+			return store.MarkAppLogRunRunning(run.RunID, run.Provider)
+		},
+		Finish: func(run process.LogRun) error {
+			if run.AppID == 0 {
+				return nil
+			}
+			return store.FinishAppLogRun(run.RunID, string(run.Status), run.FinishedAt, run.OOMKilled)
+		},
+	})
 	for _, tierCfg := range cfg.Runtime.Tiers {
 		if tierCfg.Name == defaultTier {
 			continue

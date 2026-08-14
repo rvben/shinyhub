@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rvben/shinyhub/internal/storage"
 )
 
@@ -64,9 +65,11 @@ type SharedMountResolver func(slug string) ([]SharedMount, error)
 type Status string
 
 const (
+	StatusStarting  Status = "starting"
 	StatusRunning   Status = "running"
 	StatusStopped   Status = "stopped"
 	StatusCrashed   Status = "crashed"
+	StatusLost      Status = "lost"
 	StatusUnknown   Status = "unknown"
 	StatusSuspended Status = "suspended"
 )
@@ -87,6 +90,9 @@ type ProcessInfo struct {
 	WorkerID     string
 	AppVersion   string
 	DeploymentID int64
+	// LogRunID identifies this concrete execution. Replica Index identifies a
+	// reusable pool slot; LogRunID changes on every cold start.
+	LogRunID string
 	// OOMKilled is set when this replica's most recent exit was a kernel
 	// OOM-kill (it exceeded its memory limit). Used to surface a crash reason
 	// that names the limit rather than a generic crash.
@@ -156,10 +162,35 @@ type StartParams struct {
 	JobRunID int64
 }
 
+// LogRun describes the durable lifecycle metadata emitted for one process
+// start. The Manager owns identity and timestamps; persistence is injected so
+// the process package remains independent of the database implementation.
+type LogRun struct {
+	RunID        string
+	Slug         string
+	AppID        int64
+	ReplicaIndex int
+	DeploymentID int64
+	AppVersion   string
+	Tier         string
+	Provider     string
+	Status       Status
+	StartedAt    time.Time
+	FinishedAt   time.Time
+	OOMKilled    bool
+}
+
+type LogRunRecorder struct {
+	Begin   func(LogRun) error
+	Running func(LogRun) error
+	Finish  func(LogRun) error
+}
+
 type entry struct {
 	info    *ProcessInfo
 	handle  RunHandle
 	tier    string
+	logRun  *LogRun
 	done    chan struct{}
 	stopped bool
 }
@@ -173,21 +204,30 @@ type replicaKey struct {
 // Manager tracks running app processes as a pool of replicas per slug.
 // entries maps slug → slice indexed by replica index; nil means that slot is down.
 type Manager struct {
-	mu            sync.Mutex
-	entries       map[string][]*entry
-	logFiles      map[replicaKey]*LogFile
-	lastExit      map[replicaKey]ExitVerdict
-	appsDir       string
-	runtimesMu    sync.RWMutex
-	runtimes      map[string]Runtime
-	defaultTier   string
-	envResolver   EnvResolver
-	platformEnv   PlatformDefaultEnvResolver
-	mountResolver SharedMountResolver
-	appDataRoot   string
-	stopGrace     time.Duration
+	mu             sync.Mutex
+	entries        map[string][]*entry
+	logFiles       map[replicaKey]*LogFile
+	lastExit       map[replicaKey]ExitVerdict
+	appsDir        string
+	runtimesMu     sync.RWMutex
+	runtimes       map[string]Runtime
+	defaultTier    string
+	envResolver    EnvResolver
+	platformEnv    PlatformDefaultEnvResolver
+	mountResolver  SharedMountResolver
+	appDataRoot    string
+	stopGrace      time.Duration
+	logRunRecorder LogRunRecorder
 
 	autoInstrumentApps bool
+}
+
+// SetLogRunRecorder installs durable run-lifecycle callbacks. Begin failures
+// abort the start so a process can never exist without an execution record.
+// Running/Finish failures are logged: the process lifecycle remains primary and
+// can be reconciled from the immutable file plus current replica state.
+func (m *Manager) SetLogRunRecorder(recorder LogRunRecorder) {
+	m.logRunRecorder = recorder
 }
 
 // SetStopGrace sets how long StopReplica waits after SIGTERM before escalating
@@ -516,10 +556,24 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		}
 	}
 
-	logPath := filepath.Join(m.appsDir, p.Slug, fmt.Sprintf("app-%d.log", p.Index))
+	startedAt := time.Now().UTC()
+	run := LogRun{
+		RunID: uuid.NewString(), Slug: p.Slug, AppID: p.AppID,
+		ReplicaIndex: p.Index, DeploymentID: p.DeploymentID,
+		AppVersion: p.AppVersion, Tier: tier, Status: StatusStarting,
+		StartedAt: startedAt,
+	}
+	logPath := logRunPath(m.appsDir, p.Slug, p.Index, run.RunID)
 	lf, err := OpenLogFile(logPath, DefaultLogMaxSize)
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)
+	}
+	if m.logRunRecorder.Begin != nil {
+		if err := m.logRunRecorder.Begin(run); err != nil {
+			_ = lf.Close()
+			_ = os.Remove(logPath)
+			return nil, fmt.Errorf("record log run: %w", err)
+		}
 	}
 	m.logFiles[key] = lf
 
@@ -527,9 +581,19 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	if err != nil {
 		lf.Close()
 		delete(m.logFiles, key)
+		run.Status = StatusCrashed
+		run.FinishedAt = time.Now().UTC()
+		m.finishLogRun(run)
 		return nil, fmt.Errorf("start process: %w", err)
 	}
 	handle := ep.Handle
+	run.Provider = ep.Provider
+	run.Status = StatusRunning
+	if m.logRunRecorder.Running != nil {
+		if err := m.logRunRecorder.Running(run); err != nil {
+			slog.Error("manager: persist running log run", "slug", p.Slug, "idx", p.Index, "run_id", run.RunID, "err", err)
+		}
+	}
 
 	info := &ProcessInfo{
 		Slug:         p.Slug,
@@ -543,9 +607,10 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		WorkerID:     ep.WorkerID,
 		AppVersion:   p.AppVersion,
 		DeploymentID: p.DeploymentID,
+		LogRunID:     run.RunID,
 	}
 	done := make(chan struct{})
-	pool[p.Index] = &entry{info: info, handle: handle, tier: tier, done: done}
+	pool[p.Index] = &entry{info: info, handle: handle, tier: tier, logRun: &run, done: done}
 	m.entries[p.Slug] = pool
 
 	go func() {
@@ -585,15 +650,28 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 				} else {
 					e.info.Status = StatusCrashed
 				}
+				run.Status = e.info.Status
+				run.FinishedAt = time.Now().UTC()
+				run.OOMKilled = oom
 				if lf := m.logFiles[key]; lf != nil {
 					lf.Close()
 					delete(m.logFiles, key)
 				}
+				m.finishLogRun(run)
 			}
 		}
 	}()
 
 	return info, nil
+}
+
+func (m *Manager) finishLogRun(run LogRun) {
+	if m.logRunRecorder.Finish == nil {
+		return
+	}
+	if err := m.logRunRecorder.Finish(run); err != nil {
+		slog.Error("manager: persist finished log run", "slug", run.Slug, "idx", run.ReplicaIndex, "run_id", run.RunID, "err", err)
+	}
 }
 
 // StopReplica signals a single replica to stop and waits for it to exit.
@@ -720,6 +798,12 @@ func (m *Manager) EvictReplicaIfWorker(slug string, index int, workerID string) 
 	}
 	if pool[index].info.WorkerID != workerID {
 		return
+	}
+	if pool[index].logRun != nil {
+		run := *pool[index].logRun
+		run.Status = StatusLost
+		run.FinishedAt = time.Now().UTC()
+		m.finishLogRun(run)
 	}
 	pool[index] = nil
 	for len(pool) > 0 && pool[len(pool)-1] == nil {
@@ -1242,11 +1326,45 @@ func (m *Manager) LogTail(slug string, index, n int) string {
 // LogReader returns a LogReader for a specific replica's log file.
 // Returns false if no log file exists yet (replica has never been started).
 func (m *Manager) LogReader(slug string, index int) (*LogReader, bool) {
+	if runs, err := ListLogRuns(m.appsDir, slug); err == nil {
+		for _, run := range runs {
+			if run.Index == index {
+				return NewLogReader(logRunPath(m.appsDir, slug, index, run.RunID)), true
+			}
+		}
+	}
 	path := filepath.Join(m.appsDir, slug, fmt.Sprintf("app-%d.log", index))
 	if _, err := os.Stat(path); err != nil {
 		return nil, false
 	}
 	return NewLogReader(path), true
+}
+
+// LogRunReader opens one immutable execution by replica index and run ID.
+func (m *Manager) LogRunReader(slug string, index int, runID string) (*LogReader, bool) {
+	if !validLogRunID(runID) {
+		return nil, false
+	}
+	path := logRunPath(m.appsDir, slug, index, runID)
+	if _, err := os.Stat(path); err != nil {
+		return nil, false
+	}
+	return NewLogReader(path), true
+}
+
+// LegacyLogReader opens the pre-run-history app-N.log file. It exists only so
+// upgrades retain access to logs written before immutable run IDs were added.
+func (m *Manager) LegacyLogReader(slug string, index int) (*LogReader, bool) {
+	path := filepath.Join(m.appsDir, slug, fmt.Sprintf("app-%d.log", index))
+	if _, err := os.Stat(path); err != nil {
+		return nil, false
+	}
+	return NewLogReader(path), true
+}
+
+// LogRuns returns immutable run files retained for an app, newest first.
+func (m *Manager) LogRuns(slug string) ([]LogSource, error) {
+	return ListLogRuns(m.appsDir, slug)
 }
 
 // LogSources returns every retained primary replica log for an app, including
