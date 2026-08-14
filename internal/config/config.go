@@ -195,10 +195,14 @@ type MetricsConfig struct {
 	HistoryInterval time.Duration
 }
 
-// MaintenanceConfig controls periodic database housekeeping run on the owner
-// instance only. Retention values default to "keep everything" so no history is
-// ever deleted unless the operator opts in - the safe default for an audit
-// trail and run history.
+// DefaultAppLogRunRetentionCount bounds immutable stdout/stderr history per
+// replica slot. Each run is independently byte-capped, so bounding the number
+// of runs also places a predictable ceiling on database and local-disk usage.
+const DefaultAppLogRunRetentionCount = 20
+
+// MaintenanceConfig controls periodic database and local-log housekeeping run
+// on the owner instance only. Compliance and schedule history remain opt-in;
+// application output is bounded by default because each run can contain MiBs.
 type MaintenanceConfig struct {
 	// AuditRetentionDays deletes audit_events older than this many days. 0 (the
 	// default) keeps them forever.
@@ -206,6 +210,10 @@ type MaintenanceConfig struct {
 	// ScheduleRunRetentionCount keeps this many newest runs per schedule and
 	// deletes older ones. 0 (the default) keeps all runs.
 	ScheduleRunRetentionCount int `yaml:"schedule_run_retention_count"`
+	// AppLogRunRetentionCount keeps this many newest immutable runs per app
+	// replica and deletes older metadata, chunks, and local files. 0 selects the
+	// default (20); -1 keeps every run.
+	AppLogRunRetentionCount int `yaml:"app_log_run_retention_count"`
 	// Interval is how often the maintenance loop runs. Defaults to 1h.
 	Interval time.Duration `yaml:"interval"`
 }
@@ -1367,6 +1375,12 @@ func loadRaw(path string) (*Config, error) {
 	if cfg.Maintenance.ScheduleRunRetentionCount < 0 {
 		cfg.Maintenance.ScheduleRunRetentionCount = 0
 	}
+	if cfg.Maintenance.AppLogRunRetentionCount < -1 {
+		return nil, fmt.Errorf("maintenance.app_log_run_retention_count must be -1 or greater")
+	}
+	if cfg.Maintenance.AppLogRunRetentionCount == 0 {
+		cfg.Maintenance.AppLogRunRetentionCount = DefaultAppLogRunRetentionCount
+	}
 	if cfg.Storage.AppDataDir == "" {
 		cfg.Storage.AppDataDir = "./data/app-data"
 	}
@@ -2218,6 +2232,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_SCHEDULE_RUN_RETENTION_COUNT: %q is not an integer: %w", v, err)
 		}
 		cfg.Maintenance.ScheduleRunRetentionCount = n
+	}
+	if v := os.Getenv("SHINYHUB_APP_LOG_RUN_RETENTION_COUNT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_APP_LOG_RUN_RETENTION_COUNT: %q is not an integer: %w", v, err)
+		}
+		cfg.Maintenance.AppLogRunRetentionCount = n
 	}
 	if v := os.Getenv("SHINYHUB_APP_QUOTA_MB"); v != "" {
 		n, err := strconv.Atoi(v)

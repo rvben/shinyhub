@@ -116,6 +116,25 @@ func TestManagerMirrorsRunOutputToSharedSink(t *testing.T) {
 	}
 }
 
+func TestManagerPruneLogRunFilesProtectsActiveRun(t *testing.T) {
+	m := process.NewManager(t.TempDir(), newFakeRuntime())
+	info, err := m.Start(process.StartParams{
+		Slug: "demo", AppID: 42, Index: 0, Dir: t.TempDir(), Command: []string{"app"}, Port: 19000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := m.PruneLogRunFiles(map[string]struct{}{}); err != nil || removed != 0 {
+		t.Fatalf("PruneLogRunFiles = %d, %v", removed, err)
+	}
+	if _, ok := m.LogRunReader("demo", 0, info.LogRunID); !ok {
+		t.Fatal("active run file was pruned")
+	}
+	if err := m.StopReplica("demo", 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (f *fakeRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
 	f.mu.Lock()
 	ch, ok := f.stops[h.PID]

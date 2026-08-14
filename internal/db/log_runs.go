@@ -149,6 +149,54 @@ func (s *Store) GetAppLogRun(appID int64, runID string) (*AppLogRun, error) {
 	return run, nil
 }
 
+// PruneAppLogRuns keeps the newest keep runs independently for every app and
+// replica slot. Running rows are never removed, even if unusual timestamps put
+// one beyond the retention rank. app_log_chunks are deleted by the FK cascade.
+func (s *Store) PruneAppLogRuns(keep int) (int64, error) {
+	defer s.timed("PruneAppLogRuns")()
+	if keep <= 0 {
+		return 0, nil
+	}
+	res, err := s.db.Exec(`
+		WITH ranked AS (
+			SELECT run_id, finished_at,
+			       ROW_NUMBER() OVER (
+			           PARTITION BY app_id, replica_index
+			           ORDER BY started_at DESC, run_id DESC
+			       ) AS retention_rank
+			FROM app_log_runs
+		)
+		DELETE FROM app_log_runs
+		WHERE run_id IN (
+			SELECT run_id FROM ranked
+			WHERE retention_rank > ? AND finished_at IS NOT NULL
+		)`, keep)
+	if err != nil {
+		return 0, fmt.Errorf("prune app log runs: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// ListAppLogRunIDs returns the complete retained identity set for reconciling
+// node-local immutable files after database pruning.
+func (s *Store) ListAppLogRunIDs() (map[string]struct{}, error) {
+	defer s.timed("ListAppLogRunIDs")()
+	rows, err := s.db.Query(`SELECT run_id FROM app_log_runs`)
+	if err != nil {
+		return nil, fmt.Errorf("list app log run IDs: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			return nil, fmt.Errorf("scan app log run ID: %w", err)
+		}
+		out[runID] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 type logRunScanner interface{ Scan(...any) error }
 
 func scanAppLogRun(row logRunScanner) (*AppLogRun, error) {

@@ -18,6 +18,7 @@ func TestLoad_MaintenanceFromYAML(t *testing.T) {
 	body := "maintenance:\n" +
 		"  audit_retention_days: 30\n" +
 		"  schedule_run_retention_count: 25\n" +
+		"  app_log_run_retention_count: 7\n" +
 		"  interval: 2h\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -32,6 +33,9 @@ func TestLoad_MaintenanceFromYAML(t *testing.T) {
 	}
 	if cfg.Maintenance.ScheduleRunRetentionCount != 25 {
 		t.Errorf("ScheduleRunRetentionCount = %d, want 25", cfg.Maintenance.ScheduleRunRetentionCount)
+	}
+	if cfg.Maintenance.AppLogRunRetentionCount != 7 {
+		t.Errorf("AppLogRunRetentionCount = %d, want 7", cfg.Maintenance.AppLogRunRetentionCount)
 	}
 	if cfg.Maintenance.Interval != 2*time.Hour {
 		t.Errorf("Interval = %v, want 2h", cfg.Maintenance.Interval)
@@ -54,5 +58,28 @@ func TestLoad_MaintenanceDefaultInterval(t *testing.T) {
 	}
 	if cfg.Maintenance.Interval != time.Hour {
 		t.Errorf("Interval = %v, want default 1h", cfg.Maintenance.Interval)
+	}
+	if cfg.Maintenance.AppLogRunRetentionCount != config.DefaultAppLogRunRetentionCount {
+		t.Errorf("AppLogRunRetentionCount = %d, want default %d", cfg.Maintenance.AppLogRunRetentionCount, config.DefaultAppLogRunRetentionCount)
+	}
+}
+
+func TestLoad_MaintenanceAppLogRetentionForever(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_APP_LOG_RUN_RETENTION_COUNT", "-1")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Maintenance.AppLogRunRetentionCount != -1 {
+		t.Fatalf("AppLogRunRetentionCount = %d, want -1", cfg.Maintenance.AppLogRunRetentionCount)
+	}
+}
+
+func TestLoad_MaintenanceRejectsInvalidAppLogRetention(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_APP_LOG_RUN_RETENTION_COUNT", "-2")
+	if _, err := config.Load(""); err == nil {
+		t.Fatal("expected retention below -1 to be rejected")
 	}
 }

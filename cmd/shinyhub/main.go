@@ -429,20 +429,20 @@ func probeWritable(dir string) error {
 	return os.Remove(name)
 }
 
-// runMaintenance periodically prunes the audit log and per-schedule run history
-// to keep those tables bounded. It runs on the owner instance only (so HA
-// standbys never prune concurrently) and is a no-op when no retention is
-// configured. It prunes once promptly on start, then on each interval tick.
-func runMaintenance(ctx context.Context, store *db.Store, cfg config.MaintenanceConfig) {
+// runMaintenance periodically prunes database history and reconciles immutable
+// local log files. It runs on the owner instance only, promptly and then on the
+// configured interval.
+func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manager, cfg config.MaintenanceConfig) {
 	auditRetention := time.Duration(cfg.AuditRetentionDays) * 24 * time.Hour
 	keepRuns := cfg.ScheduleRunRetentionCount
+	keepAppLogs := cfg.AppLogRunRetentionCount
 	// The database-backed login limiter only writes rows on a Postgres backend,
 	// so its ledger only needs sweeping there. Retention must comfortably exceed
 	// the longest limiter window (login uses 1m) so an in-window row is never
 	// dropped; raise it if a longer-window bucket is ever added.
 	pruneRateLimits := store.IsPostgres()
 	const rateLimitRetention = time.Hour
-	if auditRetention <= 0 && keepRuns <= 0 && !pruneRateLimits {
+	if auditRetention <= 0 && keepRuns <= 0 && keepAppLogs <= 0 && !pruneRateLimits {
 		return
 	}
 
@@ -473,6 +473,17 @@ func runMaintenance(ctx context.Context, store *db.Store, cfg config.Maintenance
 				slog.Info("pruned_schedule_runs", "removed", total, "keep_per_schedule", keepRuns)
 			}
 		}
+		if keepAppLogs > 0 {
+			n, err := store.PruneAppLogRuns(keepAppLogs)
+			if err != nil {
+				slog.Warn("prune_app_log_runs_failed", "err", err)
+			} else {
+				if n > 0 {
+					slog.Info("pruned_app_log_runs", "removed", n, "keep_per_replica", keepAppLogs)
+				}
+				reconcileLocalAppLogFiles(store, manager)
+			}
+		}
 		if pruneRateLimits {
 			if n, err := store.PruneRateLimitCounters(rateLimitRetention); err != nil {
 				slog.Warn("prune_rate_limit_counters_failed", "err", err)
@@ -491,6 +502,43 @@ func runMaintenance(ctx context.Context, store *db.Store, cfg config.Maintenance
 			return
 		case <-ticker.C:
 			prune()
+		}
+	}
+}
+
+func reconcileLocalAppLogFiles(store *db.Store, manager *process.Manager) {
+	if manager == nil {
+		return
+	}
+	retained, err := store.ListAppLogRunIDs()
+	if err != nil {
+		slog.Warn("list_retained_app_log_runs_failed", "err", err)
+		return
+	}
+	removed, err := manager.PruneLogRunFiles(retained)
+	if err != nil {
+		slog.Warn("prune_app_log_files_failed", "removed", removed, "err", err)
+	} else if removed > 0 {
+		slog.Info("pruned_app_log_files", "removed", removed)
+	}
+}
+
+// runLocalLogMaintenance reconciles every control-plane node's private disk.
+// Database deletion remains owner-only, but a former owner may retain files on
+// a standby; each node therefore removes database-orphaned files independently.
+func runLocalLogMaintenance(ctx context.Context, store *db.Store, manager *process.Manager, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	reconcileLocalAppLogFiles(store, manager)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reconcileLocalAppLogFiles(store, manager)
 		}
 	}
 }
@@ -1813,7 +1861,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		// only, so HA standbys never prune concurrently. A no-op unless retention
 		// is configured.
 		loops.Add(1)
-		go func() { defer loops.Done(); runMaintenance(octx, store, cfg.Maintenance) }()
+		go func() { defer loops.Done(); runMaintenance(octx, store, mgr, cfg.Maintenance) }()
 		// Warm-restore: re-boot and re-freeze the apps that were hibernated before
 		// this restart, so their next access is a warm resume instead of a cold
 		// boot (a frozen process does not survive a service restart, so the warm
@@ -1874,6 +1922,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	electorCtx, cancelElector := context.WithCancel(context.Background())
 	defer cancelElector()
 	go elector.Run(electorCtx)
+	var localLogMaintenanceWG sync.WaitGroup
+	if cfg.Maintenance.AppLogRunRetentionCount > 0 {
+		localLogMaintenanceWG.Add(1)
+		go func() {
+			defer localLogMaintenanceWG.Done()
+			runLocalLogMaintenance(electorCtx, store, mgr, cfg.Maintenance.Interval)
+		}()
+	}
 
 	mux := http.NewServeMux()
 	// Observe wraps the timeout handler (not the inner router) so server metrics
@@ -2079,6 +2135,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// cancels the loop context and waits for the watcher/scheduler/monitor/
 	// autoscaler to exit before we drain jobs and close the store.
 	cancelElector()
+	localLogMaintenanceWG.Wait()
 	scope.Stop()
 	// Stop the session reporter (clustered only). Cancel triggers a final
 	// flush so the last known counts are persisted before the store closes.

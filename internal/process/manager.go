@@ -1397,6 +1397,26 @@ func (m *Manager) LogRuns(slug string) ([]LogSource, error) {
 	return ListLogRuns(m.appsDir, slug)
 }
 
+// PruneLogRunFiles reconciles node-local immutable files with database-retained
+// IDs. Holding m.mu across the scan excludes the small file-open-before-record
+// window in Start; active runs are additionally protected defensively.
+func (m *Manager) PruneLogRunFiles(retained map[string]struct{}) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keep := make(map[string]struct{}, len(retained)+len(m.entries))
+	for runID := range retained {
+		keep[runID] = struct{}{}
+	}
+	for _, pool := range m.entries {
+		for _, entry := range pool {
+			if entry != nil && entry.logRun != nil {
+				keep[entry.logRun.RunID] = struct{}{}
+			}
+		}
+	}
+	return PruneLogRunFiles(m.appsDir, keep)
+}
+
 // LogSources returns every retained primary replica log for an app, including
 // logs whose replica row was removed during scale-down.
 func (m *Manager) LogSources(slug string) ([]LogSource, error) {

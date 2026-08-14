@@ -168,3 +168,83 @@ func TestCreateAppLogRunSupersedesUnfinishedSlotRun(t *testing.T) {
 		t.Fatalf("superseded run = %+v", run)
 	}
 }
+
+func TestPruneAppLogRunsKeepsNewestPerReplicaAndCascadesChunks(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "hash", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("demo")
+	base := time.Unix(1_700_000_000, 0)
+	replicaZero := []string{
+		"80000000-0000-4000-8000-000000000001",
+		"80000000-0000-4000-8000-000000000002",
+		"80000000-0000-4000-8000-000000000003",
+		"80000000-0000-4000-8000-000000000004",
+	}
+	replicaOne := []string{
+		"81000000-0000-4000-8000-000000000001",
+		"81000000-0000-4000-8000-000000000002",
+	}
+	create := func(runID string, replica, minute int, leaveRunning bool) {
+		t.Helper()
+		started := base.Add(time.Duration(minute) * time.Minute)
+		if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+			RunID: runID, AppID: app.ID, ReplicaIndex: replica, Status: "starting", StartedAt: started,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.MarkAppLogRunRunning(runID, "remote_docker"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AppendAppLogChunk(runID, 0, 0, []byte(runID), db.AppLogRetentionBytes, started); err != nil {
+			t.Fatal(err)
+		}
+		if !leaveRunning {
+			if err := store.FinishAppLogRun(runID, "stopped", started.Add(time.Second), false); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for i, runID := range replicaZero {
+		create(runID, 0, i, i == len(replicaZero)-1)
+	}
+	for i, runID := range replicaOne {
+		create(runID, 1, i, false)
+	}
+	if n, err := store.PruneAppLogRuns(0); err != nil || n != 0 {
+		t.Fatalf("disabled prune = %d, %v", n, err)
+	}
+	deleted, err := store.PruneAppLogRuns(2)
+	if err != nil || deleted != 2 {
+		t.Fatalf("PruneAppLogRuns = %d, %v, want 2", deleted, err)
+	}
+	runs, err := store.ListAppLogRuns(app.ID, 100)
+	if err != nil || len(runs) != 4 {
+		t.Fatalf("remaining runs = %d, %v", len(runs), err)
+	}
+	ids, err := store.ListAppLogRunIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range replicaZero[:2] {
+		if _, ok := ids[runID]; ok {
+			t.Errorf("pruned run %s still retained", runID)
+		}
+		if _, exists, err := store.AppLogEndOffset(runID); err != nil || exists {
+			t.Errorf("pruned chunks for %s: exists=%v err=%v", runID, exists, err)
+		}
+	}
+	for _, runID := range append(replicaZero[2:], replicaOne...) {
+		if _, ok := ids[runID]; !ok {
+			t.Errorf("expected retained run %s", runID)
+		}
+		if _, exists, err := store.AppLogEndOffset(runID); err != nil || !exists {
+			t.Errorf("retained chunks for %s: exists=%v err=%v", runID, exists, err)
+		}
+	}
+}

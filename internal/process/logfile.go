@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -155,6 +156,32 @@ func logRunPath(appsDir, slug string, index int, runID string) string {
 	return filepath.Join(appsDir, slug, logRunsDir, logRunFilename(index, runID))
 }
 
+func parseLogRunFile(name string) (index int, runID string, backup bool, ok bool) {
+	switch {
+	case strings.HasSuffix(name, ".log.1"):
+		backup = true
+		name = strings.TrimSuffix(name, ".log.1")
+	case strings.HasSuffix(name, ".log"):
+		name = strings.TrimSuffix(name, ".log")
+	default:
+		return 0, "", false, false
+	}
+	if !strings.HasPrefix(name, "replica-") {
+		return 0, "", false, false
+	}
+	body := strings.TrimPrefix(name, "replica-")
+	cut := strings.IndexByte(body, '-')
+	if cut <= 0 {
+		return 0, "", false, false
+	}
+	index, err := strconv.Atoi(body[:cut])
+	runID = body[cut+1:]
+	if err != nil || index < 0 || index > 255 || !validLogRunID(runID) {
+		return 0, "", false, false
+	}
+	return index, runID, backup, true
+}
+
 // ListLogRuns returns immutable run files newest-first. The UUID is kept in the
 // filename so history remains readable even while the database is unavailable,
 // and the replica index allows latest-run compatibility lookup after restart.
@@ -170,17 +197,8 @@ func ListLogRuns(appsDir, slug string) ([]LogSource, error) {
 	sources := make([]LogSource, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, "replica-") || !strings.HasSuffix(name, ".log") {
-			continue
-		}
-		body := strings.TrimSuffix(strings.TrimPrefix(name, "replica-"), ".log")
-		cut := strings.IndexByte(body, '-')
-		if cut <= 0 {
-			continue
-		}
-		index, err := strconv.Atoi(body[:cut])
-		runID := body[cut+1:]
-		if err != nil || index < 0 || index > 255 || !validLogRunID(runID) {
+		index, runID, backup, ok := parseLogRunFile(name)
+		if entry.IsDir() || !ok || backup {
 			continue
 		}
 		info, err := entry.Info()
@@ -201,6 +219,57 @@ func ListLogRuns(appsDir, slug string) ([]LogSource, error) {
 		return sources[i].ModifiedAt.After(sources[j].ModifiedAt)
 	})
 	return sources, nil
+}
+
+// PruneLogRunFiles removes immutable primary and rotated files whose run IDs no
+// longer exist in the database. It ignores legacy app-N.log files, malformed
+// names, symlinks, and non-regular files.
+func PruneLogRunFiles(appsDir string, retained map[string]struct{}) (int, error) {
+	apps, err := os.ReadDir(appsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	removed := 0
+	var errs []error
+	for _, app := range apps {
+		if !app.IsDir() {
+			continue
+		}
+		dir := filepath.Join(appsDir, app.Name(), logRunsDir)
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("read %s: %w", dir, err))
+			}
+			continue
+		}
+		for _, file := range files {
+			_, runID, _, ok := parseLogRunFile(file.Name())
+			if !ok || file.IsDir() {
+				continue
+			}
+			if _, keep := retained[runID]; keep {
+				continue
+			}
+			info, err := file.Info()
+			if err != nil || !info.Mode().IsRegular() {
+				if err != nil {
+					errs = append(errs, fmt.Errorf("stat %s: %w", filepath.Join(dir, file.Name()), err))
+				}
+				continue
+			}
+			path := filepath.Join(dir, file.Name())
+			if err := os.Remove(path); err != nil {
+				errs = append(errs, fmt.Errorf("remove %s: %w", path, err))
+				continue
+			}
+			removed++
+		}
+	}
+	return removed, errors.Join(errs...)
 }
 
 func validLogRunID(runID string) bool {

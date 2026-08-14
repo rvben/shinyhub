@@ -75,6 +75,60 @@ func TestListLogSources_MissingAppDirectoryIsEmpty(t *testing.T) {
 	}
 }
 
+func TestPruneLogRunFilesRemovesOnlyUnretainedImmutableFiles(t *testing.T) {
+	appsDir := t.TempDir()
+	dir := filepath.Join(appsDir, "demo", logRunsDir)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	keepID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	pruneID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	for _, name := range []string{
+		logRunFilename(0, keepID), logRunFilename(0, keepID) + ".1",
+		logRunFilename(1, pruneID), logRunFilename(1, pruneID) + ".1",
+		"replica-1-not-a-run.log", "notes.txt",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("log\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy := filepath.Join(appsDir, "demo", "app-1.log")
+	if err := os.WriteFile(legacy, []byte("legacy\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(appsDir, "outside.log")
+	if err := os.WriteFile(outside, []byte("outside\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(dir, logRunFilename(2, pruneID))
+	if err := os.Symlink(outside, symlink); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := PruneLogRunFiles(appsDir, map[string]struct{}{keepID: {}})
+	if err != nil || removed != 2 {
+		t.Fatalf("PruneLogRunFiles = %d, %v, want 2", removed, err)
+	}
+	for _, path := range []string{
+		filepath.Join(dir, logRunFilename(0, keepID)),
+		filepath.Join(dir, logRunFilename(0, keepID)+".1"),
+		filepath.Join(dir, "replica-1-not-a-run.log"),
+		filepath.Join(dir, "notes.txt"), legacy, outside, symlink,
+	} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("preserved path %s: %v", path, err)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(dir, logRunFilename(1, pruneID)),
+		filepath.Join(dir, logRunFilename(1, pruneID)+".1"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("pruned path still exists: %s", path)
+		}
+	}
+}
+
 // TestTail_EdgeCases pins the exact line semantics Tail must preserve: last-n in
 // order, files with and without a trailing newline, CRLF stripping, n larger
 // than the line count, and n<=0. These guard the backward-read implementation.

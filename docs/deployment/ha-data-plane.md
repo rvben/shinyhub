@@ -194,6 +194,14 @@ interrupt the application process. Single-node SQLite installations continue
 to use capped local run files. Fargate output remains in CloudWatch and is
 identified as externally retained in the log source list.
 
+Maintenance keeps the newest 20 immutable runs per replica by default and
+removes both shared chunks and matching node-local files. Configure
+`maintenance.app_log_run_retention_count` (or
+`SHINYHUB_APP_LOG_RUN_RETENTION_COUNT`) to change the count; `-1` retains all
+runs. Database cleanup runs immediately when an instance becomes owner; every
+control-plane node also reconciles its private log files at startup and then at
+`maintenance.interval`, so a former owner cannot accumulate orphaned files.
+
 ## Run an HA cluster locally
 
 You can run a two-instance HA cluster on one machine against a local Postgres to
