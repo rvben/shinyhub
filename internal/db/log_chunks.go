@@ -21,6 +21,15 @@ const (
 	appLogFlushInterval        = 200 * time.Millisecond
 )
 
+// AppLogMetrics receives process-local shared-log pipeline signals without
+// coupling database persistence to Prometheus. Implementations must be safe for
+// concurrent use by multiple app-log writers.
+type AppLogMetrics interface {
+	RecordAppLogFlush(result string, duration, persistenceLag time.Duration)
+	AddAppLogPendingBytes(delta int64)
+	RecordAppLogDroppedBytes(bytes int64)
+}
+
 // AppLogStats describes the retained shared output for one immutable run.
 type AppLogStats struct {
 	SizeBytes int64
@@ -197,9 +206,10 @@ func (s *Store) AppLogStatsForRuns(runIDs []string) (map[string]AppLogStats, err
 // Failed flushes retain the bounded buffer for a later retry; Write still
 // succeeds so a transient database outage cannot terminate application output.
 type AppLogWriter struct {
-	store    *Store
-	runID    string
-	maxBytes int64
+	appendChunk func(runID string, seq, startOffset int64, data []byte, maxBytes int64, createdAt time.Time) error
+	metrics     AppLogMetrics
+	runID       string
+	maxBytes    int64
 
 	mu           sync.Mutex
 	pending      []appLogPendingChunk
@@ -213,9 +223,10 @@ type AppLogWriter struct {
 }
 
 type appLogPendingChunk struct {
-	seq   int64
-	start int64
-	data  []byte
+	seq      int64
+	start    int64
+	queuedAt time.Time
+	data     []byte
 }
 
 func (s *Store) NewAppLogWriter(runID string, maxBytes int64) (*AppLogWriter, error) {
@@ -226,8 +237,11 @@ func (s *Store) NewAppLogWriter(runID string, maxBytes int64) (*AppLogWriter, er
 		maxBytes = AppLogRetentionBytes
 	}
 	w := &AppLogWriter{
-		store: s, runID: runID, maxBytes: maxBytes,
-		stop: make(chan struct{}), done: make(chan struct{}),
+		appendChunk: s.AppendAppLogChunk,
+		metrics:     s.appLogMetricsRecorder(),
+		runID:       runID,
+		maxBytes:    maxBytes,
+		stop:        make(chan struct{}), done: make(chan struct{}),
 	}
 	go w.flushLoop()
 	return w, nil
@@ -248,6 +262,7 @@ func (w *AppLogWriter) Write(p []byte) (int, error) {
 			}
 			w.pending[n-1].data = append(w.pending[n-1].data, p[:room]...)
 			w.pendingBytes += int64(room)
+			w.addPendingBytes(int64(room))
 			w.nextOffset += int64(room)
 			p = p[room:]
 			continue
@@ -258,10 +273,12 @@ func (w *AppLogWriter) Write(p []byte) (int, error) {
 		}
 		chunk := appLogPendingChunk{
 			seq: w.nextSeq, start: w.nextOffset,
-			data: append([]byte(nil), p[:take]...),
+			queuedAt: time.Now(),
+			data:     append([]byte(nil), p[:take]...),
 		}
 		w.pending = append(w.pending, chunk)
 		w.pendingBytes += int64(take)
+		w.addPendingBytes(int64(take))
 		w.nextSeq++
 		w.nextOffset += int64(take)
 		p = p[take:]
@@ -276,14 +293,37 @@ func (w *AppLogWriter) trimPendingLocked() {
 	for w.pendingBytes > w.maxBytes && len(w.pending) > 0 {
 		drop := w.pendingBytes - w.maxBytes
 		if int64(len(w.pending[0].data)) <= drop {
-			w.pendingBytes -= int64(len(w.pending[0].data))
+			drop = int64(len(w.pending[0].data))
+			w.pendingBytes -= drop
 			w.pending = w.pending[1:]
+			w.dropPendingBytes(drop)
 			continue
 		}
 		w.pending[0].data = append([]byte(nil), w.pending[0].data[drop:]...)
 		w.pending[0].start += drop
 		w.pendingBytes -= drop
+		w.dropPendingBytes(drop)
 	}
+}
+
+func (w *AppLogWriter) addPendingBytes(delta int64) {
+	if w.metrics != nil && delta != 0 {
+		w.metrics.AddAppLogPendingBytes(delta)
+	}
+}
+
+func (w *AppLogWriter) recordDroppedBytes(bytes int64) {
+	if bytes <= 0 {
+		return
+	}
+	if w.metrics != nil {
+		w.metrics.RecordAppLogDroppedBytes(bytes)
+	}
+}
+
+func (w *AppLogWriter) dropPendingBytes(bytes int64) {
+	w.addPendingBytes(-bytes)
+	w.recordDroppedBytes(bytes)
 }
 
 func (w *AppLogWriter) flushLoop() {
@@ -314,9 +354,21 @@ func (w *AppLogWriter) flushOne() (bool, error) {
 	chunk := w.pending[0]
 	w.pending = w.pending[1:]
 	w.pendingBytes -= int64(len(chunk.data))
+	w.addPendingBytes(-int64(len(chunk.data)))
 	w.mu.Unlock()
 
-	err := w.store.AppendAppLogChunk(w.runID, chunk.seq, chunk.start, chunk.data, w.maxBytes, time.Now().UTC())
+	started := time.Now()
+	err := w.appendChunk(w.runID, chunk.seq, chunk.start, chunk.data, w.maxBytes, started.UTC())
+	if w.metrics != nil {
+		result := "ok"
+		lag := time.Duration(0)
+		if err != nil {
+			result = "error"
+		} else {
+			lag = time.Since(chunk.queuedAt)
+		}
+		w.metrics.RecordAppLogFlush(result, time.Since(started), lag)
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err == nil {
@@ -333,10 +385,14 @@ func (w *AppLogWriter) flushOne() (bool, error) {
 			drop := cutoff - chunk.start
 			chunk.data = append([]byte(nil), chunk.data[drop:]...)
 			chunk.start = cutoff
+			w.recordDroppedBytes(drop)
 		}
 		w.pending = append([]appLogPendingChunk{chunk}, w.pending...)
 		w.pendingBytes += int64(len(chunk.data))
+		w.addPendingBytes(int64(len(chunk.data)))
 		w.trimPendingLocked()
+	} else {
+		w.recordDroppedBytes(int64(len(chunk.data)))
 	}
 	return true, err
 }
@@ -354,7 +410,19 @@ func (w *AppLogWriter) Close() error {
 	<-w.done
 	for {
 		had, err := w.flushOne()
-		if err != nil || !had {
+		if err != nil {
+			// Close has stopped the retry loop. Any bytes still queued after a
+			// failed final flush can no longer be persisted, so remove them from
+			// the live backlog gauge and account for the loss explicitly.
+			w.mu.Lock()
+			dropped := w.pendingBytes
+			w.pending = nil
+			w.pendingBytes = 0
+			w.dropPendingBytes(dropped)
+			w.mu.Unlock()
+			return err
+		}
+		if !had {
 			return err
 		}
 	}

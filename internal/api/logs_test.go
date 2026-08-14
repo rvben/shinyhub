@@ -32,6 +32,41 @@ func newLogsTestServer(t *testing.T) (*api.Server, *db.Store, string) {
 	return srv, store, appsDir
 }
 
+// writeCurrentLogsTestOutput seeds the storage path the handler uses for the
+// active backend: legacy local files on SQLite and an immutable shared run on
+// Postgres. Keeping these tests backend-neutral prevents a clustered test run
+// from accidentally exercising an empty database reader with a local fixture.
+func writeCurrentLogsTestOutput(t *testing.T, store *db.Store, appsDir string, content []byte) {
+	t.Helper()
+	if !store.IsPostgres() {
+		logPath := filepath.Join(appsDir, "myapp", "app-0.log")
+		if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(logPath, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	app, err := store.GetAppBySlug("myapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const runID = "99999999-9999-4999-8999-999999999999"
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: app.ID, ReplicaIndex: 0, Tier: "local",
+		Status: "starting", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkAppLogRunRunning(runID, "native"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendAppLogChunk(runID, 0, 0, content, db.AppLogRetentionBytes, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHandleLogs_NoLogFile(t *testing.T) {
 	srv, store, _ := newLogsTestServer(t)
 	hash, _ := testHashPassword("pass")
@@ -143,15 +178,24 @@ func TestHandleLogSourcesAndLogsExposeImmutableRunHistory(t *testing.T) {
 	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, Status: "running", Provider: "native", Tier: "local", AppVersion: "v2"}); err != nil {
 		t.Fatal(err)
 	}
-	logDir := filepath.Join(appsDir, "myapp", "logs")
-	if err := os.MkdirAll(logDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(logDir, "replica-0-"+olderID+".log"), []byte("old run only\n"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(logDir, "replica-0-"+newerID+".log"), []byte("new run only\n"), 0o640); err != nil {
-		t.Fatal(err)
+	if store.IsPostgres() {
+		if err := store.AppendAppLogChunk(olderID, 0, 0, []byte("old run only\n"), db.AppLogRetentionBytes, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AppendAppLogChunk(newerID, 0, 0, []byte("new run only\n"), db.AppLogRetentionBytes, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		logDir := filepath.Join(appsDir, "myapp", "logs")
+		if err := os.MkdirAll(logDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(logDir, "replica-0-"+olderID+".log"), []byte("old run only\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(logDir, "replica-0-"+newerID+".log"), []byte("new run only\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
@@ -246,13 +290,7 @@ func TestHandleLogs_TailLimitsInitialBurst(t *testing.T) {
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
 
-	logPath := filepath.Join(appsDir, "myapp", "app-0.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(logPath, []byte("a\nb\nc\nd\ne\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	writeCurrentLogsTestOutput(t, store, appsDir, []byte("a\nb\nc\nd\ne\n"))
 
 	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
 	req := httptest.NewRequest("GET", "/api/apps/myapp/logs?tail=2&follow=false", nil)
@@ -287,13 +325,7 @@ func TestHandleLogs_NoFollowReturnsPlainText(t *testing.T) {
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
 
-	logPath := filepath.Join(appsDir, "myapp", "app-0.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(logPath, []byte("hello\nworld\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	writeCurrentLogsTestOutput(t, store, appsDir, []byte("hello\nworld\n"))
 
 	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
 	req := httptest.NewRequest("GET", "/api/apps/myapp/logs?follow=false", nil)
@@ -353,14 +385,8 @@ func TestHandleLogs_SSEInitialBurst(t *testing.T) {
 	u, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
 
-	// Pre-populate log file for replica 0 (the default).
-	logPath := filepath.Join(appsDir, "myapp", "app-0.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(logPath, []byte("alpha\nbeta\ngamma\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	// Pre-populate output for replica 0 (the default).
+	writeCurrentLogsTestOutput(t, store, appsDir, []byte("alpha\nbeta\ngamma\n"))
 
 	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
 

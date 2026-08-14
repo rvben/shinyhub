@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -94,6 +95,12 @@ type Store struct {
 	// db package to the metrics registry. Never nil-checked off the hot path:
 	// audit writes are infrequent relative to request volume.
 	auditErrHook func()
+
+	// appLogMetrics is captured by each new AppLogWriter. The lock makes
+	// instrumentation safe to wire during startup without coupling this package
+	// to a concrete metrics implementation.
+	appLogMetricsMu sync.RWMutex
+	appLogMetrics   AppLogMetrics
 }
 
 // SetAuditErrorHook registers a callback invoked whenever LogAuditEvent fails to
@@ -102,6 +109,21 @@ type Store struct {
 // dropping the compliance trail.
 func (s *Store) SetAuditErrorHook(hook func()) {
 	s.auditErrHook = hook
+}
+
+// SetAppLogMetrics registers instrumentation for subsequently created shared
+// app-log writers. Existing writers retain the recorder they were created
+// with, so callers should wire this once during startup.
+func (s *Store) SetAppLogMetrics(recorder AppLogMetrics) {
+	s.appLogMetricsMu.Lock()
+	s.appLogMetrics = recorder
+	s.appLogMetricsMu.Unlock()
+}
+
+func (s *Store) appLogMetricsRecorder() AppLogMetrics {
+	s.appLogMetricsMu.RLock()
+	defer s.appLogMetricsMu.RUnlock()
+	return s.appLogMetrics
 }
 
 // fileDBMaxConns caps the connection pool for file-backed databases. WAL lets

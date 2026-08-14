@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -195,5 +196,36 @@ func TestRecordReject_AppearsInScrape(t *testing.T) {
 	rr := scrape(t, reg)
 	if !strings.Contains(rr, `shinyhub_admission_rejects_total{reason="app-not-ready",slug="demo"}`) {
 		t.Errorf("scrape missing admission-rejects series:\n%s", rr)
+	}
+}
+
+func TestAppLogMetricsExposePipelineHealthAndCleanup(t *testing.T) {
+	reg := New("test")
+	reg.RecordAppLogFlush("ok", 20*time.Millisecond, 240*time.Millisecond)
+	reg.RecordAppLogFlush("unexpected", 50*time.Millisecond, 0)
+	reg.AddAppLogPendingBytes(128)
+	reg.AddAppLogPendingBytes(-32)
+	reg.RecordAppLogDroppedBytes(12)
+	reg.RecordAppLogRunsPruned(3)
+	reg.RecordAppLogFilesPruned(2)
+
+	checks := []struct {
+		name   string
+		labels map[string]string
+		want   float64
+	}{
+		{"shinyhub_app_log_flush_attempts_total", map[string]string{"result": "ok"}, 1},
+		{"shinyhub_app_log_flush_attempts_total", map[string]string{"result": "error"}, 1},
+		{"shinyhub_app_log_flush_duration_seconds", nil, 2},
+		{"shinyhub_app_log_persistence_lag_seconds", nil, 1},
+		{"shinyhub_app_log_pending_bytes", nil, 96},
+		{"shinyhub_app_log_buffer_dropped_bytes_total", nil, 12},
+		{"shinyhub_app_log_runs_pruned_total", nil, 3},
+		{"shinyhub_app_log_files_pruned_total", nil, 2},
+	}
+	for _, check := range checks {
+		if got, ok := sampleValue(t, reg, check.name, check.labels); !ok || got != check.want {
+			t.Errorf("%s = %v (ok=%v), want %v", check.name, got, ok, check.want)
+		}
 	}
 }

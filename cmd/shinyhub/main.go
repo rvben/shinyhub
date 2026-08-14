@@ -429,10 +429,15 @@ func probeWritable(dir string) error {
 	return os.Remove(name)
 }
 
+type appLogMaintenanceMetrics interface {
+	RecordAppLogRunsPruned(count int64)
+	RecordAppLogFilesPruned(count int)
+}
+
 // runMaintenance periodically prunes database history and reconciles immutable
 // local log files. It runs on the owner instance only, promptly and then on the
 // configured interval.
-func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manager, cfg config.MaintenanceConfig) {
+func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manager, telemetry appLogMaintenanceMetrics, cfg config.MaintenanceConfig) {
 	auditRetention := time.Duration(cfg.AuditRetentionDays) * 24 * time.Hour
 	keepRuns := cfg.ScheduleRunRetentionCount
 	keepAppLogs := cfg.AppLogRunRetentionCount
@@ -480,8 +485,11 @@ func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manag
 			} else {
 				if n > 0 {
 					slog.Info("pruned_app_log_runs", "removed", n, "keep_per_replica", keepAppLogs)
+					if telemetry != nil {
+						telemetry.RecordAppLogRunsPruned(n)
+					}
 				}
-				reconcileLocalAppLogFiles(store, manager)
+				reconcileLocalAppLogFiles(store, manager, telemetry)
 			}
 		}
 		if pruneRateLimits {
@@ -506,7 +514,7 @@ func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manag
 	}
 }
 
-func reconcileLocalAppLogFiles(store *db.Store, manager *process.Manager) {
+func reconcileLocalAppLogFiles(store *db.Store, manager *process.Manager, telemetry appLogMaintenanceMetrics) {
 	if manager == nil {
 		return
 	}
@@ -520,17 +528,20 @@ func reconcileLocalAppLogFiles(store *db.Store, manager *process.Manager) {
 		slog.Warn("prune_app_log_files_failed", "removed", removed, "err", err)
 	} else if removed > 0 {
 		slog.Info("pruned_app_log_files", "removed", removed)
+		if telemetry != nil {
+			telemetry.RecordAppLogFilesPruned(removed)
+		}
 	}
 }
 
 // runLocalLogMaintenance reconciles every control-plane node's private disk.
 // Database deletion remains owner-only, but a former owner may retain files on
 // a standby; each node therefore removes database-orphaned files independently.
-func runLocalLogMaintenance(ctx context.Context, store *db.Store, manager *process.Manager, interval time.Duration) {
+func runLocalLogMaintenance(ctx context.Context, store *db.Store, manager *process.Manager, telemetry appLogMaintenanceMetrics, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	reconcileLocalAppLogFiles(store, manager)
+	reconcileLocalAppLogFiles(store, manager, telemetry)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -538,7 +549,7 @@ func runLocalLogMaintenance(ctx context.Context, store *db.Store, manager *proce
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			reconcileLocalAppLogFiles(store, manager)
+			reconcileLocalAppLogFiles(store, manager, telemetry)
 		}
 	}
 }
@@ -1283,6 +1294,9 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		// Surface dropped audit events (e.g. disk full) as a counter so the
 		// silent loss of the compliance trail is alertable.
 		store.SetAuditErrorHook(reg.RecordAuditWriteError)
+		// Shared-log writers capture this recorder when they are created. Keep
+		// persistence health observable without importing Prometheus from db.
+		store.SetAppLogMetrics(reg)
 		var mln net.Listener
 		metricsSrv, mln, err = startMetricsListener(upg.Listen, cfg.Metrics.Addr, reg)
 		if err != nil {
@@ -1741,6 +1755,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	if metricsReg != nil {
 		jobsMgr.SetScheduleMetrics(metricsReg)
 	}
+	// Preserve a genuinely nil interface when metrics are disabled. Passing the
+	// nil *Registry directly would produce a non-nil interface and panic on the
+	// first retention event that tried to record cleanup.
+	var appLogTelemetry appLogMaintenanceMetrics
+	if metricsReg != nil {
+		appLogTelemetry = metricsReg
+	}
 
 	// Replica autoscaling is opt-in per app and gated by a global switch. When
 	// enabled, the controller evaluates opted-in apps on its own interval and
@@ -1861,7 +1882,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		// only, so HA standbys never prune concurrently. A no-op unless retention
 		// is configured.
 		loops.Add(1)
-		go func() { defer loops.Done(); runMaintenance(octx, store, mgr, cfg.Maintenance) }()
+		go func() { defer loops.Done(); runMaintenance(octx, store, mgr, appLogTelemetry, cfg.Maintenance) }()
 		// Warm-restore: re-boot and re-freeze the apps that were hibernated before
 		// this restart, so their next access is a warm resume instead of a cold
 		// boot (a frozen process does not survive a service restart, so the warm
@@ -1927,7 +1948,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		localLogMaintenanceWG.Add(1)
 		go func() {
 			defer localLogMaintenanceWG.Done()
-			runLocalLogMaintenance(electorCtx, store, mgr, cfg.Maintenance.Interval)
+			runLocalLogMaintenance(electorCtx, store, mgr, appLogTelemetry, cfg.Maintenance.Interval)
 		}()
 	}
 

@@ -13,6 +13,14 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 )
 
+type appLogMaintenanceMetricsSpy struct {
+	runs  int64
+	files int
+}
+
+func (m *appLogMaintenanceMetricsSpy) RecordAppLogRunsPruned(count int64) { m.runs += count }
+func (m *appLogMaintenanceMetricsSpy) RecordAppLogFilesPruned(count int)  { m.files += count }
+
 func TestRunMaintenancePrunesDatabaseBeforeLocalLogFiles(t *testing.T) {
 	store := dbtest.New(t)
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "hash", Role: "developer"}); err != nil {
@@ -52,7 +60,8 @@ func TestRunMaintenancePrunesDatabaseBeforeLocalLogFiles(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // maintenance still runs its prompt first pass, then exits.
-	runMaintenance(ctx, store, process.NewManager(appsDir, process.NewNativeRuntime()), config.MaintenanceConfig{
+	telemetry := &appLogMaintenanceMetricsSpy{}
+	runMaintenance(ctx, store, process.NewManager(appsDir, process.NewNativeRuntime()), telemetry, config.MaintenanceConfig{
 		AppLogRunRetentionCount: 1,
 		Interval:                time.Hour,
 	})
@@ -70,5 +79,8 @@ func TestRunMaintenancePrunesDatabaseBeforeLocalLogFiles(t *testing.T) {
 		if i == 2 && err != nil {
 			t.Errorf("newest local run removed: %v", err)
 		}
+	}
+	if telemetry.runs != 2 || telemetry.files != 2 {
+		t.Fatalf("maintenance metrics = runs:%d files:%d, want runs:2 files:2", telemetry.runs, telemetry.files)
 	}
 }

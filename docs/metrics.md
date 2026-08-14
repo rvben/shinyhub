@@ -106,6 +106,28 @@ reading one instance in isolation - the example alert below already does this.
 | `shinyhub_app_state_transitions_total` | counter | `event` | App lifecycle transitions (`hibernate`, `wake`). |
 | `shinyhub_replica_restarts_total` | counter | - | Replica crash-restarts performed by the watchdog. A flapping app shows up as a rising restart rate. |
 
+### Application-log durability
+
+These process-local signals cover the shared-log path used by clustered
+Postgres deployments. They deliberately carry no app, replica, or run labels:
+those identities are unbounded and belong in the log viewer, not in Prometheus
+series. Scrape every control-plane instance and aggregate with `sum(...)` in HA.
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `shinyhub_app_log_flush_attempts_total` | counter | `result` | Shared-log database flush attempts (`ok` / `error`). |
+| `shinyhub_app_log_flush_duration_seconds` | histogram | - | Database-call duration for every shared-log flush attempt. |
+| `shinyhub_app_log_persistence_lag_seconds` | histogram | - | Time from entering the retry buffer to a successful database flush. Failed attempts do not produce a lag sample. |
+| `shinyhub_app_log_pending_bytes` | gauge | - | Bytes currently queued for persistence by this process, excluding the one chunk in flight. A brief non-zero value is normal because writes are batched. |
+| `shinyhub_app_log_buffer_dropped_bytes_total` | counter | - | Bytes evicted from the bounded retry buffer, including bytes abandoned when the final shutdown flush fails. Any increase means shared history may be incomplete. |
+| `shinyhub_app_log_runs_pruned_total` | counter | - | Immutable run records removed from database retention by the owner. |
+| `shinyhub_app_log_files_pruned_total` | counter | - | Orphaned immutable files removed from this node's private disk. |
+
+The flush and buffer metrics remain present at zero on single-node SQLite
+deployments, where the viewer reads its local files directly. Retention cleanup
+counters can still rise there. Like all Prometheus counters, cleanup and loss
+totals reset when a ShinyHub process restarts.
+
 ### Example alerts
 
 ```yaml
@@ -129,6 +151,22 @@ groups:
         for: 5m
         annotations:
           summary: "{{ $labels.slug }} is above 90% of its admission ceiling"
+
+      - alert: ShinyHubAppLogPersistenceErrors
+        expr: sum(increase(shinyhub_app_log_flush_attempts_total{result="error"}[10m])) > 0
+        annotations:
+          summary: "Shared app-log persistence has failed"
+
+      - alert: ShinyHubAppLogBacklogStuck
+        expr: sum(shinyhub_app_log_pending_bytes) > 0
+        for: 5m
+        annotations:
+          summary: "Shared app-log bytes have remained queued for 5m"
+
+      - alert: ShinyHubAppLogDataDropped
+        expr: sum(increase(shinyhub_app_log_buffer_dropped_bytes_total[5m])) > 0
+        annotations:
+          summary: "Shared app-log history may be incomplete"
 ```
 
 ## Access log

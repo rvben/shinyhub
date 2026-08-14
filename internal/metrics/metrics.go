@@ -36,9 +36,16 @@ type Registry struct {
 	fargateInventoryErrorsTotal prometheus.Counter
 	fargateRunTaskDuration      prometheus.Histogram
 
-	autoscaleScales  *prometheus.CounterVec
-	auditWriteErrors prometheus.Counter
-	runs             *prometheus.CounterVec
+	autoscaleScales   *prometheus.CounterVec
+	auditWriteErrors  prometheus.Counter
+	appLogFlushes     *prometheus.CounterVec
+	appLogFlushTime   prometheus.Histogram
+	appLogPersistLag  prometheus.Histogram
+	appLogPending     prometheus.Gauge
+	appLogDropped     prometheus.Counter
+	appLogRunsPruned  prometheus.Counter
+	appLogFilesPruned prometheus.Counter
+	runs              *prometheus.CounterVec
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -144,6 +151,46 @@ func New(version string) *Registry {
 	})
 	reg.MustRegister(auditWriteErrors)
 
+	appLogFlushes := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_app_log_flush_attempts_total",
+		Help: "Total shared app-log database flush attempts by result (ok or error).",
+	}, []string{"result"})
+	appLogFlushTime := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "shinyhub_app_log_flush_duration_seconds",
+		Help:    "Duration of shared app-log database flush attempts.",
+		Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+	})
+	appLogPersistLag := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "shinyhub_app_log_persistence_lag_seconds",
+		Help:    "Time from shared app-log bytes entering the retry buffer until their successful database flush.",
+		Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60},
+	})
+	appLogPending := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "shinyhub_app_log_pending_bytes",
+		Help: "Shared app-log bytes currently queued for database persistence by this control-plane process.",
+	})
+	appLogDropped := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinyhub_app_log_buffer_dropped_bytes_total",
+		Help: "Shared app-log bytes evicted from the bounded retry buffer before persistence could be confirmed.",
+	})
+	appLogRunsPruned := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinyhub_app_log_runs_pruned_total",
+		Help: "Immutable app-log run records removed from shared database retention by this control-plane process.",
+	})
+	appLogFilesPruned := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinyhub_app_log_files_pruned_total",
+		Help: "Orphaned immutable app-log files removed from this control-plane node's local disk.",
+	})
+	reg.MustRegister(
+		appLogFlushes,
+		appLogFlushTime,
+		appLogPersistLag,
+		appLogPending,
+		appLogDropped,
+		appLogRunsPruned,
+		appLogFilesPruned,
+	)
+
 	runs := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "shinyhub_schedule_runs_total",
 		Help: "Total scheduled-job runs by app, schedule, and terminal status.",
@@ -165,9 +212,16 @@ func New(version string) *Registry {
 		fargateInventoryErrorsTotal: fargateInventoryErrorsTotal,
 		fargateRunTaskDuration:      fargateRunTaskDuration,
 
-		autoscaleScales:  autoscaleScales,
-		auditWriteErrors: auditWriteErrors,
-		runs:             runs,
+		autoscaleScales:   autoscaleScales,
+		auditWriteErrors:  auditWriteErrors,
+		appLogFlushes:     appLogFlushes,
+		appLogFlushTime:   appLogFlushTime,
+		appLogPersistLag:  appLogPersistLag,
+		appLogPending:     appLogPending,
+		appLogDropped:     appLogDropped,
+		appLogRunsPruned:  appLogRunsPruned,
+		appLogFilesPruned: appLogFilesPruned,
+		runs:              runs,
 	}
 }
 
@@ -227,6 +281,46 @@ func (r *Registry) RegisterFleetGauges(appsRunning, replicasRunning, appsCrashed
 // disk full) silently dropping the compliance trail can be alerted on.
 func (r *Registry) RecordAuditWriteError() {
 	r.auditWriteErrors.Inc()
+}
+
+// RecordAppLogFlush records one bounded-vocabulary shared-log persistence
+// attempt. Persistence lag is observed only for successful attempts.
+func (r *Registry) RecordAppLogFlush(result string, duration, persistenceLag time.Duration) {
+	if result != "ok" {
+		result = "error"
+	}
+	r.appLogFlushes.WithLabelValues(result).Inc()
+	r.appLogFlushTime.Observe(duration.Seconds())
+	if result == "ok" {
+		r.appLogPersistLag.Observe(persistenceLag.Seconds())
+	}
+}
+
+// AddAppLogPendingBytes adjusts the process-local shared-log retry backlog.
+func (r *Registry) AddAppLogPendingBytes(delta int64) {
+	r.appLogPending.Add(float64(delta))
+}
+
+// RecordAppLogDroppedBytes records retry-buffer eviction before persistence
+// could be confirmed.
+func (r *Registry) RecordAppLogDroppedBytes(bytes int64) {
+	if bytes > 0 {
+		r.appLogDropped.Add(float64(bytes))
+	}
+}
+
+// RecordAppLogRunsPruned records database retention cleanup by the owner.
+func (r *Registry) RecordAppLogRunsPruned(count int64) {
+	if count > 0 {
+		r.appLogRunsPruned.Add(float64(count))
+	}
+}
+
+// RecordAppLogFilesPruned records private-disk cleanup on this node.
+func (r *Registry) RecordAppLogFilesPruned(count int) {
+	if count > 0 {
+		r.appLogFilesPruned.Add(float64(count))
+	}
 }
 
 // Handler returns the Prometheus scrape handler for this registry.
