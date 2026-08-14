@@ -97,6 +97,7 @@ export function createLogsViewer({
   api,
   EventSourceClass = globalThis.EventSource,
   refreshEveryMs = 5000,
+  maxRenderedEntries = MAX_RENDERED_LOG_ENTRIES,
 }) {
   const doc = panel.ownerDocument;
   const win = doc.defaultView || globalThis;
@@ -154,6 +155,10 @@ export function createLogsViewer({
   let stickToBottom = true;
   let destroyed = false;
   let renderScheduled = false;
+  let cancelScheduledRender = null;
+  let fullRenderPending = true;
+  let renderedEntries = [];
+  let renderedQuery = '';
   let refreshTimer = null;
   let scopeGeneration = 0;
   const streams = new Map();
@@ -191,18 +196,39 @@ export function createLogsViewer({
   }
 
   function scheduleRender(force = false) {
+    if (force) fullRenderPending = true;
     if ((paused && !force) || renderScheduled || destroyed) return;
     renderScheduled = true;
     const run = () => {
       renderScheduled = false;
-      if (!destroyed) renderEntries();
+      cancelScheduledRender = null;
+      if (!destroyed) {
+        const full = fullRenderPending;
+        fullRenderPending = false;
+        renderEntries(full);
+      }
     };
-    if (typeof win.requestAnimationFrame === 'function') win.requestAnimationFrame(run);
-    else win.setTimeout(run, 0);
+    if (typeof win.requestAnimationFrame === 'function') {
+      const frame = win.requestAnimationFrame(run);
+      cancelScheduledRender = () => win.cancelAnimationFrame(frame);
+    } else {
+      const timer = win.setTimeout(run, 0);
+      cancelScheduledRender = () => win.clearTimeout(timer);
+    }
+  }
+
+  function flushScheduledRender() {
+    if (!renderScheduled) return;
+    if (cancelScheduledRender) cancelScheduledRender();
+    renderScheduled = false;
+    cancelScheduledRender = null;
+    const full = fullRenderPending;
+    fullRenderPending = false;
+    renderEntries(full);
   }
 
   function addEntry(entry) {
-    trimmed += appendBoundedLogEntry(entries, entry);
+    trimmed += appendBoundedLogEntry(entries, entry, maxRenderedEntries);
     if (paused) {
       pendingWhilePaused++;
       pauseButton.textContent = `Resume (${pendingWhilePaused})`;
@@ -211,8 +237,27 @@ export function createLogsViewer({
     scheduleRender();
   }
 
-  function renderEntries() {
-    const visible = filterLogEntries(entries, searchInput.value);
+  function createEntryRow(entry) {
+    const row = doc.createElement('div');
+    row.className = entry.kind === 'event' ? 'log-entry log-entry-event' : 'log-entry';
+    if (entry.kind === 'event') {
+      const message = doc.createElement('span');
+      message.textContent = entry.line;
+      row.appendChild(message);
+    } else {
+      const source = doc.createElement('span');
+      source.className = `log-entry-source log-source-${entry.replica % 6}`;
+      source.textContent = `#${entry.replica}`;
+      source.title = `Replica #${entry.replica}`;
+      const message = doc.createElement('span');
+      message.className = 'log-entry-message';
+      message.textContent = entry.line;
+      row.append(source, message);
+    }
+    return row;
+  }
+
+  function replaceRenderedEntries(visible, query) {
     const wasFollowing = stickToBottom && atBottom();
     const fragment = doc.createDocumentFragment();
     if (visible.length === 0) {
@@ -223,31 +268,56 @@ export function createLogsViewer({
         : (sources.length ? 'Waiting for application output…' : 'No retained log sources were found.');
       fragment.appendChild(empty);
     } else {
-      for (const entry of visible) {
-        const row = doc.createElement('div');
-        row.className = entry.kind === 'event' ? 'log-entry log-entry-event' : 'log-entry';
-        if (entry.kind === 'event') {
-          const message = doc.createElement('span');
-          message.textContent = entry.line;
-          row.appendChild(message);
-        } else {
-          const source = doc.createElement('span');
-          source.className = `log-entry-source log-source-${entry.replica % 6}`;
-          source.textContent = `#${entry.replica}`;
-          source.title = `Replica #${entry.replica}`;
-          const message = doc.createElement('span');
-          message.className = 'log-entry-message';
-          message.textContent = entry.line;
-          row.append(source, message);
-        }
-        fragment.appendChild(row);
-      }
+      for (const entry of visible) fragment.appendChild(createEntryRow(entry));
     }
     output.replaceChildren(fragment);
+    renderedEntries = visible.slice();
+    renderedQuery = query;
+    return wasFollowing;
+  }
+
+  function appendRenderedEntries(visible, query) {
+    const wasFollowing = stickToBottom && atBottom();
+    if (visible.length === 0) {
+      if (renderedEntries.length === 0) return wasFollowing;
+      return replaceRenderedEntries(visible, query);
+    }
+    if (renderedEntries.length === 0) {
+      const fragment = doc.createDocumentFragment();
+      for (const entry of visible) fragment.appendChild(createEntryRow(entry));
+      output.replaceChildren(fragment);
+      renderedEntries = visible.slice();
+      return wasFollowing;
+    }
+
+    // Between full renders the visible sequence can only lose entries from the
+    // front and gain entries at the end. Reconcile that overlap in place so a
+    // busy stream never rebuilds thousands of unchanged rows.
+    const overlapStart = renderedEntries.indexOf(visible[0]);
+    const retained = overlapStart < 0 ? 0 : renderedEntries.length - overlapStart;
+    const aligned = overlapStart >= 0 && retained <= visible.length &&
+      (retained === 0 || renderedEntries[renderedEntries.length - 1] === visible[retained - 1]);
+    if (!aligned) return replaceRenderedEntries(visible, query);
+
+    for (let i = 0; i < overlapStart; i++) output.firstElementChild?.remove();
+    const fragment = doc.createDocumentFragment();
+    for (const entry of visible.slice(retained)) fragment.appendChild(createEntryRow(entry));
+    output.appendChild(fragment);
+    renderedEntries = visible.slice();
+    return wasFollowing;
+  }
+
+  function renderEntries(forceFull = false) {
+    const query = searchInput.value;
+    const visible = filterLogEntries(entries, query);
+    const canAppend = !forceFull && query === renderedQuery;
+    const wasFollowing = canAppend
+      ? appendRenderedEntries(visible, query)
+      : replaceRenderedEntries(visible, query);
     if (wasFollowing || stickToBottom) output.scrollTop = output.scrollHeight;
     const parts = [`${visible.length.toLocaleString()} visible line${visible.length === 1 ? '' : 's'}`];
     if (trimmed) parts.push(`${trimmed.toLocaleString()} older lines omitted from this session`);
-    if (searchInput.value) parts.push(`${entries.length.toLocaleString()} buffered`);
+    if (query) parts.push(`${entries.length.toLocaleString()} buffered`);
     summary.textContent = parts.join(' · ');
     jumpButton.hidden = stickToBottom;
   }
@@ -278,6 +348,7 @@ export function createLogsViewer({
     sourceSelect.replaceChildren(...options);
     selected = prior === 'all' || sources.some((s) => s.source_id === prior) ? prior : 'all';
     sourceSelect.value = selected;
+    return selected !== prior;
   }
 
   function updateConnectionStatus() {
@@ -387,7 +458,16 @@ export function createLogsViewer({
   function reconcileSources(nextSources, markChanges) {
     const previous = new Map(sources.map((source) => [source.source_id, source]));
     sources = normalizeLogSources(nextSources);
-    renderSourceOptions();
+    const selectionExpired = renderSourceOptions();
+    if (selectionExpired) {
+      updateURL();
+      if (markChanges) {
+        resetScope();
+        const message = 'Selected log run is no longer retained; showing all current replicas';
+        addEntry({ kind: 'event', replica: null, line: message });
+        announce(`${message}.`);
+      }
+    }
     if (markChanges) {
       for (const source of sources) {
         const old = previous.get(source.source_id);
@@ -439,6 +519,10 @@ export function createLogsViewer({
   });
   searchInput.addEventListener('input', () => scheduleRender(true));
   pauseButton.addEventListener('click', () => {
+    // Finish the already-scheduled frame before entering pause. Otherwise a
+    // line arriving between the click and that frame would leak into the DOM
+    // even though it is correctly counted as buffered.
+    if (!paused) flushScheduledRender();
     paused = !paused;
     pauseButton.setAttribute('aria-pressed', String(paused));
     if (paused) {
@@ -499,6 +583,7 @@ export function createLogsViewer({
 
   return () => {
     destroyed = true;
+    if (cancelScheduledRender) cancelScheduledRender();
     closeStreams();
     if (refreshTimer != null) win.clearInterval(refreshTimer);
   };

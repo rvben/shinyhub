@@ -110,7 +110,7 @@ test('viewer merges live replicas, identifies every line, and loads ended logs o
   dom.window.close();
 });
 
-test('pause buffers incoming lines and resume renders them', async () => {
+test('pause buffers incoming lines and resume renders them', async (t) => {
   const dom = new JSDOM('<section id="panel"></section>', {
     url: 'https://shinyhub.test/apps/demo/logs',
     pretendToBeVisual: true,
@@ -126,6 +126,7 @@ test('pause buffers incoming lines and resume renders them', async () => {
   const cleanup = createLogsViewer({
     panel, app: { slug: 'demo' }, api, EventSourceClass: FakeEventSource, refreshEveryMs: 60_000,
   });
+  t.after(() => { cleanup(); dom.window.close(); });
   await tick();
   const pause = panel.querySelector('#logs-pause');
   pause.click();
@@ -137,6 +138,97 @@ test('pause buffers incoming lines and resume renders them', async () => {
   await tick();
   assert.match(panel.querySelector('#detail-logs-body').textContent, /buffered while paused/);
   assert.equal(pause.getAttribute('aria-pressed'), 'false');
-  cleanup();
-  dom.window.close();
+});
+
+test('steady live output appends rows without rebuilding the whole log viewport', async (t) => {
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs',
+    pretendToBeVisual: true,
+  });
+  let stream;
+  class FakeEventSource {
+    constructor() { stream = this; }
+    close() {}
+  }
+  const source = { source_id: 'live-0', replica: 0, status: 'running', current: true, has_log: true };
+  const api = async () => ({ ok: true, json: async () => ({ sources: [source] }) });
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({
+    panel, app: { slug: 'demo' }, api, EventSourceClass: FakeEventSource,
+    refreshEveryMs: 60_000, maxRenderedEntries: 8,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await tick();
+
+  const output = panel.querySelector('#detail-logs-body');
+  const replaceChildren = output.replaceChildren.bind(output);
+  let fullRebuilds = 0;
+  output.replaceChildren = (...children) => {
+    fullRebuilds++;
+    return replaceChildren(...children);
+  };
+  for (let i = 0; i < 20; i++) {
+    stream.onmessage({ data: `line ${i}` });
+    await tick();
+  }
+
+  assert.equal(output.querySelectorAll('.log-entry').length, 8);
+  assert.match(output.firstElementChild.textContent, /line 12/);
+  assert.match(panel.querySelector('#logs-output-summary').textContent, /12 older lines omitted/);
+  assert.ok(fullRebuilds <= 1, `steady append caused ${fullRebuilds} full viewport rebuilds`);
+
+  const search = panel.querySelector('#logs-search');
+  search.value = 'line 1';
+  search.dispatchEvent(new dom.window.Event('input'));
+  await tick();
+  fullRebuilds = 0;
+  stream.onmessage({ data: 'line 20' });
+  await tick();
+  stream.onmessage({ data: 'line 100' });
+  await tick();
+  assert.equal(fullRebuilds, 0, 'steady filtered output should update incrementally');
+  assert.match(output.lastElementChild.textContent, /line 100/);
+});
+
+test('pruning the selected run resets scope, reconnects current logs, and repairs the URL', async (t) => {
+  const old = {
+    source_id: 'old-run', run_id: 'old-run', replica: 0, status: 'stopped',
+    current: false, has_log: true,
+  };
+  const current = {
+    source_id: 'current-run', run_id: 'current-run', replica: 0, status: 'running',
+    current: true, has_log: true,
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs?log_source=old-run',
+    pretendToBeVisual: true,
+  });
+  const streams = [];
+  class FakeEventSource {
+    constructor(url) { this.url = url; streams.push(this); }
+    close() { this.closed = true; }
+  }
+  let sourceRefreshes = 0;
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) {
+      sourceRefreshes++;
+      return { ok: true, json: async () => ({ sources: sourceRefreshes === 1 ? [current, old] : [current] }) };
+    }
+    return { ok: true, text: async () => 'historical line\n' };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({
+    panel, app: { slug: 'demo' }, api, EventSourceClass: FakeEventSource, refreshEveryMs: 30,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await tick();
+  assert.equal(panel.querySelector('#logs-source').value, 'old-run');
+  assert.equal(streams.length, 0, 'historical selection must not open current streams');
+
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  assert.equal(panel.querySelector('#logs-source').value, 'all');
+  assert.equal(dom.window.location.search, '');
+  assert.equal(streams.length, 1, 'falling back to all must open the current stream');
+  assert.match(panel.querySelector('#detail-logs-body').textContent, /no longer retained/i);
+  assert.match(panel.querySelector('#logs-announcement').textContent, /no longer retained/i);
 });

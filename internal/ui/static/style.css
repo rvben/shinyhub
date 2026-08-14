@@ -3952,6 +3952,7 @@ fieldset.settings-block { min-width: 0; }
   font-size: 0.78rem;
   line-height: 1.55;
   scrollbar-gutter: stable;
+  contain: layout paint;
 }
 .log-entry {
   display: grid;
