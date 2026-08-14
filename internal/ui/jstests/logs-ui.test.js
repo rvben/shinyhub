@@ -11,6 +11,7 @@ import {
   normalizeLogSources,
   retainedLogDownloadURL,
   serializeLogEntries,
+  unseenLogSuffix,
 } from '../static/views/logs-ui.js';
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
@@ -70,6 +71,15 @@ test('retained downloads target one exact run', () => {
     '/api/apps/demo/logs?replica=4&download=true&run=legacy',
   );
   assert.equal(retainedLogDownloadURL('demo', { replica: 0, has_log: false }), '');
+});
+
+test('terminal snapshots append only lines not already observed live', () => {
+  assert.deepEqual(
+    unseenLogSuffix(['boot', 'ready', 'ready'], ['ready', 'ready', 'stopping', 'stopped']),
+    ['stopping', 'stopped'],
+  );
+  assert.deepEqual(unseenLogSuffix(['old'], ['new', 'final']), ['new', 'final']);
+  assert.deepEqual(unseenLogSuffix(['same'], ['same']), []);
 });
 
 test('selected source downloads its complete retained run while all scope exports visible output', async (t) => {
@@ -297,4 +307,49 @@ test('pruning the selected run resets scope, reconnects current logs, and repair
   assert.equal(streams.length, 1, 'falling back to all must open the current stream');
   assert.match(panel.querySelector('#detail-logs-body').textContent, /no longer retained/i);
   assert.match(panel.querySelector('#logs-announcement').textContent, /no longer retained/i);
+});
+
+test('a run that stops reconciles its final retained lines without duplicating streamed output', async (t) => {
+  const running = {
+    source_id: 'run-0', run_id: 'run-0', replica: 0, status: 'running',
+    current: true, has_log: true, size_bytes: 10,
+  };
+  const stopped = { ...running, status: 'stopped', size_bytes: 30 };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs',
+    pretendToBeVisual: true,
+  });
+  let stream;
+  class FakeEventSource {
+    constructor() { stream = this; }
+    close() { this.closed = true; }
+  }
+  let discoveries = 0;
+  let terminalFetches = 0;
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) {
+      discoveries++;
+      return { ok: true, json: async () => ({ sources: [discoveries === 1 ? running : stopped] }) };
+    }
+    terminalFetches++;
+    return { ok: true, text: async () => 'boot\nready\nfinal crash detail\n' };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({
+    panel, app: { slug: 'demo' }, api, EventSourceClass: FakeEventSource, refreshEveryMs: 40,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await tick();
+  stream.onmessage({ data: 'boot' });
+  stream.onmessage({ data: 'ready' });
+  await tick();
+  await new Promise((resolve) => setTimeout(resolve, 70));
+
+  const output = panel.querySelector('#detail-logs-body').textContent;
+  assert.equal((output.match(/boot/g) || []).length, 1);
+  assert.equal((output.match(/ready/g) || []).length, 1);
+  assert.equal((output.match(/final crash detail/g) || []).length, 1);
+  assert.ok(output.indexOf('final crash detail') < output.indexOf('stopped'), 'terminal status follows final retained output');
+  assert.equal(terminalFetches, 1);
+  assert.equal(stream.closed, true);
 });

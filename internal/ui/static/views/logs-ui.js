@@ -87,6 +87,24 @@ export function retainedLogDownloadURL(slug, source) {
   return `/api/apps/${encodeURIComponent(slug)}/logs?${params.toString()}`;
 }
 
+// Return only snapshot lines that were not already observed at the end of a
+// live stream. The largest suffix/prefix overlap handles repeated log messages
+// without blindly appending the entire terminal tail.
+export function unseenLogSuffix(observed, snapshot) {
+  const max = Math.min(observed.length, snapshot.length);
+  for (let overlap = max; overlap > 0; overlap--) {
+    let matches = true;
+    for (let i = 0; i < overlap; i++) {
+      if (observed[observed.length - overlap + i] !== snapshot[i]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return snapshot.slice(overlap);
+  }
+  return snapshot.slice();
+}
+
 function sameSourceState(a, b) {
   return a && b && a.status === b.status && a.has_log === b.has_log &&
     a.provider === b.provider && a.tier === b.tier && a.size_bytes === b.size_bytes &&
@@ -395,23 +413,59 @@ export function createLogsViewer({
     }
   }
 
+  function staticLogURL(source) {
+    const run = source.legacy ? 'legacy' : source.run_id;
+    const runParam = run ? `&run=${encodeURIComponent(run)}` : '';
+    return `/api/apps/${encodeURIComponent(app.slug)}/logs?replica=${source.replica}${runParam}&tail=200&follow=false`;
+  }
+
+  async function fetchStaticLines(source) {
+    const resp = await api(staticLogURL(source));
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const text = await resp.text();
+    if (!text) return [];
+    return (text.endsWith('\n') ? text.slice(0, -1) : text).split('\n');
+  }
+
   async function loadStaticSource(source, generation) {
     if (!source.has_log) {
       addEntry({ kind: 'event', replica: source.replica, line: `Replica #${source.replica} has no retained output` });
       return;
     }
     try {
-      const run = source.legacy ? 'legacy' : source.run_id;
-      const runParam = run ? `&run=${encodeURIComponent(run)}` : '';
-      const resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/logs?replica=${source.replica}${runParam}&tail=200&follow=false`);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const text = await resp.text();
+      const lines = await fetchStaticLines(source);
       if (destroyed || generation !== scopeGeneration) return;
-      for (const line of text.replace(/\n$/, '').split('\n')) {
-        if (line || text) addEntry({ kind: 'line', replica: source.replica, line });
+      for (const line of lines) {
+        addEntry({ kind: 'line', source_id: source.source_id, replica: source.replica, line });
       }
     } catch {
+      if (destroyed || generation !== scopeGeneration) return;
       addEntry({ kind: 'event', replica: source.replica, line: `Replica #${source.replica} log is unavailable` });
+    }
+  }
+
+  async function reconcileTerminalSource(source, generation, terminalMessage = '') {
+    try {
+      if (source.has_log && source.stream_available !== false) {
+        const snapshot = await fetchStaticLines(source);
+        if (destroyed || generation !== scopeGeneration) return;
+        const observed = entries
+          .filter((entry) => entry.kind === 'line' && entry.source_id === source.source_id)
+          .map((entry) => entry.line);
+        for (const line of unseenLogSuffix(observed, snapshot)) {
+          addEntry({ kind: 'line', source_id: source.source_id, replica: source.replica, line });
+        }
+      }
+    } catch {
+      if (destroyed || generation !== scopeGeneration) return;
+      addEntry({
+        kind: 'event', replica: source.replica,
+        line: `Replica #${source.replica} final retained output could not be reconciled`,
+      });
+    } finally {
+      if (terminalMessage && !destroyed && generation === scopeGeneration) {
+        addEntry({ kind: 'event', replica: source.replica, line: terminalMessage });
+      }
     }
   }
 
@@ -431,7 +485,7 @@ export function createLogsViewer({
     };
     stream.onmessage = (event) => {
       if (!destroyed && generation === scopeGeneration) {
-        addEntry({ kind: 'line', replica: source.replica, line: event.data });
+        addEntry({ kind: 'line', source_id: source.source_id, replica: source.replica, line: event.data });
       }
     };
     stream.onerror = () => {
@@ -493,17 +547,24 @@ export function createLogsViewer({
     if (markChanges) {
       for (const source of sources) {
         const old = previous.get(source.source_id);
+        const becameTerminal = old && isLiveLogSource(old) && !isLiveLogSource(source);
         if (!sameSourceState(source, old)) {
           const message = sourceStatusEvent(source, old);
-          if (message) addEntry({ kind: 'event', replica: source.replica, line: message });
+          if (message && !becameTerminal) addEntry({ kind: 'event', replica: source.replica, line: message });
         }
         if (selected !== 'all' && selected !== source.source_id) continue;
         if (selected === 'all' && !source.current) continue;
-        if (old && isLiveLogSource(old) && !isLiveLogSource(source)) {
+        if (becameTerminal) {
           const stream = streams.get(source.source_id);
           if (stream) stream.close();
           streams.delete(source.source_id);
           connected.delete(source.source_id);
+          reconcileTerminalSource(source, scopeGeneration, sourceStatusEvent(source, old));
+        } else if (old && !isLiveLogSource(source) && source.has_log &&
+          (!old.has_log || source.size_bytes !== old.size_bytes)) {
+          // The terminal metadata can become visible before the writer's final
+          // flush. Reconcile again when retained bytes arrive on a later poll.
+          reconcileTerminalSource(source, scopeGeneration);
         } else if ((!old || !isLiveLogSource(old)) && isLiveLogSource(source)) {
           loadedSources.delete(source.source_id);
           loadSource(source, scopeGeneration);
