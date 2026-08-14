@@ -27,6 +27,7 @@ type fakeRuntime struct {
 	nextPID int
 	stops   map[int]chan struct{}
 	lastEnv []string
+	log     io.Writer
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -36,7 +37,7 @@ func newFakeRuntime() *fakeRuntime {
 	}
 }
 
-func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
+func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, log io.Writer) (process.ReplicaEndpoint, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	// Mirror the real-runtime contract: SHINYHUB_APP_DATA is injected by the
@@ -44,6 +45,7 @@ func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Write
 	// DockerRuntime translates to the in-container path). Tests that assert
 	// the cross-layer contract via lastEnv rely on this mirror.
 	f.lastEnv = append([]string(nil), p.Env...)
+	f.log = log
 	if p.AppDataPath != "" {
 		f.lastEnv = append(f.lastEnv, "SHINYHUB_APP_DATA="+p.AppDataPath)
 	}
@@ -56,6 +58,62 @@ func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Write
 		WorkerID: strconv.Itoa(pid),
 		Handle:   process.RunHandle{PID: pid},
 	}, nil
+}
+
+type captureWriteCloser struct {
+	mu     sync.Mutex
+	data   strings.Builder
+	closed bool
+}
+
+func (w *captureWriteCloser) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.data.Write(p)
+}
+
+func (w *captureWriteCloser) Close() error {
+	w.mu.Lock()
+	w.closed = true
+	w.mu.Unlock()
+	return nil
+}
+
+func TestManagerMirrorsRunOutputToSharedSink(t *testing.T) {
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	var began bool
+	m.SetLogRunRecorder(process.LogRunRecorder{Begin: func(process.LogRun) error {
+		began = true
+		return nil
+	}})
+	shared := &captureWriteCloser{}
+	m.SetLogRunSinkFactory(func(run process.LogRun) (io.WriteCloser, error) {
+		if !began {
+			t.Fatal("shared sink created before lifecycle record")
+		}
+		if run.RunID == "" || run.AppID != 42 {
+			t.Fatalf("sink run = %+v", run)
+		}
+		return shared, nil
+	})
+	info, err := m.Start(process.StartParams{
+		Slug: "demo", AppID: 42, Index: 0, Dir: t.TempDir(), Command: []string{"app"}, Port: 19000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.log.Write([]byte("node-independent\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.StopReplica("demo", 0); err != nil {
+		t.Fatal(err)
+	}
+	shared.mu.Lock()
+	defer shared.mu.Unlock()
+	if shared.data.String() != "node-independent\n" || !shared.closed {
+		t.Fatalf("shared sink data=%q closed=%v run=%s", shared.data.String(), shared.closed, info.LogRunID)
+	}
 }
 
 func (f *fakeRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {

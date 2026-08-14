@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -56,6 +57,88 @@ func TestAppLogRunsRoundTripAndOrder(t *testing.T) {
 	}
 	if _, err := store.GetAppLogRun(app.ID+100, runs[1].RunID); !errors.Is(err, db.ErrNotFound) {
 		t.Fatalf("cross-app lookup err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestAppLogChunksRetainNewestBytesAndMonotonicOffsets(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "hash", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("demo")
+	runID := "55555555-5555-4555-8555-555555555555"
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: app.ID, Status: "running", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i, part := range []string{"abcd", "efgh", "ijkl"} {
+		if err := store.AppendAppLogChunk(runID, int64(i), int64(i*4), []byte(part), 8, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := store.ReadAppLog(runID)
+	if err != nil || string(got) != "efghijkl" {
+		t.Fatalf("ReadAppLog = %q, %v", got, err)
+	}
+	from, end, err := store.ReadAppLogFrom(runID, 0)
+	if err != nil || string(from) != "efghijkl" || end != 12 {
+		t.Fatalf("ReadAppLogFrom = %q, end=%d, err=%v", from, end, err)
+	}
+	stats, err := store.AppLogStatsForRuns([]string{runID})
+	if err != nil || stats[runID].SizeBytes != 8 || stats[runID].UpdatedAt.IsZero() {
+		t.Fatalf("stats = %+v, %v", stats, err)
+	}
+}
+
+func TestAppLogWriterAndReaderStreamSharedOutput(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "hash", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("demo")
+	runID := "66666666-6666-4666-8666-666666666666"
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: app.ID, Status: "running", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := store.NewAppLogReader(runID)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lines := make(chan string, 1)
+	go reader.Follow(ctx, lines)
+	time.Sleep(50 * time.Millisecond)
+	writer, err := store.NewAppLogWriter(runID, db.AppLogRetentionBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("first\nsecond\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-lines:
+		if got != "first" {
+			t.Fatalf("follow line = %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for shared live log")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tail, err := reader.Tail(1)
+	if err != nil || len(tail) != 1 || tail[0] != "second" {
+		t.Fatalf("Tail = %v, %v", tail, err)
 	}
 }
 

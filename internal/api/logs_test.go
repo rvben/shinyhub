@@ -197,6 +197,45 @@ func TestHandleLogSourcesAndLogsExposeImmutableRunHistory(t *testing.T) {
 	}
 }
 
+func TestHandleLogsReadsSharedRunWithoutLocalFile(t *testing.T) {
+	srv, store, _ := newLogsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+	app, _ := store.GetAppBySlug("myapp")
+	runID := "77777777-7777-4777-8777-777777777777"
+	started := time.Now().Add(-time.Minute)
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: app.ID, ReplicaIndex: 2, Tier: "remote",
+		Status: "running", StartedAt: started,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkAppLogRunRunning(runID, "remote_docker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendAppLogChunk(runID, 0, 0, []byte("from another node\n"), db.AppLogRetentionBytes, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	request := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+	rec := request("/api/apps/myapp/logs?replica=2&run=" + runID + "&follow=false")
+	if rec.Code != http.StatusOK || rec.Body.String() != "from another node\n" {
+		t.Fatalf("shared log status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	rec = request("/api/apps/myapp/logs/sources")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"has_log":true`) || !strings.Contains(rec.Body.String(), `"size_bytes":18`) {
+		t.Fatalf("shared source status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestHandleLogs_TailLimitsInitialBurst verifies that ?tail=N caps the number
 // of initial lines emitted. With a 5-line file and ?tail=2, only the last two
 // lines should appear.

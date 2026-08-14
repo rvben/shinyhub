@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -186,6 +187,12 @@ type LogRunRecorder struct {
 	Finish  func(LogRun) error
 }
 
+// LogRunSinkFactory creates an additional durable output sink for a run after
+// its lifecycle record exists. It is used by clustered deployments to mirror
+// local output into shared storage without coupling process management to a
+// database implementation.
+type LogRunSinkFactory func(LogRun) (io.WriteCloser, error)
+
 type entry struct {
 	info    *ProcessInfo
 	handle  RunHandle
@@ -206,7 +213,7 @@ type replicaKey struct {
 type Manager struct {
 	mu             sync.Mutex
 	entries        map[string][]*entry
-	logFiles       map[replicaKey]*LogFile
+	logFiles       map[replicaKey]io.WriteCloser
 	lastExit       map[replicaKey]ExitVerdict
 	appsDir        string
 	runtimesMu     sync.RWMutex
@@ -218,6 +225,7 @@ type Manager struct {
 	appDataRoot    string
 	stopGrace      time.Duration
 	logRunRecorder LogRunRecorder
+	logSinkFactory LogRunSinkFactory
 
 	autoInstrumentApps bool
 }
@@ -228,6 +236,13 @@ type Manager struct {
 // can be reconciled from the immutable file plus current replica state.
 func (m *Manager) SetLogRunRecorder(recorder LogRunRecorder) {
 	m.logRunRecorder = recorder
+}
+
+// SetLogRunSinkFactory installs the shared per-run output sink. Factory
+// failures abort launch: clustered mode must not start a process whose output
+// can only be read from one control-plane node.
+func (m *Manager) SetLogRunSinkFactory(factory LogRunSinkFactory) {
+	m.logSinkFactory = factory
 }
 
 // SetStopGrace sets how long StopReplica waits after SIGTERM before escalating
@@ -383,7 +398,7 @@ func (m *Manager) PlanPlacement(tier, slug string, count int) []string {
 func NewManager(appsDir string, rt Runtime) *Manager {
 	return &Manager{
 		entries:     make(map[string][]*entry),
-		logFiles:    make(map[replicaKey]*LogFile),
+		logFiles:    make(map[replicaKey]io.WriteCloser),
 		lastExit:    make(map[replicaKey]ExitVerdict),
 		appsDir:     appsDir,
 		runtimes:    map[string]Runtime{DefaultTier: rt},
@@ -575,11 +590,26 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 			return nil, fmt.Errorf("record log run: %w", err)
 		}
 	}
-	m.logFiles[key] = lf
+	var logWriter io.WriteCloser = lf
+	if m.logSinkFactory != nil {
+		shared, err := m.logSinkFactory(run)
+		if err != nil {
+			_ = lf.Close()
+			_ = os.Remove(logPath)
+			run.Status = StatusCrashed
+			run.FinishedAt = time.Now().UTC()
+			m.finishLogRun(run)
+			return nil, fmt.Errorf("open shared log sink: %w", err)
+		}
+		if shared != nil {
+			logWriter = &fanoutLogWriter{local: lf, shared: shared, run: run}
+		}
+	}
+	m.logFiles[key] = logWriter
 
-	ep, err := rt.Start(context.Background(), p, lf)
+	ep, err := rt.Start(context.Background(), p, logWriter)
 	if err != nil {
-		lf.Close()
+		logWriter.Close()
 		delete(m.logFiles, key)
 		run.Status = StatusCrashed
 		run.FinishedAt = time.Now().UTC()

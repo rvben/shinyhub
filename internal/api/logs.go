@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,11 @@ const defaultLogTail = 200
 // query param would let an authenticated caller force the server to retain
 // the entire (up to 5 MB rotated) log in memory per request.
 const maxLogTail = 10000
+
+type appLogReader interface {
+	Tail(int) ([]string, error)
+	Follow(context.Context, chan<- string)
+}
 
 type logSourceResponse struct {
 	SourceID     string     `json:"source_id"`
@@ -93,6 +99,15 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	runIDs := make([]string, len(runs))
+	for i, run := range runs {
+		runIDs[i] = run.RunID
+	}
+	sharedStats, err := s.store.AppLogStatsForRuns(runIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
 	out := make([]*logSourceResponse, 0, len(runs)+len(replicas))
 	seenCurrent := make(map[int]bool)
 	for _, run := range runs {
@@ -111,6 +126,12 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 			src.HasLog = true
 			src.SizeBytes = file.SizeBytes
 			src.LogUpdatedAt = &modified
+		}
+		if stats, ok := sharedStats[run.RunID]; ok {
+			updated := stats.UpdatedAt
+			src.HasLog = stats.SizeBytes > 0
+			src.SizeBytes = stats.SizeBytes
+			src.LogUpdatedAt = &updated
 		}
 		if current {
 			applyCurrentLogSourceState(src, replicaByIndex[run.ReplicaIndex], liveByIndex[run.ReplicaIndex])
@@ -258,7 +279,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no log available")
 		return
 	}
-	var lr *process.LogReader
+	var lr appLogReader
 	var hasReader bool
 	if runID := q.Get("run"); runID != "" {
 		if runID == "legacy" {
@@ -269,7 +290,28 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, "no log available")
 				return
 			}
-			lr, hasReader = s.manager.LogRunReader(slug, idx, runID)
+			_, hasSharedLog, statsErr := s.store.AppLogEndOffset(runID)
+			if statsErr != nil {
+				writeError(w, http.StatusInternalServerError, "internal server error")
+				return
+			}
+			if hasSharedLog || (s.store.IsPostgres() && run.Provider != "fargate") {
+				lr, hasReader = s.store.NewAppLogReader(runID), true
+			} else {
+				lr, hasReader = s.manager.LogRunReader(slug, idx, runID)
+			}
+		}
+	} else if s.store.IsPostgres() {
+		runs, err := s.store.ListAppLogRuns(app.ID, 100)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		for _, run := range runs {
+			if run.ReplicaIndex == idx && run.Provider != "fargate" {
+				lr, hasReader = s.store.NewAppLogReader(run.RunID), true
+				break
+			}
 		}
 	} else {
 		lr, hasReader = s.manager.LogReader(slug, idx)
@@ -289,7 +331,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 // writeLogsPlain emits a one-shot, plain-text response: the last `tail` lines
 // of the log, one per line, with a trailing newline. Suitable for scripted
 // callers that pipe the output to tail/grep without parsing SSE frames.
-func writeLogsPlain(w http.ResponseWriter, lr *process.LogReader, tail int) {
+func writeLogsPlain(w http.ResponseWriter, lr appLogReader, tail int) {
 	lines, err := lr.Tail(tail)
 	if err != nil {
 		slog.Warn("logs tail", "err", err)
@@ -318,7 +360,7 @@ func writeLogFilePlain(w http.ResponseWriter, path string, tail int) {
 // Follow until the client disconnects, with periodic heartbeats.
 // When follow is false, the tail is flushed and the connection is closed
 // immediately — suitable for completed schedule runs whose log files are static.
-func streamLogReader(w http.ResponseWriter, r *http.Request, lr *process.LogReader, tail int, follow bool) {
+func streamLogReader(w http.ResponseWriter, r *http.Request, lr appLogReader, tail int, follow bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming not supported")

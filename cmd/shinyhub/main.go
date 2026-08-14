@@ -948,6 +948,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			return store.FinishAppLogRun(run.RunID, string(run.Status), run.FinishedAt, run.OOMKilled)
 		},
 	})
+	if store.IsPostgres() {
+		mgr.SetLogRunSinkFactory(func(run process.LogRun) (io.WriteCloser, error) {
+			if run.AppID == 0 {
+				return nil, nil
+			}
+			return store.NewAppLogWriter(run.RunID, db.AppLogRetentionBytes)
+		})
+	}
 	for _, tierCfg := range cfg.Runtime.Tiers {
 		if tierCfg.Name == defaultTier {
 			continue

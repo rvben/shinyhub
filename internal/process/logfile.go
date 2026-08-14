@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +15,35 @@ import (
 	"sync"
 	"time"
 )
+
+// fanoutLogWriter makes the local capped file the primary runtime sink and
+// mirrors successful bytes to shared storage. Shared failures are reported but
+// never propagated through Write: stdout persistence must not affect process
+// health, and the shared writer owns bounded retry buffering.
+type fanoutLogWriter struct {
+	local  io.WriteCloser
+	shared io.WriteCloser
+	run    LogRun
+}
+
+func (w *fanoutLogWriter) Write(p []byte) (int, error) {
+	n, err := w.local.Write(p)
+	if n > 0 {
+		if _, sharedErr := w.shared.Write(p[:n]); sharedErr != nil {
+			slog.Error("manager: mirror app log", "slug", w.run.Slug, "idx", w.run.ReplicaIndex, "run_id", w.run.RunID, "err", sharedErr)
+		}
+	}
+	return n, err
+}
+
+func (w *fanoutLogWriter) Close() error {
+	localErr := w.local.Close()
+	sharedErr := w.shared.Close()
+	if sharedErr != nil {
+		slog.Error("manager: flush shared app log", "slug", w.run.Slug, "idx", w.run.ReplicaIndex, "run_id", w.run.RunID, "err", sharedErr)
+	}
+	return errors.Join(localErr, sharedErr)
+}
 
 // DefaultLogMaxSize is the per-app log file size cap (5 MB). When exceeded,
 // the file is rotated to app.log.1 and a fresh file is started.

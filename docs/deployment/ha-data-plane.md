@@ -184,6 +184,16 @@ centralized sink (e.g. a structured log aggregator, Loki, Datadog) and sum
 the per-instance counters in your dashboards. No built-in log aggregation is
 provided by ShinyHub itself.
 
+Application stdout/stderr uses a different path. In clustered mode ShinyHub
+mirrors every non-Fargate run into Postgres in small chunks, so the Logs tab and
+`shinyhub apps logs` can follow a live replica or open a stopped run through any
+healthy control-plane instance. Each immutable run retains its newest 5 MiB;
+older bytes are pruned without changing the live follower cursor. A transient
+database write failure is retried from a bounded in-memory buffer and does not
+interrupt the application process. Single-node SQLite installations continue
+to use capped local run files. Fargate output remains in CloudWatch and is
+identified as externally retained in the log source list.
+
 ## Run an HA cluster locally
 
 You can run a two-instance HA cluster on one machine against a local Postgres to
