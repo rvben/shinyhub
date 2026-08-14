@@ -738,6 +738,9 @@ command = ["echo", "ok"]
 	if res.HooksSkipped != 0 {
 		t.Errorf("HooksSkipped = %d, want 0", res.HooksSkipped)
 	}
+	if res.HooksDeclared != 1 || res.HooksRun != 1 {
+		t.Errorf("hook counts = declared:%d run:%d, want 1/1", res.HooksDeclared, res.HooksRun)
+	}
 }
 
 // TestRun_DockerSkipsHostDepInstall proves the fix for a long-standing footgun:

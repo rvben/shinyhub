@@ -169,6 +169,9 @@ func TestRunPostDeployHooks_LogsCommand(t *testing.T) {
 	if !strings.Contains(got, "hook stdout line") {
 		t.Errorf("expected runner stdout to reach log, got:\n%s", got)
 	}
+	if !strings.Contains(got, "completed (exit_code 0, duration") {
+		t.Errorf("expected log to record successful completion, got:\n%s", got)
+	}
 }
 
 // TestRunHookExec_Roundtrip exercises the real os/exec path with /bin/echo

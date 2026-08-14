@@ -20,7 +20,9 @@ stable `failure_kind`. When a previous version exists, progress also says
 whether recovery restored it, left the app stopped, or could not recover it.
 Secrets, environment values, package-index credentials, and hook output are not
 copied into the progress stream. App logs and `deploy-hooks.log` remain the
-detailed diagnostic sources.
+detailed diagnostic sources. `deploy-hooks.log` records each hook's command,
+completion or failure, duration, and exit status; the deploy result separately
+reports declared, run, and runtime-skipped hook counts.
 
 For the interactive end-to-end path, run `shinyhub deploy . --open`. It implies
 `--start` and `--wait`, then verifies a public app through its actual routed URL

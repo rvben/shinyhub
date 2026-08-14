@@ -29,6 +29,7 @@ type convergeOpts struct {
 	retries            int  // attempts AFTER the first for deploys/transient config PATCHes
 	healthTimeout      time.Duration
 	waitForWarm        bool
+	restartAfterWarm   bool
 	concurrency        int // max apps converged in parallel; <=1 means serial
 	fleetID            string
 	runID              string
@@ -150,16 +151,18 @@ func deployWithRetry(cfg *cliConfig, slug, dir, visibility, project string, opt 
 }
 
 // resolveFirstFires records the per-schedule first-fire outcomes on res and,
-// when --wait-for-warm is set, polls each run to completion. Without
-// --wait-for-warm it only records that the runs were triggered (async path).
+// when --wait-for-warm or --restart-after-warm is set, polls each run to
+// completion. Without either it only records that the runs were triggered.
 // When waiting, a non-nil error is returned only for genuine run failures:
 // skipped_overlap is treated as success by firstFireStatusOK, and a timeout
-// (werr != nil) is non-fatal because the run is still warming and the next
-// apply self-heals.
+// (werr != nil) is non-fatal under wait-only because the run is still warming
+// and the next apply self-heals. Restart-after-warm is stricter: every run must
+// have succeeded before replicas are cycled.
 func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt convergeOpts, res *applyResult, out io.Writer) error {
+	allSucceeded := len(refs) > 0
 	for _, ref := range refs {
 		oc := firstFireOutcome{Schedule: ref.Schedule, RunID: ref.RunID}
-		if opt.waitForWarm {
+		if opt.waitForWarm || opt.restartAfterWarm {
 			poll := func() (string, error) { return pollScheduleRunStatus(cfg, slug, ref.ScheduleID, ref.RunID) }
 			status, werr := waitForFirstFireLoop(poll, opt.healthTimeout, 2*time.Second, fleetHealthProgressInterval, time.Now, time.Sleep, out, ref.Schedule)
 			oc.Status = status
@@ -167,11 +170,24 @@ func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt con
 			if werr == nil && !firstFireStatusOK(status) {
 				return fmt.Errorf("schedule %q first-fire %s", ref.Schedule, status)
 			}
+			if werr != nil || status != "succeeded" {
+				allSucceeded = false
+			}
 			// A timeout (werr != nil) is reported but not fatal: the run is still
 			// warming and the next apply self-heals.
 			continue
 		}
 		res.firstFires = append(res.firstFires, oc)
+	}
+	if opt.restartAfterWarm && len(refs) > 0 {
+		if !allSucceeded {
+			return fmt.Errorf("cannot restart after warm: not every first-fire completed successfully")
+		}
+		restarted, err := restartAppAfterWarm(cfg, slug, out)
+		if err != nil {
+			return err
+		}
+		res.warmRestarted = restarted
 	}
 	return nil
 }

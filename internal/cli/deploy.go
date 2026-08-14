@@ -48,16 +48,17 @@ func sanitizeSlug(name string) string {
 // constructed fresh per command instance (no package-level state) so repeated
 // or shuffled test runs cannot leak flag values between each other.
 type deployFlags struct {
-	slug        string
-	wait        bool
-	waitForWarm bool
-	waitTimeout int    // seconds
-	git         string // git repo URL; if set, clone instead of using local dir
-	branch      string // branch/tag to check out (default: default branch)
-	subdir      string // subdirectory within the repo containing the app
-	visibility  string // app access level: private, shared, public (empty = use server default)
-	start       bool   // start the app even if it was stopped before this deploy
-	open        bool   // start, wait for health, verify the route, and open it
+	slug             string
+	wait             bool
+	waitForWarm      bool
+	restartAfterWarm bool
+	waitTimeout      int    // seconds
+	git              string // git repo URL; if set, clone instead of using local dir
+	branch           string // branch/tag to check out (default: default branch)
+	subdir           string // subdirectory within the repo containing the app
+	visibility       string // app access level: private, shared, public (empty = use server default)
+	start            bool   // start the app even if it was stopped before this deploy
+	open             bool   // start, wait for health, verify the route, and open it
 
 	waitForServer time.Duration // poll /api/server-info until the server is ready before deploying
 }
@@ -122,6 +123,7 @@ back to the legacy response when deploying to an older server.`,
 	cmd.Flags().BoolVar(&f.wait, "wait", false, "Wait until deployment is healthy")
 	cmd.Flags().IntVar(&f.waitTimeout, "wait-timeout", 300, "Seconds to wait for healthy status when --wait is set (first-run dependency installs can take minutes)")
 	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Wait for any run_on_register first-fire to finish (uses --wait-timeout); a genuine failure exits non-zero")
+	cmd.Flags().BoolVar(&f.restartAfterWarm, "restart-after-warm", false, "Wait for run_on_register first-fires, then restart serving replicas so startup-loaded data is refreshed")
 	cmd.Flags().StringVar(&f.git, "git", "", "Git repository URL to clone and deploy")
 	cmd.Flags().StringVar(&f.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
 	cmd.Flags().StringVar(&f.subdir, "subdir", "", "Subdirectory within repo containing the app")
@@ -139,6 +141,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	if f.open {
 		f.start = true
 		f.wait = true
+	}
+	if f.restartAfterWarm {
+		f.waitForWarm = true
 	}
 	source, err := resolveDeploymentSource(args, f)
 	if err != nil {
@@ -402,6 +407,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	for _, line := range formatManifestSummary(appResp["manifest"]) {
 		fmt.Fprintln(noteW, line)
 	}
+	if summary := formatHookExecutionSummary(appResp); summary != "" {
+		fmt.Fprintln(noteW, summary)
+	}
 	// Surface visibility so the printed URL returning 401 for a brand-new private
 	// app is not a confusing surprise. Prose target matches the URL above.
 	switch access, _ := appResp["access"].(string); access {
@@ -415,26 +423,31 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 
 	refs := firstFireRefsFromDeployResponse(out)
+	warmRestarted := false
 	for _, ref := range refs {
 		fmt.Fprintf(errW, "%s: first-fire triggered (run #%d)\n", ref.Schedule, ref.RunID)
 	}
 	if f.waitForWarm && len(refs) > 0 {
 		timeout := time.Duration(f.waitTimeout) * time.Second
 		var firstFireErr error
+		allSucceeded := true
 		for _, ref := range refs {
 			poll := func() (string, error) { return pollScheduleRunStatus(cfg, slug, ref.ScheduleID, ref.RunID) }
 			status, werr := waitForFirstFireLoop(poll, timeout, healthPollInterval, 15*time.Second, time.Now, time.Sleep, errW, ref.Schedule)
 			switch {
 			case werr != nil:
+				allSucceeded = false
 				// A timeout or transient poll error is not a hard failure: the run
 				// may still be warming and the next deploy self-heals. This matches
 				// fleet apply, which also treats an unfinished wait as non-fatal.
 				fmt.Fprintf(errW, "%s: first-fire not confirmed: %v (warming may still be in progress)\n", ref.Schedule, werr)
 			case status == "skipped_overlap":
+				allSucceeded = false
 				fmt.Fprintf(errW, "%s: first-fire skipped (another run is warming the cache); warming in progress\n", ref.Schedule)
 			case firstFireStatusOK(status):
 				fmt.Fprintf(errW, "%s: first-fire %s\n", ref.Schedule, status)
 			default:
+				allSucceeded = false
 				// Dump the failed run's own log so the operator sees why the warm-up
 				// failed.
 				_ = streamRunLogs(cfg, slug, ref.ScheduleID, ref.RunID, false, cmd)
@@ -443,6 +456,16 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 		if firstFireErr != nil {
 			return firstFireErr
+		}
+		if f.restartAfterWarm {
+			if !allSucceeded {
+				return fmt.Errorf("cannot restart after warm: not every first-fire completed successfully")
+			}
+			restarted, err := restartAppAfterWarm(cfg, slug, errW)
+			if err != nil {
+				return err
+			}
+			warmRestarted = restarted
 		}
 	}
 
@@ -485,13 +508,19 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		// able to distinguish "deployed and live" from "deployed and still down"
 		// without matching on prose.
 		result := map[string]any{
-			"status":       "deployed",
-			"slug":         slug,
-			"deploy_count": deployCount,
-			"version":      currentVersion,
-			"kept_stopped": keptStopped,
-			"url":          target,
-			"opened":       opened,
+			"status":         "deployed",
+			"slug":           slug,
+			"deploy_count":   deployCount,
+			"version":        currentVersion,
+			"kept_stopped":   keptStopped,
+			"url":            target,
+			"opened":         opened,
+			"warm_restarted": warmRestarted,
+		}
+		for _, key := range []string{"hooks_declared", "hooks_run", "hooks_skipped"} {
+			if value, ok := appResp[key]; ok {
+				result[key] = value
+			}
 		}
 		if err := json.NewEncoder(stdOut).Encode(result); err != nil {
 			return err

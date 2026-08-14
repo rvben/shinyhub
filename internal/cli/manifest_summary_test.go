@@ -162,3 +162,16 @@ func TestFormatHooksSkippedWarning_FromServerShape(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatHookExecutionSummary(t *testing.T) {
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(`{"hooks_declared":2,"hooks_run":2}`), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := formatHookExecutionSummary(resp); got != "Post-deploy hooks: 2 declared, 2 ran, 0 skipped" {
+		t.Errorf("summary = %q", got)
+	}
+	if got := formatHookExecutionSummary(map[string]any{}); got != "" {
+		t.Errorf("old/no-hook response should stay silent, got %q", got)
+	}
+}

@@ -374,7 +374,11 @@ run warms the cache in the background. Pass `--wait-for-warm` to `shinyhub deplo
 or `shinyhub fleet apply` to block until the run completes (within the deploy's
 wait/health timeout); a genuine warm failure then exits non-zero, while a
 `skipped_overlap` (another run is already warming the same schedule) is treated
-as "in progress", not a failure. The imperative
+as "in progress", not a failure. Waiting does not reload a replica that already
+read the old cache at startup. For that application pattern, pass
+`--restart-after-warm` instead; it implies the wait and cycles serving replicas
+only after every first-fire succeeds. An app that was deliberately stopped
+remains stopped and sees the warmed data on its next start. The imperative
 `shinyhub schedule add --run-on-register` fires the same way and reports the
 triggered run id (add `--follow` to stream it).
 
@@ -390,8 +394,10 @@ Hooks run sequentially in the order they appear in the manifest. The
 first failing hook aborts the deploy — subsequent hooks do not run, and
 the new bundle does not start.
 
-Stdout and stderr are merged into the deploy log so the operator sees
-exactly what the hook printed.
+Stdout and stderr are merged into the version's `deploy-hooks.log`. Each hook
+also writes start and completion/failure records with its duration and exit
+status, so a quiet successful command is still distinguishable from a hook that
+was never declared.
 
 ```toml
 [[hook]]
@@ -536,10 +542,18 @@ preempted it); the entire `manifest` key is omitted when the bundle has no
 `shinyhub.toml`. Top-level app fields stay in place so scripts that read
 `deploy_count` keep working.
 
+When hooks are present, the top-level response also reports
+`hooks_declared` and `hooks_run`; `hooks_skipped` is present when a non-host
+runtime could not execute declared hooks. This distinguishes "no hooks in the
+deployed manifest" from "all declared hooks completed" without inspecting the
+server log.
+
 Each schedule entry carries its `schedule_id`; a `first_fire` object with the
 dispatched `run_id` is present only when `run_on_register` fired a run on this
 deploy. `shinyhub fleet apply --json` surfaces the same data per app under a
 `first_fires` array (with the run's `status` when `--wait-for-warm` waited).
+With `--restart-after-warm`, fleet JSON also reports `warm_restarted: true`
+when serving replicas were cycled after those runs succeeded.
 
 ## Worked example
 

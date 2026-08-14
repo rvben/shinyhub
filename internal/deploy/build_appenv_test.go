@@ -112,9 +112,9 @@ func TestManifestHooks_ReceiveAppEnv(t *testing.T) {
 		Env:       []string{"FROM_RUN=1"},
 		Manager:   managerWithEnv(t, []string{"PLAIN=1"}, []string{"SECRET=shh"}, nil),
 	}
-	skipped, err := runManifestPostDeployHooks(p, true)
-	if err != nil || skipped != 0 {
-		t.Fatalf("runManifestPostDeployHooks: skipped=%d err=%v", skipped, err)
+	declared, run, skipped, err := runManifestPostDeployHooks(p, true)
+	if err != nil || declared != 1 || run != 1 || skipped != 0 {
+		t.Fatalf("runManifestPostDeployHooks: declared=%d run=%d skipped=%d err=%v", declared, run, skipped, err)
 	}
 	want := []string{"FROM_RUN=1", "PLAIN=1", "SECRET=shh"}
 	if len(captured) != len(want) || captured[0] != want[0] || captured[1] != want[1] || captured[2] != want[2] {
@@ -122,7 +122,7 @@ func TestManifestHooks_ReceiveAppEnv(t *testing.T) {
 	}
 
 	p.Manager = managerWithEnv(t, nil, nil, fmt.Errorf("decrypt failed"))
-	if _, err := runManifestPostDeployHooks(p, true); err == nil {
+	if _, _, _, err := runManifestPostDeployHooks(p, true); err == nil {
 		t.Error("resolver error must fail the hook phase closed")
 	}
 }

@@ -38,6 +38,8 @@ type applyResult struct {
 	err        error
 	note       string
 	firstFires []firstFireOutcome
+	// warmRestarted records the opt-in post-first-fire replica cycle.
+	warmRestarted bool
 	// logTail holds the failing app's last process-log lines, populated only
 	// when a deploy-bearing action fails (e.g. the app crashed on startup), so
 	// the operator sees the cause without a second round-trip to the host.
@@ -171,6 +173,9 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 				fmt.Fprintf(out, "     %s: first-fire %s\n", ff.Schedule, ff.Status)
 			}
 		}
+		if r.warmRestarted {
+			fmt.Fprintln(out, "     replicas restarted after first-fire warm-up")
+		}
 	}
 }
 
@@ -269,6 +274,7 @@ type applyJSONApp struct {
 	PruneEligible bool               `json:"prune_eligible"`
 	Result        *jsonResult        `json:"result,omitempty"`
 	FirstFires    []firstFireOutcome `json:"first_fires,omitempty"`
+	WarmRestarted bool               `json:"warm_restarted,omitempty"`
 }
 
 // applyJSONProject is a project row in the apply JSON envelope: display
@@ -337,6 +343,7 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 		if r, ok := bySlug[d.Slug]; ok {
 			aj.Result = resultToJSON(r)
 			aj.FirstFires = r.firstFires
+			aj.WarmRestarted = r.warmRestarted
 		}
 		apps = append(apps, aj)
 	}

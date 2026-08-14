@@ -1183,6 +1183,45 @@ func TestDeploy_FirstFire_ReportedAndWaited(t *testing.T) {
 	}
 }
 
+func TestDeploy_RestartAfterWarm_WaitsThenRestarts(t *testing.T) {
+	var runPolls, restartHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/deploy", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"first_fire":{"run_id":42}}]}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/schedules/5/runs/42", func(w http.ResponseWriter, r *http.Request) {
+		runPolls++
+		_, _ = w.Write([]byte(`{"status":"succeeded"}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/restart", func(w http.ResponseWriter, r *http.Request) {
+		restartHits++
+		_, _ = w.Write([]byte(`{"status":"running"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("# shiny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTestCLIConfig(t, srv.URL)
+
+	cmd := newDeployCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{dir, "--slug", "warmapp", "--restart-after-warm"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if runPolls == 0 || restartHits != 1 {
+		t.Errorf("polls=%d restartHits=%d, want >=1/1", runPolls, restartHits)
+	}
+}
+
 // TestDeploy_FirstFire_FailureIsFatal verifies that a genuine first-fire failure
 // causes --wait-for-warm to return a non-nil error (non-zero exit).
 func TestDeploy_FirstFire_FailureIsFatal(t *testing.T) {

@@ -105,6 +105,9 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility, project string, out 
 	var keptStopped bool
 	if err := json.Unmarshal(rb, &deployResp); err == nil {
 		keptStopped, _ = deployResp["kept_stopped"].(bool)
+		if summary := formatHookExecutionSummary(deployResp); summary != "" {
+			fmt.Fprintf(out, "  %s: %s\n", slug, summary)
+		}
 		if warn := formatHooksSkippedWarning(deployResp["hooks_skipped"]); warn != "" {
 			fmt.Fprintf(out, "  %s: %s\n", slug, warn)
 		}

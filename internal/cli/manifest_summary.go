@@ -64,6 +64,19 @@ func formatHooksSkippedWarning(raw any) string {
 	return fmt.Sprintf("Warning: %d post-deploy %s skipped under the container runtime; bake setup into the image instead.", int(n), noun)
 }
 
+// formatHookExecutionSummary reports the complete successful-deploy hook
+// accounting added alongside hooks_skipped. Older servers omit
+// hooks_declared, in which case this stays silent and preserves their output.
+func formatHookExecutionSummary(resp map[string]any) string {
+	declared, ok := resp["hooks_declared"].(float64)
+	if !ok || declared <= 0 {
+		return ""
+	}
+	run, _ := resp["hooks_run"].(float64)
+	skipped, _ := resp["hooks_skipped"].(float64)
+	return fmt.Sprintf("Post-deploy hooks: %d declared, %d ran, %d skipped", int(declared), int(run), int(skipped))
+}
+
 // formatKeptStoppedNote turns the "kept_stopped" field of a deploy response
 // into the line that tells the developer the new version is on the server but
 // not serving, or "" when the app is live. Without it a successful-looking

@@ -582,6 +582,12 @@ command = ["echo", "two"]
 	if int(v) != 2 {
 		t.Errorf("hooks_skipped = %v, want 2", resp["hooks_skipped"])
 	}
+	if resp["hooks_declared"] != float64(2) {
+		t.Errorf("hooks_declared = %v, want 2", resp["hooks_declared"])
+	}
+	if _, ok := resp["hooks_run"]; ok {
+		t.Errorf("hooks_run should be omitted when no hooks ran; got %v", resp["hooks_run"])
+	}
 }
 
 // TestDeploy_ResponseOmitsHooksSkippedWhenNone asserts hooks_skipped is absent
@@ -612,6 +618,12 @@ func TestDeploy_ResponseOmitsHooksSkippedWhenNone(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if _, ok := resp["hooks_skipped"]; ok {
 		t.Errorf("expected no hooks_skipped key when none skipped; got %v", resp["hooks_skipped"])
+	}
+	if _, ok := resp["hooks_declared"]; ok {
+		t.Errorf("expected no hooks_declared key when none declared; got %v", resp["hooks_declared"])
+	}
+	if _, ok := resp["hooks_run"]; ok {
+		t.Errorf("expected no hooks_run key when none ran; got %v", resp["hooks_run"])
 	}
 }
 

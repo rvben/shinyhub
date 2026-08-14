@@ -144,6 +144,10 @@ Semantics:
   wait timeout). A genuine warm failure then exits non-zero; a `skipped_overlap`
   (another run is already warming the schedule) is reported as "in progress",
   not a failure.
+- **Startup-loaded caches.** Waiting alone does not reload a process that read
+  the empty cache before the schedule ran. Pass `--restart-after-warm` to wait
+  for every first-fire to succeed and then cycle serving replicas. The flag
+  does not start an app that was deliberately stopped.
 
 ## Sharing data between apps
 

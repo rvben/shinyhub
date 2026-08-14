@@ -1886,11 +1886,20 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// container and post-deploy hooks were therefore not run. omitempty
 		// keeps the wire shape clean for the common case.
 		HooksSkipped int `json:"hooks_skipped,omitempty"`
+		// HooksDeclared/HooksRun distinguish "no hooks" from "all hooks ran".
+		HooksDeclared int `json:"hooks_declared,omitempty"`
+		HooksRun      int `json:"hooks_run,omitempty"`
 		// KeptStopped reports that the app was left down because it was stopped
 		// before this deploy. Stated outright so the CLI does not have to infer
 		// it from a status field a concurrent start could have changed.
 		KeptStopped bool `json:"kept_stopped,omitempty"`
-	}{App: updatedApp, HooksSkipped: result.HooksSkipped, KeptStopped: keepStopped}
+	}{
+		App:           updatedApp,
+		HooksSkipped:  result.HooksSkipped,
+		HooksDeclared: result.HooksDeclared,
+		HooksRun:      result.HooksRun,
+		KeptStopped:   keepStopped,
+	}
 	if !manifestSummary.IsEmpty() {
 		resp.Manifest = &manifestSummary
 	}

@@ -132,3 +132,33 @@ func pollScheduleRunStatus(cfg *cliConfig, slug string, scheduleID, runID int64)
 	}
 	return run.Status, nil
 }
+
+// restartAppAfterWarm cycles a serving app after every first-fire completed so
+// a process that loaded data at startup gets a post-warm view. An explicitly
+// stopped app stays stopped: its next start will already see the warmed data.
+func restartAppAfterWarm(cfg *cliConfig, slug string, out io.Writer) (bool, error) {
+	_, status, err := pollAppStatus(cfg, slug)
+	if err != nil {
+		return false, fmt.Errorf("check app before warm restart: %w", err)
+	}
+	if status == "stopped" {
+		fmt.Fprintf(out, "%s: warm-up completed; app remains stopped\n", slug)
+		return false, nil
+	}
+	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/restart", nil)
+	if err != nil {
+		return false, fmt.Errorf("build warm restart request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("restart after warm: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, httpError(cfg.Token, "restart after warm", resp, body)
+	}
+	fmt.Fprintf(out, "%s: restarted after first-fire warm-up\n", slug)
+	return true, nil
+}

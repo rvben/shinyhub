@@ -19,6 +19,7 @@ type fleetApplyFlags struct {
 	retries                  int
 	healthTimeout            int
 	waitForWarm              bool
+	restartAfterWarm         bool
 	waitForServer            time.Duration
 	concurrency              int
 }
@@ -58,6 +59,7 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for deploys and transient config PATCH failures")
 	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app for healthy status after deploy")
 	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Wait for run_on_register first-fires to finish (within --health-timeout); a genuine failure fails that app")
+	cmd.Flags().BoolVar(&f.restartAfterWarm, "restart-after-warm", false, "Wait for first-fires, then restart serving replicas so startup-loaded data is refreshed")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before proceeding")
 	cmd.Flags().IntVar(&f.concurrency, "concurrency", 3, "Number of apps to deploy concurrently (default 3, 1 = serial); lower it on CPU- or memory-constrained hosts, raise it for network/IO-bound deploys")
 	return cmd
@@ -74,6 +76,9 @@ func validateConcurrency(n int) error {
 }
 
 func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
+	if f.restartAfterWarm {
+		f.waitForWarm = true
+	}
 	// fleet apply is a document command; NDJSON is not a valid output mode.
 	// -o json behaves like --json (both select the machine-readable envelope).
 	if format, err := resolveFormat(f.jsonOutput, false); err != nil {
@@ -160,6 +165,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		retries:            f.retries,
 		healthTimeout:      healthTimeoutDuration(f.healthTimeout),
 		waitForWarm:        f.waitForWarm,
+		restartAfterWarm:   f.restartAfterWarm,
 		concurrency:        f.concurrency,
 		fleetID:            pf.manifest.FleetID,
 		runID:              newRunID(),

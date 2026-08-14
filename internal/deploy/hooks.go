@@ -575,9 +575,11 @@ func runPostDeployHooks(ctx context.Context, bundleDir string, hooks []Hook, ext
 			progress(i, h, false)
 		}
 		hookCtx, cancel := context.WithTimeout(ctx, timeout)
+		started := time.Now()
 		err := hookRunner(hookCtx, bundleDir, h.Command, extraEnv, logOut)
 		cancel()
 		if err != nil {
+			fmt.Fprintf(logOut, "✗ hook[%d]: failed (duration %s): %v\n", i, time.Since(started).Round(time.Millisecond), err)
 			if errors.Is(err, context.DeadlineExceeded) {
 				return fmt.Errorf("hook[%d] (%s) timed out after %s", i, strings.Join(h.Command, " "), timeout)
 			}
@@ -586,6 +588,7 @@ func runPostDeployHooks(ctx context.Context, bundleDir string, hooks []Hook, ext
 		if progress != nil {
 			progress(i, h, true)
 		}
+		fmt.Fprintf(logOut, "✓ hook[%d]: completed (exit_code 0, duration %s)\n", i, time.Since(started).Round(time.Millisecond))
 	}
 	return nil
 }

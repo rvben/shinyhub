@@ -533,6 +533,11 @@ type Result struct {
 type PoolResult struct {
 	Replicas []Result
 	Failed   []int
+	// HooksDeclared and HooksRun make a successful preparation auditable. A
+	// zero HooksSkipped value alone cannot distinguish "no hooks configured"
+	// from "all configured hooks ran".
+	HooksDeclared int
+	HooksRun      int
 	// HooksSkipped counts post-deploy hooks declared in the manifest that were
 	// not run because the runtime prepares dependencies inside a container
 	// (the host has no view of the app's environment). 0 when hooks ran or none
@@ -974,7 +979,9 @@ func prepareElasticPool(p Params, hostDeps bool, mode config.WorkerIsolationMode
 		return nil, err
 	}
 	slog.Info("deploy: elastic mode prepared; workers spawn on demand",
-		"slug", p.Slug, "mode", mode, "hooks_skipped", res.HooksSkipped)
+		"slug", p.Slug, "mode", mode,
+		"hooks_declared", res.HooksDeclared, "hooks_run", res.HooksRun,
+		"hooks_skipped", res.HooksSkipped)
 	return res, nil
 }
 
@@ -995,11 +1002,11 @@ func prepareBundle(p Params, hostDeps bool) (*PoolResult, error) {
 	if _, _, err := resolveBundleCommand(p, m, hostDeps); err != nil {
 		return nil, err
 	}
-	hooksSkipped, err := runManifestPostDeployHooks(p, hostDeps)
+	hooksDeclared, hooksRun, hooksSkipped, err := runManifestPostDeployHooks(p, hostDeps)
 	if err != nil {
 		return nil, err
 	}
-	return &PoolResult{HooksSkipped: hooksSkipped}, nil
+	return &PoolResult{HooksDeclared: hooksDeclared, HooksRun: hooksRun, HooksSkipped: hooksSkipped}, nil
 }
 
 // resolveAutoInstrument resolves the effective auto-instrumentation setting
@@ -1039,7 +1046,9 @@ func Run(p Params) (*PoolResult, error) {
 		}
 		p.report(deployevent.Phase("replicas", deployevent.StatusCompleted, "Bundle prepared; app remains stopped"))
 		slog.Info("deploy: bundle prepared without starting it",
-			"slug", p.Slug, "hooks_skipped", res.HooksSkipped)
+			"slug", p.Slug,
+			"hooks_declared", res.HooksDeclared, "hooks_run", res.HooksRun,
+			"hooks_skipped", res.HooksSkipped)
 		return res, nil
 	}
 
@@ -1075,7 +1084,7 @@ func Run(p Params) (*PoolResult, error) {
 		return nil, err
 	}
 
-	hooksSkipped, err := runManifestPostDeployHooks(p, hostDeps)
+	hooksDeclared, hooksRun, hooksSkipped, err := runManifestPostDeployHooks(p, hostDeps)
 	if err != nil {
 		return nil, err
 	}
@@ -1148,7 +1157,10 @@ func Run(p Params) (*PoolResult, error) {
 	e := deployevent.Phase("replicas", status, message)
 	e.Current, e.Total = len(ok), total
 	p.report(e)
-	return &PoolResult{Replicas: ok, Failed: failed, HooksSkipped: hooksSkipped}, nil
+	return &PoolResult{
+		Replicas: ok, Failed: failed,
+		HooksDeclared: hooksDeclared, HooksRun: hooksRun, HooksSkipped: hooksSkipped,
+	}, nil
 }
 
 // runManifestPostDeployHooks loads shinyhub.toml from the bundle and runs any
@@ -1163,18 +1175,20 @@ func Run(p Params) (*PoolResult, error) {
 // (./deploy-hooks.log) so operators can inspect what ran without needing
 // the parent process's stdout. A best-effort tail is also slog-emitted on
 // failure to make the cause obvious in the server log.
-// runManifestPostDeployHooks returns the number of declared hooks it skipped
-// (non-zero only under a container runtime) so the caller can surface it to the
-// developer; a returned error means an executed hook failed.
-func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
+// runManifestPostDeployHooks returns declared/run/skipped counts so a caller
+// can distinguish a manifest with no hooks from one whose hooks all ran.
+// skipped is non-zero only under a container runtime; a returned error means
+// an executed hook failed.
+func runManifestPostDeployHooks(p Params, hostDeps bool) (declared, run, skipped int, err error) {
 	manifest, err := LoadManifest(p.BundleDir)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 	hooks := manifest.PostDeploy()
 	if len(hooks) == 0 {
-		return 0, nil
+		return 0, 0, 0, nil
 	}
+	declared = len(hooks)
 	// An activation brings back a bundle whose hooks already ran when it was
 	// promoted. They are app-controlled code with app-controlled side effects,
 	// so re-running them on a recovery path is not safe to assume idempotent -
@@ -1182,7 +1196,7 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 	if !p.Preparation.runsHooks() {
 		slog.Info("activation: skipping post-deploy hooks for an already-promoted bundle",
 			"slug", p.Slug, "deployment_id", p.DeploymentID, "version", p.AppVersion, "hooks", len(hooks))
-		return 0, nil
+		return declared, 0, 0, nil
 	}
 	if !hostDeps {
 		slog.Warn("skipping post-deploy hooks under non-host runtime; bake them into the image entrypoint instead",
@@ -1191,7 +1205,7 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 			fmt.Sprintf("Skipped %d post-deploy hook(s): this runtime prepares inside its container", len(hooks)))
 		e.Total = len(hooks)
 		p.report(e)
-		return len(hooks), nil
+		return declared, 0, declared, nil
 	}
 
 	// Hooks are app-controlled code that must see the same per-app env the app
@@ -1201,14 +1215,14 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 	// the hook phase closed, matching buildEnvironment.
 	appEnv, err := p.Manager.ResolveAppEnv(p.Slug)
 	if err != nil {
-		return 0, fmt.Errorf("resolve app env: %w", err)
+		return declared, 0, 0, fmt.Errorf("resolve app env: %w", err)
 	}
 	hookEnv := append(append([]string{}, p.Env...), appEnv...)
 
 	logPath := filepath.Join(p.BundleDir, "deploy-hooks.log")
 	logFile, ferr := os.Create(logPath)
 	if ferr != nil {
-		return 0, fmt.Errorf("create %s: %w", logPath, ferr)
+		return declared, 0, 0, fmt.Errorf("create %s: %w", logPath, ferr)
 	}
 	defer logFile.Close()
 
@@ -1230,12 +1244,12 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (int, error) {
 	}); err != nil {
 		slog.Warn("post-deploy hook failed", "slug", p.Slug, "log", logPath, "err", err)
 		p.report(deployevent.Phase("hooks", deployevent.StatusFailed, "Post-deploy hook failed"))
-		return 0, err
+		return declared, 0, 0, err
 	}
 	e = deployevent.Phase("hooks", deployevent.StatusCompleted, fmt.Sprintf("%d post-deploy hook(s) completed", len(hooks)))
 	e.Current, e.Total, e.ElapsedSeconds = len(hooks), len(hooks), int64(time.Since(started).Seconds())
 	p.report(e)
-	return 0, nil
+	return declared, declared, 0, nil
 }
 
 // planPoolWorkers maps each assignment's replica index to the worker the

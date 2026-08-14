@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -137,5 +140,54 @@ func TestFirstFireStatusOK(t *testing.T) {
 		if firstFireStatusOK(s) {
 			t.Errorf("firstFireStatusOK(%q) = true, want false", s)
 		}
+	}
+}
+
+func TestRestartAppAfterWarm_RestartsRunningApp(t *testing.T) {
+	var restartHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo":
+			_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/restart":
+			restartHits++
+			_, _ = io.WriteString(w, `{"status":"running"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	restarted, err := restartAppAfterWarm(&cliConfig{Host: srv.URL, Token: "test"}, "demo", &out)
+	if err != nil {
+		t.Fatalf("restartAppAfterWarm: %v", err)
+	}
+	if !restarted || restartHits != 1 {
+		t.Fatalf("restarted=%v hits=%d, want true/1", restarted, restartHits)
+	}
+	if !strings.Contains(out.String(), "restarted after first-fire warm-up") {
+		t.Errorf("output = %q", out.String())
+	}
+}
+
+func TestRestartAppAfterWarm_KeepsStoppedAppStopped(t *testing.T) {
+	var restartHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo" {
+			_, _ = io.WriteString(w, `{"app":{"status":"stopped"}}`)
+			return
+		}
+		restartHits++
+		http.Error(w, "must not restart", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	restarted, err := restartAppAfterWarm(&cliConfig{Host: srv.URL, Token: "test"}, "demo", io.Discard)
+	if err != nil {
+		t.Fatalf("restartAppAfterWarm: %v", err)
+	}
+	if restarted || restartHits != 0 {
+		t.Fatalf("restarted=%v hits=%d, want false/0", restarted, restartHits)
 	}
 }

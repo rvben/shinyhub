@@ -921,3 +921,64 @@ func TestDeclaredStringProject(t *testing.T) {
 		t.Errorf("an undeclared project must return nil, got %v", v)
 	}
 }
+
+func TestResolveFirstFires_RestartAfterWarm(t *testing.T) {
+	var restartHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo/schedules/7/runs/9":
+			_, _ = io.WriteString(w, `{"status":"succeeded"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo":
+			_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/restart":
+			restartHits++
+			_, _ = io.WriteString(w, `{"status":"running"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	res := applyResult{}
+	err := resolveFirstFires(
+		&cliConfig{Host: srv.URL, Token: "test"}, "demo",
+		[]firstFireRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
+		convergeOpts{waitForWarm: true, restartAfterWarm: true, healthTimeout: time.Second},
+		&res, io.Discard,
+	)
+	if err != nil {
+		t.Fatalf("resolveFirstFires: %v", err)
+	}
+	if restartHits != 1 || !res.warmRestarted {
+		t.Fatalf("restartHits=%d warmRestarted=%v, want 1/true", restartHits, res.warmRestarted)
+	}
+}
+
+func TestResolveFirstFires_DoesNotRestartWhileOverlapStillWarms(t *testing.T) {
+	var restartHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo/schedules/7/runs/9" {
+			_, _ = io.WriteString(w, `{"status":"skipped_overlap"}`)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/restart") {
+			restartHits++
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	res := applyResult{}
+	err := resolveFirstFires(
+		&cliConfig{Host: srv.URL, Token: "test"}, "demo",
+		[]firstFireRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
+		convergeOpts{waitForWarm: true, restartAfterWarm: true, healthTimeout: time.Second},
+		&res, io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), "not every first-fire completed successfully") {
+		t.Fatalf("error = %v, want incomplete warm-up error", err)
+	}
+	if restartHits != 0 || res.warmRestarted {
+		t.Fatalf("restartHits=%d warmRestarted=%v, want 0/false", restartHits, res.warmRestarted)
+	}
+}

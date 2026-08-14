@@ -100,6 +100,9 @@ command = ["python", "-m", "vendor_assets"]
 	if res.HooksSkipped != 0 {
 		t.Errorf("HooksSkipped = %d, want 0 (the hook ran)", res.HooksSkipped)
 	}
+	if res.HooksDeclared != 1 || res.HooksRun != 1 {
+		t.Errorf("hook counts = declared:%d run:%d, want 1/1", res.HooksDeclared, res.HooksRun)
+	}
 	if len(res.Replicas) != 0 {
 		t.Errorf("elastic deploy must report no fixed replicas, got %d", len(res.Replicas))
 	}
@@ -202,6 +205,9 @@ command = ["also-skipped"]
 	}
 	if res.HooksSkipped != 2 {
 		t.Errorf("HooksSkipped = %d, want 2", res.HooksSkipped)
+	}
+	if res.HooksDeclared != 2 || res.HooksRun != 0 {
+		t.Errorf("hook counts = declared:%d run:%d, want 2/0", res.HooksDeclared, res.HooksRun)
 	}
 }
 
