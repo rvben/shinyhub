@@ -32,6 +32,49 @@ func eqLines(t *testing.T, got, want []string) {
 	}
 }
 
+func TestListLogSources_ReturnsPrimaryReplicaLogsInIndexOrder(t *testing.T) {
+	appsDir := t.TempDir()
+	dir := filepath.Join(appsDir, "demo")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"app-2.log":        "two\n",
+		"app-0.log":        "zero\n",
+		"app-2.log.1":      "rotated\n",
+		"app-nope.log":     "ignored\n",
+		"deploy-hooks.log": "ignored\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ListLogSources(appsDir, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d sources: %+v", len(got), got)
+	}
+	if got[0].Index != 0 || got[1].Index != 2 {
+		t.Fatalf("source order = %+v, want indices 0,2", got)
+	}
+	if got[0].SizeBytes != int64(len("zero\n")) || got[1].SizeBytes != int64(len("two\n")) {
+		t.Fatalf("source sizes = %+v", got)
+	}
+}
+
+func TestListLogSources_MissingAppDirectoryIsEmpty(t *testing.T) {
+	got, err := ListLogSources(t.TempDir(), "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("got %#v, want an empty non-nil slice", got)
+	}
+}
+
 // TestTail_EdgeCases pins the exact line semantics Tail must preserve: last-n in
 // order, files with and without a trailing newline, CRLF stripping, n larger
 // than the line count, and n<=0. These guard the backward-read implementation.

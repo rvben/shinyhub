@@ -21,6 +21,7 @@ import { renderTrendsCard } from '/static/views/trends-card.js';
 import { createTablistNav } from '/static/views/tablist-keys.js';
 import { TAB_ROUTES, resolveDetailAccess, tabViewModels } from '/static/views/app-detail-nav.js';
 import { normalizeAppEnvelope } from '/static/views/app-detail-envelope.js';
+import { createLogsViewer } from '/static/views/logs-ui.js';
 
 function pluralize(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
@@ -220,7 +221,7 @@ export function mountAppDetail(ctx) {
       renderOverview(panels.overview, app, replicasStatus, body, ctx);
     }
     if (tab === 'logs') {
-      tabCleanup = renderLogs(panels.logs, app);
+      tabCleanup = renderLogs(panels.logs, app, replicasStatus, ctx);
     }
     if (tab === 'traces') {
       tabCleanup = renderTraces(panels.traces, app, ctx);
@@ -253,9 +254,10 @@ export function mountAppDetail(ctx) {
   };
 }
 
-function renderLogs(panel, app) {
-  // An app awaiting its first deploy has no log file, so opening the stream
-  // just errors into "(log stream disconnected)". Show an empty state instead.
+function renderLogs(panel, app, replicasStatus, ctx) {
+  // An app awaiting its first deploy has no log sources. Keep the intentional
+  // first-deploy guidance instead of mounting a viewer that can only report an
+  // unavailable source.
   if ((app.deploy_count || 0) === 0) {
     panel.innerHTML = `
       <div class="logs-empty">
@@ -267,34 +269,7 @@ function renderLogs(panel, app) {
     `;
     return () => {};
   }
-  panel.innerHTML = `
-    <div class="logs-toolbar">
-      <label><input id="logs-follow" type="checkbox" checked> Follow</label>
-      <button id="logs-copy" type="button" class="btn-row">Copy all</button>
-    </div>
-    <pre id="detail-logs-body" class="detail-logs-body" aria-live="polite"></pre>
-  `;
-  const body = document.getElementById('detail-logs-body');
-  const followCb = document.getElementById('logs-follow');
-  const copyBtn = document.getElementById('logs-copy');
-
-  const es = new EventSource(`/api/apps/${app.slug}/logs`, { withCredentials: true });
-  es.onmessage = (e) => {
-    const atBottom = body.scrollHeight - Math.ceil(body.scrollTop) <= body.clientHeight + 1;
-    body.appendChild(document.createTextNode(e.data + '\n'));
-    if (followCb.checked && atBottom) body.scrollTop = body.scrollHeight;
-  };
-  es.onerror = () => {
-    es.close();
-    body.appendChild(document.createTextNode('(log stream disconnected)\n'));
-    if (followCb.checked) body.scrollTop = body.scrollHeight;
-  };
-
-  copyBtn.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(body.textContent); } catch {}
-  });
-
-  return () => { es.close(); };
+  return createLogsViewer({ panel, app, initialSources: replicasStatus, api: ctx.api });
 }
 
 function makeStatusBadge(cls, text) {

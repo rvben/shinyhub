@@ -1846,11 +1846,15 @@ func TestResponsiveAndStatePolish(t *testing.T) {
 	assertContains(t, "app.js", "auditTable.hidden = noEvents",
 		"renderAuditEvents must hide #audit-table when there are no events so empty headers don't show")
 
-	// SSE log streams announce a disconnect instead of freezing silently.
+	// SSE log streams surface a disconnect/reconnect state instead of freezing
+	// silently. The app-detail viewer intentionally lets EventSource reconnect;
+	// it reports that state in its dedicated status region.
 	assertContains(t, "app.js", "(log stream disconnected)",
 		"app.js log-pane SSE onerror must append a disconnect notice")
-	assertContains(t, "views/app-detail.js", "(log stream disconnected)",
-		"app-detail.js logs-tab SSE onerror must append a disconnect notice")
+	assertContains(t, "views/logs-ui.js", "Reconnecting ·",
+		"the app-detail log viewer must expose its reconnect state")
+	assertContains(t, "views/logs-ui.js", "stream.onerror",
+		"the app-detail log viewer must handle EventSource disconnects")
 
 	// Workers refresh control (consistency with the other list views).
 	assertContains(t, "index.html", `id="workers-refresh"`,
@@ -2147,8 +2151,8 @@ func TestPrimaryButtonsStyledGlobally(t *testing.T) {
 	}
 	// The logs/traces toolbar buttons must carry a style class so they aren't
 	// unstyled user-agent buttons.
-	assertContains(t, "views/app-detail.js", `id="logs-copy" type="button" class="btn-row"`,
-		"the Logs 'Copy all' button must be a styled .btn-row")
+	assertContains(t, "views/logs-ui.js", `id="logs-copy" type="button" class="btn-row"`,
+		"the Logs 'Copy visible' button must be a styled .btn-row")
 	assertContains(t, "views/app-detail.js", `id="traces-refresh" type="button" class="btn-row"`,
 		"the Traces 'Refresh' button must be a styled .btn-row")
 }
@@ -2418,17 +2422,17 @@ func TestLogsTabEmptyStateForNeverDeployed(t *testing.T) {
 		"the never-deployed Logs tab must show a 'No logs yet' empty state")
 	assertContains(t, "style.css", "\n.logs-empty {",
 		"style.css must style the Logs empty state")
-	// The empty-state branch must precede the EventSource construction so the
-	// stream is never opened for a never-deployed app.
+	// The empty-state branch must precede viewer construction so the viewer never
+	// opens its EventSources for a never-deployed app.
 	b, err := fs.ReadFile(ui.Static(), "views/app-detail.js")
 	if err != nil {
 		t.Fatalf("read app-detail.js: %v", err)
 	}
 	js := string(b)
 	guard := strings.Index(js, "(app.deploy_count || 0) === 0")
-	es := strings.Index(js, "new EventSource(`/api/apps/${app.slug}/logs`")
-	if guard < 0 || es < 0 || guard > es {
-		t.Fatal("app-detail.js: the never-deployed guard must come before the log EventSource is opened")
+	viewer := strings.Index(js, "return createLogsViewer(")
+	if guard < 0 || viewer < 0 || guard > viewer {
+		t.Fatal("app-detail.js: the never-deployed guard must come before the multi-replica log viewer is opened")
 	}
 }
 

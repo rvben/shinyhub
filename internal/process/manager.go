@@ -1249,6 +1249,12 @@ func (m *Manager) LogReader(slug string, index int) (*LogReader, bool) {
 	return NewLogReader(path), true
 }
 
+// LogSources returns every retained primary replica log for an app, including
+// logs whose replica row was removed during scale-down.
+func (m *Manager) LogSources(slug string) ([]LogSource, error) {
+	return ListLogSources(m.appsDir, slug)
+}
+
 // appEnvAllowExact / appEnvAllowPrefixes are the allow-list of server-process
 // environment variables that may pass through to app-controlled code. Everything
 // else (AWS/GCP/Azure credentials, tokens, or any other secret the operator

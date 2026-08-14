@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,6 +47,72 @@ func TestHandleLogs_NoLogFile(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404 when no log file exists, got %d", rec.Code)
+	}
+}
+
+func TestHandleLogSources_MergesLiveRowsAndRetainedScaledDownLogs(t *testing.T) {
+	srv, store, appsDir := newLogsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+	app, _ := store.GetAppBySlug("myapp")
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: db.ReplicaStatusRunning,
+		Provider: "native", Tier: "local", AppVersion: "v-current",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 1, Status: db.ReplicaStatusRunning,
+		Provider: "fargate", Tier: "burst", AppVersion: "v-current",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Join(appsDir, "myapp")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app-0.log"), []byte("live\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app-3.log"), []byte("old\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	req := httptest.NewRequest("GET", "/api/apps/myapp/logs/sources", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Sources []struct {
+			Replica         int    `json:"replica"`
+			Status          string `json:"status"`
+			Provider        string `json:"provider"`
+			HasLog          bool   `json:"has_log"`
+			SizeBytes       int64  `json:"size_bytes"`
+			StreamAvailable bool   `json:"stream_available"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Sources) != 3 {
+		t.Fatalf("sources = %+v", body.Sources)
+	}
+	if got := body.Sources[0]; got.Replica != 0 || got.Status != "running" || got.Provider != "native" || !got.HasLog {
+		t.Errorf("live source = %+v", got)
+	}
+	if got := body.Sources[1]; got.Replica != 1 || got.Provider != "fargate" || got.HasLog || got.StreamAvailable {
+		t.Errorf("external source = %+v", got)
+	}
+	if got := body.Sources[2]; got.Replica != 3 || got.Status != "stopped" || !got.HasLog || got.SizeBytes == 0 || !got.StreamAvailable {
+		t.Errorf("retained source = %+v", got)
 	}
 }
 

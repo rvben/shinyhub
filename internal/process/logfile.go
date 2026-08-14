@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -100,6 +102,54 @@ func (l *LogFile) Close() error {
 // side (LogFile) is open or closed.
 type LogReader struct {
 	path string
+}
+
+// LogSource describes one retained replica log on local storage. Replica log
+// files outlive their process-manager entries (for example after scale-down),
+// so discovery deliberately comes from disk rather than the live process pool.
+type LogSource struct {
+	Index      int
+	SizeBytes  int64
+	ModifiedAt time.Time
+}
+
+// ListLogSources returns the primary replica log files retained for an app,
+// ordered by replica index. Rotated .log.1 backups are an implementation detail
+// of the primary stream and are not returned as separate replicas.
+func ListLogSources(appsDir, slug string) ([]LogSource, error) {
+	dir := filepath.Join(appsDir, slug)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []LogSource{}, nil
+		}
+		return nil, err
+	}
+
+	sources := make([]LogSource, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "app-") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		raw := strings.TrimSuffix(strings.TrimPrefix(name, "app-"), ".log")
+		index, err := strconv.Atoi(raw)
+		if err != nil || index < 0 || index > 255 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		sources = append(sources, LogSource{
+			Index: index, SizeBytes: info.Size(), ModifiedAt: info.ModTime(),
+		})
+	}
+	sort.Slice(sources, func(i, j int) bool { return sources[i].Index < sources[j].Index })
+	return sources, nil
 }
 
 // NewLogReader creates a reader for the log file at path.
