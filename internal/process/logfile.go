@@ -1,7 +1,6 @@
 package process
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -15,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/logstream"
 )
 
 // fanoutLogWriter makes the local capped file the primary runtime sink and
@@ -341,36 +342,28 @@ func (r *LogReader) ReadAll() ([]byte, error) {
 	return os.ReadFile(r.path)
 }
 
-// Tail returns the last n lines from the log file in chronological order. It
-// reads backward from the end in chunks, so the work is proportional to the
-// size of the returned tail rather than the whole (up to multi-MB) file - the
-// hot path for the log viewer and every new SSE follow connection.
-func (r *LogReader) Tail(n int) ([]string, error) {
-	if n <= 0 {
-		return nil, nil
-	}
+// SnapshotTail returns a tail and the exact file cursor captured with it. A
+// follower starting from that cursor cannot miss output written after this
+// snapshot, unlike a separate Tail followed by a fresh end-of-file lookup.
+func (r *LogReader) SnapshotTail(n int) ([]logstream.Record, int64, error) {
 	f, err := os.Open(r.path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
-
 	info, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	size := info.Size()
-	if size == 0 {
-		return nil, nil
+	end := info.Size()
+	if n <= 0 || end == 0 {
+		return nil, end, nil
 	}
 
 	const chunkSize = 32 * 1024
-	var buf []byte
-	pos := size
+	var data []byte
+	pos := end
 	newlines := 0
-	// Read backward until we have more than n line terminators (so the first
-	// retained line is whole, not a fragment split by a chunk boundary) or we
-	// reach the start of the file.
 	for pos > 0 && newlines <= n {
 		read := int64(chunkSize)
 		if pos < read {
@@ -379,31 +372,40 @@ func (r *LogReader) Tail(n int) ([]string, error) {
 		pos -= read
 		chunk := make([]byte, read)
 		if _, err := f.ReadAt(chunk, pos); err != nil && err != io.EOF {
-			return nil, err
+			return nil, 0, err
 		}
-		buf = append(chunk, buf...)
-		newlines = bytes.Count(buf, []byte{'\n'})
+		data = append(chunk, data...)
+		newlines = bytes.Count(data, []byte{'\n'})
 	}
+	records := logstream.RecordsFromBytes(data, pos)
+	if len(records) > n {
+		records = records[len(records)-n:]
+	}
+	return records, end, nil
+}
 
-	// Split with bufio.Scanner semantics: a trailing newline does not yield a
-	// final empty line, and a trailing '\r' (CRLF) is stripped.
-	lines := strings.Split(string(buf), "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+// Tail returns the last n lines from the log file in chronological order. It
+// reads backward from the end in chunks, so the work is proportional to the
+// size of the returned tail rather than the whole (up to multi-MB) file - the
+// hot path for the log viewer and every new SSE follow connection.
+func (r *LogReader) Tail(n int) ([]string, error) {
+	if n <= 0 {
+		return nil, nil
 	}
-	for i := range lines {
-		lines[i] = strings.TrimSuffix(lines[i], "\r")
+	records, _, err := r.SnapshotTail(n)
+	if err != nil {
+		return nil, err
 	}
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	lines := make([]string, len(records))
+	for i, record := range records {
+		lines[i] = record.Line
 	}
 	return lines, nil
 }
 
-// maxLogScanToken caps a single log line read by Follow. The bufio.Scanner
-// default of 64 KiB silently drops longer lines (a long Python traceback or a
-// base64 blob), so a crash reason or streamed log chunk could be lost.
-const maxLogScanToken = 512 * 1024
+// maxLogFollowRead bounds one poll while still accommodating the capped primary
+// file plus one unusually long line written across the snapshot boundary.
+const maxLogFollowRead = DefaultLogMaxSize + 512*1024
 
 // Follow sends new lines written to the log file to lines until ctx is
 // cancelled. It polls the file at 100 ms intervals.
@@ -412,6 +414,26 @@ func (r *LogReader) Follow(ctx context.Context, lines chan<- string) {
 	if info, err := os.Stat(r.path); err == nil {
 		offset = info.Size()
 	}
+	records := make(chan logstream.Record, cap(lines))
+	go r.FollowFrom(ctx, offset, records)
+	for {
+		select {
+		case record := <-records:
+			select {
+			case lines <- record.Line:
+			case <-ctx.Done():
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// FollowFrom sends records written strictly after offset. If rotation replaced
+// the primary with a shorter file, the cursor resets to the new file's start so
+// the follower continues instead of seeking forever beyond EOF.
+func (r *LogReader) FollowFrom(ctx context.Context, offset int64, records chan<- logstream.Record) {
 
 	// A single Ticker reused across iterations avoids the per-iteration timer
 	// allocation (and goroutine) that time.After would leak over a long-lived
@@ -430,21 +452,25 @@ func (r *LogReader) Follow(ctx context.Context, lines chan<- string) {
 		if err != nil {
 			continue
 		}
+		if info, statErr := f.Stat(); statErr == nil && info.Size() < offset {
+			offset = 0
+		}
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
 			f.Close()
 			continue
 		}
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 0, 64*1024), maxLogScanToken)
-		for scanner.Scan() {
+		data, readErr := io.ReadAll(io.LimitReader(f, maxLogFollowRead))
+		f.Close()
+		if readErr != nil || len(data) == 0 {
+			continue
+		}
+		for _, record := range logstream.RecordsFromBytes(data, offset) {
 			select {
-			case lines <- scanner.Text():
+			case records <- record:
+				offset = record.EndOffset
 			case <-ctx.Done():
-				f.Close()
 				return
 			}
 		}
-		offset, _ = f.Seek(0, io.SeekCurrent)
-		f.Close()
 	}
 }

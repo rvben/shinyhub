@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/logstream"
 )
 
 // writeFile writes raw bytes to a fresh log path and returns a reader for it.
@@ -284,4 +286,71 @@ func TestLogReader_Follow(t *testing.T) {
 		t.Error("timed out waiting for Follow to deliver line")
 	}
 	lf.Close()
+}
+
+func TestLogReaderSnapshotCursorClosesTailFollowGap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := NewLogReader(path)
+	records, cursor, err := reader.SnapshotTail(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Line != "before" || cursor != int64(len("before\n")) {
+		t.Fatalf("snapshot = %+v cursor=%d", records, cursor)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("written during handoff\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ch := make(chan logstream.Record, 2)
+	go reader.FollowFrom(ctx, cursor, ch)
+	select {
+	case got := <-ch:
+		if got.Line != "written during handoff" || got.EndOffset != int64(len("before\nwritten during handoff\n")) {
+			t.Fatalf("followed record = %+v", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for handoff output")
+	}
+}
+
+func TestLogReaderFollowFromRecoversAfterRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, []byte("a primary file longer than replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := NewLogReader(path)
+	_, cursor, err := reader.SnapshotTail(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("rotated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ch := make(chan logstream.Record, 2)
+	go reader.FollowFrom(ctx, cursor, ch)
+	select {
+	case got := <-ch:
+		if got.Line != "rotated" || got.EndOffset != int64(len("rotated\n")) {
+			t.Fatalf("rotated record = %+v", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for rotated output")
+	}
 }

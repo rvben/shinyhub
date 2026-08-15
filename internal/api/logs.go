@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/logstream"
 	"github.com/rvben/shinyhub/internal/process"
 )
 
@@ -25,6 +26,8 @@ const maxLogTail = 10000
 
 type appLogReader interface {
 	ReadAll() ([]byte, error)
+	SnapshotTail(int) ([]logstream.Record, int64, error)
+	FollowFrom(context.Context, int64, chan<- logstream.Record)
 	Tail(int) ([]string, error)
 	Follow(context.Context, chan<- string)
 }
@@ -399,8 +402,10 @@ func writeLogFilePlain(w http.ResponseWriter, path string, tail int) {
 	writeLogsPlain(w, process.NewLogReader(path), tail)
 }
 
-// streamLogReader writes the SSE response: initial Tail(tail), then optionally
-// Follow until the client disconnects, with periodic heartbeats.
+// streamLogReader writes a cursor-bearing SSE response: an atomic initial tail,
+// then output strictly after that snapshot. EventSource automatically sends the
+// last received id as Last-Event-ID when reconnecting, so resumed requests skip
+// the initial tail and continue without gaps or replay.
 // When follow is false, the tail is flushed and the connection is closed
 // immediately — suitable for completed schedule runs whose log files are static.
 func streamLogReader(w http.ResponseWriter, r *http.Request, lr appLogReader, tail int, follow bool) {
@@ -415,13 +420,17 @@ func streamLogReader(w http.ResponseWriter, r *http.Request, lr appLogReader, ta
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Initial burst: last `tail` lines.
-	lines, err := lr.Tail(tail)
-	if err != nil {
-		slog.Warn("logs tail", "err", err)
-	}
-	for _, line := range lines {
-		fmt.Fprintf(w, "data: %s\n\n", line)
+	cursor, resumed := lastEventCursor(r)
+	if !resumed {
+		records, snapshotEnd, err := lr.SnapshotTail(tail)
+		if err != nil {
+			slog.Warn("logs snapshot tail", "err", err)
+		} else {
+			cursor = snapshotEnd
+		}
+		for _, record := range records {
+			writeLogEvent(w, record)
+		}
 	}
 	flusher.Flush()
 
@@ -430,8 +439,8 @@ func streamLogReader(w http.ResponseWriter, r *http.Request, lr appLogReader, ta
 	}
 
 	// Follow new output until the client disconnects.
-	ch := make(chan string, 64)
-	go lr.Follow(r.Context(), ch)
+	ch := make(chan logstream.Record, 64)
+	go lr.FollowFrom(r.Context(), cursor, ch)
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -440,12 +449,28 @@ func streamLogReader(w http.ResponseWriter, r *http.Request, lr appLogReader, ta
 		select {
 		case <-r.Context().Done():
 			return
-		case line := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", line)
+		case record := <-ch:
+			writeLogEvent(w, record)
 			flusher.Flush()
 		case <-heartbeat.C:
 			fmt.Fprintf(w, ": heartbeat\n\n")
 			flusher.Flush()
 		}
 	}
+}
+
+func lastEventCursor(r *http.Request) (int64, bool) {
+	raw := r.Header.Get("Last-Event-ID")
+	if raw == "" {
+		return 0, false
+	}
+	cursor, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || cursor < 0 {
+		return 0, false
+	}
+	return cursor, true
+}
+
+func writeLogEvent(w http.ResponseWriter, record logstream.Record) {
+	fmt.Fprintf(w, "id: %d\ndata: %s\n\n", record.EndOffset, record.Line)
 }

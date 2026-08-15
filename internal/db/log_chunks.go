@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/logstream"
 )
 
 const (
@@ -125,6 +127,14 @@ func (s *Store) ReadAppLog(runID string) ([]byte, error) {
 // cursor. If retention has advanced beyond offset, it starts at the earliest
 // still-retained byte rather than returning a permanent gap.
 func (s *Store) ReadAppLogFrom(runID string, offset int64) ([]byte, int64, error) {
+	data, _, end, err := s.ReadAppLogWindow(runID, offset)
+	return data, end, err
+}
+
+// ReadAppLogWindow returns retained bytes after offset plus their actual
+// absolute start and end cursors. The start may be greater than offset when
+// retention has already trimmed older chunks.
+func (s *Store) ReadAppLogWindow(runID string, offset int64) ([]byte, int64, int64, error) {
 	defer s.timed("ReadAppLogFrom")()
 	rows, err := s.db.Query(`
 		SELECT start_offset, end_offset, data
@@ -132,16 +142,18 @@ func (s *Store) ReadAppLogFrom(runID string, offset int64) ([]byte, int64, error
 		WHERE run_id = ? AND end_offset > ?
 		ORDER BY chunk_seq`, runID, offset)
 	if err != nil {
-		return nil, offset, fmt.Errorf("follow app log: %w", err)
+		return nil, offset, offset, fmt.Errorf("follow app log: %w", err)
 	}
 	defer rows.Close()
 	var out bytes.Buffer
+	startCursor := offset
 	end := offset
+	found := false
 	for rows.Next() {
 		var start, chunkEnd int64
 		var chunk []byte
 		if err := rows.Scan(&start, &chunkEnd, &chunk); err != nil {
-			return nil, offset, fmt.Errorf("scan followed app log chunk: %w", err)
+			return nil, offset, offset, fmt.Errorf("scan followed app log chunk: %w", err)
 		}
 		from := int64(0)
 		if offset > start {
@@ -150,15 +162,19 @@ func (s *Store) ReadAppLogFrom(runID string, offset int64) ([]byte, int64, error
 				from = int64(len(chunk))
 			}
 		}
+		if !found {
+			startCursor = start + from
+			found = true
+		}
 		_, _ = out.Write(chunk[from:])
 		if chunkEnd > end {
 			end = chunkEnd
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, offset, err
+		return nil, offset, offset, err
 	}
-	return out.Bytes(), end, nil
+	return out.Bytes(), startCursor, end, nil
 }
 
 // AppLogEndOffset returns the current monotonic end cursor and whether the run
@@ -444,6 +460,20 @@ func (r *AppLogReader) ReadAll() ([]byte, error) {
 	return r.store.ReadAppLog(r.runID)
 }
 
+// SnapshotTail captures retained lines and their end cursor from one database
+// read, closing the gap between an initial tail and live following.
+func (r *AppLogReader) SnapshotTail(n int) ([]logstream.Record, int64, error) {
+	data, start, end, err := r.store.ReadAppLogWindow(r.runID, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	records := logstream.RecordsFromBytes(data, start)
+	if n >= 0 && len(records) > n {
+		records = records[len(records)-n:]
+	}
+	return records, end, nil
+}
+
 func (r *AppLogReader) Tail(n int) ([]string, error) {
 	if n <= 0 {
 		return nil, nil
@@ -470,6 +500,24 @@ func (r *AppLogReader) Follow(ctx context.Context, lines chan<- string) {
 	if err != nil {
 		offset = 0
 	}
+	records := make(chan logstream.Record, cap(lines))
+	go r.FollowFrom(ctx, offset, records)
+	for {
+		select {
+		case record := <-records:
+			select {
+			case lines <- record.Line:
+			case <-ctx.Done():
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// FollowFrom streams records after an absolute shared-log cursor.
+func (r *AppLogReader) FollowFrom(ctx context.Context, offset int64, records chan<- logstream.Record) {
 	ticker := time.NewTicker(appLogFlushInterval)
 	defer ticker.Stop()
 	for {
@@ -478,18 +526,17 @@ func (r *AppLogReader) Follow(ctx context.Context, lines chan<- string) {
 			return
 		case <-ticker.C:
 		}
-		data, end, err := r.store.ReadAppLogFrom(r.runID, offset)
+		data, start, end, err := r.store.ReadAppLogWindow(r.runID, offset)
 		if err != nil || len(data) == 0 {
 			continue
 		}
-		offset = end
-		for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
-			line = strings.TrimSuffix(line, "\r")
+		for _, record := range logstream.RecordsFromBytes(data, start) {
 			select {
-			case lines <- line:
+			case records <- record:
 			case <-ctx.Done():
 				return
 			}
 		}
+		offset = end
 	}
 }

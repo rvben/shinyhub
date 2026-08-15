@@ -432,9 +432,64 @@ func TestHandleLogs_SSEInitialBurst(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 
 	body := rec.Body.String()
+	for _, want := range []string{"id: 6\n", "id: 11\n", "id: 17\n"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected SSE cursor %q in body, got:\n%s", want, body)
+		}
+	}
 	for _, want := range []string{"data: alpha\n", "data: beta\n", "data: gamma\n"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected SSE line %q in body, got:\n%s", want, body)
 		}
+	}
+}
+
+func TestHandleLogs_SSEResumesAfterLastEventWithoutReplayingTail(t *testing.T) {
+	srv, store, appsDir := newLogsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+	writeCurrentLogsTestOutput(t, store, appsDir, []byte("alpha\nbeta\ngamma\n"))
+
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/apps/myapp/logs", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Last-Event-ID", "6") // immediately after "alpha\n"
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "data: alpha\n") {
+		t.Fatalf("resumed stream replayed acknowledged line:\n%s", body)
+	}
+	for _, want := range []string{"id: 11\ndata: beta\n", "id: 17\ndata: gamma\n"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("resumed stream missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestHandleLogs_SSEInvalidLastEventIDFallsBackToInitialTail(t *testing.T) {
+	srv, store, appsDir := newLogsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+	writeCurrentLogsTestOutput(t, store, appsDir, []byte("safe fallback\n"))
+
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/apps/myapp/logs", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Last-Event-ID", "not-a-cursor")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if body := rec.Body.String(); !strings.Contains(body, "id: 14\ndata: safe fallback\n") {
+		t.Fatalf("invalid cursor did not fall back to initial tail:\n%s", body)
 	}
 }

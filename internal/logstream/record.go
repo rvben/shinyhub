@@ -1,0 +1,39 @@
+// Package logstream defines the cursor-bearing records shared by local-file
+// and database-backed application log readers.
+package logstream
+
+import (
+	"bytes"
+	"strings"
+)
+
+// Record is one display line and the exclusive byte offset immediately after
+// it. EndOffset is suitable for an SSE id and resuming with Last-Event-ID.
+type Record struct {
+	Line      string
+	EndOffset int64
+}
+
+// RecordsFromBytes splits retained bytes into display lines while preserving
+// their absolute end offsets. A final unterminated line is included so crash
+// output without a trailing newline remains visible.
+func RecordsFromBytes(data []byte, startOffset int64) []Record {
+	if len(data) == 0 {
+		return nil
+	}
+	records := make([]Record, 0, bytes.Count(data, []byte{'\n'})+1)
+	lineStart := 0
+	for i, b := range data {
+		if b != '\n' {
+			continue
+		}
+		line := strings.TrimSuffix(string(data[lineStart:i]), "\r")
+		records = append(records, Record{Line: line, EndOffset: startOffset + int64(i+1)})
+		lineStart = i + 1
+	}
+	if lineStart < len(data) {
+		line := strings.TrimSuffix(string(data[lineStart:]), "\r")
+		records = append(records, Record{Line: line, EndOffset: startOffset + int64(len(data))})
+	}
+	return records
+}

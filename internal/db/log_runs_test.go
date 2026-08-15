@@ -8,6 +8,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
+	"github.com/rvben/shinyhub/internal/logstream"
 )
 
 func TestAppLogRunsRoundTripAndOrder(t *testing.T) {
@@ -89,6 +90,10 @@ func TestAppLogChunksRetainNewestBytesAndMonotonicOffsets(t *testing.T) {
 	if err != nil || string(from) != "efghijkl" || end != 12 {
 		t.Fatalf("ReadAppLogFrom = %q, end=%d, err=%v", from, end, err)
 	}
+	window, start, end, err := store.ReadAppLogWindow(runID, 0)
+	if err != nil || string(window) != "efghijkl" || start != 4 || end != 12 {
+		t.Fatalf("ReadAppLogWindow = %q, start=%d, end=%d, err=%v", window, start, end, err)
+	}
 	stats, err := store.AppLogStatsForRuns([]string{runID})
 	if err != nil || stats[runID].SizeBytes != 8 || stats[runID].UpdatedAt.IsZero() {
 		t.Fatalf("stats = %+v, %v", stats, err)
@@ -139,6 +144,49 @@ func TestAppLogWriterAndReaderStreamSharedOutput(t *testing.T) {
 	tail, err := reader.Tail(1)
 	if err != nil || len(tail) != 1 || tail[0] != "second" {
 		t.Fatalf("Tail = %v, %v", tail, err)
+	}
+}
+
+func TestAppLogReaderSnapshotCursorClosesTailFollowGap(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "hash", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("demo")
+	const runID = "77777777-7777-4777-8777-777777777777"
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: app.ID, Status: "running", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendAppLogChunk(runID, 0, 0, []byte("before\n"), db.AppLogRetentionBytes, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := store.NewAppLogReader(runID)
+	records, cursor, err := reader.SnapshotTail(200)
+	if err != nil || len(records) != 1 || records[0].Line != "before" || cursor != int64(len("before\n")) {
+		t.Fatalf("snapshot = %+v cursor=%d err=%v", records, cursor, err)
+	}
+	if err := store.AppendAppLogChunk(runID, 1, cursor, []byte("written during handoff\n"), db.AppLogRetentionBytes, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ch := make(chan logstream.Record, 2)
+	go reader.FollowFrom(ctx, cursor, ch)
+	select {
+	case got := <-ch:
+		if got.Line != "written during handoff" || got.EndOffset != int64(len("before\nwritten during handoff\n")) {
+			t.Fatalf("followed record = %+v", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for shared handoff output")
 	}
 }
 
