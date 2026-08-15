@@ -60,7 +60,7 @@ func writeCurrentLogsTestOutput(t *testing.T, store *db.Store, appsDir string, c
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkAppLogRunRunning(runID, "native"); err != nil {
+	if err := store.MarkAppLogRunRunning(runID, "native", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendAppLogChunk(runID, 0, 0, content, db.AppLogRetentionBytes, time.Now()); err != nil {
@@ -173,7 +173,7 @@ func TestHandleLogSourcesAndLogsExposeImmutableRunHistory(t *testing.T) {
 	if err := store.FinishAppLogRun(olderID, "stopped", base.Add(30*time.Second), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkAppLogRunRunning(newerID, "native"); err != nil {
+	if err := store.MarkAppLogRunRunning(newerID, "native", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, Status: "running", Provider: "native", Tier: "local", AppVersion: "v2"}); err != nil {
@@ -242,6 +242,61 @@ func TestHandleLogSourcesAndLogsExposeImmutableRunHistory(t *testing.T) {
 	}
 }
 
+func TestHandleLogSourcesPreservesExternalLogsForStoppedRun(t *testing.T) {
+	srv, store, _ := newLogsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("myapp")
+	const runID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: app.ID, ReplicaIndex: 4, Tier: "burst",
+		Status: "starting", StartedAt: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	details := process.ExternalLogs{
+		Provider: "aws_ecs", Resource: "arn:aws:ecs:eu-west-1:111122223333:task/analytics/task-4",
+		Region: "eu-west-1", Cluster: "analytics",
+		ConsoleURL: "https://console.aws.amazon.com/ecs/v2/clusters/analytics/tasks/task-4/logs?region=eu-west-1",
+	}
+	encoded, _ := json.Marshal(details)
+	if err := store.MarkAppLogRunRunning(runID, "fargate", string(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishAppLogRun(runID, "stopped", time.Now(), false); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	req := httptest.NewRequest("GET", "/api/apps/myapp/logs/sources", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Sources []struct {
+			Status          string                `json:"status"`
+			StreamAvailable bool                  `json:"stream_available"`
+			ExternalLogs    *process.ExternalLogs `json:"external_logs"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Sources) != 1 || body.Sources[0].Status != "stopped" || body.Sources[0].StreamAvailable ||
+		body.Sources[0].ExternalLogs == nil || *body.Sources[0].ExternalLogs != details {
+		t.Fatalf("external stopped source = %+v", body.Sources)
+	}
+}
+
 func TestHandleLogsReadsSharedRunWithoutLocalFile(t *testing.T) {
 	srv, store, _ := newLogsTestServer(t)
 	hash, _ := testHashPassword("pass")
@@ -257,7 +312,7 @@ func TestHandleLogsReadsSharedRunWithoutLocalFile(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkAppLogRunRunning(runID, "remote_docker"); err != nil {
+	if err := store.MarkAppLogRunRunning(runID, "remote_docker", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendAppLogChunk(runID, 0, 0, []byte("from another node\n"), db.AppLogRetentionBytes, time.Now()); err != nil {

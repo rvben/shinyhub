@@ -18,6 +18,7 @@ type AppLogRun struct {
 	AppVersion   string     `json:"app_version"`
 	Tier         string     `json:"tier"`
 	Provider     string     `json:"provider"`
+	ExternalLogs string     `json:"-"`
 	Status       string     `json:"status"`
 	StartedAt    time.Time  `json:"started_at"`
 	FinishedAt   *time.Time `json:"finished_at,omitempty"`
@@ -71,12 +72,15 @@ func (s *Store) CreateAppLogRun(p CreateAppLogRunParams) error {
 	return nil
 }
 
-// MarkAppLogRunRunning attaches the runtime provider after launch succeeds.
-func (s *Store) MarkAppLogRunRunning(runID, provider string) error {
+// MarkAppLogRunRunning attaches the runtime provider and any provider-owned log
+// handoff after launch succeeds. externalLogs is an opaque JSON envelope owned
+// by the process layer; keeping it on the immutable run preserves access after
+// the replica exits or its pool slot is reused.
+func (s *Store) MarkAppLogRunRunning(runID, provider, externalLogs string) error {
 	defer s.timed("MarkAppLogRunRunning")()
 	res, err := s.db.Exec(`
-		UPDATE app_log_runs SET provider = ?, status = 'running'
-		WHERE run_id = ?`, provider, runID)
+		UPDATE app_log_runs SET provider = ?, external_logs = ?, status = 'running'
+		WHERE run_id = ?`, provider, externalLogs, runID)
 	if err != nil {
 		return fmt.Errorf("mark app log run running: %w", err)
 	}
@@ -111,7 +115,7 @@ func (s *Store) ListAppLogRuns(appID int64, limit int) ([]*AppLogRun, error) {
 	}
 	rows, err := s.db.Query(`
 		SELECT run_id, app_id, replica_index, deployment_id, app_version, tier,
-		       provider, status, started_at, finished_at, oom_killed
+		       provider, external_logs, status, started_at, finished_at, oom_killed
 		FROM app_log_runs
 		WHERE app_id = ?
 		ORDER BY started_at DESC, run_id DESC
@@ -138,7 +142,7 @@ func (s *Store) ListUnfinishedAppLogRuns(appID int64) ([]*AppLogRun, error) {
 	defer s.timed("ListUnfinishedAppLogRuns")()
 	rows, err := s.db.Query(`
 		SELECT run_id, app_id, replica_index, deployment_id, app_version, tier,
-		       provider, status, started_at, finished_at, oom_killed
+		       provider, external_logs, status, started_at, finished_at, oom_killed
 		FROM app_log_runs
 		WHERE app_id = ? AND finished_at IS NULL
 		ORDER BY started_at DESC, run_id DESC`, appID)
@@ -163,7 +167,7 @@ func (s *Store) GetAppLogRun(appID int64, runID string) (*AppLogRun, error) {
 	defer s.timed("GetAppLogRun")()
 	row := s.db.QueryRow(`
 		SELECT run_id, app_id, replica_index, deployment_id, app_version, tier,
-		       provider, status, started_at, finished_at, oom_killed
+		       provider, external_logs, status, started_at, finished_at, oom_killed
 		FROM app_log_runs WHERE app_id = ? AND run_id = ?`, appID, runID)
 	run, err := scanAppLogRun(row)
 	if err != nil {
@@ -232,7 +236,7 @@ func scanAppLogRun(row logRunScanner) (*AppLogRun, error) {
 	var oom int
 	if err := row.Scan(&run.RunID, &run.AppID, &run.ReplicaIndex,
 		&run.DeploymentID, &run.AppVersion, &run.Tier, &run.Provider,
-		&run.Status, &started, &finished, &oom); err != nil {
+		&run.ExternalLogs, &run.Status, &started, &finished, &oom); err != nil {
 		return nil, err
 	}
 	run.StartedAt = time.UnixMilli(started)

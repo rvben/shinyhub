@@ -4,17 +4,27 @@ import { JSDOM } from 'jsdom';
 import {
   appendBoundedLogEntry,
   createLogsViewer,
+  externalLogsCommand,
   filterLogEntries,
   formatLogSourceLabel,
   isFollowableLogSource,
+  isExternalLogSource,
   isLiveLogSource,
   normalizeLogSources,
   retainedLogDownloadURL,
+  safeExternalLogsURL,
   serializeLogEntries,
   unseenLogSuffix,
 } from '../static/views/logs-ui.js';
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
+const waitUntil = async (predicate, timeoutMs = 10_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for UI state');
+    await tick();
+  }
+};
 
 test('normalizeLogSources keeps distinct runs of one replica and sorts current first', () => {
   const got = normalizeLogSources([
@@ -36,7 +46,119 @@ test('source labels and liveness are explicit', () => {
   assert.equal(isLiveLogSource(source), true);
   assert.equal(isFollowableLogSource(source), true);
   assert.equal(isFollowableLogSource({ ...source, stream_available: false }), false);
+  assert.equal(isExternalLogSource({ ...source, stream_available: false }), true);
   assert.equal(isLiveLogSource({ status: 'stopped' }), false);
+});
+
+test('external AWS handoffs validate links and quote copyable commands', () => {
+  const source = {
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: "team's apps",
+      resource: "arn:aws:ecs:eu-west-1:123:task/team/task'42",
+      console_url: 'https://console.aws.amazon.com/ecs/v2/clusters/team/tasks/task-42/logs?region=eu-west-1',
+    },
+  };
+  assert.equal(
+    externalLogsCommand(source),
+    `aws ecs describe-tasks --cluster 'team'"'"'s apps' --tasks 'arn:aws:ecs:eu-west-1:123:task/team/task'"'"'42' --region 'eu-west-1'`,
+  );
+  assert.equal(safeExternalLogsURL(source), source.external_logs.console_url);
+  assert.equal(safeExternalLogsURL({
+    external_logs: { console_url: 'https://console.aws.amazon.com.evil.test/steal' },
+  }), '');
+  assert.equal(safeExternalLogsURL({
+    external_logs: { console_url: 'https://console.aws.amazon.com:444/ecs' },
+  }), '');
+  assert.equal(externalLogsCommand({ external_logs: { provider: 'aws_ecs' } }), '');
+});
+
+test('external live and stopped runs provide an actionable permission-safe AWS handoff', async (t) => {
+  const details = (task) => ({
+    provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+    resource: `arn:aws:ecs:eu-west-1:123:task/analytics/${task}`,
+    console_url: `https://console.aws.amazon.com/ecs/v2/clusters/analytics/tasks/${task}/logs?region=eu-west-1`,
+  });
+  const current = {
+    source_id: 'task-live', run_id: 'task-live', replica: 2, current: true,
+    status: 'running', provider: 'fargate', tier: 'burst', stream_available: false,
+    external_logs: details('task-live'),
+  };
+  const stopped = {
+    source_id: 'task-old', run_id: 'task-old', replica: 2, current: false,
+    status: 'stopped', provider: 'fargate', tier: 'burst', stream_available: false,
+    started_at: '2026-08-14T08:00:00Z', external_logs: details('task-old'),
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  const copied = [];
+  Object.defineProperty(dom.window.navigator, 'clipboard', {
+    configurable: true, value: { writeText: async (value) => copied.push(value) },
+  });
+  class UnexpectedEventSource {
+    constructor() { throw new Error('external sources must not open EventSource'); }
+  }
+  const panel = dom.window.document.querySelector('#panel');
+  const api = async () => ({ ok: true, json: async () => ({ sources: [current, stopped] }) });
+  const cleanup = createLogsViewer({
+    panel, app: { slug: 'demo' }, api, EventSourceClass: UnexpectedEventSource, refreshEveryMs: 60_000,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => panel.querySelectorAll('.logs-external-row').length === 1 &&
+    /retained by its provider/i.test(panel.querySelector('#detail-logs-body').textContent));
+
+  assert.equal(panel.querySelector('.logs-status-text').textContent, '1 live source · application logs external');
+  assert.match(panel.querySelector('#detail-logs-body').textContent, /retained by its provider/i);
+  assert.equal(panel.querySelectorAll('.logs-external-row').length, 1);
+  assert.equal(panel.querySelector('.logs-external-actions a').textContent, 'Open task logs');
+  assert.equal(panel.querySelector('.logs-external-actions a').rel, 'noopener noreferrer');
+
+  const select = panel.querySelector('#logs-source');
+  select.value = 'task-old';
+  select.dispatchEvent(new dom.window.Event('change'));
+  await tick();
+  assert.equal(panel.querySelector('.logs-status-text').textContent, 'Stopped · logs retained in AWS');
+  assert.equal(panel.querySelector('#logs-download').disabled, true);
+  assert.equal(panel.querySelector('#logs-download').textContent, 'External logs');
+  assert.match(panel.querySelector('.logs-external-identity').textContent, /Task task-old.*eu-west-1.*analytics/);
+  panel.querySelector('.logs-external-actions button').click();
+  await tick();
+  assert.equal(copied.at(-1), "aws ecs describe-tasks --cluster 'analytics' --tasks 'arn:aws:ecs:eu-west-1:123:task/analytics/task-old' --region 'eu-west-1'");
+  assert.match(panel.querySelector('#logs-announcement').textContent, /command copied.*replica 2/i);
+});
+
+test('external log command remains available when clipboard access fails', async (t) => {
+  const source = {
+    source_id: 'task-old', run_id: 'task-old', replica: 2, current: false,
+    status: 'stopped', provider: 'fargate', tier: 'burst', stream_available: false,
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+      resource: 'arn:aws:ecs:eu-west-1:123:task/analytics/task-old',
+    },
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  Object.defineProperty(dom.window.navigator, 'clipboard', {
+    configurable: true, value: { writeText: async () => { throw new Error('denied'); } },
+  });
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({
+    panel, app: { slug: 'demo' },
+    api: async () => ({ ok: true, json: async () => ({ sources: [source] }) }),
+    refreshEveryMs: 60_000,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => panel.querySelector('.logs-external-actions button'));
+
+  assert.equal(panel.querySelector('#logs-source').value, 'task-old');
+  assert.equal(new URL(dom.window.location.href).searchParams.get('log_source'), 'task-old');
+  panel.querySelector('.logs-external-actions button').click();
+  await tick();
+  const fallback = panel.querySelector('.logs-external-command');
+  assert.equal(fallback.textContent, externalLogsCommand(source));
+  assert.equal(fallback.tabIndex, 0);
+  assert.match(panel.querySelector('#logs-announcement').textContent, /shown for manual copying/i);
 });
 
 test('filtering and serialization retain replica identity', () => {

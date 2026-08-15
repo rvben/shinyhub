@@ -191,8 +191,12 @@ healthy control-plane instance. Each immutable run retains its newest 5 MiB;
 older bytes are pruned without changing the live follower cursor. A transient
 database write failure is retried from a bounded in-memory buffer and does not
 interrupt the application process. Single-node SQLite installations continue
-to use capped local run files. Fargate output remains in CloudWatch and is
-identified as externally retained in the log source list.
+to use capped local run files. Fargate output remains in CloudWatch. For each
+new Fargate execution, ShinyHub retains the ECS task identity with the immutable
+log run, so the Logs tab can open that task's AWS Logs view or copy an exact
+`aws ecs describe-tasks` command after the task stops. Runs created before this
+metadata was recorded remain identified as externally retained and link to the
+ECS console without claiming that ShinyHub has a local copy.
 
 Maintenance keeps the newest 20 immutable runs per replica by default and
 removes both shared chunks and matching node-local files. Configure

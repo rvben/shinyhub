@@ -14,6 +14,42 @@ export function isFollowableLogSource(source) {
   return isLiveLogSource(source) && source.stream_available !== false;
 }
 
+export function isExternalLogSource(source) {
+  return source && source.stream_available === false;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
+export function externalLogsCommand(source) {
+  const details = source && source.external_logs;
+  if (!details || details.provider !== 'aws_ecs' || !details.resource || !details.region || !details.cluster) return '';
+  return `aws ecs describe-tasks --cluster ${shellQuote(details.cluster)} --tasks ${shellQuote(details.resource)} --region ${shellQuote(details.region)}`;
+}
+
+export function safeExternalLogsURL(source) {
+  const raw = source && source.external_logs && source.external_logs.console_url;
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    const allowed = ['console.aws.amazon.com', 'console.amazonaws.cn', 'console.amazonaws-us-gov.com'];
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port && allowed.includes(url.hostname)
+      ? url.href
+      : '';
+  } catch {
+    return '';
+  }
+}
+
+function externalLogsFallbackURL(source) {
+  if (!source || source.provider !== 'fargate') return '';
+  const resource = source.external_logs && source.external_logs.resource || '';
+  if (resource.startsWith('arn:aws-cn:')) return 'https://console.amazonaws.cn/ecs/v2';
+  if (resource.startsWith('arn:aws-us-gov:')) return 'https://console.amazonaws-us-gov.com/ecs/v2';
+  return 'https://console.aws.amazon.com/ecs/v2';
+}
+
 export function normalizeLogSources(raw = []) {
   const bySource = new Map();
   for (const item of Array.isArray(raw) ? raw : []) {
@@ -156,6 +192,7 @@ export function createLogsViewer({
         </p>
         <button id="logs-jump" type="button" class="logs-jump btn-row" hidden>Jump to latest</button>
       </div>
+      <section id="logs-external" class="logs-external" aria-label="External log access" hidden></section>
       <div id="detail-logs-body" class="detail-logs-body" tabindex="0"
            aria-label="Application log output"></div>
       <p id="logs-output-summary" class="logs-output-summary"></p>
@@ -171,6 +208,7 @@ export function createLogsViewer({
   const jumpButton = panel.querySelector('#logs-jump');
   const status = panel.querySelector('#logs-stream-status');
   const statusText = panel.querySelector('.logs-status-text');
+  const externalPanel = panel.querySelector('#logs-external');
   const output = panel.querySelector('#detail-logs-body');
   const summary = panel.querySelector('#logs-output-summary');
   const announcement = panel.querySelector('#logs-announcement');
@@ -293,9 +331,13 @@ export function createLogsViewer({
     if (visible.length === 0) {
       const empty = doc.createElement('p');
       empty.className = 'logs-output-empty';
-      empty.textContent = searchInput.value
-        ? 'No visible log lines match this search.'
-        : (sources.length ? 'Waiting for application output…' : 'No retained log sources were found.');
+      const scoped = scopedSources();
+      if (searchInput.value) empty.textContent = 'No visible log lines match this search.';
+      else if (scoped.length > 0 && scoped.every(isExternalLogSource)) {
+        empty.textContent = 'Application output is retained by its provider. Use the access details above.';
+      } else {
+        empty.textContent = sources.length ? 'Waiting for application output…' : 'No retained log sources were found.';
+      }
       fragment.appendChild(empty);
     } else {
       for (const entry of visible) fragment.appendChild(createEntryRow(entry));
@@ -352,6 +394,93 @@ export function createLogsViewer({
     jumpButton.hidden = stickToBottom;
   }
 
+  function externalResourceLabel(source) {
+    const resource = source.external_logs && source.external_logs.resource;
+    if (!resource) return '';
+    const taskID = resource.split('/').at(-1);
+    return taskID ? `Task ${taskID}` : resource;
+  }
+
+  function renderExternalLogs() {
+    const external = scopedSources().filter(isExternalLogSource);
+    if (!external.length) {
+      externalPanel.hidden = true;
+      externalPanel.replaceChildren();
+      return;
+    }
+    const intro = doc.createElement('div');
+    intro.className = 'logs-external-intro';
+    const title = doc.createElement('strong');
+    title.textContent = external.length === 1 ? 'Provider-hosted output' : `${external.length} provider-hosted outputs`;
+    const explanation = doc.createElement('span');
+    explanation.textContent = 'ShinyHub does not copy this output. Access remains subject to your AWS permissions.';
+    intro.append(title, explanation);
+
+    const list = doc.createElement('div');
+    list.className = 'logs-external-list';
+    for (const source of external) {
+      const row = doc.createElement('div');
+      row.className = 'logs-external-row';
+      const identity = doc.createElement('div');
+      identity.className = 'logs-external-identity';
+      const name = doc.createElement('strong');
+      name.textContent = formatLogSourceLabel(source);
+      const details = doc.createElement('span');
+      const location = [source.external_logs && source.external_logs.region, source.external_logs && source.external_logs.cluster]
+        .filter(Boolean).join(' · ');
+      const resourceLabel = externalResourceLabel(source);
+      details.textContent = [resourceLabel, location].filter(Boolean).join(' · ') ||
+        'External destination details were not recorded for this run';
+      details.title = source.external_logs && source.external_logs.resource || '';
+      identity.append(name, details);
+
+      const actions = doc.createElement('div');
+      actions.className = 'logs-external-actions';
+      const consoleURL = safeExternalLogsURL(source) || externalLogsFallbackURL(source);
+      if (consoleURL) {
+        const open = doc.createElement('a');
+        open.className = 'btn-row';
+        open.href = consoleURL;
+        open.target = '_blank';
+        open.rel = 'noopener noreferrer';
+        open.textContent = safeExternalLogsURL(source) ? 'Open task logs' : 'Open AWS ECS';
+        open.setAttribute('aria-label', safeExternalLogsURL(source)
+          ? `Open AWS task logs for replica ${source.replica}`
+          : `Open AWS ECS for replica ${source.replica}`);
+        actions.appendChild(open);
+      }
+      const command = externalLogsCommand(source);
+      if (command) {
+        const copyCommand = doc.createElement('button');
+        copyCommand.type = 'button';
+        copyCommand.className = 'btn-row';
+        copyCommand.textContent = 'Copy AWS command';
+        copyCommand.title = 'Copy an AWS CLI command that identifies this exact ECS task';
+        copyCommand.addEventListener('click', async () => {
+          try {
+            await win.navigator.clipboard.writeText(command);
+            announce(`AWS task command copied for replica ${source.replica}.`);
+          } catch {
+            let fallback = row.querySelector('.logs-external-command');
+            if (!fallback) {
+              fallback = doc.createElement('code');
+              fallback.className = 'logs-external-command';
+              fallback.tabIndex = 0;
+              row.appendChild(fallback);
+            }
+            fallback.textContent = command;
+            announce(`Could not copy the AWS task command for replica ${source.replica}. The command is shown for manual copying.`);
+          }
+        });
+        actions.appendChild(copyCommand);
+      }
+      row.append(identity, actions);
+      list.appendChild(row);
+    }
+    externalPanel.replaceChildren(intro, list);
+    externalPanel.hidden = false;
+  }
+
   function renderSourceOptions() {
     const prior = selected;
     const all = doc.createElement('option');
@@ -376,14 +505,22 @@ export function createLogsViewer({
       options.push(group);
     }
     sourceSelect.replaceChildren(...options);
-    selected = prior === 'all' || sources.some((s) => s.source_id === prior) ? prior : 'all';
+    if (prior === 'all' && currentSources.length === 0 && sources.length > 0) selected = sources[0].source_id;
+    else selected = prior === 'all' || sources.some((s) => s.source_id === prior) ? prior : 'all';
     sourceSelect.value = selected;
     updateDownloadControl();
+    renderExternalLogs();
     return selected !== prior;
   }
 
   function updateDownloadControl() {
     const source = sources.find((item) => item.source_id === selected);
+    if (selected !== 'all' && isExternalLogSource(source)) {
+      downloadButton.disabled = true;
+      downloadButton.textContent = 'External logs';
+      downloadButton.title = 'Use the provider access details above';
+      return;
+    }
     const retainedURL = selected === 'all' ? '' : retainedLogDownloadURL(app.slug, source);
     downloadButton.disabled = selected !== 'all' && !retainedURL;
     downloadButton.textContent = selected === 'all' ? 'Download visible' : 'Download retained run';
@@ -395,6 +532,7 @@ export function createLogsViewer({
   function updateConnectionStatus() {
     const scoped = scopedSources();
     const live = scoped.filter(isLiveLogSource);
+    const externalSources = scoped.filter(isExternalLogSource);
     const followable = live.filter(isFollowableLogSource);
     const external = live.length - followable.length;
     const connectedCount = followable.filter((source) => connected.has(source.source_id)).length;
@@ -405,7 +543,9 @@ export function createLogsViewer({
     status.classList.toggle('is-reconnecting', degradedCount === 0 && disconnectedCount > 0);
     pauseButton.disabled = followable.length === 0;
     if (live.length === 0) {
-      statusText.textContent = scoped.length
+      statusText.textContent = externalSources.length === scoped.length && scoped.length
+        ? `${scoped.length === 1 ? titleCase(scoped[0].status) : `${scoped.length} external sources`} · logs retained in AWS`
+        : scoped.length
         ? `${scoped.length} retained source${scoped.length === 1 ? '' : 's'} · no live instances`
         : 'No retained log sources';
     } else if (followable.length === 0) {
@@ -535,12 +675,8 @@ export function createLogsViewer({
   function loadSource(source, generation = scopeGeneration) {
     if (loadedSources.has(source.source_id)) return;
     loadedSources.add(source.source_id);
-    if (isLiveLogSource(source) && source.stream_available === false) {
-      addEntry({
-        kind: 'event', replica: source.replica,
-        line: `Replica #${source.replica} application output is retained by its external runtime`,
-      });
-    } else if (isLiveLogSource(source)) openLiveSource(source, generation);
+    if (isExternalLogSource(source)) return;
+    if (isLiveLogSource(source)) openLiveSource(source, generation);
     else loadStaticSource(source, generation);
   }
 
@@ -571,13 +707,16 @@ export function createLogsViewer({
 
   function reconcileSources(nextSources, markChanges) {
     const previous = new Map(sources.map((source) => [source.source_id, source]));
+    const priorSelection = selected;
     sources = normalizeLogSources(nextSources);
     const selectionExpired = renderSourceOptions();
     if (selectionExpired) {
       updateURL();
       if (markChanges) {
         resetScope();
-        const message = 'Selected log run is no longer retained; showing all current replicas';
+        const message = priorSelection === 'all'
+          ? 'No current replica runs; showing the latest retained run'
+          : 'Selected log run is no longer retained; showing all current replicas';
         addEntry({ kind: 'event', replica: null, line: message });
         announce(`${message}.`);
       }
@@ -636,6 +775,7 @@ export function createLogsViewer({
     selected = sourceSelect.value;
     updateDownloadControl();
     updateURL();
+    renderExternalLogs();
     resetScope();
     const source = sources.find((item) => item.source_id === selected);
     announce(selected === 'all' ? 'Showing all current replica runs' : `Showing ${source ? formatLogSourceLabel(source) : 'selected log run'}`);

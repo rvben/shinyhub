@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -877,11 +878,65 @@ func (r *Runtime) Start(ctx context.Context, p process.StartParams, logWriter io
 	}
 	r.log.Info("fargate task routable", "slug", p.Slug, "index", p.Index, "task_arn", taskARN, "ip", ip)
 	return process.ReplicaEndpoint{
-		URL:      fmt.Sprintf("http://%s:%d", ip, p.Port),
-		Provider: Provider,
-		WorkerID: r.workerID,
-		Handle:   process.RunHandle{ContainerID: r.encodeHandle(taskARN)},
+		URL:          fmt.Sprintf("http://%s:%d", ip, p.Port),
+		Provider:     Provider,
+		WorkerID:     r.workerID,
+		Handle:       process.RunHandle{ContainerID: r.encodeHandle(taskARN)},
+		ExternalLogs: externalLogsForTask(taskARN, r.cfg.Cluster),
 	}, nil
+}
+
+// externalLogsForTask builds a durable, credential-free handoff to the ECS
+// task's Logs tab. The URL performs no AWS API call from ShinyHub: the operator's
+// existing AWS console session and IAM permissions remain authoritative.
+func externalLogsForTask(taskARN, configuredCluster string) *process.ExternalLogs {
+	details := &process.ExternalLogs{Provider: "aws_ecs", Resource: taskARN}
+	parts := strings.SplitN(taskARN, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "ecs" {
+		return details
+	}
+	details.Region = parts[3]
+	if !strings.HasPrefix(parts[5], "task/") {
+		return details
+	}
+	resource := strings.Split(strings.TrimPrefix(parts[5], "task/"), "/")
+	if len(resource) >= 2 {
+		details.Cluster = resource[len(resource)-2]
+	}
+	if details.Cluster == "" {
+		details.Cluster = ecsClusterName(configuredCluster)
+	}
+	taskID := resource[len(resource)-1]
+	if details.Region == "" || details.Cluster == "" || taskID == "" {
+		return details
+	}
+	host := "console.aws.amazon.com"
+	switch parts[1] {
+	case "aws-cn":
+		host = "console.amazonaws.cn"
+	case "aws-us-gov":
+		host = "console.amazonaws-us-gov.com"
+	case "aws":
+	default:
+		return details
+	}
+	u := &url.URL{
+		Scheme: "https",
+		Host:   host,
+		Path:   "/ecs/v2/clusters/" + details.Cluster + "/tasks/" + taskID + "/logs",
+	}
+	q := u.Query()
+	q.Set("region", details.Region)
+	u.RawQuery = q.Encode()
+	details.ConsoleURL = u.String()
+	return details
+}
+
+func ecsClusterName(cluster string) string {
+	if i := strings.LastIndex(cluster, "/"); i >= 0 {
+		return cluster[i+1:]
+	}
+	return cluster
 }
 
 // waitForIP polls DescribeTasks until the task exposes a routable IPv4 address or

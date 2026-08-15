@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"time"
@@ -52,7 +54,8 @@ type logSourceResponse struct {
 	HasLog       bool       `json:"has_log"`
 	// StreamAvailable is false for runtimes whose application output is retained
 	// by an external provider rather than copied into ShinyHub's local log file.
-	StreamAvailable bool `json:"stream_available"`
+	StreamAvailable bool                  `json:"stream_available"`
+	ExternalLogs    *process.ExternalLogs `json:"external_logs,omitempty"`
 }
 
 // handleLogSources lists both live replica rows and retained on-disk logs. A
@@ -124,6 +127,7 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 			Tier: run.Tier, AppVersion: run.AppVersion,
 			DeploymentID: run.DeploymentID, UpdatedAt: run.StartedAt,
 			StartedAt: &started, FinishedAt: run.FinishedAt, OOMKilled: run.OOMKilled,
+			ExternalLogs: decodeExternalLogs(run.ExternalLogs),
 		}
 		if file, ok := fileByRun[run.RunID]; ok {
 			modified := file.ModifiedAt
@@ -196,6 +200,28 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 		return out[i].UpdatedAt.After(out[j].UpdatedAt)
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"sources": out})
+}
+
+func decodeExternalLogs(raw string) *process.ExternalLogs {
+	if raw == "" || len(raw) > 16*1024 {
+		return nil
+	}
+	var details process.ExternalLogs
+	if json.Unmarshal([]byte(raw), &details) != nil || details.Provider != "aws_ecs" ||
+		details.Resource == "" || len(details.Resource) > 2048 {
+		return nil
+	}
+	if details.ConsoleURL != "" {
+		u, err := url.Parse(details.ConsoleURL)
+		allowedHost := err == nil && u.Scheme == "https" && u.User == nil && u.Port() == "" &&
+			(u.Hostname() == "console.aws.amazon.com" ||
+				u.Hostname() == "console.amazonaws.cn" ||
+				u.Hostname() == "console.amazonaws-us-gov.com")
+		if !allowedHost {
+			details.ConsoleURL = ""
+		}
+	}
+	return &details
 }
 
 func applyCurrentLogSourceState(src *logSourceResponse, rep *db.Replica, live *process.ProcessInfo) {

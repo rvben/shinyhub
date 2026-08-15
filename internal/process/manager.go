@@ -176,6 +176,7 @@ type LogRun struct {
 	AppVersion   string
 	Tier         string
 	Provider     string
+	ExternalLogs *ExternalLogs
 	Status       Status
 	StartedAt    time.Time
 	FinishedAt   time.Time
@@ -619,6 +620,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	}
 	handle := ep.Handle
 	run.Provider = ep.Provider
+	run.ExternalLogs = ep.ExternalLogs
 	run.Status = StatusRunning
 	if m.logRunRecorder.Running != nil {
 		if err := m.logRunRecorder.Running(run); err != nil {

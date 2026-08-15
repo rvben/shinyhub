@@ -3943,6 +3943,65 @@ fieldset.settings-block { min-width: 0; }
 .logs-stream-status.is-degraded { color: var(--yellow); }
 .logs-stream-status.is-degraded .logs-status-dot { background: var(--yellow); }
 .logs-jump { padding-block: 0.24rem; }
+.logs-external {
+  margin-bottom: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: rgba(var(--surface-rgb), 0.48);
+}
+.logs-external[hidden] { display: none; }
+.logs-external-intro,
+.logs-external-identity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.logs-external-intro { margin-bottom: 9px; }
+.logs-external-intro strong,
+.logs-external-identity strong {
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+.logs-external-intro span,
+.logs-external-identity span {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.logs-external-list { display: flex; flex-direction: column; gap: 7px; }
+.logs-external-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+.logs-external-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.logs-external-actions a { text-decoration: none; }
+.logs-external-command {
+  flex: 1 0 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: var(--surface);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
 .detail-logs-body {
   height: clamp(24rem, 60vh, 46rem);
   overflow: auto;
@@ -4016,6 +4075,9 @@ fieldset.settings-block { min-width: 0; }
   .logs-toolbar-actions { width: 100%; }
   .logs-field { flex: 1 1 100%; min-width: 0; }
   .logs-toolbar-actions .btn-row { flex: 1 1 auto; }
+  .logs-external-row { align-items: stretch; flex-direction: column; }
+  .logs-external-actions { width: 100%; }
+  .logs-external-actions .btn-row { flex: 1 1 auto; text-align: center; }
   .detail-logs-body { height: 56vh; min-height: 22rem; }
   .log-entry { grid-template-columns: 2.5rem minmax(0, 1fr); gap: 7px; padding-inline: 8px; }
 }

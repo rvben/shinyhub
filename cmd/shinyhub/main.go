@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -998,7 +999,15 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 			if run.AppID == 0 {
 				return nil
 			}
-			return store.MarkAppLogRunRunning(run.RunID, run.Provider)
+			externalLogs := ""
+			if run.ExternalLogs != nil {
+				encoded, err := json.Marshal(run.ExternalLogs)
+				if err != nil {
+					return fmt.Errorf("encode external log handoff: %w", err)
+				}
+				externalLogs = string(encoded)
+			}
+			return store.MarkAppLogRunRunning(run.RunID, run.Provider, externalLogs)
 		},
 		Finish: func(run process.LogRun) error {
 			if run.AppID == 0 {

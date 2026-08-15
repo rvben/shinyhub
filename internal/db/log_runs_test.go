@@ -31,7 +31,8 @@ func TestAppLogRunsRoundTripAndOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.MarkAppLogRunRunning("22222222-2222-4222-8222-222222222222", "remote_docker"); err != nil {
+	externalLogs := `{"provider":"aws_ecs","resource":"arn:aws:ecs:eu-west-1:123:task/demo/task-1"}`
+	if err := store.MarkAppLogRunRunning("22222222-2222-4222-8222-222222222222", "fargate", externalLogs); err != nil {
 		t.Fatal(err)
 	}
 	finished := older.Add(30 * time.Second)
@@ -46,8 +47,11 @@ func TestAppLogRunsRoundTripAndOrder(t *testing.T) {
 	if len(runs) != 2 || runs[0].AppVersion != "v2" || runs[1].AppVersion != "v1" {
 		t.Fatalf("runs = %+v", runs)
 	}
-	if runs[0].Status != "running" || runs[0].Provider != "remote_docker" {
+	if runs[0].Status != "running" || runs[0].Provider != "fargate" {
 		t.Errorf("new run = %+v", runs[0])
+	}
+	if runs[0].ExternalLogs != externalLogs {
+		t.Errorf("external logs = %q, want %q", runs[0].ExternalLogs, externalLogs)
 	}
 	if runs[1].Status != "crashed" || runs[1].FinishedAt == nil || !runs[1].OOMKilled {
 		t.Errorf("old run = %+v", runs[1])
@@ -265,7 +269,7 @@ func TestPruneAppLogRunsKeepsNewestPerReplicaAndCascadesChunks(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.MarkAppLogRunRunning(runID, "remote_docker"); err != nil {
+		if err := store.MarkAppLogRunRunning(runID, "remote_docker", ""); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.AppendAppLogChunk(runID, 0, 0, []byte(runID), db.AppLogRetentionBytes, started); err != nil {

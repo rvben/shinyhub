@@ -23,11 +23,12 @@ import (
 // per-PID channel that Signal closes when it receives SIGTERM or SIGKILL,
 // so Stop()-based test flows terminate cleanly.
 type fakeRuntime struct {
-	mu      sync.Mutex
-	nextPID int
-	stops   map[int]chan struct{}
-	lastEnv []string
-	log     io.Writer
+	mu           sync.Mutex
+	nextPID      int
+	stops        map[int]chan struct{}
+	lastEnv      []string
+	log          io.Writer
+	externalLogs *process.ExternalLogs
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -53,10 +54,11 @@ func (f *fakeRuntime) Start(_ context.Context, p process.StartParams, log io.Wri
 	f.nextPID++
 	f.stops[pid] = make(chan struct{})
 	return process.ReplicaEndpoint{
-		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
-		Provider: "native",
-		WorkerID: strconv.Itoa(pid),
-		Handle:   process.RunHandle{PID: pid},
+		URL:          fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider:     "native",
+		WorkerID:     strconv.Itoa(pid),
+		Handle:       process.RunHandle{PID: pid},
+		ExternalLogs: f.externalLogs,
 	}, nil
 }
 
@@ -234,6 +236,9 @@ func TestManagerStartStop(t *testing.T) {
 func TestManagerCreatesImmutableLogRunPerStart(t *testing.T) {
 	appsDir := t.TempDir()
 	rt := newFakeRuntime()
+	rt.externalLogs = &process.ExternalLogs{
+		Provider: "aws_ecs", Resource: "arn:aws:ecs:eu-west-1:123:task/demo/task-1",
+	}
 	m := process.NewManager(appsDir, rt)
 	var mu sync.Mutex
 	var begun, running, finished []process.LogRun
@@ -277,7 +282,8 @@ func TestManagerCreatesImmutableLogRunPerStart(t *testing.T) {
 	if len(begun) != 2 || len(running) != 2 || len(finished) != 2 {
 		t.Fatalf("callbacks begin=%d running=%d finish=%d", len(begun), len(running), len(finished))
 	}
-	if begun[0].Status != process.StatusStarting || running[0].Provider != "native" || finished[0].Status != process.StatusStopped {
+	if begun[0].Status != process.StatusStarting || running[0].Provider != "native" ||
+		running[0].ExternalLogs != rt.externalLogs || finished[0].Status != process.StatusStopped {
 		t.Fatalf("lifecycle = begin %+v, running %+v, finish %+v", begun[0], running[0], finished[0])
 	}
 }

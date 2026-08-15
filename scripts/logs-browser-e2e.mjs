@@ -35,6 +35,16 @@ const sources = [
     status: 'stopped', has_log: true, stream_available: true, tier: 'local',
     started_at: '2026-08-14T08:00:00Z',
   },
+  {
+    source_id: 'external-run', run_id: 'external-run', replica: 7, current: false,
+    status: 'stopped', has_log: false, stream_available: false, provider: 'fargate', tier: 'burst',
+    started_at: '2026-08-13T08:00:00Z',
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics-production',
+      resource: 'arn:aws:ecs:eu-west-1:111122223333:task/analytics-production/very-long-task-identity-0123456789abcdef',
+      console_url: 'https://console.aws.amazon.com/ecs/v2/clusters/analytics-production/tasks/very-long-task-identity-0123456789abcdef/logs?region=eu-west-1',
+    },
+  },
 ];
 
 const fixtureHTML = `<!doctype html>
@@ -219,6 +229,7 @@ async function assertResponsiveLayout(page) {
     const selectors = [
       '#logs-source', '#logs-search', '#logs-pause', '#logs-copy',
       '#logs-download', '#logs-stream-status', '#detail-logs-body',
+      '#logs-external',
     ];
     const boxes = selectors.map((selector) => {
       const rect = document.querySelector(selector).getBoundingClientRect();
@@ -318,12 +329,22 @@ async function runBrowserContract(origin, state) {
 
     await source.press('r');
     await source.press('r');
+    await source.press('r');
     await page.waitForFunction(() => new URL(location.href).searchParams.get('log_source') === 'live-1');
     await output.getByText(/^one live \d+$/).waitFor();
     await page.waitForFunction(() => document.querySelector('.logs-status-text')?.textContent === 'Live · 1 connected source');
     assert.equal(await output.getByText('zero before drop', { exact: true }).count(), 0,
       'changing source scope must clear output from other replicas');
     await page.waitForFunction(() => document.querySelector('#logs-announcement')?.textContent?.includes('Replica #1'));
+
+    await source.selectOption('external-run');
+    await page.waitForFunction(() => document.querySelector('.logs-status-text')?.textContent === 'Stopped · logs retained in AWS');
+    await page.getByText('Open task logs', { exact: true }).waitFor();
+    assert.equal(await page.locator('#logs-external').isVisible(), true, 'external handoff must be visible');
+    assert.equal(await page.locator('#logs-download').isDisabled(), true, 'external runs must not offer a false local download');
+    assert.equal(await page.getByText('Open task logs', { exact: true }).getAttribute('rel'), 'noopener noreferrer');
+    assert.match(await page.locator('.logs-external-identity').textContent(), /very-long-task-identity.*eu-west-1.*analytics-production/);
+    assert.match(await output.textContent(), /retained by its provider/i);
 
     assert.equal(await page.locator('.logs-status-dot').evaluate((element) => getComputedStyle(element).animationName), 'none',
       'reduced-motion users must not receive the live pulse animation');
@@ -332,7 +353,7 @@ async function runBrowserContract(origin, state) {
     await assertContrast(page, 'light');
     await assertResponsiveLayout(page);
     assert.deepEqual(browserErrors, [], `browser runtime errors:\n${browserErrors.join('\n')}`);
-    assert.equal(await status.textContent(), 'Live · 1 connected source');
+    assert.equal(await status.textContent(), 'Stopped · logs retained in AWS');
   } finally {
     await page.evaluate(() => window.__destroyLogsViewer?.()).catch(() => {});
     await browser.close();

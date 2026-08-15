@@ -32,10 +32,24 @@ var ErrReplicaNotFound = errors.New("replica not found")
 // and the operational RunHandle for Signal/Wait/Stats/removal. A remote runtime
 // returns a non-loopback URL here; local runtimes return http://127.0.0.1:<port>.
 type ReplicaEndpoint struct {
-	URL      string    // route URL, e.g. "http://127.0.0.1:34521"
-	Provider string    // "native" | "docker" (future: "remote_docker" | "fargate")
-	WorkerID string    // stable identity: PID (stringified), container ID, task ARN
-	Handle   RunHandle // operational handle
+	URL          string        // route URL, e.g. "http://127.0.0.1:34521"
+	Provider     string        // "native" | "docker" (future: "remote_docker" | "fargate")
+	WorkerID     string        // stable identity: PID (stringified), container ID, task ARN
+	Handle       RunHandle     // operational handle
+	ExternalLogs *ExternalLogs // provider-owned log destination, when ShinyHub cannot stream output
+}
+
+// ExternalLogs is a durable handoff to a provider-owned logging surface.
+// Resource remains useful when ConsoleURL cannot be constructed (for example,
+// an older short ECS task ARN), while region and cluster support a copyable CLI
+// recovery path. The Manager records this on the immutable run so the handoff
+// survives process exit, scale-down, and control-plane restart.
+type ExternalLogs struct {
+	Provider   string `json:"provider"`
+	Resource   string `json:"resource"`
+	Region     string `json:"region,omitempty"`
+	Cluster    string `json:"cluster,omitempty"`
+	ConsoleURL string `json:"console_url,omitempty"`
 }
 
 // Runtime abstracts how app processes are started and managed.

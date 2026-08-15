@@ -230,6 +230,12 @@ func TestStartRunsTaskAndRoutesToPrivateIP(t *testing.T) {
 	if ep.Handle.ContainerID != wantHandle {
 		t.Errorf("Handle = %q, want %q", ep.Handle.ContainerID, wantHandle)
 	}
+	if ep.ExternalLogs == nil || ep.ExternalLogs.Provider != "aws_ecs" ||
+		ep.ExternalLogs.Resource != "arn:aws:ecs:eu-west-1:111122223333:task/shiny-cluster/abc123" ||
+		ep.ExternalLogs.Region != "eu-west-1" || ep.ExternalLogs.Cluster != "shiny-cluster" ||
+		ep.ExternalLogs.ConsoleURL != "https://console.aws.amazon.com/ecs/v2/clusters/shiny-cluster/tasks/abc123/logs?region=eu-west-1" {
+		t.Errorf("ExternalLogs = %+v", ep.ExternalLogs)
+	}
 
 	// The handle round-trips back to the bare task ARN for later signal/wait.
 	gotARN, err := r.decodeHandle(ep.Handle.ContainerID)
@@ -238,6 +244,41 @@ func TestStartRunsTaskAndRoutesToPrivateIP(t *testing.T) {
 	}
 	if gotARN != "arn:aws:ecs:eu-west-1:111122223333:task/shiny-cluster/abc123" {
 		t.Errorf("decoded ARN = %q", gotARN)
+	}
+}
+
+func TestExternalLogsForTaskHandlesARNFormatsAndPartitions(t *testing.T) {
+	for _, tc := range []struct {
+		name, arn, configuredCluster, wantCluster, wantURL string
+	}{
+		{
+			name: "long arn", arn: "arn:aws:ecs:eu-west-1:111122223333:task/live/abc", configuredCluster: "ignored",
+			wantCluster: "live", wantURL: "https://console.aws.amazon.com/ecs/v2/clusters/live/tasks/abc/logs?region=eu-west-1",
+		},
+		{
+			name: "short arn uses configured cluster", arn: "arn:aws:ecs:us-east-1:111122223333:task/abc",
+			configuredCluster: "arn:aws:ecs:us-east-1:111122223333:cluster/analytics",
+			wantCluster:       "analytics", wantURL: "https://console.aws.amazon.com/ecs/v2/clusters/analytics/tasks/abc/logs?region=us-east-1",
+		},
+		{
+			name: "china partition", arn: "arn:aws-cn:ecs:cn-north-1:111122223333:task/live/abc", configuredCluster: "live",
+			wantCluster: "live", wantURL: "https://console.amazonaws.cn/ecs/v2/clusters/live/tasks/abc/logs?region=cn-north-1",
+		},
+		{
+			name: "unknown partition has no link", arn: "arn:example:ecs:moon-1:111122223333:task/live/abc", configuredCluster: "live",
+			wantCluster: "live", wantURL: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := externalLogsForTask(tc.arn, tc.configuredCluster)
+			if got.Resource != tc.arn || got.Cluster != tc.wantCluster || got.ConsoleURL != tc.wantURL {
+				t.Fatalf("externalLogsForTask = %+v", got)
+			}
+		})
+	}
+	invalid := externalLogsForTask("not-an-arn", "cluster")
+	if invalid.Resource != "not-an-arn" || invalid.ConsoleURL != "" {
+		t.Fatalf("invalid ARN handoff = %+v", invalid)
 	}
 }
 
