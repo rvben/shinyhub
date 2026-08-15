@@ -30,6 +30,9 @@ type AppLogMetrics interface {
 	RecordAppLogFlush(result string, duration, persistenceLag time.Duration)
 	AddAppLogPendingBytes(delta int64)
 	RecordAppLogDroppedBytes(bytes int64)
+	AddAppLogFollowers(delta int)
+	AddAppLogViewers(delta int)
+	RecordAppLogFollowError()
 }
 
 // AppLogStats describes the retained shared output for one immutable run.

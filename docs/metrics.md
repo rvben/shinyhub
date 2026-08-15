@@ -106,7 +106,7 @@ reading one instance in isolation - the example alert below already does this.
 | `shinyhub_app_state_transitions_total` | counter | `event` | App lifecycle transitions (`hibernate`, `wake`). |
 | `shinyhub_replica_restarts_total` | counter | - | Replica crash-restarts performed by the watchdog. A flapping app shows up as a rising restart rate. |
 
-### Application-log durability
+### Application-log durability and delivery
 
 These process-local signals cover the shared-log path used by clustered
 Postgres deployments. They deliberately carry no app, replica, or run labels:
@@ -122,6 +122,9 @@ series. Scrape every control-plane instance and aggregate with `sum(...)` in HA.
 | `shinyhub_app_log_buffer_dropped_bytes_total` | counter | - | Bytes evicted from the bounded retry buffer, including bytes abandoned when the final shutdown flush fails. Any increase means shared history may be incomplete. |
 | `shinyhub_app_log_runs_pruned_total` | counter | - | Immutable run records removed from database retention by the owner. |
 | `shinyhub_app_log_files_pruned_total` | counter | - | Orphaned immutable files removed from this node's private disk. |
+| `shinyhub_app_log_followers` | gauge | - | Active per-run shared database followers on this process. Compare with `shinyhub_app_log_viewers` to confirm concurrent viewers are sharing followers. |
+| `shinyhub_app_log_viewers` | gauge | - | Active retained-log viewer subscriptions on this process. |
+| `shinyhub_app_log_follow_errors_total` | counter | - | Failed database reads by shared retained-log followers. A rise means live delivery is degraded; durable history remains available for catch-up once reads recover. |
 
 The flush and buffer metrics remain present at zero on single-node SQLite
 deployments, where the viewer reads its local files directly. Retention cleanup
@@ -167,6 +170,11 @@ groups:
         expr: sum(increase(shinyhub_app_log_buffer_dropped_bytes_total[5m])) > 0
         annotations:
           summary: "Shared app-log history may be incomplete"
+
+      - alert: ShinyHubAppLogFollowErrors
+        expr: sum(increase(shinyhub_app_log_follow_errors_total[10m])) > 0
+        annotations:
+          summary: "Shared app-log live delivery has encountered database errors"
 ```
 
 ## Access log

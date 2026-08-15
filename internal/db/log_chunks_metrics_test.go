@@ -8,11 +8,14 @@ import (
 )
 
 type appLogMetricsSpy struct {
-	mu      sync.Mutex
-	flushes []string
-	pending int64
-	dropped int64
-	lags    []time.Duration
+	mu           sync.Mutex
+	flushes      []string
+	pending      int64
+	dropped      int64
+	lags         []time.Duration
+	followers    int
+	viewers      int
+	followErrors int64
 }
 
 func (m *appLogMetricsSpy) RecordAppLogFlush(result string, _ time.Duration, lag time.Duration) {
@@ -34,6 +37,24 @@ func (m *appLogMetricsSpy) RecordAppLogDroppedBytes(bytes int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.dropped += bytes
+}
+
+func (m *appLogMetricsSpy) AddAppLogFollowers(delta int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.followers += delta
+}
+
+func (m *appLogMetricsSpy) AddAppLogViewers(delta int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.viewers += delta
+}
+
+func (m *appLogMetricsSpy) RecordAppLogFollowError() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.followErrors++
 }
 
 func TestAppLogWriterMetricsTrackFailureAndRecovery(t *testing.T) {

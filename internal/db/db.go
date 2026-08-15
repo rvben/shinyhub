@@ -120,8 +120,8 @@ func (s *Store) SetAuditErrorHook(hook func()) {
 }
 
 // SetAppLogMetrics registers instrumentation for subsequently created shared
-// app-log writers. Existing writers retain the recorder they were created
-// with, so callers should wire this once during startup.
+// app-log writers and followers. Existing pipelines retain the recorder they
+// were created with, so callers should wire this once during startup.
 func (s *Store) SetAppLogMetrics(recorder AppLogMetrics) {
 	s.appLogMetricsMu.Lock()
 	s.appLogMetrics = recorder

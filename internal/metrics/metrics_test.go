@@ -208,6 +208,9 @@ func TestAppLogMetricsExposePipelineHealthAndCleanup(t *testing.T) {
 	reg.RecordAppLogDroppedBytes(12)
 	reg.RecordAppLogRunsPruned(3)
 	reg.RecordAppLogFilesPruned(2)
+	reg.AddAppLogFollowers(1)
+	reg.AddAppLogViewers(3)
+	reg.RecordAppLogFollowError()
 
 	checks := []struct {
 		name   string
@@ -222,6 +225,9 @@ func TestAppLogMetricsExposePipelineHealthAndCleanup(t *testing.T) {
 		{"shinyhub_app_log_buffer_dropped_bytes_total", nil, 12},
 		{"shinyhub_app_log_runs_pruned_total", nil, 3},
 		{"shinyhub_app_log_files_pruned_total", nil, 2},
+		{"shinyhub_app_log_followers", nil, 1},
+		{"shinyhub_app_log_viewers", nil, 3},
+		{"shinyhub_app_log_follow_errors_total", nil, 1},
 	}
 	for _, check := range checks {
 		if got, ok := sampleValue(t, reg, check.name, check.labels); !ok || got != check.want {

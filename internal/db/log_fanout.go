@@ -15,6 +15,7 @@ type appLogWindowReader func(offset int64) ([]byte, int64, int64, error)
 // never stalls polling or delivery to another client.
 type appLogFanout struct {
 	read           appLogWindowReader
+	metrics        AppLogMetrics
 	pollInterval   time.Duration
 	retentionBytes int64
 	wake           chan struct{}
@@ -37,9 +38,10 @@ type appLogSubscriber struct {
 	wake chan struct{}
 }
 
-func newAppLogFanout(read appLogWindowReader, offset int64, pollInterval time.Duration, retentionBytes int64) *appLogFanout {
+func newAppLogFanout(read appLogWindowReader, metrics AppLogMetrics, offset int64, pollInterval time.Duration, retentionBytes int64) *appLogFanout {
 	return &appLogFanout{
 		read:           read,
+		metrics:        metrics,
 		pollInterval:   pollInterval,
 		retentionBytes: retentionBytes,
 		wake:           make(chan struct{}, 1),
@@ -52,6 +54,10 @@ func newAppLogFanout(read appLogWindowReader, offset int64, pollInterval time.Du
 
 func (f *appLogFanout) run() {
 	defer close(f.done)
+	if f.metrics != nil {
+		f.metrics.AddAppLogFollowers(1)
+		defer f.metrics.AddAppLogFollowers(-1)
+	}
 	ticker := time.NewTicker(f.pollInterval)
 	defer ticker.Stop()
 	for {
@@ -71,7 +77,13 @@ func (f *appLogFanout) poll() {
 	f.mu.Unlock()
 
 	data, start, end, err := f.read(offset)
-	if err != nil || len(data) == 0 {
+	if err != nil {
+		if f.metrics != nil {
+			f.metrics.RecordAppLogFollowError()
+		}
+		return
+	}
+	if len(data) == 0 {
 		return
 	}
 	records := logstream.RecordsFromBytes(data, start)
@@ -113,6 +125,9 @@ func (f *appLogFanout) addSubscriber() *appLogSubscriber {
 	subscriber := &appLogSubscriber{wake: make(chan struct{}, 1)}
 	f.mu.Lock()
 	f.subscribers[subscriber] = struct{}{}
+	if f.metrics != nil {
+		f.metrics.AddAppLogViewers(1)
+	}
 	signalAppLogSubscriber(subscriber)
 	f.mu.Unlock()
 	return subscriber
@@ -120,7 +135,12 @@ func (f *appLogFanout) addSubscriber() *appLogSubscriber {
 
 func (f *appLogFanout) removeSubscriber(subscriber *appLogSubscriber) int {
 	f.mu.Lock()
-	delete(f.subscribers, subscriber)
+	if _, ok := f.subscribers[subscriber]; ok {
+		delete(f.subscribers, subscriber)
+		if f.metrics != nil {
+			f.metrics.AddAppLogViewers(-1)
+		}
+	}
 	remaining := len(f.subscribers)
 	f.mu.Unlock()
 	return remaining
@@ -180,6 +200,7 @@ func (s *Store) subscribeAppLog(runID string, offset int64) (*appLogFanout, *app
 			func(cursor int64) ([]byte, int64, int64, error) {
 				return s.ReadAppLogWindow(runID, cursor)
 			},
+			s.appLogMetricsRecorder(),
 			offset,
 			appLogFlushInterval,
 			AppLogRetentionBytes,

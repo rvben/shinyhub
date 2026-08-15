@@ -36,16 +36,19 @@ type Registry struct {
 	fargateInventoryErrorsTotal prometheus.Counter
 	fargateRunTaskDuration      prometheus.Histogram
 
-	autoscaleScales   *prometheus.CounterVec
-	auditWriteErrors  prometheus.Counter
-	appLogFlushes     *prometheus.CounterVec
-	appLogFlushTime   prometheus.Histogram
-	appLogPersistLag  prometheus.Histogram
-	appLogPending     prometheus.Gauge
-	appLogDropped     prometheus.Counter
-	appLogRunsPruned  prometheus.Counter
-	appLogFilesPruned prometheus.Counter
-	runs              *prometheus.CounterVec
+	autoscaleScales    *prometheus.CounterVec
+	auditWriteErrors   prometheus.Counter
+	appLogFlushes      *prometheus.CounterVec
+	appLogFlushTime    prometheus.Histogram
+	appLogPersistLag   prometheus.Histogram
+	appLogPending      prometheus.Gauge
+	appLogDropped      prometheus.Counter
+	appLogRunsPruned   prometheus.Counter
+	appLogFilesPruned  prometheus.Counter
+	appLogFollowers    prometheus.Gauge
+	appLogViewers      prometheus.Gauge
+	appLogFollowErrors prometheus.Counter
+	runs               *prometheus.CounterVec
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -181,6 +184,18 @@ func New(version string) *Registry {
 		Name: "shinyhub_app_log_files_pruned_total",
 		Help: "Orphaned immutable app-log files removed from this control-plane node's local disk.",
 	})
+	appLogFollowers := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "shinyhub_app_log_followers",
+		Help: "Active shared database followers for retained app-log runs on this control-plane process.",
+	})
+	appLogViewers := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "shinyhub_app_log_viewers",
+		Help: "Active retained app-log viewer subscriptions on this control-plane process.",
+	})
+	appLogFollowErrors := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinyhub_app_log_follow_errors_total",
+		Help: "Shared app-log follower database reads that failed on this control-plane process.",
+	})
 	reg.MustRegister(
 		appLogFlushes,
 		appLogFlushTime,
@@ -189,6 +204,9 @@ func New(version string) *Registry {
 		appLogDropped,
 		appLogRunsPruned,
 		appLogFilesPruned,
+		appLogFollowers,
+		appLogViewers,
+		appLogFollowErrors,
 	)
 
 	runs := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -212,16 +230,19 @@ func New(version string) *Registry {
 		fargateInventoryErrorsTotal: fargateInventoryErrorsTotal,
 		fargateRunTaskDuration:      fargateRunTaskDuration,
 
-		autoscaleScales:   autoscaleScales,
-		auditWriteErrors:  auditWriteErrors,
-		appLogFlushes:     appLogFlushes,
-		appLogFlushTime:   appLogFlushTime,
-		appLogPersistLag:  appLogPersistLag,
-		appLogPending:     appLogPending,
-		appLogDropped:     appLogDropped,
-		appLogRunsPruned:  appLogRunsPruned,
-		appLogFilesPruned: appLogFilesPruned,
-		runs:              runs,
+		autoscaleScales:    autoscaleScales,
+		auditWriteErrors:   auditWriteErrors,
+		appLogFlushes:      appLogFlushes,
+		appLogFlushTime:    appLogFlushTime,
+		appLogPersistLag:   appLogPersistLag,
+		appLogPending:      appLogPending,
+		appLogDropped:      appLogDropped,
+		appLogRunsPruned:   appLogRunsPruned,
+		appLogFilesPruned:  appLogFilesPruned,
+		appLogFollowers:    appLogFollowers,
+		appLogViewers:      appLogViewers,
+		appLogFollowErrors: appLogFollowErrors,
+		runs:               runs,
 	}
 }
 
@@ -307,6 +328,21 @@ func (r *Registry) RecordAppLogDroppedBytes(bytes int64) {
 	if bytes > 0 {
 		r.appLogDropped.Add(float64(bytes))
 	}
+}
+
+// AddAppLogFollowers adjusts the number of per-run shared database followers.
+func (r *Registry) AddAppLogFollowers(delta int) {
+	r.appLogFollowers.Add(float64(delta))
+}
+
+// AddAppLogViewers adjusts the number of retained-log viewer subscriptions.
+func (r *Registry) AddAppLogViewers(delta int) {
+	r.appLogViewers.Add(float64(delta))
+}
+
+// RecordAppLogFollowError records a failed retained-log follower database read.
+func (r *Registry) RecordAppLogFollowError() {
+	r.appLogFollowErrors.Inc()
 }
 
 // RecordAppLogRunsPruned records database retention cleanup by the owner.
