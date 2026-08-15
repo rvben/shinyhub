@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
+	"github.com/rvben/shinyhub/internal/metrics"
 	"github.com/rvben/shinyhub/internal/process"
 )
 
@@ -306,6 +309,79 @@ type fakeExternalLogReader struct {
 	err        error
 }
 
+type blockingExternalLogReader struct {
+	calls   atomic.Int32
+	started chan struct{}
+	release chan struct{}
+}
+
+type concurrencyExternalLogReader struct {
+	active    atomic.Int32
+	maxActive atomic.Int32
+	started   chan struct{}
+	release   chan struct{}
+}
+
+func (f *concurrencyExternalLogReader) Read(ctx context.Context, _ process.ExternalLogs, _ string, _ int32) (process.ExternalLogPage, error) {
+	active := f.active.Add(1)
+	defer f.active.Add(-1)
+	for {
+		maximum := f.maxActive.Load()
+		if active <= maximum || f.maxActive.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	f.started <- struct{}{}
+	select {
+	case <-f.release:
+		return process.ExternalLogPage{}, nil
+	case <-ctx.Done():
+		return process.ExternalLogPage{}, ctx.Err()
+	}
+}
+
+func newConcurrentProviderLogsFixture(t *testing.T, reader process.ExternalLogReader) (*api.Server, string, string) {
+	t.Helper()
+	srv, store, _ := newLogsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("myapp")
+	const runID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: app.ID, ReplicaIndex: 2, Tier: "burst",
+		Status: "running", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	details, _ := json.Marshal(process.ExternalLogs{
+		Provider: "aws_ecs", Resource: "arn:aws:ecs:eu-west-1:111122223333:task/analytics/task-2",
+		Region: "eu-west-1", LogGroup: "/shinyhub/apps", LogStream: "app/app/task-2",
+	})
+	if err := store.MarkAppLogRunRunning(runID, "fargate", string(details)); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetExternalLogReader(reader)
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	return srv, token, "/api/apps/myapp/logs?replica=2&run=" + runID + "&provider=true"
+}
+
+func (f *blockingExternalLogReader) Read(ctx context.Context, _ process.ExternalLogs, _ string, _ int32) (process.ExternalLogPage, error) {
+	f.calls.Add(1)
+	f.started <- struct{}{}
+	select {
+	case <-f.release:
+		return process.ExternalLogPage{NextCursor: "shared-token"}, nil
+	case <-ctx.Done():
+		return process.ExternalLogPage{}, ctx.Err()
+	}
+}
+
 func (f *fakeExternalLogReader) Read(_ context.Context, details process.ExternalLogs, cursor string, limit int32) (process.ExternalLogPage, error) {
 	f.gotDetails, f.gotCursor, f.gotLimit = details, cursor, limit
 	return f.page, f.err
@@ -346,6 +422,8 @@ func TestHandleLogsReadsStoppedFargateRunFromExternalProvider(t *testing.T) {
 		NextCursor: "next-token",
 	}}
 	srv.SetExternalLogReader(reader)
+	reg := metrics.New("test")
+	srv.SetMetrics(reg)
 	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
 	req := httptest.NewRequest("GET", "/api/apps/myapp/logs?replica=3&run="+runID+"&provider=true&tail=2&cursor=prior-token", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -393,6 +471,119 @@ func TestHandleLogsReadsStoppedFargateRunFromExternalProvider(t *testing.T) {
 	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "temporarily unavailable") ||
 		strings.Contains(rec.Body.String(), "AccessDeniedException") {
 		t.Fatalf("provider failure status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	reader.err = process.ErrExternalLogsThrottled
+	req = httptest.NewRequest("GET", "/api/apps/myapp/logs?replica=3&run="+runID+"&provider=true", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "5" ||
+		!strings.Contains(rec.Body.String(), "retry shortly") {
+		t.Fatalf("provider throttle status=%d retry-after=%q body=%s",
+			rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
+	}
+	metricsRec := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(metricsRec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metricsBody := metricsRec.Body.String()
+	for _, result := range []string{"ok", "error", "throttled"} {
+		if !strings.Contains(metricsBody, `shinyhub_provider_log_reads_total{result="`+result+`"} 1`) {
+			t.Fatalf("provider log metrics missing result %q:\n%s", result, metricsBody)
+		}
+	}
+}
+
+func TestHandleLogsCoalescesConcurrentReadsForTheSameProviderCursor(t *testing.T) {
+	reader := &blockingExternalLogReader{started: make(chan struct{}, 2), release: make(chan struct{})}
+	srv, token, providerURL := newConcurrentProviderLogsFixture(t, reader)
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", providerURL+"&cursor=same-token", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+
+	done := make(chan *httptest.ResponseRecorder, 2)
+	go func() { done <- request() }()
+	<-reader.started
+	go func() { done <- request() }()
+	select {
+	case <-reader.started:
+		close(reader.release)
+		<-done
+		<-done
+		t.Fatal("identical concurrent provider reads reached CloudWatch twice")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(reader.release)
+	for range 2 {
+		if rec := <-done; rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	if got := reader.calls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+}
+
+func TestHandleLogsSharesRecentlyCompletedProviderReads(t *testing.T) {
+	release := make(chan struct{})
+	close(release)
+	reader := &blockingExternalLogReader{started: make(chan struct{}, 2), release: release}
+	srv, token, providerURL := newConcurrentProviderLogsFixture(t, reader)
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", providerURL+"&cursor=recent-token", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+
+	for range 2 {
+		if rec := request(); rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	if got := reader.calls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1 for adjacent identical reads", got)
+	}
+}
+
+func TestHandleLogsBoundsConcurrentProviderReads(t *testing.T) {
+	reader := &concurrencyExternalLogReader{started: make(chan struct{}, 8), release: make(chan struct{})}
+	srv, token, providerURL := newConcurrentProviderLogsFixture(t, reader)
+	done := make(chan *httptest.ResponseRecorder, 8)
+	for i := range 8 {
+		go func() {
+			req := httptest.NewRequest("GET", providerURL+"&cursor=cursor-"+strconv.Itoa(i), nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, req)
+			done <- rec
+		}()
+	}
+
+	for range 4 {
+		<-reader.started
+	}
+	select {
+	case <-reader.started:
+		close(reader.release)
+		for range 8 {
+			<-done
+		}
+		t.Fatalf("provider concurrency exceeded 4 (observed %d)", reader.maxActive.Load())
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(reader.release)
+	for range 8 {
+		if rec := <-done; rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	if got := reader.maxActive.Load(); got > 4 {
+		t.Fatalf("max provider concurrency = %d, want <= 4", got)
 	}
 }
 

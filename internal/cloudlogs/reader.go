@@ -5,6 +5,7 @@ package cloudlogs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	"github.com/aws/smithy-go"
 
 	"github.com/rvben/shinyhub/internal/process"
 )
@@ -60,6 +62,10 @@ func (r *Reader) Read(ctx context.Context, details process.ExternalLogs, cursor 
 	}
 	out, err := r.client.GetLogEvents(ctx, in)
 	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && strings.Contains(strings.ToLower(apiErr.ErrorCode()), "throttl") {
+			return process.ExternalLogPage{}, fmt.Errorf("%w: %w", process.ErrExternalLogsThrottled, err)
+		}
 		return process.ExternalLogPage{}, fmt.Errorf("get CloudWatch log events: %w", err)
 	}
 	page := process.ExternalLogPage{

@@ -12,6 +12,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.0
 	github.com/aws/aws-sdk-go-v2/service/s3files v1.3.0
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.44.0
+	github.com/aws/smithy-go v1.27.8
 	github.com/cloudflare/tableflip v1.2.3
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/go-chi/chi/v5 v5.3.1
@@ -57,7 +58,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.33.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.45.0 // indirect
-	github.com/aws/smithy-go v1.27.8 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

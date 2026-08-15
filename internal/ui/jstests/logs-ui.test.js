@@ -235,6 +235,59 @@ test('a Fargate run stopping appends its final CloudWatch page before the termin
   assert.ok(output.indexOf('final line') < output.indexOf('stopped'), 'terminal event follows final provider output');
 });
 
+test('a terminal CloudWatch read waits for an in-flight page before fetching the final page', async (t) => {
+  const running = {
+    source_id: 'run-race', run_id: 'run-race', replica: 1, current: true,
+    status: 'running', provider: 'fargate', stream_available: false, inline_available: true,
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+      resource: 'arn:aws:ecs:eu-west-1:123:task/analytics/task-race',
+      log_group: '/shinyhub/apps', log_stream: 'app/app/task-race',
+    },
+  };
+  const stopped = { ...running, status: 'stopped' };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  let discoveries = 0;
+  let providerCalls = 0;
+  let releaseFirst;
+  const firstPage = new Promise((resolve) => { releaseFirst = resolve; });
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) {
+      discoveries++;
+      return { ok: true, json: async () => ({ sources: [discoveries === 1 ? running : stopped] }) };
+    }
+    providerCalls++;
+    if (providerCalls === 1) {
+      await firstPage;
+      return {
+        ok: true,
+        json: async () => ({
+          events: [{ message: 'in-flight line', timestamp: '2026-08-15T14:00:00Z' }], next_cursor: 'race-1',
+        }),
+      };
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        events: [{ message: 'final raced line', timestamp: '2026-08-15T14:00:01Z' }], next_cursor: 'race-2',
+      }),
+    };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, api, refreshEveryMs: 25 });
+  t.after(() => { cleanup(); dom.window.close(); });
+
+  await waitUntil(() => discoveries >= 2 && providerCalls === 1);
+  releaseFirst();
+  await waitUntil(() => /final raced line/.test(panel.querySelector('#detail-logs-body').textContent));
+  const output = panel.querySelector('#detail-logs-body').textContent;
+  assert.equal(providerCalls, 2);
+  assert.ok(output.indexOf('in-flight line') < output.indexOf('final raced line'));
+  assert.ok(output.indexOf('final raced line') < output.indexOf('stopped'));
+});
+
 test('CloudWatch permission failures degrade to the direct AWS handoff', async (t) => {
   const source = {
     source_id: 'run-2', run_id: 'run-2', replica: 2, current: true,
@@ -260,6 +313,198 @@ test('CloudWatch permission failures degrade to the direct AWS handoff', async (
   assert.match(panel.querySelector('.logs-status-text').textContent, /Delayed/i);
   assert.match(panel.querySelector('#logs-announcement').textContent, /Direct AWS access remains available/i);
   assert.equal(panel.querySelector('.logs-external-actions a').textContent, 'Open task logs');
+});
+
+test('CloudWatch throttling honors Retry-After without alarming the operator', async (t) => {
+  const source = {
+    source_id: 'run-throttled', run_id: 'run-throttled', replica: 3, current: true,
+    status: 'running', provider: 'fargate', stream_available: false, inline_available: true,
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+      resource: 'arn:aws:ecs:eu-west-1:123:task/analytics/task-throttled',
+      log_group: '/shinyhub/apps', log_stream: 'app/app/task-throttled',
+      console_url: 'https://console.aws.amazon.com/ecs/v2/clusters/analytics/tasks/task-throttled/logs?region=eu-west-1',
+    },
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  let providerCalls = 0;
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) return { ok: true, json: async () => ({ sources: [source] }) };
+    providerCalls++;
+    return { ok: false, status: 429, headers: { get: () => '1' } };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, api, refreshEveryMs: 30 });
+  t.after(() => { cleanup(); dom.window.close(); });
+
+  await waitUntil(() => /Delayed/i.test(panel.querySelector('.logs-status-text').textContent));
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  assert.equal(providerCalls, 1, 'Retry-After must override the ordinary failure backoff');
+  assert.doesNotMatch(panel.querySelector('#detail-logs-body').textContent, /CloudWatch output is unavailable/i);
+  assert.equal(panel.querySelector('.logs-external-actions a').textContent, 'Open task logs');
+});
+
+test('a stopped CloudWatch run is fetched once and then remains quiescent', async (t) => {
+  const source = {
+    source_id: 'run-stopped', run_id: 'run-stopped', replica: 4, current: false,
+    status: 'stopped', provider: 'fargate', stream_available: false, inline_available: true,
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+      resource: 'arn:aws:ecs:eu-west-1:123:task/analytics/task-stopped',
+      log_group: '/shinyhub/apps', log_stream: 'app/app/task-stopped',
+    },
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs?log_source=run-stopped', pretendToBeVisual: true,
+  });
+  let providerCalls = 0;
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) return { ok: true, json: async () => ({ sources: [source] }) };
+    providerCalls++;
+    return {
+      ok: true,
+      json: async () => ({
+        events: [{ message: 'final retained line', timestamp: '2026-08-15T14:00:00Z' }],
+        next_cursor: 'stopped-forward-token',
+      }),
+    };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, api, refreshEveryMs: 20 });
+  t.after(() => { cleanup(); dom.window.close(); });
+
+  await waitUntil(() => /final retained line/.test(panel.querySelector('#detail-logs-body').textContent));
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  assert.equal(providerCalls, 1, 'completed runs must not keep spending CloudWatch reads');
+});
+
+test('a caught-up live CloudWatch source backs off while source discovery stays fresh', async (t) => {
+  const source = {
+    source_id: 'run-live-idle', run_id: 'run-live-idle', replica: 5, current: true,
+    status: 'running', provider: 'fargate', stream_available: false, inline_available: true,
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+      resource: 'arn:aws:ecs:eu-west-1:123:task/analytics/task-idle',
+      log_group: '/shinyhub/apps', log_stream: 'app/app/task-idle',
+    },
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  let discoveries = 0;
+  let providerCalls = 0;
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) {
+      discoveries++;
+      return { ok: true, json: async () => ({ sources: [source] }) };
+    }
+    providerCalls++;
+    return {
+      ok: true,
+      json: async () => providerCalls === 1
+        ? { events: [{ message: 'latest line', timestamp: '2026-08-15T14:00:00Z' }], next_cursor: 'idle-token' }
+        : { events: [], next_cursor: 'idle-token' },
+    };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, api, refreshEveryMs: 80 });
+  t.after(() => { cleanup(); dom.window.close(); });
+
+  await waitUntil(() => /latest line/.test(panel.querySelector('#detail-logs-body').textContent));
+  await new Promise((resolve) => setTimeout(resolve, 850));
+  assert.ok(discoveries >= 7, `source discovery became stale (${discoveries} requests)`);
+  assert.ok(providerCalls >= 3 && providerCalls <= 4, `caught-up source made ${providerCalls} provider reads`);
+});
+
+test('hidden tabs abort CloudWatch reads and resume immediately when visible', async (t) => {
+  const source = {
+    source_id: 'run-visible', run_id: 'run-visible', replica: 6, current: true,
+    status: 'running', provider: 'fargate', stream_available: false, inline_available: true,
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+      resource: 'arn:aws:ecs:eu-west-1:123:task/analytics/task-visible',
+      log_group: '/shinyhub/apps', log_stream: 'app/app/task-visible',
+    },
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  let hidden = false;
+  Object.defineProperty(dom.window.document, 'hidden', { configurable: true, get: () => hidden });
+  let providerCalls = 0;
+  let aborted = 0;
+  const api = async (url, options = {}) => {
+    if (url.endsWith('/logs/sources')) return { ok: true, json: async () => ({ sources: [source] }) };
+    providerCalls++;
+    if (providerCalls === 1) {
+      return new Promise((resolve, reject) => {
+        options.signal?.addEventListener('abort', () => {
+          aborted++;
+          reject(new dom.window.DOMException('Aborted', 'AbortError'));
+        }, { once: true });
+      });
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        events: [{ message: 'visible again', timestamp: '2026-08-15T14:00:00Z' }],
+        next_cursor: 'visible-token',
+      }),
+    };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, api, refreshEveryMs: 30 });
+  t.after(() => { cleanup(); dom.window.close(); });
+
+  await waitUntil(() => providerCalls === 1);
+  hidden = true;
+  dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange'));
+  await waitUntil(() => aborted === 1);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(providerCalls, 1, 'hidden tabs must remain quiescent');
+
+  hidden = false;
+  dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange'));
+  await waitUntil(() => /visible again/.test(panel.querySelector('#detail-logs-body').textContent));
+  assert.ok(providerCalls >= 2 && providerCalls <= 3, `visibility recovery made ${providerCalls} reads`);
+  assert.doesNotMatch(panel.querySelector('#detail-logs-body').textContent, /unavailable in ShinyHub/i,
+    'intentional suspension must not look like a provider failure');
+});
+
+test('one viewer bounds concurrent CloudWatch reads across many replicas', async (t) => {
+  const sources = Array.from({ length: 7 }, (_, replica) => ({
+    source_id: `run-${replica}`, run_id: `run-${replica}`, replica, current: true,
+    status: 'running', provider: 'fargate', stream_available: false, inline_available: true,
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+      resource: `arn:aws:ecs:eu-west-1:123:task/analytics/task-${replica}`,
+      log_group: '/shinyhub/apps', log_stream: `app/app/task-${replica}`,
+    },
+  }));
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  let active = 0;
+  let maxActive = 0;
+  let completed = 0;
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) return { ok: true, json: async () => ({ sources }) };
+    active++;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    active--;
+    completed++;
+    return { ok: true, json: async () => ({ events: [], next_cursor: `token-${completed}` }) };
+  };
+  const cleanup = createLogsViewer({
+    panel: dom.window.document.querySelector('#panel'), app: { slug: 'demo' }, api, refreshEveryMs: 60_000,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+
+  await waitUntil(() => completed === sources.length);
+  assert.ok(maxActive <= 3, `browser issued ${maxActive} concurrent provider reads`);
 });
 
 test('external log command remains available when clipboard access fails', async (t) => {

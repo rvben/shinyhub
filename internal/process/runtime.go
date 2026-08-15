@@ -28,6 +28,10 @@ var ErrReplicaAlreadyRunning = errors.New("replica already running")
 // may still be running and its control-plane state must be left intact.
 var ErrReplicaNotFound = errors.New("replica not found")
 
+// ErrExternalLogsThrottled marks a provider rate-limit response. API callers
+// use it to return a bounded Retry-After hint without exposing provider errors.
+var ErrExternalLogsThrottled = errors.New("external logs throttled")
+
 // ReplicaEndpoint is the result of starting a replica: where the proxy routes
 // to it, which provider owns it, a stable worker identity used for recovery,
 // and the operational RunHandle for Signal/Wait/Stats/removal. A remote runtime

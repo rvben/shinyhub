@@ -2,26 +2,43 @@ package cloudlogs
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	cloudwatchtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/rvben/shinyhub/internal/process"
 )
 
 type fakeClient struct {
 	input *cloudwatchlogs.GetLogEventsInput
+	err   error
 }
 
 func (f *fakeClient) GetLogEvents(_ context.Context, input *cloudwatchlogs.GetLogEventsInput, _ ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.GetLogEventsOutput, error) {
 	f.input = input
+	if f.err != nil {
+		return nil, f.err
+	}
 	return &cloudwatchlogs.GetLogEventsOutput{
 		Events:           []cloudwatchtypes.OutputLogEvent{{Message: aws.String("ready"), Timestamp: aws.Int64(1_700_000_000_000)}},
 		NextForwardToken: aws.String("forward-token"),
 	}, nil
+}
+
+func TestReaderClassifiesCloudWatchThrottling(t *testing.T) {
+	client := &fakeClient{err: &smithy.GenericAPIError{Code: "ThrottlingException", Message: "slow down"}}
+	_, err := New(client, "eu-west-1").Read(context.Background(), process.ExternalLogs{
+		Provider: "aws_ecs", Region: "eu-west-1",
+		LogGroup: "/shinyhub/apps", LogStream: "app/app/task-1",
+	}, "", 200)
+	if !errors.Is(err, process.ErrExternalLogsThrottled) {
+		t.Fatalf("Read error = %v, want ErrExternalLogsThrottled", err)
+	}
 }
 
 func TestReaderReturnsLatestCloudWatchEvents(t *testing.T) {

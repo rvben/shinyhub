@@ -48,6 +48,8 @@ type Registry struct {
 	appLogFollowers    prometheus.Gauge
 	appLogViewers      prometheus.Gauge
 	appLogFollowErrors prometheus.Counter
+	providerLogReads   *prometheus.CounterVec
+	providerLogLatency *prometheus.HistogramVec
 	runs               *prometheus.CounterVec
 }
 
@@ -209,6 +211,17 @@ func New(version string) *Registry {
 		appLogFollowErrors,
 	)
 
+	providerLogReads := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_provider_log_reads_total",
+		Help: "Total external provider log reads by bounded result (ok, shared, throttled, or error).",
+	}, []string{"result"})
+	providerLogLatency := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "shinyhub_provider_log_read_duration_seconds",
+		Help:    "External provider log read latency by bounded result.",
+		Buckets: []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15},
+	}, []string{"result"})
+	reg.MustRegister(providerLogReads, providerLogLatency)
+
 	runs := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "shinyhub_schedule_runs_total",
 		Help: "Total scheduled-job runs by app, schedule, and terminal status.",
@@ -242,6 +255,8 @@ func New(version string) *Registry {
 		appLogFollowers:    appLogFollowers,
 		appLogViewers:      appLogViewers,
 		appLogFollowErrors: appLogFollowErrors,
+		providerLogReads:   providerLogReads,
+		providerLogLatency: providerLogLatency,
 		runs:               runs,
 	}
 }
@@ -343,6 +358,19 @@ func (r *Registry) AddAppLogViewers(delta int) {
 // RecordAppLogFollowError records a failed retained-log follower database read.
 func (r *Registry) RecordAppLogFollowError() {
 	r.appLogFollowErrors.Inc()
+}
+
+// RecordProviderLogRead records one provider-backed log request. The result is
+// normalized to a fixed vocabulary so upstream error text cannot create
+// unbounded Prometheus label cardinality.
+func (r *Registry) RecordProviderLogRead(result string, duration time.Duration) {
+	switch result {
+	case "ok", "shared", "throttled":
+	default:
+		result = "error"
+	}
+	r.providerLogReads.WithLabelValues(result).Inc()
+	r.providerLogLatency.WithLabelValues(result).Observe(duration.Seconds())
 }
 
 // RecordAppLogRunsPruned records database retention cleanup by the owner.

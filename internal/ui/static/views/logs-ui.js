@@ -2,6 +2,7 @@
 // reusable pool slots; source IDs identify concrete executions of those slots.
 
 export const MAX_RENDERED_LOG_ENTRIES = 2500;
+const MAX_CONCURRENT_PROVIDER_READS = 3;
 
 const LIVE_STATUSES = new Set(['running', 'starting', 'deploying', 'waking']);
 
@@ -173,6 +174,20 @@ function sourceStatusEvent(source, previous) {
   return `Replica #${source.replica} ${titleCase(source.status).toLocaleLowerCase()}`;
 }
 
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 export function createLogsViewer({
   panel,
   app,
@@ -245,15 +260,21 @@ export function createLogsViewer({
   let renderedEntries = [];
   let renderedQuery = '';
   let refreshTimer = null;
+  let providerTimer = null;
   let scopeGeneration = 0;
   const streams = new Map();
   const loadedSources = new Set();
   const connected = new Set();
   const degraded = new Set();
   const providerCursors = new Map();
-  const providerLoading = new Set();
+  const providerLoading = new Map();
+  const providerControllers = new Map();
   const providerConnected = new Set();
   const providerDegraded = new Set();
+  const providerCompleted = new Set();
+  const providerIdlePolls = new Map();
+  const providerFailurePolls = new Map();
+  const providerNextPollAt = new Map();
 
   try {
     const requested = new URLSearchParams(win.location && win.location.search || '').get('log_source');
@@ -614,58 +635,174 @@ export function createLogsViewer({
     return `/api/apps/${encodeURIComponent(app.slug)}/logs?${params.toString()}`;
   }
 
-  async function fetchProviderSource(source, generation) {
-    if (providerLoading.has(source.source_id)) return [];
-    providerLoading.add(source.source_id);
+  function retryAfterDelayMs(response) {
+    if (!response || response.status !== 429 || !response.headers || typeof response.headers.get !== 'function') return 0;
+    const raw = String(response.headers.get('Retry-After') || '').trim();
+    if (!raw) return 0;
+    if (/^\d+$/.test(raw)) return Math.min(60_000, Number(raw) * 1000);
+    const retryAt = Date.parse(raw);
+    return Number.isFinite(retryAt) ? Math.min(60_000, Math.max(0, retryAt - Date.now())) : 0;
+  }
+
+  async function performProviderSourceFetch(source, generation) {
     const cursor = providerCursors.get(source.source_id) || '';
+    const controller = typeof win.AbortController === 'function' ? new win.AbortController() : null;
+    if (controller) providerControllers.set(source.source_id, controller);
     try {
-      const resp = await api(providerLogURL(source, cursor));
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const resp = await api(providerLogURL(source, cursor), controller ? { signal: controller.signal } : {});
+      if (!resp.ok) {
+        const error = new Error(`HTTP ${resp.status}`);
+        error.throttled = resp.status === 429;
+        error.retryAfterMs = retryAfterDelayMs(resp);
+        throw error;
+      }
       const page = await resp.json();
-      if (destroyed || generation !== scopeGeneration) return [];
+      if (destroyed || generation !== scopeGeneration) return { entries: [], outcome: 'aborted' };
       const nextCursor = String(page && page.next_cursor || '');
       // CloudWatch returns the same forward token when the caller is caught up.
       // Treat that as an empty page even if an intermediary replayed the body.
       if (cursor && nextCursor === cursor) {
+        if (!isLiveLogSource(source)) providerCompleted.add(source.source_id);
         providerConnected.add(source.source_id);
         providerDegraded.delete(source.source_id);
         updateConnectionStatus();
-        return [];
+        return { entries: [], outcome: isLiveLogSource(source) ? 'idle' : 'complete' };
       }
       if (nextCursor) providerCursors.set(source.source_id, nextCursor);
+      if (!isLiveLogSource(source)) providerCompleted.add(source.source_id);
       providerConnected.add(source.source_id);
       providerDegraded.delete(source.source_id);
       updateConnectionStatus();
-      return (Array.isArray(page && page.events) ? page.events : []).map((event) => ({
+      const entries = (Array.isArray(page && page.events) ? page.events : []).map((event) => ({
         kind: 'line', source_id: source.source_id, replica: source.replica,
         line: String(event && event.message || ''), timestamp: Date.parse(event && event.timestamp || '') || 0,
       }));
-    } catch {
-      if (destroyed || generation !== scopeGeneration) return [];
+      return {
+        entries,
+        outcome: isLiveLogSource(source) ? (entries.length ? 'active' : 'idle') : 'complete',
+      };
+    } catch (error) {
+      if (destroyed || generation !== scopeGeneration || error && error.name === 'AbortError') {
+        return { entries: [], outcome: 'aborted' };
+      }
       providerConnected.delete(source.source_id);
       const firstFailure = !providerDegraded.has(source.source_id);
       providerDegraded.add(source.source_id);
       updateConnectionStatus();
-      if (firstFailure) {
+      if (firstFailure && !error.throttled) {
         addEntry({
           kind: 'event', replica: source.replica,
           line: `Replica #${source.replica} CloudWatch output is unavailable in ShinyHub; use the AWS access above`,
         });
         announce(`CloudWatch output for replica ${source.replica} is unavailable in ShinyHub. Direct AWS access remains available.`);
       }
-      return [];
+      return {
+        entries: [], outcome: error.throttled ? 'throttled' : 'error', retryAfterMs: error.retryAfterMs || 0,
+      };
     } finally {
-      providerLoading.delete(source.source_id);
+      if (providerControllers.get(source.source_id) === controller) providerControllers.delete(source.source_id);
     }
   }
 
-  async function pollProviderSources(generation = scopeGeneration) {
-    const pollable = scopedSources().filter(isInlineProviderLogSource);
+  async function fetchProviderSource(source, generation, { waitForExisting = false, force = false } = {}) {
+    if (providerCompleted.has(source.source_id) && !force) return { entries: [], outcome: 'complete' };
+    const existing = providerLoading.get(source.source_id);
+    if (existing) {
+      if (!waitForExisting) return { entries: [], outcome: 'busy' };
+      await existing;
+      if (destroyed || generation !== scopeGeneration) return { entries: [], outcome: 'aborted' };
+      return fetchProviderSource(source, generation, { force });
+    }
+    const pending = performProviderSourceFetch(source, generation);
+    providerLoading.set(source.source_id, pending);
+    try {
+      return await pending;
+    } finally {
+      if (providerLoading.get(source.source_id) === pending) providerLoading.delete(source.source_id);
+    }
+  }
+
+  function clearProviderTimer() {
+    if (providerTimer != null) win.clearTimeout(providerTimer);
+    providerTimer = null;
+  }
+
+  function scheduleNextProviderPoll() {
+    clearProviderTimer();
+    if (destroyed || doc.hidden) return;
+    const pollable = scopedSources().filter((source) =>
+      isInlineProviderLogSource(source) && !providerCompleted.has(source.source_id));
     if (!pollable.length) return;
-    const batches = await Promise.all(pollable.map((source) => fetchProviderSource(source, generation)));
+    const now = Date.now();
+    const nextAt = Math.min(...pollable.map((source) => providerNextPollAt.get(source.source_id) || now));
+    providerTimer = win.setTimeout(() => {
+      providerTimer = null;
+      pollProviderSources(scopeGeneration);
+    }, Math.max(0, nextAt - now));
+  }
+
+  function updateProviderPollSchedule(source, outcome, retryAfterMs = 0) {
+    const id = source.source_id;
+    if (outcome === 'complete') {
+      providerCompleted.add(id);
+      providerNextPollAt.delete(id);
+      return;
+    }
+    const base = Math.max(1, refreshEveryMs);
+    let delay = base;
+    if (outcome === 'active') {
+      providerIdlePolls.delete(id);
+      providerFailurePolls.delete(id);
+    } else if (outcome === 'idle') {
+      const idle = (providerIdlePolls.get(id) || 0) + 1;
+      providerIdlePolls.set(id, idle);
+      providerFailurePolls.delete(id);
+      delay = Math.min(30_000, base * (2 ** Math.min(idle, 6)));
+    } else if (outcome === 'error' || outcome === 'throttled') {
+      const failures = (providerFailurePolls.get(id) || 0) + 1;
+      providerFailurePolls.set(id, failures);
+      delay = Math.min(60_000, base * (2 ** Math.min(failures, 7)));
+      if (outcome === 'throttled') delay = Math.max(delay, retryAfterMs);
+    } else if (outcome === 'aborted' || outcome === 'busy') {
+      delay = base;
+    }
+    providerNextPollAt.set(id, Date.now() + delay);
+  }
+
+  async function pollProviderSources(generation = scopeGeneration, requestedSources = null) {
+    if (destroyed || generation !== scopeGeneration || doc.hidden) return;
+    const now = Date.now();
+    const candidates = (requestedSources || scopedSources()).filter((source) =>
+      isInlineProviderLogSource(source) && !providerCompleted.has(source.source_id));
+    const pollable = requestedSources ? candidates : candidates.filter((source) =>
+      (providerNextPollAt.get(source.source_id) || 0) <= now);
+    if (!pollable.length) {
+      scheduleNextProviderPoll();
+      return;
+    }
+    const batches = await mapWithConcurrency(pollable, MAX_CONCURRENT_PROVIDER_READS, async (source) => ({
+      source,
+      result: destroyed || generation !== scopeGeneration || doc.hidden
+        ? { entries: [], outcome: 'aborted' }
+        : await fetchProviderSource(source, generation),
+    }));
     if (destroyed || generation !== scopeGeneration) return;
-    const batch = batches.flat().sort((a, b) => a.timestamp - b.timestamp || a.replica - b.replica);
+    for (const { source, result } of batches) {
+      updateProviderPollSchedule(source, result.outcome, result.retryAfterMs);
+    }
+    const batch = batches.flatMap(({ result }) => result.entries)
+      .sort((a, b) => a.timestamp - b.timestamp || a.replica - b.replica);
     for (const entry of batch) addEntry(entry);
+    scheduleNextProviderPoll();
+  }
+
+  async function reconcileTerminalProviderSource(source, generation, terminalMessage) {
+    const result = await fetchProviderSource(source, generation, { waitForExisting: true, force: true });
+    if (destroyed || generation !== scopeGeneration) return;
+    updateProviderPollSchedule(source, result.outcome, result.retryAfterMs);
+    for (const entry of result.entries) addEntry(entry);
+    if (terminalMessage) addEntry({ kind: 'event', replica: source.replica, line: terminalMessage });
+    scheduleNextProviderPoll();
   }
 
   async function fetchStaticLines(source) {
@@ -796,14 +933,24 @@ export function createLogsViewer({
     degraded.clear();
   }
 
+  function abortProviderReads() {
+    for (const controller of providerControllers.values()) controller.abort();
+    providerControllers.clear();
+  }
+
   function resetScope() {
     scopeGeneration++;
     closeStreams();
+    abortProviderReads();
     loadedSources.clear();
     providerCursors.clear();
     providerLoading.clear();
     providerConnected.clear();
     providerDegraded.clear();
+    providerCompleted.clear();
+    providerIdlePolls.clear();
+    providerFailurePolls.clear();
+    providerNextPollAt.clear();
     entries = [];
     trimmed = 0;
     pendingWhilePaused = 0;
@@ -811,7 +958,7 @@ export function createLogsViewer({
     for (const source of scopedSources()) loadSource(source, scopeGeneration);
     updateConnectionStatus();
     scheduleRender(true);
-    pollProviderSources(scopeGeneration);
+    scheduleNextProviderPoll();
   }
 
   function reconcileSources(nextSources, markChanges) {
@@ -848,12 +995,7 @@ export function createLogsViewer({
           degraded.delete(source.source_id);
           const terminalMessage = sourceStatusEvent(source, old);
           if (isInlineProviderLogSource(source)) {
-            const generation = scopeGeneration;
-            pollProviderSources(generation).then(() => {
-              if (terminalMessage && !destroyed && generation === scopeGeneration) {
-                addEntry({ kind: 'event', replica: source.replica, line: terminalMessage });
-              }
-            });
+            reconcileTerminalProviderSource(source, scopeGeneration, terminalMessage);
           } else {
             reconcileTerminalSource(source, scopeGeneration, terminalMessage);
           }
@@ -880,7 +1022,7 @@ export function createLogsViewer({
       const payload = await resp.json();
       if (destroyed) return false;
       reconcileSources(payload && payload.sources, markChanges);
-      if (markChanges) pollProviderSources(scopeGeneration);
+      if (markChanges) scheduleNextProviderPoll();
       return true;
     } catch {
       status.classList.add('is-reconnecting');
@@ -929,6 +1071,22 @@ export function createLogsViewer({
     output.scrollTop = output.scrollHeight;
     jumpButton.hidden = true;
   });
+  function handleVisibilityChange() {
+    if (doc.hidden) {
+      clearProviderTimer();
+      abortProviderReads();
+      return;
+    }
+    const now = Date.now();
+    for (const source of scopedSources()) {
+      if (isInlineProviderLogSource(source) && !providerCompleted.has(source.source_id)) {
+        providerNextPollAt.set(source.source_id, now);
+      }
+    }
+    scheduleNextProviderPoll();
+    refreshSources(true);
+  }
+  doc.addEventListener('visibilitychange', handleVisibilityChange);
   copyButton.addEventListener('click', async () => {
     const text = serializeLogEntries(filterLogEntries(entries, searchInput.value));
     try {
@@ -981,14 +1139,19 @@ export function createLogsViewer({
     if (!discovered) renderSourceOptions();
     resetScope();
     if (!discovered && sources.length === 0) scheduleRender(true);
-    refreshTimer = win.setInterval(() => refreshSources(true), refreshEveryMs);
+    refreshTimer = win.setInterval(() => {
+      if (!doc.hidden) refreshSources(true);
+    }, refreshEveryMs);
   }
   start();
 
   return () => {
     destroyed = true;
     if (cancelScheduledRender) cancelScheduledRender();
+    doc.removeEventListener('visibilitychange', handleVisibilityChange);
+    abortProviderReads();
     closeStreams();
     if (refreshTimer != null) win.clearInterval(refreshTimer);
+    clearProviderTimer();
   };
 }

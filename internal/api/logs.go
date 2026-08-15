@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -131,7 +132,7 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 			DeploymentID: run.DeploymentID, UpdatedAt: run.StartedAt,
 			StartedAt: &started, FinishedAt: run.FinishedAt, OOMKilled: run.OOMKilled,
 			ExternalLogs: externalLogs,
-			InlineAvailable: s.externalLogs != nil && externalLogs != nil &&
+			InlineAvailable: s.providerLogs != nil && externalLogs != nil &&
 				externalLogs.LogGroup != "" && externalLogs.LogStream != "",
 		}
 		if file, ok := fileByRun[run.RunID]; ok {
@@ -386,7 +387,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		details := decodeExternalLogs(run.ExternalLogs)
-		if s.externalLogs == nil || details == nil || details.LogGroup == "" || details.LogStream == "" {
+		if s.providerLogs == nil || details == nil || details.LogGroup == "" || details.LogStream == "" {
 			writeError(w, http.StatusServiceUnavailable, "provider logs are not available through ShinyHub")
 			return
 		}
@@ -395,9 +396,27 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "provider cursor is too long")
 			return
 		}
-		page, err := s.externalLogs.Read(r.Context(), *details, cursor, int32(tail))
+		started := time.Now()
+		page, shared, err := s.providerLogs.read(r.Context(), *details, cursor, int32(tail))
+		result := "ok"
+		if shared {
+			result = "shared"
+		}
+		if errors.Is(err, process.ErrExternalLogsThrottled) {
+			result = "throttled"
+		} else if err != nil {
+			result = "error"
+		}
+		if s.metrics != nil {
+			s.metrics.RecordProviderLogRead(result, time.Since(started))
+		}
 		if err != nil {
 			slog.Warn("read provider logs", "slug", slug, "run_id", runID, "err", err)
+			if errors.Is(err, process.ErrExternalLogsThrottled) {
+				w.Header().Set("Retry-After", "5")
+				writeError(w, http.StatusTooManyRequests, "provider logs are busy; retry shortly")
+				return
+			}
 			writeError(w, http.StatusBadGateway, "provider logs are temporarily unavailable")
 			return
 		}
