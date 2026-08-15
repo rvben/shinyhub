@@ -131,6 +131,12 @@ deployments, where the viewer reads its local files directly. Retention cleanup
 counters can still rise there. Like all Prometheus counters, cleanup and loss
 totals reset when a ShinyHub process restarts.
 
+After a follower read fails, its polling interval backs off exponentially with
+jitter to a five-second ceiling. A successful read restores the normal 200 ms
+cadence, while a locally committed log chunk wakes the follower immediately.
+This bounds database pressure during an outage without delaying healthy local
+delivery.
+
 ### Example alerts
 
 ```yaml

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 
 type appLogWindowReader func(offset int64) ([]byte, int64, int64, error)
 
+const appLogFollowMaxBackoff = 5 * time.Second
+
 // appLogFanout owns the single steady-state database follower for one run.
 // Subscribers read immutable copies from its bounded history, so a slow client
 // never stalls polling or delivery to another client.
@@ -17,6 +20,7 @@ type appLogFanout struct {
 	read           appLogWindowReader
 	metrics        AppLogMetrics
 	pollInterval   time.Duration
+	retryDelay     func(consecutiveFailures int) time.Duration
 	retentionBytes int64
 	wake           chan struct{}
 	stopped        chan struct{}
@@ -40,9 +44,12 @@ type appLogSubscriber struct {
 
 func newAppLogFanout(read appLogWindowReader, metrics AppLogMetrics, offset int64, pollInterval time.Duration, retentionBytes int64) *appLogFanout {
 	return &appLogFanout{
-		read:           read,
-		metrics:        metrics,
-		pollInterval:   pollInterval,
+		read:         read,
+		metrics:      metrics,
+		pollInterval: pollInterval,
+		retryDelay: func(consecutiveFailures int) time.Duration {
+			return appLogFollowBackoff(pollInterval, appLogFollowMaxBackoff, consecutiveFailures, rand.Float64())
+		},
 		retentionBytes: retentionBytes,
 		wake:           make(chan struct{}, 1),
 		stopped:        make(chan struct{}),
@@ -58,20 +65,72 @@ func (f *appLogFanout) run() {
 		f.metrics.AddAppLogFollowers(1)
 		defer f.metrics.AddAppLogFollowers(-1)
 	}
-	ticker := time.NewTicker(f.pollInterval)
-	defer ticker.Stop()
+	consecutiveFailures := 0
 	for {
-		f.poll()
+		err := f.poll()
+		delay := f.pollInterval
+		if err != nil {
+			consecutiveFailures++
+			delay = f.retryDelay(consecutiveFailures)
+		} else {
+			consecutiveFailures = 0
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-f.stopped:
+			stopAppLogTimer(timer)
 			return
 		case <-f.wake:
-		case <-ticker.C:
+			stopAppLogTimer(timer)
+		case <-timer.C:
 		}
 	}
 }
 
-func (f *appLogFanout) poll() {
+func appLogFollowBackoff(base, maximum time.Duration, consecutiveFailures int, sample float64) time.Duration {
+	if base <= 0 || consecutiveFailures <= 0 {
+		return base
+	}
+	// A missing ceiling falls back to the base cadence.
+	if maximum <= 0 {
+		maximum = base
+	}
+	if maximum <= base {
+		return maximum
+	}
+	delay := base
+	for range consecutiveFailures {
+		if delay >= maximum/2 {
+			delay = maximum
+			break
+		}
+		delay *= 2
+	}
+	if sample < 0 {
+		sample = 0
+	} else if sample > 1 {
+		sample = 1
+	}
+	// ±20% jitter prevents every run and control-plane node from retrying a
+	// recovering database in lockstep.
+	delay = time.Duration(float64(delay) * (0.8 + 0.4*sample))
+	if delay > maximum {
+		return maximum
+	}
+	return delay
+}
+
+func stopAppLogTimer(timer *time.Timer) {
+	if timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
+	}
+}
+
+func (f *appLogFanout) poll() error {
 	f.mu.Lock()
 	offset := f.latest
 	f.mu.Unlock()
@@ -81,14 +140,14 @@ func (f *appLogFanout) poll() {
 		if f.metrics != nil {
 			f.metrics.RecordAppLogFollowError()
 		}
-		return
+		return err
 	}
 	if len(data) == 0 {
-		return
+		return nil
 	}
 	records := logstream.RecordsFromBytes(data, start)
 	if len(records) == 0 {
-		return
+		return nil
 	}
 
 	f.mu.Lock()
@@ -108,6 +167,7 @@ func (f *appLogFanout) poll() {
 		signalAppLogSubscriber(subscriber)
 	}
 	f.mu.Unlock()
+	return nil
 }
 
 func (f *appLogFanout) trimHistoryLocked() {

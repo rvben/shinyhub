@@ -124,8 +124,89 @@ func TestAppLogFanoutRecordsPollErrors(t *testing.T) {
 		time.Hour,
 		AppLogRetentionBytes,
 	)
-	fanout.poll()
+	if err := fanout.poll(); err == nil {
+		t.Fatal("poll succeeded, want injected error")
+	}
 	if metrics.followErrors != 1 {
 		t.Fatalf("follow errors = %d, want 1", metrics.followErrors)
 	}
+}
+
+func TestAppLogFollowBackoffIsCappedAndJittered(t *testing.T) {
+	const base = 200 * time.Millisecond
+	tests := []struct {
+		name     string
+		failures int
+		sample   float64
+		maximum  time.Duration
+		want     time.Duration
+	}{
+		{name: "first low jitter", failures: 1, sample: 0, want: 320 * time.Millisecond},
+		{name: "first midpoint", failures: 1, sample: 0.5, want: 400 * time.Millisecond},
+		{name: "first high jitter", failures: 1, sample: 1, want: 480 * time.Millisecond},
+		{name: "eventually capped", failures: 20, sample: 1, want: appLogFollowMaxBackoff},
+		{name: "smaller ceiling wins", failures: 1, sample: 0.5, maximum: 100 * time.Millisecond, want: 100 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			maximum := tt.maximum
+			if maximum == 0 {
+				maximum = appLogFollowMaxBackoff
+			}
+			if got := appLogFollowBackoff(base, maximum, tt.failures, tt.sample); got != tt.want {
+				t.Fatalf("backoff = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAppLogFanoutWakeInterruptsFailureBackoff(t *testing.T) {
+	var attempts atomic.Int64
+	metrics := &appLogMetricsSpy{}
+	fanout := newAppLogFanout(
+		func(offset int64) ([]byte, int64, int64, error) {
+			if attempts.Add(1) == 1 {
+				return nil, offset, offset, context.DeadlineExceeded
+			}
+			return []byte("recovered\n"), offset, offset + int64(len("recovered\n")), nil
+		},
+		metrics,
+		0,
+		time.Hour,
+		AppLogRetentionBytes,
+	)
+	backoffStarted := make(chan int, 1)
+	fanout.retryDelay = func(consecutiveFailures int) time.Duration {
+		backoffStarted <- consecutiveFailures
+		return time.Hour
+	}
+	subscriber := fanout.addSubscriber()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	output := make(chan logstream.Record, 1)
+	go fanout.follow(ctx, subscriber, 0, output)
+	go fanout.run()
+	t.Cleanup(func() {
+		fanout.stop()
+		<-fanout.done
+	})
+
+	select {
+	case failures := <-backoffStarted:
+		if failures != 1 {
+			t.Fatalf("consecutive failures = %d, want 1", failures)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fanout did not enter failure backoff")
+	}
+	fanout.signal()
+	select {
+	case got := <-output:
+		if got.Line != "recovered" || attempts.Load() != 2 {
+			t.Fatalf("recovery = %+v after %d attempts", got, attempts.Load())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("wake did not interrupt follower backoff")
+	}
+	fanout.removeSubscriber(subscriber)
 }
