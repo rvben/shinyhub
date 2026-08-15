@@ -7,11 +7,23 @@ import (
 	"strings"
 )
 
+// StreamState describes the health of live retained-log delivery.
+type StreamState string
+
+const (
+	StreamDegraded  StreamState = "degraded"
+	StreamRecovered StreamState = "recovered"
+)
+
 // Record is one display line and the exclusive byte offset immediately after
 // it. EndOffset is suitable for an SSE id and resuming with Last-Event-ID.
 type Record struct {
 	Line      string
 	EndOffset int64
+	// StreamState carries cursor-free delivery health transitions. These are
+	// operational SSE events, not application output, and never advance the
+	// durable resume cursor.
+	StreamState StreamState
 	// GapBefore reports that the requested resume cursor predates the earliest
 	// available byte. Consumers should surface this once before the record.
 	GapBefore bool

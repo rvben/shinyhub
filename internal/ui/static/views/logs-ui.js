@@ -193,6 +193,7 @@ export function createLogsViewer({
   const streams = new Map();
   const loadedSources = new Set();
   const connected = new Set();
+  const degraded = new Set();
 
   try {
     const requested = new URLSearchParams(win.location && win.location.search || '').get('log_source');
@@ -397,8 +398,11 @@ export function createLogsViewer({
     const followable = live.filter(isFollowableLogSource);
     const external = live.length - followable.length;
     const connectedCount = followable.filter((source) => connected.has(source.source_id)).length;
-    status.classList.toggle('is-connected', followable.length > 0 && connectedCount === followable.length);
-    status.classList.toggle('is-reconnecting', followable.length > connectedCount);
+    const degradedCount = followable.filter((source) => degraded.has(source.source_id)).length;
+    const disconnectedCount = followable.length - connectedCount;
+    status.classList.toggle('is-connected', followable.length > 0 && connectedCount === followable.length && degradedCount === 0);
+    status.classList.toggle('is-degraded', degradedCount > 0);
+    status.classList.toggle('is-reconnecting', degradedCount === 0 && disconnectedCount > 0);
     pauseButton.disabled = followable.length === 0;
     if (live.length === 0) {
       statusText.textContent = scoped.length
@@ -406,6 +410,8 @@ export function createLogsViewer({
         : 'No retained log sources';
     } else if (followable.length === 0) {
       statusText.textContent = `${live.length} live source${live.length === 1 ? '' : 's'} · application logs external`;
+    } else if (degradedCount > 0) {
+      statusText.textContent = `Delayed · ${degradedCount} live source${degradedCount === 1 ? '' : 's'} waiting for log storage${disconnectedCount ? ` · ${disconnectedCount} reconnecting` : ''}`;
     } else if (connectedCount === followable.length) {
       statusText.textContent = `Live · ${connectedCount} connected source${connectedCount === 1 ? '' : 's'}${external ? ` · ${external} external` : ''}`;
     } else {
@@ -498,10 +504,30 @@ export function createLogsViewer({
           announce(`Some earlier output from replica ${source.replica} is no longer retained.`);
         }
       });
+      stream.addEventListener('stream-degraded', () => {
+        if (destroyed || generation !== scopeGeneration || degraded.has(source.source_id)) return;
+        degraded.add(source.source_id);
+        updateConnectionStatus();
+        addEntry({
+          kind: 'event', replica: source.replica,
+          line: `Replica #${source.replica} live output delayed while retained log storage recovers`,
+        });
+        announce(`Live output from replica ${source.replica} is temporarily delayed. It will catch up automatically.`);
+      });
+      stream.addEventListener('stream-recovered', () => {
+        if (destroyed || generation !== scopeGeneration || !degraded.delete(source.source_id)) return;
+        updateConnectionStatus();
+        addEntry({
+          kind: 'event', replica: source.replica,
+          line: `Replica #${source.replica} live output delivery recovered`,
+        });
+        announce(`Live output from replica ${source.replica} recovered and is catching up.`);
+      });
     }
     stream.onerror = () => {
       if (destroyed || generation !== scopeGeneration) return;
       connected.delete(source.source_id);
+      degraded.delete(source.source_id);
       updateConnectionStatus();
     };
   }
@@ -527,6 +553,7 @@ export function createLogsViewer({
     }
     streams.clear();
     connected.clear();
+    degraded.clear();
   }
 
   function resetScope() {
@@ -570,6 +597,7 @@ export function createLogsViewer({
           if (stream) stream.close();
           streams.delete(source.source_id);
           connected.delete(source.source_id);
+          degraded.delete(source.source_id);
           reconcileTerminalSource(source, scopeGeneration, sourceStatusEvent(source, old));
         } else if (old && !isLiveLogSource(source) && source.has_log &&
           (!old.has_log || source.size_bytes !== old.size_bytes)) {

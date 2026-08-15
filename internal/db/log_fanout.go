@@ -27,10 +27,12 @@ type appLogFanout struct {
 	done           chan struct{}
 	stopOnce       sync.Once
 
-	mu          sync.Mutex
-	history     []appLogFanoutRecord
-	latest      int64
-	subscribers map[*appLogSubscriber]struct{}
+	mu           sync.Mutex
+	history      []appLogFanoutRecord
+	latest       int64
+	streamState  logstream.StreamState
+	stateVersion uint64
+	subscribers  map[*appLogSubscriber]struct{}
 }
 
 type appLogFanoutRecord struct {
@@ -39,7 +41,8 @@ type appLogFanoutRecord struct {
 }
 
 type appLogSubscriber struct {
-	wake chan struct{}
+	wake             chan struct{}
+	seenStateVersion uint64
 }
 
 func newAppLogFanout(read appLogWindowReader, metrics AppLogMetrics, offset int64, pollInterval time.Duration, retentionBytes int64) *appLogFanout {
@@ -67,13 +70,22 @@ func (f *appLogFanout) run() {
 	}
 	consecutiveFailures := 0
 	for {
-		err := f.poll()
+		hadRecords, err := f.poll()
 		delay := f.pollInterval
 		if err != nil {
+			if consecutiveFailures == 0 {
+				f.setStreamState(logstream.StreamDegraded)
+			}
 			consecutiveFailures++
 			delay = f.retryDelay(consecutiveFailures)
 		} else {
+			if consecutiveFailures > 0 {
+				f.setStreamState(logstream.StreamRecovered)
+			}
 			consecutiveFailures = 0
+			if hadRecords {
+				f.signalSubscribers()
+			}
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -130,7 +142,7 @@ func stopAppLogTimer(timer *time.Timer) {
 	}
 }
 
-func (f *appLogFanout) poll() error {
+func (f *appLogFanout) poll() (bool, error) {
 	f.mu.Lock()
 	offset := f.latest
 	f.mu.Unlock()
@@ -140,14 +152,14 @@ func (f *appLogFanout) poll() error {
 		if f.metrics != nil {
 			f.metrics.RecordAppLogFollowError()
 		}
-		return err
+		return false, err
 	}
 	if len(data) == 0 {
-		return nil
+		return false, nil
 	}
 	records := logstream.RecordsFromBytes(data, start)
 	if len(records) == 0 {
-		return nil
+		return false, nil
 	}
 
 	f.mu.Lock()
@@ -163,11 +175,8 @@ func (f *appLogFanout) poll() error {
 	}
 	f.latest = end
 	f.trimHistoryLocked()
-	for subscriber := range f.subscribers {
-		signalAppLogSubscriber(subscriber)
-	}
 	f.mu.Unlock()
-	return nil
+	return true, nil
 }
 
 func (f *appLogFanout) trimHistoryLocked() {
@@ -182,8 +191,16 @@ func (f *appLogFanout) trimHistoryLocked() {
 }
 
 func (f *appLogFanout) addSubscriber() *appLogSubscriber {
-	subscriber := &appLogSubscriber{wake: make(chan struct{}, 1)}
 	f.mu.Lock()
+	subscriber := &appLogSubscriber{
+		wake:             make(chan struct{}, 1),
+		seenStateVersion: f.stateVersion,
+	}
+	// A viewer joining during an incident needs the current degraded state;
+	// stale recovery events are intentionally not replayed to later viewers.
+	if f.streamState == logstream.StreamDegraded && subscriber.seenStateVersion > 0 {
+		subscriber.seenStateVersion--
+	}
 	f.subscribers[subscriber] = struct{}{}
 	if f.metrics != nil {
 		f.metrics.AddAppLogViewers(1)
@@ -209,6 +226,22 @@ func (f *appLogFanout) removeSubscriber(subscriber *appLogSubscriber) int {
 func (f *appLogFanout) recordsAfter(offset int64) []logstream.Record {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.recordsAfterLocked(offset)
+}
+
+func (f *appLogFanout) nextRecords(subscriber *appLogSubscriber, offset int64) []logstream.Record {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	records := f.recordsAfterLocked(offset)
+	if subscriber.seenStateVersion == f.stateVersion || f.streamState == "" {
+		return records
+	}
+	subscriber.seenStateVersion = f.stateVersion
+	return append([]logstream.Record{{StreamState: f.streamState}}, records...)
+}
+
+func (f *appLogFanout) recordsAfterLocked(offset int64) []logstream.Record {
 
 	first := 0
 	for first < len(f.history) && f.history[first].record.EndOffset <= offset {
@@ -225,6 +258,28 @@ func (f *appLogFanout) recordsAfter(offset int64) []logstream.Record {
 		records[0].GapBefore = true
 	}
 	return records
+}
+
+func (f *appLogFanout) setStreamState(state logstream.StreamState) {
+	f.mu.Lock()
+	if f.streamState == state {
+		f.mu.Unlock()
+		return
+	}
+	f.streamState = state
+	f.stateVersion++
+	for subscriber := range f.subscribers {
+		signalAppLogSubscriber(subscriber)
+	}
+	f.mu.Unlock()
+}
+
+func (f *appLogFanout) signalSubscribers() {
+	f.mu.Lock()
+	for subscriber := range f.subscribers {
+		signalAppLogSubscriber(subscriber)
+	}
+	f.mu.Unlock()
 }
 
 func (f *appLogFanout) signal() {
@@ -305,7 +360,7 @@ func (s *Store) followAppLogFanout(ctx context.Context, runID string, offset int
 
 func (f *appLogFanout) follow(ctx context.Context, subscriber *appLogSubscriber, offset int64, records chan<- logstream.Record) {
 	for {
-		available := f.recordsAfter(offset)
+		available := f.nextRecords(subscriber, offset)
 		if len(available) == 0 {
 			select {
 			case <-ctx.Done():
@@ -319,7 +374,9 @@ func (f *appLogFanout) follow(ctx context.Context, subscriber *appLogSubscriber,
 		for _, record := range available {
 			select {
 			case records <- record:
-				offset = record.EndOffset
+				if record.StreamState == "" {
+					offset = record.EndOffset
+				}
 			case <-ctx.Done():
 				return
 			case <-f.stopped:

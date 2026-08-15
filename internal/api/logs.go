@@ -472,6 +472,14 @@ func lastEventCursor(r *http.Request) (int64, bool) {
 }
 
 func writeLogEvent(w http.ResponseWriter, record logstream.Record) {
+	switch record.StreamState {
+	case logstream.StreamDegraded:
+		fmt.Fprint(w, "event: stream-degraded\ndata: Live output is temporarily delayed while retained log storage recovers\n\n")
+		return
+	case logstream.StreamRecovered:
+		fmt.Fprint(w, "event: stream-recovered\ndata: Live output delivery recovered\n\n")
+		return
+	}
 	if record.GapBefore {
 		fmt.Fprint(w, "event: retention-gap\ndata: Output before this point is no longer retained\n\n")
 	}

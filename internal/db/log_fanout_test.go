@@ -124,11 +124,29 @@ func TestAppLogFanoutRecordsPollErrors(t *testing.T) {
 		time.Hour,
 		AppLogRetentionBytes,
 	)
-	if err := fanout.poll(); err == nil {
+	if _, err := fanout.poll(); err == nil {
 		t.Fatal("poll succeeded, want injected error")
 	}
 	if metrics.followErrors != 1 {
 		t.Fatalf("follow errors = %d, want 1", metrics.followErrors)
+	}
+}
+
+func TestAppLogFanoutReplaysOnlyCurrentDegradationToNewSubscribers(t *testing.T) {
+	fanout := newAppLogFanout(nil, nil, 0, time.Hour, AppLogRetentionBytes)
+	fanout.setStreamState(logstream.StreamDegraded)
+	duringIncident := fanout.addSubscriber()
+	if got := fanout.nextRecords(duringIncident, 0); len(got) != 1 || got[0].StreamState != logstream.StreamDegraded {
+		t.Fatalf("subscriber joining incident = %+v, want current degraded state", got)
+	}
+
+	fanout.setStreamState(logstream.StreamRecovered)
+	if got := fanout.nextRecords(duringIncident, 0); len(got) != 1 || got[0].StreamState != logstream.StreamRecovered {
+		t.Fatalf("incident subscriber recovery = %+v, want recovered state", got)
+	}
+	afterIncident := fanout.addSubscriber()
+	if got := fanout.nextRecords(afterIncident, 0); len(got) != 0 {
+		t.Fatalf("subscriber after incident received stale state = %+v", got)
 	}
 }
 
@@ -183,7 +201,7 @@ func TestAppLogFanoutWakeInterruptsFailureBackoff(t *testing.T) {
 	subscriber := fanout.addSubscriber()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	output := make(chan logstream.Record, 1)
+	output := make(chan logstream.Record, 3)
 	go fanout.follow(ctx, subscriber, 0, output)
 	go fanout.run()
 	t.Cleanup(func() {
@@ -199,14 +217,33 @@ func TestAppLogFanoutWakeInterruptsFailureBackoff(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("fanout did not enter failure backoff")
 	}
-	fanout.signal()
 	select {
 	case got := <-output:
-		if got.Line != "recovered" || attempts.Load() != 2 {
-			t.Fatalf("recovery = %+v after %d attempts", got, attempts.Load())
+		if got.StreamState != logstream.StreamDegraded {
+			t.Fatalf("failure event = %+v, want degraded", got)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("wake did not interrupt follower backoff")
+		t.Fatal("subscriber was not told that live delivery degraded")
+	}
+	fanout.signal()
+	for _, want := range []struct {
+		state logstream.StreamState
+		line  string
+	}{
+		{state: logstream.StreamRecovered},
+		{line: "recovered"},
+	} {
+		select {
+		case got := <-output:
+			if got.StreamState != want.state || got.Line != want.line {
+				t.Fatalf("recovery sequence record = %+v, want state=%q line=%q", got, want.state, want.line)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("wake did not deliver the recovery sequence")
+		}
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("recovery attempts = %d, want 2", attempts.Load())
 	}
 	fanout.removeSubscriber(subscriber)
 }

@@ -509,6 +509,9 @@ func (r *AppLogReader) Follow(ctx context.Context, lines chan<- string) {
 	for {
 		select {
 		case record := <-records:
+			if record.StreamState != "" {
+				continue
+			}
 			select {
 			case lines <- record.Line:
 			case <-ctx.Done():

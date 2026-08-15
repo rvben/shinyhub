@@ -381,3 +381,41 @@ test('retention gaps are surfaced as source-specific operational events', async 
   assert.match(panel.querySelector('#detail-logs-body').textContent, /Replica #2 reconnected.*no longer retained/i);
   assert.match(panel.querySelector('#logs-announcement').textContent, /earlier output from replica 2.*no longer retained/i);
 });
+
+test('shared-log delivery degradation stays connected and reports recovery', async (t) => {
+  const source = {
+    source_id: 'run-2', run_id: 'run-2', replica: 2, status: 'running',
+    current: true, has_log: true,
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  let stream;
+  class FakeEventSource {
+    constructor() { this.listeners = new Map(); stream = this; }
+    addEventListener(type, listener) { this.listeners.set(type, listener); }
+    close() {}
+  }
+  const api = async () => ({ ok: true, json: async () => ({ sources: [source] }) });
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({
+    panel, app: { slug: 'demo' }, api, EventSourceClass: FakeEventSource, refreshEveryMs: 60_000,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await tick();
+  stream.onopen();
+  stream.listeners.get('stream-degraded')({ data: 'temporarily delayed' });
+  await tick();
+
+  assert.equal(panel.querySelector('.logs-status-text').textContent, 'Delayed · 1 live source waiting for log storage');
+  assert.ok(panel.querySelector('.logs-stream-status').classList.contains('is-degraded'));
+  assert.match(panel.querySelector('#detail-logs-body').textContent, /Replica #2 live output delayed/i);
+  assert.match(panel.querySelector('#logs-announcement').textContent, /temporarily delayed.*catch up automatically/i);
+
+  stream.listeners.get('stream-recovered')({ data: 'recovered' });
+  await tick();
+  assert.equal(panel.querySelector('.logs-status-text').textContent, 'Live · 1 connected source');
+  assert.ok(panel.querySelector('.logs-stream-status').classList.contains('is-connected'));
+  assert.match(panel.querySelector('#detail-logs-body').textContent, /Replica #2 live output delivery recovered/i);
+  assert.match(panel.querySelector('#logs-announcement').textContent, /recovered and is catching up/i);
+});

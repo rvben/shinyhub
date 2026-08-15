@@ -3940,6 +3940,8 @@ fieldset.settings-block { min-width: 0; }
 }
 .logs-stream-status.is-reconnecting { color: var(--yellow); }
 .logs-stream-status.is-reconnecting .logs-status-dot { background: var(--yellow); }
+.logs-stream-status.is-degraded { color: var(--yellow); }
+.logs-stream-status.is-degraded .logs-status-dot { background: var(--yellow); }
 .logs-jump { padding-block: 0.24rem; }
 .detail-logs-body {
   height: clamp(24rem, 60vh, 46rem);
