@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -184,6 +184,13 @@ test-ha:
 # it launches a billed Fargate task and then stops it.
 test-fargate-it:
 	GOWORK=off go test -tags=integration -run TestIntegration -count=1 -v -timeout 12m ./internal/fargate/...
+
+# test-provider-logs-it reuses any retained CloudWatch stream to prove that
+# adjacent API viewers share one real provider read and export bounded metrics.
+# It creates no AWS resources. Set the SHINYHUB_PROVIDER_LOG_IT_* variables
+# documented in internal/api/provider_logs_integration_test.go.
+test-provider-logs-it:
+	GOWORK=off go test -tags=integration -run TestIntegrationProviderLogsMultiViewer -count=1 -v -timeout 2m ./internal/api
 
 # test-provisioning runs the build-provisioning gate: a real `uv sync` through
 # the production Landlock-sandboxed build path, covering the corp shape that

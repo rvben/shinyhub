@@ -164,3 +164,20 @@ AWS credentials use the standard SDK chain (`AWS_PROFILE`, environment
 credentials, SSO, or an instance role). The principal needs permission to run,
 describe, list, tag, and stop tasks and to pass the task roles used by the task
 definition.
+
+After that lifecycle test, its stopped task's CloudWatch stream can verify the
+authenticated multi-viewer API path without launching another task:
+
+```bash
+AWS_PROFILE=shinyhub-it \
+SHINYHUB_PROVIDER_LOG_IT_REGION=eu-west-1 \
+SHINYHUB_PROVIDER_LOG_IT_GROUP=/shinyhub-it/provider-canary \
+SHINYHUB_PROVIDER_LOG_IT_STREAM=app/app/<task-id> \
+SHINYHUB_PROVIDER_LOG_IT_EXPECT=<expected-message> \
+make test-provider-logs-it
+```
+
+This opt-in canary makes exactly two `GetLogEvents` calls. It proves eight
+adjacent authenticated viewers share one provider request, a later request
+refreshes after the one-second sharing window, and Prometheus reports two
+`ok` reads plus seven `shared` reads. It creates no AWS resources.
