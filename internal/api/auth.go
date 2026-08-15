@@ -497,8 +497,8 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "password is managed by your identity provider")
 			return
 		}
-		if len(req.NewPassword) < 8 {
-			writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+		if err := auth.ValidateNewPassword(req.NewPassword); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if err := auth.VerifyPassword(current.PasswordHash, req.CurrentPassword); err != nil {
@@ -571,15 +571,15 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 
 type createTokenRequest struct {
 	Name string `json:"name"`
-	// ExpiresInDays sets an expiry that far in the future; 0/absent keeps the
-	// token non-expiring (the historical behavior).
+	// ExpiresInDays sets an expiry that far in the future. 0/absent uses the
+	// secure default; new non-expiring credentials are not supported.
 	ExpiresInDays int `json:"expires_in_days"`
 }
 
-// maxTokenExpiryDays caps requested expiries at ten years: far enough out to
-// be "effectively forever" for a real workflow, small enough to reject typos
-// like 99999999 that would silently mean never.
-const maxTokenExpiryDays = 3650
+const (
+	defaultTokenExpiryDays = 90
+	maxTokenExpiryDays     = 365
+)
 
 type createTokenResponse struct {
 	ID        int64     `json:"id"`
@@ -726,16 +726,16 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ExpiresInDays < 0 || req.ExpiresInDays > maxTokenExpiryDays {
+	if req.ExpiresInDays == 0 {
+		req.ExpiresInDays = defaultTokenExpiryDays
+	}
+	if req.ExpiresInDays < 1 || req.ExpiresInDays > maxTokenExpiryDays {
 		writeError(w, http.StatusBadRequest,
-			fmt.Sprintf("expires_in_days must be between 0 (never) and %d", maxTokenExpiryDays))
+			fmt.Sprintf("expires_in_days must be between 1 and %d", maxTokenExpiryDays))
 		return
 	}
-	var expiresAt *time.Time
-	if req.ExpiresInDays > 0 {
-		t := time.Now().UTC().Add(time.Duration(req.ExpiresInDays) * 24 * time.Hour)
-		expiresAt = &t
-	}
+	t := time.Now().UTC().Add(time.Duration(req.ExpiresInDays) * 24 * time.Hour)
+	expiresAt := &t
 
 	rawKey, keyHash, err := generateAPIKey()
 	if err != nil {
@@ -754,10 +754,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auditDetail := ""
-	if req.ExpiresInDays > 0 {
-		auditDetail = fmt.Sprintf("expires_in_days=%d", req.ExpiresInDays)
-	}
+	auditDetail := fmt.Sprintf("expires_in_days=%d", req.ExpiresInDays)
 	s.store.LogAuditEvent(db.AuditEventParams{
 		UserID:       &u.ID,
 		Action:       "create_token",

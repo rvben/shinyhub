@@ -57,6 +57,7 @@ func TestCSRF_POSTMatchingTokenAllowed(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "any"})
 	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "matching-token"})
 	req.Header.Set("X-CSRF-Token", "matching-token")
+	req.Header.Set("Referer", "https://hub.example.com/apps")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -96,9 +97,9 @@ func TestCSRF_POSTFromDashboardRefererAllowed(t *testing.T) {
 	}
 }
 
-func TestCSRF_POSTNoRefererAllowed(t *testing.T) {
-	// A missing Referer (privacy tooling, no-referrer policy) must not break the
-	// dashboard; the token check still applies.
+func TestCSRF_POSTNoRefererRejected(t *testing.T) {
+	// A malicious same-origin app can deliberately suppress Referer, so missing
+	// metadata must fail closed even when the readable double-submit token matches.
 	h := auth.CSRFMiddleware(nil)(okHandler())
 	req := httptest.NewRequest("POST", "/api/apps", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "any"})
@@ -106,8 +107,8 @@ func TestCSRF_POSTNoRefererAllowed(t *testing.T) {
 	req.Header.Set("X-CSRF-Token", "matching-token")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("want 200 for no-referer mutation, got %d", rr.Code)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("want 403 for no-referer mutation, got %d", rr.Code)
 	}
 }
 
@@ -158,6 +159,7 @@ func TestCSRF_POSTForwardAuthUserMatchingTokenAllowed(t *testing.T) {
 	req = req.WithContext(auth.WithUser(req.Context(), &auth.ContextUser{ID: 7, Username: "fa-user", Role: "developer"}))
 	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "matching-token"})
 	req.Header.Set("X-CSRF-Token", "matching-token")
+	req.Header.Set("Referer", "https://hub.example.com/apps")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {

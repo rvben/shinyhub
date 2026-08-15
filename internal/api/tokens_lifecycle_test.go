@@ -12,9 +12,8 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 )
 
-// TestCreateToken_WithExpiry pins the opt-in expiry: expires_in_days sets
-// expires_at about that far out; 0/absent keeps the token non-expiring;
-// negative or absurd values 400.
+// TestCreateToken_WithExpiry pins the bounded-expiry policy: expires_in_days
+// sets expires_at, absent uses 90 days, and out-of-range values are rejected.
 func TestCreateToken_WithExpiry(t *testing.T) {
 	srv, store := newTestServer(t)
 	_, tok := mkUser(t, store, "dev", "developer")
@@ -38,15 +37,19 @@ func TestCreateToken_WithExpiry(t *testing.T) {
 		t.Errorf("expires_at = %v, want ~%v", resp.ExpiresAt, want)
 	}
 
-	rec = do(t, srv, "POST", "/api/tokens", tok, []byte(`{"name":"forever"}`))
+	rec = do(t, srv, "POST", "/api/tokens", tok, []byte(`{"name":"default-expiry"}`))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create forever = %d", rec.Code)
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.ExpiresAt != nil {
-		t.Errorf("token without expiry should have null expires_at, got %v", resp.ExpiresAt)
+	if resp.ExpiresAt == nil {
+		t.Fatal("token without an explicit expiry must use the 90-day default")
+	}
+	want = time.Now().Add(90 * 24 * time.Hour)
+	if d := resp.ExpiresAt.Sub(want); d < -time.Hour || d > time.Hour {
+		t.Errorf("default expires_at = %v, want ~%v", resp.ExpiresAt, want)
 	}
 
 	for _, bad := range []string{`{"name":"x","expires_in_days":-1}`, `{"name":"x","expires_in_days":40000}`} {

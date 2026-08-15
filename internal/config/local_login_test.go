@@ -72,6 +72,7 @@ func TestActiveSSOLoginPaths(t *testing.T) {
 	t.Setenv("SHINYHUB_GITHUB_CLIENT_ID", "gh")
 	t.Setenv("SHINYHUB_GITHUB_CLIENT_SECRET", "gh-secret")
 	t.Setenv("SHINYHUB_FORWARD_AUTH_ENABLED", "true")
+	t.Setenv("SHINYHUB_FORWARD_AUTH_SHARED_SECRET", "pppppppppppppppppppppppppppppppp")
 	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -87,6 +88,7 @@ func TestLocalLogin_DisabledWithForwardAuthIsAllowed(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	t.Setenv("SHINYHUB_AUTH_LOCAL_LOGIN", "false")
 	t.Setenv("SHINYHUB_FORWARD_AUTH_ENABLED", "true")
+	t.Setenv("SHINYHUB_FORWARD_AUTH_SHARED_SECRET", "pppppppppppppppppppppppppppppppp")
 	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatalf("SSO-only with forward-auth should load: %v", err)

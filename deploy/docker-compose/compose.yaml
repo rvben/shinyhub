@@ -2,6 +2,7 @@
 #
 # Requirements:
 #   export SHINYHUB_AUTH_SECRET=$(openssl rand -hex 32)
+#   export POSTGRES_PASSWORD=$(openssl rand -hex 32) # when using the profile
 #
 #   Linux:
 #     export DOCKER_GID=$(stat -c %g /var/run/docker.sock)
@@ -82,6 +83,13 @@ services:
     network_mode: host
 
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
     depends_on:
       init-perms:
@@ -103,6 +111,8 @@ services:
 
     environment:
       SHINYHUB_AUTH_SECRET: "${SHINYHUB_AUTH_SECRET:?SHINYHUB_AUTH_SECRET is required}"
+      SHINYHUB_BASE_URL: "${SHINYHUB_BASE_URL:-}"
+      SHINYHUB_APP_ORIGIN: "${SHINYHUB_APP_ORIGIN:-}"
 
       # Storage: pass as env vars (single source of truth; shinyhub.yaml omits
       # these keys so the env override is always authoritative).
@@ -118,7 +128,7 @@ services:
 
       # Optional: point at the postgres service (requires the postgres profile).
       # When set, also set database.driver: postgres in shinyhub.yaml.
-      # SHINYHUB_DB_DSN: "postgres://shinyhub:shinyhub@127.0.0.1:5432/shinyhub?sslmode=disable"
+      # SHINYHUB_DB_DSN: "postgres://shinyhub:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@127.0.0.1:5432/shinyhub?sslmode=disable"
 
   # Postgres service (optional -- enable with: docker compose --profile postgres up -d)
   # Provides a HA-grade database backend on a single node.
@@ -131,13 +141,16 @@ services:
     # With host networking the container binds directly on the host loopback.
     # The shinyhub service reaches it at 127.0.0.1:5432 (no DNS name needed).
     network_mode: host
+    # Host networking is retained for compatibility, but Postgres must never
+    # listen on the host's public interfaces.
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
 
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
     environment:
       POSTGRES_USER: shinyhub
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-shinyhub}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required for the postgres profile}"
       POSTGRES_DB: shinyhub
 
     healthcheck:

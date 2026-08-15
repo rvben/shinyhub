@@ -1700,7 +1700,7 @@ func newTokensCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.name, "name", "", "Name for the token (required)")
 	_ = cmd.MarkFlagRequired("name")
 	cmd.Flags().StringVar(&f.format, "format", "text", "Output format: text or json")
-	cmd.Flags().IntVar(&f.expiresInDays, "expires-in-days", 0, "Days until the token expires (0 = never)")
+	cmd.Flags().IntVar(&f.expiresInDays, "expires-in-days", 90, "Days until the token expires (1-365; default 90)")
 	return cmd
 }
 
@@ -1729,18 +1729,15 @@ func runTokensCreate(cmd *cobra.Command, args []string, f *tokensCreateFlags) er
 		return err
 	}
 
-	if f.expiresInDays < 0 {
-		return validationErr("--expires-in-days must be 0 (never) or positive", "")
+	if f.expiresInDays < 1 || f.expiresInDays > 365 {
+		return validationErr("--expires-in-days must be between 1 and 365", "")
 	}
 
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	payload := map[string]any{"name": f.name}
-	if f.expiresInDays > 0 {
-		payload["expires_in_days"] = f.expiresInDays
-	}
+	payload := map[string]any{"name": f.name, "expires_in_days": f.expiresInDays}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err

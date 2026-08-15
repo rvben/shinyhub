@@ -857,8 +857,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const wantsPwChange = canSetPw &&
       (profileNewPw.value.length > 0 || profileCurrentPw.value.length > 0);
     if (wantsPwChange) {
-      if (profileNewPw.value.length < 8) {
-        setError(profileError, 'New password must be at least 8 characters');
+      if (profileNewPw.value.length < 15) {
+        setError(profileError, 'New password must be at least 15 characters');
         return;
       }
       body.current_password = profileCurrentPw.value;
@@ -1578,8 +1578,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const id = state.resetPwTargetId;
     if (!id) return;
     const password = resetPwInput.value;
-    if (password.length < 8) {
-      setError(resetPwError, 'Password must be at least 8 characters');
+    if (password.length < 15) {
+      setError(resetPwError, 'Password must be at least 15 characters');
       return;
     }
     let resp;
@@ -1631,8 +1631,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const username = newUserUsername.value.trim();
     const password = newUserPassword.value;
     const role     = newUserRole.value;
-    if (!username || password.length < 8) {
-      setError(newUserError, 'Username and 8+ char password are required');
+    if (!username || password.length < 15) {
+      setError(newUserError, 'Username and 15+ char password are required');
       return;
     }
     const submitBtn = newUserForm.querySelector('button[type="submit"]');
@@ -1803,7 +1803,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!name) { setError(newTokenError, 'A token name is required'); return; }
     const payload = { name };
     const expiryDays = parseInt(document.getElementById('new-token-expiry').value, 10);
-    if (Number.isFinite(expiryDays) && expiryDays > 0) payload.expires_in_days = expiryDays;
+    if (Number.isFinite(expiryDays)) payload.expires_in_days = expiryDays;
     let resp;
     try {
       resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify(payload) });

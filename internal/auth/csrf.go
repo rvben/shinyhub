@@ -59,10 +59,15 @@ func CSRFMiddleware(trustedNets []*net.IPNet) func(http.Handler) http.Handler {
 			// read the (JS-readable) csrf_token cookie and issue a same-origin
 			// mutating request. Reject any mutation whose Referer is under /app/.
 			// The dashboard's own fetches carry a dashboard-route Referer (never
-			// /app/); token-authed API clients bypass CSRF above; a missing Referer
-			// is allowed so privacy tooling / no-referrer policies don't break the
-			// dashboard. For hard isolation of untrusted apps, deploy them on a
-			// separate origin (server.app_origin).
+			// /app/); token-authed API clients bypass CSRF above. A missing Referer
+			// fails closed: otherwise app JavaScript can set referrerPolicy=no-referrer
+			// and bypass this path check after reading the double-submit token. For
+			// hard isolation of untrusted apps, deploy them on a separate origin
+			// (server.app_origin).
+			if r.Header.Get("Referer") == "" {
+				http.Error(w, "csrf: missing referer", http.StatusForbidden)
+				return
+			}
 			if refererUnderAppPath(r.Header.Get("Referer")) {
 				http.Error(w, "csrf: mutation originated from a proxied app", http.StatusForbidden)
 				return
@@ -84,9 +89,8 @@ func CSRFMiddleware(trustedNets []*net.IPNet) func(http.Handler) http.Handler {
 }
 
 // refererUnderAppPath reports whether the Referer URL's path is under /app/,
-// i.e. the request was initiated from a proxied app page. An empty or
-// unparseable Referer returns false (fail-open for missing headers; the
-// double-submit token check still applies).
+// i.e. the request was initiated from a proxied app page. Empty Referer values
+// are rejected by the middleware before this helper is called.
 func refererUnderAppPath(referer string) bool {
 	if referer == "" {
 		return false

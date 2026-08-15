@@ -364,8 +364,8 @@ func validateSetupUsername(username string) error {
 }
 
 func validateSetupPassword(password string) error {
-	if len(password) < 8 {
-		return fmt.Errorf("administrator password must be at least 8 characters")
+	if err := auth.ValidateNewPassword(password); err != nil {
+		return fmt.Errorf("administrator %w", err)
 	}
 	return nil
 }

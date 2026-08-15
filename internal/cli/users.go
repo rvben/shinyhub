@@ -163,7 +163,7 @@ func newUsersCreateCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 	}
 	cmd.Flags().StringVar(&username, "username", "", "Username (required)")
-	cmd.Flags().StringVar(&password, "password", "", "Password, at least 8 characters (required)")
+	cmd.Flags().StringVar(&password, "password", "", "Password, at least 15 characters (required)")
 	cmd.Flags().StringVar(&role, "role", "developer", "Role: viewer, developer, operator, or admin")
 	_ = cmd.MarkFlagRequired("username")
 	_ = cmd.MarkFlagRequired("password")
@@ -256,7 +256,7 @@ func newUsersResetPasswordCmd() *cobra.Command {
 		Short: "Reset a user's password",
 		Args:  cobra.ExactArgs(1),
 	}
-	cmd.Flags().StringVar(&password, "password", "", "New password, at least 8 characters (required)")
+	cmd.Flags().StringVar(&password, "password", "", "New password, at least 15 characters (required)")
 	_ = cmd.MarkFlagRequired("password")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		username := args[0]

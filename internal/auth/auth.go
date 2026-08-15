@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -58,6 +59,25 @@ func CanSlideSession(authTime time.Time) bool {
 // minimum for current hardware; existing lower-cost hashes still verify since
 // bcrypt self-describes its cost in the hash.
 const bcryptCost = 12
+
+// MinPasswordLength follows NIST SP 800-63B's minimum for single-factor
+// passwords. ShinyHub's local login currently has no second factor, so shorter
+// memorized secrets are rejected on creation and rotation. Existing hashes
+// remain valid so upgrades do not lock users out.
+const MinPasswordLength = 15
+
+// ValidateNewPassword applies the policy shared by setup, self-service changes,
+// and administrator-created/reset accounts. bcrypt accepts at most 72 bytes;
+// rejecting longer input avoids users believing ignored suffix bytes matter.
+func ValidateNewPassword(password string) error {
+	if utf8.RuneCountInString(password) < MinPasswordLength {
+		return fmt.Errorf("password must be at least %d characters", MinPasswordLength)
+	}
+	if len(password) > 72 {
+		return fmt.Errorf("password must be at most 72 bytes")
+	}
+	return nil
+}
 
 func HashPassword(password string) (string, error) {
 	b, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)

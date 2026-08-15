@@ -2467,6 +2467,7 @@ auth:
   secret: ` + strings.Repeat("a", 32) + `
   forward_auth:
     enabled: true
+    shared_secret: ` + strings.Repeat("p", 32) + `
 `
 	f := writeYAML(t, yaml)
 	cfg, err := config.Load(f)
@@ -2479,6 +2480,9 @@ auth:
 	if got, want := cfg.Auth.ForwardAuth.UserHeader, "X-Forwarded-User"; got != want {
 		t.Fatalf("UserHeader: got %q want %q", got, want)
 	}
+	if got, want := cfg.Auth.ForwardAuth.SecretHeader, "X-ShinyHub-Forward-Auth-Secret"; got != want {
+		t.Fatalf("SecretHeader: got %q want %q", got, want)
+	}
 	if got, want := cfg.Auth.ForwardAuth.DefaultRole, "developer"; got != want {
 		t.Fatalf("DefaultRole: got %q want %q", got, want)
 	}
@@ -2490,6 +2494,7 @@ auth:
   secret: ` + strings.Repeat("a", 32) + `
   forward_auth:
     enabled: true
+    shared_secret: ` + strings.Repeat("p", 32) + `
     default_role: banana
 `
 	f := writeYAML(t, yaml)
@@ -2501,6 +2506,7 @@ auth:
 func TestForwardAuth_EnvOverride(t *testing.T) {
 	t.Setenv("SHINYHUB_FORWARD_AUTH_ENABLED", "true")
 	t.Setenv("SHINYHUB_FORWARD_AUTH_USER_HEADER", "X-User")
+	t.Setenv("SHINYHUB_FORWARD_AUTH_SHARED_SECRET", strings.Repeat("p", 32))
 	t.Setenv("SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS", "admins,sre")
 	yaml := `
 auth:
@@ -2581,6 +2587,7 @@ func TestGroupRoleMappings_RejectsInvalidRole(t *testing.T) {
 func TestAdminGroupsAliasMergesIntoMappings(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	t.Setenv("SHINYHUB_FORWARD_AUTH_ENABLED", "true")
+	t.Setenv("SHINYHUB_FORWARD_AUTH_SHARED_SECRET", strings.Repeat("p", 32))
 	t.Setenv("SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS", "legacy-admins")
 	cfg, err := config.Load("")
 	if err != nil {

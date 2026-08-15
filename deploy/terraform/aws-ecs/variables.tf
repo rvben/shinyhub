@@ -39,29 +39,65 @@ variable "trusted_proxy_cidrs" {
 # --- Image ---
 
 variable "image" {
-  description = "Docker image for the ShinyHub control-plane container."
+  description = "Digest-pinned Docker image for the ShinyHub control-plane container."
   type        = string
-  default     = "ghcr.io/rvben/shinyhub:latest"
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.image))
+    error_message = "image must be pinned by sha256 digest."
+  }
 }
 
 variable "runner_image_python" {
-  description = "Fargate runner image for Python Shiny apps."
+  description = "Digest-pinned Fargate runner image for Python Shiny apps."
   type        = string
-  default     = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.runner_image_python))
+    error_message = "runner_image_python must be pinned by sha256 digest."
+  }
 }
 
 variable "runner_image_r" {
-  description = "Fargate runner image for R Shiny apps."
+  description = "Digest-pinned Fargate runner image for R Shiny apps."
   type        = string
-  default     = "rocker/r-base"
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.runner_image_r))
+    error_message = "runner_image_r must be pinned by sha256 digest."
+  }
 }
 
 # --- TLS ---
 
 variable "certificate_arn" {
-  description = "ACM certificate ARN. When set, the ALB adds an HTTPS listener on port 443. When empty, HTTP only (evaluation/internal use)."
+  description = "ACM certificate ARN for the required HTTPS listener. HTTP is redirect-only."
   type        = string
-  default     = ""
+
+  validation {
+    condition     = can(regex("^arn:[^:]+:acm:[^:]+:[0-9]{12}:certificate/", var.certificate_arn))
+    error_message = "certificate_arn must be a non-empty ACM certificate ARN."
+  }
+}
+
+variable "base_url" {
+  description = "Public HTTPS control-plane origin covered by certificate_arn (for example https://hub.example.com)."
+  type        = string
+
+  validation {
+    condition     = can(regex("^https://[^/]+$", var.base_url))
+    error_message = "base_url must be a bare HTTPS origin."
+  }
+}
+
+variable "app_origin" {
+  description = "Separate public HTTPS origin for proxied apps (for example https://apps.example.com). Route it to the same ALB."
+  type        = string
+
+  validation {
+    condition     = can(regex("^https://[^/]+$", var.app_origin))
+    error_message = "app_origin must be a bare HTTPS origin."
+  }
 }
 
 # --- ECS sizing ---
@@ -114,6 +150,29 @@ variable "db_username" {
   description = "PostgreSQL master username."
   type        = string
   default     = "shinyhub"
+}
+
+variable "db_multi_az" {
+  description = "Create a Multi-AZ RDS deployment. Keep enabled for production resilience."
+  type        = bool
+  default     = true
+}
+
+variable "db_backup_retention_days" {
+  description = "RDS automated backup retention in days."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.db_backup_retention_days >= 7 && var.db_backup_retention_days <= 35
+    error_message = "db_backup_retention_days must be between 7 and 35."
+  }
+}
+
+variable "db_deletion_protection" {
+  description = "Protect the RDS instance from accidental deletion."
+  type        = bool
+  default     = true
 }
 
 # --- Fargate secrets routing (optional) ---

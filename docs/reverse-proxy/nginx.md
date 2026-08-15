@@ -29,7 +29,7 @@ Browser --> nginx (TLS, auth_request) --> ShinyHub :8080
 ```nginx
 server {
     listen 443 ssl;
-    server_name shiny.example.com;
+    server_name shiny.example.com apps.example.com;
 
     # TLS configuration omitted for brevity.
 
@@ -51,6 +51,8 @@ server {
         proxy_set_header X-Forwarded-User   $auth_user;
         proxy_set_header X-Forwarded-Email  $auth_email;
         proxy_set_header X-Forwarded-Groups $auth_groups;
+        # Load this value from a root-readable secrets include; never commit it.
+        proxy_set_header X-ShinyHub-Forward-Auth-Secret "replace-with-the-same-random-secret-as-shinyhub";
 
         # Standard proxy headers.
         proxy_set_header Host              $host;
@@ -87,6 +89,7 @@ oauth2-proxy at `http://oauth2-proxy:4180/oauth2/auth`).
 | `X-Forwarded-User` | `user_header` | Username (required). Default header name. |
 | `X-Forwarded-Email` | `email_header` | Email address (optional). Accepted by config but not yet used by ShinyHub (reserved). |
 | `X-Forwarded-Groups` | `groups_header` | Comma-separated group list. When `groups_header` is configured the proxy MUST send this header on every request (empty when the user has no groups); the listed groups drive role promotion AND revocation. An absent header is treated as no groups and revokes any group-derived role, so a dropped header demotes the user to the default role. |
+| `X-ShinyHub-Forward-Auth-Secret` | `secret_header` | Required proxy credential. Generate at least 32 random characters and configure the same value as `shared_secret`. ShinyHub strips it before proxying. |
 
 ## ShinyHub configuration
 
@@ -95,6 +98,8 @@ Add `auth.forward_auth` to your `shinyhub.yaml` and add nginx's address to
 
 ```yaml
 server:
+  base_url: https://shiny.example.com
+  app_origin: https://apps.example.com
   trusted_proxies:
     - 127.0.0.0/8   # loopback (nginx and ShinyHub on the same host)
     - ::1/128
@@ -103,6 +108,7 @@ auth:
   secret: "..."     # your existing secret
   forward_auth:
     enabled: true
+    shared_secret: "replace-with-a-random-32+-character-secret"
     user_header: X-Forwarded-User     # must match proxy_set_header names above
     email_header: X-Forwarded-Email
     groups_header: X-Forwarded-Groups  # when set, always emit - empty value for users with no groups
@@ -124,6 +130,7 @@ Or with environment variables:
 
 ```
 SHINYHUB_FORWARD_AUTH_ENABLED=true
+SHINYHUB_FORWARD_AUTH_SHARED_SECRET=replace-with-the-same-random-32+-character-secret
 SHINYHUB_FORWARD_AUTH_USER_HEADER=X-Forwarded-User
 SHINYHUB_FORWARD_AUTH_EMAIL_HEADER=X-Forwarded-Email
 SHINYHUB_FORWARD_AUTH_GROUPS_HEADER=X-Forwarded-Groups

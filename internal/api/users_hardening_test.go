@@ -39,7 +39,7 @@ func TestCreateUser_RejectsPasswordUnder8Chars(t *testing.T) {
 	// A compliant password still creates the user (guard against over-rejection).
 	rec = httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, adminReq(t, http.MethodPost, "/api/users",
-		map[string]string{"username": "carol", "password": "longenough", "role": "developer"}, token))
+		map[string]string{"username": "carol", "password": "long-enough-password", "role": "developer"}, token))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("valid password: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}

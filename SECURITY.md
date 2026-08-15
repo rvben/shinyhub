@@ -46,6 +46,13 @@ Recommended hardening for native mode:
 - Restrict who can obtain a deploy token or an interactive `developer`/
   `operator`/`admin` account.
 
+Native filesystem isolation defaults to `standard` on Linux: Landlock makes the
+host filesystem read-only to app processes except for their own bundle/data and
+private scratch directories, and enables `NO_NEW_PRIVS`. This reduces accidental
+or opportunistic writes but does not change the trusted-code model: apps retain
+the service account's readable data and network access. Set
+`runtime.native.isolation: off` only for a reviewed compatibility need.
+
 ### Docker runtime for lower-trust scenarios
 
 If app authors are **not** fully trusted operators, use `runtime.mode: docker`.
@@ -388,12 +395,14 @@ need a global ceiling on those too.
 
 ## Audit-trail integrity and alerting
 
-Every mutating action is recorded in `audit_events`. The write is best-effort by
-design: `LogAuditEvent` never fails the caller, so a database or disk problem
-cannot block a legitimate operation. That means a persistent write failure
-(disk full, DB busy) can silently drop audit rows while the mutations themselves
-succeed. This is surfaced two ways, and a production deployment should alert on
-at least one:
+Every mutating action is recorded in `audit_events` and emitted as a structured
+`audit_event` log record. Ship stdout to an append-only off-host destination
+(CloudWatch, a SIEM, or equivalent); the Terraform deployment already sends
+control-plane logs to CloudWatch. The database write is best-effort by design:
+`LogAuditEvent` never fails the caller, so a database or disk problem cannot
+block a legitimate operation. Every structured record carries `persisted=true`
+or `false`, preserving the attempted event in the external stream even when the
+database write fails. A production deployment should also alert on at least one:
 
 - **Always on:** each dropped audit write emits an `audit_log_write_failed`
   error log line (action + error), independent of any metrics configuration.
@@ -405,7 +414,7 @@ Deleting a user sets `audit_events.user_id` to NULL (`ON DELETE SET NULL`) rathe
 than removing the rows, so the accountability trail survives account deletion
 (anonymized, not lost) - a deliberate privacy-preserving control.
 
-## Hosting apps on the same origin as the dashboard
+## Isolating apps from the dashboard origin
 
 By default ShinyHub serves proxied apps same-origin with the dashboard, under
 `/app/<slug>/`. This is convenient but means an app's own JavaScript shares the
@@ -420,17 +429,23 @@ operators (for example, developer self-service on a shared instance).
 Two defenses apply:
 
 - **Built in (defense in depth):** mutating `/api/` requests whose `Referer` is
-  under `/app/` are rejected, which blocks the straightforward attack from an app
-  page. This does not stop an app that deliberately strips its referrer, so it is
-  a mitigation, not a complete boundary.
-- **Recommended for untrusted multi-tenant hosting (complete fix):** serve apps
-  from a **separate origin** (a distinct hostname or wildcard subdomain, e.g.
-  `*.apps.example.com`) from the dashboard/API origin. The same-origin policy then
-  isolates app JavaScript from the control-plane session entirely: the host-only
-  session and CSRF cookies are never sent to the app origin, and `/api/` is not
-  reachable from it. Route the two origins to ShinyHub with your reverse proxy and
-  keep session/CSRF cookies host-scoped (the default; do not set a shared cookie
-  `Domain`).
+  under `/app/` or missing entirely are rejected, which blocks both the
+  straightforward attack and a `no-referrer` bypass. This remains defense in
+  depth rather than a replacement for a separate browser origin.
+- **Recommended for untrusted multi-tenant hosting (complete fix):** configure
+  `server.app_origin` (or `SHINYHUB_APP_ORIGIN`) as a distinct HTTPS hostname,
+  for example `https://apps.example.com`, and route it to the same ShinyHub
+  backend as `server.base_url`. ShinyHub then exposes only `/app/*` and health
+  probes on that virtual host; `/api`, `/static`, `/internal`, and the dashboard
+  return 404. After access control succeeds on the control origin, a hashed,
+  single-use, app-bound code valid for 60 seconds establishes a host-only
+  session on the app origin and is immediately removed from the URL. The
+  control-plane session and CSRF cookies are never shared with app JavaScript.
+
+`server.app_origin` must be a bare HTTPS origin and must differ from
+`server.base_url`. Do not configure a shared cookie `Domain`. Existing installs
+that leave it unset retain same-origin behavior for compatibility and should be
+treated as trusted-app deployments.
 
 ## Backup, restore, and recovery drill
 

@@ -19,15 +19,15 @@ func writeIsolationCfg(t *testing.T, body string) string {
 	return p
 }
 
-// Isolation defaults to "off" (the historical native behavior) when unset.
-func TestRuntimeNativeIsolation_DefaultsOff(t *testing.T) {
+// Isolation defaults to the Linux Landlock-backed standard policy when unset.
+func TestRuntimeNativeIsolation_DefaultsStandard(t *testing.T) {
 	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Runtime.Native.Isolation != "off" {
-		t.Errorf("default isolation = %q, want off", cfg.Runtime.Native.Isolation)
+	if cfg.Runtime.Native.Isolation != "standard" {
+		t.Errorf("default isolation = %q, want standard", cfg.Runtime.Native.Isolation)
 	}
 }
 

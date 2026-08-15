@@ -14,6 +14,9 @@ server:
   host: 0.0.0.0                       # bind address
   port: 8080                          # HTTP port
   base_url: https://shiny.example.com # external URL (used in OAuth callbacks)  # SHINYHUB_BASE_URL
+  # Strongly recommended when app authors are less trusted than operators.
+  # Route this separate HTTPS hostname to the same ShinyHub backend.
+  # app_origin: https://apps.example.com # isolated proxied-app origin  # SHINYHUB_APP_ORIGIN
   trusted_proxies:                    # CIDRs that may set X-Forwarded-For
     - 127.0.0.0/8                     # default: loopback only
     - ::1/128
@@ -68,6 +71,8 @@ auth:
   # forward_auth:
   #   enabled: true                              # SHINYHUB_FORWARD_AUTH_ENABLED
   #   user_header: X-Forwarded-User              # SHINYHUB_FORWARD_AUTH_USER_HEADER   (default: X-Forwarded-User)
+  #   shared_secret: "generate-with-openssl-rand-hex-32" # SHINYHUB_FORWARD_AUTH_SHARED_SECRET (required, 32+ characters)
+  #   secret_header: X-ShinyHub-Forward-Auth-Secret       # SHINYHUB_FORWARD_AUTH_SECRET_HEADER (default shown)
   #   email_header: X-Forwarded-Email            # SHINYHUB_FORWARD_AUTH_EMAIL_HEADER  (reserved; not yet used)
   #   groups_header: X-Forwarded-Groups          # SHINYHUB_FORWARD_AUTH_GROUPS_HEADER
   #   admin_groups: ["shinyhub-admins"]          # SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS  (deprecated alias for auth.group_role_mappings role: admin)

@@ -13,14 +13,18 @@ database:
   dsn: /data/db/shinyhub.db    # SHINYHUB_DB_DSN
 
 server:
-  host: 0.0.0.0                # binds directly on the host interface (host networking)
-  port: 8080                   # reachable at http://<host-ip>:8080
+  host: 127.0.0.1              # reverse proxy only; do not expose plaintext directly
+  port: 8080                   # reachable locally at http://127.0.0.1:8080
   # No `ports:` mapping needed with network_mode: host -- the server binds
   # the host port directly from this config.
   trusted_proxies:             # CIDRs that may set X-Forwarded-For
     - 127.0.0.0/8              # loopback only (no upstream proxy in this topology)
     - ::1/128
   shutdown_apps: adopt         # leave app containers running across restarts
+  # Production deployments that run untrusted app code should set both values
+  # (or the corresponding env vars) and route both HTTPS names to this backend.
+  # base_url: https://hub.example.com
+  # app_origin: https://apps.example.com
 
 auth:
   # REQUIRED. Provided via SHINYHUB_AUTH_SECRET env var in compose.yaml.

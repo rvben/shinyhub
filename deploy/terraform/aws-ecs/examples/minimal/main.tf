@@ -16,12 +16,19 @@ module "shinyhub" {
   # Secrets: ARN of a pre-existing Secrets Manager secret holding the auth secret.
   auth_secret_arn = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:shinyhub/auth-secret-AbCdEf"
 
+  # Resolve and review real multi-architecture digests before deployment.
+  image               = "ghcr.io/rvben/shinyhub@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  runner_image_python = "ghcr.io/astral-sh/uv@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  runner_image_r      = "rocker/r-base@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
   # Trusted proxy CIDRs: ALB subnet CIDRs so the server sees real client IPs
   # rather than ALB node IPs in rate-limiting and audit logs.
   trusted_proxy_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
 
-  # Optional: add an HTTPS listener when you have an ACM certificate.
-  # certificate_arn = "arn:aws:acm:eu-west-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  # HTTPS is mandatory; HTTP redirects to this listener.
+  certificate_arn = "arn:aws:acm:eu-west-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  base_url        = "https://hub.example.com"
+  app_origin      = "https://apps.example.com"
 
   name_prefix = "shinyhub-prod"
   tags = {

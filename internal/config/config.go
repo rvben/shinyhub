@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -389,9 +390,13 @@ type DatabaseConfig struct {
 }
 
 type ServerConfig struct {
-	Host           string   `yaml:"host"`
-	Port           int      `yaml:"port"`
-	BaseURL        string   `yaml:"base_url"`
+	Host    string `yaml:"host"`
+	Port    int    `yaml:"port"`
+	BaseURL string `yaml:"base_url"`
+	// AppOrigin is an optional, dedicated HTTPS origin used exclusively for
+	// proxied app traffic. Keeping apps on a different origin prevents app
+	// JavaScript from reading control-plane cookies or calling /api endpoints.
+	AppOrigin      string   `yaml:"app_origin"`
 	TrustedProxies []string `yaml:"trusted_proxies"`
 
 	// ShutdownApps controls what happens to running app subprocesses /
@@ -601,6 +606,11 @@ func (c *Config) HasSSOLoginPath() bool {
 type ForwardAuthConfig struct {
 	Enabled    bool   `yaml:"enabled"`
 	UserHeader string `yaml:"user_header"`
+	// SharedSecret authenticates the proxy itself in addition to its source IP.
+	// This prevents a locally run app from forging identity headers when it can
+	// reach a listener whose loopback/network CIDR is trusted.
+	SharedSecret string `yaml:"shared_secret"`
+	SecretHeader string `yaml:"secret_header"`
 	// EmailHeader is the proxy header carrying the user's email (e.g. Authelia's
 	// Remote-Email). When set, the middleware captures it request-scoped and
 	// forwards it to apps as X-Shinyhub-Email and the identity token's email
@@ -1309,6 +1319,9 @@ func loadRaw(path string) (*Config, error) {
 	if cfg.Server.Port < 0 || cfg.Server.Port > 65535 {
 		return nil, fmt.Errorf("server.port must be between 0 and 65535, got %d", cfg.Server.Port)
 	}
+	if err := validateAppOrigin(&cfg.Server); err != nil {
+		return nil, err
+	}
 
 	// Parse trusted proxy CIDRs. Default to loopback-only when none are configured,
 	// so XFF is trusted only from local reverse proxies by default.
@@ -1427,6 +1440,22 @@ func loadRaw(path string) (*Config, error) {
 	if cfg.Auth.ForwardAuth.Enabled {
 		if cfg.Auth.ForwardAuth.UserHeader == "" {
 			cfg.Auth.ForwardAuth.UserHeader = "X-Forwarded-User"
+		}
+		if cfg.Auth.ForwardAuth.SecretHeader == "" {
+			cfg.Auth.ForwardAuth.SecretHeader = "X-ShinyHub-Forward-Auth-Secret"
+		}
+		if len(cfg.Auth.ForwardAuth.SharedSecret) < 32 || strings.HasPrefix(cfg.Auth.ForwardAuth.SharedSecret, "replace-with-") || strings.HasPrefix(cfg.Auth.ForwardAuth.SharedSecret, "generate-with-") {
+			return nil, fmt.Errorf("auth.forward_auth.shared_secret must be random and at least 32 characters when forward-auth is enabled")
+		}
+		for _, identityHeader := range []string{
+			cfg.Auth.ForwardAuth.UserHeader,
+			cfg.Auth.ForwardAuth.EmailHeader,
+			cfg.Auth.ForwardAuth.NameHeader,
+			cfg.Auth.ForwardAuth.GroupsHeader,
+		} {
+			if identityHeader != "" && strings.EqualFold(cfg.Auth.ForwardAuth.SecretHeader, identityHeader) {
+				return nil, fmt.Errorf("auth.forward_auth.secret_header must be different from every identity header")
+			}
 		}
 		if cfg.Auth.ForwardAuth.DefaultRole == "" {
 			cfg.Auth.ForwardAuth.DefaultRole = "developer"
@@ -1652,6 +1681,29 @@ func normalizeMetrics(m *MetricsConfig) error {
 	}
 	if _, _, err := net.SplitHostPort(m.Addr); err != nil {
 		return fmt.Errorf("metrics.addr: %q is not a valid host:port address: %w", m.Addr, err)
+	}
+	return nil
+}
+
+// validateAppOrigin requires a clean, dedicated HTTPS origin. A path, query,
+// fragment, userinfo, or shared control-plane host would make the routing
+// boundary ambiguous and could put control-plane cookies back in reach of app
+// JavaScript.
+func validateAppOrigin(server *ServerConfig) error {
+	server.AppOrigin = strings.TrimRight(strings.TrimSpace(server.AppOrigin), "/")
+	if server.AppOrigin == "" {
+		return nil
+	}
+	u, err := url.Parse(server.AppOrigin)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("server.app_origin must be a bare HTTPS origin such as https://apps.example.com")
+	}
+	base, baseErr := url.Parse(strings.TrimRight(strings.TrimSpace(server.BaseURL), "/"))
+	if baseErr != nil || base.Scheme != "https" || base.Host == "" {
+		return fmt.Errorf("server.base_url must be an absolute HTTPS URL when server.app_origin is set")
+	}
+	if strings.EqualFold(base.Host, u.Host) {
+		return fmt.Errorf("server.app_origin must use a different host from server.base_url")
 	}
 	return nil
 }
@@ -1964,7 +2016,11 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	if r.Mode != "" {
 		rc.Mode = r.Mode
 	}
-	isolation, err := sandbox.ParseLevel(r.Native.Isolation)
+	nativeIsolation := r.Native.Isolation
+	if nativeIsolation == "" {
+		nativeIsolation = string(sandbox.LevelStandard)
+	}
+	isolation, err := sandbox.ParseLevel(nativeIsolation)
 	if err != nil {
 		return RuntimeConfig{}, fmt.Errorf("runtime.native.isolation: %w", err)
 	}
@@ -2140,6 +2196,12 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_USER_HEADER"); v != "" {
 		cfg.Auth.ForwardAuth.UserHeader = v
 	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_SHARED_SECRET"); v != "" {
+		cfg.Auth.ForwardAuth.SharedSecret = v
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_SECRET_HEADER"); v != "" {
+		cfg.Auth.ForwardAuth.SecretHeader = v
+	}
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_EMAIL_HEADER"); v != "" {
 		cfg.Auth.ForwardAuth.EmailHeader = v
 	}
@@ -2259,6 +2321,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
+	}
+	if v := os.Getenv("SHINYHUB_APP_ORIGIN"); v != "" {
+		cfg.Server.AppOrigin = v
 	}
 	if v := os.Getenv("SHINYHUB_SERVER_HOST"); v != "" {
 		cfg.Server.Host = v

@@ -114,8 +114,8 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
-	if len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+	if err := auth.ValidateNewPassword(req.Password); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	role := req.Role
@@ -270,8 +270,8 @@ func (s *Server) handlePatchUserPassword(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	if len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+	if err := auth.ValidateNewPassword(req.Password); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

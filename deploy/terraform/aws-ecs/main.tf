@@ -7,6 +7,10 @@ locals {
   trusted_proxies = join(",", var.trusted_proxy_cidrs)
 }
 
+data "aws_vpc" "this" {
+  id = var.vpc_id
+}
+
 # ---------------------------------------------------------------------------
 # Random password for the RDS master user
 # ---------------------------------------------------------------------------
@@ -23,7 +27,7 @@ resource "random_password" "db" {
 resource "aws_secretsmanager_secret" "db_password" {
   name                    = "${local.name}/db-password"
   description             = "ShinyHub RDS master password"
-  recovery_window_in_days = 0
+  recovery_window_in_days = 7
   tags                    = local.tags
 }
 
@@ -74,7 +78,6 @@ resource "aws_security_group_rule" "alb_ingress_http" {
 }
 
 resource "aws_security_group_rule" "alb_ingress_https" {
-  count             = var.certificate_arn != "" ? 1 : 0
   security_group_id = aws_security_group.alb.id
   type              = "ingress"
   description       = "HTTPS from internet"
@@ -114,15 +117,55 @@ resource "aws_security_group_rule" "cp_ingress_alb" {
   source_security_group_id = aws_security_group.alb.id
 }
 
-# CP egress: all outbound (AWS APIs, ECR, Secrets Manager, bundle fetch).
-resource "aws_security_group_rule" "cp_egress_all" {
+# CP egress to HTTPS services (AWS APIs, ECR, Secrets Manager, and the ALB).
+resource "aws_security_group_rule" "cp_egress_https" {
   security_group_id = aws_security_group.cp.id
   type              = "egress"
-  description       = "All outbound (AWS APIs, ECR, bundle fetch)"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
+  description       = "HTTPS outbound"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
   cidr_blocks       = ["0.0.0.0/0"]
+}
+
+resource "aws_security_group_rule" "cp_egress_dns_udp" {
+  security_group_id = aws_security_group.cp.id
+  type              = "egress"
+  description       = "DNS within VPC"
+  from_port         = 53
+  to_port           = 53
+  protocol          = "udp"
+  cidr_blocks       = [data.aws_vpc.this.cidr_block]
+}
+
+resource "aws_security_group_rule" "cp_egress_dns_tcp" {
+  security_group_id = aws_security_group.cp.id
+  type              = "egress"
+  description       = "DNS fallback within VPC"
+  from_port         = 53
+  to_port           = 53
+  protocol          = "tcp"
+  cidr_blocks       = [data.aws_vpc.this.cidr_block]
+}
+
+resource "aws_security_group_rule" "cp_egress_rds" {
+  security_group_id        = aws_security_group.cp.id
+  type                     = "egress"
+  description              = "Postgres"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.rds.id
+}
+
+resource "aws_security_group_rule" "cp_egress_app" {
+  security_group_id        = aws_security_group.cp.id
+  type                     = "egress"
+  description              = "Proxy to dynamically allocated app ports"
+  from_port                = 0
+  to_port                  = 65535
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.app.id
 }
 
 # App-task security group.
@@ -144,26 +187,36 @@ resource "aws_security_group_rule" "app_ingress_cp" {
   source_security_group_id = aws_security_group.cp.id
 }
 
-# App self-ingress for inter-task traffic.
-resource "aws_security_group_rule" "app_ingress_self" {
-  security_group_id = aws_security_group.app.id
-  type              = "ingress"
-  description       = "Self"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  self              = true
-}
-
-# App egress: all outbound.
-resource "aws_security_group_rule" "app_egress_all" {
+# App egress defaults to HTTPS plus VPC DNS. Workloads that require a database
+# or another private service should receive a narrowly scoped additional rule.
+resource "aws_security_group_rule" "app_egress_https" {
   security_group_id = aws_security_group.app.id
   type              = "egress"
-  description       = "All outbound"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
+  description       = "HTTPS outbound"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
   cidr_blocks       = ["0.0.0.0/0"]
+}
+
+resource "aws_security_group_rule" "app_egress_dns_udp" {
+  security_group_id = aws_security_group.app.id
+  type              = "egress"
+  description       = "DNS within VPC"
+  from_port         = 53
+  to_port           = 53
+  protocol          = "udp"
+  cidr_blocks       = [data.aws_vpc.this.cidr_block]
+}
+
+resource "aws_security_group_rule" "app_egress_dns_tcp" {
+  security_group_id = aws_security_group.app.id
+  type              = "egress"
+  description       = "DNS fallback within VPC"
+  from_port         = 53
+  to_port           = 53
+  protocol          = "tcp"
+  cidr_blocks       = [data.aws_vpc.this.cidr_block]
 }
 
 # RDS security group: accepts only from the control-plane SG on 5432.
@@ -195,26 +248,34 @@ resource "aws_db_subnet_group" "this" {
 }
 
 resource "aws_db_instance" "this" {
-  identifier           = local.name
-  engine               = "postgres"
-  engine_version       = "16"
-  instance_class       = var.db_instance_class
-  allocated_storage    = 20
-  storage_type         = "gp3"
-  storage_encrypted    = true
-  db_name              = var.db_name
-  username             = var.db_username
-  password             = random_password.db.result
-  db_subnet_group_name = aws_db_subnet_group.this.name
+  identifier                          = local.name
+  engine                              = "postgres"
+  engine_version                      = "16"
+  instance_class                      = var.db_instance_class
+  allocated_storage                   = 20
+  storage_type                        = "gp3"
+  storage_encrypted                   = true
+  iam_database_authentication_enabled = true
+  db_name                             = var.db_name
+  username                            = var.db_username
+  password                            = random_password.db.result
+  db_subnet_group_name                = aws_db_subnet_group.this.name
 
   vpc_security_group_ids = [aws_security_group.rds.id]
 
-  multi_az            = false
-  publicly_accessible = false
-  skip_final_snapshot = true
-  deletion_protection = false
+  multi_az                  = var.db_multi_az
+  publicly_accessible       = false
+  backup_retention_period   = var.db_backup_retention_days
+  copy_tags_to_snapshot     = true
+  skip_final_snapshot       = false
+  final_snapshot_identifier = "${local.name}-final-${random_id.final_snapshot.hex}"
+  deletion_protection       = var.db_deletion_protection
 
   tags = local.tags
+}
+
+resource "random_id" "final_snapshot" {
+  byte_length = 4
 }
 
 # ---------------------------------------------------------------------------
@@ -474,7 +535,7 @@ resource "aws_iam_role" "app_task" {
 resource "aws_secretsmanager_secret" "db_dsn" {
   name                    = "${local.name}/db-dsn"
   description             = "ShinyHub SHINYHUB_DB_DSN (full Postgres connection string)"
-  recovery_window_in_days = 0
+  recovery_window_in_days = 7
   tags                    = local.tags
 }
 
@@ -544,6 +605,11 @@ resource "aws_ecs_task_definition" "cp" {
       # (internal/config applyEnv SHINYHUB_TRUSTED_PROXIES)
       { name = "SHINYHUB_TRUSTED_PROXIES", value = local.trusted_proxies },
 
+      # Split the trusted control plane and untrusted app JavaScript across
+      # distinct browser origins. Both DNS names route to this ALB.
+      { name = "SHINYHUB_BASE_URL", value = var.base_url },
+      { name = "SHINYHUB_APP_ORIGIN", value = var.app_origin },
+
       # --- FargateRuntimeConfig required fields ---
       # (internal/config validateFargate enforces these)
 
@@ -565,9 +631,9 @@ resource "aws_ecs_task_definition" "cp" {
       { name = "SHINYHUB_RUNTIME_FARGATE_TASK_MEMORY_MB", value = tostring(var.app_memory_mb) },
 
       # runtime.fargate.control_plane_url -> SHINYHUB_RUNTIME_FARGATE_CONTROL_PLANE_URL
-      # Runners fetch their bundle from this URL over the VPC-internal network.
-      # The ALB DNS name is reachable from inside the VPC.
-      { name = "SHINYHUB_RUNTIME_FARGATE_CONTROL_PLANE_URL", value = "http://${aws_lb.this.dns_name}" },
+      # Runners fetch bundles over authenticated HTTPS. The base_url hostname
+      # must resolve to this ALB from the private subnets.
+      { name = "SHINYHUB_RUNTIME_FARGATE_CONTROL_PLANE_URL", value = var.base_url },
 
       # --- Runtime fields supplied via ARNs passed as env (CP env protocol) ---
       # docs/fargate-runner-contract.md: the module supplies these ARNs as CP env
@@ -611,12 +677,13 @@ resource "aws_ecs_task_definition" "cp" {
 # ---------------------------------------------------------------------------
 
 resource "aws_lb" "this" {
-  name               = local.name
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = var.public_subnet_ids
-  tags               = local.tags
+  name                       = local.name
+  internal                   = false
+  load_balancer_type         = "application"
+  security_groups            = [aws_security_group.alb.id]
+  subnets                    = var.public_subnet_ids
+  drop_invalid_header_fields = true
+  tags                       = local.tags
 }
 
 resource "aws_lb_target_group" "cp" {
@@ -644,30 +711,17 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
   tags              = local.tags
 
-  # When certificate_arn is set, redirect HTTP to HTTPS; otherwise forward.
-  dynamic "default_action" {
-    for_each = var.certificate_arn != "" ? [1] : []
-    content {
-      type = "redirect"
-      redirect {
-        port        = "443"
-        protocol    = "HTTPS"
-        status_code = "HTTP_301"
-      }
-    }
-  }
-
-  dynamic "default_action" {
-    for_each = var.certificate_arn == "" ? [1] : []
-    content {
-      type             = "forward"
-      target_group_arn = aws_lb_target_group.cp.arn
+  default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
     }
   }
 }
 
 resource "aws_lb_listener" "https" {
-  count             = var.certificate_arn != "" ? 1 : 0
   load_balancer_arn = aws_lb.this.arn
   port              = 443
   protocol          = "HTTPS"

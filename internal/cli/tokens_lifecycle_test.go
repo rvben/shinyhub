@@ -32,10 +32,10 @@ func TestTokensCreate_SendsExpiry(t *testing.T) {
 	}
 }
 
-func TestTokensCreate_NoExpiryOmitsField(t *testing.T) {
+func TestTokensCreate_DefaultExpiryIsNinetyDays(t *testing.T) {
 	_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"id":1,"name":"ci","token":"shk_x","created_at":"2026-01-01T00:00:00Z","expires_at":null}`))
+		_, _ = w.Write([]byte(`{"id":1,"name":"ci","token":"shk_x","created_at":"2026-01-01T00:00:00Z","expires_at":"2026-04-01T00:00:00Z"}`))
 	})
 	cmd := newTokensCmd()
 	var o, e bytes.Buffer
@@ -49,8 +49,8 @@ func TestTokensCreate_NoExpiryOmitsField(t *testing.T) {
 	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
 		t.Fatal(err)
 	}
-	if _, present := body["expires_in_days"]; present {
-		t.Errorf("expires_in_days should be omitted when not set, body=%v", body)
+	if days, ok := body["expires_in_days"].(float64); !ok || days != 90 {
+		t.Errorf("expires_in_days = %v, want default 90", body["expires_in_days"])
 	}
 }
 

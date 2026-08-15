@@ -2318,6 +2318,44 @@ func (s *Store) ConsumeOAuthState(state string) error {
 	return nil
 }
 
+// --- App-origin launch codes ---
+
+// CreateAppLaunchCode persists only the SHA-256 hash of a short-lived launch
+// capability. The raw code exists only in the redirect URL and is never stored.
+func (s *Store) CreateAppLaunchCode(codeHash string, userID int64, appSlug string) error {
+	// Keep the table bounded even when users abandon redirects. Cleanup is
+	// deliberately best-effort; creation itself still fails closed.
+	s.db.Exec(`DELETE FROM app_launch_codes WHERE created_at < ` + s.d.nowMinusSeconds(120)) //nolint:errcheck
+	_, err := s.db.Exec(
+		`INSERT INTO app_launch_codes (code_hash, user_id, app_slug) VALUES (?, ?, ?)`,
+		codeHash, userID, appSlug,
+	)
+	if err != nil {
+		return fmt.Errorf("create app launch code: %w", err)
+	}
+	return nil
+}
+
+// ConsumeAppLaunchCode atomically validates and deletes a launch capability.
+// Codes are bound to one app slug, expire after 60 seconds, and cannot be
+// replayed even when multiple control-plane instances share the database.
+func (s *Store) ConsumeAppLaunchCode(codeHash, appSlug string) (*auth.ContextUser, error) {
+	row := s.db.QueryRow(
+		`DELETE FROM app_launch_codes
+		 WHERE code_hash = ? AND app_slug = ? AND created_at >= `+s.d.nowMinusSeconds(60)+`
+		 RETURNING user_id`,
+		codeHash, appSlug,
+	)
+	var userID int64
+	if err := row.Scan(&userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("consume app launch code: %w", err)
+	}
+	return s.LookupContextUser(userID)
+}
+
 // --- Audit Events ---
 
 // Audit action constants. Most actions in the codebase are still raw string
@@ -2369,6 +2407,23 @@ func (s *Store) LogAuditEvent(p AuditEventParams) {
 		INSERT INTO audit_events (user_id, action, resource_type, resource_id, detail, ip_address)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		p.UserID, p.Action, p.ResourceType, p.ResourceID, p.Detail, p.IPAddress)
+	var userID any
+	if p.UserID != nil {
+		userID = *p.UserID
+	}
+	// Emit the same event to structured stdout so production log shipping can
+	// retain an off-host, append-only copy. "persisted" lets alerting distinguish
+	// the normal dual-write path from a database/disk failure without losing the
+	// attempted security event itself.
+	slog.Info("audit_event",
+		"user_id", userID,
+		"action", p.Action,
+		"resource_type", p.ResourceType,
+		"resource_id", p.ResourceID,
+		"detail", p.Detail,
+		"ip_address", p.IPAddress,
+		"persisted", err == nil,
+	)
 	if err != nil {
 		slog.Error("audit_log_write_failed", "action", p.Action, "err", err)
 		if s.auditErrHook != nil {

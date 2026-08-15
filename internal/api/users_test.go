@@ -56,7 +56,7 @@ func TestCreateUser_Admin(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]string{
 		"username": "newdev",
-		"password": "secret123",
+		"password": "secret123-long-enough",
 		"role":     "developer",
 	})
 	req := authedRequest(t, "POST", "/api/users", body, adminToken)
@@ -81,7 +81,7 @@ func TestCreateUser_Viewer(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]string{
 		"username": "guest",
-		"password": "secret123",
+		"password": "secret123-long-enough",
 		"role":     "viewer",
 	})
 	req := authedRequest(t, "POST", "/api/users", body, adminToken)
@@ -115,7 +115,7 @@ func TestCreateUser_RejectsInvalidRole(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]string{
 		"username": "bad",
-		"password": "secret123",
+		"password": "secret123-long-enough",
 		"role":     "wizard",
 	})
 	req := authedRequest(t, "POST", "/api/users", body, adminToken)
@@ -183,7 +183,7 @@ func TestPatchUserPassword_Admin(t *testing.T) {
 	target, _ := store.GetUserByUsername("target")
 	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
 
-	body, _ := json.Marshal(map[string]string{"password": "newsecret123"})
+	body, _ := json.Marshal(map[string]string{"password": "new-secret-password"})
 	path := fmt.Sprintf("/api/users/%d/password", target.ID)
 	req := authedRequest(t, "PATCH", path, body, adminToken)
 	rec := httptest.NewRecorder()
@@ -196,7 +196,7 @@ func TestPatchUserPassword_Admin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload target: %v", err)
 	}
-	if err := auth.VerifyPassword(updated.PasswordHash, "newsecret123"); err != nil {
+	if err := auth.VerifyPassword(updated.PasswordHash, "new-secret-password"); err != nil {
 		t.Errorf("new password does not verify: %v", err)
 	}
 }
@@ -229,7 +229,7 @@ func TestPatchUserPassword_NonAdminForbidden(t *testing.T) {
 	target, _ := store.GetUserByUsername("target")
 	devToken, _ := auth.IssueJWT(dev.ID, "dev", "developer", "test-secret")
 
-	body, _ := json.Marshal(map[string]string{"password": "newsecret123"})
+	body, _ := json.Marshal(map[string]string{"password": "new-secret-password"})
 	path := fmt.Sprintf("/api/users/%d/password", target.ID)
 	req := authedRequest(t, "PATCH", path, body, devToken)
 	rec := httptest.NewRecorder()
@@ -322,7 +322,7 @@ func TestPatchUserPassword_RejectsSystemUser(t *testing.T) {
 	}
 	adminToken, _ := seedUserAndJWT(t, store, "admin1", "admin")
 
-	body := strings.NewReader(`{"password":"longenoughpw"}`)
+	body := strings.NewReader(`{"password":"long-enough-password"}`)
 	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/users/%d/password", syntheticUser.ID), body)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	req.Header.Set("Content-Type", "application/json")

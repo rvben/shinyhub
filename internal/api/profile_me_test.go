@@ -90,7 +90,7 @@ func TestPatchMe_ChangeOwnPassword(t *testing.T) {
 
 	// Wrong current password is rejected.
 	rec := patchMe(t, srv, token, map[string]any{
-		"current_password": "wrong", "new_password": "brand-new-pass",
+		"current_password": "wrong", "new_password": "brand-new-password",
 	})
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("wrong current password: expected 401, got %d", rec.Code)
@@ -106,13 +106,13 @@ func TestPatchMe_ChangeOwnPassword(t *testing.T) {
 
 	// Correct current password rotates the hash, and the new password verifies.
 	rec = patchMe(t, srv, token, map[string]any{
-		"current_password": "seed-password", "new_password": "brand-new-pass",
+		"current_password": "seed-password", "new_password": "brand-new-password",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("change password: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	u, _ := store.GetUserByID(id)
-	if err := auth.VerifyPassword(u.PasswordHash, "brand-new-pass"); err != nil {
+	if err := auth.VerifyPassword(u.PasswordHash, "brand-new-password"); err != nil {
 		t.Errorf("new password does not verify: %v", err)
 	}
 }

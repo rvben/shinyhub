@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1978,8 +1979,16 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	// X-Shinyhub-Name, and a hand-rolled ContextUser here would silently blank
 	// them for every native /app session.
 	appUserLookup := store.LookupContextUser
-	emptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets)(prx)
-	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(emptyState)
+	proxyEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets)(prx)
+	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(proxyEmptyState)
+	var parsedAppOrigin *url.URL
+	if cfg.Server.AppOrigin != "" {
+		parsedAppOrigin, _ = url.Parse(cfg.Server.AppOrigin) // validated by config.Load
+		redirect := appOriginRedirectHandler(store, parsedAppOrigin)
+		redirectEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets)(redirect)
+		controlAppHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(redirectEmptyState)
+		appHandler = appOriginDispatch(parsedAppOrigin, cfg.TrustedProxyNets, store, cfg.Auth.Secret, controlAppHandler, appHandler)
+	}
 	mux.Handle("/app/", appHandler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -2006,6 +2015,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		faCfg := auth.ForwardAuthConfig{
 			Enabled:             true,
 			UserHeader:          cfg.Auth.ForwardAuth.UserHeader,
+			SharedSecret:        cfg.Auth.ForwardAuth.SharedSecret,
+			SecretHeader:        cfg.Auth.ForwardAuth.SecretHeader,
 			EmailHeader:         cfg.Auth.ForwardAuth.EmailHeader,
 			NameHeader:          cfg.Auth.ForwardAuth.NameHeader,
 			GroupsHeader:        cfg.Auth.ForwardAuth.GroupsHeader,
@@ -2015,6 +2026,7 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		}
 		rootHandler = auth.ForwardAuthMiddleware(store, faCfg, cfg.TrustedProxyNets)(mux)
 	}
+	rootHandler = appOriginBoundary(rootHandler, parsedAppOrigin, cfg.TrustedProxyNets)
 
 	// Branding injects inline <script>/<style> into the SPA shell only when
 	// active; the strict CSP allows exactly those blocks by SHA-256 hash (both

@@ -73,3 +73,49 @@ func TestForwardAuth_StripsHeadersOnTrustedAuthedPath(t *testing.T) {
 		t.Error("forward-auth headers were not stripped on the trusted authenticated path")
 	}
 }
+
+func TestForwardAuth_TrustedPeerMustPresentProxySecret(t *testing.T) {
+	_, trusted, _ := net.ParseCIDR("127.0.0.0/8")
+	cfg := faStripConfig()
+	cfg.SecretHeader = "X-Proxy-Secret"
+	cfg.SharedSecret = "01234567890123456789012345678901"
+
+	for _, tc := range []struct {
+		name       string
+		secret     string
+		wantStatus int
+		wantUser   bool
+	}{
+		{name: "missing", wantStatus: http.StatusForbidden},
+		{name: "wrong", secret: "wrong", wantStatus: http.StatusForbidden},
+		{name: "valid", secret: cfg.SharedSecret, wantStatus: http.StatusOK, wantUser: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotUser *ContextUser
+			var leakedSecret string
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotUser = UserFromContext(r.Context())
+				leakedSecret = r.Header.Get(cfg.SecretHeader)
+				w.WriteHeader(http.StatusOK)
+			})
+			h := ForwardAuthMiddleware(newFakeStore(), cfg, []*net.IPNet{trusted})(next)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = "127.0.0.1:5000"
+			req.Header.Set(cfg.UserHeader, "alice")
+			if tc.secret != "" {
+				req.Header.Set(cfg.SecretHeader, tc.secret)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if (gotUser != nil) != tc.wantUser {
+				t.Fatalf("user = %#v, want present %v", gotUser, tc.wantUser)
+			}
+			if leakedSecret != "" {
+				t.Fatal("proxy secret reached downstream handler")
+			}
+		})
+	}
+}

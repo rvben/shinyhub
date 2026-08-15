@@ -51,7 +51,7 @@ The container joins group `0` (root) by default, which is correct. Leave
 
 ```sh
 export SHINYHUB_ADMIN_USER=admin
-export SHINYHUB_ADMIN_PASSWORD=changeme
+export SHINYHUB_ADMIN_PASSWORD='replace-with-15+-characters'
 ```
 
 These have no effect once the user already exists in the database.
@@ -79,7 +79,7 @@ set above.
 curl -fsSL https://raw.githubusercontent.com/rvben/shinyhub/main/scripts/install.sh | sh
 
 # Log in
-shinyhub login --host http://localhost:8080 --username admin --password changeme
+shinyhub login --host http://localhost:8080 --username admin
 
 # Deploy a Shiny app bundle (zip or directory)
 shinyhub deploy /path/to/my-app --slug my-app
@@ -113,7 +113,15 @@ runtime backend:
   host network stack. The loopback address is the same for all of them.
 
 There is no `ports:` mapping in the compose file. The server binds directly
-on the host port specified in `shinyhub.yaml` (`server.port: 8080`).
+to host loopback on the port specified in `shinyhub.yaml` (`server.port: 8080`).
+
+> **Security scope:** this single-host Compose topology is intended for
+> evaluation and trusted internal app authors. Host networking removes the
+> network boundary between app containers, and mounting the Docker socket gives
+> the control-plane container daemon-level authority. Do not use this topology
+> for mutually untrusted tenants. Use the ECS/Fargate module or remote workers,
+> put ShinyHub behind an HTTPS reverse proxy, and configure distinct
+> `SHINYHUB_BASE_URL` and `SHINYHUB_APP_ORIGIN` hostnames.
 
 ## Configuration
 

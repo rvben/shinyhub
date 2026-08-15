@@ -1011,8 +1011,8 @@
               <input id="profile-current-password" type="password"
                      autocomplete="current-password" placeholder="Your current password">
               <label for="profile-new-password">New password</label>
-              <input id="profile-new-password" type="password" minlength="8"
-                     autocomplete="new-password" placeholder="At least 8 characters">
+              <input id="profile-new-password" type="password" minlength="15"
+                     autocomplete="new-password" placeholder="At least 15 characters">
             </fieldset>
             <p id="profile-password-managed" class="profile-hint" hidden>Your name and password are managed by your identity provider.</p>
 
@@ -1082,7 +1082,6 @@
               <option value="30">30 days</option>
               <option value="90" selected>90 days</option>
               <option value="365">365 days</option>
-              <option value="0">Never</option>
             </select>
             <p class="profile-hint">An expired token stops authenticating; create a new one to replace it.</p>
 
@@ -1129,8 +1128,8 @@
                    autocomplete="off" spellcheck="false" placeholder="alice">
 
             <label for="new-user-password">Password</label>
-            <input id="new-user-password" type="password" required minlength="8"
-                   autocomplete="new-password" placeholder="At least 8 characters">
+            <input id="new-user-password" type="password" required minlength="15"
+                   autocomplete="new-password" placeholder="At least 15 characters">
 
             <label for="new-user-role">Role</label>
             <select id="new-user-role">
@@ -1185,8 +1184,8 @@
         <div class="modal-body">
           <form id="reset-password-form">
             <label for="reset-password-input">New password</label>
-            <input id="reset-password-input" type="password" required minlength="8"
-                   autocomplete="new-password" placeholder="At least 8 characters">
+            <input id="reset-password-input" type="password" required minlength="15"
+                   autocomplete="new-password" placeholder="At least 15 characters">
 
             <p id="reset-password-error" class="error" hidden></p>
 

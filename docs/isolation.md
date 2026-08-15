@@ -33,15 +33,15 @@ container shares the host network stack); use it only when apps are trusted.
 ```yaml
 runtime:
   native:
-    isolation: standard   # off (default) | standard
+    isolation: standard   # standard (default) | off
 ```
 
 Or via environment: `SHINYHUB_RUNTIME_NATIVE_ISOLATION=standard`.
 
 | Level | Effect |
 |-------|--------|
-| `off` (default) | No isolation. The historical native behavior. |
-| `standard` | Filesystem confinement (below) plus `NO_NEW_PRIVS` (blocks setuid privilege escalation). |
+| `standard` (default) | Filesystem confinement (below) plus `NO_NEW_PRIVS` (blocks setuid privilege escalation). |
+| `off` | No isolation. Use only for a trusted app that requires writes outside its own bundle/data directories. |
 
 `strict` (tighter reads and network restriction) is reserved for a later release
 and is rejected at load until then, rather than silently treated as `standard`.

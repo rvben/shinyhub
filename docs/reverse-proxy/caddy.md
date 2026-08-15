@@ -31,7 +31,7 @@ Browser --> Caddy (TLS, auth) --> ShinyHub :8080
 ## Caddyfile
 
 ```caddy
-shiny.example.com {
+shiny.example.com, apps.example.com {
     # Step 1: authenticate via your auth service.
     forward_auth auth-service:9091 {
         uri /api/verify
@@ -45,6 +45,8 @@ shiny.example.com {
     # disables buffering so SSE log-streaming works.
     reverse_proxy localhost:8080 {
         flush_interval -1
+        # Supply this through Caddy's environment, not source control.
+        header_up X-ShinyHub-Forward-Auth-Secret {$SHINYHUB_FORWARD_AUTH_SHARED_SECRET}
     }
 }
 ```
@@ -109,6 +111,7 @@ interferes with it. If interactions disconnect, check these in order:
 | `X-Forwarded-User` | `user_header` | Username (required). Default header name. |
 | `X-Forwarded-Email` | `email_header` | Email address (optional). Accepted by config but not yet used by ShinyHub (reserved). |
 | `X-Forwarded-Groups` | `groups_header` | Comma-separated group list. When `groups_header` is configured the proxy MUST send this header on every request (empty when the user has no groups); the listed groups drive role promotion AND revocation. An absent header is treated as no groups and revokes any group-derived role, so a dropped header demotes the user to the default role. |
+| `X-ShinyHub-Forward-Auth-Secret` | `secret_header` | Required proxy credential. Generate at least 32 random characters and configure the same value as `shared_secret`. ShinyHub strips it before proxying. |
 
 ## ShinyHub configuration
 
@@ -124,6 +127,8 @@ Add `auth.forward_auth` to your `shinyhub.yaml` and add Caddy's address to
 
 ```yaml
 server:
+  base_url: https://shiny.example.com
+  app_origin: https://apps.example.com
   trusted_proxies:
     - 127.0.0.0/8   # loopback (Caddy and ShinyHub on the same host)
     - ::1/128
@@ -132,6 +137,7 @@ auth:
   secret: "..."     # your existing secret
   forward_auth:
     enabled: true
+    shared_secret: "replace-with-a-random-32+-character-secret"
     user_header: X-Forwarded-User     # matches copy_headers above
     email_header: X-Forwarded-Email
     groups_header: X-Forwarded-Groups  # when set, always emit - empty value for users with no groups
@@ -153,6 +159,7 @@ Or with environment variables:
 
 ```
 SHINYHUB_FORWARD_AUTH_ENABLED=true
+SHINYHUB_FORWARD_AUTH_SHARED_SECRET=replace-with-the-same-random-32+-character-secret
 SHINYHUB_FORWARD_AUTH_USER_HEADER=X-Forwarded-User
 SHINYHUB_FORWARD_AUTH_EMAIL_HEADER=X-Forwarded-Email
 SHINYHUB_FORWARD_AUTH_GROUPS_HEADER=X-Forwarded-Groups

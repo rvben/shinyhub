@@ -56,7 +56,7 @@ func TestRunSetupFreshNonInteractive(t *testing.T) {
 	databasePath := filepath.Join(dir, "state", "shinyhub.db")
 	setupTestEnv(t, databasePath)
 	t.Setenv("SHINYHUB_ADMIN_USER", "owner")
-	t.Setenv("SHINYHUB_ADMIN_PASSWORD", "correct-horse")
+	t.Setenv("SHINYHUB_ADMIN_PASSWORD", "correct-horse-password")
 	setSetupTTY(t, false)
 
 	cmd, _ := setupTestCommand("")
@@ -86,7 +86,7 @@ func TestRunSetupFreshNonInteractive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(content), "correct-horse") {
+	if strings.Contains(string(content), "correct-horse-password") {
 		t.Fatal("generated config must not contain the administrator password")
 	}
 	if !strings.Contains(string(content), "secret:") {
@@ -112,7 +112,7 @@ func TestRunSetupFreshNonInteractive(t *testing.T) {
 	if user.Role != "admin" {
 		t.Fatalf("administrator role = %q, want admin", user.Role)
 	}
-	if err := auth.VerifyPassword(user.PasswordHash, "correct-horse"); err != nil {
+	if err := auth.VerifyPassword(user.PasswordHash, "correct-horse-password"); err != nil {
 		t.Fatalf("administrator password was not stored correctly: %v", err)
 	}
 }
@@ -123,7 +123,7 @@ func TestRunSetupIsIdempotent(t *testing.T) {
 	databasePath := filepath.Join(dir, "shinyhub.db")
 	setupTestEnv(t, databasePath)
 	t.Setenv("SHINYHUB_ADMIN_USER", "admin")
-	t.Setenv("SHINYHUB_ADMIN_PASSWORD", "first-password")
+	t.Setenv("SHINYHUB_ADMIN_PASSWORD", "first-password-long")
 	setSetupTTY(t, false)
 	cmd, _ := setupTestCommand("")
 
@@ -214,11 +214,11 @@ func TestRunSetupInteractiveDefaultsAndRetriesPassword(t *testing.T) {
 	databasePath := filepath.Join(dir, "shinyhub.db")
 	setupTestEnv(t, databasePath)
 	setSetupTTY(t, true,
-		"short",              // rejected
-		"first-password",     // first attempt
-		"different-password", // mismatch
-		"confirmed-password", // second attempt
-		"confirmed-password", // confirmation
+		"short",                   // rejected
+		"first-password-long",     // first attempt
+		"different-password-long", // mismatch
+		"confirmed-password",      // second attempt
+		"confirmed-password",      // confirmation
 	)
 	cmd, output := setupTestCommand("\n")
 
@@ -232,7 +232,7 @@ func TestRunSetupInteractiveDefaultsAndRetriesPassword(t *testing.T) {
 	got := output.String()
 	for _, want := range []string{
 		"Administrator username [admin]",
-		"must be at least 8 characters",
+		"must be at least 15 characters",
 		"Passwords do not match",
 	} {
 		if !strings.Contains(got, want) {
@@ -273,7 +273,7 @@ func TestMaybeRunInteractiveSetup(t *testing.T) {
 	dir := t.TempDir()
 	configFile := filepath.Join(dir, "shinyhub.yaml")
 	setupTestEnv(t, filepath.Join(dir, "shinyhub.db"))
-	setSetupTTY(t, true, "setup-password", "setup-password")
+	setSetupTTY(t, true, "setup-password-long", "setup-password-long")
 	previousConfigPath := configPath
 	configPath = configFile
 	t.Cleanup(func() { configPath = previousConfigPath })

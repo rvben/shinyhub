@@ -1,8 +1,8 @@
 # ShinyHub AWS ECS/Fargate Terraform module
 
 Deploys the ShinyHub control plane on AWS ECS Fargate with:
-- An Application Load Balancer (HTTP always; HTTPS when `certificate_arn` is set)
-- A single-AZ PostgreSQL 16 RDS instance (encrypted, private subnets)
+- An Application Load Balancer with mandatory HTTPS (HTTP redirects only)
+- A Multi-AZ PostgreSQL 16 RDS instance (encrypted, private subnets, backups and deletion protection enabled)
 - ECS cluster with the control-plane service (desired count variable; default 1)
 - IAM roles scoped to the exact API surface used by `internal/fargate`
 - CloudWatch log groups for control-plane and app-runner tasks
@@ -22,6 +22,12 @@ The module does NOT create a VPC. Every organisation has one; pass your existing
      --secret-string "$(openssl rand -hex 32)"
    ```
    Pass the returned ARN as `auth_secret_arn`.
+4. An ACM certificate ARN for the public hostname. Plaintext ALB deployments are
+   intentionally unsupported.
+5. Reviewed, digest-pinned control-plane and runner image references. Tags such
+   as `latest` are intentionally rejected because they can change after review.
+6. Two DNS names covered by the certificate and routed to the ALB: `base_url`
+   for the dashboard/API and a distinct `app_origin` for untrusted app traffic.
 
 ## Trusted proxy CIDRs (required)
 
@@ -72,10 +78,12 @@ this repository's CI pipeline. The `make iac-validate` target runs only
 | `private_subnet_ids` | list(string) | (required) | Subnet IDs for ECS and RDS |
 | `auth_secret_arn` | string | (required) | Secrets Manager ARN for SHINYHUB_AUTH_SECRET |
 | `trusted_proxy_cidrs` | list(string) | (required) | ALB subnet CIDRs for SHINYHUB_TRUSTED_PROXIES |
-| `image` | string | `ghcr.io/rvben/shinyhub:latest` | Control-plane image |
-| `runner_image_python` | string | `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` | Python runner image |
-| `runner_image_r` | string | `rocker/r-base` | R runner image |
-| `certificate_arn` | string | `""` | ACM certificate ARN (enables HTTPS listener) |
+| `image` | string | (required) | Digest-pinned control-plane image |
+| `runner_image_python` | string | (required) | Digest-pinned Python runner image |
+| `runner_image_r` | string | (required) | Digest-pinned R runner image |
+| `certificate_arn` | string | (required) | ACM certificate ARN for HTTPS |
+| `base_url` | string | (required) | Public HTTPS dashboard/API origin |
+| `app_origin` | string | (required) | Separate public HTTPS app origin |
 | `cp_cpu` | number | `512` | Control-plane task CPU units |
 | `cp_memory` | number | `1024` | Control-plane task memory (MiB) |
 | `cp_desired_count` | number | `1` | Control-plane service replica count |
@@ -84,6 +92,9 @@ this repository's CI pipeline. The `make iac-validate` target runs only
 | `db_instance_class` | string | `db.t4g.micro` | RDS instance class |
 | `db_name` | string | `shinyhub` | PostgreSQL database name |
 | `db_username` | string | `shinyhub` | PostgreSQL master username |
+| `db_multi_az` | bool | `true` | Enable Multi-AZ RDS |
+| `db_backup_retention_days` | number | `7` | Automated backup retention (7-35 days) |
+| `db_deletion_protection` | bool | `true` | Protect RDS from accidental deletion |
 | `fargate_secrets_name_prefix` | string | `""` | Secrets Manager prefix for per-app secrets |
 | `name_prefix` | string | `shinyhub` | Resource name prefix |
 | `tags` | map(string) | `{}` | Additional resource tags |

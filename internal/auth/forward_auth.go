@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net"
@@ -20,6 +21,10 @@ var ErrUserNotFound = errors.New("forward auth: user not found")
 type ForwardAuthConfig struct {
 	Enabled    bool
 	UserHeader string
+	// SharedSecret is a second factor for the proxy-to-ShinyHub trust channel.
+	// Production config validation requires it when forward-auth is enabled.
+	SharedSecret string
+	SecretHeader string
 	// EmailHeader is the proxy header carrying the user's email. When set, the
 	// middleware captures it request-scoped onto the ContextUser (forwarded to
 	// apps as X-Shinyhub-Email and the token email claim); not persisted.
@@ -84,6 +89,7 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			// caller from injecting a forged Remote-User/-Groups/-Email/-Name into a
 			// tenant app.
 			userHdr := strings.TrimSpace(r.Header.Get(cfg.UserHeader))
+			proxySecret := r.Header.Get(cfg.SecretHeader)
 			nameHdr := strings.TrimSpace(r.Header.Get(cfg.NameHeader))
 			emailHdr := strings.TrimSpace(r.Header.Get(cfg.EmailHeader))
 			var groupsVals []string
@@ -92,6 +98,7 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				groupsVals, groupsPresent = r.Header[textproto.CanonicalMIMEHeaderKey(cfg.GroupsHeader)]
 			}
 			delForwardAuthHeader(r, cfg.UserHeader)
+			delForwardAuthHeader(r, cfg.SecretHeader)
 			delForwardAuthHeader(r, cfg.GroupsHeader)
 			delForwardAuthHeader(r, cfg.NameHeader)
 			delForwardAuthHeader(r, cfg.EmailHeader)
@@ -119,6 +126,10 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			username := userHdr
 			if username == "" {
 				next.ServeHTTP(w, r)
+				return
+			}
+			if cfg.SharedSecret != "" && subtle.ConstantTimeCompare([]byte(proxySecret), []byte(cfg.SharedSecret)) != 1 {
+				http.Error(w, "forward auth: proxy authentication failed", http.StatusForbidden)
 				return
 			}
 
