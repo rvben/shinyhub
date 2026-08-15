@@ -104,12 +104,12 @@ summary:focus-visible {
   --cyan:        #0369A1;
   --cyan-bright: #0369A1;
   --sparkle:     #0284C7;
-  --electric:    #2563EB;
+  --electric:    #1D4ED8;
   --accent:      #0369A1;
   --accent-glow: rgba(3,105,161,0.14);
   --accent-dim:  rgba(3,105,161,0.07);
-  --green:       #15803D;
-  --green-bg:    rgba(21,128,61,0.10);
+  --green:       #166534;
+  --green-bg:    rgba(22,101,52,0.10);
   --red:         #DC2626;
   --red-bg:      rgba(220,38,38,0.10);
   --yellow:      #B45309;

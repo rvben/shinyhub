@@ -156,6 +156,9 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: App-detail logs browser E2E
+        run: make test-browser-logs-e2e
+
       - name: Browser onboarding E2E (installed wheel)
         run: make test-browser-onboarding-e2e
 

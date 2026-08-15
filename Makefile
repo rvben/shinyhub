@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -114,6 +114,17 @@ test-onboarding-e2e:
 # cannot find the browser.
 test-browser-onboarding-e2e:
 	./scripts/browser-onboarding-e2e.sh
+
+# test-browser-logs-e2e serves the production app-detail logs module and CSS to
+# system Chrome, then exercises native EventSource reconnects, ended-run keyboard
+# selection, mobile layout, reduced motion, and rendered dark/light contrast.
+# Playwright is exact-pinned in the existing render-rig driver package so the
+# dashboard's fast jsdom suite does not acquire a browser dependency.
+test-browser-logs-e2e:
+	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required)"; exit 1; }
+	@if [ ! -d node_modules/axe-core ]; then npm install --no-audit --no-fund --silent; fi
+	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm install --no-audit --no-fund --silent; fi
+	SHINYHUB_E2E_BROWSER_CHANNEL="$${SHINYHUB_E2E_BROWSER_CHANNEL:-chrome}" node scripts/logs-browser-e2e.mjs
 
 # test-cli-compatibility-e2e downloads the checksum-pinned previous release and
 # proves both supported upgrade directions with real servers: current CLI ->
