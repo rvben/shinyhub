@@ -99,6 +99,7 @@ func (s *Store) AppendAppLogChunk(runID string, seq, startOffset int64, data []b
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("append app log chunk commit: %w", err)
 	}
+	s.wakeAppLogFanout(runID)
 	return nil
 }
 
@@ -518,18 +519,11 @@ func (r *AppLogReader) Follow(ctx context.Context, lines chan<- string) {
 
 // FollowFrom streams records after an absolute shared-log cursor.
 func (r *AppLogReader) FollowFrom(ctx context.Context, offset int64, records chan<- logstream.Record) {
-	ticker := time.NewTicker(appLogFlushInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		data, start, end, err := r.store.ReadAppLogWindow(r.runID, offset)
-		if err != nil || len(data) == 0 {
-			continue
-		}
+	// Catch up once before joining the shared follower. This preserves the
+	// snapshot-to-follow handoff while keeping steady-state polling independent
+	// of the number of connected viewers.
+	data, start, end, err := r.store.ReadAppLogWindow(r.runID, offset)
+	if err == nil && len(data) > 0 {
 		gapBeforeNext := start > offset
 		for _, record := range logstream.RecordsFromBytes(data, start) {
 			if gapBeforeNext {
@@ -544,4 +538,5 @@ func (r *AppLogReader) FollowFrom(ctx context.Context, offset int64, records cha
 		}
 		offset = end
 	}
+	r.store.followAppLogFanout(ctx, r.runID, offset, records)
 }

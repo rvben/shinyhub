@@ -90,6 +90,14 @@ type Store struct {
 	db *boundDB
 	d  dialect
 
+	// appLogFanouts collapses all live readers for a run onto one database
+	// follower. A viewer performs one direct catch-up read before subscribing;
+	// steady-state polling is shared process-wide after that handoff.
+	appLogFanoutsMu     sync.Mutex
+	appLogFanouts       map[string]*appLogFanout
+	appLogFanoutsClosed bool
+	appLogFanoutsWG     sync.WaitGroup
+
 	// auditErrHook, if set, is invoked when an audit-event write fails. It lets
 	// the server surface dropped audit events as a metric without coupling the
 	// db package to the metrics registry. Never nil-checked off the hot path:
@@ -453,6 +461,14 @@ func (s *Store) hasLegacySchema() (bool, error) {
 }
 
 func (s *Store) Close() error {
+	s.appLogFanoutsMu.Lock()
+	s.appLogFanoutsClosed = true
+	for runID, fanout := range s.appLogFanouts {
+		delete(s.appLogFanouts, runID)
+		fanout.stop()
+	}
+	s.appLogFanoutsMu.Unlock()
+	s.appLogFanoutsWG.Wait()
 	return s.db.Close()
 }
 
