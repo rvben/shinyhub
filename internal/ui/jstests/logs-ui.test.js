@@ -69,6 +69,18 @@ test('external AWS handoffs validate links and quote copyable commands', () => {
   assert.equal(safeExternalLogsURL({
     external_logs: { console_url: 'https://console.aws.amazon.com:444/ecs' },
   }), '');
+  assert.equal(safeExternalLogsURL({
+    external_logs: {
+      resource: 'arn:aws:ecs:eu-west-1:123:task/team/task-42', region: 'eu-west-1',
+      log_url: 'https://eu-west-1.console.amazonaws.cn/cloudwatch/home',
+    },
+  }), '', 'a commercial ARN cannot hand off to another AWS partition');
+  assert.equal(externalLogsCommand({
+    external_logs: {
+      provider: 'aws_ecs', resource: source.external_logs.resource, region: 'eu-west-1',
+      log_group: '/shinyhub/apps', log_stream: 'app/app/task-42',
+    },
+  }), "aws logs get-log-events --log-group-name '/shinyhub/apps' --log-stream-name 'app/app/task-42' --region 'eu-west-1'");
   assert.equal(externalLogsCommand({ external_logs: { provider: 'aws_ecs' } }), '');
 });
 
@@ -125,6 +137,129 @@ test('external live and stopped runs provide an actionable permission-safe AWS h
   await tick();
   assert.equal(copied.at(-1), "aws ecs describe-tasks --cluster 'analytics' --tasks 'arn:aws:ecs:eu-west-1:123:task/analytics/task-old' --region 'eu-west-1'");
   assert.match(panel.querySelector('#logs-announcement').textContent, /command copied.*replica 2/i);
+});
+
+test('CloudWatch-backed Fargate runs render inline and resume with an opaque cursor', async (t) => {
+  const source = {
+    source_id: 'run-live', run_id: 'run-live', replica: 2, current: true,
+    status: 'running', provider: 'fargate', tier: 'burst', stream_available: false,
+    inline_available: true,
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+      resource: 'arn:aws:ecs:eu-west-1:123:task/analytics/task-live',
+      log_group: '/shinyhub/apps', log_stream: 'app/app/task-live',
+      console_url: 'https://console.aws.amazon.com/ecs/v2/clusters/analytics/tasks/task-live/logs?region=eu-west-1',
+    },
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  class UnexpectedEventSource {
+    constructor() { throw new Error('CloudWatch polling must not open EventSource'); }
+  }
+  const providerURLs = [];
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) return { ok: true, json: async () => ({ sources: [source] }) };
+    providerURLs.push(url);
+    const cursor = new URL(url, dom.window.location.href).searchParams.get('cursor');
+    return {
+      ok: true,
+      json: async () => cursor
+        ? { events: [{ message: 'ready', timestamp: '2026-08-15T14:00:01Z' }], next_cursor: 'cursor-2' }
+        : { events: [{ message: 'booting', timestamp: '2026-08-15T14:00:00Z' }], next_cursor: 'cursor-1' },
+    };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({
+    panel, app: { slug: 'demo' }, api, EventSourceClass: UnexpectedEventSource, refreshEveryMs: 30,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+
+  await waitUntil(() => /ready/.test(panel.querySelector('#detail-logs-body').textContent));
+  assert.match(providerURLs[0], /provider=true/);
+  assert.match(providerURLs[0], /run=run-live/);
+  assert.match(providerURLs[1], /cursor=cursor-1/);
+  assert.deepEqual(
+    [...panel.querySelectorAll('.log-entry-message')].slice(0, 2).map((el) => el.textContent),
+    ['booting', 'ready'],
+  );
+  assert.deepEqual(
+    [...panel.querySelectorAll('.log-entry-source')].slice(0, 2).map((el) => el.textContent),
+    ['#2', '#2'],
+  );
+  assert.equal(panel.querySelector('.logs-status-text').textContent, 'Live · 1 CloudWatch source connected');
+  assert.equal(panel.querySelectorAll('.logs-external-row').length, 1, 'AWS fallback remains visible');
+});
+
+test('a Fargate run stopping appends its final CloudWatch page before the terminal event', async (t) => {
+  const running = {
+    source_id: 'run-0', run_id: 'run-0', replica: 0, current: true,
+    status: 'running', provider: 'fargate', stream_available: false, inline_available: true,
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+      resource: 'arn:aws:ecs:eu-west-1:123:task/analytics/task-0',
+      log_group: '/shinyhub/apps', log_stream: 'app/app/task-0',
+    },
+  };
+  const stopped = { ...running, status: 'stopped' };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  let discoveries = 0;
+  let pages = 0;
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) {
+      discoveries++;
+      return { ok: true, json: async () => ({ sources: [discoveries === 1 ? running : stopped] }) };
+    }
+    pages++;
+    return {
+      ok: true,
+      json: async () => pages === 1
+        ? { events: [{ message: 'boot', timestamp: '2026-08-15T14:00:00Z' }], next_cursor: 'cursor-1' }
+        : { events: [{ message: 'final line', timestamp: '2026-08-15T14:00:01Z' }], next_cursor: 'cursor-2' },
+    };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({
+    panel, app: { slug: 'demo' }, api, EventSourceClass: class { constructor() { throw new Error('unexpected SSE'); } },
+    refreshEveryMs: 35,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+
+  await waitUntil(() => /stopped/i.test(panel.querySelector('#detail-logs-body').textContent));
+  const output = panel.querySelector('#detail-logs-body').textContent;
+  assert.equal((output.match(/boot/g) || []).length, 1);
+  assert.equal((output.match(/final line/g) || []).length, 1);
+  assert.doesNotMatch(output, /could not be reconciled/i);
+  assert.ok(output.indexOf('final line') < output.indexOf('stopped'), 'terminal event follows final provider output');
+});
+
+test('CloudWatch permission failures degrade to the direct AWS handoff', async (t) => {
+  const source = {
+    source_id: 'run-2', run_id: 'run-2', replica: 2, current: true,
+    status: 'running', provider: 'fargate', stream_available: false, inline_available: true,
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics',
+      resource: 'arn:aws:ecs:eu-west-1:123:task/analytics/task-2',
+      log_group: '/shinyhub/apps', log_stream: 'app/app/task-2',
+      console_url: 'https://console.aws.amazon.com/ecs/v2/clusters/analytics/tasks/task-2/logs?region=eu-west-1',
+    },
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true,
+  });
+  const api = async (url) => url.endsWith('/logs/sources')
+    ? { ok: true, json: async () => ({ sources: [source] }) }
+    : { ok: false, status: 502 };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, api, refreshEveryMs: 60_000 });
+  t.after(() => { cleanup(); dom.window.close(); });
+
+  await waitUntil(() => /CloudWatch output is unavailable/i.test(panel.querySelector('#detail-logs-body').textContent));
+  assert.match(panel.querySelector('.logs-status-text').textContent, /Delayed/i);
+  assert.match(panel.querySelector('#logs-announcement').textContent, /Direct AWS access remains available/i);
+  assert.equal(panel.querySelector('.logs-external-actions a').textContent, 'Open task logs');
 });
 
 test('external log command remains available when clipboard access fails', async (t) => {

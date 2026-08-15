@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -55,6 +56,7 @@ type logSourceResponse struct {
 	// StreamAvailable is false for runtimes whose application output is retained
 	// by an external provider rather than copied into ShinyHub's local log file.
 	StreamAvailable bool                  `json:"stream_available"`
+	InlineAvailable bool                  `json:"inline_available"`
 	ExternalLogs    *process.ExternalLogs `json:"external_logs,omitempty"`
 }
 
@@ -121,13 +123,16 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 		current := !seenCurrent[run.ReplicaIndex]
 		seenCurrent[run.ReplicaIndex] = true
 		started := run.StartedAt
+		externalLogs := decodeExternalLogs(run.ExternalLogs)
 		src := &logSourceResponse{
 			SourceID: run.RunID, RunID: run.RunID, Replica: run.ReplicaIndex,
 			Current: current, Status: run.Status, Provider: run.Provider,
 			Tier: run.Tier, AppVersion: run.AppVersion,
 			DeploymentID: run.DeploymentID, UpdatedAt: run.StartedAt,
 			StartedAt: &started, FinishedAt: run.FinishedAt, OOMKilled: run.OOMKilled,
-			ExternalLogs: decodeExternalLogs(run.ExternalLogs),
+			ExternalLogs: externalLogs,
+			InlineAvailable: s.externalLogs != nil && externalLogs != nil &&
+				externalLogs.LogGroup != "" && externalLogs.LogStream != "",
 		}
 		if file, ok := fileByRun[run.RunID]; ok {
 			modified := file.ModifiedAt
@@ -212,16 +217,53 @@ func decodeExternalLogs(raw string) *process.ExternalLogs {
 		return nil
 	}
 	if details.ConsoleURL != "" {
-		u, err := url.Parse(details.ConsoleURL)
-		allowedHost := err == nil && u.Scheme == "https" && u.User == nil && u.Port() == "" &&
-			(u.Hostname() == "console.aws.amazon.com" ||
-				u.Hostname() == "console.amazonaws.cn" ||
-				u.Hostname() == "console.amazonaws-us-gov.com")
-		if !allowedHost {
+		if !isSafeExternalLogURL(details.ConsoleURL,
+			"console.aws.amazon.com",
+			"console.amazonaws.cn",
+			"console.amazonaws-us-gov.com",
+		) {
 			details.ConsoleURL = ""
 		}
 	}
+	if details.LogURL != "" {
+		host := cloudWatchConsoleHost(details.Resource, details.Region)
+		if host == "" || !isSafeExternalLogURL(details.LogURL, host) {
+			details.LogURL = ""
+		}
+	}
 	return &details
+}
+
+func isSafeExternalLogURL(raw string, allowedHosts ...string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" {
+		return false
+	}
+	for _, host := range allowedHosts {
+		if u.Hostname() == host {
+			return true
+		}
+	}
+	return false
+}
+
+func cloudWatchConsoleHost(resource, region string) string {
+	parts := strings.SplitN(resource, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "ecs" || parts[3] != region || region == "" {
+		return ""
+	}
+	suffix := ""
+	switch parts[1] {
+	case "aws":
+		suffix = ".console.aws.amazon.com"
+	case "aws-cn":
+		suffix = ".console.amazonaws.cn"
+	case "aws-us-gov":
+		suffix = ".console.amazonaws-us-gov.com"
+	default:
+		return ""
+	}
+	return region + suffix
 }
 
 func applyCurrentLogSourceState(src *logSourceResponse, rep *db.Replica, live *process.ProcessInfo) {
@@ -319,6 +361,49 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "download must be true or false")
 			return
 		}
+	}
+
+	providerRead := false
+	if raw := q.Get("provider"); raw != "" {
+		switch raw {
+		case "true", "1":
+			providerRead = true
+		case "false", "0":
+		default:
+			writeError(w, http.StatusBadRequest, "provider must be true or false")
+			return
+		}
+	}
+	if providerRead {
+		runID := q.Get("run")
+		if runID == "" || runID == "legacy" {
+			writeError(w, http.StatusBadRequest, "provider logs require an immutable run")
+			return
+		}
+		run, err := s.store.GetAppLogRun(app.ID, runID)
+		if err != nil || run.ReplicaIndex != idx {
+			writeError(w, http.StatusNotFound, "no log available")
+			return
+		}
+		details := decodeExternalLogs(run.ExternalLogs)
+		if s.externalLogs == nil || details == nil || details.LogGroup == "" || details.LogStream == "" {
+			writeError(w, http.StatusServiceUnavailable, "provider logs are not available through ShinyHub")
+			return
+		}
+		cursor := q.Get("cursor")
+		if len(cursor) > 4096 {
+			writeError(w, http.StatusBadRequest, "provider cursor is too long")
+			return
+		}
+		page, err := s.externalLogs.Read(r.Context(), *details, cursor, int32(tail))
+		if err != nil {
+			slog.Warn("read provider logs", "slug", slug, "run_id", runID, "err", err)
+			writeError(w, http.StatusBadGateway, "provider logs are temporarily unavailable")
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, page)
+		return
 	}
 
 	if s.manager == nil {

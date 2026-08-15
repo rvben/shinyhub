@@ -36,6 +36,18 @@ const sources = [
     started_at: '2026-08-14T08:00:00Z',
   },
   {
+    source_id: 'cloudwatch-run', run_id: 'cloudwatch-run', replica: 6, current: false,
+    status: 'stopped', has_log: false, stream_available: false, inline_available: true,
+    provider: 'fargate', tier: 'burst', started_at: '2026-08-13T09:00:00Z',
+    external_logs: {
+      provider: 'aws_ecs', region: 'eu-west-1', cluster: 'analytics-production',
+      resource: 'arn:aws:ecs:eu-west-1:111122223333:task/analytics-production/cloudwatch-task-0123456789abcdef',
+      log_group: '/shinyhub/apps', log_stream: 'app/shinyhub/cloudwatch-task-0123456789abcdef',
+      log_url: 'https://eu-west-1.console.aws.amazon.com/cloudwatch/home?region=eu-west-1#logsV2:log-groups',
+      console_url: 'https://console.aws.amazon.com/ecs/v2/clusters/analytics-production/tasks/cloudwatch-task-0123456789abcdef/logs?region=eu-west-1',
+    },
+  },
+  {
     source_id: 'external-run', run_id: 'external-run', replica: 7, current: false,
     status: 'stopped', has_log: false, stream_available: false, provider: 'fargate', tier: 'burst',
     started_at: '2026-08-13T08:00:00Z',
@@ -98,6 +110,7 @@ function startFixtureServer() {
     openStreams: new Set(),
     zeroConnections: 0,
     oneConnections: 0,
+    providerRequests: [],
   };
 
   const server = createServer((req, res) => {
@@ -131,6 +144,18 @@ function startFixtureServer() {
 
     const replica = url.searchParams.get('replica');
     const run = url.searchParams.get('run');
+    if (url.searchParams.get('provider') === 'true') {
+      state.providerRequests.push(url.href);
+      if (replica === '6' && run === 'cloudwatch-run') {
+        json(res, 200, {
+          events: [{ message: 'historical CloudWatch output', timestamp: '2026-08-13T09:00:01Z' }],
+          next_cursor: 'cloudwatch-forward-token',
+        });
+      } else {
+        json(res, 404, { error: 'provider log not found' });
+      }
+      return;
+    }
     if (url.searchParams.get('follow') === 'false') {
       if (replica === '0' && run === 'old-run') {
         text(res, 200, 'retained first line\nretained final line\n');
@@ -327,15 +352,24 @@ async function runBrowserContract(origin, state) {
     assert.equal(state.liveRequests.length, requestCountWhileHistorical,
       'selecting an ended run must close live streams without reconnecting them');
 
-    await source.press('r');
-    await source.press('r');
-    await source.press('r');
+    await source.selectOption('live-1');
     await page.waitForFunction(() => new URL(location.href).searchParams.get('log_source') === 'live-1');
     await output.getByText(/^one live \d+$/).waitFor();
     await page.waitForFunction(() => document.querySelector('.logs-status-text')?.textContent === 'Live · 1 connected source');
     assert.equal(await output.getByText('zero before drop', { exact: true }).count(), 0,
       'changing source scope must clear output from other replicas');
     await page.waitForFunction(() => document.querySelector('#logs-announcement')?.textContent?.includes('Replica #1'));
+
+    await source.selectOption('cloudwatch-run');
+    await output.getByText('historical CloudWatch output', { exact: true }).waitFor();
+    await page.waitForFunction(() => document.querySelector('.logs-status-text')?.textContent === 'Stopped · CloudWatch logs available');
+    await page.getByText('Open CloudWatch logs', { exact: true }).waitFor();
+    assert.equal(await page.locator('#logs-download').textContent(), 'AWS-retained logs');
+    assert.equal(await page.locator('#logs-download').isDisabled(), true, 'provider-retained runs must not offer a false local download');
+    assert.match(state.providerRequests[0], /provider=true/);
+    assert.match(state.providerRequests[0], /run=cloudwatch-run/);
+    assert.match(await page.locator('.logs-external-identity').textContent(), /shinyhub\/apps.*cloudwatch-task.*eu-west-1/);
+    assert.equal(await page.getByText('Open CloudWatch logs', { exact: true }).getAttribute('rel'), 'noopener noreferrer');
 
     await source.selectOption('external-run');
     await page.waitForFunction(() => document.querySelector('.logs-status-text')?.textContent === 'Stopped · logs retained in AWS');

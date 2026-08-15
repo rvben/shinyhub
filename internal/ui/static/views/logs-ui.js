@@ -14,8 +14,12 @@ export function isFollowableLogSource(source) {
   return isLiveLogSource(source) && source.stream_available !== false;
 }
 
+export function isInlineProviderLogSource(source) {
+  return source && source.stream_available === false && source.inline_available === true;
+}
+
 export function isExternalLogSource(source) {
-  return source && source.stream_available === false;
+  return source && source.stream_available === false && !isInlineProviderLogSource(source);
 }
 
 function shellQuote(value) {
@@ -24,16 +28,30 @@ function shellQuote(value) {
 
 export function externalLogsCommand(source) {
   const details = source && source.external_logs;
-  if (!details || details.provider !== 'aws_ecs' || !details.resource || !details.region || !details.cluster) return '';
+  if (!details || details.provider !== 'aws_ecs' || !details.resource || !details.region) return '';
+  if (details.log_group && details.log_stream) {
+    return `aws logs get-log-events --log-group-name ${shellQuote(details.log_group)} --log-stream-name ${shellQuote(details.log_stream)} --region ${shellQuote(details.region)}`;
+  }
+  if (!details.cluster) return '';
   return `aws ecs describe-tasks --cluster ${shellQuote(details.cluster)} --tasks ${shellQuote(details.resource)} --region ${shellQuote(details.region)}`;
 }
 
 export function safeExternalLogsURL(source) {
-  const raw = source && source.external_logs && source.external_logs.console_url;
+  const details = source && source.external_logs;
+  const raw = details && (details.log_url || details.console_url);
   if (!raw) return '';
   try {
     const url = new URL(raw);
-    const allowed = ['console.aws.amazon.com', 'console.amazonaws.cn', 'console.amazonaws-us-gov.com'];
+    const region = String(details.region || '');
+    const partition = String(details.resource || '').split(':')[1];
+    const domains = {
+      aws: ['console.aws.amazon.com', '.console.aws.amazon.com'],
+      'aws-cn': ['console.amazonaws.cn', '.console.amazonaws.cn'],
+      'aws-us-gov': ['console.amazonaws-us-gov.com', '.console.amazonaws-us-gov.com'],
+    };
+    const domain = domains[partition];
+    const allowed = domain ? [domain[0]] : [];
+    if (domain && /^[a-z0-9-]+$/.test(region)) allowed.push(`${region}${domain[1]}`);
     return url.protocol === 'https:' && !url.username && !url.password && !url.port && allowed.includes(url.hostname)
       ? url.href
       : '';
@@ -232,6 +250,10 @@ export function createLogsViewer({
   const loadedSources = new Set();
   const connected = new Set();
   const degraded = new Set();
+  const providerCursors = new Map();
+  const providerLoading = new Set();
+  const providerConnected = new Set();
+  const providerDegraded = new Set();
 
   try {
     const requested = new URLSearchParams(win.location && win.location.search || '').get('log_source');
@@ -402,7 +424,7 @@ export function createLogsViewer({
   }
 
   function renderExternalLogs() {
-    const external = scopedSources().filter(isExternalLogSource);
+    const external = scopedSources().filter((source) => source.external_logs && source.external_logs.provider === 'aws_ecs');
     if (!external.length) {
       externalPanel.hidden = true;
       externalPanel.replaceChildren();
@@ -411,9 +433,11 @@ export function createLogsViewer({
     const intro = doc.createElement('div');
     intro.className = 'logs-external-intro';
     const title = doc.createElement('strong');
-    title.textContent = external.length === 1 ? 'Provider-hosted output' : `${external.length} provider-hosted outputs`;
+    title.textContent = external.length === 1 ? 'AWS log source' : `${external.length} AWS log sources`;
     const explanation = doc.createElement('span');
-    explanation.textContent = 'ShinyHub does not copy this output. Access remains subject to your AWS permissions.';
+    explanation.textContent = external.some(isInlineProviderLogSource)
+      ? 'Read on demand from CloudWatch. Direct AWS access remains available as a fallback.'
+      : 'ShinyHub cannot read this output directly. Access remains subject to your AWS permissions.';
     intro.append(title, explanation);
 
     const list = doc.createElement('div');
@@ -428,7 +452,10 @@ export function createLogsViewer({
       const details = doc.createElement('span');
       const location = [source.external_logs && source.external_logs.region, source.external_logs && source.external_logs.cluster]
         .filter(Boolean).join(' · ');
-      const resourceLabel = externalResourceLabel(source);
+      const logIdentity = source.external_logs && source.external_logs.log_group && source.external_logs.log_stream
+        ? `${source.external_logs.log_group} · ${source.external_logs.log_stream}`
+        : '';
+      const resourceLabel = logIdentity || externalResourceLabel(source);
       details.textContent = [resourceLabel, location].filter(Boolean).join(' · ') ||
         'External destination details were not recorded for this run';
       details.title = source.external_logs && source.external_logs.resource || '';
@@ -443,9 +470,10 @@ export function createLogsViewer({
         open.href = consoleURL;
         open.target = '_blank';
         open.rel = 'noopener noreferrer';
-        open.textContent = safeExternalLogsURL(source) ? 'Open task logs' : 'Open AWS ECS';
+        const directCloudWatch = source.external_logs && source.external_logs.log_url && consoleURL === source.external_logs.log_url;
+        open.textContent = directCloudWatch ? 'Open CloudWatch logs' : (safeExternalLogsURL(source) ? 'Open task logs' : 'Open AWS ECS');
         open.setAttribute('aria-label', safeExternalLogsURL(source)
-          ? `Open AWS task logs for replica ${source.replica}`
+          ? `Open AWS logs for replica ${source.replica}`
           : `Open AWS ECS for replica ${source.replica}`);
         actions.appendChild(open);
       }
@@ -515,10 +543,10 @@ export function createLogsViewer({
 
   function updateDownloadControl() {
     const source = sources.find((item) => item.source_id === selected);
-    if (selected !== 'all' && isExternalLogSource(source)) {
+    if (selected !== 'all' && source && source.external_logs) {
       downloadButton.disabled = true;
-      downloadButton.textContent = 'External logs';
-      downloadButton.title = 'Use the provider access details above';
+      downloadButton.textContent = isInlineProviderLogSource(source) ? 'AWS-retained logs' : 'External logs';
+      downloadButton.title = 'Copy visible output or use the AWS access details above';
       return;
     }
     const retainedURL = selected === 'all' ? '' : retainedLogDownloadURL(app.slug, source);
@@ -534,28 +562,38 @@ export function createLogsViewer({
     const live = scoped.filter(isLiveLogSource);
     const externalSources = scoped.filter(isExternalLogSource);
     const followable = live.filter(isFollowableLogSource);
-    const external = live.length - followable.length;
+    const inlineProvider = live.filter(isInlineProviderLogSource);
+    const external = live.length - followable.length - inlineProvider.length;
     const connectedCount = followable.filter((source) => connected.has(source.source_id)).length;
     const degradedCount = followable.filter((source) => degraded.has(source.source_id)).length;
-    const disconnectedCount = followable.length - connectedCount;
-    status.classList.toggle('is-connected', followable.length > 0 && connectedCount === followable.length && degradedCount === 0);
-    status.classList.toggle('is-degraded', degradedCount > 0);
-    status.classList.toggle('is-reconnecting', degradedCount === 0 && disconnectedCount > 0);
-    pauseButton.disabled = followable.length === 0;
+    const providerConnectedCount = inlineProvider.filter((source) => providerConnected.has(source.source_id)).length;
+    const providerDegradedCount = inlineProvider.filter((source) => providerDegraded.has(source.source_id)).length;
+    const availableCount = connectedCount + providerConnectedCount;
+    const availableTotal = followable.length + inlineProvider.length;
+    const totalDegraded = degradedCount + providerDegradedCount;
+    const disconnectedCount = availableTotal - availableCount;
+    status.classList.toggle('is-connected', availableTotal > 0 && availableCount === availableTotal && totalDegraded === 0);
+    status.classList.toggle('is-degraded', totalDegraded > 0);
+    status.classList.toggle('is-reconnecting', totalDegraded === 0 && disconnectedCount > 0);
+    pauseButton.disabled = availableTotal === 0;
     if (live.length === 0) {
-      statusText.textContent = externalSources.length === scoped.length && scoped.length
+      statusText.textContent = scoped.length === 1 && isInlineProviderLogSource(scoped[0])
+        ? `${titleCase(scoped[0].status)} · CloudWatch logs available`
+        : externalSources.length === scoped.length && scoped.length
         ? `${scoped.length === 1 ? titleCase(scoped[0].status) : `${scoped.length} external sources`} · logs retained in AWS`
         : scoped.length
         ? `${scoped.length} retained source${scoped.length === 1 ? '' : 's'} · no live instances`
         : 'No retained log sources';
-    } else if (followable.length === 0) {
+    } else if (availableTotal === 0) {
       statusText.textContent = `${live.length} live source${live.length === 1 ? '' : 's'} · application logs external`;
-    } else if (degradedCount > 0) {
-      statusText.textContent = `Delayed · ${degradedCount} live source${degradedCount === 1 ? '' : 's'} waiting for log storage${disconnectedCount ? ` · ${disconnectedCount} reconnecting` : ''}`;
-    } else if (connectedCount === followable.length) {
-      statusText.textContent = `Live · ${connectedCount} connected source${connectedCount === 1 ? '' : 's'}${external ? ` · ${external} external` : ''}`;
+    } else if (totalDegraded > 0) {
+      statusText.textContent = `Delayed · ${totalDegraded} live source${totalDegraded === 1 ? '' : 's'} waiting for log storage${disconnectedCount ? ` · ${disconnectedCount} reconnecting` : ''}`;
+    } else if (availableCount === availableTotal) {
+      statusText.textContent = inlineProvider.length === availableTotal
+        ? `Live · ${availableCount} CloudWatch source${availableCount === 1 ? '' : 's'} connected`
+        : `Live · ${availableCount} connected source${availableCount === 1 ? '' : 's'}${inlineProvider.length ? ` · ${inlineProvider.length} via CloudWatch` : ''}${external ? ` · ${external} external` : ''}`;
     } else {
-      statusText.textContent = `Reconnecting · ${connectedCount} of ${followable.length} available live sources connected`;
+      statusText.textContent = `Reconnecting · ${availableCount} of ${availableTotal} available live sources connected`;
     }
   }
 
@@ -563,6 +601,71 @@ export function createLogsViewer({
     const run = source.legacy ? 'legacy' : source.run_id;
     const runParam = run ? `&run=${encodeURIComponent(run)}` : '';
     return `/api/apps/${encodeURIComponent(app.slug)}/logs?replica=${source.replica}${runParam}&tail=200&follow=false`;
+  }
+
+  function providerLogURL(source, cursor = '') {
+    const params = new URLSearchParams({
+      replica: String(source.replica),
+      run: source.run_id,
+      provider: 'true',
+      tail: '200',
+    });
+    if (cursor) params.set('cursor', cursor);
+    return `/api/apps/${encodeURIComponent(app.slug)}/logs?${params.toString()}`;
+  }
+
+  async function fetchProviderSource(source, generation) {
+    if (providerLoading.has(source.source_id)) return [];
+    providerLoading.add(source.source_id);
+    const cursor = providerCursors.get(source.source_id) || '';
+    try {
+      const resp = await api(providerLogURL(source, cursor));
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const page = await resp.json();
+      if (destroyed || generation !== scopeGeneration) return [];
+      const nextCursor = String(page && page.next_cursor || '');
+      // CloudWatch returns the same forward token when the caller is caught up.
+      // Treat that as an empty page even if an intermediary replayed the body.
+      if (cursor && nextCursor === cursor) {
+        providerConnected.add(source.source_id);
+        providerDegraded.delete(source.source_id);
+        updateConnectionStatus();
+        return [];
+      }
+      if (nextCursor) providerCursors.set(source.source_id, nextCursor);
+      providerConnected.add(source.source_id);
+      providerDegraded.delete(source.source_id);
+      updateConnectionStatus();
+      return (Array.isArray(page && page.events) ? page.events : []).map((event) => ({
+        kind: 'line', source_id: source.source_id, replica: source.replica,
+        line: String(event && event.message || ''), timestamp: Date.parse(event && event.timestamp || '') || 0,
+      }));
+    } catch {
+      if (destroyed || generation !== scopeGeneration) return [];
+      providerConnected.delete(source.source_id);
+      const firstFailure = !providerDegraded.has(source.source_id);
+      providerDegraded.add(source.source_id);
+      updateConnectionStatus();
+      if (firstFailure) {
+        addEntry({
+          kind: 'event', replica: source.replica,
+          line: `Replica #${source.replica} CloudWatch output is unavailable in ShinyHub; use the AWS access above`,
+        });
+        announce(`CloudWatch output for replica ${source.replica} is unavailable in ShinyHub. Direct AWS access remains available.`);
+      }
+      return [];
+    } finally {
+      providerLoading.delete(source.source_id);
+    }
+  }
+
+  async function pollProviderSources(generation = scopeGeneration) {
+    const pollable = scopedSources().filter(isInlineProviderLogSource);
+    if (!pollable.length) return;
+    const batches = await Promise.all(pollable.map((source) => fetchProviderSource(source, generation)));
+    if (destroyed || generation !== scopeGeneration) return;
+    const batch = batches.flat().sort((a, b) => a.timestamp - b.timestamp || a.replica - b.replica);
+    for (const entry of batch) addEntry(entry);
   }
 
   async function fetchStaticLines(source) {
@@ -675,6 +778,7 @@ export function createLogsViewer({
   function loadSource(source, generation = scopeGeneration) {
     if (loadedSources.has(source.source_id)) return;
     loadedSources.add(source.source_id);
+    if (isInlineProviderLogSource(source)) return;
     if (isExternalLogSource(source)) return;
     if (isLiveLogSource(source)) openLiveSource(source, generation);
     else loadStaticSource(source, generation);
@@ -696,6 +800,10 @@ export function createLogsViewer({
     scopeGeneration++;
     closeStreams();
     loadedSources.clear();
+    providerCursors.clear();
+    providerLoading.clear();
+    providerConnected.clear();
+    providerDegraded.clear();
     entries = [];
     trimmed = 0;
     pendingWhilePaused = 0;
@@ -703,6 +811,7 @@ export function createLogsViewer({
     for (const source of scopedSources()) loadSource(source, scopeGeneration);
     updateConnectionStatus();
     scheduleRender(true);
+    pollProviderSources(scopeGeneration);
   }
 
   function reconcileSources(nextSources, markChanges) {
@@ -737,7 +846,17 @@ export function createLogsViewer({
           streams.delete(source.source_id);
           connected.delete(source.source_id);
           degraded.delete(source.source_id);
-          reconcileTerminalSource(source, scopeGeneration, sourceStatusEvent(source, old));
+          const terminalMessage = sourceStatusEvent(source, old);
+          if (isInlineProviderLogSource(source)) {
+            const generation = scopeGeneration;
+            pollProviderSources(generation).then(() => {
+              if (terminalMessage && !destroyed && generation === scopeGeneration) {
+                addEntry({ kind: 'event', replica: source.replica, line: terminalMessage });
+              }
+            });
+          } else {
+            reconcileTerminalSource(source, scopeGeneration, terminalMessage);
+          }
         } else if (old && !isLiveLogSource(source) && source.has_log &&
           (!old.has_log || source.size_bytes !== old.size_bytes)) {
           // The terminal metadata can become visible before the writer's final
@@ -761,6 +880,7 @@ export function createLogsViewer({
       const payload = await resp.json();
       if (destroyed) return false;
       reconcileSources(payload && payload.sources, markChanges);
+      if (markChanges) pollProviderSources(scopeGeneration);
       return true;
     } catch {
       status.classList.add('is-reconnecting');

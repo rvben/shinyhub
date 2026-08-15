@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -294,6 +295,104 @@ func TestHandleLogSourcesPreservesExternalLogsForStoppedRun(t *testing.T) {
 	if len(body.Sources) != 1 || body.Sources[0].Status != "stopped" || body.Sources[0].StreamAvailable ||
 		body.Sources[0].ExternalLogs == nil || *body.Sources[0].ExternalLogs != details {
 		t.Fatalf("external stopped source = %+v", body.Sources)
+	}
+}
+
+type fakeExternalLogReader struct {
+	gotDetails process.ExternalLogs
+	gotCursor  string
+	gotLimit   int32
+	page       process.ExternalLogPage
+	err        error
+}
+
+func (f *fakeExternalLogReader) Read(_ context.Context, details process.ExternalLogs, cursor string, limit int32) (process.ExternalLogPage, error) {
+	f.gotDetails, f.gotCursor, f.gotLimit = details, cursor, limit
+	return f.page, f.err
+}
+
+func TestHandleLogsReadsStoppedFargateRunFromExternalProvider(t *testing.T) {
+	srv, store, _ := newLogsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("myapp")
+	const runID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: app.ID, ReplicaIndex: 3, Tier: "burst",
+		Status: "starting", StartedAt: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	details := process.ExternalLogs{
+		Provider: "aws_ecs", Resource: "arn:aws:ecs:eu-west-1:111122223333:task/analytics/task-3",
+		Region: "eu-west-1", Cluster: "analytics", LogGroup: "/shinyhub/apps", LogStream: "app/app/task-3",
+	}
+	encoded, _ := json.Marshal(details)
+	if err := store.MarkAppLogRunRunning(runID, "fargate", string(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishAppLogRun(runID, "stopped", time.Now(), false); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &fakeExternalLogReader{page: process.ExternalLogPage{
+		Events:     []process.ExternalLogEvent{{Message: "booted", Timestamp: time.UnixMilli(1_700_000_000_000)}},
+		NextCursor: "next-token",
+	}}
+	srv.SetExternalLogReader(reader)
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	req := httptest.NewRequest("GET", "/api/apps/myapp/logs?replica=3&run="+runID+"&provider=true&tail=2&cursor=prior-token", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if reader.gotDetails != details || reader.gotCursor != "prior-token" || reader.gotLimit != 2 {
+		t.Fatalf("provider read = details %+v cursor %q limit %d", reader.gotDetails, reader.gotCursor, reader.gotLimit)
+	}
+	var page process.ExternalLogPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 1 || page.Events[0].Message != "booted" || page.NextCursor != "next-token" {
+		t.Fatalf("page = %+v", page)
+	}
+
+	req = httptest.NewRequest("GET", "/api/apps/myapp/logs/sources", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sources status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var sources struct {
+		Sources []struct {
+			RunID           string `json:"run_id"`
+			InlineAvailable bool   `json:"inline_available"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
+		t.Fatal(err)
+	}
+	if len(sources.Sources) != 1 || sources.Sources[0].RunID != runID || !sources.Sources[0].InlineAvailable {
+		t.Fatalf("sources = %+v", sources.Sources)
+	}
+
+	reader.err = errors.New("AccessDeniedException: secret provider detail")
+	req = httptest.NewRequest("GET", "/api/apps/myapp/logs?replica=3&run="+runID+"&provider=true", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "temporarily unavailable") ||
+		strings.Contains(rec.Body.String(), "AccessDeniedException") {
+		t.Fatalf("provider failure status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

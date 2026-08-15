@@ -56,6 +56,7 @@ type Server struct {
 	metrics         *metrics.Registry   // nil when metrics are disabled
 	history         *history.Store      // nil when metrics-history collection is disabled
 	tracer          *servertrace.Tracer // nil when server tracing is disabled
+	externalLogs    process.ExternalLogReader
 	router          chi.Router
 
 	// renderPacingCores/renderPacingSource record the effective host cores (and
@@ -233,6 +234,12 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 
 // Router returns the fully-configured http.Handler.
 func (s *Server) Router() http.Handler { return s.router }
+
+// SetExternalLogReader enables optional, on-demand reads from provider-owned
+// log storage. A nil reader leaves the credential-free console handoff intact.
+func (s *Server) SetExternalLogReader(reader process.ExternalLogReader) {
+	s.externalLogs = reader
+}
 
 // Config returns the server's configuration. Exposed for tests that need to
 // locate temp directories (e.g. AppsDir, AppDataDir) created by the test helper.

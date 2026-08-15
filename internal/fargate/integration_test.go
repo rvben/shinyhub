@@ -16,8 +16,10 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 
+	"github.com/rvben/shinyhub/internal/cloudlogs"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
 )
@@ -44,13 +46,15 @@ import (
 //	SHINYHUB_FARGATE_IT_COMMAND          comma-separated launch command override
 //	                                     (optional; else the task def's command)
 //	SHINYHUB_FARGATE_IT_PORT             route port to assert in the URL (default 8000)
+//	SHINYHUB_FARGATE_IT_EXPECT_LOG       message to await before and after stop
+//	                                     (optional; enables the CloudWatch read proof)
 //
 // AWS credentials resolve through the standard SDK chain (AWS_PROFILE, env vars,
 // SSO, instance role). The task definition's container should stay running long
 // enough to acquire an ENI (e.g. a container whose command sleeps), so Start can
 // observe the private IP.
 
-func itConfig(t *testing.T) (*ecs.Client, Config, process.StartParams) {
+func itConfig(t *testing.T) (aws.Config, *ecs.Client, Config, process.StartParams) {
 	t.Helper()
 	cluster := os.Getenv("SHINYHUB_FARGATE_IT_CLUSTER")
 	if cluster == "" {
@@ -96,7 +100,7 @@ func itConfig(t *testing.T) (*ecs.Client, Config, process.StartParams) {
 		DeploymentID: 1,
 		AppVersion:   "it",
 	}
-	return ecs.NewFromConfig(awsCfg), cfg, p
+	return awsCfg, ecs.NewFromConfig(awsCfg), cfg, p
 }
 
 func splitEnvList(v string) []string {
@@ -158,6 +162,9 @@ func assertExternalLogsHandoff(t *testing.T, details *process.ExternalLogs, task
 		t.Fatalf("external log location = region %q cluster %q, want non-empty region and cluster %q",
 			details.Region, details.Cluster, ecsClusterName(configuredCluster))
 	}
+	if details.LogGroup == "" || details.LogStream == "" || details.LogURL == "" {
+		t.Fatalf("CloudWatch log handoff = %+v, want group, stream, and direct URL", details)
+	}
 	taskID := taskARN[strings.LastIndex(taskARN, "/")+1:]
 	u, err := url.Parse(details.ConsoleURL)
 	if err != nil {
@@ -172,6 +179,34 @@ func assertExternalLogsHandoff(t *testing.T, details *process.ExternalLogs, task
 		t.Fatalf("external console URL = %q, want safe task Logs URL path %q in region %q",
 			details.ConsoleURL, wantPath, details.Region)
 	}
+	logURL, err := url.Parse(details.LogURL)
+	if err != nil || logURL.Scheme != "https" || logURL.User != nil || logURL.Port() != "" ||
+		logURL.Query().Get("region") != details.Region || !strings.HasPrefix(logURL.Hostname(), details.Region+".console.") {
+		t.Fatalf("CloudWatch console URL = %q, want safe region-scoped URL", details.LogURL)
+	}
+}
+
+func waitForCloudWatchMessage(t *testing.T, ctx context.Context, reader *cloudlogs.Reader, details process.ExternalLogs, expected string) {
+	t.Helper()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		page, err := reader.Read(ctx, details, "", 200)
+		lastErr = err
+		if err == nil {
+			for _, event := range page.Events {
+				if strings.Contains(event.Message, expected) {
+					return
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("CloudWatch log %q not available before deadline (last error: %v)", expected, lastErr)
+		case <-ticker.C:
+		}
+	}
 }
 
 // TestIntegration_StartInventorySignalWait drives the full lifecycle against a
@@ -181,7 +216,7 @@ func assertExternalLogsHandoff(t *testing.T, details *process.ExternalLogs, task
 // after any failure before the normal terminal state, so a failed run does not
 // leak a billed task.
 func TestIntegration_StartInventorySignalWait(t *testing.T) {
-	client, cfg, p := itConfig(t)
+	awsCfg, client, cfg, p := itConfig(t)
 	store, appID, fixtureDeploymentID := integrationLogStore(t, p.AppVersion)
 	p.DeploymentID = fixtureDeploymentID
 	rt := New(client, cfg, nil,
@@ -228,6 +263,13 @@ func TestIntegration_StartInventorySignalWait(t *testing.T) {
 		t.Fatalf("decodeHandle(%q) = %q, %v", ep.Handle.ContainerID, taskARN, err)
 	}
 	assertExternalLogsHandoff(t, ep.ExternalLogs, taskARN, cfg.Cluster)
+	expectedLog := os.Getenv("SHINYHUB_FARGATE_IT_EXPECT_LOG")
+	providerReader := cloudlogs.New(cloudwatchlogs.NewFromConfig(awsCfg), awsCfg.Region)
+	if expectedLog != "" {
+		logCtx, logCancel := context.WithTimeout(ctx, 90*time.Second)
+		waitForCloudWatchMessage(t, logCtx, providerReader, *ep.ExternalLogs, expectedLog)
+		logCancel()
+	}
 
 	const runID = "00000000-0000-4000-8000-000000000001"
 	deploymentID := p.DeploymentID
@@ -313,5 +355,10 @@ func TestIntegration_StartInventorySignalWait(t *testing.T) {
 		persistedHandoff != *ep.ExternalLogs {
 		t.Fatalf("stopped immutable run = %+v handoff=%+v, want original handoff %+v",
 			persisted, persistedHandoff, ep.ExternalLogs)
+	}
+	if expectedLog != "" {
+		logCtx, logCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer logCancel()
+		waitForCloudWatchMessage(t, logCtx, providerReader, persistedHandoff, expectedLog)
 	}
 }

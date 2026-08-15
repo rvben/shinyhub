@@ -193,9 +193,25 @@ func TestStartRunsTaskAndRoutesToPrivateIP(t *testing.T) {
 	f := &fakeECS{
 		runTaskFn: func(*ecs.RunTaskInput) (*ecs.RunTaskOutput, error) {
 			return &ecs.RunTaskOutput{Tasks: []ecstypes.Task{{
-				TaskArn:    aws.String("arn:aws:ecs:eu-west-1:111122223333:task/shiny-cluster/abc123"),
-				LastStatus: aws.String("PROVISIONING"),
+				TaskArn:           aws.String("arn:aws:ecs:eu-west-1:111122223333:task/shiny-cluster/abc123"),
+				TaskDefinitionArn: aws.String("arn:aws:ecs:eu-west-1:111122223333:task-definition/shiny-app:7"),
+				LastStatus:        aws.String("PROVISIONING"),
 			}}}, nil
+		},
+		describeTDFn: func(*ecs.DescribeTaskDefinitionInput) (*ecs.DescribeTaskDefinitionOutput, error) {
+			return &ecs.DescribeTaskDefinitionOutput{TaskDefinition: &ecstypes.TaskDefinition{
+				ContainerDefinitions: []ecstypes.ContainerDefinition{{
+					Name: aws.String("app"),
+					LogConfiguration: &ecstypes.LogConfiguration{
+						LogDriver: ecstypes.LogDriverAwslogs,
+						Options: map[string]string{
+							"awslogs-group":         "/shinyhub/apps",
+							"awslogs-region":        "eu-west-1",
+							"awslogs-stream-prefix": "app",
+						},
+					},
+				}},
+			}}, nil
 		},
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
 			calls++
@@ -233,6 +249,8 @@ func TestStartRunsTaskAndRoutesToPrivateIP(t *testing.T) {
 	if ep.ExternalLogs == nil || ep.ExternalLogs.Provider != "aws_ecs" ||
 		ep.ExternalLogs.Resource != "arn:aws:ecs:eu-west-1:111122223333:task/shiny-cluster/abc123" ||
 		ep.ExternalLogs.Region != "eu-west-1" || ep.ExternalLogs.Cluster != "shiny-cluster" ||
+		ep.ExternalLogs.LogGroup != "/shinyhub/apps" || ep.ExternalLogs.LogStream != "app/app/abc123" ||
+		ep.ExternalLogs.LogURL != "https://eu-west-1.console.aws.amazon.com/cloudwatch/home?region=eu-west-1#logsV2:log-groups/log-group/$252Fshinyhub$252Fapps/log-events/app$252Fapp$252Fabc123" ||
 		ep.ExternalLogs.ConsoleURL != "https://console.aws.amazon.com/ecs/v2/clusters/shiny-cluster/tasks/abc123/logs?region=eu-west-1" {
 		t.Errorf("ExternalLogs = %+v", ep.ExternalLogs)
 	}
@@ -2394,6 +2412,17 @@ func TestContainerOverride_NoClampsWhenUnderCeiling(t *testing.T) {
 	}
 	if ov.Memory == nil || *ov.Memory != 2048 {
 		t.Errorf("Memory: want 2048 (no clamp), got %v", ov.Memory)
+	}
+}
+
+func TestContainerOverride_OmitsEmptyCommandToPreserveTaskDefinition(t *testing.T) {
+	rt := New(&fakeECS{}, Config{
+		Cluster: "c", TaskDefinition: "td", ContainerName: "app", Subnets: []string{"s-1"},
+	}, nil)
+
+	ov := rt.buildContainerOverride(process.StartParams{Slug: "myapp", Command: []string{}})
+	if ov.Command != nil {
+		t.Fatalf("Command = %#v, want nil so ECS preserves the task definition command", ov.Command)
 	}
 }
 

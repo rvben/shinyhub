@@ -74,3 +74,31 @@ func TestDecodeExternalLogsAllowsOnlyExpectedAWSConsoleOrigins(t *testing.T) {
 		t.Errorf("incomplete metadata = %+v", got)
 	}
 }
+
+func TestDecodeExternalLogsAllowsOnlyRegionScopedCloudWatchOrigins(t *testing.T) {
+	encode := func(logURL string) string {
+		raw, err := json.Marshal(process.ExternalLogs{
+			Provider: "aws_ecs", Resource: "arn:aws:ecs:eu-west-1:123:task/demo/task-1",
+			Region: "eu-west-1", LogGroup: "/shinyhub/apps", LogStream: "app/app/task-1", LogURL: logURL,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+
+	const allowed = "https://eu-west-1.console.aws.amazon.com/cloudwatch/home?region=eu-west-1#logsV2:log-groups"
+	if got := decodeExternalLogs(encode(allowed)); got == nil || got.LogURL != allowed {
+		t.Fatalf("allowed CloudWatch URL = %+v", got)
+	}
+	for _, unsafe := range []string{
+		"https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=eu-west-1",
+		"https://eu-west-1.console.aws.amazon.com.evil.test/steal",
+		"http://eu-west-1.console.aws.amazon.com/cloudwatch/home",
+	} {
+		got := decodeExternalLogs(encode(unsafe))
+		if got == nil || got.LogURL != "" {
+			t.Errorf("unsafe CloudWatch URL %q = %+v", unsafe, got)
+		}
+	}
+}

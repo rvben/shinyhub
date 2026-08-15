@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"syscall"
+	"time"
 )
 
 // ErrNoLiveWorker is returned (wrapped) when a tier-bound remote runtime has no
@@ -49,7 +50,32 @@ type ExternalLogs struct {
 	Resource   string `json:"resource"`
 	Region     string `json:"region,omitempty"`
 	Cluster    string `json:"cluster,omitempty"`
+	LogGroup   string `json:"log_group,omitempty"`
+	LogStream  string `json:"log_stream,omitempty"`
+	LogURL     string `json:"log_url,omitempty"`
 	ConsoleURL string `json:"console_url,omitempty"`
+}
+
+// ExternalLogEvent is one provider-retained application log event. Timestamp
+// is provider time rather than ShinyHub receipt time, so callers can preserve
+// ordering when polling multiple remote streams.
+type ExternalLogEvent struct {
+	Message   string    `json:"message"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// ExternalLogPage is a bounded provider response. NextCursor is opaque to
+// ShinyHub and the browser; passing it back resumes strictly after this page.
+type ExternalLogPage struct {
+	Events     []ExternalLogEvent `json:"events"`
+	NextCursor string             `json:"next_cursor,omitempty"`
+}
+
+// ExternalLogReader retrieves provider-owned logs on demand. Implementations
+// must treat ExternalLogs as untrusted persisted input and validate the
+// provider-specific identifiers before making an external request.
+type ExternalLogReader interface {
+	Read(context.Context, ExternalLogs, string, int32) (ExternalLogPage, error)
 }
 
 // Runtime abstracts how app processes are started and managed.

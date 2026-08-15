@@ -25,6 +25,7 @@ import (
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
@@ -40,6 +41,7 @@ import (
 	"github.com/rvben/shinyhub/internal/autoscale"
 	"github.com/rvben/shinyhub/internal/backup"
 	"github.com/rvben/shinyhub/internal/cli"
+	"github.com/rvben/shinyhub/internal/cloudlogs"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/data"
 	"github.com/rvben/shinyhub/internal/db"
@@ -1196,6 +1198,17 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 
 	srv := api.New(cfg, store, mgr, prx)
 	srv.SetVersion(version)
+	if fc := cfg.Runtime.Fargate; fc.Cluster != "" {
+		var opts []func(*awsconfig.LoadOptions) error
+		if fc.Region != "" {
+			opts = append(opts, awsconfig.WithRegion(fc.Region))
+		}
+		if awsCfg, err := awsconfig.LoadDefaultConfig(ctx, opts...); err != nil {
+			slog.Warn("CloudWatch application logs unavailable; using AWS console handoff", "err", err)
+		} else {
+			srv.SetExternalLogReader(cloudlogs.New(cloudwatchlogs.NewFromConfig(awsCfg), awsCfg.Region))
+		}
+	}
 	if isClustered(cfg) {
 		srv.SetCluster(cfg.Server.InstanceID)
 	}

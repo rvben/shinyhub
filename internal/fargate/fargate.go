@@ -509,8 +509,13 @@ func (r *Runtime) replicaEnv(p process.StartParams) []ecstypes.KeyValuePair {
 func (r *Runtime) buildContainerOverride(p process.StartParams) ecstypes.ContainerOverride {
 	ov := ecstypes.ContainerOverride{
 		Name:        aws.String(r.cfg.ContainerName),
-		Command:     p.Command,
 		Environment: r.replicaEnv(p),
+	}
+	// An empty command is not a no-op in ECS: serializing command: [] clears the
+	// task definition's command. Omit the field entirely unless the app supplied
+	// a real override so operator-owned task definitions remain authoritative.
+	if len(p.Command) > 0 {
+		ov.Command = p.Command
 	}
 	if p.MemoryLimitMB > 0 {
 		mem := int32(p.MemoryLimitMB)
@@ -866,6 +871,10 @@ func (r *Runtime) Start(ctx context.Context, p process.StartParams, logWriter io
 		return process.ReplicaEndpoint{}, fmt.Errorf("fargate: run task returned no task")
 	}
 	taskARN := aws.ToString(out.Tasks[0].TaskArn)
+	usedTaskDef := taskDef
+	if arn := aws.ToString(out.Tasks[0].TaskDefinitionArn); arn != "" {
+		usedTaskDef = arn
+	}
 	r.metrics.RecordRunTask("ok")
 	r.metrics.ObserveRunTaskLatency(time.Since(startTime).Seconds())
 	r.log.Info("fargate run task issued", "slug", p.Slug, "index", p.Index, "task_arn", taskARN)
@@ -882,8 +891,75 @@ func (r *Runtime) Start(ctx context.Context, p process.StartParams, logWriter io
 		Provider:     Provider,
 		WorkerID:     r.workerID,
 		Handle:       process.RunHandle{ContainerID: r.encodeHandle(taskARN)},
-		ExternalLogs: externalLogsForTask(taskARN, r.cfg.Cluster),
+		ExternalLogs: r.externalLogsForTask(ctx, taskARN, usedTaskDef),
 	}, nil
+}
+
+// externalLogsForTask enriches the durable ECS task handoff with the exact
+// awslogs destination used by the selected container. Discovery is best effort:
+// logging metadata must never turn an otherwise healthy application start into
+// a failure, and the existing ECS task link remains useful when a task
+// definition is unavailable or uses another log driver.
+func (r *Runtime) externalLogsForTask(ctx context.Context, taskARN, taskDef string) *process.ExternalLogs {
+	details := externalLogsForTask(taskARN, r.cfg.Cluster)
+	out, err := r.client.DescribeTaskDefinition(ctx, &ecs.DescribeTaskDefinitionInput{
+		TaskDefinition: aws.String(taskDef),
+	})
+	if err != nil || out.TaskDefinition == nil {
+		if err != nil {
+			r.log.Warn("fargate: discover external logs", "task_definition", taskDef, "err", err)
+		}
+		return details
+	}
+	for _, container := range out.TaskDefinition.ContainerDefinitions {
+		if aws.ToString(container.Name) != r.cfg.ContainerName || container.LogConfiguration == nil ||
+			container.LogConfiguration.LogDriver != ecstypes.LogDriverAwslogs {
+			continue
+		}
+		options := container.LogConfiguration.Options
+		group, prefix := options["awslogs-group"], options["awslogs-stream-prefix"]
+		if group == "" || prefix == "" {
+			return details
+		}
+		details.LogGroup = group
+		details.LogStream = prefix + "/" + r.cfg.ContainerName + "/" + taskIDFromARN(taskARN)
+		if region := options["awslogs-region"]; region != "" {
+			details.Region = region
+		}
+		details.LogURL = cloudWatchLogURL(taskARN, details.Region, details.LogGroup, details.LogStream)
+		return details
+	}
+	return details
+}
+
+func taskIDFromARN(taskARN string) string {
+	if i := strings.LastIndex(taskARN, "/"); i >= 0 {
+		return taskARN[i+1:]
+	}
+	return taskARN
+}
+
+func cloudWatchLogURL(taskARN, region, group, stream string) string {
+	parts := strings.SplitN(taskARN, ":", 6)
+	if len(parts) != 6 || region == "" || group == "" || stream == "" {
+		return ""
+	}
+	host := ""
+	switch parts[1] {
+	case "aws":
+		host = region + ".console.aws.amazon.com"
+	case "aws-cn":
+		host = region + ".console.amazonaws.cn"
+	case "aws-us-gov":
+		host = region + ".console.amazonaws-us-gov.com"
+	default:
+		return ""
+	}
+	escape := func(value string) string {
+		return strings.ReplaceAll(url.PathEscape(value), "%", "$25")
+	}
+	return "https://" + host + "/cloudwatch/home?region=" + url.QueryEscape(region) +
+		"#logsV2:log-groups/log-group/" + escape(group) + "/log-events/" + escape(stream)
 }
 
 // externalLogsForTask builds a durable, credential-free handoff to the ECS
