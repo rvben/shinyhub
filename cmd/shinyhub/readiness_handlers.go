@@ -18,6 +18,20 @@ type drainChecker interface {
 	SyncedOnce() bool
 }
 
+// probeMethods limits unauthenticated liveness/readiness endpoints to the two
+// safe retrieval methods understood by load balancers. In particular, do not
+// answer TRACE or accept state-changing verbs on the public app origin.
+func probeMethods(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // readyzHandler builds the /readyz HTTP handler from its dependencies.
 // Extracted so the handler logic can be unit-tested without running the full
 // server. The returned handler is mounted directly on the mux in runServe.
