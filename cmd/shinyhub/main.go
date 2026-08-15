@@ -1990,13 +1990,13 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		appHandler = appOriginDispatch(parsedAppOrigin, cfg.TrustedProxyNets, store, cfg.Auth.Secret, controlAppHandler, appHandler)
 	}
 	mux.Handle("/app/", appHandler)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/healthz", probeMethods(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/readyz", readyzHandler(prx, readyCh, store))
-	mux.HandleFunc("/activez", activezHandler(ownerAndReady))
+	})))
+	mux.Handle("/readyz", probeMethods(readyzHandler(prx, readyCh, store)))
+	mux.Handle("/activez", probeMethods(activezHandler(ownerAndReady)))
 	mux.Handle("/static/", ui.Handler())
 
 	// GET /internal/fargate-bundle/{digest} - streams the bundle zip to a Fargate

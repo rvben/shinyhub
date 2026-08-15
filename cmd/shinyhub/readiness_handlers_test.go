@@ -34,6 +34,38 @@ func closedCh() chan struct{} {
 // openCh returns a channel that is never closed, simulating startup.
 func openCh() chan struct{} { return make(chan struct{}) }
 
+func TestProbeMethods(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method+" allowed", func(t *testing.T) {
+			called := false
+			h := probeMethods(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(method, "/healthz", nil))
+			if rec.Code != http.StatusNoContent || !called {
+				t.Fatalf("status = %d, called = %v; want 204, true", rec.Code, called)
+			}
+		})
+	}
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodTrace} {
+		t.Run(method+" rejected", func(t *testing.T) {
+			called := false
+			h := probeMethods(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(method, "/healthz", nil))
+			if rec.Code != http.StatusMethodNotAllowed || called {
+				t.Fatalf("status = %d, called = %v; want 405, false", rec.Code, called)
+			}
+			if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+				t.Fatalf("Allow = %q, want GET, HEAD", got)
+			}
+		})
+	}
+}
+
 // ----------------------------------------------------------------------------
 // /readyz tests
 // ----------------------------------------------------------------------------
