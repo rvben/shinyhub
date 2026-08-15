@@ -119,7 +119,7 @@ func TestRecovery_LogsCrashMarkFailure(t *testing.T) {
 
 	app := &db.App{ID: 1, Slug: "myapp"}
 	r := &db.Replica{Index: 0} // PID nil -> crash-mark branch; mgr/prx untouched
-	recoverNativeReplica(store, nil, nil, app, r, "/bundles/v1")
+	recoverNativeReplica(store, nil, nil, app, r, "/bundles/v1", "")
 
 	if !strings.Contains(buf.String(), "myapp") {
 		t.Fatalf("expected a warning when the crash-mark persist fails, got:\n%s", buf.String())

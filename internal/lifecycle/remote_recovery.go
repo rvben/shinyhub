@@ -49,7 +49,7 @@ func matchInventoryItem(items []process.InventoryItem, slug string, index int, d
 // resolve the owning worker and container.
 func recoverRemoteReplica(
 	store *db.Store, mgr *process.Manager, prx *proxy.Proxy,
-	app *db.App, r *db.Replica, items []process.InventoryItem,
+	app *db.App, r *db.Replica, items []process.InventoryItem, logRunID string,
 ) bool {
 	if r.DesiredState == db.ReplicaDesiredWarm {
 		// Warm-parked by the idle shrink: deliberately stopped; expansion boots it, not recovery.
@@ -90,16 +90,18 @@ func recoverRemoteReplica(
 	if item.URL == "" && fargate.IsECSManagedWorkerID(item.WorkerID) {
 		mgr.Adopt(app.Slug, process.ProcessInfo{
 			Slug:        app.Slug,
+			AppID:       app.ID,
 			Index:       r.Index,
 			Status:      process.StatusRunning,
 			Tier:        r.Tier,
 			Provider:    r.Provider,
 			EndpointURL: r.EndpointURL, // preserve DB value if present
 			WorkerID:    r.WorkerID,
+			LogRunID:    logRunID,
 		}, process.RunHandle{ContainerID: r.WorkerID + "/" + item.ContainerID})
 		slog.Info("recovery: partial-adopt ecs replica (no ip yet)",
 			"slug", app.Slug, "idx", r.Index, "container", item.ContainerID,
-			"launch_type", item.WorkerID)
+			"launch_type", item.WorkerID, "log_run_id", logRunID)
 		return true // slot is claimed; caller sets anyAlive=true
 	}
 
@@ -111,12 +113,14 @@ func recoverRemoteReplica(
 	// Phase 2: full adoption with proxy registration (task is routable).
 	mgr.Adopt(app.Slug, process.ProcessInfo{
 		Slug:        app.Slug,
+		AppID:       app.ID,
 		Index:       r.Index,
 		Status:      process.StatusRunning,
 		Tier:        r.Tier,
 		Provider:    r.Provider,
 		EndpointURL: item.URL,
 		WorkerID:    r.WorkerID,
+		LogRunID:    logRunID,
 	}, process.RunHandle{ContainerID: r.WorkerID + "/" + item.ContainerID})
 	if err := prx.RegisterReplica(app.Slug, r.Index, item.URL, mgr.TransportForWorker(r.Tier, r.WorkerID), derefInt64(r.DeploymentID)); err != nil {
 		slog.Error("recovery: register remote proxy", "slug", app.Slug, "idx", r.Index, "err", err)
@@ -132,7 +136,7 @@ func recoverRemoteReplica(
 			slog.Error("recovery: persist remote endpoint", "slug", app.Slug, "idx", r.Index, "err", err)
 		}
 	}
-	slog.Info("recovery: re-adopted remote replica", "slug", app.Slug, "idx", r.Index, "container", item.ContainerID)
+	slog.Info("recovery: re-adopted remote replica", "slug", app.Slug, "idx", r.Index, "container", item.ContainerID, "log_run_id", logRunID)
 	return true
 }
 

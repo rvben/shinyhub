@@ -138,7 +138,7 @@ func TestRecoverNativeReplica_ReAdoptsFrozenWarmReplica(t *testing.T) {
 	}
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	if !recoverNativeReplica(store, mgr, nil, app, replicaAt(t, store, app.ID, 1), bundleDir) {
+	if !recoverNativeReplica(store, mgr, nil, app, replicaAt(t, store, app.ID, 1), bundleDir, "") {
 		t.Fatalf("a verified frozen warm replica must be re-adopted, not reaped")
 	}
 	// The frozen process must NOT have been killed - it stays frozen, warm-resumable.
@@ -165,7 +165,7 @@ func TestRecoverNativeReplica_FrozenWithNoProcessDowngrades(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 
-	if recoverNativeReplica(store, mgr, nil, app, replicaAt(t, store, app.ID, 1), t.TempDir()) {
+	if recoverNativeReplica(store, mgr, nil, app, replicaAt(t, store, app.ID, 1), t.TempDir(), "") {
 		t.Fatalf("a frozen warm replica with no live process must not be re-adopted")
 	}
 	if r := replicaAt(t, store, app.ID, 1); r.Status != "stopped" {

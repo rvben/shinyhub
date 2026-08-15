@@ -10,6 +10,8 @@ WORK="$(mktemp -d)"
 SERVER_PID=""
 BROWSER_PID=""
 CONNECT_PID=""
+LOGS_PID=""
+SERVER_CRASHED=0
 PORT="${SHINYHUB_BROWSER_E2E_PORT:-18090}"
 HOST="http://127.0.0.1:${PORT}"
 ADMIN_USER="browser-admin"
@@ -18,7 +20,13 @@ CLI_VERSION="v0.0.0-browser-e2e"
 WHEEL_VERSION="0.0.0+browser.e2e"
 
 cleanup() {
-  for pid in "${CONNECT_PID}" "${BROWSER_PID}" "${SERVER_PID}"; do
+  # A SIGKILL recovery check intentionally leaves the replica children alive.
+  # If a later assertion fails before the replacement control plane starts,
+  # briefly recover it here so the normal graceful shutdown can reap them.
+  if [ "${SERVER_CRASHED}" = "1" ] && [ -x "${BIN:-}" ]; then
+    start_server >/dev/null 2>&1 || true
+  fi
+  for pid in "${CONNECT_PID}" "${LOGS_PID}" "${BROWSER_PID}" "${SERVER_PID}"; do
     if [ -n "${pid}" ]; then
       kill "${pid}" 2>/dev/null || true
       wait "${pid}" 2>/dev/null || true
@@ -50,7 +58,7 @@ file_mode() {
 
 fail() {
   echo "BROWSER ONBOARDING E2E FAIL: $*" >&2
-  for log in build.log install.log server.log chrome.log connect-first.log connect-current.json connect-current.log whoami.log doctor.log deploy.log logs-browser.log connect-refresh.log tokens-after-refresh.log revoked.log connect-recovery.log; do
+  for log in build.log install.log server.log chrome.log connect-first.log connect-current.json connect-current.log whoami.log doctor.log deploy.log logs-browser.log logs-reconnected-browser.log scale-down.log logs-history-browser.log connect-refresh.log tokens-after-refresh.log revoked.log connect-recovery.log; do
     if [ -s "${WORK}/${log}" ]; then
       echo "----- ${log} (last 100 lines) -----" >&2
       tail -100 "${WORK}/${log}" >&2
@@ -106,6 +114,43 @@ wait_for_pairing_url() {
     sleep 0.1
   done
   return 1
+}
+
+wait_for_file() {
+  local path="$1"
+  local pid="$2"
+  local attempt=0
+  while [ ! -s "${path}" ] && [ "${attempt}" -lt 300 ]; do
+    kill -0 "${pid}" 2>/dev/null || return 1
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  [ -s "${path}" ]
+}
+
+start_server() {
+  local started_pid
+  (
+    cd "${WORK}"
+    SHINYHUB_SERVER_HOST=127.0.0.1 \
+    SHINYHUB_SERVER_PORT="${PORT}" \
+    SHINYHUB_SHUTDOWN_APPS=stop \
+      exec "${BIN}" serve --config "${WORK}/shinyhub.yaml"
+  ) >>"${WORK}/server.log" 2>&1 &
+  started_pid=$!
+  SERVER_PID="${started_pid}"
+  # /readyz deliberately permits a read-only standby. This journey performs
+  # mutations, so do not hand control back until the restarted process owns the
+  # control-plane lease and has refreshed its routing index too. A replacement
+  # may need the full 30-second lease TTL after an ungraceful owner crash.
+  if ! "${ROOT}/scripts/wait-http.sh" "${HOST}/readyz" 30 ||
+     ! "${ROOT}/scripts/wait-http.sh" "${HOST}/activez" 45 ||
+     ! kill -0 "${started_pid}" 2>/dev/null; then
+    kill "${started_pid}" 2>/dev/null || true
+    wait "${started_pid}" 2>/dev/null || true
+    if [ "${SERVER_PID}" = "${started_pid}" ]; then SERVER_PID=""; fi
+    return 1
+  fi
 }
 
 start_connect() {
@@ -177,6 +222,7 @@ BIN="${WORK}/bin/shinyhub"
 "${BIN}" --version | grep -q "${CLI_VERSION}" || fail "installed command lost the embedded release version"
 
 cp -R "${ROOT}/testdata/e2e-app" "${WORK}/app"
+printf '[app]\nreplicas = 2\n' >"${WORK}/app/shinyhub.toml"
 printf '%s\n' "${ADMIN_PASSWORD}" >"${WORK}/admin-password"
 chmod 600 "${WORK}/admin-password"
 
@@ -187,16 +233,8 @@ echo "==> initializing and starting a fresh installed server"
     --admin-password-file "${WORK}/admin-password" \
     --config "${WORK}/shinyhub.yaml" --output table
 ) >/dev/null || fail "server init"
-(
-  cd "${WORK}"
-  SHINYHUB_SERVER_HOST=127.0.0.1 \
-  SHINYHUB_SERVER_PORT="${PORT}" \
-  SHINYHUB_SHUTDOWN_APPS=stop \
-    exec "${BIN}" serve --config "${WORK}/shinyhub.yaml"
-) >"${WORK}/server.log" 2>&1 &
-SERVER_PID=$!
-"${ROOT}/scripts/wait-http.sh" "${HOST}/readyz" 30 || fail "server readiness"
-kill -0 "${SERVER_PID}" 2>/dev/null || fail "server exited during startup (port ${PORT} may be in use)"
+: >"${WORK}/server.log"
+start_server || fail "server readiness (port ${PORT} may be in use)"
 
 echo "==> launching an isolated headless browser"
 mkdir -p "${WORK}/chrome-profile"
@@ -283,9 +321,40 @@ echo "${open_result}" | grep -Fq '"opened":false' \
 
 echo "==> reading real application output in the packaged dashboard"
 node --experimental-websocket "${ROOT}/scripts/browser-onboarding-cdp.mjs" logs \
-  "${DEBUG_URL}" "${HOST}/apps/app/logs" "shinyhub browser logs E2E" "" "${WORK}/logs.png" \
+  "${DEBUG_URL}" "${HOST}/apps/app/logs" "shinyhub browser logs E2E" "live" "${WORK}/logs.png" \
   >"${WORK}/logs-browser.log" 2>&1 || fail "app-detail logs browser contract"
-grep -q 'LOGS PASS' "${WORK}/logs-browser.log" || fail "logs browser contract did not report success"
+grep -q 'LOGS LIVE PASS' "${WORK}/logs-browser.log" || fail "live logs browser contract did not report success"
+
+echo "==> crashing and recovering the control plane beneath the selected live stream"
+kill -9 "${SERVER_PID}" 2>/dev/null || fail "crash the control plane"
+wait "${SERVER_PID}" 2>/dev/null || true
+SERVER_PID=""
+SERVER_CRASHED=1
+node --experimental-websocket "${ROOT}/scripts/browser-onboarding-cdp.mjs" logs \
+  "${DEBUG_URL}" "${HOST}/apps/app/logs" "shinyhub browser logs E2E" "reconnected" "${WORK}/logs-reconnected.png" \
+  >"${WORK}/logs-reconnected-browser.log" 2>&1 &
+LOGS_PID=$!
+wait_for_file "${WORK}/logs-reconnected.png.ready" "${LOGS_PID}" \
+  || fail "browser did not observe the reconnecting live stream"
+start_server || fail "control-plane recovery"
+SERVER_CRASHED=0
+if ! wait "${LOGS_PID}"; then
+  LOGS_PID=""
+  fail "reconnected log stream browser contract"
+fi
+LOGS_PID=""
+grep -q 'LOGS RECONNECTED PASS' "${WORK}/logs-reconnected-browser.log" \
+  || fail "reconnected logs browser contract did not report success"
+
+echo "==> scaling down and preserving the selected replica run in history"
+"${BIN}" apps set app --replicas 1 --yes --wait \
+  --config "${WORK}/client.json" --output table >"${WORK}/scale-down.log" 2>&1 \
+  || fail "scale app down to one replica"
+node --experimental-websocket "${ROOT}/scripts/browser-onboarding-cdp.mjs" logs \
+  "${DEBUG_URL}" "${HOST}/apps/app/logs" "shinyhub browser logs E2E" "history" "${WORK}/logs-history.png" \
+  >"${WORK}/logs-history-browser.log" 2>&1 || fail "scaled-down log history browser contract"
+grep -q 'LOGS HISTORY PASS' "${WORK}/logs-history-browser.log" \
+  || fail "historical logs browser contract did not report success"
 
 echo "==> proactively rotating the healthy credential through browser approval"
 start_refresh "${WORK}/connect-refresh.log"

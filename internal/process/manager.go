@@ -81,6 +81,7 @@ const DefaultTier = "local"
 
 type ProcessInfo struct {
 	Slug         string
+	AppID        int64
 	Index        int
 	PID          int
 	Port         int
@@ -627,6 +628,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 
 	info := &ProcessInfo{
 		Slug:         p.Slug,
+		AppID:        p.AppID,
 		Index:        p.Index,
 		PID:          handle.PID,
 		Port:         p.Port,
@@ -1208,6 +1210,14 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 	}
 	info.Tier = tier
 	done := make(chan struct{})
+	var adoptedRun *LogRun
+	if info.LogRunID != "" {
+		adoptedRun = &LogRun{
+			RunID: info.LogRunID, AppID: info.AppID, Slug: slug, ReplicaIndex: info.Index,
+			DeploymentID: info.DeploymentID, AppVersion: info.AppVersion,
+			Tier: tier, Provider: info.Provider, Status: info.Status,
+		}
+	}
 
 	// Register the pool slot under the lock, then release it BEFORE the warm
 	// re-adopt (file I/O) and the monitoring goroutine. The locked section is a
@@ -1221,7 +1231,7 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 		for len(pool) <= info.Index {
 			pool = append(pool, nil)
 		}
-		pool[info.Index] = &entry{info: &info, handle: handle, tier: tier, done: done}
+		pool[info.Index] = &entry{info: &info, handle: handle, tier: tier, logRun: adoptedRun, done: done}
 		m.entries[slug] = pool
 	}()
 
@@ -1263,13 +1273,24 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if p := m.entries[slug]; info.Index < len(p) {
-			if e := p[info.Index]; e != nil && e.handle == handle && !e.stopped {
+			if e := p[info.Index]; e != nil && e.handle == handle {
 				key := replicaKey{slug, info.Index}
-				// MemoryLimitMB is unknown for an adopted process (no StartParams);
-				// the watcher falls back to the app's stored limit when it is 0.
 				e.info.OOMKilled = oom
-				m.lastExit[key] = ExitVerdict{OOMKilled: oom, MemoryLimitMB: 0, At: time.Now()}
-				e.info.Status = StatusCrashed
+				if e.stopped {
+					e.info.Status = StatusStopped
+				} else {
+					// MemoryLimitMB is unknown for an adopted process (no StartParams);
+					// the watcher falls back to the app's stored limit when it is 0.
+					m.lastExit[key] = ExitVerdict{OOMKilled: oom, MemoryLimitMB: 0, At: time.Now()}
+					e.info.Status = StatusCrashed
+				}
+				if e.logRun != nil {
+					run := *e.logRun
+					run.Status = e.info.Status
+					run.FinishedAt = time.Now().UTC()
+					run.OOMKilled = oom
+					m.finishLogRun(run)
+				}
 			}
 		}
 	}()

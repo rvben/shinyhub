@@ -120,7 +120,7 @@ func TestRecoverRemoteReplica_PersistsLiveEndpoint(t *testing.T) {
 	prx := proxy.New()
 	prx.SetPoolSize("app", 1)
 
-	if !recoverRemoteReplica(store, mgr, prx, app, r, items) {
+	if !recoverRemoteReplica(store, mgr, prx, app, r, items, "") {
 		t.Fatal("recoverRemoteReplica returned false for a live replica")
 	}
 

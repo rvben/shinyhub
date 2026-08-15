@@ -231,6 +231,16 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			markRecoveryStopped(store, app.Slug)
 			continue
 		}
+		unfinishedRuns, err := store.ListUnfinishedAppLogRuns(app.ID)
+		if err != nil {
+			slog.Error("process recovery: list unfinished log runs", "slug", app.Slug, "err", err)
+		}
+		logRunByReplica := make(map[int]string, len(unfinishedRuns))
+		for _, run := range unfinishedRuns {
+			if _, exists := logRunByReplica[run.ReplicaIndex]; !exists {
+				logRunByReplica[run.ReplicaIndex] = run.RunID
+			}
+		}
 		prx.SetPoolSize(app.Slug, app.Replicas)
 		prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, defaultMaxSessions))
 		prx.SetPoolAppID(app.Slug, app.ID)
@@ -241,6 +251,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		indeterminate := false
 		healable := false
 		for _, r := range reps {
+			logRunID := logRunByReplica[r.Index]
 			if r.Status == db.ReplicaStatusLost {
 				// A lost replica is never re-adopted; the next deploy re-places it.
 				continue
@@ -271,7 +282,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 					}
 					continue
 				}
-				if recoverRemoteReplica(store, mgr, prx, app, r, ti.items) {
+				if recoverRemoteReplica(store, mgr, prx, app, r, ti.items, logRunID) {
 					anyAlive = true
 					continue
 				}
@@ -292,12 +303,12 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 				continue
 			}
 			if lister, ok := rt.(ContainerLister); ok {
-				if recoverContainerReplica(store, mgr, prx, app, r, lister, listContainers(lister)) {
+				if recoverContainerReplica(store, mgr, prx, app, r, lister, listContainers(lister), logRunID) {
 					anyAlive = true
 				}
 				continue
 			}
-			if recoverNativeReplica(store, mgr, prx, app, r, bundleDir) {
+			if recoverNativeReplica(store, mgr, prx, app, r, bundleDir, logRunID) {
 				anyAlive = true
 			}
 		}
@@ -382,7 +393,7 @@ func workerDeclaredGone(store *db.Store, workerID string) bool {
 // recoverNativeReplica re-adopts a single PID-backed replica. It returns true
 // when the replica was adopted, and marks crashed (so the watcher restarts it)
 // when the PID is missing, dead, or fails the stale-process identity check.
-func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, bundleDir string) bool {
+func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, bundleDir, logRunID string) bool {
 	if r.DesiredState == db.ReplicaDesiredWarm {
 		// Warm-parked by the idle shrink: expansion boots it, not recovery. A
 		// 'suspended' warm row is a frozen (SIGSTOP'd) process that survived this
@@ -393,7 +404,7 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		// it stays hibernated and wakeable, and the watcher's wake already falls
 		// back to cold-boot if the resume ever fails.
 		if r.Status == "suspended" {
-			if reAdoptFrozenWarmReplica(mgr, app, r, bundleDir) {
+			if reAdoptFrozenWarmReplica(mgr, app, r, bundleDir, logRunID) {
 				return true
 			}
 			cleanupFrozenWarmReplica(store, app, r, bundleDir)
@@ -422,6 +433,7 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
 		Slug:        app.Slug,
+		AppID:       app.ID,
 		Index:       r.Index,
 		PID:         *r.PID,
 		Port:        *r.Port,
@@ -430,6 +442,7 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		Provider:    r.Provider,
 		EndpointURL: r.EndpointURL,
 		WorkerID:    r.WorkerID,
+		LogRunID:    logRunID,
 	}, process.RunHandle{PID: *r.PID})
 	targetURL := r.EndpointURL
 	if targetURL == "" {
@@ -439,7 +452,7 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		slog.Error("process recovery: register proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}
-	slog.Info("process recovery: re-adopted process", "slug", app.Slug, "idx", r.Index, "pid", *r.PID)
+	slog.Info("process recovery: re-adopted process", "slug", app.Slug, "idx", r.Index, "pid", *r.PID, "log_run_id", logRunID)
 	return true
 }
 
@@ -455,7 +468,7 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 // reused/unrelated PID is never adopted. Returns false - leaving the caller to
 // reap and downgrade - when there is no live, verified process to re-adopt
 // (manager absent, PID/port missing, process gone, or identity mismatch).
-func reAdoptFrozenWarmReplica(mgr *process.Manager, app *db.App, r *db.Replica, bundleDir string) bool {
+func reAdoptFrozenWarmReplica(mgr *process.Manager, app *db.App, r *db.Replica, bundleDir, logRunID string) bool {
 	if mgr == nil || r.PID == nil || r.Port == nil || bundleDir == "" {
 		return false
 	}
@@ -467,6 +480,7 @@ func reAdoptFrozenWarmReplica(mgr *process.Manager, app *db.App, r *db.Replica, 
 	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
 		Slug:        app.Slug,
+		AppID:       app.ID,
 		Index:       r.Index,
 		PID:         *r.PID,
 		Port:        *r.Port,
@@ -475,6 +489,7 @@ func reAdoptFrozenWarmReplica(mgr *process.Manager, app *db.App, r *db.Replica, 
 		Provider:    r.Provider,
 		EndpointURL: r.EndpointURL,
 		WorkerID:    r.WorkerID,
+		LogRunID:    logRunID,
 	}, process.RunHandle{PID: *r.PID})
 	slog.Info("recovery: re-adopted frozen warm replica (warm-resumable on next wake)",
 		"slug", app.Slug, "idx", r.Index, "pid", *r.PID)
@@ -575,7 +590,7 @@ func derefInt64(p *int64) int64 {
 // It returns true when the replica was adopted; a missing container, an
 // out-of-pool index, or a missing port row leaves the replica unadopted so the
 // watcher relaunches it.
-func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, lister ContainerLister, containers []process.ContainerInfo) bool {
+func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, lister ContainerLister, containers []process.ContainerInfo, logRunID string) bool {
 	if r.DesiredState == db.ReplicaDesiredWarm {
 		// Warm-parked by the idle shrink: expansion boots it, not recovery. A
 		// 'suspended' warm row is a paused container that survived the restart and
@@ -638,6 +653,7 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
 		Slug:        app.Slug,
+		AppID:       app.ID,
 		Index:       r.Index,
 		PID:         pid,
 		Port:        port,
@@ -646,6 +662,7 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 		Provider:    r.Provider,
 		EndpointURL: r.EndpointURL,
 		WorkerID:    r.WorkerID,
+		LogRunID:    logRunID,
 	}, process.RunHandle{ContainerID: cID})
 	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID)); err != nil {
 		slog.Error("recovery: register docker proxy", "slug", app.Slug, "idx", r.Index, "err", err)

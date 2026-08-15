@@ -160,6 +160,13 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	runID := "11111111-1111-4111-8111-111111111111"
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: app.ID, ReplicaIndex: 0,
+		Status: "running", StartedAt: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='myapp'`)
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
@@ -179,8 +186,8 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 	info, ok := mgr.GetReplica("myapp", 0)
 	if !ok {
 		t.Error("expected manager to have myapp replica 0 after recovery")
-	} else if info.PID != pid {
-		t.Errorf("expected PID %d in manager, got %d", pid, info.PID)
+	} else if info.AppID != app.ID || info.PID != pid || info.LogRunID != runID {
+		t.Errorf("recovered process = %+v, want app %d, PID %d, and log run %s", info, app.ID, pid, runID)
 	}
 }
 

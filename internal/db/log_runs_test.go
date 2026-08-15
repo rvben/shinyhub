@@ -52,6 +52,13 @@ func TestAppLogRunsRoundTripAndOrder(t *testing.T) {
 	if runs[1].Status != "crashed" || runs[1].FinishedAt == nil || !runs[1].OOMKilled {
 		t.Errorf("old run = %+v", runs[1])
 	}
+	unfinished, err := store.ListUnfinishedAppLogRuns(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unfinished) != 1 || unfinished[0].RunID != runs[0].RunID {
+		t.Fatalf("unfinished runs = %+v, want only %s", unfinished, runs[0].RunID)
+	}
 	got, err := store.GetAppLogRun(app.ID, runs[1].RunID)
 	if err != nil || got.RunID != runs[1].RunID {
 		t.Fatalf("GetAppLogRun = %+v, %v", got, err)

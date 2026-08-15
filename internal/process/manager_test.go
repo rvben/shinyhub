@@ -116,6 +116,38 @@ func TestManagerMirrorsRunOutputToSharedSink(t *testing.T) {
 	}
 }
 
+func TestManagerAdoptClosesRecoveredLogRunOnStop(t *testing.T) {
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	finished := make(chan process.LogRun, 1)
+	m.SetLogRunRecorder(process.LogRunRecorder{
+		Finish: func(run process.LogRun) error {
+			finished <- run
+			return nil
+		},
+	})
+	ep, err := rt.Start(context.Background(), process.StartParams{Port: 19000}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Adopt("demo", process.ProcessInfo{
+		Slug: "demo", AppID: 42, Index: 1, Status: process.StatusRunning,
+		Tier: process.DefaultTier, Provider: "native",
+		LogRunID: "11111111-1111-4111-8111-111111111111",
+	}, ep.Handle)
+	if err := m.StopReplica("demo", 1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case run := <-finished:
+		if run.RunID != "11111111-1111-4111-8111-111111111111" || run.AppID != 42 || run.Status != process.StatusStopped || run.FinishedAt.IsZero() {
+			t.Fatalf("finished adopted run = %+v", run)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("adopted log run was not closed")
+	}
+}
+
 func TestManagerPruneLogRunFilesProtectsActiveRun(t *testing.T) {
 	m := process.NewManager(t.TempDir(), newFakeRuntime())
 	info, err := m.Start(process.StartParams{

@@ -12,7 +12,7 @@ if (!['approve', 'revoke', 'logs'].includes(action) || !debuggerURL || !value) {
   console.error(`usage:
   browser-onboarding-cdp.mjs approve <debugger-url> <pairing-url> [username] [password] [screenshot]
   browser-onboarding-cdp.mjs revoke  <debugger-url> <token-name> [username] [password] [screenshot]
-  browser-onboarding-cdp.mjs logs    <debugger-url> <logs-url> <expected-log-line> [unused] [screenshot]`);
+  browser-onboarding-cdp.mjs logs    <debugger-url> <logs-url> <expected-log-line> <live|reconnected|history> [screenshot]`);
   process.exit(2);
 }
 
@@ -222,14 +222,78 @@ async function revoke(client, tokenName) {
   await screenshot(client, screenshotPath);
 }
 
-async function verifyLogs(client, logsURL, expectedLine) {
-  if (!expectedLine) throw new Error('logs verification requires an expected application log line');
-  const target = new URL(logsURL);
-  if (!/^\/apps\/[a-z0-9-]+\/logs$/.test(target.pathname)) {
-    throw new Error(`invalid app logs URL: ${logsURL}`);
-  }
+const logLineDetailsExpression = expectedLine => `(() =>
+  Array.from(document.querySelectorAll('.log-entry-message'))
+    .filter(element => element.textContent === ${JSON.stringify(expectedLine)})
+    .map(element => ({
+      line: element.textContent,
+      source: element.closest('.log-entry')?.querySelector('.log-entry-source')?.textContent.trim(),
+    }))
+)()`;
 
+async function waitForExactReplicaLines(client, expectedLine, expectedSources) {
+  await waitFor(
+    client,
+    `JSON.stringify(${logLineDetailsExpression(expectedLine)}.map(item => item.source).sort()) === ${JSON.stringify(JSON.stringify([...expectedSources].sort()))}`,
+    `application startup output from ${expectedSources.join(' and ')}`,
+    30_000,
+  );
+}
+
+async function assertExactReplicaLines(client, expectedLine, expectedSources, label) {
+  const details = await evaluate(client, logLineDetailsExpression(expectedLine));
+  const actual = details.map(item => item.source).sort();
+  const expected = [...expectedSources].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(`${label}: got ${JSON.stringify(details)}, want one line from ${expected.join(' and ')}`);
+  }
+}
+
+async function selectLogSource(client, labelPrefix) {
+  const selected = await evaluate(client, `(() => {
+    const select = document.querySelector('#logs-source');
+    const option = Array.from(select?.options || []).find(candidate => candidate.textContent.trim().startsWith(${JSON.stringify(labelPrefix)}));
+    if (!select || !option) return false;
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', {bubbles: true}));
+    return true;
+  })()`);
+  if (!selected) throw new Error(`log source unavailable: ${labelPrefix}`);
+}
+
+async function verifyMobileLogsLayout(client, screenshotPath) {
+  await client.call('Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  try {
+    const layout = await evaluate(client, `(() => {
+      const selectors = ['#logs-source', '#logs-search', '#logs-pause', '#logs-copy', '#logs-download', '#detail-logs-body'];
+      return {
+        viewportWidth: innerWidth,
+        documentWidth: document.documentElement.scrollWidth,
+        controls: selectors.map(selector => {
+          const rect = document.querySelector(selector)?.getBoundingClientRect();
+          return {selector, left: rect?.left, right: rect?.right, width: rect?.width};
+        }),
+      };
+    })()`);
+    const invalidControl = layout.controls.find(control =>
+      !(control.width > 0) || control.left < 0 || control.right > layout.viewportWidth + 0.5);
+    if (layout.documentWidth !== layout.viewportWidth || invalidControl) {
+      throw new Error(`mobile logs layout overflowed: ${JSON.stringify({layout, invalidControl})}`);
+    }
+    await screenshot(client, screenshotPath);
+  } finally {
+    await client.call('Emulation.clearDeviceMetricsOverride');
+  }
+}
+
+async function verifyLiveLogs(client, target, expectedLine) {
   await client.call('Page.navigate', {url: target.href});
+  await waitFor(client, `location.pathname === ${JSON.stringify(target.pathname)}`, 'the app-detail logs route');
   await waitFor(client, `document.body.dataset.auth === 'in'`, 'the authenticated dashboard session');
   await waitFor(client, visibleExpression('#detail-logs-panel'), 'the app-detail logs panel');
   await waitFor(
@@ -239,40 +303,147 @@ async function verifyLogs(client, logsURL, expectedLine) {
   );
   await waitFor(
     client,
-    `document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
-    'one live application log stream',
+    `document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 2 connected sources'`,
+    'two live application log streams',
     30_000,
   );
+  await waitForExactReplicaLines(client, expectedLine, ['#0', '#1']);
+
+  const initial = await evaluate(client, `(() => ({
+    sourceOptions: Array.from(document.querySelectorAll('#logs-source option')).map(option => option.textContent.trim()),
+    outputLabel: document.querySelector('#detail-logs-body')?.getAttribute('aria-label'),
+    pauseDisabled: document.querySelector('#logs-pause')?.disabled,
+  }))()`);
+  if (initial.sourceOptions[0] !== 'All current replicas (2 live, 2 total)' ||
+      !initial.sourceOptions.some(option => option.startsWith('Replica #0 — Running')) ||
+      !initial.sourceOptions.some(option => option.startsWith('Replica #1 — Running')) ||
+      initial.outputLabel !== 'Application log output' || initial.pauseDisabled !== false) {
+    throw new Error(`two-replica logs workspace contract was incomplete: ${JSON.stringify(initial)}`);
+  }
+
+  await verifyMobileLogsLayout(client, screenshotPath);
+  await selectLogSource(client, 'Replica #1 — Running');
   await waitFor(
     client,
-    `Array.from(document.querySelectorAll('.log-entry-message')).some(element => element.textContent === ${JSON.stringify(expectedLine)})`,
-    'the deterministic application startup line',
+    `new URL(location.href).searchParams.has('log_source') && document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
+    'the isolated Replica #1 stream and persistent URL selection',
+  );
+  await waitForExactReplicaLines(client, expectedLine, ['#1']);
+
+  const beforeReload = await evaluate(client, `performance.timeOrigin`);
+  await client.call('Page.reload');
+  await waitFor(client, `performance.timeOrigin !== ${JSON.stringify(beforeReload)}`, 'the refreshed logs document');
+  await waitFor(client, `document.body.dataset.auth === 'in'`, 'the restored authenticated session');
+  await waitFor(
+    client,
+    `document.querySelector('#logs-source')?.selectedOptions[0]?.textContent.trim().startsWith('Replica #1 — Running') && document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
+    'Replica #1 selection to survive refresh',
     30_000,
   );
+  await waitForExactReplicaLines(client, expectedLine, ['#1']);
+  console.log('LOGS LIVE PASS');
+}
 
-  const details = await evaluate(client, `(() => {
-    const matchingLine = Array.from(document.querySelectorAll('.log-entry-message'))
-      .find(element => element.textContent === ${JSON.stringify(expectedLine)});
-    return {
-      pathname: location.pathname,
-      activeTab: document.querySelector('#detail-tab-logs')?.getAttribute('aria-selected'),
-      status: document.querySelector('.logs-status-text')?.textContent.trim(),
-      sourceOptions: Array.from(document.querySelectorAll('#logs-source option')).map(option => option.textContent.trim()),
-      lineSource: matchingLine?.closest('.log-entry')?.querySelector('.log-entry-source')?.textContent.trim(),
-      outputLabel: document.querySelector('#detail-logs-body')?.getAttribute('aria-label'),
-      pauseDisabled: document.querySelector('#logs-pause')?.disabled,
-    };
-  })()`);
-  if (details.pathname !== target.pathname || details.activeTab !== 'true' ||
-      details.status !== 'Live · 1 connected source' ||
-      details.sourceOptions[0] !== 'All current replicas (1 live, 1 total)' ||
-      !details.sourceOptions.some(option => option.startsWith('Replica #0 — Running')) ||
-      details.lineSource !== '#0' || details.outputLabel !== 'Application log output' ||
-      details.pauseDisabled !== false) {
-    throw new Error(`logs workspace contract was incomplete: ${JSON.stringify(details)}`);
+async function verifyReconnectedLogs(client, target, expectedLine) {
+  await waitFor(client, `location.pathname === ${JSON.stringify(target.pathname)}`, 'the existing app-detail logs route');
+  await waitFor(
+    client,
+    `document.querySelector('.logs-status-text')?.textContent.trim().startsWith('Reconnecting ·')`,
+    'the selected native stream to notice the crashed control plane',
+  );
+  // The shell waits for this sentinel before restarting the control plane, so
+  // observing the reconnecting state is deterministic rather than a race.
+  if (!screenshotPath) throw new Error('reconnect verification requires a sentinel path');
+  await fs.writeFile(`${screenshotPath}.ready`, 'ready\n');
+  await waitFor(
+    client,
+    `document.querySelector('#logs-source')?.selectedOptions[0]?.textContent.trim().startsWith('Replica #1 — Running') && document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
+    'Replica #1 to reconnect through the restarted control plane',
+    45_000,
+  );
+  // onopen precedes any replayed message events. Give those events one turn to
+  // arrive, then assert instead of accepting the pre-disconnect DOM before an
+  // erroneous duplicate is appended.
+  await new Promise(resolve => setTimeout(resolve, 750));
+  await assertExactReplicaLines(client, expectedLine, ['#1'], 'reconnect duplicated application output');
+  const restored = await evaluate(client, `(() => ({
+    hasPersistentSelection: new URL(location.href).searchParams.has('log_source'),
+    activeTab: document.querySelector('#detail-tab-logs')?.getAttribute('aria-selected'),
+  }))()`);
+  if (!restored.hasPersistentSelection || restored.activeTab !== 'true') {
+    throw new Error(`reconnected logs lost navigation state: ${JSON.stringify(restored)}`);
   }
   await screenshot(client, screenshotPath);
-  console.log('LOGS PASS');
+  console.log('LOGS RECONNECTED PASS');
+}
+
+async function verifyHistoricalLogs(client, target, expectedLine) {
+  await waitFor(client, `location.pathname === ${JSON.stringify(target.pathname)}`, 'the existing app-detail logs route');
+  await waitFor(client, `document.body.dataset.auth === 'in'`, 'the authenticated dashboard session');
+  try {
+    await waitFor(
+      client,
+      `document.querySelector('#logs-source')?.selectedOptions[0]?.textContent.trim().startsWith('Replica #1 — Stopped')`,
+      'the selected Replica #1 run to become retained and stopped',
+      30_000,
+    );
+  } catch (error) {
+    const diagnostics = await evaluate(client, `(async () => {
+      const response = await fetch('/api/apps/app/logs/sources');
+      return {
+        selected: document.querySelector('#logs-source')?.selectedOptions[0]?.textContent.trim(),
+        status: document.querySelector('.logs-status-text')?.textContent.trim(),
+        groups: Array.from(document.querySelectorAll('#logs-source optgroup')).map(group => ({
+          label: group.label,
+          options: Array.from(group.querySelectorAll('option')).map(option => option.textContent.trim()),
+        })),
+        sources: response.ok ? (await response.json()).sources : {httpStatus: response.status},
+      };
+    })()`);
+    throw new Error(`${error.message}: ${JSON.stringify(diagnostics)}`);
+  }
+  await waitFor(
+    client,
+    `document.querySelector('.logs-status-text')?.textContent.trim() === '1 retained source · no live instances'`,
+    'the retained-run status',
+  );
+  await waitForExactReplicaLines(client, expectedLine, ['#1']);
+
+  const history = await evaluate(client, `(() => ({
+    hasPersistentSelection: new URL(location.href).searchParams.has('log_source'),
+    sourceOptions: Array.from(document.querySelectorAll('#logs-source option')).map(option => option.textContent.trim()),
+    historyGroups: Array.from(document.querySelectorAll('#logs-source optgroup')).map(group => group.label),
+    pauseDisabled: document.querySelector('#logs-pause')?.disabled,
+  }))()`);
+  if (!history.hasPersistentSelection || history.sourceOptions[0] !== 'All current replicas (1 live, 2 total)' ||
+      !history.sourceOptions.some(option => option.startsWith('Replica #0 — Running')) ||
+      !history.sourceOptions.some(option => option.startsWith('Replica #1 —') && option.includes('Stopped')) ||
+      !history.historyGroups.includes('Current runs') || history.pauseDisabled !== true) {
+    throw new Error(`scale-down history contract was incomplete: ${JSON.stringify(history)}`);
+  }
+  await screenshot(client, screenshotPath);
+
+  await selectLogSource(client, 'All current replicas');
+  await waitFor(
+    client,
+    `!new URL(location.href).searchParams.has('log_source') && document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
+    'the merged live-and-retained view after leaving the stopped run',
+    30_000,
+  );
+  await waitForExactReplicaLines(client, expectedLine, ['#0', '#1']);
+  console.log('LOGS HISTORY PASS');
+}
+
+async function verifyLogs(client, logsURL, expectedLine, phase) {
+  if (!expectedLine) throw new Error('logs verification requires an expected application log line');
+  const target = new URL(logsURL);
+  if (!/^\/apps\/[a-z0-9-]+\/logs$/.test(target.pathname)) {
+    throw new Error(`invalid app logs URL: ${logsURL}`);
+  }
+  if (phase === 'live') await verifyLiveLogs(client, target, expectedLine);
+  else if (phase === 'reconnected') await verifyReconnectedLogs(client, target, expectedLine);
+  else if (phase === 'history') await verifyHistoricalLogs(client, target, expectedLine);
+  else throw new Error(`unknown logs verification phase: ${phase}`);
 }
 
 let client;
@@ -283,7 +454,7 @@ try {
   await client.call('Runtime.enable');
   if (action === 'approve') await approve(client, value);
   else if (action === 'revoke') await revoke(client, value);
-  else await verifyLogs(client, value, username);
+  else await verifyLogs(client, value, username, password);
 } catch (error) {
   console.error(`BROWSER ONBOARDING FAIL: ${error.stack || error.message}`);
   process.exitCode = 1;

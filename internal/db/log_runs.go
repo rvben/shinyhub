@@ -131,6 +131,32 @@ func (s *Store) ListAppLogRuns(appID int64, limit int) ([]*AppLogRun, error) {
 	return out, rows.Err()
 }
 
+// ListUnfinishedAppLogRuns returns every execution that still belongs to a
+// live process. Recovery uses this to reconnect adopted processes to their
+// immutable run records, so a later stop or crash can close the right row.
+func (s *Store) ListUnfinishedAppLogRuns(appID int64) ([]*AppLogRun, error) {
+	defer s.timed("ListUnfinishedAppLogRuns")()
+	rows, err := s.db.Query(`
+		SELECT run_id, app_id, replica_index, deployment_id, app_version, tier,
+		       provider, status, started_at, finished_at, oom_killed
+		FROM app_log_runs
+		WHERE app_id = ? AND finished_at IS NULL
+		ORDER BY started_at DESC, run_id DESC`, appID)
+	if err != nil {
+		return nil, fmt.Errorf("list unfinished app log runs: %w", err)
+	}
+	defer rows.Close()
+	out := []*AppLogRun{}
+	for rows.Next() {
+		run, err := scanAppLogRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
 // GetAppLogRun scopes lookup to the parent app so a run ID can never be used
 // to read another app's file through the logs endpoint.
 func (s *Store) GetAppLogRun(appID int64, runID string) (*AppLogRun, error) {
