@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.9](https://github.com/rvben/shinyhub/compare/v0.11.8...v0.11.9) - 2026-08-15
+
+### Breaking Changes
+
+- **security**: harden app and deployment trust boundaries ([caea2a2](https://github.com/rvben/shinyhub/commit/caea2a256e7c44e1294aa52ce81e1a55e7bdbf2d))
+
+### Added
+
+- **logs**: link stopped Fargate runs to AWS ([6fe7d62](https://github.com/rvben/shinyhub/commit/6fe7d624dfa9a06a21060e4f825a8088cda58f95))
+- **logs**: surface live delivery degradation ([e9856d2](https://github.com/rvben/shinyhub/commit/e9856d2c4f6e02cd701079be6a804a04f8046c55))
+- **metrics**: observe shared log followers ([923ce1b](https://github.com/rvben/shinyhub/commit/923ce1bec77831466ffb3590abb7b8bb39b0e402))
+- **logs**: surface retention gaps on resume ([7e46384](https://github.com/rvben/shinyhub/commit/7e46384f7dee59337a967002c3b27273cc30ab00))
+- **logs**: download complete retained runs ([1f8292d](https://github.com/rvben/shinyhub/commit/1f8292d70c11fd5df7e751171d74c3f297f1f1bf))
+- **logs**: expose shared pipeline health ([bcbcf4e](https://github.com/rvben/shinyhub/commit/bcbcf4e6e119a63b1b6350cda7c0c35c881a7014))
+- **logs**: bound retained run history ([b6cc724](https://github.com/rvben/shinyhub/commit/b6cc72413e11a8f29533cfd70009a30129b83e63))
+- **logs**: share run output across HA nodes ([9f86702](https://github.com/rvben/shinyhub/commit/9f8670243365c166e76300d5a82334eb4a437a6b))
+- **logs**: add immutable run history ([45958c7](https://github.com/rvben/shinyhub/commit/45958c7250f23b4c256c20999569cab86deeb376))
+- **logs**: add multi-replica log viewer ([f8d3a5e](https://github.com/rvben/shinyhub/commit/f8d3a5e0d54f6603bbe84ecdf4f1cae0eb419609))
+- **deploy**: add post-warm restart and hook diagnostics ([a800130](https://github.com/rvben/shinyhub/commit/a80013014d708abe3f95e713a5ba1bd2583f4cbe))
+
+### Fixed
+
+- **fargate**: wait for running tasks before routing ([cbf95be](https://github.com/rvben/shinyhub/commit/cbf95be16d401a80b598abf484aa916302e83033))
+- **security**: harden app and deployment trust boundaries ([caea2a2](https://github.com/rvben/shinyhub/commit/caea2a256e7c44e1294aa52ce81e1a55e7bdbf2d))
+- **logs**: close recovered replica runs ([55f43ec](https://github.com/rvben/shinyhub/commit/55f43ec3834de0fd725e6b5ddc10e48dbb08f8e8))
+- **logs**: back off follower retries ([bf27e2e](https://github.com/rvben/shinyhub/commit/bf27e2e6d3c85d766a8769da844fa4c556b8bd1f))
+- **logs**: resume streams from durable cursors ([99c3f27](https://github.com/rvben/shinyhub/commit/99c3f270a6dfd197c96dc15a1532cd99849c3f71))
+- **logs**: reconcile output after replica exit ([462994a](https://github.com/rvben/shinyhub/commit/462994ab4f10371f57e543fd6f951d117354934c))
+- **fleet**: qualify schedule progress with app slug ([0c6651d](https://github.com/rvben/shinyhub/commit/0c6651d7e9116b5ed02c195c4079eaa26c1045ca))
+
+### Performance
+
+- **logs**: share retained stream followers ([a4baf67](https://github.com/rvben/shinyhub/commit/a4baf67639e60bc31d6119c9fcb8447f7d6adbca))
+- **logs**: update live output incrementally ([1595604](https://github.com/rvben/shinyhub/commit/1595604c4e6b8e67ed29a332f957ee9f7cadb5bc))
+
 ## [0.11.8](https://github.com/rvben/shinyhub/compare/v0.11.7...v0.11.8) - 2026-08-14
 
 ### Fixed
