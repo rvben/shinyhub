@@ -108,10 +108,10 @@ test-onboarding-e2e:
 
 # test-browser-onboarding-e2e exercises what is actually shipped and what a
 # workstation user actually sees: build + uv-tool-install the wheel, start its
-# embedded server, sign in and pair through Chrome, deploy, revoke the token in
-# the dashboard, then recover through the existing browser session. Requires
-# uv, Node 20+, and Chrome/Chromium; set SHINYHUB_E2E_BROWSER when auto-detection
-# cannot find the browser.
+# embedded server, sign in and pair through Chrome, deploy, verify its live logs
+# in the dashboard, revoke the token, then recover through the existing browser
+# session. Requires uv, Node 20+, and Chrome/Chromium; set SHINYHUB_E2E_BROWSER
+# when auto-detection cannot find the browser.
 test-browser-onboarding-e2e:
 	./scripts/browser-onboarding-e2e.sh
 

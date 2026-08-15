@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Release-real onboarding dogfood: build and install the Python wheel, pair the
-# installed CLI through a real browser, deploy, revoke the credential in the UI,
-# and recover through a second browser pairing without signing in again.
+# installed CLI through a real browser, deploy, verify its live logs in the UI,
+# revoke the credential, and recover through a second browser pairing without
+# signing in again.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -49,7 +50,7 @@ file_mode() {
 
 fail() {
   echo "BROWSER ONBOARDING E2E FAIL: $*" >&2
-  for log in build.log install.log server.log chrome.log connect-first.log connect-current.json connect-current.log whoami.log doctor.log deploy.log connect-refresh.log tokens-after-refresh.log revoked.log connect-recovery.log; do
+  for log in build.log install.log server.log chrome.log connect-first.log connect-current.json connect-current.log whoami.log doctor.log deploy.log logs-browser.log connect-refresh.log tokens-after-refresh.log revoked.log connect-recovery.log; do
     if [ -s "${WORK}/${log}" ]; then
       echo "----- ${log} (last 100 lines) -----" >&2
       tail -100 "${WORK}/${log}" >&2
@@ -279,6 +280,12 @@ echo "${open_result}" | grep -Fq '"url":"'"${HOST}"'/app/app/"' \
   || fail "app open did not return the canonical URL"
 echo "${open_result}" | grep -Fq '"opened":false' \
   || fail "headless app open did not report opened=false"
+
+echo "==> reading real application output in the packaged dashboard"
+node --experimental-websocket "${ROOT}/scripts/browser-onboarding-cdp.mjs" logs \
+  "${DEBUG_URL}" "${HOST}/apps/app/logs" "shinyhub browser logs E2E" "" "${WORK}/logs.png" \
+  >"${WORK}/logs-browser.log" 2>&1 || fail "app-detail logs browser contract"
+grep -q 'LOGS PASS' "${WORK}/logs-browser.log" || fail "logs browser contract did not report success"
 
 echo "==> proactively rotating the healthy credential through browser approval"
 start_refresh "${WORK}/connect-refresh.log"

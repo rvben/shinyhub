@@ -8,8 +8,11 @@ import fs from 'node:fs/promises';
 
 const [action, debuggerURL, value, username, password, screenshotPath] = process.argv.slice(2);
 
-if (!['approve', 'revoke'].includes(action) || !debuggerURL || !value) {
-  console.error('usage: browser-onboarding-cdp.mjs <approve|revoke> <debugger-url> <pairing-url|token-name> [username] [password] [screenshot]');
+if (!['approve', 'revoke', 'logs'].includes(action) || !debuggerURL || !value) {
+  console.error(`usage:
+  browser-onboarding-cdp.mjs approve <debugger-url> <pairing-url> [username] [password] [screenshot]
+  browser-onboarding-cdp.mjs revoke  <debugger-url> <token-name> [username] [password] [screenshot]
+  browser-onboarding-cdp.mjs logs    <debugger-url> <logs-url> <expected-log-line> [unused] [screenshot]`);
   process.exit(2);
 }
 
@@ -219,6 +222,59 @@ async function revoke(client, tokenName) {
   await screenshot(client, screenshotPath);
 }
 
+async function verifyLogs(client, logsURL, expectedLine) {
+  if (!expectedLine) throw new Error('logs verification requires an expected application log line');
+  const target = new URL(logsURL);
+  if (!/^\/apps\/[a-z0-9-]+\/logs$/.test(target.pathname)) {
+    throw new Error(`invalid app logs URL: ${logsURL}`);
+  }
+
+  await client.call('Page.navigate', {url: target.href});
+  await waitFor(client, `document.body.dataset.auth === 'in'`, 'the authenticated dashboard session');
+  await waitFor(client, visibleExpression('#detail-logs-panel'), 'the app-detail logs panel');
+  await waitFor(
+    client,
+    `document.querySelector('#detail-tab-logs')?.getAttribute('aria-selected') === 'true'`,
+    'the Logs tab to become active',
+  );
+  await waitFor(
+    client,
+    `document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
+    'one live application log stream',
+    30_000,
+  );
+  await waitFor(
+    client,
+    `Array.from(document.querySelectorAll('.log-entry-message')).some(element => element.textContent === ${JSON.stringify(expectedLine)})`,
+    'the deterministic application startup line',
+    30_000,
+  );
+
+  const details = await evaluate(client, `(() => {
+    const matchingLine = Array.from(document.querySelectorAll('.log-entry-message'))
+      .find(element => element.textContent === ${JSON.stringify(expectedLine)});
+    return {
+      pathname: location.pathname,
+      activeTab: document.querySelector('#detail-tab-logs')?.getAttribute('aria-selected'),
+      status: document.querySelector('.logs-status-text')?.textContent.trim(),
+      sourceOptions: Array.from(document.querySelectorAll('#logs-source option')).map(option => option.textContent.trim()),
+      lineSource: matchingLine?.closest('.log-entry')?.querySelector('.log-entry-source')?.textContent.trim(),
+      outputLabel: document.querySelector('#detail-logs-body')?.getAttribute('aria-label'),
+      pauseDisabled: document.querySelector('#logs-pause')?.disabled,
+    };
+  })()`);
+  if (details.pathname !== target.pathname || details.activeTab !== 'true' ||
+      details.status !== 'Live · 1 connected source' ||
+      details.sourceOptions[0] !== 'All current replicas (1 live, 1 total)' ||
+      !details.sourceOptions.some(option => option.startsWith('Replica #0 — Running')) ||
+      details.lineSource !== '#0' || details.outputLabel !== 'Application log output' ||
+      details.pauseDisabled !== false) {
+    throw new Error(`logs workspace contract was incomplete: ${JSON.stringify(details)}`);
+  }
+  await screenshot(client, screenshotPath);
+  console.log('LOGS PASS');
+}
+
 let client;
 try {
   const target = await pageTarget(debuggerURL.replace(/\/$/, ''));
@@ -226,7 +282,8 @@ try {
   await client.call('Page.enable');
   await client.call('Runtime.enable');
   if (action === 'approve') await approve(client, value);
-  else await revoke(client, value);
+  else if (action === 'revoke') await revoke(client, value);
+  else await verifyLogs(client, value, username);
 } catch (error) {
   console.error(`BROWSER ONBOARDING FAIL: ${error.stack || error.message}`);
   process.exitCode = 1;
