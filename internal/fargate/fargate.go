@@ -939,10 +939,12 @@ func ecsClusterName(cluster string) string {
 	return cluster
 }
 
-// waitForIP polls DescribeTasks until the task exposes a routable IPv4 address or
-// reaches a terminal STOPPED state (a fast-failing task), bounded by
-// startTimeout and ctx. The routable address is the private IP by default, or
-// the ENI's public IP when RouteViaPublicIP is set.
+// waitForIP polls DescribeTasks until the task is RUNNING and exposes a routable
+// IPv4 address, or reaches a terminal STOPPED state (a fast-failing task),
+// bounded by startTimeout and ctx. Requiring RUNNING matters because ECS can
+// attach an ENI before the container is ready; returning that IP early would
+// route requests to a task that cannot accept them yet. The routable address is
+// the private IP by default, or the ENI's public IP when RouteViaPublicIP is set.
 func (r *Runtime) waitForIP(ctx context.Context, taskARN string) (string, error) {
 	deadline := time.Now().Add(r.startTimeout)
 	for {
@@ -955,16 +957,19 @@ func (r *Runtime) waitForIP(ctx context.Context, taskARN string) (string, error)
 		// visible yet" and keep polling until the task appears, stops, or the
 		// start timeout expires, rather than failing an otherwise healthy start.
 		if task != nil {
-			ip, err := r.routeIP(ctx, *task)
-			if err != nil {
-				return "", err
-			}
-			if ip != "" {
-				return ip, nil
-			}
-			if aws.ToString(task.LastStatus) == "STOPPED" {
+			status := aws.ToString(task.LastStatus)
+			if status == "STOPPED" {
 				return "", fmt.Errorf("fargate: task %s stopped before becoming routable: %s",
 					taskARN, aws.ToString(task.StoppedReason))
+			}
+			if status == "RUNNING" {
+				ip, err := r.routeIP(ctx, *task)
+				if err != nil {
+					return "", err
+				}
+				if ip != "" {
+					return ip, nil
+				}
 			}
 		}
 		if !time.Now().Before(deadline) {

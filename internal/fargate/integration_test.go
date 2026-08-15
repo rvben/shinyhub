@@ -109,7 +109,7 @@ func splitEnvList(v string) []string {
 	return out
 }
 
-func integrationLogStore(t *testing.T) (*db.Store, int64) {
+func integrationLogStore(t *testing.T, appVersion string) (*db.Store, int64, int64) {
 	t.Helper()
 	store, err := db.Open(":memory:")
 	if err != nil {
@@ -137,7 +137,13 @@ func integrationLogStore(t *testing.T) (*db.Store, int64) {
 	if err != nil {
 		t.Fatalf("read integration app: %v", err)
 	}
-	return store, app.ID
+	deployment, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: appVersion, BundleDir: "/tmp/shinyhub-fargate-it",
+	})
+	if err != nil {
+		t.Fatalf("create integration deployment: %v", err)
+	}
+	return store, app.ID, deployment.ID
 }
 
 func assertExternalLogsHandoff(t *testing.T, details *process.ExternalLogs, taskARN, configuredCluster string) {
@@ -176,6 +182,8 @@ func assertExternalLogsHandoff(t *testing.T, details *process.ExternalLogs, task
 // leak a billed task.
 func TestIntegration_StartInventorySignalWait(t *testing.T) {
 	client, cfg, p := itConfig(t)
+	store, appID, fixtureDeploymentID := integrationLogStore(t, p.AppVersion)
+	p.DeploymentID = fixtureDeploymentID
 	rt := New(client, cfg, nil,
 		WithPollInterval(5*time.Second),
 		WithStartTimeout(4*time.Minute))
@@ -221,7 +229,6 @@ func TestIntegration_StartInventorySignalWait(t *testing.T) {
 	}
 	assertExternalLogsHandoff(t, ep.ExternalLogs, taskARN, cfg.Cluster)
 
-	store, appID := integrationLogStore(t)
 	const runID = "00000000-0000-4000-8000-000000000001"
 	deploymentID := p.DeploymentID
 	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{

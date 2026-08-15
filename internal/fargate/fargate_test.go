@@ -1015,6 +1015,33 @@ func TestStartStopsTaskThatNeverBecomesRoutable(t *testing.T) {
 	}
 }
 
+func TestStartWaitsForRunningEvenWhenENIHasIP(t *testing.T) {
+	calls := 0
+	f := &fakeECS{
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			calls++
+			status := "PROVISIONING"
+			if calls >= 2 {
+				status = "RUNNING"
+			}
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{
+				taskWithIP("task-arn", "192.0.2.50", status),
+			}}, nil
+		},
+	}
+	r := fastRuntime(f)
+	ep, err := r.Start(context.Background(), startParams(), io.Discard)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if calls < 2 {
+		t.Fatalf("Start returned after %d describe call(s), before the task was RUNNING", calls)
+	}
+	if ep.URL != "http://192.0.2.50:8000" {
+		t.Errorf("URL = %q, want http://192.0.2.50:8000", ep.URL)
+	}
+}
+
 func TestStartFailsWhenTaskStopsBeforeRoutable(t *testing.T) {
 	f := &fakeECS{
 		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
