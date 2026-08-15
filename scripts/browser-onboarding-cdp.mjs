@@ -282,7 +282,10 @@ async function verifyMobileLogsLayout(client, screenshotPath) {
     })()`);
     const invalidControl = layout.controls.find(control =>
       !(control.width > 0) || control.left < 0 || control.right > layout.viewportWidth + 0.5);
-    if (layout.documentWidth !== layout.viewportWidth || invalidControl) {
+    // A vertical scrollbar can make documentElement.scrollWidth narrower than
+    // innerWidth (15px on the GitHub runner). Only a document wider than the
+    // viewport is horizontal overflow.
+    if (layout.documentWidth > layout.viewportWidth + 0.5 || invalidControl) {
       throw new Error(`mobile logs layout overflowed: ${JSON.stringify({layout, invalidControl})}`);
     }
     await screenshot(client, screenshotPath);
