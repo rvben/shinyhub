@@ -175,14 +175,15 @@ test-ha:
 	./scripts/ha-failover-e2e.sh
 
 # test-fargate-it runs the Fargate runtime's real-cluster smoke test (launch a
-# task, assert routing + inventory, stop it). It is gated behind the `integration`
-# build tag and skips unless SHINYHUB_FARGATE_IT_CLUSTER (and the related
-# SHINYHUB_FARGATE_IT_* vars documented in internal/fargate/integration_test.go)
+# task, assert routing + inventory + durable AWS Logs handoff, stop it, and
+# prove the stopped task keeps the same immutable handoff). It is gated behind
+# the `integration` build tag and skips unless SHINYHUB_FARGATE_IT_CLUSTER (and
+# the related SHINYHUB_FARGATE_IT_* vars documented in integration_test.go)
 # are set. There is no open-source ECS emulator that supports the Fargate awsvpc
 # RunTask path, so this requires a real ECS cluster and AWS credentials; running
 # it launches a billed Fargate task and then stops it.
 test-fargate-it:
-	go test -tags=integration -run TestIntegration -count=1 -v ./internal/fargate/...
+	GOWORK=off go test -tags=integration -run TestIntegration -count=1 -v -timeout 12m ./internal/fargate/...
 
 # test-provisioning runs the build-provisioning gate: a real `uv sync` through
 # the production Landlock-sandboxed build path, covering the corp shape that

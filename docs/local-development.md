@@ -133,3 +133,34 @@ server, pairs the installed CLI through a real headless Chrome session, deploys
 an app, revokes the credential in the dashboard, and reconnects without a
 second sign-in. Set `SHINYHUB_E2E_BROWSER` to a Chrome/Chromium executable when
 auto-detection cannot find one. Set `E2E_KEEP=1` to retain logs and screenshots.
+
+### Real-cluster Fargate smoke test
+
+Changes to the Fargate runtime or external log handoff should also compile and,
+when AWS test infrastructure is available, run the opt-in real-cluster gate:
+
+```bash
+make test-fargate-it
+```
+
+The target skips unless `SHINYHUB_FARGATE_IT_CLUSTER` is set. A configured run
+launches one billed Fargate task, verifies routing and inventory, persists the
+exact ECS task Logs handoff in a migrated local database, stops the task, and
+proves both AWS and the immutable run still identify that stopped execution.
+The test installs an emergency cleanup before making assertions, gives the main
+lifecycle eight minutes, and gives cleanup another two minutes to confirm the
+task reaches `STOPPED`.
+
+AWS documents that stopped tasks remain available to `DescribeTasks` for at
+least one hour. The smoke test checks that immediate post-stop window; the
+database assertion separately proves ShinyHub keeps the exact handoff with its
+immutable run after the runtime lifecycle ends. See the
+[ECS `DescribeTasks` API](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DescribeTasks.html).
+
+Set the cluster, task definition, container, subnets, and optional network,
+region, command, and port variables documented in
+[`internal/fargate/integration_test.go`](../internal/fargate/integration_test.go).
+AWS credentials use the standard SDK chain (`AWS_PROFILE`, environment
+credentials, SSO, or an instance role). The principal needs permission to run,
+describe, list, tag, and stop tasks and to pass the task roles used by the task
+definition.

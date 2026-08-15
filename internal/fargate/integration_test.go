@@ -4,7 +4,9 @@ package fargate
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -12,9 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 
+	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
 )
 
@@ -105,10 +109,71 @@ func splitEnvList(v string) []string {
 	return out
 }
 
+func integrationLogStore(t *testing.T) (*db.Store, int64) {
+	t.Helper()
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open integration log store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate integration log store: %v", err)
+	}
+	if err := store.CreateUser(db.CreateUserParams{
+		Username: "fargate-it", PasswordHash: "integration-only", Role: "developer",
+	}); err != nil {
+		t.Fatalf("create integration owner: %v", err)
+	}
+	owner, err := store.GetUserByUsername("fargate-it")
+	if err != nil {
+		t.Fatalf("read integration owner: %v", err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{
+		Slug: "shinyhub-it", Name: "Fargate integration", OwnerID: owner.ID,
+	}); err != nil {
+		t.Fatalf("create integration app: %v", err)
+	}
+	app, err := store.GetAppBySlug("shinyhub-it")
+	if err != nil {
+		t.Fatalf("read integration app: %v", err)
+	}
+	return store, app.ID
+}
+
+func assertExternalLogsHandoff(t *testing.T, details *process.ExternalLogs, taskARN, configuredCluster string) {
+	t.Helper()
+	if details == nil {
+		t.Fatal("Start returned no external log handoff")
+	}
+	if details.Provider != "aws_ecs" || details.Resource != taskARN {
+		t.Fatalf("external log identity = %+v, want provider aws_ecs and task %s", details, taskARN)
+	}
+	if details.Region == "" || details.Cluster != ecsClusterName(configuredCluster) {
+		t.Fatalf("external log location = region %q cluster %q, want non-empty region and cluster %q",
+			details.Region, details.Cluster, ecsClusterName(configuredCluster))
+	}
+	taskID := taskARN[strings.LastIndex(taskARN, "/")+1:]
+	u, err := url.Parse(details.ConsoleURL)
+	if err != nil {
+		t.Fatalf("parse external console URL %q: %v", details.ConsoleURL, err)
+	}
+	allowedHost := u.Hostname() == "console.aws.amazon.com" ||
+		u.Hostname() == "console.amazonaws.cn" ||
+		u.Hostname() == "console.amazonaws-us-gov.com"
+	wantPath := "/ecs/v2/clusters/" + details.Cluster + "/tasks/" + taskID + "/logs"
+	if u.Scheme != "https" || u.User != nil || u.Port() != "" || !allowedHost ||
+		u.Path != wantPath || u.Query().Get("region") != details.Region {
+		t.Fatalf("external console URL = %q, want safe task Logs URL path %q in region %q",
+			details.ConsoleURL, wantPath, details.Region)
+	}
+}
+
 // TestIntegration_StartInventorySignalWait drives the full lifecycle against a
-// real cluster: launch a task, confirm it routes and appears in inventory, then
-// stop it and confirm it terminates. The task is always stopped on cleanup even
-// if an assertion fails midway, so a failed run does not leak a billed task.
+// real cluster: launch a task, confirm it routes and appears in inventory,
+// persist its exact AWS Logs handoff, stop it, and prove the stopped task and
+// immutable handoff still identify the same execution. Cleanup stops the task
+// after any failure before the normal terminal state, so a failed run does not
+// leak a billed task.
 func TestIntegration_StartInventorySignalWait(t *testing.T) {
 	client, cfg, p := itConfig(t)
 	rt := New(client, cfg, nil,
@@ -122,10 +187,20 @@ func TestIntegration_StartInventorySignalWait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	// Guarantee teardown of the real task regardless of later failures.
+	stopped := false
+	// Guarantee teardown of the real task after any failure before Wait confirms
+	// STOPPED. Avoid a redundant StopTask call after the normal path succeeds.
 	defer func() {
+		if stopped {
+			return
+		}
 		if serr := rt.Signal(ep.Handle, syscall.SIGKILL); serr != nil {
 			t.Logf("cleanup stop: %v", serr)
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cleanupCancel()
+		if werr := rt.Wait(cleanupCtx, ep.Handle); werr != nil {
+			t.Logf("cleanup wait for STOPPED: %v", werr)
 		}
 	}()
 
@@ -143,6 +218,25 @@ func TestIntegration_StartInventorySignalWait(t *testing.T) {
 	taskARN, err := rt.decodeHandle(ep.Handle.ContainerID)
 	if err != nil || taskARN == "" {
 		t.Fatalf("decodeHandle(%q) = %q, %v", ep.Handle.ContainerID, taskARN, err)
+	}
+	assertExternalLogsHandoff(t, ep.ExternalLogs, taskARN, cfg.Cluster)
+
+	store, appID := integrationLogStore(t)
+	const runID = "00000000-0000-4000-8000-000000000001"
+	deploymentID := p.DeploymentID
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: appID, ReplicaIndex: p.Index,
+		DeploymentID: &deploymentID, AppVersion: p.AppVersion, Tier: p.Tier,
+		Status: "starting", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create immutable log run: %v", err)
+	}
+	externalLogs, err := json.Marshal(ep.ExternalLogs)
+	if err != nil {
+		t.Fatalf("encode external log handoff: %v", err)
+	}
+	if err := store.MarkAppLogRunRunning(runID, ep.Provider, string(externalLogs)); err != nil {
+		t.Fatalf("persist external log handoff: %v", err)
 	}
 
 	// The live task must show up in inventory with our identifying labels, the
@@ -177,5 +271,40 @@ func TestIntegration_StartInventorySignalWait(t *testing.T) {
 	}
 	if err := rt.Wait(ctx, ep.Handle); err != nil {
 		t.Fatalf("Wait: %v", err)
+	}
+	stopped = true
+
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer verifyCancel()
+	described, err := client.DescribeTasks(verifyCtx, &ecs.DescribeTasksInput{
+		Cluster: aws.String(cfg.Cluster), Tasks: []string{taskARN},
+	})
+	if err != nil {
+		t.Fatalf("DescribeTasks after stop: %v", err)
+	}
+	if len(described.Failures) > 0 || len(described.Tasks) != 1 ||
+		aws.ToString(described.Tasks[0].TaskArn) != taskARN ||
+		aws.ToString(described.Tasks[0].LastStatus) != "STOPPED" {
+		t.Fatalf("stopped task lookup = tasks %+v failures %+v", described.Tasks, described.Failures)
+	}
+
+	finishedAt := time.Now()
+	if err := store.FinishAppLogRun(runID, "stopped", finishedAt, false); err != nil {
+		t.Fatalf("finish immutable log run: %v", err)
+	}
+	persisted, err := store.GetAppLogRun(appID, runID)
+	if err != nil {
+		t.Fatalf("read stopped immutable log run: %v", err)
+	}
+	var persistedHandoff process.ExternalLogs
+	if err := json.Unmarshal([]byte(persisted.ExternalLogs), &persistedHandoff); err != nil {
+		t.Fatalf("decode persisted external log handoff: %v", err)
+	}
+	if persisted.Status != "stopped" || persisted.FinishedAt == nil || persisted.Provider != Provider ||
+		persisted.ReplicaIndex != p.Index || persisted.DeploymentID == nil ||
+		*persisted.DeploymentID != p.DeploymentID ||
+		persistedHandoff != *ep.ExternalLogs {
+		t.Fatalf("stopped immutable run = %+v handoff=%+v, want original handoff %+v",
+			persisted, persistedHandoff, ep.ExternalLogs)
 	}
 }
