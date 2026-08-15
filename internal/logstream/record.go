@@ -12,6 +12,9 @@ import (
 type Record struct {
 	Line      string
 	EndOffset int64
+	// GapBefore reports that the requested resume cursor predates the earliest
+	// available byte. Consumers should surface this once before the record.
+	GapBefore bool
 }
 
 // RecordsFromBytes splits retained bytes into display lines while preserving

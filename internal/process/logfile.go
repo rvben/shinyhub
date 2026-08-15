@@ -434,6 +434,7 @@ func (r *LogReader) Follow(ctx context.Context, lines chan<- string) {
 // the primary with a shorter file, the cursor resets to the new file's start so
 // the follower continues instead of seeking forever beyond EOF.
 func (r *LogReader) FollowFrom(ctx context.Context, offset int64, records chan<- logstream.Record) {
+	gapBeforeNext := false
 
 	// A single Ticker reused across iterations avoids the per-iteration timer
 	// allocation (and goroutine) that time.After would leak over a long-lived
@@ -454,6 +455,7 @@ func (r *LogReader) FollowFrom(ctx context.Context, offset int64, records chan<-
 		}
 		if info, statErr := f.Stat(); statErr == nil && info.Size() < offset {
 			offset = 0
+			gapBeforeNext = true
 		}
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
 			f.Close()
@@ -465,6 +467,10 @@ func (r *LogReader) FollowFrom(ctx context.Context, offset int64, records chan<-
 			continue
 		}
 		for _, record := range logstream.RecordsFromBytes(data, offset) {
+			if gapBeforeNext {
+				record.GapBefore = true
+				gapBeforeNext = false
+			}
 			select {
 			case records <- record:
 				offset = record.EndOffset

@@ -530,7 +530,12 @@ func (r *AppLogReader) FollowFrom(ctx context.Context, offset int64, records cha
 		if err != nil || len(data) == 0 {
 			continue
 		}
+		gapBeforeNext := start > offset
 		for _, record := range logstream.RecordsFromBytes(data, start) {
+			if gapBeforeNext {
+				record.GapBefore = true
+				gapBeforeNext = false
+			}
 			select {
 			case records <- record:
 			case <-ctx.Done():

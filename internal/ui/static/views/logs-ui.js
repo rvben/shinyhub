@@ -488,6 +488,17 @@ export function createLogsViewer({
         addEntry({ kind: 'line', source_id: source.source_id, replica: source.replica, line: event.data });
       }
     };
+    if (typeof stream.addEventListener === 'function') {
+      stream.addEventListener('retention-gap', () => {
+        if (!destroyed && generation === scopeGeneration) {
+          addEntry({
+            kind: 'event', replica: source.replica,
+            line: `Replica #${source.replica} reconnected after older output was no longer retained`,
+          });
+          announce(`Some earlier output from replica ${source.replica} is no longer retained.`);
+        }
+      });
+    }
     stream.onerror = () => {
       if (destroyed || generation !== scopeGeneration) return;
       connected.delete(source.source_id);

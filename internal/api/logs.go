@@ -472,5 +472,8 @@ func lastEventCursor(r *http.Request) (int64, bool) {
 }
 
 func writeLogEvent(w http.ResponseWriter, record logstream.Record) {
+	if record.GapBefore {
+		fmt.Fprint(w, "event: retention-gap\ndata: Output before this point is no longer retained\n\n")
+	}
 	fmt.Fprintf(w, "id: %d\ndata: %s\n\n", record.EndOffset, record.Line)
 }

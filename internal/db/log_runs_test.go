@@ -94,6 +94,18 @@ func TestAppLogChunksRetainNewestBytesAndMonotonicOffsets(t *testing.T) {
 	if err != nil || string(window) != "efghijkl" || start != 4 || end != 12 {
 		t.Fatalf("ReadAppLogWindow = %q, start=%d, end=%d, err=%v", window, start, end, err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resumed := make(chan logstream.Record, 1)
+	go store.NewAppLogReader(runID).FollowFrom(ctx, 0, resumed)
+	select {
+	case record := <-resumed:
+		if record.Line != "efghijkl" || record.EndOffset != 12 || !record.GapBefore {
+			t.Fatalf("retention-gap record = %+v", record)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for retained resume window")
+	}
 	stats, err := store.AppLogStatsForRuns([]string{runID})
 	if err != nil || stats[runID].SizeBytes != 8 || stats[runID].UpdatedAt.IsZero() {
 		t.Fatalf("stats = %+v, %v", stats, err)

@@ -347,7 +347,7 @@ func TestLogReaderFollowFromRecoversAfterRotation(t *testing.T) {
 	go reader.FollowFrom(ctx, cursor, ch)
 	select {
 	case got := <-ch:
-		if got.Line != "rotated" || got.EndOffset != int64(len("rotated\n")) {
+		if got.Line != "rotated" || got.EndOffset != int64(len("rotated\n")) || !got.GapBefore {
 			t.Fatalf("rotated record = %+v", got)
 		}
 	case <-ctx.Done():
