@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.10](https://github.com/rvben/shinyhub/compare/v0.11.9...v0.11.10) - 2026-08-15
+
+### Fixed
+
+- **security**: restrict unauthenticated probe endpoints to GET and HEAD
+  ([45bbe90](https://github.com/rvben/shinyhub/commit/45bbe90))
+
 ## [0.11.9](https://github.com/rvben/shinyhub/compare/v0.11.8...v0.11.9) - 2026-08-15
 
 ### Breaking Changes
