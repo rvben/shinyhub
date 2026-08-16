@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.11](https://github.com/rvben/shinyhub/compare/v0.11.10...v0.11.11) - 2026-08-16
+
+### Added
+
+- **logs**: stream durable CloudWatch output inline ([a9d17a6](https://github.com/rvben/shinyhub/commit/a9d17a6c33a547c05b3f138d779775a7175198d4))
+
+### Fixed
+
+- **release**: align version metadata and restore documented release targets ([02191c7](https://github.com/rvben/shinyhub/commit/02191c736c90efe67c06ba80f0269b0288597301))
+
+### Performance
+
+- **logs**: reduce CloudWatch polling load ([562abf4](https://github.com/rvben/shinyhub/commit/562abf490ff3938ea502cd56e0c76e8ffc23fb49))
+
 ## [0.11.10](https://github.com/rvben/shinyhub/compare/v0.11.9...v0.11.10) - 2026-08-15
 
 ### Fixed
