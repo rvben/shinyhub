@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -436,6 +436,15 @@ iac-validate:
 #   GitHub Actions picks up the v* tag and runs GoReleaser.
 #   Binaries are attached to the GitHub release automatically.
 #   The install script at scripts/install.sh always pulls the latest release.
+
+release-patch:
+	vership bump patch
+
+release-minor:
+	vership bump minor
+
+release-major:
+	vership bump major
 
 # clispec-score builds the binary and scores it against The CLI Spec v0.2.
 # Requires clispec >= 0.2.0 installed (cargo install clispec --force).
