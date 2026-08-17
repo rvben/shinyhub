@@ -215,6 +215,76 @@ func TestDiff_BundleDeclaredWorkerDriftIsReconciled(t *testing.T) {
 	}
 }
 
+func TestDiff_ReportsUnmanagedStoredOverridesWithoutCreatingDrift(t *testing.T) {
+	hibernateOff := 0
+	app := AppEntry{Slug: "dash", Source: "./dash", Visibility: "private"}
+	got := Diff(mani("eu", app), map[string]string{"dash": "sha256:same"}, []ObservedApp{{
+		Slug: "dash", ManagedBy: sp("fleet:eu"), ContentDigest: "sha256:same", Access: "private",
+		HibernateTimeoutMinutes: &hibernateOff,
+		MaxSessionsPerReplica:   ptr(25),
+		WorkerIsolation:         sp("grouped"),
+		WorkerGroupedSize:       ptr(6),
+		WorkerMaxWorkers:        ptr(40),
+	}})[0]
+
+	if got.Action != ActionUnchanged || len(got.ConfigDrift) != 0 {
+		t.Fatalf("unmanaged values must remain informational: action=%q drift=%+v", got.Action, got.ConfigDrift)
+	}
+	want := []string{
+		"hibernate_timeout_minutes", "max_sessions_per_replica", "worker_isolation",
+		"worker_grouped_size", "worker_max_workers",
+	}
+	if len(got.Unmanaged) != len(want) {
+		t.Fatalf("unmanaged = %+v, want keys %v", got.Unmanaged, want)
+	}
+	for i, key := range want {
+		if got.Unmanaged[i].Key != key {
+			t.Errorf("unmanaged[%d].Key = %q, want %q", i, got.Unmanaged[i].Key, key)
+		}
+	}
+	if got.Unmanaged[0].Server != "0" || got.Unmanaged[0].Default != "(default)" {
+		t.Errorf("hibernate unmanaged item = %+v", got.Unmanaged[0])
+	}
+}
+
+func TestDiff_DeclaredOffDefaultValuesAreNotUnmanaged(t *testing.T) {
+	reset := -1
+	app := AppEntry{
+		Slug: "dash", Source: "./dash", Visibility: "private",
+		Config: Config{HibernateTimeoutMinutes: &reset},
+		Bundle: Config{
+			MaxSessionsPerReplica: ptr(25), WorkerIsolation: sp("grouped"),
+			WorkerGroupedSize: ptr(6), WorkerMaxWorkers: ptr(40),
+		},
+	}
+	got := Diff(mani("eu", app), map[string]string{"dash": "sha256:same"}, []ObservedApp{{
+		Slug: "dash", ManagedBy: sp("fleet:eu"), ContentDigest: "sha256:same", Access: "private",
+		HibernateTimeoutMinutes: ptr(0), MaxSessionsPerReplica: ptr(25),
+		WorkerIsolation: sp("grouped"), WorkerGroupedSize: ptr(6), WorkerMaxWorkers: ptr(40),
+	}})[0]
+
+	if len(got.Unmanaged) != 0 {
+		t.Fatalf("manifest-declared off-default values must not be unmanaged: %+v", got.Unmanaged)
+	}
+	if len(got.ConfigDrift) != 1 || got.ConfigDrift[0].Key != "hibernate_timeout_minutes" || got.ConfigDrift[0].Desired != "(default)" {
+		t.Fatalf("reset must remain ordinary managed drift: %+v", got.ConfigDrift)
+	}
+}
+
+func TestDiff_DefaultRepresentationsDoNotProduceUnmanagedNoise(t *testing.T) {
+	app := AppEntry{Slug: "dash", Source: "./dash", Visibility: "private"}
+	got := Diff(mani("eu", app), map[string]string{"dash": "sha256:same"}, []ObservedApp{{
+		Slug: "dash", ManagedBy: sp("fleet:eu"), ContentDigest: "sha256:same", Access: "private",
+		MaxSessionsPerReplica: ptr(0), RenderSeconds: func() *float64 { v := 0.0; return &v }(),
+		MinWarmReplicas: ptr(0), WorkerIsolation: sp(""), WorkerGroupedSize: ptr(0),
+		WorkerMaxWorkers: ptr(0), WorkerMaxSessionLifetimeSecs: ptr(0),
+		Autoscale: &ObservedAutoscale{},
+	}})[0]
+	if len(got.Unmanaged) != 0 {
+		t.Fatalf("default representations must stay quiet: %+v", got.Unmanaged)
+	}
+}
+
 func TestEffectiveConfig_FleetOverridesBundleAndCreateDoesNotRepatchBundle(t *testing.T) {
 	app := AppEntry{
 		Bundle: Config{Name: sp("Bundle name"), WorkerIsolation: sp("grouped")},

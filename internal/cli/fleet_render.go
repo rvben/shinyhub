@@ -13,7 +13,7 @@ import (
 )
 
 // fleetPlanSchemaVersion is the stable --json envelope version.
-const fleetPlanSchemaVersion = 1
+const fleetPlanSchemaVersion = 2
 
 // planLegend is the one-line glyph key printed under the plan's app list so the
 // column glyphs are self-describing.
@@ -58,33 +58,44 @@ func foreignAdoptWarning(diff []fleet.AppDiff, adopt bool) string {
 }
 
 func reasonText(d fleet.AppDiff) string {
+	var reason string
 	switch d.Action {
 	case fleet.ActionCreate:
-		return "new"
+		reason = "new"
 	case fleet.ActionAdopt:
 		if d.AdoptFrom != "" {
-			return fmt.Sprintf("owned by %s; --adopt will TRANSFER ownership to this fleet", d.AdoptFrom)
+			reason = fmt.Sprintf("owned by %s; --adopt will TRANSFER ownership to this fleet", d.AdoptFrom)
+		} else {
+			reason = "unmanaged, not owned by this fleet (needs --adopt)"
 		}
-		return "unmanaged, not owned by this fleet (needs --adopt)"
 	case fleet.ActionUnchanged:
-		return "unchanged"
+		reason = "unchanged"
 	case fleet.ActionDelete:
-		return "fleet-managed, absent from manifest (prune candidate)"
-	}
-	var parts []string
-	if d.Action == fleet.ActionUpdateSource || d.Action == fleet.ActionUpdateSourceConfig {
-		sv := d.ServerDigest
-		if sv == "" {
-			sv = "(none)"
+		reason = "fleet-managed, absent from manifest (prune candidate)"
+	default:
+		var parts []string
+		if d.Action == fleet.ActionUpdateSource || d.Action == fleet.ActionUpdateSourceConfig {
+			sv := d.ServerDigest
+			if sv == "" {
+				sv = "(none)"
+			}
+			parts = append(parts, fmt.Sprintf("source %s -> %s", shortDigest(sv), shortDigest(d.LocalDigest)))
 		}
-		parts = append(parts, fmt.Sprintf("source %s -> %s", shortDigest(sv), shortDigest(d.LocalDigest)))
-	}
-	if d.Action == fleet.ActionUpdateConfig || d.Action == fleet.ActionUpdateSourceConfig {
-		for _, c := range d.ConfigDrift {
-			parts = append(parts, fmt.Sprintf("%s %s -> %s", c.Key, c.Server, c.Desired))
+		if d.Action == fleet.ActionUpdateConfig || d.Action == fleet.ActionUpdateSourceConfig {
+			for _, c := range d.ConfigDrift {
+				parts = append(parts, fmt.Sprintf("%s %s -> %s", c.Key, c.Server, c.Desired))
+			}
 		}
+		reason = strings.Join(parts, ", ")
 	}
-	return strings.Join(parts, ", ")
+	if len(d.Unmanaged) == 0 {
+		return reason
+	}
+	items := make([]string, 0, len(d.Unmanaged))
+	for _, u := range d.Unmanaged {
+		items = append(items, fmt.Sprintf("%s=%s (default %s)", u.Key, u.Server, u.Default))
+	}
+	return reason + "; unmanaged: " + strings.Join(items, ", ")
 }
 
 func shortDigest(d string) string {
@@ -334,20 +345,27 @@ type jsonDriftItem struct {
 	Desired string `json:"desired"`
 }
 
+type jsonUnmanagedItem struct {
+	Key     string `json:"key"`
+	Server  string `json:"server"`
+	Default string `json:"default"`
+}
+
 type jsonDigest struct {
 	Local  string `json:"local"`
 	Server string `json:"server"`
 }
 
 type jsonApp struct {
-	Slug          string          `json:"slug"`
-	Action        string          `json:"action"`
-	Owned         bool            `json:"owned"`
-	Digest        jsonDigest      `json:"digest"`
-	ConfigDrift   []jsonDriftItem `json:"config_drift"`
-	AdoptRequired bool            `json:"adopt_required"`
-	AdoptFrom     string          `json:"adopt_from,omitempty"`
-	PruneEligible bool            `json:"prune_eligible"`
+	Slug          string              `json:"slug"`
+	Action        string              `json:"action"`
+	Owned         bool                `json:"owned"`
+	Digest        jsonDigest          `json:"digest"`
+	ConfigDrift   []jsonDriftItem     `json:"config_drift"`
+	Unmanaged     []jsonUnmanagedItem `json:"unmanaged"`
+	AdoptRequired bool                `json:"adopt_required"`
+	AdoptFrom     string              `json:"adopt_from,omitempty"`
+	PruneEligible bool                `json:"prune_eligible"`
 }
 
 type jsonProject struct {
@@ -400,10 +418,15 @@ func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Ma
 		for _, c := range d.ConfigDrift {
 			drift = append(drift, jsonDriftItem{Key: c.Key, Server: c.Server, Desired: c.Desired})
 		}
+		unmanaged := make([]jsonUnmanagedItem, 0, len(d.Unmanaged))
+		for _, u := range d.Unmanaged {
+			unmanaged = append(unmanaged, jsonUnmanagedItem{Key: u.Key, Server: u.Server, Default: u.Default})
+		}
 		apps = append(apps, jsonApp{
 			Slug: d.Slug, Action: string(d.Action), Owned: d.Owned,
 			Digest:        jsonDigest{Local: d.LocalDigest, Server: d.ServerDigest},
 			ConfigDrift:   drift,
+			Unmanaged:     unmanaged,
 			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
 		})
 	}

@@ -70,6 +70,12 @@ Only the keys you declare here are owned by the fleet manifest. An omitted key
 may still be owned by the source bundle's `shinyhub.toml`; if neither manifest
 declares it, a value set through the UI or CLI survives untouched.
 
+In other words, `[app]` keys are a sparse overlay: omitting a key leaves its
+current server value in place; omission does **not** reset it to the default.
+To inherit the global hibernation timeout explicitly, declare
+`hibernate_timeout_minutes = -1`. The adjacent value `0` means **never
+hibernate**, not "use the default".
+
 Declaring `name` or `description` therefore makes the manifest their owner: a
 rename in the dashboard shows up as drift on the next `fleet plan` and is
 reverted by `fleet apply`. `plan` renders both quoted, so an empty or
@@ -219,6 +225,13 @@ shinyhub fleet plan
 replays a saved plan. `--detailed-exitcode` makes it exit `2` when changes
 are pending (useful in CI gates). `--json` emits a stable machine-readable
 envelope; `-q/--quiet` collapses to the summary.
+
+An operational setting omitted from both manifest layers is not drift and is
+never changed by `apply`. When its stored value is an override rather than the
+field's unset/default representation, `plan` nevertheless labels it
+`unmanaged` in the app row. JSON schema version 2 exposes the same information
+as `apps[].unmanaged`, with `key`, `server`, and `default` fields. This signal
+is informational and does not change the action or detailed exit code.
 
 ### 3. `shinyhub fleet apply`
 

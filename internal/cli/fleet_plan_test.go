@@ -171,8 +171,8 @@ func TestFleetPlan_JSONEnvelope(t *testing.T) {
 	if jerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &env); jerr != nil {
 		t.Fatalf("output is not valid JSON: %v\n%s", jerr, out)
 	}
-	if env["schema_version"].(float64) != 1 {
-		t.Fatalf("schema_version = %v, want 1", env["schema_version"])
+	if env["schema_version"].(float64) != 2 {
+		t.Fatalf("schema_version = %v, want 2", env["schema_version"])
 	}
 	if env["fleet_id"] != "eu" {
 		t.Fatalf("fleet_id = %v", env["fleet_id"])

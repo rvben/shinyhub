@@ -75,6 +75,17 @@ type ConfigDriftItem struct {
 	Desired string
 }
 
+// UnmanagedConfigItem is one operational setting that neither the fleet
+// manifest nor the source bundle declares, but whose stored server value is
+// not the field's unset/default representation. It is observational only: an
+// unmanaged item never changes the planned action because sparse manifests
+// deliberately leave it alone.
+type UnmanagedConfigItem struct {
+	Key     string
+	Server  string
+	Default string
+}
+
 // AppDiff is the planned action for one app.
 type AppDiff struct {
 	Slug          string
@@ -83,6 +94,7 @@ type AppDiff struct {
 	LocalDigest   string
 	ServerDigest  string
 	ConfigDrift   []ConfigDriftItem
+	Unmanaged     []UnmanagedConfigItem
 	AdoptRequired bool
 	// AdoptFrom is the current owner marker ("fleet:<id>") when this adopt
 	// would transfer the app away from a DIFFERENT fleet. Empty for a
@@ -133,6 +145,7 @@ func Diff(m *Manifest, localDigests map[string]string, observed []ObservedApp) [
 
 		srcChanged := d.LocalDigest == "" || o.ContentDigest == "" || d.LocalDigest != o.ContentDigest
 		d.ConfigDrift = configDrift(app, o)
+		d.Unmanaged = unmanagedConfig(app, o)
 		cfgChanged := len(d.ConfigDrift) > 0
 
 		switch {
@@ -165,6 +178,61 @@ func Diff(m *Manifest, localDigests map[string]string, observed []ObservedApp) [
 	}
 	sort.Slice(dels, func(i, j int) bool { return dels[i].Slug < dels[j].Slug })
 	return append(out, dels...)
+}
+
+// unmanagedConfig returns stored operational overrides that are outside both
+// manifest layers. These values remain intentionally untouched by apply; the
+// list exists so omission cannot be mistaken for convergence in plan output.
+//
+// The database/API representations below have explicit unset values (nil,
+// zero, empty string, or an all-zero autoscale policy). Replicas is excluded:
+// it is always materialized at app creation and its default is server-config
+// dependent, so the observed row alone cannot distinguish a default from an
+// override without producing false positives.
+func unmanagedConfig(app AppEntry, o ObservedApp) []UnmanagedConfigItem {
+	var out []UnmanagedConfigItem
+	c := EffectiveConfig(app)
+	addInt := func(key string, desired, server *int, unset int, display string) {
+		if desired == nil && server != nil && *server != unset {
+			out = append(out, UnmanagedConfigItem{Key: key, Server: fmt.Sprintf("%d", *server), Default: display})
+		}
+	}
+	addFloat := func(key string, desired, server *float64, unset float64, display string) {
+		if desired == nil && server != nil && *server != unset {
+			out = append(out, UnmanagedConfigItem{Key: key, Server: fmt.Sprintf("%g", *server), Default: display})
+		}
+	}
+
+	if !c.HibernateResetToDefault {
+		addInt("hibernate_timeout_minutes", c.HibernateTimeoutMinutes, o.HibernateTimeoutMinutes, -1, "(default)")
+	}
+	addInt("max_sessions_per_replica", c.MaxSessionsPerReplica, o.MaxSessionsPerReplica, 0, "(default)")
+	addFloat("render_seconds", c.RenderSeconds, o.RenderSeconds, 0, "0")
+	if c.IdentityHeaders == nil && o.IdentityHeaders != nil {
+		out = append(out, UnmanagedConfigItem{
+			Key: "identity_headers", Server: fmt.Sprintf("%t", *o.IdentityHeaders), Default: "(default)",
+		})
+	}
+	addInt("min_warm_replicas", c.MinWarmReplicas, o.MinWarmReplicas, 0, "0")
+	if c.MemoryLimitMB == nil && o.MemoryLimitMB != nil {
+		out = append(out, UnmanagedConfigItem{Key: "memory_limit_mb", Server: fmt.Sprintf("%d", *o.MemoryLimitMB), Default: "(default)"})
+	}
+	if c.CPUQuotaPercent == nil && o.CPUQuotaPercent != nil {
+		out = append(out, UnmanagedConfigItem{Key: "cpu_quota_percent", Server: fmt.Sprintf("%d", *o.CPUQuotaPercent), Default: "(default)"})
+	}
+	if c.WorkerIsolation == nil && o.WorkerIsolation != nil && *o.WorkerIsolation != "" {
+		out = append(out, UnmanagedConfigItem{Key: "worker_isolation", Server: fmt.Sprintf("%q", *o.WorkerIsolation), Default: "(default)"})
+	}
+	addInt("worker_grouped_size", c.WorkerGroupedSize, o.WorkerGroupedSize, 0, "0")
+	addInt("worker_max_workers", c.WorkerMaxWorkers, o.WorkerMaxWorkers, 0, "0")
+	addInt("worker_max_session_lifetime_secs", c.WorkerMaxSessionLifetimeSecs, o.WorkerMaxSessionLifetimeSecs, 0, "0")
+	if c.Autoscale == nil && o.Autoscale != nil &&
+		(o.Autoscale.Enabled || o.Autoscale.MinReplicas != 0 || o.Autoscale.MaxReplicas != 0 || o.Autoscale.Target != 0) {
+		out = append(out, UnmanagedConfigItem{
+			Key: "autoscale", Server: autoscaleDisplay(o.Autoscale.Enabled, o.Autoscale.MinReplicas, o.Autoscale.MaxReplicas, o.Autoscale.Target), Default: "off",
+		})
+	}
+	return out
 }
 
 // configDrift returns the fleet-declared keys whose observed server value

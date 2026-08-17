@@ -154,6 +154,47 @@ func TestPlanJSON_ExposesAdoptFrom(t *testing.T) {
 	}
 }
 
+func TestPlanOutput_ExposesUnmanagedConfigWithoutChangingAction(t *testing.T) {
+	diff := []fleet.AppDiff{{
+		Slug: "dash", Action: fleet.ActionUnchanged,
+		Unmanaged: []fleet.UnmanagedConfigItem{{
+			Key: "hibernate_timeout_minutes", Server: "0", Default: "(default)",
+		}},
+	}}
+	out := renderPlanToString(t, &fleetPlanFlags{file: defaultFleetManifest}, "shinyhub fleet plan", &fleet.Manifest{FleetID: "eu"}, diff)
+	if !strings.Contains(out, "unchanged; unmanaged: hibernate_timeout_minutes=0 (default (default))") {
+		t.Fatalf("human plan missing unmanaged signal:\n%s", out)
+	}
+	if !strings.Contains(out, "0 to update") || !strings.Contains(out, "1 unchanged") {
+		t.Fatalf("unmanaged observation must not change action counts:\n%s", out)
+	}
+
+	var buf bytes.Buffer
+	if err := writeFleetPlanJSON(&buf, &fleet.Manifest{FleetID: "eu"}, "http://s", diff, nil, 0, "report only"); err != nil {
+		t.Fatal(err)
+	}
+	var env struct {
+		SchemaVersion int `json:"schema_version"`
+		Apps          []struct {
+			Action    string              `json:"action"`
+			Unmanaged []jsonUnmanagedItem `json:"unmanaged"`
+		} `json:"apps"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.SchemaVersion != 2 {
+		t.Fatalf("schema_version = %d, want 2", env.SchemaVersion)
+	}
+	if len(env.Apps) != 1 || env.Apps[0].Action != "unchanged" || len(env.Apps[0].Unmanaged) != 1 {
+		t.Fatalf("JSON unmanaged signal missing or changed action: %+v", env.Apps)
+	}
+	u := env.Apps[0].Unmanaged[0]
+	if u.Key != "hibernate_timeout_minutes" || u.Server != "0" || u.Default != "(default)" {
+		t.Fatalf("JSON unmanaged item = %+v", u)
+	}
+}
+
 // FLT-4: the "Next:" block must offer ONE combined apply command, not a
 // sequence of separate applies (--adopt already applies create/update too).
 func TestApplySuggestion_CombinesAllPendingFlags(t *testing.T) {

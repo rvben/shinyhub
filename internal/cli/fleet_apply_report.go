@@ -263,18 +263,19 @@ func finalFailureKind(r applyResult) deployfail.Kind {
 }
 
 type applyJSONApp struct {
-	Slug          string             `json:"slug"`
-	AppURL        string             `json:"app_url"`
-	Action        string             `json:"action"`
-	Owned         bool               `json:"owned"`
-	Digest        jsonDigest         `json:"digest"`
-	ConfigDrift   []jsonDriftItem    `json:"config_drift"`
-	AdoptRequired bool               `json:"adopt_required"`
-	AdoptFrom     string             `json:"adopt_from,omitempty"`
-	PruneEligible bool               `json:"prune_eligible"`
-	Result        *jsonResult        `json:"result,omitempty"`
-	FirstFires    []firstFireOutcome `json:"first_fires,omitempty"`
-	WarmRestarted bool               `json:"warm_restarted,omitempty"`
+	Slug          string              `json:"slug"`
+	AppURL        string              `json:"app_url"`
+	Action        string              `json:"action"`
+	Owned         bool                `json:"owned"`
+	Digest        jsonDigest          `json:"digest"`
+	ConfigDrift   []jsonDriftItem     `json:"config_drift"`
+	Unmanaged     []jsonUnmanagedItem `json:"unmanaged"`
+	AdoptRequired bool                `json:"adopt_required"`
+	AdoptFrom     string              `json:"adopt_from,omitempty"`
+	PruneEligible bool                `json:"prune_eligible"`
+	Result        *jsonResult         `json:"result,omitempty"`
+	FirstFires    []firstFireOutcome  `json:"first_fires,omitempty"`
+	WarmRestarted bool                `json:"warm_restarted,omitempty"`
 }
 
 // applyJSONProject is a project row in the apply JSON envelope: display
@@ -334,10 +335,15 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 		for _, c := range d.ConfigDrift {
 			drift = append(drift, jsonDriftItem{Key: c.Key, Server: c.Server, Desired: c.Desired})
 		}
+		unmanaged := make([]jsonUnmanagedItem, 0, len(d.Unmanaged))
+		for _, u := range d.Unmanaged {
+			unmanaged = append(unmanaged, jsonUnmanagedItem{Key: u.Key, Server: u.Server, Default: u.Default})
+		}
 		aj := applyJSONApp{
 			Slug: d.Slug, AppURL: host + "/app/" + d.Slug + "/", Action: string(d.Action), Owned: d.Owned,
 			Digest:        jsonDigest{Local: d.LocalDigest, Server: d.ServerDigest},
 			ConfigDrift:   drift,
+			Unmanaged:     unmanaged,
 			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
 		}
 		if r, ok := bySlug[d.Slug]; ok {
