@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.12](https://github.com/rvben/shinyhub/compare/v0.11.11...v0.11.12) - 2026-08-17
+
+### Added
+
+- **ui**: harden app restart feedback ([adea5f6](https://github.com/rvben/shinyhub/commit/adea5f6189950594f9efb6072cbc1ee068e9966a))
+
 ## [0.11.11](https://github.com/rvben/shinyhub/compare/v0.11.10...v0.11.11) - 2026-08-16
 
 ### Added
