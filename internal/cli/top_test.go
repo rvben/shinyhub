@@ -178,6 +178,48 @@ func TestTop_JSONKeepsAbsentAndPartialApart(t *testing.T) {
 	}
 }
 
+func TestTop_MetricsFailureFallsBackToExplicitPartialAppRows(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/apps/metrics":
+			http.Error(w, "metrics backend unavailable", http.StatusBadGateway)
+		case "/api/apps":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{
+					"slug": "idle-app", "status": "idle", "replicas": 1,
+					"replicas_running": 0, "workers_running": 0,
+					"sessions_ceiling": 240,
+				}},
+				"total": 1, "limit": 10000, "offset": 0,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	out, err := runTopCLI(t, srv, "--output", "json")
+	if err != nil {
+		t.Fatalf("top should degrade to app-list rows: %v\n%s", err, out)
+	}
+	var env struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Items) != 1 {
+		t.Fatalf("items = %d, want 1: %s", len(env.Items), out)
+	}
+	item := env.Items[0]
+	if item["metrics_unavailable"] != true || item["replicas_running"] != float64(0) {
+		t.Errorf("fallback row does not distinguish unavailable from zero: %v", item)
+	}
+	if item["sessions_ceiling"] != float64(240) || item["cpu_percent"] != nil {
+		t.Errorf("fallback row lost configured capacity or invented metrics: %v", item)
+	}
+}
+
 // --output table off a terminal is the form an operator reads through `less` or
 // finds in a CI log. It must carry the same absent marker as the JSON, and no
 // escape sequences: a pipe cannot interpret them.

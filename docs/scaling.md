@@ -243,10 +243,21 @@ process is already listening.
 
 ### Observability
 
+- `shinyhub apps list` and `apps show` report configured `replicas` beside live
+  `replicas_running` and `workers_running`. `status` is observational;
+  `desired_status` preserves lifecycle intent. An empty healthy elastic pool is
+  `idle`, while a desired-running crashed replica is `crashed` or `degraded`.
+- `effective_hibernate_timeout_minutes` resolves an inherited per-app timeout
+  against the live server default, so runtime checks do not need to parse the
+  deployment configuration.
 - `warm_shrink` and `warm_expand` audit events are recorded whenever the
   watcher crosses the warm floor in either direction.
 - Replicas that are stopped but parked (warm-floor slots) appear in
   `shinyhub apps show <slug>` so operators can see the pool state at a glance.
+- The floor is established when a deployed app is started and is restored on
+  server boot. If a desired warm replica crashes, its replica row exposes the
+  last exit reason/code or signal and restart count; the app status becomes
+  degraded/crashed rather than hibernated.
 
 ### High-availability note
 

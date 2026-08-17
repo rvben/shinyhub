@@ -101,6 +101,15 @@ test('an elastic app hides Sleep but keeps Stop and Restart', () => {
   }
 });
 
+test('an idle elastic app stays openable and offers Stop and Restart', () => {
+  const a = appCardActions({ deploy_count: 1, status: 'idle', worker_isolation: 'grouped' }, true);
+  assert.equal(a.showOpen, true);
+  assert.equal(a.showSleep, false);
+  assert.equal(a.showStop, true);
+  assert.equal(a.showRestart, true);
+  assert.equal(a.showStart, false);
+});
+
 test('an explicit multiplex app offers Sleep', () => {
   const a = appCardActions({ deploy_count: 1, status: 'running', worker_isolation: 'multiplex' }, true);
   assert.equal(a.showSleep, true);

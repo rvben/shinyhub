@@ -39,8 +39,13 @@ func parseTopSort(v string) (topSort, error) {
 // reads.
 type topMetrics struct {
 	Status          string       `json:"status"`
+	DesiredStatus   string       `json:"desired_status"`
 	Deploying       bool         `json:"deploying"`
 	SessionsCap     int          `json:"sessions_cap"`
+	SessionsCeiling int          `json:"sessions_ceiling"`
+	ReplicasDesired int          `json:"replicas_desired"`
+	ReplicasRunning int          `json:"replicas_running"`
+	WorkersRunning  int          `json:"workers_running"`
 	WorkerIsolation string       `json:"worker_isolation"`
 	MaxWorkers      int          `json:"max_workers"`
 	Replicas        []topReplica `json:"replicas"`
@@ -75,10 +80,12 @@ type topReplica struct {
 // renders those with a "at least" marker rather than silently presenting a
 // lower bound as the whole.
 type topRow struct {
-	Slug     string
-	Status   string
-	Running  int
-	Replicas int
+	Slug               string
+	Status             string
+	Running            int
+	Workers            int
+	Replicas           int
+	MetricsUnavailable bool
 
 	CPUPercent *float64
 	CPUPartial bool
@@ -101,8 +108,12 @@ type topRow struct {
 // the sum is reported as a floor. When no running replica reported at all the
 // figure is absent rather than zero.
 func topRowFor(slug string, m topMetrics) topRow {
+	replicas := m.ReplicasDesired
+	if replicas <= 0 {
+		replicas = len(m.Replicas)
+	}
 	row := topRow{
-		Slug: slug, Status: m.Status, Replicas: len(m.Replicas),
+		Slug: slug, Status: m.Status, Replicas: replicas, Workers: m.WorkersRunning,
 		ReplicaRows: append([]topReplica(nil), m.Replicas...),
 	}
 	if m.Deploying {
@@ -141,6 +152,9 @@ func topRowFor(slug string, m topMetrics) topRow {
 		cpu += *r.CPUPercent
 		cpuKnown = true
 	}
+	if m.ReplicasRunning > row.Running {
+		row.Running = m.ReplicasRunning
+	}
 
 	if cpuKnown {
 		row.CPUPercent = &cpu
@@ -160,6 +174,9 @@ func topRowFor(slug string, m topMetrics) topRow {
 // ceiling; a multiplex pool multiplies its per-replica cap by the replicas it
 // runs. An uncapped pool has no ceiling to report.
 func topCeiling(m topMetrics, replicas int) int {
+	if m.SessionsCeiling > 0 {
+		return m.SessionsCeiling
+	}
 	if m.SessionsCap <= 0 {
 		return 0
 	}
@@ -998,7 +1015,10 @@ func topItems(rows []topRow) []map[string]any {
 			"slug":                r.Slug,
 			"status":              r.Status,
 			"replicas_running":    r.Running,
+			"workers_running":     r.Workers,
+			"replicas_desired":    r.Replicas,
 			"replicas_total":      r.Replicas,
+			"metrics_unavailable": r.MetricsUnavailable,
 			"cpu_percent":         r.CPUPercent,
 			"cpu_percent_partial": r.CPUPartial,
 			"rss_bytes":           r.RSSBytes,

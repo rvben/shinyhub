@@ -127,6 +127,7 @@ type appStore interface {
 	FinishWake(slug string) (bool, error)
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
+	RecordReplicaCrash(p db.UpsertReplicaParams) error
 	ListReconcilableApps() ([]*db.App, error)
 	ListWakingApps() ([]*db.App, error)
 	ListReplicas(appID int64) ([]*db.Replica, error)
@@ -208,6 +209,9 @@ type Watcher struct {
 	// starts a fresh incident, so an occasional crash never accumulates.
 	crashCount map[replicaKey]int
 	lastCrash  map[replicaKey]time.Time
+	// seenExitSequence prevents a crashed manager entry from being counted again
+	// on every watchdog tick while its restart is still inside backoff.
+	seenExitSequence map[replicaKey]int
 	// driving tracks slugs currently being driven by driveWakingApp so a
 	// concurrent trigger (e.g. inline from the miss path and from the reconciler)
 	// does not spawn two parallel deploys for the same wake. The guard is
@@ -251,17 +255,18 @@ const wakeDrainTimeout = 15 * time.Second
 func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
-		cfg:           cfg,
-		mgr:           mgr,
-		prx:           prx,
-		store:         st,
-		deploy:        deployFn,
-		attempts:      make(map[replicaKey]int),
-		nextRetry:     make(map[replicaKey]time.Time),
-		crashCount:    make(map[replicaKey]int),
-		lastCrash:     make(map[replicaKey]time.Time),
-		driving:       make(map[string]bool),
-		expandingWarm: make(map[string]bool),
+		cfg:              cfg,
+		mgr:              mgr,
+		prx:              prx,
+		store:            st,
+		deploy:           deployFn,
+		attempts:         make(map[replicaKey]int),
+		nextRetry:        make(map[replicaKey]time.Time),
+		crashCount:       make(map[replicaKey]int),
+		lastCrash:        make(map[replicaKey]time.Time),
+		seenExitSequence: make(map[replicaKey]int),
+		driving:          make(map[string]bool),
+		expandingWarm:    make(map[string]bool),
 	}
 }
 
@@ -947,22 +952,46 @@ func (w *Watcher) handleCrashed(slug string, index int) {
 	if err != nil {
 		return
 	}
+	reason := w.crashReason(slug, index, nil, derefIntOr0(app.MemoryLimitMB))
+	verdict, hasVerdict := w.mgr.LastExit(slug, index)
+	if reason == "" && hasVerdict {
+		reason = verdict.Reason
+	}
+	if reason == "" {
+		reason = "replica process exited unexpectedly"
+	}
 	k := replicaKey{slug, index}
+	newCrash := true
+	if hasVerdict && verdict.RestartCount > 0 {
+		w.mu.Lock()
+		newCrash = w.seenExitSequence[k] != verdict.RestartCount
+		if newCrash {
+			w.seenExitSequence[k] = verdict.RestartCount
+		}
+		w.mu.Unlock()
+	}
+	crash := db.UpsertReplicaParams{AppID: app.ID, Index: index, Reason: reason}
+	if hasVerdict {
+		crash.ExitCode, crash.Signal = verdict.ExitCode, verdict.Signal
+	}
+	if newCrash {
+		if err := w.store.RecordReplicaCrash(crash); err != nil {
+			slog.Warn("watcher: record replica crash failed", "slug", slug, "index", index, "err", err)
+		}
+	}
 	w.mu.Lock()
 	now := time.Now()
-	if last, ok := w.lastCrash[k]; ok && now.Sub(last) > crashLoopWindow {
-		w.crashCount[k] = 0 // stable since the last crash; start a fresh incident
+	if newCrash {
+		if last, ok := w.lastCrash[k]; ok && now.Sub(last) > crashLoopWindow {
+			w.crashCount[k] = 0 // stable since the last crash; start a fresh incident
+		}
+		w.lastCrash[k] = now
+		w.crashCount[k]++
 	}
-	w.lastCrash[k] = now
-	w.crashCount[k]++
 	count := w.crashCount[k]
 	w.mu.Unlock()
 
 	if count > w.cfg.RestartMaxAttempts {
-		reason := w.crashReason(slug, index, nil, derefIntOr0(app.MemoryLimitMB))
-		if reason == "" {
-			reason = "the app crashed repeatedly"
-		}
 		w.prx.Deregister(slug)
 		if serr := w.mgr.Stop(slug); serr != nil {
 			slog.Warn("watcher: stop crash-looping app failed", "slug", slug, "err", serr)
@@ -1012,6 +1041,12 @@ func (w *Watcher) restartSlot(app *db.App, index int) {
 			return // not the app's fault: retry next tick at zero cost
 		}
 		opErr = err
+		reason := w.crashReason(app.Slug, index, err, derefIntOr0(app.MemoryLimitMB))
+		if rerr := w.store.RecordReplicaCrash(db.UpsertReplicaParams{
+			AppID: app.ID, Index: index, Reason: reason,
+		}); rerr != nil {
+			slog.Warn("watcher: record replica restart failure", "slug", app.Slug, "index", index, "err", rerr)
+		}
 		w.mu.Lock()
 		w.attempts[k]++
 		w.scheduleBackoffLocked(k, w.attempts[k])

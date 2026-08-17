@@ -85,9 +85,22 @@ func TestFleetHealth_AggregatesAcrossBackends(t *testing.T) {
 	store.CreateApp(db.CreateAppParams{Slug: "dash", Name: "Dash", OwnerID: admin.ID})
 	dash, _ := store.GetAppBySlug("dash")
 	store.UpsertReplica(db.UpsertReplicaParams{AppID: dash.ID, Index: 0, Status: db.ReplicaStatusLost, Tier: "remote", Provider: "remote_docker"})
-	// broke: crashed - its replicas cannot start.
+	// broke: the durable app status is stale/benign, but its desired-running
+	// replica crashed. Fleet health must follow replica reality too.
 	store.CreateApp(db.CreateAppParams{Slug: "broke", Name: "Broke", OwnerID: admin.ID})
-	store.MarkAppCrashed("broke", "ModuleNotFoundError: No module named 'pandas'")
+	broke, _ := store.GetAppBySlug("broke")
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "broke", Status: "hibernated"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID:        broke.ID,
+		Index:        0,
+		Status:       "crashed",
+		DesiredState: "running",
+		Reason:       "ModuleNotFoundError: No module named 'pandas'",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	req := authedRequest(t, "GET", "/api/fleet/health", nil, adminTok)
 	rec := httptest.NewRecorder()

@@ -84,12 +84,111 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	}
 	// One project lookup for the whole page: decorate() is a map read, so the
 	// per-app cost stays constant however many apps the page carries.
+	appIDs := make([]int64, len(apps))
+	for i, a := range apps {
+		appIDs[i] = a.ID
+	}
+	replicasByApp, err := s.store.ListReplicasForApps(appIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
 	disp := s.loadProjectDisplay()
 	for _, a := range apps {
 		s.decorateApp(a)
+		replicas := s.liveReplicaView(a.Slug, replicasByApp[a.ID])
+		elasticKnown, workersRunning, workersTotal := s.elasticObservation(a.Slug)
+		// A server built without a process manager (unit tests and API-only
+		// embeddings) has no live authority. Preserve the stored status when there
+		// are no durable replica facts to contradict it.
+		if s.manager != nil || len(replicas) > 0 || elasticKnown {
+			s.decorateAppObservation(a, replicas, elasticKnown, workersRunning, workersTotal)
+		}
 		a.ProjectName, a.ProjectIconEmoji = disp.decorate(a.ProjectSlug)
 	}
 	writeList(w, apps, limit, offset, nil)
+}
+
+// liveReplicaView returns a detached replica slice with the single-node process
+// manager overlaid on durable rows. In native/SQLite mode the manager is the
+// authority for whether a process exists: a DB row that still says running but
+// has no manager entry is reported stopped, not counted as live. Clustered mode
+// keeps the shared DB as authority because another server can own the process.
+func (s *Server) liveReplicaView(slug string, stored []*db.Replica) []*db.Replica {
+	byIndex := make(map[int]*db.Replica, len(stored))
+	for _, rep := range stored {
+		if rep == nil {
+			continue
+		}
+		copy := *rep
+		byIndex[copy.Index] = &copy
+	}
+
+	if s.manager != nil && !s.clustered {
+		live := s.manager.AllForSlug(slug)
+		for _, rep := range byIndex {
+			if rep.Status == db.ReplicaStatusRunning && (rep.Index >= len(live) || live[rep.Index] == nil) {
+				rep.Status = string(process.StatusStopped)
+				rep.PID, rep.Port = nil, nil
+			}
+		}
+		for index, info := range live {
+			if info == nil {
+				continue
+			}
+			rep := byIndex[index]
+			if rep == nil {
+				rep = &db.Replica{Index: index, DesiredState: "running"}
+				byIndex[index] = rep
+			}
+			rep.Status = string(info.Status)
+			rep.Provider, rep.Tier = info.Provider, info.Tier
+			if info.PID != 0 {
+				pid := info.PID
+				rep.PID = &pid
+			}
+			if info.Port != 0 {
+				port := info.Port
+				rep.Port = &port
+			}
+			if verdict, ok := s.manager.LastExit(slug, index); ok {
+				rep.ExitCode = verdict.ExitCode
+				rep.Signal = verdict.Signal
+				if verdict.RestartCount > rep.RestartCount {
+					rep.RestartCount = verdict.RestartCount
+				}
+				if rep.Status == string(process.StatusCrashed) && verdict.Reason != "" {
+					rep.Reason = verdict.Reason
+				}
+			}
+		}
+	}
+
+	out := make([]*db.Replica, 0, len(byIndex))
+	for _, rep := range byIndex {
+		if rep.Status == db.ReplicaStatusLost {
+			rep.Reason = s.lostReplicaReason(rep.Tier)
+		}
+		out = append(out, rep)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Index < out[j].Index })
+	return out
+}
+
+func (s *Server) elasticObservation(slug string) (known bool, running, total int) {
+	if s.proxy == nil {
+		return false, 0, 0
+	}
+	snap, ok := s.proxy.ElasticWorkersSnapshot(slug)
+	if !ok {
+		return false, 0, 0
+	}
+	for _, worker := range snap.Workers {
+		if worker.Status == "running" {
+			running++
+		}
+	}
+	return true, running, len(snap.Workers)
 }
 
 type createAppRequest struct {
@@ -239,30 +338,18 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		replicas = []*db.Replica{}
 	}
 
-	// Merge live process state into DB rows when the manager is available.
-	if s.manager != nil {
-		live := s.manager.AllForSlug(slug)
-		for i, rep := range replicas {
-			if rep.Index < len(live) && live[rep.Index] != nil {
-				replicas[i].Status = string(live[rep.Index].Status)
-				if live[rep.Index].PID != 0 {
-					pid := live[rep.Index].PID
-					replicas[i].PID = &pid
-				}
-				if live[rep.Index].Port != 0 {
-					port := live[rep.Index].Port
-					replicas[i].Port = &port
-				}
-			}
-		}
-	}
+	replicas = s.liveReplicaView(slug, replicas)
 
 	// Derive a presentation-only reason for replicas lost to a dead worker.
 	for i, rep := range replicas {
 		if rep.Status == db.ReplicaStatusLost {
 			replicas[i].Reason = s.lostReplicaReason(rep.Tier)
+		} else if rep.Status == "crashed" && rep.Reason == "" {
+			replicas[i].Reason = "replica process exited unexpectedly"
 		}
 	}
+	elasticKnown, workersRunning, workersTotal := s.elasticObservation(slug)
+	s.decorateAppObservation(app, replicas, elasticKnown, workersRunning, workersTotal)
 
 	// effective_max_sessions_per_replica resolves the app's own cap against the
 	// runtime default (0 = inherit). Clients use it to render an honest
@@ -287,13 +374,14 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	envelope := map[string]any{
-		"app":                                app,
-		"resource_revision":                  resourceRevision,
-		"replicas_status":                    replicas,
-		"effective_max_sessions_per_replica": effectiveCap,
-		"effective_autoscale_target":         effectiveTarget,
-		"redeploy_in_flight":                 s.isRedeployInFlight(slug),
-		"can_manage":                         canManage,
+		"app":                                 app,
+		"resource_revision":                   resourceRevision,
+		"replicas_status":                     replicas,
+		"effective_max_sessions_per_replica":  effectiveCap,
+		"effective_autoscale_target":          effectiveTarget,
+		"effective_hibernate_timeout_minutes": app.EffectiveHibernateTimeoutMinutes,
+		"redeploy_in_flight":                  s.isRedeployInFlight(slug),
+		"can_manage":                          canManage,
 	}
 	// render_pacing is the same advisory block PATCH returns, computed from the
 	// app's stored render_seconds. It is here so a client can show the cap
@@ -3086,9 +3174,10 @@ func (s *Server) buildWorkerPool(slug string, snap proxy.ElasticPoolSnapshot) wo
 }
 
 type replicaMetrics struct {
-	Index  int    `json:"index"`
-	Status string `json:"status"`
-	PID    int    `json:"pid,omitempty"`
+	Index        int    `json:"index"`
+	Status       string `json:"status"`
+	DesiredState string `json:"desired_state,omitempty"`
+	PID          int    `json:"pid,omitempty"`
 	// CPUPercent is the replica's CPU rate since the previous poll, where 100 is
 	// one fully busy core. It is null when no rate is available yet, which covers
 	// the first poll after a replica starts and every tier that cannot report one.
@@ -3107,6 +3196,9 @@ type replicaMetrics struct {
 	// replacement. Empty for healthy replicas. Mirrors db.Replica.Reason so the
 	// live poll stays consistent with the app envelope.
 	Reason           string `json:"reason,omitempty"`
+	ExitCode         *int   `json:"exit_code,omitempty"`
+	Signal           string `json:"signal,omitempty"`
+	RestartCount     int    `json:"restart_count"`
 	MetricsAvailable bool   `json:"metrics_available"`
 }
 
@@ -3124,6 +3216,9 @@ type metricsResponse struct {
 	// otherwise the dominant replica status (or the DB-recorded status if
 	// no replicas are tracked yet).
 	Status string `json:"status"`
+	// DesiredStatus preserves the database lifecycle intent when Status is an
+	// observational value such as idle, degraded, or crashed.
+	DesiredStatus string `json:"desired_status"`
 	// Deploying is true while a deployment or rollback for this app is
 	// actively executing on this instance (see Server.appDeploying). The
 	// dashboard's 10s poll uses it to flip the card badge to "Deploying"
@@ -3140,7 +3235,11 @@ type metricsResponse struct {
 	// this pool. 0 means uncapped. For elastic (grouped/per_session) pools it
 	// is the per-worker cap, so the admission ceiling is
 	// MaxWorkers x SessionsCap.
-	SessionsCap int `json:"sessions_cap"`
+	SessionsCap     int `json:"sessions_cap"`
+	ReplicasDesired int `json:"replicas_desired"`
+	ReplicasRunning int `json:"replicas_running"`
+	WorkersRunning  int `json:"workers_running"`
+	SessionsCeiling int `json:"sessions_ceiling"`
 	// WorkerIsolation and MaxWorkers describe the elastic pool when the app
 	// runs grouped/per_session isolation; omitted for multiplex.
 	WorkerIsolation  string           `json:"worker_isolation,omitempty"`
@@ -3208,15 +3307,29 @@ func (s *Server) buildAppMetrics(slug string, app *db.App) metricsResponse {
 // the DB reads out lets handleBatchMetrics fetch them for all cards in a few
 // queries instead of three per card.
 func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.Replica, autoscaleEvent db.AuditEvent, autoscaleFound bool) metricsResponse {
+	// Work on a copy: batch metrics receives the same app pointers other handler
+	// code may still use, and observational decoration must stay request-local.
+	observedApp := *app
+	s.decorateApp(&observedApp)
 	resp := metricsResponse{
 		Status:               app.Status,
+		DesiredStatus:        app.Status,
 		Deploying:            s.appDeploying(app),
 		LastDeploymentStatus: app.LastDeploymentStatus,
+		ReplicasDesired:      app.Replicas,
+		SessionsCeiling:      observedApp.SessionsCeiling,
 		Replicas:             []replicaMetrics{},
 	}
 
 	if s.manager == nil {
-		return resp
+		for _, rep := range dbReplicas {
+			resp.Replicas = append(resp.Replicas, replicaMetrics{
+				Index: rep.Index, Status: rep.Status, DesiredState: rep.DesiredState,
+				Tier: rep.Tier, Provider: rep.Provider, Sessions: -1,
+				Reason: rep.Reason, ExitCode: rep.ExitCode, Signal: rep.Signal,
+				RestartCount: rep.RestartCount,
+			})
+		}
 	}
 
 	var sessionCounts []int64
@@ -3225,7 +3338,10 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 		resp.SessionsCap = s.proxy.PoolCap(slug)
 	}
 
-	infos := s.manager.AllForSlug(slug)
+	var infos []*process.ProcessInfo
+	if s.manager != nil {
+		infos = s.manager.AllForSlug(slug)
+	}
 
 	// Sessions-count slice may be shorter than infos if SetPoolSize raced
 	// with a Deregister; clamp lookups to avoid out-of-range reads.
@@ -3238,7 +3354,7 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 
 	anyRunning := false
 	for i, info := range infos {
-		rm := replicaMetrics{Index: i, Sessions: sessionAt(i)}
+		rm := replicaMetrics{Index: i, DesiredState: "running", Sessions: sessionAt(i)}
 		if info == nil {
 			rm.Status = string(process.StatusStopped)
 			resp.Replicas = append(resp.Replicas, rm)
@@ -3248,6 +3364,12 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 		rm.PID = info.PID
 		rm.Tier = info.Tier
 		rm.Provider = info.Provider
+		if info.Status == process.StatusCrashed {
+			if verdict, ok := s.manager.LastExit(slug, i); ok {
+				rm.ExitCode, rm.Signal = verdict.ExitCode, verdict.Signal
+				rm.RestartCount, rm.Reason = verdict.RestartCount, verdict.Reason
+			}
+		}
 		if info.Status == process.StatusRunning {
 			if handle, ok := s.manager.HandleReplica(slug, i); ok {
 				if stats, err := s.sampler.Sample(handle); err == nil {
@@ -3302,7 +3424,7 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 			for _, w := range snap.Workers {
 				rm, tracked := managerRow[w.SlotID]
 				if !tracked {
-					rm = replicaMetrics{Index: w.SlotID}
+					rm = replicaMetrics{Index: w.SlotID, DesiredState: "running"}
 				}
 				rm.Sessions = int64(w.Sessions)
 				// The manager tracks process health; the proxy tracks routing.
@@ -3330,27 +3452,60 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 		dbReplicas = nil
 	}
 	for _, rep := range dbReplicas {
-		if rep.Status != db.ReplicaStatusLost {
+		if rep.Status != db.ReplicaStatusLost && rep.Status != "crashed" {
 			continue
 		}
-		reason := s.lostReplicaReason(rep.Tier)
+		reason := rep.Reason
+		if rep.Status == db.ReplicaStatusLost {
+			reason = s.lostReplicaReason(rep.Tier)
+		} else if reason == "" {
+			reason = "replica process exited unexpectedly"
+		}
 		if rep.Index < len(resp.Replicas) {
-			resp.Replicas[rep.Index].Status = string(db.ReplicaStatusLost)
+			resp.Replicas[rep.Index].Status = rep.Status
+			resp.Replicas[rep.Index].DesiredState = rep.DesiredState
 			resp.Replicas[rep.Index].Reason = reason
+			resp.Replicas[rep.Index].ExitCode = rep.ExitCode
+			resp.Replicas[rep.Index].Signal = rep.Signal
+			resp.Replicas[rep.Index].RestartCount = rep.RestartCount
 			resp.Replicas[rep.Index].Tier = rep.Tier
 			resp.Replicas[rep.Index].Provider = rep.Provider
 			resp.Replicas[rep.Index].MetricsAvailable = false
 		} else {
 			resp.Replicas = append(resp.Replicas, replicaMetrics{
-				Index:    rep.Index,
-				Status:   string(db.ReplicaStatusLost),
-				Reason:   reason,
-				Tier:     rep.Tier,
-				Provider: rep.Provider,
-				Sessions: -1,
+				Index:        rep.Index,
+				Status:       rep.Status,
+				DesiredState: rep.DesiredState,
+				Reason:       reason,
+				ExitCode:     rep.ExitCode,
+				Signal:       rep.Signal,
+				RestartCount: rep.RestartCount,
+				Tier:         rep.Tier,
+				Provider:     rep.Provider,
+				Sessions:     -1,
 			})
 		}
 	}
+
+	observationReplicas := make([]*db.Replica, 0, len(resp.Replicas))
+	workersTotal := 0
+	for _, rep := range resp.Replicas {
+		observationReplicas = append(observationReplicas, &db.Replica{
+			Index: rep.Index, Status: rep.Status, DesiredState: rep.DesiredState,
+			Reason: rep.Reason, ExitCode: rep.ExitCode, Signal: rep.Signal,
+			RestartCount: rep.RestartCount,
+		})
+		if elastic {
+			workersTotal++
+			if rep.Status == "running" {
+				resp.WorkersRunning++
+			}
+		}
+	}
+	s.decorateAppObservation(&observedApp, observationReplicas, elastic, resp.WorkersRunning, workersTotal)
+	resp.Status = observedApp.Status
+	resp.DesiredStatus = observedApp.DesiredStatus
+	resp.ReplicasRunning = observedApp.ReplicasRunning
 
 	metricsAS := buildAutoscaleStatus(autoscaleEvent, autoscaleFound, s.cfg.Runtime.Autoscale.Cooldown)
 	resp.AutoscaleStatus = &metricsAS

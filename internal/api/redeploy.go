@@ -3,6 +3,7 @@ package api
 import (
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
@@ -84,6 +85,121 @@ func (s *Server) decorateApp(app *db.App) {
 	app.Deploying = s.appDeploying(app)
 	app.EffectiveWorkerIsolation = deploy.ResolveWorkerIsolation(
 		app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
+	if app.HibernateTimeoutMinutes != nil {
+		app.EffectiveHibernateTimeoutMinutes = float64(*app.HibernateTimeoutMinutes)
+	} else {
+		app.EffectiveHibernateTimeoutMinutes = s.cfg.Lifecycle.HibernateTimeout.Minutes()
+	}
+	app.EffectiveMaxSessionsPerReplica = deploy.ResolveMaxSessionsPerReplica(
+		app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
+	app.SessionsCeiling = configuredSessionsCeiling(app)
+}
+
+// configuredSessionsCeiling gives sessions_ceiling one stable meaning on every
+// isolation mode: configured admission capacity, independent of how many
+// processes happen to be live at the instant of the read. A zero cap is
+// uncapped and therefore remains zero rather than pretending to be capacity.
+func configuredSessionsCeiling(app *db.App) int {
+	switch app.EffectiveWorkerIsolation {
+	case "grouped":
+		if app.WorkerMaxWorkers <= 0 || app.WorkerGroupedSize <= 0 {
+			return 0
+		}
+		return app.WorkerMaxWorkers * app.WorkerGroupedSize
+	case "per_session":
+		if app.WorkerMaxWorkers <= 0 {
+			return 0
+		}
+		return app.WorkerMaxWorkers
+	default:
+		cap := app.EffectiveMaxSessionsPerReplica
+		if cap <= 0 {
+			return 0
+		}
+		return app.Replicas * cap
+	}
+}
+
+// decorateAppObservation overlays process reality onto the stored lifecycle
+// state. desired_status preserves the database value; status becomes the field
+// operators expect: whether the app is actually serving, idle, or unhealthy.
+func (s *Server) decorateAppObservation(app *db.App, replicas []*db.Replica, elasticKnown bool, workersRunning, workersTotal int) {
+	if app.DesiredStatus == "" {
+		app.DesiredStatus = app.Status
+	}
+	app.ReplicasRunning = 0
+	app.WorkersRunning = workersRunning
+	app.LastReplicaError = ""
+
+	if elasticKnown {
+		// Elastic pools are demand-driven and have no durable replica rows. Their
+		// empty healthy state is idle, while transitional workers are starting.
+		switch {
+		case workersRunning > 0:
+			app.Status = "running"
+		case workersTotal > 0:
+			app.Status = "starting"
+		case app.DesiredStatus == "running" || app.DesiredStatus == "degraded":
+			app.Status = "idle"
+		default:
+			app.Status = app.DesiredStatus
+		}
+		return
+	}
+
+	crashed, lost, starting, intentionallyParked := 0, 0, 0, 0
+	var lastReplicaErrorAt time.Time
+	for _, rep := range replicas {
+		if rep == nil {
+			continue
+		}
+		// Exit diagnostics deliberately survive a successful restart. Keep the
+		// newest one visible at app level even after this slot is serving again.
+		if rep.Reason != "" && (app.LastReplicaError == "" || rep.UpdatedAt.After(lastReplicaErrorAt)) {
+			app.LastReplicaError = rep.Reason
+			lastReplicaErrorAt = rep.UpdatedAt
+		}
+		switch rep.Status {
+		case db.ReplicaStatusRunning:
+			app.ReplicasRunning++
+		case "crashed":
+			if rep.DesiredState == "" || rep.DesiredState == "running" {
+				crashed++
+			}
+		case db.ReplicaStatusLost:
+			if rep.DesiredState == "" || rep.DesiredState == "running" {
+				lost++
+			}
+		case "starting", "booting", "resuming":
+			starting++
+		default:
+			if rep.DesiredState == db.ReplicaDesiredWarm {
+				intentionallyParked++
+			}
+		}
+	}
+
+	switch {
+	case app.ReplicasRunning > 0 && crashed+lost > 0:
+		app.Status = "degraded"
+	case app.ReplicasRunning > 0:
+		app.Status = "running"
+	case crashed > 0:
+		app.Status = "crashed"
+	case lost > 0:
+		app.Status = "degraded"
+	case starting > 0:
+		app.Status = "starting"
+	case intentionallyParked > 0 && app.DesiredStatus != "stopped":
+		app.Status = "hibernated"
+	case len(replicas) == 0 && (app.DesiredStatus == "running" || app.DesiredStatus == "degraded"):
+		app.Status = "degraded"
+	default:
+		app.Status = app.DesiredStatus
+	}
+	if app.LastReplicaError == "" && app.Status == "crashed" {
+		app.LastReplicaError = app.LastError
+	}
 }
 
 // dataLockFor returns the per-slug mutex used to serialize the quota check

@@ -20,7 +20,7 @@ export { appAvatar } from './app-avatar.js';
 // routes purely on status. So openable apps carry no status label at all; only
 // an app a viewer genuinely cannot open is flagged "Unavailable".
 const OPENABLE = new Set([
-  'running', 'healthy', 'hibernated', 'suspended', 'deploying', 'waking', 'degraded',
+  'running', 'healthy', 'idle', 'hibernated', 'suspended', 'deploying', 'waking', 'degraded',
 ]);
 
 // "Recently opened" is a shortcut for skipping a scan of a large catalog. When

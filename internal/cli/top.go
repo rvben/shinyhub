@@ -197,7 +197,12 @@ func fetchTopRows(cfg *cliConfig) ([]topRow, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, httpError(cfg.Token, "app metrics", resp, body)
+		metricsErr := httpError(cfg.Token, "app metrics", resp, body)
+		rows, fallbackErr := fetchTopRowsFromAppList(cfg)
+		if fallbackErr == nil {
+			return rows, nil
+		}
+		return nil, fmt.Errorf("%w; app-list fallback also failed: %v", metricsErr, fallbackErr)
 	}
 	var env struct {
 		Metrics map[string]topMetrics `json:"metrics"`
@@ -206,6 +211,49 @@ func fetchTopRows(cfg *cliConfig) ([]topRow, error) {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return topRowsFrom(env.Metrics), nil
+}
+
+// fetchTopRowsFromAppList degrades a metrics outage to an explicit partial
+// snapshot. The list endpoint carries status plus desired/actual process counts
+// and configured capacity, so a monitor can distinguish "zero running" from
+// "metrics unavailable" without inventing CPU/RSS/session readings.
+func fetchTopRowsFromAppList(cfg *cliConfig) ([]topRow, error) {
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps?limit=10000", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build app-list fallback request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, httpError(cfg.Token, "list apps", resp, body)
+	}
+	var env struct {
+		Items []struct {
+			Slug            string `json:"slug"`
+			Status          string `json:"status"`
+			Replicas        int    `json:"replicas"`
+			ReplicasRunning int    `json:"replicas_running"`
+			WorkersRunning  int    `json:"workers_running"`
+			SessionsCeiling int    `json:"sessions_ceiling"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("decode app-list fallback: %w", err)
+	}
+	rows := make([]topRow, 0, len(env.Items))
+	for _, app := range env.Items {
+		rows = append(rows, topRow{
+			Slug: app.Slug, Status: app.Status, Replicas: app.Replicas,
+			Running: app.ReplicasRunning, Workers: app.WorkersRunning,
+			Ceiling: app.SessionsCeiling, MetricsUnavailable: true,
+		})
+	}
+	return rows, nil
 }
 
 // topTerminal owns every terminal mutation the live view makes, so undoing them

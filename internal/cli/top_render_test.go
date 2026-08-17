@@ -240,6 +240,9 @@ func TestTopRow_DeployingOverridesStatus(t *testing.T) {
 // worker ceiling and a multiplex pool by its replicas. Getting this wrong shows
 // an app as having 5x the headroom it has.
 func TestTopCeiling_ElasticAndMultiplexAndUncapped(t *testing.T) {
+	if got := topCeiling(topMetrics{SessionsCeiling: 240, SessionsCap: 6, MaxWorkers: 40}, 0); got != 240 {
+		t.Errorf("server-configured ceiling = %d, want 240", got)
+	}
 	elastic := topMetrics{SessionsCap: 5, WorkerIsolation: "grouped", MaxWorkers: 6}
 	if got := topCeiling(elastic, 1); got != 30 {
 		t.Errorf("elastic ceiling = %d, want 30 (max_workers 6 x cap 5)", got)

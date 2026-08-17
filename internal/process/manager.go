@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -110,7 +111,68 @@ type ExitVerdict struct {
 	// (0 when unknown, e.g. an adopted process). The watcher falls back to the
 	// app's stored limit when this is 0.
 	MemoryLimitMB int
+	ExitCode      *int
+	Signal        string
+	Reason        string
+	RestartCount  int
 	At            time.Time
+}
+
+func replicaExitVerdict(waitErr error, oom bool, memoryLimitMB int, prior ExitVerdict) ExitVerdict {
+	v := ExitVerdict{
+		OOMKilled: oom, MemoryLimitMB: memoryLimitMB,
+		RestartCount: prior.RestartCount + 1, At: time.Now(),
+	}
+	var nativeErr *exec.ExitError
+	var runtimeErr *ProcessExitError
+	switch {
+	case errors.As(waitErr, &nativeErr):
+		if ws, ok := nativeErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			v.Signal = exitSignalName(ws.Signal())
+		} else {
+			code := nativeErr.ExitCode()
+			v.ExitCode = &code
+		}
+	case errors.As(waitErr, &runtimeErr):
+		code := runtimeErr.Code
+		v.ExitCode = &code
+	case waitErr == nil:
+		code := 0
+		v.ExitCode = &code
+	}
+
+	switch {
+	case oom && memoryLimitMB > 0:
+		v.Reason = fmt.Sprintf("kernel OOM-killed replica at memory_limit_mb=%d", memoryLimitMB)
+	case oom:
+		v.Reason = "kernel OOM-killed replica"
+	case v.Signal != "":
+		v.Reason = "replica terminated by " + v.Signal
+	case v.ExitCode != nil:
+		v.Reason = fmt.Sprintf("replica exited with code %d", *v.ExitCode)
+	case waitErr != nil:
+		v.Reason = waitErr.Error()
+	default:
+		v.Reason = "replica process exited unexpectedly"
+	}
+	return v
+}
+
+func exitSignalName(sig syscall.Signal) string {
+	switch sig {
+	case syscall.SIGKILL:
+		return "SIGKILL"
+	case syscall.SIGTERM:
+		return "SIGTERM"
+	case syscall.SIGSEGV:
+		return "SIGSEGV"
+	case syscall.SIGABRT:
+		return "SIGABRT"
+	case syscall.SIGHUP:
+		return "SIGHUP"
+	default:
+		return fmt.Sprintf("signal %d", sig)
+	}
 }
 
 type StartParams struct {
@@ -660,7 +722,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 					"slug", p.Slug, "idx", p.Index, "panic", rec)
 			}
 		}()
-		rt.Wait(context.Background(), handle)
+		waitErr := rt.Wait(context.Background(), handle)
 		// Consume the OOM verdict from the runtime BEFORE taking m.mu: the
 		// runtime read takes its own lock, and the verdict was stashed by Wait
 		// before it tore the cgroup down.
@@ -674,14 +736,13 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		if pool := m.entries[p.Slug]; p.Index < len(pool) {
 			if e := pool[p.Index]; e != nil && e.handle == handle {
 				key := replicaKey{p.Slug, p.Index}
-				// Record the exit verdict (and OOM flag) BEFORE flipping Status,
-				// so no reader under m.mu can observe the crash without it. Every
-				// exit overwrites the verdict, so a non-OOM exit clears a stale OOM.
+				// Record the exit verdict BEFORE flipping Status, so no reader under
+				// m.mu can observe the crash without its cause and restart count.
 				e.info.OOMKilled = oom
-				m.lastExit[key] = ExitVerdict{OOMKilled: oom, MemoryLimitMB: p.MemoryLimitMB, At: time.Now()}
 				if e.stopped {
 					e.info.Status = StatusStopped
 				} else {
+					m.lastExit[key] = replicaExitVerdict(waitErr, oom, p.MemoryLimitMB, m.lastExit[key])
 					e.info.Status = StatusCrashed
 				}
 				run.Status = e.info.Status
@@ -1270,7 +1331,7 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 					"slug", slug, "idx", info.Index, "panic", rec)
 			}
 		}()
-		rt.Wait(context.Background(), handle)
+		waitErr := rt.Wait(context.Background(), handle)
 		oom := consumeOOM(rt, handle.PID)
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -1283,7 +1344,7 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 				} else {
 					// MemoryLimitMB is unknown for an adopted process (no StartParams);
 					// the watcher falls back to the app's stored limit when it is 0.
-					m.lastExit[key] = ExitVerdict{OOMKilled: oom, MemoryLimitMB: 0, At: time.Now()}
+					m.lastExit[key] = replicaExitVerdict(waitErr, oom, 0, m.lastExit[key])
 					e.info.Status = StatusCrashed
 				}
 				if e.logRun != nil {

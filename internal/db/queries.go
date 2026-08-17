@@ -628,19 +628,36 @@ type App struct {
 	// IconEmoji is the emoji chosen as the app's icon, or "" when none is set.
 	// Separate from IconMime because IconMime is written verbatim as a
 	// Content-Type header. Display order is emoji > uploaded image > monogram.
-	IconEmoji               string    `json:"icon_emoji,omitempty"`
-	ProjectSlug             string    `json:"project_slug,omitempty"`
-	OwnerID                 int64     `json:"owner_id"`
-	Access                  string    `json:"access"`
-	Status                  string    `json:"status"`
-	Replicas                int       `json:"replicas"`
-	MaxSessionsPerReplica   int       `json:"max_sessions_per_replica"`
-	DeployCount             int       `json:"deploy_count"`
-	HibernateTimeoutMinutes *int      `json:"hibernate_timeout_minutes"`
-	MemoryLimitMB           *int      `json:"memory_limit_mb"`
-	CPUQuotaPercent         *int      `json:"cpu_quota_percent"`
-	CreatedAt               time.Time `json:"created_at"`
-	UpdatedAt               time.Time `json:"updated_at"`
+	IconEmoji   string `json:"icon_emoji,omitempty"`
+	ProjectSlug string `json:"project_slug,omitempty"`
+	OwnerID     int64  `json:"owner_id"`
+	Access      string `json:"access"`
+	Status      string `json:"status"`
+	// DesiredStatus is the persisted lifecycle intent before the API overlays
+	// live replica/worker reality onto Status. It is computed by the API layer;
+	// database reads leave it empty.
+	DesiredStatus string `json:"desired_status,omitempty"`
+	Replicas      int    `json:"replicas"`
+	// ReplicasRunning and WorkersRunning are live process counts computed by the
+	// API layer. Replicas remains the configured/desired replica count.
+	ReplicasRunning       int `json:"replicas_running"`
+	WorkersRunning        int `json:"workers_running"`
+	MaxSessionsPerReplica int `json:"max_sessions_per_replica"`
+	// EffectiveMaxSessionsPerReplica resolves MaxSessionsPerReplica against the
+	// runtime default. SessionsCeiling is configured admission capacity, computed
+	// consistently for multiplex and elastic isolation.
+	EffectiveMaxSessionsPerReplica int  `json:"effective_max_sessions_per_replica"`
+	SessionsCeiling                int  `json:"sessions_ceiling"`
+	DeployCount                    int  `json:"deploy_count"`
+	HibernateTimeoutMinutes        *int `json:"hibernate_timeout_minutes"`
+	// EffectiveHibernateTimeoutMinutes is the exact timeout in minutes after
+	// resolving a nil per-app value against lifecycle.hibernate_timeout. A
+	// float preserves duration settings such as 90s as 1.5 minutes.
+	EffectiveHibernateTimeoutMinutes float64   `json:"effective_hibernate_timeout_minutes"`
+	MemoryLimitMB                    *int      `json:"memory_limit_mb"`
+	CPUQuotaPercent                  *int      `json:"cpu_quota_percent"`
+	CreatedAt                        time.Time `json:"created_at"`
+	UpdatedAt                        time.Time `json:"updated_at"`
 	// LastDeployedAt is the created_at of the most-recent deployment row,
 	// or nil if the app has never been deployed. Joined in via the
 	// deploymentSummarySQL fragment below.
@@ -716,6 +733,10 @@ type App struct {
 	// error plus the tail of the app log, e.g. a Python traceback). Empty when
 	// the app is not crashed; cleared on a successful (re)start.
 	LastError string `json:"last_error,omitempty"`
+	// LastReplicaError is the newest replica-level failure visible in the live
+	// status view, including failures that have not exhausted the app's restart
+	// budget and therefore have not promoted LastError yet.
+	LastReplicaError string `json:"last_replica_error"`
 	// CrashedAt is the Unix-epoch seconds of the transition into "crashed", or
 	// 0 when the app is not crashed. Cleared alongside LastError on (re)start.
 	CrashedAt int64 `json:"crashed_at,omitempty"`
@@ -2781,10 +2802,15 @@ type Replica struct {
 	DesiredState string    `json:"desired_state"`
 	DeploymentID *int64    `json:"deployment_id,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
-	// Reason is a derived, presentation-only annotation set by the read layer
-	// (e.g. "worker unavailable" for a lost replica whose tier has no healthy
-	// worker). It is never scanned from or persisted to the database.
+	// Reason is the most recent persisted crash reason, or a presentation-only
+	// annotation set by the read layer for states such as a lost worker.
 	Reason string `json:"reason,omitempty"`
+	// ExitCode, Signal, and RestartCount describe the most recent unexpected
+	// exit of this replica slot. They are populated by the process manager/read
+	// layer even before the watchdog exhausts its restart budget.
+	ExitCode     *int   `json:"exit_code,omitempty"`
+	Signal       string `json:"signal,omitempty"`
+	RestartCount int    `json:"restart_count"`
 }
 
 // UpsertReplicaParams holds the fields for inserting or updating a replica row.
@@ -2801,6 +2827,9 @@ type UpsertReplicaParams struct {
 	AppVersion   string
 	DesiredState string
 	DeploymentID *int64
+	ExitCode     *int
+	Signal       string
+	Reason       string
 }
 
 // UpsertReplica inserts a new replica or updates an existing one identified by
@@ -2811,11 +2840,19 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 	if desired == "" {
 		desired = "running"
 	}
+	restartCount := 0
+	if p.Status == "crashed" {
+		restartCount = 1
+		if p.Reason == "" {
+			p.Reason = "replica process exited unexpectedly"
+		}
+	}
 	_, err := s.db.Exec(`
 		INSERT INTO replicas (app_id, idx, pid, port, status, provider, tier,
 		                      endpoint_url, worker_id, app_version, desired_state,
-		                      deployment_id, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`)
+		                      deployment_id, updated_at, exit_code, exit_signal,
+		                      exit_reason, restart_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`, ?, ?, ?, ?)
 		ON CONFLICT(app_id, idx) DO UPDATE SET
 			pid           = excluded.pid,
 			port          = excluded.port,
@@ -2827,14 +2864,41 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 			app_version   = excluded.app_version,
 			desired_state = excluded.desired_state,
 			deployment_id = excluded.deployment_id,
+			exit_code     = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_code ELSE replicas.exit_code END,
+			exit_signal   = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_signal ELSE replicas.exit_signal END,
+			exit_reason   = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_reason ELSE replicas.exit_reason END,
+			restart_count = CASE WHEN excluded.status = 'crashed' THEN replicas.restart_count + 1 ELSE replicas.restart_count END,
 			updated_at    = excluded.updated_at`,
 		p.AppID, p.Index, p.PID, p.Port, p.Status, p.Provider, p.Tier,
 		p.EndpointURL, p.WorkerID, p.AppVersion, desired, p.DeploymentID,
+		p.ExitCode, p.Signal, p.Reason, restartCount,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert replica: %w", err)
 	}
 	return nil
+}
+
+// RecordReplicaCrash updates only crash diagnostics and status, preserving the
+// replica's placement and identity metadata. It inserts a minimal row when a
+// crash is observed before the normal replica upsert reached the database.
+func (s *Store) RecordReplicaCrash(p UpsertReplicaParams) error {
+	if p.Reason == "" {
+		p.Reason = "replica process exited unexpectedly"
+	}
+	res, err := s.db.Exec(`
+		UPDATE replicas
+		   SET status = 'crashed', exit_code = ?, exit_signal = ?, exit_reason = ?,
+		       restart_count = restart_count + 1, updated_at = `+s.d.nowEpoch()+`
+		 WHERE app_id = ? AND idx = ?`, p.ExitCode, p.Signal, p.Reason, p.AppID, p.Index)
+	if err != nil {
+		return fmt.Errorf("record replica crash: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	p.Status = "crashed"
+	return s.UpsertReplica(p)
 }
 
 // ListReplicas returns all replicas for the given app, ordered by index.
@@ -2843,7 +2907,8 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 	rows, err := s.db.Query(`
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
-		       deployment_id, updated_at
+		       deployment_id, updated_at, exit_code, exit_signal, exit_reason,
+		       restart_count
 		FROM replicas WHERE app_id = ? ORDER BY idx`, appID)
 	if err != nil {
 		return nil, err
@@ -2855,7 +2920,8 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 		var updatedAt int64
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
-			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
+			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.ExitCode, &r.Signal,
+			&r.Reason, &r.RestartCount); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
@@ -2876,7 +2942,8 @@ func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error
 	rows, err := s.db.Query(`
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
-		       deployment_id, updated_at
+		       deployment_id, updated_at, exit_code, exit_signal, exit_reason,
+		       restart_count
 		FROM replicas WHERE app_id IN (`+ph+`) ORDER BY app_id, idx`, args...)
 	if err != nil {
 		return nil, err
@@ -2888,7 +2955,8 @@ func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error
 		var updatedAt int64
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
-			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
+			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.ExitCode, &r.Signal,
+			&r.Reason, &r.RestartCount); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)

@@ -345,6 +345,11 @@ func (f *fakeStore) UpsertReplica(p db.UpsertReplicaParams) error {
 	})
 	return nil
 }
+
+func (f *fakeStore) RecordReplicaCrash(p db.UpsertReplicaParams) error {
+	p.Status = "crashed"
+	return f.UpsertReplica(p)
+}
 func (f *fakeStore) ListReconcilableApps() ([]*db.App, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

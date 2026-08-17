@@ -46,9 +46,10 @@
 const ELASTIC_ISOLATION = new Set(['grouped', 'per_session']);
 
 // Statuses from which lifecycle actions that assume a live pool apply.
-// "degraded" is included: some replicas are serving, so stopping or sleeping
-// the app is still meaningful.
-const UP_STATUSES = new Set(['running', 'degraded']);
+// "degraded" is included because some replicas may still be serving. "idle"
+// is the healthy empty state of an elastic pool: there is no worker to sleep,
+// but restarting or stopping the configured pool is still meaningful.
+const UP_STATUSES = new Set(['running', 'degraded', 'idle']);
 
 // Statuses from which an app can be started back up. "crashed" is included: the
 // app is down and a start is the way back.

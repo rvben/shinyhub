@@ -397,8 +397,11 @@ func (r *DockerRuntime) Signal(handle RunHandle, sig syscall.Signal) error {
 }
 
 func (r *DockerRuntime) Wait(ctx context.Context, handle RunHandle) error {
-	_, err := r.client.waitContainer(ctx, handle.ContainerID)
-	return err
+	code, err := r.client.waitContainer(ctx, handle.ContainerID)
+	if err != nil {
+		return err
+	}
+	return &ProcessExitError{Code: code}
 }
 
 func (r *DockerRuntime) Stats(ctx context.Context, handle RunHandle) (*float64, uint64, error) {

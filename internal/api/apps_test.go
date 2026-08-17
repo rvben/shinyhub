@@ -86,6 +86,83 @@ func TestListApps(t *testing.T) {
 	// empty list is fine
 }
 
+// Status is an observation, not merely the stored lifecycle intent: a crashed
+// desired-running replica must never masquerade as hibernated, and an app with
+// no process must not claim to be running. List and detail must agree.
+func TestAppsStatusAndCountsFollowReplicaReality(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	srv.Config().Lifecycle.HibernateTimeout = 10 * time.Minute
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "crashed", Name: "Crashed", OwnerID: owner.ID})
+	store.CreateApp(db.CreateAppParams{Slug: "empty", Name: "Empty", OwnerID: owner.ID})
+	crashed, _ := store.GetAppBySlug("crashed")
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "crashed", Status: "hibernated"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: crashed.ID, Index: 0, Status: "crashed", DesiredState: "running",
+		Signal: "SIGKILL", Reason: "kernel OOM-killed replica",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "empty", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
+	check := func(slug string, got db.App) {
+		t.Helper()
+		switch slug {
+		case "crashed":
+			if got.Status != "crashed" || got.DesiredStatus != "hibernated" {
+				t.Errorf("crashed status/desired = %q/%q, want crashed/hibernated", got.Status, got.DesiredStatus)
+			}
+			if got.ReplicasRunning != 0 || got.EffectiveHibernateTimeoutMinutes != 10 {
+				t.Errorf("crashed running/effective timeout = %d/%g, want 0/10", got.ReplicasRunning, got.EffectiveHibernateTimeoutMinutes)
+			}
+			if got.LastReplicaError != "kernel OOM-killed replica" {
+				t.Errorf("last_replica_error = %q", got.LastReplicaError)
+			}
+		case "empty":
+			if got.Status == "running" || got.ReplicasRunning != 0 {
+				t.Errorf("empty status/running = %q/%d; zero-process app must not report running", got.Status, got.ReplicasRunning)
+			}
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps", nil, token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d: %s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Items []db.App `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, app := range list.Items {
+		check(app.Slug, app)
+	}
+
+	for _, slug := range []string{"crashed", "empty"} {
+		rec = httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps/"+slug, nil, token))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("show %s: %d: %s", slug, rec.Code, rec.Body.String())
+		}
+		var detail struct {
+			App db.App `json:"app"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
+		}
+		check(slug, detail.App)
+	}
+}
+
 func TestListApps_PreviewAsViewer(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := testHashPassword("pass")

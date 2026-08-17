@@ -434,6 +434,12 @@ func TestManagerLastExit_RecordsCrash(t *testing.T) {
 			if v.MemoryLimitMB != 512 {
 				t.Errorf("LastExit.MemoryLimitMB = %d, want 512 (the enforced limit)", v.MemoryLimitMB)
 			}
+			if v.ExitCode == nil || *v.ExitCode != 1 {
+				t.Errorf("LastExit.ExitCode = %v, want 1", v.ExitCode)
+			}
+			if v.Reason == "" || v.RestartCount != 1 {
+				t.Errorf("LastExit reason/count = %q/%d, want non-empty/1", v.Reason, v.RestartCount)
+			}
 			return // pass
 		}
 		time.Sleep(20 * time.Millisecond)

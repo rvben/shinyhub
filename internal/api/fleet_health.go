@@ -90,12 +90,27 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 		Tiers:         []fleetHealthTier{},
 		DegradedApps:  []fleetHealthDegraded{},
 	}
+	appIDs := make([]int64, len(apps))
+	for i, app := range apps {
+		appIDs[i] = app.ID
+	}
+	replicasByApp, err := s.store.ListReplicasForApps(appIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
 	for _, a := range apps {
+		s.decorateApp(a)
+		replicas := s.liveReplicaView(a.Slug, replicasByApp[a.ID])
+		elasticKnown, workersRunning, workersTotal := s.elasticObservation(a.Slug)
+		s.decorateAppObservation(a, replicas, elasticKnown, workersRunning, workersTotal)
 		switch a.Status {
 		case "running":
 			resp.Apps.Running++
 		case "stopped":
 			resp.Apps.Stopped++
+		case "degraded":
+			resp.Apps.Degraded++
 		case "crashed":
 			resp.Apps.Crashed++
 		}
@@ -175,7 +190,9 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	resp.Apps.Degraded = len(degradedSlugs)
+	// The actionable list is currently replica-loss-specific. The aggregate was
+	// already derived from the broader observational app state above, which also
+	// catches an intended-running app with no live replica at all.
 
 	// Emit tiers in a stable order: configured tiers first, then any extras.
 	seen := map[string]bool{}

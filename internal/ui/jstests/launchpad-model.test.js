@@ -6,7 +6,7 @@ import { GROUP_ORDER_FIXTURE, GROUP_ORDER_EXPECTED } from './group-order-fixture
 test('launchReadiness: openable states carry no status label (no sleeping/running detail)', () => {
   // A viewer never sees internal state - running, hibernated, waking, deploying,
   // and degraded all collapse to "openable, no label".
-  for (const status of ['running', 'healthy', 'hibernated', 'suspended', 'deploying', 'waking', 'degraded']) {
+  for (const status of ['running', 'healthy', 'idle', 'hibernated', 'suspended', 'deploying', 'waking', 'degraded']) {
     assert.deepEqual(launchReadiness({ status }), { openable: true, label: '' },
       `${status} should be openable with no label`);
   }

@@ -150,30 +150,35 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 
 	var resp2 struct {
 		App struct {
-			Slug                         string  `json:"slug"`
-			Name                         string  `json:"name"`
-			OwnerID                      int64   `json:"owner_id"`
-			Access                       string  `json:"access"`
-			Status                       string  `json:"status"`
-			Replicas                     int     `json:"replicas"`
-			MaxSessionsPerReplica        int     `json:"max_sessions_per_replica"`
-			DeployCount                  int     `json:"deploy_count"`
-			HibernateTimeoutMinutes      *int    `json:"hibernate_timeout_minutes"`
-			MemoryLimitMB                *int    `json:"memory_limit_mb"`
-			CPUQuotaPercent              *int    `json:"cpu_quota_percent"`
-			ProjectSlug                  string  `json:"project_slug,omitempty"`
-			CreatedAt                    string  `json:"created_at"`
-			UpdatedAt                    string  `json:"updated_at"`
-			AutoscaleEnabled             bool    `json:"autoscale_enabled"`
-			AutoscaleMinReplicas         int     `json:"autoscale_min_replicas"`
-			AutoscaleMaxReplicas         int     `json:"autoscale_max_replicas"`
-			AutoscaleTarget              float64 `json:"autoscale_target"`
-			RenderSeconds                float64 `json:"render_seconds"`
-			WorkerIsolation              string  `json:"worker_isolation"`
-			EffectiveWorkerIsolation     string  `json:"effective_worker_isolation"`
-			WorkerGroupedSize            int     `json:"worker_grouped_size"`
-			WorkerMaxWorkers             int     `json:"worker_max_workers"`
-			WorkerMaxSessionLifetimeSecs int     `json:"worker_max_session_lifetime_secs"`
+			Slug                             string   `json:"slug"`
+			Name                             string   `json:"name"`
+			OwnerID                          int64    `json:"owner_id"`
+			Access                           string   `json:"access"`
+			Status                           string   `json:"status"`
+			DesiredStatus                    string   `json:"desired_status"`
+			Replicas                         int      `json:"replicas"`
+			ReplicasRunning                  *int     `json:"replicas_running"`
+			WorkersRunning                   int      `json:"workers_running"`
+			MaxSessionsPerReplica            int      `json:"max_sessions_per_replica"`
+			DeployCount                      int      `json:"deploy_count"`
+			HibernateTimeoutMinutes          *int     `json:"hibernate_timeout_minutes"`
+			EffectiveHibernateTimeoutMinutes *float64 `json:"effective_hibernate_timeout_minutes"`
+			LastReplicaError                 string   `json:"last_replica_error"`
+			MemoryLimitMB                    *int     `json:"memory_limit_mb"`
+			CPUQuotaPercent                  *int     `json:"cpu_quota_percent"`
+			ProjectSlug                      string   `json:"project_slug,omitempty"`
+			CreatedAt                        string   `json:"created_at"`
+			UpdatedAt                        string   `json:"updated_at"`
+			AutoscaleEnabled                 bool     `json:"autoscale_enabled"`
+			AutoscaleMinReplicas             int      `json:"autoscale_min_replicas"`
+			AutoscaleMaxReplicas             int      `json:"autoscale_max_replicas"`
+			AutoscaleTarget                  float64  `json:"autoscale_target"`
+			RenderSeconds                    float64  `json:"render_seconds"`
+			WorkerIsolation                  string   `json:"worker_isolation"`
+			EffectiveWorkerIsolation         string   `json:"effective_worker_isolation"`
+			WorkerGroupedSize                int      `json:"worker_grouped_size"`
+			WorkerMaxWorkers                 int      `json:"worker_max_workers"`
+			WorkerMaxSessionLifetimeSecs     int      `json:"worker_max_session_lifetime_secs"`
 		} `json:"app"`
 		RenderPacing *struct {
 			EffectiveCores                        float64 `json:"effective_cores"`
@@ -185,11 +190,14 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 		EffectiveMaxSessionsPerReplica *int     `json:"effective_max_sessions_per_replica"`
 		EffectiveAutoscaleTarget       *float64 `json:"effective_autoscale_target"`
 		ReplicasStatus                 []struct {
-			Index  int    `json:"index"`
-			Status string `json:"status"`
-			PID    *int   `json:"pid"`
-			Port   *int   `json:"port"`
-			Reason string `json:"reason"`
+			Index        int    `json:"index"`
+			Status       string `json:"status"`
+			PID          *int   `json:"pid"`
+			Port         *int   `json:"port"`
+			Reason       string `json:"reason"`
+			ExitCode     *int   `json:"exit_code"`
+			Signal       string `json:"signal"`
+			RestartCount int    `json:"restart_count"`
 		} `json:"replicas_status"`
 		RejectsByReason *struct {
 			WindowSeconds int               `json:"window_seconds"`
@@ -214,9 +222,22 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	}
 	w := cmd.OutOrStdout()
 	a := resp2.App
+	actualReplicas := 0
+	if a.ReplicasRunning != nil {
+		actualReplicas = *a.ReplicasRunning
+	} else {
+		for _, rep := range resp2.ReplicasStatus {
+			if rep.Status == "running" {
+				actualReplicas++
+			}
+		}
+	}
 	fmt.Fprintf(w, "Slug:        %s\n", a.Slug)
 	fmt.Fprintf(w, "Name:        %s\n", a.Name)
 	fmt.Fprintf(w, "Status:      %s\n", stylerFor(w).status(a.Status))
+	if a.DesiredStatus != "" && a.DesiredStatus != a.Status {
+		fmt.Fprintf(w, "Desired:     %s\n", stylerFor(w).status(a.DesiredStatus))
+	}
 	fmt.Fprintf(w, "Access:      %s\n", a.Access)
 	fmt.Fprintf(w, "Owner:       user #%d\n", a.OwnerID)
 	if a.ProjectSlug != "" {
@@ -257,7 +278,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 		fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent sessions\n",
 			wp.MaxWorkers, wp.SessionsPerWorker, wp.Ceiling)
 	} else {
-		fmt.Fprintf(w, "Replicas:    %d\n", a.Replicas)
+		fmt.Fprintf(w, "Replicas:    %d desired · %d running\n", a.Replicas, actualReplicas)
 		// effective cap resolves the per-app value against the runtime default (0 =
 		// inherit). Annotate a 0 with the resolved default and print the admission
 		// ceiling (replicas × effective cap) so the bare "0" is not cryptic. An
@@ -289,6 +310,24 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			eff := a.MaxSessionsPerReplica
 			fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent new sessions\n", a.Replicas, eff, a.Replicas*eff)
 		}
+	}
+	if a.EffectiveHibernateTimeoutMinutes == nil {
+		if a.HibernateTimeoutMinutes == nil {
+			fmt.Fprintln(w, "Hibernate:   (global default)")
+		} else if *a.HibernateTimeoutMinutes == 0 {
+			fmt.Fprintln(w, "Hibernate:   disabled")
+		} else {
+			fmt.Fprintf(w, "Hibernate:   %d minutes\n", *a.HibernateTimeoutMinutes)
+		}
+	} else if *a.EffectiveHibernateTimeoutMinutes == 0 {
+		fmt.Fprintln(w, "Hibernate:   disabled")
+	} else if a.HibernateTimeoutMinutes == nil {
+		fmt.Fprintf(w, "Hibernate:   %g minutes (inherited)\n", *a.EffectiveHibernateTimeoutMinutes)
+	} else {
+		fmt.Fprintf(w, "Hibernate:   %g minutes\n", *a.EffectiveHibernateTimeoutMinutes)
+	}
+	if a.LastReplicaError != "" {
+		fmt.Fprintf(w, "Last replica error: %s\n", a.LastReplicaError)
 	}
 	// Autoscale summary: when enabled, resolve the effective target (the app's
 	// own value, or the runtime default the server reports when the app's is 0)
@@ -346,11 +385,6 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			fmt.Fprintf(w, "  %s: %d\n", reason, rr.Counts[reason])
 		}
 	}
-	if a.HibernateTimeoutMinutes != nil {
-		fmt.Fprintf(w, "Hibernate:   %d min\n", *a.HibernateTimeoutMinutes)
-	} else {
-		fmt.Fprintln(w, "Hibernate:   (global default)")
-	}
 	if a.MemoryLimitMB != nil {
 		fmt.Fprintf(w, "Memory:      %d MB\n", *a.MemoryLimitMB)
 	}
@@ -376,7 +410,16 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			if r.Port != nil {
 				port = fmt.Sprintf("%d", *r.Port)
 			}
-			t.row(txt(r.Index), statusTxt(r.Status), dimTxt(pid), dimTxt(port)).note(r.Reason)
+			diagnostic := r.Reason
+			if r.Signal != "" {
+				diagnostic = strings.TrimSpace(diagnostic + " · " + r.Signal)
+			} else if r.ExitCode != nil {
+				diagnostic = strings.TrimSpace(diagnostic + fmt.Sprintf(" · exit %d", *r.ExitCode))
+			}
+			if r.RestartCount > 0 {
+				diagnostic = strings.TrimSpace(diagnostic + fmt.Sprintf(" · restart %d", r.RestartCount))
+			}
+			t.row(txt(r.Index), statusTxt(r.Status), dimTxt(pid), dimTxt(port)).note(strings.TrimPrefix(diagnostic, "· "))
 		}
 		t.render(w)
 	}

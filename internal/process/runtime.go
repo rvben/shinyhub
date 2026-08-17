@@ -283,6 +283,15 @@ type ExitInfo struct {
 	Signaled bool // true if killed by signal (e.g. SIGKILL after timeout)
 }
 
+// ProcessExitError carries a runtime-reported exit code through Runtime.Wait.
+// Long-running replicas are expected not to exit at all, so code 0 is still an
+// exit event worth surfacing rather than a successful Wait to discard.
+type ProcessExitError struct {
+	Code int
+}
+
+func (e *ProcessExitError) Error() string { return fmt.Sprintf("process exited with code %d", e.Code) }
+
 // SharedMount is a read-only mount of another app's data dir into the consumer.
 type SharedMount struct {
 	SourceSlug string // for path naming under data/shared/<source-slug>

@@ -191,7 +191,7 @@ export function mountAppDetail(ctx) {
     seedStat('app-detail-replicas', '0 / ' + (app.replicas || 1));
     const openLink = document.getElementById('app-detail-open');
     openLink.href = `/app/${app.slug}/`;
-    openLink.hidden = app.status !== 'running';
+    openLink.hidden = !['running', 'idle'].includes(app.status);
 
     // The header kebab holds only manager actions, so a viewer must not see it
     // at all. That decision, and which individual items apply to this app, is
