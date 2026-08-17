@@ -184,61 +184,7 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *
 		fmt.Fprintln(out, summary)
 		return planExit(f, diff, projects)
 	}
-
-	fmt.Fprintf(out, "%s\n%s  ·  fleet_id=%s  ·  server=%s\n\n", model.Outcome, cmdLabel, m.FleetID, host)
-
-	// Omitted entirely when the manifest declares no projects, so existing
-	// output stays byte-identical for manifests that do not use the feature.
-	projectResources := planResourcesByKind(model, "project")
-	if len(projectResources) > 0 {
-		fmt.Fprintf(out, "Projects (%d)\n", len(projectResources))
-		wSlug := 0
-		for _, resource := range projectResources {
-			if len(resource.Name) > wSlug {
-				wSlug = len(resource.Name)
-			}
-		}
-		for _, resource := range projectResources {
-			g, word := planActionGlyphWord(resource.Action)
-			keys := make([]string, 0, len(resource.Changes))
-			for _, change := range resource.Changes {
-				keys = append(keys, change.Field)
-			}
-			reason := ""
-			if len(keys) > 0 {
-				reason = strings.Join(keys, ", ")
-			}
-			fmt.Fprintf(out, "  %s  %-*s  %-*s  %s\n", g, 9, word, wSlug, resource.Name, reason)
-		}
-		fmt.Fprintln(out)
-	}
-
-	appResources := planResourcesByKind(model, "app")
-	fmt.Fprintf(out, "Apps (%d)   legend: %s\n", len(appResources), planLegend)
-
-	// Aligned columns: glyph word slug reason.
-	wWord, wSlug := 0, 0
-	for _, resource := range appResources {
-		_, word := planActionGlyphWord(resource.Action)
-		if len(word) > wWord {
-			wWord = len(word)
-		}
-		if len(resource.Name) > wSlug {
-			wSlug = len(resource.Name)
-		}
-	}
-	for _, resource := range appResources {
-		g, word := planActionGlyphWord(resource.Action)
-		fmt.Fprintf(out, "  %s  %-*s  %-*s  %s\n", g, wWord, word, wSlug, resource.Name, planResourceReason(resource))
-	}
-	fmt.Fprintf(out, "\n%s\n", summary)
-
-	// Actionable Next block: ONE combined apply command covering every pending
-	// action, with the human description of what it will do.
-	if c.Create+c.Update+c.Adopt+c.Delete > 0 {
-		next := model.NextActions[0]
-		fmt.Fprintf(out, "\nNext:\n  %s\n      (%s)\n", next.Command, next.Description)
-	}
+	renderFleetPlanHuman(out, model, m.FleetID, cmdLabel, planOutputWidth(out), stylerFor(out))
 	return planExit(f, diff, projects)
 }
 

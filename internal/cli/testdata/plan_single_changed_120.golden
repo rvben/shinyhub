@@ -6,9 +6,8 @@ Impact
   ! warning  two running replicas will be replaced
 
 Changes
-  ~ content
-      current  9f3b2e1a
-      planned  7a1d9c0f
+  ACTION  AREA                  CURRENT              PLANNED
+  ~       content               9f3b2e1a             7a1d9c0f
 
 Bundle
   2 files · 2.0KiB source · 1.0KiB upload · 7a1d9c0f

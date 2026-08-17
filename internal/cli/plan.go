@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -26,6 +25,7 @@ type planFlags struct {
 	out              string
 	force            bool
 	expiresIn        time.Duration
+	details          bool
 }
 
 // deploymentSource is shared by plan and deploy so repository selection,
@@ -161,12 +161,14 @@ Examples:
 	cmd.Flags().StringVar(&f.out, "out", "", "Save the exact plan and bundle to this path")
 	cmd.Flags().BoolVar(&f.force, "force", false, "Replace an existing --out plan file atomically")
 	cmd.Flags().DurationVar(&f.expiresIn, "expires-in", defaultPlanLifetime, "Saved plan lifetime (for example 30m or 24h)")
+	cmd.Flags().BoolVar(&f.details, "details", false, "Show full bundle, launch, manifest, and saved-plan details")
 	cmd.AddCommand(newPlanShowCmd())
 	return cmd
 }
 
 func newPlanShowCmd() *cobra.Command {
-	return &cobra.Command{
+	var details, files bool
+	cmd := &cobra.Command{
 		Use:   "show PLAN",
 		Short: "Inspect and verify a saved plan offline",
 		Args:  cobra.ExactArgs(1),
@@ -184,13 +186,18 @@ func newPlanShowCmd() *cobra.Command {
 			}
 			plan := loaded.Envelope.Plan
 			plan.SavedPlan = &savedPlanSummary{Path: args[0], PlanID: loaded.Envelope.PlanID, ExpiresAt: loaded.Envelope.ExpiresAt, Integrity: loaded.Envelope.Integrity}
-			renderDeploymentPlan(cmd.OutOrStdout(), plan)
+			renderDeploymentPlanWith(cmd.OutOrStdout(), plan, planRenderOptions{
+				Width: planOutputWidth(cmd.OutOrStdout()), Details: details || files,
+			})
 			if !time.Now().Before(loaded.Envelope.ExpiresAt) {
 				fmt.Fprintf(cmd.OutOrStdout(), "\nExpired: %s. Re-run `shinyhub plan` before applying.\n", loaded.Envelope.ExpiresAt.Format(time.RFC3339))
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&details, "details", false, "Show full bundle, launch, manifest, and saved-plan details")
+	cmd.Flags().BoolVar(&files, "files", false, "Show bundle files (also enables the complete detail view)")
+	return cmd
 }
 
 func resolveDeploymentSource(args []string, f *deployFlags) (*deploymentSource, error) {
@@ -375,7 +382,9 @@ func runPlan(cmd *cobra.Command, args []string, f *planFlags) error {
 			return err
 		}
 	} else {
-		renderDeploymentPlan(cmd.OutOrStdout(), plan)
+		renderDeploymentPlanWith(cmd.OutOrStdout(), plan, planRenderOptions{
+			Width: planOutputWidth(cmd.OutOrStdout()), Details: f.details,
+		})
 	}
 	if plan.ExitCode == 2 {
 		return &ExitCodeError{Code: 2, Err: errors.New("changes are pending"), Reported: true}
@@ -543,95 +552,7 @@ func assembleDeploymentPlan(cfg *cliConfig, source *deploymentSource, bundle *bu
 }
 
 func renderDeploymentPlan(out io.Writer, plan deploymentPlan) {
-	model := plan.Plan
-	if model.SchemaVersion == 0 {
-		model = deploymentPlanDocument(plan)
-	}
-	fmt.Fprintln(out, model.Outcome)
-	if plan.SavedPlan == nil {
-		fmt.Fprintln(out, "Deployment plan (read-only)")
-	} else {
-		fmt.Fprintln(out, "Deployment plan (saved; no remote changes)")
-	}
-	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "\n  Target\t%s\n  App\t%s\n  URL\t%s\n  Permission\t%s\n  Action\t%s (%s content)\n  Visibility\t%s\n  Lifecycle\t%s\n",
-		plan.Host, plan.Slug, plan.AppURL, plan.Permission, plan.Action, plan.ChangeStatus, plan.Visibility, plan.Lifecycle)
-	_ = w.Flush()
-
-	if len(model.Resources) > 0 && len(model.Resources[0].Changes) > 0 {
-		fmt.Fprintln(out, "\nChanges")
-		changes := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(changes, "  ACTION\tAREA\tCURRENT\tPLANNED")
-		for _, change := range model.Resources[0].Changes {
-			current, planned := planChangeValues(change)
-			glyph, word := planActionGlyphWord(change.Action)
-			fmt.Fprintf(changes, "  %s %s\t%s\t%s\t%s\n", glyph, word, change.Field, current, planned)
-		}
-		_ = changes.Flush()
-	}
-
-	fmt.Fprintf(out, "\nBundle\n  Source: %s\n  Digest: %s\n  Size: %s source → %s upload (%d files)\n",
-		plan.Source, plan.Bundle.Digest, humanBytes(plan.Bundle.UncompressedBytes), humanBytes(int64(plan.Bundle.CompressedBytes)), plan.Bundle.FileCount)
-	for i, path := range plan.Bundle.Files {
-		if i == 20 {
-			fmt.Fprintf(out, "    … and %d more\n", len(plan.Bundle.Files)-i)
-			break
-		}
-		fmt.Fprintf(out, "    %s\n", path)
-	}
-	if plan.Bundle.IgnoreFile != "" {
-		fmt.Fprintf(out, "  Ignored by %s: %d path(s)\n", plan.Bundle.IgnoreFile, len(plan.Bundle.IgnoredPaths))
-	}
-	for _, group := range plan.Bundle.ProtectedPaths {
-		fmt.Fprintf(out, "  Protected (%s): %s\n", group.Reason, strings.Join(group.Paths, ", "))
-	}
-
-	fmt.Fprintf(out, "\nLaunch\n  Runtime: %s\n  Command: %s\n", plan.Launch.Runtime, strings.Join(plan.Launch.Command, " "))
-	fmt.Fprintf(out, "  Scope: %s\n", plan.Launch.CommandScope)
-	if strings.Contains(strings.Join(plan.Launch.Command, " "), "{port}") || strings.Contains(strings.Join(plan.Launch.Command, " "), "{host}") {
-		fmt.Fprintln(out, "  Placeholders: {host} and {port} are assigned per replica")
-	}
-	if len(plan.Launch.DependencyPreparation) > 0 {
-		fmt.Fprintf(out, "  Prepare: %s\n", strings.Join(plan.Launch.DependencyPreparation, " → "))
-	}
-	fmt.Fprintf(out, "  Readiness: GET %s; %s; timeout %ds\n", plan.Launch.ReadinessPath, plan.Launch.ReadinessStatus, plan.Launch.StartupTimeoutSeconds)
-
-	fmt.Fprintln(out, "\nManifest")
-	if !plan.Manifest.Present {
-		fmt.Fprintln(out, "  No shinyhub.toml; server defaults and current app settings apply.")
-	} else {
-		for _, effect := range plan.Manifest.Effects {
-			fmt.Fprintln(out, "  "+effect)
-		}
-	}
-	for _, warning := range model.Warnings {
-		fmt.Fprintln(out, "\nWarning: "+warning.Summary)
-	}
-	if plan.SavedPlan != nil {
-		remaining := time.Until(plan.SavedPlan.ExpiresAt).Round(time.Minute)
-		if remaining < 0 {
-			remaining = 0
-		}
-		fmt.Fprintf(out, "\nSaved exact plan\n  File: %s\n  Plan ID: %s\n  Expires: %s (%s remaining)\n  Integrity: %s\n",
-			plan.SavedPlan.Path, plan.SavedPlan.PlanID, plan.SavedPlan.ExpiresAt.Format(time.RFC3339), remaining, plan.SavedPlan.Integrity)
-		fmt.Fprintln(out, "  Contains application source; keep this file private and do not commit it.")
-	}
-
-	fmt.Fprintln(out, "\nResult")
-	contentChange := planChangeByField(model.Resources[0].Changes, "content")
-	if contentChange != nil && contentChange.Action == planActionUnchanged {
-		fmt.Fprintln(out, "  No content change. Deploy would still record a deployment and restart the app according to the lifecycle above.")
-	} else if contentChange != nil && contentChange.Current != nil && contentChange.Current.Unknown {
-		fmt.Fprintln(out, "  Live content digest is unavailable; deploy may change content. The plan remains read-only.")
-	} else {
-		fmt.Fprintf(out, "  %s\n", model.Outcome)
-	}
-	c := model.Counts
-	fmt.Fprintf(out, "  Plan: %d to create, %d to update, %d to adopt, %d to delete, %d unchanged.\n",
-		c.Create, c.Update, c.Adopt, c.Delete, c.Unchanged)
-	if len(model.NextActions) > 0 {
-		fmt.Fprintf(out, "  Run: %s\n", model.NextActions[0].Command)
-	}
+	renderDeploymentPlanWith(out, plan, planRenderOptions{Width: planOutputWidth(out)})
 }
 
 func deploymentCommand(source *deploymentSource, start, includeVisibility bool) string {

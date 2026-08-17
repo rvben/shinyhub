@@ -166,7 +166,7 @@ func TestPlanOutput_ExposesUnmanagedConfigWithoutChangingAction(t *testing.T) {
 		}},
 	}}
 	out := renderPlanToString(t, &fleetPlanFlags{file: defaultFleetManifest}, "shinyhub fleet plan", &fleet.Manifest{FleetID: "eu"}, diff)
-	if !strings.Contains(out, "unchanged; unmanaged: hibernate_timeout_minutes=0 (default (default))") {
+	if !strings.Contains(strings.Join(strings.Fields(out), " "), "unchanged; unmanaged: hibernate_timeout_minutes=0 (default (default))") {
 		t.Fatalf("human plan missing unmanaged signal:\n%s", out)
 	}
 	if !strings.Contains(out, "0 to update") || !strings.Contains(out, "1 unchanged") {

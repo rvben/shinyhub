@@ -244,9 +244,12 @@ func TestRenderDeploymentPlanExplainsIdenticalRedeploy(t *testing.T) {
 	}
 	var out bytes.Buffer
 	renderDeploymentPlan(&out, plan)
-	for _, want := range []string{"Deployment plan (read-only)", "Bundle", "Launch", "Manifest", "No content change", "would still record a deployment", "Run: shinyhub deploy"} {
+	for _, want := range []string{"ShinyHub will redeploy demo", "read-only", "Bundle", "Impact", "unchanged", "Next", "shinyhub deploy"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output should contain %q:\n%s", want, out.String())
 		}
+	}
+	if strings.Contains(out.String(), "\nLaunch\n") || strings.Contains(out.String(), "\nManifest\n") {
+		t.Fatalf("default plan should keep implementation detail progressive:\n%s", out.String())
 	}
 }

@@ -1,13 +1,17 @@
 ShinyHub will change 2 resources and delete 1 app
 shinyhub fleet plan  ·  fleet_id=eu  ·  server=http://SERVER
 
+Changes
 Apps (3)   legend: + create  ~ update  > adopt  - delete  = unchanged
-  +  create  sales-explorer  new
-  ~  update  ops-metrics     source LIVE -> 0f655f10
-  -  delete  retired         fleet-managed, absent from manifest (prune candidate)
+  + create    app.sales-explorer  new
+  ~ update    app.ops-metrics  source LIVE → 0f655f10
+
+Deletes (1) — irreversible; requires --prune and confirmation
+  - delete    app.retired  fleet-managed, absent from manifest (prune candidate)
 
 Plan: 1 to create, 1 to update, 0 to adopt, 1 to delete, 0 unchanged.
 
 Next:
   shinyhub fleet apply --prune -f FLEET.toml
-      (apply 1 create + 1 update, delete 1 app (irreversible; confirmation required))
+  apply 1 create + 1 update, delete 1 app (irreversible; confirmation required)
+  Confirmation is required; the suggested command never pre-confirms it.
