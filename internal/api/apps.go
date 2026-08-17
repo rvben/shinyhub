@@ -212,6 +212,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		ResourceID:   req.Slug,
 		IPAddress:    s.ClientIP(r),
 	})
+	w.Header().Set(hdrResourceRevision, appResourceRevision(app))
 	writeJSON(w, http.StatusCreated, app)
 }
 
@@ -221,6 +222,9 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Capture the durable revision before presentation decorators overlay live
+	// process observations onto the response model.
+	resourceRevision := appResourceRevision(app)
 	// Same derived fields the list payload carries, so the detail header agrees
 	// with the card.
 	s.decorateApp(app)
@@ -284,6 +288,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 
 	envelope := map[string]any{
 		"app":                                app,
+		"resource_revision":                  resourceRevision,
 		"replicas_status":                    replicas,
 		"effective_max_sessions_per_replica": effectiveCap,
 		"effective_autoscale_target":         effectiveTarget,
@@ -368,6 +373,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		// current_version, which is the newest row regardless of status.
 		envelope["released_version"] = relVersion
 	}
+	w.Header().Set(hdrResourceRevision, resourceRevision)
 	writeJSON(w, http.StatusOK, envelope)
 }
 
@@ -1347,7 +1353,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// deployed against, not one a concurrent start changed mid-upload. Whether
 	// the app was ever successfully deployed is resolved further down, from the
 	// deployments table.
-	stoppedByOperator := app.Status == "stopped" && r.URL.Query().Get("start") != "true"
+	stoppedByOperator := false
 
 	maxSize := maxBundleUploadSize
 	if cap := int64(s.cfg.Storage.MaxBundleMB); cap > 0 {
@@ -1433,6 +1439,24 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// would still be on disk, counted by DirSize against a concurrent
 	// same-slug deploy that takes the lock the instant we release it.
 	defer dropUncommitted()
+
+	// Refresh and fence the resource under the same lock that protects every
+	// deployment mutation. Uploading and extracting above only touched temporary
+	// candidate files; a stale saved plan is rejected here before quota checks,
+	// manifest settings, deployment rows, or the running pool can change.
+	app, err = s.store.GetAppBySlug(slug)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusConflict, "precondition failed: app no longer exists (re-run plan)")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if checkAppPreconditions(w, r, app) {
+		return
+	}
+	stoppedByOperator = app.Status == "stopped" && r.URL.Query().Get("start") != "true"
 
 	// Enforce per-app disk quota INSIDE the lock: the new extracted version
 	// has already been written, so DirSize now reflects the post-deploy
