@@ -23,6 +23,9 @@ type planFlags struct {
 	deployFlags
 	detailedExitcode bool
 	failOnChanges    bool
+	out              string
+	force            bool
+	expiresIn        time.Duration
 }
 
 // deploymentSource is shared by plan and deploy so repository selection,
@@ -57,6 +60,7 @@ type deploymentRemotePreview struct {
 	LastDeploymentStatus string `json:"last_deployment_status,omitempty"`
 	ManagedBy            string `json:"managed_by,omitempty"`
 	RedeployInFlight     bool   `json:"redeploy_in_flight,omitempty"`
+	ResourceRevision     string `json:"resource_revision,omitempty"`
 }
 
 type deploymentManifestPreview struct {
@@ -83,7 +87,16 @@ type deploymentPlan struct {
 	Warnings      []string                  `json:"warnings"`
 	DeployCommand string                    `json:"deploy_command"`
 	ExitCode      int                       `json:"exit_code"`
+	Start         bool                      `json:"start"`
+	SavedPlan     *savedPlanSummary         `json:"saved_plan,omitempty"`
 	Plan          planDocument              `json:"plan"`
+}
+
+type savedPlanSummary struct {
+	Path      string    `json:"path"`
+	PlanID    string    `json:"plan_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Integrity string    `json:"integrity"`
 }
 
 // prepareDeployment is the shared, side-effect-free preparation used by both
@@ -114,6 +127,9 @@ contract and shinyhub.toml, then compare its content digest with the selected
 remote app. Plan makes only GET requests and never creates, updates, starts, or
 deploys an app.
 
+Pass --out to save the exact bundle and reviewed plan locally with mode 0600.
+Saving a plan still makes no remote changes; apply it later with 'shinyhub apply'.
+
 Pass '.' explicitly to plan the current directory. Source-selection flags are
 the same as deploy, so the printed deploy command is directly reusable.
 
@@ -142,7 +158,39 @@ Examples:
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m)")
 	cmd.Flags().BoolVar(&f.detailedExitcode, "detailed-exitcode", false, "Exit 2 when content is new, changed, or cannot be compared")
 	cmd.Flags().BoolVar(&f.failOnChanges, "fail-on-changes", false, "Alias for --detailed-exitcode (CI gate)")
+	cmd.Flags().StringVar(&f.out, "out", "", "Save the exact plan and bundle to this path")
+	cmd.Flags().BoolVar(&f.force, "force", false, "Replace an existing --out plan file atomically")
+	cmd.Flags().DurationVar(&f.expiresIn, "expires-in", defaultPlanLifetime, "Saved plan lifetime (for example 30m or 24h)")
+	cmd.AddCommand(newPlanShowCmd())
 	return cmd
+}
+
+func newPlanShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show PLAN",
+		Short: "Inspect and verify a saved plan offline",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			loaded, err := readSavedPlan(args[0], time.Now(), true)
+			if err != nil {
+				return &ExitCodeError{Code: 1, Kind: KindValidation, Err: err}
+			}
+			format, err := resolveFormat(false, false)
+			if err != nil {
+				return err
+			}
+			if format == formatJSON {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(loaded.Envelope)
+			}
+			plan := loaded.Envelope.Plan
+			plan.SavedPlan = &savedPlanSummary{Path: args[0], PlanID: loaded.Envelope.PlanID, ExpiresAt: loaded.Envelope.ExpiresAt, Integrity: loaded.Envelope.Integrity}
+			renderDeploymentPlan(cmd.OutOrStdout(), plan)
+			if !time.Now().Before(loaded.Envelope.ExpiresAt) {
+				fmt.Fprintf(cmd.OutOrStdout(), "\nExpired: %s. Re-run `shinyhub plan` before applying.\n", loaded.Envelope.ExpiresAt.Format(time.RFC3339))
+			}
+			return nil
+		},
+	}
 }
 
 func resolveDeploymentSource(args []string, f *deployFlags) (*deploymentSource, error) {
@@ -223,6 +271,12 @@ func resolveDeploymentSource(args []string, f *deployFlags) (*deploymentSource, 
 }
 
 func runPlan(cmd *cobra.Command, args []string, f *planFlags) error {
+	if f.force && f.out == "" {
+		return fmt.Errorf("--force requires --out")
+	}
+	if cmd.Flags().Changed("expires-in") && f.out == "" {
+		return fmt.Errorf("--expires-in requires --out")
+	}
 	if f.failOnChanges {
 		f.detailedExitcode = true
 	}
@@ -297,6 +351,25 @@ func runPlan(cmd *cobra.Command, args []string, f *planFlags) error {
 	}
 
 	plan := assembleDeploymentPlan(cfg, source, bundle, launch, remote, permission, f.start, warnings, f.detailedExitcode)
+	if f.out != "" {
+		if !info.Capabilities.PlanApply {
+			return fmt.Errorf("server %s does not support atomic saved-plan apply; upgrade it before using --out", cfg.Host)
+		}
+		if remote.Exists && remote.ResourceRevision == "" {
+			return fmt.Errorf("server %s did not return a resource revision for %s; upgrade it before using --out", cfg.Host, source.Slug)
+		}
+		applyCommand := "shinyhub apply " + shellQuote(f.out)
+		plan.Plan.Command = applyCommand
+		plan.Plan.NextActions = []planNextAction{{Command: applyCommand, Description: "Apply the exact reviewed bundle", RequiresConfirmation: true}}
+		envelope, err := buildSavedPlan(plan, bundle.Buffer.Bytes(), info.ProtocolVersion, f.expiresIn, time.Now())
+		if err != nil {
+			return err
+		}
+		if err := writeSavedPlan(f.out, envelope, bundle.Buffer.Bytes(), f.force); err != nil {
+			return err
+		}
+		plan.SavedPlan = &savedPlanSummary{Path: f.out, PlanID: envelope.PlanID, ExpiresAt: envelope.ExpiresAt, Integrity: envelope.Integrity}
+	}
 	if format == formatJSON {
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(plan); err != nil {
 			return err
@@ -328,6 +401,7 @@ func fetchDeploymentTarget(cfg *cliConfig, slug string) (deploymentRemotePreview
 			App              db.App `json:"app"`
 			CanManage        *bool  `json:"can_manage"`
 			RedeployInFlight bool   `json:"redeploy_in_flight"`
+			ResourceRevision string `json:"resource_revision"`
 		}
 		if err := json.Unmarshal(body, &envelope); err != nil {
 			return remote, "", protocolFailure(cfg, &protocolError{op: "decode app", err: err})
@@ -344,11 +418,16 @@ func fetchDeploymentTarget(cfg *cliConfig, slug string) (deploymentRemotePreview
 		if envelope.App.ManagedBy != nil {
 			managedBy = *envelope.App.ManagedBy
 		}
+		resourceRevision := envelope.ResourceRevision
+		if resourceRevision == "" {
+			resourceRevision = resp.Header.Get("X-Shinyhub-Resource-Revision")
+		}
 		return deploymentRemotePreview{
 			Exists: true, Status: envelope.App.Status, Access: envelope.App.Access,
 			DeployCount: envelope.App.DeployCount, ContentDigest: envelope.App.ContentDigest,
 			LastDeploymentStatus: envelope.App.LastDeploymentStatus,
 			ManagedBy:            managedBy, RedeployInFlight: envelope.RedeployInFlight,
+			ResourceRevision: resourceRevision,
 		}, permission, nil
 	}
 	if resp.StatusCode != http.StatusNotFound {
@@ -412,7 +491,7 @@ func assembleDeploymentPlan(cfg *cliConfig, source *deploymentSource, bundle *bu
 	plan := deploymentPlan{
 		Status: "planned", Host: cfg.Host, AppURL: cfg.Host + "/app/" + source.Slug + "/",
 		Slug: source.Slug, Source: source.Label, Permission: permission, Remote: remote,
-		Bundle: bundle, Manifest: manifest, Warnings: warnings,
+		Bundle: bundle, Manifest: manifest, Warnings: warnings, Start: start,
 		Launch: deploymentLaunchPreview{
 			Runtime: runtime, Command: command,
 			CommandScope:          "bundle-resolved base command; server runtime and tracing policy may wrap it",
@@ -469,7 +548,11 @@ func renderDeploymentPlan(out io.Writer, plan deploymentPlan) {
 		model = deploymentPlanDocument(plan)
 	}
 	fmt.Fprintln(out, model.Outcome)
-	fmt.Fprintln(out, "Deployment plan (read-only)")
+	if plan.SavedPlan == nil {
+		fmt.Fprintln(out, "Deployment plan (read-only)")
+	} else {
+		fmt.Fprintln(out, "Deployment plan (saved; no remote changes)")
+	}
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "\n  Target\t%s\n  App\t%s\n  URL\t%s\n  Permission\t%s\n  Action\t%s (%s content)\n  Visibility\t%s\n  Lifecycle\t%s\n",
 		plan.Host, plan.Slug, plan.AppURL, plan.Permission, plan.Action, plan.ChangeStatus, plan.Visibility, plan.Lifecycle)
@@ -523,6 +606,15 @@ func renderDeploymentPlan(out io.Writer, plan deploymentPlan) {
 	}
 	for _, warning := range model.Warnings {
 		fmt.Fprintln(out, "\nWarning: "+warning.Summary)
+	}
+	if plan.SavedPlan != nil {
+		remaining := time.Until(plan.SavedPlan.ExpiresAt).Round(time.Minute)
+		if remaining < 0 {
+			remaining = 0
+		}
+		fmt.Fprintf(out, "\nSaved exact plan\n  File: %s\n  Plan ID: %s\n  Expires: %s (%s remaining)\n  Integrity: %s\n",
+			plan.SavedPlan.Path, plan.SavedPlan.PlanID, plan.SavedPlan.ExpiresAt.Format(time.RFC3339), remaining, plan.SavedPlan.Integrity)
+		fmt.Fprintln(out, "  Contains application source; keep this file private and do not commit it.")
 	}
 
 	fmt.Fprintln(out, "\nResult")

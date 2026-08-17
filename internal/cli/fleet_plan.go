@@ -197,6 +197,7 @@ type serverCaps struct {
 	ContentDigest      bool `json:"content_digest"`
 	CLIConnect         bool `json:"cli_connect"`
 	DeployEvents       bool `json:"deploy_events"`
+	PlanApply          bool `json:"plan_apply"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just
