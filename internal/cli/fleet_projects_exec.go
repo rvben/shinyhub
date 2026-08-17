@@ -45,7 +45,7 @@ func convergeProjects(cfg *cliConfig, pf *preflightResult, opt convergeOpts, out
 	results := make([]applyResult, 0, len(pf.projectDiff))
 	for _, d := range pf.projectDiff {
 		start := time.Now()
-		r := applyResult{slug: d.Slug, action: d.Action}
+		r := applyResult{slug: d.Slug, action: d.Action, mutation: mutationNone}
 		entry := entries[d.Slug]
 
 		switch d.Action {
@@ -53,16 +53,16 @@ func convergeProjects(cfg *cliConfig, pf *preflightResult, opt convergeOpts, out
 			r.status, r.duration = statusUnchanged, time.Since(start)
 		case fleet.ActionCreate:
 			if err := createProject(cfg, entry, opt.runID); err != nil {
-				r.status, r.err = statusFailed, err
+				r.status, r.err, r.mutation = statusFailed, err, mutationUnknown
 			} else {
-				r.status = statusCreated
+				r.status, r.mutation = statusCreated, mutationCommitted
 			}
 			r.duration = time.Since(start)
 		case fleet.ActionUpdateConfig:
 			if err := patchProject(cfg, entry, driftedKeys(d.Drift), opt.runID); err != nil {
-				r.status, r.err = statusFailed, err
+				r.status, r.err, r.mutation = statusFailed, err, mutationUnknown
 			} else {
-				r.status = statusUpdated
+				r.status, r.mutation = statusUpdated, mutationCommitted
 			}
 			r.duration = time.Since(start)
 		default:

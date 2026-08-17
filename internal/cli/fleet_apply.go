@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/fleet"
@@ -39,7 +40,7 @@ func newFleetApplyCmd() *cobra.Command {
 			"  0  all converged (or --dry-run report)\n" +
 			"  1  usage / manifest validation error\n" +
 			"  3  transport / auth error\n" +
-			"  4  partial: >=1 app failed after retries\n" +
+			"  4  partial: >=1 app failed to converge\n" +
 			"  5  conflicts: >=1 app skipped on a precondition 409\n" +
 			"  6  server not ready (reachable host, but shinyhub is not up yet)\n\n" +
 			"Example:\n" +
@@ -56,7 +57,7 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.allowUnsafeDegradedPrune, "allow-unsafe-degraded-prune", false,
 		"Allow prune against a server without precondition support (accepts a documented race)")
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
-	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for deploys and transient config PATCH failures")
+	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for transient deploy and config failures (deterministic deploy failures are never retried)")
 	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app for healthy status after deploy")
 	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Wait for run_on_register first-fires to finish (within --health-timeout); a genuine failure fails that app")
 	cmd.Flags().BoolVar(&f.restartAfterWarm, "restart-after-warm", false, "Wait for first-fires, then restart serving replicas so startup-loaded data is refreshed")
@@ -157,6 +158,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		return &ExitCodeError{Code: 3, Err: err}
 	}
 
+	runID := newRunID()
 	opt := convergeOpts{
 		adopt:              f.adopt,
 		prune:              f.prune,
@@ -168,7 +170,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		restartAfterWarm:   f.restartAfterWarm,
 		concurrency:        f.concurrency,
 		fleetID:            pf.manifest.FleetID,
-		runID:              newRunID(),
+		runID:              runID,
 	}
 	// Per-app deploy progress (zip summary, health-wait lines) is diagnostic,
 	// not the report. In --json mode it must not pollute stdout, which has to
@@ -183,13 +185,59 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		projects: convergeProjects(cfg, pf, opt, progressOut),
 	}
 	outcome.apps = convergeFleet(cfg, pf, opt, progressOut)
+	reportCtx := applyReportContext{
+		RunID: runID, FleetID: pf.manifest.FleetID,
+		PlanCommand: fleetPlanRecoveryCommand(f.file), ResumeCommand: fleetApplyRecoveryCommand(f),
+	}
 
 	if f.jsonOutput {
 		code, reason := applyExitCode(outcome.all())
-		if jerr := writeFleetApplyJSON(out, pf.manifest, pf.host, pf.diff, pf.projectDiff, outcome, code, reason); jerr != nil {
+		if jerr := writeFleetApplyJSONWithContext(out, reportCtx, pf.manifest, pf.host, pf.diff, pf.projectDiff, outcome, code, reason); jerr != nil {
 			return &ExitCodeError{Code: 1, Err: jerr}
 		}
 		return applyExitErr(code, reason)
 	}
-	return renderApplyReport(out, pf.manifest.FleetID, outcome, quietFlag)
+	return renderApplyReportWithContext(out, reportCtx, outcome, quietFlag)
+}
+
+func fleetPlanRecoveryCommand(file string) string {
+	parts := []string{"shinyhub fleet plan"}
+	if file != "" && file != defaultFleetManifest {
+		parts = append(parts, "-f", shellQuote(file))
+	}
+	return strings.Join(parts, " ")
+}
+
+// fleetApplyRecoveryCommand reconstructs the convergence intent without ever
+// pre-confirming deletion. Re-running this command recomputes the diff, so
+// resources already committed by a partial run become unchanged.
+func fleetApplyRecoveryCommand(f *fleetApplyFlags) string {
+	parts := []string{"shinyhub fleet apply"}
+	if f.adopt {
+		parts = append(parts, "--adopt")
+	}
+	if f.prune {
+		parts = append(parts, "--prune")
+	}
+	if f.allowUnsafeDegradedPrune {
+		parts = append(parts, "--allow-unsafe-degraded-prune")
+	}
+	if f.retries != 1 {
+		parts = append(parts, "--retries", fmt.Sprintf("%d", f.retries))
+	}
+	if f.healthTimeout != 120 {
+		parts = append(parts, "--health-timeout", fmt.Sprintf("%d", f.healthTimeout))
+	}
+	if f.restartAfterWarm {
+		parts = append(parts, "--restart-after-warm")
+	} else if f.waitForWarm {
+		parts = append(parts, "--wait-for-warm")
+	}
+	if f.concurrency != 3 {
+		parts = append(parts, "--concurrency", fmt.Sprintf("%d", f.concurrency))
+	}
+	if f.file != "" && f.file != defaultFleetManifest {
+		parts = append(parts, "-f", shellQuote(f.file))
+	}
+	return strings.Join(parts, " ")
 }

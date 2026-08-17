@@ -1,0 +1,21 @@
+shinyhub fleet apply  ·  fleet_id=eu  ·  run_id=9d2f6d1895964dcabf1ba57d5301d9c4
+
+Apps (4)
+  ~  sales    updated
+  -  retired  deleted
+  ✗  weekly   failed  mutation partial
+  ✗  forecast conflict
+
+Applied: 0 created, 1 updated, 1 deleted, 0 unchanged, 0 adopted, 0 skipped, 1 failed, 1 conflicts.
+Result: PARTIAL - 1 failed, 1 conflict(s); re-run plan. Exit 5.
+  weekly: config patch returned HTTP 500
+    -> shinyhub apps logs weekly --tail 200
+  forecast: resource revision changed
+    -> shinyhub fleet plan   (re-review before re-applying)
+
+Recovery
+  Run ID: 9d2f6d1895964dcabf1ba57d5301d9c4 (use this to correlate server audit records)
+  Remote mutation: 2 committed, 1 partial, 0 unknown.
+  Remote state changed; review a fresh plan before applying again.
+  1. shinyhub fleet plan -f fleets/eu.toml
+  2. shinyhub fleet apply --prune -f fleets/eu.toml

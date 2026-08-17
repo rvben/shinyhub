@@ -601,6 +601,9 @@ func TestConvergeApp_PostDeployPatchFailureHasNoLogTail(t *testing.T) {
 	if r.status != statusFailed {
 		t.Fatalf("status = %s (%v), want failed", r.status, r.err)
 	}
+	if r.mutation != mutationPartial {
+		t.Fatalf("mutation = %s, want partial after deploy succeeded and config patch failed", r.mutation)
+	}
 	if len(r.logTail) != 0 {
 		t.Fatalf("post-deploy patch failure must not attach a log tail, got %v", r.logTail)
 	}
@@ -695,6 +698,53 @@ func TestConvergeApp_RetriedSuccessRecordsFailedAttemptKind(t *testing.T) {
 	}
 	if r.attemptsDetail[0].Kind != deployfail.ReadinessTimeout || r.attemptsDetail[0].Attempt != 1 {
 		t.Fatalf("attempt 1 record = %+v, want {Attempt:1 Kind:readiness_timeout}", r.attemptsDetail[0])
+	}
+}
+
+func TestRetryableDeployFailure_RejectsDeterministicFailures(t *testing.T) {
+	for _, kind := range []deployfail.Kind{
+		deployfail.RuntimeMissing, deployfail.BuildFailed, deployfail.InterpreterUnavailable,
+		deployfail.HookFailed, deployfail.BundleInvalid, deployfail.Crashed, deployfail.ZipError,
+	} {
+		if retryableDeployFailure(kind) {
+			t.Errorf("%s is deterministic and must not be retried implicitly", kind)
+		}
+	}
+	for _, kind := range []deployfail.Kind{deployfail.ReadinessTimeout, deployfail.ServerError, deployfail.TransportError} {
+		if !retryableDeployFailure(kind) {
+			t.Errorf("%s should remain retryable", kind)
+		}
+	}
+}
+
+func TestConvergeApp_DeterministicDeployFailureIsNotRetried(t *testing.T) {
+	var deployHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy") {
+			atomic.AddInt32(&deployHits, 1)
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"dependency resolution failed","failure_kind":"build_failed"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	r := convergeApp(cfg,
+		fleet.AppDiff{Slug: "broken", Action: fleet.ActionCreate},
+		fleet.AppEntry{Slug: "broken", Source: "./x", Visibility: "private"},
+		fleet.ObservedApp{}, dir,
+		convergeOpts{preconditions: true, retries: 3, fleetID: "eu", runID: "r"},
+		"fleet:eu", io.Discard)
+	if r.status != statusFailed || r.attempts != 1 || atomic.LoadInt32(&deployHits) != 1 {
+		t.Fatalf("status=%s attempts=%d deploy_hits=%d; deterministic failure must stop after one attempt",
+			r.status, r.attempts, deployHits)
+	}
+	if len(r.attemptsDetail) != 1 || r.attemptsDetail[0].Kind != deployfail.BuildFailed {
+		t.Fatalf("attempt detail = %+v, want one build_failed", r.attemptsDetail)
 	}
 }
 

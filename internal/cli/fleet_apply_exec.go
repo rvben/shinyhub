@@ -146,8 +146,24 @@ func deployWithRetry(cfg *cliConfig, slug, dir, visibility, project string, opt 
 			return promoted, attempts, committed, firstFires, failed, nil
 		}
 		failed = append(failed, attemptOutcome{Attempt: attempts, Kind: kind, Err: err.Error()})
+		if attempts == total || !retryableDeployFailure(kind) {
+			return "", attempts, committed, firstFires, failed, err
+		}
 	}
 	return "", total, committed, firstFires, failed, err
+}
+
+// retryableDeployFailure is intentionally narrow. Infrastructure and timing
+// failures may heal; invalid bundles, missing runtimes, build/hook errors and
+// crashes are deterministic until the source or server is changed and must not
+// be repeated implicitly.
+func retryableDeployFailure(kind deployfail.Kind) bool {
+	switch kind {
+	case deployfail.ReadinessTimeout, deployfail.ServerError, deployfail.TransportError:
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveFirstFires records the per-schedule first-fire outcomes on res and,
@@ -387,9 +403,13 @@ func releaseAdoptReservation(cfg *cliConfig, slug string, prior *string, marker 
 // unrecognized action is reported as skipped rather than silently dropped.
 func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs fleet.ObservedApp, srcDir string, opt convergeOpts, marker string, out io.Writer) applyResult {
 	start := time.Now()
-	res := applyResult{slug: d.Slug, action: d.Action}
+	res := applyResult{slug: d.Slug, action: d.Action, mutation: mutationNone}
 	done := func(s applyStatus) applyResult {
 		res.status, res.duration = s, time.Since(start)
+		switch s {
+		case statusCreated, statusUpdated, statusDeleted, statusAdopted:
+			res.mutation = mutationCommitted
+		}
 		return res
 	}
 	fail := func(err error, attempts int) applyResult {
@@ -407,8 +427,9 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 	// only where the deploy step failed; post-deploy config/ownership patch and
 	// first-fire failures use fail (the app is running, so its tail would be
 	// misleading).
-	failDeploy := func(err error, attempts int) applyResult {
+	failDeploy := func(err error, attempts int, mutation applyMutationState) applyResult {
 		fail(err, attempts)
+		res.mutation = mutation
 		// Mark this as a deploy-bearing failure so the top-level failure_kind is
 		// attributed to the deploy. A post-deploy failure (config patch, first-fire)
 		// uses fail directly and must NOT inherit a deploy attempt's kind.
@@ -446,6 +467,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		if err := patchManagedBy(cfg, d.Slug, &marker, nil, ifMB, opt.runID); err != nil {
 			return fail(err, 1)
 		}
+		res.mutation = mutationUnknown
 		// Redeploy (idempotent if identical). If it fails without the new
 		// bundle going live, RELEASE the reservation - restore managed_by to
 		// its observed prior value - so a deploy failure never leaves an "owned
@@ -457,11 +479,20 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attemptsDetail = failed
 		if err != nil {
-			if !committed && !adoptBundleWentLive(cfg, d.Slug, d.ServerDigest) {
+			wentLive := committed
+			if !wentLive {
+				wentLive = adoptBundleWentLive(cfg, d.Slug, d.ServerDigest)
+			}
+			if !wentLive {
 				releaseAdoptReservation(cfg, d.Slug, obs.ManagedBy, marker, opt)
 			}
-			return failDeploy(err, attempts)
+			state := mutationUnknown
+			if wentLive {
+				state = mutationPartial
+			}
+			return failDeploy(err, attempts, state)
 		}
+		res.mutation = mutationPartial
 		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
@@ -494,12 +525,17 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		return done(statusDeleted)
 
 	case fleet.ActionCreate:
-		promoted, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
-			return failDeploy(err, attempts)
+			state := mutationUnknown
+			if committed {
+				state = mutationPartial
+			}
+			return failDeploy(err, attempts, state)
 		}
+		res.mutation = mutationPartial
 		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
@@ -516,11 +552,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 			}
 		}
 		if err := patchManagedBy(cfg, d.Slug, &marker, ifD, ifM, opt.runID); err != nil {
-			if isConflictError(err) {
-				return fail(err, attempts)
-			}
-			res.note = "deployed; ownership marker not stamped, next plan shows adopt: " + err.Error()
-			return done(statusCreated)
+			return fail(fmt.Errorf("deployed but ownership marker was not stamped: %w", err), attempts)
 		}
 		// Apply the manifest's declared [app.config] to the freshly created app.
 		// The deploy set the source bundle and visibility; the numeric config
@@ -540,19 +572,23 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 				}
 			}
 			if err := applyConfigDrift(cfg, d.Slug, cfgDrift, entry.Config, ifDc, ifMc, opt.runID); err != nil {
-				res.note = "created; declared config not fully applied, next plan shows update(config): " + err.Error()
-				return done(statusCreated)
+				return fail(fmt.Errorf("created but declared config was not fully applied: %w", err), attempts)
 			}
 		}
 		return done(statusCreated)
 
 	case fleet.ActionUpdateSource:
-		promoted, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
-			return failDeploy(err, attempts)
+			state := mutationNone
+			if committed {
+				state = mutationPartial
+			}
+			return failDeploy(err, attempts, state)
 		}
+		res.mutation = mutationPartial
 		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
@@ -562,12 +598,12 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		// digest).
 		ifD, ifM := precondPtrs(opt, promoted, marker)
 		if err := reassertFleetConfig(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
-			res.note = "source updated; declared config not reasserted, next plan corrects it: " + err.Error()
-			return done(statusUpdated)
+			return fail(fmt.Errorf("source updated but declared config was not reasserted: %w", err), attempts)
 		}
 		return done(statusUpdated)
 
 	case fleet.ActionUpdateConfig:
+		res.mutation = mutationUnknown
 		ifD, ifM := precondPtrs(opt, d.ServerDigest, marker)
 		attempts, err := applyConfigDriftWithRetry(cfg, d.Slug, d.ConfigDrift, fleet.EffectiveConfig(entry), ifD, ifM, opt.runID, opt.retries)
 		if err != nil {
@@ -580,12 +616,17 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		// Mandatory ordering: deploy first, then patch fleet config
 		// on top with a precondition built from the FRESHLY promoted digest -
 		// never the stale pre-deploy one.
-		promoted, attempts, _, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
-			return failDeploy(err, attempts)
+			state := mutationNone
+			if committed {
+				state = mutationPartial
+			}
+			return failDeploy(err, attempts, state)
 		}
+		res.mutation = mutationPartial
 		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}

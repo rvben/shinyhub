@@ -44,7 +44,7 @@ var kindTable = []kindInfo{
 	{KindTimeout, 3, true, "Request or wait deadline exceeded"},
 	{KindRateLimit, 3, true, "Too many requests (HTTP 429)"},
 	{KindServerError, 3, true, "Server-side failure (HTTP 5xx)"},
-	{KindPartialConvergence, 4, false, "fleet apply: one or more apps failed after retries"},
+	{KindPartialConvergence, 4, false, "fleet apply: one or more apps failed to converge"},
 	{KindConflict, 5, false, "Resource exists with different configuration (HTTP 409)"},
 	{KindServerNotReady, 6, true, "Host reachable but ShinyHub is not up"},
 	{KindJobFailed, 0, false, "schedule --follow: the remote job failed; exit code is the job's own"},

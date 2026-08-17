@@ -129,6 +129,95 @@ func TestWriteFleetApplyJSON_HasResultAndSummary(t *testing.T) {
 	}
 }
 
+func TestApplyReport_PartialRunNamesCommittedWorkAndRecovery(t *testing.T) {
+	ctx := applyReportContext{
+		RunID: "run-0123456789", FleetID: "eu",
+		PlanCommand: "shinyhub fleet plan -f fleet.toml", ResumeCommand: "shinyhub fleet apply -f fleet.toml",
+	}
+	o := applyOutcome{apps: []applyResult{
+		{slug: "done", action: fleet.ActionUpdateSource, status: statusUpdated, mutation: mutationCommitted},
+		{slug: "half", action: fleet.ActionUpdateSourceConfig, status: statusFailed, mutation: mutationPartial, err: errors.New("config patch failed")},
+		{slug: "raced", action: fleet.ActionUpdateConfig, status: statusConflict, mutation: mutationNone, err: errors.New("revision changed")},
+	}}
+	var out bytes.Buffer
+	err := renderApplyReportWithContext(&out, ctx, o, false)
+	if exitCode(err) != 5 {
+		t.Fatalf("exit = %d, want conflict exit 5", exitCode(err))
+	}
+	text := out.String()
+	for _, want := range []string{
+		"run_id=run-0123456789", "mutation partial", "Remote mutation: 1 committed, 1 partial, 0 unknown",
+		"Remote state changed", "shinyhub fleet plan -f fleet.toml", "shinyhub fleet apply -f fleet.toml",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("partial report missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestApplyReport_PartialGolden(t *testing.T) {
+	ctx := applyReportContext{
+		RunID: "9d2f6d1895964dcabf1ba57d5301d9c4", FleetID: "eu",
+		PlanCommand:   "shinyhub fleet plan -f fleets/eu.toml",
+		ResumeCommand: "shinyhub fleet apply --prune -f fleets/eu.toml",
+	}
+	o := applyOutcome{apps: []applyResult{
+		{slug: "sales", action: fleet.ActionUpdateSource, status: statusUpdated, mutation: mutationCommitted, attempts: 1},
+		{slug: "retired", action: fleet.ActionDelete, status: statusDeleted, mutation: mutationCommitted, attempts: 1},
+		{slug: "weekly", action: fleet.ActionUpdateSourceConfig, status: statusFailed, mutation: mutationPartial,
+			attempts: 1, err: errors.New("config patch returned HTTP 500")},
+		{slug: "forecast", action: fleet.ActionUpdateConfig, status: statusConflict, mutation: mutationNone,
+			attempts: 1, err: errors.New("resource revision changed")},
+	}}
+	var out bytes.Buffer
+	_ = renderApplyReportWithContext(&out, ctx, o, false)
+	assertPlanWidth(t, out.String(), 120)
+	assertTextGolden(t, "fleet_apply_partial.golden", out.Bytes())
+}
+
+func TestFleetApplyJSON_ExposesRunMutationAndRecoveryContract(t *testing.T) {
+	ctx := applyReportContext{
+		RunID: "run-json", FleetID: "eu", ResumeCommand: "shinyhub fleet apply -f fleet.toml",
+	}
+	diff := []fleet.AppDiff{{Slug: "half", Action: fleet.ActionUpdateSourceConfig}}
+	result := applyResult{
+		slug: "half", action: fleet.ActionUpdateSourceConfig, status: statusFailed,
+		mutation: mutationPartial, err: errors.New("patch failed"),
+	}
+	var out bytes.Buffer
+	if err := writeFleetApplyJSONWithContext(&out, ctx, &fleet.Manifest{FleetID: "eu"}, "https://h", diff, nil,
+		applyOutcome{apps: []applyResult{result}}, 4, "PARTIAL"); err != nil {
+		t.Fatal(err)
+	}
+	var env applyJSONEnvelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.RunID != "run-json" || env.Status != "partial" {
+		t.Fatalf("run identity/status = %q/%q", env.RunID, env.Status)
+	}
+	if got := env.Apps[0].Result; got == nil || got.MutationState != "partial" {
+		t.Fatalf("per-resource mutation state missing: %+v", got)
+	}
+	if env.Recovery.Strategy != "repair_then_resume" || env.Recovery.SafeToRetry || len(env.Recovery.Commands) != 1 {
+		t.Fatalf("recovery contract = %+v", env.Recovery)
+	}
+}
+
+func TestApplyRecovery_OnlyRetriesTransientDeployFailures(t *testing.T) {
+	ctx := applyReportContext{ResumeCommand: "shinyhub fleet apply"}
+	transient := applyResult{status: statusFailed, deployFailed: true,
+		attemptsDetail: []attemptOutcome{{Kind: deployfail.ServerError}}}
+	if got := applyRecoveryFor(ctx, []applyResult{transient}); got.Strategy != "resume" || !got.SafeToRetry {
+		t.Fatalf("transient recovery = %+v, want safe resume", got)
+	}
+	deterministic := applyResult{status: statusFailed, deployFailed: true,
+		attemptsDetail: []attemptOutcome{{Kind: deployfail.BuildFailed}}}
+	if got := applyRecoveryFor(ctx, []applyResult{deterministic}); got.Strategy != "repair_then_resume" || got.SafeToRetry {
+		t.Fatalf("deterministic recovery = %+v, want repair then resume", got)
+	}
+}
+
 // TestWriteFleetApplyJSON_IncludesAppURL verifies each applied app carries its
 // served URL, so CI can post a link to the app from a PR without a follow-up
 // `apps list`.

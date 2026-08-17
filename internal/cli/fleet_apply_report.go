@@ -23,7 +23,21 @@ const (
 	statusAdopted   applyStatus = "adopted"
 	statusSkipped   applyStatus = "skipped"  // adopt w/o --adopt, prune w/o --prune, degraded prune
 	statusConflict  applyStatus = "conflict" // precondition 409
-	statusFailed    applyStatus = "failed"   // error after all retries
+	statusFailed    applyStatus = "failed"   // deterministic failure, or transient error after retries
+)
+
+// applyMutationState says what the CLI can prove about remote mutation for one
+// resource, independently of whether convergence finished successfully.
+// Partial and unknown are deliberately distinct from failed: a post-deploy
+// config failure can leave useful work committed, while a precondition conflict
+// can prove that nothing changed.
+type applyMutationState string
+
+const (
+	mutationNone      applyMutationState = "none"
+	mutationCommitted applyMutationState = "committed"
+	mutationPartial   applyMutationState = "partial"
+	mutationUnknown   applyMutationState = "unknown"
 )
 
 // applyResult is one app's outcome. note carries a short human reason for
@@ -33,6 +47,7 @@ type applyResult struct {
 	slug       string
 	action     fleet.Action
 	status     applyStatus
+	mutation   applyMutationState
 	attempts   int
 	duration   time.Duration
 	err        error
@@ -53,6 +68,22 @@ type applyResult struct {
 	// top-level failure_kind is emitted only when this is set, so a post-deploy
 	// failure never inherits a deploy attempt's kind.
 	deployFailed bool
+}
+
+func resultMutationState(r applyResult) applyMutationState {
+	if r.mutation != "" {
+		return r.mutation
+	}
+	switch r.status {
+	case statusCreated, statusUpdated, statusDeleted, statusAdopted:
+		return mutationCommitted
+	case statusUnchanged, statusSkipped, statusConflict:
+		return mutationNone
+	case statusFailed:
+		return mutationUnknown
+	default:
+		return mutationUnknown
+	}
 }
 
 type applyTally struct {
@@ -92,11 +123,11 @@ func applyExitCode(res []applyResult) (int, string) {
 	t := tallyResults(res)
 	switch {
 	case t.failed > 0 && t.conflicts > 0:
-		return 5, fmt.Sprintf("PARTIAL - %d failed after retries, %d conflict(s); re-run plan", t.failed, t.conflicts)
+		return 5, fmt.Sprintf("PARTIAL - %d failed, %d conflict(s); re-run plan", t.failed, t.conflicts)
 	case t.conflicts > 0:
 		return 5, fmt.Sprintf("CONFLICTS - %d app(s) changed under us; re-run plan", t.conflicts)
 	case t.failed > 0:
-		return 4, fmt.Sprintf("PARTIAL - %d failed after retries", t.failed)
+		return 4, fmt.Sprintf("PARTIAL - %d failed", t.failed)
 	default:
 		return 0, "OK - all converged"
 	}
@@ -112,11 +143,14 @@ func applyExitErr(code int, reason string) error {
 	return &ExitCodeError{Code: code, Err: fmt.Errorf("%s", reason), Reported: true}
 }
 
-func statusGlyph(r applyResult) string {
+func statusGlyph(s styler, r applyResult) string {
 	switch r.status {
 	case statusFailed, statusConflict:
-		return "✗"
+		return s.glyphFail()
 	case statusSkipped:
+		if s.ascii {
+			return "."
+		}
 		return "•"
 	}
 	g, _ := glyphWord(r.action)
@@ -150,9 +184,18 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 		}
 		// The slug is the only padded field, and it is never painted, so no
 		// escape can enter a column width.
-		line := fmt.Sprintf("  %s  %-*s %s", s.glyphPaint(statusGlyph(r)), wSlug, r.slug, statusWord)
+		glyph := statusGlyph(s, r)
+		if r.status == statusFailed || r.status == statusConflict {
+			glyph = s.red(glyph)
+		} else {
+			glyph = s.glyphPaint(glyph)
+		}
+		line := fmt.Sprintf("  %s  %-*s %s", glyph, wSlug, r.slug, statusWord)
 		if r.attempts > 1 {
 			line += s.dim(fmt.Sprintf(" (attempt %d)", r.attempts))
+		}
+		if state := resultMutationState(r); state == mutationPartial || state == mutationUnknown {
+			line += "  " + s.yellow("mutation "+string(state))
 		}
 		if r.note != "" {
 			line += "  " + s.dim(r.note)
@@ -179,12 +222,85 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 	}
 }
 
+type applyReportContext struct {
+	RunID         string
+	FleetID       string
+	PlanCommand   string
+	ResumeCommand string
+}
+
+type applyRecovery struct {
+	Strategy    string   `json:"strategy"`
+	SafeToRetry bool     `json:"safe_to_retry"`
+	Summary     string   `json:"summary"`
+	Commands    []string `json:"commands"`
+}
+
+func applyRecoveryFor(ctx applyReportContext, results []applyResult) applyRecovery {
+	t := tallyResults(results)
+	if t.failed == 0 && t.conflicts == 0 {
+		return applyRecovery{Strategy: "none", SafeToRetry: true, Summary: "all resources converged", Commands: []string{}}
+	}
+	if t.conflicts > 0 {
+		commands := []string{}
+		if ctx.PlanCommand != "" {
+			commands = append(commands, ctx.PlanCommand)
+		}
+		if ctx.ResumeCommand != "" {
+			commands = append(commands, ctx.ResumeCommand)
+		}
+		return applyRecovery{
+			Strategy: "replan", SafeToRetry: false,
+			Summary:  "Remote state changed; review a fresh plan before applying again.",
+			Commands: commands,
+		}
+	}
+
+	safe := true
+	for _, r := range results {
+		if r.status != statusFailed || !r.deployFailed || !retryableDeployFailure(finalFailureKind(r)) {
+			if r.status == statusFailed {
+				safe = false
+			}
+		}
+	}
+	strategy := "resume"
+	summary := "Re-run apply; current state is recomputed and completed resources become unchanged."
+	if !safe {
+		strategy = "repair_then_resume"
+		summary = "Fix the reported deterministic or post-commit failure, then re-run apply."
+	}
+	commands := []string{}
+	if ctx.ResumeCommand != "" {
+		commands = append(commands, ctx.ResumeCommand)
+	}
+	return applyRecovery{Strategy: strategy, SafeToRetry: safe, Summary: summary, Commands: commands}
+}
+
+func applyMutationCounts(results []applyResult) (committed, partial, unknown int) {
+	for _, r := range results {
+		switch resultMutationState(r) {
+		case mutationCommitted:
+			committed++
+		case mutationPartial:
+			partial++
+		case mutationUnknown:
+			unknown++
+		}
+	}
+	return committed, partial, unknown
+}
+
 // renderApplyReport prints the final table + summary + exit reason and
 // returns the ExitCodeError implied by the results (nil for exit 0). Quiet
 // collapses to the summary + result line only. The glyph and the status word
 // always carry the signal on their own, so color only weights what is already
 // legible: strip it and the report reads identically.
 func renderApplyReport(out io.Writer, fleetID string, o applyOutcome, quiet bool) error {
+	return renderApplyReportWithContext(out, applyReportContext{FleetID: fleetID}, o, quiet)
+}
+
+func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o applyOutcome, quiet bool) error {
 	s := stylerFor(out)
 	all := o.all()
 	code, reason := applyExitCode(all)
@@ -199,7 +315,11 @@ func renderApplyReport(out io.Writer, fleetID string, o applyOutcome, quiet bool
 		return applyExitErr(code, reason)
 	}
 
-	fmt.Fprintf(out, "shinyhub fleet apply  ·  fleet_id=%s\n\n", fleetID)
+	header := fmt.Sprintf("shinyhub fleet apply  ·  fleet_id=%s", ctx.FleetID)
+	if ctx.RunID != "" {
+		header += "  ·  run_id=" + ctx.RunID
+	}
+	fmt.Fprintf(out, "%s\n\n", header)
 
 	// Omitted entirely when the manifest declares no projects, so existing
 	// output stays byte-identical for manifests that do not use the feature.
@@ -209,7 +329,10 @@ func renderApplyReport(out io.Writer, fleetID string, o applyOutcome, quiet bool
 		fmt.Fprintln(out)
 	}
 
-	renderResultRows(out, s, o.apps, slugColumnWidth(o.apps))
+	if len(o.apps) > 0 {
+		fmt.Fprintf(out, "Apps (%d)\n", len(o.apps))
+		renderResultRows(out, s, o.apps, slugColumnWidth(o.apps))
+	}
 	fmt.Fprintf(out, "\n%s\nResult: %s. Exit %d.\n", summary, reason, code)
 
 	// Failures end with the single most useful next command; conflicts point
@@ -230,6 +353,22 @@ func renderApplyReport(out io.Writer, fleetID string, o applyOutcome, quiet bool
 				s.dim("-> shinyhub fleet plan   (re-review before re-applying)"))
 		}
 	}
+	if code != 0 {
+		recovery := applyRecoveryFor(ctx, all)
+		committed, partial, unknown := applyMutationCounts(all)
+		fmt.Fprintln(out, "\nRecovery")
+		if ctx.RunID != "" {
+			fmt.Fprintf(out, "  Run ID: %s (use this to correlate server audit records)\n", ctx.RunID)
+		}
+		fmt.Fprintf(out, "  Remote mutation: %d committed, %d partial, %d unknown.\n", committed, partial, unknown)
+		fmt.Fprintf(out, "  %s\n", recovery.Summary)
+		for i, command := range recovery.Commands {
+			fmt.Fprintf(out, "  %d. %s\n", i+1, command)
+		}
+		if recovery.Strategy == "resume" || recovery.Strategy == "repair_then_resume" {
+			fmt.Fprintln(out, "  Completed resources are re-read and will not be applied twice.")
+		}
+	}
 	return applyExitErr(code, reason)
 }
 
@@ -244,6 +383,7 @@ type jsonAttempt struct {
 
 type jsonResult struct {
 	Status         string        `json:"status"`
+	MutationState  string        `json:"mutation_state"`
 	Attempts       int           `json:"attempts"`
 	FailureKind    string        `json:"failure_kind,omitempty"`
 	AttemptDetails []jsonAttempt `json:"attempt_details,omitempty"`
@@ -290,22 +430,26 @@ type applyJSONProject struct {
 
 type applyJSONEnvelope struct {
 	SchemaVersion int                `json:"schema_version"`
+	RunID         string             `json:"run_id,omitempty"`
+	Status        string             `json:"status"`
 	FleetID       string             `json:"fleet_id"`
 	Server        string             `json:"server"`
 	GeneratedAt   string             `json:"generated_at"`
 	Projects      []applyJSONProject `json:"projects"`
 	Apps          []applyJSONApp     `json:"apps"`
 	Summary       jsonSummary        `json:"summary"`
+	Recovery      applyRecovery      `json:"recovery"`
 }
 
 // resultToJSON maps one applyResult onto the shared jsonResult shape used by
 // both apps and projects.
 func resultToJSON(r applyResult) *jsonResult {
 	jr := &jsonResult{
-		Status:     string(r.status),
-		Attempts:   r.attempts,
-		DurationMS: r.duration.Milliseconds(),
-		LogTail:    r.logTail,
+		Status:        string(r.status),
+		MutationState: string(resultMutationState(r)),
+		Attempts:      r.attempts,
+		DurationMS:    r.duration.Milliseconds(),
+		LogTail:       r.logTail,
 	}
 	if r.err != nil {
 		jr.Error = r.err.Error()
@@ -322,6 +466,10 @@ func resultToJSON(r applyResult) *jsonResult {
 }
 
 func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []fleet.AppDiff, projects []fleet.ProjectDiff, o applyOutcome, code int, reason string) error {
+	return writeFleetApplyJSONWithContext(out, applyReportContext{FleetID: m.FleetID}, m, host, diff, projects, o, code, reason)
+}
+
+func writeFleetApplyJSONWithContext(out io.Writer, ctx applyReportContext, m *fleet.Manifest, host string, diff []fleet.AppDiff, projects []fleet.ProjectDiff, o applyOutcome, code int, reason string) error {
 	bySlug := make(map[string]applyResult, len(o.apps))
 	for _, r := range o.apps {
 		bySlug[r.slug] = r
@@ -377,6 +525,8 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 	t := tallyResults(o.all())
 	env := applyJSONEnvelope{
 		SchemaVersion: fleetPlanSchemaVersion,
+		RunID:         ctx.RunID,
+		Status:        applyRunStatus(code),
 		FleetID:       m.FleetID,
 		Server:        host,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
@@ -391,6 +541,7 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 			ExitCode:   code,
 			ExitReason: reason,
 		},
+		Recovery: applyRecoveryFor(ctx, o.all()),
 	}
 	b, err := json.Marshal(env)
 	if err != nil {
@@ -398,4 +549,15 @@ func writeFleetApplyJSON(out io.Writer, m *fleet.Manifest, host string, diff []f
 	}
 	_, err = out.Write(append(b, '\n'))
 	return err
+}
+
+func applyRunStatus(code int) string {
+	switch code {
+	case 0:
+		return "converged"
+	case 5:
+		return "conflict"
+	default:
+		return "partial"
+	}
 }
