@@ -339,7 +339,7 @@ var buildRootOnce sync.Once
 // tests to call; registration happens exactly once per process.
 func buildRoot() *cobra.Command {
 	buildRootOnce.Do(func() {
-		rootCmd.AddCommand(newInitCmd(), serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, newWorkerCmd(), newSandboxCmd())
+		rootCmd.AddCommand(newInitCmd(), serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, newHealthcheckCmd(), newWorkerCmd(), newSandboxCmd())
 		cli.AddCommandsTo(rootCmd)
 	})
 	return rootCmd
@@ -750,7 +750,7 @@ func (h *hostSampler) Sample(handle process.RunHandle) (process.Stats, error) {
 func runServe(ctx context.Context, logger *slog.Logger) error {
 	cfg, err := config.Load(serverConfigPath())
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return &cli.ExitCodeError{Code: 1, Kind: cli.KindValidation, Err: fmt.Errorf("load config: %w", err)}
 	}
 
 	// Record the configured build interpreter policy (build.python_preference,

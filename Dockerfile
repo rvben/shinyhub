@@ -23,6 +23,11 @@ ENV SHINYHUB_CONFIG=/etc/shinyhub/shinyhub.yaml
 EXPOSE 8080
 
 USER nonroot:nonroot
+# The binary carries its own readiness probe because distroless has no shell,
+# curl, or wget. Deployments using a non-default port should override the probe
+# URL, as the reference Compose deployment does.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=6 \
+    CMD ["/usr/local/bin/shinyhub", "healthcheck"]
 # `serve` is a subcommand (rootCmd has no default action), so it must be in
 # the entrypoint or the container exits printing help instead of serving.
 # Kept identical to Dockerfile.goreleaser so dev and release images behave the

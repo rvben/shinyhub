@@ -1444,8 +1444,13 @@ func loadRaw(path string) (*Config, error) {
 		if cfg.Auth.ForwardAuth.SecretHeader == "" {
 			cfg.Auth.ForwardAuth.SecretHeader = "X-ShinyHub-Forward-Auth-Secret"
 		}
-		if len(cfg.Auth.ForwardAuth.SharedSecret) < 32 || strings.HasPrefix(cfg.Auth.ForwardAuth.SharedSecret, "replace-with-") || strings.HasPrefix(cfg.Auth.ForwardAuth.SharedSecret, "generate-with-") {
-			return nil, fmt.Errorf("auth.forward_auth.shared_secret must be random and at least 32 characters when forward-auth is enabled")
+		switch {
+		case cfg.Auth.ForwardAuth.SharedSecret == "":
+			return nil, fmt.Errorf("auth.forward_auth.shared_secret is required when forward-auth is enabled; set auth.forward_auth.shared_secret or SHINYHUB_FORWARD_AUTH_SHARED_SECRET to a random value generated with `openssl rand -hex 32`")
+		case strings.HasPrefix(cfg.Auth.ForwardAuth.SharedSecret, "replace-with-") || strings.HasPrefix(cfg.Auth.ForwardAuth.SharedSecret, "generate-with-"):
+			return nil, fmt.Errorf("auth.forward_auth.shared_secret still contains a placeholder; replace it with a random value generated with `openssl rand -hex 32`")
+		case len(cfg.Auth.ForwardAuth.SharedSecret) < 32:
+			return nil, fmt.Errorf("auth.forward_auth.shared_secret must be at least 32 characters; replace it with a random value generated with `openssl rand -hex 32`")
 		}
 		for _, identityHeader := range []string{
 			cfg.Auth.ForwardAuth.UserHeader,

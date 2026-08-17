@@ -168,6 +168,27 @@ SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE=developer
 SHINYHUB_FORWARD_AUTH_REQUIRE_GROUPS_HEADER=false
 ```
 
+Generate the shared value once and provide it independently to both processes:
+
+```sh
+export SHINYHUB_FORWARD_AUTH_SHARED_SECRET=$(openssl rand -hex 32)
+```
+
+After restarting both services, sign in through Caddy in a browser and open the
+following URL—not the direct ShinyHub listener—so the check covers
+`forward_auth`, copied identity headers, and the proxy credential together:
+
+```text
+https://shiny.example.com/api/auth/me
+```
+
+For command-line verification, send the SSO session cookie or credential
+required by your auth service.
+
+If the identity request returns `403`, inspect the ShinyHub log. A missing or
+incorrect proxy credential produces a rate-limited warning naming the proxy IP
+and configured `secret_header`; secret values are never logged.
+
 ## Notes
 
 **Trust boundary.** ShinyHub checks the DIRECT peer IP of the TCP connection,

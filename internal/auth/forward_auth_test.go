@@ -763,6 +763,51 @@ func TestForwardAuth_TrustedPeerWithUserHeader_NoWarn(t *testing.T) {
 	}
 }
 
+// TestForwardAuth_InvalidProxySecret_LogsActionableWarnOnce verifies that a
+// live proxy wiring error is visible to operators without logging the secret
+// or flooding logs on every request.
+func TestForwardAuth_InvalidProxySecret_LogsActionableWarnOnce(t *testing.T) {
+	buf := captureSlog(t)
+
+	store := newFakeStore()
+	cfg := ForwardAuthConfig{
+		Enabled:      true,
+		UserHeader:   "X-Forwarded-User",
+		SharedSecret: "01234567890123456789012345678901",
+		SecretHeader: "X-ShinyHub-Forward-Auth-Secret",
+		DefaultRole:  "developer",
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+	mw := ForwardAuthMiddleware(store, cfg, trusted)(&reachedHandler{})
+
+	sendRequest := func(secret string) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = "127.0.0.1:5555"
+		r.Header.Set(cfg.UserHeader, "alice")
+		if secret != "" {
+			r.Header.Set(cfg.SecretHeader, secret)
+		}
+		mw.ServeHTTP(httptest.NewRecorder(), r)
+	}
+
+	sendRequest("")
+	logLine := buf.String()
+	for _, want := range []string{"missing or invalid proxy credential", "127.0.0.1", cfg.SecretHeader} {
+		if !strings.Contains(logLine, want) {
+			t.Fatalf("WARN log = %q, want %q", logLine, want)
+		}
+	}
+	if strings.Contains(logLine, cfg.SharedSecret) {
+		t.Fatal("WARN log leaked the configured proxy secret")
+	}
+
+	buf.Reset()
+	sendRequest("wrong")
+	if strings.Contains(buf.String(), "forward_auth") {
+		t.Fatalf("WARN must not repeat for the same proxy IP, got: %s", buf.String())
+	}
+}
+
 // TestForwardAuth_UntrustedPeerNoUserHeader_NoWarn verifies that an untrusted
 // peer without the user header does not trigger the misconfiguration warning
 // (the header absence means there is nothing to warn about).

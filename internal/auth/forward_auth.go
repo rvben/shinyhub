@@ -73,6 +73,9 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 	// misconfiguration warning so we log at most once per distinct IP per
 	// server lifetime.
 	var warnedPeers sync.Map
+	// invalidSecretPeers similarly bounds the operator-facing warning for a
+	// trusted proxy that asserts an identity without the configured credential.
+	var invalidSecretPeers sync.Map
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,6 +132,16 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				return
 			}
 			if cfg.SharedSecret != "" && subtle.ConstantTimeCompare([]byte(proxySecret), []byte(cfg.SharedSecret)) != 1 {
+				host, _, err := net.SplitHostPort(r.RemoteAddr)
+				if err != nil {
+					host = r.RemoteAddr
+				}
+				if _, alreadyWarned := invalidSecretPeers.LoadOrStore(host, struct{}{}); !alreadyWarned {
+					slog.Warn("forward_auth: trusted proxy asserted a user with a missing or invalid proxy credential; configure the proxy to overwrite the secret header",
+						"peer", host,
+						"secret_header", cfg.SecretHeader,
+					)
+				}
 				http.Error(w, "forward auth: proxy authentication failed", http.StatusForbidden)
 				return
 			}

@@ -11,11 +11,22 @@ and spawns R Shiny app processes as sibling Docker containers via the
 
 ## Quickstart
 
-**1. Generate a secret and export it**
+**1. Generate the server secret and export it**
 
 ```sh
 export SHINYHUB_AUTH_SECRET=$(openssl rand -hex 32)
 ```
+
+When enabling `auth.forward_auth`, generate a separate proxy credential and
+export it before starting the stack. Configure the reverse proxy to overwrite
+`X-ShinyHub-Forward-Auth-Secret` with the same value:
+
+```sh
+export SHINYHUB_FORWARD_AUTH_SHARED_SECRET=$(openssl rand -hex 32)
+```
+
+Do not reuse `SHINYHUB_AUTH_SECRET`: the proxy credential is deliberately a
+separate trust boundary and is passed into the container by `compose.yaml`.
 
 **2. Set the data root**
 
@@ -59,7 +70,16 @@ These have no effect once the user already exists in the database.
 **5. Start the stack**
 
 ```sh
-docker compose up -d
+docker compose up -d --wait --wait-timeout 90
+```
+
+`--wait` returns nonzero unless ShinyHub reaches `/readyz`. Configuration
+errors and restart loops therefore fail the deployment command instead of
+leaving an apparently successful but unusable stack. On failure, inspect the
+actionable startup error:
+
+```sh
+docker compose logs shinyhub
 ```
 
 On first start an `init-perms` helper (busybox) runs once to create the data
@@ -136,10 +156,33 @@ Other commonly changed settings:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `server.port` | `8080` | Host port the server binds on |
+| `SHINYHUB_PORT` | `8080` | Host port the server and its Compose healthcheck use |
 | `runtime.docker.default_memory_mb` | `512` | Per-replica memory cap (MiB) |
 | `runtime.docker.default_cpu_percent` | `100` | Per-replica CPU cap (100 = 1 core) |
 | `lifecycle.hibernate_timeout` | `30m` | Idle timeout before an app is hibernated |
+
+### Forward-auth deployment verification
+
+Forward-auth has two independently verified halves:
+
+1. Startup validates that ShinyHub has a random 32+ character proxy credential.
+   If it is absent, the error names both the YAML key and
+   `SHINYHUB_FORWARD_AUTH_SHARED_SECRET`, and shows the generation command.
+2. The first identity-bearing request validates that the reverse proxy sends
+   the same credential. A mismatch returns `403` and emits one warning per
+   proxy IP naming the `secret_header`, without logging either secret value.
+
+After deployment, sign in through the public reverse-proxy URL in a browser,
+then open:
+
+```text
+https://shiny.example.com/api/auth/me
+```
+
+It must return the identity established by the auth proxy. For command-line
+verification, send the SSO session cookie or credential required by your auth
+service. A successful readiness probe alone cannot prove that the proxy copied
+the user and credential headers correctly.
 
 ## PostgreSQL backend (optional)
 
@@ -166,7 +209,7 @@ Pull the new image and restart:
 
 ```sh
 docker compose pull
-docker compose up -d
+docker compose up -d --wait --wait-timeout 90
 ```
 
 The server adopts running app containers across restarts
@@ -182,12 +225,21 @@ The server adopts running app containers across restarts
 
 ## Health monitoring
 
-ShinyHub exposes `GET /healthz` which returns `200 OK` when the server is
-ready. The distroless image has no shell or curl, so the compose file omits a
-container healthcheck. Wire `/healthz` into your external monitor instead:
+ShinyHub exposes `GET /healthz` for liveness and `GET /readyz` for readiness.
+The distroless image has no shell or curl, so the ShinyHub binary includes a
+small `healthcheck` subcommand and Compose uses it to probe `/readyz`. Inspect
+the current state with:
 
 ```sh
-curl -fsS http://localhost:8080/healthz
+docker compose ps
+docker inspect --format '{{json .State.Health}}' $(docker compose ps -q shinyhub)
+```
+
+External load balancers and monitors should also use `/readyz` when deciding
+whether to send traffic:
+
+```sh
+curl -fsS http://localhost:8080/readyz
 ```
 
 ## Stopping and cleaning up

@@ -39,9 +39,10 @@
 #   same path inside the container. The DB stays in a named volume (the daemon
 #   never needs to reach it).
 #
-# Container healthcheck: skipped.
-#   The shinyhub image is distroless (no shell, no curl). The /healthz HTTP
-#   endpoint is available for external monitors (see README).
+# Container healthcheck:
+#   The distroless image has no shell or curl, so its built-in `healthcheck`
+#   command probes /readyz. Use `docker compose up -d --wait` so configuration
+#   errors and restart loops fail the deployment instead of appearing healthy.
 #
 # Profiles:
 #   (default) SQLite only.
@@ -111,8 +112,13 @@ services:
 
     environment:
       SHINYHUB_AUTH_SECRET: "${SHINYHUB_AUTH_SECRET:?SHINYHUB_AUTH_SECRET is required}"
+      # Optional unless auth.forward_auth.enabled is true. Passing the empty value
+      # keeps the reference deployment usable without forward-auth; ShinyHub emits
+      # an actionable startup error when forward-auth is enabled but this is unset.
+      SHINYHUB_FORWARD_AUTH_SHARED_SECRET: "${SHINYHUB_FORWARD_AUTH_SHARED_SECRET:-}"
       SHINYHUB_BASE_URL: "${SHINYHUB_BASE_URL:-}"
       SHINYHUB_APP_ORIGIN: "${SHINYHUB_APP_ORIGIN:-}"
+      SHINYHUB_PORT: "${SHINYHUB_PORT:-8080}"
 
       # Storage: pass as env vars (single source of truth; shinyhub.yaml omits
       # these keys so the env override is always authoritative).
@@ -129,6 +135,13 @@ services:
       # Optional: point at the postgres service (requires the postgres profile).
       # When set, also set database.driver: postgres in shinyhub.yaml.
       # SHINYHUB_DB_DSN: "postgres://shinyhub:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@127.0.0.1:5432/shinyhub?sslmode=disable"
+
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/shinyhub", "healthcheck", "--url", "http://127.0.0.1:${SHINYHUB_PORT:-8080}/readyz", "--timeout", "3s"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   # Postgres service (optional -- enable with: docker compose --profile postgres up -d)
   # Provides a HA-grade database backend on a single node.

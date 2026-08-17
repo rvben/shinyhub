@@ -45,15 +45,27 @@ func TestAppOriginRequiresDedicatedBareHTTPSOrigin(t *testing.T) {
 	}
 }
 
-func TestForwardAuthRequiresProxySharedSecret(t *testing.T) {
-	path := writeYAML(t, `
-auth:
-  secret: 01234567890123456789012345678901
-  forward_auth:
-    enabled: true
-`)
-	_, err := config.Load(path)
-	if err == nil || !strings.Contains(err.Error(), "forward_auth.shared_secret") {
-		t.Fatalf("Load error = %v, want missing shared-secret error", err)
+func TestForwardAuthRejectsInvalidProxySharedSecret(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		secretLine string
+		want       string
+	}{
+		{name: "missing", want: "set auth.forward_auth.shared_secret or SHINYHUB_FORWARD_AUTH_SHARED_SECRET"},
+		{name: "placeholder", secretLine: "    shared_secret: replace-with-a-random-32+-character-secret\n", want: "still contains a placeholder"},
+		{name: "too short", secretLine: "    shared_secret: too-short\n", want: "must be at least 32 characters"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "auth:\n" +
+				"  secret: 01234567890123456789012345678901\n" +
+				"  forward_auth:\n" +
+				"    enabled: true\n" +
+				tc.secretLine
+			path := writeYAML(t, yaml)
+			_, err := config.Load(path)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load error = %v, want containing %q", err, tc.want)
+			}
+		})
 	}
 }
