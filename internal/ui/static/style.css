@@ -1122,6 +1122,141 @@ body[data-auth="out"] {
 .app-card-fact.is-attention { color: var(--yellow); }
 .app-card-fact.is-danger { color: var(--red); font-weight: 600; }
 
+.app-card-lifecycle {
+  min-width: 0;
+}
+
+.app-card-feedback,
+.app-card-confirm {
+  margin-block-start: 0.7rem;
+  min-width: 0;
+}
+
+.app-card-feedback[hidden],
+.app-card-confirm[hidden] { display: none; }
+
+.app-card-feedback {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  color: var(--text-soft);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.app-card-feedback.is-pending {
+  border-color: color-mix(in srgb, var(--yellow) 32%, transparent);
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+
+.app-card-feedback.is-success {
+  border-color: color-mix(in srgb, var(--green) 32%, transparent);
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+.app-card-feedback.is-error {
+  border-color: color-mix(in srgb, var(--red) 34%, transparent);
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.app-card-feedback-copy,
+.app-card-confirm-copy {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.app-card-feedback strong,
+.app-card-confirm strong {
+  display: block;
+  margin-block-end: 0.1rem;
+  color: currentColor;
+  font-weight: 700;
+}
+
+.app-card-feedback-actions,
+.app-card-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: none;
+  gap: 0.4rem;
+}
+
+.app-card-confirm {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding-block-start: 0.75rem;
+  border-block-start: 1px solid var(--line-2);
+  color: var(--text-soft);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.app-card-confirm strong { color: var(--text); }
+
+.app-card-lifecycle-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding-inline: 0.8rem;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: rgba(var(--surface-rgb), 0.42);
+  color: var(--text-soft);
+  font-family: var(--font);
+  font-size: 0.75rem;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background var(--ease), border-color var(--ease), color var(--ease);
+}
+
+.app-card-lifecycle-action:hover {
+  border-color: var(--cyan-bright);
+  color: var(--cyan-bright);
+  background: var(--accent-dim);
+}
+
+.app-card-lifecycle-action.is-primary {
+  border-color: var(--cyan-bright);
+  background: var(--cyan-bright);
+  color: var(--bg-deep);
+}
+
+.app-card-lifecycle-action.is-primary:hover {
+  border-color: var(--sparkle);
+  background: var(--sparkle);
+  color: var(--bg-deep);
+}
+
+.app-card.is-lifecycle-busy .kebab-menu > button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+@media (max-width: 700px) {
+  .app-card-feedback,
+  .app-card-confirm {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .app-card-feedback-actions,
+  .app-card-confirm-actions { width: 100%; }
+
+  .app-card-feedback-actions .app-card-lifecycle-action,
+  .app-card-confirm-actions .app-card-lifecycle-action { flex: 1; }
+}
+
 .app-actions {
   display: flex;
   align-items: center;
@@ -1139,7 +1274,7 @@ body[data-auth="out"] {
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  height: 40px;
+  height: 44px;
   font-size: 0.76rem;
   padding: 0 0.8rem;
   border-radius: var(--radius);
@@ -1153,7 +1288,7 @@ body[data-auth="out"] {
   transition: background var(--ease), border-color var(--ease), color var(--ease);
 }
 
-.app-actions .kebab-menu > button { width: 40px; height: 40px; padding: 0; }
+.app-actions .kebab-menu > button { width: 44px; height: 44px; padding: 0; }
 
 .app-actions a:hover,
 .app-actions button:hover {

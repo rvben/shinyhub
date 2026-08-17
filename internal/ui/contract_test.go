@@ -3129,7 +3129,8 @@ func TestEscapeClosesNewTokenModal(t *testing.T) {
 // restart) had no disabled-during-request guard, so a slow request or an
 // impatient double-click could fire the request twice. They must all follow
 // the same disable-before/re-enable-after pattern already used by the login
-// and schedule handlers.
+// and schedule handlers. Card-local restart confirmation has no persistent
+// trigger button during the request, so it also guards on its pending model.
 func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
 	b, err := fs.ReadFile(ui.Static(), "app.js")
 	if err != nil {
@@ -3156,8 +3157,11 @@ func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
 	checkGuard("async function deleteUser(id, username, btn)", "deleteUser", "btn.disabled = true", "btn.disabled = false")
 	checkGuard("async function revokeToken(id, name, btn)", "revokeToken", "btn.disabled = true", "btn.disabled = false")
 	checkGuard("async function submitNewUser(event)", "submitNewUser", "submitBtn.disabled = true", "submitBtn.disabled = false")
-	checkGuard("async function restart(slug, btn)", "the card Restart handler", "btn.disabled = true", "btn.disabled = false")
+	checkGuard("async function performRestart(slug, btn, cardLocal = false)", "the Restart request handler", "btn.disabled = true", "btn.disabled = false")
 	checkGuard("async function lifecycleAction(slug, path, btn, failureMessage)", "the Sleep/Stop/Start handler", "btn.disabled = true", "btn.disabled = false")
+	if !strings.Contains(src, "appRestartFeedback.get(slug)?.phase === 'pending'") {
+		t.Fatal("card-local Restart must reject a second request while its first restart is pending")
+	}
 
 	// Each guarded function must actually receive the triggering button at its
 	// call site, not just declare an unused parameter.

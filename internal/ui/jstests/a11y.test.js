@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import axe from 'axe-core';
+import { createAppCardLifecycle } from '../static/views/app-card-lifecycle.js';
 
 // Automated accessibility gate for the dashboard's static shell. Loads
 // index.html into jsdom, reveals every hidden section/view (the SPA hides all
@@ -87,4 +88,28 @@ test('the initially-visible shell (nothing revealed) is also clean', async () =>
     0,
     `axe found ${violations.length} violation(s) in the first-paint shell:\n\n${formatViolations(violations)}`,
   );
+});
+
+test('app-card restart confirmation, progress, success, and recovery are structurally accessible', async () => {
+  const shell = '<!DOCTYPE html><html lang="en"><head><title>Restart state</title></head>' +
+    '<body><main><article id="card" aria-label="Sales dashboard"></article></main></body></html>';
+
+  for (const phase of ['confirm', 'pending', 'success', 'error']) {
+    const violations = await runAxeOn(shell, (d) => {
+      const control = createAppCardLifecycle(d, {
+        appName: 'Sales dashboard',
+        onConfirm() {},
+        onRetry() {},
+        onViewLogs() {},
+      });
+      d.getElementById('card').appendChild(control.root);
+      if (phase === 'confirm') control.showConfirmation();
+      else control.setPhase(phase, phase === 'error' ? 'Process exited before becoming ready.' : '');
+    });
+    assert.equal(
+      violations.length,
+      0,
+      `axe found ${violations.length} violation(s) in restart ${phase}:\n\n${formatViolations(violations)}`,
+    );
+  }
 });

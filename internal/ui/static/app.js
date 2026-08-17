@@ -19,6 +19,7 @@ import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { headerStats } from '/static/views/stat-format.js';
 import { appCardFacts } from '/static/views/app-card-facts.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
+import { createAppCardLifecycle, requestAppRestart, restartConfirmationCopy } from '/static/views/app-card-lifecycle.js';
 import { applyLoginProviders } from '/static/views/login-providers.js';
 import { applyBranding } from '/static/views/branding.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
@@ -190,6 +191,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // reads the description from here. Without it the modal would show an empty
   // Description for every project and saving would clear it.
   const projectRows = new Map();
+  // Restart feedback belongs to the affected app card, not the page. The
+  // durable model survives search/sort/refresh re-renders; the control map is
+  // rebuilt with the DOM and never retains detached cards.
+  const appCardLifecycleControls = new Map();
+  const appRestartFeedback = new Map();
+  let appRestartFeedbackVersion = 0;
 
   const loginView = document.getElementById('login-view');
   const overviewView = document.getElementById('overview-view');
@@ -479,8 +486,52 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function applyRestartFeedbackToCard(slug, card, control) {
+    if (!card || !control) return;
+    const entry = appRestartFeedback.get(slug);
+    const pending = entry && entry.phase === 'pending';
+
+    if (entry) control.setPhase(entry.phase, entry.message || '');
+    else control.clear();
+
+    card.classList.toggle('is-lifecycle-busy', !!pending);
+    const menuButton = card.querySelector('.kebab-menu > button');
+    if (menuButton) menuButton.disabled = !!pending;
+
+    const badge = card.querySelector('.app-header .badge');
+    const app = state.apps.find((item) => item.slug === slug);
+    if (!badge || !app) return;
+    if (pending) {
+      badge.className = 'badge badge-deploying';
+      badge.textContent = 'Restarting';
+      return;
+    }
+    const info = appCardBadge(app, formatStatus);
+    badge.className = info.cls;
+    badge.textContent = info.text;
+  }
+
+  function setRestartFeedback(slug, phase, message = '') {
+    const entry = { phase, message, version: ++appRestartFeedbackVersion };
+    appRestartFeedback.set(slug, entry);
+    const control = appCardLifecycleControls.get(slug);
+    const card = appGrid.querySelector(`.app-card[data-slug="${slug}"]`);
+    applyRestartFeedbackToCard(slug, card, control);
+    return entry;
+  }
+
+  function clearRestartFeedback(slug, expectedVersion = null) {
+    const current = appRestartFeedback.get(slug);
+    if (expectedVersion !== null && current && current.version !== expectedVersion) return;
+    appRestartFeedback.delete(slug);
+    const control = appCardLifecycleControls.get(slug);
+    const card = appGrid.querySelector(`.app-card[data-slug="${slug}"]`);
+    applyRestartFeedbackToCard(slug, card, control);
+  }
+
   function renderGridVerbatim(groups, gridEl, emptyEl, options = {}) {
     gridEl.textContent = '';
+    appCardLifecycleControls.clear();
     const total = groups.reduce((n, g) => n + g.apps.length, 0);
     const empty = total === 0;
     emptyEl.hidden = !empty;
@@ -587,6 +638,14 @@ document.addEventListener('DOMContentLoaded', () => {
       const actions = document.createElement('div');
       actions.className = 'app-actions';
 
+      const lifecycleControl = createAppCardLifecycle(document, {
+        appName: app.name,
+        onConfirm: () => performRestart(app.slug, null, true),
+        onRetry: () => performRestart(app.slug, null, true),
+        onViewLogs: () => openLogs(app.slug),
+      });
+      appCardLifecycleControls.set(app.slug, lifecycleControl);
+
       const canManage = canManageApp(state.user, app);
       const cardActions = appCardActions(app, canManage);
 
@@ -657,7 +716,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
       card.appendChild(header);
       card.appendChild(facts);
+      card.appendChild(lifecycleControl.root);
       card.appendChild(actions);
+      applyRestartFeedbackToCard(app.slug, card, lifecycleControl);
       cardHost.appendChild(card);
     }
     }
@@ -703,6 +764,8 @@ document.addEventListener('DOMContentLoaded', () => {
     state.auditPage = 0;
     state.auditHasMore = false;
     state.canCreateApps = false;
+    appRestartFeedback.clear();
+    appCardLifecycleControls.clear();
     newAppButton.hidden = true;
     closeProfileModal();
     renderIdentity(null);
@@ -1026,6 +1089,10 @@ document.addEventListener('DOMContentLoaded', () => {
       // Standard {items,...} list envelope; tolerate a bare array for resilience.
       const gridBody = (await response.json()) || [];
       state.apps = Array.isArray(gridBody) ? gridBody : (Array.isArray(gridBody.items) ? gridBody.items : []);
+      const visibleSlugs = new Set(state.apps.map((app) => app.slug));
+      for (const slug of appRestartFeedback.keys()) {
+        if (!visibleSlugs.has(slug)) appRestartFeedback.delete(slug);
+      }
     }
     clearGridLoading();
     renderApps();
@@ -1851,30 +1918,66 @@ document.addEventListener('DOMContentLoaded', () => {
     loadTokens();
   }
 
-  async function restart(slug, btn) {
+  async function performRestart(slug, btn, cardLocal = false) {
+    if (cardLocal && appRestartFeedback.get(slug)?.phase === 'pending') return;
     setError(appError, '');
+    if (cardLocal) setRestartFeedback(slug, 'pending');
     if (btn) btn.disabled = true;
 
-    let response;
+    let result;
     try {
-      response = await api(`/api/apps/${slug}/restart`, {method: 'POST'});
-    } catch {
-      setError(appError, 'Network error');
-      return;
+      result = await requestAppRestart(api, slug);
     } finally {
       if (btn) btn.disabled = false;
     }
 
-    if (response.status === 401) {
+    if (result.kind === 'unauthorized') {
+      if (cardLocal) clearRestartFeedback(slug);
       await handleUnauthorized();
       return;
     }
-    if (!response.ok) {
-      setError(appError, 'Restart failed');
+
+    if (result.kind !== 'success') {
+      if (cardLocal) {
+        setRestartFeedback(slug, 'error', result.message);
+        // Restart failures can leave the app stopped. Refresh the durable state
+        // while preserving the local recovery panel across the grid re-render.
+        if (result.kind === 'error') await loadApps();
+      } else {
+        setError(appError, result.message);
+      }
       return;
     }
 
-    window.setTimeout(loadApps, 1000);
+    if (result.app) {
+      const app = state.apps.find((item) => item.slug === slug);
+      if (app) Object.assign(app, result.app);
+    }
+
+    if (cardLocal) {
+      // The restart endpoint responds only after deployRun has passed readiness
+      // and the proxy has switched, so success here means the app is serving.
+      const success = setRestartFeedback(slug, 'success');
+      await loadApps();
+      window.setTimeout(() => clearRestartFeedback(slug, success.version), 6000);
+    } else {
+      await loadApps();
+    }
+  }
+
+  async function restart(slug, btn) {
+    const card = btn && btn.closest('.app-card');
+    const control = card && appCardLifecycleControls.get(slug);
+    if (card && control) {
+      const returnFocus = card.querySelector('.kebab-menu > button');
+      control.showConfirmation(returnFocus);
+      return;
+    }
+
+    const app = state.apps.find((item) => item.slug === slug);
+    const copy = restartConfirmationCopy(app ? app.name : slug);
+    if (!window.confirm(`${copy.title}\n\n${copy.message}`)) return;
+    await performRestart(slug, btn, false);
   }
 
   // lifecycleAction is the shared POST-then-refresh path behind Sleep, Stop and
@@ -1884,6 +1987,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 409 with the actual reason (the app is not running, the app uses elastic
   // worker isolation) and that reason is what tells the operator what to do.
   async function lifecycleAction(slug, path, btn, failureMessage) {
+    clearRestartFeedback(slug);
     setError(appError, '');
     if (btn) btn.disabled = true;
 
