@@ -1,0 +1,23 @@
+ShinyHub will change 2 resources and delete 1 app
+shinyhub fleet plan  ·  fleet_id=eu  ·  server=https://hub.example.com
+
+Ownership changes
+  > adopt     app.revenue  owner fleet:legacy → fleet:eu
+
+Changes
+Apps (4)   legend: + create  ~ update  > adopt  - delete  = unchanged
+  ~ update    app.sales-dashboard
+      source 9f3b2e1a → 7a1d9c0f
+      min_replicas 1 → 2
+  = ok        app.stable  unchanged
+
+Deletes (1) — irreversible; requires --prune and confirmation
+  - delete    app.retired  fleet-managed, absent from manifest (prune candidate)
+
+Plan: 0 to create, 1 to update, 1 to adopt, 1 to delete, 1 unchanged.
+
+Next:
+  shinyhub fleet apply --adopt --prune -f fleets/eu.toml
+  adopt 1 app, apply 1 update, delete 1 app (irreversible; confirmation
+  required)
+  Confirmation is required; the suggested command never pre-confirms it.

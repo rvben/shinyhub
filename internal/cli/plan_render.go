@@ -44,37 +44,44 @@ func renderDeploymentPlanWith(out io.Writer, plan deploymentPlan, opts planRende
 		model = deploymentPlanDocument(plan)
 	}
 
-	lines := []string{
-		planOutcomeText(s, model.Outcome),
-		planMetaLine(s, plan, model),
-	}
+	lines := singlePlanHeaderLines(s, plan, model, opts.Width)
 	lines = append(lines, "")
-	lines = append(lines, singlePlanImpactLines(s, model)...)
+	lines = append(lines, singlePlanImpactLines(s, model, opts.Width)...)
 	lines = append(lines, "", "Changes")
 	if len(model.Resources) > 0 {
 		lines = append(lines, planChangeLines(s, model.Resources[0].Changes, opts.Width)...)
 	}
 
 	lines = append(lines, "", "Bundle")
-	lines = append(lines, fmt.Sprintf("  %d files%s%s source%s%s upload%s%s",
-		plan.Bundle.FileCount, planSeparator(s), humanBytes(plan.Bundle.UncompressedBytes),
-		planSeparator(s), humanBytes(int64(plan.Bundle.CompressedBytes)), planSeparator(s), shortDigest(plan.Bundle.Digest)))
+	if opts.Width < 60 {
+		lines = append(lines,
+			fmt.Sprintf("  Files   %d", plan.Bundle.FileCount),
+			"  Source  "+humanBytes(plan.Bundle.UncompressedBytes),
+			"  Upload  "+humanBytes(int64(plan.Bundle.CompressedBytes)),
+			"  Digest  "+shortDigest(plan.Bundle.Digest),
+		)
+	} else {
+		lines = append(lines, fmt.Sprintf("  %d files%s%s source%s%s upload%s%s",
+			plan.Bundle.FileCount, planSeparator(s), humanBytes(plan.Bundle.UncompressedBytes),
+			planSeparator(s), humanBytes(int64(plan.Bundle.CompressedBytes)), planSeparator(s), shortDigest(plan.Bundle.Digest)))
+	}
 	if !opts.Details {
 		if plan.SavedPlan != nil {
-			lines = append(lines, "  Details: shinyhub plan show --details "+shellQuote(plan.SavedPlan.Path))
+			lines = append(lines, wrapPlanValue("  Details: ", "shinyhub plan show --details "+shellQuote(plan.SavedPlan.Path), opts.Width)...)
 		} else {
-			lines = append(lines, "  Details: rerun with --details (or use --output json)")
+			lines = append(lines, wrapPlanValue("  Details: ", "rerun with --details (or use --output json)", opts.Width)...)
 		}
 	}
 
 	c := model.Counts
-	lines = append(lines, "", planCountsLine(s, c))
+	lines = append(lines, "")
+	lines = append(lines, planCountsLines(s, c, opts.Width)...)
 	if plan.SavedPlan != nil {
 		remaining := time.Until(plan.SavedPlan.ExpiresAt).Round(time.Minute)
 		if remaining < 0 {
 			remaining = 0
 		}
-		lines = append(lines, planSavedLine(s, plan.SavedPlan, remaining))
+		lines = append(lines, planSavedLines(s, plan.SavedPlan, remaining, opts.Width)...)
 	}
 	if len(model.NextActions) > 0 {
 		lines = append(lines, "", "Next:")
@@ -98,10 +105,8 @@ func renderFleetPlanHuman(out io.Writer, model planDocument, fleetID, command st
 	} else if model.Counts.Adopt > 0 {
 		severity = planSeverityWarning
 	}
-	lines := []string{
-		planPaint(s, severity, model.Outcome),
-		fleetPlanMetaLine(s, fleetID, model.Target, command),
-	}
+	lines := paintPlanLines(s, severity, wrapPlanValue("", model.Outcome, width))
+	lines = append(lines, fleetPlanMetaLines(s, fleetID, model.Target, command, width)...)
 
 	ownership := filterPlanResources(model.Resources, planActionAdopt)
 	if len(ownership) > 0 {
@@ -132,25 +137,44 @@ func renderFleetPlanHuman(out io.Writer, model planDocument, fleetID, command st
 		lines = append(lines, fleetResourceLines(s, projects, width, false)...)
 	}
 	appCount := len(planResourcesByKind(model, "app"))
-	lines = append(lines, fmt.Sprintf("Apps (%d)   legend: %s", appCount, planLegend))
+	if width < 60 {
+		lines = append(lines, fmt.Sprintf("Apps (%d)", appCount),
+			"  Legend: + create, ~ update",
+			"          > adopt, - delete, = ok")
+	} else {
+		lines = append(lines, fmt.Sprintf("Apps (%d)   legend: %s", appCount, planLegend))
+	}
 	lines = append(lines, fleetResourceLines(s, apps, width, false)...)
 	if len(deletes) > 0 {
 		heading := fmt.Sprintf("Deletes (%d) — irreversible; requires --prune and confirmation", len(deletes))
 		if s.ascii {
 			heading = fmt.Sprintf("Deletes (%d) - irreversible; requires --prune and confirmation", len(deletes))
 		}
-		lines = append(lines, "", planPaint(s, planSeverityDestructive, heading))
+		lines = append(lines, "")
+		if width < 60 {
+			shortHeading := fmt.Sprintf("Deletes (%d) — irreversible", len(deletes))
+			if s.ascii {
+				shortHeading = fmt.Sprintf("Deletes (%d) - irreversible", len(deletes))
+			}
+			lines = append(lines,
+				planPaint(s, planSeverityDestructive, shortHeading),
+				planPaint(s, planSeverityDestructive, "  Requires --prune and confirmation."),
+			)
+		} else {
+			lines = append(lines, planPaint(s, planSeverityDestructive, heading))
+		}
 		lines = append(lines, fleetResourceLines(s, deletes, width, false)...)
 	}
 
-	lines = append(lines, "", planCountsLine(s, model.Counts))
+	lines = append(lines, "")
+	lines = append(lines, planCountsLines(s, model.Counts, width)...)
 	if len(model.NextActions) > 0 {
 		next := model.NextActions[0]
 		lines = append(lines, "", "Next:")
 		lines = append(lines, "  "+next.Command)
 		lines = append(lines, wrapPlanValue("  ", next.Description, width)...)
 		if next.RequiresConfirmation {
-			lines = append(lines, "  Confirmation is required; the suggested command never pre-confirms it.")
+			lines = append(lines, wrapPlanValue("  ", "Confirmation is required; the suggested command never pre-confirms it.", width)...)
 		}
 	}
 	writePlanLines(out, s, width, lines)
@@ -161,6 +185,13 @@ func fleetPlanMetaLine(s styler, fleetID, target, command string) string {
 		return fmt.Sprintf("%s  |  fleet_id=%s  |  server=%s", command, fleetID, target)
 	}
 	return fmt.Sprintf("%s  ·  fleet_id=%s  ·  server=%s", command, fleetID, target)
+}
+
+func fleetPlanMetaLines(s styler, fleetID, target, command string, width int) []string {
+	if width >= 60 {
+		return []string{fleetPlanMetaLine(s, fleetID, target, command)}
+	}
+	return []string{command, "fleet_id: " + fleetID, "server:   " + target}
 }
 
 func filterPlanResources(resources []planResource, action planAction) []planResource {
@@ -180,9 +211,16 @@ func fleetResourceLines(s styler, resources []planResource, width int, ownership
 			glyph, word := planActionGlyphWord(resource.Action)
 			name := resource.Kind + "." + resource.Name
 			base := fmt.Sprintf("  %s %-9s %s", planActionText(s, resource.Action, glyph), word, name)
-			reason := fleetResourceReason(s, resource, ownership)
-			if reason != "" {
-				lines = append(lines, wrapPlanValue(base+"  ", reason, width)...)
+			reasons := fleetResourceReasonLines(s, resource, ownership)
+			if len(reasons) > 0 {
+				if width < 60 || len(reasons) > 1 {
+					lines = append(lines, base)
+					for _, reason := range reasons {
+						lines = append(lines, wrapPlanValue("      ", reason, width)...)
+					}
+				} else {
+					lines = append(lines, wrapPlanValue(base+"  ", reasons[0], width)...)
+				}
 			} else {
 				lines = append(lines, base)
 			}
@@ -195,6 +233,28 @@ func fleetResourceLines(s styler, resources []planResource, width int, ownership
 		name := resource.Kind + "." + resource.Name
 		lines = append(lines, fmt.Sprintf("  %s       %-30s %s",
 			planActionText(s, resource.Action, glyph), name, fleetResourceReason(s, resource, ownership)))
+	}
+	return lines
+}
+
+func fleetResourceReasonLines(s styler, resource planResource, ownership bool) []string {
+	if resource.Action != planActionUpdate || len(resource.Changes) < 2 {
+		if reason := fleetResourceReason(s, resource, ownership); reason != "" {
+			return []string{reason}
+		}
+		return nil
+	}
+	lines := make([]string, 0, len(resource.Changes)+len(resource.Notes))
+	for _, change := range resource.Changes {
+		one := resource
+		one.Changes = []planChange{change}
+		one.Notes = nil
+		lines = append(lines, fleetResourceReason(s, one, ownership))
+	}
+	for _, note := range resource.Notes {
+		if note != "new" && note != "unchanged" {
+			lines = append(lines, note)
+		}
 	}
 	return lines
 }
@@ -213,7 +273,17 @@ func fleetResourceReason(s styler, resource planResource, ownership bool) string
 	return reason
 }
 
-func planOutcomeText(s styler, outcome string) string { return planPaint(s, planSeverityInfo, outcome) }
+func singlePlanHeaderLines(s styler, plan deploymentPlan, model planDocument, width int) []string {
+	lines := wrapPlanValue("", model.Outcome, width)
+	if width >= 60 {
+		return append(lines, planMetaLine(s, plan, model))
+	}
+	kind := "read-only"
+	if plan.SavedPlan != nil {
+		kind = "saved exact plan; no remote changes"
+	}
+	return append(lines, kind, "server: "+model.Target)
+}
 
 func planMetaLine(s styler, plan deploymentPlan, model planDocument) string {
 	kind := "read-only"
@@ -223,7 +293,7 @@ func planMetaLine(s styler, plan deploymentPlan, model planDocument) string {
 	return fmt.Sprintf("%s%s%s", kind, planSeparator(s), model.Target)
 }
 
-func singlePlanImpactLines(s styler, model planDocument) []string {
+func singlePlanImpactLines(s styler, model planDocument, width int) []string {
 	lines := []string{"Impact"}
 	if len(model.Impacts) == 0 && len(model.Warnings) == 0 {
 		return append(lines, "  = none")
@@ -237,10 +307,12 @@ func singlePlanImpactLines(s styler, model planDocument) []string {
 			}
 		}
 		label := string(impact.Kind)
-		lines = append(lines, "  "+planPaint(s, impact.Severity, marker+" "+label)+"  "+impact.Summary)
+		prefix := "  " + planPaint(s, impact.Severity, marker+" "+label) + "  "
+		lines = append(lines, wrapPlanValue(prefix, impact.Summary, width)...)
 	}
 	for _, warning := range model.Warnings {
-		lines = append(lines, "  "+planPaint(s, warning.Severity, "! warning")+"  "+warning.Summary)
+		prefix := "  " + planPaint(s, warning.Severity, "! warning") + "  "
+		lines = append(lines, wrapPlanValue(prefix, warning.Summary, width)...)
 	}
 	return lines
 }
@@ -299,6 +371,28 @@ func planCountsLine(s styler, c planCounts) string {
 	return line
 }
 
+func planCountsLines(s styler, c planCounts, width int) []string {
+	if width >= 60 {
+		return []string{planCountsLine(s, c)}
+	}
+	lines := []string{"Plan:"}
+	for _, item := range []struct {
+		action planAction
+		count  int
+		label  string
+	}{
+		{planActionCreate, c.Create, "create"},
+		{planActionUpdate, c.Update, "update"},
+		{planActionAdopt, c.Adopt, "adopt"},
+		{planActionDelete, c.Delete, "delete"},
+		{planActionUnchanged, c.Unchanged, "unchanged"},
+	} {
+		glyph, _ := planActionGlyphWord(item.action)
+		lines = append(lines, fmt.Sprintf("  %s %d %s", planActionText(s, item.action, glyph), item.count, item.label))
+	}
+	return lines
+}
+
 func planSavedLine(s styler, saved *savedPlanSummary, remaining time.Duration) string {
 	mark := s.glyphOK()
 	if !s.tty {
@@ -308,50 +402,70 @@ func planSavedLine(s styler, saved *savedPlanSummary, remaining time.Duration) s
 		fmt.Sprintf("  %s%s%s remaining", saved.Path, planSeparator(s), remaining)
 }
 
+func planSavedLines(s styler, saved *savedPlanSummary, remaining time.Duration, width int) []string {
+	if width >= 60 {
+		return []string{planSavedLine(s, saved, remaining)}
+	}
+	mark := s.glyphOK()
+	if !s.tty {
+		mark = "+"
+	}
+	return []string{
+		planPaint(s, planSeverityInfo, mark+" Saved exact plan"),
+		"  " + saved.Path,
+		fmt.Sprintf("  %s remaining", remaining),
+	}
+}
+
+func paintPlanLines(s styler, severity planSeverity, lines []string) []string {
+	painted := make([]string, len(lines))
+	for i, line := range lines {
+		painted[i] = planPaint(s, severity, line)
+	}
+	return painted
+}
+
 func singlePlanDetailLines(s styler, plan deploymentPlan, width int) []string {
-	lines := []string{"Details", "  Source      " + plan.Source, "  Bundle      " + plan.Bundle.Digest}
+	lines := []string{"Details"}
+	lines = append(lines, wrapPlanValue("  Source      ", plan.Source, width)...)
+	lines = append(lines, wrapPlanValue("  Bundle      ", plan.Bundle.Digest, width)...)
 	for _, path := range plan.Bundle.Files {
-		lines = append(lines, "    "+path)
+		lines = append(lines, wrapPlanValue("    ", path, width)...)
 	}
 	if plan.Bundle.IgnoreFile != "" {
-		lines = append(lines, fmt.Sprintf("  Ignored     %d paths via %s", len(plan.Bundle.IgnoredPaths), plan.Bundle.IgnoreFile))
+		lines = append(lines, wrapPlanValue("  Ignored     ", fmt.Sprintf("%d paths via %s", len(plan.Bundle.IgnoredPaths), plan.Bundle.IgnoreFile), width)...)
 	}
 	for _, group := range plan.Bundle.ProtectedPaths {
-		lines = append(lines, "  Protected   "+group.Reason+": "+strings.Join(group.Paths, ", "))
+		lines = append(lines, wrapPlanValue("  Protected   ", group.Reason+": "+strings.Join(group.Paths, ", "), width)...)
 	}
-	lines = append(lines,
-		"", "Launch",
-		"  Runtime     "+plan.Launch.Runtime,
-	)
+	lines = append(lines, "", "Launch")
+	lines = append(lines, wrapPlanValue("  Runtime     ", plan.Launch.Runtime, width)...)
 	lines = append(lines, wrapPlanValue("  Command     ", strings.Join(plan.Launch.Command, " "), width)...)
 	if len(plan.Launch.DependencyPreparation) > 0 {
-		lines = append(lines, "  Prepare     "+strings.Join(plan.Launch.DependencyPreparation, planArrow(s)))
+		lines = append(lines, wrapPlanValue("  Prepare     ", strings.Join(plan.Launch.DependencyPreparation, planArrow(s)), width)...)
 	}
-	lines = append(lines, fmt.Sprintf("  Readiness   GET %s%s%s%stimeout %ds",
-		plan.Launch.ReadinessPath, planSeparator(s), plan.Launch.ReadinessStatus,
-		planSeparator(s), plan.Launch.StartupTimeoutSeconds))
+	readiness := fmt.Sprintf("GET %s%s%s%stimeout %ds", plan.Launch.ReadinessPath, planSeparator(s),
+		plan.Launch.ReadinessStatus, planSeparator(s), plan.Launch.StartupTimeoutSeconds)
+	lines = append(lines, wrapPlanValue("  Readiness   ", readiness, width)...)
 	lines = append(lines, "", "Manifest")
 	if !plan.Manifest.Present {
-		lines = append(lines, "  No shinyhub.toml; server defaults and current settings apply.")
+		lines = append(lines, wrapPlanValue("  ", "No shinyhub.toml; server defaults and current settings apply.", width)...)
 	} else {
 		for _, effect := range plan.Manifest.Effects {
-			lines = append(lines, "  "+effect)
+			lines = append(lines, wrapPlanValue("  ", effect, width)...)
 		}
 	}
 	lines = append(lines, "", "Target")
-	lines = append(lines,
-		"  App         "+plan.Slug,
-		"  URL         "+plan.AppURL,
-		"  Permission  "+plan.Permission,
-		"  Visibility  "+plan.Visibility,
-	)
+	lines = append(lines, wrapPlanValue("  App         ", plan.Slug, width)...)
+	lines = append(lines, wrapPlanValue("  URL         ", plan.AppURL, width)...)
+	lines = append(lines, wrapPlanValue("  Permission  ", plan.Permission, width)...)
+	lines = append(lines, wrapPlanValue("  Visibility  ", plan.Visibility, width)...)
 	if plan.SavedPlan != nil {
-		lines = append(lines, "", "Saved plan metadata",
-			"  Plan ID     "+plan.SavedPlan.PlanID,
-			"  Expires     "+plan.SavedPlan.ExpiresAt.Format(time.RFC3339),
-			"  Integrity   "+plan.SavedPlan.Integrity,
-			"  Contains application source; keep private and do not commit.",
-		)
+		lines = append(lines, "", "Saved plan metadata")
+		lines = append(lines, wrapPlanValue("  Plan ID     ", plan.SavedPlan.PlanID, width)...)
+		lines = append(lines, wrapPlanValue("  Expires     ", plan.SavedPlan.ExpiresAt.Format(time.RFC3339), width)...)
+		lines = append(lines, wrapPlanValue("  Integrity   ", plan.SavedPlan.Integrity, width)...)
+		lines = append(lines, wrapPlanValue("  ", "Contains application source; keep private and do not commit.", width)...)
 	}
 	return lines
 }
@@ -412,6 +526,18 @@ func wrapPlanValue(prefix, value string, width int) []string {
 	lines, current := []string{}, prefix
 	used := 0
 	for _, word := range words {
+		if visibleWidth(word) > available {
+			if used > 0 {
+				lines = append(lines, current)
+			}
+			chunks := splitPlanToken(word, available)
+			for _, chunk := range chunks[:len(chunks)-1] {
+				lines = append(lines, indent+chunk)
+			}
+			current = indent + chunks[len(chunks)-1]
+			used = visibleWidth(chunks[len(chunks)-1])
+			continue
+		}
 		needed := visibleWidth(word)
 		if used > 0 {
 			needed++
@@ -429,6 +555,23 @@ func wrapPlanValue(prefix, value string, width int) []string {
 		used += visibleWidth(word)
 	}
 	return append(lines, current)
+}
+
+func splitPlanToken(token string, width int) []string {
+	if width <= 0 || visibleWidth(token) <= width {
+		return []string{token}
+	}
+	runes := []rune(token)
+	chunks := make([]string, 0, (len(runes)+width-1)/width)
+	for len(runes) > 0 {
+		n := width
+		if n > len(runes) {
+			n = len(runes)
+		}
+		chunks = append(chunks, string(runes[:n]))
+		runes = runes[n:]
+	}
+	return chunks
 }
 
 func writePlanLines(out io.Writer, s styler, width int, lines []string) {

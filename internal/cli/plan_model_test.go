@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,6 +169,123 @@ func TestFleetPlanASCIIAndColorParity(t *testing.T) {
 	}
 	if stripANSI(colored.String()) != plain.String() {
 		t.Fatalf("fleet color changed meaning or layout:\n--- color stripped ---\n%s--- plain ---\n%s", stripANSI(colored.String()), plain.String())
+	}
+}
+
+func TestPlanRenderersGoldenWidthAndModeMatrix(t *testing.T) {
+	single := singlePlanModelFixture()
+	single.Plan = deploymentPlanDocument(single)
+	fleetDoc := fleetPlanDocument("shinyhub fleet plan", "fleets/eu.toml", &fleet.Manifest{FleetID: "eu"},
+		"https://hub.example.com", fleetPlanModelDiffFixture(), nil)
+
+	for _, width := range []int{40, 80, 120, 160} {
+		t.Run(fmt.Sprintf("single/%d", width), func(t *testing.T) {
+			var plain, colored, asciiOut, detailed bytes.Buffer
+			renderDeploymentPlanWith(&plain, single, planRenderOptions{Width: width})
+			renderDeploymentPlanWith(&colored, single, planRenderOptions{Width: width, Styler: &styler{color: true, tty: true}})
+			renderDeploymentPlanWith(&asciiOut, single, planRenderOptions{Width: width, Styler: &styler{ascii: true}})
+			renderDeploymentPlanWith(&detailed, single, planRenderOptions{Width: width, Details: true})
+			assertPlanResponsiveWidth(t, plain.String(), width)
+			assertPlanResponsiveWidth(t, detailed.String(), width)
+			assertPlanDecisionContract(t, plain.String(), "ShinyHub will update", "Impact", "Changes", "Plan:", "Next:")
+			assertPlanDecisionContract(t, detailed.String(), "Details", "Launch", "Manifest", "Target")
+			if strings.Contains(plain.String(), "…") || strings.Contains(detailed.String(), "…") {
+				t.Errorf("responsive plan hid content behind ellipsis at width %d:\n%s", width, detailed.String())
+			}
+			assertColorAndASCIIModeParity(t, plain.String(), colored.String(), asciiOut.String())
+			assertTextGolden(t, fmt.Sprintf("plan_single_changed_%d.golden", width), plain.Bytes())
+		})
+
+		t.Run(fmt.Sprintf("fleet/%d", width), func(t *testing.T) {
+			var plain, colored, asciiOut bytes.Buffer
+			renderFleetPlanHuman(&plain, fleetDoc, "eu", "shinyhub fleet plan", width, styler{})
+			renderFleetPlanHuman(&colored, fleetDoc, "eu", "shinyhub fleet plan", width, styler{color: true, tty: true})
+			renderFleetPlanHuman(&asciiOut, fleetDoc, "eu", "shinyhub fleet plan", width, styler{ascii: true})
+			assertPlanResponsiveWidth(t, plain.String(), width)
+			assertPlanDecisionContract(t, plain.String(), "ShinyHub will", "Ownership changes", "Changes", "Deletes", "Plan:", "Next:")
+			assertColorAndASCIIModeParity(t, plain.String(), colored.String(), asciiOut.String())
+			assertTextGolden(t, fmt.Sprintf("plan_fleet_risk_%d.golden", width), plain.Bytes())
+		})
+	}
+}
+
+func TestFleetPlanLargeFixtureIsCompleteAndDeterministicallyOrdered(t *testing.T) {
+	const appCount = 1000
+	diff := make([]fleet.AppDiff, 0, appCount)
+	for i := appCount - 1; i >= 0; i-- {
+		diff = append(diff, fleet.AppDiff{
+			Slug:         fmt.Sprintf("app-%04d", i),
+			Action:       fleet.ActionUpdateSource,
+			ServerDigest: fmt.Sprintf("sha256:old-%04d", i),
+			LocalDigest:  fmt.Sprintf("sha256:new-%04d", i),
+		})
+	}
+	doc := fleetPlanDocument("shinyhub fleet plan", "fleet.toml", &fleet.Manifest{FleetID: "large"},
+		"https://hub.example.com", diff, nil)
+	if doc.Counts.Update != appCount || len(doc.Resources) != appCount {
+		t.Fatalf("large plan counts/resources = %d/%d, want %d/%d", doc.Counts.Update, len(doc.Resources), appCount, appCount)
+	}
+
+	var out bytes.Buffer
+	renderFleetPlanHuman(&out, doc, "large", "shinyhub fleet plan", 80, styler{})
+	assertPlanResponsiveWidth(t, out.String(), 80)
+	previous := -1
+	for i := 0; i < appCount; i++ {
+		name := fmt.Sprintf("app-%04d", i)
+		position := strings.Index(out.String(), name)
+		if position < 0 {
+			t.Fatalf("large plan omitted %s", name)
+		}
+		if position <= previous {
+			t.Fatalf("large plan is not ordered at %s", name)
+		}
+		previous = position
+	}
+	if !strings.Contains(out.String(), "Plan: 0 to create, 1000 to update") {
+		t.Fatalf("large plan omitted decision totals")
+	}
+}
+
+// Suggested shell commands remain a single copy-pastable line and may be
+// soft-wrapped by a very narrow terminal. Every other line is owned by the
+// renderer and must fit the selected viewport without relying on terminal
+// wrapping.
+func assertPlanResponsiveWidth(t *testing.T, output string, width int) {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "shinyhub ") {
+			continue
+		}
+		if got := visibleWidth(line); got > width {
+			t.Errorf("line is %d columns wide at width %d: %q", got, width, line)
+		}
+	}
+}
+
+func assertPlanDecisionContract(t *testing.T, output string, anchors ...string) {
+	t.Helper()
+	for _, anchor := range anchors {
+		if !strings.Contains(output, anchor) {
+			t.Errorf("plan missing decision anchor %q:\n%s", anchor, output)
+		}
+	}
+}
+
+func assertColorAndASCIIModeParity(t *testing.T, plain, colored, asciiOut string) {
+	t.Helper()
+	if stripANSI(colored) != plain {
+		t.Errorf("semantic color changed plan content or layout:\n--- color stripped ---\n%s--- plain ---\n%s", stripANSI(colored), plain)
+	}
+	for _, r := range asciiOut {
+		if r > 127 {
+			t.Errorf("ASCII plan contains non-ASCII rune %q:\n%s", r, asciiOut)
+			break
+		}
+	}
+	for _, anchor := range []string{"Plan:", "Next:"} {
+		if !strings.Contains(asciiOut, anchor) {
+			t.Errorf("ASCII plan missing decision anchor %q:\n%s", anchor, asciiOut)
+		}
 	}
 }
 

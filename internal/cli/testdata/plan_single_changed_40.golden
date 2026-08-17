@@ -1,0 +1,33 @@
+ShinyHub will update sales-dashboard
+read-only
+server: https://hub.example.com
+
+Impact
+  ! availability  deploy new version and
+                  replace running
+                  replicas
+  ! warning  two running replicas will
+             be replaced
+
+Changes
+  ~ content
+      current  9f3b2e1a
+      planned  7a1d9c0f
+
+Bundle
+  Files   2
+  Source  2.0KiB
+  Upload  1.0KiB
+  Digest  7a1d9c0f
+  Details: rerun with --details (or use
+           --output json)
+
+Plan:
+  + 0 create
+  ~ 1 update
+  > 0 adopt
+  - 0 delete
+  = 0 unchanged
+
+Next:
+  shinyhub deploy /work/sales-dashboard --slug sales-dashboard --wait
