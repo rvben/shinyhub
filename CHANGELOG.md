@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.13](https://github.com/rvben/shinyhub/compare/v0.11.12...v0.11.13) - 2026-08-17
+
+### Fixed
+
+- **fleet**: report unmanaged app settings in plans ([9ab1794](https://github.com/rvben/shinyhub/commit/9ab1794500a21caf9392a5577bd235dd54451d94))
+
 ## [0.11.12](https://github.com/rvben/shinyhub/compare/v0.11.11...v0.11.12) - 2026-08-17
 
 ### Added
