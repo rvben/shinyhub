@@ -89,6 +89,10 @@ func TestWriteFleetPlanJSON_IncludesProjectsArray(t *testing.T) {
 	if p0["slug"] != "sales" || p0["action"] != "create" {
 		t.Errorf("project entry = %v, want slug=sales action=create", p0)
 	}
+	plan, ok := env["plan"].(map[string]any)
+	if !ok || plan["schema_version"] != float64(planModelSchemaVersion) || plan["scope"] != "fleet" {
+		t.Fatalf("shared plan model missing from fleet JSON: %v", env["plan"])
+	}
 }
 
 // FLT-5: the plan reason for an adopt must distinguish a genuinely unmanaged
@@ -200,7 +204,7 @@ func TestPlanOutput_ExposesUnmanagedConfigWithoutChangingAction(t *testing.T) {
 func TestApplySuggestion_CombinesAllPendingFlags(t *testing.T) {
 	c := planCounts{Create: 1, Update: 2, Adopt: 1, Delete: 1}
 	cmd, desc := applySuggestion(defaultFleetManifest, c)
-	if cmd != "shinyhub fleet apply --adopt --prune --yes" {
+	if cmd != "shinyhub fleet apply --adopt --prune" {
 		t.Fatalf("combined command = %q", cmd)
 	}
 	for _, want := range []string{"adopt 1 app", "1 create", "2 update", "delete 1 app"} {
@@ -268,8 +272,11 @@ func TestRenderFleetPlan_NextBlockIsSingleCombinedCommand(t *testing.T) {
 	if n := strings.Count(next, "shinyhub fleet apply"); n != 1 {
 		t.Fatalf("Next block must have exactly one apply command, found %d:\n%s", n, next)
 	}
-	if !strings.Contains(next, "--adopt") || !strings.Contains(next, "--prune --yes") {
+	if !strings.Contains(next, "--adopt") || !strings.Contains(next, "--prune") {
 		t.Fatalf("combined command missing required flags:\n%s", next)
+	}
+	if strings.Contains(next, "--yes") {
+		t.Fatalf("a suggested destructive command must not pre-confirm deletion:\n%s", next)
 	}
 }
 

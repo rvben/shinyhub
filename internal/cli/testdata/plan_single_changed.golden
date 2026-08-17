@@ -1,0 +1,38 @@
+ShinyHub will update sales-dashboard
+Deployment plan (read-only)
+
+  Target      https://hub.example.com
+  App         sales-dashboard
+  URL         https://hub.example.com/app/sales-dashboard/
+  Permission  manage existing app
+  Action      update (changed content)
+  Visibility  private
+  Lifecycle   deploy new version and replace running replicas
+
+Changes
+  ACTION    AREA     CURRENT          PLANNED
+  ~ update  content  sha256:9f3b2e1a  sha256:7a1d9c0f
+
+Bundle
+  Source: /work/sales-dashboard
+  Digest: sha256:7a1d9c0f
+  Size: 2.0KiB source → 1.0KiB upload (2 files)
+    app.py
+    requirements.txt
+
+Launch
+  Runtime: python
+  Command: uv run shiny run app.py --host {host} --port {port}
+  Scope: bundle-resolved base command; server runtime and tracing policy may wrap it
+  Placeholders: {host} and {port} are assigned per replica
+  Readiness: GET /; any 2xx or 3xx; timeout 120s
+
+Manifest
+  No shinyhub.toml; server defaults and current app settings apply.
+
+Warning: two running replicas will be replaced
+
+Result
+  ShinyHub will update sales-dashboard
+  Plan: 0 to create, 1 to update, 0 to adopt, 0 to delete, 0 unchanged.
+  Run: shinyhub deploy /work/sales-dashboard --slug sales-dashboard --wait

@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "scope": "single-app",
+  "command": "shinyhub plan",
+  "target": "https://hub.example.com",
+  "outcome": "ShinyHub will update sales-dashboard",
+  "resources": [
+    {
+      "kind": "app",
+      "name": "sales-dashboard",
+      "action": "update",
+      "changes": [
+        {
+          "field": "content",
+          "action": "update",
+          "current": {
+            "kind": "digest",
+            "display": "sha256:9f3b2e1a"
+          },
+          "planned": {
+            "kind": "digest",
+            "display": "sha256:7a1d9c0f"
+          }
+        }
+      ],
+      "impacts": [
+        {
+          "kind": "availability",
+          "severity": "warning",
+          "summary": "deploy new version and replace running replicas"
+        }
+      ],
+      "notes": []
+    }
+  ],
+  "impacts": [
+    {
+      "kind": "availability",
+      "severity": "warning",
+      "summary": "deploy new version and replace running replicas"
+    }
+  ],
+  "warnings": [
+    {
+      "severity": "warning",
+      "summary": "two running replicas will be replaced"
+    }
+  ],
+  "counts": {
+    "create": 0,
+    "update": 1,
+    "adopt": 0,
+    "delete": 0,
+    "unchanged": 0
+  },
+  "next_actions": [
+    {
+      "command": "shinyhub deploy /work/sales-dashboard --slug sales-dashboard --wait",
+      "description": "Apply this preview from the selected source",
+      "requires_confirmation": false
+    }
+  ]
+}

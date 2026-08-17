@@ -167,12 +167,17 @@ func TestPendingCountsProjectDrift(t *testing.T) {
 
 // The summary tally and the exit code must agree: a created project counts in
 // both, or `fleet plan` prints "1 to create" and exits 0.
-func TestAddProjectCountsFoldsIntoPlanCounts(t *testing.T) {
-	c := addProjectCounts(planCounts{}, []fleet.ProjectDiff{
+func TestSharedPlanCountsIncludeProjects(t *testing.T) {
+	projects := []fleet.ProjectDiff{
 		{Slug: "a", Action: fleet.ActionCreate},
 		{Slug: "b", Action: fleet.ActionUpdateConfig},
 		{Slug: "c", Action: fleet.ActionUnchanged},
-	})
+	}
+	resources := make([]planResource, 0, len(projects))
+	for _, project := range projects {
+		resources = append(resources, fleetProjectPlanResource(project))
+	}
+	c := countsFromPlanResources(resources)
 	if c.Create != 1 || c.Update != 1 || c.Unchanged != 1 {
 		t.Errorf("counts = %+v, want 1/1/1", c)
 	}

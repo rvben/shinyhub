@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "scope": "fleet",
+  "command": "shinyhub fleet plan",
+  "target": "https://hub.example.com",
+  "outcome": "ShinyHub will change 3 resources and delete 1 app",
+  "resources": [
+    {
+      "kind": "project",
+      "name": "analytics",
+      "action": "update",
+      "changes": [
+        {
+          "field": "name",
+          "action": "update",
+          "current": {
+            "kind": "string",
+            "display": "Analytics"
+          },
+          "planned": {
+            "kind": "string",
+            "display": "Revenue analytics"
+          }
+        }
+      ],
+      "impacts": [],
+      "notes": []
+    },
+    {
+      "kind": "app",
+      "name": "sales-dashboard",
+      "action": "update",
+      "changes": [
+        {
+          "field": "content",
+          "action": "update",
+          "current": {
+            "kind": "digest",
+            "display": "sha256:9f3b2e1a"
+          },
+          "planned": {
+            "kind": "digest",
+            "display": "sha256:7a1d9c0f"
+          }
+        },
+        {
+          "field": "min_replicas",
+          "action": "update",
+          "current": {
+            "kind": "string",
+            "display": "1"
+          },
+          "planned": {
+            "kind": "string",
+            "display": "2"
+          }
+        }
+      ],
+      "impacts": [],
+      "notes": []
+    },
+    {
+      "kind": "app",
+      "name": "revenue",
+      "action": "adopt",
+      "changes": [
+        {
+          "field": "owner",
+          "action": "adopt",
+          "current": {
+            "kind": "string",
+            "display": "fleet:legacy"
+          },
+          "planned": {
+            "kind": "string",
+            "display": "fleet:eu"
+          }
+        }
+      ],
+      "impacts": [
+        {
+          "kind": "ownership",
+          "severity": "warning",
+          "summary": "ownership will transfer to this fleet"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "kind": "app",
+      "name": "retired",
+      "action": "delete",
+      "changes": [],
+      "impacts": [
+        {
+          "kind": "destructive",
+          "severity": "destructive",
+          "summary": "fleet-managed app is absent from the manifest and eligible for pruning"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "kind": "app",
+      "name": "stable",
+      "action": "unchanged",
+      "changes": [],
+      "impacts": [],
+      "notes": [
+        "unchanged"
+      ]
+    }
+  ],
+  "impacts": [
+    {
+      "kind": "ownership",
+      "severity": "warning",
+      "summary": "ownership will transfer to this fleet"
+    },
+    {
+      "kind": "destructive",
+      "severity": "destructive",
+      "summary": "fleet-managed app is absent from the manifest and eligible for pruning"
+    }
+  ],
+  "warnings": [],
+  "counts": {
+    "create": 0,
+    "update": 2,
+    "adopt": 1,
+    "delete": 1,
+    "unchanged": 1
+  },
+  "next_actions": [
+    {
+      "command": "shinyhub fleet apply --adopt --prune -f fleets/eu.toml",
+      "description": "adopt 1 app, apply 2 update, delete 1 app (irreversible; confirmation required)",
+      "requires_confirmation": true
+    }
+  ]
+}

@@ -20,16 +20,20 @@ const fleetPlanSchemaVersion = 2
 const planLegend = "+ create  ~ update  > adopt  - delete  = unchanged"
 
 func glyphWord(a fleet.Action) (string, string) {
+	return planActionGlyphWord(canonicalFleetAction(a))
+}
+
+func planActionGlyphWord(a planAction) (string, string) {
 	switch a {
-	case fleet.ActionCreate:
+	case planActionCreate:
 		return "+", "create"
-	case fleet.ActionUpdateSource, fleet.ActionUpdateConfig, fleet.ActionUpdateSourceConfig:
+	case planActionUpdate:
 		return "~", "update"
-	case fleet.ActionAdopt:
+	case planActionAdopt:
 		return ">", "adopt"
-	case fleet.ActionUnchanged:
+	case planActionUnchanged:
 		return "=", "ok"
-	case fleet.ActionDelete:
+	case planActionDelete:
 		return "-", "delete"
 	}
 	return "?", string(a)
@@ -58,44 +62,7 @@ func foreignAdoptWarning(diff []fleet.AppDiff, adopt bool) string {
 }
 
 func reasonText(d fleet.AppDiff) string {
-	var reason string
-	switch d.Action {
-	case fleet.ActionCreate:
-		reason = "new"
-	case fleet.ActionAdopt:
-		if d.AdoptFrom != "" {
-			reason = fmt.Sprintf("owned by %s; --adopt will TRANSFER ownership to this fleet", d.AdoptFrom)
-		} else {
-			reason = "unmanaged, not owned by this fleet (needs --adopt)"
-		}
-	case fleet.ActionUnchanged:
-		reason = "unchanged"
-	case fleet.ActionDelete:
-		reason = "fleet-managed, absent from manifest (prune candidate)"
-	default:
-		var parts []string
-		if d.Action == fleet.ActionUpdateSource || d.Action == fleet.ActionUpdateSourceConfig {
-			sv := d.ServerDigest
-			if sv == "" {
-				sv = "(none)"
-			}
-			parts = append(parts, fmt.Sprintf("source %s -> %s", shortDigest(sv), shortDigest(d.LocalDigest)))
-		}
-		if d.Action == fleet.ActionUpdateConfig || d.Action == fleet.ActionUpdateSourceConfig {
-			for _, c := range d.ConfigDrift {
-				parts = append(parts, fmt.Sprintf("%s %s -> %s", c.Key, c.Server, c.Desired))
-			}
-		}
-		reason = strings.Join(parts, ", ")
-	}
-	if len(d.Unmanaged) == 0 {
-		return reason
-	}
-	items := make([]string, 0, len(d.Unmanaged))
-	for _, u := range d.Unmanaged {
-		items = append(items, fmt.Sprintf("%s=%s (default %s)", u.Key, u.Server, u.Default))
-	}
-	return reason + "; unmanaged: " + strings.Join(items, ", ")
+	return planResourceReason(fleetAppPlanResource(d, ""))
 }
 
 func shortDigest(d string) string {
@@ -107,29 +74,6 @@ func shortDigest(d string) string {
 		return "(none)"
 	}
 	return d
-}
-
-type planCounts struct {
-	Create, Update, Adopt, Delete, Unchanged int
-}
-
-func countDiff(diff []fleet.AppDiff) planCounts {
-	var c planCounts
-	for _, d := range diff {
-		switch d.Action {
-		case fleet.ActionCreate:
-			c.Create++
-		case fleet.ActionUpdateSource, fleet.ActionUpdateConfig, fleet.ActionUpdateSourceConfig:
-			c.Update++
-		case fleet.ActionAdopt:
-			c.Adopt++
-		case fleet.ActionDelete:
-			c.Delete++
-		case fleet.ActionUnchanged:
-			c.Unchanged++
-		}
-	}
-	return c
 }
 
 // pending reports whether the diff has any non-unchanged action (drives
@@ -146,22 +90,6 @@ func pending(diff []fleet.AppDiff, projects []fleet.ProjectDiff) bool {
 		}
 	}
 	return false
-}
-
-// addProjectCounts folds project rows into the same create/update tally the
-// apps use, so the summary line and the exit code cover both passes.
-func addProjectCounts(c planCounts, projects []fleet.ProjectDiff) planCounts {
-	for _, p := range projects {
-		switch p.Action {
-		case fleet.ActionCreate:
-			c.Create++
-		case fleet.ActionUpdateConfig:
-			c.Update++
-		case fleet.ActionUnchanged:
-			c.Unchanged++
-		}
-	}
-	return c
 }
 
 // shellQuote returns s safe to paste as a single POSIX-shell argv word. A
@@ -225,8 +153,8 @@ func applySuggestion(file string, c planCounts) (cmd, desc string) {
 		actions = append(actions, "apply "+strings.Join(cu, " + "))
 	}
 	if c.Delete > 0 {
-		parts = append(parts, "--prune", "--yes")
-		actions = append(actions, "delete "+plural(c.Delete, "app")+" (irreversible: removes data dir)")
+		parts = append(parts, "--prune")
+		actions = append(actions, "delete "+plural(c.Delete, "app")+" (irreversible; confirmation required)")
 	}
 	if file != "" && file != defaultFleetManifest {
 		parts = append(parts, "-f", shellQuote(file))
@@ -240,13 +168,14 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *
 
 	if f.jsonOutput {
 		code, reason := planExitInfo(f, diff, projects)
-		if err := writeFleetPlanJSON(out, m, host, diff, projects, code, reason); err != nil {
+		if err := writeFleetPlanJSONWithFile(out, m, host, f.file, diff, projects, code, reason); err != nil {
 			return &ExitCodeError{Code: 1, Err: err}
 		}
 		return planExit(f, diff, projects)
 	}
 
-	c := addProjectCounts(countDiff(diff), projects)
+	model := fleetPlanDocument(cmdLabel, f.file, m, host, diff, projects)
+	c := model.Counts
 	summary := fmt.Sprintf(
 		"Plan: %d to create, %d to update, %d to adopt, %d to delete, %d unchanged.",
 		c.Create, c.Update, c.Adopt, c.Delete, c.Unchanged)
@@ -256,57 +185,59 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *
 		return planExit(f, diff, projects)
 	}
 
-	fmt.Fprintf(out, "%s  ·  fleet_id=%s  ·  server=%s\n\n", cmdLabel, m.FleetID, host)
+	fmt.Fprintf(out, "%s\n%s  ·  fleet_id=%s  ·  server=%s\n\n", model.Outcome, cmdLabel, m.FleetID, host)
 
 	// Omitted entirely when the manifest declares no projects, so existing
 	// output stays byte-identical for manifests that do not use the feature.
-	if len(projects) > 0 {
-		fmt.Fprintf(out, "Projects (%d)\n", len(projects))
+	projectResources := planResourcesByKind(model, "project")
+	if len(projectResources) > 0 {
+		fmt.Fprintf(out, "Projects (%d)\n", len(projectResources))
 		wSlug := 0
-		for _, p := range projects {
-			if len(p.Slug) > wSlug {
-				wSlug = len(p.Slug)
+		for _, resource := range projectResources {
+			if len(resource.Name) > wSlug {
+				wSlug = len(resource.Name)
 			}
 		}
-		for _, p := range projects {
-			g, word := glyphWord(p.Action)
-			keys := make([]string, 0, len(p.Drift))
-			for _, it := range p.Drift {
-				keys = append(keys, it.Key)
+		for _, resource := range projectResources {
+			g, word := planActionGlyphWord(resource.Action)
+			keys := make([]string, 0, len(resource.Changes))
+			for _, change := range resource.Changes {
+				keys = append(keys, change.Field)
 			}
 			reason := ""
 			if len(keys) > 0 {
 				reason = strings.Join(keys, ", ")
 			}
-			fmt.Fprintf(out, "  %s  %-*s  %-*s  %s\n", g, 9, word, wSlug, p.Slug, reason)
+			fmt.Fprintf(out, "  %s  %-*s  %-*s  %s\n", g, 9, word, wSlug, resource.Name, reason)
 		}
 		fmt.Fprintln(out)
 	}
 
-	fmt.Fprintf(out, "Apps (%d)   legend: %s\n", len(diff), planLegend)
+	appResources := planResourcesByKind(model, "app")
+	fmt.Fprintf(out, "Apps (%d)   legend: %s\n", len(appResources), planLegend)
 
 	// Aligned columns: glyph word slug reason.
 	wWord, wSlug := 0, 0
-	for _, d := range diff {
-		_, word := glyphWord(d.Action)
+	for _, resource := range appResources {
+		_, word := planActionGlyphWord(resource.Action)
 		if len(word) > wWord {
 			wWord = len(word)
 		}
-		if len(d.Slug) > wSlug {
-			wSlug = len(d.Slug)
+		if len(resource.Name) > wSlug {
+			wSlug = len(resource.Name)
 		}
 	}
-	for _, d := range diff {
-		g, word := glyphWord(d.Action)
-		fmt.Fprintf(out, "  %s  %-*s  %-*s  %s\n", g, wWord, word, wSlug, d.Slug, reasonText(d))
+	for _, resource := range appResources {
+		g, word := planActionGlyphWord(resource.Action)
+		fmt.Fprintf(out, "  %s  %-*s  %-*s  %s\n", g, wWord, word, wSlug, resource.Name, planResourceReason(resource))
 	}
 	fmt.Fprintf(out, "\n%s\n", summary)
 
 	// Actionable Next block: ONE combined apply command covering every pending
 	// action, with the human description of what it will do.
 	if c.Create+c.Update+c.Adopt+c.Delete > 0 {
-		applyCmd, desc := applySuggestion(f.file, c)
-		fmt.Fprintf(out, "\nNext:\n  %s\n      (%s)\n", applyCmd, desc)
+		next := model.NextActions[0]
+		fmt.Fprintf(out, "\nNext:\n  %s\n      (%s)\n", next.Command, next.Description)
 	}
 	return planExit(f, diff, projects)
 }
@@ -388,6 +319,7 @@ type jsonEnvelope struct {
 	Projects      []jsonProject `json:"projects"`
 	Apps          []jsonApp     `json:"apps"`
 	Summary       jsonSummary   `json:"summary"`
+	Plan          planDocument  `json:"plan"`
 }
 
 // jsonProjectsFromDiff maps the project diff to its JSON shape, sorted by slug
@@ -409,6 +341,10 @@ func jsonProjectsFromDiff(projects []fleet.ProjectDiff) []jsonProject {
 }
 
 func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Manifest, host string, diff []fleet.AppDiff, projects []fleet.ProjectDiff, exitCode int, exitReason string) error {
+	return writeFleetPlanJSONWithFile(out, m, host, defaultFleetManifest, diff, projects, exitCode, exitReason)
+}
+
+func writeFleetPlanJSONWithFile(out interface{ Write([]byte) (int, error) }, m *fleet.Manifest, host, file string, diff []fleet.AppDiff, projects []fleet.ProjectDiff, exitCode int, exitReason string) error {
 	apps := make([]jsonApp, 0, len(diff))
 	// Stable ordering for machine consumers: by slug.
 	sorted := append([]fleet.AppDiff(nil), diff...)
@@ -430,7 +366,8 @@ func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Ma
 			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
 		})
 	}
-	c := addProjectCounts(countDiff(diff), projects)
+	model := fleetPlanDocument("shinyhub fleet plan", file, m, host, diff, projects)
+	c := model.Counts
 	env := jsonEnvelope{
 		SchemaVersion: fleetPlanSchemaVersion,
 		FleetID:       m.FleetID,
@@ -446,6 +383,7 @@ func writeFleetPlanJSON(out interface{ Write([]byte) (int, error) }, m *fleet.Ma
 			ExitCode:   exitCode,
 			ExitReason: exitReason,
 		},
+		Plan: model,
 	}
 	b, err := json.Marshal(env)
 	if err != nil {

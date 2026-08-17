@@ -83,6 +83,7 @@ type deploymentPlan struct {
 	Warnings      []string                  `json:"warnings"`
 	DeployCommand string                    `json:"deploy_command"`
 	ExitCode      int                       `json:"exit_code"`
+	Plan          planDocument              `json:"plan"`
 }
 
 // prepareDeployment is the shared, side-effect-free preparation used by both
@@ -458,15 +459,33 @@ func assembleDeploymentPlan(cfg *cliConfig, source *deploymentSource, bundle *bu
 	if detailed && plan.ChangeStatus != "unchanged" {
 		plan.ExitCode = 2
 	}
+	plan.Plan = deploymentPlanDocument(plan)
 	return plan
 }
 
 func renderDeploymentPlan(out io.Writer, plan deploymentPlan) {
+	model := plan.Plan
+	if model.SchemaVersion == 0 {
+		model = deploymentPlanDocument(plan)
+	}
+	fmt.Fprintln(out, model.Outcome)
 	fmt.Fprintln(out, "Deployment plan (read-only)")
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "\n  Target\t%s\n  App\t%s\n  URL\t%s\n  Permission\t%s\n  Action\t%s (%s content)\n  Visibility\t%s\n  Lifecycle\t%s\n",
 		plan.Host, plan.Slug, plan.AppURL, plan.Permission, plan.Action, plan.ChangeStatus, plan.Visibility, plan.Lifecycle)
 	_ = w.Flush()
+
+	if len(model.Resources) > 0 && len(model.Resources[0].Changes) > 0 {
+		fmt.Fprintln(out, "\nChanges")
+		changes := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(changes, "  ACTION\tAREA\tCURRENT\tPLANNED")
+		for _, change := range model.Resources[0].Changes {
+			current, planned := planChangeValues(change)
+			glyph, word := planActionGlyphWord(change.Action)
+			fmt.Fprintf(changes, "  %s %s\t%s\t%s\t%s\n", glyph, word, change.Field, current, planned)
+		}
+		_ = changes.Flush()
+	}
 
 	fmt.Fprintf(out, "\nBundle\n  Source: %s\n  Digest: %s\n  Size: %s source → %s upload (%d files)\n",
 		plan.Source, plan.Bundle.Digest, humanBytes(plan.Bundle.UncompressedBytes), humanBytes(int64(plan.Bundle.CompressedBytes)), plan.Bundle.FileCount)
@@ -502,19 +521,25 @@ func renderDeploymentPlan(out io.Writer, plan deploymentPlan) {
 			fmt.Fprintln(out, "  "+effect)
 		}
 	}
-	for _, warning := range plan.Warnings {
-		fmt.Fprintln(out, "\nWarning: "+warning)
+	for _, warning := range model.Warnings {
+		fmt.Fprintln(out, "\nWarning: "+warning.Summary)
 	}
 
 	fmt.Fprintln(out, "\nResult")
-	if plan.ChangeStatus == "unchanged" {
+	contentChange := planChangeByField(model.Resources[0].Changes, "content")
+	if contentChange != nil && contentChange.Action == planActionUnchanged {
 		fmt.Fprintln(out, "  No content change. Deploy would still record a deployment and restart the app according to the lifecycle above.")
-	} else if plan.ChangeStatus == "unknown" {
+	} else if contentChange != nil && contentChange.Current != nil && contentChange.Current.Unknown {
 		fmt.Fprintln(out, "  Live content digest is unavailable; deploy may change content. The plan remains read-only.")
 	} else {
-		fmt.Fprintf(out, "  %s %s with digest %s\n", strings.ToUpper(plan.Action[:1])+plan.Action[1:], plan.Slug, plan.Bundle.Digest)
+		fmt.Fprintf(out, "  %s\n", model.Outcome)
 	}
-	fmt.Fprintf(out, "  Run: %s\n", plan.DeployCommand)
+	c := model.Counts
+	fmt.Fprintf(out, "  Plan: %d to create, %d to update, %d to adopt, %d to delete, %d unchanged.\n",
+		c.Create, c.Update, c.Adopt, c.Delete, c.Unchanged)
+	if len(model.NextActions) > 0 {
+		fmt.Fprintf(out, "  Run: %s\n", model.NextActions[0].Command)
+	}
 }
 
 func deploymentCommand(source *deploymentSource, start, includeVisibility bool) string {

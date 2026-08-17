@@ -1,3 +1,4 @@
+ShinyHub will change 2 resources and delete 1 app
 shinyhub fleet plan  ·  fleet_id=eu  ·  server=http://SERVER
 
 Apps (3)   legend: + create  ~ update  > adopt  - delete  = unchanged
@@ -8,5 +9,5 @@ Apps (3)   legend: + create  ~ update  > adopt  - delete  = unchanged
 Plan: 1 to create, 1 to update, 0 to adopt, 1 to delete, 0 unchanged.
 
 Next:
-  shinyhub fleet apply --prune --yes -f FLEET.toml
-      (apply 1 create + 1 update, delete 1 app (irreversible: removes data dir))
+  shinyhub fleet apply --prune -f FLEET.toml
+      (apply 1 create + 1 update, delete 1 app (irreversible; confirmation required))

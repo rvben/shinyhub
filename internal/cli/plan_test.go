@@ -62,6 +62,9 @@ func TestPlanUnchangedJSONAndDetailedExitCode(t *testing.T) {
 	if got.ExitCode != 0 || got.Bundle.Digest != preview.Digest {
 		t.Fatalf("exit/digest = %d/%q, want 0/%q", got.ExitCode, got.Bundle.Digest, preview.Digest)
 	}
+	if got.Plan.SchemaVersion != planModelSchemaVersion || got.Plan.Scope != "single-app" || got.Plan.Counts.Update != 1 {
+		t.Fatalf("shared plan model missing from single-app JSON: %+v", got.Plan)
+	}
 	for _, request := range methods {
 		if !strings.HasPrefix(request, "GET ") {
 			t.Fatalf("plan made a mutating request: %s", request)
