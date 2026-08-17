@@ -14,11 +14,12 @@ var noColorFlag bool
 // color is always additive to a word or glyph that already carries the meaning,
 // so a monochrome terminal loses decoration, never information.
 const (
-	ansiReset  = "\x1b[0m"
-	ansiDim    = "\x1b[2m"
-	ansiRed    = "\x1b[31m"
-	ansiGreen  = "\x1b[32m"
-	ansiYellow = "\x1b[33m"
+	ansiReset   = "\x1b[0m"
+	ansiDim     = "\x1b[2m"
+	ansiRed     = "\x1b[31m"
+	ansiGreen   = "\x1b[32m"
+	ansiYellow  = "\x1b[33m"
+	ansiReverse = "\x1b[7m"
 )
 
 // styler renders text for one specific writer. It carries two independent
@@ -124,10 +125,11 @@ func (s styler) paint(code, v string) string {
 	return code + v + ansiReset
 }
 
-func (s styler) dim(v string) string    { return s.paint(ansiDim, v) }
-func (s styler) red(v string) string    { return s.paint(ansiRed, v) }
-func (s styler) green(v string) string  { return s.paint(ansiGreen, v) }
-func (s styler) yellow(v string) string { return s.paint(ansiYellow, v) }
+func (s styler) dim(v string) string     { return s.paint(ansiDim, v) }
+func (s styler) red(v string) string     { return s.paint(ansiRed, v) }
+func (s styler) green(v string) string   { return s.paint(ansiGreen, v) }
+func (s styler) yellow(v string) string  { return s.paint(ansiYellow, v) }
+func (s styler) reverse(v string) string { return s.paint(ansiReverse, v) }
 
 // status paints a lifecycle word by what it means for the operator: green for a
 // steady healthy state, yellow for a transition that will resolve on its own,

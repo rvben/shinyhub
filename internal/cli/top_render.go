@@ -51,10 +51,15 @@ type topMetrics struct {
 // computed for it yet", and MetricsAvailable says whether the sample succeeded
 // at all - a replica on a tier with no PID reports neither CPU nor memory.
 type topReplica struct {
+	Index            int      `json:"index"`
 	Status           string   `json:"status"`
+	PID              *int     `json:"pid"`
 	CPUPercent       *float64 `json:"cpu_percent"`
 	RSSBytes         int64    `json:"rss_bytes"`
 	Sessions         int64    `json:"sessions"`
+	Tier             string   `json:"tier"`
+	Provider         string   `json:"provider"`
+	Reason           string   `json:"reason"`
 	MetricsAvailable bool     `json:"metrics_available"`
 }
 
@@ -83,6 +88,9 @@ type topRow struct {
 	// Ceiling is the app's admission ceiling: how many sessions it will accept
 	// before rejecting with 503. 0 means uncapped.
 	Ceiling int
+	// ReplicaRows backs the selected-app inspector in the interactive view. The
+	// aggregate table and machine-readable output remain one row per app.
+	ReplicaRows []topReplica
 }
 
 // topRowFor folds one app's replicas into the single line the view shows.
@@ -93,7 +101,10 @@ type topRow struct {
 // the sum is reported as a floor. When no running replica reported at all the
 // figure is absent rather than zero.
 func topRowFor(slug string, m topMetrics) topRow {
-	row := topRow{Slug: slug, Status: m.Status, Replicas: len(m.Replicas)}
+	row := topRow{
+		Slug: slug, Status: m.Status, Replicas: len(m.Replicas),
+		ReplicaRows: append([]topReplica(nil), m.Replicas...),
+	}
 	if m.Deploying {
 		row.Status = "deploying"
 	}
@@ -224,13 +235,15 @@ func sortTopRows(rows []topRow, by topSort, reverse bool) {
 // distinction as a row: an unmeasured app makes the fleet total a floor, not a
 // smaller number.
 type topTotals struct {
-	Apps       int
-	Running    int
-	CPUPercent *float64
-	CPUPartial bool
-	RSSBytes   *int64
-	RSSPartial bool
-	Sessions   *int64
+	Apps            int
+	Running         int
+	Replicas        int
+	ReplicasRunning int
+	CPUPercent      *float64
+	CPUPartial      bool
+	RSSBytes        *int64
+	RSSPartial      bool
+	Sessions        *int64
 }
 
 func topTotalsFor(rows []topRow) topTotals {
@@ -244,6 +257,8 @@ func topTotalsFor(rows []topRow) topTotals {
 		sessKnown bool
 	)
 	for _, r := range rows {
+		t.Replicas += r.Replicas
+		t.ReplicasRunning += r.Running
 		if r.Running > 0 {
 			t.Running++
 		}
@@ -319,6 +334,13 @@ type topView struct {
 	// states how far behind it has fallen in words. A one-shot frame leaves this
 	// zero: it is printed the moment it is captured.
 	Age time.Duration
+	// Interactive state. These fields are ignored by snapshot rendering.
+	Selected  string
+	Filter    string
+	Filtering bool
+	Paused    bool
+	Inspect   bool
+	Help      bool
 }
 
 // topMore renders the count in the "N more app(s)" notices. plural builds a
@@ -424,6 +446,9 @@ func renderTop(w io.Writer, s styler, v topView) {
 		s.dim(topSummary(s, totals, v)),
 		"",
 	}
+	if v.Live && v.Keys {
+		head = topTUIHeader(s, totals, v)
+	}
 
 	var tail []string
 	tail = append(tail, "")
@@ -443,6 +468,104 @@ func renderTop(w io.Writer, s styler, v topView) {
 	for _, line := range append(append(head, body...), tail...) {
 		fmt.Fprintln(w, truncateVisible(line, v.Width, ellipsis))
 	}
+}
+
+// topTUIHeader gives the interactive form the meter bank of a process monitor.
+// Snapshot output deliberately keeps the compact prose summary: it is a report,
+// while this is the stable control surface an operator watches.
+func topTUIHeader(s styler, t topTotals, v topView) []string {
+	state := s.green("LIVE")
+	if v.Paused {
+		state = s.yellow("PAUSED")
+	}
+	title := fmt.Sprintf("shinyhub top  %s", s.dim(v.Host))
+	clock := fmt.Sprintf("%s  sampled %s  every %s", state, v.At.Format("15:04:05"), v.Interval)
+	lines := topTUIPair(title, clock, v.Width)
+
+	cpu := topMeter(s, "CPU", topFloat(t.CPUPercent), 100, topPercentText(s, t.CPUPercent, t.CPUPartial), 18, false)
+	apps := topMeter(s, "Apps", float64(t.Running), float64(t.Apps),
+		fmt.Sprintf("%d/%d running", t.Running, t.Apps), 18, true)
+	lines = append(lines, topTUIPair(cpu, apps, v.Width)...)
+
+	memory := fmt.Sprintf("Memory   %-18s", topRSSText(s, t.RSSBytes, t.RSSPartial))
+	replicas := topMeter(s, "Replicas", float64(t.ReplicasRunning), float64(t.Replicas),
+		fmt.Sprintf("%d/%d running", t.ReplicasRunning, t.Replicas), 18, true)
+	lines = append(lines, topTUIPair(memory, replicas, v.Width)...)
+
+	sessionValue := "-"
+	if t.Sessions != nil {
+		sessionValue = fmt.Sprintf("%d active", *t.Sessions)
+	}
+	sessions := fmt.Sprintf("Sessions %-18s", sessionValue)
+	order := "Order    " + topSortLabel(v.Sort, v.Reverse)
+	lines = append(lines, topTUIPair(sessions, order, v.Width)...)
+	if v.Filtering {
+		lines = append(lines, s.green("Filter: ")+v.Filter+"_")
+	} else if v.Filter != "" {
+		lines = append(lines, s.dim("Filter: ")+v.Filter+s.dim("  (Esc clears)"))
+	}
+	return append(lines, "")
+}
+
+func topFloat(v *float64) float64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+// topTUIPair uses two banks on ordinary terminals and stacks them on narrow
+// ones. Structural reflow keeps the right-hand state visible instead of merely
+// truncating it away.
+func topTUIPair(left, right string, width int) []string {
+	const split = 46
+	if (width > 0 && width < 96) || visibleWidth(left) >= split-2 {
+		return []string{left, right}
+	}
+	padding := split - visibleWidth(left)
+	if padding < 2 {
+		padding = 2
+	}
+	return []string{left + strings.Repeat(" ", padding) + right}
+}
+
+func topMeter(s styler, label string, value, maximum float64, text string, width int, highIsGood bool) string {
+	ratio := 0.0
+	if maximum > 0 {
+		ratio = value / maximum
+	}
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	filled := int(ratio*float64(width) + 0.5)
+	fill, empty := "█", "·"
+	if s.ascii {
+		fill, empty = "|", "."
+	}
+	bar := strings.Repeat(fill, filled) + strings.Repeat(empty, width-filled)
+	if highIsGood {
+		switch {
+		case ratio >= 1:
+			bar = s.green(bar)
+		case ratio >= .8:
+			bar = s.yellow(bar)
+		default:
+			bar = s.red(bar)
+		}
+	} else {
+		switch {
+		case ratio >= 1:
+			bar = s.red(bar)
+		case ratio >= .8:
+			bar = s.yellow(bar)
+		default:
+			bar = s.green(bar)
+		}
+	}
+	return fmt.Sprintf("%-8s [%s] %s", label, bar, text)
 }
 
 // topSummary is the fleet line: how much of the host these apps are using
@@ -483,6 +606,9 @@ func topStaleAfter(v topView) time.Duration {
 // stopped moving, which is exactly what an operator watching a table for
 // movement will not notice.
 func topStatusLine(s styler, v topView) string {
+	if v.Paused {
+		return s.yellow("paused") + s.dim(" · refresh disabled; press Space to resume")
+	}
 	stale := ""
 	if v.Age >= topStaleAfter(v) {
 		stale = fmt.Sprintf("showing a sample %s old", v.Age.Round(time.Second))
@@ -503,7 +629,7 @@ func topFooter(v topView) string {
 	if !v.Live || !v.Keys {
 		return sorted
 	}
-	return sorted + " · c cpu · m mem · s sessions · n name · r reverse · q quit"
+	return "↑↓/jk move  Enter inspect  / filter  Space pause  Tab sort  ? help  q quit"
 }
 
 func topAnyPartial(rows []topRow) bool {
@@ -520,6 +646,9 @@ func topAnyPartial(rows []topRow) bool {
 func topBody(s styler, v topView, overhead int) []string {
 	if len(v.Rows) == 0 {
 		return []string{s.dim("No apps visible to this account.")}
+	}
+	if v.Live && v.Keys {
+		return topTUIBody(s, v, overhead)
 	}
 
 	page := topWindowOf(v.Rows, v.Limit, v.Offset)
@@ -588,6 +717,202 @@ func topBody(s styler, v topView, overhead int) []string {
 		lines = append(lines, windowed)
 	}
 	return lines
+}
+
+func topFilteredRows(rows []topRow, filter string) []topRow {
+	filter = strings.ToLower(strings.TrimSpace(filter))
+	if filter == "" {
+		return rows
+	}
+	out := make([]topRow, 0, len(rows))
+	for _, r := range rows {
+		if strings.Contains(strings.ToLower(r.Slug), filter) ||
+			strings.Contains(strings.ToLower(r.Status), filter) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func topSelectedIndex(rows []topRow, selected string) int {
+	for i := range rows {
+		if rows[i].Slug == selected {
+			return i
+		}
+	}
+	return -1
+}
+
+func topSortHeader(label string, column, active topSort, reverse bool, ascii bool) string {
+	if column != active {
+		return label
+	}
+	arrow := "▼"
+	if reverse {
+		arrow = "▲"
+	}
+	if ascii {
+		arrow = "v"
+		if reverse {
+			arrow = "^"
+		}
+	}
+	return label + arrow
+}
+
+// topTUIBody is a selectable, scrolling process table. The selected slug, not
+// a row number, is the identity so sorting and refreshes do not make the cursor
+// jump to a different app.
+func topTUIBody(s styler, v topView, overhead int) []string {
+	if v.Help {
+		lines := topHelpBody(s)
+		if v.Height > 0 {
+			room := v.Height - overhead
+			if room <= 0 {
+				return nil
+			}
+			if len(lines) > room {
+				lines = lines[:room]
+			}
+		}
+		return lines
+	}
+	rows := topFilteredRows(topWindowOf(v.Rows, v.Limit, v.Offset), v.Filter)
+	if len(rows) == 0 {
+		return []string{s.dim("No apps match ") + fmt.Sprintf("%q", v.Filter) + s.dim(". Press Esc to clear the filter.")}
+	}
+
+	selected := topSelectedIndex(rows, v.Selected)
+	if selected < 0 {
+		selected = 0
+	}
+	detail := []string(nil)
+	if v.Inspect && selected >= 0 {
+		detail = topInspector(s, rows[selected])
+		if v.Height > 0 {
+			maxDetail := v.Height - overhead - 4
+			switch {
+			case maxDetail <= 0:
+				detail = nil
+			case len(detail) > maxDetail:
+				detail = append(detail[:maxDetail-1], s.dim("  … more replicas; enlarge the terminal to inspect them"))
+			}
+		}
+	}
+
+	room := len(rows)
+	if v.Height > 0 {
+		// One line belongs to the table header. When scrolling is needed, another
+		// belongs to the position indicator. Inspector lines are protected too.
+		room = v.Height - overhead - 1 - len(detail)
+		if room < len(rows) {
+			room--
+		}
+		if room < 1 {
+			room = 1
+		}
+	}
+	start := 0
+	if selected >= room {
+		start = selected - room + 1
+	}
+	if start+room > len(rows) {
+		start = len(rows) - room
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := start + room
+	if end > len(rows) {
+		end = len(rows)
+	}
+
+	t := newTable(" ", topSortHeader("APP", topSortName, v.Sort, v.Reverse, s.ascii), "STATUS", "REPLICAS",
+		topSortHeader("CPU%", topSortCPU, v.Sort, v.Reverse, s.ascii),
+		topSortHeader("RSS", topSortMemory, v.Sort, v.Reverse, s.ascii),
+		topSortHeader("SESSIONS", topSortSessions, v.Sort, v.Reverse, s.ascii)).
+		alignRight(3, 4, 5, 6)
+	for i := start; i < end; i++ {
+		r := rows[i]
+		isSelected := i == selected
+		marker := ""
+		if isSelected {
+			marker = ">"
+		}
+		status := statusTxt(r.Status)
+		sessions := txt(topSessionsText(r))
+		if isSelected {
+			// An outer reverse-video run must not contain inner resets, or the
+			// selection would disappear halfway across the row.
+			status = txt(r.Status)
+		} else if r.Sessions != nil && r.Ceiling > 0 && *r.Sessions >= int64(r.Ceiling) {
+			sessions = alertTxt(topSessionsText(r))
+		}
+		markerCell := markTxt(marker)
+		if isSelected {
+			markerCell = txt(marker)
+		}
+		t.row(markerCell, txt(r.Slug), status,
+			txt(fmt.Sprintf("%d/%d", r.Running, r.Replicas)),
+			txt(topCPUText(s, r.CPUPercent, r.CPUPartial)),
+			txt(topRSSText(s, r.RSSBytes, r.RSSPartial)), sessions)
+		if isSelected {
+			t.paintRow(styler.reverse)
+		}
+	}
+
+	var buf bytes.Buffer
+	t.renderWith(&buf, s)
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(rows) > room {
+		lines = append(lines, s.dim(fmt.Sprintf("rows %d-%d of %d", start+1, end, len(rows))))
+	}
+	return append(lines, detail...)
+}
+
+func topInspector(s styler, r topRow) []string {
+	lines := []string{"", fmt.Sprintf("%s  %s · %d/%d replicas · sessions %s",
+		s.green(r.Slug), s.status(r.Status), r.Running, r.Replicas, topSessionsText(r))}
+	if len(r.ReplicaRows) == 0 {
+		return append(lines, s.dim("  No replicas reported."))
+	}
+	t := newTable("#", "STATUS", "PID", "CPU%", "RSS", "SESS", "PLACEMENT").
+		alignRight(0, 2, 3, 4, 5).indent(2)
+	for _, replica := range r.ReplicaRows {
+		pid := "-"
+		if replica.PID != nil {
+			pid = fmt.Sprintf("%d", *replica.PID)
+		}
+		cpu := "-"
+		if replica.CPUPercent != nil {
+			cpu = fmt.Sprintf("%.1f", *replica.CPUPercent)
+		}
+		placement := strings.Trim(replica.Tier+"/"+replica.Provider, "/")
+		t.row(txt(replica.Index), statusTxt(replica.Status), dimTxt(pid), txt(cpu),
+			txt(humanBytes(replica.RSSBytes)), txt(replica.Sessions), dimTxt(placement)).
+			note(replica.Reason)
+	}
+	var buf bytes.Buffer
+	t.renderWith(&buf, s)
+	return append(lines, strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")...)
+}
+
+func topHelpBody(s styler) []string {
+	return []string{
+		s.green("Keyboard"),
+		"  ↑ / k, ↓ / j      move selection",
+		"  PgUp / PgDn       move one page",
+		"  Home / End        first or last app",
+		"  Enter             inspect selected app's replicas",
+		"  /                 filter by app or status",
+		"  Esc               cancel or clear filter",
+		"  Space             pause or resume refreshes",
+		"  Tab               cycle sort column",
+		"  c / m / s / n     sort by CPU, memory, sessions, or name",
+		"  r                 reverse sort order",
+		"  ?                 close this help",
+		"  q                 quit",
+	}
 }
 
 // truncateVisible cuts line to at most width printed columns, replacing the

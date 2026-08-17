@@ -24,6 +24,81 @@ func renderToString(v topView) string {
 	return buf.String()
 }
 
+func TestRenderTop_InteractiveViewLooksAndBehavesLikeAMonitor(t *testing.T) {
+	pid := 4321
+	rows := []topRow{
+		{Slug: "analytics", Status: "running", Running: 1, Replicas: 1,
+			CPUPercent: f64(24), RSSBytes: i64(64 << 20), Sessions: i64(2)},
+		{Slug: "payments", Status: "running", Running: 1, Replicas: 2,
+			CPUPercent: f64(9), RSSBytes: i64(32 << 20), Sessions: i64(1), Ceiling: 10,
+			ReplicaRows: []topReplica{{Index: 0, Status: "running", PID: &pid,
+				CPUPercent: f64(9), RSSBytes: 32 << 20, Sessions: 1,
+				Tier: "local", Provider: "native", MetricsAvailable: true}}},
+	}
+	out := renderToString(topView{
+		Host: "https://example.test", At: time.Unix(0, 0).UTC(), Rows: rows,
+		Sort: topSortCPU, Interval: 2 * time.Second, Live: true, Keys: true,
+		Width: 120, Height: 30, Selected: "payments",
+	})
+	for _, want := range []string{
+		"CPU      [", "Apps     [", "Memory", "Replicas [", "CPU%▼",
+		">", "payments", "Enter inspect", "/ filter", "Space pause",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("interactive frame is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "outside --limit/--offset") {
+		t.Errorf("interactive frame fell back to report-style pagination:\n%s", out)
+	}
+}
+
+func TestRenderTop_InteractiveFilterInspectorAndHelp(t *testing.T) {
+	pid := 77
+	rows := []topRow{
+		{Slug: "other", Status: "stopped", Replicas: 1},
+		{Slug: "payments", Status: "running", Running: 1, Replicas: 1,
+			Sessions: i64(1), ReplicaRows: []topReplica{{Index: 0, Status: "running",
+				PID: &pid, CPUPercent: f64(3.5), RSSBytes: 4096, Sessions: 1,
+				Tier: "edge", Provider: "remote", MetricsAvailable: true}}},
+	}
+	out := renderToString(topView{
+		Host: "h", At: time.Unix(0, 0).UTC(), Rows: rows, Sort: topSortName,
+		Interval: time.Second, Live: true, Keys: true, Width: 120, Height: 30,
+		Selected: "payments", Filter: "pay", Inspect: true,
+	})
+	for _, want := range []string{"Filter: pay", "payments", "PLACEMENT", "edge/remote", "77"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("filtered inspector is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "other") {
+		t.Errorf("filter left a non-matching app visible:\n%s", out)
+	}
+
+	help := renderToString(topView{
+		Host: "h", At: time.Unix(0, 0).UTC(), Rows: rows, Sort: topSortCPU,
+		Interval: time.Second, Live: true, Keys: true, Width: 120, Height: 30, Help: true,
+	})
+	for _, want := range []string{"Keyboard", "PgUp / PgDn", "pause or resume", "quit"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help screen is missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestTopMeter_UsesOppositeSemanticsForHealthAndLoad(t *testing.T) {
+	s := styler{color: true}
+	healthy := topMeter(s, "Apps", 3, 3, "3/3 running", 10, true)
+	if !strings.Contains(healthy, ansiGreen) || strings.Contains(healthy, ansiRed) {
+		t.Errorf("full availability is not green: %q", healthy)
+	}
+	saturated := topMeter(s, "CPU", 100, 100, "100.0%", 10, false)
+	if !strings.Contains(saturated, ansiRed) || strings.Contains(saturated, ansiGreen) {
+		t.Errorf("saturated load is not red: %q", saturated)
+	}
+}
+
 // The figure an operator reads is the app's whole footprint, so every running
 // replica is added up. Reporting one replica (which the legacy top-level
 // cpu_percent/rss_bytes fields do) would understate a scaled-out app by exactly

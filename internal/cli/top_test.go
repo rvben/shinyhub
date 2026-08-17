@@ -394,3 +394,73 @@ func TestTopWindow_ClampsRatherThanPanics(t *testing.T) {
 		t.Errorf("an unset window returned %d rows, want all 3", len(got))
 	}
 }
+
+func TestTopLiveState_NavigatesFiltersPausesAndSorts(t *testing.T) {
+	rows := []topRow{{Slug: "alpha", Status: "running"}, {Slug: "beta", Status: "stopped"}, {Slug: "gamma", Status: "running"}}
+	f := &topFlags{}
+	state := topLiveState{by: topSortCPU}
+	state.ensureSelection(rows, f)
+	if state.selected != "alpha" {
+		t.Fatalf("initial selection = %q, want alpha", state.selected)
+	}
+
+	state.handleKey(topKey{kind: topKeyDown}, rows, f, 2)
+	if state.selected != "beta" {
+		t.Errorf("Down selected %q, want beta", state.selected)
+	}
+	state.handleKey(topKey{kind: topKeyPageDown}, rows, f, 2)
+	if state.selected != "gamma" {
+		t.Errorf("PageDown selected %q, want gamma", state.selected)
+	}
+
+	state.handleKey(topKey{kind: topKeyRune, b: '/'}, rows, f, 2)
+	state.handleKey(topKey{kind: topKeyRune, b: 'b'}, rows, f, 2)
+	state.handleKey(topKey{kind: topKeyRune, b: 'e'}, rows, f, 2)
+	state.handleKey(topKey{kind: topKeyRune, b: '\r'}, rows, f, 2)
+	if state.filter != "be" || state.filtering || state.selected != "beta" {
+		t.Errorf("filter state = filter:%q editing:%v selected:%q, want be/false/beta",
+			state.filter, state.filtering, state.selected)
+	}
+	state.handleKey(topKey{kind: topKeyEscape}, rows, f, 2)
+	if state.filter != "" {
+		t.Errorf("Escape left filter %q, want it cleared", state.filter)
+	}
+
+	state.handleKey(topKey{kind: topKeyRune, b: ' '}, rows, f, 2)
+	if !state.paused {
+		t.Error("Space did not pause refreshes")
+	}
+	state.handleKey(topKey{kind: topKeyRune, b: '\t'}, rows, f, 2)
+	if state.by != topSortMemory {
+		t.Errorf("Tab changed sort to %q, want mem", state.by)
+	}
+	state.handleKey(topKey{kind: topKeyRune, b: '?'}, rows, f, 2)
+	if !state.help {
+		t.Error("? did not open help")
+	}
+	state.handleKey(topKey{kind: topKeyEscape}, rows, f, 2)
+	if state.help {
+		t.Error("Escape did not close help")
+	}
+}
+
+func TestDecodeTopEscape_RecognizesNavigationKeys(t *testing.T) {
+	cases := map[string]topKeyKind{
+		"\x1b[A":  topKeyUp,
+		"\x1b[B":  topKeyDown,
+		"\x1b[5~": topKeyPageUp,
+		"\x1b[6~": topKeyPageDown,
+		"\x1b[H":  topKeyHome,
+		"\x1b[F":  topKeyEnd,
+	}
+	for seq, want := range cases {
+		got, complete, _ := decodeTopEscape(seq)
+		if !complete || got.kind != want {
+			t.Errorf("decodeTopEscape(%q) = kind %v complete %v, want %v/true",
+				seq, got.kind, complete, want)
+		}
+	}
+	if _, complete, prefix := decodeTopEscape("\x1b["); complete || !prefix {
+		t.Errorf("partial CSI reported complete=%v prefix=%v, want false/true", complete, prefix)
+	}
+}

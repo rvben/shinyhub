@@ -54,10 +54,11 @@ func newTopCmd() *cobra.Command {
 		Short: "Live CPU, memory and session usage for every app",
 		Long: `Watch what the whole server is doing, one line per app.
 
-On a terminal this repaints in place until you quit: press c, m, s or n to sort
-by CPU, memory, sessions or name, r to reverse the order, and q to leave. Any
-other output form (a pipe, --output json, TERM=dumb) prints a single snapshot
-and exits, so this is safe to use in a script.
+On a terminal this opens an interactive monitor. Move with the arrow or j/k
+keys, press Enter to inspect an app's replicas, / to filter, Space to pause,
+Tab to cycle the sort column, ? for all shortcuts, and q to leave. Any other
+output form (a pipe, --output json, TERM=dumb) prints a single snapshot and
+exits, so this is safe to use in a script.
 
 Figures come from the same live sample the dashboard shows and cover each app's
 whole process group. A figure the server could not measure prints as "-" rather
@@ -261,25 +262,260 @@ func (t *topTerminal) paint(s styler, v topView) {
 	fmt.Fprint(t.out, cursorHome+frame+eraseBelow)
 }
 
-// topKeys reads stdin one byte at a time. The channel closes when stdin does,
-// which is how a live view survives having its input taken away rather than
-// spinning on a dead reader.
-func topKeys(in *os.File) <-chan byte {
-	ch := make(chan byte, 8)
+type topKeyKind uint8
+
+const (
+	topKeyRune topKeyKind = iota
+	topKeyUp
+	topKeyDown
+	topKeyPageUp
+	topKeyPageDown
+	topKeyHome
+	topKeyEnd
+	topKeyEscape
+)
+
+type topKey struct {
+	kind topKeyKind
+	b    byte
+}
+
+// topKeys decodes the small set of terminal escape sequences the monitor uses.
+// Escape itself is emitted after a short ambiguity window because it is also
+// the first byte of every arrow and page key.
+func topKeys(in *os.File) <-chan topKey {
+	raw := make(chan byte, 16)
 	go func() {
-		defer close(ch)
+		defer close(raw)
 		buf := make([]byte, 1)
 		for {
 			n, err := in.Read(buf)
 			if n == 1 {
-				ch <- buf[0]
+				raw <- buf[0]
 			}
 			if err != nil {
 				return
 			}
 		}
 	}()
+
+	ch := make(chan topKey, 16)
+	go func() {
+		defer close(ch)
+		var seq string
+		var timer *time.Timer
+		var timerC <-chan time.Time
+		stopTimer := func() {
+			if timer != nil {
+				timer.Stop()
+			}
+			timerC = nil
+		}
+		flushEscape := func() {
+			ch <- topKey{kind: topKeyEscape}
+			for i := 1; i < len(seq); i++ {
+				ch <- topKey{kind: topKeyRune, b: seq[i]}
+			}
+			seq = ""
+			stopTimer()
+		}
+		for {
+			select {
+			case b, ok := <-raw:
+				if !ok {
+					if seq != "" {
+						flushEscape()
+					}
+					return
+				}
+				if seq == "" && b != 0x1b {
+					ch <- topKey{kind: topKeyRune, b: b}
+					continue
+				}
+				seq += string(b)
+				if key, complete, prefix := decodeTopEscape(seq); complete {
+					ch <- key
+					seq = ""
+					stopTimer()
+				} else if !prefix {
+					flushEscape()
+				} else {
+					stopTimer()
+					timer = time.NewTimer(35 * time.Millisecond)
+					timerC = timer.C
+				}
+			case <-timerC:
+				flushEscape()
+			}
+		}
+	}()
 	return ch
+}
+
+func decodeTopEscape(seq string) (topKey, bool, bool) {
+	known := map[string]topKeyKind{
+		"\x1b[A": topKeyUp, "\x1b[B": topKeyDown,
+		"\x1b[5~": topKeyPageUp, "\x1b[6~": topKeyPageDown,
+		"\x1b[H": topKeyHome, "\x1b[1~": topKeyHome,
+		"\x1b[F": topKeyEnd, "\x1b[4~": topKeyEnd,
+	}
+	if kind, ok := known[seq]; ok {
+		return topKey{kind: kind}, true, true
+	}
+	if seq == "\x1b" {
+		return topKey{}, false, true
+	}
+	for candidate := range known {
+		if strings.HasPrefix(candidate, seq) {
+			return topKey{}, false, true
+		}
+	}
+	return topKey{}, false, false
+}
+
+type topLiveState struct {
+	by           topSort
+	reverse      bool
+	selected     string
+	filter       string
+	filterBefore string
+	filtering    bool
+	paused       bool
+	inspect      bool
+	help         bool
+}
+
+func (s *topLiveState) visible(rows []topRow, f *topFlags) []topRow {
+	return topFilteredRows(topWindowOf(rows, f.limit, f.offset), s.filter)
+}
+
+func (s *topLiveState) ensureSelection(rows []topRow, f *topFlags) {
+	visible := s.visible(rows, f)
+	if len(visible) == 0 {
+		s.selected = ""
+		return
+	}
+	if topSelectedIndex(visible, s.selected) < 0 || s.selected == "" {
+		s.selected = visible[0].Slug
+	}
+}
+
+func (s *topLiveState) move(rows []topRow, f *topFlags, delta int) {
+	visible := s.visible(rows, f)
+	if len(visible) == 0 {
+		return
+	}
+	i := topSelectedIndex(visible, s.selected)
+	if i < 0 {
+		i = 0
+	}
+	i += delta
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(visible) {
+		i = len(visible) - 1
+	}
+	s.selected = visible[i].Slug
+}
+
+func (s *topLiveState) cycleSort() {
+	for i, v := range topSortValues {
+		if topSort(v) == s.by {
+			s.by = topSort(topSortValues[(i+1)%len(topSortValues)])
+			return
+		}
+	}
+	s.by = topSortCPU
+}
+
+// handleKey mutates only local presentation state. No key in top changes an
+// app; operational actions remain explicit shinyhub commands with their normal
+// confirmation and error behavior.
+func (s *topLiveState) handleKey(key topKey, rows []topRow, f *topFlags, page int) (quit bool) {
+	if key.kind == topKeyRune && (key.b == keyCtrlC || key.b == keyCtrlD) {
+		return true
+	}
+	if s.help {
+		if key.kind == topKeyEscape || (key.kind == topKeyRune && key.b == '?') {
+			s.help = false
+		} else if key.kind == topKeyRune && (key.b == 'q' || key.b == 'Q') {
+			return true
+		}
+		return false
+	}
+	if s.filtering {
+		switch {
+		case key.kind == topKeyEscape:
+			s.filter, s.filtering = s.filterBefore, false
+		case key.kind == topKeyRune && (key.b == '\r' || key.b == '\n'):
+			s.filtering = false
+		case key.kind == topKeyRune && (key.b == 8 || key.b == 127):
+			if len(s.filter) > 0 {
+				s.filter = s.filter[:len(s.filter)-1]
+			}
+		case key.kind == topKeyRune && key.b >= 32 && key.b < 127:
+			s.filter += string(key.b)
+		}
+		s.ensureSelection(rows, f)
+		return false
+	}
+
+	switch key.kind {
+	case topKeyUp:
+		s.move(rows, f, -1)
+	case topKeyDown:
+		s.move(rows, f, 1)
+	case topKeyPageUp:
+		s.move(rows, f, -page)
+	case topKeyPageDown:
+		s.move(rows, f, page)
+	case topKeyHome:
+		s.move(rows, f, -len(rows))
+	case topKeyEnd:
+		s.move(rows, f, len(rows))
+	case topKeyEscape:
+		if s.filter != "" {
+			s.filter = ""
+			s.ensureSelection(rows, f)
+		} else {
+			s.inspect = false
+		}
+	case topKeyRune:
+		switch key.b {
+		case 'q', 'Q':
+			return true
+		case 'k':
+			s.move(rows, f, -1)
+		case 'j':
+			s.move(rows, f, 1)
+		case 'g':
+			s.move(rows, f, -len(rows))
+		case 'G':
+			s.move(rows, f, len(rows))
+		case '\r', '\n':
+			s.inspect = !s.inspect
+		case '/':
+			s.filterBefore, s.filtering = s.filter, true
+		case ' ':
+			s.paused = !s.paused
+		case '\t':
+			s.cycleSort()
+		case 'c':
+			s.by = topSortCPU
+		case 'm':
+			s.by = topSortMemory
+		case 's':
+			s.by = topSortSessions
+		case 'n':
+			s.by = topSortName
+		case 'r':
+			s.reverse = !s.reverse
+		case '?':
+			s.help = true
+		}
+	}
+	return false
 }
 
 // runTopLive drives the repainting view until the user quits, the process is
@@ -297,15 +533,16 @@ func runTopLive(cmd *cobra.Command, out *os.File, cfg *cliConfig, f *topFlags,
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var keys <-chan byte
+	var keys <-chan topKey
 	if raw {
 		keys = topKeys(os.Stdin)
 	}
 
 	s := stylerFor(out)
-	reverse := false
 	lastErr := ""
 	shown := first
+	state := topLiveState{by: by}
+	state.ensureSelection(shown.rows, f)
 
 	paint := func() {
 		width, height, err := term.GetSize(int(out.Fd()))
@@ -313,20 +550,26 @@ func runTopLive(cmd *cobra.Command, out *os.File, cfg *cliConfig, f *topFlags,
 			width, height = 0, 0
 		}
 		tt.paint(s, topView{
-			Host:     cfg.Host,
-			At:       shown.at,
-			Rows:     shown.rows,
-			Limit:    f.limit,
-			Offset:   f.offset,
-			Sort:     by,
-			Reverse:  reverse,
-			Interval: f.interval,
-			Live:     true,
-			Keys:     raw,
-			Width:    width,
-			Height:   height,
-			Err:      lastErr,
-			Age:      time.Since(shown.at),
+			Host:      cfg.Host,
+			At:        shown.at,
+			Rows:      shown.rows,
+			Limit:     f.limit,
+			Offset:    f.offset,
+			Sort:      state.by,
+			Reverse:   state.reverse,
+			Interval:  f.interval,
+			Live:      true,
+			Keys:      raw,
+			Width:     width,
+			Height:    height,
+			Err:       lastErr,
+			Age:       time.Since(shown.at),
+			Selected:  state.selected,
+			Filter:    state.filter,
+			Filtering: state.filtering,
+			Paused:    state.paused,
+			Inspect:   state.inspect,
+			Help:      state.help,
 		})
 	}
 	paint()
@@ -351,36 +594,34 @@ func runTopLive(cmd *cobra.Command, out *os.File, cfg *cliConfig, f *topFlags,
 		case <-ctx.Done():
 			return nil
 
-		case b, ok := <-keys:
+		case key, ok := <-keys:
 			if !ok {
 				// stdin closed: keep watching, just without shortcuts.
 				keys, raw = nil, false
 				paint()
 				continue
 			}
-			switch b {
-			case 'q', 'Q', keyCtrlC, keyCtrlD:
-				return nil
-			case 'c':
-				by = topSortCPU
-			case 'm':
-				by = topSortMemory
-			case 's':
-				by = topSortSessions
-			case 'n':
-				by = topSortName
-			case 'r':
-				reverse = !reverse
-			default:
-				continue
+			wasPaused := state.paused
+			page := 10
+			if _, height, err := term.GetSize(int(out.Fd())); err == nil && height > 12 {
+				page = height - 12
 			}
-			sortTopRows(shown.rows, by, reverse)
+			if state.handleKey(key, shown.rows, f, page) {
+				return nil
+			}
+			sortTopRows(shown.rows, state.by, state.reverse)
+			state.ensureSelection(shown.rows, f)
+			// Resuming should not make the operator wait for the next ticker edge.
+			if wasPaused && !state.paused && !inFlight {
+				inFlight = true
+				go func() { results <- pollTopRows(cfg) }()
+			}
 			paint()
 
 		case <-tick.C:
 			// A server slower than the interval simply refreshes less often;
 			// stacking polls on it would make a struggling server worse.
-			if !inFlight {
+			if !state.paused && !inFlight {
 				inFlight = true
 				go func() { results <- pollTopRows(cfg) }()
 			}
@@ -394,10 +635,11 @@ func runTopLive(cmd *cobra.Command, out *os.File, cfg *cliConfig, f *topFlags,
 					return p.err
 				}
 				lastErr = "last refresh failed: " + p.err.Error()
-			} else {
+			} else if !state.paused {
 				shown, lastErr = p, ""
 			}
-			sortTopRows(shown.rows, by, reverse)
+			sortTopRows(shown.rows, state.by, state.reverse)
+			state.ensureSelection(shown.rows, f)
 			paint()
 		}
 	}

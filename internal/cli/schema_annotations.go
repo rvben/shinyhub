@@ -424,7 +424,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 			{Name: "captured_at", Type: "string", Desc: "RFC 3339 timestamp of the sample"},
 			{Name: "totals", Type: "object", Desc: "Fleet sums: apps, running, cpu_percent, rss_bytes, sessions, and the two *_partial flags"},
 		},
-		Notes: "Repaints in place on a terminal and exits on q; any other output form prints one snapshot and exits, so it is safe in a script. --interval sets the refresh rate (minimum 1s) and applies only to the live form. --fields applies to JSON output; the live table has a fixed layout. A figure the server could not measure is null rather than 0.",
+		Notes: "Opens an interactive monitor on a terminal: arrows or j/k move, Enter inspects replicas, / filters, Space pauses, Tab cycles sorting, ? shows help, and q exits. Any other output form prints one snapshot and exits, so it is safe in a script. --interval sets the refresh rate (minimum 1s) and applies only to the live form. --fields applies to JSON output; the live table has a fixed layout. A figure the server could not measure is null rather than 0.",
 	},
 
 	// ── tokens ───────────────────────────────────────────────────────────────

@@ -71,6 +71,7 @@ type table struct {
 type tableRow struct {
 	cells []cell
 	note  string
+	paint func(styler, string) string
 }
 
 // newTable starts a table with the given column headers.
@@ -98,6 +99,16 @@ func (t *table) indent(n int) *table {
 // with "-" so a short row cannot shift the columns after it.
 func (t *table) row(cells ...cell) *table {
 	t.rows = append(t.rows, tableRow{cells: cells})
+	return t
+}
+
+// paintRow applies one style to the complete row added last. It is used for
+// selected rows in terminal interfaces, where coloring a marker alone is too
+// easy to lose while scanning a dense table.
+func (t *table) paintRow(paint func(styler, string) string) *table {
+	if len(t.rows) > 0 {
+		t.rows[len(t.rows)-1].paint = paint
+	}
 	return t
 }
 
@@ -146,7 +157,11 @@ func (t *table) renderWith(w io.Writer, s styler) {
 			}
 			cols[i] = t.pad(painted, c.text, widths[i], i)
 		}
-		fmt.Fprintln(w, t.lead+strings.TrimRight(strings.Join(cols, colGap), " "))
+		line := strings.TrimRight(strings.Join(cols, colGap), " ")
+		if r.paint != nil {
+			line = r.paint(s, line)
+		}
+		fmt.Fprintln(w, t.lead+line)
 		if r.note != "" {
 			fmt.Fprintf(w, "%s%s %s\n", noteIndent, s.dim("└"), s.dim(r.note))
 		}
