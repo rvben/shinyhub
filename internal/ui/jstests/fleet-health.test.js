@@ -141,3 +141,22 @@ test('summariseFleetHealth: no stale schedules stays healthy', () => {
   assert.equal(s.statusLabel, 'healthy');
   assert.equal(s.staleSchedules.length, 0);
 });
+
+test('summariseFleetHealth: idle elastic apps are healthy and named in the headline', () => {
+  const s = summariseFleetHealth({
+    apps: { total: 4, running: 1, idle: 3, stopped: 0, degraded: 0, crashed: 0 },
+    replicas: { running: 1, lost: 0, stopped: 0 },
+    tiers: [],
+    degraded_apps: [],
+  });
+  assert.equal(s.statusClass, 'running');
+  assert.equal(s.statusLabel, 'healthy');
+  assert.match(s.headline, /4 apps · 1 running · 3 idle/);
+});
+
+test('summariseFleetHealth: no idle chip when nothing is idle or the server predates the bucket', () => {
+  const withZero = summariseFleetHealth({ apps: { total: 2, running: 2, idle: 0 }, replicas: {}, tiers: [], degraded_apps: [] });
+  assert.doesNotMatch(withZero.headline, /idle/);
+  const older = summariseFleetHealth({ apps: { total: 2, running: 2 }, replicas: {}, tiers: [], degraded_apps: [] });
+  assert.doesNotMatch(older.headline, /idle/);
+});

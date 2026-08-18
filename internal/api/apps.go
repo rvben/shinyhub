@@ -97,12 +97,12 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	for _, a := range apps {
 		s.decorateApp(a)
 		replicas := s.liveReplicaView(a.Slug, replicasByApp[a.ID])
-		elasticKnown, workersRunning, workersTotal := s.elasticObservation(a.Slug)
+		pool := s.elasticObservation(a.Slug)
 		// A server built without a process manager (unit tests and API-only
 		// embeddings) has no live authority. Preserve the stored status when there
 		// are no durable replica facts to contradict it.
-		if s.manager != nil || len(replicas) > 0 || elasticKnown {
-			s.decorateAppObservation(a, replicas, elasticKnown, workersRunning, workersTotal)
+		if s.manager != nil || len(replicas) > 0 || pool.Known {
+			s.decorateAppObservation(a, replicas, pool)
 		}
 		a.ProjectName, a.ProjectIconEmoji = disp.decorate(a.ProjectSlug)
 	}
@@ -175,20 +175,22 @@ func (s *Server) liveReplicaView(slug string, stored []*db.Replica) []*db.Replic
 	return out
 }
 
-func (s *Server) elasticObservation(slug string) (known bool, running, total int) {
+// elasticObservation reads the proxy's live worker view for slug into the
+// shape decorateAppObservation consumes. Known stays false when the app is not
+// a registered elastic pool.
+func (s *Server) elasticObservation(slug string) elasticPool {
 	if s.proxy == nil {
-		return false, 0, 0
+		return elasticPool{}
 	}
 	snap, ok := s.proxy.ElasticWorkersSnapshot(slug)
 	if !ok {
-		return false, 0, 0
+		return elasticPool{}
 	}
+	pool := elasticPool{Known: true}
 	for _, worker := range snap.Workers {
-		if worker.Status == "running" {
-			running++
-		}
+		pool.observe(worker.Status)
 	}
-	return true, running, len(snap.Workers)
+	return pool
 }
 
 type createAppRequest struct {
@@ -349,8 +351,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 			replicas[i].Reason = "replica process exited unexpectedly"
 		}
 	}
-	elasticKnown, workersRunning, workersTotal := s.elasticObservation(slug)
-	s.decorateAppObservation(app, replicas, elasticKnown, workersRunning, workersTotal)
+	s.decorateAppObservation(app, replicas, s.elasticObservation(slug))
 
 	// effective_max_sessions_per_replica resolves the app's own cap against the
 	// runtime default (0 = inherit). Clients use it to render an honest
@@ -3566,7 +3567,7 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 	}
 
 	observationReplicas := make([]*db.Replica, 0, len(resp.Replicas))
-	workersTotal := 0
+	pool := elasticPool{Known: elastic}
 	for _, rep := range resp.Replicas {
 		observationReplicas = append(observationReplicas, &db.Replica{
 			Index: rep.Index, Status: rep.Status, DesiredState: rep.DesiredState,
@@ -3574,13 +3575,11 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 			RestartCount: rep.RestartCount,
 		})
 		if elastic {
-			workersTotal++
-			if rep.Status == "running" {
-				resp.WorkersRunning++
-			}
+			pool.observe(rep.Status)
 		}
 	}
-	s.decorateAppObservation(&observedApp, observationReplicas, elastic, resp.WorkersRunning, workersTotal)
+	resp.WorkersRunning = pool.Running
+	s.decorateAppObservation(&observedApp, observationReplicas, pool)
 	resp.Status = observedApp.Status
 	resp.DesiredStatus = observedApp.DesiredStatus
 	resp.ReplicasRunning = observedApp.ReplicasRunning

@@ -45,6 +45,12 @@ export function summariseFleetHealth(h) {
   }
 
   const parts = [`${num(apps.total)} apps`, `${num(apps.running)} running`];
+  // Idle: healthy elastic apps (grouped / per_session) with no live worker.
+  // They boot one on the first request, so they are neither running nor a
+  // problem; without this line a fleet of grouped apps reads "N apps, 0
+  // running" with nothing accounting for the gap.
+  const idleApps = num(apps.idle);
+  if (idleApps > 0) parts.push(`${idleApps} idle`);
   if (crashedApps > 0) parts.push(`${crashedApps} crashed`);
   if (degradedApps > 0) parts.push(`${degradedApps} degraded`);
   if (lostReplicas > 0) parts.push(`${lostReplicas} replicas lost`);
