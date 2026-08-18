@@ -95,6 +95,13 @@ func (s *Store) Append(slug string, sm Sample) {
 // Series returns slug's samples within the window ending at now (unix seconds),
 // oldest-first, copied out. Unknown slugs return an empty, non-nil series.
 func (s *Store) Series(slug string, now int64) Series {
+	return s.SeriesWindow(slug, now, s.window)
+}
+
+// SeriesWindow returns only the requested tail of a ring. The duration is
+// clamped to the configured retention window so a specialized fleet view can
+// avoid copying and serializing hours of data it will immediately discard.
+func (s *Store) SeriesWindow(slug string, now int64, window time.Duration) Series {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := EmptySeries()
@@ -102,7 +109,10 @@ func (s *Store) Series(slug string, now int64) Series {
 	if r == nil {
 		return out
 	}
-	cutoff := now - int64(s.window.Seconds())
+	if window <= 0 || window > s.window {
+		window = s.window
+	}
+	cutoff := now - int64(window.Seconds())
 	bn := len(r.buf)
 	for i := range r.size {
 		sm := r.buf[(r.start+i)%bn] // oldest-first

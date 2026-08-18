@@ -14,7 +14,7 @@ import { createFocusTrap } from '/static/views/focus-trap.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail } from '/static/views/app-detail.js';
 import { appCardBadge, updateCardStatusBadge, updateStatusPill } from '/static/views/app-card-badge.js';
-import { renderSidebarApps, highlightSidebarApp } from '/static/views/sidebar-nav.js';
+import { renderSidebarApps, highlightSidebarApp, isPrimaryNavActive } from '/static/views/sidebar-nav.js';
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { headerStats } from '/static/views/stat-format.js';
 import { appCardFacts } from '/static/views/app-card-facts.js';
@@ -805,11 +805,12 @@ document.addEventListener('DOMContentLoaded', () => {
     tabUsers.hidden = payload.user.role !== 'admin';
     tabWorkers.hidden = payload.user.role !== 'admin';
     // The home (/) is role-adaptive: fleet operators (admin/operator) get the
-    // Overview, everyone else the Launchpad. Show only the matching nav item,
-    // and hide the operator-flavoured Apps grid from pure viewers.
+    // Overview, everyone else the Launchpad. The dedicated Launchpad remains
+    // available to every signed-in user; the operator-flavoured Apps grid stays
+    // hidden from pure viewers.
     const isOperator = payload.user.role === 'admin' || payload.user.role === 'operator';
     tabOverview.hidden = !isOperator;
-    tabLaunchpad.hidden = isOperator;
+    tabLaunchpad.hidden = false;
     tabApps.hidden = payload.user.role === 'viewer';
     newAppButton.hidden = !state.canCreateApps;
     // Load the admin fleet-health banner now that state.user is set; loadApps
@@ -4595,7 +4596,12 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(loginError, '');
 
     const submitBtn = loginForm.querySelector('button[type="submit"]');
-    if (submitBtn) submitBtn.disabled = true;
+    const submitLabel = submitBtn ? submitBtn.textContent : '';
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Signing in…';
+      submitBtn.setAttribute('aria-busy', 'true');
+    }
     try {
       let response;
       try {
@@ -4640,7 +4646,11 @@ document.addEventListener('DOMContentLoaded', () => {
       consumeNextParam();
       await handleDeployHash();
     } finally {
-      if (submitBtn) submitBtn.disabled = false;
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = submitLabel;
+        submitBtn.removeAttribute('aria-busy');
+      }
     }
   });
 
@@ -4934,10 +4944,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // [data-nav] links (app cards, overview links, detail folder tabs).
     for (const el of document.querySelectorAll('#primary-nav [data-nav]')) {
       const url = new URL(el.href);
-      const active = url.pathname === pathname
-        || (pathname.startsWith('/apps/') && url.pathname === '/apps')
-        // /home is the stable alias of the contextual home; highlight the Home nav.
-        || (pathname === '/home' && url.pathname === '/');
+      const active = isPrimaryNavActive(url.pathname, pathname, state.user && state.user.role);
       el.classList.toggle('tab-active', active);
       if (active) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
     }
@@ -5142,16 +5149,20 @@ document.addEventListener('DOMContentLoaded', () => {
     hideAllPageViews();
     const role = ctx.state.user && ctx.state.user.role;
     const isOperator = role === 'admin' || role === 'operator';
-    // Admin "preview viewer home": ?preview=viewer mounts the Launchpad in
-    // read-only preview for an operator (the param is meaningless to a viewer,
-    // who already gets the Launchpad).
-    if (isOperator && new URLSearchParams(location.search).get('preview') === 'viewer') {
-      return mountLaunchpad(ctx, { preview: true });
-    }
     return isOperator ? mountOverview(ctx) : mountLaunchpad(ctx);
   };
   router.register('/', mountHome);
   router.register('/home', mountHome);
+  router.register('/launchpad', () => {
+    hideAllPageViews();
+    const role = ctx.state.user && ctx.state.user.role;
+    const isOperator = role === 'admin' || role === 'operator';
+    // Preview is an explicit operator diagnostic mode. A viewer who receives
+    // the query parameter still gets their ordinary Launchpad.
+    const preview = isOperator
+      && new URLSearchParams(location.search).get('preview') === 'viewer';
+    return mountLaunchpad(ctx, { preview });
+  });
   router.register('/apps', () => {
     hideAllPageViews();
     // The Apps grid is operator-flavoured; pure viewers don't get it (the nav
@@ -5279,7 +5290,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // must not contain `\` (Windows-separator normalization). It must not be
   // `/` or `/login` (those would no-op or loop). Anything else falls
   // through silently.
-  const SPA_ROUTE_PREFIXES = ['/apps/', '/users', '/workers', '/audit-log', '/tokens'];
+  const SPA_ROUTE_PREFIXES = ['/launchpad', '/apps/', '/users', '/workers', '/audit-log', '/tokens'];
   function consumeNextParam() {
     const params = new URLSearchParams(window.location.search);
     const raw = params.get('next');

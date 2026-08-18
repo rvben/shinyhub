@@ -20,11 +20,14 @@ func TestMetricsResponseMarshalsNewFields(t *testing.T) {
 		CooldownUntil: &coolUntil,
 	}
 	resp := metricsResponse{
+		GeneratedAt:      lastAt,
 		MetricsAvailable: false,
 		AutoscaleStatus:  &as,
 		Replicas: []replicaMetrics{{
 			Index: 0, Status: "running",
 			Tier: "burst", Provider: "fargate", MetricsAvailable: false,
+			EffectiveMemoryLimitMB: 512, EffectiveCPUQuotaPercent: 100,
+			MemoryLimitEnforced: true, CPUQuotaEnforced: true, ResourceEnforcementKnown: true,
 		}},
 	}
 	b, err := json.Marshal(resp)
@@ -33,8 +36,10 @@ func TestMetricsResponseMarshalsNewFields(t *testing.T) {
 	}
 	s := string(b)
 	for _, key := range []string{
-		`"metrics_available"`, `"autoscale_status"`, `"tier":"burst"`,
+		`"generated_at"`, `"metrics_available"`, `"autoscale_status"`, `"tier":"burst"`,
 		`"provider":"fargate"`, `"last_action":"up"`, `"in_cooldown":true`,
+		`"effective_memory_limit_mb":512`, `"effective_cpu_quota_percent":100`,
+		`"memory_limit_enforced":true`, `"resource_enforcement_known":true`,
 	} {
 		if !strings.Contains(s, key) {
 			t.Errorf("metricsResponse JSON missing %s; got %s", key, s)

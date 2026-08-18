@@ -76,6 +76,46 @@ func TestGetMetricsHistory_ReturnsSeries(t *testing.T) {
 	}
 }
 
+func TestGetBatchMetricsHistory_ReturnsViewableSeriesAndTimestamp(t *testing.T) {
+	srv, store := newTestServer(t)
+	token := seedHistoryApp(t, store)
+	st := history.NewStore(12*time.Hour, 15*time.Second)
+	now := time.Now().Unix()
+	cpu := 37.5
+	oldCPU := 12.5
+	st.Append("myapp", history.Sample{TS: now - 901, CPU: &oldCPU, RSS: 128, Instances: 1})
+	st.Append("myapp", history.Sample{TS: now, CPU: &cpu, RSS: 256, Instances: 1})
+	srv.SetHistory(st)
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps/metrics/history?slugs=myapp,missing", nil, token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		WindowSeconds   int64                     `json:"window_seconds"`
+		IntervalSeconds int64                     `json:"interval_seconds"`
+		GeneratedAt     time.Time                 `json:"generated_at"`
+		History         map[string]history.Series `json:"history"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.GeneratedAt.IsZero() || resp.GeneratedAt.Location() != time.UTC {
+		t.Errorf("generated_at = %v, want a UTC timestamp", resp.GeneratedAt)
+	}
+	if resp.WindowSeconds != 900 || resp.IntervalSeconds != 15 {
+		t.Errorf("window/interval = %d/%d, want 900/15", resp.WindowSeconds, resp.IntervalSeconds)
+	}
+	series, ok := resp.History["myapp"]
+	if !ok || len(series.CPU) != 1 || series.CPU[0] == nil || *series.CPU[0] != cpu {
+		t.Errorf("history[myapp] = %#v", series)
+	}
+	if _, leaked := resp.History["missing"]; leaked {
+		t.Error("unknown app must not appear in batch history")
+	}
+}
+
 func TestGetMetricsHistory_KnownAppNoSamplesEmptySeries(t *testing.T) {
 	srv, store := newTestServer(t)
 	token := seedHistoryApp(t, store)

@@ -7,6 +7,7 @@ import {
   sidebarAppModel,
   renderSidebarApps,
   highlightSidebarApp,
+  isPrimaryNavActive,
 } from '../static/views/sidebar-nav.js';
 import { appCardBadge } from '../static/views/app-card-badge.js';
 
@@ -18,6 +19,17 @@ const badgeFor = (a) => appCardBadge(a, fmt);
 function container() {
   return new JSDOM('<!DOCTYPE html><div id="c"></div>').window.document;
 }
+
+test('isPrimaryNavActive: contextual home and dedicated Launchpad follow the signed-in role', () => {
+  assert.equal(isPrimaryNavActive('/', '/', 'admin'), true);
+  assert.equal(isPrimaryNavActive('/launchpad', '/', 'admin'), false);
+  assert.equal(isPrimaryNavActive('/launchpad', '/', 'viewer'), true);
+  assert.equal(isPrimaryNavActive('/', '/', 'viewer'), false);
+  assert.equal(isPrimaryNavActive('/', '/home', 'operator'), true);
+  assert.equal(isPrimaryNavActive('/launchpad', '/home', 'viewer'), true);
+  assert.equal(isPrimaryNavActive('/launchpad', '/launchpad', 'admin'), true);
+  assert.equal(isPrimaryNavActive('/apps', '/apps/demo/logs', 'admin'), true);
+});
 
 test('groupAppsByProject: ungrouped first, named projects sorted, apps sorted by name', () => {
   const apps = [
@@ -99,12 +111,12 @@ test('renderSidebarApps: deep-link race — the renderer marks active even when 
   assert.equal(c.querySelector('a.sidebar-app.active').getAttribute('data-app-slug'), 'foo');
 });
 
-test('renderSidebarApps: empty list renders an empty state and no rows', () => {
+test('renderSidebarApps: empty list stays quiet because the current view owns onboarding', () => {
   const doc = container();
   const c = doc.getElementById('c');
   renderSidebarApps(c, [], '/', badgeFor, doc);
   assert.equal(c.querySelectorAll('a.sidebar-app').length, 0);
-  assert.ok(c.querySelector('.sidebar-apps-empty'));
+  assert.equal(c.childElementCount, 0);
 });
 
 test('highlightSidebarApp: moves active in place on navigation, never more than one', () => {

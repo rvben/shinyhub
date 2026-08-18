@@ -92,6 +92,9 @@ func (s *Server) decorateApp(app *db.App) {
 	}
 	app.EffectiveMaxSessionsPerReplica = deploy.ResolveMaxSessionsPerReplica(
 		app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
+	defaultMem, defaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
+	app.EffectiveMemoryLimitMB = deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem)
+	app.EffectiveCPUQuotaPercent = deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defaultCPU)
 	app.SessionsCeiling = configuredSessionsCeiling(app)
 }
 

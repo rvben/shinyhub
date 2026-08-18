@@ -150,6 +150,8 @@ func newMetricsTestServerWithProxy(t *testing.T) (*api.Server, *db.Store, *proce
 // keeps legacy top-level fields mirroring the first running replica.
 func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 	srv, store, mgr, prx := newMetricsTestServerWithProxy(t)
+	srv.Config().Runtime.Docker.DefaultMemoryMB = 512
+	srv.Config().Runtime.Docker.DefaultCPUPercent = 150
 	hash, _ := testHashPassword("pass")
 	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
 	u, _ := store.GetUserByUsername("owner")
@@ -188,12 +190,15 @@ func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 		CPUPercent  float64 `json:"cpu_percent"`
 		RSSBytes    int64   `json:"rss_bytes"`
 		Replicas    []struct {
-			Index      int     `json:"index"`
-			Status     string  `json:"status"`
-			PID        int     `json:"pid"`
-			CPUPercent float64 `json:"cpu_percent"`
-			RSSBytes   int64   `json:"rss_bytes"`
-			Sessions   int64   `json:"sessions"`
+			Index                    int     `json:"index"`
+			Status                   string  `json:"status"`
+			PID                      int     `json:"pid"`
+			CPUPercent               float64 `json:"cpu_percent"`
+			RSSBytes                 int64   `json:"rss_bytes"`
+			Sessions                 int64   `json:"sessions"`
+			EffectiveMemoryLimitMB   int     `json:"effective_memory_limit_mb"`
+			EffectiveCPUQuotaPercent int     `json:"effective_cpu_quota_percent"`
+			EnforcementKnown         bool    `json:"resource_enforcement_known"`
 		} `json:"replicas"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
@@ -225,6 +230,12 @@ func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 		}
 		if rm.Sessions != 0 {
 			t.Errorf("replica[%d]: expected sessions=0 (no in-flight), got %d", i, rm.Sessions)
+		}
+		if rm.EffectiveMemoryLimitMB != 512 || rm.EffectiveCPUQuotaPercent != 150 {
+			t.Errorf("replica[%d]: effective limits = %d MB/%d%%, want 512 MB/150%%", i, rm.EffectiveMemoryLimitMB, rm.EffectiveCPUQuotaPercent)
+		}
+		if !rm.EnforcementKnown {
+			t.Errorf("replica[%d]: resource enforcement must be known when a manager is wired", i)
 		}
 	}
 	if resp.Replicas[0].PID != 1001 || resp.Replicas[1].PID != 1002 {

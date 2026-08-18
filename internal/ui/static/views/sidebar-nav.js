@@ -13,6 +13,21 @@
 import { groupApps, UNGROUPED } from './project-groups.js';
 import { createGroupDisclosure } from './group-disclosure.js';
 
+// Section navigation has a contextual home: operators see Overview at `/`
+// while everyone else sees the Launchpad. `/home` is the stable alias used by
+// branded landing pages, so it follows the same role-aware selection. The
+// dedicated `/launchpad` route is always the app-opening surface.
+export function isPrimaryNavActive(hrefPath, currentPath, role) {
+  const href = hrefPath || '';
+  const current = currentPath || '/';
+  const isOperator = role === 'admin' || role === 'operator';
+  if (current === '/' || current === '/home') {
+    return isOperator ? href === '/' : href === '/launchpad';
+  }
+  if (current.startsWith('/apps/') && href === '/apps') return true;
+  return href === current;
+}
+
 // Group apps by project_slug. Apps with no project_slug render UNGROUPED at the
 // top (project: null); named projects follow under their display-name heading;
 // apps are sorted by display name within each group. The ordering is the shared
@@ -63,10 +78,8 @@ export function renderSidebarApps(container, apps, currentPath, badgeFor, doc) {
   container.textContent = '';
   const list = (apps || []).filter(Boolean);
   if (!list.length) {
-    const empty = d.createElement('p');
-    empty.className = 'sidebar-apps-empty';
-    empty.textContent = 'No apps yet';
-    container.appendChild(empty);
+    // The active Overview/Launchpad owns the useful first-run message and CTA.
+    // Leave this secondary navigation region empty instead of repeating it.
     return;
   }
 

@@ -771,9 +771,10 @@ func (s *Server) buildRouter() chi.Router {
 		// the apps table (and degrade every user's list-view latency). Uses the
 		// shared per-user action limiter (30/min) - generous for fleet apply.
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps", s.handleCreateApp)
-		// Static "/metrics" is registered before the "{slug}" wildcard so chi
-		// routes the batch endpoint here rather than to handleGetApp(slug=metrics).
+		// Static metrics routes are registered before the "{slug}" wildcard so chi
+		// does not treat "metrics" as an app slug.
 		r.Get("/api/apps/metrics", s.handleBatchMetrics)
+		r.Get("/api/apps/metrics/history", s.handleBatchMetricsHistory)
 		r.Get("/api/apps/{slug}", s.handleGetApp)
 		r.Patch("/api/apps/{slug}", s.handlePatchApp)
 		r.Delete("/api/apps/{slug}", s.handleDeleteApp)

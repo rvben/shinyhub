@@ -653,11 +653,16 @@ type App struct {
 	// EffectiveHibernateTimeoutMinutes is the exact timeout in minutes after
 	// resolving a nil per-app value against lifecycle.hibernate_timeout. A
 	// float preserves duration settings such as 90s as 1.5 minutes.
-	EffectiveHibernateTimeoutMinutes float64   `json:"effective_hibernate_timeout_minutes"`
-	MemoryLimitMB                    *int      `json:"memory_limit_mb"`
-	CPUQuotaPercent                  *int      `json:"cpu_quota_percent"`
-	CreatedAt                        time.Time `json:"created_at"`
-	UpdatedAt                        time.Time `json:"updated_at"`
+	EffectiveHibernateTimeoutMinutes float64 `json:"effective_hibernate_timeout_minutes"`
+	MemoryLimitMB                    *int    `json:"memory_limit_mb"`
+	CPUQuotaPercent                  *int    `json:"cpu_quota_percent"`
+	// Effective resource fields are presentation-only: the API resolves nullable
+	// app overrides against the placement-aware runtime defaults. Zero means the
+	// platform applies no ShinyHub per-replica limit.
+	EffectiveMemoryLimitMB   int       `json:"effective_memory_limit_mb"`
+	EffectiveCPUQuotaPercent int       `json:"effective_cpu_quota_percent"`
+	CreatedAt                time.Time `json:"created_at"`
+	UpdatedAt                time.Time `json:"updated_at"`
 	// LastDeployedAt is the created_at of the most-recent deployment row,
 	// or nil if the app has never been deployed. Joined in via the
 	// deploymentSummarySQL fragment below.

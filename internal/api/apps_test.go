@@ -86,6 +86,50 @@ func TestListApps(t *testing.T) {
 	// empty list is fine
 }
 
+func TestListAppsResolvesEffectiveResourceDefaults(t *testing.T) {
+	srv, store := newTestServer(t)
+	srv.Config().Runtime.Docker.DefaultMemoryMB = 768
+	srv.Config().Runtime.Docker.DefaultCPUPercent = 125
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "inherited", Name: "Inherited", OwnerID: owner.ID})
+
+	read := func() db.App {
+		t.Helper()
+		token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps", nil, token))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list: %d: %s", rec.Code, rec.Body.String())
+		}
+		var env struct {
+			Items []db.App `json:"items"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&env); err != nil || len(env.Items) != 1 {
+			t.Fatalf("decode list: items=%d err=%v", len(env.Items), err)
+		}
+		return env.Items[0]
+	}
+
+	got := read()
+	if got.EffectiveMemoryLimitMB != 768 || got.EffectiveCPUQuotaPercent != 125 {
+		t.Fatalf("inherited effective limits = %d MB/%d%%, want 768 MB/125%%", got.EffectiveMemoryLimitMB, got.EffectiveCPUQuotaPercent)
+	}
+
+	zero := 0
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug: "inherited", SetMemoryLimitMB: true, MemoryLimitMB: &zero,
+		SetCPUQuotaPercent: true, CPUQuotaPercent: &zero,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got = read()
+	if got.EffectiveMemoryLimitMB != 0 || got.EffectiveCPUQuotaPercent != 0 {
+		t.Fatalf("explicit unlimited limits = %d MB/%d%%, want 0/0", got.EffectiveMemoryLimitMB, got.EffectiveCPUQuotaPercent)
+	}
+}
+
 // Status is an observation, not merely the stored lifecycle intent: a crashed
 // desired-running replica must never masquerade as hibernated, and an app with
 // no process must not claim to be running. List and detail must agree.

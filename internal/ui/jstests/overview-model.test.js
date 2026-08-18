@@ -4,11 +4,31 @@ import { buildOverviewModel, pulseOrder } from '../static/views/overview-model.j
 
 const MIB = 1024 * 1024;
 
-test('buildOverviewModel: empty fleet reads as nominal with a deploy prompt', () => {
+function replica(index, { cpu = 0, rssMB = 0, memMB = 512, cpuQuota = 100,
+  metricsAvailable = true, memoryEnforced = true, cpuEnforced = true } = {}) {
+  return {
+    index,
+    status: 'running',
+    metrics_available: metricsAvailable,
+    cpu_percent: cpu,
+    rss_bytes: rssMB * MIB,
+    effective_memory_limit_mb: memMB,
+    effective_cpu_quota_percent: cpuQuota,
+    memory_limit_enforced: memoryEnforced,
+    cpu_quota_enforced: cpuEnforced,
+    resource_enforcement_known: true,
+  };
+}
+
+function ready(metrics, generatedAt = '2026-08-18T09:00:00Z') {
+  return { state: 'ready', metrics, generatedAt };
+}
+
+test('buildOverviewModel: empty fleet is neutral and not presented as healthy', () => {
   const m = buildOverviewModel([], {});
   assert.equal(m.total, 0);
-  assert.equal(m.verdict.tone, 'nominal');
-  assert.match(m.verdict.headline, /No apps deployed/);
+  assert.equal(m.verdict.tone, 'empty');
+  assert.equal(m.verdict.headline, 'Fleet not configured');
 });
 
 test('buildOverviewModel: healthy fleet is nominal with a one-line summary', () => {
@@ -17,7 +37,10 @@ test('buildOverviewModel: healthy fleet is nominal with a one-line summary', () 
     { slug: 'b', status: 'running' },
     { slug: 'c', status: 'hibernated' },
   ];
-  const m = buildOverviewModel(apps, {});
+  const m = buildOverviewModel(apps, ready({
+    a: { status: 'running', replicas: [replica(0)] },
+    b: { status: 'running', replicas: [replica(0)] },
+  }));
   assert.equal(m.verdict.tone, 'nominal');
   assert.equal(m.verdict.headline, 'All systems nominal');
   assert.equal(m.counts.healthy, 2);
@@ -52,63 +75,120 @@ test('buildOverviewModel: segments cover every bucket in a stable order', () => 
   assert.equal(m.segments.find((s) => s.key === 'healthy').count, 1);
 });
 
-test('buildOverviewModel: sums live CPU/RAM and flags apps near their memory limit', () => {
-  const apps = [
-    { slug: 'a', status: 'running', memory_limit_mb: 256 },
-    { slug: 'b', status: 'running', memory_limit_mb: 256 },
-  ];
-  const metrics = {
-    a: { cpu_percent: 12, rss_bytes: 240 * MIB }, // 240/256 = 0.94 -> near limit
-    b: { cpu_percent: 5, rss_bytes: 100 * MIB }, // 100/256 = 0.39 -> fine
-  };
-  const m = buildOverviewModel(apps, metrics);
-  assert.equal(m.resources.cpuPercent, 17);
-  assert.equal(m.resources.rssBytes, 340 * MIB);
-  assert.equal(m.resources.running, 2);
-  assert.equal(m.resources.nearLimit.length, 1);
-  assert.equal(m.resources.nearLimit[0].slug, 'a');
-  assert.ok(m.resources.nearLimit[0].fraction > 0.9);
+test('buildOverviewModel: uses resolved limits and stable units in fleet denominators', () => {
+  const apps = [{ slug: 'a', status: 'running' }, { slug: 'b', status: 'running' }];
+  const m = buildOverviewModel(apps, ready({
+    a: { status: 'running', replicas: [replica(0, { cpu: 40, rssMB: 200, memMB: 512, cpuQuota: 100 })] },
+    b: { status: 'running', replicas: [replica(0, { cpu: 50, rssMB: 300, memMB: 1024, cpuQuota: 200 })] },
+  }));
+  assert.equal(m.resources.cpu.used, 90);
+  assert.equal(m.resources.cpu.capacity, 300);
+  assert.equal(m.resources.memory.used, 500 * MIB);
+  assert.equal(m.resources.memory.capacity, 1536 * MIB);
+  assert.equal(m.resources.cpu.coverage.coveredReplicas, 2);
+  assert.equal(m.resources.state, 'ready');
 });
 
-test('buildOverviewModel: one app without a rate makes the fleet CPU unavailable', () => {
-  // The fleet total is a sum, so it is only as complete as its least-informed
-  // member. Reporting 12 while app b's usage is unknown states a total the
-  // dashboard cannot back up, and it would read as the fleet getting quieter
-  // during a deploy.
-  const apps = [
-    { slug: 'a', status: 'running' },
-    { slug: 'b', status: 'running' },
-  ];
-  const metrics = {
-    a: { cpu_percent: 12, rss_bytes: 100 * MIB },
-    b: { cpu_percent: null, rss_bytes: 100 * MIB },
-  };
-  const m = buildOverviewModel(apps, metrics);
-  assert.equal(m.resources.cpuPercent, null);
-  assert.equal(m.resources.rssBytes, 200 * MIB, 'memory needs no baseline and still totals');
-  assert.equal(m.resources.running, 2);
+test('buildOverviewModel: an idle running replica counts and genuine zero remains observable', () => {
+  const apps = [{ slug: 'idle', status: 'running' }];
+  const m = buildOverviewModel(apps, ready({ idle: { status: 'running', replicas: [replica(0)] } }));
+  assert.equal(m.resources.runningApps, 1);
+  assert.equal(m.resources.runningReplicas, 1);
+  assert.equal(m.resources.cpu.observedUsed, 0);
+  assert.equal(m.resources.memory.observedUsed, 0);
+  assert.equal(m.resources.state, 'ready');
 });
 
-test('buildOverviewModel: a fleet genuinely at zero still reports 0', () => {
+test('buildOverviewModel: request failure is unavailable, never synthetic zero', () => {
+  const apps = [{ slug: 'a', status: 'running', replicas: 1 }];
+  const m = buildOverviewModel(apps, { state: 'unavailable', metrics: {}, generatedAt: null });
+  assert.equal(m.resources.state, 'unavailable');
+  assert.equal(m.resources.cpu.fraction, null);
+  assert.equal(m.resources.memory.fraction, null);
+  assert.equal(m.verdict.headline, 'Resource metrics unavailable');
+});
+
+test('buildOverviewModel: stale state preserves last good values and timestamp', () => {
+  const metrics = { a: { status: 'running', replicas: [replica(0, { cpu: 25, rssMB: 128 })] } };
+  const m = buildOverviewModel([{ slug: 'a', status: 'running' }], {
+    state: 'stale', metrics, generatedAt: '2026-08-18T08:59:00Z',
+  });
+  assert.equal(m.resources.state, 'stale');
+  assert.equal(m.resources.cpu.used, 25);
+  assert.equal(m.resources.generatedAt, '2026-08-18T08:59:00Z');
+  assert.equal(m.verdict.headline, 'Resource data is stale');
+});
+
+test('buildOverviewModel: unlimited and unenforced replicas produce partial coverage', () => {
+  const apps = [{ slug: 'unlimited', status: 'running' }, { slug: 'unenforced', status: 'running' }];
+  const m = buildOverviewModel(apps, ready({
+    unlimited: { status: 'running', replicas: [replica(0, { memMB: 0, cpuQuota: 0 })] },
+    unenforced: { status: 'running', replicas: [replica(0, { memoryEnforced: false, cpuEnforced: false })] },
+  }));
+  assert.equal(m.resources.state, 'partial');
+  assert.equal(m.resources.memory.coverage.unlimitedReplicas, 1);
+  assert.equal(m.resources.memory.coverage.unenforcedReplicas, 1);
+  assert.equal(m.resources.memory.capacity, 0);
+  assert.equal(m.verdict.headline, 'Resource coverage is partial');
+});
+
+test('buildOverviewModel: one hot replica is not masked by a cool sibling', () => {
+  const apps = [{ slug: 'scaled', name: 'Scaled', status: 'running' }];
+  const m = buildOverviewModel(apps, ready({
+    scaled: { status: 'running', replicas: [
+      replica(0, { rssMB: 251, memMB: 256 }),
+      replica(1, { rssMB: 10, memMB: 256 }),
+    ] },
+  }));
+  assert.ok(m.resources.memory.fraction < 0.6, 'aggregate stays cool');
+  assert.ok(m.resources.memory.peakFraction > 0.95, 'hottest replica is retained');
+  assert.equal(m.resources.memory.severity, 'critical');
+  assert.equal(m.resources.hotspots[0].replicaIndex, 0);
+  assert.equal(m.verdict.headline, 'Resource limit critical');
+});
+
+test('buildOverviewModel: warning and critical boundaries are exact for CPU and memory', () => {
+  const warning = buildOverviewModel([{ slug: 'warn', status: 'running' }], ready({
+    warn: { status: 'running', replicas: [replica(0, { cpu: 85, cpuQuota: 100, rssMB: 85, memMB: 100 })] },
+  }));
+  assert.equal(warning.resources.cpu.severity, 'warning');
+  assert.equal(warning.resources.memory.severity, 'warning');
+
+  const critical = buildOverviewModel([{ slug: 'crit', status: 'running' }], ready({
+    crit: { status: 'running', replicas: [replica(0, { cpu: 95, cpuQuota: 100, rssMB: 95, memMB: 100 })] },
+  }));
+  assert.equal(critical.resources.cpu.severity, 'critical');
+  assert.equal(critical.resources.memory.severity, 'critical');
+});
+
+test('buildOverviewModel: hotspots sort critical first and retain all alerts', () => {
+  const apps = Array.from({ length: 6 }, (_, i) => ({ slug: `app-${i}`, status: 'running' }));
+  const metrics = Object.fromEntries(apps.map((app, i) => [app.slug, {
+    status: 'running', replicas: [replica(0, { rssMB: i === 5 ? 98 : 90, memMB: 100 })],
+  }]));
+  const m = buildOverviewModel(apps, ready(metrics));
+  assert.equal(m.resources.hotspots.length, 6);
+  assert.equal(m.resources.hotspots[0].severity, 'critical');
+  assert.equal(m.resources.hiddenHotspotCount, 2);
+});
+
+test('buildOverviewModel: computes rising, falling, and collecting 15-minute trends', () => {
   const apps = [{ slug: 'a', status: 'running' }];
-  const m = buildOverviewModel(apps, { a: { cpu_percent: 0, rss_bytes: 10 * MIB } });
-  assert.equal(m.resources.cpuPercent, 0);
-});
+  const metrics = ready({ a: { status: 'running', replicas: [replica(0, { cpu: 20, rssMB: 20, memMB: 100, cpuQuota: 100 })] } });
+  const ts = [0, 180, 360, 540, 720, 900];
+  const rising = buildOverviewModel(apps, metrics, { historyAvailable: true, historyBySlug: {
+    a: { ts, cpu: [10, 10, 10, 20, 20, 20], rss: [10, 10, 10, 20, 20, 20].map((v) => v * MIB), instances: [1, 1, 1, 1, 1, 1] },
+  } });
+  assert.equal(rising.resources.cpu.trend.state, 'rising');
+  assert.equal(rising.resources.cpu.trend.deltaFraction, 0.1);
 
-test('buildOverviewModel: a scaled app is judged against per-replica capacity, not its single-replica limit', () => {
-  // Two replicas each at 50% of a 256 MB limit: summed RSS = the limit, but the
-  // fleet capacity is 512 MB, so the app is NOT near its limit.
-  const apps = [{ slug: 'scaled', status: 'running', memory_limit_mb: 256, replicas: 2 }];
-  const metrics = {
-    scaled: {
-      status: 'running',
-      replicas: [
-        { status: 'running', rss_bytes: 128 * MIB },
-        { status: 'running', rss_bytes: 128 * MIB },
-      ],
-    },
-  };
-  const m = buildOverviewModel(apps, metrics);
-  assert.equal(m.resources.rssBytes, 256 * MIB);
-  assert.equal(m.resources.nearLimit.length, 0);
+  const falling = buildOverviewModel(apps, metrics, { historyAvailable: true, historyBySlug: {
+    a: { ts, cpu: [30, 30, 30, 20, 20, 20], rss: [30, 30, 30, 20, 20, 20].map((v) => v * MIB), instances: [1, 1, 1, 1, 1, 1] },
+  } });
+  assert.equal(falling.resources.cpu.trend.state, 'falling');
+
+  const collecting = buildOverviewModel(apps, metrics, { historyAvailable: true, historyBySlug: {
+    a: { ts: [0, 30], cpu: [10, 20], rss: [10, 20], instances: [1, 1] },
+  } });
+  assert.equal(collecting.resources.cpu.trend.state, 'collecting');
 });

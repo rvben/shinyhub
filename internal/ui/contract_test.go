@@ -2614,8 +2614,8 @@ func TestAppCardFactsStayOperational(t *testing.T) {
 // (sparklinePoints, headerStats, metricsText, buildOverviewModel) are unit-tested
 // against real nulls in internal/ui/jstests/.
 func TestAbsentCPURateRendersAsUnknown(t *testing.T) {
-	assertContains(t, "views/overview.js", "if (pct === null || pct === undefined) return",
-		"the Overview fleet CPU tile must render an absent total as a neutral glyph, not 0%")
+	assertContains(t, "views/overview-model.js", "replica.cpu_percent != null",
+		"the Overview allocation model must exclude an absent CPU rate instead of treating it as 0%")
 	assertContains(t, "views/replica-display.js", "typeof replica.cpu_percent === 'number'",
 		"a replica's CPU cell must type-check the rate so null renders as a dash instead of 0.0%")
 	assertContains(t, "views/stat-format.js", "cpuAvailable",
@@ -2658,6 +2658,10 @@ func TestOverviewContract(t *testing.T) {
 		"the / route mounts the Overview (views/overview.js)")
 	assertContains(t, "app.js", "router.register('/apps'",
 		"the apps grid moved to the /apps route")
+	assertContains(t, "views/overview.js", "if (model.total === 0)",
+		"an empty fleet must take the focused first-run render path instead of showing operational panels")
+	assertContains(t, "views/overview.js", "Deploy your first Shiny app",
+		"the empty Overview must provide a concrete first-value action")
 }
 
 // TestLaunchpadContract pins the viewer Launchpad (the non-operator / home) to
@@ -2672,11 +2676,17 @@ func TestLaunchpadContract(t *testing.T) {
 	assertContains(t, "index.html", `id="launchpad-body"`,
 		"launchpad.js renders the gallery into #launchpad-body")
 	assertContains(t, "index.html", `id="tab-launchpad"`,
-		"the non-operator home nav item")
+		"the Launchpad nav item available to every signed-in user")
+	assertContains(t, "app.js", "tabLaunchpad.hidden = false",
+		"admins and operators retain a first-class Launchpad destination")
+	assertContains(t, "app.js", "router.register('/launchpad'",
+		"the Launchpad has a dedicated route independent of the contextual home")
 	assertContains(t, "views/launchpad-model.js", "app.description",
 		"GET /api/apps returns description (db.App.Description); the Launchpad tile shows it")
 	assertContains(t, "views/launchpad.js", "/app/",
 		"a Launchpad tile launches the proxied app at /app/<slug>/")
+	assertContains(t, "views/launchpad.js", "cta.href = '/apps'",
+		"an operator's empty Launchpad must link directly to the app-management path")
 	// A pure viewer must not reach the operator detail page (logs / deployments /
 	// configuration) via a sidebar link or a typed URL; the detail mount redirects
 	// them to the Launchpad once the app loads, while a per-app manager (can_manage)
@@ -2694,11 +2704,11 @@ func TestLaunchpadContract(t *testing.T) {
 // the Overview entry, the role-gated route, the viewer-scoped fetch, the banner,
 // and the faithful sidebar.
 func TestPreviewViewerHomeUIContract(t *testing.T) {
-	assertContains(t, "index.html", `href="/home?preview=viewer"`,
+	assertContains(t, "index.html", `href="/launchpad?preview=viewer"`,
 		"the Overview has a Preview viewer home entry")
 	assertContains(t, "app.js", "preview') === 'viewer'",
-		"mountHome mounts the Launchpad in preview for an operator on ?preview=viewer")
-	assertContains(t, "app.js", "{ preview: true }",
+		"the dedicated Launchpad route enables preview for an operator on ?preview=viewer")
+	assertContains(t, "app.js", "mountLaunchpad(ctx, { preview })",
 		"the preview mounts the Launchpad with preview mode on")
 	assertContains(t, "views/launchpad.js", "/api/apps?as=viewer",
 		"preview fetches the viewer-scoped (public+shared) app list")
@@ -2715,6 +2725,8 @@ func TestPreviewViewerHomeUIContract(t *testing.T) {
 func TestRootHomeUIContract(t *testing.T) {
 	assertContains(t, "app.js", "router.register('/home'",
 		"the SPA registers /home as the stable authenticated home alias")
+	assertContains(t, "app.js", "router.register('/launchpad'",
+		"the SPA registers the dedicated app-opening destination")
 	assertContains(t, "app.js", "window.location.assign('/')",
 		"logout navigates to the contextual root so the landing page shows when one is configured")
 	assertContains(t, "app.js", "suppressUnloadGuard",
@@ -3079,6 +3091,9 @@ func TestLoginHandlesRateLimitAndDoubleSubmit(t *testing.T) {
 	}
 	if !strings.Contains(body, "submitBtn.disabled = true") || !strings.Contains(body, "submitBtn.disabled = false") {
 		t.Fatal("the login submit button must be disabled for the duration of the request to prevent a double-submit")
+	}
+	if !strings.Contains(body, "Signing in…") || !strings.Contains(body, "aria-busy") {
+		t.Fatal("the login submit button must name and expose its in-progress state while authentication is pending")
 	}
 }
 

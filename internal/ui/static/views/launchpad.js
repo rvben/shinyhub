@@ -1,5 +1,6 @@
-// Launchpad view - the viewer/consumer home. A warm, app-forward gallery built
-// for one motion: find an app, open it. Logic lives in launchpad-model.js (DOM-
+// Launchpad view - the app-opening surface for viewers and operators. An
+// app-forward gallery built for one motion: find an app, open it. Logic lives in
+// launchpad-model.js (DOM-
 // free, unit-tested); this file renders it (createElement/textContent only, so
 // an app name or description can never inject markup) and tracks recently-opened
 // apps in localStorage. No operator chrome (no deploy/metrics/kebab) - launching
@@ -222,9 +223,21 @@ export function mountLaunchpad(ctx, opts = {}) {
 
   function renderEmpty() {
     const sec = el('section', 'lp-empty');
-    sec.appendChild(el('h2', 'lp-empty-title', 'No apps shared with you yet'));
-    sec.appendChild(el('p', 'lp-empty-body',
-      'When an operator gives you access to an app, it shows up here ready to open. Ask your admin if you are expecting one.'));
+    const role = ctx.state && ctx.state.user && ctx.state.user.role;
+    const isOperator = role === 'admin' || role === 'operator';
+    if (isOperator && !preview) {
+      sec.appendChild(el('h2', 'lp-empty-title', 'No apps to launch yet'));
+      sec.appendChild(el('p', 'lp-empty-body',
+        'Deploy your first app and it will appear here ready to open.'));
+      const cta = el('a', 'btn-primary', 'Go to Apps');
+      cta.href = '/apps';
+      cta.setAttribute('data-nav', '');
+      sec.appendChild(cta);
+    } else {
+      sec.appendChild(el('h2', 'lp-empty-title', 'No apps shared with you yet'));
+      sec.appendChild(el('p', 'lp-empty-body',
+        'When an operator gives you access to an app, it shows up here ready to open. Ask your admin if you are expecting one.'));
+    }
     return sec;
   }
 

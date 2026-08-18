@@ -18,7 +18,7 @@ var appDetailPath = regexp.MustCompile(`^/apps/` + slugpkg.Pattern + `(/[a-z-]+)
 // derive from this list so the two cannot drift - a route present in one but not
 // the other silently 404s on deep links/reloads. To add an SPA page, add it here.
 func ExactUIRoutes() []string {
-	return []string{"/login", "/home", "/apps", "/users", "/workers", "/audit-log", "/tokens"}
+	return []string{"/login", "/home", "/launchpad", "/apps", "/users", "/workers", "/audit-log", "/tokens"}
 }
 
 // IsUIPath reports whether path is a client-side-rendered SPA route that

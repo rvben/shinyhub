@@ -3247,6 +3247,16 @@ type replicaMetrics struct {
 	Signal           string `json:"signal,omitempty"`
 	RestartCount     int    `json:"restart_count"`
 	MetricsAvailable bool   `json:"metrics_available"`
+	// Effective resource limits mirror the placement-aware pair deployment
+	// resolves for the app. A zero limit is genuinely unlimited; it is not the
+	// nullable "inherit" value stored on the app. EnforcementKnown distinguishes
+	// an unenforced native cgroup limit from a test/API-only server that has no
+	// runtime authority to answer.
+	EffectiveMemoryLimitMB   int  `json:"effective_memory_limit_mb"`
+	EffectiveCPUQuotaPercent int  `json:"effective_cpu_quota_percent"`
+	MemoryLimitEnforced      bool `json:"memory_limit_enforced"`
+	CPUQuotaEnforced         bool `json:"cpu_quota_enforced"`
+	ResourceEnforcementKnown bool `json:"resource_enforcement_known"`
 }
 
 // autoscaleStatus is the live autoscale state returned in the metrics poll and
@@ -3259,6 +3269,7 @@ type autoscaleStatus struct {
 }
 
 type metricsResponse struct {
+	GeneratedAt time.Time `json:"generated_at"`
 	// Status is the app-level status: "running" if any replica is running,
 	// otherwise the dominant replica status (or the DB-recorded status if
 	// no replicas are tracked yet).
@@ -3359,6 +3370,7 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 	observedApp := *app
 	s.decorateApp(&observedApp)
 	resp := metricsResponse{
+		GeneratedAt:          time.Now().UTC(),
 		Status:               app.Status,
 		DesiredStatus:        app.Status,
 		Deploying:            s.appDeploying(app),
@@ -3534,6 +3546,14 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 		}
 	}
 
+	// Attach the app's deployment-resolved capacity to each final display row
+	// after elastic and lost-replica overlays establish its provider tier.
+	// Overview can compare usage with the configured per-replica ceiling and use
+	// the row's tier to verify whether that provider actually enforces it.
+	for i := range resp.Replicas {
+		s.decorateReplicaResources(app, &resp.Replicas[i])
+	}
+
 	observationReplicas := make([]*db.Replica, 0, len(resp.Replicas))
 	workersTotal := 0
 	for _, rep := range resp.Replicas {
@@ -3560,6 +3580,23 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 	return resp
 }
 
+func (s *Server) decorateReplicaResources(app *db.App, rm *replicaMetrics) {
+	tier := rm.Tier
+	if tier == "" {
+		tier = s.cfg.Runtime.DefaultTierName()
+	}
+	// Deployment resolves one placement-aware pair for the app and passes it to
+	// every replica. Match that exact behavior here; resolving each row from its
+	// tier would overstate precision for the documented multi-tier fallback.
+	defaultMem, defaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
+	rm.EffectiveMemoryLimitMB = deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem)
+	rm.EffectiveCPUQuotaPercent = deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defaultCPU)
+	if s.manager != nil {
+		rm.ResourceEnforcementKnown = true
+		rm.MemoryLimitEnforced, rm.CPUQuotaEnforced = s.manager.ResourceEnforcement(tier)
+	}
+}
+
 // handleBatchMetrics returns the live metrics for many apps in one response,
 // keyed by slug, so the dashboard populates every card's CPU/RAM/status with a
 // single request instead of one round-trip per app. The slugs to report are
@@ -3573,57 +3610,10 @@ func (s *Server) handleBatchMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the target apps the caller may view. With ?slugs= the requested
-	// cards are fetched in one query and access-filtered; with no ?slugs= the
-	// visible-apps query already returns only viewable apps.
-	var apps []*db.App
-	if raw := strings.TrimSpace(r.URL.Query().Get("slugs")); raw != "" {
-		var slugs []string
-		for _, s := range strings.Split(raw, ",") {
-			if s = strings.TrimSpace(s); s != "" {
-				slugs = append(slugs, s)
-			}
-		}
-		fetched, err := s.store.GetAppsBySlugs(slugs)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		for _, app := range fetched {
-			if ok, verr := s.canViewApp(u, app); verr == nil && ok {
-				apps = append(apps, app)
-			}
-			// unknown or not-viewable slugs are silently skipped
-		}
-	} else {
-		// What "every app" means depends on the caller, exactly as it does for
-		// GET /api/apps: a privileged operator sees the whole server, everyone
-		// else sees what they own or have been granted. Deriving both from the
-		// same rule keeps a card and its metrics from disagreeing about which
-		// apps exist, and keeps this branch consistent with ?slugs=, where an
-		// admin naming an app it does not own has always been answered.
-		var (
-			visible []*db.App
-			err     error
-		)
-		if isPrivilegedAppOperator(u) {
-			visible, err = s.store.ListApps(0, 0)
-		} else {
-			visible, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		// Neither query knows about token scope, and scope beats role and
-		// visibility both. Without this filter a token scoped to one app could
-		// read every public app's pids and resource usage by omitting ?slugs=,
-		// which naming those apps explicitly would have refused.
-		for _, app := range visible {
-			if u.AppInScope(app.Slug) {
-				apps = append(apps, app)
-			}
-		}
+	apps, err := s.metricAppsForUser(u, r.URL.Query().Get("slugs"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
 
 	// Batch the two per-card DB reads (replicas, latest autoscale event) so the
@@ -3650,7 +3640,61 @@ func (s *Server) handleBatchMetrics(w http.ResponseWriter, r *http.Request) {
 		ev, found := autoscaleBySlug[app.Slug]
 		out[app.Slug] = s.buildAppMetricsFrom(app.Slug, app, replicasByApp[app.ID], ev, found)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"metrics": out})
+	writeJSON(w, http.StatusOK, map[string]any{"metrics": out, "generated_at": time.Now().UTC()})
+}
+
+// metricAppsForUser resolves a batch-observability request to the exact apps
+// the caller may view. Live metrics and history share it so neither endpoint
+// can drift into exposing a broader fleet than the apps list.
+func (s *Server) metricAppsForUser(u *auth.ContextUser, rawSlugs string) ([]*db.App, error) {
+	var apps []*db.App
+	if raw := strings.TrimSpace(rawSlugs); raw != "" {
+		var slugs []string
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				slugs = append(slugs, s)
+			}
+		}
+		fetched, err := s.store.GetAppsBySlugs(slugs)
+		if err != nil {
+			return nil, err
+		}
+		for _, app := range fetched {
+			if ok, verr := s.canViewApp(u, app); verr == nil && ok {
+				apps = append(apps, app)
+			}
+			// unknown or not-viewable slugs are silently skipped
+		}
+	} else {
+		// What "every app" means depends on the caller, exactly as it does for
+		// GET /api/apps: a privileged operator sees the whole server, everyone
+		// else sees what they own or have been granted. Deriving both from the
+		// same rule keeps a card and its metrics from disagreeing about which
+		// apps exist, and keeps this branch consistent with ?slugs=, where an
+		// admin naming an app it does not own has always been answered.
+		var (
+			visible []*db.App
+			err     error
+		)
+		if isPrivilegedAppOperator(u) {
+			visible, err = s.store.ListApps(0, 0)
+		} else {
+			visible, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
+		}
+		if err != nil {
+			return nil, err
+		}
+		// Neither query knows about token scope, and scope beats role and
+		// visibility both. Without this filter a token scoped to one app could
+		// read every public app's pids and resource usage by omitting ?slugs=,
+		// which naming those apps explicitly would have refused.
+		for _, app := range visible {
+			if u.AppInScope(app.Slug) {
+				apps = append(apps, app)
+			}
+		}
+	}
+	return apps, nil
 }
 
 func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {

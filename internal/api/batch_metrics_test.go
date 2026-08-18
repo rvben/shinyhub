@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
@@ -36,12 +37,16 @@ func TestBatchMetrics_RequestedVisibleAppsKeyedBySlug(t *testing.T) {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Metrics map[string]struct {
+		GeneratedAt time.Time `json:"generated_at"`
+		Metrics     map[string]struct {
 			Status string `json:"status"`
 		} `json:"metrics"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode (route should hit the batch handler, not handleGetApp): %v", err)
+	}
+	if body.GeneratedAt.IsZero() {
+		t.Error("batch metrics must include generated_at")
 	}
 	if _, ok := body.Metrics["mine1"]; !ok {
 		t.Error("mine1 missing from batch metrics")

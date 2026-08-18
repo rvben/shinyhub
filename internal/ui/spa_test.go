@@ -7,7 +7,7 @@ import "testing"
 // reload, while API and unknown paths must not.
 func TestIsUIPath(t *testing.T) {
 	uiRoutes := []string{
-		"/login", "/home", "/apps", "/users", "/workers", "/audit-log", "/tokens",
+		"/login", "/home", "/launchpad", "/apps", "/users", "/workers", "/audit-log", "/tokens",
 		"/apps/my-app", "/apps/my-app/logs",
 	}
 	for _, p := range uiRoutes {

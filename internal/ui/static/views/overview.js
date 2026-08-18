@@ -10,6 +10,7 @@ import { formatStatus } from './status-label.js';
 import { appCardBadge } from './app-card-badge.js';
 
 const POLL_MS = 10000;
+const REQUEST_TIMEOUT_MS = 8000;
 
 export function mountOverview(ctx) {
   const view = document.getElementById('overview-view');
@@ -19,6 +20,20 @@ export function mountOverview(ctx) {
 
   let disposed = false;
   let timer = null;
+  let loadInFlight = false;
+  let lastMetricsSnapshot = null;
+  let lastLiveSignature = '';
+  let lastLiveResources = null;
+  const pendingControllers = new Set();
+  let live = document.getElementById('overview-live');
+  if (!live) {
+    live = el('p', 'sr-only');
+    live.id = 'overview-live';
+    live.setAttribute('role', 'status');
+    live.setAttribute('aria-live', 'polite');
+    live.setAttribute('aria-atomic', 'true');
+    view.appendChild(live);
+  }
   // Server-computed capability: admins always, operators behind the
   // auth.operator_audit_access flag. Gates the recent-activity feed.
   const canReadAudit = !!(ctx.state && ctx.state.canReadAudit);
@@ -28,62 +43,106 @@ export function mountOverview(ctx) {
   function stop() {
     disposed = true;
     if (timer) { clearInterval(timer); timer = null; }
+    for (const controller of pendingControllers) controller.abort();
+    pendingControllers.clear();
   }
 
   body.replaceChildren(skeleton());
 
-  async function load(initial) {
-    let apps = [];
-    try {
-      const resp = await ctx.api('/api/apps');
-      if (disposed) return;
-      if (resp.status === 401) { stop(); ctx.onUnauthorized(); return; }
-      if (!resp.ok) { if (initial) body.replaceChildren(errorState()); return; }
-      // Standard {items,...} list envelope; tolerate a bare array for resilience.
-      const ovBody = (await resp.json()) || [];
-      apps = Array.isArray(ovBody) ? ovBody : (Array.isArray(ovBody.items) ? ovBody.items : []);
-    } catch {
-      if (initial) body.replaceChildren(errorState());
-      return;
-    }
-    if (disposed) return;
-    ctx.state.apps = apps;
-    if (typeof ctx.syncSidebar === 'function') ctx.syncSidebar();
-
-    const metrics = await fetchMetrics(apps.map((a) => a.slug));
-    if (disposed) return;
-    const events = canReadAudit ? await fetchActivity() : null;
-    if (disposed) return;
-
-    const model = buildOverviewModel(apps, metrics);
-    body.replaceChildren(render(model, events));
+  function requestJSON(path) {
+    return apiWithTimeout(ctx.api, path, REQUEST_TIMEOUT_MS, pendingControllers, async (response) => ({
+      response,
+      body: response.ok ? await response.json() : null,
+    }));
   }
 
-  async function fetchMetrics(slugs) {
-    if (slugs.length === 0) return {};
+  async function load(initial) {
+    if (loadInFlight) return;
+    loadInFlight = true;
     try {
-      const qs = encodeURIComponent(slugs.join(','));
-      const resp = await ctx.api('/api/apps/metrics?slugs=' + qs);
-      if (!resp.ok) return {};
-      const b = await resp.json();
-      return (b && b.metrics) || {};
-    } catch { return {}; }
+      let apps = [];
+      try {
+        const { response: resp, body: ovBody } = await requestJSON('/api/apps');
+        if (disposed) return;
+        if (resp.status === 401) { stop(); ctx.onUnauthorized(); return; }
+        if (!resp.ok) { if (initial) body.replaceChildren(errorState()); return; }
+        // Standard {items,...} list envelope; tolerate a bare array for resilience.
+        const payload = ovBody || [];
+        apps = Array.isArray(payload) ? payload : (Array.isArray(payload.items) ? payload.items : []);
+      } catch {
+        if (initial) body.replaceChildren(errorState());
+        return;
+      }
+      if (disposed) return;
+      ctx.state.apps = apps;
+      if (typeof ctx.syncSidebar === 'function') ctx.syncSidebar();
+
+      const [metrics, history, events] = await Promise.all([
+        fetchMetrics(apps.length),
+        fetchHistory(apps.length),
+        canReadAudit && apps.length > 0 ? fetchActivity() : Promise.resolve(null),
+      ]);
+      if (disposed) return;
+
+      const model = buildOverviewModel(apps, metrics, history);
+      replaceOverviewContent(body, render(model, events));
+      const signature = resourceLiveSignature(model.resources);
+      if (!initial && lastLiveSignature && signature !== lastLiveSignature) {
+        live.textContent = resourceLiveSummary(model.resources, lastLiveResources);
+      }
+      lastLiveSignature = signature;
+      lastLiveResources = model.resources;
+    } finally {
+      loadInFlight = false;
+    }
+  }
+
+  async function fetchMetrics(appCount) {
+    if (appCount === 0) return { state: 'ready', metrics: {}, generatedAt: null };
+    try {
+      // With no slug filter the endpoint resolves the caller's visible fleet.
+      // This keeps large fleets out of request-line limits.
+      const { response: resp, body: b } = await requestJSON('/api/apps/metrics');
+      if (!resp.ok) throw new Error('metrics request failed');
+      lastMetricsSnapshot = {
+        state: 'ready',
+        metrics: (b && b.metrics) || {},
+        generatedAt: (b && b.generated_at) || new Date().toISOString(),
+      };
+      return lastMetricsSnapshot;
+    } catch {
+      if (lastMetricsSnapshot) return { ...lastMetricsSnapshot, state: 'stale' };
+      return { state: 'unavailable', metrics: {}, generatedAt: null };
+    }
+  }
+
+  async function fetchHistory(appCount) {
+    if (appCount === 0) return { historyBySlug: {}, historyAvailable: true };
+    try {
+      const { response: resp, body: b } = await requestJSON('/api/apps/metrics/history');
+      if (!resp.ok) throw new Error('history request failed');
+      return { historyBySlug: (b && b.history) || {}, historyAvailable: true };
+    } catch {
+      return { historyBySlug: {}, historyAvailable: false };
+    }
   }
 
   async function fetchActivity() {
     try {
-      const resp = await ctx.api('/api/audit?limit=6');
+      const { response: resp, body: b } = await requestJSON('/api/audit?limit=6');
       if (!resp.ok) return null;
-      const b = await resp.json();
       return (b && Array.isArray(b.events)) ? b.events : null;
     } catch { return null; }
   }
 
   function render(model, events) {
     const root = el('div', 'ov-grid');
+    if (model.total === 0) {
+      root.appendChild(renderFirstRun());
+      return root;
+    }
     root.appendChild(renderPulse(model));
     if (model.attention.length > 0) root.appendChild(renderAttention(model.attention));
-    else if (model.total === 0) root.appendChild(renderFirstRun());
     root.appendChild(renderFooter(model, events));
     return root;
   }
@@ -176,9 +235,12 @@ export function mountOverview(ctx) {
 
   function renderFirstRun() {
     const sec = el('section', 'ov-panel ov-firstrun');
+    const mark = el('span', 'ov-firstrun-mark', '+');
+    mark.setAttribute('aria-hidden', 'true');
+    sec.appendChild(mark);
     sec.appendChild(el('h2', 'ov-firstrun-title', 'Deploy your first Shiny app'));
     sec.appendChild(el('p', 'ov-firstrun-body',
-      'Apps you deploy appear here with live health and resource usage. Head to Apps to create one.'));
+      'Once it is deployed, Overview will show its health, resource usage, and recent activity.'));
     const cta = el('a', 'btn-primary', 'Go to Apps');
     cta.href = '/apps';
     cta.setAttribute('data-nav', '');
@@ -196,46 +258,7 @@ export function mountOverview(ctx) {
   }
 
   function renderResources(res) {
-    const sec = el('section', 'ov-panel ov-resources');
-    sec.appendChild(sectionTitle('Resource pressure'));
-
-    const line = el('p', 'ov-res-line');
-    const cpu = el('span', 'ov-res-stat');
-    cpu.appendChild(el('b', null, formatCpu(res.cpuPercent)));
-    cpu.appendChild(el('span', 'ov-res-stat-label', 'CPU'));
-    const ram = el('span', 'ov-res-stat');
-    ram.appendChild(el('b', null, res.rssBytes > 0 ? formatBytes(res.rssBytes) : '0 KB'));
-    ram.appendChild(el('span', 'ov-res-stat-label', 'RAM'));
-    line.appendChild(cpu);
-    line.appendChild(el('span', 'ov-res-sep', '·'));
-    line.appendChild(ram);
-    const across = res.running === 1 ? 'across 1 running app' : `across ${res.running} running apps`;
-    line.appendChild(el('span', 'ov-res-across', across));
-    sec.appendChild(line);
-
-    if (res.nearLimit.length > 0) {
-      sec.appendChild(el('p', 'ov-res-subhead', 'Approaching memory limit'));
-      const list = el('ul', 'ov-nearlimit');
-      for (const n of res.nearLimit.slice(0, 4)) {
-        const li = el('li', 'ov-nearlimit-row');
-        const a = el('a', 'ov-nearlimit-name', n.name);
-        a.href = '/apps/' + encodeURIComponent(n.slug) + '/configuration';
-        a.setAttribute('data-nav', '');
-        li.appendChild(a);
-        const track = el('span', 'ov-meter' + (n.fraction >= 0.95 ? ' ov-meter--hot' : ''));
-        const fill = el('span', 'ov-meter-fill');
-        fill.style.width = Math.min(100, Math.round(n.fraction * 100)) + '%';
-        track.appendChild(fill);
-        li.appendChild(track);
-        li.appendChild(el('span', 'ov-nearlimit-val',
-          `${formatBytes(n.usedBytes)} / ${formatBytes(n.limitBytes)}`));
-        list.appendChild(li);
-      }
-      sec.appendChild(list);
-    } else if (res.running > 0) {
-      sec.appendChild(el('p', 'ov-res-clear', 'No apps near their limits.'));
-    }
-    return sec;
+    return renderResourcePressure(res);
   }
 
   function renderActivity(events) {
@@ -306,20 +329,333 @@ export function mountOverview(ctx) {
   };
 }
 
+// Exported as a small, state-complete renderer so its meter semantics and
+// unavailable/partial copy can be verified without mounting the whole SPA.
+export function renderResourcePressure(res) {
+  const sec = el('section', 'ov-panel ov-resources');
+  sec.setAttribute('aria-labelledby', 'ov-resources-title');
+
+  const head = el('div', 'ov-res-head');
+  const titleWrap = el('div', 'ov-res-heading');
+  const title = el('h2', 'ov-section-title', 'App allocation pressure');
+  title.id = 'ov-resources-title';
+  titleWrap.appendChild(title);
+  titleWrap.appendChild(el('p', 'ov-res-scope', 'Against enforced per-replica limits'));
+  head.appendChild(titleWrap);
+  head.appendChild(el('p', 'ov-res-updated', updatedText(res)));
+  sec.appendChild(head);
+
+  if (res.state === 'unavailable') {
+    const unavailable = el('div', 'ov-res-message ov-res-message--unavailable');
+    unavailable.appendChild(el('b', null, 'Metrics unavailable'));
+    unavailable.appendChild(el('span', null, 'CPU and memory pressure could not be verified. Health status remains available above.'));
+    sec.appendChild(unavailable);
+    return sec;
+  }
+  if (res.state === 'idle') {
+    sec.appendChild(el('p', 'ov-res-message', 'No running replicas to measure.'));
+    return sec;
+  }
+
+  const rows = el('div', 'ov-capacity-list');
+  rows.appendChild(renderCapacityRow('CPU', res.cpu));
+  rows.appendChild(renderCapacityRow('Memory', res.memory));
+  sec.appendChild(rows);
+
+  if (res.hotspots.length > 0) {
+    const hotspotHead = el('div', 'ov-hotspot-head');
+    hotspotHead.appendChild(el('h3', 'ov-res-subhead', 'Pressure alerts'));
+    hotspotHead.appendChild(el('span', 'ov-section-count', String(res.hotspots.length)));
+    sec.appendChild(hotspotHead);
+    const list = el('ul', 'ov-hotspot-list');
+    list.id = 'ov-pressure-alerts';
+    for (const [index, item] of res.hotspots.entries()) {
+      const li = renderHotspot(item);
+      if (index >= 4) li.hidden = true;
+      list.appendChild(li);
+    }
+    sec.appendChild(list);
+    if (res.hiddenHotspotCount > 0) {
+      const toggle = el('button', 'ov-res-toggle', `View all ${res.hotspots.length} pressure alerts`);
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.setAttribute('aria-controls', list.id);
+      toggle.dataset.disclosureKey = 'pressure-alerts';
+      toggle.dataset.focusKey = 'pressure-alerts-toggle';
+      toggle.addEventListener('click', () => {
+        const expanded = toggle.getAttribute('aria-expanded') === 'true';
+        toggle.setAttribute('aria-expanded', String(!expanded));
+        for (const [index, row] of [...list.children].entries()) {
+          if (index >= 4) row.hidden = expanded;
+        }
+        toggle.textContent = expanded ? `View all ${res.hotspots.length} pressure alerts` : 'Show fewer';
+      });
+      sec.appendChild(toggle);
+    }
+  } else {
+    const complete = res.cpu.state === 'ready' && res.memory.state === 'ready';
+    const text = complete
+      ? 'All covered replicas are below the 85% warning threshold.'
+      : `No pressure alerts among ${Math.max(res.cpu.coverage.coveredReplicas, res.memory.coverage.coveredReplicas)} of ${res.runningReplicas} covered running replicas.`;
+    sec.appendChild(el('p', 'ov-res-clear', text));
+  }
+  return sec;
+}
+
+// Polls replace the Overview snapshot, but a keyboard user following a pressure
+// link must not be thrown back to the document. Stable focus keys restore the
+// same control when it still exists in the refreshed snapshot.
+export function replaceOverviewContent(body, next) {
+  const focusKey = focusedKey(body);
+  const disclosures = expandedDisclosureKeys(body);
+  body.replaceChildren(next);
+  restoreDisclosures(body, disclosures);
+  restoreFocus(body, focusKey);
+}
+
+function renderCapacityRow(label, metric) {
+  const row = el('section', 'ov-capacity-row ov-capacity-row--' + metric.severity);
+  row.setAttribute('aria-label', label + ' allocation pressure');
+
+  const top = el('div', 'ov-capacity-top');
+  top.appendChild(el('h3', 'ov-capacity-label', label));
+  top.appendChild(el('span', 'ov-pressure-state ov-pressure-state--' + stateTone(metric), stateLabel(metric)));
+  row.appendChild(top);
+
+  const values = el('div', 'ov-capacity-values');
+  values.appendChild(el('b', 'ov-capacity-value', capacityValue(metric)));
+  const context = el('span', 'ov-capacity-context');
+  if (metric.fraction != null) context.appendChild(el('strong', null, `${Math.round(metric.fraction * 100)}%`));
+  else context.appendChild(el('strong', null, 'Capacity unavailable'));
+  if (metric.peakFraction != null && metric.fraction != null && metric.peakFraction - metric.fraction >= 0.05) {
+    context.appendChild(el('span', 'ov-capacity-peak', `Peak replica ${Math.round(metric.peakFraction * 100)}%`));
+  }
+  context.appendChild(el('span', null, trendText(metric.trend)));
+  values.appendChild(context);
+  row.appendChild(values);
+
+  if (metric.fraction != null) {
+    const meter = document.createElement('meter');
+    meter.className = 'ov-capacity-meter ov-capacity-meter--' + metric.severity;
+    meter.min = 0;
+    meter.max = 1;
+    meter.low = 0.85;
+    meter.high = 0.95;
+    meter.optimum = 0;
+    meter.value = Math.min(1, Math.max(0, metric.fraction));
+    meter.setAttribute('aria-label', meterLabel(label, metric));
+    meter.textContent = `${Math.round(metric.fraction * 100)}%`;
+    row.appendChild(meter);
+  }
+  row.appendChild(el('p', 'ov-capacity-coverage', coverageText(metric)));
+  return row;
+}
+
+function renderHotspot(item) {
+  const li = el('li', 'ov-hotspot-row');
+  const main = el('div', 'ov-hotspot-main');
+  const link = el('a', 'ov-hotspot-name', item.name);
+  link.href = '/apps/' + encodeURIComponent(item.slug) + '/configuration';
+  link.setAttribute('data-nav', '');
+  link.dataset.focusKey = `pressure:${item.slug}:${item.metric}`;
+  main.appendChild(link);
+  const replica = item.replicaIndex == null ? '' : ` · Replica ${item.replicaIndex + 1}`;
+  main.appendChild(el('span', 'ov-hotspot-meta', `${item.metric === 'cpu' ? 'CPU' : 'Memory'}${replica}`));
+  li.appendChild(main);
+
+  const meter = document.createElement('meter');
+  meter.className = 'ov-capacity-meter ov-capacity-meter--' + item.severity;
+  meter.min = 0;
+  meter.max = 1;
+  meter.low = 0.85;
+  meter.high = 0.95;
+  meter.optimum = 0;
+  meter.value = Math.min(1, item.fraction);
+  meter.setAttribute('aria-label', hotspotLabel(item));
+  li.appendChild(meter);
+
+  const values = el('span', 'ov-hotspot-values');
+  values.appendChild(el('b', null, `${Math.round(item.fraction * 100)}%`));
+  values.appendChild(el('span', null, `${formatResource(item.metric, item.used)} / ${formatResource(item.metric, item.limit)}`));
+  li.appendChild(values);
+  li.appendChild(el('span', 'ov-pressure-state ov-pressure-state--' + item.severity, titleCase(item.severity)));
+  return li;
+}
+
+function capacityValue(metric) {
+  if (metric.capacity > 0) {
+    return `${formatResource(metric.kind, metric.used)} / ${formatResource(metric.kind, metric.capacity)}`;
+  }
+  if (metric.coverage.observedReplicas > 0) return `${formatResource(metric.kind, metric.observedUsed)} observed`;
+  return 'Unavailable';
+}
+
+function formatResource(kind, value) {
+  if (kind === 'cpu') {
+    const cores = Number(value || 0) / 100;
+    return `${cores > 0 && cores < 0.1 ? cores.toFixed(2) : cores.toFixed(1)} cores`;
+  }
+  const bytes = Number(value || 0);
+  const gib = 1024 * 1024 * 1024;
+  return bytes >= gib ? `${(bytes / gib).toFixed(1)} GB` : formatBytes(bytes);
+}
+
+function stateTone(metric) {
+  if (metric.state === 'unavailable' || metric.state === 'stale') return metric.state;
+  if (metric.severity === 'critical' || metric.severity === 'warning') return metric.severity;
+  if (metric.state === 'partial') return metric.state;
+  return metric.severity;
+}
+
+function stateLabel(metric) {
+  if (metric.state === 'unavailable') return 'Unavailable';
+  if (metric.state === 'stale') return 'Stale';
+  if (metric.state === 'partial') {
+    if (metric.severity === 'critical' || metric.severity === 'warning') return `${titleCase(metric.severity)} · Partial`;
+    return 'Partial';
+  }
+  return titleCase(metric.severity === 'unknown' ? 'Unavailable' : metric.severity);
+}
+
+function coverageText(metric) {
+  const c = metric.coverage;
+  const parts = [`${c.coveredReplicas} of ${c.runningReplicas} running replicas covered`];
+  if (c.unlimitedReplicas) parts.push(`${c.unlimitedReplicas} unlimited`);
+  if (c.unenforcedReplicas) parts.push(`${c.unenforcedReplicas} not enforced`);
+  if (c.unknownCapacityReplicas) parts.push(`${c.unknownCapacityReplicas} capacity unknown`);
+  if (c.unavailableReplicas) parts.push(`${c.unavailableReplicas} metrics unavailable`);
+  return parts.join(' · ');
+}
+
+function trendText(trend) {
+  if (!trend || trend.state === 'unavailable') return 'Trend unavailable';
+  if (trend.state === 'collecting') return 'Collecting trend';
+  const window = trend.windowSeconds >= 12 * 60 ? '15m' : `${Math.max(2, Math.round(trend.windowSeconds / 60))}m`;
+  if (trend.state === 'steady') return `Steady / ${window}`;
+  const points = Math.abs(Math.round(trend.deltaFraction * 100));
+  return `${titleCase(trend.state)} ${points} pts / ${window}`;
+}
+
+function meterLabel(label, metric) {
+  const peak = metric.peakFraction != null && metric.peakFraction - metric.fraction >= 0.05
+    ? ` Hottest replica is ${Math.round(metric.peakFraction * 100)} percent.` : '';
+  return `${label} allocation, ${Math.round(metric.fraction * 100)} percent of enforced limits.${peak} ${stateLabel(metric).toLowerCase()}. ${coverageText(metric)}.`;
+}
+
+function hotspotLabel(item) {
+  const replica = item.replicaIndex == null ? '' : `, replica ${item.replicaIndex + 1}`;
+  return `${item.name}, ${item.metric}${replica}, ${formatResource(item.metric, item.used)} of ${formatResource(item.metric, item.limit)}, ${Math.round(item.fraction * 100)} percent, ${item.severity}.`;
+}
+
+function updatedText(res) {
+  if (!res.generatedAt) return res.state === 'unavailable' ? 'Not updated' : 'Waiting for data';
+  const age = relativeAge(res.generatedAt);
+  return res.state === 'stale' ? `Last updated ${age}` : `Updated ${age}`;
+}
+
+function relativeAge(iso) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return 'recently';
+  const seconds = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (seconds < 5) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  return `${Math.round(seconds / 60)}m ago`;
+}
+
+function focusedKey(root) {
+  const active = document.activeElement;
+  return active && root.contains(active) ? active.dataset.focusKey || null : null;
+}
+
+function restoreFocus(root, key) {
+  if (!key) return;
+  const match = [...root.querySelectorAll('[data-focus-key]')].find((node) => node.dataset.focusKey === key);
+  if (match) match.focus({ preventScroll: true });
+}
+
+function expandedDisclosureKeys(root) {
+  return [...root.querySelectorAll('[data-disclosure-key][aria-expanded="true"]')]
+    .map((node) => node.dataset.disclosureKey);
+}
+
+function restoreDisclosures(root, keys) {
+  for (const key of keys) {
+    const match = [...root.querySelectorAll('[data-disclosure-key]')]
+      .find((node) => node.dataset.disclosureKey === key);
+    if (match && match.getAttribute('aria-expanded') !== 'true') match.click();
+  }
+}
+
+export function resourceLiveSignature(res) {
+  const hotspots = res.hotspots.map((item) =>
+    `${item.slug}:${item.metric}:${item.replicaIndex ?? 'x'}:${item.severity}`).sort().join(',');
+  return [res.state, res.cpu.state, res.cpu.severity, res.memory.state, res.memory.severity, hotspots].join(':');
+}
+
+export function resourceLiveSummary(res, previous = null) {
+  if (res.state === 'unavailable') return 'Resource metrics are unavailable.';
+  if (res.state === 'stale') return 'Resource metrics are stale; showing the last successful snapshot.';
+  const changed = changedHotspot(res.hotspots, previous && previous.hotspots);
+  if (changed) {
+    if (changed.cleared) return `Resource pressure cleared: ${hotspotDescription(changed.item)}.`;
+    return `Resource pressure alert: ${hotspotDescription(changed.item)}.`;
+  }
+  return `Resource coverage is ${res.state}. CPU ${stateLabel(res.cpu)}. Memory ${stateLabel(res.memory)}.`;
+}
+
+function changedHotspot(current, prior) {
+  if (!Array.isArray(prior)) return current[0] ? { item: current[0], cleared: false } : null;
+  const previousByMetric = new Map(prior.map((item) => [`${item.slug}:${item.metric}`, item]));
+  for (const item of current) {
+    const old = previousByMetric.get(`${item.slug}:${item.metric}`);
+    if (!old || old.replicaIndex !== item.replicaIndex || old.severity !== item.severity) {
+      return { item, cleared: false };
+    }
+  }
+  const currentKeys = new Set(current.map((item) => `${item.slug}:${item.metric}`));
+  const cleared = prior.find((item) => !currentKeys.has(`${item.slug}:${item.metric}`));
+  return cleared ? { item: cleared, cleared: true } : null;
+}
+
+function hotspotDescription(item) {
+  const replica = item.replicaIndex == null ? '' : `, replica ${item.replicaIndex + 1}`;
+  return `${item.name}, ${item.metric}${replica}, ${item.severity}`;
+}
+
+// A stuck fetch must not freeze Overview forever. The deadline rejects even if
+// a custom API adapter ignores AbortSignal; real fetches are aborted as well.
+export async function apiWithTimeout(api, path, timeoutMs = REQUEST_TIMEOUT_MS, controllers = null, consume = (response) => response) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  if (controller && controllers) controllers.add(controller);
+  let timeout;
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(() => {
+      if (controller) controller.abort();
+      const error = new Error(`Request timed out: ${path}`);
+      error.name = 'AbortError';
+      reject(error);
+    }, timeoutMs);
+  });
+  try {
+    const options = controller ? { signal: controller.signal } : {};
+    const operation = Promise.resolve(api(path, options)).then(consume);
+    return await Promise.race([operation, deadline]);
+  } finally {
+    clearTimeout(timeout);
+    if (controller && controllers) controllers.delete(controller);
+  }
+}
+
+function titleCase(value) {
+  const text = String(value || '');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
   if (text != null) n.textContent = text;
   return n;
-}
-
-// A null total means at least one running app had no CPU rate this poll, which
-// is not the same as the fleet being idle.
-function formatCpu(pct) {
-  if (pct === null || pct === undefined) return '—';
-  const p = Number(pct) || 0;
-  if (p >= 100) return (p / 100).toFixed(1) + ' cores';
-  return p.toFixed(0) + '%';
 }
 
 function humanAction(action) {
