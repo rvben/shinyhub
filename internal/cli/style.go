@@ -133,7 +133,8 @@ func (s styler) reverse(v string) string { return s.paint(ansiReverse, v) }
 
 // status paints a lifecycle word by what it means for the operator: green for a
 // steady healthy state, yellow for a transition that will resolve on its own,
-// red for a failure, dim for a state that is off on purpose. An unrecognized
+// red for a failure, dim for a state that is off on purpose or standing by
+// (idle: a healthy elastic pool waiting for its first request). An unrecognized
 // word is returned unchanged rather than guessed at, so a status the server
 // grows later renders plainly instead of being miscolored.
 func (s styler) status(word string) string {
@@ -144,7 +145,7 @@ func (s styler) status(word string) string {
 		return s.red(word)
 	case "deploying", "starting", "restarting", "stopping", "pending", "warming", "booting", "provisioning", "running_now":
 		return s.yellow(word)
-	case "stopped", "hibernated", "sleeping", "disabled", "unknown", "unmanaged", "skipped", "unchanged", "never", "none", "-":
+	case "stopped", "hibernated", "sleeping", "idle", "disabled", "unknown", "unmanaged", "skipped", "unchanged", "never", "none", "-":
 		return s.dim(word)
 	}
 	return word

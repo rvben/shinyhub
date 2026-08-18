@@ -20,6 +20,7 @@ import (
 
 	gitignore "github.com/sabhiram/go-gitignore"
 
+	"github.com/rvben/shinyhub/internal/appstatus"
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deployevent"
@@ -120,7 +121,7 @@ back to the legacy response when deploying to an older server.`,
 		},
 	}
 	cmd.Flags().StringVar(&f.slug, "slug", "", "App slug; serves at /app/<slug>/ (lowercase letters, digits, single hyphens; no leading/trailing hyphen). Defaults to the directory name")
-	cmd.Flags().BoolVar(&f.wait, "wait", false, "Wait until deployment is healthy")
+	cmd.Flags().BoolVar(&f.wait, "wait", false, "Wait until the app is healthy: running, or idle for an elastic (grouped/per_session) pool that boots workers on demand")
 	cmd.Flags().IntVar(&f.waitTimeout, "wait-timeout", 300, "Seconds to wait for healthy status when --wait is set (first-run dependency installs can take minutes)")
 	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Wait for any run_on_register first-fire to finish (uses --wait-timeout); a genuine failure exits non-zero")
 	cmd.Flags().BoolVar(&f.restartAfterWarm, "restart-after-warm", false, "Wait for run_on_register first-fires, then restart serving replicas so startup-loaded data is refreshed")
@@ -554,6 +555,8 @@ func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration
 	p := newProgress(errOut, fmt.Sprintf("Waiting for %s to be healthy", slug))
 	var lastErr error
 	var lastPollOK bool
+	var lastStatus string
+	unknownReported := false
 	for time.Now().Before(deadline) {
 		ready, status, err := pollAppStatus(cfg, slug)
 		if err == nil && ready {
@@ -567,6 +570,12 @@ func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration
 			if errors.As(err, &he) && he.fatal() {
 				p.stop()
 				return fmt.Errorf("checking %s: %w", slug, err)
+			}
+		} else {
+			lastStatus = status
+			if hint := unknownStatusHint(status); hint != "" && !unknownReported {
+				unknownReported = true
+				p.note("Note: " + hint)
 			}
 		}
 		if isTerminalStatus(status) {
@@ -585,12 +594,18 @@ func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration
 	if !lastPollOK && lastErr != nil {
 		return fmt.Errorf("timed out after %s waiting for %s to be healthy (last error: %v)", timeout, slug, lastErr)
 	}
-	// The app was reachable and still in a non-terminal startup state: the
-	// deploy was committed and the app is still booting (first-run dependency
-	// installs can outlast the wait window). Make clear this is not a failure.
-	return fmt.Errorf("deploy committed, but %s is still starting after %s (timed out). "+
+	// The app was reachable and still in a non-terminal state: the deploy was
+	// committed and the app has not failed. Name the status the server last
+	// reported so the operator can tell "still booting a first-run dependency
+	// install" from "parked or stopped", and flag a status this CLI predates.
+	if hint := unknownStatusHint(lastStatus); hint != "" {
+		return fmt.Errorf("deploy committed, but %s never reported a status this CLI recognises within %s (timed out): %s. "+
+			"Check the app with `shinyhub apps show %s`", slug, timeout, hint, slug)
+	}
+	return fmt.Errorf("deploy committed, but %s is still %s after %s (timed out). "+
 		"First-run dependency installs can take longer than this; the app has not failed. "+
-		"Check progress with `shinyhub apps logs %s`, or re-run with a larger --wait-timeout", slug, timeout, slug)
+		"Check progress with `shinyhub apps logs %s`, or re-run with a larger --wait-timeout",
+		slug, waitingStatusWord(lastStatus), timeout, slug)
 }
 
 // isTerminalStatus reports whether an app status indicates a non-recoverable
@@ -731,7 +746,32 @@ func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
 		return false, "", err
 	}
 	status := result.App.Status
-	return status == "running" && !result.RedeployInFlight, status, nil
+	// Ready means the app answers requests now. Elastic pools (grouped /
+	// per_session) report idle until their first request boots a worker,
+	// which is a serving state, not a gap; the shared predicate knows every
+	// status the server emits, so a status added there is accepted here.
+	return appstatus.Serving(status) && !result.RedeployInFlight, status, nil
+}
+
+// unknownStatusHint explains a status this CLI cannot classify. The server may
+// consider the app healthy in a vocabulary this binary predates (an older CLI
+// waited a full timeout on the then-new idle status), so a readiness wait says
+// so out loud instead of stalling in silence. Returns "" for a known status.
+func unknownStatusHint(status string) string {
+	if status == "" || appstatus.Class(status) != appstatus.KindUnknown {
+		return ""
+	}
+	return fmt.Sprintf("the server reports status %q, which this CLI (%s) does not recognise; "+
+		"upgrade the shinyhub CLI to match the server", status, version)
+}
+
+// waitingStatusWord is the status shown while a wait is in progress: the last
+// word the server reported, or "starting" before any poll has answered.
+func waitingStatusWord(last string) string {
+	if last == "" {
+		return appstatus.Starting
+	}
+	return last
 }
 
 // resolveVisibilityFlag normalizes the accepted "internal" alias to the

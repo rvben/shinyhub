@@ -230,6 +230,8 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 	deadline := start.Add(timeout)
 	lastProgress := start
 	var lastErr error
+	var lastStatus string
+	unknownReported := false
 	for {
 		t := now()
 		ready, status, err := poll()
@@ -244,6 +246,15 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 			if errors.As(err, &he) && he.fatal() {
 				return fmt.Errorf("checking %s: %w", slug, err)
 			}
+		} else {
+			lastStatus = status
+			// A status this CLI cannot classify is reported on first sighting,
+			// not on the progress cadence: it is the one thing the operator
+			// can act on before the timeout burns.
+			if hint := unknownStatusHint(status); hint != "" && !unknownReported {
+				unknownReported = true
+				fmt.Fprintf(out, "  %s: %s\n", slug, hint)
+			}
 		}
 		if isTerminalStatus(status) {
 			return fmt.Errorf("%s %s during startup; run: shinyhub apps logs %s", slug, status, slug)
@@ -252,14 +263,28 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 			break
 		}
 		if t.Sub(lastProgress) >= progressEvery {
-			fmt.Fprintf(out, "  %s: still %s %s\n", slug, s.status("starting"),
+			fmt.Fprintf(out, "  %s: still %s %s\n", slug, s.status(waitingStatusWord(lastStatus)),
 				s.dim(fmt.Sprintf("(%s/%s)", t.Sub(start).Round(time.Second), timeout)))
 			lastProgress = t
 		}
 		sleep(pollEvery)
 	}
+	// The timeout names what the server last said, so a 15-minute wait ends
+	// in a diagnosis rather than a bare "timed out".
+	detail := ""
+	if hint := unknownStatusHint(lastStatus); hint != "" {
+		detail = hint
+	} else if lastStatus != "" {
+		detail = "last status: " + lastStatus
+	}
 	if lastErr != nil {
-		return fmt.Errorf("timed out after %s waiting for %s to be healthy (last error: %v)", timeout, slug, lastErr)
+		if detail != "" {
+			detail += "; "
+		}
+		detail += fmt.Sprintf("last error: %v", lastErr)
+	}
+	if detail != "" {
+		return fmt.Errorf("timed out after %s waiting for %s to be healthy (%s)", timeout, slug, detail)
 	}
 	return fmt.Errorf("timed out after %s waiting for %s to be healthy", timeout, slug)
 }
