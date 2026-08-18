@@ -4251,7 +4251,7 @@ fieldset.settings-block { min-width: 0; }
   letter-spacing: 0.02em;
 }
 .provenance-provider.is-brand { background: var(--surface-2); }
-.provenance-provider.is-gitlab svg { width: 44px; height: 44px; }
+.provenance-provider.is-gitlab svg { width: 20px; height: 20px; }
 .provenance-provider.is-github svg { width: 20px; height: 20px; fill: #fff; }
 :root[data-theme="light"] .provenance-provider.is-github svg { fill: #000; }
 .provenance-provider.is-ci { color: var(--text-muted); background: var(--surface-2); }
