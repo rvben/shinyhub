@@ -1,4 +1,4 @@
-# Deploying from the CLI when ShinyHub is behind an auth proxy
+# Deploying from the CLI behind an auth proxy
 
 When ShinyHub sits behind an authentication proxy (Authelia, oauth2-proxy,
 Cloudflare Access, or any other forward-auth solution), browser users
