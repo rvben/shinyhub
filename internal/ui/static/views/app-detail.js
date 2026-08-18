@@ -19,7 +19,12 @@ import { crashBanner } from '/static/views/crash-banner.js';
 import { connectivityBanner } from '/static/views/connectivity-banner.js';
 import { renderTrendsCard } from '/static/views/trends-card.js';
 import { createTablistNav } from '/static/views/tablist-keys.js';
-import { TAB_ROUTES, resolveDetailAccess, tabViewModels } from '/static/views/app-detail-nav.js';
+import {
+  TAB_ROUTES,
+  resolveDetailAccess,
+  tabStripScrollTarget,
+  tabViewModels,
+} from '/static/views/app-detail-nav.js';
 import { normalizeAppEnvelope } from '/static/views/app-detail-envelope.js';
 import { createLogsViewer } from '/static/views/logs-ui.js';
 
@@ -58,8 +63,15 @@ export function mountAppDetail(ctx) {
   // again after web fonts load (on a fresh/deep-link load the tabs widen when
   // the font swaps in, which is what makes the strip overflow in the first place).
   function syncTabStrip(activeEl) {
-    if (activeEl) {
-      try { activeEl.scrollIntoView({ inline: 'center', block: 'nearest' }); } catch { /* older browsers */ }
+    if (activeEl && tabsNav) {
+      const navRect = tabsNav.getBoundingClientRect();
+      const activeRect = activeEl.getBoundingClientRect();
+      tabsNav.scrollLeft = tabStripScrollTarget({
+        clientWidth: tabsNav.clientWidth,
+        scrollWidth: tabsNav.scrollWidth,
+        tabLeft: activeRect.left - navRect.left + tabsNav.scrollLeft,
+        tabWidth: activeRect.width,
+      });
     }
     updateTabOverflow();
   }
@@ -130,14 +142,10 @@ export function mountAppDetail(ctx) {
       if (vm.ariaCurrent) el.setAttribute('aria-current', vm.ariaCurrent);
       else el.removeAttribute('aria-current');
     }
-    // On narrow screens the tab bar scrolls horizontally; bring the active tab
-    // into view so the user can see which section they're on. block:'nearest'
-    // avoids any vertical page jump (no-op on desktop where it's already shown).
+    // On narrow screens the tab bar scrolls horizontally. Keep the active tab
+    // for the post-render centering pass below; measuring while the view is
+    // still hidden would produce zero-width geometry on a deep link.
     const activeTabEl = tabEls[tab];
-    requestAnimationFrame(() => syncTabStrip(activeTabEl));
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(() => syncTabStrip(activeTabEl)).catch(() => {});
-    }
 
     document.getElementById('app-detail-heading').textContent = app.name;
     document.getElementById('app-detail-slug').textContent = '/' + app.slug;
@@ -241,6 +249,10 @@ export function mountAppDetail(ctx) {
     }
 
     view.hidden = false;
+    requestAnimationFrame(() => syncTabStrip(activeTabEl));
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => syncTabStrip(activeTabEl)).catch(() => {});
+    }
     ctx.updateActiveNav(location.pathname);
     ctx.metrics.setTargets([app.slug]);
 
@@ -274,7 +286,12 @@ function renderHeaderProvenance(host, raw) {
 
   const mark = document.createElement('span');
   mark.className = `provenance-provider${model.provider === 'gitlab' ? ' is-gitlab' : ''}`;
-  mark.textContent = model.mark;
+  if (model.markIcon) {
+    mark.classList.add(`is-${model.markIcon}`);
+    mark.append(provenanceIcon(model.markIcon));
+  } else {
+    mark.textContent = model.mark;
+  }
   mark.setAttribute('aria-hidden', 'true');
   const copy = document.createElement('span');
   copy.className = 'provenance-copy';
@@ -296,6 +313,28 @@ function renderHeaderProvenance(host, raw) {
   copy.append(primary, detail);
   host.append(mark, copy);
   if (model.url) host.append(externalLink('Open pipeline ↗', model.url, 'provenance-open'));
+}
+
+function provenanceIcon(name) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  const paths = name === 'manual'
+    ? [
+        ['circle', { cx: '12', cy: '8', r: '3.25' }],
+        ['path', { d: 'M5.5 19.5c.9-3.6 3.1-5.4 6.5-5.4s5.6 1.8 6.5 5.4' }],
+      ]
+    : [
+        ['path', { d: 'M4.5 7.5v5h5' }],
+        ['path', { d: 'M5.2 12.2A7.25 7.25 0 1 0 7.4 7' }],
+      ];
+  for (const [tag, attrs] of paths) {
+    const node = document.createElementNS(ns, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    svg.append(node);
+  }
+  return svg;
 }
 
 function renderLogs(panel, app, replicasStatus, ctx) {

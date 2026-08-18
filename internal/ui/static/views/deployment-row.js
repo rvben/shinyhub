@@ -60,6 +60,7 @@ export function provenanceModel(raw) {
       change: null,
       provider: '',
       mark: '',
+      markIcon: '',
       headerText: '',
       headerDetail: '',
     };
@@ -77,14 +78,17 @@ export function provenanceModel(raw) {
     let label;
     let headerLead;
     let mark;
+    let markIcon = '';
     if (isRollback) {
       label = 'Rollback';
       headerLead = 'Rolled back';
-      mark = 'RB';
+      mark = '';
+      markIcon = 'rollback';
     } else if (channel === 'dashboard') {
       label = 'Manual deployment';
       headerLead = 'Deployed manually';
-      mark = 'UI';
+      mark = '';
+      markIcon = 'manual';
     } else if (channel === 'cli') {
       label = 'CLI deployment';
       headerLead = 'Deployed via ShinyHub CLI';
@@ -103,6 +107,7 @@ export function provenanceModel(raw) {
       change: null,
       provider: originKind,
       mark,
+      markIcon,
       headerText: actor ? `${headerLead} by ${actor}` : headerLead,
       headerDetail: channelLabel,
     };
@@ -126,6 +131,7 @@ export function provenanceModel(raw) {
     change: change.label ? { label: String(change.label), url: change.url || '' } : null,
     provider: metadata.provider || '',
     mark: metadata.provider === 'gitlab' ? 'GL' : 'CI',
+    markIcon: '',
     headerText: '',
     headerDetail: details.join(' · ') || `fleet ${raw.fleet_id || 'run'}`,
     runID: raw.run_id,

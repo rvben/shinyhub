@@ -50,6 +50,7 @@ test('legacy deployments expose an explicit provenance fallback', () => {
     change: null,
     provider: '',
     mark: '',
+    markIcon: '',
     headerText: '',
     headerDetail: '',
   });
@@ -61,7 +62,8 @@ test('direct deployment provenance distinguishes dashboard, CLI, and API channel
   assert.equal(dashboard.detail, 'admin · Dashboard');
   assert.equal(dashboard.headerText, 'Deployed manually by admin');
   assert.equal(dashboard.headerDetail, 'Dashboard');
-  assert.equal(dashboard.mark, 'UI');
+  assert.equal(dashboard.mark, '');
+  assert.equal(dashboard.markIcon, 'manual');
 
   const cli = provenanceModel({ origin: { kind: 'direct', channel: 'cli', actor: 'release-bot' } });
   assert.equal(cli.label, 'CLI deployment');
@@ -79,7 +81,8 @@ test('rollback provenance names the action and authenticated actor', () => {
   assert.equal(p.label, 'Rollback');
   assert.equal(p.detail, 'admin · Dashboard');
   assert.equal(p.headerText, 'Rolled back by admin');
-  assert.equal(p.mark, 'RB');
+  assert.equal(p.mark, '');
+  assert.equal(p.markIcon, 'rollback');
 });
 
 test('a current succeeded deployment shows its release label and blocks its own rollback', () => {

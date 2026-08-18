@@ -55,3 +55,12 @@ export function tabViewModels(slug, activeTab, canManage) {
     };
   });
 }
+
+// tabStripScrollTarget returns the horizontal scroll position that centers the
+// active tab without overscrolling either edge. Keeping the geometry pure makes
+// the phone-width deep-link behavior deterministic and unit-testable.
+export function tabStripScrollTarget({ clientWidth, scrollWidth, tabLeft, tabWidth }) {
+  const max = Math.max(0, scrollWidth - clientWidth);
+  const centered = tabLeft - (clientWidth - tabWidth) / 2;
+  return Math.max(0, Math.min(max, centered));
+}

@@ -4,6 +4,7 @@ import {
   TAB_ROUTES,
   MANAGER_ONLY_TABS,
   resolveDetailAccess,
+  tabStripScrollTarget,
   tabViewModels,
 } from '../static/views/app-detail-nav.js';
 
@@ -131,4 +132,19 @@ test('tabViewModels hides manager-only tabs from a non-manager', () => {
 test('tabViewModels shows every tab to a manager', () => {
   const models = tabViewModels('demo', 'overview', true);
   assert.equal(models.every(m => m.hidden === false), true);
+});
+
+test('tabStripScrollTarget centers the active tab and clamps both edges', () => {
+  assert.equal(tabStripScrollTarget({
+    clientWidth: 390, scrollWidth: 760, tabLeft: 310, tabWidth: 110,
+  }), 170);
+  assert.equal(tabStripScrollTarget({
+    clientWidth: 390, scrollWidth: 760, tabLeft: 20, tabWidth: 90,
+  }), 0);
+  assert.equal(tabStripScrollTarget({
+    clientWidth: 390, scrollWidth: 760, tabLeft: 700, tabWidth: 90,
+  }), 370);
+  assert.equal(tabStripScrollTarget({
+    clientWidth: 760, scrollWidth: 760, tabLeft: 300, tabWidth: 90,
+  }), 0);
 });
