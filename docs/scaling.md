@@ -226,6 +226,17 @@ ShinyHub has two distinct warm floors:
 They apply to different pool models; `warm_spares` is not an autoscaling signal
 and `min_warm_replicas` does not create isolated session workers.
 
+Under `grouped` or `per_session` isolation a positive `min_warm_replicas` is
+accepted and stored (it applies again the moment the app returns to
+`multiplex`) but has no effect: an elastic pool runs no standing replicas, so
+there is nothing for the floor to keep alive. The server says so wherever the
+combination is produced. A bundle manifest that declares the floor or the
+isolation gets a `Note:` under the deploy summary (`manifest.warnings` in the
+deploy response and `warnings` in `shinyhub deploy --output json`), `shinyhub
+apps set` prints a `warning:` line from the `X-ShinyHub-Warning` response
+header, and the Configuration tab shows the note under the Keep warm field.
+Pre-boot elastic workers with `[app.worker].warm_spares` instead.
+
 By default a hibernated app restarts on demand: the first request after an idle
 period waits for Python (or R) to start, and that user sees the "Loading..."
 page. `min_warm_replicas` changes this: instead of stopping every replica when
@@ -259,6 +270,17 @@ process is already listening.
   `replicas_running` and `workers_running`. `status` is observational;
   `desired_status` preserves lifecycle intent. An empty healthy elastic pool is
   `idle`, while a desired-running crashed replica is `crashed` or `degraded`.
+- `idle` is a healthy status. `shinyhub deploy --wait`, `fleet apply` (which
+  health-waits every deployed app for up to `--health-timeout` seconds, with
+  or without `--wait-for-warm`), `apps open`, and the dashboard fleet-health
+  summary all accept it: an elastic pool that has booted no worker yet is
+  ready to serve the first request (under `multiplex` the same gates wait for
+  `running`). Elastic workers that are booting, being frozen, or resuming
+  report `starting`; a frozen warm spare is ready but not running, so a pool
+  holding only frozen spares is `idle` too, and a spare that has not been
+  frozen (no snapshot support) is a running worker.
+  The CLI enforces these gates, so upgrade it together with the server: a
+  v0.11.14 CLI accepts only `running` and times out on an idle elastic pool.
 - `effective_hibernate_timeout_minutes` resolves an inherited per-app timeout
   against the live server default, so runtime checks do not need to parse the
   deployment configuration.

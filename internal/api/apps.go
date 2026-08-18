@@ -97,12 +97,12 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	for _, a := range apps {
 		s.decorateApp(a)
 		replicas := s.liveReplicaView(a.Slug, replicasByApp[a.ID])
-		elasticKnown, workersRunning, workersTotal := s.elasticObservation(a.Slug)
+		pool := s.elasticObservation(a.Slug)
 		// A server built without a process manager (unit tests and API-only
 		// embeddings) has no live authority. Preserve the stored status when there
 		// are no durable replica facts to contradict it.
-		if s.manager != nil || len(replicas) > 0 || elasticKnown {
-			s.decorateAppObservation(a, replicas, elasticKnown, workersRunning, workersTotal)
+		if s.manager != nil || len(replicas) > 0 || pool.Known {
+			s.decorateAppObservation(a, replicas, pool)
 		}
 		a.ProjectName, a.ProjectIconEmoji = disp.decorate(a.ProjectSlug)
 	}
@@ -175,20 +175,22 @@ func (s *Server) liveReplicaView(slug string, stored []*db.Replica) []*db.Replic
 	return out
 }
 
-func (s *Server) elasticObservation(slug string) (known bool, running, total int) {
+// elasticObservation reads the proxy's live worker view for slug into the
+// shape decorateAppObservation consumes. Known stays false when the app is not
+// a registered elastic pool.
+func (s *Server) elasticObservation(slug string) elasticPool {
 	if s.proxy == nil {
-		return false, 0, 0
+		return elasticPool{}
 	}
 	snap, ok := s.proxy.ElasticWorkersSnapshot(slug)
 	if !ok {
-		return false, 0, 0
+		return elasticPool{}
 	}
+	pool := elasticPool{Known: true}
 	for _, worker := range snap.Workers {
-		if worker.Status == "running" {
-			running++
-		}
+		pool.observe(worker.Status)
 	}
-	return true, running, len(snap.Workers)
+	return pool
 }
 
 type createAppRequest struct {
@@ -349,8 +351,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 			replicas[i].Reason = "replica process exited unexpectedly"
 		}
 	}
-	elasticKnown, workersRunning, workersTotal := s.elasticObservation(slug)
-	s.decorateAppObservation(app, replicas, elasticKnown, workersRunning, workersTotal)
+	s.decorateAppObservation(app, replicas, s.elasticObservation(slug))
 
 	// effective_max_sessions_per_replica resolves the app's own cap against the
 	// runtime default (0 = inherit). Clients use it to render an honest
@@ -857,6 +858,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// being changed. A memory-limit change re-runs the same math: on an elastic
 	// app it moves the per-worker budget term (multiplex no-ops inside the
 	// validator), so a raise that busts the host budget cannot slip in alone.
+	// Advisories are collected here and attached only to the success response:
+	// a header set before a later validation step would ride along on the
+	// error reply that step writes.
+	var warnings []string
 	if setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerWarmSpares || setWorkerMaxSessionLifetime || setMemoryLimitMB {
 		ws := config.WorkerSettings{
 			// Resolve through the fleet default exactly like the runtime does
@@ -887,7 +892,20 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		// the operator learns the host has no memory backstop (the CLI relays
 		// this header to stderr).
 		if warn := config.WorkerBudgetWarning(ws, effMemMB, s.cfg.HostBudgetMB(), s.cfg.MinAvailableMemoryMB()); warn != "" {
-			w.Header().Set("X-ShinyHub-Warning", warn)
+			warnings = append(warnings, warn)
+		}
+	}
+
+	// A keep-warm floor on an elastic pool is accepted but inert (see
+	// config.MinWarmReplicasInertWarning). Warn on the change that produces the
+	// combination, whichever side of it this request sets, and evaluate the
+	// post-patch state so a request that sets both is judged as a whole.
+	if setMinWarmReplicas || setWorkerIsolation {
+		iso := config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(
+			orString(newWorkerIsolation, setWorkerIsolation, app.WorkerIsolation),
+			s.cfg.Runtime.DefaultWorkerIsolation))
+		if warn := config.MinWarmReplicasInertWarning(orInt(newMinWarmReplicas, setMinWarmReplicas, app.MinWarmReplicas), iso); warn != "" {
+			warnings = append(warnings, warn)
 		}
 	}
 
@@ -1261,6 +1279,9 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	if block := s.buildRenderPacingBlock(effectiveRenderSeconds, effectiveCap); block != nil {
 		resp["render_pacing"] = block
 	}
+	for _, warn := range warnings {
+		addWarningHeader(w, warn)
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1289,6 +1310,18 @@ func orInt(newVal int, set bool, fallback int) int {
 		return newVal
 	}
 	return fallback
+}
+
+// addWarningHeader attaches msg to the response's X-ShinyHub-Warning header,
+// the advisory channel for a request that succeeded but deserves a heads-up.
+// The CLI and the dashboard read the header with Get, which returns only the
+// first value, so a second warning on the same response is joined onto the
+// first rather than sent as a separate value they would never see.
+func addWarningHeader(w http.ResponseWriter, msg string) {
+	if prev := w.Header().Get("X-ShinyHub-Warning"); prev != "" {
+		msg = prev + "; " + msg
+	}
+	w.Header().Set("X-ShinyHub-Warning", msg)
 }
 
 // patchAppAuditDetail builds a JSON detail blob for the update_app audit event,
@@ -1749,6 +1782,18 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// Refresh so deploy.Run sees the updated replicas / max_sessions.
 		if fresh, ferr := s.store.GetAppBySlug(slug); ferr == nil {
 			app = fresh
+		}
+		// A manifest that declares a keep-warm floor or the isolation mode
+		// may have just produced a floor that elastic isolation ignores. The
+		// check runs against the refreshed row so it sees the manifest's
+		// value combined with whatever the other knob already held, and it
+		// is scoped to manifests that touch one of the two so an unrelated
+		// redeploy does not repeat the advisory forever.
+		if manifest.App.MinWarmReplicas != nil || (manifest.App.Worker != nil && manifest.App.Worker.Isolation != nil) {
+			iso := config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation))
+			if warn := config.MinWarmReplicasInertWarning(app.MinWarmReplicas, iso); warn != "" {
+				manifestSummary.Warnings = append(manifestSummary.Warnings, warn)
+			}
 		}
 	}
 
@@ -3566,7 +3611,7 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 	}
 
 	observationReplicas := make([]*db.Replica, 0, len(resp.Replicas))
-	workersTotal := 0
+	pool := elasticPool{Known: elastic}
 	for _, rep := range resp.Replicas {
 		observationReplicas = append(observationReplicas, &db.Replica{
 			Index: rep.Index, Status: rep.Status, DesiredState: rep.DesiredState,
@@ -3574,13 +3619,11 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 			RestartCount: rep.RestartCount,
 		})
 		if elastic {
-			workersTotal++
-			if rep.Status == "running" {
-				resp.WorkersRunning++
-			}
+			pool.observe(rep.Status)
 		}
 	}
-	s.decorateAppObservation(&observedApp, observationReplicas, elastic, resp.WorkersRunning, workersTotal)
+	resp.WorkersRunning = pool.Running
+	s.decorateAppObservation(&observedApp, observationReplicas, pool)
 	resp.Status = observedApp.Status
 	resp.DesiredStatus = observedApp.DesiredStatus
 	resp.ReplicasRunning = observedApp.ReplicasRunning

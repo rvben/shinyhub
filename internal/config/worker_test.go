@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -80,6 +81,46 @@ func TestWorkerBudgetWarning(t *testing.T) {
 			}
 			if tc.wantWarning && !strings.Contains(got, "memory guard") {
 				t.Errorf("warning should name the missing memory guard, got %q", got)
+			}
+		})
+	}
+}
+
+// TestMinWarmReplicasInertWarning pins the shared keep-warm-under-elastic
+// warning: it fires only for a positive floor on an elastic mode, and it names
+// the floor, the mode, and worker.warm_spares as the knob that does pre-boot.
+func TestMinWarmReplicasInertWarning(t *testing.T) {
+	tests := []struct {
+		name      string
+		minWarm   int
+		isolation WorkerIsolationMode
+		want      bool
+	}{
+		{"grouped with a floor warns", 1, IsolationGrouped, true},
+		{"per_session with a floor warns", 3, IsolationPerSession, true},
+		{"multiplex with a floor is silent", 1, IsolationMultiplex, false},
+		{"unresolved empty isolation is silent", 1, "", false},
+		{"grouped with no floor is silent", 0, IsolationGrouped, false},
+		{"grouped with a negative floor is silent", -1, IsolationGrouped, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MinWarmReplicasInertWarning(tt.minWarm, tt.isolation)
+			if (got != "") != tt.want {
+				t.Fatalf("MinWarmReplicasInertWarning(%d, %q) = %q, want warning=%v", tt.minWarm, tt.isolation, got, tt.want)
+			}
+			if !tt.want {
+				return
+			}
+			for _, needle := range []string{
+				"min_warm_replicas=" + strconv.Itoa(tt.minWarm),
+				"worker.isolation=" + string(tt.isolation),
+				"worker.warm_spares",
+				"idle",
+			} {
+				if !strings.Contains(got, needle) {
+					t.Errorf("warning %q should mention %q", got, needle)
+				}
 			}
 		})
 	}

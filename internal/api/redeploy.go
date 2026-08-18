@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/appstatus"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 )
@@ -123,27 +124,62 @@ func configuredSessionsCeiling(app *db.App) int {
 	}
 }
 
+// elasticPool is the live shape of an elastic (grouped / per_session) pool as
+// the app observation needs it. Known is false when the proxy has no elastic
+// pool registered for the app: multiplex apps, and elastic apps that are
+// stopped or not yet deployed.
+type elasticPool struct {
+	Known   bool
+	Running int // workers serving right now; reported as workers_running
+	Booting int // booting, suspending or resuming: not assignable yet
+	Total   int // every worker slot the proxy tracks, whatever its state
+}
+
+// observe folds one worker's status into p. The proxy's routing labels are
+// booting, running, suspending, suspended, resuming and draining; the metrics
+// path may substitute the manager's health view (crashed, stopped) for a
+// tracked worker. A frozen warm spare (suspended) is ready but not running:
+// it resumes on the first request, so a pool holding only frozen spares is
+// idle, never stuck in starting. A spare still being frozen (suspending) is
+// mid-provisioning and unassignable, exactly like a booting worker, so it
+// counts as booting; otherwise a pool whose only slot is freezing would read
+// idle while the allocator still rejects. Draining workers are on their way
+// out and count toward neither.
+func (p *elasticPool) observe(status string) {
+	p.Total++
+	switch status {
+	case "running":
+		p.Running++
+	case "booting", "suspending", "resuming":
+		p.Booting++
+	}
+}
+
 // decorateAppObservation overlays process reality onto the stored lifecycle
 // state. desired_status preserves the database value; status becomes the field
 // operators expect: whether the app is actually serving, idle, or unhealthy.
-func (s *Server) decorateAppObservation(app *db.App, replicas []*db.Replica, elasticKnown bool, workersRunning, workersTotal int) {
+// Every value written to app.Status is a constant from internal/appstatus, the
+// vocabulary the CLI's readiness gates classify.
+func (s *Server) decorateAppObservation(app *db.App, replicas []*db.Replica, pool elasticPool) {
 	if app.DesiredStatus == "" {
 		app.DesiredStatus = app.Status
 	}
 	app.ReplicasRunning = 0
-	app.WorkersRunning = workersRunning
+	app.WorkersRunning = pool.Running
 	app.LastReplicaError = ""
 
-	if elasticKnown {
-		// Elastic pools are demand-driven and have no durable replica rows. Their
-		// empty healthy state is idle, while transitional workers are starting.
+	if pool.Known {
+		// Elastic pools are demand-driven and have no durable replica rows.
+		// Their empty healthy state is idle: the first request boots a worker,
+		// so idle is a serving state, not a gap. Workers on their way up make
+		// the app starting; a live worker makes it running.
 		switch {
-		case workersRunning > 0:
-			app.Status = "running"
-		case workersTotal > 0:
-			app.Status = "starting"
-		case app.DesiredStatus == "running" || app.DesiredStatus == "degraded":
-			app.Status = "idle"
+		case pool.Running > 0:
+			app.Status = appstatus.Running
+		case pool.Booting > 0:
+			app.Status = appstatus.Starting
+		case app.DesiredStatus == appstatus.Running || app.DesiredStatus == appstatus.Degraded:
+			app.Status = appstatus.Idle
 		default:
 			app.Status = app.DesiredStatus
 		}
@@ -184,23 +220,23 @@ func (s *Server) decorateAppObservation(app *db.App, replicas []*db.Replica, ela
 
 	switch {
 	case app.ReplicasRunning > 0 && crashed+lost > 0:
-		app.Status = "degraded"
+		app.Status = appstatus.Degraded
 	case app.ReplicasRunning > 0:
-		app.Status = "running"
+		app.Status = appstatus.Running
 	case crashed > 0:
-		app.Status = "crashed"
+		app.Status = appstatus.Crashed
 	case lost > 0:
-		app.Status = "degraded"
+		app.Status = appstatus.Degraded
 	case starting > 0:
-		app.Status = "starting"
-	case intentionallyParked > 0 && app.DesiredStatus != "stopped":
-		app.Status = "hibernated"
-	case len(replicas) == 0 && (app.DesiredStatus == "running" || app.DesiredStatus == "degraded"):
-		app.Status = "degraded"
+		app.Status = appstatus.Starting
+	case intentionallyParked > 0 && app.DesiredStatus != appstatus.Stopped:
+		app.Status = appstatus.Hibernated
+	case len(replicas) == 0 && (app.DesiredStatus == appstatus.Running || app.DesiredStatus == appstatus.Degraded):
+		app.Status = appstatus.Degraded
 	default:
 		app.Status = app.DesiredStatus
 	}
-	if app.LastReplicaError == "" && app.Status == "crashed" {
+	if app.LastReplicaError == "" && app.Status == appstatus.Crashed {
 		app.LastReplicaError = app.LastError
 	}
 }

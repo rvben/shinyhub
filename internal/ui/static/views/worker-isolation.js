@@ -31,3 +31,18 @@ export function workerCapacityLine(mode, groupedSize, maxWorkers, memMB) {
 
   return '';
 }
+
+// keepWarmInertNote returns the advisory shown beneath the Keep warm field
+// when a positive keep-warm floor cannot take effect: min_warm_replicas keeps
+// multiplex replicas running through idle hibernation, but an elastic pool
+// (grouped / per_session) has no standing replicas. Its workers boot on demand
+// and the app reports idle, which is healthy, with none running, so the floor
+// is stored but inert until isolation returns to multiplex. The note names
+// Warm workers as the control that does pre-boot elastic workers. Empty when
+// the floor is zero or the isolation is multiplex (or unknown).
+export function keepWarmInertNote(minWarm, isolation) {
+  const floor = Number(minWarm) || 0;
+  if (floor <= 0) return '';
+  if (isolation !== 'grouped' && isolation !== 'per_session') return '';
+  return `Keep warm has no effect under ${isolation} isolation: workers boot on demand and the app reports idle with none running. Use Warm workers (Scaling) to keep workers pre-booted.`;
+}

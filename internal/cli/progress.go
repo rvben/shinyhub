@@ -129,6 +129,19 @@ func (p *progress) done(suffix, settled string) {
 		p.s.dim("("+humanElapsed(time.Since(p.started))+")"))
 }
 
+// note interrupts the wait with a full line of its own (a warning the operator
+// should see before the wait ends) and lets the progress line resume beneath
+// it. On a non-redrawing writer the label is reprinted so the dots that follow
+// still read as belonging to the wait.
+func (p *progress) note(msg string) {
+	p.halt()
+	if !p.s.redraw {
+		fmt.Fprintf(p.w, "\n%s\n%s", msg, p.label)
+		return
+	}
+	fmt.Fprintf(p.w, "%s%s\n", eraseLine, msg)
+}
+
 // stop ends the wait without a verdict: the caller is about to print its own
 // failure or its own success line, so this only closes off the progress line.
 func (p *progress) stop() {

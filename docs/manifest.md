@@ -81,7 +81,7 @@ starts.
 | `replicas` | int ≥ 1 | Desired number of identical replica processes serving this app. Runtime surfaces report the actual `replicas_running` separately. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int 0..1000 | Per-replica admission cap for new cookieless sessions. `0` means "use the runtime default". |
 | `render_seconds` | float 0..600 | CPU cost of one page render, used to pace admission so a burst queues on a wait page instead of stalling every session. `0` disables pacing. Applied live on deploy (no restart). See [Render pacing](scaling.md#render-pacing). |
-| `min_warm_replicas` | int 0..1000 | Minimum number of replica processes kept running when the app idles. Workers live inside a replica; this setting counts outer app processes, not `[app.worker]` workers. `0` (default) allows full hibernation. When set above `0`, the watcher stops only enough replicas to reach this floor so the first post-idle request hits a warm process. If the stored `replicas` value is less than `min_warm_replicas`, the floor self-clamps to `replicas`. Absent key leaves the stored value unchanged (same declared-only semantics as `replicas`). See [Pre-warming](scaling.md#pre-warming). |
+| `min_warm_replicas` | int 0..1000 | Minimum number of replica processes kept running when the app idles. Workers live inside a replica; this setting counts outer app processes, not `[app.worker]` workers. `0` (default) allows full hibernation. When set above `0`, the watcher stops only enough replicas to reach this floor so the first post-idle request hits a warm process. If the stored `replicas` value is less than `min_warm_replicas`, the floor self-clamps to `replicas`. Absent key leaves the stored value unchanged (same declared-only semantics as `replicas`). Inert under `[app.worker] isolation = "grouped"` or `"per_session"` (elastic pools boot workers on demand and report `idle` with none running); the server accepts it and reports a manifest warning; use `[app.worker] warm_spares` there. See [Pre-warming](scaling.md#pre-warming). |
 | `command` | array of strings | Launch-command override. See [`[app] command`](#app-command) below. |
 | `startup_timeout_seconds` | int 1..3600 | Readiness deadline for deploy, wake, scale, rollback, and `shinyhub run`; default 120 seconds. Read at boot and not stored in the database. |
 | `build_timeout_seconds` | int 30..7200 | Host-side uv/renv dependency-build deadline; default 900 seconds. Read at build time and inert for Docker runtimes. |
@@ -269,6 +269,12 @@ cloning.
 A replica is an outer app process. Workers live inside that runtime pool:
 `min_warm_replicas` counts replica processes, while `[app.worker].max_workers`
 and `warm_spares` count demand-driven workers within an elastic app pool.
+Under `grouped` or `per_session` isolation the pool boots workers on demand and
+the app reports `idle` (healthy) with none running, so a `min_warm_replicas`
+floor is accepted and stored but has no effect; the deploy response carries a
+manifest warning (`Note:` in the CLI, `manifest.warnings` in the response) when a
+manifest declares that combination. Use `warm_spares` to keep elastic workers
+pre-booted.
 
 ### `[app] name` and `[app] description`
 

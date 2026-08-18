@@ -361,3 +361,51 @@ func TestDeploy_OpenPublicRouteFailureExplainsDeploySucceeded(t *testing.T) {
 		t.Errorf("hint = %q", hintOf(err))
 	}
 }
+
+// A manifest advisory from the server (a setting accepted but inert as
+// declared) reaches both output modes: table mode prints it as a note under
+// the deploy summary, and the JSON envelope carries it verbatim in `warnings`
+// so a pipeline learns it without parsing prose. The negative control pins
+// that the key is absent when the server sends no advisory.
+func TestDeploy_ManifestWarningsReachBothOutputModes(t *testing.T) {
+	const advisory = "min_warm_replicas=1 has no effect under worker.isolation=grouped: set worker.warm_spares to keep workers pre-booted"
+	body := `{"slug":"demo","status":"idle","deploy_count":4,"current_version":"v4",` +
+		`"manifest":{"app":{"min_warm_replicas":1},"warnings":["` + advisory + `"]}}`
+
+	srv := deployStubServer(t, body, nil)
+	writeTestCLIConfig(t, srv.URL)
+	stdout, _, err := execCLISplit(t, "deploy", deployTestBundleDir(t), "--slug", "demo", "-o", "table")
+	if err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+	if !strings.Contains(stdout, "Note: "+advisory) {
+		t.Errorf("table mode should print the advisory as a note; got %q", stdout)
+	}
+
+	stdout, _, err = execCLISplit(t, "deploy", deployTestBundleDir(t), "--slug", "demo")
+	if err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &obj); err != nil {
+		t.Fatalf("stdout is not a JSON object: %q: %v", stdout, err)
+	}
+	warnings, _ := obj["warnings"].([]any)
+	if len(warnings) != 1 || warnings[0] != advisory {
+		t.Errorf("warnings = %v, want [%q]; full stdout: %q", obj["warnings"], advisory, stdout)
+	}
+
+	srv2 := deployStubServer(t, `{"slug":"demo","status":"running","deploy_count":4,"current_version":"v4"}`, nil)
+	writeTestCLIConfig(t, srv2.URL)
+	stdout, _, err = execCLISplit(t, "deploy", deployTestBundleDir(t), "--slug", "demo")
+	if err != nil {
+		t.Fatalf("deploy failed: %v", err)
+	}
+	obj = nil
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &obj); err != nil {
+		t.Fatalf("stdout is not a JSON object: %q: %v", stdout, err)
+	}
+	if _, present := obj["warnings"]; present {
+		t.Errorf("warnings must be omitted when the server sends none; got %v", obj["warnings"])
+	}
+}

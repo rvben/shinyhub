@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/appstatus"
 	"github.com/rvben/shinyhub/internal/db"
 )
 
@@ -30,6 +31,7 @@ type staleScheduleItem struct {
 type fleetAppCounts struct {
 	Total    int `json:"total"`
 	Running  int `json:"running"`
+	Idle     int `json:"idle"` // healthy elastic apps with no live worker (boot on demand)
 	Stopped  int `json:"stopped"`
 	Degraded int `json:"degraded"` // running apps with >=1 lost replica
 	Crashed  int `json:"crashed"`  // apps down because their replicas cannot start
@@ -102,16 +104,17 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	for _, a := range apps {
 		s.decorateApp(a)
 		replicas := s.liveReplicaView(a.Slug, replicasByApp[a.ID])
-		elasticKnown, workersRunning, workersTotal := s.elasticObservation(a.Slug)
-		s.decorateAppObservation(a, replicas, elasticKnown, workersRunning, workersTotal)
+		s.decorateAppObservation(a, replicas, s.elasticObservation(a.Slug))
 		switch a.Status {
-		case "running":
+		case appstatus.Running:
 			resp.Apps.Running++
-		case "stopped":
+		case appstatus.Idle:
+			resp.Apps.Idle++
+		case appstatus.Stopped:
 			resp.Apps.Stopped++
-		case "degraded":
+		case appstatus.Degraded:
 			resp.Apps.Degraded++
-		case "crashed":
+		case appstatus.Crashed:
 			resp.Apps.Crashed++
 		}
 	}

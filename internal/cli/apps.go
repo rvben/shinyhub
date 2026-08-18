@@ -1252,7 +1252,7 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		}
 	}
 	if minWarmReplicasChanged {
-		fmt.Printf("%s: min-warm-replicas set to %d\n", slug, f.minWarmReplicas)
+		lines = append(lines, fmt.Sprintf("%s: min-warm-replicas set to %d", slug, f.minWarmReplicas))
 	}
 	if renderSecondsChanged {
 		if f.renderSeconds == 0 {

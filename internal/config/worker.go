@@ -61,6 +61,29 @@ func ValidateWorkerSettings(w WorkerSettings, clustered bool, effectiveMemMB, ho
 	return nil
 }
 
+// MinWarmReplicasInertWarning returns a warning when a keep-warm floor cannot
+// take effect: min_warm_replicas keeps multiplex replicas running through idle
+// hibernation, but an elastic pool (grouped / per_session) has no standing
+// replicas at all. Its workers boot on demand and the app reports idle, which
+// is healthy, with none running, so the floor is accepted (it applies again the
+// moment isolation returns to multiplex) but does nothing now. The message
+// names the knob that does pre-boot elastic workers. Empty when the floor is
+// unset or the isolation is multiplex. isolation must already be resolved
+// against the fleet default.
+func MinWarmReplicasInertWarning(minWarm int, isolation WorkerIsolationMode) string {
+	if minWarm <= 0 {
+		return ""
+	}
+	switch isolation {
+	case IsolationGrouped, IsolationPerSession:
+	default:
+		return ""
+	}
+	return fmt.Sprintf(
+		"min_warm_replicas=%d has no effect under worker.isolation=%s: elastic pools boot workers on demand and report idle (healthy) with none running; set worker.warm_spares to keep workers pre-booted",
+		minWarm, isolation)
+}
+
 // WorkerBudgetWarning returns a human-readable warning when elastic isolation
 // (grouped/per_session) is configured with NO memory guard active: the static
 // worst-case check is inert (it needs both host_budget_mb and a per-worker

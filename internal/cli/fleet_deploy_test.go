@@ -607,3 +607,58 @@ func TestDeployAppBundle_BundleRejectionClassifiedBundleInvalid(t *testing.T) {
 		t.Fatalf("kind = %q, want bundle_invalid for a 4xx bundle rejection", kind)
 	}
 }
+
+// TestDeployAppBundle_EmitsManifestWarningsBeforeHealthWait covers the
+// reported grouped-app scenario end to end on the CLI side: the server accepts
+// the deploy, attaches a keep-warm advisory to the manifest block, and then
+// reports the app as idle (an elastic pool with no worker booted). The fleet
+// output must print the advisory as a note ahead of the health line, and the
+// idle status must satisfy the health wait rather than run it to the timeout.
+func TestDeployAppBundle_EmitsManifestWarningsBeforeHealthWait(t *testing.T) {
+	const advisory = "min_warm_replicas=1 has no effect under worker.isolation=grouped: set worker.warm_spares to keep workers pre-booted"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/apps/demo/deploy":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "ok",
+				"manifest": map[string]any{
+					"app":      map[string]any{"min_warm_replicas": 1},
+					"warnings": []string{advisory},
+				},
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"app": map[string]any{"status": "idle", "desired_status": "running"},
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"slug": "demo", "content_digest": "sha256:X"},
+			})
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+
+	var buf bytes.Buffer
+	if _, _, _, _, err := deployAppBundle(cfg, "demo", dir, "private", "", &buf, "run-1", 5*time.Second); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	out := buf.String()
+	note := strings.Index(out, "demo: Note: "+advisory)
+	healthy := strings.Index(out, "healthy")
+	if note < 0 {
+		t.Fatalf("fleet deploy must print the server's manifest warning as a note, got:\n%s", out)
+	}
+	if healthy < 0 {
+		t.Fatalf("an idle elastic app must satisfy the health wait, got:\n%s", out)
+	}
+	if note > healthy {
+		t.Errorf("the advisory must precede the health line so it explains what follows, got:\n%s", out)
+	}
+}

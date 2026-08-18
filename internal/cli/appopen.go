@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/rvben/shinyhub/internal/appstatus"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/spf13/cobra"
 )
@@ -59,13 +60,24 @@ func fetchAppLaunchState(cfg *cliConfig, slug string) (appLaunchState, error) {
 	}, nil
 }
 
+// appStatusOpenable mirrors the dashboard's launchpad contract
+// (launchpad-model.js): every state in which the app's URL produces a page.
+// Idle is an elastic pool with no live worker; the request boots one.
 func appStatusOpenable(status string) bool {
 	switch strings.ToLower(status) {
-	case "running", "healthy", "hibernated", "suspended", "deploying", "waking", "degraded":
+	case appstatus.Running, "healthy", appstatus.Idle, appstatus.Hibernated, appstatus.Suspended,
+		appstatus.Deploying, appstatus.Waking, appstatus.Degraded:
 		return true
 	default:
 		return false
 	}
+}
+
+// appStatusServesNow reports whether the public route can be probed without
+// waking or booting anything the user did not ask for. Idle is included: the
+// probe boots the worker the user's browser is about to need anyway.
+func appStatusServesNow(status string) bool {
+	return appstatus.Serving(status) || status == "healthy" || status == appstatus.Degraded
 }
 
 // verifyPublicAppRoute proves that the user-facing route answers, not merely
@@ -177,7 +189,7 @@ func runAppsOpen(cmd *cobra.Command, args []string, f *appsOpenFlags) error {
 		return appOpenStateError(slug, state)
 	}
 	target := remoteAppURL(cfg.Host, slug)
-	if state.Access == "public" && (state.Status == "running" || state.Status == "healthy" || state.Status == "degraded") {
+	if state.Access == "public" && appStatusServesNow(state.Status) {
 		if err := verifyPublicAppRoute(target); err != nil {
 			return &hintedMsgError{msg: fmt.Sprintf("%s is openable in the API, but its public route check failed: %v", slug, err),
 				hint: fmt.Sprintf("the app was not changed; inspect `shinyhub apps logs %s --no-follow` and retry %s", slug, target), cause: err}
