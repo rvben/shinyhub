@@ -302,6 +302,19 @@ spare, and replenishment begins immediately, subject to `max_workers` and the
 runtime memory floor. With `warm_spares = 0` (the default), the first request
 still cold-starts a worker and sees the loading page while it boots.
 
+**An elastic pool with no workers is `idle`, and idle is healthy.** Workers
+exist only while sessions (or warm spares) need them, so `GET /api/apps/{slug}`
+reports `status: idle` for a desired-running grouped or per_session app whose
+pool is empty or holds only frozen warm spares (ready to resume, not running),
+`starting` while a worker boots, is being frozen, or resumes, and `running`
+once one is up (an unfrozen spare is a running worker). `shinyhub deploy --wait`,
+`shinyhub fleet apply`, `shinyhub apps open` and the dashboard fleet-health
+strip all treat `idle` as healthy for these modes. `min_warm_replicas` counts
+outer replica processes and is inert under elastic isolation: the server stores
+it and reports a warning (deploy `Note:` / `manifest.warnings`, `apps set`
+`warning:`, an inline note under Keep warm in the dashboard) instead of
+rejecting it. Use `warm_spares` to keep elastic workers pre-booted.
+
 When `runtime.snapshot.enabled` is on and the selected runtime can reclaim the
 worker's cgroup memory, a ready spare is frozen and its resident memory is
 reclaimed to swap. Demand resumes that same process, checks readiness, and only
