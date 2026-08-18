@@ -268,6 +268,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Accept", deployevent.MediaType)
+	req.Header.Set("X-Shinyhub-Deploy-Channel", "cli")
 
 	// Deploy can take several minutes on first run (uv downloads packages).
 	// Use the untimed client to match the SSE logs command.

@@ -4422,6 +4422,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       xhr.open('POST', `/api/apps/${encodeURIComponent(slug)}/deploy`, true);
       xhr.withCredentials = true;
+      xhr.setRequestHeader('X-Shinyhub-Deploy-Channel', 'dashboard');
       const csrf = readCookie('csrf_token');
       if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
 

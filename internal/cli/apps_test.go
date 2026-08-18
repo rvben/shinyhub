@@ -1540,6 +1540,9 @@ func TestAppsRollback_WaitPolls(t *testing.T) {
 	setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/api/apps/demo/rollback":
+			if got := r.Header.Get("X-Shinyhub-Deploy-Channel"); got != "cli" {
+				t.Errorf("rollback channel = %q, want cli", got)
+			}
 			_, _ = w.Write([]byte(`{"status":"rolled_back","slug":"demo"}`))
 		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
 			if atomic.AddInt32(&getCount, 1) < 2 {

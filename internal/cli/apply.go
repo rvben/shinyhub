@@ -189,6 +189,7 @@ func postSavedPlanBundle(cfg *cliConfig, loaded *loadedSavedPlan, revision strin
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Accept", deployevent.MediaType)
+	req.Header.Set("X-Shinyhub-Deploy-Channel", "cli")
 	req.Header.Set("X-Shinyhub-If-Resource-Revision", revision)
 	return streamClient.Do(req)
 }

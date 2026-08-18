@@ -15,12 +15,14 @@ import (
 // and asserts that stdout contains exactly one JSON object (the result
 // envelope) while progress text goes to stderr.
 func TestDeploy_JSONModeKeepsStdoutClean(t *testing.T) {
+	var deployChannel string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/apps/demo", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"app":{"slug":"demo","status":"running","deploy_count":3,"current_version":"v3"}}`))
 	})
 	mux.HandleFunc("/api/apps/demo/deploy", func(w http.ResponseWriter, r *http.Request) {
+		deployChannel = r.Header.Get("X-Shinyhub-Deploy-Channel")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"slug":"demo","status":"running","deploy_count":3,"current_version":"v3"}`))
 	})
@@ -53,6 +55,9 @@ func TestDeploy_JSONModeKeepsStdoutClean(t *testing.T) {
 	}
 	if obj["url"] != srv.URL+"/app/demo/" || obj["opened"] != false {
 		t.Errorf("stdout should always carry canonical URL and browser state; got %#v", obj)
+	}
+	if deployChannel != "cli" {
+		t.Errorf("deploy channel = %q, want cli", deployChannel)
 	}
 
 	// Progress text must go to stderr.

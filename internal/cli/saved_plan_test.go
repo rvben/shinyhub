@@ -107,6 +107,9 @@ func TestPlanOutThenApplyUploadsReviewedBytesAndRevision(t *testing.T) {
 			_, _ = io.WriteString(w, `{"app":{"slug":"demo","status":"running","access":"private","content_digest":"sha256:old"},"can_manage":true,"resource_revision":"rev:app:planned"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/deploy":
 			revision = r.Header.Get("X-Shinyhub-If-Resource-Revision")
+			if got := r.Header.Get("X-Shinyhub-Deploy-Channel"); got != "cli" {
+				t.Errorf("deploy channel = %q, want cli", got)
+			}
 			file, _, err := r.FormFile("bundle")
 			if err != nil {
 				t.Errorf("bundle: %v", err)

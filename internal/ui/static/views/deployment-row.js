@@ -49,8 +49,63 @@ export function deploymentRowModel(d, { isCurrent = false, now = Date.now() } = 
 }
 
 export function provenanceModel(raw) {
-  if (!raw || !raw.run_id) {
-    return { available: false, label: 'Provenance unavailable', detail: 'Deployed before provenance tracking', url: '', change: null, provider: '' };
+  const origin = raw && raw.origin ? raw.origin : {};
+  const originKind = origin.kind || (raw && raw.run_id ? 'fleet' : 'legacy');
+  if (originKind === 'legacy') {
+    return {
+      available: false,
+      label: 'Source not recorded',
+      detail: 'No deployment source was captured',
+      url: '',
+      change: null,
+      provider: '',
+      mark: '',
+      headerText: '',
+      headerDetail: '',
+    };
+  }
+  if (originKind === 'direct' || originKind === 'rollback') {
+    const channel = origin.channel || 'api';
+    const actor = origin.actor ? String(origin.actor) : '';
+    const channelLabels = {
+      dashboard: 'Dashboard',
+      cli: 'ShinyHub CLI',
+      api: 'API',
+    };
+    const channelLabel = channelLabels[channel] || 'API';
+    const isRollback = originKind === 'rollback';
+    let label;
+    let headerLead;
+    let mark;
+    if (isRollback) {
+      label = 'Rollback';
+      headerLead = 'Rolled back';
+      mark = 'RB';
+    } else if (channel === 'dashboard') {
+      label = 'Manual deployment';
+      headerLead = 'Deployed manually';
+      mark = 'UI';
+    } else if (channel === 'cli') {
+      label = 'CLI deployment';
+      headerLead = 'Deployed via ShinyHub CLI';
+      mark = 'CLI';
+    } else {
+      label = 'Direct API deployment';
+      headerLead = 'Deployed via API';
+      mark = 'API';
+    }
+    return {
+      available: true,
+      label,
+      detail: actor ? `${actor} · ${channelLabel}` : channelLabel,
+      url: '',
+      revisionURL: '',
+      change: null,
+      provider: originKind,
+      mark,
+      headerText: actor ? `${headerLead} by ${actor}` : headerLead,
+      headerDetail: channelLabel,
+    };
   }
   const metadata = raw.metadata || {};
   const revision = metadata.revision || {};
@@ -70,6 +125,9 @@ export function provenanceModel(raw) {
     revisionURL: revision.url || '',
     change: change.label ? { label: String(change.label), url: change.url || '' } : null,
     provider: metadata.provider || '',
+    mark: metadata.provider === 'gitlab' ? 'GL' : 'CI',
+    headerText: '',
+    headerDetail: details.join(' · ') || `fleet ${raw.fleet_id || 'run'}`,
     runID: raw.run_id,
   };
 }

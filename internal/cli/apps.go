@@ -650,6 +650,7 @@ func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error 
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
+	req.Header.Set("X-Shinyhub-Deploy-Channel", "cli")
 	if bodyReader != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

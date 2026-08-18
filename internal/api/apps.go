@@ -1466,6 +1466,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := s.knownFleetRunID(r)
+	origin := deploymentOriginForRequest(r, runID, false)
 
 	if s.manager == nil {
 		writeError(w, http.StatusServiceUnavailable, "process manager not available")
@@ -1670,7 +1671,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// fixes it leave the app down.
 	keepStopped := stoppedByOperator && prevActive != nil
 
-	pendingDep, err := s.store.BeginDeploymentWithProvenance(app.ID, version, bundleDir, runID, nil)
+	pendingDep, err := s.store.BeginDeploymentWithOrigin(app.ID, version, bundleDir, runID, nil, origin)
 	if err != nil {
 		slog.Error("deploy: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -2079,6 +2080,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := s.knownFleetRunID(r)
+	origin := deploymentOriginForRequest(r, runID, true)
 
 	// Parse optional body to support targeted rollback by deployment ID.
 	var reqBody struct {
@@ -2173,7 +2175,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	if existing, lerr := s.store.ListDeployments(app.ID); lerr == nil && len(existing) > 0 {
 		prevActive = existing[0]
 	}
-	pendingDep, err := s.store.BeginDeploymentWithProvenance(app.ID, prev.Version, prev.BundleDir, runID, &prev.ID)
+	pendingDep, err := s.store.BeginDeploymentWithOrigin(app.ID, prev.Version, prev.BundleDir, runID, &prev.ID, origin)
 	if err != nil {
 		slog.Error("rollback: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")

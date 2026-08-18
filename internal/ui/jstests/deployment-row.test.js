@@ -44,12 +44,42 @@ test('provenance presents pipeline first with durable revision and optional MR',
 test('legacy deployments expose an explicit provenance fallback', () => {
   assert.deepEqual(provenanceModel(null), {
     available: false,
-    label: 'Provenance unavailable',
-    detail: 'Deployed before provenance tracking',
+    label: 'Source not recorded',
+    detail: 'No deployment source was captured',
     url: '',
     change: null,
     provider: '',
+    mark: '',
+    headerText: '',
+    headerDetail: '',
   });
+});
+
+test('direct deployment provenance distinguishes dashboard, CLI, and API channels', () => {
+  const dashboard = provenanceModel({ origin: { kind: 'direct', channel: 'dashboard', actor: 'admin' } });
+  assert.equal(dashboard.label, 'Manual deployment');
+  assert.equal(dashboard.detail, 'admin · Dashboard');
+  assert.equal(dashboard.headerText, 'Deployed manually by admin');
+  assert.equal(dashboard.headerDetail, 'Dashboard');
+  assert.equal(dashboard.mark, 'UI');
+
+  const cli = provenanceModel({ origin: { kind: 'direct', channel: 'cli', actor: 'release-bot' } });
+  assert.equal(cli.label, 'CLI deployment');
+  assert.equal(cli.headerText, 'Deployed via ShinyHub CLI by release-bot');
+  assert.equal(cli.mark, 'CLI');
+
+  const api = provenanceModel({ origin: { kind: 'direct', channel: 'api' } });
+  assert.equal(api.label, 'Direct API deployment');
+  assert.equal(api.detail, 'API');
+  assert.equal(api.headerText, 'Deployed via API');
+});
+
+test('rollback provenance names the action and authenticated actor', () => {
+  const p = provenanceModel({ origin: { kind: 'rollback', channel: 'dashboard', actor: 'admin' } });
+  assert.equal(p.label, 'Rollback');
+  assert.equal(p.detail, 'admin · Dashboard');
+  assert.equal(p.headerText, 'Rolled back by admin');
+  assert.equal(p.mark, 'RB');
 });
 
 test('a current succeeded deployment shows its release label and blocks its own rollback', () => {

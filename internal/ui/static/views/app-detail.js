@@ -274,17 +274,21 @@ function renderHeaderProvenance(host, raw) {
 
   const mark = document.createElement('span');
   mark.className = `provenance-provider${model.provider === 'gitlab' ? ' is-gitlab' : ''}`;
-  mark.textContent = model.provider === 'gitlab' ? 'GL' : 'CI';
+  mark.textContent = model.mark;
   mark.setAttribute('aria-hidden', 'true');
   const copy = document.createElement('span');
   copy.className = 'provenance-copy';
   const primary = document.createElement('span');
   primary.className = 'provenance-primary';
-  primary.append('Deployed by ');
-  primary.append(model.url ? externalLink(model.label, model.url) : model.label);
+  if (model.headerText) {
+    primary.textContent = model.headerText;
+  } else {
+    primary.append('Deployed by ');
+    primary.append(model.url ? externalLink(model.label, model.url) : model.label);
+  }
   const detail = document.createElement('span');
   detail.className = 'provenance-detail';
-  detail.append(model.detail);
+  detail.append(model.headerDetail || model.detail);
   if (model.change) {
     detail.append(' · ');
     detail.append(model.change.url ? externalLink(model.change.label, model.change.url) : model.change.label);
@@ -357,7 +361,10 @@ async function renderDeployments(panel, app, ctx) {
     try {
       r = await ctx.api(`/api/apps/${app.slug}/rollback`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shinyhub-Deploy-Channel': 'dashboard',
+        },
         body: JSON.stringify({ deployment_id: Number(btn.dataset.id) }),
       });
     } catch {

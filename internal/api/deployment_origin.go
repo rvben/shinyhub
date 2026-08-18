@@ -1,0 +1,42 @@
+package api
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/db"
+)
+
+const deploymentChannelHeader = "X-Shinyhub-Deploy-Channel"
+
+// deploymentOriginForRequest converts request context into durable deployment
+// attribution. A linked fleet run is authoritative; otherwise clients may
+// identify their channel from a small allow-list. Unknown/direct API clients
+// deliberately fall back to "api" rather than being mislabeled as dashboard.
+func deploymentOriginForRequest(r *http.Request, runID string, rollback bool) db.DeploymentOrigin {
+	origin := db.DeploymentOrigin{Kind: db.DeploymentOriginDirect, Channel: db.DeploymentChannelAPI}
+	if rollback {
+		origin.Kind = db.DeploymentOriginRollback
+	}
+	if runID != "" {
+		origin.Kind = db.DeploymentOriginFleet
+		origin.Channel = db.DeploymentChannelFleet
+	}
+	if origin.Kind != db.DeploymentOriginFleet {
+		switch strings.ToLower(strings.TrimSpace(r.Header.Get(deploymentChannelHeader))) {
+		case db.DeploymentChannelDashboard:
+			origin.Channel = db.DeploymentChannelDashboard
+		case db.DeploymentChannelCLI:
+			origin.Channel = db.DeploymentChannelCLI
+		case db.DeploymentChannelAPI:
+			origin.Channel = db.DeploymentChannelAPI
+		}
+	}
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		id := u.ID
+		origin.UserID = &id
+		origin.Actor = u.Username
+	}
+	return origin
+}

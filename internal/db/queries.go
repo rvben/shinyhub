@@ -1463,6 +1463,7 @@ type Deployment struct {
 	Status        string
 	ContentDigest string // "" until SetDeploymentDigest records it
 	CreatedAt     time.Time
+	Origin        DeploymentOrigin
 	// Prepared reports that this deployment finished its host-side preparation
 	// (dependency build + post-deploy hooks). False on every row written before
 	// the column existed, and on elastic deployments made before preparation ran
@@ -1479,7 +1480,59 @@ const (
 	DeploymentPending   = "pending"
 	DeploymentSucceeded = "succeeded"
 	DeploymentFailed    = "failed"
+
+	DeploymentOriginFleet    = "fleet"
+	DeploymentOriginDirect   = "direct"
+	DeploymentOriginRollback = "rollback"
+	DeploymentOriginLegacy   = "legacy"
+
+	DeploymentChannelFleet     = "fleet"
+	DeploymentChannelDashboard = "dashboard"
+	DeploymentChannelCLI       = "cli"
+	DeploymentChannelAPI       = "api"
 )
+
+// DeploymentOrigin is durable attribution captured when a deployment row is
+// created. Actor is an immutable username snapshot: UserID keeps relational
+// identity while the snapshot survives a later rename or user deletion.
+type DeploymentOrigin struct {
+	Kind    string `json:"kind"`
+	Channel string `json:"channel,omitempty"`
+	UserID  *int64 `json:"user_id,omitempty"`
+	Actor   string `json:"actor,omitempty"`
+}
+
+func normalizeDeploymentOrigin(runID string, origin DeploymentOrigin) (DeploymentOrigin, error) {
+	if runID != "" {
+		origin.Kind = DeploymentOriginFleet
+		origin.Channel = DeploymentChannelFleet
+	}
+	if origin.Kind == "" {
+		origin.Kind = DeploymentOriginLegacy
+	}
+	switch origin.Kind {
+	case DeploymentOriginFleet:
+		if runID == "" {
+			return DeploymentOrigin{}, fmt.Errorf("fleet deployment origin requires run id")
+		}
+		origin.Channel = DeploymentChannelFleet
+	case DeploymentOriginDirect, DeploymentOriginRollback:
+		switch origin.Channel {
+		case DeploymentChannelDashboard, DeploymentChannelCLI, DeploymentChannelAPI:
+		case "":
+			origin.Channel = DeploymentChannelAPI
+		default:
+			return DeploymentOrigin{}, fmt.Errorf("invalid deployment origin channel %q", origin.Channel)
+		}
+	case DeploymentOriginLegacy:
+		origin.Channel = ""
+		origin.UserID = nil
+		origin.Actor = ""
+	default:
+		return DeploymentOrigin{}, fmt.Errorf("invalid deployment origin kind %q", origin.Kind)
+	}
+	return origin, nil
+}
 
 type CreateDeploymentParams struct {
 	AppID          int64
@@ -1487,6 +1540,7 @@ type CreateDeploymentParams struct {
 	BundleDir      string
 	RunID          string
 	RestoredFromID *int64
+	Origin         DeploymentOrigin
 	// Status records the outcome of the deploy attempt. Empty defaults to
 	// "succeeded" (a row created via this helper represents an already-live
 	// bundle). The pending->succeeded/failed flow uses BeginDeployment.
@@ -1498,15 +1552,21 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	if status == "" {
 		status = DeploymentSucceeded
 	}
+	origin, err := normalizeDeploymentOrigin(p.RunID, p.Origin)
+	if err != nil {
+		return nil, err
+	}
 	var id int64
-	err := s.db.QueryRow(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id) VALUES (?, ?, ?, ?, NULLIF(?, ''), ?) RETURNING id`,
+	err = s.db.QueryRow(
+		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, origin_user_id, origin_actor)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?) RETURNING id`,
 		p.AppID, p.Version, p.BundleDir, status, p.RunID, p.RestoredFromID,
+		origin.Kind, origin.Channel, origin.UserID, origin.Actor,
 	).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
-	return &Deployment{ID: id, AppID: p.AppID, Version: p.Version, BundleDir: p.BundleDir, Status: status}, nil
+	return &Deployment{ID: id, AppID: p.AppID, Version: p.Version, BundleDir: p.BundleDir, Status: status, Origin: origin}, nil
 }
 
 func (s *Store) UpdateDeploymentStatus(id int64, status string) error {
@@ -1530,15 +1590,31 @@ func (s *Store) BeginDeployment(appID int64, version, bundleDir string) (*Deploy
 // BeginDeploymentWithProvenance records the fleet run that caused a deploy and,
 // for rollbacks, the historical deployment whose bundle is being restored.
 func (s *Store) BeginDeploymentWithProvenance(appID int64, version, bundleDir, runID string, restoredFromID *int64) (*Deployment, error) {
+	origin := DeploymentOrigin{Kind: DeploymentOriginLegacy}
+	if runID != "" {
+		origin.Kind = DeploymentOriginFleet
+	}
+	return s.BeginDeploymentWithOrigin(appID, version, bundleDir, runID, restoredFromID, origin)
+}
+
+// BeginDeploymentWithOrigin records both linked fleet metadata and direct
+// deployment attribution before the running pool is touched.
+func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID string, restoredFromID *int64, origin DeploymentOrigin) (*Deployment, error) {
+	origin, err := normalizeDeploymentOrigin(runID, origin)
+	if err != nil {
+		return nil, fmt.Errorf("begin deployment: %w", err)
+	}
 	var id int64
-	err := s.db.QueryRow(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id) VALUES (?, ?, ?, ?, NULLIF(?, ''), ?) RETURNING id`,
+	err = s.db.QueryRow(
+		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, origin_user_id, origin_actor)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?) RETURNING id`,
 		appID, version, bundleDir, DeploymentPending, runID, restoredFromID,
+		origin.Kind, origin.Channel, origin.UserID, origin.Actor,
 	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
 	}
-	return &Deployment{ID: id, AppID: appID, Version: version, BundleDir: bundleDir, Status: DeploymentPending}, nil
+	return &Deployment{ID: id, AppID: appID, Version: version, BundleDir: bundleDir, Status: DeploymentPending, Origin: origin}, nil
 }
 
 // PromoteDeployment marks a pending deployment as the live one. It only acts
@@ -1662,6 +1738,7 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		           SELECT COUNT(*) FROM deployments d3
 		           WHERE d3.app_id = d.app_id AND d3.status = 'succeeded' AND d3.id <= d.restored_from_id
 		       ) END AS restored_from_release_number,
+		       d.origin_kind, d.origin_channel, d.origin_user_id, d.origin_actor,
 		       fr.id, fr.fleet_id, fr.kind, fr.provenance, fr.created_at
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
@@ -1676,10 +1753,13 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 	for rows.Next() {
 		var d DeploymentSummary
 		var release, restoredID, restoredRelease sql.NullInt64
+		var originKind, originChannel, originActor string
+		var originUserID sql.NullInt64
 		var runID, fleetID, kind, raw sql.NullString
 		var runCreated sql.NullTime
 		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.FailureReason, &d.CreatedAt, &release,
-			&restoredID, &restoredRelease, &runID, &fleetID, &kind, &raw, &runCreated); err != nil {
+			&restoredID, &restoredRelease, &originKind, &originChannel, &originUserID, &originActor,
+			&runID, &fleetID, &kind, &raw, &runCreated); err != nil {
 			return nil, err
 		}
 		if release.Valid {
@@ -1694,16 +1774,23 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 			n := restoredRelease.Int64
 			d.RestoredFromReleaseNumber = &n
 		}
+		origin := DeploymentOrigin{Kind: originKind, Channel: originChannel, Actor: originActor}
+		if originUserID.Valid {
+			id := originUserID.Int64
+			origin.UserID = &id
+		}
+		p := &DeploymentProvenance{Origin: origin}
 		if runID.Valid {
-			p := &DeploymentProvenance{RunID: runID.String, FleetID: fleetID.String, Kind: kind.String}
+			p.RunID, p.FleetID, p.Kind = runID.String, fleetID.String, kind.String
 			if runCreated.Valid {
-				p.StartedAt = runCreated.Time
+				started := runCreated.Time
+				p.StartedAt = &started
 			}
 			if raw.Valid && raw.String != "" {
 				_ = json.Unmarshal([]byte(raw.String), &p.Metadata)
 			}
-			d.Provenance = p
 		}
+		d.Provenance = p
 		result = append(result, d)
 	}
 	return result, rows.Err()
@@ -1728,30 +1815,54 @@ type DeploymentSummary struct {
 }
 
 type DeploymentProvenance struct {
-	RunID     string              `json:"run_id"`
-	FleetID   string              `json:"fleet_id"`
-	Kind      string              `json:"kind"`
-	StartedAt time.Time           `json:"started_at"`
-	Metadata  provenance.Metadata `json:"metadata"`
+	Origin    DeploymentOrigin    `json:"origin"`
+	RunID     string              `json:"run_id,omitempty"`
+	FleetID   string              `json:"fleet_id,omitempty"`
+	Kind      string              `json:"kind,omitempty"`
+	StartedAt *time.Time          `json:"started_at,omitempty"`
+	Metadata  provenance.Metadata `json:"metadata,omitempty"`
 }
 
 // CurrentDeploymentProvenance returns the attribution of the live succeeded
-// deployment. Legacy and manual deployments correctly return nil.
+// deployment. Legacy deployments return nil so the detail header stays quiet;
+// direct deployments and rollbacks return their actor/channel attribution.
 func (s *Store) CurrentDeploymentProvenance(appID int64) (*DeploymentProvenance, error) {
 	var p DeploymentProvenance
-	var raw string
-	err := s.db.QueryRow(`SELECT fr.id, fr.fleet_id, fr.kind, fr.provenance, fr.created_at
-		FROM deployments d JOIN fleet_runs fr ON fr.id = d.run_id
+	var originKind, originChannel, originActor string
+	var originUserID sql.NullInt64
+	var runID, fleetID, kind, raw sql.NullString
+	var started sql.NullTime
+	err := s.db.QueryRow(`SELECT d.origin_kind, d.origin_channel, d.origin_user_id, d.origin_actor,
+		       fr.id, fr.fleet_id, fr.kind, fr.provenance, fr.created_at
+		FROM deployments d LEFT JOIN fleet_runs fr ON fr.id = d.run_id
 		WHERE d.app_id = ? AND d.status = 'succeeded' ORDER BY d.id DESC LIMIT 1`, appID).
-		Scan(&p.RunID, &p.FleetID, &p.Kind, &raw, &p.StartedAt)
+		Scan(&originKind, &originChannel, &originUserID, &originActor,
+			&runID, &fleetID, &kind, &raw, &started)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("current deployment provenance: %w", err)
 	}
-	if err := json.Unmarshal([]byte(raw), &p.Metadata); err != nil {
-		return nil, fmt.Errorf("decode deployment provenance: %w", err)
+	if originKind == DeploymentOriginLegacy {
+		return nil, nil
+	}
+	p.Origin = DeploymentOrigin{Kind: originKind, Channel: originChannel, Actor: originActor}
+	if originUserID.Valid {
+		id := originUserID.Int64
+		p.Origin.UserID = &id
+	}
+	if runID.Valid {
+		p.RunID, p.FleetID, p.Kind = runID.String, fleetID.String, kind.String
+		if started.Valid {
+			at := started.Time
+			p.StartedAt = &at
+		}
+		if raw.Valid && raw.String != "" {
+			if err := json.Unmarshal([]byte(raw.String), &p.Metadata); err != nil {
+				return nil, fmt.Errorf("decode deployment provenance: %w", err)
+			}
+		}
 	}
 	return &p, nil
 }

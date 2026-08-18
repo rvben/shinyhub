@@ -358,8 +358,9 @@ control surface; there is no apply, prune, or drift action in the UI.
   now*, not a conformance signal: it does not by itself tell you whether the
   app matches the manifest. Run `fleet plan` for that. The UI labels the
   value accordingly so it is not mistaken for a drift indicator.
-- **Deployment source.** A quiet header strip identifies the pipeline that
-  produced the live version, with commit/ref and optional merge request
-  context. Deployment history repeats this source per release. Rows created
-  before provenance tracking say so explicitly rather than implying an
-  unknown pipeline.
+- **Deployment source.** A quiet header strip identifies how the live version
+  was produced. Fleet deploys link back to their pipeline, commit/ref, and
+  optional merge request; dashboard, CLI, API, and rollback actions name their
+  channel and authenticated operator. Deployment history repeats the source
+  per release. Rows created before source tracking say only that no source was
+  recorded, without implying that a manual deployment is an error.
