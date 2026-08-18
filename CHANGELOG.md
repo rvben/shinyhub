@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.14](https://github.com/rvben/shinyhub/compare/v0.11.13...v0.11.14) - 2026-08-18
+
+### Added
+
+- **ui**: add deployment provider marks ([0fba1a7](https://github.com/rvben/shinyhub/commit/0fba1a7411d8df5e84bb8c64896393ccf9f03f8c))
+- **deployments**: track manual deployment origins ([97ae5d4](https://github.com/rvben/shinyhub/commit/97ae5d40be27d21c3fae357ea2424c58dacfbbe7))
+- **fleet**: track deployment provenance ([72c79ee](https://github.com/rvben/shinyhub/commit/72c79ee38be491f92f1033b072d06b0e2fbbddc0))
+- **ui**: refine role landing and resource overview ([30fa091](https://github.com/rvben/shinyhub/commit/30fa09152b76c3d7a6649a5a710726a0b39e27f8))
+- **demo**: add curated public deployment stacks ([0743599](https://github.com/rvben/shinyhub/commit/07435990b5285e6d0686f7f5813bf73539f7388c))
+- **platform**: add serverless tiers, warm pools, and first-run tour ([5bb76d0](https://github.com/rvben/shinyhub/commit/5bb76d095efc0a99f464712871813cf503ff811b))
+- **cli**: harden plan output contracts ([9e78d21](https://github.com/rvben/shinyhub/commit/9e78d2125bae7b8f51d95bfd39ac07f434af9eba))
+- **cli**: make fleet apply recovery explicit ([d27c810](https://github.com/rvben/shinyhub/commit/d27c810b45f4417dec7cb01fb2b1760ccf05fb85))
+- **cli**: add responsive plan rendering ([67bc795](https://github.com/rvben/shinyhub/commit/67bc7950a99777306c78abac4264930472b6a3ba))
+- **cli**: add exact saved plan apply ([c30c9bf](https://github.com/rvben/shinyhub/commit/c30c9bfab9508db427dd6d41e4706dfc939d1e59))
+- **api**: add atomic app revision preconditions ([53b0869](https://github.com/rvben/shinyhub/commit/53b0869d0ab9da4350ef8b687e77725abfa79337))
+- **cli**: unify plan presentation model ([a851d68](https://github.com/rvben/shinyhub/commit/a851d68c0b3d8a3c3c16b32ffed2220c6b7dfbda))
+- **cli**: turn top into an interactive TUI ([065bb1c](https://github.com/rvben/shinyhub/commit/065bb1cfda1115ce0be480b3713c0d7309f4ca61))
+
+### Fixed
+
+- **cli**: classify closed idle connections ([d0740c7](https://github.com/rvben/shinyhub/commit/d0740c74cead74f9c2fcf24ecf35311a8c0ebea9))
+- **ui**: center GitLab provenance mark ([36b6c71](https://github.com/rvben/shinyhub/commit/36b6c71c0a839f702bb66ceacf8d806c16fa9d3e))
+- **ui**: polish deployment provenance presentation ([3671a19](https://github.com/rvben/shinyhub/commit/3671a191231941d55daccbd528aebe6a2f95a389))
+- **auth**: clarify forward-auth proxy failures ([ae7e2b7](https://github.com/rvben/shinyhub/commit/ae7e2b7988ae14d9023ababaf4d45a218d9f7db9))
+- **observability**: report actual app runtime state ([64a6f6d](https://github.com/rvben/shinyhub/commit/64a6f6dc3cbdc0189805cc0feccd2cc3b7057a1e))
+- **auth**: make forward-auth deployments fail visibly ([ce31c96](https://github.com/rvben/shinyhub/commit/ce31c96390c46db66923e33d10bb589ebeef938f))
+
 ## [0.11.13](https://github.com/rvben/shinyhub/compare/v0.11.12...v0.11.13) - 2026-08-17
 
 ### Fixed
