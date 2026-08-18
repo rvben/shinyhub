@@ -48,6 +48,17 @@ export function deploymentRowModel(d, { isCurrent = false, now = Date.now() } = 
   };
 }
 
+// Keep provider-specific presentation deliberately small. Provenance accepts
+// arbitrary provider identifiers, so recognized CI systems receive their
+// official mark while every custom or future provider falls back to ShinyHub's
+// neutral workflow icon instead of a guessed abbreviation.
+export function deploymentProviderIcon(provider) {
+  const normalized = String(provider || '').trim().toLowerCase();
+  if (['gitlab', 'gitlab_ci', 'gitlab-ci'].includes(normalized)) return 'gitlab';
+  if (['github', 'github_actions', 'github-actions'].includes(normalized)) return 'github';
+  return 'ci';
+}
+
 export function provenanceModel(raw) {
   const origin = raw && raw.origin ? raw.origin : {};
   const originKind = origin.kind || (raw && raw.run_id ? 'fleet' : 'legacy');
@@ -61,6 +72,7 @@ export function provenanceModel(raw) {
       provider: '',
       mark: '',
       markIcon: '',
+      providerIcon: '',
       headerText: '',
       headerDetail: '',
     };
@@ -108,6 +120,7 @@ export function provenanceModel(raw) {
       provider: originKind,
       mark,
       markIcon,
+      providerIcon: '',
       headerText: actor ? `${headerLead} by ${actor}` : headerLead,
       headerDetail: channelLabel,
     };
@@ -130,8 +143,9 @@ export function provenanceModel(raw) {
     revisionURL: revision.url || '',
     change: change.label ? { label: String(change.label), url: change.url || '' } : null,
     provider: metadata.provider || '',
-    mark: metadata.provider === 'gitlab' ? 'GL' : 'CI',
+    mark: '',
     markIcon: '',
+    providerIcon: deploymentProviderIcon(metadata.provider),
     headerText: '',
     headerDetail: details.join(' · ') || `fleet ${raw.fleet_id || 'run'}`,
     runID: raw.run_id,

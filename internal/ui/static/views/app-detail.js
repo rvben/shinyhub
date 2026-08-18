@@ -285,8 +285,14 @@ function renderHeaderProvenance(host, raw) {
   if (!model.available) return;
 
   const mark = document.createElement('span');
-  mark.className = `provenance-provider${model.provider === 'gitlab' ? ' is-gitlab' : ''}`;
-  if (model.markIcon) {
+  mark.className = 'provenance-provider';
+  if (model.providerIcon === 'gitlab' || model.providerIcon === 'github') {
+    mark.classList.add('is-brand', `is-${model.providerIcon}`);
+    mark.append(providerBrandIcon(model.providerIcon));
+  } else if (model.providerIcon) {
+    mark.classList.add(`is-${model.providerIcon}`);
+    mark.append(provenanceIcon(model.providerIcon));
+  } else if (model.markIcon) {
     mark.classList.add(`is-${model.markIcon}`);
     mark.append(provenanceIcon(model.markIcon));
   } else {
@@ -315,6 +321,40 @@ function renderHeaderProvenance(host, raw) {
   if (model.url) host.append(externalLink('Open pipeline ↗', model.url, 'provenance-open'));
 }
 
+// Exact paths from the providers' official brand kits. They are inlined so the
+// provenance indicator never depends on an external request. GitHub's permitted
+// black/white mark is selected by CSS for theme contrast; GitLab remains in its
+// official full-colour treatment.
+// GitLab: https://about.gitlab.com/images/press/gitlab-logo-500-rgb.svg
+// GitHub: https://brand.github.com/GitHub_Logos.zip
+function providerBrandIcon(name) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('aria-hidden', 'true');
+  if (name === 'gitlab') {
+    svg.setAttribute('viewBox', '0 0 380 380');
+    const paths = [
+      ['#e24329', 'M265.26416,174.37243l-.2134-.55822-21.19899-55.30908c-.4236-1.08359-1.18542-1.99642-2.17699-2.62689-.98837-.63373-2.14749-.93253-3.32305-.87014-1.1689.06239-2.29195.48925-3.20809,1.21821-.90957.73554-1.56629,1.73047-1.87493,2.85346l-14.31327,43.80662h-57.90965l-14.31327-43.80662c-.30864-1.12299-.96536-2.11791-1.87493-2.85346-.91614-.72895-2.03911-1.15582-3.20809-1.21821-1.17548-.06239-2.33468.23641-3.32297.87014-.99166.63047-1.75348,1.5433-2.17707,2.62689l-21.19891,55.31237-.21348.55493c-6.28158,16.38521-.92929,34.90803,13.05891,45.48782.02621.01641.04922.03611.07552.05582l.18719.14119,32.29094,24.17392,15.97151,12.09024,9.71951,7.34871c2.34117,1.77316,5.57877,1.77316,7.92002,0l9.71943-7.34871,15.96822-12.09024,32.48142-24.31511c.02958-.02299.05588-.04269.08538-.06568,13.97834-10.57977,19.32735-29.09604,13.04905-45.47796Z'],
+      ['#fc6d26', 'M265.26416,174.37243l-.2134-.55822c-10.5174,2.16062-20.20405,6.6099-28.49844,12.81593-.1346.0985-25.20497,19.05805-46.55171,35.19699,15.84998,11.98517,29.6477,22.40405,29.6477,22.40405l32.48142-24.31511c.02958-.02299.05588-.04269.08538-.06568,13.97834-10.57977,19.32735-29.09604,13.04905-45.47796Z'],
+      ['#fca326', 'M160.34962,244.23117l15.97151,12.09024,9.71951,7.34871c2.34117,1.77316,5.57877,1.77316,7.92002,0l9.71943-7.34871,15.96822-12.09024s-13.79772-10.41888-29.6477-22.40405c-15.85327,11.98517-29.65099,22.40405-29.65099,22.40405Z'],
+      ['#fc6d26', 'M143.44561,186.63014c-8.29111-6.20274-17.97446-10.65531-28.49507-12.81264l-.21348.55493c-6.28158,16.38521-.92929,34.90803,13.05891,45.48782.02621.01641.04922.03611.07552.05582l.18719.14119,32.29094,24.17392s13.79772-10.41888,29.65099-22.40405c-21.34673-16.13894-46.42031-35.09848-46.55499-35.19699Z'],
+    ];
+    for (const [fill, d] of paths) {
+      const path = document.createElementNS(ns, 'path');
+      path.setAttribute('fill', fill);
+      path.setAttribute('d', d);
+      svg.append(path);
+    }
+    return svg;
+  }
+
+  svg.setAttribute('viewBox', '0 0 98 96');
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', 'M41.4395 69.3848C28.8066 67.8535 19.9062 58.7617 19.9062 46.9902C19.9062 42.2051 21.6289 37.0371 24.5 33.5918C23.2559 30.4336 23.4473 23.7344 24.8828 20.959C28.7109 20.4805 33.8789 22.4902 36.9414 25.2656C40.5781 24.1172 44.4062 23.543 49.0957 23.543C53.7852 23.543 57.6133 24.1172 61.0586 25.1699C64.0254 22.4902 69.2891 20.4805 73.1172 20.959C74.457 23.543 74.6484 30.2422 73.4043 33.4961C76.4668 37.1328 78.0937 42.0137 78.0937 46.9902C78.0937 58.7617 69.1934 67.6621 56.3691 69.2891C59.623 71.3945 61.8242 75.9883 61.8242 81.252L61.8242 91.2051C61.8242 94.0762 64.2168 95.7031 67.0879 94.5547C84.4102 87.9512 98 70.6289 98 49.1914C98 22.1074 75.9883 6.69539e-07 48.9043 4.309e-07C21.8203 1.92261e-07 -1.9479e-07 22.1074 -4.3343e-07 49.1914C-6.20631e-07 70.4375 13.4941 88.0469 31.6777 94.6504C34.2617 95.6074 36.75 93.8848 36.75 91.3008L36.75 83.6445C35.4102 84.2188 33.6875 84.6016 32.1562 84.6016C25.8398 84.6016 22.1074 81.1563 19.4277 74.7441C18.375 72.1602 17.2266 70.6289 15.0254 70.3418C13.877 70.2461 13.4941 69.7676 13.4941 69.1934C13.4941 68.0449 15.4082 67.1836 17.3223 67.1836C20.0977 67.1836 22.4902 68.9063 24.9785 72.4473C26.8926 75.2227 28.9023 76.4668 31.2949 76.4668C33.6875 76.4668 35.2187 75.6055 37.4199 73.4043C39.0469 71.7773 40.291 70.3418 41.4395 69.3848Z');
+  svg.append(path);
+  return svg;
+}
+
 function provenanceIcon(name) {
   const ns = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(ns, 'svg');
@@ -325,9 +365,12 @@ function provenanceIcon(name) {
         ['circle', { cx: '12', cy: '8', r: '3.25' }],
         ['path', { d: 'M5.5 19.5c.9-3.6 3.1-5.4 6.5-5.4s5.6 1.8 6.5 5.4' }],
       ]
-    : [
+    : name === 'rollback' ? [
         ['path', { d: 'M4.5 7.5v5h5' }],
         ['path', { d: 'M5.2 12.2A7.25 7.25 0 1 0 7.4 7' }],
+      ] : [
+        ['path', { d: 'M5 5.5h5v5H5zM14 13.5h5v5h-5z' }],
+        ['path', { d: 'M10 8h2.5a4 4 0 0 1 4 4v1.5M7.5 10.5v5a3 3 0 0 0 3 3H14' }],
       ];
   for (const [tag, attrs] of paths) {
     const node = document.createElementNS(ns, tag);

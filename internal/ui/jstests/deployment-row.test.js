@@ -4,6 +4,7 @@ import {
   relativeTime,
   deploymentRowModel,
   deploymentListModels,
+  deploymentProviderIcon,
   provenanceModel,
 } from '../static/views/deployment-row.js';
 
@@ -39,6 +40,17 @@ test('provenance presents pipeline first with durable revision and optional MR',
   assert.equal(p.label, 'GitLab pipeline #412');
   assert.equal(p.detail, 'abcdef12 · main');
   assert.deepEqual(p.change, { label: 'MR !87', url: 'https://gitlab.example/mr/87' });
+  assert.equal(p.mark, '');
+  assert.equal(p.providerIcon, 'gitlab');
+});
+
+test('deployment provider marks recognize brand aliases and keep a neutral fallback', () => {
+  assert.equal(deploymentProviderIcon('gitlab'), 'gitlab');
+  assert.equal(deploymentProviderIcon('GITLAB_CI'), 'gitlab');
+  assert.equal(deploymentProviderIcon('github'), 'github');
+  assert.equal(deploymentProviderIcon('github-actions'), 'github');
+  assert.equal(deploymentProviderIcon('buildkite'), 'ci');
+  assert.equal(deploymentProviderIcon(''), 'ci');
 });
 
 test('legacy deployments expose an explicit provenance fallback', () => {
@@ -51,6 +63,7 @@ test('legacy deployments expose an explicit provenance fallback', () => {
     provider: '',
     mark: '',
     markIcon: '',
+    providerIcon: '',
     headerText: '',
     headerDetail: '',
   });

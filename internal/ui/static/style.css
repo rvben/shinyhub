@@ -4250,12 +4250,18 @@ fieldset.settings-block { min-width: 0; }
   font: 600 0.75rem/1.35 var(--font);
   letter-spacing: 0.02em;
 }
-.provenance-provider.is-gitlab { color: #fca326; background: rgba(252,163,38,0.1); }
+.provenance-provider.is-brand { background: var(--surface-2); }
+.provenance-provider.is-gitlab svg { width: 44px; height: 44px; }
+.provenance-provider.is-github svg { width: 20px; height: 20px; fill: #fff; }
+:root[data-theme="light"] .provenance-provider.is-github svg { fill: #000; }
+.provenance-provider.is-ci { color: var(--text-muted); background: var(--surface-2); }
 .provenance-provider.is-manual { color: var(--cyan); background: var(--accent-dim); }
 .provenance-provider.is-rollback { color: var(--standby); background: var(--standby-bg); }
 .provenance-provider svg {
   width: 18px;
   height: 18px;
+}
+.provenance-provider:not(.is-brand) svg {
   fill: none;
   stroke: currentColor;
   stroke-width: 1.7;
