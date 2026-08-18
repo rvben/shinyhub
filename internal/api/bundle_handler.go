@@ -12,7 +12,8 @@ import (
 
 // FargateBundleHandler serves bundle zips to Fargate tasks that authenticate
 // with a short-lived HMAC capability token (Authorization: Bearer). It is
-// mounted on GET /internal/fargate-bundle/{digest} directly on the main mux
+// mounted on GET /internal/runtime-bundle/{digest} (plus the legacy Fargate
+// alias) directly on the main mux
 // so large bundle streams are not subject to the apiTimeoutHandler's 30s cap.
 // Per-source-IP rate limiting bounds invalid-token probing.
 type FargateBundleHandler struct {

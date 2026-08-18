@@ -1813,6 +1813,7 @@ func TestAppsSet_IsolationPopulatesPayload(t *testing.T) {
 		"--isolation", "grouped",
 		"--grouped-size", "5",
 		"--max-workers", "3",
+		"--warm-spares", "1",
 	); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1832,6 +1833,9 @@ func TestAppsSet_IsolationPopulatesPayload(t *testing.T) {
 	}
 	if got := body["worker_max_workers"]; got != float64(3) {
 		t.Errorf("expected worker_max_workers=3, got %v", got)
+	}
+	if got := body["worker_warm_spares"]; got != float64(1) {
+		t.Errorf("expected worker_warm_spares=1, got %v", got)
 	}
 	if _, present := body["worker_max_session_lifetime_secs"]; present {
 		t.Errorf("expected worker_max_session_lifetime_secs to be absent when not set")

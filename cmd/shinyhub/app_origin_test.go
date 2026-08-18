@@ -99,7 +99,7 @@ func TestAppOriginBoundaryHidesControlPlaneRoutes(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	handler := appOriginBoundary(next, appOrigin, nil)
 
-	for _, path := range []string{"/api/users", "/static/app.js", "/internal/fargate-bundle/x", "/"} {
+	for _, path := range []string{"/api/users", "/static/app.js", "/internal/fargate-bundle/x", "/internal/runtime-bundle/x", "/"} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "https://apps.example.com"+path, nil))
 		if rec.Code != http.StatusNotFound {

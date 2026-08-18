@@ -9,9 +9,9 @@ import (
 	"github.com/rvben/shinyhub/internal/storage"
 )
 
-// AppSecretsCleaner removes an app's external secret-backend resources (Fargate
-// Secrets Manager entries and per-app task-definition revisions) when the app
-// is deleted. A nil cleaner disables this step (no secrets backend configured).
+// AppSecretsCleaner removes an app's retained external provider resources when
+// the app is deleted. The legacy name is retained for compatibility. A nil
+// cleaner disables this step.
 type AppSecretsCleaner interface {
 	CleanupApp(ctx context.Context, appID int64) error
 }
@@ -19,7 +19,7 @@ type AppSecretsCleaner interface {
 // ReconcileDeletingApps finishes app deletions that were interrupted between
 // the 'deleting' tombstone and the row removal (a crash, or a cleanup failure
 // that handleDeleteApp deliberately deferred). For each tombstoned app it
-// retries on-disk cleanup and external secret-backend cleanup and, only once
+// retries on-disk cleanup and external provider-resource cleanup and, only once
 // both succeed, drops the row. A still-failing cleanup leaves the tombstone in
 // place for the next startup rather than orphaning bytes, secrets, or task-def
 // revisions. cleaner may be nil.
@@ -37,7 +37,7 @@ func ReconcileDeletingApps(ctx context.Context, store *db.Store, cfg *config.Con
 		}
 		if cleaner != nil {
 			if err := cleaner.CleanupApp(ctx, app.ID); err != nil {
-				slog.Error("reconcile deleting apps: secret cleanup still failing; tombstone retained",
+				slog.Error("reconcile deleting apps: provider cleanup still failing; tombstone retained",
 					"slug", app.Slug, "err", err)
 				continue
 			}

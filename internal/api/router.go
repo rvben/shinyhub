@@ -94,9 +94,9 @@ type Server struct {
 	// disabled; the endpoints then report an empty fleet and 404 on revoke.
 	workerReg *worker.Registry
 
-	// secretsCleaner removes an app's external secret-backend resources (Fargate
-	// Secrets Manager entries + per-app task-def revisions) on delete. Nil when
-	// no Fargate secrets backend is configured. Set via SetSecretsCleaner.
+	// secretsCleaner removes an app's retained external provider resources on
+	// delete. The field name is legacy. Nil when no managed cleanup is needed.
+	// Set via SetSecretsCleaner.
 	secretsCleaner appSecretsCleaner
 
 	// clustered is true when the server is running against a shared Postgres
@@ -261,6 +261,7 @@ func (s *Server) withTierPlacement(p deploy.Params, app *db.App) deploy.Params {
 	p.DefaultWorkerIsolation = s.cfg.Runtime.DefaultWorkerIsolation
 	p.WorkerGroupedSize = app.WorkerGroupedSize
 	p.WorkerMaxWorkers = app.WorkerMaxWorkers
+	p.WorkerWarmSpares = app.WorkerWarmSpares
 	// Pin a shared-mount consumer to the worker(s) hosting its source data so
 	// each replica lands beside the data it mounts. resolveColocation returns no
 	// pin (and no error) for the common case of no shared mounts or a
@@ -521,15 +522,15 @@ func (s *Server) SetOIDCProvider(p *oauth.OIDCProvider) { s.oidcProvider = p }
 // Must be called before the server begins handling requests.
 func (s *Server) SetSecretsKey(k []byte) { s.secretsKey = k }
 
-// appSecretsCleaner removes an app's external secret-backend resources on
-// delete. The Fargate runtime implements it; nil disables the step.
+// appSecretsCleaner removes an app's retained external resources on delete.
+// Managed runtimes implement it; nil disables the step.
 type appSecretsCleaner interface {
 	CleanupApp(ctx context.Context, appID int64) error
 }
 
-// SetSecretsCleaner wires the external secret-backend cleanup invoked on app
-// delete. Called at startup when a Fargate secrets backend is configured; left
-// nil otherwise. Must be called before the server handles requests.
+// SetSecretsCleaner wires external resource cleanup invoked on app delete.
+// The legacy method name is retained for compatibility. Must be called before
+// the server handles requests.
 func (s *Server) SetSecretsCleaner(c appSecretsCleaner) { s.secretsCleaner = c }
 
 // cleanupAppSecrets runs the external secret-backend cleanup for a deleted app,

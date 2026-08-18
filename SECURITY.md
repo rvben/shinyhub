@@ -336,6 +336,39 @@ key is handled implicitly). The app's own **task role** is deliberately NOT
 granted any Secrets Manager access: the values are injected as env by the agent,
 so app code never holds secret-store permissions.
 
+### Scaleway Serverless Containers runtime
+
+The Scaleway adapter creates every replica with `privacy=private`, HTTPS-only,
+`min_scale=0`, and `max_scale=1`. Browser traffic never calls the provider
+endpoint directly. ShinyHub proxies it and adds the control plane's
+`SCW_SECRET_KEY` as `X-Auth-Token` only on the provider-facing request. The
+source browser request is cloned before the header is added, so the credential
+cannot be forwarded back to middleware or reused by app code.
+
+Use a dedicated Scaleway IAM application and API key restricted to the project
+that owns the Serverless Containers namespace. The same secret authorizes API
+management and private endpoint invocation, so a leaked key can both call and
+mutate managed containers. Never use an organization Owner key. Store
+`SCW_ACCESS_KEY` and `SCW_SECRET_KEY` only in the control-plane service
+environment and rotate them as a pair.
+
+App env vars marked secret are submitted through Scaleway's secret environment
+variable field, not its ordinary environment field. Scaleway does not return
+their values after submission. The app process necessarily receives their
+plaintext values at runtime; do not grant untrusted app users process inspection
+or arbitrary code execution.
+
+The bundle capability remains digest-scoped and short-lived as described above,
+but Scaleway receives it through a secret environment variable. The runner
+fetches it only from the HTTPS `control_plane_url`. Resource tags contain app
+slug, replica index, deployment/version identifiers, and content digest; do not
+put secrets in any of those metadata fields.
+
+Serverless container filesystems are ephemeral, and a WebSocket/request may be
+closed at the provider's request-duration limit. Neither behavior is a security
+boundary for session or durable state. Keep important state in an explicitly
+configured external service and make reconnect handling idempotent.
+
 #### Pre-existing JWT signing key note
 
 `auth.secret` serves two purposes: JWT session token signing and (via HKDF
@@ -356,6 +389,7 @@ the database or app-visible state.
 | `auth.secret` | `SHINYHUB_AUTH_SECRET` | Session/JWT signing key. Must be at least 32 characters and not the example placeholder; the server refuses to start otherwise. Generate with `openssl rand -hex 32`. |
 | OAuth client secrets | `SHINYHUB_GITHUB_CLIENT_SECRET`, `SHINYHUB_GOOGLE_CLIENT_SECRET`, `SHINYHUB_OIDC_CLIENT_SECRET` | Only the configured providers need a value. |
 | Deploy token | `SHINYHUB_DEPLOY_TOKEN` (+ `SHINYHUB_DEPLOY_TOKEN_ROLE`) | Pre-shared CI bearer credential. At least 32 characters. Not persisted. |
+| Scaleway API key | `SCW_ACCESS_KEY`, `SCW_SECRET_KEY` | Required only for `scaleway_serverless` tiers. Used for provider management and private-origin invocation; never written to YAML or injected into apps. |
 
 Server secrets are kept out of the environment exposed to deployed app
 subprocesses, so app code cannot read the signing key or OAuth secrets from its

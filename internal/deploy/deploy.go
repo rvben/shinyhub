@@ -494,10 +494,11 @@ type Params struct {
 	// drive SetPoolMode inside Run.
 	WorkerIsolation        string
 	DefaultWorkerIsolation string
-	// WorkerGroupedSize and WorkerMaxWorkers configure the elastic pool when
+	// WorkerGroupedSize, WorkerMaxWorkers, and WorkerWarmSpares configure the elastic pool when
 	// mode is grouped or per_session; ignored for multiplex.
 	WorkerGroupedSize int
 	WorkerMaxWorkers  int
+	WorkerWarmSpares  int
 	// PrepareOnly builds the bundle and runs its post-deploy hooks without
 	// booting anything and without registering a pool with the proxy. It is how
 	// a deploy to an app the operator stopped still rejects a broken bundle at
@@ -1060,6 +1061,7 @@ func Run(p Params) (*PoolResult, error) {
 	// apply the correct routing algorithm for this pool's sessions.
 	resolvedMode := config.WorkerIsolationMode(ResolveWorkerIsolation(p.WorkerIsolation, p.DefaultWorkerIsolation))
 	p.Proxy.SetPoolMode(p.Slug, resolvedMode, p.WorkerGroupedSize, p.WorkerMaxWorkers)
+	p.Proxy.SetPoolWarmSpares(p.Slug, p.WorkerWarmSpares)
 
 	// Host-side dep prep and post-deploy hooks are pool-wide: run them once if
 	// any assigned tier prepares deps on the host.
@@ -1074,7 +1076,8 @@ func Run(p Params) (*PoolResult, error) {
 	if resolvedMode == config.IsolationGrouped || resolvedMode == config.IsolationPerSession {
 		res, err := prepareElasticPool(p, hostDeps, resolvedMode)
 		if err == nil {
-			p.report(deployevent.Phase("replicas", deployevent.StatusCompleted, "Workers will start on demand"))
+			p.Proxy.ReconcileElasticWarmSpares(p.Slug)
+			p.report(deployevent.Phase("replicas", deployevent.StatusCompleted, "Workers ready on demand; warm spares provisioning"))
 		}
 		return res, err
 	}

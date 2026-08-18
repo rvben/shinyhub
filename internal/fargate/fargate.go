@@ -250,6 +250,8 @@ type Runtime struct {
 	syncKeys map[int64]string
 }
 
+var _ process.ManagedRuntime = (*Runtime)(nil)
+
 // FargateMetrics records AWS operation outcomes for the Fargate runtime. A nil
 // recorder is a no-op; the no-op default (noopFargateMetrics) satisfies the
 // interface so callers need no nil guard. Wire to the Prometheus registry via

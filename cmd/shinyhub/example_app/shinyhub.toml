@@ -1,0 +1,4 @@
+[app]
+name = "ShinyHub Tour"
+description = "A live, reactive Python Shiny app deployed through ShinyHub's real build pipeline."
+icon = "⚡"

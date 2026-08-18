@@ -212,8 +212,10 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 				config.WorkerIsolationMode(resolvedIso),
 				app.WorkerGroupedSize,
 				app.WorkerMaxWorkers)
+			prx.SetPoolWarmSpares(app.Slug, app.WorkerWarmSpares)
 			prx.SetPoolAppID(app.Slug, app.ID)
 			prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, identityGlobal))
+			prx.ReconcileElasticWarmSpares(app.Slug)
 			// Mark the app running: the empty elastic pool is live and will
 			// spawn workers on demand. A crashed/failed app that was in elastic
 			// mode is re-exposed as "running" here; the next spawn attempt will

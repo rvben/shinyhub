@@ -77,6 +77,7 @@ type Config struct {
 	WorkerIsolation              *string  `toml:"-"`
 	WorkerGroupedSize            *int     `toml:"-"`
 	WorkerMaxWorkers             *int     `toml:"-"`
+	WorkerWarmSpares             *int     `toml:"-"`
 	WorkerMaxSessionLifetimeSecs *int     `toml:"-"`
 	HibernateResetToDefault      bool     `toml:"-"`
 }

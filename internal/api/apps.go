@@ -533,6 +533,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setWorkerGroupedSize        bool
 		newWorkerMaxWorkers         int
 		setWorkerMaxWorkers         bool
+		newWorkerWarmSpares         int
+		setWorkerWarmSpares         bool
 		newWorkerMaxSessionLifetime int
 		setWorkerMaxSessionLifetime bool
 
@@ -827,6 +829,15 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		newWorkerMaxWorkers, setWorkerMaxWorkers = n, true
 	}
 
+	if rawVal, present := raw["worker_warm_spares"]; present {
+		var n int
+		if err := json.Unmarshal(rawVal, &n); err != nil {
+			writeError(w, http.StatusBadRequest, "worker_warm_spares must be an integer")
+			return
+		}
+		newWorkerWarmSpares, setWorkerWarmSpares = n, true
+	}
+
 	if rawVal, present := raw["worker_max_session_lifetime_secs"]; present {
 		var n int
 		if err := json.Unmarshal(rawVal, &n); err != nil {
@@ -842,7 +853,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// being changed. A memory-limit change re-runs the same math: on an elastic
 	// app it moves the per-worker budget term (multiplex no-ops inside the
 	// validator), so a raise that busts the host budget cannot slip in alone.
-	if setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime || setMemoryLimitMB {
+	if setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerWarmSpares || setWorkerMaxSessionLifetime || setMemoryLimitMB {
 		ws := config.WorkerSettings{
 			// Resolve through the fleet default exactly like the runtime does
 			// (SetPoolMode below): an app with empty stored isolation inherits
@@ -852,6 +863,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 				s.cfg.Runtime.DefaultWorkerIsolation)),
 			GroupedSize:        orInt(newWorkerGroupedSize, setWorkerGroupedSize, app.WorkerGroupedSize),
 			MaxWorkers:         orInt(newWorkerMaxWorkers, setWorkerMaxWorkers, app.WorkerMaxWorkers),
+			WarmSpares:         orInt(newWorkerWarmSpares, setWorkerWarmSpares, app.WorkerWarmSpares),
 			MaxSessionLifetime: orInt(newWorkerMaxSessionLifetime, setWorkerMaxSessionLifetime, app.WorkerMaxSessionLifetimeSecs),
 		}
 		memMB, _ := s.cfg.Runtime.DefaultResourcesForApp(app)
@@ -993,6 +1005,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	oldWorkerIsolation := app.WorkerIsolation
 	oldWorkerGroupedSize := app.WorkerGroupedSize
 	oldWorkerMaxWorkers := app.WorkerMaxWorkers
+	oldWorkerWarmSpares := app.WorkerWarmSpares
 	oldWorkerMaxSessionLifetime := app.WorkerMaxSessionLifetimeSecs
 	oldProjectSlug := app.ProjectSlug
 
@@ -1028,6 +1041,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		WorkerGroupedSize:            newWorkerGroupedSize,
 		SetWorkerMaxWorkers:          setWorkerMaxWorkers,
 		WorkerMaxWorkers:             newWorkerMaxWorkers,
+		SetWorkerWarmSpares:          setWorkerWarmSpares,
+		WorkerWarmSpares:             newWorkerWarmSpares,
 		SetWorkerMaxSessionLifetime:  setWorkerMaxSessionLifetime,
 		WorkerMaxSessionLifetimeSecs: newWorkerMaxSessionLifetime,
 	})
@@ -1156,7 +1171,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// reshapes the pool without requiring a full redeploy cycle. The isolation
 	// change will also trigger redeployApp (below), which calls deploy.Run and
 	// therefore sets it again; this call covers the stopped-app case too.
-	if (setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers) && s.proxy != nil {
+	if (setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerWarmSpares) && s.proxy != nil {
 		effectiveIsolation := app.WorkerIsolation
 		if setWorkerIsolation {
 			effectiveIsolation = newWorkerIsolation
@@ -1169,9 +1184,22 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		if setWorkerMaxWorkers {
 			effectiveMaxWorkers = newWorkerMaxWorkers
 		}
+		effectiveWarmSpares := app.WorkerWarmSpares
+		if setWorkerWarmSpares {
+			effectiveWarmSpares = newWorkerWarmSpares
+		}
 		s.proxy.SetPoolMode(slug,
 			config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(effectiveIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
 			effectiveGroupedSize, effectiveMaxWorkers)
+		s.proxy.SetPoolWarmSpares(slug, effectiveWarmSpares)
+		// A warm-target-only edit is hot: preserve assigned workers and converge
+		// the spare floor in place. Structural worker changes redeploy below and
+		// deploy.Run reconciles only after the bundle is prepared. Never provision
+		// from a settings edit while the app is stopped.
+		structuralWorkerChanged := setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers
+		if setWorkerWarmSpares && !structuralWorkerChanged && priorStatus == "running" {
+			s.proxy.ReconcileElasticWarmSpares(slug)
+		}
 	}
 	workerChanged := setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime
 	if (setReplicas || setPlacement || clearPlacement || resourceChanged || workerChanged) && priorStatus == "running" {
@@ -1198,7 +1226,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug || setIdentityHeaders ||
 		setReplicas || setMaxSessions || setRenderSeconds || setMinWarmReplicas || setManagedBy ||
 		setPlacement || clearPlacement || setAutoscale ||
-		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime ||
+		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerWarmSpares || setWorkerMaxSessionLifetime ||
 		setEphemeralDataAck
 	if u := auth.UserFromContext(r.Context()); u != nil && (nonResourceTouched || memChanged || cpuChanged) {
 		detail := patchAppAuditDetail(
@@ -1209,6 +1237,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			setWorkerIsolation, oldWorkerIsolation, newWorkerIsolation,
 			setWorkerGroupedSize, oldWorkerGroupedSize, newWorkerGroupedSize,
 			setWorkerMaxWorkers, oldWorkerMaxWorkers, newWorkerMaxWorkers,
+			setWorkerWarmSpares, oldWorkerWarmSpares, newWorkerWarmSpares,
 			setWorkerMaxSessionLifetime, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime,
 			setProjectSlug, oldProjectSlug, newProjectSlug)
 		s.store.LogAuditEvent(db.AuditEventParams{
@@ -1269,6 +1298,7 @@ func patchAppAuditDetail(
 	setWorkerIsolation bool, oldWorkerIsolation, newWorkerIsolation string,
 	setWorkerGroupedSize bool, oldWorkerGroupedSize, newWorkerGroupedSize int,
 	setWorkerMaxWorkers bool, oldWorkerMaxWorkers, newWorkerMaxWorkers int,
+	setWorkerWarmSpares bool, oldWorkerWarmSpares, newWorkerWarmSpares int,
 	setWorkerMaxSessionLifetime bool, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime int,
 	setProjectSlug bool, oldProject, newProject string,
 ) string {
@@ -1293,6 +1323,9 @@ func patchAppAuditDetail(
 	}
 	if setWorkerMaxWorkers {
 		d["worker_max_workers"] = map[string]any{"old": oldWorkerMaxWorkers, "new": newWorkerMaxWorkers}
+	}
+	if setWorkerWarmSpares {
+		d["worker_warm_spares"] = map[string]any{"old": oldWorkerWarmSpares, "new": newWorkerWarmSpares}
 	}
 	if setWorkerMaxSessionLifetime {
 		d["worker_max_session_lifetime_secs"] = map[string]any{"old": oldWorkerMaxSessionLifetime, "new": newWorkerMaxSessionLifetime}
@@ -1742,17 +1775,27 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// the settings it was deployed with, not the failed bundle's.
 		if manifestApplied {
 			if _, _, _, _, _, rerr := s.store.PatchAppSettings(db.PatchAppSettingsParams{
-				Slug:               slug,
-				SetHibernate:       true,
-				HibernateMinutes:   preManifestApp.HibernateTimeoutMinutes,
-				SetReplicas:        true,
-				Replicas:           preManifestApp.Replicas,
-				SetMaxSessions:     true,
-				MaxSessions:        preManifestApp.MaxSessionsPerReplica,
-				SetMemoryLimitMB:   true,
-				MemoryLimitMB:      preManifestApp.MemoryLimitMB,
-				SetCPUQuotaPercent: true,
-				CPUQuotaPercent:    preManifestApp.CPUQuotaPercent,
+				Slug:                         slug,
+				SetHibernate:                 true,
+				HibernateMinutes:             preManifestApp.HibernateTimeoutMinutes,
+				SetReplicas:                  true,
+				Replicas:                     preManifestApp.Replicas,
+				SetMaxSessions:               true,
+				MaxSessions:                  preManifestApp.MaxSessionsPerReplica,
+				SetMemoryLimitMB:             true,
+				MemoryLimitMB:                preManifestApp.MemoryLimitMB,
+				SetCPUQuotaPercent:           true,
+				CPUQuotaPercent:              preManifestApp.CPUQuotaPercent,
+				SetWorkerIsolation:           true,
+				WorkerIsolation:              preManifestApp.WorkerIsolation,
+				SetWorkerGroupedSize:         true,
+				WorkerGroupedSize:            preManifestApp.WorkerGroupedSize,
+				SetWorkerMaxWorkers:          true,
+				WorkerMaxWorkers:             preManifestApp.WorkerMaxWorkers,
+				SetWorkerWarmSpares:          true,
+				WorkerWarmSpares:             preManifestApp.WorkerWarmSpares,
+				SetWorkerMaxSessionLifetime:  true,
+				WorkerMaxSessionLifetimeSecs: preManifestApp.WorkerMaxSessionLifetimeSecs,
 			}); rerr != nil {
 				slog.Error("deploy: revert manifest [app] settings after failed deploy", "slug", slug, "err", rerr)
 			}
@@ -1764,6 +1807,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				s.proxy.SetPoolMode(slug,
 					config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(preManifestApp.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
 					preManifestApp.WorkerGroupedSize, preManifestApp.WorkerMaxWorkers)
+				s.proxy.SetPoolWarmSpares(slug, preManifestApp.WorkerWarmSpares)
 			}
 			if _, rerr := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 				AppID: preManifestApp.ID, Slug: slug,
@@ -2452,11 +2496,10 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		detail = "deferred cleanup: " + cleanupErr.Error()
 		slog.Error("app delete cleanup failed; tombstone retained for reconcile", "slug", slug, "err", cleanupErr)
 	} else if secErr := s.cleanupAppSecrets(r.Context(), app.ID); secErr != nil {
-		// External secret-backend cleanup (Fargate Secrets Manager entries +
-		// per-app task-def revisions) failed: keep the tombstone so reconcile
-		// retries and neither secrets nor revisions orphan.
-		detail = "deferred secret cleanup: " + secErr.Error()
-		slog.Error("app delete secret cleanup failed; tombstone retained for reconcile", "slug", slug, "err", secErr)
+		// External managed-resource cleanup failed: keep the tombstone so
+		// reconciliation retries and no provider resources are orphaned.
+		detail = "deferred provider cleanup: " + secErr.Error()
+		slog.Error("app delete provider cleanup failed; tombstone retained for reconcile", "slug", slug, "err", secErr)
 	} else if err := s.store.DeleteApp(slug); err != nil && !errors.Is(err, db.ErrNotFound) {
 		// Bytes are gone; only the tombstone row remains. Reconcile will drop
 		// it on next startup, so this is not a client-visible failure.
@@ -3115,17 +3158,20 @@ type workerPoolStatus struct {
 	Mode              string             `json:"mode"`
 	SessionsPerWorker int                `json:"sessions_per_worker"`
 	MaxWorkers        int                `json:"max_workers"`
+	WarmSpareTarget   int                `json:"warm_spare_target"`
 	Ceiling           int                `json:"ceiling"`
 	Workers           []workerPoolWorker `json:"workers"`
 }
 
 type workerPoolWorker struct {
 	SlotID int `json:"slot_id"`
-	// Status is the proxy's routing view: "booting", "running", or "draining".
-	Status   string `json:"status"`
-	Sessions int    `json:"sessions"`
-	PID      int    `json:"pid,omitempty"`
-	Port     int    `json:"port,omitempty"`
+	// Status is the proxy's routing view: booting, suspending, suspended,
+	// resuming, running, or draining.
+	Status    string `json:"status"`
+	Sessions  int    `json:"sessions"`
+	PID       int    `json:"pid,omitempty"`
+	Port      int    `json:"port,omitempty"`
+	WarmSpare bool   `json:"warm_spare,omitempty"`
 }
 
 // buildWorkerPool merges the proxy's live worker snapshot with the process
@@ -3141,11 +3187,12 @@ func (s *Server) buildWorkerPool(slug string, snap proxy.ElasticPoolSnapshot) wo
 		Mode:              snap.Mode,
 		SessionsPerWorker: snap.SessionsPerWorker,
 		MaxWorkers:        snap.MaxWorkers,
+		WarmSpareTarget:   snap.WarmSpareTarget,
 		Ceiling:           snap.MaxWorkers * snap.SessionsPerWorker,
 		Workers:           make([]workerPoolWorker, 0, len(snap.Workers)),
 	}
 	for _, w := range snap.Workers {
-		entry := workerPoolWorker{SlotID: w.SlotID, Status: w.Status, Sessions: w.Sessions}
+		entry := workerPoolWorker{SlotID: w.SlotID, Status: w.Status, Sessions: w.Sessions, WarmSpare: w.WarmSpare}
 		if w.SlotID >= 0 && w.SlotID < len(live) && live[w.SlotID] != nil {
 			entry.PID = live[w.SlotID].PID
 			entry.Port = live[w.SlotID].Port

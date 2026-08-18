@@ -1,0 +1,60 @@
+name: scaleway serverless integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      long_provider_checks:
+        description: Run the 16/62-minute scale-to-zero and WebSocket checks
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scaleway-serverless-integration
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+      SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+      SCW_DEFAULT_PROJECT_ID: ${{ secrets.SCW_DEFAULT_PROJECT_ID }}
+      SCW_DEFAULT_REGION: ${{ vars.SCW_DEFAULT_REGION || 'nl-ams' }}
+      SHINYHUB_TEST_SCALEWAY_NAMESPACE_ID: ${{ secrets.SCW_SERVERLESS_TEST_NAMESPACE_ID }}
+      SHINYHUB_TEST_SCALEWAY_IMAGE: ${{ vars.SCW_SERVERLESS_TEST_IMAGE }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check integration configuration
+        id: configured
+        shell: bash
+        run: |
+          if [[ -n "$SCW_ACCESS_KEY" && -n "$SCW_SECRET_KEY" && -n "$SCW_DEFAULT_PROJECT_ID" && -n "$SHINYHUB_TEST_SCALEWAY_NAMESPACE_ID" && -n "$SHINYHUB_TEST_SCALEWAY_IMAGE" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Scaleway integration secrets/variables are not configured; real-provider test skipped."
+          fi
+
+      - name: HTTP, WebSocket, stable wake, and cleanup
+        if: steps.configured.outputs.enabled == 'true'
+        run: go test -tags=integration ./internal/scaleway -run '^TestIntegration' -count=1 -v -timeout=30m
+
+      - name: Scale-to-zero and long-WebSocket behavior
+        if: >-
+          steps.configured.outputs.enabled == 'true' &&
+          (github.event_name == 'schedule' || inputs.long_provider_checks)
+        env:
+          SHINYHUB_TEST_SCALEWAY_LONG: "1"
+        run: go test -tags='integration slow' ./internal/scaleway -run '^TestSlowIntegration' -count=1 -v -timeout=90m

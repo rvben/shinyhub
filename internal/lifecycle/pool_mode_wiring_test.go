@@ -61,6 +61,8 @@ func (p *modeRecordingProxy) SetPoolMode(slug string, mode config.WorkerIsolatio
 	p.poolModes[slug] = mode
 	p.mu.Unlock()
 }
+func (p *modeRecordingProxy) SetPoolWarmSpares(_ string, _ int)   {}
+func (p *modeRecordingProxy) ReconcileElasticWarmSpares(_ string) {}
 
 func newPoolModeWatcher(cfg Config, prx *modeRecordingProxy, st *fakeStore,
 	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {

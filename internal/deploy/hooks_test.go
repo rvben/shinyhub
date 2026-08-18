@@ -1073,9 +1073,14 @@ func TestLoadManifest_WorkerPerSessionValid(t *testing.T) {
 [app.worker]
 isolation = "per_session"
 max_workers = 2
+warm_spares = 1
 `)
-	if _, err := LoadManifest(dir); err != nil {
+	m, err := LoadManifest(dir)
+	if err != nil {
 		t.Errorf("expected valid per_session worker block, got %v", err)
+	}
+	if m.App.Worker == nil || m.App.Worker.WarmSpares == nil || *m.App.Worker.WarmSpares != 1 {
+		t.Fatalf("warm_spares not parsed: %+v", m.App.Worker)
 	}
 }
 

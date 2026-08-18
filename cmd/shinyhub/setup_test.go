@@ -100,6 +100,9 @@ func TestRunSetupFreshNonInteractive(t *testing.T) {
 	if len(cfg.Auth.Secret) != 64 {
 		t.Fatalf("generated secret length = %d, want 64", len(cfg.Auth.Secret))
 	}
+	if cfg.Server.Host != "127.0.0.1" {
+		t.Fatalf("generated server host = %q, want loopback", cfg.Server.Host)
+	}
 	store, err := db.Open(databasePath)
 	if err != nil {
 		t.Fatal(err)
@@ -279,8 +282,12 @@ func TestMaybeRunInteractiveSetup(t *testing.T) {
 	t.Cleanup(func() { configPath = previousConfigPath })
 	cmd, output := setupTestCommand("\n")
 
-	if err := maybeRunInteractiveSetup(cmd); err != nil {
+	result, err := maybeRunInteractiveSetup(cmd)
+	if err != nil {
 		t.Fatalf("maybeRunInteractiveSetup: %v", err)
+	}
+	if result == nil || !result.CreatedConfig || !result.CreatedAdmin {
+		t.Fatalf("interactive setup result = %+v, want freshly initialized setup", result)
 	}
 	got := output.String()
 	for _, want := range []string{"Welcome to ShinyHub", "Administrator \"admin\" created", "Starting ShinyHub"} {
@@ -302,7 +309,7 @@ func TestMaybeRunInteractiveSetupNonTTYExplainsBothPaths(t *testing.T) {
 	t.Cleanup(func() { configPath = previousConfigPath })
 	cmd, _ := setupTestCommand("")
 
-	err := maybeRunInteractiveSetup(cmd)
+	_, err := maybeRunInteractiveSetup(cmd)
 	if err == nil || !strings.Contains(err.Error(), "shinyhub init") || !strings.Contains(err.Error(), "SHINYHUB_AUTH_SECRET") {
 		t.Fatalf("expected interactive and unattended recovery paths, got %v", err)
 	}

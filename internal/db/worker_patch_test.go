@@ -17,6 +17,8 @@ func TestPatchAppSettings_Worker(t *testing.T) {
 		WorkerIsolation:     "per_session",
 		SetWorkerMaxWorkers: true,
 		WorkerMaxWorkers:    12,
+		SetWorkerWarmSpares: true,
+		WorkerWarmSpares:    2,
 	}); err != nil {
 		t.Fatalf("PatchAppSettings: %v", err)
 	}
@@ -24,8 +26,8 @@ func TestPatchAppSettings_Worker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAppBySlug: %v", err)
 	}
-	if got.WorkerIsolation != "per_session" || got.WorkerMaxWorkers != 12 {
-		t.Fatalf("worker fields not persisted: isolation=%q maxWorkers=%d", got.WorkerIsolation, got.WorkerMaxWorkers)
+	if got.WorkerIsolation != "per_session" || got.WorkerMaxWorkers != 12 || got.WorkerWarmSpares != 2 {
+		t.Fatalf("worker fields not persisted: isolation=%q maxWorkers=%d warmSpares=%d", got.WorkerIsolation, got.WorkerMaxWorkers, got.WorkerWarmSpares)
 	}
 }
 
@@ -48,6 +50,8 @@ func TestApplyAppManifestSettings_Worker(t *testing.T) {
 		WorkerGroupedSize:            4,
 		SetWorkerMaxWorkers:          true,
 		WorkerMaxWorkers:             8,
+		SetWorkerWarmSpares:          true,
+		WorkerWarmSpares:             2,
 		SetWorkerMaxSessionLifetime:  true,
 		WorkerMaxSessionLifetimeSecs: 3600,
 	}); err != nil {
@@ -66,6 +70,9 @@ func TestApplyAppManifestSettings_Worker(t *testing.T) {
 	}
 	if got.WorkerMaxWorkers != 8 {
 		t.Errorf("WorkerMaxWorkers = %d, want 8", got.WorkerMaxWorkers)
+	}
+	if got.WorkerWarmSpares != 2 {
+		t.Errorf("WorkerWarmSpares = %d, want 2", got.WorkerWarmSpares)
 	}
 	if got.WorkerMaxSessionLifetimeSecs != 3600 {
 		t.Errorf("WorkerMaxSessionLifetimeSecs = %d, want 3600", got.WorkerMaxSessionLifetimeSecs)

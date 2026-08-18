@@ -67,7 +67,7 @@ func TestPatchApp_WorkerIsolationPerSessionSucceeds(t *testing.T) {
 	srv, store := newWorkerPatchServer(t)
 	_, token := seedWorkerApp(t, store)
 
-	body := []byte(`{"worker_isolation":"per_session","worker_max_workers":2}`)
+	body := []byte(`{"worker_isolation":"per_session","worker_max_workers":2,"worker_warm_spares":1}`)
 	rec := patchWorkerApp(t, srv, token, body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -79,6 +79,18 @@ func TestPatchApp_WorkerIsolationPerSessionSucceeds(t *testing.T) {
 	}
 	if app.WorkerMaxWorkers != 2 {
 		t.Errorf("WorkerMaxWorkers = %d, want 2", app.WorkerMaxWorkers)
+	}
+	if app.WorkerWarmSpares != 1 {
+		t.Errorf("WorkerWarmSpares = %d, want 1", app.WorkerWarmSpares)
+	}
+}
+
+func TestPatchApp_WorkerWarmSparesCannotExceedMaxWorkers(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+	rec := patchWorkerApp(t, srv, token, []byte(`{"worker_isolation":"per_session","worker_max_workers":2,"worker_warm_spares":3}`))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "warm_spares") {
+		t.Fatalf("expected warm_spares validation error, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

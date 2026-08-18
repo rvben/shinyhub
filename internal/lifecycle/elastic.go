@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -43,12 +44,24 @@ type ElasticSpawner struct {
 	// TerminateHook is called at the start of every Terminate invocation. Nil
 	// in production; set in tests to count or observe termination calls.
 	TerminateHook func(slug string, slotID int)
+	// WarmRetryDelay optionally overrides the warm-spare retry backoff. Nil in
+	// production; tests use a short deterministic delay.
+	WarmRetryDelay func(attempt int) time.Duration
 
 	// lifetimeTimers holds the armed max_session_lifetime backstop timers,
 	// keyed by "slug/slotID". Terminate cancels the timer via Stop so that
 	// an early client-disconnect does not leave a goroutine for the remaining
 	// lifetime duration.
 	lifetimeTimers sync.Map
+
+	warmRetryMu sync.Mutex
+	warmRetries map[string]*elasticWarmRetry
+}
+
+type elasticWarmRetry struct {
+	attempt int
+	timer   *time.Timer
+	epoch   uint64
 }
 
 // Spawn boots one native elastic worker for slug at the given slotID.
@@ -61,7 +74,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	app, err := s.Store.GetAppBySlug(slug)
 	if err != nil {
 		slog.Warn("elastic spawn: get app", "slug", slug, "slotID", slotID, "err", err)
-		s.Proxy.ReleaseReservation(slug, slotID)
+		s.releaseReservation(slug, slotID)
 		return
 	}
 
@@ -69,7 +82,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	deps, err := s.Store.ListDeployments(app.ID)
 	if err != nil || len(deps) == 0 {
 		slog.Warn("elastic spawn: no ready deployments", "slug", slug, "slotID", slotID)
-		s.Proxy.ReleaseReservation(slug, slotID)
+		s.releaseReservation(slug, slotID)
 		return
 	}
 	dep := deps[0]
@@ -97,7 +110,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	})
 	if err != nil {
 		slog.Warn("elastic spawn: resolve launch", "slug", slug, "slotID", slotID, "err", err)
-		s.Proxy.ReleaseReservation(slug, slotID)
+		s.releaseReservation(slug, slotID)
 		return
 	}
 
@@ -116,7 +129,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		slog.Error("elastic spawn: the app's built environment is missing; redeploy to rebuild it",
 			"slug", slug, "slotID", slotID, "bundle", dep.BundleDir,
 			"version", dep.Version, "type", plan.AppType)
-		s.Proxy.ReleaseReservation(slug, slotID)
+		s.releaseReservation(slug, slotID)
 		return
 	}
 
@@ -139,7 +152,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	})
 	if err != nil {
 		slog.Warn("elastic spawn: start process", "slug", slug, "slotID", slotID, "err", err)
-		s.Proxy.ReleaseReservation(slug, slotID)
+		s.releaseReservation(slug, slotID)
 		return
 	}
 
@@ -164,45 +177,212 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
 			slog.Warn("elastic spawn: stop after health failure", "slug", slug, "slotID", slotID, "err", stopErr)
 		}
-		s.Proxy.ReleaseReservation(slug, slotID)
+		s.releaseReservation(slug, slotID)
 		return
+	}
+
+	// A pristine warm reservation is frozen after it proves healthy. SuspendReplica
+	// reclaims its cgroup memory to swap when the configured runtime supports it;
+	// otherwise it remains a running spare, preserving low latency without making
+	// snapshot support a correctness requirement.
+	registerSuspended := false
+	if s.Proxy.BeginElasticSpareSuspend(slug, slotID) {
+		freed, suspendErr := s.Manager.SuspendReplica(slug, slotID)
+		if freed {
+			registerSuspended = true
+		} else if suspendErr != nil && !errors.Is(suspendErr, process.ErrRuntimeNotSnapshotter) {
+			slog.Warn("elastic warm spare: freeze failed; keeping worker running",
+				"slug", slug, "slotID", slotID, "err", suspendErr)
+		}
 	}
 
 	// Register the ready worker with the proxy. slotID ties this process to the
 	// reservation created by reserveWorker, and deploymentID is used by the
 	// proxy's sticky-pin DeploymentID check.
-	if regErr := s.Proxy.RegisterElasticWorker(slug, slotID, info.EndpointURL, transport, dep.ID); regErr != nil {
+	var regErr error
+	if registerSuspended {
+		regErr = s.Proxy.RegisterSuspendedElasticWorker(slug, slotID, info.EndpointURL, transport, dep.ID)
+	} else {
+		regErr = s.Proxy.RegisterElasticWorker(slug, slotID, info.EndpointURL, transport, dep.ID)
+	}
+	if regErr != nil {
 		slog.Warn("elastic spawn: proxy register failed", "slug", slug, "slotID", slotID, "err", regErr)
 		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
 			slog.Warn("elastic spawn: stop after register failure", "slug", slug, "slotID", slotID, "err", stopErr)
 		}
 		// The slot is still in workerBooting state; release it so capacity
 		// returns to the pool.
-		s.Proxy.ReleaseReservation(slug, slotID)
+		s.releaseReservation(slug, slotID)
 		return
 	}
 
 	slog.Info("elastic spawn: worker ready",
-		"slug", slug, "slotID", slotID, "endpoint", info.EndpointURL)
+		"slug", slug, "slotID", slotID, "endpoint", info.EndpointURL,
+		"warm_spare", s.Proxy.IsUnassignedElasticWarmSpare(slug, slotID),
+		"suspended", registerSuspended)
+	// The target may have been lowered while this process was booting or being
+	// frozen. Reconcile only retires stable ready/suspended spares, so converging
+	// here avoids racing Terminate against a process that has not registered yet.
+	s.Proxy.ReconcileElasticWarmSpares(slug)
 
 	// Arm the absolute session-lifetime backstop. When configured, the worker
 	// is terminated after the deadline regardless of active connections, so a
 	// misbehaving or long-running session cannot pin the worker indefinitely.
 	// The returned timer is stored so Terminate can cancel it on an early exit
 	// and avoid a goroutine lingering for the full remaining lifetime.
-	if app.WorkerMaxSessionLifetimeSecs > 0 {
-		lifetime := time.Duration(app.WorkerMaxSessionLifetimeSecs) * time.Second
-		key := slug + "/" + strconv.Itoa(slotID)
-		timer := time.AfterFunc(lifetime, func() {
-			slog.Info("elastic spawn: max session lifetime reached, terminating worker",
-				"slug", slug, "slotID", slotID, "lifetime_s", app.WorkerMaxSessionLifetimeSecs)
-			// Remove our own map entry before calling Terminate so that
-			// Terminate's LoadAndDelete finds nothing and does not double-Stop.
-			s.lifetimeTimers.Delete(key)
-			s.Terminate(slug, slotID)
-		})
-		s.lifetimeTimers.Store(key, timer)
+	if !s.Proxy.IsUnassignedElasticWarmSpare(slug, slotID) {
+		s.armLifetime(app, slug, slotID)
 	}
+}
+
+// releaseReservation preserves the demand-driven failure behavior for ordinary
+// workers, while making a configured warm floor self-healing. At most one retry
+// timer exists per app; repeated failures back off to one minute so a broken
+// bundle cannot create a tight boot loop.
+func (s *ElasticSpawner) releaseReservation(slug string, slotID int) {
+	wasWarmSpare := s.Proxy.IsUnassignedElasticWarmSpare(slug, slotID)
+	epoch := s.Proxy.PoolEpoch(slug)
+	s.Proxy.ReleaseReservation(slug, slotID)
+	if !wasWarmSpare {
+		return
+	}
+	s.warmRetryMu.Lock()
+	if s.warmRetries == nil {
+		s.warmRetries = make(map[string]*elasticWarmRetry)
+	}
+	state := s.warmRetries[slug]
+	if state == nil || state.epoch != epoch {
+		if state != nil && state.timer != nil {
+			state.timer.Stop()
+		}
+		state = &elasticWarmRetry{epoch: epoch}
+		s.warmRetries[slug] = state
+	}
+	if state.timer != nil {
+		s.warmRetryMu.Unlock()
+		return
+	}
+	state.attempt++
+	attempt := state.attempt
+	delay := s.warmRetryBackoff(attempt)
+	state.timer = time.AfterFunc(delay, func() {
+		s.warmRetryMu.Lock()
+		if current := s.warmRetries[slug]; current == state {
+			state.timer = nil
+		}
+		s.warmRetryMu.Unlock()
+		s.Proxy.ReconcileElasticWarmSparesAtEpoch(slug, epoch)
+	})
+	s.warmRetryMu.Unlock()
+	slog.Warn("elastic warm spare: scheduling provisioning retry",
+		"slug", slug, "attempt", attempt, "delay", delay)
+}
+
+func (s *ElasticSpawner) warmRetryBackoff(attempt int) time.Duration {
+	if s.WarmRetryDelay != nil {
+		return s.WarmRetryDelay(attempt)
+	}
+	delay := 2 * time.Second
+	for i := 1; i < attempt && delay < time.Minute; i++ {
+		delay *= 2
+	}
+	if delay > time.Minute {
+		return time.Minute
+	}
+	return delay
+}
+
+func (s *ElasticSpawner) armLifetime(app *db.App, slug string, slotID int) {
+	if app.WorkerMaxSessionLifetimeSecs <= 0 {
+		return
+	}
+	lifetime := time.Duration(app.WorkerMaxSessionLifetimeSecs) * time.Second
+	key := slug + "/" + strconv.Itoa(slotID)
+	timer := time.AfterFunc(lifetime, func() {
+		slog.Info("elastic spawn: max session lifetime reached, terminating worker",
+			"slug", slug, "slotID", slotID, "lifetime_s", app.WorkerMaxSessionLifetimeSecs)
+		s.lifetimeTimers.Delete(key)
+		s.Terminate(slug, slotID)
+	})
+	if prior, loaded := s.lifetimeTimers.Swap(key, timer); loaded {
+		prior.(*time.Timer).Stop()
+	}
+}
+
+// WarmSpareConsumed starts the lifetime backstop for a pristine spare that was
+// kept running because snapshotting was unavailable. Frozen spares start the
+// same timer in Resume after readiness succeeds.
+func (s *ElasticSpawner) WarmSpareConsumed(slug string, slotID int) {
+	app, err := s.Store.GetAppBySlug(slug)
+	if err != nil {
+		slog.Warn("elastic warm spare: load lifetime after assignment", "slug", slug, "slotID", slotID, "err", err)
+		return
+	}
+	s.armLifetime(app, slug, slotID)
+}
+
+// Resume thaws a frozen warm spare, runs the same readiness contract used for
+// a cold elastic start, and only then makes it routable. A failed resume removes
+// the client binding and slot so the next request can allocate clean capacity.
+func (s *ElasticSpawner) Resume(slug string, slotID int) {
+	ep, err := s.Manager.Resume(slug, slotID)
+	if err != nil {
+		slog.Warn("elastic warm spare: resume failed", "slug", slug, "slotID", slotID, "err", err)
+		s.Terminate(slug, slotID)
+		return
+	}
+	info, ok := s.Manager.GetReplica(slug, slotID)
+	if !ok {
+		s.Terminate(slug, slotID)
+		return
+	}
+	endpoint := ep.URL
+	if endpoint == "" {
+		endpoint = info.EndpointURL
+	}
+	transport := s.Manager.TransportForWorker(info.Tier, info.WorkerID)
+
+	app, appErr := s.Store.GetAppBySlug(slug)
+	if appErr != nil {
+		slog.Warn("elastic warm spare: load resume metadata failed", "slug", slug, "slotID", slotID)
+		s.Terminate(slug, slotID)
+		return
+	}
+	deps, depsErr := s.Store.ListDeployments(app.ID)
+	if depsErr != nil || len(deps) == 0 {
+		slog.Warn("elastic warm spare: load resume deployment failed", "slug", slug, "slotID", slotID, "err", depsErr)
+		s.Terminate(slug, slotID)
+		return
+	}
+	plan, planErr := deploy.ResolveLaunch(deps[0].BundleDir, deploy.LaunchOptions{
+		Port: info.Port, BindHost: s.Manager.AppBindHostFor(info.Tier), PrepHostDeps: false,
+		CommandHostDeps: s.Manager.HostPreparesDepsFor(info.Tier),
+	})
+	if planErr != nil {
+		slog.Warn("elastic warm spare: resolve resume readiness", "slug", slug, "slotID", slotID, "err", planErr)
+		s.Terminate(slug, slotID)
+		return
+	}
+	hc := s.HealthCheck
+	if hc == nil {
+		hc = func(url string, timeout time.Duration, tr http.RoundTripper) error {
+			return waitElasticHealthy(url, plan.ReadyPath, plan.ReadyStatus, timeout, tr, func() bool {
+				inf, exists := s.Manager.GetReplica(slug, slotID)
+				return exists && inf.Status == process.StatusRunning
+			})
+		}
+	}
+	if err := hc(endpoint, 15*time.Second, transport); err != nil {
+		slog.Warn("elastic warm spare: readiness after resume failed", "slug", slug, "slotID", slotID, "err", err)
+		s.Terminate(slug, slotID)
+		return
+	}
+	if !s.Proxy.MarkElasticWorkerResumed(slug, slotID) {
+		s.Terminate(slug, slotID)
+		return
+	}
+	s.armLifetime(app, slug, slotID)
+	slog.Info("elastic warm spare: resumed", "slug", slug, "slotID", slotID)
 }
 
 // Terminate stops the elastic worker at slotID and removes it from the proxy
@@ -225,6 +405,7 @@ func (s *ElasticSpawner) Terminate(slug string, slotID int) {
 			"slug", slug, "slotID", slotID, "err", err)
 	}
 	s.Proxy.DeregisterElasticWorker(slug, slotID)
+	s.Proxy.ReconcileElasticWarmSpares(slug)
 }
 
 // ReapElasticOrphans stops any processes the Manager knows about that belong

@@ -130,10 +130,12 @@ runtime:
   # listed is the default for apps that have no explicit placement.
   # tiers:
   #   - name: local                    # tier name (referenced by per-app placement)
-  #     runtime: docker                # native | docker | remote_docker | fargate
+  #     runtime: docker                # native | docker | remote_docker | fargate | scaleway_serverless
   #   - name: burst
   #     runtime: fargate
   #     launch_type: FARGATE           # FARGATE (default) or EC2; fargate tiers only
+  #   - name: scale-to-zero
+  #     runtime: scaleway_serverless
 
   docker:
     socket: /var/run/docker.sock
@@ -194,6 +196,24 @@ runtime:
     secrets:
       name_prefix: ""                 # e.g. shinyhub/prod; make it unique per install  # SHINYHUB_RUNTIME_FARGATE_SECRETS_NAME_PREFIX
       kms_key_id: ""                  # optional customer-managed KMS key (id, ARN, or alias); empty = default aws/secretsmanager key  # SHINYHUB_RUNTIME_FARGATE_SECRETS_KMS_KEY_ID
+
+  # Optional: Scaleway Serverless Containers v1. Every replica gets one private,
+  # retained container resource with min_scale=0 and max_scale=1. Scaleway turns
+  # its instance off after the provider idle window and wakes it on the next
+  # proxied request. API credentials are env-only: SCW_ACCESS_KEY and
+  # SCW_SECRET_KEY. SCW_DEFAULT_PROJECT_ID / SCW_DEFAULT_REGION are also honored.
+  scaleway:
+    region: nl-ams                    # fr-par | nl-ams | pl-waw  # SHINYHUB_RUNTIME_SCALEWAY_REGION
+    project_id: ""                    # Scaleway Project UUID  # SHINYHUB_RUNTIME_SCALEWAY_PROJECT_ID
+    namespace_id: ""                  # existing Serverless Containers namespace UUID  # SHINYHUB_RUNTIME_SCALEWAY_NAMESPACE_ID
+    image: ""                         # linux/amd64 runner image, e.g. rg.nl-ams.scw.cloud/shinyhub/runner:latest  # SHINYHUB_RUNTIME_SCALEWAY_IMAGE
+    name_prefix: shinyhub             # provider resource prefix; replica identity is always retained  # SHINYHUB_RUNTIME_SCALEWAY_NAME_PREFIX
+    control_plane_url: ""             # public HTTPS URL reachable by the runner, e.g. https://hub.example.com  # SHINYHUB_RUNTIME_SCALEWAY_CONTROL_PLANE_URL
+    bundle_token_ttl: 10m             # capability lifetime for fetching one deployment bundle  # SHINYHUB_RUNTIME_SCALEWAY_BUNDLE_TOKEN_TTL
+    private_network_id: ""            # optional single attached Private Network UUID  # SHINYHUB_RUNTIME_SCALEWAY_PRIVATE_NETWORK_ID
+    default_memory_mb: 512            # 128-12228 MB per replica  # SHINYHUB_RUNTIME_SCALEWAY_DEFAULT_MEMORY_MB
+    default_mvcpu: 250                # 70-6000 mvCPU; 1000 = one vCPU  # SHINYHUB_RUNTIME_SCALEWAY_DEFAULT_MVCPU
+    durable_data: false               # assert an operator-provided durable backend; local container disk is ephemeral  # SHINYHUB_RUNTIME_SCALEWAY_DURABLE_DATA
 
   # Optional: replica autoscale controller. These are the GLOBAL controller
   # settings; autoscaling is opt-in per app (apps set autoscale_enabled and

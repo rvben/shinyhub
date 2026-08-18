@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -25,8 +26,12 @@ type recordingRuntime struct {
 	mu      sync.Mutex
 	started []process.StartParams
 	// endpointURL is the URL returned by Start. Defaults to "http://127.0.0.1:9000".
-	endpointURL string
-	startErr    error
+	endpointURL  string
+	startErr     error
+	suspendFreed bool
+	suspendCalls int
+	resumeCalls  int
+	waitCh       chan struct{}
 }
 
 func (r *recordingRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
@@ -49,7 +54,17 @@ func (r *recordingRuntime) Start(_ context.Context, p process.StartParams, _ io.
 }
 
 func (r *recordingRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
-func (r *recordingRuntime) Wait(_ context.Context, _ process.RunHandle) error  { return nil }
+func (r *recordingRuntime) Wait(ctx context.Context, _ process.RunHandle) error {
+	if r.waitCh == nil {
+		return nil
+	}
+	select {
+	case <-r.waitCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 func (r *recordingRuntime) Stats(_ context.Context, _ process.RunHandle) (*float64, uint64, error) {
 	return nil, 0, nil
 }
@@ -59,6 +74,22 @@ func (r *recordingRuntime) RunOnce(_ context.Context, _ process.StartParams, _ i
 func (r *recordingRuntime) HostPreparesDeps() bool    { return false }
 func (r *recordingRuntime) AppBindHost() string       { return "127.0.0.1" }
 func (r *recordingRuntime) HostProvidesAppData() bool { return true }
+func (r *recordingRuntime) Suspend(_ context.Context, _ process.RunHandle) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.suspendCalls++
+	return r.suspendFreed, nil
+}
+func (r *recordingRuntime) Resume(_ context.Context, h process.RunHandle) (process.ReplicaEndpoint, error) {
+	r.mu.Lock()
+	r.resumeCalls++
+	url := r.endpointURL
+	r.mu.Unlock()
+	if url == "" {
+		url = "http://127.0.0.1:9000"
+	}
+	return process.ReplicaEndpoint{URL: url, Provider: "native", WorkerID: "test-worker", Handle: h}, nil
+}
 
 // mustCreateElasticApp creates a test app in elastic per_session mode.
 func mustCreateElasticApp(t *testing.T, store *db.Store, slug string) *db.App {
@@ -145,6 +176,126 @@ func TestSpawnElasticWorker_BootsWithCorrectSlotID(t *testing.T) {
 	// Verify proxy has a running worker at slotID.
 	if prx.ElasticWorkerCount("app1") == 0 {
 		t.Error("proxy pool should have a registered worker after Spawn")
+	}
+}
+
+func TestElasticWarmSpare_FreezesThenResumesOnDemand(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateElasticApp(t, store, "warmapp")
+	bundleDir := mustMinimalBundle(t)
+	_ = mustCreateDeploymentInDir(t, store, app.ID, bundleDir)
+
+	rt := &recordingRuntime{suspendFreed: true, waitCh: make(chan struct{})}
+	t.Cleanup(func() { close(rt.waitCh) })
+	mgr := process.NewManager(t.TempDir(), rt)
+	prx := proxy.New()
+	prx.SetPoolMode("warmapp", config.IsolationPerSession, 1, 3)
+	prx.SetPoolWarmSpares("warmapp", 1)
+	prx.SetSpawnFunc(func(string, int) {})
+	prx.ReconcileElasticWarmSpares("warmapp")
+
+	spawner := &lifecycle.ElasticSpawner{
+		Store: store, Manager: mgr, Proxy: prx,
+		RuntimeCfg: config.RuntimeConfig{Mode: "native"}, HealthCheck: noopHealthCheck,
+	}
+	spawner.Spawn("warmapp", 0)
+	snap, _ := prx.ElasticWorkersSnapshot("warmapp")
+	if len(snap.Workers) != 1 || snap.Workers[0].Status != "suspended" || !snap.Workers[0].WarmSpare {
+		t.Fatalf("warm worker snapshot = %+v, want suspended spare", snap)
+	}
+	if info, ok := mgr.GetReplica("warmapp", 0); !ok || info.Status != process.StatusSuspended {
+		t.Fatalf("manager worker = %+v ok=%v, want suspended", info, ok)
+	}
+
+	resumeDone := make(chan struct{})
+	prx.SetResumeFunc(func(slug string, slotID int) {
+		spawner.Resume(slug, slotID)
+		close(resumeDone)
+	})
+	rec := httptest.NewRecorder()
+	prx.ServeHTTP(rec, httptest.NewRequest("GET", "/app/warmapp/", nil))
+	select {
+	case <-resumeDone:
+	case <-time.After(time.Second):
+		t.Fatal("warm spare did not resume")
+	}
+	snap, _ = prx.ElasticWorkersSnapshot("warmapp")
+	var consumed *proxy.ElasticWorkerStatus
+	for i := range snap.Workers {
+		if snap.Workers[i].SlotID == 0 {
+			consumed = &snap.Workers[i]
+		}
+	}
+	if consumed == nil || consumed.Status != "running" || consumed.WarmSpare {
+		t.Fatalf("worker snapshot = %+v, want slot 0 running non-spare", snap.Workers)
+	}
+	rt.mu.Lock()
+	suspendCalls, resumeCalls := rt.suspendCalls, rt.resumeCalls
+	rt.mu.Unlock()
+	if suspendCalls != 1 || resumeCalls != 1 {
+		t.Fatalf("snapshot calls suspend/resume = %d/%d, want 1/1", suspendCalls, resumeCalls)
+	}
+}
+
+func TestElasticWarmSpare_ProvisionFailureRetriesWithoutDemand(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	prx.SetPoolMode("missing", config.IsolationPerSession, 1, 2)
+	prx.SetPoolWarmSpares("missing", 1)
+	first := make(chan int, 1)
+	prx.SetSpawnFunc(func(_ string, slotID int) { first <- slotID })
+	prx.ReconcileElasticWarmSpares("missing")
+	slotID := <-first
+
+	retried := make(chan int, 1)
+	prx.SetSpawnFunc(func(_ string, replacement int) { retried <- replacement })
+	spawner := &lifecycle.ElasticSpawner{
+		Store: store, Proxy: prx,
+		WarmRetryDelay: func(int) time.Duration { return 10 * time.Millisecond },
+	}
+	// The missing app makes Spawn fail before it needs a process manager. The
+	// failed reservation was a warm spare, so the controller must replenish it
+	// on its own rather than waiting for a browser request.
+	spawner.Spawn("missing", slotID)
+
+	select {
+	case replacement := <-retried:
+		if replacement == slotID {
+			t.Fatalf("replacement reused slot %d; slot IDs must remain monotonic", slotID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("warm-spare provisioning failure was not retried")
+	}
+}
+
+func TestElasticWarmSpare_RetryCannotCrossPoolGeneration(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	prx.SetPoolMode("missing", config.IsolationPerSession, 1, 2)
+	prx.SetPoolWarmSpares("missing", 1)
+	first := make(chan int, 1)
+	prx.SetSpawnFunc(func(_ string, slotID int) { first <- slotID })
+	prx.ReconcileElasticWarmSpares("missing")
+	slotID := <-first
+
+	unexpected := make(chan int, 1)
+	prx.SetSpawnFunc(func(_ string, replacement int) { unexpected <- replacement })
+	spawner := &lifecycle.ElasticSpawner{
+		Store: store, Proxy: prx,
+		WarmRetryDelay: func(int) time.Duration { return 15 * time.Millisecond },
+	}
+	spawner.Spawn("missing", slotID)
+	// A deploy/stop invalidates the pool after the retry was scheduled. Reusing
+	// the slug for a fresh pool must not let stale delayed work provision into
+	// that new generation while its bundle may still be preparing.
+	prx.Deregister("missing")
+	prx.SetPoolMode("missing", config.IsolationPerSession, 1, 2)
+	prx.SetPoolWarmSpares("missing", 1)
+
+	select {
+	case replacement := <-unexpected:
+		t.Fatalf("stale retry provisioned slot %d in a new pool generation", replacement)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

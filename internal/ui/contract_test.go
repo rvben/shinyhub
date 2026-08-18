@@ -1020,7 +1020,8 @@ func TestAppsPayloadExposesFleetFields(t *testing.T) {
 
 // TestWorkerIsolationControlsWired guards the Configuration -> Scaling worker
 // isolation controls. app.js must read app.worker_isolation and
-// app.worker_max_workers from the GET envelope, include worker_isolation in the
+// app.worker_max_workers and app.worker_warm_spares from the GET envelope,
+// include worker_isolation in the
 // scaling PATCH payload, and call workerCapacityLine so the host-capacity
 // helper line stays live. If any of these wires drift the controls silently
 // stop reflecting or persisting the isolation mode.
@@ -1036,16 +1037,22 @@ func TestWorkerIsolationControlsWired(t *testing.T) {
 		"app.js scaling populate must read app.worker_isolation from the GET envelope")
 	assertContains(t, "app.js", "worker_max_workers",
 		"app.js scaling populate must read app.worker_max_workers from the GET envelope")
+	assertContains(t, "app.js", "worker_warm_spares",
+		"app.js scaling populate must read app.worker_warm_spares from the GET envelope")
 
 	// Save path: include the isolation mode in the PATCH payload.
 	assertContains(t, "app.js", "worker_isolation: workerIsolation",
 		"saveScalingSettings must include worker_isolation in the PATCH payload")
+	assertContains(t, "app.js", "worker_warm_spares: workerWarmSpares",
+		"saveScalingSettings must include worker_warm_spares in the PATCH payload")
 
 	// HTML: the isolation select and capacity helper must exist.
 	assertContains(t, "index.html", `id="worker-isolation"`,
 		"index.html must expose #worker-isolation as the isolation mode select")
 	assertContains(t, "index.html", `id="worker-max-workers"`,
 		"index.html must expose #worker-max-workers as the max workers input")
+	assertContains(t, "index.html", `id="worker-warm-spares"`,
+		"index.html must expose #worker-warm-spares as the warm worker input")
 	assertContains(t, "index.html", `id="worker-capacity"`,
 		"index.html must expose #worker-capacity as the slot workerCapacityLine populates")
 
@@ -1135,8 +1142,8 @@ func TestFargateBundleRouteOnMainMux(t *testing.T) {
 	// a refactor of the URL cannot silently break the runner without this test
 	// catching the drift.
 	assertFileContains(t, "../../build/fargate-runner/entrypoint.sh",
-		"/internal/fargate-bundle/",
-		"entrypoint.sh must fetch the bundle from GET /internal/fargate-bundle/{digest}; changing this path requires updating the entrypoint too")
+		"/internal/runtime-bundle/",
+		"entrypoint.sh must fetch the bundle from GET /internal/runtime-bundle/{digest}; changing this path requires updating the entrypoint too")
 }
 
 func assertContains(t *testing.T, path, needle, contract string) {

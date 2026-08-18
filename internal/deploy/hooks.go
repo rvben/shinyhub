@@ -170,6 +170,7 @@ type WorkerManifest struct {
 	Isolation              *string `toml:"isolation"`
 	GroupedSize            *int    `toml:"grouped_size"`
 	MaxWorkers             *int    `toml:"max_workers"`
+	WarmSpares             *int    `toml:"warm_spares"`
 	MaxSessionLifetimeSecs *int    `toml:"max_session_lifetime_secs"`
 }
 
@@ -459,6 +460,9 @@ func normalizeAndValidateApp(a *AppSettings) error {
 		}
 		if a.Worker.MaxWorkers != nil {
 			ws.MaxWorkers = *a.Worker.MaxWorkers
+		}
+		if a.Worker.WarmSpares != nil {
+			ws.WarmSpares = *a.Worker.WarmSpares
 		}
 		if a.Worker.MaxSessionLifetimeSecs != nil {
 			ws.MaxSessionLifetime = *a.Worker.MaxSessionLifetimeSecs

@@ -564,6 +564,14 @@
                 <input id="worker-max-workers" type="number" min="0" max="1000" step="1"
                        inputmode="numeric" autocomplete="off" aria-label="Maximum worker processes per replica">
               </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Warm workers</span>
+                  <span class="scaling-option-help">Healthy, unused isolated workers kept ready for the next sessions. They are frozen and memory-reclaimed when the runtime supports it, and always count toward max workers.</span>
+                </span>
+                <input id="worker-warm-spares" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Warm isolated worker processes for this app">
+              </label>
               <p id="scaling-ceiling" class="scaling-ceiling" aria-live="polite"></p>
               <p id="worker-capacity" class="scaling-ceiling" aria-live="polite"></p>
               <div class="env-form-actions">

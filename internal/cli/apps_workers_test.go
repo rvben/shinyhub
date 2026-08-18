@@ -15,7 +15,7 @@ func TestAppsShow_RendersWorkerPool(t *testing.T) {
 	// replicas_status carries a stale row from a pre-isolation-switch deploy;
 	// for an elastic app the Workers table is the truth and the multiplex
 	// Replicas section must not render next to it.
-	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":10,"deploy_count":3,"created_at":"2026-07-09T10:00:00Z","worker_isolation":"grouped"},"effective_max_sessions_per_replica":10,"replicas_status":[{"index":0,"status":"running","pid":4321,"port":20101}],"worker_pool":{"mode":"grouped","sessions_per_worker":2,"max_workers":5,"ceiling":10,"workers":[{"slot_id":0,"status":"running","sessions":2,"pid":4321,"port":20101},{"slot_id":1,"status":"booting","sessions":1}]}}`)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":7,"access":"private","status":"running","replicas":1,"max_sessions_per_replica":10,"deploy_count":3,"created_at":"2026-07-09T10:00:00Z","worker_isolation":"grouped"},"effective_max_sessions_per_replica":10,"replicas_status":[{"index":0,"status":"running","pid":4321,"port":20101}],"worker_pool":{"mode":"grouped","sessions_per_worker":2,"max_workers":5,"warm_spare_target":1,"ceiling":10,"workers":[{"slot_id":0,"status":"running","sessions":2,"pid":4321,"port":20101},{"slot_id":1,"status":"booting","sessions":0,"warm_spare":true}]}}`)
 
 	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
@@ -24,12 +24,13 @@ func TestAppsShow_RendersWorkerPool(t *testing.T) {
 	for _, want := range []string{
 		"Isolation:   grouped (2 sessions/worker, max 5 workers)",
 		"Admission ceiling: 5 × 2 = 10 concurrent sessions",
+		"Warm spares: 1 (frozen when snapshotting is available)",
 		"Workers:",
 		// Columns are sized to their widest value and the numeric ones are
 		// right-aligned, so slot/session/pid/port digits line up on the right.
-		"  SLOT  STATUS   SESSIONS   PID   PORT",
-		"     0  running       2/2  4321  20101",
-		"     1  booting       1/2     -      -",
+		"  SLOT  STATUS   WARM  SESSIONS   PID   PORT",
+		"     0  running  -          2/2  4321  20101",
+		"     1  booting  yes        0/2     -      -",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)

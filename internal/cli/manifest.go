@@ -128,6 +128,9 @@ func summarizeManifest(m *deploy.Manifest) []string {
 		if m.App.Worker.MaxWorkers != nil {
 			worker = append(worker, fmt.Sprintf("max_workers=%d", *m.App.Worker.MaxWorkers))
 		}
+		if m.App.Worker.WarmSpares != nil {
+			worker = append(worker, fmt.Sprintf("warm_spares=%d", *m.App.Worker.WarmSpares))
+		}
 		if m.App.Worker.MaxSessionLifetimeSecs != nil {
 			worker = append(worker, fmt.Sprintf("max_session_lifetime_secs=%d", *m.App.Worker.MaxSessionLifetimeSecs))
 		}

@@ -746,6 +746,7 @@ type App struct {
 	WorkerIsolation              string `json:"worker_isolation"`
 	WorkerGroupedSize            int    `json:"worker_grouped_size"`
 	WorkerMaxWorkers             int    `json:"worker_max_workers"`
+	WorkerWarmSpares             int    `json:"worker_warm_spares"`
 	WorkerMaxSessionLifetimeSecs int    `json:"worker_max_session_lifetime_secs"`
 	// EffectiveWorkerIsolation is WorkerIsolation resolved against the fleet
 	// default (runtime.default_worker_isolation), so it is never empty. Computed
@@ -853,7 +854,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
 		       last_autoscale_at, identity_headers, min_warm_replicas,
 		       last_error, crashed_at, description, icon_mime, icon_emoji,
-		       worker_isolation, worker_grouped_size, worker_max_workers,
+		       worker_isolation, worker_grouped_size, worker_max_workers, worker_warm_spares,
 		       worker_max_session_lifetime_secs, ephemeral_data_ack, render_seconds,`
 
 type CreateAppParams struct {
@@ -3270,6 +3271,8 @@ type ApplyAppManifestSettingsParams struct {
 	WorkerGroupedSize            int
 	SetWorkerMaxWorkers          bool
 	WorkerMaxWorkers             int
+	SetWorkerWarmSpares          bool
+	WorkerWarmSpares             int
 	SetWorkerMaxSessionLifetime  bool
 	WorkerMaxSessionLifetimeSecs int
 
@@ -3464,6 +3467,14 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) (bool
 			return false, fmt.Errorf("update worker_max_workers: %w", err)
 		}
 	}
+	if p.SetWorkerWarmSpares {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_warm_spares = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerWarmSpares, p.AppID,
+		); err != nil {
+			return false, fmt.Errorf("update worker_warm_spares: %w", err)
+		}
+	}
 	if p.SetWorkerMaxSessionLifetime {
 		if _, err := tx.Exec(
 			`UPDATE apps SET worker_max_session_lifetime_secs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -3526,6 +3537,8 @@ type PatchAppSettingsParams struct {
 	WorkerGroupedSize            int
 	SetWorkerMaxWorkers          bool
 	WorkerMaxWorkers             int
+	SetWorkerWarmSpares          bool
+	WorkerWarmSpares             int
 	SetWorkerMaxSessionLifetime  bool
 	WorkerMaxSessionLifetimeSecs int
 }
@@ -3675,6 +3688,14 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			return "", 0, nil, nil, false, fmt.Errorf("update worker_max_workers: %w", err)
 		}
 	}
+	if p.SetWorkerWarmSpares {
+		if _, err := tx.Exec(
+			`UPDATE apps SET worker_warm_spares = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.WorkerWarmSpares, appID,
+		); err != nil {
+			return "", 0, nil, nil, false, fmt.Errorf("update worker_warm_spares: %w", err)
+		}
+	}
 	if p.SetWorkerMaxSessionLifetime {
 		if _, err := tx.Exec(
 			`UPDATE apps SET worker_max_session_lifetime_secs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -3747,7 +3768,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
 		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime, &a.IconEmoji,
 		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
-		&a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
+		&a.WorkerWarmSpares, &a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
 		&lastDeployedAtRaw, &a.ReleaseNumber, &releasedAtRaw,
 		&currentVersion, &contentDigest, &lastDeploymentStatus,
 	)

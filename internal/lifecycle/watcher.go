@@ -100,6 +100,8 @@ type proxyBackend interface {
 	// per_session; they are ignored for multiplex (pass zero). Creates the
 	// pool (size 1) if absent, mirroring SetPoolCap.
 	SetPoolMode(slug string, mode config.WorkerIsolationMode, groupedSize, maxWorkers int)
+	SetPoolWarmSpares(slug string, warmSpares int)
+	ReconcileElasticWarmSpares(slug string)
 }
 
 // MetricsRecorder records lifecycle business metrics. A nil recorder disables
@@ -597,6 +599,7 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		w.prx.SetPoolMode(app.Slug,
 			config.WorkerIsolationMode(resolvedIso),
 			app.WorkerGroupedSize, app.WorkerMaxWorkers)
+		w.prx.SetPoolWarmSpares(app.Slug, app.WorkerWarmSpares)
 
 		booted := true
 		for i := 0; i < app.Replicas; i++ {
@@ -1657,6 +1660,7 @@ func (w *Watcher) driveWakingApp(slug string) {
 		w.prx.SetPoolMode(slug,
 			config.WorkerIsolationMode(resolvedIso),
 			app.WorkerGroupedSize, app.WorkerMaxWorkers)
+		w.prx.SetPoolWarmSpares(slug, app.WorkerWarmSpares)
 
 		// Phase 1: elastic apps (grouped or per_session) are demand-driven. Skip
 		// the replica boot loop; FinishWake transitions the app to running and
@@ -1713,6 +1717,9 @@ func (w *Watcher) driveWakingApp(slug string) {
 				// so a later request retries instead of being stuck in waking.
 				return
 			}
+		}
+		if isElasticIsolation(resolvedIso) {
+			w.prx.ReconcileElasticWarmSpares(slug)
 		}
 		// Finalize waking -> running via a conditional CAS. If a concurrent
 		// stop/delete moved the app off waking during the deploy, FinishWake wins

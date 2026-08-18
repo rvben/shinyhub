@@ -32,6 +32,8 @@ func TestDecide(t *testing.T) {
 		{"grouped booting slot at cap allocates", []workerState{{slotID: 0, assignedClients: 8, status: workerBooting}}, config.IsolationGrouped, 8, 5, -1, decision{kind: decisionAllocate}},
 		{"grouped booting slots at cap at max rejects", []workerState{{slotID: 0, assignedClients: 8, status: workerBooting}, {slotID: 1, assignedClients: 8, status: workerBooting}}, config.IsolationGrouped, 8, 2, -1, decision{kind: decisionReject}},
 		{"per_session booting slot is full for new clients", []workerState{{slotID: 0, assignedClients: 1, status: workerBooting}}, config.IsolationPerSession, 1, 5, -1, decision{kind: decisionAllocate}},
+		{"grouped packs a resuming group before consuming another spare", []workerState{{slotID: 0, assignedClients: 1, status: workerResuming}, {slotID: 1, status: workerSuspended}}, config.IsolationGrouped, 8, 5, -1, decision{decisionBind, 0}},
+		{"an unused suspended spare beats an unused booting spare", []workerState{{slotID: 0, status: workerBooting}, {slotID: 1, status: workerSuspended}}, config.IsolationGrouped, 8, 5, -1, decision{decisionBind, 1}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

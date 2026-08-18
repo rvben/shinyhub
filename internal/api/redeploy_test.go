@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
@@ -158,6 +159,71 @@ func TestPatchApp_ResourceLimitChangeTriggersRedeploy(t *testing.T) {
 
 	if !s.isRedeployInFlight(slug) {
 		t.Fatal("a resource-limit change on a running app must mark redeploy_in_flight (cycle the pool)")
+	}
+}
+
+func TestPatchApp_WarmSparesReconcileLiveWithoutRedeploy(t *testing.T) {
+	const slug = "warm-live"
+	store, app := newRedeployTestStore(t, slug, "running")
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug: slug, SetWorkerIsolation: true, WorkerIsolation: "per_session",
+		SetWorkerMaxWorkers: true, WorkerMaxWorkers: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prx := proxy.New()
+	spawned := make(chan int, 1)
+	prx.SetSpawnFunc(func(_ string, slotID int) { spawned <- slotID })
+	s := New(&config.Config{Auth: config.AuthConfig{Secret: "test-secret"}}, store, nil, prx)
+
+	body := []byte(`{"worker_warm_spares":1}`)
+	token, _ := auth.IssueJWT(app.OwnerID, "bob", "admin", "test-secret")
+	req := httptest.NewRequest("PATCH", "/api/apps/"+slug, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH warm_spares: got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if s.isRedeployInFlight(slug) {
+		t.Fatal("a warm-target-only edit must preserve active sessions, not redeploy the pool")
+	}
+	select {
+	case <-spawned:
+	case <-time.After(time.Second):
+		t.Fatal("running elastic app did not reconcile its new warm-spare target")
+	}
+}
+
+func TestPatchApp_WarmSparesDoesNotBootStoppedApp(t *testing.T) {
+	const slug = "warm-stopped"
+	store, app := newRedeployTestStore(t, slug, "stopped")
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug: slug, SetWorkerIsolation: true, WorkerIsolation: "per_session",
+		SetWorkerMaxWorkers: true, WorkerMaxWorkers: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prx := proxy.New()
+	spawned := make(chan int, 1)
+	prx.SetSpawnFunc(func(_ string, slotID int) { spawned <- slotID })
+	s := New(&config.Config{Auth: config.AuthConfig{Secret: "test-secret"}}, store, nil, prx)
+
+	body := []byte(`{"worker_warm_spares":1}`)
+	token, _ := auth.IssueJWT(app.OwnerID, "bob", "admin", "test-secret")
+	req := httptest.NewRequest("PATCH", "/api/apps/"+slug, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH warm_spares: got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case slotID := <-spawned:
+		t.Fatalf("settings edit booted stopped app worker slot %d", slotID)
+	case <-time.After(30 * time.Millisecond):
 	}
 }
 

@@ -672,6 +672,9 @@ type RuntimeConfig struct {
 	// Fargate holds the AWS ECS/Fargate runtime settings. They are required when
 	// any tier declares runtime "fargate"; otherwise the zero value is unused.
 	Fargate FargateRuntimeConfig
+	// Scaleway holds the Serverless Containers v1 settings shared by tiers whose
+	// runtime is "scaleway_serverless".
+	Scaleway ScalewayRuntimeConfig
 	// Snapshot controls warm-wake (freeze + cgroup reclaim), shared by the
 	// native and docker runtimes.
 	Snapshot SnapshotConfig
@@ -780,6 +783,25 @@ type FargateRuntimeConfig struct {
 	SecretsKMSKeyID string
 }
 
+// ScalewayRuntimeConfig configures persistent Serverless Container resources.
+// Each ShinyHub replica owns one resource with min_scale=0 and max_scale=1;
+// Scaleway scales the underlying instance to zero while retaining its endpoint.
+// Credentials are never stored here: the SDK and private-origin transport read
+// SCW_ACCESS_KEY / SCW_SECRET_KEY from the process environment.
+type ScalewayRuntimeConfig struct {
+	Region           string
+	ProjectID        string
+	NamespaceID      string
+	Image            string
+	NamePrefix       string
+	ControlPlaneURL  string
+	BundleTokenTTL   time.Duration
+	PrivateNetworkID string
+	DefaultMemoryMB  int
+	DefaultMVCpu     int
+	DurableData      bool
+}
+
 // FargateS3FilesConfig configures the managed Amazon S3 Files durable-data
 // backend for a Fargate tier. When FileSystemArn is set, the control plane
 // mounts the file system into every app's task and gives each app an isolated
@@ -870,16 +892,17 @@ func (r RuntimeConfig) RuntimeForTier(name string) (string, bool) {
 }
 
 // DefaultResourcesForTier returns the platform-default memory limit and CPU
-// quota for a replica placed on the named tier. For a "fargate" tier it returns
-// the Fargate-specific defaults (runtime.fargate.default_memory_mb /
-// default_cpu_percent). For any other runtime it returns the Docker defaults
-// (runtime.docker.default_memory_mb / default_cpu_percent), preserving
-// existing behaviour for native and docker tiers. A zero value for either
-// field means "no limit" as documented.
+// quota for a replica placed on the named tier. Managed runtimes return their
+// provider-specific defaults; Scaleway's mvCPU value is converted to the
+// percentage convention used by app manifests (1 CPU = 100%). Native and
+// Docker tiers use the Docker defaults. A zero value means "no limit".
 func (r RuntimeConfig) DefaultResourcesForTier(tier string) (memMB, cpuPct int) {
 	rt, _ := r.RuntimeForTier(tier)
 	if rt == "fargate" {
 		return r.Fargate.DefaultMemoryMB, r.Fargate.DefaultCPUPercent
+	}
+	if rt == "scaleway_serverless" {
+		return r.Scaleway.DefaultMemoryMB, r.Scaleway.DefaultMVCpu / 10
 	}
 	return r.Docker.DefaultMemoryMB, r.Docker.DefaultCPUPercent
 }
@@ -992,7 +1015,7 @@ var validTopLevelKeys = map[string]bool{
 // the top level is a common mistake; the unknown-key error hints at the correct
 // nesting for these.
 var runtimeSubKeys = map[string]bool{
-	"docker": true, "tiers": true, "autoscale": true, "fargate": true, "snapshot": true, "native": true,
+	"docker": true, "tiers": true, "autoscale": true, "fargate": true, "scaleway": true, "snapshot": true, "native": true,
 }
 
 // checkTopLevelKeys rejects any top-level YAML key that is not a known config
@@ -1069,12 +1092,13 @@ type rawRuntimeConfig struct {
 	MaxReplicas     int                    `yaml:"max_replicas"`
 	// Pointer so an explicit 0 (documented as "unlimited") is
 	// distinguishable from the key being absent (apply the safe default).
-	DefaultMaxSessionsPerReplica *int                    `yaml:"default_max_sessions_per_replica"`
-	DefaultWorkerIsolation       string                  `yaml:"default_worker_isolation"`
-	Tiers                        []rawTierConfig         `yaml:"tiers"`
-	Autoscale                    rawAutoscaleConfig      `yaml:"autoscale"`
-	Fargate                      rawFargateRuntimeConfig `yaml:"fargate"`
-	Snapshot                     rawSnapshotConfig       `yaml:"snapshot"`
+	DefaultMaxSessionsPerReplica *int                     `yaml:"default_max_sessions_per_replica"`
+	DefaultWorkerIsolation       string                   `yaml:"default_worker_isolation"`
+	Tiers                        []rawTierConfig          `yaml:"tiers"`
+	Autoscale                    rawAutoscaleConfig       `yaml:"autoscale"`
+	Fargate                      rawFargateRuntimeConfig  `yaml:"fargate"`
+	Scaleway                     rawScalewayRuntimeConfig `yaml:"scaleway"`
+	Snapshot                     rawSnapshotConfig        `yaml:"snapshot"`
 }
 
 type rawNativeRuntimeConfig struct {
@@ -1100,6 +1124,20 @@ type rawFargateRuntimeConfig struct {
 	DurableData       bool                    `yaml:"durable_data"`
 	S3Files           rawFargateS3FilesConfig `yaml:"s3files"`
 	Secrets           rawFargateSecretsConfig `yaml:"secrets"`
+}
+
+type rawScalewayRuntimeConfig struct {
+	Region           string `yaml:"region"`
+	ProjectID        string `yaml:"project_id"`
+	NamespaceID      string `yaml:"namespace_id"`
+	Image            string `yaml:"image"`
+	NamePrefix       string `yaml:"name_prefix"`
+	ControlPlaneURL  string `yaml:"control_plane_url"`
+	BundleTokenTTL   string `yaml:"bundle_token_ttl"`
+	PrivateNetworkID string `yaml:"private_network_id"`
+	DefaultMemoryMB  int    `yaml:"default_memory_mb"`
+	DefaultMVCpu     int    `yaml:"default_mvcpu"`
+	DurableData      bool   `yaml:"durable_data"`
 }
 
 type rawFargateS3FilesConfig struct {
@@ -1539,6 +1577,7 @@ func loadRaw(path string) (*Config, error) {
 	} else {
 		seen := map[string]bool{}
 		hasFargate := false
+		hasScaleway := false
 		for _, t := range raw.Runtime.Tiers {
 			if t.Name == "" {
 				return nil, fmt.Errorf("runtime.tiers: tier name must not be empty")
@@ -1555,8 +1594,11 @@ func loadRaw(path string) (*Config, error) {
 			case "fargate":
 				// accepted: a fargate runtime is registered for this tier at startup
 				hasFargate = true
+			case "scaleway_serverless":
+				// accepted: a Scaleway Serverless Containers v1 runtime is registered at startup
+				hasScaleway = true
 			default:
-				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native, docker, remote_docker, or fargate)", t.Name, t.Runtime)
+				return nil, fmt.Errorf("runtime.tiers: tier %q has unknown runtime %q (want native, docker, remote_docker, fargate, or scaleway_serverless)", t.Name, t.Runtime)
 			}
 			lt := strings.ToUpper(strings.TrimSpace(t.LaunchType))
 			switch lt {
@@ -1587,6 +1629,11 @@ func loadRaw(path string) (*Config, error) {
 				}
 			}
 			if err := validateFargate(cfg.Runtime.Fargate, cfg.Runtime.Tiers); err != nil {
+				return nil, err
+			}
+		}
+		if hasScaleway {
+			if err := validateScaleway(cfg.Runtime.Scaleway); err != nil {
 				return nil, err
 			}
 		}
@@ -2000,6 +2047,36 @@ func validateFargate(f FargateRuntimeConfig, tiers []TierConfig) error {
 	return nil
 }
 
+func validateScaleway(s ScalewayRuntimeConfig) error {
+	switch s.Region {
+	case "fr-par", "nl-ams", "pl-waw":
+	default:
+		return fmt.Errorf("runtime.scaleway.region %q is not supported; want fr-par, nl-ams, or pl-waw", s.Region)
+	}
+	if s.ProjectID == "" {
+		return fmt.Errorf("runtime.scaleway.project_id is required when a tier uses runtime \"scaleway_serverless\"")
+	}
+	if s.NamespaceID == "" {
+		return fmt.Errorf("runtime.scaleway.namespace_id is required when a tier uses runtime \"scaleway_serverless\"")
+	}
+	if s.Image == "" {
+		return fmt.Errorf("runtime.scaleway.image is required when a tier uses runtime \"scaleway_serverless\"")
+	}
+	if !strings.HasPrefix(s.ControlPlaneURL, "https://") {
+		return fmt.Errorf("runtime.scaleway.control_plane_url must use https:// so bundle tokens are never sent in plaintext")
+	}
+	if s.BundleTokenTTL <= 0 {
+		return fmt.Errorf("runtime.scaleway.bundle_token_ttl must be positive")
+	}
+	if s.DefaultMemoryMB < 128 || s.DefaultMemoryMB > 12228 {
+		return fmt.Errorf("runtime.scaleway.default_memory_mb must be between 128 and 12228")
+	}
+	if s.DefaultMVCpu < 70 || s.DefaultMVCpu > 6000 {
+		return fmt.Errorf("runtime.scaleway.default_mvcpu must be between 70 and 6000")
+	}
+	return nil
+}
+
 func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	rc := RuntimeConfig{
 		Mode: "native",
@@ -2135,6 +2212,41 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	}
 	if rc.Fargate.BundleTokenTTL <= 0 {
 		rc.Fargate.BundleTokenTTL = 10 * time.Minute
+	}
+
+	rc.Scaleway = ScalewayRuntimeConfig{
+		Region:           r.Scaleway.Region,
+		ProjectID:        r.Scaleway.ProjectID,
+		NamespaceID:      r.Scaleway.NamespaceID,
+		Image:            r.Scaleway.Image,
+		NamePrefix:       r.Scaleway.NamePrefix,
+		ControlPlaneURL:  r.Scaleway.ControlPlaneURL,
+		PrivateNetworkID: r.Scaleway.PrivateNetworkID,
+		DefaultMemoryMB:  r.Scaleway.DefaultMemoryMB,
+		DefaultMVCpu:     r.Scaleway.DefaultMVCpu,
+		DurableData:      r.Scaleway.DurableData,
+	}
+	if rc.Scaleway.Region == "" {
+		rc.Scaleway.Region = "nl-ams"
+	}
+	if rc.Scaleway.NamePrefix == "" {
+		rc.Scaleway.NamePrefix = "shinyhub"
+	}
+	if rc.Scaleway.DefaultMemoryMB == 0 {
+		rc.Scaleway.DefaultMemoryMB = 512
+	}
+	if rc.Scaleway.DefaultMVCpu == 0 {
+		rc.Scaleway.DefaultMVCpu = 250
+	}
+	if r.Scaleway.BundleTokenTTL != "" {
+		d, err := time.ParseDuration(r.Scaleway.BundleTokenTTL)
+		if err != nil {
+			return rc, fmt.Errorf("runtime.scaleway.bundle_token_ttl: %w", err)
+		}
+		rc.Scaleway.BundleTokenTTL = d
+	}
+	if rc.Scaleway.BundleTokenTTL <= 0 {
+		rc.Scaleway.BundleTokenTTL = 10 * time.Minute
 	}
 
 	rc.Autoscale.Enabled = r.Autoscale.Enabled
@@ -2546,6 +2658,59 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_RUNTIME_FARGATE_DEFAULT_CPU_PERCENT: %q is not an integer: %w", v, err)
 		}
 		cfg.Runtime.Fargate.DefaultCPUPercent = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_REGION"); v != "" {
+		cfg.Runtime.Scaleway.Region = v
+	} else if v := os.Getenv("SCW_DEFAULT_REGION"); v != "" {
+		cfg.Runtime.Scaleway.Region = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_PROJECT_ID"); v != "" {
+		cfg.Runtime.Scaleway.ProjectID = v
+	} else if v := os.Getenv("SCW_DEFAULT_PROJECT_ID"); v != "" {
+		cfg.Runtime.Scaleway.ProjectID = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_NAMESPACE_ID"); v != "" {
+		cfg.Runtime.Scaleway.NamespaceID = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_IMAGE"); v != "" {
+		cfg.Runtime.Scaleway.Image = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_NAME_PREFIX"); v != "" {
+		cfg.Runtime.Scaleway.NamePrefix = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_CONTROL_PLANE_URL"); v != "" {
+		cfg.Runtime.Scaleway.ControlPlaneURL = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_PRIVATE_NETWORK_ID"); v != "" {
+		cfg.Runtime.Scaleway.PrivateNetworkID = v
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_BUNDLE_TOKEN_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("SHINYHUB_RUNTIME_SCALEWAY_BUNDLE_TOKEN_TTL: %q must be a positive duration", v)
+		}
+		cfg.Runtime.Scaleway.BundleTokenTTL = d
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_DEFAULT_MEMORY_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_SCALEWAY_DEFAULT_MEMORY_MB: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Scaleway.DefaultMemoryMB = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_DEFAULT_MVCPU"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_SCALEWAY_DEFAULT_MVCPU: %q is not an integer: %w", v, err)
+		}
+		cfg.Runtime.Scaleway.DefaultMVCpu = n
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_SCALEWAY_DURABLE_DATA"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_SCALEWAY_DURABLE_DATA: %q is not a boolean: %w", v, err)
+		}
+		cfg.Runtime.Scaleway.DurableData = enabled
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DEFAULT_REPLICAS"); v != "" {
 		n, err := strconv.Atoi(v)

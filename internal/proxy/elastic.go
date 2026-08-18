@@ -215,6 +215,145 @@ func removeElasticWorker(pool *backendPool, slotID int) {
 	delete(pool.workers, slotID)
 }
 
+// ReconcileElasticWarmSpares converges an elastic pool on its configured count
+// of never-used warm workers. Missing spares are reserved and spawned; excess
+// spares are retired. Workers that have ever been assigned are never counted or
+// recycled, preventing state from crossing client identities.
+func (p *Proxy) ReconcileElasticWarmSpares(slug string) {
+	p.reconcileElasticWarmSpares(slug, nil)
+}
+
+// ReconcileElasticWarmSparesAtEpoch is the delayed-work variant. It no-ops if
+// Deregister has invalidated the pool generation since the retry was scheduled.
+func (p *Proxy) ReconcileElasticWarmSparesAtEpoch(slug string, epoch uint64) {
+	p.reconcileElasticWarmSpares(slug, &epoch)
+}
+
+func (p *Proxy) reconcileElasticWarmSpares(slug string, expectedEpoch *uint64) {
+	memOK := true
+	if g := p.memGuard.Load(); g != nil {
+		if availMB, ok := g.probe(); ok && availMB < g.minAvailableMB {
+			memOK = false
+		}
+	}
+
+	p.mu.Lock()
+	if expectedEpoch != nil && p.poolEpoch[slug] != *expectedEpoch {
+		p.mu.Unlock()
+		return
+	}
+	pool := p.pools[slug]
+	if pool == nil || !poolIsElastic(pool) {
+		p.mu.Unlock()
+		return
+	}
+	var spareIDs, retireableSpareIDs []int
+	active := 0
+	for id, w := range pool.workers {
+		if w.status != workerDraining {
+			active++
+		}
+		if w.spare && !w.everAssigned && w.assignedClients == 0 && w.status != workerDraining {
+			spareIDs = append(spareIDs, id)
+			if w.status == workerRunning || w.status == workerSuspended {
+				retireableSpareIDs = append(retireableSpareIDs, id)
+			}
+		}
+	}
+	sort.Ints(spareIDs)
+	sort.Ints(retireableSpareIDs)
+
+	var stopIDs []int
+	surplus := len(spareIDs) - pool.warmSpareTarget
+	for surplus > 0 && len(retireableSpareIDs) > 0 {
+		id := retireableSpareIDs[len(retireableSpareIDs)-1]
+		retireableSpareIDs = retireableSpareIDs[:len(retireableSpareIDs)-1]
+		if w := pool.workers[id]; w != nil {
+			w.status = workerDraining
+			stopIDs = append(stopIDs, id)
+			active--
+			surplus--
+		}
+	}
+
+	var spawnIDs []int
+	if memOK && p.spawn != nil {
+		missing := pool.warmSpareTarget - (len(spareIDs) - len(stopIDs))
+		for missing > 0 && active < pool.maxWorkers {
+			id := pool.allocateSlotID()
+			addElasticWorker(pool, &replicaBackend{
+				slotID: id,
+				status: workerBooting,
+				spare:  true,
+			})
+			spawnIDs = append(spawnIDs, id)
+			missing--
+			active++
+		}
+	}
+	spawn, terminate := p.spawn, p.terminate
+	p.mu.Unlock()
+
+	if terminate != nil {
+		for _, id := range stopIDs {
+			go terminate(slug, id)
+		}
+	}
+	if spawn != nil {
+		for _, id := range spawnIDs {
+			go spawn(slug, id)
+		}
+	}
+}
+
+// BeginElasticSpareSuspend atomically claims a booted, still-unassigned warm
+// reservation for freezing. While suspending it is not assignable, closing the
+// race between admission and the runtime's freeze operation.
+func (p *Proxy) BeginElasticSpareSuspend(slug string, slotID int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool := p.pools[slug]
+	if pool == nil {
+		return false
+	}
+	w := pool.workers[slotID]
+	if w == nil || !w.spare || w.everAssigned || w.assignedClients != 0 || w.status != workerBooting {
+		return false
+	}
+	w.status = workerSuspending
+	return true
+}
+
+// IsUnassignedElasticWarmSpare reports whether a slot is still a pristine
+// spare. Lifecycle uses it to avoid arming a client-lifetime timer before the
+// worker has actually been consumed.
+func (p *Proxy) IsUnassignedElasticWarmSpare(slug string, slotID int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool := p.pools[slug]
+	if pool == nil {
+		return false
+	}
+	w := pool.workers[slotID]
+	return w != nil && w.spare && !w.everAssigned && w.assignedClients == 0
+}
+
+// MarkElasticWorkerResumed makes a successfully thawed spare routable.
+func (p *Proxy) MarkElasticWorkerResumed(slug string, slotID int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool := p.pools[slug]
+	if pool == nil {
+		return false
+	}
+	w := pool.workers[slotID]
+	if w == nil || w.status != workerResuming {
+		return false
+	}
+	w.status = workerRunning
+	return true
+}
+
 // reserveWorker atomically allocates a booting slot for a new elastic worker.
 // It acquires the write lock, counts active (non-draining) workers, and
 // returns -1 when the pool is not elastic or already at maxWorkers. Otherwise
@@ -294,6 +433,8 @@ func (p *Proxy) bindClientLocked(slug, clientID string, slotID int) {
 	if pool != nil {
 		if w, ok := pool.workers[slotID]; ok {
 			w.assignedClients++
+			w.everAssigned = true
+			w.spare = false
 		}
 	}
 }
@@ -313,6 +454,7 @@ type placement struct {
 	slotID       int   // valid when kind == placedBind
 	deploymentID int64 // 0 while the bound worker is still booting
 	spawned      bool  // a new slot was reserved; the caller dispatches the spawn callback
+	resume       bool  // a suspended spare was claimed; dispatch the resume callback
 }
 
 // placeClient atomically places a fresh elastic client. It re-runs decide()
@@ -349,7 +491,11 @@ func (p *Proxy) placeClient(slug, clientID string, memOK bool) placement {
 	switch d.kind {
 	case decisionRoute, decisionBind:
 		w := pool.workers[d.slotID]
+		wasSuspended := w.status == workerSuspended
 		p.bindClientLocked(slug, clientID, d.slotID)
+		if wasSuspended {
+			w.status = workerResuming
+		}
 		if w.status == workerRunning {
 			// The worker became ready in the lock gap. The caller still serves
 			// the loading page (it reloads and routes within seconds), so arm
@@ -357,7 +503,7 @@ func (p *Proxy) placeClient(slug, clientID string, memOK bool) placement {
 			// already ran and will never see this binding.
 			p.armClientReleaseLocked(slug, clientID)
 		}
-		return placement{kind: placedBind, slotID: d.slotID, deploymentID: w.deploymentID}
+		return placement{kind: placedBind, slotID: d.slotID, deploymentID: w.deploymentID, resume: wasSuspended}
 	case decisionAllocate:
 		if !memOK {
 			return placement{kind: placedMemoryPressure}
@@ -623,6 +769,7 @@ type ElasticWorkerStatus struct {
 	Sessions     int    `json:"sessions"`
 	ActiveConns  int64  `json:"active_conns"`
 	DeploymentID int64  `json:"deployment_id,omitempty"`
+	WarmSpare    bool   `json:"warm_spare,omitempty"`
 }
 
 // ElasticPoolSnapshot is a point-in-time capacity view of an elastic pool:
@@ -631,6 +778,7 @@ type ElasticPoolSnapshot struct {
 	Mode              string // "grouped" or "per_session"
 	SessionsPerWorker int    // per-worker admission cap (grouped_size; always 1 for per_session)
 	MaxWorkers        int
+	WarmSpareTarget   int
 	Workers           []ElasticWorkerStatus // sorted by SlotID
 }
 
@@ -638,6 +786,12 @@ func (s workerStatus) label() string {
 	switch s {
 	case workerBooting:
 		return "booting"
+	case workerSuspending:
+		return "suspending"
+	case workerSuspended:
+		return "suspended"
+	case workerResuming:
+		return "resuming"
 	case workerDraining:
 		return "draining"
 	default:
@@ -661,6 +815,7 @@ func (p *Proxy) ElasticWorkersSnapshot(slug string) (ElasticPoolSnapshot, bool) 
 		Mode:              string(pool.mode),
 		SessionsPerWorker: perWorkerCap(pool.mode, pool.groupedSize),
 		MaxWorkers:        pool.maxWorkers,
+		WarmSpareTarget:   pool.warmSpareTarget,
 		Workers:           make([]ElasticWorkerStatus, 0, len(pool.workers)),
 	}
 	for _, w := range pool.workers {
@@ -670,6 +825,7 @@ func (p *Proxy) ElasticWorkersSnapshot(slug string) (ElasticPoolSnapshot, bool) 
 			Sessions:     w.assignedClients,
 			ActiveConns:  w.activeConns.Load(),
 			DeploymentID: w.deploymentID,
+			WarmSpare:    w.spare && !w.everAssigned,
 		})
 	}
 	sort.Slice(snap.Workers, func(i, j int) bool { return snap.Workers[i].SlotID < snap.Workers[j].SlotID })

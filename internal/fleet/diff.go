@@ -47,6 +47,7 @@ type ObservedApp struct {
 	WorkerIsolation              *string
 	WorkerGroupedSize            *int
 	WorkerMaxWorkers             *int
+	WorkerWarmSpares             *int
 	WorkerMaxSessionLifetimeSecs *int
 	ContentDigest                string
 	ManagedBy                    *string
@@ -265,6 +266,7 @@ func configDrift(app AppEntry, o ObservedApp) []ConfigDriftItem {
 	d = appendStringDrift(d, "worker_isolation", c.WorkerIsolation, o.WorkerIsolation)
 	d = appendIntDrift(d, "worker_grouped_size", c.WorkerGroupedSize, o.WorkerGroupedSize)
 	d = appendIntDrift(d, "worker_max_workers", c.WorkerMaxWorkers, o.WorkerMaxWorkers)
+	d = appendIntDrift(d, "worker_warm_spares", c.WorkerWarmSpares, o.WorkerWarmSpares)
 	d = appendIntDrift(d, "worker_max_session_lifetime_secs", c.WorkerMaxSessionLifetimeSecs, o.WorkerMaxSessionLifetimeSecs)
 	d = appendAutoscaleDrift(d, c.Autoscale, o.Autoscale)
 	return d

@@ -59,12 +59,14 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/sandbox"
+	scalewayruntime "github.com/rvben/shinyhub/internal/scaleway"
 	"github.com/rvben/shinyhub/internal/secrets"
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/ui"
 	"github.com/rvben/shinyhub/internal/upgrade"
 	"github.com/rvben/shinyhub/internal/worker"
+	"github.com/scaleway/scaleway-sdk-go/scw"
 	gopscpu "github.com/shirou/gopsutil/v4/cpu"
 	gopsmem "github.com/shirou/gopsutil/v4/mem"
 	"github.com/spf13/cobra"
@@ -96,18 +98,30 @@ var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Run the ShinyHub server",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := maybeRunInteractiveSetup(cmd); err != nil {
+		explicitConfig := cmd.Flags().Changed("config") || os.Getenv("SHINYHUB_CONFIG") != ""
+		setup, err := maybeRunInteractiveSetup(cmd)
+		if err != nil {
 			return err
+		}
+		if explicitConfig {
+			setup = nil
 		}
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
 		logger := logging.New()
 		slog.SetDefault(logger)
-		return runServe(ctx, logger)
+		return runServe(ctx, logger, serveOptions{
+			FirstRun:  setup,
+			NoBrowser: serveNoBrowser,
+			ErrOut:    cmd.ErrOrStderr(),
+		})
 	},
 }
 
-var backupOut string
+var (
+	backupOut      string
+	serveNoBrowser bool
+)
 
 var backupCmd = &cobra.Command{
 	Use:   "backup",
@@ -322,6 +336,7 @@ func serverConfigPath() string {
 
 func init() {
 	cli.SetVersion(version)
+	serveCmd.Flags().BoolVar(&serveNoBrowser, "no-browser", false, "Do not open a browser after interactive first-run setup")
 	backupCmd.Flags().StringVar(&backupOut, "out", "", "Destination archive path (.tar.gz)")
 	_ = backupCmd.MarkFlagRequired("out")
 	migrateBackendCmd.Flags().StringVar(&migrateTargetDSN, "to", "", "Target Postgres DSN (overrides SHINYHUB_TARGET_DSN)")
@@ -570,7 +585,7 @@ func isClustered(cfg *config.Config) bool {
 // (Postgres DSN) includes a local-only tier (native or docker). Local runtimes
 // bind loopback ports on a single host and cannot be reached by other CP
 // instances, so they must be refused at boot with a clear message directing the
-// operator to use an off-host tier (remote_docker or fargate).
+// operator to use an off-host tier (remote_docker or a managed cloud runtime).
 //
 // Single-node deployments (SQLite) are unaffected: native and docker tiers
 // continue to work unchanged.
@@ -582,7 +597,7 @@ func checkClusteredRuntimeTiers(cfg *config.Config) error {
 		if tier.Runtime == "native" || tier.Runtime == "docker" {
 			return fmt.Errorf(
 				"tier %q uses runtime %q, which is not supported in a clustered deployment "+
-					"(Postgres DSN detected); use an off-host runtime (remote_docker or fargate) instead",
+					"(Postgres DSN detected); use an off-host runtime (remote_docker, fargate, or scaleway_serverless) instead",
 				tier.Name, tier.Runtime,
 			)
 		}
@@ -592,8 +607,8 @@ func checkClusteredRuntimeTiers(cfg *config.Config) error {
 
 // buildRuntime constructs a process.Runtime for a single tier from its TierConfig.
 // Docker tiers share the daemon settings from cfg.Runtime.Docker; a burst tier
-// may therefore point at the same daemon under a distinct tier name. Fargate tiers
-// share cfg.Runtime.Fargate (one ECS cluster) but may use different launch types.
+// may therefore point at the same daemon under a distinct tier name. Managed
+// provider tiers share their provider-level configuration.
 // config.Load validates tier modes, so the default case is unreachable in production.
 func buildRuntime(ctx context.Context, tier config.TierConfig, cfg *config.Config, bundleTokenKey []byte) (process.Runtime, error) {
 	switch tier.Runtime {
@@ -624,6 +639,8 @@ func buildRuntime(ctx context.Context, tier config.TierConfig, cfg *config.Confi
 		return nativeRT, nil
 	case "fargate":
 		return buildFargateRuntime(ctx, cfg, tier, bundleTokenKey)
+	case "scaleway_serverless":
+		return buildScalewayRuntime(cfg, bundleTokenKey)
 	case "remote_docker":
 		// Handled upstream: remote tiers are registered via NewRemoteRuntime before
 		// RegisterRuntime; buildRuntime is not called for remote_docker tiers.
@@ -633,8 +650,8 @@ func buildRuntime(ctx context.Context, tier config.TierConfig, cfg *config.Confi
 	}
 }
 
-// deriveBundleTokenKey derives the 32-byte key used to mint and verify Fargate
-// bundle tokens. Key material comes from the same auth secret as all other
+// deriveBundleTokenKey derives the 32-byte key used to mint and verify managed
+// runtime bundle tokens. Key material comes from the same auth secret as all other
 // HKDF derivations, but with a distinct info string so the bundle key is
 // independent of the secrets-encryption key. Panics on failure (HKDF read of
 // 32 bytes is infallible).
@@ -730,6 +747,58 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 	}, slog.Default(), opts...), nil
 }
 
+// buildScalewayRuntime constructs a scale-to-zero runtime backed by Scaleway
+// Serverless Containers v1. Each replica keeps one private provider resource;
+// Scaleway suspends its instance after idle time and wakes it on the next proxy
+// request. The secret key authenticates both SDK calls and private-origin HTTP.
+func buildScalewayRuntime(cfg *config.Config, bundleTokenKey []byte) (process.Runtime, error) {
+	accessKey := strings.TrimSpace(os.Getenv("SCW_ACCESS_KEY"))
+	secretKey := strings.TrimSpace(os.Getenv("SCW_SECRET_KEY"))
+	if accessKey == "" || secretKey == "" {
+		return nil, fmt.Errorf("scaleway serverless runtime requires SCW_ACCESS_KEY and SCW_SECRET_KEY")
+	}
+
+	sc := cfg.Runtime.Scaleway
+	client, err := scw.NewClient(
+		scw.WithAuth(accessKey, secretKey),
+		scw.WithDefaultProjectID(sc.ProjectID),
+		scw.WithDefaultRegion(scw.Region(sc.Region)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create scaleway client: %w", err)
+	}
+	return scalewayruntime.New(scalewayruntime.NewSDKClient(client, sc.Region), scalewayruntime.Config{
+		Region:           sc.Region,
+		ProjectID:        sc.ProjectID,
+		NamespaceID:      sc.NamespaceID,
+		Image:            sc.Image,
+		NamePrefix:       sc.NamePrefix,
+		ControlPlaneURL:  sc.ControlPlaneURL,
+		BundleTokenKey:   bundleTokenKey,
+		BundleTokenTTL:   sc.BundleTokenTTL,
+		OriginToken:      secretKey,
+		PrivateNetworkID: sc.PrivateNetworkID,
+		DefaultMemoryMB:  sc.DefaultMemoryMB,
+		DefaultMVCpu:     sc.DefaultMVCpu,
+		DurableData:      sc.DurableData,
+	}, slog.Default())
+}
+
+// appResourceCleaners fans app deletion out to every configured managed cloud
+// backend. All cleanups are attempted so a transient provider failure cannot
+// prevent another provider from releasing its resources.
+type appResourceCleaners []process.AppResourceCleaner
+
+func (cleaners appResourceCleaners) CleanupApp(ctx context.Context, appID int64) error {
+	var errs []error
+	for _, cleaner := range cleaners {
+		if err := cleaner.CleanupApp(ctx, appID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // hostSampler samples PID-backed replicas (native) via gopsutil and reports
 // PID-less replicas (docker/remote/fargate handles, whose RunHandle carries a
 // ContainerID rather than a PID) as unmeasured without error: the zero Stats it
@@ -747,7 +816,7 @@ func (h *hostSampler) Sample(handle process.RunHandle) (process.Stats, error) {
 	return h.gops.Sample(handle)
 }
 
-func runServe(ctx context.Context, logger *slog.Logger) error {
+func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) error {
 	cfg, err := config.Load(serverConfigPath())
 	if err != nil {
 		return &cli.ExitCodeError{Code: 1, Kind: cli.KindValidation, Err: fmt.Errorf("load config: %w", err)}
@@ -1218,21 +1287,25 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	srv.SetSecretsKey(secretsKey)
 	srv.SetTraceBuffer(traceBuffer)
 
-	// When the Fargate secrets backend is configured, wire the per-app cleanup
-	// (delete Secrets Manager entries + deregister task-def revisions) that runs
-	// on app delete and on the startup tombstone reconcile. Every Fargate runtime
-	// instance shares the cluster-wide secrets config, so the first one suffices.
-	var fargateSecretsCleaner *fargate.Runtime
-	if cfg.Runtime.Fargate.SecretsNamePrefix != "" {
-		for _, tierName := range cfg.Runtime.TierOrder() {
-			if frt, ok := mgr.RuntimeForTier(tierName).(*fargate.Runtime); ok {
-				fargateSecretsCleaner = frt
-				break
-			}
+	// Wire retained provider-resource cleanup into both app deletion and startup
+	// tombstone reconciliation. Provider configuration is shared across tiers,
+	// so one cleaner per runtime mode covers all tiers without duplicate API calls.
+	var managedResourceCleaners appResourceCleaners
+	seenCleanerMode := make(map[string]bool)
+	for _, tierName := range cfg.Runtime.TierOrder() {
+		mode, _ := cfg.Runtime.RuntimeForTier(tierName)
+		if seenCleanerMode[mode] {
+			continue
 		}
+		cleaner, ok := mgr.RuntimeForTier(tierName).(process.AppResourceCleaner)
+		if !ok {
+			continue
+		}
+		managedResourceCleaners = append(managedResourceCleaners, cleaner)
+		seenCleanerMode[mode] = true
 	}
-	if fargateSecretsCleaner != nil {
-		srv.SetSecretsCleaner(fargateSecretsCleaner)
+	if len(managedResourceCleaners) > 0 {
+		srv.SetSecretsCleaner(managedResourceCleaners)
 	}
 	if workerReg != nil {
 		srv.SetNodeForTier(func(tier string) string {
@@ -1592,6 +1665,10 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	prx.SetSpawnFunc(func(slug string, slotID int) {
 		go elasticSpawner.Spawn(slug, slotID)
 	})
+	prx.SetResumeFunc(func(slug string, slotID int) {
+		go elasticSpawner.Resume(slug, slotID)
+	})
+	prx.SetWarmSpareConsumedFunc(elasticSpawner.WarmSpareConsumed)
 	prx.SetTerminateFunc(elasticSpawner.Terminate)
 
 	// Host-memory admission floor for elastic pools: while MemAvailable is
@@ -1704,28 +1781,27 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		watcher.SetTracer(tracer.Tracer())
 	}
 
-	// Wire lost-replica healing. For fargate tiers, ECS reachability is
-	// validated at startup so the gate is always-true (fargate tasks are
-	// never placed via a worker registry). For worker tiers, delegate to
-	// the registry. Mixed deployments (fargate burst + worker tiers) are
+	// Wire lost-replica healing. Managed cloud API reachability is validated at
+	// startup, so those tiers do not depend on a worker registry. For worker
+	// tiers, delegate to the registry. Mixed cloud + worker deployments are
 	// handled by the combined predicate.
 	//
-	// Note: persistent RunTask failures still consume the normal crash-restart
-	// budget, so always-true for fargate tiers cannot cause runaway
+	// Note: persistent provider failures still consume the normal crash-restart
+	// budget, so always-true for managed tiers cannot cause runaway
 	// re-placement.
-	hasFargateTier := false
+	hasManagedCloudTier := false
 	for _, name := range cfg.Runtime.TierOrder() {
 		mode, _ := cfg.Runtime.RuntimeForTier(name)
-		if mode == "fargate" {
-			hasFargateTier = true
+		if mode == "fargate" || mode == "scaleway_serverless" {
+			hasManagedCloudTier = true
 			break
 		}
 	}
-	if workerReg != nil || hasFargateTier {
+	if workerReg != nil || hasManagedCloudTier {
 		watcher.EnableLostReplicaHealing(func(tier string) bool {
 			mode, _ := cfg.Runtime.RuntimeForTier(tier)
-			if mode == "fargate" {
-				return true // ECS is always-reachable as a startup precondition
+			if mode == "fargate" || mode == "scaleway_serverless" {
+				return true // provider API is the placement authority
 			}
 			if workerReg != nil {
 				_, ok := workerReg.WorkerForTier(tier)
@@ -1735,11 +1811,11 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		})
 	}
 
-	// reconcileCleaner is captured by ownerWork for the owner-scoped reconcile so
-	// Fargate secrets are cleaned up only when this instance holds the lease.
+	// reconcileCleaner is captured by ownerWork for owner-scoped cleanup so only
+	// the lease holder mutates retained cloud resources.
 	var reconcileCleaner lifecycle.AppSecretsCleaner
-	if fargateSecretsCleaner != nil {
-		reconcileCleaner = fargateSecretsCleaner
+	if len(managedResourceCleaners) > 0 {
+		reconcileCleaner = managedResourceCleaners
 	}
 
 	// Worker-down monitor: object created here, loop started inside ownerWork.
@@ -2012,12 +2088,14 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 	mux.Handle("/activez", probeMethods(activezHandler(ownerAndReady)))
 	mux.Handle("/static/", ui.Handler())
 
-	// GET /internal/fargate-bundle/{digest} - streams the bundle zip to a Fargate
-	// task that presents a short-lived HMAC capability token as a bearer credential.
+	// GET /internal/runtime-bundle/{digest} streams a bundle to a managed runtime
+	// runner presenting a short-lived HMAC capability token. Keep the original
+	// Fargate route as a compatibility alias for already-deployed runner images.
 	// Mounted directly on the main mux (not under /api/) so large bundle streams
 	// are not subject to apiTimeoutHandler's 30-second cap.
 	fargateBundleHandler := api.NewFargateBundleHandler(store, cfg.Storage.AppsDir, bundleTokenKey)
 	internalMux := chi.NewRouter()
+	internalMux.Get("/runtime-bundle/{digest}", fargateBundleHandler.Handle)
 	internalMux.Get("/fargate-bundle/{digest}", fargateBundleHandler.Handle)
 	mux.Handle("/internal/", http.StripPrefix("/internal", internalMux))
 
@@ -2157,6 +2235,8 @@ func runServe(ctx context.Context, logger *slog.Logger) error {
 		scope.Stop()
 		return fmt.Errorf("sd_notify: %w", err)
 	}
+
+	startFirstRunExperience(ctx, logger, srv.Router(), store, cfg, ownerAndReady, serveOpts)
 
 	select {
 	case err := <-serveErr:
@@ -2523,7 +2603,8 @@ func isLargeUploadRoute(method, path string) bool {
 //
 //   - /app/* — the reverse proxy to app processes, which carries Shiny
 //     WebSockets and arbitrarily long streaming responses.
-//   - /internal/fargate-bundle/* — streams a deployment bundle (large body).
+//   - /internal/runtime-bundle/* — streams a deployment bundle (large body).
+//   - /internal/fargate-bundle/* — compatibility alias for older runners.
 //   - the long-lived /api/ routes enumerated by isLongLivedAPIRoute (SSE log
 //     streams, bundle uploads, lifecycle swaps, per-app data uploads).
 //
@@ -2534,6 +2615,8 @@ func needsUnboundedDeadline(method, path string) bool {
 	case strings.HasPrefix(path, "/app/"):
 		return true
 	case strings.HasPrefix(path, "/internal/fargate-bundle/"):
+		return true
+	case strings.HasPrefix(path, "/internal/runtime-bundle/"):
 		return true
 	case strings.HasPrefix(path, "/api/"):
 		return isLongLivedAPIRoute(method, path)

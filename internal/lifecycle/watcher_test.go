@@ -140,6 +140,8 @@ func (f *fakeProxy) SetPoolCap(slug string, max int) {
 func (f *fakeProxy) SetPoolAppID(_ string, _ int64)                               {}
 func (f *fakeProxy) SetPoolIdentityHeaders(_ string, _ bool)                      {}
 func (f *fakeProxy) SetPoolMode(_ string, _ config.WorkerIsolationMode, _, _ int) {}
+func (f *fakeProxy) SetPoolWarmSpares(_ string, _ int)                            {}
+func (f *fakeProxy) ReconcileElasticWarmSpares(_ string)                          {}
 
 type fakeStore struct {
 	mu                sync.Mutex

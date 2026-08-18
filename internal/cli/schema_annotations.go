@@ -187,6 +187,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		},
 		Notes: "Read-only: builds the local archive and makes only GET requests. --detailed-exitcode and --fail-on-changes exit 2 for new, changed, or unknown content; unchanged content exits 0.",
 	},
+	"plan show": {Mutating: ro, ArgTypes: map[string]string{"PLAN": "path"}},
+	"apply":     {Mutating: mut, ArgTypes: map[string]string{"PLAN": "path"}},
 	"deploy": {
 		Mutating: mut, Streaming: true,
 		ArgEnums: map[string][]string{
@@ -265,6 +267,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "effective_worker_isolation", Type: "string", Desc: "worker_isolation resolved against the fleet default, so never empty; read this to decide what the app's pool supports"},
 		{Name: "worker_grouped_size", Type: "integer", Desc: "Clients per grouped worker (>= 1 when isolation is grouped)"},
 		{Name: "worker_max_workers", Type: "integer", Desc: "Demand-driven worker ceiling for grouped/per_session modes"},
+		{Name: "worker_warm_spares", Type: "integer", Desc: "Never-used elastic workers kept prebooted; frozen and memory-reclaimed when snapshotting is available"},
 		{Name: "worker_max_session_lifetime_secs", Type: "integer", Desc: "Absolute worker lifetime in seconds (0 = unlimited)"},
 		{Name: "worker_pool", Type: "object", Desc: "Live elastic capacity view: {mode,sessions_per_worker,max_workers,ceiling,workers:[{slot_id,status,sessions,pid,port}]}; present only while a grouped/per_session pool exists"},
 		{Name: "render_seconds", Type: "number", Desc: "Cost of one page render in CPU-seconds; 0 disables render-aware admission pacing"},
@@ -745,5 +748,6 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"manifest validate": {Mutating: ro, Notes: "Validates shinyhub.toml [app] fields including memory_limit_mb (0 or 16-1048576 MiB) and cpu_quota_percent (0 or 1-6400; 100 = 1 core); out-of-range values are rejected with a clear message."},
 
 	// ── schema ────────────────────────────────────────────────────────────────
-	"schema": {Mutating: ro},
+	"schema":      {Mutating: ro},
+	"healthcheck": {Mutating: ro},
 }

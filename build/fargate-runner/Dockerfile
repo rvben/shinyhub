@@ -1,4 +1,4 @@
-# Reference Python Shiny runner for ShinyHub Fargate tasks.
+# Reference Python Shiny runner for ShinyHub managed container runtimes.
 # Based on the uv image that is also used by the Docker runtime's Python tier
 # (runtime.docker.images.python), keeping the dep-prep semantics in sync.
 # See entrypoint.sh for the fetch-verify-prep-exec sequence.

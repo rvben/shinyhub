@@ -161,6 +161,7 @@ func TestNeedsUnboundedDeadline(t *testing.T) {
 
 		// Fargate bundle stream — large response body.
 		{"fargate bundle", http.MethodGet, "/internal/fargate-bundle/sha256-abc", true},
+		{"managed runtime bundle", http.MethodGet, "/internal/runtime-bundle/sha256-abc", true},
 
 		// Delegates to the /api long-lived matrix.
 		{"api logs SSE", http.MethodGet, "/api/apps/myapp/logs", true},

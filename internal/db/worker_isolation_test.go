@@ -13,7 +13,7 @@ func TestApp_WorkerIsolationDefaults(t *testing.T) {
 	if got.WorkerIsolation != "multiplex" {
 		t.Errorf("WorkerIsolation = %q, want multiplex", got.WorkerIsolation)
 	}
-	if got.WorkerGroupedSize != 0 || got.WorkerMaxWorkers != 0 || got.WorkerMaxSessionLifetimeSecs != 0 {
+	if got.WorkerGroupedSize != 0 || got.WorkerMaxWorkers != 0 || got.WorkerWarmSpares != 0 || got.WorkerMaxSessionLifetimeSecs != 0 {
 		t.Errorf("worker numeric defaults not zero: %+v", got)
 	}
 }

@@ -2302,15 +2302,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const isolationSelect = document.getElementById('worker-isolation');
     const groupedSizeInput = document.getElementById('worker-grouped-size');
     const maxWorkersInput = document.getElementById('worker-max-workers');
+    const warmSparesInput = document.getElementById('worker-warm-spares');
     isolationSelect.value = app.worker_isolation || 'multiplex';
     isolationSelect.dataset.original = isolationSelect.value;
     isolationSelect.dataset.appStatus = String(app.status ?? '');
     isolationSelect.dataset.lifetimeSecs = app.worker_max_session_lifetime_secs != null ? String(app.worker_max_session_lifetime_secs) : '';
     groupedSizeInput.value = String(app.worker_grouped_size ?? 1);
     maxWorkersInput.value = String(app.worker_max_workers ?? 0);
+    warmSparesInput.value = String(app.worker_warm_spares ?? 0);
     isolationSelect.disabled = !canEdit;
     groupedSizeInput.disabled = !canEdit;
     maxWorkersInput.disabled = !canEdit;
+    warmSparesInput.disabled = !canEdit;
     updateWorkerCapacity();
 
     // Render pacing: one number, plus the server's advisory for what it implies
@@ -2897,8 +2900,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const groupedSizeRaw = document.getElementById('worker-grouped-size').value.trim();
     const maxWorkersRaw = document.getElementById('worker-max-workers').value.trim();
+    const warmSparesRaw = document.getElementById('worker-warm-spares').value.trim();
     const workerGroupedSize = parseInt(groupedSizeRaw, 10);
     const workerMaxWorkers = parseInt(maxWorkersRaw, 10);
+    const workerWarmSpares = parseInt(warmSparesRaw, 10);
+    if (!Number.isFinite(workerWarmSpares) || workerWarmSpares < 0 || workerWarmSpares > 1000) {
+      setError(errEl, 'Warm workers must be a whole number between 0 and 1000.');
+      return;
+    }
+    if (workerIsolation !== 'multiplex' && Number.isFinite(workerMaxWorkers) && workerWarmSpares > workerMaxWorkers) {
+      setError(errEl, 'Warm workers cannot exceed max workers.');
+      return;
+    }
     const lifetimeRaw = isolationSelect.dataset.lifetimeSecs;
     const workerMaxSessionLifetimeSecs = lifetimeRaw ? parseInt(lifetimeRaw, 10) : null;
 
@@ -2908,6 +2921,7 @@ document.addEventListener('DOMContentLoaded', () => {
       worker_isolation: workerIsolation,
       worker_grouped_size: Number.isFinite(workerGroupedSize) ? workerGroupedSize : 1,
       worker_max_workers: Number.isFinite(workerMaxWorkers) ? workerMaxWorkers : 0,
+      worker_warm_spares: workerWarmSpares,
     };
     if (workerMaxSessionLifetimeSecs !== null && Number.isFinite(workerMaxSessionLifetimeSecs)) {
       payload.worker_max_session_lifetime_secs = workerMaxSessionLifetimeSecs;
@@ -3785,6 +3799,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('worker-isolation').addEventListener('change', updateWorkerCapacity);
   document.getElementById('worker-grouped-size').addEventListener('input', updateWorkerCapacity);
   document.getElementById('worker-max-workers').addEventListener('input', updateWorkerCapacity);
+  document.getElementById('worker-warm-spares').addEventListener('input', updateWorkerCapacity);
 
   // Autoscale: enabling seeds sane bounds; bounds inputs + target-mode radios.
   document.querySelectorAll('input[name="autoscale-target-mode"]').forEach(r => {
@@ -3827,6 +3842,7 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('worker-isolation'),
       document.getElementById('worker-grouped-size'),
       document.getElementById('worker-max-workers'),
+      document.getElementById('worker-warm-spares'),
     ],
     'scaling-save-btn', 'scaling-dirty');
   registerSettingsSection('render',

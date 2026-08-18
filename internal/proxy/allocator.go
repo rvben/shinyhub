@@ -5,9 +5,12 @@ import "github.com/rvben/shinyhub/internal/config"
 type workerStatus int
 
 const (
-	workerRunning  workerStatus = iota
-	workerBooting               // slot reserved, reverse-proxy not yet installed
-	workerDraining              // draining existing clients, no new routing
+	workerRunning    workerStatus = iota
+	workerBooting                 // slot reserved, reverse-proxy not yet installed
+	workerSuspending              // ready spare is being frozen; not assignable
+	workerSuspended               // frozen/reclaimed spare; resume on assignment
+	workerResuming                // assigned frozen spare is being thawed
+	workerDraining                // draining existing clients, no new routing
 )
 
 type workerState struct {
@@ -42,9 +45,13 @@ func perWorkerCap(mode config.WorkerIsolationMode, groupedSize int) int {
 func decide(workers []workerState, mode config.WorkerIsolationMode, groupedSize, maxWorkers, pinnedSlot int) decision {
 	if pinnedSlot >= 0 {
 		for _, wkr := range workers {
-			if wkr.slotID == pinnedSlot && wkr.status != workerDraining {
-				return decision{kind: decisionRoute, slotID: pinnedSlot}
+			if wkr.slotID != pinnedSlot || wkr.status == workerDraining || wkr.status == workerSuspending {
+				continue
 			}
+			if wkr.status == workerSuspended {
+				return decision{kind: decisionBind, slotID: pinnedSlot}
+			}
+			return decision{kind: decisionRoute, slotID: pinnedSlot}
 		}
 	}
 	cap := perWorkerCap(mode, groupedSize)
@@ -57,6 +64,7 @@ func decide(workers []workerState, mode config.WorkerIsolationMode, groupedSize,
 	// reserve its own slot and the pool would shed at max_workers clients
 	// instead of the configured max_workers x grouped_size ceiling.
 	bestReady, bestReadyClients := -1, -1
+	bestSuspended := -1
 	bestBooting, bestBootingClients := -1, -1
 	active := 0
 	for _, wkr := range workers {
@@ -76,10 +84,28 @@ func decide(workers []workerState, mode config.WorkerIsolationMode, groupedSize,
 			if wkr.assignedClients > bestBootingClients {
 				bestBooting, bestBootingClients = wkr.slotID, wkr.assignedClients
 			}
+		case workerSuspended:
+			if bestSuspended < 0 {
+				bestSuspended = wkr.slotID
+			}
+		case workerResuming:
+			if wkr.assignedClients > bestBootingClients {
+				bestBooting, bestBootingClients = wkr.slotID, wkr.assignedClients
+			}
 		}
 	}
 	if bestReady >= 0 {
 		return decision{kind: decisionRoute, slotID: bestReady}
+	}
+	// A provisioning worker that already owns clients is an in-use group. Keep
+	// packing that group before consuming another pristine spare. Empty booting
+	// reservations are warm-spare candidates and remain lower priority than an
+	// already-suspended spare, which has completed its readiness check.
+	if bestBooting >= 0 && bestBootingClients > 0 {
+		return decision{kind: decisionBind, slotID: bestBooting}
+	}
+	if bestSuspended >= 0 {
+		return decision{kind: decisionBind, slotID: bestSuspended}
 	}
 	if bestBooting >= 0 {
 		return decision{kind: decisionBind, slotID: bestBooting}

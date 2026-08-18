@@ -245,7 +245,7 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 			}
 		case "replicas", "max_sessions_per_replica", "min_warm_replicas",
 			"memory_limit_mb", "cpu_quota_percent", "worker_grouped_size",
-			"worker_max_workers", "worker_max_session_lifetime_secs":
+			"worker_max_workers", "worker_warm_spares", "worker_max_session_lifetime_secs":
 			n, perr := strconv.Atoi(c.Desired)
 			if perr != nil {
 				return fmt.Errorf("app %s: invalid desired %s=%q: %w", slug, c.Key, c.Desired, perr)

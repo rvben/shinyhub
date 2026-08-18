@@ -66,6 +66,7 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 			Isolation:          config.WorkerIsolationMode(app.WorkerIsolation),
 			GroupedSize:        app.WorkerGroupedSize,
 			MaxWorkers:         app.WorkerMaxWorkers,
+			WarmSpares:         app.WorkerWarmSpares,
 			MaxSessionLifetime: app.WorkerMaxSessionLifetimeSecs,
 		}
 		if m.Worker != nil {
@@ -77,6 +78,9 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 			}
 			if m.Worker.MaxWorkers != nil {
 				ws.MaxWorkers = *m.Worker.MaxWorkers
+			}
+			if m.Worker.WarmSpares != nil {
+				ws.WarmSpares = *m.Worker.WarmSpares
 			}
 			if m.Worker.MaxSessionLifetimeSecs != nil {
 				ws.MaxSessionLifetime = *m.Worker.MaxSessionLifetimeSecs
@@ -125,7 +129,7 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 	// zero values below are inert because SetAutoscale gates the DB write.
 	// Resolve worker fields: nil pointer means "absent, leave stored value unchanged".
 	var workerIsolation string
-	var workerGroupedSize, workerMaxWorkers, workerMaxSessionLifetimeSecs int
+	var workerGroupedSize, workerMaxWorkers, workerWarmSpares, workerMaxSessionLifetimeSecs int
 	if m.Worker != nil {
 		if m.Worker.Isolation != nil {
 			workerIsolation = *m.Worker.Isolation
@@ -135,6 +139,9 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		}
 		if m.Worker.MaxWorkers != nil {
 			workerMaxWorkers = *m.Worker.MaxWorkers
+		}
+		if m.Worker.WarmSpares != nil {
+			workerWarmSpares = *m.Worker.WarmSpares
 		}
 		if m.Worker.MaxSessionLifetimeSecs != nil {
 			workerMaxSessionLifetimeSecs = *m.Worker.MaxSessionLifetimeSecs
@@ -182,6 +189,8 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		WorkerGroupedSize:            workerGroupedSize,
 		SetWorkerMaxWorkers:          m.Worker != nil && m.Worker.MaxWorkers != nil,
 		WorkerMaxWorkers:             workerMaxWorkers,
+		SetWorkerWarmSpares:          m.Worker != nil && m.Worker.WarmSpares != nil,
+		WorkerWarmSpares:             workerWarmSpares,
 		SetWorkerMaxSessionLifetime:  m.Worker != nil && m.Worker.MaxSessionLifetimeSecs != nil,
 		WorkerMaxSessionLifetimeSecs: workerMaxSessionLifetimeSecs,
 		SetIconEmoji:                 m.Icon != nil,
@@ -208,7 +217,7 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 	// deploy.Run (triggered by the caller's redeploy path) will set it again,
 	// but this call covers apps that are stopped or not yet deployed.
 	// Use the resolved manifest values (not app, which is the pre-write snapshot).
-	if m.Worker != nil && (m.Worker.Isolation != nil || m.Worker.GroupedSize != nil || m.Worker.MaxWorkers != nil) && s.proxy != nil {
+	if m.Worker != nil && (m.Worker.Isolation != nil || m.Worker.GroupedSize != nil || m.Worker.MaxWorkers != nil || m.Worker.WarmSpares != nil) && s.proxy != nil {
 		effectiveIsolation := app.WorkerIsolation
 		if workerIsolation != "" {
 			effectiveIsolation = workerIsolation
@@ -221,9 +230,14 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		if workerMaxWorkers != 0 {
 			effectiveMaxWorkers = workerMaxWorkers
 		}
+		effectiveWarmSpares := app.WorkerWarmSpares
+		if m.Worker.WarmSpares != nil {
+			effectiveWarmSpares = workerWarmSpares
+		}
 		s.proxy.SetPoolMode(app.Slug,
 			config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(effectiveIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
 			effectiveGroupedSize, effectiveMaxWorkers)
+		s.proxy.SetPoolWarmSpares(app.Slug, effectiveWarmSpares)
 	}
 	// Unconditional: a removed key must revert the live pool too (an
 	// atomic store; unconditional costs nothing).
@@ -580,6 +594,9 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 		if m.Worker.MaxWorkers != nil {
 			w["max_workers"] = *m.Worker.MaxWorkers
 		}
+		if m.Worker.WarmSpares != nil {
+			w["warm_spares"] = *m.Worker.WarmSpares
+		}
 		if m.Worker.MaxSessionLifetimeSecs != nil {
 			w["max_session_lifetime_secs"] = *m.Worker.MaxSessionLifetimeSecs
 		}
@@ -649,6 +666,9 @@ func manifestAppDetail(m deploy.AppSettings) string {
 		}
 		if m.Worker.MaxWorkers != nil {
 			w["max_workers"] = *m.Worker.MaxWorkers
+		}
+		if m.Worker.WarmSpares != nil {
+			w["warm_spares"] = *m.Worker.WarmSpares
 		}
 		if m.Worker.MaxSessionLifetimeSecs != nil {
 			w["max_session_lifetime_secs"] = *m.Worker.MaxSessionLifetimeSecs

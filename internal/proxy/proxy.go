@@ -293,6 +293,11 @@ type replicaBackend struct {
 	slotID          int
 	status          workerStatus
 	assignedClients int
+	// spare marks a never-used worker created to satisfy warmSpareTarget.
+	// everAssigned is sticky: once true, the worker is never recycled across
+	// client identities as a spare.
+	spare        bool
+	everAssigned bool
 }
 
 // backendPool holds a fixed-size slice of replicas for one slug.
@@ -322,11 +327,12 @@ type backendPool struct {
 	// Phase 1 worker-isolation additions. When mode != multiplex the pool is
 	// demand-driven: workers live in the map keyed by monotonic slotID, and
 	// replicas (the dense slice) is unused.
-	mode        config.WorkerIsolationMode
-	groupedSize int
-	maxWorkers  int
-	workers     map[int]*replicaBackend // slotID -> backend; nil for multiplex
-	nextSlotID  int
+	mode            config.WorkerIsolationMode
+	groupedSize     int
+	maxWorkers      int
+	warmSpareTarget int
+	workers         map[int]*replicaBackend // slotID -> backend; nil for multiplex
+	nextSlotID      int
 }
 
 // AccessLogEntry describes a single proxied request. It is passed to the
@@ -369,6 +375,7 @@ type (
 type Proxy struct {
 	mu          sync.RWMutex
 	pools       map[string]*backendPool
+	poolEpoch   map[string]uint64 // incremented whenever Deregister invalidates a pool generation
 	wakeTrigger func(slug string)
 	// appStatusFn reports an app's lifecycle status and (for a crashed app) its
 	// failure reason. When set, a no-backend miss for a "crashed" or "stopped"
@@ -489,6 +496,12 @@ type Proxy struct {
 	// page. Tasks 12/13 provide the real implementation; wire via SetSpawnFunc.
 	spawn func(slug string, slotID int)
 
+	// resume thaws a frozen warm spare after admission binds its first client.
+	resume func(slug string, slotID int)
+	// warmSpareConsumed notifies lifecycle when a pristine running spare is
+	// assigned without a resume, so its max-session-lifetime timer starts then.
+	warmSpareConsumed func(slug string, slotID int)
+
 	// memGuard is the optional host-memory admission floor for elastic pools:
 	// while the host reports less available memory than the floor, NO new
 	// worker is allocated (fresh sessions are shed with 503) but existing
@@ -542,6 +555,7 @@ func New() *Proxy {
 	// implicitly slowed by it (same pattern as SetWakeTrigger).
 	return &Proxy{
 		pools:                make(map[string]*backendPool),
+		poolEpoch:            make(map[string]uint64),
 		lastSeen:             make(map[string]time.Time),
 		wsReady:              make(map[string]struct{}),
 		firstServedAt:        make(map[string]time.Time),
@@ -552,6 +566,15 @@ func New() *Proxy {
 		appLimiters:          make(map[string]*admission.AppLimiter),
 		appliedRenderSeconds: make(map[string]float64),
 	}
+}
+
+// PoolEpoch identifies the current lifetime of a slug's routing pool. Delayed
+// controller work captures it so a retry from a prior deploy/stop cannot act on
+// a newly-created pool for the same slug.
+func (p *Proxy) PoolEpoch(slug string) uint64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.poolEpoch[slug]
 }
 
 // SetTerminateFunc registers the callback invoked (via a goroutine, never
@@ -574,6 +597,21 @@ func (p *Proxy) SetSpawnFunc(fn func(slug string, slotID int)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.spawn = fn
+}
+
+// SetResumeFunc registers the callback that thaws an assigned frozen spare.
+func (p *Proxy) SetResumeFunc(fn func(slug string, slotID int)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resume = fn
+}
+
+// SetWarmSpareConsumedFunc registers the callback invoked once when a running
+// (non-frozen fallback) warm spare receives its first client.
+func (p *Proxy) SetWarmSpareConsumedFunc(fn func(slug string, slotID int)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.warmSpareConsumed = fn
 }
 
 // SetMemoryGuard arms (or, with a non-positive floor or nil probe, disarms)
@@ -1284,6 +1322,27 @@ func (p *Proxy) SetPoolMode(slug string, mode config.WorkerIsolationMode, groupe
 	}
 }
 
+// SetPoolWarmSpares sets the desired count of never-used elastic workers kept
+// ready for immediate assignment. ReconcileElasticWarmSpares performs the
+// actual spawn/retire work separately so callers can update several pool knobs
+// atomically before provisioning begins.
+func (p *Proxy) SetPoolWarmSpares(slug string, warmSpares int) {
+	if warmSpares < 0 {
+		warmSpares = 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool, ok := p.pools[slug]
+	if !ok {
+		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		p.pools[slug] = pool
+	}
+	if pool.maxWorkers > 0 && warmSpares > pool.maxWorkers {
+		warmSpares = pool.maxWorkers
+	}
+	pool.warmSpareTarget = warmSpares
+}
+
 // SetPoolAppID records the numeric database primary key for the app that owns
 // slug's pool. The session reporter uses this to write replica_sessions rows
 // keyed by app_id without a DB lookup at snapshot time. Call this alongside
@@ -1473,6 +1532,16 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 // it is updated in-place to preserve assignedClients; a brand-new entry is
 // created only when the slot is absent (e.g. called out of order in tests).
 func (p *Proxy) RegisterElasticWorker(slug string, slotID int, targetURL string, base http.RoundTripper, deploymentID int64) error {
+	return p.registerElasticWorker(slug, slotID, targetURL, base, deploymentID, workerRunning)
+}
+
+// RegisterSuspendedElasticWorker installs the route metadata for a frozen warm
+// spare while leaving it unroutable until the resume callback succeeds.
+func (p *Proxy) RegisterSuspendedElasticWorker(slug string, slotID int, targetURL string, base http.RoundTripper, deploymentID int64) error {
+	return p.registerElasticWorker(slug, slotID, targetURL, base, deploymentID, workerSuspended)
+}
+
+func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string, base http.RoundTripper, deploymentID int64, readyStatus workerStatus) error {
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		return fmt.Errorf("register elastic %s#%d: invalid url: %w", slug, slotID, err)
@@ -1547,14 +1616,14 @@ func (p *Proxy) RegisterElasticWorker(slug string, slotID int, targetURL string,
 		existing.rp = rp
 		existing.targetURL = targetURL
 		existing.deploymentID = deploymentID
-		existing.status = workerRunning
+		existing.status = readyStatus
 	} else {
 		if pool.workers == nil {
 			pool.workers = make(map[int]*replicaBackend)
 		}
 		pool.workers[slotID] = &replicaBackend{
 			slotID:       slotID,
-			status:       workerRunning,
+			status:       readyStatus,
 			targetURL:    targetURL,
 			deploymentID: deploymentID,
 			rp:           rp,
@@ -1717,6 +1786,10 @@ func (p *Proxy) ReplicaDeploymentID(slug string, index int) int64 {
 // redeploy. Multiplex pools retain the previous behaviour (no callbacks).
 func (p *Proxy) Deregister(slug string) {
 	p.mu.Lock()
+	if p.poolEpoch == nil {
+		p.poolEpoch = make(map[string]uint64)
+	}
+	p.poolEpoch[slug]++
 	pool := p.pools[slug]
 	if pool != nil && poolIsElastic(pool) {
 		// Stop all pending client grace timers for this slug so they do not
@@ -2104,6 +2177,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Capture the spawn callback while holding the read lock so the read is
 		// race-free against SetSpawnFunc (which takes the write lock).
 		spawnFn := p.spawn
+		resumeFn := p.resume
+		warmSpareConsumedFn := p.warmSpareConsumed
 
 		cid, isNew := p.clientID(r, slug)
 		if isNew {
@@ -2143,15 +2218,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// branch below trust the read-lock snapshot: while the read lock is held
 			// a worker cannot be removed or change status (both need the write lock).
 			wkr := pool.workers[d.slotID]
-			if wkr == nil || wkr.status == workerBooting || wkr.status == workerDraining {
-				booting := wkr != nil && wkr.status == workerBooting
+			if wkr == nil || wkr.status != workerRunning {
+				waiting := wkr != nil && (wkr.status == workerBooting || wkr.status == workerResuming)
 				p.mu.RUnlock()
 				// A WebSocket upgrade cannot follow the loading page's reload
 				// loop: a non-101 hard-fails scripted clients that connect
 				// straight after their first response. Park the upgrade until
 				// the pinned worker registers (bounded by wsBootParkTTL,
 				// canceled when the client hangs up), then route it.
-				if booting && !parked && isWSUpgrade(r) && p.waitWorkerReady(r.Context(), slug, d.slotID) {
+				if waiting && !parked && isWSUpgrade(r) && p.waitWorkerReady(r.Context(), slug, d.slotID) {
 					parked = true
 					p.mu.RLock()
 					pool = p.pools[slug]
@@ -2195,7 +2270,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				wkr2 := pool2.workers[d.slotID]
-				if wkr2 == nil || wkr2.status == workerBooting || wkr2.status == workerDraining {
+				if wkr2 == nil || wkr2.status != workerRunning {
 					p.mu.Unlock()
 					p.serveMissPage(rec, slug, nil)
 					return
@@ -2212,6 +2287,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					cs = &clientSlot{slotID: d.slotID}
 					p.clients[slug][cid] = cs
 					wkr.assignedClients++
+					wasSpare := wkr.spare && !wkr.everAssigned
+					wkr.everAssigned = true
+					wkr.spare = false
+					if wasSpare {
+						if warmSpareConsumedFn != nil {
+							go warmSpareConsumedFn(slug, d.slotID)
+						}
+						go p.ReconcileElasticWarmSpares(slug)
+					}
 				}
 				wkr.activeConns.Add(1)
 				replicaIndex = wkr.slotID
@@ -2284,6 +2368,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if pl.spawned && spawnFn != nil {
 					go spawnFn(slug, pl.slotID)
 				}
+				if pl.resume && resumeFn != nil {
+					go resumeFn(slug, pl.slotID)
+				}
+				go p.ReconcileElasticWarmSpares(slug)
 				p.serveMissPage(rec, slug, nil)
 			case placedMemoryPressure:
 				p.recordReject(rec, slug, ReasonMemoryPressure, true)

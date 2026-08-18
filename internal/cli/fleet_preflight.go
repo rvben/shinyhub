@@ -193,6 +193,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			WorkerIsolation:              stringPtr(a.WorkerIsolation),
 			WorkerGroupedSize:            intPtr(a.WorkerGroupedSize),
 			WorkerMaxWorkers:             intPtr(a.WorkerMaxWorkers),
+			WorkerWarmSpares:             intPtr(a.WorkerWarmSpares),
 			WorkerMaxSessionLifetimeSecs: intPtr(a.WorkerMaxSessionLifetimeSecs),
 			ContentDigest:                a.ContentDigest,
 			ManagedBy:                    a.ManagedBy,
@@ -262,6 +263,7 @@ func bundleFleetConfig(a deploy.AppSettings) fleet.Config {
 		c.WorkerIsolation = a.Worker.Isolation
 		c.WorkerGroupedSize = a.Worker.GroupedSize
 		c.WorkerMaxWorkers = a.Worker.MaxWorkers
+		c.WorkerWarmSpares = a.Worker.WarmSpares
 		c.WorkerMaxSessionLifetimeSecs = a.Worker.MaxSessionLifetimeSecs
 	}
 	return c

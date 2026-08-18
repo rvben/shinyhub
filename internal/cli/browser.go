@@ -29,3 +29,10 @@ var openBrowserURL = func(target string) error {
 	}
 	return err
 }
+
+// OpenBrowserURL opens target in the operating system's default browser. The
+// caller should treat failure as a recoverable convenience failure and show a
+// copyable URL instead.
+func OpenBrowserURL(target string) error {
+	return openBrowserURL(target)
+}

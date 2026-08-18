@@ -14,12 +14,20 @@ type WorkerSettings struct {
 	Isolation          WorkerIsolationMode
 	GroupedSize        int
 	MaxWorkers         int
+	WarmSpares         int
 	MaxSessionLifetime int
 }
 
 const baseWorkerOverheadMB = 150 // base RSS + shared libs + page cache headroom
 
 func ValidateWorkerSettings(w WorkerSettings, clustered bool, effectiveMemMB, hostBudgetMB int) error {
+	// Warm-spare state is persisted even while multiplex ignores it, so enforce
+	// its storage-safe range before the isolation early return. This lets an
+	// operator preconfigure a future elastic switch without allowing a DB
+	// constraint failure to surface as a 500.
+	if w.WarmSpares < 0 || w.WarmSpares > 1000 {
+		return fmt.Errorf("worker.warm_spares must be between 0 and 1000")
+	}
 	switch w.Isolation {
 	case "", IsolationMultiplex:
 		return nil // multiplex ignores the other knobs
@@ -36,6 +44,9 @@ func ValidateWorkerSettings(w WorkerSettings, clustered bool, effectiveMemMB, ho
 	}
 	if w.MaxWorkers < 1 {
 		return fmt.Errorf("worker.max_workers must be >= 1 for %s", w.Isolation)
+	}
+	if w.WarmSpares > w.MaxWorkers {
+		return fmt.Errorf("worker.warm_spares=%d must be <= worker.max_workers=%d", w.WarmSpares, w.MaxWorkers)
 	}
 	if w.MaxSessionLifetime < 0 {
 		return fmt.Errorf("worker.max_session_lifetime must be >= 0 (0 = unlimited)")

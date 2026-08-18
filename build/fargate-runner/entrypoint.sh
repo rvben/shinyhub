@@ -1,5 +1,5 @@
 #!/bin/sh
-# ShinyHub Fargate reference runner - Python/uv.
+# ShinyHub managed-container reference runner - Python/uv.
 #
 # Env vars injected by the control plane (fargate.replicaEnv):
 #   SHINYHUB_CONTROL_PLANE_URL  - base URL of the control plane
@@ -25,11 +25,11 @@ BUNDLE_DIR=/app/bundle
 # Step 1: fetch the bundle from the control plane using the capability token.
 # The token is passed as a Bearer credential in the Authorization header so it
 # does not appear in reverse-proxy request logs (path parameter would be logged).
-# Endpoint: GET /internal/fargate-bundle/{digest}
+# Endpoint: GET /internal/runtime-bundle/{digest}
 echo "[shinyhub-runner] fetching bundle for ${SHINYHUB_SLUG:-unknown} digest=${SHINYHUB_CONTENT_DIGEST}"
 curl -fsSL \
     -H "Authorization: Bearer ${SHINYHUB_BUNDLE_TOKEN}" \
-    "${SHINYHUB_CONTROL_PLANE_URL}/internal/fargate-bundle/${SHINYHUB_CONTENT_DIGEST}" \
+    "${SHINYHUB_CONTROL_PLANE_URL}/internal/runtime-bundle/${SHINYHUB_CONTENT_DIGEST}" \
     -o "${BUNDLE_ZIP}"
 
 # Step 2: verify the SHA-256 digest of the downloaded zip before extracting.

@@ -178,6 +178,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			EffectiveWorkerIsolation         string   `json:"effective_worker_isolation"`
 			WorkerGroupedSize                int      `json:"worker_grouped_size"`
 			WorkerMaxWorkers                 int      `json:"worker_max_workers"`
+			WorkerWarmSpares                 int      `json:"worker_warm_spares"`
 			WorkerMaxSessionLifetimeSecs     int      `json:"worker_max_session_lifetime_secs"`
 		} `json:"app"`
 		RenderPacing *struct {
@@ -207,13 +208,15 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			Mode              string `json:"mode"`
 			SessionsPerWorker int    `json:"sessions_per_worker"`
 			MaxWorkers        int    `json:"max_workers"`
+			WarmSpareTarget   int    `json:"warm_spare_target"`
 			Ceiling           int    `json:"ceiling"`
 			Workers           []struct {
-				SlotID   int    `json:"slot_id"`
-				Status   string `json:"status"`
-				Sessions int    `json:"sessions"`
-				PID      int    `json:"pid"`
-				Port     int    `json:"port"`
+				SlotID    int    `json:"slot_id"`
+				Status    string `json:"status"`
+				Sessions  int    `json:"sessions"`
+				PID       int    `json:"pid"`
+				Port      int    `json:"port"`
+				WarmSpare bool   `json:"warm_spare"`
 			} `json:"workers"`
 		} `json:"worker_pool"`
 	}
@@ -262,6 +265,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 				fmt.Fprintf(w, " × %d sessions", a.WorkerGroupedSize)
 			}
 			fmt.Fprintln(w)
+			fmt.Fprintf(w, "Warm spares: %d\n", a.WorkerWarmSpares)
 		}
 	}
 	fmt.Fprintf(w, "Deploys:     %d\n", a.DeployCount)
@@ -277,6 +281,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			wp.Mode, wp.SessionsPerWorker, sessWord, wp.MaxWorkers)
 		fmt.Fprintf(w, "Admission ceiling: %d × %d = %d concurrent sessions\n",
 			wp.MaxWorkers, wp.SessionsPerWorker, wp.Ceiling)
+		fmt.Fprintf(w, "Warm spares: %d (frozen when snapshotting is available)\n", wp.WarmSpareTarget)
 	} else {
 		fmt.Fprintf(w, "Replicas:    %d desired · %d running\n", a.Replicas, actualReplicas)
 		// effective cap resolves the per-app value against the runtime default (0 =
@@ -426,24 +431,32 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	if wp := resp2.WorkerPool; wp != nil {
 		fmt.Fprintln(w, "")
 		if len(wp.Workers) == 0 {
-			fmt.Fprintln(w, "Workers:     none yet (spawned on demand)")
+			if wp.WarmSpareTarget > 0 {
+				fmt.Fprintln(w, "Workers:     none yet (warm spares provisioning)")
+			} else {
+				fmt.Fprintln(w, "Workers:     none yet (spawned on demand)")
+			}
 		} else {
 			bound := 0
 			for _, wk := range wp.Workers {
 				bound += wk.Sessions
 			}
 			fmt.Fprintf(w, "Workers:     %d live · %d/%d sessions\n", len(wp.Workers), bound, wp.Ceiling)
-			t := newTable("SLOT", "STATUS", "SESSIONS", "PID", "PORT").
-				alignRight(0, 2, 3, 4).indent(2)
+			t := newTable("SLOT", "STATUS", "WARM", "SESSIONS", "PID", "PORT").
+				alignRight(0, 3, 4, 5).indent(2)
 			for _, wk := range wp.Workers {
 				pid, port := "-", "-"
+				warm := "-"
+				if wk.WarmSpare {
+					warm = "yes"
+				}
 				if wk.PID != 0 {
 					pid = fmt.Sprintf("%d", wk.PID)
 				}
 				if wk.Port != 0 {
 					port = fmt.Sprintf("%d", wk.Port)
 				}
-				t.row(txt(wk.SlotID), statusTxt(wk.Status),
+				t.row(txt(wk.SlotID), statusTxt(wk.Status), txt(warm),
 					txt(fmt.Sprintf("%d/%d", wk.Sessions, wp.SessionsPerWorker)),
 					dimTxt(pid), dimTxt(port))
 			}
@@ -837,6 +850,7 @@ type appsSetFlags struct {
 	isolation             string
 	groupedSize           int
 	maxWorkers            int
+	warmSpares            int
 	maxSessionLifetime    int
 	ephemeralDataOk       bool
 	icon                  string
@@ -894,6 +908,8 @@ func newAppsSetCmd() *cobra.Command {
 		"Clients per worker when --isolation grouped (>= 1)")
 	cmd.Flags().IntVar(&f.maxWorkers, "max-workers", 0,
 		"Demand-driven worker ceiling for grouped/per_session (>= 1)")
+	cmd.Flags().IntVar(&f.warmSpares, "warm-spares", 0,
+		"Prebooted elastic workers kept ready; frozen and memory-reclaimed when snapshotting is available (0..max-workers)")
 	cmd.Flags().IntVar(&f.maxSessionLifetime, "max-session-lifetime", 0,
 		"Absolute worker lifetime in seconds (0 = unlimited)")
 	cmd.Flags().BoolVar(&f.ephemeralDataOk, "ephemeral-data-ok", false,
@@ -926,8 +942,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	isolationChanged := cmd.Flags().Changed("isolation")
 	groupedSizeChanged := cmd.Flags().Changed("grouped-size")
 	maxWorkersChanged := cmd.Flags().Changed("max-workers")
+	warmSparesChanged := cmd.Flags().Changed("warm-spares")
 	maxSessionLifetimeChanged := cmd.Flags().Changed("max-session-lifetime")
-	anyWorkerChanged := isolationChanged || groupedSizeChanged || maxWorkersChanged || maxSessionLifetimeChanged
+	anyWorkerChanged := isolationChanged || groupedSizeChanged || maxWorkersChanged || warmSparesChanged || maxSessionLifetimeChanged
 	ephemeralDataOkChanged := cmd.Flags().Changed("ephemeral-data-ok")
 	iconChanged := cmd.Flags().Changed("icon")
 	nameChanged := cmd.Flags().Changed("name")
@@ -984,6 +1001,12 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if minWarmReplicasChanged && (f.minWarmReplicas < 0 || f.minWarmReplicas > 1000) {
 		return fmt.Errorf("--min-warm-replicas must be between 0 and 1000")
+	}
+	if warmSparesChanged && (f.warmSpares < 0 || f.warmSpares > 1000) {
+		return fmt.Errorf("--warm-spares must be between 0 and 1000")
+	}
+	if warmSparesChanged && maxWorkersChanged && f.warmSpares > f.maxWorkers {
+		return fmt.Errorf("--warm-spares must be <= --max-workers")
 	}
 	if hibernateChanged && f.hibernateTimeout < -1 {
 		return fmt.Errorf("--hibernate-timeout must be -1 (reset to global default), 0 (disable), or a positive number of minutes")
@@ -1127,6 +1150,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if maxWorkersChanged {
 		payload["worker_max_workers"] = f.maxWorkers
+	}
+	if warmSparesChanged {
+		payload["worker_warm_spares"] = f.warmSpares
 	}
 	if maxSessionLifetimeChanged {
 		payload["worker_max_session_lifetime_secs"] = f.maxSessionLifetime

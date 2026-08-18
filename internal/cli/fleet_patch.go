@@ -140,6 +140,9 @@ func fleetConfigBody(c fleet.Config) map[string]any {
 	if c.WorkerMaxWorkers != nil {
 		body["worker_max_workers"] = *c.WorkerMaxWorkers
 	}
+	if c.WorkerWarmSpares != nil {
+		body["worker_warm_spares"] = *c.WorkerWarmSpares
+	}
 	if c.WorkerMaxSessionLifetimeSecs != nil {
 		body["worker_max_session_lifetime_secs"] = *c.WorkerMaxSessionLifetimeSecs
 	}

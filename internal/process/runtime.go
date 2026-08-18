@@ -38,7 +38,7 @@ var ErrExternalLogsThrottled = errors.New("external logs throttled")
 // returns a non-loopback URL here; local runtimes return http://127.0.0.1:<port>.
 type ReplicaEndpoint struct {
 	URL          string        // route URL, e.g. "http://127.0.0.1:34521"
-	Provider     string        // "native" | "docker" (future: "remote_docker" | "fargate")
+	Provider     string        // runtime provider, e.g. native, docker, fargate, scaleway_serverless
 	WorkerID     string        // stable identity: PID (stringified), container ID, task ARN
 	Handle       RunHandle     // operational handle
 	ExternalLogs *ExternalLogs // provider-owned log destination, when ShinyHub cannot stream output
@@ -131,8 +131,9 @@ type Runtime interface {
 // workers all back the data dir with a persistent host directory). Only the
 // Fargate runtime implements it, returning false unless a durable backend
 // (S3 Files, or an operator-asserted volume) is configured. The durable-data
-// guard consumes it via Manager.TierHasDurableDataFor to block deploying a
-// data-using app onto a tier that would silently lose its data.
+// Fargate and serverless runtimes implement it. The durable-data guard consumes
+// it via Manager.TierHasDurableDataFor to block deploying a data-using app onto
+// a tier that would silently lose its data.
 type DurableDataReporter interface {
 	// TierHasDurableData reports whether app-data on this tier survives task
 	// restart/hibernation and is shared across replicas.
@@ -161,12 +162,10 @@ type ReplicaTransporter interface {
 // another worker is not adopted with the wrong worker's URL, handle, and
 // transport.
 //
-// Running means "not stopped": for the Fargate runtime a task in PROVISIONING,
-// PENDING, or RUNNING state is reported as Running=true. Only STOPPED tasks
-// are Running=false. This is intentional: a Fargate task that has not yet
-// acquired an IP is not yet routable, but it is NOT gone and must not trigger
-// re-placement. Consumers that need "routable now" must check URL != "" in
-// addition to Running.
+// Running means "logically active", which is distinct from routability. For
+// Fargate, provisioning/pending tasks are active before they have an IP. For a
+// scale-to-zero service, the retained definition may be active while no backing
+// instance exists. Consumers that need "routable now" must also check URL != "".
 type InventoryItem struct {
 	ContainerID string
 	Labels      map[string]string
@@ -183,6 +182,31 @@ type InventoryItem struct {
 // uses it to reconcile remote tiers by deployment id instead of InspectPID.
 type ReplicaInventory interface {
 	Inventory(ctx context.Context) ([]InventoryItem, error)
+}
+
+// AppResourceCleaner is an optional capability for runtimes that persist
+// provider-owned resources beyond a replica's process lifetime. CleanupApp is
+// invoked when an app is deleted and by startup tombstone reconciliation. It
+// must be idempotent: a missing or already-deleted resource is success.
+type AppResourceCleaner interface {
+	CleanupApp(ctx context.Context, appID int64) error
+}
+
+// ManagedRuntime is the provider-neutral contract for remotely managed,
+// hibernatable replicas. A managed runtime can start and stop replicas through
+// Runtime, reconstruct live state after a control-plane restart through
+// ReplicaInventory, and remove retained provider resources when the app is
+// deleted through AppResourceCleaner.
+//
+// Providers may implement sleep differently. Fargate terminates the task;
+// request-driven serverless providers may retain the service definition while
+// their underlying instance scales to zero. Callers depend only on the
+// observable contract: after Signal+Wait the replica is no longer reported as
+// running, and a later Start makes it routable again.
+type ManagedRuntime interface {
+	Runtime
+	ReplicaInventory
+	AppResourceCleaner
 }
 
 // ErrRuntimeNotSnapshotter is returned (wrapped) by Manager.Suspend/Resume when
