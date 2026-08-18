@@ -11,7 +11,7 @@ and wake on demand. ShinyHub runs as a single Go binary backed by SQLite, with
 no external services to operate.
 
 <p align="center">
-  <img src="docs/images/dashboard.png" alt="ShinyHub dashboard showing the app grid with running apps and per-app CPU and memory" width="900">
+  <a href="https://demo.shinyhub.dev"><img src="docs/images/dashboard.jpg" alt="ShinyHub Demo launchpad grouping live identity, Python Shiny, R Shiny, Plotly Dash, and Streamlit applications" width="900"></a>
 </p>
 
 ## Contents
@@ -41,32 +41,44 @@ no external services to operate.
 - **Fleet reconcile.** Declare a whole set of apps in one `fleet.toml` and converge the server to match, kubectl-apply style. See [docs/fleet.md](docs/fleet.md).
 - **Observability.** OpenTelemetry tracing (proxy, app, and control-plane spans), an opt-in Prometheus `/metrics` endpoint, and a structured access log with request-ID and trace correlation. See [docs/tracing.md](docs/tracing.md) and [docs/metrics.md](docs/metrics.md).
 - **Container isolation (optional).** Run each app inside a Docker container with CPU and memory limits.
-- **Worker isolation.** Per-app session isolation dial: `multiplex` (shared event loop), `grouped` (N clients per worker), or `per_session` (one process per browser client, HOL-free). See [docs/isolation.md](docs/isolation.md).
+- **Managed cloud tiers.** Place replicas on AWS ECS/Fargate or private Scaleway Serverless Containers; Scaleway retains a stable endpoint and scales idle app compute to zero. See [docs/deployment/scaleway-serverless.md](docs/deployment/scaleway-serverless.md).
+- **Worker isolation.** Per-app session isolation dial: `multiplex` (shared event loop), `grouped` (N clients per worker), or `per_session` (one process per browser client, HOL-free), with optional frozen warm spares for low-latency assignment. See [docs/isolation.md](docs/isolation.md).
 - **Branding (white-label).** Customize the front door (title, logo, theme, landing page) without forking. See [docs/branding.md](docs/branding.md).
 - **Audit log.** Mutating actions recorded for admin review.
 - **Single binary, SQLite, no external dependencies.**
 
 ## Quick start
 
-The simplest way to run ShinyHub end to end is with
-[`uv`](https://docs.astral.sh/uv/): it installs and runs the server in one
-command, and it is also the runtime ShinyHub uses to launch Python apps, so once
-`uv` is on the host you have everything you need. For an isolated or production
-deployment use [Docker](#docker); for a standalone server binary see
-[Binary](#binary).
+The simplest way to run ShinyHub end to end is one command with
+[`uv`](https://docs.astral.sh/uv/). It is also the runtime ShinyHub uses to
+launch Python apps, so once `uv` is on the host you have everything you need.
+For an isolated or production deployment use [Docker](#docker); for a
+standalone server binary see [Binary](#binary).
 
 ### uv (recommended)
+
+```bash
+uvx shinyhub serve
+```
+
+On the first run, ShinyHub asks for an administrator username and password,
+creates a private loopback-only `shinyhub.yaml`, prepares the SQLite database,
+opens the dashboard, and deploys **ShinyHub Tour**—a real reactive Python Shiny
+app with bundled example data—through the normal build and runtime pipeline.
+Nothing sensitive is echoed. The database, bundles, and per-app data land under
+`./data/` by default and remain there across restarts.
+
+The example is added only when this interactive process creates a fresh local
+configuration and administrator. Existing installs, explicit `--config` runs,
+unattended setup, PostgreSQL, and non-loopback servers are never populated.
+Pass `--no-browser` to keep the browser closed.
+
+For regular use, install the same command once:
 
 ```bash
 uv tool install shinyhub
 shinyhub serve
 ```
-
-On the first run, ShinyHub asks for an administrator username and password,
-creates a private `shinyhub.yaml` with a cryptographically random secret, prepares
-the SQLite database, and then starts normally. Nothing sensitive is echoed. The
-database, bundles, and per-app data land under `./data/` by default. Open
-`http://localhost:8080` and sign in with the administrator you just created.
 
 Prefer setup and startup as separate steps? Run `shinyhub init`, inspect the
 summary, and then run `shinyhub serve`. Both paths are safe to rerun: existing

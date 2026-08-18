@@ -89,6 +89,7 @@ starts.
 | `readiness_status` | int 100..599 | Require this exact response status. When omitted, any 2xx or 3xx response is healthy. See [Readiness](#app-readiness). |
 | `identity_headers` | bool | Per-app identity-forwarding toggle. See [`[app] identity_headers`](#app-identity_headers) below. |
 | `autoscale` | inline table | Per-app session-saturation autoscale policy. See [`[app] autoscale`](#app-autoscale) below. |
+| `worker` | table | Elastic worker-isolation policy, including the warm-spare floor. See [`[app.worker]`](#appworker) below. |
 | `icon` | string | Single emoji app icon. See [`[app] icon`](#app-icon) below. |
 
 All fields are optional. Omitted database-backed fields are left untouched:
@@ -237,6 +238,37 @@ rejected, so an incomplete block can never silently persist an all-zero policy.
 Bounds are range-checked `0..1000` even when disabled, so a later re-enable never
 hits an out-of-range stored value. An unknown key inside the table fails the
 deploy under strict-mode parsing.
+
+### `[app.worker]`
+
+Declare how browser identities share worker processes. `grouped` and
+`per_session` are single-node elastic pools; see the full
+[worker-isolation guide](isolation.md#worker-isolation-session-isolation-dial).
+
+```toml
+[app.worker]
+isolation = "per_session"
+max_workers = 30
+warm_spares = 2
+max_session_lifetime_secs = 3600
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `isolation` | `multiplex`, `grouped`, or `per_session` | Session-sharing model. `multiplex` is the default. |
+| `grouped_size` | int >= 1 | Clients admitted to each worker in `grouped` mode. |
+| `max_workers` | int >= 1 | Hard elastic worker ceiling for `grouped` and `per_session`. |
+| `warm_spares` | int 0..`max_workers` | Healthy workers kept pristine for new clients. With snapshot support they are frozen and memory-reclaimed; otherwise they remain running. Default 0. |
+| `max_session_lifetime_secs` | int >= 0 | Absolute lifetime after a consumed worker is ready; 0 is unlimited. Waiting time as a pristine spare is not included. |
+
+The block is reconciled as a unit when present and left untouched when absent.
+Warm spares count toward `max_workers` and are never reused after serving a
+client. Frozen spares resume the same process; this is not copy-on-write process
+cloning.
+
+A replica is an outer app process. Workers live inside that runtime pool:
+`min_warm_replicas` counts replica processes, while `[app.worker].max_workers`
+and `warm_spares` count demand-driven workers within an elastic app pool.
 
 ### `[app] name` and `[app] description`
 

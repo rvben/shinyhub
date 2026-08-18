@@ -1,0 +1,125 @@
+[project]
+site_name = "ShinyHub"
+site_description = "Deploy and operate fast, reliable R and Python dashboards."
+site_author = "Ruben Jongejan"
+site_url = "https://shinyhub.dev/"
+copyright = """
+Copyright &copy; 2026 Ruben Jongejan
+"""
+
+repo_url = "https://github.com/rvben/shinyhub"
+repo_name = "rvben/shinyhub"
+edit_uri = "blob/main/docs/"
+
+extra_css = [
+  "https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap",
+  "stylesheets/extra.css",
+]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = [
+    { "Installation" = "getting-started/installation.md" },
+    { "Quick start" = "getting-started/quickstart.md" },
+    { "Local development" = "local-development.md" },
+    { "Doctor" = "doctor.md" },
+  ]},
+  { "Deploy applications" = [
+    { "Application manifest" = "manifest.md" },
+    { "Deployment plan" = "deployment-plan.md" },
+    { "Deployment progress" = "deploy-progress.md" },
+    { "Environment and secrets" = "environment.md" },
+    { "Persistent data" = "data.md" },
+    { "Scheduled jobs" = "schedules.md" },
+    { "Fleet reconciliation" = "fleet.md" },
+    { "Bundle filtering" = "recipes/bundle-filtering.md" },
+  ]},
+  { "Framework recipes" = [
+    { "R Shiny" = "recipes/r-shiny.md" },
+    { "Dash" = "recipes/dash.md" },
+    { "Streamlit" = "recipes/streamlit.md" },
+    { "Output caching" = "recipes/output-caching.md" },
+    { "Remote workers" = "recipes/remote-worker.md" },
+  ]},
+  { "Operate ShinyHub" = [
+    { "Configuration" = "configuration.md" },
+    { "Scaling" = "scaling.md" },
+    { "Application performance" = "app-performance.md" },
+    { "Isolation" = "isolation.md" },
+    { "Identity forwarding" = "identity.md" },
+    { "Native OIDC" = "native-oidc.md" },
+    { "Metrics" = "metrics.md" },
+    { "Tracing" = "tracing.md" },
+    { "Zero-downtime upgrades" = "zero-downtime-upgrades.md" },
+    { "Secret rotation" = "secret-rotation.md" },
+  ]},
+  { "Installation guides" = [
+    { "Docker Compose" = "deployment/docker-compose.md" },
+    { "systemd" = "deployment/systemd.md" },
+    { "AWS ECS and Fargate" = "deployment/aws-ecs.md" },
+    { "Scaleway Serverless" = "deployment/scaleway-serverless.md" },
+    { "High-availability data plane" = "deployment/ha-data-plane.md" },
+    { "SQLite to Postgres" = "deployment/sqlite-to-postgres.md" },
+    { "Reverse proxy overview" = "reverse-proxy/deploying-behind-a-proxy.md" },
+    { "Caddy" = "reverse-proxy/caddy.md" },
+    { "nginx" = "reverse-proxy/nginx.md" },
+    { "OIDC bridge" = "reverse-proxy/oidc-bridge.md" },
+  ]},
+  { "Reference" = [
+    { "CLI" = "cli.md" },
+    { "Several servers" = "hosts.md" },
+    { "Branding" = "branding.md" },
+    { "Load testing" = "load-testing.md" },
+    { "Managed runner contract" = "fargate-runner-contract.md" },
+    { "Security" = "security.md" },
+  ]},
+  { "Live demo" = "demo.md" },
+]
+
+[project.theme]
+language = "en"
+favicon = "images/favicon.svg"
+features = [
+  "content.action.edit",
+  "content.action.view",
+  "content.code.copy",
+  "content.code.select",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "search.share",
+  "search.suggest",
+]
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "blue"
+accent = "light-blue"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "blue"
+accent = "light-blue"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[project.theme.icon]
+logo = "lucide/sparkles"
+repo = "fontawesome/brands/github"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/rvben/shinyhub"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/python"
+link = "https://pypi.org/project/shinyhub/"

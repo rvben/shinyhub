@@ -7,6 +7,8 @@ ShinyHub is a self-hosted platform for deploying and managing Shiny apps
 users can install it with `pip` or `uv`:
 
 ```bash
+uvx shinyhub serve
+# or install it once:
 uv tool install shinyhub
 # or:
 pip install shinyhub
@@ -16,7 +18,7 @@ pip install shinyhub
 
 ```bash
 shinyhub --help                       # list subcommands
-shinyhub serve                        # run the server
+shinyhub serve                        # run the real local server
 shinyhub connect https://...          # pair through browser or SSO
 shinyhub deploy ./my-app --slug demo  # deploy an app
 ```

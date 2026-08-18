@@ -159,7 +159,7 @@ immutable run after the runtime lifecycle ends. See the
 
 Set the cluster, task definition, container, subnets, and optional network,
 region, command, and port variables documented in
-[`internal/fargate/integration_test.go`](../internal/fargate/integration_test.go).
+[`internal/fargate/integration_test.go`](https://github.com/rvben/shinyhub/blob/main/internal/fargate/integration_test.go).
 AWS credentials use the standard SDK chain (`AWS_PROFILE`, environment
 credentials, SSO, or an instance role). The principal needs permission to run,
 describe, list, tag, and stop tasks and to pass the task roles used by the task

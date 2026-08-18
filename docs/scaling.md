@@ -214,6 +214,18 @@ and `server.render_park_ttl` / `render_park_max_per_app` /
 
 ## Pre-warming
 
+ShinyHub has two distinct warm floors:
+
+- `min_warm_replicas` keeps multiplex replica processes available across app
+  idle periods and is also the horizontal autoscale floor described below.
+- `[app.worker].warm_spares` keeps pristine workers ready inside `grouped` or
+  `per_session` elastic pools. Those workers count toward `max_workers` and can
+  be frozen and memory-reclaimed until first use. See
+  [Worker isolation](isolation.md#worker-isolation-session-isolation-dial).
+
+They apply to different pool models; `warm_spares` is not an autoscaling signal
+and `min_warm_replicas` does not create isolated session workers.
+
 By default a hibernated app restarts on demand: the first request after an idle
 period waits for Python (or R) to start, and that user sees the "Loading..."
 page. `min_warm_replicas` changes this: instead of stopping every replica when
@@ -353,7 +365,7 @@ others in the same process.
 
 See [docs/isolation.md](isolation.md) for the full operator guide covering
 `multiplex`, `grouped`, and `per_session` modes, the config surface, and
-Phase 1 limitations.
+warm-spare behavior.
 
 ### Output caching
 
@@ -416,7 +428,7 @@ WARN native: cgroup base unavailable; warm-wake and resource limits disabled
 ShinyHub then **degrades gracefully**: apps still start and serve traffic
 normally (single-process, uncapped, hibernating via a cold stop instead of a
 warm freeze). Only warm-wake and per-app limits are off. The shipped unit
-[`deploy/systemd/shinyhub.service`](../deploy/systemd/shinyhub.service) already
+[`deploy/systemd/shinyhub.service`](https://github.com/rvben/shinyhub/blob/main/deploy/systemd/shinyhub.service) already
 includes the `Delegate=` line; if you hand-write or template your own unit, copy
 it across. After editing the unit run `systemctl daemon-reload` and restart the
 service.

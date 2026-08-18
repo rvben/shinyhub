@@ -163,8 +163,8 @@ performance isolation between concurrent users.
 | Mode | Clients per worker | HOL blocking | RAM scaling | Performance isolation | Governed by |
 |---|---|---|---|---|---|
 | `multiplex` (default) | Unbounded (all sessions share one process) | Yes - a heavy session stalls others | One process per replica; scales with `replicas` | None within a replica | `replicas`, `max_sessions_per_replica`, autoscale |
-| `grouped` | Up to `grouped_size` clients per worker | Reduced (only within the group) | One process per group; scales with active groups up to `max_workers` | Partial - groups are isolated from each other | `grouped_size`, `max_workers`, `max_session_lifetime_secs` |
-| `per_session` | 1 client per worker (one process per browser client) | Eliminated | One process per active client; scales with active clients up to `max_workers` | Full - each client runs in its own process | `max_workers`, `max_session_lifetime_secs` |
+| `grouped` | Up to `grouped_size` clients per worker | Reduced (only within the group) | One process per group, plus optional pristine `warm_spares`, up to `max_workers` | Partial - groups are isolated from each other | `grouped_size`, `max_workers`, `warm_spares`, `max_session_lifetime_secs` |
+| `per_session` | 1 client per worker (one process per browser client) | Eliminated | One process per active client, plus optional pristine `warm_spares`, up to `max_workers` | Full - each client runs in its own process | `max_workers`, `warm_spares`, `max_session_lifetime_secs` |
 
 `multiplex` is the historical mode and is unchanged by this feature. `grouped`
 and `per_session` are **elastic**: workers are started on demand and
@@ -181,7 +181,8 @@ single-node deployment (see caveats below).
 # Switch to per_session isolation with a ceiling of 30 workers
 shinyhub apps set <slug> \
   --isolation per_session \
-  --max-workers 30
+  --max-workers 30 \
+  --warm-spares 2
 
 # grouped: up to 5 clients per worker, ceiling 20 workers
 shinyhub apps set <slug> \
@@ -203,6 +204,7 @@ Verified CLI flags (`shinyhub apps set --help`):
 | `--isolation multiplex\|grouped\|per_session` | Session isolation mode |
 | `--grouped-size N` | Clients per worker when using `grouped` (>= 1) |
 | `--max-workers N` | Demand-driven worker ceiling for `grouped`/`per_session` (>= 1) |
+| `--warm-spares N` | Healthy, unused elastic workers kept ready (0..`max-workers`; default 0) |
 | `--max-session-lifetime SECS` | Absolute worker lifetime in seconds; 0 = unlimited |
 
 **Via PATCH API** (for tooling):
@@ -214,12 +216,13 @@ curl -X PATCH https://shinyhub.example.com/api/apps/<slug> \
   -d '{
     "worker_isolation": "per_session",
     "worker_max_workers": 30,
+    "worker_warm_spares": 2,
     "worker_max_session_lifetime_secs": 3600
   }'
 ```
 
 PATCH keys: `worker_isolation`, `worker_grouped_size`, `worker_max_workers`,
-`worker_max_session_lifetime_secs`.
+`worker_warm_spares`, `worker_max_session_lifetime_secs`.
 
 #### Via manifest (travels with the bundle)
 
@@ -229,6 +232,7 @@ Declare the policy in `shinyhub.toml` so it is reconciled on every deploy:
 [app.worker]
 isolation              = "per_session"
 max_workers            = 30
+warm_spares            = 2
 max_session_lifetime_secs = 3600
 ```
 
@@ -242,9 +246,10 @@ max_workers  = 20
 ```
 
 Manifest fields (`WorkerManifest`, `internal/deploy/hooks.go`):
-`isolation`, `grouped_size`, `max_workers`, `max_session_lifetime_secs`.
+`isolation`, `grouped_size`, `max_workers`, `warm_spares`,
+`max_session_lifetime_secs`.
 
-When the `[app.worker]` block is present, all four columns are reconciled on
+When the `[app.worker]` block is present, all five columns are reconciled on
 every deploy. Omitting the block leaves any previously-set value unchanged
 (same semantics as the `[app.autoscale]` block).
 
@@ -276,7 +281,7 @@ while its stored column says nothing.
 `host_budget_mb` enables the host-capacity guard (see below). Leave it at 0
 to disable the guard.
 
-### Caveats and limitations (Phase 1)
+### Caveats and limitations
 
 **`per_session` isolates the browser CLIENT, not the tab.** A "client" is a
 cookie identity. Multiple tabs in the same browser profile share a single
@@ -290,11 +295,29 @@ server itself boots normally; the error surfaces when you save the worker
 settings or deploy a manifest that sets the mode. `multiplex` retains full HA
 behavior and is unaffected.
 
-**Cold start per session (no warm pool yet).** In Phase 1 there is no warm
-pool. The first request from a new client cold-starts a fresh worker process
-and the user sees the "Loading..." page while it boots. Subsequent requests
-from the same client route to the warm worker. Warm spare pre-allocation is a
-Phase 2 item.
+**Warm spares remove the process boot from the request path.** With
+`warm_spares > 0`, ShinyHub continuously maintains that many healthy workers
+which have never served a client. The first new client atomically consumes a
+spare, and replenishment begins immediately, subject to `max_workers` and the
+runtime memory floor. With `warm_spares = 0` (the default), the first request
+still cold-starts a worker and sees the loading page while it boots.
+
+When `runtime.snapshot.enabled` is on and the selected runtime can reclaim the
+worker's cgroup memory, a ready spare is frozen and its resident memory is
+reclaimed to swap. Demand resumes that same process, checks readiness, and only
+then routes the client. If snapshot support is disabled or unavailable, the
+same policy degrades to a healthy running spare. This is deliberately **not
+copy-on-write cloning**: every spare is independently booted, and resume thaws
+the same PID/container. Post-initialization fork or CRIU-style cloning would
+need a much stricter application/runtime contract and is not implied by this
+setting.
+
+Warm spares count toward `max_workers`. A target of 2 with `max_workers = 30`
+leaves room for at most 28 simultaneously assigned workers while both spares
+are pristine. A spare is never recycled after serving an identity; it follows
+the normal disconnect/lifetime termination path. The absolute session lifetime
+timer starts after the consumed spare successfully resumes, not while it waits
+unused.
 
 **Cold bursts pack onto provisioning workers.** In `grouped` mode a new
 client is placed on the fullest worker that still has room under
@@ -313,8 +336,9 @@ browsers re-enter via the splash's reload loop, scripted clients cannot).
 If the boot exceeds the window the upgrade falls back to the loading page.
 
 **Per-worker capacity view.** `shinyhub apps show <slug>` renders the live
-worker table for elastic apps - slot, routing status (booting/running/
-draining), bound sessions against `grouped_size`, pid, port - plus the
+worker table for elastic apps - slot, routing status (booting/suspending/
+suspended/resuming/running/draining), warm-spare marker, bound sessions against
+`grouped_size`, pid, port - plus the
 admission-ceiling arithmetic, and `shinyhub apps metrics <slug>` adds
 per-worker CPU and RSS. The same data rides the app envelope (`worker_pool`)
 and the metrics poll consumed by the dashboard. Tune `grouped_size` and
@@ -381,14 +405,18 @@ cancels the reclaim and proceeds normally. `max_session_lifetime_secs` is
 therefore not the only reclaim path; the 15-second grace window handles the
 "seen the loading page, then disappeared" case independently.
 
-**Elastic workers are ephemeral.** They are NOT re-adopted on a server
-restart. The elastic pool starts empty after every restart. Connected clients
-will cold-start a new worker on their next request.
+**Assigned elastic workers are ephemeral.** They are NOT re-adopted on a server
+restart. Connected clients need a new worker on their next request. The
+configured pristine spare target is reconciled again during recovery, so a
+restarted host begins prebooting new spares without waiting for client demand.
 
 **Elastic apps skip fixed-replica booting at deploy.** For `grouped` and
-`per_session` apps, the deploy pipeline boots no replicas. The app is marked
-running, but there are no warm processes yet. Boot errors surface at
-first-session time, not at deploy time.
+`per_session` apps, the deploy pipeline boots no fixed replicas. The app is
+marked running, then any configured warm spares are provisioned asynchronously.
+Warm-spare boot errors are logged and replenishment retries automatically with
+backoff capped at one minute; they do not turn an otherwise prepared deployment
+into a failed deploy. With no usable spare, boot errors still surface at
+first-session time.
 
 **Recovering a previous bundle does not re-run preparation.** After a failed
 deploy, ShinyHub restores the previously-good bundle. That is an activation of a
@@ -425,31 +453,32 @@ be unattributable. The same runtime rule applies as everywhere else: under a
 container runtime the host does not prepare deps, so hooks are skipped and the
 skipped count is reported back to the developer.
 
-**Compute-idle reclaim is Phase 3.** There is currently no mechanism to
-suspend or throttle a live-but-idle worker in between requests. An allocated
-worker holds its full resource slice until the client disconnects (or
-`max_session_lifetime_secs` expires).
+**Assigned-worker compute-idle reclaim is not implemented.** Only pristine warm
+spares are eligible for freeze/reclaim. Once a worker has been assigned, it
+holds its resource slice until the client disconnects (or
+`max_session_lifetime_secs` expires); it is never returned to the spare pool.
 
 ### How to enable
 
 1. **Set the dial via CLI**:
 
    ```bash
-   shinyhub apps set myapp --isolation per_session --max-workers 20
+   shinyhub apps set myapp --isolation per_session --max-workers 20 --warm-spares 1
    ```
 
    The new routing policy is applied immediately, and any
    currently-connected sessions cold-start in their new worker on their
    next request.
 
-   On an app whose status is **running**, changing any worker dial also
-   triggers a redeploy in the background, which tears down and
-   re-registers the pool. Treat it as a pool restart rather than a
-   routing tweak: current sessions are dropped. It does **not** re-run
-   the dependency build or the manifest's post-deploy hooks, because the
-   bundle and its environment are unchanged. On a stopped or hibernated
-   app no redeploy is triggered and the change is a pure metadata
-   update.
+   On a **running** app, changing the isolation, group size, worker ceiling,
+   or lifetime triggers a redeploy in the background, which tears down and
+   re-registers the pool. Treat those changes as a pool restart: current
+   sessions are dropped. Changing only `warm_spares` is hot and preserves
+   assigned workers; the controller provisions or retires only pristine
+   spares. On a stopped or hibernated app every worker change is metadata-only
+   until the app starts. A settings-triggered redeploy does **not** re-run the
+   dependency build or manifest post-deploy hooks, because the bundle and its
+   environment are unchanged.
 
 2. **Or declare it in `shinyhub.toml`** (recommended for reproducible fleets):
 
@@ -457,6 +486,7 @@ worker holds its full resource slice until the client disconnects (or
    [app.worker]
    isolation   = "per_session"
    max_workers = 20
+   warm_spares = 1
    ```
 
    The block is reconciled on every subsequent deploy, so the policy
