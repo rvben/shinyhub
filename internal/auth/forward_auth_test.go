@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
@@ -792,7 +793,7 @@ func TestForwardAuth_InvalidProxySecret_LogsActionableWarnOnce(t *testing.T) {
 
 	sendRequest("")
 	logLine := buf.String()
-	for _, want := range []string{"missing or invalid proxy credential", "127.0.0.1", cfg.SecretHeader} {
+	for _, want := range []string{"without a valid proxy credential", "127.0.0.1", cfg.SecretHeader, "reason=missing"} {
 		if !strings.Contains(logLine, want) {
 			t.Fatalf("WARN log = %q, want %q", logLine, want)
 		}
@@ -805,6 +806,114 @@ func TestForwardAuth_InvalidProxySecret_LogsActionableWarnOnce(t *testing.T) {
 	sendRequest("wrong")
 	if strings.Contains(buf.String(), "forward_auth") {
 		t.Fatalf("WARN must not repeat for the same proxy IP, got: %s", buf.String())
+	}
+}
+
+func TestForwardAuth_ProxyCredentialFailure_BrowserGetsDeploymentPage(t *testing.T) {
+	cfg := ForwardAuthConfig{
+		Enabled:      true,
+		UserHeader:   "X-Forwarded-User",
+		SharedSecret: "01234567890123456789012345678901",
+		SecretHeader: "X-ShinyHub-Forward-Auth-Secret",
+		DefaultRole:  "developer",
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+
+	for _, tc := range []struct {
+		name     string
+		secret   string
+		wantLead string
+	}{
+		{name: "missing header", wantLead: "did not include the credential"},
+		{name: "mismatched value", secret: "wrong", wantLead: "could not verify"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next := &reachedHandler{}
+			mw := ForwardAuthMiddleware(newFakeStore(), cfg, trusted)(next)
+			req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+			req.RemoteAddr = "127.0.0.1:5555"
+			req.Header.Set(cfg.UserHeader, "alice")
+			req.Header.Set("Sec-Fetch-Mode", "navigate")
+			if tc.secret != "" {
+				req.Header.Set(cfg.SecretHeader, tc.secret)
+			}
+			rec := httptest.NewRecorder()
+
+			mw.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", rec.Code)
+			}
+			if next.called {
+				t.Fatal("downstream handler was called for an unverified proxy")
+			}
+			if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+				t.Fatalf("Content-Type = %q, want HTML", got)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("Cache-Control = %q, want no-store", got)
+			}
+			if got := rec.Header().Get("X-Robots-Tag"); got != "noindex" {
+				t.Fatalf("X-Robots-Tag = %q, want noindex", got)
+			}
+			if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "style-src 'sha256-") || !strings.Contains(csp, "default-src 'none'") {
+				t.Fatalf("Content-Security-Policy = %q, want a locked-down inline-style hash", csp)
+			}
+			body := rec.Body.String()
+			for _, want := range []string{
+				"Reverse proxy setup incomplete",
+				cfg.SecretHeader,
+				"auth.forward_auth.shared_secret",
+				"header_up",
+				tc.wantLead,
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("body does not contain %q", want)
+				}
+			}
+			if strings.Contains(body, cfg.SharedSecret) {
+				t.Fatal("deployment page leaked the configured proxy secret")
+			}
+		})
+	}
+}
+
+func TestForwardAuth_ProxyCredentialFailure_APIResponseIsMachineReadable(t *testing.T) {
+	cfg := ForwardAuthConfig{
+		Enabled:      true,
+		UserHeader:   "X-Forwarded-User",
+		SharedSecret: "01234567890123456789012345678901",
+		SecretHeader: "X-ShinyHub-Forward-Auth-Secret",
+		DefaultRole:  "developer",
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+	mw := ForwardAuthMiddleware(newFakeStore(), cfg, trusted)(&reachedHandler{})
+	req := httptest.NewRequest(http.MethodPost, "/api/apps", nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set(cfg.UserHeader, "alice")
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+
+	mw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := payload["code"]; got != "forward_auth_secret_header_missing" {
+		t.Errorf("code = %q, want forward_auth_secret_header_missing", got)
+	}
+	if !strings.Contains(payload["message"], cfg.SecretHeader) {
+		t.Errorf("message = %q, want configured header name", payload["message"])
+	}
+	if strings.Contains(rec.Body.String(), cfg.SharedSecret) {
+		t.Fatal("API response leaked the configured proxy secret")
 	}
 }
 

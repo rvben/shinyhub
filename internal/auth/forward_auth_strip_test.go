@@ -86,8 +86,8 @@ func TestForwardAuth_TrustedPeerMustPresentProxySecret(t *testing.T) {
 		wantStatus int
 		wantUser   bool
 	}{
-		{name: "missing", wantStatus: http.StatusForbidden},
-		{name: "wrong", secret: "wrong", wantStatus: http.StatusForbidden},
+		{name: "missing", wantStatus: http.StatusServiceUnavailable},
+		{name: "wrong", secret: "wrong", wantStatus: http.StatusServiceUnavailable},
 		{name: "valid", secret: cfg.SharedSecret, wantStatus: http.StatusOK, wantUser: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -136,13 +136,19 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				if err != nil {
 					host = r.RemoteAddr
 				}
+				missing := proxySecret == ""
+				reason := "mismatch"
+				if missing {
+					reason = "missing"
+				}
 				if _, alreadyWarned := invalidSecretPeers.LoadOrStore(host, struct{}{}); !alreadyWarned {
-					slog.Warn("forward_auth: trusted proxy asserted a user with a missing or invalid proxy credential; configure the proxy to overwrite the secret header",
+					slog.Warn("forward_auth: trusted proxy asserted a user without a valid proxy credential; configure the proxy to overwrite the secret header",
 						"peer", host,
 						"secret_header", cfg.SecretHeader,
+						"reason", reason,
 					)
 				}
-				http.Error(w, "forward auth: proxy authentication failed", http.StatusForbidden)
+				writeForwardAuthProxyError(w, r, cfg.SecretHeader, missing)
 				return
 			}
 
