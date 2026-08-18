@@ -530,12 +530,18 @@ type ManifestApplied struct {
 	Schedules          []ManifestScheduleResult    `json:"schedules,omitempty"`
 	AccessGroups       []ManifestAccessGroupResult `json:"access_groups,omitempty"`
 	IconShadowedUpload bool                        `json:"icon_shadowed_upload,omitempty"`
+	// Warnings are advisories about settings the manifest declared that were
+	// accepted but cannot take effect as written (for example a keep-warm
+	// floor under elastic isolation). The deploy itself succeeded; the CLI
+	// prints each one so the operator learns it at deploy time rather than
+	// from a health wait that never ends.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // IsEmpty reports whether nothing was applied. The handler omits the field
 // from the response in that case so the wire shape stays clean.
 func (m *ManifestApplied) IsEmpty() bool {
-	return m == nil || (len(m.App) == 0 && len(m.Schedules) == 0 && len(m.AccessGroups) == 0)
+	return m == nil || (len(m.App) == 0 && len(m.Schedules) == 0 && len(m.AccessGroups) == 0 && len(m.Warnings) == 0)
 }
 
 // manifestAppliedSummary computes the per-field record of [app] changes. It

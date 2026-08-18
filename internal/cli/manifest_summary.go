@@ -28,6 +28,7 @@ func formatManifestSummary(raw any) []string {
 	if warn := formatIconShadowWarning(raw); warn != "" {
 		lines = append(lines, warn)
 	}
+	lines = append(lines, formatManifestWarnings(raw)...)
 	if schedules, ok := m["schedules"].([]any); ok && len(schedules) > 0 {
 		created, updated := 0, 0
 		for _, s := range schedules {
@@ -109,6 +110,40 @@ func formatIconShadowWarning(raw any) string {
 	icon, _ := app["icon"].(string)
 	return fmt.Sprintf("Note: [app] icon %q is now shown instead of this app's uploaded image.\n"+
 		"      The image is still stored. Set icon = \"\" in shinyhub.toml to use it.", icon)
+}
+
+// formatManifestWarnings turns the manifest block's "warnings" list (server
+// advisories about declared settings that were accepted but cannot take
+// effect as written) into one "Note: ..." line each, or nil when there are
+// none. Older servers omit the field, so this stays silent for them. The
+// deploy succeeded, so these are notes rather than errors, but they are the
+// only place the operator learns at deploy time that a knob is inert.
+func formatManifestWarnings(raw any) []string {
+	var lines []string
+	for _, text := range manifestWarningTexts(raw) {
+		lines = append(lines, "Note: "+text)
+	}
+	return lines
+}
+
+// manifestWarningTexts returns the manifest block's non-empty warning strings
+// verbatim, for the JSON result, or nil when the block or field is absent.
+func manifestWarningTexts(raw any) []string {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	items, ok := m["warnings"].([]any)
+	if !ok {
+		return nil
+	}
+	var texts []string
+	for _, item := range items {
+		if text, ok := item.(string); ok && text != "" {
+			texts = append(texts, text)
+		}
+	}
+	return texts
 }
 
 // formatAppFields renders the [app] summary map as `key=value; key=value` in

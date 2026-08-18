@@ -118,6 +118,13 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility, project string, out 
 		if warn := formatIconShadowWarning(deployResp["manifest"]); warn != "" {
 			fmt.Fprintf(out, "  %s: %s\n", slug, warn)
 		}
+		// Server advisories about declared-but-inert settings (for example a
+		// keep-warm floor under elastic isolation). Printed before the health
+		// wait so the operator reads why an app will sit at idle instead of
+		// discovering it from the wait itself.
+		for _, warn := range formatManifestWarnings(deployResp["manifest"]) {
+			fmt.Fprintf(out, "  %s: %s\n", slug, warn)
+		}
 	}
 
 	// Bundle accepted: from here on the deploy is committed even if a

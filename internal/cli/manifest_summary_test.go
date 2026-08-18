@@ -175,3 +175,35 @@ func TestFormatHookExecutionSummary(t *testing.T) {
 		t.Errorf("old/no-hook response should stay silent, got %q", got)
 	}
 }
+
+// TestFormatManifestSummaryWarnings asserts the manifest block's warnings list
+// is rendered as one "Note: ..." line each, placed with the other advisories,
+// and that an absent or malformed field stays silent (older servers omit it).
+func TestFormatManifestSummaryWarnings(t *testing.T) {
+	raw := map[string]any{
+		"app": map[string]any{"min_warm_replicas": float64(1)},
+		"warnings": []any{
+			"min_warm_replicas=1 has no effect under worker.isolation=grouped",
+			"",
+			42,
+		},
+	}
+	lines := formatManifestSummary(raw)
+	want := []string{
+		"Applied [app] settings: min_warm_replicas=1",
+		"Note: min_warm_replicas=1 has no effect under worker.isolation=grouped",
+	}
+	if !reflect.DeepEqual(lines, want) {
+		t.Errorf("got %q, want %q", lines, want)
+	}
+
+	if got := formatManifestWarnings(map[string]any{"app": map[string]any{}}); got != nil {
+		t.Errorf("absent warnings must be silent, got %q", got)
+	}
+	if got := formatManifestWarnings(map[string]any{"warnings": "not a list"}); got != nil {
+		t.Errorf("malformed warnings must be silent, got %q", got)
+	}
+	if got := formatManifestWarnings(nil); got != nil {
+		t.Errorf("nil manifest must be silent, got %q", got)
+	}
+}

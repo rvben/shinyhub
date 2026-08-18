@@ -452,3 +452,145 @@ func TestPatchApp_InheritedElasticIsolationGuardsMemoryLimit(t *testing.T) {
 		t.Error("inherited elastic app with guard disarmed: expected a warning")
 	}
 }
+
+// TestPatchApp_MinWarmReplicasUnderElasticWarns pins the keep-warm advisory:
+// a floor set on an elastic app is accepted (the request succeeds and the
+// value persists, since it applies again under multiplex) but the response
+// carries an X-ShinyHub-Warning naming the floor, the isolation mode, and
+// worker.warm_spares as the knob that pre-boots elastic workers.
+func TestPatchApp_MinWarmReplicasUnderElasticWarns(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	rec := patchWorkerApp(t, srv, token,
+		[]byte(`{"worker_isolation":"grouped","worker_grouped_size":4,"worker_max_workers":3}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Fatalf("elastic isolation with no floor must not warn, got %q", warn)
+	}
+
+	rec = patchWorkerApp(t, srv, token, []byte(`{"min_warm_replicas":1}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	warn := rec.Header().Get("X-ShinyHub-Warning")
+	if warn == "" {
+		t.Fatal("expected X-ShinyHub-Warning for min_warm_replicas on a grouped app")
+	}
+	for _, needle := range []string{"min_warm_replicas=1", "worker.isolation=grouped", "worker.warm_spares"} {
+		if !strings.Contains(warn, needle) {
+			t.Errorf("warning %q should mention %q", warn, needle)
+		}
+	}
+	app, _ := store.GetAppBySlug("wapp")
+	if app.MinWarmReplicas != 1 {
+		t.Errorf("MinWarmReplicas = %d, want 1 (the floor is accepted, not rejected)", app.MinWarmReplicas)
+	}
+}
+
+// TestPatchApp_IsolationSwitchOntoFloorWarns covers the other order: the
+// floor is already stored and the request switches isolation to elastic. The
+// combination is what is inert, so whichever side arrives last must warn.
+func TestPatchApp_IsolationSwitchOntoFloorWarns(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	rec := patchWorkerApp(t, srv, token, []byte(`{"min_warm_replicas":2}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Fatalf("a floor on a multiplex app is effective and must not warn, got %q", warn)
+	}
+
+	rec = patchWorkerApp(t, srv, token,
+		[]byte(`{"worker_isolation":"per_session","worker_max_workers":2}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	warn := rec.Header().Get("X-ShinyHub-Warning")
+	if !strings.Contains(warn, "min_warm_replicas=2") || !strings.Contains(warn, "worker.isolation=per_session") {
+		t.Errorf("switching to per_session over a stored floor should warn about it, got %q", warn)
+	}
+
+	// Switching back to multiplex makes the floor effective again: silent.
+	rec = patchWorkerApp(t, srv, token, []byte(`{"worker_isolation":"multiplex"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Errorf("returning to multiplex must not warn, got %q", warn)
+	}
+}
+
+// TestPatchApp_UnrelatedPatchOnInertFloorStaysSilent pins the scope of the
+// advisory: it is attached to the request that produces the inert combination,
+// not to every later PATCH of an app that happens to hold one. Otherwise a
+// rename would keep repeating a warning the operator already saw.
+func TestPatchApp_UnrelatedPatchOnInertFloorStaysSilent(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	rec := patchWorkerApp(t, srv, token,
+		[]byte(`{"min_warm_replicas":1,"worker_isolation":"grouped","worker_grouped_size":4,"worker_max_workers":3}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn == "" {
+		t.Fatal("setting both sides of the inert combination in one request must warn")
+	}
+
+	rec = patchWorkerApp(t, srv, token, []byte(`{"name":"Renamed"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Errorf("a rename must not repeat the keep-warm advisory, got %q", warn)
+	}
+}
+
+// TestPatchApp_WarningsJoinIntoOneHeader pins that two advisories on the same
+// response arrive in a single X-ShinyHub-Warning value: the CLI and dashboard
+// read the header with Get, which returns only the first value, so a second
+// value would be silently dropped.
+func TestPatchApp_WarningsJoinIntoOneHeader(t *testing.T) {
+	srv, store := newWorkerFloorServer(t, 0)
+	_, token := seedWorkerApp(t, store)
+
+	rec := patchWorkerApp(t, srv, token,
+		[]byte(`{"min_warm_replicas":1,"worker_isolation":"per_session","worker_max_workers":2}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := len(rec.Header().Values("X-ShinyHub-Warning")); n != 1 {
+		t.Fatalf("expected exactly one X-ShinyHub-Warning value, got %d: %v", n, rec.Header().Values("X-ShinyHub-Warning"))
+	}
+	warn := rec.Header().Get("X-ShinyHub-Warning")
+	if !strings.Contains(warn, "memory guard") {
+		t.Errorf("joined warning should carry the memory-guard advisory, got %q", warn)
+	}
+	if !strings.Contains(warn, "min_warm_replicas=1") {
+		t.Errorf("joined warning should carry the keep-warm advisory, got %q", warn)
+	}
+}
+
+// TestPatchApp_RejectedRequestCarriesNoWarning pins that advisories ride only
+// on a successful PATCH. The body below earns the keep-warm advisory (a floor
+// on a grouped app) but is rejected further down the handler because it sets
+// both replicas and placement; the 400 must not carry X-ShinyHub-Warning, or
+// a client that reads the header before the status would report a warning
+// about a change that never happened.
+func TestPatchApp_RejectedRequestCarriesNoWarning(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+
+	rec := patchWorkerApp(t, srv, token, []byte(`{"worker_isolation":"grouped","worker_grouped_size":4,"worker_max_workers":3,"min_warm_replicas":1,"replicas":2,"placement":null}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for replicas+placement in one request, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if warn := rec.Header().Get("X-ShinyHub-Warning"); warn != "" {
+		t.Fatalf("rejected PATCH must not carry an advisory, got %q", warn)
+	}
+}

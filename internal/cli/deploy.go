@@ -524,6 +524,11 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 				result[key] = value
 			}
 		}
+		// Server advisories about declared-but-inert manifest settings; a JSON
+		// consumer must not have to parse the human summary to learn them.
+		if warnings := manifestWarningTexts(appResp["manifest"]); len(warnings) > 0 {
+			result["warnings"] = warnings
+		}
 		if err := json.NewEncoder(stdOut).Encode(result); err != nil {
 			return err
 		}
