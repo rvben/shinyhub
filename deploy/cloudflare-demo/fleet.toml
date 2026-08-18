@@ -1,0 +1,78 @@
+fleet_id = "shinyhub-cloudflare-demo"
+
+[[project]]
+slug = "featured"
+name = "Featured demos"
+description = "Interactive examples running in the live Cloudflare-hosted demo."
+icon = "✦"
+
+[[project]]
+slug = "frameworks"
+name = "Framework gallery"
+description = "One ShinyHub deployment workflow across Python and R frameworks."
+icon = "🧩"
+
+[[app]]
+slug = "operations-dashboard"
+source = "./apps/operations-dashboard"
+visibility = "public"
+
+  [app.config]
+  name = "Operations dashboard"
+  description = "Explore a synthetic service fleet with live capacity and latency controls."
+  project = "featured"
+  hibernate_timeout_minutes = 10
+  replicas = 1
+  max_sessions_per_replica = 6
+
+[[app]]
+slug = "r-shiny-gallery"
+source = "./apps/r-shiny-gallery"
+visibility = "public"
+
+  [app.config]
+  name = "R Shiny explorer"
+  description = "Filter and inspect the built-in mtcars dataset in a compact R Shiny app."
+  project = "frameworks"
+  hibernate_timeout_minutes = 10
+  replicas = 1
+  max_sessions_per_replica = 6
+
+[[app]]
+slug = "dash-demo"
+source = "./apps/dash-demo"
+visibility = "public"
+
+  [app.config]
+  name = "Plotly Dash"
+  description = "A minimal Dash app served behind ShinyHub's app proxy."
+  project = "frameworks"
+  hibernate_timeout_minutes = 10
+  replicas = 1
+  max_sessions_per_replica = 6
+
+[[app]]
+slug = "streamlit-demo"
+source = "./apps/streamlit-demo"
+visibility = "public"
+
+  [app.config]
+  name = "Streamlit"
+  description = "A small Streamlit application using the same lifecycle controls."
+  project = "frameworks"
+  hibernate_timeout_minutes = 10
+  replicas = 1
+  max_sessions_per_replica = 6
+
+[[app]]
+slug = "identity-demo"
+source = "./apps/identity-demo"
+visibility = "public"
+
+  [app.config]
+  name = "Identity forwarding"
+  description = "Inspect the trusted identity context ShinyHub passes to an application."
+  project = "featured"
+  hibernate_timeout_minutes = 10
+  replicas = 1
+  max_sessions_per_replica = 6

@@ -1,0 +1,11 @@
+{
+  "canvas": "#060914",
+  "surface": "#0e1426",
+  "surfaceRaised": "#141b32",
+  "surfaceHover": "#1b2444",
+  "line": "#2b3a63",
+  "text": "#e8eeff",
+  "textSoft": "#a8b4d4",
+  "accent": "#13b8a6",
+  "accentBright": "#5eead4"
+}

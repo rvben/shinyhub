@@ -19,6 +19,8 @@ node_modules/
 # (default config writes the SQLite DB and per-app data under ./data).
 /shinyhub.yaml
 /data/
+/site/
+/deploy/demo/.env
 *.db
 *.db-shm
 *.db-wal

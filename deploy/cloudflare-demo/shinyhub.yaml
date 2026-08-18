@@ -1,0 +1,56 @@
+database:
+  driver: sqlite
+  dsn: /data/shinyhub.db
+
+server:
+  host: 0.0.0.0
+  port: 8081
+  base_url: https://demo.shinyhub.dev
+  app_origin: https://apps.demo.shinyhub.dev
+  trusted_proxies:
+    - 127.0.0.0/8
+    - ::1/128
+  shutdown_apps: adopt
+
+auth:
+  secret: replaced-by-SHINYHUB_AUTH_SECRET
+  local_login: true
+  oauth_default_role: viewer
+  operator_audit_access: false
+
+storage:
+  version_retention: 1
+  app_quota_mb: 256
+  max_bundle_mb: 32
+
+runtime:
+  mode: native
+  default_replicas: 1
+  max_replicas: 1
+  default_max_sessions_per_replica: 6
+  default_worker_isolation: multiplex
+
+lifecycle:
+  watch_interval: 15s
+  restart_max_attempts: 3
+  hibernate_timeout: 10m
+
+defaults:
+  app_visibility: private
+  timezone: Europe/Amsterdam
+
+maintenance:
+  audit_retention_days: 7
+  schedule_run_retention_count: 10
+  app_log_run_retention_count: 5
+  interval: 1h
+
+branding:
+  site_title: ShinyHub Demo
+  theme:
+    primary_color: "#13b8a6"
+  footer_links:
+    - label: Documentation
+      url: https://shinyhub.dev
+    - label: GitHub
+      url: https://github.com/rvben/shinyhub

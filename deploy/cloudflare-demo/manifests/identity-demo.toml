@@ -1,0 +1,5 @@
+[app]
+command = ["python", "-m", "shiny", "run", "app.py", "--host", "{host}", "--port", "{port}"]
+memory_limit_mb = 384
+cpu_quota_percent = 100
+identity_headers = true

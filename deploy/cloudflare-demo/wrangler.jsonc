@@ -1,0 +1,43 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "shinyhub-demo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "demo.shinyhub.dev",
+      "custom_domain": true
+    },
+    {
+      "pattern": "apps.demo.shinyhub.dev",
+      "custom_domain": true
+    }
+  ],
+  "containers": [
+    {
+      "class_name": "ShinyHubDemo",
+      "image": "./Dockerfile",
+      "image_build_context": "../..",
+      "max_instances": 1,
+      "instance_type": "standard-1"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SHINYHUB_DEMO",
+        "class_name": "ShinyHubDemo"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ShinyHubDemo"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

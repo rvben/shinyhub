@@ -1,0 +1,81 @@
+name: shinyhub-demo
+
+services:
+  init-perms:
+    image: busybox:1.36
+    restart: "no"
+    volumes:
+      - ${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}:${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}
+      - shinyhub-db:/data/db
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/apps" \
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/app-data"
+        chown -R 65532:65532 \
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/apps" \
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/app-data" \
+                 /data/db
+
+  shinyhub:
+    image: ${SHINYHUB_IMAGE:?Pin SHINYHUB_IMAGE in .env}
+    container_name: shinyhub-demo
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      init-perms:
+        condition: service_completed_successfully
+    group_add:
+      - "${DOCKER_GID:-0}"
+    volumes:
+      - ./shinyhub.yaml:/etc/shinyhub/shinyhub.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}:${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}
+      - shinyhub-db:/data/db
+    environment:
+      SHINYHUB_AUTH_SECRET: ${SHINYHUB_AUTH_SECRET:?Set SHINYHUB_AUTH_SECRET in .env}
+      SHINYHUB_DEPLOY_TOKEN: ${SHINYHUB_DEPLOY_TOKEN:?Set SHINYHUB_DEPLOY_TOKEN in .env}
+      SHINYHUB_DEPLOY_TOKEN_ROLE: admin
+      SHINYHUB_GITHUB_CLIENT_ID: ${SHINYHUB_GITHUB_CLIENT_ID:?Set SHINYHUB_GITHUB_CLIENT_ID in .env}
+      SHINYHUB_GITHUB_CLIENT_SECRET: ${SHINYHUB_GITHUB_CLIENT_SECRET:?Set SHINYHUB_GITHUB_CLIENT_SECRET in .env}
+      SHINYHUB_GITHUB_CALLBACK_URL: https://demo.shinyhub.dev/api/auth/github/callback
+      SHINYHUB_APPS_DIR: ${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/apps
+      SHINYHUB_APP_DATA_DIR: ${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/app-data
+      SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON: ${SHINYHUB_PYTHON_IMAGE:?Pin SHINYHUB_PYTHON_IMAGE in .env}
+      SHINYHUB_RUNTIME_DOCKER_IMAGE_R: ${SHINYHUB_R_IMAGE:?Pin SHINYHUB_R_IMAGE in .env}
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    container_name: shinyhub-demo-caddy
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    depends_on:
+      - shinyhub
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
+
+volumes:
+  shinyhub-db:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,4 @@
+[app]
+command = ["python", "app.py", "--port", "{port}", "--host", "{host}"]
+memory_limit_mb = 384
+cpu_quota_percent = 100

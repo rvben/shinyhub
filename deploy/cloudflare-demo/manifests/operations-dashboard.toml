@@ -1,0 +1,5 @@
+[app]
+command = ["python", "-m", "shiny", "run", "app.py", "--host", "{host}", "--port", "{port}"]
+memory_limit_mb = 512
+cpu_quota_percent = 100
+render_seconds = 0.2
