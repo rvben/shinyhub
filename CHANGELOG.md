@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.15](https://github.com/rvben/shinyhub/compare/v0.11.14...v0.11.15) - 2026-08-18
+
+### Added
+
+- **ui**: explain an inert Keep warm floor under elastic isolation ([87e8fcd](https://github.com/rvben/shinyhub/commit/87e8fcd1ee7debb8d934340b24e8ec681667c727))
+- **api**: warn when min_warm_replicas is inert under elastic isolation ([c5cad29](https://github.com/rvben/shinyhub/commit/c5cad29e2d421b7e2c07338372f8d66d668b5a4a))
+
+### Fixed
+
+- **cli**: route the apps set keep-warm confirmation through the output renderer ([5503b65](https://github.com/rvben/shinyhub/commit/5503b65b4b33ddd477c3137dc6e42b389283f1e0))
+- **cli**: accept idle as healthy when waiting for elastic apps ([d6ea35e](https://github.com/rvben/shinyhub/commit/d6ea35e80a1f30eef2a1abefdf20c27b8e500d19))
+- **api**: report elastic pools by live worker state and count idle apps ([aa3f899](https://github.com/rvben/shinyhub/commit/aa3f89984d63b62dffef1da1306bff7fa4622b87))
+
 ## [0.11.14](https://github.com/rvben/shinyhub/compare/v0.11.13...v0.11.14) - 2026-08-18
 
 ### Added
