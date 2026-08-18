@@ -255,9 +255,11 @@ func TestTransportAdvice_WordingPerShape(t *testing.T) {
 			KindNetwork,
 		},
 		{
-			"unrecognised shape keeps its own cause",
+			// net/http sometimes returns this unexported sentinel instead of EOF
+			// for the same close-before-response race.
+			"server closed idle connection",
 			errors.New("http: server closed idle connection"),
-			"cannot reach the ShinyHub server at https://shinyhub.example: http: server closed idle connection",
+			"the connection to the ShinyHub server at https://shinyhub.example closed before it answered",
 			KindNetwork,
 		},
 	}

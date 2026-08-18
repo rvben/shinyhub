@@ -2383,8 +2383,8 @@ func TestDetailTabsScrollAffordanceOnMobile(t *testing.T) {
 		"the tab strip must fade clipped edges via a data-overflow mask")
 	assertContains(t, "views/app-detail.js", "data-overflow",
 		"app-detail.js must maintain the data-overflow hint on the tab strip")
-	assertContains(t, "views/app-detail.js", "scrollIntoView({ inline: 'center', block: 'nearest' })",
-		"the active tab must scroll into view on a scrollable strip")
+	assertContains(t, "views/app-detail.js", "tabStripScrollTarget({",
+		"the active tab must be centered with the testable scroll-target helper")
 }
 
 // TestDetailTabsAreFolderTabs guards the elevated folder-tab styling: tabs must

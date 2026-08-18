@@ -111,7 +111,7 @@ func transportAdvice(err error, server string, timeout time.Duration) (msg, hint
 			"check the server's TLS certificate", KindNetwork
 	}
 
-	if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
+	if connectionClosedBeforeAnswering(err) {
 		return fmt.Sprintf("the connection to the ShinyHub server at %s closed before it answered", server),
 			"the server, or a proxy in front of it, dropped the connection; check the server's logs",
 			KindNetwork
@@ -125,6 +125,23 @@ func transportAdvice(err error, server string, timeout time.Duration) (msg, hint
 		cause = ue.Err
 	}
 	return fmt.Sprintf("cannot reach the ShinyHub server at %s: %s", server, cause), targetHint(), KindNetwork
+}
+
+// connectionClosedBeforeAnswering recognises the equivalent shapes net/http
+// can return when the peer accepts a connection and closes it without a
+// response. errServerClosedIdle is an unexported net/http sentinel, so its
+// stable standard-library message is the only available discriminator.
+func connectionClosedBeforeAnswering(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	for err != nil {
+		if err.Error() == "http: server closed idle connection" {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
 
 // targetHint names the thing the operator can change to point somewhere else,
