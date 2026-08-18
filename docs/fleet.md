@@ -258,6 +258,38 @@ reflects the worst outcome.
 | `--allow-unsafe-degraded-prune` | Permit prune against a server without precondition support, accepting a documented race (see [Degraded mode](#degraded-mode)). |
 | `--json` | Emit the machine-readable result envelope. |
 | `-q/--quiet` | Collapse to the summary plus result line. |
+| `--provenance auto\|none` | Detect CI attribution (default) or intentionally omit it. |
+
+### Deployment provenance
+
+On servers that advertise the `fleet_provenance` capability, `fleet apply`
+registers one immutable run before it makes any changes. Every deployment and
+audit event produced by that apply carries the run ID, so the dashboard can
+link the live version and deployment history back to its source.
+
+GitLab CI works without extra credentials. In `auto` mode the CLI reads
+GitLab's predefined `CI_PIPELINE_*`, `CI_JOB_*`, `CI_COMMIT_*`, and
+`CI_MERGE_REQUEST_*` variables. It stores a bounded snapshot containing the
+pipeline, job, commit/ref, and optional merge request links; ShinyHub does not
+call the GitLab API or store a GitLab token.
+
+Provider-neutral overrides are available for other CI systems:
+
+```
+shinyhub fleet apply \
+  --source-provider buildkite \
+  --source-label "Production pipeline #812" \
+  --source-url "https://buildkite.example/pipelines/812" \
+  --revision "$GIT_COMMIT" \
+  --revision-ref "$GIT_BRANCH"
+```
+
+The full override set is `--source-provider`, `--source-label`,
+`--source-url`, `--job-label`, `--job-url`, `--revision`, `--revision-ref`,
+`--revision-url`, `--change-label`, and `--change-url`. Links must use HTTPS.
+Use `--provenance=none` to opt out; it cannot be combined with explicit
+provenance flags. Older servers simply receive the existing run header and
+continue normally without attribution.
 
 `--prune` is guarded: when prune candidates exist and prune will actually
 run, an interactive run asks you to type the word `prune` to confirm.
@@ -326,3 +358,8 @@ control surface; there is no apply, prune, or drift action in the UI.
   now*, not a conformance signal: it does not by itself tell you whether the
   app matches the manifest. Run `fleet plan` for that. The UI labels the
   value accordingly so it is not mistaken for a drift indicator.
+- **Deployment source.** A quiet header strip identifies the pipeline that
+  produced the live version, with commit/ref and optional merge request
+  context. Deployment history repeats this source per release. Rows created
+  before provenance tracking say so explicitly rather than implying an
+  unknown pipeline.

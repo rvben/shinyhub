@@ -113,6 +113,7 @@ func (s *Server) audit(r *http.Request, action, resourceType, resourceID, detail
 		ResourceID:   resourceID,
 		Detail:       detail,
 		IPAddress:    s.ClientIP(r),
+		RunID:        s.knownFleetRunID(r),
 	})
 }
 

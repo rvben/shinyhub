@@ -310,6 +310,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		ResourceType: "app",
 		ResourceID:   req.Slug,
 		IPAddress:    s.ClientIP(r),
+		RunID:        s.knownFleetRunID(r),
 	})
 	w.Header().Set(hdrResourceRevision, appResourceRevision(app))
 	writeJSON(w, http.StatusCreated, app)
@@ -382,6 +383,9 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		"effective_hibernate_timeout_minutes": app.EffectiveHibernateTimeoutMinutes,
 		"redeploy_in_flight":                  s.isRedeployInFlight(slug),
 		"can_manage":                          canManage,
+	}
+	if p, err := s.store.CurrentDeploymentProvenance(app.ID); err == nil && p != nil {
+		envelope["deployment_provenance"] = p
 	}
 	// render_pacing is the same advisory block PATCH returns, computed from the
 	// app's stored render_seconds. It is here so a client can show the cap
@@ -1242,7 +1246,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			setProjectSlug, oldProjectSlug, newProjectSlug)
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
-			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r),
+			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r), RunID: s.knownFleetRunID(r),
 		})
 	}
 	if projectCreated {
@@ -1461,6 +1465,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	runID := s.knownFleetRunID(r)
 
 	if s.manager == nil {
 		writeError(w, http.StatusServiceUnavailable, "process manager not available")
@@ -1665,7 +1670,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// fixes it leave the app down.
 	keepStopped := stoppedByOperator && prevActive != nil
 
-	pendingDep, err := s.store.BeginDeployment(app.ID, version, bundleDir)
+	pendingDep, err := s.store.BeginDeploymentWithProvenance(app.ID, version, bundleDir, runID, nil)
 	if err != nil {
 		slog.Error("deploy: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -2028,6 +2033,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			ResourceType: "app",
 			ResourceID:   slug,
 			IPAddress:    s.ClientIP(r),
+			RunID:        runID,
 		})
 	}
 
@@ -2072,6 +2078,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	runID := s.knownFleetRunID(r)
 
 	// Parse optional body to support targeted rollback by deployment ID.
 	var reqBody struct {
@@ -2166,7 +2173,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	if existing, lerr := s.store.ListDeployments(app.ID); lerr == nil && len(existing) > 0 {
 		prevActive = existing[0]
 	}
-	pendingDep, err := s.store.BeginDeployment(app.ID, prev.Version, prev.BundleDir)
+	pendingDep, err := s.store.BeginDeploymentWithProvenance(app.ID, prev.Version, prev.BundleDir, runID, &prev.ID)
 	if err != nil {
 		slog.Error("rollback: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -2276,6 +2283,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			ResourceType: "app",
 			ResourceID:   slug,
 			IPAddress:    s.ClientIP(r),
+			RunID:        runID,
 		})
 	}
 	// Rollbacks are not counted as deploys — deploy_count tracks forward deployments only.
@@ -2515,6 +2523,7 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 			ResourceID:   slug,
 			Detail:       detail,
 			IPAddress:    s.ClientIP(r),
+			RunID:        s.knownFleetRunID(r),
 		})
 	}
 	w.WriteHeader(http.StatusOK)
@@ -2673,7 +2682,7 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 		accessDetail, _ := json.Marshal(map[string]string{"from": oldAccess, "to": req.Access})
 		s.store.LogAuditEvent(db.AuditEventParams{
 			UserID: &u.ID, Action: "set_access", ResourceType: "app",
-			ResourceID: slug, Detail: string(accessDetail), IPAddress: s.ClientIP(r),
+			ResourceID: slug, Detail: string(accessDetail), IPAddress: s.ClientIP(r), RunID: s.knownFleetRunID(r),
 		})
 	}
 	writeJSON(w, http.StatusOK, app)

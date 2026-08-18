@@ -769,7 +769,7 @@ func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writ
 // warning. The interactive `deploy` path sets it; the fleet path clears it,
 // because fleet reconciles visibility through its own config-drift mechanism
 // and the deploy-layer warning would otherwise leak once per retry.
-func ensureAppCore(cfg *cliConfig, slug, visibility, project string, errOut io.Writer, warnExisting bool) error {
+func ensureAppCore(cfg *cliConfig, slug, visibility, project string, errOut io.Writer, warnExisting bool, runIDs ...string) error {
 	checkReq, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -809,6 +809,9 @@ func ensureAppCore(cfg *cliConfig, slug, visibility, project string, errOut io.W
 	}
 	createReq.Header.Set("Authorization", authHeader(cfg.Token))
 	createReq.Header.Set("Content-Type", "application/json")
+	if len(runIDs) > 0 && runIDs[0] != "" {
+		decorateFleetRequest(createReq, runIDs[0])
+	}
 	cr, err := httpClient.Do(createReq)
 	if err != nil {
 		return err

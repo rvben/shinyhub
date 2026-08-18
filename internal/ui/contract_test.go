@@ -757,8 +757,8 @@ func TestDeploymentRowFitsLongVersionIDs(t *testing.T) {
 	if strings.Contains(css, "grid-template-columns: 5rem 1fr auto auto") {
 		t.Fatal("style.css: .deployment-row must not pin the version column to a fixed 5rem; epoch-millis version IDs overflow it and overlap the timestamp, so size the column to its content instead")
 	}
-	assertContains(t, "style.css", "grid-template-columns: minmax(11rem, max-content) 1fr auto",
-		"the Deployments-tab version column must grow to fit the deploy number, status badge, and epoch-millis version ID without overlapping the timestamp")
+	assertContains(t, "style.css", "grid-template-columns: minmax(9rem, max-content) minmax(14rem, 1fr) minmax(6rem, auto) auto",
+		"the four-column Deployments grid must let both version and source grow without overlapping the timestamp or action")
 }
 
 // TestNewUserSnippetIsRunnable guards the new-user handoff. The snippet is

@@ -42,6 +42,7 @@ type serverCapabilities struct {
 	CLIConnect         bool `json:"cli_connect"`
 	DeployEvents       bool `json:"deploy_events"`
 	PlanApply          bool `json:"plan_apply"`
+	FleetProvenance    bool `json:"fleet_provenance"`
 }
 
 // handleServerInfo advertises server capability flags so a fleet-aware CLI
@@ -58,6 +59,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			CLIConnect:         true,
 			DeployEvents:       true,
 			PlanApply:          true,
+			FleetProvenance:    true,
 		},
 		Runtimes: detectRuntimes(),
 	})

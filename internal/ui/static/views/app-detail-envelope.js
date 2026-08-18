@@ -32,6 +32,7 @@ export function normalizeAppEnvelope(body) {
   // The live succeeded bundle's epoch id (for the "bundle …" hover) — distinct
   // from current_version, which is the newest row regardless of status.
   app.released_version = body.released_version || null;
+  app.deployment_provenance = body.deployment_provenance || null;
 
   const replicasStatus = Array.isArray(body.replicas_status) ? body.replicas_status : [];
   return { app, replicasStatus };

@@ -58,3 +58,32 @@ func TestIsConflict(t *testing.T) {
 		t.Fatal("200 is not a conflict")
 	}
 }
+
+func TestBuildFleetProvenance_GitLabAutoDetection(t *testing.T) {
+	env := map[string]string{
+		"GITLAB_CI": "true", "CI_PIPELINE_IID": "412", "CI_PIPELINE_URL": "https://gitlab.example/pipelines/412",
+		"CI_JOB_NAME": "deploy-production", "CI_JOB_URL": "https://gitlab.example/jobs/99",
+		"CI_PROJECT_URL": "https://gitlab.example/acme/apps", "CI_COMMIT_SHA": "abcdef1234567890", "CI_COMMIT_REF_NAME": "main",
+		"CI_MERGE_REQUEST_IID": "87",
+	}
+	m, err := buildFleetProvenance(&fleetApplyFlags{provenanceMode: "auto"}, func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Provider != "gitlab" || m.Source == nil || m.Source.Label != "GitLab pipeline #412" {
+		t.Fatalf("source=%#v", m)
+	}
+	if m.Revision == nil || m.Revision.URL != "https://gitlab.example/acme/apps/-/commit/abcdef1234567890" {
+		t.Fatalf("revision=%#v", m.Revision)
+	}
+	if m.Change == nil || m.Change.URL != "https://gitlab.example/acme/apps/-/merge_requests/87" {
+		t.Fatalf("change=%#v", m.Change)
+	}
+}
+
+func TestBuildFleetProvenance_NoneRejectsExplicitFields(t *testing.T) {
+	_, err := buildFleetProvenance(&fleetApplyFlags{provenanceMode: "none", sourceURL: "https://example.test/p"}, func(string) string { return "" })
+	if err == nil {
+		t.Fatal("expected conflict between none and explicit source")
+	}
+}

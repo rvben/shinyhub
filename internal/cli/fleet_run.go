@@ -1,16 +1,22 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
+
+	"github.com/rvben/shinyhub/internal/provenance"
 )
 
 // newRunID returns a random 32-hex-char id correlating every per-app call in
-// one fleet run. The server records it via the existing per-app audit rows
-// (no new audit type); a run is reconstructed by grouping on this id.
+// one fleet run. New servers register this id before mutation and attach it to
+// deployments and audit events; old servers safely ignore the header.
 func newRunID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
@@ -25,6 +31,108 @@ var fleetUserAgent = "shinyhub-fleet/" + version
 func decorateFleetRequest(req *http.Request, runID string) {
 	req.Header.Set("X-Shinyhub-Run-Id", runID)
 	req.Header.Set("User-Agent", fleetUserAgent)
+}
+
+func buildFleetProvenance(f *fleetApplyFlags, getenv func(string) string) (provenance.Metadata, error) {
+	var m provenance.Metadata
+	mode := strings.ToLower(strings.TrimSpace(f.provenanceMode))
+	if mode != "auto" && mode != "none" {
+		return m, fmt.Errorf("--provenance must be auto or none")
+	}
+	explicit := f.sourceProvider != "" || f.sourceURL != "" || f.sourceLabel != "" || f.jobURL != "" || f.jobLabel != "" || f.revision != "" || f.revisionRef != "" || f.revisionURL != "" || f.changeURL != "" || f.changeLabel != ""
+	if mode == "none" {
+		if explicit {
+			return m, fmt.Errorf("explicit provenance flags cannot be used with --provenance=none")
+		}
+		return m, nil
+	}
+	if getenv("GITLAB_CI") != "" {
+		m.Provider = "gitlab"
+		pipelineLabel := "GitLab pipeline"
+		if iid := getenv("CI_PIPELINE_IID"); iid != "" {
+			pipelineLabel += " #" + iid
+		}
+		if u := getenv("CI_PIPELINE_URL"); u != "" {
+			m.Source = &provenance.Link{Label: pipelineLabel, URL: u}
+		}
+		if u := getenv("CI_JOB_URL"); u != "" {
+			label := getenv("CI_JOB_NAME")
+			if label == "" {
+				label = "GitLab job"
+			}
+			m.Job = &provenance.Link{Label: label, URL: u}
+		}
+		sha, ref := getenv("CI_COMMIT_SHA"), getenv("CI_COMMIT_REF_NAME")
+		if sha != "" || ref != "" {
+			revURL := ""
+			if base := strings.TrimSuffix(getenv("CI_PROJECT_URL"), "/"); base != "" && sha != "" {
+				revURL = base + "/-/commit/" + sha
+			}
+			m.Revision = &provenance.Revision{SHA: sha, Ref: ref, URL: revURL}
+		}
+		if iid := getenv("CI_MERGE_REQUEST_IID"); iid != "" {
+			base := strings.TrimSuffix(getenv("CI_MERGE_REQUEST_PROJECT_URL"), "/")
+			if base == "" {
+				base = strings.TrimSuffix(getenv("CI_PROJECT_URL"), "/")
+			}
+			m.Change = &provenance.Link{Label: "MR !" + iid}
+			if base != "" {
+				m.Change.URL = base + "/-/merge_requests/" + iid
+			}
+		}
+	}
+	if f.sourceProvider != "" {
+		m.Provider = f.sourceProvider
+	}
+	if f.sourceURL != "" || f.sourceLabel != "" {
+		m.Source = &provenance.Link{Label: f.sourceLabel, URL: f.sourceURL}
+		if m.Source.Label == "" {
+			m.Source.Label = "Deployment source"
+		}
+	}
+	if f.jobURL != "" || f.jobLabel != "" {
+		m.Job = &provenance.Link{Label: f.jobLabel, URL: f.jobURL}
+		if m.Job.Label == "" {
+			m.Job.Label = "Deployment job"
+		}
+	}
+	if f.revision != "" || f.revisionRef != "" || f.revisionURL != "" {
+		m.Revision = &provenance.Revision{SHA: f.revision, Ref: f.revisionRef, URL: f.revisionURL}
+	}
+	if f.changeURL != "" || f.changeLabel != "" {
+		m.Change = &provenance.Link{Label: f.changeLabel, URL: f.changeURL}
+		if m.Change.Label == "" {
+			m.Change.Label = "Change"
+		}
+	}
+	if err := m.Validate(); err != nil {
+		return provenance.Metadata{}, err
+	}
+	return m, nil
+}
+
+func registerFleetRun(cfg *cliConfig, runID, fleetID string, metadata provenance.Metadata) error {
+	body, err := json.Marshal(map[string]any{"run_id": runID, "fleet_id": fleetID, "kind": "fleet_apply", "provenance": metadata})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, cfg.Host+"/api/fleet/runs", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	req.Header.Set("Content-Type", "application/json")
+	decorateFleetRequest(req, runID)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("register fleet run: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	return nil
 }
 
 // setPrecondition applies the If-Match-style headers the server enforces.

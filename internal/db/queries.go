@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/provenance"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -1481,9 +1482,11 @@ const (
 )
 
 type CreateDeploymentParams struct {
-	AppID     int64
-	Version   string
-	BundleDir string
+	AppID          int64
+	Version        string
+	BundleDir      string
+	RunID          string
+	RestoredFromID *int64
 	// Status records the outcome of the deploy attempt. Empty defaults to
 	// "succeeded" (a row created via this helper represents an already-live
 	// bundle). The pending->succeeded/failed flow uses BeginDeployment.
@@ -1497,8 +1500,8 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	}
 	var id int64
 	err := s.db.QueryRow(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?) RETURNING id`,
-		p.AppID, p.Version, p.BundleDir, status,
+		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id) VALUES (?, ?, ?, ?, NULLIF(?, ''), ?) RETURNING id`,
+		p.AppID, p.Version, p.BundleDir, status, p.RunID, p.RestoredFromID,
 	).Scan(&id)
 	if err != nil {
 		return nil, err
@@ -1521,10 +1524,16 @@ func (s *Store) UpdateDeploymentStatus(id int64, status string) error {
 // mid-deploy the row stays 'pending'; startup reconciliation fails it so it is
 // never mistaken for a good deployment.
 func (s *Store) BeginDeployment(appID int64, version, bundleDir string) (*Deployment, error) {
+	return s.BeginDeploymentWithProvenance(appID, version, bundleDir, "", nil)
+}
+
+// BeginDeploymentWithProvenance records the fleet run that caused a deploy and,
+// for rollbacks, the historical deployment whose bundle is being restored.
+func (s *Store) BeginDeploymentWithProvenance(appID int64, version, bundleDir, runID string, restoredFromID *int64) (*Deployment, error) {
 	var id int64
 	err := s.db.QueryRow(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status) VALUES (?, ?, ?, ?) RETURNING id`,
-		appID, version, bundleDir, DeploymentPending,
+		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id) VALUES (?, ?, ?, ?, NULLIF(?, ''), ?) RETURNING id`,
+		appID, version, bundleDir, DeploymentPending, runID, restoredFromID,
 	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
@@ -1647,9 +1656,16 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		       CASE WHEN d.status = 'succeeded' THEN (
 		           SELECT COUNT(*) FROM deployments d2
 		           WHERE d2.app_id = d.app_id AND d2.status = 'succeeded' AND d2.id <= d.id
-		       ) END AS release_number
+		       ) END AS release_number,
+		       d.restored_from_id,
+		       CASE WHEN d.restored_from_id IS NOT NULL THEN (
+		           SELECT COUNT(*) FROM deployments d3
+		           WHERE d3.app_id = d.app_id AND d3.status = 'succeeded' AND d3.id <= d.restored_from_id
+		       ) END AS restored_from_release_number,
+		       fr.id, fr.fleet_id, fr.kind, fr.provenance, fr.created_at
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
+		LEFT JOIN fleet_runs fr ON fr.id = d.run_id
 		WHERE a.slug = ?
 		ORDER BY d.id DESC`, slug)
 	if err != nil {
@@ -1659,13 +1675,34 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 	result := make([]DeploymentSummary, 0)
 	for rows.Next() {
 		var d DeploymentSummary
-		var release sql.NullInt64
-		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.FailureReason, &d.CreatedAt, &release); err != nil {
+		var release, restoredID, restoredRelease sql.NullInt64
+		var runID, fleetID, kind, raw sql.NullString
+		var runCreated sql.NullTime
+		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.FailureReason, &d.CreatedAt, &release,
+			&restoredID, &restoredRelease, &runID, &fleetID, &kind, &raw, &runCreated); err != nil {
 			return nil, err
 		}
 		if release.Valid {
 			n := release.Int64
 			d.ReleaseNumber = &n
+		}
+		if restoredID.Valid {
+			n := restoredID.Int64
+			d.RestoredFromDeploymentID = &n
+		}
+		if restoredRelease.Valid {
+			n := restoredRelease.Int64
+			d.RestoredFromReleaseNumber = &n
+		}
+		if runID.Valid {
+			p := &DeploymentProvenance{RunID: runID.String, FleetID: fleetID.String, Kind: kind.String}
+			if runCreated.Valid {
+				p.StartedAt = runCreated.Time
+			}
+			if raw.Valid && raw.String != "" {
+				_ = json.Unmarshal([]byte(raw.String), &p.Metadata)
+			}
+			d.Provenance = p
 		}
 		result = append(result, d)
 	}
@@ -1683,8 +1720,40 @@ type DeploymentSummary struct {
 	FailureReason string `json:"failure_reason"`
 	// ReleaseNumber is the human-friendly v1/v2/… rank among the app's succeeded
 	// deployments; nil for failed/pending rows (a failed attempt has no release).
-	ReleaseNumber *int64    `json:"release_number"`
-	CreatedAt     time.Time `json:"created_at"`
+	ReleaseNumber             *int64                `json:"release_number"`
+	RestoredFromDeploymentID  *int64                `json:"restored_from_deployment_id,omitempty"`
+	RestoredFromReleaseNumber *int64                `json:"restored_from_release_number,omitempty"`
+	Provenance                *DeploymentProvenance `json:"provenance,omitempty"`
+	CreatedAt                 time.Time             `json:"created_at"`
+}
+
+type DeploymentProvenance struct {
+	RunID     string              `json:"run_id"`
+	FleetID   string              `json:"fleet_id"`
+	Kind      string              `json:"kind"`
+	StartedAt time.Time           `json:"started_at"`
+	Metadata  provenance.Metadata `json:"metadata"`
+}
+
+// CurrentDeploymentProvenance returns the attribution of the live succeeded
+// deployment. Legacy and manual deployments correctly return nil.
+func (s *Store) CurrentDeploymentProvenance(appID int64) (*DeploymentProvenance, error) {
+	var p DeploymentProvenance
+	var raw string
+	err := s.db.QueryRow(`SELECT fr.id, fr.fleet_id, fr.kind, fr.provenance, fr.created_at
+		FROM deployments d JOIN fleet_runs fr ON fr.id = d.run_id
+		WHERE d.app_id = ? AND d.status = 'succeeded' ORDER BY d.id DESC LIMIT 1`, appID).
+		Scan(&p.RunID, &p.FleetID, &p.Kind, &raw, &p.StartedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("current deployment provenance: %w", err)
+	}
+	if err := json.Unmarshal([]byte(raw), &p.Metadata); err != nil {
+		return nil, fmt.Errorf("decode deployment provenance: %w", err)
+	}
+	return &p, nil
 }
 
 // CurrentRelease returns the app's current release number (count of succeeded
@@ -2411,6 +2480,7 @@ type AuditEventParams struct {
 	ResourceID   string
 	Detail       string
 	IPAddress    string
+	RunID        string
 }
 
 // AuditEvent is a row from the audit_events table.
@@ -2424,6 +2494,7 @@ type AuditEvent struct {
 	Detail       string    `json:"detail"`
 	IPAddress    string    `json:"ip_address"`
 	CreatedAt    time.Time `json:"created_at"`
+	RunID        string    `json:"run_id,omitempty"`
 }
 
 // LogAuditEvent inserts an audit event. A write failure is logged and surfaced
@@ -2431,9 +2502,9 @@ type AuditEvent struct {
 // never break normal operation.
 func (s *Store) LogAuditEvent(p AuditEventParams) {
 	_, err := s.db.Exec(`
-		INSERT INTO audit_events (user_id, action, resource_type, resource_id, detail, ip_address)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		p.UserID, p.Action, p.ResourceType, p.ResourceID, p.Detail, p.IPAddress)
+		INSERT INTO audit_events (user_id, action, resource_type, resource_id, detail, ip_address, run_id)
+		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''))`,
+		p.UserID, p.Action, p.ResourceType, p.ResourceID, p.Detail, p.IPAddress, p.RunID)
 	var userID any
 	if p.UserID != nil {
 		userID = *p.UserID
@@ -2449,6 +2520,7 @@ func (s *Store) LogAuditEvent(p AuditEventParams) {
 		"resource_id", p.ResourceID,
 		"detail", p.Detail,
 		"ip_address", p.IPAddress,
+		"run_id", p.RunID,
 		"persisted", err == nil,
 	)
 	if err != nil {
@@ -2489,7 +2561,7 @@ func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent,
 	query := `
 		SELECT ae.id, ae.user_id, u.username,
 		       ae.action, ae.resource_type, ae.resource_id,
-		       ae.detail, ae.ip_address, ae.created_at
+		       ae.detail, ae.ip_address, ae.created_at, ae.run_id
 		FROM audit_events ae
 		LEFT JOIN users u ON u.id = ae.user_id`
 	args := []any{}
@@ -2507,13 +2579,15 @@ func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent,
 	result := make([]AuditEvent, 0)
 	for rows.Next() {
 		var e AuditEvent
+		var runID sql.NullString
 		if err := rows.Scan(
 			&e.ID, &e.UserID, &e.Username,
 			&e.Action, &e.ResourceType, &e.ResourceID,
-			&e.Detail, &e.IPAddress, &e.CreatedAt,
+			&e.Detail, &e.IPAddress, &e.CreatedAt, &runID,
 		); err != nil {
 			return nil, err
 		}
+		e.RunID = runID.String
 		result = append(result, e)
 	}
 	return result, rows.Err()

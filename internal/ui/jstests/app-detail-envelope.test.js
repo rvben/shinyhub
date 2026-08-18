@@ -20,6 +20,7 @@ test('normalizeAppEnvelope unwraps body.app and copies envelope fields onto it',
     release_number: 4,
     released_at: '2026-07-01T00:00:00Z',
     released_version: '1717200000',
+    deployment_provenance: { run_id: '0123456789abcdef0123456789abcdef', metadata: { provider: 'gitlab' } },
   };
   const { app, replicasStatus } = normalizeAppEnvelope(body);
   assert.equal(app.slug, 'demo');
@@ -30,6 +31,7 @@ test('normalizeAppEnvelope unwraps body.app and copies envelope fields onto it',
   assert.equal(app.release_number, 4);
   assert.equal(app.released_at, '2026-07-01T00:00:00Z');
   assert.equal(app.released_version, '1717200000');
+  assert.equal(app.deployment_provenance.metadata.provider, 'gitlab');
   assert.deepEqual(replicasStatus, [{ index: 0, status: 'running' }]);
 });
 
@@ -51,6 +53,7 @@ test('normalizeAppEnvelope nulls absent release fields (hides the version chip)'
   assert.equal(app.release_number, null);
   assert.equal(app.released_at, null);
   assert.equal(app.released_version, null);
+  assert.equal(app.deployment_provenance, null);
 });
 
 test('normalizeAppEnvelope ignores non-conforming envelope field types', () => {

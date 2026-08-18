@@ -50,7 +50,7 @@ func healthTimeoutDuration(seconds int) time.Duration {
 // callers that care (adopt) resolve that authoritatively with a digest
 // readback.
 func deployAppBundle(cfg *cliConfig, slug, dir, visibility, project string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, firstFires []firstFireRef, kind deployfail.Kind, err error) {
-	if err := ensureFleetApp(cfg, slug, visibility, project, out); err != nil {
+	if err := ensureFleetAppWithRun(cfg, slug, visibility, project, out, runID); err != nil {
 		return "", false, nil, deployfail.Unknown, err
 	}
 	buf, summary, err := zipDir(dir)
@@ -195,6 +195,10 @@ func readPromotedDigest(cfg *cliConfig, slug string) (string, error) {
 // project_slug.
 func ensureFleetApp(cfg *cliConfig, slug, visibility, project string, out io.Writer) error {
 	return ensureAppCore(cfg, slug, visibility, project, out, false)
+}
+
+func ensureFleetAppWithRun(cfg *cliConfig, slug, visibility, project string, out io.Writer, runID string) error {
+	return ensureAppCore(cfg, slug, visibility, project, out, false, runID)
 }
 
 // waitForFleetHealthy blocks until the app reports running or a terminal

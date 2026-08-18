@@ -4,6 +4,7 @@ import {
   relativeTime,
   deploymentRowModel,
   deploymentListModels,
+  provenanceModel,
 } from '../static/views/deployment-row.js';
 
 // The Deployments tab marks the LIVE deployment and suppresses its Roll back
@@ -21,6 +22,34 @@ test('relativeTime renders compact buckets and tolerates bad input', () => {
   assert.equal(relativeTime(new Date(NOW - 2 * 86400 * 1000), NOW), '2d ago');
   assert.equal(relativeTime(null, NOW), '');
   assert.equal(relativeTime('not-a-date', NOW), '');
+});
+
+test('provenance presents pipeline first with durable revision and optional MR', () => {
+  const p = provenanceModel({
+    run_id: '0123456789abcdef0123456789abcdef',
+    fleet_id: 'prod-eu',
+    metadata: {
+      provider: 'gitlab',
+      source: { label: 'GitLab pipeline #412', url: 'https://gitlab.example/pipelines/412' },
+      revision: { sha: 'abcdef1234567890', ref: 'main', url: 'https://gitlab.example/commit/abcdef' },
+      change: { label: 'MR !87', url: 'https://gitlab.example/mr/87' },
+    },
+  });
+  assert.equal(p.available, true);
+  assert.equal(p.label, 'GitLab pipeline #412');
+  assert.equal(p.detail, 'abcdef12 · main');
+  assert.deepEqual(p.change, { label: 'MR !87', url: 'https://gitlab.example/mr/87' });
+});
+
+test('legacy deployments expose an explicit provenance fallback', () => {
+  assert.deepEqual(provenanceModel(null), {
+    available: false,
+    label: 'Provenance unavailable',
+    detail: 'Deployed before provenance tracking',
+    url: '',
+    change: null,
+    provider: '',
+  });
 });
 
 test('a current succeeded deployment shows its release label and blocks its own rollback', () => {

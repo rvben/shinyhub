@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +24,17 @@ type fleetApplyFlags struct {
 	restartAfterWarm         bool
 	waitForServer            time.Duration
 	concurrency              int
+	provenanceMode           string
+	sourceProvider           string
+	sourceURL                string
+	sourceLabel              string
+	jobURL                   string
+	jobLabel                 string
+	revision                 string
+	revisionRef              string
+	revisionURL              string
+	changeURL                string
+	changeLabel              string
 }
 
 func newFleetApplyCmd() *cobra.Command {
@@ -63,6 +75,17 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.restartAfterWarm, "restart-after-warm", false, "Wait for first-fires, then restart serving replicas so startup-loaded data is refreshed")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before proceeding")
 	cmd.Flags().IntVar(&f.concurrency, "concurrency", 3, "Number of apps to deploy concurrently (default 3, 1 = serial); lower it on CPU- or memory-constrained hosts, raise it for network/IO-bound deploys")
+	cmd.Flags().StringVar(&f.provenanceMode, "provenance", "auto", "Deployment provenance: auto (detect GitLab CI) or none")
+	cmd.Flags().StringVar(&f.sourceProvider, "source-provider", "", "Provenance provider identifier (for example gitlab)")
+	cmd.Flags().StringVar(&f.sourceURL, "source-url", "", "Pipeline or deployment source HTTPS URL")
+	cmd.Flags().StringVar(&f.sourceLabel, "source-label", "", "Human-readable pipeline or source label")
+	cmd.Flags().StringVar(&f.jobURL, "job-url", "", "CI job HTTPS URL")
+	cmd.Flags().StringVar(&f.jobLabel, "job-label", "", "Human-readable CI job label")
+	cmd.Flags().StringVar(&f.revision, "revision", "", "Deployed commit SHA or revision")
+	cmd.Flags().StringVar(&f.revisionRef, "revision-ref", "", "Deployed branch or tag")
+	cmd.Flags().StringVar(&f.revisionURL, "revision-url", "", "Deployed revision HTTPS URL")
+	cmd.Flags().StringVar(&f.changeURL, "change-url", "", "Merge request or change HTTPS URL")
+	cmd.Flags().StringVar(&f.changeLabel, "change-label", "", "Human-readable merge request or change label")
 	return cmd
 }
 
@@ -89,6 +112,10 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 	}
 	if err := validateConcurrency(f.concurrency); err != nil {
 		return err
+	}
+	metadata, err := buildFleetProvenance(f, os.Getenv)
+	if err != nil {
+		return validationErr("invalid deployment provenance: "+err.Error(), "use HTTPS links, or pass --provenance=none")
 	}
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
@@ -159,6 +186,11 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 	}
 
 	runID := newRunID()
+	if pf.caps.FleetProvenance {
+		if err := registerFleetRun(cfg, runID, pf.manifest.FleetID, metadata); err != nil {
+			return &ExitCodeError{Code: 3, Err: err}
+		}
+	}
 	opt := convergeOpts{
 		adopt:              f.adopt,
 		prune:              f.prune,
@@ -213,6 +245,18 @@ func fleetPlanRecoveryCommand(file string) string {
 // resources already committed by a partial run become unchanged.
 func fleetApplyRecoveryCommand(f *fleetApplyFlags) string {
 	parts := []string{"shinyhub fleet apply"}
+	if f.provenanceMode != "" && f.provenanceMode != "auto" {
+		parts = append(parts, "--provenance", shellQuote(f.provenanceMode))
+	}
+	for _, item := range []struct{ name, value string }{
+		{"--source-provider", f.sourceProvider}, {"--source-url", f.sourceURL}, {"--source-label", f.sourceLabel},
+		{"--job-url", f.jobURL}, {"--job-label", f.jobLabel}, {"--revision", f.revision},
+		{"--revision-ref", f.revisionRef}, {"--revision-url", f.revisionURL}, {"--change-url", f.changeURL}, {"--change-label", f.changeLabel},
+	} {
+		if item.value != "" {
+			parts = append(parts, item.name, shellQuote(item.value))
+		}
+	}
 	if f.adopt {
 		parts = append(parts, "--adopt")
 	}

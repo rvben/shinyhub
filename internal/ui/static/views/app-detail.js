@@ -11,7 +11,7 @@ import {
   renderAutoscaleSummary,
   renderRejectsByReason,
 } from '/static/views/autoscale.js';
-import { deploymentListModels, relativeTime } from '/static/views/deployment-row.js';
+import { deploymentListModels, provenanceModel, relativeTime } from '/static/views/deployment-row.js';
 import { statusPillClass } from '/static/views/stat-format.js';
 import { formatStatus } from '/static/views/status-label.js';
 import { appStatusView } from '/static/views/app-card-badge.js';
@@ -208,6 +208,7 @@ export function mountAppDetail(ctx) {
     }
     const fleetDigest = document.getElementById('app-detail-fleet');
     if (fleetDigest) renderFleetDigest(fleetDigest, app);
+    renderHeaderProvenance(document.getElementById('app-detail-provenance'), app.deployment_provenance);
 
     // Show the selected panel, hide the rest.
     for (const t of TAB_ROUTES) {
@@ -254,6 +255,45 @@ export function mountAppDetail(ctx) {
   };
 }
 
+function externalLink(label, href, className = '') {
+  const a = document.createElement('a');
+  a.textContent = label;
+  a.href = href;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  if (className) a.className = className;
+  return a;
+}
+
+function renderHeaderProvenance(host, raw) {
+  if (!host) return;
+  host.replaceChildren();
+  const model = provenanceModel(raw);
+  host.hidden = !model.available;
+  if (!model.available) return;
+
+  const mark = document.createElement('span');
+  mark.className = `provenance-provider${model.provider === 'gitlab' ? ' is-gitlab' : ''}`;
+  mark.textContent = model.provider === 'gitlab' ? 'GL' : 'CI';
+  mark.setAttribute('aria-hidden', 'true');
+  const copy = document.createElement('span');
+  copy.className = 'provenance-copy';
+  const primary = document.createElement('span');
+  primary.className = 'provenance-primary';
+  primary.append('Deployed by ');
+  primary.append(model.url ? externalLink(model.label, model.url) : model.label);
+  const detail = document.createElement('span');
+  detail.className = 'provenance-detail';
+  detail.append(model.detail);
+  if (model.change) {
+    detail.append(' · ');
+    detail.append(model.change.url ? externalLink(model.change.label, model.change.url) : model.change.label);
+  }
+  copy.append(primary, detail);
+  host.append(mark, copy);
+  if (model.url) host.append(externalLink('Open pipeline ↗', model.url, 'provenance-open'));
+}
+
 function renderLogs(panel, app, replicasStatus, ctx) {
   // An app awaiting its first deploy has no log sources. Keep the intentional
   // first-deploy guidance instead of mounting a viewer that can only report an
@@ -284,6 +324,7 @@ async function renderDeployments(panel, app, ctx) {
     <ul id="detail-deployments-list" class="deployments-list" hidden>
       <li class="deployments-head" aria-hidden="true">
         <span>Deployment</span>
+        <span>Source</span>
         <span>Deployed</span>
         <span></span>
       </li>
@@ -412,6 +453,22 @@ async function renderDeployments(panel, app, ctx) {
       whenCell.textContent = m.relWhen || '—';
       if (m.absWhen) whenCell.title = m.absWhen;
 
+      const sourceCell = document.createElement('span');
+      sourceCell.className = 'deployment-source';
+      const sourcePrimary = document.createElement('span');
+      sourcePrimary.className = 'deployment-source-primary';
+      if (m.source.url) sourcePrimary.appendChild(externalLink(m.source.label, m.source.url));
+      else sourcePrimary.textContent = m.source.label;
+      const sourceDetail = document.createElement('span');
+      sourceDetail.className = 'deployment-source-detail';
+      sourceDetail.append(m.source.detail);
+      if (m.source.change) {
+        sourceDetail.append(' · ');
+        sourceDetail.append(m.source.change.url ? externalLink(m.source.change.label, m.source.change.url) : m.source.change.label);
+      }
+      if (m.restoredFromReleaseNumber != null) sourceDetail.append(` · restored bundle from v${m.restoredFromReleaseNumber}`);
+      sourceCell.append(sourcePrimary, sourceDetail);
+
       const actionCell = document.createElement('span');
       actionCell.className = 'deployment-action';
       if (m.canRollback) {
@@ -428,7 +485,7 @@ async function renderDeployments(panel, app, ctx) {
         actionCell.appendChild(span);
       }
 
-      li.append(verCell, whenCell, actionCell);
+      li.append(verCell, sourceCell, whenCell, actionCell);
       list.appendChild(li);
     }
   }

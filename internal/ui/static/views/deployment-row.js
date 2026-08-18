@@ -31,6 +31,7 @@ export function deploymentRowModel(d, { isCurrent = false, now = Date.now() } = 
   const releaseNumber = typeof d.release_number === 'number' ? d.release_number : null;
   const created = d.created_at ? new Date(d.created_at) : null;
   const createdValid = created && Number.isFinite(created.getTime());
+  const source = provenanceModel(d.provenance);
   return {
     id: d.id,
     version,
@@ -42,6 +43,34 @@ export function deploymentRowModel(d, { isCurrent = false, now = Date.now() } = 
     canRollback: status === 'succeeded' && !isCurrent,
     relWhen: createdValid ? relativeTime(created, now) : '',
     absWhen: createdValid ? created.toLocaleString() : '',
+    source,
+    restoredFromReleaseNumber: typeof d.restored_from_release_number === 'number' ? d.restored_from_release_number : null,
+  };
+}
+
+export function provenanceModel(raw) {
+  if (!raw || !raw.run_id) {
+    return { available: false, label: 'Provenance unavailable', detail: 'Deployed before provenance tracking', url: '', change: null, provider: '' };
+  }
+  const metadata = raw.metadata || {};
+  const revision = metadata.revision || {};
+  const source = metadata.source || {};
+  const change = metadata.change || {};
+  const job = metadata.job || {};
+  const shortSHA = revision.sha ? String(revision.sha).slice(0, 8) : '';
+  const details = [];
+  if (shortSHA) details.push(shortSHA);
+  if (revision.ref) details.push(String(revision.ref));
+  if (job.label) details.push(String(job.label));
+  return {
+    available: true,
+    label: source.label || 'ShinyHub fleet apply',
+    detail: details.join(' · ') || `fleet ${raw.fleet_id || 'run'}`,
+    url: source.url || '',
+    revisionURL: revision.url || '',
+    change: change.label ? { label: String(change.label), url: change.url || '' } : null,
+    provider: metadata.provider || '',
+    runID: raw.run_id,
   };
 }
 

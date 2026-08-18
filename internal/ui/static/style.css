@@ -4226,21 +4226,74 @@ fieldset.settings-block { min-width: 0; }
 
 /* ── App detail: Deployments tab ─────────────────────────────────────────── */
 
+.app-detail-provenance {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--surface-rgb), 0.55);
+}
+.app-detail-provenance[hidden] { display: none; }
+.provenance-provider {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font: 600 0.75rem/1.35 var(--font);
+  letter-spacing: 0.02em;
+}
+.provenance-provider.is-gitlab { color: #fca326; background: rgba(252,163,38,0.1); }
+.provenance-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-width: 65ch; }
+.provenance-primary { color: var(--text-soft); font-size: 0.875rem; line-height: 1.55; letter-spacing: -0.005em; }
+.provenance-primary a,
+.deployment-source-primary a { color: var(--cyan-bright); font-weight: 600; text-decoration: none; }
+.provenance-primary a:hover,
+.deployment-source-primary a:hover,
+.deployment-source-detail a:hover { text-decoration: underline; }
+.provenance-detail,
+.deployment-source-detail {
+  color: var(--text-muted);
+  font: 400 0.82rem/1.5 var(--mono);
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.provenance-detail a,
+.deployment-source-detail a { color: inherit; text-underline-offset: 2px; }
+.provenance-open {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  font: 600 0.75rem/1.35 var(--font);
+  letter-spacing: 0.02em;
+  text-decoration: none;
+}
+.provenance-open:hover { color: var(--cyan-bright); }
+
 .deployments-list { list-style: none; padding: 0; margin: 0; }
 .deployment-row,
 .deployments-head {
   display: grid;
-  grid-template-columns: minmax(11rem, max-content) 1fr auto;
-  gap: 12px 16px;
+  grid-template-columns: minmax(9rem, max-content) minmax(14rem, 1fr) minmax(6rem, auto) auto;
+  gap: 8px 16px;
   align-items: center;
   padding: 10px 0;
   border-bottom: 1px solid var(--line);
 }
 .deployments-head {
   text-transform: uppercase;
-  letter-spacing: 0.14em;
-  font-size: 0.66rem;
-  color: var(--text-dim);
+  letter-spacing: 0.02em;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text-muted);
   padding-bottom: 8px;
 }
 .deployment-row:last-child { border-bottom: none; }
@@ -4256,12 +4309,12 @@ fieldset.settings-block { min-width: 0; }
   white-space: nowrap;
 }
 .deployment-number {
-  font-family: 'Space Mono', monospace;
+  font-family: var(--mono);
   color: var(--cyan-bright);
   font-weight: 700;
 }
 .deployment-version-id {
-  font-family: 'Space Mono', monospace;
+  font-family: var(--mono);
   color: var(--text-muted);
   font-size: 0.8rem;
 }
@@ -4289,6 +4342,8 @@ fieldset.settings-block { min-width: 0; }
   border-color: var(--line-2);
 }
 .deployment-when { color: var(--text-muted); font-size: 0.9rem; }
+.deployment-source { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.deployment-source-primary { color: var(--text-soft); font-size: 0.875rem; line-height: 1.55; letter-spacing: -0.005em; }
 .deployment-user { color: var(--text-soft); font-size: 0.9rem; }
 .deployment-action { justify-self: end; }
 .deployment-live-note { color: var(--text-dim); font-size: 0.8rem; font-style: italic; }
@@ -4310,6 +4365,23 @@ fieldset.settings-block { min-width: 0; }
   background: rgba(56,189,248,0.08);
 }
 .rollback-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+@media (max-width: 700px) {
+  #app-detail-view { padding-inline: 0; }
+  .app-detail-provenance { grid-template-columns: auto minmax(0, 1fr); }
+  .provenance-open { grid-column: 2; min-height: 44px; }
+  .deployments-head { display: none; }
+  .deployment-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "version action" "source source" "when when";
+    padding-block: 16px;
+  }
+  .deployment-version { grid-area: version; }
+  .deployment-source { grid-area: source; }
+  .deployment-when { grid-area: when; }
+  .deployment-action { grid-area: action; }
+  .rollback-btn { min-height: 44px; }
+}
 
 /* ── Branding: operator footer and logo ── */
 footer.brand-footer { display:flex; gap:1rem; justify-content:center;
