@@ -26,7 +26,7 @@ import { formatManifestSummary, renderDeployResult } from '/static/deploy-summar
 import { segmentApps } from '/static/views/fleet-ui.js';
 import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
-import { workerCapacityLine } from '/static/views/worker-isolation.js';
+import { workerCapacityLine, keepWarmInertNote } from '/static/views/worker-isolation.js';
 import { parseRenderSeconds, renderPacingAdvice } from '/static/views/render-pacing.js';
 import { initTheme, getThemePreference, setThemePreference } from '/static/views/theme.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
@@ -2279,7 +2279,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const minWarmInput = document.getElementById('min-warm-replicas');
     minWarmInput.value = String(app.min_warm_replicas ?? 0);
     minWarmInput.disabled = !canEdit;
-    updateMinWarmWarning(app.replicas ?? 1, app.min_warm_replicas ?? 0);
+    // The inert-floor note reads the EFFECTIVE isolation: the raw column is
+    // empty for an app inheriting an elastic fleet default, and that app's
+    // floor is just as inert as one that set grouped explicitly.
+    updateMinWarmWarning(app.replicas ?? 1, app.min_warm_replicas ?? 0,
+      app.effective_worker_isolation || app.worker_isolation || 'multiplex');
 
     setError(document.getElementById('hibernate-error'), '');
     setHidden(document.getElementById('hibernate-status'), true);
@@ -2734,10 +2738,25 @@ document.addEventListener('DOMContentLoaded', () => {
     await loadApps();
   }
 
-  function updateMinWarmWarning(replicas, minWarm) {
+  function updateMinWarmWarning(replicas, minWarm, isolation) {
     const el = document.getElementById('min-warm-warning');
     if (!el) return;
     el.hidden = !(replicas < minWarm);
+    // A positive floor under elastic isolation is stored but does nothing;
+    // say so next to the field rather than letting the operator wait for
+    // replicas that an elastic pool never runs.
+    const inertEl = document.getElementById('min-warm-inert-warning');
+    if (!inertEl) return;
+    const note = keepWarmInertNote(minWarm, isolation);
+    inertEl.textContent = note;
+    inertEl.hidden = !note;
+  }
+
+  // currentIsolationChoice is the isolation the Scaling select currently
+  // shows: the saved value after a load, or the pending edit before a save.
+  function currentIsolationChoice() {
+    const sel = document.getElementById('worker-isolation');
+    return sel && sel.value ? sel.value : 'multiplex';
   }
 
   function updateScalingCeiling() {
@@ -2849,7 +2868,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Re-evaluate the keep-warm warning using the values just saved.
     const savedReplicas = parseInt(document.getElementById('scaling-replicas').value, 10);
     const savedMinWarm = minWarm;
-    updateMinWarmWarning(Number.isFinite(savedReplicas) ? savedReplicas : 1, savedMinWarm);
+    updateMinWarmWarning(Number.isFinite(savedReplicas) ? savedReplicas : 1, savedMinWarm, currentIsolationChoice());
     await loadApps();
   }
 
@@ -2953,6 +2972,10 @@ document.addEventListener('DOMContentLoaded', () => {
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
     snapshotSettingsSection('scaling');
+    // Isolation is one half of the keep-warm advisory shown in the Hibernation
+    // fieldset, so a save that switches mode re-evaluates it against the
+    // floor the operator has in the field.
+    updateMinWarmWarning(replicas, parseInt(document.getElementById('min-warm-replicas').value, 10) || 0, workerIsolation);
     await loadApps();
     // Isolation is the one saved field the header menu is derived from, and the
     // metrics poller only ever merges status and deploying. Without folding the
@@ -3798,6 +3821,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Worker isolation: live capacity helper on any input change.
   document.getElementById('worker-isolation').addEventListener('change', updateWorkerCapacity);
+  // Live re-evaluation of the keep-warm advisory as either half is edited, so
+  // the note reflects the pending choice and not only the last saved one.
+  const refreshKeepWarmNote = () => {
+    const replicas = parseInt(document.getElementById('scaling-replicas').value, 10);
+    const minWarm = parseInt(document.getElementById('min-warm-replicas').value, 10);
+    updateMinWarmWarning(Number.isFinite(replicas) ? replicas : 1,
+      Number.isFinite(minWarm) ? minWarm : 0, currentIsolationChoice());
+  };
+  document.getElementById('worker-isolation').addEventListener('change', refreshKeepWarmNote);
+  document.getElementById('min-warm-replicas').addEventListener('input', refreshKeepWarmNote);
   document.getElementById('worker-grouped-size').addEventListener('input', updateWorkerCapacity);
   document.getElementById('worker-max-workers').addEventListener('input', updateWorkerCapacity);
   document.getElementById('worker-warm-spares').addEventListener('input', updateWorkerCapacity);

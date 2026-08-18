@@ -1950,8 +1950,10 @@ fieldset.settings-block { min-width: 0; }
   line-height: 1.5;
 }
 .settings-inline-note code { font-family: var(--mono); font-size: 0.85em; color: var(--cyan-bright); }
-/* Inline warning under a field (e.g. keep-warm floor clamp). */
-.scaling-option-warn { color: var(--color-warning, #fbbf24); }
+/* Inline warning under a field (e.g. keep-warm floor clamp, inert keep-warm
+   under elastic isolation). Doubled selector so it outranks the later
+   .scaling-option-help color rule on the same element. */
+.scaling-option-help.scaling-option-warn { color: var(--yellow, #fbbf24); }
 /* Small muted metadata (e.g. data-dir quota usage). */
 .settings-meta { color: var(--text-muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 

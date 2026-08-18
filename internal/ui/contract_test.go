@@ -1061,6 +1061,25 @@ func TestWorkerIsolationControlsWired(t *testing.T) {
 		"worker-isolation.js must export workerCapacityLine so it can be imported by app.js and unit-tested")
 }
 
+// TestKeepWarmInertNoteWired guards the Keep warm advisory for elastic
+// isolation. A positive min_warm_replicas under grouped / per_session is
+// stored but inert (an elastic pool runs no standing replicas and reports idle
+// as healthy), and the field is the one place an operator would otherwise
+// keep raising the floor waiting for replicas that never come. The note is
+// computed by keepWarmInertNote from the EFFECTIVE isolation (the raw column
+// is empty when the app inherits an elastic fleet default) and rendered into
+// #min-warm-inert-warning; each wire fails silently on its own.
+func TestKeepWarmInertNoteWired(t *testing.T) {
+	assertContains(t, "views/worker-isolation.js", "export function keepWarmInertNote",
+		"worker-isolation.js must export keepWarmInertNote so it can be imported by app.js and unit-tested")
+	assertContains(t, "app.js", "keepWarmInertNote",
+		"app.js must call keepWarmInertNote to compute the Keep warm advisory")
+	assertContains(t, "app.js", "app.effective_worker_isolation || app.worker_isolation",
+		"app.js must evaluate the Keep warm advisory against the effective isolation on load")
+	assertContains(t, "index.html", `id="min-warm-inert-warning"`,
+		"index.html must expose #min-warm-inert-warning as the slot keepWarmInertNote populates")
+}
+
 // TestRenderPacingControlWired guards the Configuration -> Render pacing
 // control, the dashboard surface for apps.render_seconds. Three wires carry it,
 // and each fails silently on its own:
