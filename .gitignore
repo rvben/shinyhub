@@ -12,6 +12,10 @@ tmp/
 CLAUDE.md
 CLAUDE.local.md
 
+# Product positioning and brand direction, maintained by local tooling rather
+# than as a repo artifact. Nothing in the build or the docs site reads it.
+PRODUCT.md
+
 # JS toolchain (only used for JSDOM tests of UI assets)
 node_modules/
 
