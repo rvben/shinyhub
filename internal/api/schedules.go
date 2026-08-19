@@ -385,7 +385,7 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 	// Run admits the run synchronously (insert row + overlap policy) and
 	// executes the command in its own goroutine, so this does not block on
 	// the run finishing but does surface admission failures to the caller.
-	runID, err := s.jobs.Run(id, "manual", uid)
+	runID, err := s.jobs.Run(id, scheduler.TriggerManual, uid)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start run: "+err.Error())
 		return

@@ -47,7 +47,7 @@ Fields:
 | `cmd` | Command to run inside the bundle dir. Shell-quoted; use `--cmd-json` for exact control. For a Python app on the native runtime, prefix with `uv run` (see the note above). |
 | `timeout` | Seconds before SIGTERM; SIGKILL after a 10-second grace. |
 | `overlap` | `skip` (default) drops new ticks while one is in flight; `queue` holds at most one extra; `concurrent` allows overlap. |
-| `missed` | `skip` (default) ignores ticks missed during downtime; `run_once` dispatches one catch-up at startup. |
+| `missed` | `skip` (default) ignores ticks missed during downtime; `run_once` dispatches one catch-up at startup, recorded with `trigger: "missed"` (see "Run provenance" below). |
 | `run_on_register` | When `true`, fire this schedule once on first registration if the app has never had a successful run of it, warming the cache on a fresh deploy. CLI flag: `--run-on-register`. See "Warm on first deploy" below. |
 
 **Timezone PATCH tri-state:** The `timezone` key in a PATCH request has three distinct meanings:
@@ -109,6 +109,26 @@ shinyhub schedule run fetch daily-fetch --follow
 ```
 
 `--follow` tails the run's log until exit.
+
+## Run provenance (`trigger`)
+
+Every run records **why** it started in its `trigger` field, visible in
+`shinyhub schedule runs <app> <name>` and in the API run history:
+
+| `trigger` | Meaning |
+|---|---|
+| `schedule` | A cron boundary arrived while the server was running. The normal case. |
+| `missed` | A catch-up dispatched at startup by `missed = "run_once"`, because one or more boundaries passed while the server was down. Corresponds to no cron boundary. |
+| `register` | A first-fire from `run_on_register`, including the startup reconcile that retries a first-fire interrupted by a restart. |
+| `manual` | Started by an operator via the CLI, UI, or `POST /api/schedules/{id}/run`. |
+
+`missed` distinguishes a backfill from an on-time fire, so "did the catch-up
+policy cover last night's outage?" is answerable from run history alone.
+
+> **Compatibility:** catch-up runs previously recorded `trigger: "schedule"`,
+> indistinguishable from an on-time fire. Tooling that filters run history on
+> `trigger == "schedule"` to mean "any automatic run" must match `missed` too.
+> Runs recorded before the upgrade keep their original `schedule` value.
 
 ## Warm on first deploy (`run_on_register`)
 

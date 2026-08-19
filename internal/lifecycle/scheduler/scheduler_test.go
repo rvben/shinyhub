@@ -144,6 +144,65 @@ func TestScheduler_MissedRun_DispatchesOnceForRunOnceSchedule(t *testing.T) {
 	s.Stop()
 }
 
+// TestScheduler_MissedRun_LabelsCatchUpDistinctly asserts that a catch-up run
+// dispatched by the missed-run policy is recorded under its own trigger, not
+// under the trigger a cron boundary uses. Without the distinction an operator
+// cannot tell "the policy backfilled the outage" from "a boundary fired", and
+// has to correlate run timestamps against process start times by hand.
+func TestScheduler_MissedRun_LabelsCatchUpDistinctly(t *testing.T) {
+	pastRun := time.Now().Add(-25 * time.Hour).UTC()
+	store := &fakeStore{
+		enabled: []*db.Schedule{
+			{ID: 1, CronExpr: "@every 24h", Enabled: true, MissedPolicy: "run_once"},
+		},
+		lastSucc: map[int64]*db.ScheduleRun{
+			1: {ID: 99, ScheduleID: 1, StartedAt: pastRun, Status: "succeeded"},
+		},
+	}
+	jobs := &fakeJobs{}
+	s := New(jobs, store, time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForCallCount(t, jobs, 1, 2*time.Second)
+	s.Stop()
+
+	// Two bounds: the catch-up must carry the missed trigger, and it must not
+	// carry the boundary trigger. Asserting only the first would still pass if
+	// every trigger in the system were renamed to "missed".
+	if got := jobs.triggerFor(1); got != TriggerMissed {
+		t.Fatalf("catch-up trigger = %q, want %q", got, TriggerMissed)
+	}
+	if got := jobs.triggerFor(1); got == TriggerSchedule {
+		t.Fatalf("catch-up trigger = %q, must differ from a cron-boundary fire", got)
+	}
+}
+
+// TestScheduler_BoundaryFire_KeepsScheduleTrigger is the negative control for
+// the test above: labelling catch-ups must not relabel ordinary cron fires.
+func TestScheduler_BoundaryFire_KeepsScheduleTrigger(t *testing.T) {
+	store := &fakeStore{
+		enabled: []*db.Schedule{
+			{ID: 3, CronExpr: "@every 1s", Enabled: true, MissedPolicy: "skip"},
+		},
+	}
+	jobs := &fakeJobs{}
+	s := New(jobs, store, time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForCallCount(t, jobs, 1, 3*time.Second)
+	s.Stop()
+
+	if got := jobs.triggerFor(3); got != TriggerSchedule {
+		t.Fatalf("boundary-fire trigger = %q, want %q", got, TriggerSchedule)
+	}
+}
+
 func TestScheduler_MissedRun_SkipsWhenPolicyIsSkip(t *testing.T) {
 	pastRun := time.Now().Add(-25 * time.Hour).UTC()
 	store := &fakeStore{

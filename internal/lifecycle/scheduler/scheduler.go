@@ -13,6 +13,26 @@ import (
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
+// Trigger values recorded on every schedule run, naming what caused it. The
+// column is free-form TEXT, but these are the only values any writer produces,
+// so a run's provenance is answerable from the run record alone.
+const (
+	// TriggerSchedule is a run started by a cron boundary arriving while the
+	// server was up.
+	TriggerSchedule = "schedule"
+	// TriggerMissed is a catch-up run dispatched at startup by the missed-run
+	// policy (missed = "run_once") because one or more boundaries passed while
+	// the server was down. It is deliberately distinct from TriggerSchedule: a
+	// catch-up corresponds to no cron boundary, and conflating the two makes
+	// "did the policy backfill the outage?" unanswerable from run history.
+	TriggerMissed = "missed"
+	// TriggerRegister is a first-fire dispatched by run_on_register, including
+	// the startup reconcile that retries an interrupted first-fire.
+	TriggerRegister = "register"
+	// TriggerManual is a run started by an operator through the API or CLI.
+	TriggerManual = "manual"
+)
+
 // Jobs is the narrow interface scheduler needs from the jobs package, satisfied
 // by *jobs.Manager. Kept here to avoid an import cycle in tests.
 type Jobs interface {
@@ -192,7 +212,7 @@ func (s *Scheduler) register(sched *db.Schedule) error {
 	spec := s.prefixedSpec(sched)
 	schedID := sched.ID
 	id, err := c.AddFunc(spec, func() {
-		if _, err := s.jobs.Run(schedID, "schedule", nil); err != nil {
+		if _, err := s.jobs.Run(schedID, TriggerSchedule, nil); err != nil {
 			slog.Warn("scheduled run failed", "schedule", schedID, "err", err)
 		}
 	})
@@ -225,7 +245,7 @@ func (s *Scheduler) dispatchMissedIfDue(sched *db.Schedule) {
 	next := schedule.Next(last.StartedAt)
 	if next.Before(time.Now()) {
 		go func(id int64) {
-			if _, err := s.jobs.Run(id, "schedule", nil); err != nil {
+			if _, err := s.jobs.Run(id, TriggerMissed, nil); err != nil {
 				slog.Warn("missed-run dispatch failed", "schedule", id, "err", err)
 			}
 		}(sched.ID)
@@ -248,7 +268,7 @@ func (s *Scheduler) reconcileFirstFires() {
 	}
 	for _, id := range ids {
 		go func(id int64) {
-			if _, err := s.jobs.Run(id, "register", nil); err != nil {
+			if _, err := s.jobs.Run(id, TriggerRegister, nil); err != nil {
 				slog.Warn("reconcile first-fire dispatch failed", "schedule", id, "err", err)
 			}
 		}(id)
