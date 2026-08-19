@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -517,6 +518,52 @@ func latestEmbeddedVersion(subdir string) (int, error) {
 	return max, nil
 }
 
+// HasLegacySchema reports whether the database holds core tables with no
+// migration ledger, i.e. it predates versioned migrations and carries real data
+// despite reporting schema version 0. Callers that treat version 0 as "empty"
+// must consult this, or they mistake a pre-ledger production database for a
+// fresh install.
+func (s *Store) HasLegacySchema() (bool, error) {
+	return s.hasLegacySchema()
+}
+
+// PendingMigrations returns, in ascending order, the versions Migrate would
+// apply to this database. An empty result means Migrate is a no-op.
+//
+// It is deliberately the applied-set difference rather than a version
+// comparison: a ledger missing a middle version is still at the latest version,
+// yet Migrate would run the missing one.
+func (s *Store) PendingMigrations() ([]int, error) {
+	migrations, err := loadMigrations(s.migrationsSubdir())
+	if err != nil {
+		return nil, err
+	}
+	applied, err := s.appliedMigrations()
+	if err != nil {
+		// No ledger table yet: the database has never been migrated, so every
+		// embedded migration is pending.
+		if !strings.Contains(err.Error(), "no such table") && !strings.Contains(err.Error(), "does not exist") {
+			return nil, err
+		}
+		applied = map[int]bool{}
+	}
+	var pending []int
+	for _, m := range migrations {
+		if !applied[m.version] {
+			pending = append(pending, m.version)
+		}
+	}
+	sort.Ints(pending)
+	return pending, nil
+}
+
+// ErrSchemaTooNew marks a database whose recorded schema version exceeds the
+// highest migration this binary embeds, i.e. a downgrade. It is a permanent
+// condition: no amount of retrying changes it, and only swapping the binary or
+// the database resolves it. Callers branch on it with errors.Is so the startup
+// path can exit with a distinct code instead of restart-looping.
+var ErrSchemaTooNew = errors.New("database schema is newer than this binary")
+
 // VerifySchemaCompatibility returns an error if the database's recorded schema
 // version is newer than the highest migration this binary embeds, which means
 // the database was migrated by a newer build. Running an older binary against
@@ -534,7 +581,17 @@ func (s *Store) VerifySchemaCompatibility() error {
 		return err
 	}
 	if dbVer > binVer {
-		return fmt.Errorf("database schema version %d was created by a newer shinyhub build (this binary supports up to version %d); downgrade is not supported - upgrade the server or restore from a compatible backup", dbVer, binVer)
+		// The two recovery artifacts are named separately on purpose. A
+		// pre-migration snapshot is a bare database file that is moved back into
+		// place, while 'shinyhub restore' reads a .tar.gz from 'shinyhub backup';
+		// an operator who feeds one to the other gets nowhere, and this message is
+		// read at the worst possible moment to be guessing.
+		return fmt.Errorf("%w: database is at schema version %d, this binary supports up to %d. "+
+			"Downgrade is not supported and this will not succeed on retry. "+
+			"Resolve it by running the newer shinyhub build again, or stop the service and either "+
+			"move the pre-migration snapshot (named in the log of the upgrade that wrote it) back "+
+			"into place, or restore a backup archive with 'shinyhub restore <archive>'",
+			ErrSchemaTooNew, dbVer, binVer)
 	}
 	return nil
 }

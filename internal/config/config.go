@@ -387,6 +387,13 @@ type LifecycleConfig struct {
 type DatabaseConfig struct {
 	Driver string `yaml:"driver"`
 	DSN    string `yaml:"dsn"`
+	// PreMigrationSnapshot copies the SQLite database aside before applying any
+	// pending migration, giving a rollback point for an upgrade that turns out
+	// bad. Defaults to true; set false when an external backup already covers
+	// it or the database is too large to copy inside the start timeout.
+	// Snapshots are never pruned automatically - deleting them is an explicit
+	// operator decision.
+	PreMigrationSnapshot bool `yaml:"pre_migration_snapshot"`
 }
 
 type ServerConfig struct {
@@ -1238,7 +1245,7 @@ func LoadForMaintenance(path string) (*Config, error) {
 // the two public entry points handle differently.
 func loadRaw(path string) (*Config, error) {
 	raw := &rawConfig{
-		Database: DatabaseConfig{Driver: "sqlite", DSN: "./data/shinyhub.db"},
+		Database: DatabaseConfig{Driver: "sqlite", DSN: "./data/shinyhub.db", PreMigrationSnapshot: true},
 		Server:   ServerConfig{Host: "0.0.0.0", Port: 8080},
 		Storage:  StorageConfig{AppsDir: "./data/apps", AppDataDir: "./data/app-data", MaxBundleMB: 128},
 	}
@@ -2364,6 +2371,13 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v
+	}
+	if v := os.Getenv("SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT: %w", err)
+		}
+		cfg.Database.PreMigrationSnapshot = b
 	}
 	if v := os.Getenv("SHINYHUB_PID_FILE"); v != "" {
 		cfg.Server.PIDFile = v

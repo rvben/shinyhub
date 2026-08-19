@@ -11,8 +11,8 @@ func TestScheduleFreshnessCollector(t *testing.T) {
 	const ts = int64(1751284800) // fixed unix timestamp
 	query := func() ([]ScheduleSample, error) {
 		return []ScheduleSample{
-			{Slug: "jp-dash", Name: "refresh-data", LastSuccessUnix: ts, OK: true},
-			{Slug: "ccro-kpi", Name: "refresh-data", OK: false}, // never succeeded -> no sample
+			{Slug: "alpha-dash", Name: "refresh-data", LastSuccessUnix: ts, OK: true},
+			{Slug: "beta-kpi", Name: "refresh-data", OK: false}, // never succeeded -> no sample
 		}, nil
 	}
 	c := NewScheduleFreshnessCollector(query)
@@ -43,7 +43,7 @@ func TestScheduleFreshnessCollector(t *testing.T) {
 	for _, lp := range m.Label {
 		labels[lp.GetName()] = lp.GetValue()
 	}
-	if labels["slug"] != "jp-dash" || labels["schedule"] != "refresh-data" {
-		t.Fatalf("labels = %v, want slug=jp-dash schedule=refresh-data", labels)
+	if labels["slug"] != "alpha-dash" || labels["schedule"] != "refresh-data" {
+		t.Fatalf("labels = %v, want slug=alpha-dash schedule=refresh-data", labels)
 	}
 }

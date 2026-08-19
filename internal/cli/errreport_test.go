@@ -8,6 +8,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/backup"
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 type fakeTimeoutErr struct{}
@@ -51,6 +54,16 @@ func TestClassify(t *testing.T) {
 		// it must never inherit the legacy exit-3 auth heuristic, even wrapped.
 		{"protocol decode error", &protocolError{op: "decode apps", err: errors.New("cannot unmarshal")}, KindInternal, 1},
 		{"protocol decode error wrapped in legacy exit 3", &ExitCodeError{Code: 3, Err: &protocolError{op: "decode apps", err: errors.New("cannot unmarshal")}}, KindInternal, 1},
+		// A schema downgrade is permanent: it must carry its own exit code so a
+		// supervisor can stop restarting instead of looping on a doomed start.
+		{"schema too new", db.ErrSchemaTooNew, KindSchemaIncompatible, 7},
+		{"schema too new wrapped by startup", fmt.Errorf("schema compatibility: %w", db.ErrSchemaTooNew), KindSchemaIncompatible, 7},
+		// Handing a database file to `restore` is the caller getting the argument
+		// wrong, not shinyhub failing. Reporting it as internal tells an operator's
+		// automation to escalate a broken tool when the fix is to pass a different
+		// path, and that misread lands during an outage recovery.
+		{"restore given a database file", backup.ErrNotAnArchive, KindValidation, 1},
+		{"restore given a database file, wrapped", fmt.Errorf("%s is a SQLite database file, %w: ...", "/var/lib/shinyhub/snap.sqlite", backup.ErrNotAnArchive), KindValidation, 1},
 		{"plain error", errors.New("something odd"), KindInternal, 1},
 	}
 	for _, tc := range cases {

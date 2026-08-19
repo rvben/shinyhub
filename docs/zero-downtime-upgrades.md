@@ -57,6 +57,20 @@ straggler is force-closed.
   them in a transaction that can block the old process); split large backfills or
   table rewrites out of the upgrade and run them separately afterward.
   Same-version restarts apply no migrations and are always safe.
+- **A rollback point is taken automatically.** Before applying pending
+  migrations the successor copies the SQLite database aside as
+  `<dsn>.pre-migration-v<version>-<timestamp>.sqlite`, and logs the path. It is
+  written only when migrations are pending, and never pruned. See
+  [Schema migrations on startup](configuration.md#schema-migrations-on-startup)
+  for the opt-out and the Postgres equivalent.
+- **Rolling back to an older binary needs the snapshot.** An older build refuses
+  to serve a database a newer one migrated, exiting `7`
+  (`schema_incompatible`); the unit sets `RestartPreventExitStatus=7` so systemd
+  stops rather than restart-loops. Put back the pre-migration snapshot along
+  with the old binary, following
+  [Getting back to the older build](configuration.md#getting-back-to-the-older-build)
+  - a snapshot is moved into place, not fed to `shinyhub restore`, and its
+  `-wal` sidecar has to go or the rollback silently undoes itself.
 - **systemd MAINPID.** With `Type=notify`, ShinyHub sends `READY=1` plus
   `MAINPID=<own pid>` on startup and after each handoff, so systemd retargets the
   main PID to the successor. The unit sets `Restart=on-failure` (not

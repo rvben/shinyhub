@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-// TestManifestDocCrossLinksFleetPrecedence guards the cross-link from the bundle
+// TestManifestDocLinksToFleetPrecedence guards the cross-link from the bundle
 // manifest doc to the fleet precedence section. The bundle `shinyhub.toml` is
 // only the per-deploy layer; a fleet manifest overrides it. If manifest.md
 // drops the link, or fleet.md renames the "## Config precedence" heading the
 // link targets, readers lose the precedence story and the anchor breaks
 // silently. This test fails on either regression.
-func TestManifestDocCrossLinksFleetPrecedence(t *testing.T) {
+func TestManifestDocLinksToFleetPrecedence(t *testing.T) {
 	manifest, err := os.ReadFile("../../docs/manifest.md")
 	if err != nil {
 		t.Fatalf("read manifest.md: %v", err)

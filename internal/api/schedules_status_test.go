@@ -11,20 +11,8 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 )
 
-func TestFleetScheduleStatus_AdminOnly(t *testing.T) {
-	srv, store := newFleetHealthServer(t)
-	hash, _ := testHashPassword("pass")
-	store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: hash, Role: "developer"})
-	dev, _ := store.GetUserByUsername("dev")
-	devTok, _ := auth.IssueJWT(dev.ID, "dev", "developer", "test-secret")
-
-	req := authedRequest(t, "GET", "/api/fleet/schedules/status", nil, devTok)
-	rec := httptest.NewRecorder()
-	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("non-admin status = %d, want 403", rec.Code)
-	}
-}
+// The role gate is covered by TestFleetScheduleStatus_OperatorCanRead and
+// TestFleetScheduleStatus_BelowOperatorForbidden in schedules_status_access_test.go.
 
 func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	srv, store := newFleetHealthServer(t)
@@ -33,8 +21,8 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	admin, _ := store.GetUserByUsername("admin")
 	adminTok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
 
-	store.CreateApp(db.CreateAppParams{Slug: "jp-dash", Name: "jp-dash", OwnerID: admin.ID})
-	app, _ := store.GetAppBySlug("jp-dash")
+	store.CreateApp(db.CreateAppParams{Slug: "alpha-dash", Name: "alpha-dash", OwnerID: admin.ID})
+	app, _ := store.GetAppBySlug("alpha-dash")
 	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: app.ID, Name: "refresh-data", CronExpr: "0 6 * * *",
 		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,
@@ -80,7 +68,7 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %+v", len(got), got)
 	}
-	if got[0].Slug != "jp-dash" || got[0].Schedule != "refresh-data" {
+	if got[0].Slug != "alpha-dash" || got[0].Schedule != "refresh-data" {
 		t.Fatalf("row = %+v", got[0])
 	}
 	if !got[0].Stale {

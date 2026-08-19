@@ -18,6 +18,7 @@ const (
 	KindConflict             Kind = "conflict"
 	KindServerNotReady       Kind = "server_not_ready"
 	KindJobFailed            Kind = "job_failed"
+	KindSchemaIncompatible   Kind = "schema_incompatible"
 	KindInternal             Kind = "internal"
 )
 
@@ -47,5 +48,6 @@ var kindTable = []kindInfo{
 	{KindPartialConvergence, 4, false, "fleet apply: one or more apps failed to converge"},
 	{KindConflict, 5, false, "Resource exists with different configuration (HTTP 409)"},
 	{KindServerNotReady, 6, true, "Host reachable but ShinyHub is not up"},
+	{KindSchemaIncompatible, 7, false, "serve: the database was migrated by a newer build; permanent until the binary or database changes"},
 	{KindJobFailed, 0, false, "schedule --follow: the remote job failed; exit code is the job's own"},
 }

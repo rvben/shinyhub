@@ -9,6 +9,9 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/rvben/shinyhub/internal/backup"
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 // statusKind maps an HTTP status code to its stable error kind and process
@@ -43,6 +46,20 @@ func classify(err error) (Kind, int) {
 	hasECE := errors.As(err, &ece)
 	if hasECE && ece.Kind != "" {
 		return ece.Kind, exitCode(err)
+	}
+	// A schema downgrade is permanent, so it gets a code of its own rather than
+	// riding the generic exit 1: a supervisor configured with
+	// RestartPreventExitStatus=7 stops instead of restart-looping on a start
+	// that cannot succeed until the binary or the database changes.
+	if errors.Is(err, db.ErrSchemaTooNew) {
+		return KindSchemaIncompatible, 7
+	}
+	// Handing `restore` a database file instead of a backup archive is the caller
+	// getting the argument wrong. Left to the internal fallback it reads as a
+	// shinyhub failure, which sends an operator hunting a broken tool when the
+	// fix is a different path - during the rollback where they can least afford it.
+	if errors.Is(err, backup.ErrNotAnArchive) {
+		return KindValidation, 1
 	}
 	var ce *conflictError
 	if errors.As(err, &ce) {

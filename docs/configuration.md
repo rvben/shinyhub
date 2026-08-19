@@ -48,6 +48,94 @@ The secret signs sessions and encrypts application secrets at rest. Follow the
 [secret rotation procedure](secret-rotation.md) instead of replacing it
 directly on a running installation.
 
+## Schema migrations on startup
+
+The server applies any pending migrations when it starts. Before it changes the
+schema it copies the SQLite database aside, so an upgrade that turns out bad can
+be rolled back by restoring the old binary and that file:
+
+```
+INFO pre-migration snapshot written
+     path=/var/lib/shinyhub/shinyhub.db.pre-migration-v58-20260819T091223Z.sqlite
+     pending_migrations=1 note="never pruned automatically"
+```
+
+The snapshot is written only when migrations are actually pending, so ordinary
+restarts and same-version reloads write nothing. It is a complete, self-contained
+database (no `-wal`/`-shm` sidecars) taken with `VACUUM INTO`, safe to run while
+the server is live.
+
+Snapshots are **never deleted automatically**. Removing old ones is an explicit
+operator decision, so a disk-space policy is yours to set.
+
+```yaml
+database:
+  pre_migration_snapshot: false   # SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT
+```
+
+Turn it off when an external backup already covers the upgrade, or when the
+database is too large to copy inside the service start timeout. While it is on,
+a snapshot that cannot be written **aborts startup**: migrating a database the
+operator cannot get back is worse than not starting.
+
+Postgres deployments log a warning instead, because `VACUUM INTO` is SQLite-only.
+Take a `pg_dump` before an upgrade that carries migrations.
+
+### Downgrades exit 7
+
+A database migrated by a newer build is never served by an older one: the schema
+carries columns this code cannot read. The server refuses to start and exits
+with code `7` (`schema_incompatible`), naming the two versions and what to do:
+
+```
+database schema is newer than this binary: database is at schema version 59,
+this binary supports up to 58. Downgrade is not supported and this will not
+succeed on retry.
+```
+
+The condition is permanent, so the packaged systemd unit sets
+`RestartPreventExitStatus=7`. Without it the unit restart-loops and reports
+`activating (auto-restart)`, which most monitoring reads as healthy while the
+service is in fact down.
+
+### Getting back to the older build
+
+The fastest resolution is to start the newer build again. To stay on the older
+one, restore state it can read. There are two artifacts, and they are restored
+differently:
+
+A **pre-migration snapshot** is a bare database file, so it is moved back into
+place rather than fed to a command:
+
+```bash
+systemctl stop shinyhub
+mv /var/lib/shinyhub/shinyhub.db.pre-migration-v58-20260819T091223Z.sqlite \
+   /var/lib/shinyhub/shinyhub.db
+rm -f /var/lib/shinyhub/shinyhub.db-wal /var/lib/shinyhub/shinyhub.db-shm
+systemctl start shinyhub
+```
+
+Delete the `-wal` and `-shm` sidecars as shown. They belong to the *migrated*
+database, and SQLite replays them over whatever file it finds at that path: leave
+them and the rows you just rolled back come straight back, with no error and no
+warning. The snapshot itself needs no sidecars, being a self-contained
+`VACUUM INTO` copy.
+
+A **backup archive** from `shinyhub backup` is a `.tar.gz` containing the
+database plus the apps and app-data trees, and is restored with the command:
+
+```bash
+systemctl stop shinyhub
+shinyhub restore /var/backups/shinyhub-20260819.tar.gz
+systemctl start shinyhub
+```
+
+The two are not interchangeable: handing a snapshot to `shinyhub restore` is
+rejected, with the move-it-into-place instructions above. Note the difference in
+scope, which matters when choosing between them - a snapshot rolls back the
+database alone, so any deploy that landed after it was taken stays on disk while
+the database no longer knows about it. An archive rolls back all three together.
+
 ## Dedicated application origin
 
 Production deployments should serve application traffic from an origin that is
