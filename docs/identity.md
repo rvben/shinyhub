@@ -280,6 +280,41 @@ client-side fetch hits, and makes the app load-testable (a session with no
 token is simply anonymous, and a broken one is a classified error instead of a
 silent empty page).
 
+### Testing an identity-gated app
+
+Strict verification has a consequence for app tests: a signed-in code path
+cannot be driven with a made-up token string, because a token that is present
+but unverifiable is an error rather than an anonymous visitor. Both packages
+therefore ship a test-token minter.
+
+```python
+from shinyhub_identity.testing import fake_session, identity_env
+
+with identity_env():
+    user = session_identity(fake_session(username="alice", groups=["admins"]))
+```
+
+```r
+user <- with_shinyhub_identity(
+  current_user(shinyhub_test_session(username = "alice", groups = "admins"))
+)
+```
+
+The wrapper sets `SHINYHUB_IDENTITY_KEY` and `SHINYHUB_APP_SLUG` for the
+duration, so the app under test calls the helper exactly as it does in
+production. Each rejection reason is reachable by changing one minting argument
+(`expires_in`, `key`, `slug`, `issuer`), so a test can name the failure it
+expects instead of hand-crafting a broken token.
+
+The minted tokens carry the production claim set, including which claims are
+omitted when empty. `TestConformance_TestHelperMatchesProduction` compares them
+field by field against `identity.MintToken` in both languages, so a helper that
+drifted into being more permissive than the proxy fails the build rather than
+handing app authors green tests for code that breaks on deploy.
+
+These helpers are test-only: the default key is a fixed published constant, so
+tokens minted with it are forgeable by anyone.
+
 The manual recipes below show what the helpers do under the hood, for languages
 or frameworks the packages do not cover.
 

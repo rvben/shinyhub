@@ -95,6 +95,49 @@ vocabulary, and a cross-language conformance test pins them together):
 Letting the condition propagate is a reasonable default: the app is not going
 to render anything trustworthy anyway.
 
+## Testing your app
+
+Because verification is strict, a signed-in code path cannot be tested with a
+made-up token string: it needs a genuinely valid one. The package ships helpers
+that mint those.
+
+```r
+test_that("admins see the panel", {
+  user <- with_shinyhub_identity(
+    current_user(shinyhub_test_session(username = "alice", groups = "platform-admins"))
+  )
+  expect_equal(user$username, "alice")
+})
+```
+
+`with_shinyhub_identity()` sets the two environment variables ShinyHub injects
+(and restores them afterwards), so the app calls `current_user(session)` exactly
+as it does in production. `shinyhub_test_session(token = "")` is an anonymous
+visitor, and `shinyhub_test_token()` mints a bare token for `verify_token()`.
+
+Every rejection path is one argument, so a test names the thing that is wrong:
+
+```r
+shinyhub_test_token(expires_in = -60)      # -> expired
+shinyhub_test_token(key = as.raw(1:32))    # -> bad_signature
+shinyhub_test_token(slug = "other-app")    # -> wrong_audience
+shinyhub_test_token(issuer = "evil")       # -> wrong_issuer
+"not-a-jwt"                                # -> malformed
+```
+
+**The tokens are real, not stubs.** They carry the same claim set the proxy
+mints, including which claims are *omitted* when empty, so an app that reads
+`user$claims$email` sees `NULL` in a test exactly where it would in production.
+ShinyHub's conformance suite checks this field by field against the production
+minter, in both SDKs, and fails if either side drifts.
+
+The Python counterparts are `shinyhub_identity.testing.mint_token`,
+`.fake_session` and `.identity_env`; the names differ because R exports into the
+attached namespace, but the behaviour and the reason vocabulary are the same.
+
+These helpers are for tests only. The default key is a fixed, published
+constant, so tokens minted with it are forgeable by anyone.
+
 ## Local development
 
 With no ShinyHub proxy in front there is no token, so `current_user` is always
@@ -115,6 +158,9 @@ release verifies tokens from any ShinyHub **v0.8.6 or later** (the release
 that introduced identity forwarding); the token contract is stable across
 server releases. Claims a later server added (`email`, `name`) are simply
 `""` when an older server minted the token.
+
+**Upgrading from 0.3:** additive only. The `shinyhub_test_*` helpers and
+`with_shinyhub_identity()` are new; nothing else changed.
 
 **Upgrading from 0.2:** a rejected token now raises a `shinyhub_identity_error`
 condition instead of returning `NULL` with a warning, so code that treated
