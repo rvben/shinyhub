@@ -98,6 +98,46 @@ vocabulary, and a cross-language conformance test pins them together):
 Letting the error propagate is a reasonable default: the app is not going to
 render anything trustworthy anyway.
 
+## Testing your app
+
+Because verification is strict, a signed-in code path cannot be tested with a
+made-up token string: it needs a genuinely valid one. `shinyhub_identity.testing`
+mints those.
+
+```python
+from shinyhub_identity.shiny import session_identity
+from shinyhub_identity.testing import fake_session, identity_env
+
+def test_admins_see_the_panel():
+    with identity_env():
+        session = fake_session(username="alice", groups=["platform-admins"])
+        assert session_identity(session).username == "alice"
+```
+
+`identity_env()` sets the two environment variables ShinyHub injects (and
+restores them afterwards), so the app calls `session_identity(session)` exactly
+as it does in production. `fake_headers(...)` is the equivalent for
+`current_user(headers)`, and an anonymous request is just `{}`.
+
+Every rejection path is one argument, so a test names the thing that is wrong:
+
+```python
+mint_token(expires_in=-60)          # -> expired
+mint_token(key=b"\xff" * 32)        # -> bad_signature
+mint_token(slug="other-app")        # -> wrong_audience
+mint_token(issuer="evil")           # -> wrong_issuer
+fake_headers(token="not-a-jwt")     # -> malformed
+```
+
+**The tokens are real, not stubs.** They carry the same claim set the proxy
+mints, including which claims are *omitted* when empty, so an app that reads
+`user.claims["email"]` fails in a test exactly where it would fail in
+production. ShinyHub's conformance suite checks this field by field against the
+production minter and fails if either side drifts.
+
+This module is for tests only. The default key is a fixed, published constant,
+so tokens minted with it are forgeable by anyone.
+
 ## Local development
 
 With no ShinyHub proxy in front there is no token, so the identity is always
@@ -127,6 +167,9 @@ release verifies tokens from any ShinyHub **v0.8.6 or later** (the release
 that introduced identity forwarding); the token contract is stable across
 server releases. Claims a later server added (`email`, `name`) are simply
 `""` when an older server minted the token.
+
+**Upgrading from 0.3:** additive only. `shinyhub_identity.testing` is new;
+nothing else changed.
 
 **Upgrading from 0.2:** a rejected token now raises `IdentityError` instead of
 returning `None` with a warning, so code that treated `None` as "not logged in"

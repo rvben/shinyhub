@@ -1,12 +1,14 @@
 package identity_test
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -247,6 +249,211 @@ cat(sprintf('{"reason":"%s"}\n', reason))`
 			})
 		}
 	}
+}
+
+// TestConformance_TestHelperMatchesProduction pins the SDKs' TEST-token minters
+// against the production one, claim by claim.
+//
+// Those minters exist so an app author can test their identity-gated code, and
+// they are only worth shipping if what they produce is indistinguishable from
+// what the proxy sends. A helper that is even slightly more generous - an empty
+// email minted as "" instead of omitted, groups as [] instead of null, aud as a
+// string instead of a one-element array - lets an app author write a green test
+// for code that breaks on deploy, which is worse than having no helper at all.
+//
+// This is the only place the Go, Python and R minters exist at once, so it is
+// the only place that drift can be caught.
+func TestConformance_TestHelperMatchesProduction(t *testing.T) {
+	requireConformance(t)
+
+	// The published test-helper defaults. Mirrored here rather than imported,
+	// so a change to either side shows up as a failure instead of moving both
+	// at once.
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	const slug = "test-app"
+	keyHex := hex.EncodeToString(key)
+
+	pyScript := `import os, json
+from shinyhub_identity.testing import mint_token
+p = json.loads(os.environ["PARAMS"])
+print(json.dumps({"token": mint_token(key=os.environ["KEY_HEX"], slug=os.environ["SLUG"], **p)}))`
+
+	rScript := `source(Sys.getenv("RFILE"))
+source(Sys.getenv("RTESTFILE"))
+p <- jsonlite::fromJSON(Sys.getenv("PARAMS"), simplifyVector = FALSE)
+tok <- shinyhub_test_token(
+  user_id = p$user_id, username = p$username, role = p$role,
+  app_role = p$app_role, email = p$email, name = p$name,
+  groups = unlist(p$groups), groups_truncated = p$groups_truncated,
+  key = Sys.getenv("KEY_HEX"), slug = Sys.getenv("SLUG")
+)
+cat(jsonlite::toJSON(list(token = tok), auto_unbox = TRUE), "\n")`
+
+	rTestFile, err := filepath.Abs("../../packaging/r-identity/R/testing.R")
+	if err != nil {
+		t.Fatalf("resolve R testing helper: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		params identity.TokenParams
+		// rawGroups is what an app author passes to the helper: unsorted, as it
+		// comes from an IdP. Production sanitizes before minting, so the Go side
+		// mints the SanitizeGroups output and the two must still agree.
+		rawGroups []string
+	}{
+		{
+			name:   "minimal",
+			params: identity.TokenParams{UserID: 42, Username: "testuser", Role: "viewer"},
+		},
+		{
+			name: "every_optional_claim",
+			params: identity.TokenParams{
+				UserID: 7, Username: "carol", Role: "admin", AppRole: "manager",
+				Email: "carol@example.com", Name: "Carol Danvers",
+				GroupsTruncated: true,
+			},
+			rawGroups: []string{"b-team", "a-team"},
+		},
+		{
+			name:      "single_group",
+			params:    identity.TokenParams{UserID: 1, Username: "solo", Role: "viewer"},
+			rawGroups: []string{"only-team"},
+		},
+		{
+			name:   "app_role_without_groups",
+			params: identity.TokenParams{UserID: 2, Username: "owner", Role: "developer", AppRole: "owner"},
+		},
+	}
+
+	for _, tc := range cases {
+		for _, lang := range []string{"python", "r"} {
+			t.Run(tc.name+"/"+lang, func(t *testing.T) {
+				params := tc.params
+				params.Slug = slug
+				// Exactly what the proxy does before minting.
+				if len(tc.rawGroups) > 0 {
+					_, params.Groups, _ = identity.SanitizeGroups(tc.rawGroups)
+				}
+				production, err := identity.MintToken(key, params)
+				if err != nil {
+					t.Fatalf("mint production token: %v", err)
+				}
+
+				helperArgs, err := json.Marshal(map[string]any{
+					"user_id":          tc.params.UserID,
+					"username":         tc.params.Username,
+					"role":             tc.params.Role,
+					"app_role":         tc.params.AppRole,
+					"email":            tc.params.Email,
+					"name":             tc.params.Name,
+					"groups":           append([]string{}, tc.rawGroups...),
+					"groups_truncated": tc.params.GroupsTruncated,
+				})
+				if err != nil {
+					t.Fatalf("encode helper args: %v", err)
+				}
+
+				env := []string{
+					"PARAMS=" + string(helperArgs),
+					"KEY_HEX=" + keyHex,
+					"SLUG=" + slug,
+					"RTESTFILE=" + rTestFile,
+				}
+				out := runHelper(t, lang, env, pyScript, rScript)
+				token, ok := out["token"].(string)
+				if !ok || token == "" {
+					t.Fatalf("%s helper returned no token (got %v)", lang, out)
+				}
+
+				assertSameClaims(t, decodeClaims(t, production), decodeClaims(t, token))
+
+				// The claim set matching is worth nothing if the signature does
+				// not, so check the server's own verifier accepts the helper's
+				// token under the same key and algorithm.
+				parsed, err := jwt.Parse(token, func(*jwt.Token) (any, error) { return key, nil },
+					jwt.WithValidMethods([]string{"HS256"}),
+					jwt.WithIssuer(identity.Issuer),
+					jwt.WithAudience(slug))
+				if err != nil {
+					t.Fatalf("%s helper token failed verification: %v", lang, err)
+				}
+				if !parsed.Valid {
+					t.Fatalf("%s helper token parsed but is not valid", lang)
+				}
+			})
+		}
+	}
+}
+
+// assertSameClaims compares two decoded claim sets exactly, except for the two
+// timestamps: production and the helper mint moments apart, so their absolute
+// values legitimately differ. The lifetime BETWEEN them must still match, and
+// both must be present - a helper that quietly dropped exp would otherwise mint
+// a token with no replay bound and pass this test.
+func assertSameClaims(t *testing.T, want, got map[string]any) {
+	t.Helper()
+
+	timestamps := map[string]bool{"iat": true, "exp": true}
+
+	for _, name := range sortedKeys(want) {
+		if _, present := got[name]; !present {
+			t.Errorf("helper omits claim %q that production mints (value %#v)", name, want[name])
+			continue
+		}
+		if timestamps[name] {
+			continue
+		}
+		if !reflect.DeepEqual(got[name], want[name]) {
+			t.Errorf("claim %q = %#v, production mints %#v", name, got[name], want[name])
+		}
+	}
+	for _, name := range sortedKeys(got) {
+		if _, present := want[name]; !present {
+			t.Errorf("helper mints claim %q = %#v that production does not", name, got[name])
+		}
+	}
+
+	for name := range timestamps {
+		if _, ok := got[name].(float64); !ok {
+			t.Errorf("claim %q is %#v, want a number", name, got[name])
+			return
+		}
+	}
+	if lifetime := got["exp"].(float64) - got["iat"].(float64); lifetime != identity.TokenTTL.Seconds() {
+		t.Errorf("helper token lifetime is %vs, production mints %vs", lifetime, identity.TokenTTL.Seconds())
+	}
+}
+
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// decodeClaims reads a token's payload WITHOUT verifying it: this compares what
+// was minted, so it must not depend on the thing being checked.
+func decodeClaims(t *testing.T, token string) map[string]any {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token has %d segments, want 3: %q", len(parts), token)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode token payload: %v", err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("parse token payload %s: %v", payload, err)
+	}
+	return claims
 }
 
 // lastJSONLine parses the final non-empty output line as a JSON object, or nil
