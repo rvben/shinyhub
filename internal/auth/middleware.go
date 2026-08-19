@@ -102,8 +102,13 @@ type authResult struct {
 	Credential *CredentialInfo
 }
 
+// userFromClaims builds the identity from the token alone, for the nil-lookup
+// path. SessionEpoch is carried across even though there is no live value to
+// check it against: consumers that compare this epoch to the database later
+// (the live-session recheck) must see the epoch the token was issued with, not
+// a zero that reads as "never revoked" and matches no real user.
 func userFromClaims(c *Claims) *ContextUser {
-	return &ContextUser{ID: c.UserID, Username: c.Subject, Role: c.Role}
+	return &ContextUser{ID: c.UserID, Username: c.Subject, Role: c.Role, TokenEpoch: c.SessionEpoch}
 }
 
 func tokenFromClaims(c *Claims) *TokenInfo {

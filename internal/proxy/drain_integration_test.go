@@ -15,7 +15,7 @@ import (
 func hijackingHandler(tr *connTracker, held chan<- net.Conn) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rec := newStatusRecorder(w)
-		rec.trackHijack = tr.track
+		rec.trackHijack = func(c net.Conn) net.Conn { return tr.track(c, ConnPrincipal{}) }
 		conn, _, err := rec.Hijack()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

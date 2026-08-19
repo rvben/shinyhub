@@ -32,8 +32,8 @@ func TestConnTracker_TrackCountForget(t *testing.T) {
 	if tr.count() != 0 {
 		t.Fatalf("empty tracker count = %d, want 0", tr.count())
 	}
-	a := tr.track(&stubConn{}).(*trackedConn)
-	b := tr.track(&stubConn{})
+	a := tr.track(&stubConn{}, ConnPrincipal{}).(*trackedConn)
+	b := tr.track(&stubConn{}, ConnPrincipal{})
 	if tr.count() != 2 {
 		t.Fatalf("count after 2 tracks = %d, want 2", tr.count())
 	}
@@ -51,8 +51,8 @@ func TestConnTracker_TrackCountForget(t *testing.T) {
 func TestConnTracker_CloseAllForceClosesUnderlying(t *testing.T) {
 	tr := newConnTracker()
 	s1, s2 := &stubConn{}, &stubConn{}
-	tr.track(s1)
-	tr.track(s2)
+	tr.track(s1, ConnPrincipal{})
+	tr.track(s2, ConnPrincipal{})
 	forced := tr.closeAll()
 	if forced != 2 {
 		t.Fatalf("closeAll returned %d, want 2", forced)
@@ -90,7 +90,7 @@ func TestProxy_DrainUpgraded_NoneReturnsImmediately(t *testing.T) {
 func TestProxy_DrainUpgraded_WaitsThenForceCloses(t *testing.T) {
 	p := New()
 	s := &stubConn{}
-	p.conns.track(s)
+	p.conns.track(s, ConnPrincipal{})
 	start := time.Now()
 	forced := p.DrainUpgraded(150 * time.Millisecond)
 	if forced != 1 {
@@ -106,7 +106,7 @@ func TestProxy_DrainUpgraded_WaitsThenForceCloses(t *testing.T) {
 
 func TestProxy_DrainUpgraded_ReturnsEarlyWhenConnsClose(t *testing.T) {
 	p := New()
-	tc := p.conns.track(&stubConn{})
+	tc := p.conns.track(&stubConn{}, ConnPrincipal{})
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		tc.Close()

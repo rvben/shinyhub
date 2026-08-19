@@ -2019,8 +2019,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (which lives for the duration of the WS) ever starts.
 	rec.onUpgrade = func() { p.MarkWSReady(slug) }
 	// Track the hijacked connection (if this request upgrades to WebSocket) so a
-	// graceful shutdown can wait for it to close before exiting.
-	rec.trackHijack = p.conns.track
+	// graceful shutdown can wait for it to close before exiting, and so the
+	// session recheck can find it again. The principal is read inside the
+	// closure, at the hijack itself: that is the last moment the request context
+	// exists, and the connection then outlives it by hours with no middleware
+	// ever seeing it again.
+	rec.trackHijack = func(c net.Conn) net.Conn {
+		return p.conns.track(c, connPrincipal(r, slug))
+	}
 	start := time.Now()
 	replicaIndex := -1
 	sticky := false

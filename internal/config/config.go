@@ -436,6 +436,18 @@ type ServerConfig struct {
 	// upgrade and continuing to serve. Defaults to 60s.
 	UpgradeTimeout time.Duration `yaml:"upgrade_timeout"`
 
+	// SessionRecheckInterval is how often each instance re-runs the per-app
+	// access check over its live WebSocket app sessions, closing the ones whose
+	// identity has been revoked (sessions revoked, user deleted or demoted,
+	// membership removed, app made private). It bounds how long a revoked user
+	// keeps the session they already had open; the request path is unaffected.
+	//
+	// Written as a duration ("30s", "2m") or as a bare 0 to turn the sweep off.
+	// A pointer so an explicit 0 (never re-check, the behaviour before this
+	// existed) is distinguishable from an absent key, which applies the default
+	// (see the SessionRecheckInterval accessor). Negative values disable too.
+	SessionRecheckInterval *SweepInterval `yaml:"session_recheck_interval"`
+
 	// StopGrace is the SIGTERM-to-SIGKILL window when stopping a single app
 	// replica (hibernation, stop, restart, shutdown). Raise it for apps that
 	// need longer to flush session state on shutdown. Defaults to 10s.
@@ -481,6 +493,59 @@ type ServerConfig struct {
 	RenderParkMaxPerApp *int    `yaml:"render_park_max_per_app"`
 	RenderParkMaxTotal  *int    `yaml:"render_park_max_total"`
 	RenderParkTTL       *string `yaml:"render_park_ttl"`
+}
+
+// defaultSessionRecheckInterval bounds how long a revoked user keeps a session
+// that was already open. 30 seconds is short enough that revocation feels
+// immediate to the operator who performed it, and long enough that the sweep
+// stays cheap: it costs a handful of indexed reads per distinct (app, user)
+// with a live WebSocket, not per connection and not per request.
+const defaultSessionRecheckInterval = 30 * time.Second
+
+// SweepInterval is a duration that also accepts a bare 0 in YAML.
+//
+// yaml.v3 decodes a time.Duration only from a unit-suffixed string, so
+// "session_recheck_interval: 0" - the obvious way to write "off", and the
+// spelling the field documents - would otherwise refuse to start the server
+// with a type error. Zero denotes the same span in every unit, so it is
+// accepted bare; any other unit-less number is rejected, because "30" could
+// mean 30 seconds or 30 nanoseconds and guessing wrong would leave a security
+// sweep running nine orders of magnitude too often, or effectively never.
+type SweepInterval time.Duration
+
+// UnmarshalYAML accepts a duration string ("30s", "2m", "-1s") or a bare zero.
+//
+// It decides on the node's own tag rather than by trying decodes in order.
+// Trying an integer decode first looks equivalent and is not: yaml.v3 truncates
+// a float into an int, so "0.5" would decode to 0 and silently turn the sweep
+// off - the operator asks for a half-second sweep and gets none, with nothing
+// reported. Every value this does not understand is an error, so no spelling
+// can quietly disable a security control.
+func (s *SweepInterval) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf(`session_recheck_interval: expected a duration such as "30s", or 0 to disable`)
+	}
+	switch value.Tag {
+	case "!!int", "!!float":
+		// A unit-less number. Zero is the only one that denotes the same span
+		// in every unit, so it is the only one accepted; reading "30" as
+		// seconds or as nanoseconds differs by nine orders of magnitude and
+		// this is not the place to guess.
+		if f, err := strconv.ParseFloat(value.Value, 64); err == nil && f == 0 {
+			*s = 0
+			return nil
+		}
+		return fmt.Errorf("session_recheck_interval %q: missing unit, write %q (or 0 to disable)", value.Value, value.Value+"s")
+	case "!!str":
+		d, err := time.ParseDuration(value.Value)
+		if err != nil {
+			return fmt.Errorf("session_recheck_interval %q: %w", value.Value, err)
+		}
+		*s = SweepInterval(d)
+		return nil
+	default:
+		return fmt.Errorf(`session_recheck_interval %q: expected a duration such as "30s", or 0 to disable`, value.Value)
+	}
 }
 
 // defaultMinAvailableMemoryMB is the runtime memory floor applied when
@@ -2392,6 +2457,17 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Server.UpgradeTimeout = d
 	}
+	if v := os.Getenv("SHINYHUB_SESSION_RECHECK_INTERVAL"); v != "" {
+		d, perr := time.ParseDuration(v)
+		if perr != nil {
+			return fmt.Errorf("parse SHINYHUB_SESSION_RECHECK_INTERVAL %q: %w", v, perr)
+		}
+		// Unlike the timeouts around it, 0 is meaningful here: it disables the
+		// sweep. So this one accepts it rather than rejecting non-positive values.
+		// time.ParseDuration already accepts a bare "0", matching the YAML form.
+		interval := SweepInterval(d)
+		cfg.Server.SessionRecheckInterval = &interval
+	}
 	if v := os.Getenv("SHINYHUB_STOP_GRACE"); v != "" {
 		d, perr := time.ParseDuration(v)
 		if perr != nil {
@@ -2936,6 +3012,22 @@ func applyEnv(cfg *Config) error {
 // HostBudgetMB returns the total RAM budget (in MiB) for app worker processes.
 // 0 means the host-capacity guard is disabled.
 func (c *Config) HostBudgetMB() int { return c.Server.HostBudgetMB }
+
+// SessionRecheckInterval returns how often live WebSocket app sessions are
+// re-authorized. Unset applies the default; an explicit 0 or a negative value
+// disables the sweep entirely, which restores the pre-existing behaviour where
+// a session that was already open outlived any revocation. 0 from this accessor
+// means disabled.
+func (c *Config) SessionRecheckInterval() time.Duration {
+	switch {
+	case c.Server.SessionRecheckInterval == nil:
+		return defaultSessionRecheckInterval
+	case *c.Server.SessionRecheckInterval < 0:
+		return 0
+	default:
+		return time.Duration(*c.Server.SessionRecheckInterval)
+	}
+}
 
 // MinAvailableMemoryMB returns the runtime host-memory floor (in MiB) below
 // which no new elastic worker is allocated. Unset applies the safe default

@@ -22,13 +22,28 @@ func newConnTracker() *connTracker {
 }
 
 // track wraps c so that closing it unregisters it, registers the wrapper, and
-// returns the wrapper to hand back to the hijacking caller.
-func (t *connTracker) track(c net.Conn) net.Conn {
-	tc := &trackedConn{Conn: c, tracker: t}
+// returns the wrapper to hand back to the hijacking caller. principal is the
+// identity the connection was admitted under; it is required rather than
+// optional because a connection nobody can attribute is a connection nobody can
+// revoke.
+func (t *connTracker) track(c net.Conn, principal ConnPrincipal) net.Conn {
+	tc := &trackedConn{Conn: c, tracker: t, principal: principal}
 	t.mu.Lock()
 	t.conns[tc] = struct{}{}
 	t.mu.Unlock()
 	return tc
+}
+
+// snapshot returns the currently tracked connections. Callers iterate the copy
+// so a Close (which takes the same lock to unregister) cannot deadlock.
+func (t *connTracker) snapshot() []*trackedConn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	open := make([]*trackedConn, 0, len(t.conns))
+	for tc := range t.conns {
+		open = append(open, tc)
+	}
+	return open
 }
 
 func (t *connTracker) forget(tc *trackedConn) {
@@ -47,12 +62,7 @@ func (t *connTracker) count() int {
 // open. Each Close unregisters its own entry (via trackedConn.Close), so the
 // set is empty afterward.
 func (t *connTracker) closeAll() int {
-	t.mu.Lock()
-	open := make([]*trackedConn, 0, len(t.conns))
-	for tc := range t.conns {
-		open = append(open, tc)
-	}
-	t.mu.Unlock()
+	open := t.snapshot()
 	for _, tc := range open {
 		tc.Close()
 	}
@@ -65,9 +75,12 @@ func (t *connTracker) closeAll() int {
 // error is returned on every subsequent call.
 type trackedConn struct {
 	net.Conn
-	tracker  *connTracker
-	once     sync.Once
-	closeErr error
+	tracker *connTracker
+	// principal is fixed at the upgrade and never mutated, so the recheck sweep
+	// reads it without holding the tracker lock.
+	principal ConnPrincipal
+	once      sync.Once
+	closeErr  error
 }
 
 func (c *trackedConn) Close() error {

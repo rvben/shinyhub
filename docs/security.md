@@ -18,6 +18,9 @@ history, and optional process or container isolation.
 - Use Docker, remote workers, Fargate, or private Scaleway Serverless Containers
   when application authors should not share the control-plane host boundary.
 - Apply CPU, memory, session, replica, bundle, and data quotas.
+- Leave `server.session_recheck_interval` enabled so revoking a user also closes
+  the app sessions they already have open, not only their next request. See
+  [WebSocket and session binding](identity.md#websocket-and-session-binding).
 - Store `auth.secret`, OAuth credentials, deploy tokens, and database passwords
   in a secrets manager or owner-readable environment file.
 - Enable metrics, structured logs, and retention appropriate to the installation.

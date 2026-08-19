@@ -23,7 +23,7 @@ func TestStatusRecorder_HijackInvokesTrackHook(t *testing.T) {
 	raw := &stubConn{}
 	hr := &hijackableRecorder{conn: raw}
 	rec := newStatusRecorder(hr)
-	rec.trackHijack = tr.track
+	rec.trackHijack = func(c net.Conn) net.Conn { return tr.track(c, ConnPrincipal{}) }
 
 	got, _, err := rec.Hijack()
 	if err != nil {

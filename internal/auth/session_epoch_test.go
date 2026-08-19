@@ -72,6 +72,33 @@ func TestIssueSessionToken_CarriesEpoch(t *testing.T) {
 	}
 }
 
+// TestResolvedIdentity_CarriesTheEpochWithoutALookup pins the claim-only
+// resolution path (nil userLookup). The epoch must survive into the resolved
+// identity rather than defaulting to 0.
+//
+// A zero here is not a harmless placeholder: it is the epoch of a user whose
+// sessions have never been revoked, so it silently matches a real state. The
+// live-session recheck compares this value against the database, and a spurious
+// 0 would report every user who has ever had a revocation as revoked again -
+// closing their sessions on every sweep, forever, with no way to get a session
+// that survives.
+func TestResolvedIdentity_CarriesTheEpochWithoutALookup(t *testing.T) {
+	secret := "test-secret"
+	u := &auth.ContextUser{ID: 7, Username: "bob", Role: "developer", TokenEpoch: 4}
+	tok, err := auth.IssueSessionToken(u, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := auth.AuthenticateRequest(mkEpochRequest(tok), secret, nil, nil, nil)
+	if err != nil || got == nil {
+		t.Fatalf("claim-only authentication must succeed, got user=%v err=%v", got, err)
+	}
+	if got.TokenEpoch != 4 {
+		t.Fatalf("TokenEpoch = %d, want 4 (the epoch the token was issued with)", got.TokenEpoch)
+	}
+}
+
 // mkEpochRequest is a tiny helper kept for symmetry with other auth tests.
 func mkEpochRequest(tok string) *http.Request {
 	req := httptest.NewRequest("GET", "/", nil)
