@@ -3,7 +3,7 @@ import time
 import jwt  # PyJWT
 import pytest
 
-from shinyhub_identity import Identity, current_user, verify_token
+from shinyhub_identity import Identity, IdentityError, current_user, verify_token
 
 # 32-byte key, matching ShinyHub's HKDF-SHA256-derived per-app key length.
 KEY = bytes.fromhex("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
@@ -72,26 +72,23 @@ def test_name_absent_is_empty_string():
     assert u.name == ""
 
 
+def test_identity_is_keyword_only():
+    # Field order is not part of the API: constructing positionally must fail,
+    # so a future field can be inserted anywhere without breaking callers.
+    with pytest.raises(TypeError):
+        Identity("42", "alice", "admin")
+
+
 def test_missing_token_is_anonymous():
     assert current_user({}, key=KEY, slug=SLUG) is None
 
 
-def test_bad_signature_is_anonymous():
-    wrong = bytes.fromhex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
-    assert current_user(headers(mint(key=wrong)), key=KEY, slug=SLUG) is None
-
-
-def test_wrong_audience_is_anonymous():
-    assert current_user(headers(mint(slug="other-app")), key=KEY, slug=SLUG) is None
-
-
-def test_wrong_issuer_is_anonymous():
-    assert current_user(headers(mint(iss="evil")), key=KEY, slug=SLUG) is None
-
-
-def test_expired_token_is_anonymous():
-    stale = mint(iat=int(time.time()) - 3600, exp_delta=300)  # expired ~55m ago
-    assert current_user(headers(stale), key=KEY, slug=SLUG) is None
+def test_present_but_invalid_token_is_not_anonymous():
+    # The whole point of the contract: a broken deployment must not render as
+    # a logged-out visitor.
+    wrong = bytes.fromhex("ff" * 32)
+    with pytest.raises(IdentityError):
+        current_user(headers(mint(key=wrong)), key=KEY, slug=SLUG)
 
 
 def test_canonical_case_header_key_is_found():
@@ -113,22 +110,14 @@ def test_reads_key_and_slug_from_env(monkeypatch):
     assert current_user(headers(mint())).role == "admin"
 
 
-def test_missing_exp_is_rejected():
-    # A signed token that omits exp must not be accepted: the short-lived-token
-    # guarantee requires an expiry to bound replay.
-    claims = {
-        "iss": "shinyhub",
-        "sub": "42",
-        "aud": SLUG,
-        "preferred_username": "alice",
-        "role": "admin",
-        "groups": [],
-    }
-    token = jwt.encode(claims, KEY, algorithm="HS256")
-    assert current_user(headers(token), key=KEY, slug=SLUG) is None
-
-
 def test_verify_token_primitive():
     assert verify_token(mint(), key=KEY, slug=SLUG).username == "alice"
-    assert verify_token("", key=KEY, slug=SLUG) is None
-    assert verify_token(None, key=KEY, slug=SLUG) is None
+
+
+def test_verify_token_rejects_an_absent_token():
+    # Unlike current_user, this primitive has no "anonymous" outcome: the
+    # caller asked to verify something and passed nothing.
+    for empty in ("", None):
+        with pytest.raises(IdentityError) as caught:
+            verify_token(empty, key=KEY, slug=SLUG)
+        assert caught.value.reason == "no_token"

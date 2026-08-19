@@ -1,9 +1,13 @@
 # identity-demo
 
 A Shiny for Python app that demonstrates ShinyHub identity forwarding. It
-verifies the signed `X-Shinyhub-Identity-Token` JWT on every request and
-displays the caller's username, display name, platform role, and group
+verifies the signed `X-Shinyhub-Identity-Token` JWT once when the session opens
+and displays the caller's username, display name, platform role, and group
 memberships. An admins-only panel appears when the verified role is `admin`.
+
+It decodes the token inline, with PyJWT only, to show what the verification
+does. Real apps should install `shinyhub-identity` and call
+`session_identity(session)`.
 
 ## Run locally
 
@@ -34,6 +38,10 @@ After deploy, the app is live at `https://your-shinyhub.example.com/app/identity
   visitor message. For a public app, logged-out visitors reach this branch;
   for a private or shared app, ShinyHub redirects unauthenticated requests to
   the login page before they reach the app.
+- **Broken deployment:** a token that arrives but fails verification (a stale
+  `SHINYHUB_IDENTITY_KEY` after an `auth.secret` rotation, say) gets its own
+  message naming the rejection. That case is deliberately not rendered as
+  "anonymous", so a misconfiguration cannot hide behind a signed-out page.
 
 **Note:** Set the app's access level to `private` or `shared` (Configuration
 tab) to require sign-in. With `public` access, logged-out visitors reach the

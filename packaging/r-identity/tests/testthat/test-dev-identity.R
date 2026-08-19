@@ -14,13 +14,16 @@ test_that("dev env vars yield a synthetic identity", {
     SHINYHUB_IDENTITY_DEV_ROLE = NA
   ), {
     u <- current_user(list(request = list()))
-    expect_equal(u$preferred_username, "devlin")
+    expect_s3_class(u, "shinyhub_identity")
+    expect_equal(u$username, "devlin")
+    expect_equal(u$user_id, "devlin")
     expect_equal(u$role, "viewer")
-    expect_true("team-a" %in% u$groups)
-    expect_true("team-b" %in% u$groups)
+    expect_equal(u$groups, c("team-a", "team-b"))
     expect_equal(u$email, "devlin@example.com")
     expect_equal(u$name, "Devlin Example")
-    expect_true(isTRUE(u$dev))
+    # The marker lives in the raw claims, where it cannot be mistaken for a
+    # verified field of the identity itself.
+    expect_true(isTRUE(u$claims$dev))
   })
 })
 
@@ -50,7 +53,7 @@ test_that("dev identity does not shadow a real token", {
   ), {
     session <- list(request = list(HTTP_X_SHINYHUB_IDENTITY_TOKEN = dmint()))
     u <- current_user(session, key = dkey, slug = dslug)
-    expect_equal(u$preferred_username, "alice")
+    expect_equal(u$username, "alice")
   })
 })
 
