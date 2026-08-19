@@ -1,3 +1,7 @@
+---
+description: "Install ShinyHub as a Python package, a standalone binary, or a container image, starting from one uvx command for a local evaluation."
+---
+
 # Installation
 
 ShinyHub is distributed as a Python package, a standalone server binary, and a

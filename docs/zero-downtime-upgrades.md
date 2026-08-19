@@ -1,3 +1,7 @@
+---
+description: "Upgrade or restart on SIGHUP without dropping live sessions or refusing connections, by re-execing the control plane in place."
+---
+
 # Zero-downtime upgrades (systemd)
 
 ShinyHub can be upgraded or restarted without dropping live app sessions or

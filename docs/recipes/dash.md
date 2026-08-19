@@ -1,3 +1,7 @@
+---
+description: "Deploy a Dash app by giving it an explicit launch command in the manifest, since it does not follow the Shiny bundle convention."
+---
+
 # Deploy a Dash app
 
 Dash apps do not follow the Shiny for Python bundle convention, so they

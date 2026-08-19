@@ -1,3 +1,7 @@
+---
+description: "Cache an expensive result across sessions with functools.cache at module scope, so one user's miss becomes every other user's hit."
+---
+
 # Output caching across sessions
 
 `@reactive.calc` caches *within* a session. The moment a second user

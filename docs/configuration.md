@@ -1,3 +1,7 @@
+---
+description: "Every server setting ShinyHub reads from YAML, the environment variable that overrides each one, and the default applied when both are absent."
+---
+
 # Configuration
 
 ShinyHub reads server configuration from YAML and allows environment variables

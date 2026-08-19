@@ -1,3 +1,7 @@
+---
+description: "Run the standalone binary as an unprivileged service with delegated cgroup controllers, so native apps get real CPU and memory limits."
+---
+
 # systemd
 
 The standalone binary can run as an unprivileged systemd service with delegated

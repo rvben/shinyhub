@@ -1,3 +1,7 @@
+---
+description: "Wire the nginx auth_request module so an external authenticator supplies the user, and ShinyHub trusts those headers only from the proxy."
+---
+
 # Forward-auth with nginx
 
 ShinyHub can trust authentication performed by an upstream reverse proxy. This

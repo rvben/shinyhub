@@ -1,3 +1,7 @@
+---
+description: "An optional shinyhub.toml at a bundle root that sets the launch command, dependencies, post-deploy hooks, and per-app configuration."
+---
+
 # Bundle manifest (`shinyhub.toml`)
 
 A bundle may include a `shinyhub.toml` file at its root. The manifest is

@@ -1,3 +1,7 @@
+---
+description: "Terminate OpenID Connect single sign-on inside ShinyHub, adding a Sign in with SSO button without any external authentication proxy."
+---
+
 # Native OIDC login (SSO without an external auth proxy)
 
 ShinyHub can terminate OpenID Connect single sign-on itself. Enable it and the

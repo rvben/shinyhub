@@ -1,3 +1,7 @@
+---
+description: "Move an existing single-node install onto Postgres, which is the prerequisite for running more than one control-plane instance."
+---
+
 # Migrating from SQLite to Postgres
 
 ShinyHub runs single-node on SQLite by default. High availability (multiple

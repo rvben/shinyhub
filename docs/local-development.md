@@ -1,3 +1,7 @@
+---
+description: "Two local loops: developing the ShinyHub control plane itself, and running an app exactly the way the server will run it."
+---
+
 # Local development
 
 ShinyHub supports two complementary local loops: developing the ShinyHub

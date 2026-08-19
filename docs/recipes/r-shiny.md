@@ -1,3 +1,7 @@
+---
+description: "Deploy an R Shiny app from two files, app.R at the bundle root and an renv.lock naming its packages. No manifest is required."
+---
+
 # Deploy an R Shiny app
 
 An R bundle needs two files: `app.R` at the root, and a `renv.lock` naming the

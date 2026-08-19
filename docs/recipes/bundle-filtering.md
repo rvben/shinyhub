@@ -1,3 +1,7 @@
+---
+description: "The two filtering layers that decide which files reach the upload zip: a per-tree ignore file, and the exclusions built into deploy."
+---
+
 # Bundle filtering
 
 When `shinyhub deploy` builds the upload zip, it applies two independent

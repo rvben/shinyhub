@@ -1,3 +1,7 @@
+---
+description: "Run the bundled k6 harness to reproduce ShinyHub's throughput and hibernation performance claims on your own hardware."
+---
+
 # Load Testing ShinyHub
 
 ShinyHub ships a k6-based load-test harness under `loadtest/`. Two scenarios

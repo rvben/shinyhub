@@ -1,3 +1,7 @@
+---
+description: "Two ways to authenticate LDAP or SAML users, since ShinyHub ships no LDAP client and no SAML service provider of its own."
+---
+
 # OIDC bridge for LDAP and SAML sites
 
 ShinyHub has no built-in LDAP client or SAML service provider. Sites that

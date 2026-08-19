@@ -1,3 +1,7 @@
+---
+description: "Run cron-style jobs against an app's bundle as short-lived processes in the same runtime, with the output of every run captured."
+---
+
 # Scheduled Jobs
 
 ShinyHub can run cron-style jobs against an app's bundle. Each run is a

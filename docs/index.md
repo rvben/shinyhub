@@ -1,4 +1,5 @@
 ---
+description: "Deploy and operate interactive R and Python applications with authentication, scaling, hibernation, and observability, on hardware you control."
 hide:
   - navigation
   - toc

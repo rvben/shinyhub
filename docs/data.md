@@ -1,3 +1,7 @@
+---
+description: "Give each app a persistent directory that survives redeploys, for the Parquet, DuckDB, and SQLite files it reads and writes."
+---
+
 # Persistent Data Dir
 
 Every deployed app gets its own directory at `<storage.app_data_dir>/<slug>/`.

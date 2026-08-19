@@ -1,3 +1,7 @@
+---
+description: "Restrict what a native app process can reach on disk, instead of letting it run with the full filesystem reach of the ShinyHub service user."
+---
+
 # Native process isolation
 
 The native runtime launches each app as a plain OS process. By default that

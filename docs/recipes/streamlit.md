@@ -1,3 +1,7 @@
+---
+description: "Streamlit needs an explicit launch command in the manifest, plus the headless and port flags that let ShinyHub proxy it correctly."
+---
+
 # Deploy a Streamlit app
 
 Streamlit apps do not follow the Shiny for Python bundle convention

@@ -1,3 +1,7 @@
+---
+description: "The authentication, authorization, and isolation model for self-hosted installs where platform operators control who may deploy code."
+---
+
 # Security
 
 ShinyHub is designed for self-hosted environments where platform operators

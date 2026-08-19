@@ -1,3 +1,7 @@
+---
+description: "Go from nothing installed to a live Shiny app, then deploy one of your own through the same workflow you would use in production."
+---
+
 # Quick start
 
 Go from nothing installed to a live Shiny application, then deploy one of your

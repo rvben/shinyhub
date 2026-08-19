@@ -1,3 +1,7 @@
+---
+description: "Run several control-plane instances and separate app traffic from ownership and scheduling, with the failover behavior operators need to know."
+---
+
 # HA Data-Plane Operator Guide
 
 This guide explains how ShinyHub's high-availability (HA) mode separates

@@ -1,3 +1,7 @@
+---
+description: "How deploy reports each phase: a spinner in an interactive terminal, durable line-oriented updates in CI, and heartbeats through long builds."
+---
+
 # Deployment progress
 
 `shinyhub deploy` reports the work the server is actually doing. Interactive

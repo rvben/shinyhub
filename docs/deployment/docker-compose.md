@@ -1,3 +1,7 @@
+---
+description: "A reference Compose stack that runs the control plane and starts each app as a sibling container with its own CPU and memory limits."
+---
+
 # Docker Compose
 
 The reference Compose stack runs the ShinyHub control plane and starts

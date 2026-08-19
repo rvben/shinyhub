@@ -1,3 +1,7 @@
+---
+description: "Shell completion for bash, zsh, and fish, and how the CLI stays predictable when a workstation and its server run different versions."
+---
+
 # CLI completion and compatibility
 
 ShinyHub's CLI is designed to remain discoverable after the first successful

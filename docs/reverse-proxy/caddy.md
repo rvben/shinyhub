@@ -1,3 +1,7 @@
+---
+description: "Wire Caddy's forward_auth so an upstream authenticator supplies the user, and ShinyHub trusts those headers only when the proxy sets them."
+---
+
 # Forward-auth with Caddy
 
 ShinyHub can trust authentication performed by an upstream reverse proxy. When

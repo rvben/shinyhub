@@ -1,3 +1,7 @@
+---
+description: "Customize the login page, dashboard, and emails with your own name, logo, and colors. Every white-label field is optional."
+---
+
 # Branding (White-Label)
 
 ShinyHub ships a white-label mode that lets operators customize the front door

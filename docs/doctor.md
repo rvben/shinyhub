@@ -1,3 +1,7 @@
+---
+description: "A read-only preflight for running an app locally, connecting to a server, and deploying, reporting every problem it finds with the fix."
+---
+
 # Doctor
 
 `shinyhub doctor` is a read-only preflight for the complete developer journey:

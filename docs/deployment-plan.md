@@ -1,3 +1,7 @@
+---
+description: "Use plan and apply when a deploy needs review, an audit trail, or a strict split between approving the bundle and shipping it."
+---
+
 # Plan and apply
 
 ShinyHub has two deployment paths:

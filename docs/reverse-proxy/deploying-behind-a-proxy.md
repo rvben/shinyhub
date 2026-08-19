@@ -1,3 +1,7 @@
+---
+description: "How the CLI authenticates when an auth proxy sits in front of ShinyHub and intercepts the browser login a token deploy cannot complete."
+---
+
 # Deploying from the CLI behind an auth proxy
 
 When ShinyHub sits behind an authentication proxy (Authelia, oauth2-proxy,

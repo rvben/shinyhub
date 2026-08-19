@@ -1,3 +1,7 @@
+---
+description: "The interface a managed container runner image must implement so ECS, Fargate, and Scaleway Serverless can host apps the control plane schedules."
+---
+
 # Managed Runner Image Contract
 
 This document defines the interface between the ShinyHub control plane and a

@@ -1,3 +1,7 @@
+---
+description: "A live ShinyHub running a curated fleet of R and Python apps, so you can try deploys, scaling, and hibernation before installing anything."
+---
+
 # Live demo
 
 The public demo is a real ShinyHub installation running a curated fleet of R and

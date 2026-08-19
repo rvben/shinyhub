@@ -1,3 +1,7 @@
+---
+description: "Add a second host as a remote Docker worker over Tailscale, with mTLS end to end, so a deployment tier runs its containers there."
+---
+
 # Join a remote Docker worker over Tailscale
 
 This walks through adding a second host as a ShinyHub remote Docker worker so a

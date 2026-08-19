@@ -1,3 +1,7 @@
+---
+description: "Propagate W3C trace context through the reverse proxy and inject the OTEL variables each app process needs to export its own spans."
+---
+
 # OpenTelemetry Tracing
 
 ShinyHub propagates W3C trace context through its reverse proxy and injects

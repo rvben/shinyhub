@@ -1,3 +1,7 @@
+---
+description: "Every proxied request carries the authenticated user to the app as X-Shinyhub headers, so apps personalize without running their own login."
+---
+
 # Identity Forwarding
 
 ShinyHub forwards the authenticated user's identity to every app process it

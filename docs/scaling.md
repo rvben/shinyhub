@@ -1,3 +1,7 @@
+---
+description: "Size the replica pool and the per-replica session cap that together set an app's admission ceiling, and see what happens above it."
+---
+
 # Scaling apps
 
 ShinyHub serves traffic through a fixed pool of **replica** processes

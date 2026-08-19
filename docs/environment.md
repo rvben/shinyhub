@@ -1,3 +1,7 @@
+---
+description: "Per-app environment variables, with values marked secret encrypted at rest under AES-256-GCM and never returned in plaintext."
+---
+
 # Environment Variables and Secrets
 
 Every app has its own key-value environment store. Non-secret values are stored

@@ -1,3 +1,7 @@
+---
+description: "Keep credentials for several servers side by side, so one laptop can hold a local hub, a staging server, and production at the same time."
+---
+
 # Working with several servers
 
 The CLI keeps one credential per server. Connecting to a second ShinyHub adds it

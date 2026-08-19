@@ -1,3 +1,7 @@
+---
+description: "Keep the dashboard on a small always-on instance and run apps as serverless containers, so intermittent traffic stops paying for idle VMs."
+---
+
 # Scaleway Serverless Containers
 
 Use this tier when application traffic is intermittent and paying for idle app

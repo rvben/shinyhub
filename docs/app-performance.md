@@ -1,3 +1,7 @@
+---
+description: "Why a deployed app opens quickly but renders slowly, how to measure where the delay comes from, and which fixes shorten time to first chart."
+---
+
 # App startup performance
 
 A common report is: "the app opens, but the charts and tables take a couple of

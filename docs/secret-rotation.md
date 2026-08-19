@@ -1,3 +1,7 @@
+---
+description: "auth.secret is HKDF-derived into every key ShinyHub stores, so follow this procedure or at-rest secrets stop decrypting after a change."
+---
+
 # Rotating `auth.secret`
 
 `auth.secret` is the root of every secret ShinyHub stores. It is HKDF-derived

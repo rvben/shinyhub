@@ -1,3 +1,7 @@
+---
+description: "Prometheus metrics for the control plane, a structured access log for every request, and how both line up with trace identifiers."
+---
+
 # Metrics and Observability
 
 ShinyHub exposes Prometheus metrics for the server process itself (the control

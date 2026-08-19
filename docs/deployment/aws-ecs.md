@@ -1,3 +1,7 @@
+---
+description: "A Terraform module that runs the control plane on ECS, Postgres on RDS, and each app as an isolated Fargate task behind HTTPS."
+---
+
 # AWS ECS and Fargate
 
 The Terraform module deploys an HTTPS control plane on ECS, PostgreSQL on RDS,

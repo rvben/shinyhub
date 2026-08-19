@@ -1,3 +1,7 @@
+---
+description: "Declare a whole set of apps in fleet.toml and let the CLI compute the difference against what the server runs, then converge it."
+---
+
 # Fleet manifest (`fleet.toml`)
 
 `shinyhub fleet` reconciles a whole set of apps against a single declarative
