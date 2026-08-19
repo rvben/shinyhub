@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 type fakeTimeoutErr struct{}
@@ -51,6 +53,10 @@ func TestClassify(t *testing.T) {
 		// it must never inherit the legacy exit-3 auth heuristic, even wrapped.
 		{"protocol decode error", &protocolError{op: "decode apps", err: errors.New("cannot unmarshal")}, KindInternal, 1},
 		{"protocol decode error wrapped in legacy exit 3", &ExitCodeError{Code: 3, Err: &protocolError{op: "decode apps", err: errors.New("cannot unmarshal")}}, KindInternal, 1},
+		// A schema downgrade is permanent: it must carry its own exit code so a
+		// supervisor can stop restarting instead of looping on a doomed start.
+		{"schema too new", db.ErrSchemaTooNew, KindSchemaIncompatible, 7},
+		{"schema too new wrapped by startup", fmt.Errorf("schema compatibility: %w", db.ErrSchemaTooNew), KindSchemaIncompatible, 7},
 		{"plain error", errors.New("something odd"), KindInternal, 1},
 	}
 	for _, tc := range cases {

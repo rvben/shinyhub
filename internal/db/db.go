@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -556,6 +557,13 @@ func (s *Store) PendingMigrations() ([]int, error) {
 	return pending, nil
 }
 
+// ErrSchemaTooNew marks a database whose recorded schema version exceeds the
+// highest migration this binary embeds, i.e. a downgrade. It is a permanent
+// condition: no amount of retrying changes it, and only swapping the binary or
+// the database resolves it. Callers branch on it with errors.Is so the startup
+// path can exit with a distinct code instead of restart-looping.
+var ErrSchemaTooNew = errors.New("database schema is newer than this binary")
+
 // VerifySchemaCompatibility returns an error if the database's recorded schema
 // version is newer than the highest migration this binary embeds, which means
 // the database was migrated by a newer build. Running an older binary against
@@ -573,7 +581,10 @@ func (s *Store) VerifySchemaCompatibility() error {
 		return err
 	}
 	if dbVer > binVer {
-		return fmt.Errorf("database schema version %d was created by a newer shinyhub build (this binary supports up to version %d); downgrade is not supported - upgrade the server or restore from a compatible backup", dbVer, binVer)
+		return fmt.Errorf("%w: database is at schema version %d, this binary supports up to %d. "+
+			"Downgrade is not supported and this will not succeed on retry. "+
+			"Resolve it by running the newer shinyhub build again, or stop the service and "+
+			"restore a compatible snapshot with 'shinyhub restore <archive>'", ErrSchemaTooNew, dbVer, binVer)
 	}
 	return nil
 }

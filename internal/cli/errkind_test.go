@@ -19,6 +19,7 @@ func TestKindTable_CoversSpecKinds(t *testing.T) {
 		KindPartialConvergence:   4,
 		KindConflict:             5,
 		KindServerNotReady:       6,
+		KindSchemaIncompatible:   7,
 		KindJobFailed:            0, // passthrough: no fixed exit code
 	}
 	if len(kindTable) != len(want) {

@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 // statusKind maps an HTTP status code to its stable error kind and process
@@ -43,6 +45,13 @@ func classify(err error) (Kind, int) {
 	hasECE := errors.As(err, &ece)
 	if hasECE && ece.Kind != "" {
 		return ece.Kind, exitCode(err)
+	}
+	// A schema downgrade is permanent, so it gets a code of its own rather than
+	// riding the generic exit 1: a supervisor configured with
+	// RestartPreventExitStatus=7 stops instead of restart-looping on a start
+	// that cannot succeed until the binary or the database changes.
+	if errors.Is(err, db.ErrSchemaTooNew) {
+		return KindSchemaIncompatible, 7
 	}
 	var ce *conflictError
 	if errors.As(err, &ce) {

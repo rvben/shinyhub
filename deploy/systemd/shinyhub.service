@@ -32,6 +32,12 @@ TimeoutStartSec=120
 # outage" gap. (Restart=always is NOT used: it would race the handoff.)
 Restart=on-failure
 RestartSec=5s
+# Exit 7 means the database was migrated by a NEWER shinyhub build, so this
+# binary refuses to serve it. Retrying cannot fix that, and without this line
+# the unit sits in "activating (auto-restart)" forever - which reads as healthy
+# to most monitoring - while the service is in fact down. Stopping puts the unit
+# in "failed" so the alert fires and `journalctl -u shinyhub` shows the reason.
+RestartPreventExitStatus=7
 
 # Raise the file-descriptor limit well above the default 1024: each proxied
 # WebSocket session holds client+backend sockets, plus DB connections and app
