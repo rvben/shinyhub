@@ -91,6 +91,21 @@ def test_non_hex_env_key(monkeypatch):
     assert "hex" in str(err)
 
 
+def test_explicit_empty_key_is_no_key():
+    # An app that reads the variable itself and passes it through gets an empty
+    # value when it is unset. The reason must not depend on which of the two
+    # routes the empty key travelled, and must not accuse a key that was never
+    # there of being the wrong key. The R helper is pinned to the same answers.
+    for empty in ("", b"", bytearray()):
+        err = reason_of(lambda: verify_token(mint(), key=empty, slug=SLUG))
+        assert err.reason == "no_key"
+        assert "SHINYHUB_IDENTITY_KEY" in str(err)
+
+    # A key that IS present and simply wrong still reports the wrong key.
+    err = reason_of(lambda: verify_token(mint(), key=WRONG_KEY, slug=SLUG))
+    assert err.reason == "bad_signature"
+
+
 def test_missing_slug_names_the_variable(monkeypatch):
     monkeypatch.delenv("SHINYHUB_APP_SLUG", raising=False)
     err = reason_of(lambda: verify_token(mint(), key=KEY))

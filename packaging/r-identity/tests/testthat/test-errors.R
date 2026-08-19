@@ -111,6 +111,21 @@ test_that("a non-hex key env var is bad_key and says hex", {
   })
 })
 
+test_that("an explicitly passed empty key is no_key, not bad_key or bad_signature", {
+  # An app that reads the variable itself and passes it through gets an empty
+  # value when it is unset. The reason must not depend on which of the two
+  # routes the empty key travelled, and must not accuse a key that was never
+  # there of being the wrong key: "" once reported bad_key and raw(0) reported
+  # bad_signature, sending the operator to rotate rather than to set the env.
+  for (empty in list("", raw(0), character(0))) {
+    err <- expect_reason(verify_token(dmint(), key = empty, slug = dslug), "no_key")
+    expect_match(conditionMessage(err), "SHINYHUB_IDENTITY_KEY", fixed = TRUE)
+  }
+
+  # A key that IS present and simply wrong still reports the wrong key.
+  expect_reason(verify_token(dmint(), key = dwrong_key, slug = dslug), "bad_signature")
+})
+
 test_that("a missing slug env var is no_slug and names the variable", {
   with_env(list(SHINYHUB_APP_SLUG = NA), {
     err <- expect_reason(verify_token(dmint(), key = dkey), "no_slug")
