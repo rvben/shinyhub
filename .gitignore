@@ -1,5 +1,8 @@
 .superpowers/
 docs/superpowers/
+.claire/
+.codex/
+.impeccable/
 go.work
 go.work.sum
 bin/
@@ -41,3 +44,9 @@ loadtest/render/driver/package-lock.json
 # Local investigation scratch. Not shipped, and it carries customer names
 # that must never reach a committed file.
 research/
+
+# Local prototypes kept beside the repo, never part of a build.
+experiments/
+
+# macOS Finder metadata.
+.DS_Store
