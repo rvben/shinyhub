@@ -517,6 +517,45 @@ func latestEmbeddedVersion(subdir string) (int, error) {
 	return max, nil
 }
 
+// HasLegacySchema reports whether the database holds core tables with no
+// migration ledger, i.e. it predates versioned migrations and carries real data
+// despite reporting schema version 0. Callers that treat version 0 as "empty"
+// must consult this, or they mistake a pre-ledger production database for a
+// fresh install.
+func (s *Store) HasLegacySchema() (bool, error) {
+	return s.hasLegacySchema()
+}
+
+// PendingMigrations returns, in ascending order, the versions Migrate would
+// apply to this database. An empty result means Migrate is a no-op.
+//
+// It is deliberately the applied-set difference rather than a version
+// comparison: a ledger missing a middle version is still at the latest version,
+// yet Migrate would run the missing one.
+func (s *Store) PendingMigrations() ([]int, error) {
+	migrations, err := loadMigrations(s.migrationsSubdir())
+	if err != nil {
+		return nil, err
+	}
+	applied, err := s.appliedMigrations()
+	if err != nil {
+		// No ledger table yet: the database has never been migrated, so every
+		// embedded migration is pending.
+		if !strings.Contains(err.Error(), "no such table") && !strings.Contains(err.Error(), "does not exist") {
+			return nil, err
+		}
+		applied = map[int]bool{}
+	}
+	var pending []int
+	for _, m := range migrations {
+		if !applied[m.version] {
+			pending = append(pending, m.version)
+		}
+	}
+	sort.Ints(pending)
+	return pending, nil
+}
+
 // VerifySchemaCompatibility returns an error if the database's recorded schema
 // version is newer than the highest migration this binary embeds, which means
 // the database was migrated by a newer build. Running an older binary against

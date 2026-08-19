@@ -915,6 +915,25 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			slog.Warn("store close", "err", err)
 		}
 	}()
+	// Copy the database aside before changing its schema, so a bad upgrade can
+	// be rolled back by putting the old binary and this file back. A snapshot
+	// that cannot be written aborts startup: migrating a database the operator
+	// cannot recover is worse than not starting.
+	snap, err := backup.PreMigrationSnapshot(cfg, store, time.Now())
+	if err != nil {
+		return fmt.Errorf("pre-migration snapshot: %w (set database.pre_migration_snapshot: false to skip it)", err)
+	}
+	switch {
+	case snap.Path != "":
+		slog.Info("pre-migration snapshot written", "path", snap.Path,
+			"pending_migrations", len(snap.Pending), "note", "never pruned automatically")
+	case len(snap.Pending) > 0 && store.IsPostgres():
+		slog.Warn("applying migrations with no snapshot; take a pg_dump before upgrading a Postgres deployment",
+			"pending_migrations", len(snap.Pending))
+	case len(snap.Pending) > 0:
+		slog.Info("applying migrations without a pre-migration snapshot",
+			"pending_migrations", len(snap.Pending), "reason", snap.Skipped)
+	}
 	if err := store.Migrate(); err != nil {
 		return fmt.Errorf("db migrate: %w", err)
 	}

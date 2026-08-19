@@ -9,6 +9,10 @@
 database:
   driver: sqlite                      # only driver supported today
   dsn: ./data/shinyhub.db             # SHINYHUB_DB_DSN
+  # Copy the database aside before applying any pending migration, so a bad
+  # upgrade can be rolled back. Written only when migrations are actually
+  # pending, and never pruned automatically.
+  pre_migration_snapshot: true        # SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT
 
 server:
   host: 0.0.0.0                       # bind address
