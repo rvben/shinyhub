@@ -217,8 +217,8 @@ func TestFleetHealth_CountsStaleSchedules(t *testing.T) {
 	admin, _ := store.GetUserByUsername("admin")
 	adminTok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
 
-	store.CreateApp(db.CreateAppParams{Slug: "jp-dash", Name: "jp-dash", OwnerID: admin.ID})
-	app, _ := store.GetAppBySlug("jp-dash")
+	store.CreateApp(db.CreateAppParams{Slug: "alpha-dash", Name: "alpha-dash", OwnerID: admin.ID})
+	app, _ := store.GetAppBySlug("alpha-dash")
 	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: app.ID, Name: "refresh-data", CronExpr: "0 6 * * *",
 		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,
@@ -261,7 +261,7 @@ func TestFleetHealth_CountsStaleSchedules(t *testing.T) {
 	if got.StaleSchedules != 1 {
 		t.Fatalf("stale_schedules = %d, want 1", got.StaleSchedules)
 	}
-	if len(got.StaleScheduleList) != 1 || got.StaleScheduleList[0].Slug != "jp-dash" {
-		t.Fatalf("stale_schedule_list = %+v, want [jp-dash/refresh-data]", got.StaleScheduleList)
+	if len(got.StaleScheduleList) != 1 || got.StaleScheduleList[0].Slug != "alpha-dash" {
+		t.Fatalf("stale_schedule_list = %+v, want [alpha-dash/refresh-data]", got.StaleScheduleList)
 	}
 }

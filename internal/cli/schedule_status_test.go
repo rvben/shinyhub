@@ -8,8 +8,8 @@ import (
 
 // The server returns the standard {items,total,limit,offset} list envelope.
 const scheduleStatusBody = `{"items":[
-  {"slug":"jp-dash","schedule":"refresh-data","enabled":true,"last_run_at":"2026-06-30T06:00:00Z","last_run_status":"succeeded","last_success_at":"2026-06-30T06:00:00Z","last_success_age_s":7200,"stale":false},
-  {"slug":"ccro-kpi","schedule":"refresh-data","enabled":true,"last_run_at":"2026-06-30T06:00:00Z","last_run_status":"failed","last_success_at":null,"last_success_age_s":null,"stale":true}
+  {"slug":"alpha-dash","schedule":"refresh-data","enabled":true,"last_run_at":"2026-06-30T06:00:00Z","last_run_status":"succeeded","last_success_at":"2026-06-30T06:00:00Z","last_success_age_s":7200,"stale":false},
+  {"slug":"beta-kpi","schedule":"refresh-data","enabled":true,"last_run_at":"2026-06-30T06:00:00Z","last_run_status":"failed","last_success_at":null,"last_success_age_s":null,"stale":true}
 ],"total":2,"limit":0,"offset":0}`
 
 func TestScheduleStatus_Table(t *testing.T) {
@@ -43,13 +43,13 @@ func TestScheduleStatus_SlugFilter(t *testing.T) {
 		}
 		w.WriteHeader(404)
 	})
-	if _, err := execCLI(t, "schedule", "status", "jp-dash", "-o", "table"); err != nil {
+	if _, err := execCLI(t, "schedule", "status", "alpha-dash", "-o", "table"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(*reqs) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(*reqs))
 	}
-	if !strings.Contains((*reqs)[0].Query, "slug=jp-dash") {
+	if !strings.Contains((*reqs)[0].Query, "slug=alpha-dash") {
 		t.Errorf("a slug arg should filter via ?slug=, got query %q", (*reqs)[0].Query)
 	}
 }
@@ -71,7 +71,7 @@ func TestScheduleStatus_JSONEnvelope(t *testing.T) {
 	if !strings.Contains(out, `"items"`) {
 		t.Fatalf("json output should be a renderList envelope with an items key:\n%s", out)
 	}
-	if !strings.Contains(out, `"slug":"jp-dash"`) || !strings.Contains(out, `"stale":true`) {
+	if !strings.Contains(out, `"slug":"alpha-dash"`) || !strings.Contains(out, `"stale":true`) {
 		t.Fatalf("json output missing rows:\n%s", out)
 	}
 }

@@ -195,7 +195,7 @@ platform defaults, so tuning is a few settings (UI → app → Configuration, or
 |---|---|
 | `OTEL_TRACES_SAMPLER_ARG=1.0` | Sample this app harder than the fleet `sample_ratio` |
 | `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=starlette` | Drop the long-lived WebSocket/ASGI spans |
-| `OTEL_RESOURCE_ATTRIBUTES=team=ccro,owner=lsf` | Ownership tags on every span (replaces the platform default, so re-add `shinyhub.app=<slug>` if you still want it) |
+| `OTEL_RESOURCE_ATTRIBUTES=team=analytics,owner=data-eng` | Ownership tags on every span (replaces the platform default, so re-add `shinyhub.app=<slug>` if you still want it) |
 | `OTEL_SERVICE_NAME=my-name` | Override the default service name (the app slug) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT=...` | Send this app's spans to a different collector |
 

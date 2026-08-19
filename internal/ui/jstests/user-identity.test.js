@@ -5,7 +5,7 @@ import { initials, avatarHue, identityModel } from '../static/views/user-identit
 test('initials prefer first+last word of a display name', () => {
   assert.equal(initials('Ruben Jongejan', 'ruben'), 'RJ');
   assert.equal(initials('  ada   lovelace  ', 'ada'), 'AL');
-  assert.equal(initials('Jean-Luc Picard', 'jlp'), 'JP'); // first alnum of each word
+  assert.equal(initials('Mary-Kate Olsen', 'mko'), 'MO'); // first alnum of each word
 });
 
 test('initials fall back through single token, username, then ?', () => {

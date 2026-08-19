@@ -9,7 +9,7 @@ import (
 
 func TestScheduleFreshness(t *testing.T) {
 	store := newScheduleStore(t)
-	appID := newScheduleAppFixture(t, store, "jp-dash")
+	appID := newScheduleAppFixture(t, store, "alpha-dash")
 	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: appID, Name: "refresh-data", CronExpr: "0 6 * * *",
 		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,
@@ -55,7 +55,7 @@ func TestScheduleFreshness(t *testing.T) {
 		t.Fatalf("got %d rows, want 1", len(rows))
 	}
 	fr := rows[0]
-	if fr.Slug != "jp-dash" || fr.Name != "refresh-data" {
+	if fr.Slug != "alpha-dash" || fr.Name != "refresh-data" {
 		t.Fatalf("slug/name = %q/%q", fr.Slug, fr.Name)
 	}
 	if !fr.Enabled || fr.CronExpr != "0 6 * * *" || fr.TimeoutSeconds != 3600 {
@@ -156,7 +156,7 @@ func TestScheduleFreshness_CarriesScheduleID(t *testing.T) {
 
 func TestScheduleFreshness_NeverRun(t *testing.T) {
 	store := newScheduleStore(t)
-	appID := newScheduleAppFixture(t, store, "ccro-kpi")
+	appID := newScheduleAppFixture(t, store, "beta-kpi")
 	if _, err := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: appID, Name: "refresh-data", CronExpr: "0 6 * * *",
 		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,

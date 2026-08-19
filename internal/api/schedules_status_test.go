@@ -21,8 +21,8 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	admin, _ := store.GetUserByUsername("admin")
 	adminTok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
 
-	store.CreateApp(db.CreateAppParams{Slug: "jp-dash", Name: "jp-dash", OwnerID: admin.ID})
-	app, _ := store.GetAppBySlug("jp-dash")
+	store.CreateApp(db.CreateAppParams{Slug: "alpha-dash", Name: "alpha-dash", OwnerID: admin.ID})
+	app, _ := store.GetAppBySlug("alpha-dash")
 	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: app.ID, Name: "refresh-data", CronExpr: "0 6 * * *",
 		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,
@@ -68,7 +68,7 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %+v", len(got), got)
 	}
-	if got[0].Slug != "jp-dash" || got[0].Schedule != "refresh-data" {
+	if got[0].Slug != "alpha-dash" || got[0].Schedule != "refresh-data" {
 		t.Fatalf("row = %+v", got[0])
 	}
 	if !got[0].Stale {

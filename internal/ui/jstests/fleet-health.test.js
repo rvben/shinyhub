@@ -122,8 +122,8 @@ test('summariseFleetHealth: stale schedules escalate to degraded', () => {
     degraded_apps: [],
     stale_schedules: 2,
     stale_schedule_list: [
-      { slug: 'jp-dash', schedule: 'refresh-data' },
-      { slug: 'ccro-kpi', schedule: 'refresh-data' },
+      { slug: 'alpha-dash', schedule: 'refresh-data' },
+      { slug: 'beta-kpi', schedule: 'refresh-data' },
     ],
   });
   assert.equal(s.statusClass, 'lost');
