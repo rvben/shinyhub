@@ -48,6 +48,57 @@ The secret signs sessions and encrypts application secrets at rest. Follow the
 [secret rotation procedure](secret-rotation.md) instead of replacing it
 directly on a running installation.
 
+## Schema migrations on startup
+
+The server applies any pending migrations when it starts. Before it changes the
+schema it copies the SQLite database aside, so an upgrade that turns out bad can
+be rolled back by restoring the old binary and that file:
+
+```
+INFO pre-migration snapshot written
+     path=/var/lib/shinyhub/shinyhub.db.pre-migration-v58-20260819T091223Z.sqlite
+     pending_migrations=1 note="never pruned automatically"
+```
+
+The snapshot is written only when migrations are actually pending, so ordinary
+restarts and same-version reloads write nothing. It is a complete, self-contained
+database (no `-wal`/`-shm` sidecars) taken with `VACUUM INTO`, safe to run while
+the server is live.
+
+Snapshots are **never deleted automatically**. Removing old ones is an explicit
+operator decision, so a disk-space policy is yours to set.
+
+```yaml
+database:
+  pre_migration_snapshot: false   # SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT
+```
+
+Turn it off when an external backup already covers the upgrade, or when the
+database is too large to copy inside the service start timeout. While it is on,
+a snapshot that cannot be written **aborts startup**: migrating a database the
+operator cannot get back is worse than not starting.
+
+Postgres deployments log a warning instead, because `VACUUM INTO` is SQLite-only.
+Take a `pg_dump` before an upgrade that carries migrations.
+
+### Downgrades exit 7
+
+A database migrated by a newer build is never served by an older one: the schema
+carries columns this code cannot read. The server refuses to start and exits
+with code `7` (`schema_incompatible`), naming the two versions and what to do:
+
+```
+database schema is newer than this binary: database is at schema version 59,
+this binary supports up to 58. Downgrade is not supported and this will not
+succeed on retry.
+```
+
+The condition is permanent, so the packaged systemd unit sets
+`RestartPreventExitStatus=7`. Without it the unit restart-loops and reports
+`activating (auto-restart)`, which most monitoring reads as healthy while the
+service is in fact down. Resolve it by starting the newer build again, or by
+stopping the service and restoring a compatible snapshot.
+
 ## Dedicated application origin
 
 Production deployments should serve application traffic from an origin that is

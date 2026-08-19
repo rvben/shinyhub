@@ -35,3 +35,16 @@ dedicated application origin is configured.
 The reference unit supports listener handoff on `SIGHUP`. Follow the
 [zero-downtime upgrade guide](../zero-downtime-upgrades.md) to replace the
 binary while existing HTTP and WebSocket connections drain normally.
+
+The unit sets `RestartPreventExitStatus=7`. Exit `7` means the database was
+migrated by a newer build, which this binary refuses to serve; retrying cannot
+fix it, so systemd stops and the unit shows `failed` instead of looping in
+`activating (auto-restart)`. If you copy the unit rather than installing it,
+keep that line, or a botched downgrade looks healthy to monitoring while the
+service is down. `journalctl -u shinyhub` shows the two versions involved.
+
+Before applying pending migrations the server writes a pre-migration snapshot of
+the SQLite database beside it; see
+[Schema migrations on startup](../configuration.md#schema-migrations-on-startup).
+Those files are never pruned automatically, so include them in whatever
+disk-space policy covers `/var/lib/shinyhub`.
