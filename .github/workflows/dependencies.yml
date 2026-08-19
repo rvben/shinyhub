@@ -1,0 +1,187 @@
+name: dependencies
+
+# Weekly dependency refresh. `upd` rewrites the manifests, this job runs the
+# repo's own checks against the result, and the outcome is offered as a single
+# rolling pull request rather than pushed to main.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dependencies
+  cancel-in-progress: false
+
+env:
+  # Pinned by digest as well as by version, so a replaced or re-tagged release
+  # fails the checksum instead of running an unreviewed binary against this
+  # repo. Bump both together.
+  UPD_VERSION: v0.6.0
+  UPD_SHA256: 340417c75b1aecc25e26df109809b9a3a819f3c37ae549c25df33ea90a4a3e29
+  UPD_BRANCH: deps/upd
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install upd
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/upd.tar.gz \
+            "https://github.com/rvben/upd/releases/download/${UPD_VERSION}/upd-${UPD_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${UPD_SHA256}  /tmp/upd.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/upd.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/upd /usr/local/bin/upd
+          upd --version
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      # Named explicitly rather than left to discovery: these are the manifests
+      # the checks below cover. The tree also holds example, demo and load-test
+      # manifests that nothing in CI builds, and a positional path is what keeps
+      # this run off them. `--lock` refreshes package-lock.json.
+      - name: Apply updates
+        id: upd
+        env:
+          # Unauthenticated GitHub API calls hit HTTP 429, which upd reports as
+          # errors rather than as up-to-date dependencies.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          upd --apply --max-bump minor --min-age 7d --lock --no-color \
+            --format text go.mod package.json 2>&1 | tee /tmp/upd.txt
+
+          # go.sum carries a hash per module version, so a rewritten go.mod
+          # without this leaves every subsequent go command failing on a missing
+          # entry rather than on anything to do with the update itself.
+          go mod tidy
+
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Reported, never applied: GITHUB_TOKEN is not allowed to push changes
+      # under .github/workflows, so a run that rewrote a `uses:` ref would fail
+      # at the push with everything else already done. Anything that must not
+      # move even by hand belongs in .updrc.toml, which records the reason
+      # beside each pin.
+      - name: Report action updates left for a human
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          upd --dry-run --max-bump minor --min-age 7d --no-color \
+            --format text -l actions,pre-commit > /tmp/upd-actions.txt 2>&1 || true
+          {
+            echo "### Action and hook updates (not applied)"
+            echo '```'
+            cat /tmp/upd-actions.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The checks run here rather than on the pull request because GitHub does
+      # not start `on: pull_request` workflows for a PR opened with
+      # GITHUB_TOKEN. Same commands as the fast `test` job in ci.yml; every
+      # other job there is left to the merge.
+      - name: Lint
+        if: steps.upd.outputs.changed == 'true'
+        run: go vet ./...
+
+      - name: Vet gated tests (integration, e2e)
+        if: steps.upd.outputs.changed == 'true'
+        run: go vet -tags "integration e2e" ./...
+
+      - name: Test (Go)
+        if: steps.upd.outputs.changed == 'true'
+        run: make test-go
+
+      - name: Test (JS)
+        if: steps.upd.outputs.changed == 'true'
+        run: make test-js
+
+      - name: Vulnerability scan
+        if: steps.upd.outputs.changed == 'true'
+        run: make vuln
+
+      - name: Build
+        if: steps.upd.outputs.changed == 'true'
+        run: go build -o /tmp/shinyhub ./cmd/shinyhub
+
+      - name: Open or update the pull request
+        if: steps.upd.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Named rather than inferred from the git remote, so `gh` never falls
+          # back to the interactive prompt it cannot answer here.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${UPD_BRANCH}"
+          git add go.mod go.sum package.json package-lock.json
+          git commit -m "chore(deps): weekly dependency update"
+
+          # Force-pushed so the branch stays a single rolling proposal rather
+          # than accumulating a commit per week.
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/${UPD_BRANCH}"
+
+          {
+            echo "Weekly dependency refresh by [upd](https://github.com/rvben/upd) \`${UPD_VERSION}\`,"
+            echo "capped at minor and skipping releases younger than 7 days."
+            echo
+            echo '```'
+            cat /tmp/upd.txt
+            echo '```'
+            echo
+            echo "### Checks"
+            echo
+            echo "\`go vet ./...\`, the gated-test vet, \`make test-go\`, \`make test-js\`,"
+            echo "\`make vuln\` and \`go build\` passed in the job that opened this pull request."
+            echo "GitHub does not start \`on: pull_request\` workflows for a pull request opened"
+            echo "with \`GITHUB_TOKEN\`, so they run there rather than appearing as status checks"
+            echo "here."
+            echo
+            echo "That is the fast \`test\` job's set. The race detector, Postgres, provisioning"
+            echo "and end-to-end jobs are not part of this run; merging is what puts the change"
+            echo "through them."
+            echo
+            echo "### Not applied"
+            echo
+            echo '```'
+            cat /tmp/upd-actions.txt
+            echo '```'
+          } > /tmp/pr-body.md
+
+          if [ -n "$(gh pr list --head "${UPD_BRANCH}" --state open --json number --jq '.[0].number // empty')" ]; then
+            echo "Existing pull request updated in place."
+          else
+            gh pr create --base main --head "${UPD_BRANCH}" \
+              --title "chore(deps): weekly dependency update" \
+              --body-file /tmp/pr-body.md
+          fi
+
+      - name: Nothing to update
+        if: steps.upd.outputs.changed != 'true'
+        run: echo "No dependency updates within policy." >> "$GITHUB_STEP_SUMMARY"
