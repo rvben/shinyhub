@@ -19,6 +19,7 @@ package backup
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"errors"
@@ -226,6 +227,34 @@ func Create(cfg *config.Config, version, outPath string) error {
 	return nil
 }
 
+// ErrNotAnArchive reports that the path handed to Restore is a database file
+// rather than the .tar.gz `shinyhub backup` writes. Callers match it with
+// errors.Is to classify the mistake as a bad argument: the operator passes a
+// different path, so nothing here is broken and there is nothing to escalate.
+var ErrNotAnArchive = errors.New("not a shinyhub backup archive")
+
+// sqliteMagic is the 16-byte header every SQLite database file starts with,
+// including one produced by VACUUM INTO.
+var sqliteMagic = []byte("SQLite format 3\x00")
+
+// isSQLiteFile reports whether path begins with the SQLite file header. It reads
+// the content rather than trusting the extension, because the snapshot an
+// operator is holding may well have been renamed on its way out of the incident.
+// Unreadable or short files are not databases as far as this check is concerned;
+// they fall through to the archive reader, which reports its own error.
+func isSQLiteFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, len(sqliteMagic))
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return false
+	}
+	return bytes.Equal(buf, sqliteMagic)
+}
+
 // ReadManifest returns the manifest from an archive without extracting it.
 func ReadManifest(archivePath string) (Manifest, error) {
 	f, err := os.Open(archivePath)
@@ -369,6 +398,23 @@ func restore(cfg *config.Config, archivePath string, force bool) (movedAside []s
 		if !ok {
 			return nil, fmt.Errorf("database %q is in-memory; cannot restore into it", cfg.Database.DSN)
 		}
+	}
+
+	// A pre-migration snapshot is a bare SQLite file; a backup archive is a
+	// .tar.gz. Both are called snapshots, and the startup log names the
+	// pre-migration one by path at exactly the moment an operator is hunting for
+	// a way back from a failed upgrade, so handing it to restore is the expected
+	// mistake rather than an exotic one. Caught here it explains itself; left to
+	// ReadManifest it surfaces as "gzip: invalid header".
+	if isSQLiteFile(archivePath) {
+		detail := "restore reads a .tar.gz written by `shinyhub backup`"
+		if !postgres {
+			detail += fmt.Sprintf(
+				". To put a pre-migration snapshot back, stop the server, move it to %s "+
+					"(removing any -wal and -shm files beside that path), then start the older binary",
+				dbPath)
+		}
+		return nil, fmt.Errorf("%s is a SQLite database file, %w: %s", archivePath, ErrNotAnArchive, detail)
 	}
 
 	manifest, err := ReadManifest(archivePath)

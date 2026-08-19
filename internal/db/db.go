@@ -581,10 +581,17 @@ func (s *Store) VerifySchemaCompatibility() error {
 		return err
 	}
 	if dbVer > binVer {
+		// The two recovery artifacts are named separately on purpose. A
+		// pre-migration snapshot is a bare database file that is moved back into
+		// place, while 'shinyhub restore' reads a .tar.gz from 'shinyhub backup';
+		// an operator who feeds one to the other gets nowhere, and this message is
+		// read at the worst possible moment to be guessing.
 		return fmt.Errorf("%w: database is at schema version %d, this binary supports up to %d. "+
 			"Downgrade is not supported and this will not succeed on retry. "+
-			"Resolve it by running the newer shinyhub build again, or stop the service and "+
-			"restore a compatible snapshot with 'shinyhub restore <archive>'", ErrSchemaTooNew, dbVer, binVer)
+			"Resolve it by running the newer shinyhub build again, or stop the service and either "+
+			"move the pre-migration snapshot (named in the log of the upgrade that wrote it) back "+
+			"into place, or restore a backup archive with 'shinyhub restore <archive>'",
+			ErrSchemaTooNew, dbVer, binVer)
 	}
 	return nil
 }

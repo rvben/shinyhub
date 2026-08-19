@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/rvben/shinyhub/internal/backup"
 	"github.com/rvben/shinyhub/internal/db"
 )
 
@@ -52,6 +53,13 @@ func classify(err error) (Kind, int) {
 	// that cannot succeed until the binary or the database changes.
 	if errors.Is(err, db.ErrSchemaTooNew) {
 		return KindSchemaIncompatible, 7
+	}
+	// Handing `restore` a database file instead of a backup archive is the caller
+	// getting the argument wrong. Left to the internal fallback it reads as a
+	// shinyhub failure, which sends an operator hunting a broken tool when the
+	// fix is a different path - during the rollback where they can least afford it.
+	if errors.Is(err, backup.ErrNotAnArchive) {
+		return KindValidation, 1
 	}
 	var ce *conflictError
 	if errors.As(err, &ce) {
