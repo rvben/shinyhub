@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.17](https://github.com/rvben/shinyhub/compare/v0.11.16...v0.11.17) - 2026-08-19
+
+### Breaking Changes
+
+- **identity**: raise on an unverifiable token instead of returning anonymous ([07497f6](https://github.com/rvben/shinyhub/commit/07497f662d46288eb12abb4fe2e469d3a7f2f39b))
+
+### Added
+
+- **identity**: raise on an unverifiable token instead of returning anonymous ([07497f6](https://github.com/rvben/shinyhub/commit/07497f662d46288eb12abb4fe2e469d3a7f2f39b))
+
+### Fixed
+
+- **access**: close live app sessions when a user's access is revoked ([9beae51](https://github.com/rvben/shinyhub/commit/9beae51369eea701e9e3df381f4ed20d48af5d45))
+- **identity**: report an empty verification key as no_key in the R helper ([0ddd30d](https://github.com/rvben/shinyhub/commit/0ddd30d214cef072255050c2160001458205911f))
+
 ## [0.11.16](https://github.com/rvben/shinyhub/compare/v0.11.15...v0.11.16) - 2026-08-19
 
 ### Added
