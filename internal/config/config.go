@@ -493,6 +493,24 @@ type ServerConfig struct {
 	RenderParkMaxPerApp *int    `yaml:"render_park_max_per_app"`
 	RenderParkMaxTotal  *int    `yaml:"render_park_max_total"`
 	RenderParkTTL       *string `yaml:"render_park_ttl"`
+
+	// StatusOverlay controls whether the proxy appends its status overlay to an
+	// app's HTML page loads. The overlay explains a mid-session disconnect that
+	// the app itself cannot explain: only ShinyHub knows whether the process was
+	// hibernated, redeployed, or died, so without it a visitor sees Shiny's grey
+	// "disconnected" box and no way forward.
+	//
+	// On by default, because the case it covers is a plain gap in the product
+	// and an app that never disconnects never sees it. A pointer so an operator
+	// who wants strictly untouched app bytes can say so and be believed: set it
+	// false and no response body is ever rewritten.
+	StatusOverlay *bool `yaml:"status_overlay"`
+}
+
+// StatusOverlayEnabled reports whether app page loads get the status overlay.
+// Absent means enabled.
+func (s *ServerConfig) StatusOverlayEnabled() bool {
+	return s.StatusOverlay == nil || *s.StatusOverlay
 }
 
 // defaultSessionRecheckInterval bounds how long a revoked user keeps a session
@@ -2433,6 +2451,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_AUTH_LOCAL_LOGIN: %w", err)
 		}
 		cfg.Auth.LocalLogin = &b
+	}
+	if v := os.Getenv("SHINYHUB_SERVER_STATUS_OVERLAY"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SERVER_STATUS_OVERLAY: %w", err)
+		}
+		cfg.Server.StatusOverlay = &b
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v

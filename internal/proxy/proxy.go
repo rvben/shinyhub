@@ -390,6 +390,13 @@ type Proxy struct {
 	// Atomic for a lock-free read on the request path.
 	wakeHoldNanos atomic.Int64
 
+	// statusOverlay enables injecting the status overlay into app page loads,
+	// so a mid-session disconnect can say which of hibernation, redeploy, or
+	// death caused it. Off unless main.go wires it from config, matching
+	// SetWakeTrigger: an embedder or test is never implicitly rewriting the
+	// HTML of an app it serves. Atomic for a lock-free read per response.
+	statusOverlay atomic.Bool
+
 	// stickySecret is the HMAC key that signs the per-app sticky-routing cookie.
 	// When set, the cookie value carries a signature bound to the app slug and
 	// replica index, so a client cannot forge or replay it to pin itself to a
@@ -978,6 +985,18 @@ func (p *Proxy) SetWakeTrigger(fn func(string)) {
 	p.mu.Unlock()
 }
 
+// SetStatusOverlay turns the injected disconnect overlay on or off. It takes
+// effect on the next response from every backend, including ones already
+// registered.
+func (p *Proxy) SetStatusOverlay(enabled bool) {
+	p.statusOverlay.Store(enabled)
+}
+
+// StatusOverlayEnabled reports whether app HTML is currently being rewritten.
+func (p *Proxy) StatusOverlayEnabled() bool {
+	return p.statusOverlay.Load()
+}
+
 // getWakeTrigger returns the current wake trigger under the read lock.
 func (p *Proxy) getWakeTrigger() func(string) {
 	p.mu.RLock()
@@ -1460,8 +1479,9 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 	rp.Transport = &errCapturingTransport{base: base}
 	// Strip any backend Set-Cookie that collides with ShinyHub's reserved
 	// cookie namespaces so a deployer-controlled app cannot set the platform's
-	// session/sticky/elastic-client-id cookies in a visitor's browser.
-	rp.ModifyResponse = filterReservedSetCookies
+	// session/sticky/elastic-client-id cookies in a visitor's browser, then
+	// (when enabled) add the status overlay to HTML page loads.
+	rp.ModifyResponse = p.modifyResponseFor(slugCopy)
 	rp.Director = func(req *http.Request) {
 		// Populate standard forwarding headers so backend apps (uvicorn with
 		// --proxy-headers, R Shiny httpuv, Dash, custom FastAPI, etc.) can
@@ -1495,6 +1515,8 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		// Strip inbound platform identity headers and (when enabled for
 		// this pool and a user is authenticated) inject the real ones.
 		applyIdentityHeaders(req, pool, slugCopy, &p.identityProvider)
+		// Ask for a body ModifyResponse can splice the status overlay into.
+		p.relaxEncodingForOverlay(req)
 
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
@@ -1575,8 +1597,9 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 	rp.Transport = &errCapturingTransport{base: base}
 	// Strip any backend Set-Cookie that collides with ShinyHub's reserved
 	// cookie namespaces so a deployer-controlled app cannot set the platform's
-	// session/sticky/elastic-client-id cookies in a visitor's browser.
-	rp.ModifyResponse = filterReservedSetCookies
+	// session/sticky/elastic-client-id cookies in a visitor's browser, then
+	// (when enabled) add the status overlay to HTML page loads.
+	rp.ModifyResponse = p.modifyResponseFor(slugCopy)
 	rp.Director = func(req *http.Request) {
 		scheme := "http"
 		if req.TLS != nil {
@@ -1589,6 +1612,8 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 		applyForwardingHeaders(req, scheme, clientIP, proxytrust.PeerIsTrusted(req, p.trustedProxyNets()))
 		stripInternalCookies(req)
 		applyIdentityHeaders(req, pool, slugCopy, &p.identityProvider)
+		// Ask for a body ModifyResponse can splice the status overlay into.
+		p.relaxEncodingForOverlay(req)
 
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host

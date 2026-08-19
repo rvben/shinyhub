@@ -1210,6 +1210,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Sign the sticky-routing cookie so a client cannot forge it to pin a
 	// replica and bypass the per-replica session cap.
 	prx.SetStickySecret(deriveStickyCookieKey(cfg.Auth.Secret))
+	// Explain a mid-session disconnect to the visitor. The app process cannot:
+	// it does not know whether it was hibernated, redeployed, or killed.
+	prx.SetStatusOverlay(cfg.Server.StatusOverlayEnabled())
 	// Identity forwarding: the proxy injects the authenticated user's
 	// identity headers + per-app signed token. The provider owns the groups
 	// TTL cache and minting; the proxy holds no secret and no store.
