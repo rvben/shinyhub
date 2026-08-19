@@ -795,6 +795,7 @@ func (s *Store) ListSharedDataSources(consumerAppID int64) ([]*SharedDataMount, 
 // joined to its app, plus the last run and last successful run. It feeds the
 // Prometheus collector, the `schedule status` CLI, and the admin banner.
 type ScheduleFreshness struct {
+	ScheduleID     int64
 	Slug           string
 	Name           string
 	Enabled        bool
@@ -818,13 +819,28 @@ func (f *ScheduleFreshness) EffectiveLocation(def *time.Location) *time.Location
 // LATERAL; same shape as SchedulesNeedingFirstFireRetry). last success uses
 // finished_at so a slow-but-recently-finished job reads as fresh.
 func (s *Store) ScheduleFreshness() ([]ScheduleFreshness, error) {
+	return s.scheduleFreshness("")
+}
+
+// ScheduleFreshnessByApp returns the same freshness rows as ScheduleFreshness
+// restricted to one app, so the per-app schedule list can report last run and
+// staleness without scanning the fleet. Both share one query body, so the two
+// views can never disagree about what "last success" means.
+func (s *Store) ScheduleFreshnessByApp(appID int64) ([]ScheduleFreshness, error) {
+	return s.scheduleFreshness("WHERE sc.app_id = ?", appID)
+}
+
+// scheduleFreshness runs the freshness query with an optional WHERE clause.
+// The clause is a constant supplied by the callers above, never user input.
+func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshness, error) {
 	rows, err := s.db.Query(`
-		SELECT a.slug, sc.name, sc.enabled, sc.cron_expr, sc.timezone, sc.created_at, sc.timeout_seconds,
+		SELECT sc.id, a.slug, sc.name, sc.enabled, sc.cron_expr, sc.timezone, sc.created_at, sc.timeout_seconds,
 		  (SELECT started_at  FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC LIMIT 1),
 		  (SELECT status      FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC LIMIT 1),
 		  (SELECT finished_at FROM schedule_runs WHERE schedule_id=sc.id AND status='succeeded' ORDER BY started_at DESC LIMIT 1)
 		FROM app_schedules sc JOIN apps a ON a.id = sc.app_id
-		ORDER BY a.slug, sc.name`)
+		`+where+`
+		ORDER BY a.slug, sc.name`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("schedule freshness: %w", err)
 	}
@@ -837,7 +853,7 @@ func (s *Store) ScheduleFreshness() ([]ScheduleFreshness, error) {
 		var lastRunAt sql.NullTime
 		var lastStatus sql.NullString
 		var lastSuccess sql.NullTime
-		if err := rows.Scan(&fr.Slug, &fr.Name, &enabled, &fr.CronExpr, &tz,
+		if err := rows.Scan(&fr.ScheduleID, &fr.Slug, &fr.Name, &enabled, &fr.CronExpr, &tz,
 			&fr.CreatedAt, &fr.TimeoutSeconds, &lastRunAt, &lastStatus, &lastSuccess); err != nil {
 			return nil, err
 		}

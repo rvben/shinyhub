@@ -43,6 +43,41 @@ type scheduleDTO struct {
 	// FirstFireRunID is set only on a create response when run_on_register
 	// dispatched a first run. Omitted everywhere else.
 	FirstFireRunID *int64 `json:"first_fire_run_id,omitempty"`
+
+	// Freshness, populated only on the list endpoint (where it is computed
+	// from run history) and omitted everywhere else. Field names and meanings
+	// match GET /api/fleet/schedules/status so a caller reading either surface
+	// applies one definition of "stale".
+	//
+	// Omitted rather than null on create/update responses: null here means
+	// "never run", a claim those responses cannot make about an existing
+	// schedule. Stale is present on every list row, including never-run
+	// schedules, which can themselves be overdue.
+	LastRunAt       *string `json:"last_run_at,omitempty"`
+	LastRunStatus   *string `json:"last_run_status,omitempty"`
+	LastSuccessAt   *string `json:"last_success_at,omitempty"`
+	LastSuccessAgeS *int64  `json:"last_success_age_s,omitempty"`
+	Stale           *bool   `json:"stale,omitempty"`
+}
+
+// applyFreshness fills the freshness half of the DTO from a freshness row.
+func (d *scheduleDTO) applyFreshness(fr db.ScheduleFreshness, def *time.Location, now time.Time) {
+	stale := scheduleStale(fr, def, now)
+	d.Stale = &stale
+	if fr.LastRunAt != nil {
+		v := fr.LastRunAt.UTC().Format(time.RFC3339)
+		d.LastRunAt = &v
+	}
+	if fr.LastRunStatus != "" {
+		v := fr.LastRunStatus
+		d.LastRunStatus = &v
+	}
+	if fr.LastSuccessAt != nil {
+		v := fr.LastSuccessAt.UTC().Format(time.RFC3339)
+		d.LastSuccessAt = &v
+		age := int64(now.Sub(*fr.LastSuccessAt).Seconds())
+		d.LastSuccessAgeS = &age
+	}
 }
 
 func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Location) scheduleDTO {
@@ -82,6 +117,19 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// One extra query for the whole list, not one per schedule: freshness is
+	// what a caller would otherwise reconstruct from per-schedule run history.
+	fresh, err := s.store.ScheduleFreshnessByApp(app.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	byID := make(map[int64]db.ScheduleFreshness, len(fresh))
+	for _, fr := range fresh {
+		byID[fr.ScheduleID] = fr
+	}
+	def := s.cfg.Scheduler.Location
+	now := time.Now()
 	out := make([]scheduleDTO, 0, len(rows))
 	for _, sc := range rows {
 		var next *time.Time
@@ -90,7 +138,11 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 				next = &t
 			}
 		}
-		out = append(out, toScheduleDTO(sc, next, s.cfg.Scheduler.Location))
+		dto := toScheduleDTO(sc, next, def)
+		if fr, ok := byID[sc.ID]; ok {
+			dto.applyFreshness(fr, def, now)
+		}
+		out = append(out, dto)
 	}
 	limit, offset := parsePagination(r)
 	writeList(w, out, limit, offset, nil)

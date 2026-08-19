@@ -36,10 +36,14 @@ func scheduleStale(fr db.ScheduleFreshness, def *time.Location, now time.Time) b
 }
 
 // handleFleetScheduleStatus returns per-schedule freshness across the fleet:
-// last run + status, last success + age, and a cron-aware stale flag. Admin
-// only and side-effect free. ?slug=<slug> filters to one app.
+// last run + status, last success + age, and a cron-aware stale flag.
+// Admin-or-operator and side-effect free. ?slug=<slug> filters to one app.
+//
+// Rows are filtered by the caller's app scope, so a scoped deploy token cannot
+// enumerate schedules for apps outside its allowlist regardless of its role.
 func (s *Server) handleFleetScheduleStatus(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	u, ok := requireOperator(w, r)
+	if !ok {
 		return
 	}
 	rows, err := s.store.ScheduleFreshness()
@@ -55,6 +59,9 @@ func (s *Server) handleFleetScheduleStatus(w http.ResponseWriter, r *http.Reques
 	out := make([]scheduleStatusItem, 0, len(rows))
 	for _, fr := range rows {
 		if filter != "" && fr.Slug != filter {
+			continue
+		}
+		if !u.AppInScope(fr.Slug) {
 			continue
 		}
 		item := scheduleStatusItem{

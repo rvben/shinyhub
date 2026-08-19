@@ -11,20 +11,8 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 )
 
-func TestFleetScheduleStatus_AdminOnly(t *testing.T) {
-	srv, store := newFleetHealthServer(t)
-	hash, _ := testHashPassword("pass")
-	store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: hash, Role: "developer"})
-	dev, _ := store.GetUserByUsername("dev")
-	devTok, _ := auth.IssueJWT(dev.ID, "dev", "developer", "test-secret")
-
-	req := authedRequest(t, "GET", "/api/fleet/schedules/status", nil, devTok)
-	rec := httptest.NewRecorder()
-	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("non-admin status = %d, want 403", rec.Code)
-	}
-}
+// The role gate is covered by TestFleetScheduleStatus_OperatorCanRead and
+// TestFleetScheduleStatus_BelowOperatorForbidden in schedules_status_access_test.go.
 
 func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	srv, store := newFleetHealthServer(t)

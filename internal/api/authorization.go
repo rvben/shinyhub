@@ -12,6 +12,27 @@ func isPrivilegedAppOperator(u *auth.ContextUser) bool {
 	return u != nil && (u.Role == "admin" || u.Role == "operator")
 }
 
+// requireOperator returns the user from context and writes 403 unless they hold
+// admin or operator. Use it for fleet-wide read endpoints whose inputs an
+// operator can already reach per-app through canViewApp; requireAdmin remains
+// correct for anything an operator cannot otherwise see.
+//
+// The returned user still carries its app scope: a fleet-wide handler must
+// filter its rows with u.AppInScope, since role alone does not bound a scoped
+// deploy token.
+func requireOperator(w http.ResponseWriter, r *http.Request) (*auth.ContextUser, bool) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return nil, false
+	}
+	if !isPrivilegedAppOperator(u) {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return nil, false
+	}
+	return u, true
+}
+
 func canCreateApps(u *auth.ContextUser) bool {
 	if u == nil {
 		return false

@@ -110,6 +110,55 @@ shinyhub schedule run fetch daily-fetch --follow
 
 `--follow` tails the run's log until exit.
 
+## Monitoring data freshness
+
+A schedule that stops firing is silent by nature: the app keeps serving, just
+from data that stops advancing. Two surfaces report it, both using the same
+server-side staleness rule, so a dashboard never has to reimplement cron
+arithmetic client-side.
+
+**Across the fleet** (admin or operator):
+
+```bash
+shinyhub schedule status              # every app
+shinyhub schedule status fetch        # one app
+```
+
+```
+APP    SCHEDULE      LAST RUN   LAST SUCCESS          AGE  STALE
+fetch  daily-fetch   succeeded  2026-08-18T06:00:12Z  30h  yes
+```
+
+**Per app** (anyone with access to that app):
+
+```bash
+shinyhub schedule ls fetch
+```
+
+`schedule ls` carries the same freshness fields per schedule -
+`last_run_at`, `last_run_status`, `last_success_at`, `last_success_age_s`
+and `stale`.
+
+`stale` is cron-aware rather than a fixed threshold. It takes the last
+**success** as the anchor (the schedule's creation time if it has never
+succeeded), asks the schedule's own cron expression for the next fire after
+that anchor in its effective timezone, and reports stale once that time is more
+than 10 minutes in the past. So a schedule that runs and fails every night is
+stale: a failure does not advance the data.
+
+Two deliberate exceptions:
+
+- A **disabled** schedule is never stale. It is not supposed to be firing.
+- A run still **in progress** is not stale until it exceeds the schedule's
+  `timeout`. Past that it is treated as a zombie and staleness applies again.
+  The timeout is not otherwise added to the grace period, so a daily schedule
+  with a 24h timeout still flags at ~24h, not 48h.
+
+`last_success_at` / `last_success_age_s` are absent when a schedule has never
+succeeded (`schedule status` reports them as `null`; `schedule ls` omits the
+keys). Neither is ever reported as `0`, so "never succeeded" cannot be read as
+"succeeded just now".
+
 ## Run provenance (`trigger`)
 
 Every run records **why** it started in its `trigger` field, visible in

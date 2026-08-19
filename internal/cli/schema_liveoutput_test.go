@@ -306,11 +306,20 @@ func seedContractFixtures(t *testing.T, store *db.Store, cfg *config.Config, dat
 	if err != nil {
 		t.Fatalf("create schedule: %v", err)
 	}
-	if _, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
-		ScheduleID: schedID, Status: "succeeded", Trigger: "cron", StartedAt: time.Now().Add(-time.Hour),
-	}); err != nil {
+	// Insert then finish it: a succeeded run always carries finished_at in
+	// production, and the freshness fields (last_success_at / age) read that
+	// column, so a run left unfinished would leave those declarations unverified.
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "running", Trigger: "schedule", StartedAt: time.Now().Add(-time.Hour),
+	})
+	if err != nil {
 		t.Fatalf("insert schedule run: %v", err)
 	}
+	zero := 0
+	mustNoErr(t, "finish schedule run", store.FinishScheduleRun(db.FinishScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: &zero,
+		FinishedAt: time.Now().Add(-time.Hour).Add(time.Minute),
+	}))
 
 	// Pace the fixture app so the render_pacing advisory block the schema declares
 	// is present in live output. Like worker_pool above, that block is emitted

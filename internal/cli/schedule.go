@@ -138,7 +138,7 @@ func newScheduleLsCmd() *cobra.Command {
 				fmt.Fprintln(w, "No schedules.")
 				return
 			}
-			t := newTable("ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "COMMAND").alignRight(0)
+			t := newTable("ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "LAST RUN", "AGE", "STALE", "COMMAND").alignRight(0)
 			for _, item := range rendered {
 				// A disabled schedule is dimmed: it is still listed, but it is not
 				// going to run, and that is the thing worth seeing at a glance.
@@ -150,9 +150,20 @@ func newScheduleLsCmd() *cobra.Command {
 				if inherited, ok := item["timezone_inherited"].(bool); ok && inherited {
 					tzDisplay += " (inherited)"
 				}
+				// Age is time since last SUCCESS, matching `schedule status`: a
+				// schedule failing every night is not fresh just because it ran.
+				age := dimTxt("-")
+				if item["last_success_age_s"] != nil {
+					age = txt(humanizeAgeSeconds(item["last_success_age_s"]))
+				}
+				stale := dimTxt("-")
+				if b, ok := item["stale"].(bool); ok && b {
+					stale = alertTxt("yes")
+				}
 				cmdParts, _ := item["command"].([]string)
 				t.row(dimTxt(item["id"]), txt(item["name"]), txt(item["cron_expr"]),
-					enabled, dimTxt(tzDisplay), txt(strings.Join(cmdParts, " ")))
+					enabled, dimTxt(tzDisplay), statusTxt(strOrDash(item["last_run_status"])),
+					age, stale, txt(strings.Join(cmdParts, " ")))
 			}
 			t.render(w)
 		})

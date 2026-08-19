@@ -72,6 +72,88 @@ func TestScheduleFreshness(t *testing.T) {
 	}
 }
 
+// ScheduleFreshnessByApp backs the per-app schedule list, which must not pay
+// the cost of the fleet-wide scan nor expose another app's schedules. It
+// carries ScheduleID so a caller can join the row onto a schedule by identity
+// rather than by name.
+func TestScheduleFreshnessByApp_ScopesToOneApp(t *testing.T) {
+	store := newScheduleStore(t)
+	mineID := newScheduleAppFixture(t, store, "mine")
+	theirsID := newScheduleAppFixture(t, store, "theirs")
+
+	mineSched, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: mineID, Name: "refresh-data", CronExpr: "0 6 * * *",
+		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatalf("CreateSchedule mine: %v", err)
+	}
+	if _, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: theirsID, Name: "other-job", CronExpr: "0 7 * * *",
+		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	}); err != nil {
+		t.Fatalf("CreateSchedule theirs: %v", err)
+	}
+
+	base := time.Date(2026, 6, 29, 6, 0, 0, 0, time.UTC)
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: mineSched, Status: "running", Trigger: "schedule",
+		StartedAt: base, LogPath: "r.log",
+	})
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := store.FinishScheduleRun(db.FinishScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: ptrInt(0), FinishedAt: base.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+
+	rows, err := store.ScheduleFreshnessByApp(mineID)
+	if err != nil {
+		t.Fatalf("ScheduleFreshnessByApp: %v", err)
+	}
+	// Two bounds: my schedule present, the other app's absent. A query missing
+	// its WHERE clause returns both and would pass a presence-only assertion.
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want exactly 1 (the other app's schedule must not appear): %+v", len(rows), rows)
+	}
+	fr := rows[0]
+	if fr.Slug != "mine" || fr.Name != "refresh-data" {
+		t.Fatalf("row = %q/%q, want mine/refresh-data", fr.Slug, fr.Name)
+	}
+	if fr.ScheduleID != mineSched {
+		t.Fatalf("ScheduleID = %d, want %d", fr.ScheduleID, mineSched)
+	}
+	if fr.LastRunStatus != "succeeded" || fr.LastSuccessAt == nil {
+		t.Fatalf("freshness not resolved: %+v", fr)
+	}
+}
+
+// The fleet-wide query must populate ScheduleID too, so both callers can rely
+// on it. Added with the field rather than left to drift.
+func TestScheduleFreshness_CarriesScheduleID(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "solo")
+	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "refresh-data", CronExpr: "0 6 * * *",
+		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+	rows, err := store.ScheduleFreshness()
+	if err != nil {
+		t.Fatalf("ScheduleFreshness: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ScheduleID != schedID {
+		t.Fatalf("ScheduleID not populated: %+v (want %d)", rows, schedID)
+	}
+}
+
 func TestScheduleFreshness_NeverRun(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "ccro-kpi")
