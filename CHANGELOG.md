@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.16](https://github.com/rvben/shinyhub/compare/v0.11.15...v0.11.16) - 2026-08-19
+
+### Added
+
+- **db**: snapshot the database before applying migrations ([bf6f493](https://github.com/rvben/shinyhub/commit/bf6f49322b2f1f6e316a511802a4c7c55ab170b7))
+- **api,cli**: expose schedule freshness to operators and per-app callers ([ca75b2a](https://github.com/rvben/shinyhub/commit/ca75b2aa28fd13f1598c98f0d4fabbc70996895c))
+- **scheduler**: record missed-run catch-ups under their own trigger ([a2c5634](https://github.com/rvben/shinyhub/commit/a2c5634e2583797abdbeef6697c343087c925da8))
+
+### Fixed
+
+- **restore**: reject a database file with guidance instead of a gzip error ([b58fe5a](https://github.com/rvben/shinyhub/commit/b58fe5a59ae069ac9d253825577daab3a3dccec0))
+- **serve**: exit 7 on a schema downgrade instead of restart-looping ([0b5e38c](https://github.com/rvben/shinyhub/commit/0b5e38c65cfcf30e5e1fb195b1657413b025226e))
+
 ## [0.11.15](https://github.com/rvben/shinyhub/compare/v0.11.14...v0.11.15) - 2026-08-18
 
 ### Added
