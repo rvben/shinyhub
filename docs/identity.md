@@ -143,10 +143,11 @@ signature, and `exp` (allow about 30 seconds of clock leeway).
 ## Client helpers (recommended)
 
 Rather than decode the token yourself, use the one-call helper for your
-language. Each returns the verified identity or a defined anonymous value
-(`None` / `NULL`), so your app needs no JWT plumbing and stays testable without
-SSO. Both read the injected `SHINYHUB_IDENTITY_KEY` / `SHINYHUB_APP_SLUG`
-automatically.
+language, so your app needs no JWT plumbing and stays testable without SSO.
+Both read the injected `SHINYHUB_IDENTITY_KEY` / `SHINYHUB_APP_SLUG`
+automatically, and both return the same identity shape: `user_id`, `username`,
+`role`, `groups`, `name`, `email`, `groups_truncated`, and the raw verified
+`claims`. `email` and `name` are empty when the IdP asserted none.
 
 The helpers are versioned independently of the server: their versions track
 changes to the helper APIs, not the server release train. Any helper release
@@ -155,16 +156,35 @@ shipped in v0.8.6); the token contract is stable across server releases, and
 claims a later server added (`email`, `name`) are simply empty when an older
 server minted the token.
 
-Failure handling is fail-closed but not silent where it matters. Every
-verification failure returns the anonymous value - no exception. A token that
-is **present but rejected** (missing or wrong key, audience/issuer mismatch,
-expired, clock skew) additionally emits a diagnostic - a Python `WARNING` on
-the `"shinyhub_identity"` logger, an R `warning()` - once per distinct reason
-per process, because a rejected-but-present token almost always means a
-misconfigured deployment, while a genuine anonymous visitor sends no token at
-all. Deployments that gate on identity should still self-check at startup
-(assert `SHINYHUB_IDENTITY_KEY` and `SHINYHUB_APP_SLUG` are set) so
-misconfiguration fails fast instead of rendering every user anonymous.
+### Anonymous and broken are different answers
+
+`None` / `NULL` means exactly one thing: **the request carried no identity
+token**, so the visitor is anonymous. A token that is present but fails
+verification - missing or wrong key, audience or issuer mismatch, expired,
+clock skew - is a broken deployment rather than a visitor, so it raises:
+
+- Python: `IdentityError`, carrying `.reason` and `.detail`.
+- R: a `shinyhub_identity_error` condition carrying `$reason` and `$detail`,
+  caught with `tryCatch(expr, shinyhub_identity_error = function(e) ...)`.
+
+`reason` is a stable classification, identical in both languages and pinned by
+a cross-language conformance test:
+
+| `reason` | Meaning |
+|----------|---------|
+| `no_token` | nothing to verify (`verify_token` only; `current_user` returns the anonymous value instead) |
+| `no_key` | `SHINYHUB_IDENTITY_KEY` unset or empty |
+| `bad_key` | `SHINYHUB_IDENTITY_KEY` is not valid hex |
+| `no_slug` | `SHINYHUB_APP_SLUG` unset or empty |
+| `bad_signature` | signed with a different key |
+| `expired` | past its `exp` (tokens live 5 minutes) |
+| `wrong_audience` | minted for a different app slug |
+| `wrong_issuer` | `iss` is not `shinyhub` |
+| `malformed` | unparseable, or missing the required `exp` claim |
+
+Let it propagate unless you have something better to do with it. An app that
+renders a misconfigured deployment as "logged out" hides the outage behind an
+empty dashboard, which is exactly what this contract exists to prevent.
 
 For local development (no proxy, so no token and no injected key), both
 helpers honor `SHINYHUB_IDENTITY_DEV_USER` (plus optional
@@ -180,17 +200,29 @@ pip install shinyhub-identity   # or: uv add shinyhub-identity
 ```
 
 ```python
-from shinyhub_identity import current_user
+from shinyhub_identity.shiny import session_identity
 
 def server(input, output, session):
-    user = current_user(session.http_conn.headers)   # None when anonymous
+    user = session_identity(session)   # None when anonymous
     if user and "platform-admins" in user.groups:
         ...  # gate on the VERIFIED groups
 ```
 
-The returned identity exposes `user_id`, `username`, `role`, `email`, `name`,
-`groups`, and `groups_truncated` (with the raw verified `claims` mapping). `email`
-and `name` are `""` when the IdP asserted none.
+`session_identity` verifies the handshake once and returns that answer for the
+session's life. That is a correctness property, not a cache: ShinyHub binds
+identity at the WebSocket handshake, and the token it forwarded there expires
+five minutes later, so an app that re-verifies the handshake headers from a
+reactive starts failing part-way through a long session even though nothing
+about the user changed.
+
+Outside Shiny (Streamlit, Dash, FastAPI, ...) use the framework-free
+primitive, which takes any header mapping and verifies per request:
+
+```python
+from shinyhub_identity import current_user
+
+user = current_user(request.headers)   # None when anonymous
+```
 
 ### R
 
@@ -204,16 +236,20 @@ library(shinyhubidentity)
 
 server <- function(input, output, session) {
   user <- current_user(session)   # NULL when anonymous
-  # user$preferred_username, user$role, user$email, user$name, user$groups
+  # user$username, user$role, user$email, user$name, user$groups
 }
 ```
+
+`current_user(session)` verifies once per session, for the same reason the
+Python helper does.
 
 **Migrating from a hand-rolled per-app JWT fetch?** Delete it - the client-side
 `get_jwt` / `decode_jwt` code and any browser-side token fetch. ShinyHub already
 injects and signs the identity server-side; call `current_user` instead. That
 also removes the internal-CA `ERR_CERT_AUTHORITY_INVALID` failure mode a
-client-side fetch hits, and makes the app load-testable (a forged or absent
-session is simply anonymous, not an error).
+client-side fetch hits, and makes the app load-testable (a session with no
+token is simply anonymous, and a broken one is a classified error instead of a
+silent empty page).
 
 The manual recipes below show what the helpers do under the hood, for languages
 or frameworks the packages do not cover.
@@ -241,12 +277,15 @@ def current_user(headers) -> dict | None:
     if not token:
         return None
     return jwt.decode(token, KEY, algorithms=["HS256"],
-                      audience=SLUG, issuer="shinyhub", leeway=30)
+                      audience=SLUG, issuer="shinyhub", leeway=30,
+                      options={"require": ["exp"]})
 ```
 
-`jwt.decode` raises `jwt.exceptions.InvalidTokenError` (or a subclass) when
-the token is missing, expired, has the wrong audience, or fails the signature
-check. Treat any exception as unauthenticated.
+`jwt.decode` raises `jwt.exceptions.InvalidTokenError` (or a subclass) when the
+token is expired, has the wrong audience or issuer, omits `exp`, or fails the
+signature check. Let it propagate: the anonymous case already returned `None`
+above, so an exception here means the deployment is broken, not that the
+visitor is logged out.
 
 In Shiny for Python, read request headers inside the server function via
 `session.http_conn.headers`:
@@ -258,6 +297,12 @@ def server(input, output, session):
     user = current_user(dict(session.http_conn.headers))
     # user is None for anonymous visitors
 ```
+
+Verify once, at the top of the server function as above, and keep the result.
+The handshake headers stay in memory for the session's life while the token
+they carry expires five minutes later, so calling `current_user` from inside a
+reactive starts raising part-way through a long session even though nothing
+about the user changed. `session_identity` does this for you.
 
 A runnable demo is in `examples/identity-demo/`.
 
@@ -281,25 +326,35 @@ app_slug     <- Sys.getenv("SHINYHUB_APP_SLUG")
 
 current_user <- function(session) {
   token <- session$request$HTTP_X_SHINYHUB_IDENTITY_TOKEN
+  # No token at all: an anonymous visitor.
   if (is.null(token) || token == "") return(NULL)
 
-  claims <- tryCatch(
-    jose::jwt_decode_hmac(token, secret = identity_key),
-    error = function(e) NULL
-  )
-  if (is.null(claims)) return(NULL)
+  # Present but unverifiable: a broken deployment. jose signals a bad signature
+  # or an expired token as an error; let it propagate rather than turning it
+  # into "logged out".
+  claims <- jose::jwt_decode_hmac(token, secret = identity_key)
 
-  # jose validates signature, exp, and nbf (with a 60-second grace period).
-  # Manually assert iss and aud, which jose does not check.
-  if (!identical(claims$iss, "shinyhub"))  return(NULL)
-  if (!identical(claims$aud, app_slug))    return(NULL)
+  # jose validates the signature, and exp/nbf when present (with a fixed
+  # 60-second grace period of its own). Assert iss, aud, the presence of exp,
+  # and the narrower 30 seconds of skew the Python recipe above allows, so the
+  # same token gets the same answer in both languages.
+  if (is.null(claims$exp))                 stop("identity token: no exp claim")
+  if (as.numeric(claims$exp) + 30 < as.numeric(Sys.time()))
+                                           stop("identity token: expired")
+  if (!identical(claims$iss, "shinyhub"))  stop("identity token: wrong issuer")
+  if (!(app_slug %in% claims$aud))         stop("identity token: wrong audience")
 
   claims
 }
 ```
 
 Use `current_user(session)` inside your Shiny server function. It returns
-`NULL` for anonymous visitors or when the token fails any check.
+`NULL` only for a visitor who sent no token; anything else is an error.
+
+A real Shiny session's `request` is frozen at the WebSocket handshake while the
+token it carries expires five minutes later, so verify once and keep the
+result for the session rather than re-verifying inside a reactive. Both client
+packages do this for you.
 
 
 ## Worked example: per-group UI gating
@@ -369,6 +424,12 @@ Identity keys are derived from `auth.secret`. To rotate, change `auth.secret`,
 restart the ShinyHub server, and restart (or redeploy) each app so it picks up
 its new `SHINYHUB_IDENTITY_KEY`. Tokens minted with the old key become invalid
 immediately after the server restarts.
+
+Restarting the apps is required, not cosmetic: a running app keeps the key it
+was spawned with, so until it restarts it rejects every token the server mints
+(the client helpers report `bad_signature`). See
+[Rotating `auth.secret`](secret-rotation.md) for the full procedure, including
+the at-rest secrets that need `shinyhub rotate-secret`.
 
 ### High-availability deployments
 

@@ -1,13 +1,15 @@
 Package: shinyhubidentity
 Title: Read the Signed ShinyHub Identity in a Shiny App
-Version: 0.2.0
+Version: 0.3.0
 Authors@R:
     person("Ruben J.", "Jongejan", email = "ruben.jongejan@gmail.com",
            role = c("aut", "cre"))
 Description: Verifies the signed identity token that ShinyHub forwards to a
     proxied Shiny app and returns the current user's identity, so apps need no
-    JWT plumbing of their own. Every failure mode returns NULL rather than
-    erroring, so an app stays testable without SSO.
+    JWT plumbing of their own. NULL means the request carried no token (an
+    anonymous visitor); a token that is present but fails verification raises a
+    shinyhub_identity_error condition, so a misconfigured deployment cannot
+    masquerade as a logged-out user.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Imports:

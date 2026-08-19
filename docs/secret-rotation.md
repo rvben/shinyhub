@@ -13,11 +13,19 @@ description: "auth.secret is HKDF-derived into every key ShinyHub stores, so fol
 - short-lived signing keys for identity JWTs and sticky/session cookies.
 
 Changing `auth.secret` therefore invalidates everything encrypted under the old
-value. The short-lived signing keys self-heal (tokens and cookies are re-minted
-within their TTL), but the **at-rest** secrets - app env secrets and the worker
-CA key - do not: after a naive change they can no longer be decrypted, and the
-affected apps fail to start. That makes an otherwise routine response to a
-suspected leak a data-loss event.
+value. Sticky and session cookies recover on their own (a user signs in again
+and gets a cookie under the new key), but the **at-rest** secrets - app env
+secrets and the worker CA key - do not: after a naive change they can no longer
+be decrypted, and the affected apps fail to start. That makes an otherwise
+routine response to a suspected leak a data-loss event.
+
+Identity JWTs do not recover on their own either, for a different reason: an
+app process receives its `SHINYHUB_IDENTITY_KEY` in its environment when it is
+**spawned**, and a running app keeps the key it started with (the server
+re-adopts live app processes across its own restart). Until each app is
+restarted, the server mints tokens under the new key that the app rejects, and
+the client helpers report `bad_signature`. Step 5 below is part of the
+rotation, not optional cleanup.
 
 `shinyhub rotate-secret` closes that gap: it re-encrypts every at-rest secret
 from the current `auth.secret` to a new one, atomically.
@@ -47,6 +55,12 @@ SHINYHUB_NEW_AUTH_SECRET="$NEW" shinyhub rotate-secret --config /etc/shinyhub/sh
 # 4. Switch the server to the new secret (update the config file or the
 #    SHINYHUB_AUTH_SECRET env used by the unit) and start it.
 systemctl start shinyhub
+
+# 5. Restart every app so each picks up its new identity key. A process that
+#    was already running keeps the key it was spawned with.
+for slug in $(shinyhub apps list --json | jq -r '.items[].slug'); do
+  shinyhub apps restart "$slug"
+done
 ```
 
 `rotate-secret` re-encrypts in a **single database transaction**: if anything

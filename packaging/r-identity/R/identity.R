@@ -5,140 +5,258 @@
 # its verification key via the SHINYHUB_IDENTITY_KEY (hex) and SHINYHUB_APP_SLUG
 # environment variables. These helpers verify that token; the plain
 # X-Shinyhub-* convenience headers must NOT be trusted for access decisions.
+#
+# NULL means exactly one thing: the request carried no identity token, so the
+# visitor is anonymous. A token that IS present but fails verification raises a
+# "shinyhub_identity_error" condition instead, because that is a broken
+# deployment and rendering it as "anonymous" hides the outage behind an empty
+# dashboard. The reason vocabulary is identical to the Python helper's.
 
-# Rejection reasons already warned about, so a misconfigured deployment warns
-# once per distinct problem per session instead of once per request.
-.shinyhub_warned <- new.env(parent = emptyenv())
-
-# Warn that a PRESENT token was rejected. A genuine anonymous visitor sends no
-# token at all, so a rejected token almost always means a misconfiguration
-# (wrong or missing key, audience/issuer mismatch, clock skew) - high-signal,
-# and safe to surface without leaking anything.
-.shinyhub_warn_once <- function(reason_key, detail) {
-  if (exists(reason_key, envir = .shinyhub_warned, inherits = FALSE)) {
-    return(invisible(NULL))
-  }
-  assign(reason_key, TRUE, envir = .shinyhub_warned)
-  warning(
-    sprintf(
-      paste0(
-        "identity token present but rejected: %s ",
-        "(the request is treated as anonymous; a rejected-but-present ",
-        "token usually means the deployment is misconfigured)"
-      ),
-      detail
-    ),
-    call. = FALSE
-  )
-  invisible(NULL)
+# Raise a rejection. The condition carries `reason` (stable, for code to branch
+# on) and `detail` (human-readable, for the operator's log line), so an app can
+# do tryCatch(..., shinyhub_identity_error = function(e) e$reason).
+.shinyhub_error <- function(reason, detail) {
+  stop(structure(
+    class = c("shinyhub_identity_error", "error", "condition"),
+    list(
+      message = sprintf("identity token rejected (%s): %s", reason, detail),
+      call = NULL,
+      reason = reason,
+      detail = detail
+    )
+  ))
 }
 
-.shinyhub_reset_warned <- function() {
-  rm(list = ls(envir = .shinyhub_warned), envir = .shinyhub_warned)
-  invisible(NULL)
+# jose reports every rejection as a plain error, so the reason is recovered from
+# the message. The exact messages this classifies are pinned in
+# tests/testthat/test-errors.R: a jose wording change fails there rather than
+# silently collapsing every rejection into "malformed".
+.shinyhub_decode_reason <- function(message) {
+  if (grepl("has expired", message, fixed = TRUE)) {
+    return("expired")
+  }
+  if (grepl("signature", message, ignore.case = TRUE)) {
+    return("bad_signature")
+  }
+  "malformed"
+}
+
+.shinyhub_chr <- function(value, default = "") {
+  if (is.null(value) || length(value) == 0) default else as.character(value)[[1]]
+}
+
+# Normalize verified claims into the identity shape, whose field names match the
+# Python helper's Identity so one documented contract covers both SDKs. The raw
+# claims stay available under $claims.
+.shinyhub_identity <- function(claims) {
+  groups <- claims$groups
+  structure(
+    list(
+      user_id = .shinyhub_chr(claims$sub),
+      username = .shinyhub_chr(claims$preferred_username),
+      role = .shinyhub_chr(claims$role),
+      groups = if (is.null(groups)) character(0) else as.character(unlist(groups)),
+      name = .shinyhub_chr(claims$name),
+      email = .shinyhub_chr(claims$email),
+      groups_truncated = isTRUE(claims$groups_truncated),
+      claims = claims
+    ),
+    class = "shinyhub_identity"
+  )
 }
 
 #' Verify a ShinyHub identity token.
 #'
-#' @param token The raw JWT string, or NULL/"" for an anonymous request.
+#' @param token The raw JWT string.
 #' @param key Raw key bytes or a hex string. Defaults to the
 #'   \code{SHINYHUB_IDENTITY_KEY} environment variable (hex).
 #' @param slug The expected audience (the app slug). Defaults to the
 #'   \code{SHINYHUB_APP_SLUG} environment variable.
-#' @return A named list of verified JWT claims (\code{preferred_username},
-#'   \code{role}, \code{groups}, \code{sub}, ...), or \code{NULL} when the
-#'   request is anonymous or the token fails any check.
+#' @param leeway Seconds of clock skew allowed past \code{exp}, matching the
+#'   Python helper's default so both SDKs accept and reject the same token.
+#'   Values above 60 have no effect: jose applies its own 60-second grace and
+#'   has already rejected the token by then.
+#' @return A \code{shinyhub_identity}: a list of \code{user_id},
+#'   \code{username}, \code{role}, \code{groups}, \code{name}, \code{email},
+#'   \code{groups_truncated}, and the raw \code{claims}.
 #'
-#'   Fail-closed diagnostics: a token that is \emph{present} but fails any
-#'   check still returns \code{NULL}, and additionally raises a warning (once
-#'   per distinct reason per session), because a present-but-rejected token
-#'   usually means a misconfigured deployment rather than an anonymous
-#'   visitor. A request without a token stays silent.
+#'   Every failure raises a \code{shinyhub_identity_error} condition, including
+#'   an absent token (reason \code{"no_token"}). This primitive is for code that
+#'   already knows a token is expected; use \code{\link{current_user}} when an
+#'   absent token means "anonymous". The condition's \code{reason} is one of
+#'   \code{no_token}, \code{no_key}, \code{bad_key}, \code{no_slug},
+#'   \code{bad_signature}, \code{expired}, \code{wrong_audience},
+#'   \code{wrong_issuer}, \code{malformed}.
 #' @export
-verify_token <- function(token, key = NULL, slug = NULL) {
+verify_token <- function(token, key = NULL, slug = NULL, leeway = 30) {
   if (is.null(token) || length(token) == 0 || !nzchar(token)) {
-    return(NULL)
+    .shinyhub_error("no_token", "no identity token to verify")
   }
-  resolved <- .shinyhub_resolve_key(key)
-  if (is.null(resolved$key)) {
-    .shinyhub_warn_once("no_key", resolved$problem)
-    return(NULL)
-  }
+  key <- .shinyhub_resolve_key(key)
   slug <- .shinyhub_resolve_slug(slug)
-  if (is.null(slug)) {
-    .shinyhub_warn_once(
-      "no_slug",
-      "expected audience unknown (SHINYHUB_APP_SLUG is unset or empty)"
+
+  # ShinyHub mints HS256 only, and jose verifies whatever HMAC size the token's
+  # own header asks for. Pin the algorithm so this helper rejects exactly what
+  # the Python helper's algorithms=["HS256"] rejects.
+  split_error <- NULL
+  header <- tryCatch(
+    jose::jwt_split(token)$header,
+    error = function(e) {
+      split_error <<- conditionMessage(e)
+      NULL
+    }
+  )
+  if (!is.null(split_error)) {
+    .shinyhub_error(
+      .shinyhub_decode_reason(split_error),
+      sprintf("token could not be parsed: %s", split_error)
     )
-    return(NULL)
   }
-  # jose validates the signature and exp (with its own grace); errors on any
-  # failure. Treat any error as unauthenticated.
+  if (!identical(header$alg, "HS256")) {
+    .shinyhub_error("malformed", sprintf(
+      "token algorithm is %s, expected HS256",
+      if (is.null(header$alg)) "absent" else header$alg
+    ))
+  }
+
   decode_error <- NULL
   claims <- tryCatch(
-    jose::jwt_decode_hmac(token, secret = resolved$key),
+    jose::jwt_decode_hmac(token, secret = key),
     error = function(e) {
       decode_error <<- conditionMessage(e)
       NULL
     }
   )
   if (is.null(claims)) {
-    .shinyhub_warn_once(
-      "decode",
+    .shinyhub_error(
+      .shinyhub_decode_reason(decode_error),
       sprintf("token failed verification: %s", decode_error)
     )
-    return(NULL)
   }
   # jose validates exp only when present; require it so a token that omits exp
-  # cannot bypass the short-lived-token / replay bound.
+  # cannot bypass the short-lived-token / replay bound. A claim ShinyHub always
+  # mints but this token lacks is malformed, not "wrong": the Python helper
+  # classifies a missing exp/iss/aud the same way.
   if (is.null(claims$exp)) {
-    .shinyhub_warn_once("no_exp", "token carries no exp claim")
-    return(NULL)
+    .shinyhub_error("malformed", "token carries no exp claim")
+  }
+  # jose applies a fixed 60-second grace of its own, so enforce `leeway` here or
+  # a token 45 seconds past exp would be accepted in R and rejected in Python.
+  if (as.numeric(claims$exp) + leeway < as.numeric(Sys.time())) {
+    .shinyhub_error("expired", sprintf(
+      "token expired at %s",
+      format(as.POSIXct(as.numeric(claims$exp), origin = "1970-01-01", tz = "UTC"),
+        "%Y-%m-%dT%H:%M:%SZ",
+        tz = "UTC"
+      )
+    ))
   }
   # jose does not check iss/aud; assert them ourselves.
+  if (is.null(claims$iss)) {
+    .shinyhub_error("malformed", "token carries no iss claim")
+  }
   if (!identical(claims$iss, "shinyhub")) {
-    .shinyhub_warn_once("bad_iss", "token issuer is not \"shinyhub\"")
-    return(NULL)
+    .shinyhub_error("wrong_issuer", "token issuer is not \"shinyhub\"")
+  }
+  if (is.null(claims$aud)) {
+    .shinyhub_error("malformed", "token carries no aud claim")
   }
   if (!(slug %in% claims$aud)) {
-    .shinyhub_warn_once(
-      "bad_aud",
+    .shinyhub_error(
+      "wrong_audience",
       sprintf("token audience does not include this app's slug (%s)", slug)
     )
-    return(NULL)
   }
-  claims
+  .shinyhub_identity(claims)
 }
 
 #' Verified identity of the current Shiny session, or NULL when anonymous.
 #'
 #' Call inside your Shiny \code{server} function.
 #'
+#' The session's handshake token is verified once, on the first call, and the
+#' same answer is returned for the rest of the session's life. That is a
+#' correctness property, not a cache: the handshake request is frozen for the
+#' life of a Shiny session while the token it carries expires five minutes in,
+#' so re-verifying it from a reactive would start failing part-way through a
+#' long session even though nothing about the user changed. \code{key} and
+#' \code{slug} are therefore read on the first call only.
+#'
 #' For local development (no ShinyHub proxy, so no token and no injected key),
 #' setting \code{SHINYHUB_IDENTITY_DEV_USER} (and optionally
 #' \code{SHINYHUB_IDENTITY_DEV_GROUPS} (comma-separated),
 #' \code{SHINYHUB_IDENTITY_DEV_EMAIL}, \code{SHINYHUB_IDENTITY_DEV_NAME},
 #' \code{SHINYHUB_IDENTITY_DEV_ROLE} (default \code{"viewer"})) makes this
-#' return a synthetic claims list marked with \code{dev = TRUE}. It never
-#' activates when \code{SHINYHUB_IDENTITY_KEY} is set - ShinyHub always
-#' injects that key into app processes - so it cannot mask a real
-#' verification failure in a deployment.
+#' return a synthetic identity whose claims are marked \code{dev = TRUE}. It
+#' never activates when \code{SHINYHUB_IDENTITY_KEY} is set - ShinyHub always
+#' injects that key into app processes - so it cannot mask a real verification
+#' failure in a deployment.
 #'
 #' @param session A Shiny session object; its \code{request} carries the
 #'   forwarded header as \code{HTTP_X_SHINYHUB_IDENTITY_TOKEN}.
-#' @param key,slug See \code{\link{verify_token}}.
-#' @return Verified claims list, or \code{NULL} for an anonymous visitor.
+#' @param key,slug,leeway See \code{\link{verify_token}}.
+#' @return A \code{shinyhub_identity}, or \code{NULL} for an anonymous visitor.
+#'   A token that is present but fails verification raises a
+#'   \code{shinyhub_identity_error} condition on every call, with the same
+#'   \code{reason}, rather than degrading into \code{NULL}.
 #' @export
-current_user <- function(session, key = NULL, slug = NULL) {
-  token <- session$request$HTTP_X_SHINYHUB_IDENTITY_TOKEN
-  no_token <- is.null(token) || length(token) == 0 || !nzchar(token)
-  if (no_token && is.null(key)) {
-    dev <- .shinyhub_dev_identity()
-    if (!is.null(dev)) {
-      return(dev)
-    }
+current_user <- function(session, key = NULL, slug = NULL, leeway = 30) {
+  cache <- .shinyhub_cache(session)
+  if (!is.null(cache) && exists("outcome", envir = cache, inherits = FALSE)) {
+    return(.shinyhub_replay(get("outcome", envir = cache)))
   }
-  verify_token(token, key = key, slug = slug)
+  outcome <- tryCatch(
+    list(
+      identity = .shinyhub_verify_session(session, key, slug, leeway),
+      error = NULL
+    ),
+    shinyhub_identity_error = function(e) list(identity = NULL, error = e)
+  )
+  if (!is.null(cache)) {
+    assign("outcome", outcome, envir = cache)
+  }
+  .shinyhub_replay(outcome)
+}
+
+.shinyhub_verify_session <- function(session, key, slug, leeway) {
+  token <- session$request$HTTP_X_SHINYHUB_IDENTITY_TOKEN
+  if (is.null(token) || length(token) == 0 || !nzchar(token)) {
+    if (is.null(key)) {
+      dev <- .shinyhub_dev_identity()
+      if (!is.null(dev)) {
+        return(dev)
+      }
+    }
+    return(NULL)
+  }
+  verify_token(token, key = key, slug = slug, leeway = leeway)
+}
+
+.shinyhub_replay <- function(outcome) {
+  if (!is.null(outcome$error)) {
+    stop(outcome$error)
+  }
+  outcome$identity
+}
+
+# The session's own userData environment holds the verified outcome, so it is
+# released with the session and cannot leak across sessions.
+#
+# A session-shaped list (an app's test double) has no userData environment and
+# is verified on every call. That is right for a stub: the staleness this
+# guards against needs a real, long-lived session whose frozen handshake token
+# ages past its exp.
+.shinyhub_cache <- function(session) {
+  store <- session$userData
+  if (!is.environment(store)) {
+    return(NULL)
+  }
+  slot <- store$.shinyhub_identity
+  if (!is.environment(slot)) {
+    slot <- new.env(parent = emptyenv())
+    assign(".shinyhub_identity", slot, envir = store)
+  }
+  slot
 }
 
 # Synthetic identity for local development, from SHINYHUB_IDENTITY_DEV_*.
@@ -163,7 +281,7 @@ current_user <- function(session, key = NULL, slug = NULL) {
   if (!nzchar(role)) {
     role <- "viewer"
   }
-  list(
+  .shinyhub_identity(list(
     dev = TRUE,
     sub = username,
     preferred_username = username,
@@ -171,20 +289,18 @@ current_user <- function(session, key = NULL, slug = NULL) {
     email = Sys.getenv("SHINYHUB_IDENTITY_DEV_EMAIL", unset = ""),
     name = Sys.getenv("SHINYHUB_IDENTITY_DEV_NAME", unset = ""),
     groups = as.list(groups)
-  )
+  ))
 }
 
-# Resolve the verification key, returning list(key =, problem =). Exactly one
-# of the two is non-NULL: a resolved key carries no problem, and a problem
-# string describes why no key is available.
+# Resolve the verification key to raw bytes, raising when unavailable.
 .shinyhub_resolve_key <- function(key) {
   if (is.null(key)) {
     key <- Sys.getenv("SHINYHUB_IDENTITY_KEY", unset = "")
     if (!nzchar(key)) {
-      return(list(
-        key = NULL,
-        problem = "no verification key (SHINYHUB_IDENTITY_KEY is unset or empty)"
-      ))
+      .shinyhub_error(
+        "no_key",
+        "no verification key (SHINYHUB_IDENTITY_KEY is unset or empty)"
+      )
     }
   }
   if (is.character(key)) {
@@ -193,14 +309,14 @@ current_user <- function(session, key = NULL, slug = NULL) {
     # not-hex signal.
     parsed <- tryCatch(sodium::hex2bin(key), error = function(e) NULL)
     if (is.null(parsed) || length(parsed) == 0) {
-      return(list(
-        key = NULL,
-        problem = "verification key is not valid hex (check SHINYHUB_IDENTITY_KEY)"
-      ))
+      .shinyhub_error(
+        "bad_key",
+        "verification key is not valid hex (check SHINYHUB_IDENTITY_KEY)"
+      )
     }
-    return(list(key = parsed, problem = NULL))
+    return(parsed)
   }
-  list(key = key, problem = NULL) # already raw bytes
+  key # already raw bytes
 }
 
 .shinyhub_resolve_slug <- function(slug) {
@@ -208,7 +324,10 @@ current_user <- function(session, key = NULL, slug = NULL) {
     slug <- Sys.getenv("SHINYHUB_APP_SLUG", unset = "")
   }
   if (!nzchar(slug)) {
-    return(NULL)
+    .shinyhub_error(
+      "no_slug",
+      "expected audience unknown (SHINYHUB_APP_SLUG is unset or empty)"
+    )
   }
   slug
 }

@@ -1,7 +1,7 @@
 # This demo decodes the ShinyHub identity token inline to stay dependency-light
 # and show what the verification does under the hood. In your own app, prefer
 # the one-call helper: `pip install shinyhub-identity`, then
-# `from shinyhub_identity import current_user`. See docs/identity.md.
+# `from shinyhub_identity.shiny import session_identity`. See docs/identity.md.
 import os
 
 import jwt
@@ -76,22 +76,33 @@ app_ui = ui.page_fluid(
 
 
 def server(input, output, session):
-    headers = session.http_conn.headers
-
-    def verified():
-        token = headers.get("x-shinyhub-identity-token")
-        if not token:
-            return None
+    # Verify once, at session start. Identity is bound at the WebSocket
+    # handshake and the token forwarded there expires five minutes later, so
+    # decoding it inside a reactive starts failing part-way through a long
+    # session even though nothing about the user changed. `session_identity`
+    # in the helper package does exactly this for you.
+    token = session.http_conn.headers.get("x-shinyhub-identity-token")
+    user, rejected = None, ""
+    if token:
         try:
-            return jwt.decode(token, KEY, algorithms=["HS256"],
-                              audience=SLUG, issuer="shinyhub", leeway=30)
-        except jwt.InvalidTokenError:
-            return None
+            user = jwt.decode(token, KEY, algorithms=["HS256"],
+                              audience=SLUG, issuer="shinyhub", leeway=30,
+                              options={"require": ["exp"]})
+        except jwt.InvalidTokenError as err:
+            # A token that is present but does not verify means a broken
+            # deployment, not an anonymous visitor. Rendering it as "signed
+            # out" would hide a misconfiguration behind an empty page.
+            rejected = str(err)
 
     @output
     @render.ui
     def who():
-        user = verified()
+        if rejected:
+            return ui.p(
+                f"An identity token arrived but failed verification ({rejected}). "
+                "This deployment is misconfigured; nobody is signed out.",
+                class_="anonymous",
+            )
         if user is None:
             return ui.p("Sign in through ShinyHub to inspect a verified identity context.", class_="anonymous")
         groups = ", ".join(user.get("groups") or []) or "(none)"
@@ -106,9 +117,8 @@ def server(input, output, session):
     @output
     @render.ui
     def admin_panel():
-        user = verified()
         if user and user["role"] == "admin":
-            return ui.section(
+            return ui.tags.section(
                 ui.h2("Administrator context"),
                 ui.p("This panel is visible because the verified role is admin."),
                 class_="admin-panel",

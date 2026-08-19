@@ -31,23 +31,69 @@ server <- function(input, output, session) {
 }
 ```
 
-`current_user(session)` returns the verified JWT claims
-(`preferred_username`, `role`, `email`, `name`, `groups`, `groups_truncated`,
-`sub`, ...) or `NULL` (`email`/`name` are present only when the deployment's
-IdP asserts them). Every failure -
-no token, bad signature, wrong audience/issuer, expired, or no ShinyHub in front
-(running locally) - returns `NULL` rather than erroring, so your app stays
-testable without SSO.
+`current_user(session)` returns the verified identity:
 
-A token that is **present but rejected** additionally raises an R `warning()`
-(once per distinct reason per session), because that almost always means a
-misconfigured deployment - missing or wrong `SHINYHUB_IDENTITY_KEY`,
-audience/issuer mismatch, clock skew - rather than an anonymous visitor. A
-request without a token stays silent.
+| Field | Value |
+|-------|-------|
+| `user_id` | Decimal user ID |
+| `username` | Username |
+| `role` | Platform role: `viewer`, `developer`, `operator`, or `admin` |
+| `groups` | Character vector of verified group names |
+| `groups_truncated` | `TRUE` when the group list was capped at 100 |
+| `email` | `""` unless the deployment's IdP asserts one |
+| `name` | Display name; `""` unless the IdP asserts one |
+| `claims` | The raw verified JWT claims |
+
+The field names match the Python helper's `Identity`, so one documented
+contract covers both SDKs.
+
+It verifies the session's handshake token once and returns that answer for the
+session's life. That is a correctness property, not a cache: a Shiny session's
+`request` is frozen at the WebSocket handshake while the token it carries
+expires five minutes later, so re-verifying it inside a reactive would start
+failing part-way through a long session even though nothing about the user
+changed.
 
 Key and slug default to the `SHINYHUB_IDENTITY_KEY`/`SHINYHUB_APP_SLUG`
 environment variables ShinyHub injects; pass `key=`/`slug=` explicitly for
 tests.
+
+## `NULL` means anonymous, and nothing else
+
+A genuine anonymous visitor sends **no token at all**, so that is the only case
+that returns `NULL`. A token that is present but fails verification is a broken
+deployment - missing or wrong `SHINYHUB_IDENTITY_KEY`, audience or issuer
+mismatch, an expired token, clock skew - and raises a `shinyhub_identity_error`
+condition instead. An app that renders that as "logged out" hides the outage
+behind an empty dashboard, which is exactly what this contract prevents.
+
+```r
+user <- tryCatch(
+  current_user(session),
+  shinyhub_identity_error = function(e) {
+    message("identity broken: ", conditionMessage(e))   # e$reason, e$detail
+    stop(e)
+  }
+)
+```
+
+`e$reason` is a stable classification (the Python helper uses the same
+vocabulary, and a cross-language conformance test pins them together):
+
+| `reason` | Meaning |
+|----------|---------|
+| `no_token` | nothing to verify (`verify_token` only; `current_user` returns `NULL`) |
+| `no_key` | `SHINYHUB_IDENTITY_KEY` unset or empty |
+| `bad_key` | `SHINYHUB_IDENTITY_KEY` is not valid hex |
+| `no_slug` | `SHINYHUB_APP_SLUG` unset or empty |
+| `bad_signature` | signed with a different key |
+| `expired` | past its `exp` (tokens live 5 minutes) |
+| `wrong_audience` | minted for a different app slug |
+| `wrong_issuer` | `iss` is not `shinyhub` |
+| `malformed` | unparseable, or missing the required `exp` claim |
+
+Letting the condition propagate is a reasonable default: the app is not going
+to render anything trustworthy anyway.
 
 ## Local development
 
@@ -56,8 +102,8 @@ With no ShinyHub proxy in front there is no token, so `current_user` is always
 (and optionally `SHINYHUB_IDENTITY_DEV_GROUPS` (comma-separated),
 `SHINYHUB_IDENTITY_DEV_EMAIL`, `SHINYHUB_IDENTITY_DEV_NAME`,
 `SHINYHUB_IDENTITY_DEV_ROLE`, default `viewer`); `current_user` then returns a
-synthetic claims list marked `dev = TRUE`. This can never activate under a
-real deployment: it only applies when no token arrived **and**
+synthetic identity whose `claims` are marked `dev = TRUE`. This can never
+activate under a real deployment: it only applies when no token arrived **and**
 `SHINYHUB_IDENTITY_KEY` is absent, and ShinyHub always injects that key into
 app processes.
 
@@ -68,7 +114,14 @@ tracks changes to *this package's API*, not the server's release train. Any
 release verifies tokens from any ShinyHub **v0.8.6 or later** (the release
 that introduced identity forwarding); the token contract is stable across
 server releases. Claims a later server added (`email`, `name`) are simply
-absent when an older server minted the token.
+`""` when an older server minted the token.
+
+**Upgrading from 0.2:** a rejected token now raises a `shinyhub_identity_error`
+condition instead of returning `NULL` with a warning, so code that treated
+`NULL` as "not logged in" should either let the condition propagate or catch it
+explicitly. The return value is now a normalized identity: read `user_id` and
+`username` where you read `sub` and `preferred_username`, and reach for
+`$claims` when you want a raw JWT claim.
 
 ## Why verify, not just read the plain headers?
 
