@@ -87,6 +87,29 @@
 #'   \code{no_token}, \code{no_key}, \code{bad_key}, \code{no_slug},
 #'   \code{bad_signature}, \code{expired}, \code{wrong_audience},
 #'   \code{wrong_issuer}, \code{malformed}.
+#' @examples
+#' # In a deployed app, ShinyHub injects the key and slug; mint one here so the
+#' # example runs standalone.
+#' key <- sodium::random(32)
+#' token <- jose::jwt_encode_hmac(
+#'   jose::jwt_claim(
+#'     iss = "shinyhub", aud = "sales-dashboard", sub = "42",
+#'     preferred_username = "alice", role = "admin",
+#'     exp = as.numeric(Sys.time()) + 300
+#'   ),
+#'   secret = key
+#' )
+#'
+#' user <- verify_token(token, key = key, slug = "sales-dashboard")
+#' user$username
+#' user$role
+#'
+#' # A token meant for another app is rejected, not silently treated as
+#' # anonymous. Branch on the reason, never on a NULL return.
+#' tryCatch(
+#'   verify_token(token, key = key, slug = "other-app"),
+#'   shinyhub_identity_error = function(e) e$reason
+#' )
 #' @export
 verify_token <- function(token, key = NULL, slug = NULL, leeway = 30) {
   if (is.null(token) || length(token) == 0 || !nzchar(token)) {
@@ -199,6 +222,21 @@ verify_token <- function(token, key = NULL, slug = NULL, leeway = 30) {
 #'   A token that is present but fails verification raises a
 #'   \code{shinyhub_identity_error} condition on every call, with the same
 #'   \code{reason}, rather than degrading into \code{NULL}.
+#' @examples
+#' # Inside a Shiny server function, verify once and keep the result:
+#' #
+#' #   server <- function(input, output, session) {
+#' #     user <- current_user(session)
+#' #     output$who <- renderText(if (is.null(user)) "anonymous" else user$username)
+#' #   }
+#' #
+#' # A session is any object with a `request`, so the contract is testable
+#' # without a running app.
+#' anonymous <- current_user(
+#'   list(request = list()),
+#'   key = sodium::random(32), slug = "sales-dashboard"
+#' )
+#' is.null(anonymous)
 #' @export
 current_user <- function(session, key = NULL, slug = NULL, leeway = 30) {
   cache <- .shinyhub_cache(session)
@@ -296,12 +334,17 @@ current_user <- function(session, key = NULL, slug = NULL, leeway = 30) {
 .shinyhub_resolve_key <- function(key) {
   if (is.null(key)) {
     key <- Sys.getenv("SHINYHUB_IDENTITY_KEY", unset = "")
-    if (!nzchar(key)) {
-      .shinyhub_error(
-        "no_key",
-        "no verification key (SHINYHUB_IDENTITY_KEY is unset or empty)"
-      )
-    }
+  }
+  # An empty key is an absent key however it arrived, so an app that reads the
+  # variable itself and passes the result through gets the same no_key the
+  # environment path gives. Otherwise an unset variable surfaces as bad_key for
+  # "" and as bad_signature for raw(0), telling the operator to rotate a key
+  # that was never there.
+  if (length(key) == 0 || (is.character(key) && !nzchar(key[[1]]))) {
+    .shinyhub_error(
+      "no_key",
+      "no verification key (SHINYHUB_IDENTITY_KEY is unset or empty)"
+    )
   }
   if (is.character(key)) {
     # sodium::hex2bin does not error on garbage - it skips invalid characters

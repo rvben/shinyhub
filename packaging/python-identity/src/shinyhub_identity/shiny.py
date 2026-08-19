@@ -98,12 +98,16 @@ def session_identity(
     called from inside a reactive without threading the session through.
 
     Returns the same answer every time it is called for a given session: the
-    handshake token is verified on the first call only. A token that was
+    handshake token is verified on the first call only, so ``key``, ``slug``
+    and ``leeway`` are read on the first call only too. A token that was
     present but failed verification raises ``IdentityError`` on every call,
     with the same ``reason``, rather than degrading into ``None``.
     """
     if session is None:
         session = _active_session()
+    # Shape-check before the cache lookup: the likeliest mistake is passing
+    # something that is not a session at all, and "no http_conn.headers" names
+    # that directly, where the weak-reference refusal below would not.
     headers = _headers_of(session)
     outcome = _cached(session)
     if outcome is None:

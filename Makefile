@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -83,17 +83,58 @@ test-py-identity:
 	cd packaging/python-identity && PYTHONPATH=src uv run --with pytest --with pyjwt --no-project python -m pytest tests/ -q
 
 # test-r-identity runs the shinyhubidentity R helper's testthat suite. Needs R
-# with jose, sodium and testthat; skips cleanly when Rscript is absent.
+# with jose, sodium and testthat (see bootstrap-r-identity). Skips when Rscript
+# is absent so a developer without an R toolchain can still run the rest;
+# SHINYHUB_IDENTITY_STRICT=1 turns that absence into a failure, which is what CI
+# sets. Without it a broken R setup would make the whole R half of the identity
+# contract a silent no-op while the job still reported green.
 test-r-identity:
 	@if command -v Rscript >/dev/null 2>&1; then \
 		Rscript -e 'testthat::test_local("packaging/r-identity")'; \
+	elif [ "$$SHINYHUB_IDENTITY_STRICT" = "1" ]; then \
+		echo "Rscript not found and SHINYHUB_IDENTITY_STRICT=1: refusing to skip the R identity tests"; \
+		exit 1; \
 	else \
 		echo "Rscript not found; skipping R identity helper tests"; \
 	fi
 
+# bootstrap-r-identity installs the R packages the helper suite needs, so CI
+# provisions exactly what a developer does. On Linux, sodium also needs the
+# libsodium system headers (libsodium-dev on Debian/Ubuntu).
+bootstrap-r-identity:
+	@command -v Rscript >/dev/null 2>&1 || { echo "Rscript not found"; exit 1; }
+	Rscript -e 'p <- c("jose", "sodium", "testthat", "roxygen2"); m <- p[!p %in% rownames(installed.packages())]; if (length(m)) install.packages(m, repos = "https://cloud.r-project.org")'
+
+# check-r-identity runs R CMD check over the helper package. testthat exercises
+# the code; check is what validates everything around it: that the docs match
+# the functions they document, that NAMESPACE is consistent, and that the
+# documented examples still run. Builds into tmp/ so no tarball is left behind.
+#
+# R CMD check exits 0 on WARNING and NOTE, so its own status is not a usable
+# gate: an undocumented argument reports "1 WARNING" and a green build. The
+# final status line is the real verdict, so require it to be exactly OK.
+check-r-identity:
+	@command -v R >/dev/null 2>&1 || { echo "R not found (needed for R CMD check)"; exit 1; }
+	rm -rf tmp/r-identity-check && mkdir -p tmp/r-identity-check
+	cd tmp/r-identity-check && R CMD build ../../packaging/r-identity && R CMD check --no-manual shinyhubidentity_*.tar.gz
+	@status=$$(grep '^Status:' tmp/r-identity-check/shinyhubidentity.Rcheck/00check.log); \
+	echo "$$status"; \
+	if [ "$$status" != "Status: OK" ]; then \
+		echo "R CMD check did not end clean; see tmp/r-identity-check/shinyhubidentity.Rcheck/00check.log"; \
+		exit 1; \
+	fi
+
+# docs-r-identity regenerates man/ and NAMESPACE from the roxygen comments.
+# Both are generated artifacts: edit the comments in R/identity.R, never the
+# .Rd files. check-r-identity fails if they drift out of sync.
+docs-r-identity:
+	@command -v Rscript >/dev/null 2>&1 || { echo "Rscript not found"; exit 1; }
+	Rscript -e 'roxygen2::roxygenise("packaging/r-identity")'
+
 # test-identity-conformance verifies the shipped Python and R helpers against a
 # token minted by the real production MintToken. Each language subtest skips
-# when its toolchain (uv / Rscript) is absent.
+# when its toolchain (uv / Rscript) is absent, unless SHINYHUB_IDENTITY_STRICT=1
+# makes the absence a failure.
 test-identity-conformance:
 	SHINYHUB_CONFORMANCE=1 go test ./internal/identity/ -run TestConformance -count=1 -v
 

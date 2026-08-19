@@ -276,13 +276,14 @@ jobs:
         run: make test-provisioning
 
   # Client-side identity-helper tests (Python + R JWT verification against a
-  # token minted by the real production MintToken). Security-relevant surface
-  # that previously only ran when a developer invoked it locally. uv is
-  # installed for the Python helper; the R subtests skip cleanly when Rscript
-  # is absent, so no R toolchain is provisioned here.
+  # token minted by the real production MintToken). Security-relevant surface,
+  # so BOTH toolchains are provisioned and SHINYHUB_IDENTITY_STRICT=1 makes a
+  # missing one fail the job: the R half of the contract is exactly where the
+  # cross-language divergences live, and a skipped subtest is indistinguishable
+  # from a passing one in a CI summary.
   test-identity:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -296,8 +297,27 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          use-public-rspm: true
+
+      # sodium binds libsodium; jose binds openssl (already on the runner).
+      - name: Install R helper dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev
+          make bootstrap-r-identity
+
       - name: Identity helper tests
+        env:
+          SHINYHUB_IDENTITY_STRICT: "1"
         run: make test-identity
+
+      # R CMD check validates what testthat cannot: docs matching the functions
+      # they document, NAMESPACE consistency, and runnable examples.
+      - name: R package check
+        run: make check-r-identity
 
   # Terraform fmt/validate for the AWS ECS IaC. No cloud credentials are needed
   # (init runs with -backend=false), so a syntax/format regression is caught in

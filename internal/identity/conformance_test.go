@@ -31,6 +31,22 @@ func requireConformance(t *testing.T) {
 	}
 }
 
+// requireToolchain keeps the matrix runnable on a machine without uv or R,
+// while making sure CI can never report a green conformance run that verified
+// nothing: with SHINYHUB_IDENTITY_STRICT=1 an absent toolchain fails instead of
+// skipping. A silent skip is the dangerous outcome here, because "all subtests
+// passed" and "half the subtests never ran" look identical in a CI summary.
+func requireToolchain(t *testing.T, bin string) {
+	t.Helper()
+	if _, err := exec.LookPath(bin); err == nil {
+		return
+	}
+	if os.Getenv("SHINYHUB_IDENTITY_STRICT") == "1" {
+		t.Fatalf("%s not found and SHINYHUB_IDENTITY_STRICT=1: the %s half of the conformance matrix would not have run", bin, bin)
+	}
+	t.Skipf("%s not available", bin)
+}
+
 // runHelper runs a helper script in one language and returns its last output
 // line parsed as JSON. env carries the SHINYHUB_* variables under test.
 func runHelper(t *testing.T, lang string, env []string, pyScript, rScript string) map[string]any {
@@ -38,16 +54,12 @@ func runHelper(t *testing.T, lang string, env []string, pyScript, rScript string
 	var cmd *exec.Cmd
 	switch lang {
 	case "python":
-		if _, err := exec.LookPath("uv"); err != nil {
-			t.Skip("uv not available")
-		}
+		requireToolchain(t, "uv")
 		src, _ := filepath.Abs("../../packaging/python-identity/src")
 		cmd = exec.Command("uv", "run", "--with", "pyjwt", "--no-project", "python", "-c", pyScript)
 		env = append(env, "PYTHONPATH="+src)
 	case "r":
-		if _, err := exec.LookPath("Rscript"); err != nil {
-			t.Skip("Rscript not available")
-		}
+		requireToolchain(t, "Rscript")
 		rfile, _ := filepath.Abs("../../packaging/r-identity/R/identity.R")
 		cmd = exec.Command("Rscript", "-e", rScript)
 		env = append(env, "RFILE="+rfile)
