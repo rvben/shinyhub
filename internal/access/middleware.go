@@ -48,49 +48,69 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 				return
 			}
 
-			if app.Access == "public" {
-				// Resolve the optional identity so the proxy can forward it to
-				// the app (public apps can still personalize for signed-in
-				// users). Anonymous requests pass through with no context user.
-				if user := ResolveOptionalUser(r, jwtSecret, revoked, userLookup); user != nil {
-					r = r.WithContext(auth.WithUser(r.Context(), user))
+			// Resolve the identity for every app, public included: the proxy
+			// Director reads it to forward identity headers, and a public app
+			// can still personalize for a signed-in user. An anonymous request
+			// resolves to nil and is denied only where decide says so.
+			user, token := resolveSession(r, jwtSecret, revoked, userLookup)
+			if user != nil {
+				ctx := auth.WithUser(r.Context(), user)
+				if token != nil {
+					// Carried so the proxy can record this session's jti
+					// alongside any connection it upgrades. The periodic
+					// re-check needs it to close live sessions whose token was
+					// revoked on logout.
+					ctx = auth.WithTokenInfo(ctx, token)
 				}
-				next.ServeHTTP(w, r)
-				return
+				r = r.WithContext(ctx)
 			}
 
-			// Both "private" and "shared" require authentication. Admins,
-			// operators, and any authenticated user on shared apps bypass the
-			// membership check; other roles on private apps must pass the
-			// UserCanAccessApp check.
-			user := extractUser(r, jwtSecret, revoked, userLookup)
-			if user == nil {
-				writeAccessDenied(w, r, http.StatusUnauthorized, "Sign in to access this app")
-				return
-			}
-
-			// The proxy Director reads this identity to forward it to the app.
-			r = r.WithContext(auth.WithUser(r.Context(), user))
-
-			// admin, operator, and any authenticated user for shared apps bypass membership check.
-			if user.Role == "admin" || user.Role == "operator" || app.Access == "shared" {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			ok, err := st.UserCanAccessApp(slug, user.ID)
+			status, err := decide(st, app, user)
 			if err != nil {
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
-			if !ok {
+			switch status {
+			case http.StatusUnauthorized:
+				writeAccessDenied(w, r, http.StatusUnauthorized, "Sign in to access this app")
+			case http.StatusForbidden:
 				writeAccessDenied(w, r, http.StatusForbidden, "You don't have access to this app")
-				return
+			default:
+				next.ServeHTTP(w, r)
 			}
-
-			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// decide is the per-app authorization rule, expressed as the HTTP status the
+// request path would answer with: 200 admit, 401 authenticate first, 403 no
+// access, 500 could not tell. user is nil for an anonymous caller.
+//
+// It is deliberately the ONLY place the rule is written. Recheck re-runs this
+// same function against the live database for connections that were upgraded
+// to WebSockets, where the middleware never gets another turn - so a live
+// session can never be governed by a different rule than admission was.
+func decide(st store, app *db.App, user *auth.ContextUser) (int, error) {
+	if app.Access == "public" {
+		return http.StatusOK, nil
+	}
+	// Both "private" and "shared" require authentication.
+	if user == nil {
+		return http.StatusUnauthorized, nil
+	}
+	// admin, operator, and any authenticated user for shared apps bypass the
+	// membership check.
+	if user.Role == "admin" || user.Role == "operator" || app.Access == "shared" {
+		return http.StatusOK, nil
+	}
+	ok, err := st.UserCanAccessApp(app.Slug, user.ID)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	if !ok {
+		return http.StatusForbidden, nil
+	}
+	return http.StatusOK, nil
 }
 
 // extractUser authenticates the request strictly from the session cookie.
@@ -120,14 +140,23 @@ func extractUser(r *http.Request, secret string, revoked auth.RevocationChecker,
 // function - callers are responsible for calling auth.WithUser if they want
 // to propagate the identity downstream.
 func ResolveOptionalUser(r *http.Request, secret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) *auth.ContextUser {
-	if u := auth.UserFromContext(r.Context()); u != nil {
-		return u
-	}
-	user, _, err := auth.AuthenticateBrowserSession(r, secret, userLookup, revoked)
-	if err != nil {
-		return nil
-	}
+	user, _ := resolveSession(r, secret, revoked, userLookup)
 	return user
+}
+
+// resolveSession is ResolveOptionalUser plus the session token's metadata. The
+// token is nil whenever the identity did not come from a session JWT this
+// middleware validated - an upstream forward-auth identity already in the
+// request context has no jti of ours to revoke.
+func resolveSession(r *http.Request, secret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) (*auth.ContextUser, *auth.TokenInfo) {
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		return u, auth.TokenInfoFromContext(r.Context())
+	}
+	user, token, err := auth.AuthenticateBrowserSession(r, secret, userLookup, revoked)
+	if err != nil {
+		return nil, nil
+	}
+	return user, token
 }
 
 // writeAccessDenied returns a styled HTML page for browser navigation requests

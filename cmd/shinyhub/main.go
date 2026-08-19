@@ -1241,6 +1241,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// load. Single-node deployments skip this entirely: no rows, no goroutine.
 	var reporterWG sync.WaitGroup
 	var reporterCancel context.CancelFunc
+	// Declared here, started once the /app/* chain below is wired (the recheck
+	// reuses that chain's store and user lookup so both decide alike).
+	var recheckWG sync.WaitGroup
+	var recheckCancel context.CancelFunc
 	if isClustered(cfg) {
 		flushCh := make(chan string, 16)
 		prx.EnableImmediateFlush(flushCh)
@@ -2087,6 +2091,32 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// X-Shinyhub-Name, and a hand-rolled ContextUser here would silently blank
 	// them for every native /app session.
 	appUserLookup := store.LookupContextUser
+	// The middleware above decides once per request, and a WebSocket upgrade is
+	// one request: the session it opens then outlives every later decision. This
+	// re-runs the same check over this instance's live upgraded connections and
+	// closes the ones whose identity has been revoked. Deliberately started
+	// outside the owner scope - an HA standby holds its own connections and no
+	// other instance can close them for it.
+	if every := cfg.SessionRecheckInterval(); every > 0 {
+		recheckCtx, cancelRecheck := context.WithCancel(context.Background())
+		recheckCancel = cancelRecheck
+		recheckWG.Add(1)
+		go func() {
+			defer recheckWG.Done()
+			prx.StartSessionRecheck(recheckCtx, every, func(c proxy.ConnPrincipal) (bool, string, error) {
+				return access.Recheck(store, appUserLookup, store.IsTokenRevoked, access.Principal{
+					Slug:         c.Slug,
+					UserID:       c.UserID,
+					Role:         c.Role,
+					SessionEpoch: c.SessionEpoch,
+					JTI:          c.JTI,
+				})
+			})
+		}()
+		slog.Info("session recheck started", "interval", every)
+	} else {
+		slog.Warn("session recheck disabled: revoking a user will not close the app sessions they already have open")
+	}
 	proxyEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets)(prx)
 	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(proxyEmptyState)
 	var parsedAppOrigin *url.URL
@@ -2296,6 +2326,12 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	if reporterCancel != nil {
 		reporterCancel()
 		reporterWG.Wait()
+	}
+	// Stop re-authorizing live sessions before the drain below starts closing
+	// them, so the two are never racing over the same connections.
+	if recheckCancel != nil {
+		recheckCancel()
+		recheckWG.Wait()
 	}
 	// Stop the pool syncer (clustered only). Nil out the on-miss hook after
 	// the syncer goroutine exits so a late-arriving request cannot invoke

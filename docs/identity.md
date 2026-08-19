@@ -46,9 +46,38 @@ absent headers as anonymous.
 ### WebSocket and session binding
 
 For Shiny apps, identity is bound at WebSocket upgrade time. The session that
-is opened belongs to the user who triggered the upgrade. Subsequent messages
-on that WebSocket are not re-authenticated per-message; the initial identity
-check governs the session's lifetime.
+is opened belongs to the user who triggered the upgrade, and messages on that
+WebSocket are not re-authenticated per-message.
+
+The connection is re-authorized on a timer instead. Every ShinyHub instance
+sweeps its own live upgraded connections every `server.session_recheck_interval`
+(default 30s) and closes the ones whose access has lapsed:
+
+| What changed | How it is detected |
+| --- | --- |
+| An admin revoked the user's sessions, or their password changed | `users.token_epoch` no longer matches the connection's |
+| The user was deleted | the user row is gone |
+| The user's global role changed | the live role no longer matches the one the app was told |
+| The user signed out | that session token's `jti` is revoked |
+| The user lost access to the app (membership or group grant removed) | the admission check is re-run against the live database |
+| A public app was made private | same, for a connection admitted anonymously |
+
+A lapsed connection is closed at the socket, without a WebSocket close frame.
+The browser sees a dropped connection, reconnects, and meets the normal access
+check, which answers with the proper 401 or 403. So the window in which a
+revoked user keeps a session they already had open is one sweep interval, not
+the session's natural lifetime.
+
+The sweep is per-instance by design. A hijacked connection can only be closed by
+the process holding it, so in a high-availability deployment every instance
+sweeps its own connections, standbys included, rather than the control-plane
+owner doing it for the cluster.
+
+Two kinds of drift are deliberately not swept, because they are not access
+decisions: group membership and profile fields (email, display name) change what
+a live session is *told* about the user, not whether it may stay open. Both are
+already bounded by the caches described below, and reach the app on its next
+HTTP request.
 
 ### Token validity window
 
@@ -417,6 +446,30 @@ reverts to the global default on the next deploy.
 The global `false` kill switch always wins. If the operator has set
 `auth.identity_headers: false`, setting `identity_headers = true` in a
 manifest has no effect.
+
+### Session re-check interval
+
+```yaml
+# shinyhub.yaml
+server:
+  session_recheck_interval: 30s   # default; 0 disables the sweep
+```
+
+How often each instance re-authorizes its live WebSocket app sessions (see
+[WebSocket and session binding](#websocket-and-session-binding)). It bounds how
+long a revoked user keeps a session that was already open; ordinary HTTP
+requests are authorized on every request and are unaffected by this setting.
+
+The value is a duration, so write `30s` or `2m`, not `30`. A bare `0` turns the
+sweep off, restoring the older behaviour where an open session outlived every
+revocation. `SHINYHUB_SESSION_RECHECK_INTERVAL` overrides the YAML key.
+
+Lowering it costs little: a sweep decides once per distinct (app, user) pair
+that holds a live connection, not once per connection and not once per request,
+so a user with eight tabs open costs one decision. An instance with no upgraded
+connections does no work at all. If the database is unreachable the sweep fails
+open and keeps every connection, because dropping every live session on a
+transient error is worse than a few more seconds of access for one revoked user.
 
 ### Key rotation
 
