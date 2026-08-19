@@ -152,6 +152,41 @@ exposes app proxy traffic and health checks only; it does not expose the
 dashboard, static control-plane assets, or `/api` routes. This prevents
 application JavaScript from sharing an origin with control-plane cookies.
 
+## Application status overlay
+
+When an application's WebSocket drops mid-session, Shiny shows a grey
+"disconnected" box. It cannot say more than that: the application process is the
+one party that does not know whether it was hibernated, redeployed, or killed.
+ShinyHub does know, so its proxy appends a small script to application HTML page
+loads that explains the disconnect and offers a reload.
+
+```yaml
+server:
+  status_overlay: false   # SHINYHUB_SERVER_STATUS_OVERLAY
+```
+
+On by default. What it does, and what it deliberately does not do:
+
+- It appends one `<script>` before `</body>` on top-level HTML navigations only.
+  Sub-resources, XHR, JSON, WebSocket upgrades, redirects, and error responses
+  are never touched.
+- It runs after the application's own bootstrap and replaces no global. It
+  watches for the `#shiny-disconnected-overlay` element that R and Python Shiny
+  both add, and does nothing in an application that never adds one.
+- On a disconnect it polls the application's readiness endpoint and reports
+  whether the app is back, gone, or still down. Polling is read only: it never
+  reaches the application and never wakes it.
+- If the application sets a `Content-Security-Policy`, ShinyHub adds the
+  overlay's `sha256` script hash to it and nothing else. A policy that forbids
+  scripts outright (`'none'`) is honoured by skipping the injection, never by
+  relaxing the policy.
+- Page loads are fetched from the backend uncompressed so the script can be
+  spliced in. The backend hop still negotiates gzip; only the in-process view is
+  plain.
+
+Set it to `false` for byte-for-byte untouched application responses. No response
+body is rewritten while it is off.
+
 ## Environment overrides
 
 Configuration keys generally map to `SHINYHUB_<UPPER_SNAKE_CASE>` variables.
