@@ -101,9 +101,27 @@ test-r-identity:
 # bootstrap-r-identity installs the R packages the helper suite needs, so CI
 # provisions exactly what a developer does. On Linux, sodium also needs the
 # libsodium system headers (libsodium-dev on Debian/Ubuntu).
+#
+# It installs from whatever repository R is already configured with, falling
+# back to CRAN only when there is none. Hardcoding CRAN instead defeats a
+# binary-package mirror: every dependency then compiles from source, so a
+# missing system header anywhere in the tree fails the install.
+#
+# install.packages reports a failed install as a warning, not an error, so the
+# command exits 0 with the package absent and the suite dies later complaining
+# about something unrelated. Loading each package afterwards is what turns that
+# into a failure here, naming what is missing.
 bootstrap-r-identity:
 	@command -v Rscript >/dev/null 2>&1 || { echo "Rscript not found"; exit 1; }
-	Rscript -e 'p <- c("jose", "sodium", "testthat", "roxygen2"); m <- p[!p %in% rownames(installed.packages())]; if (length(m)) install.packages(m, repos = "https://cloud.r-project.org")'
+	Rscript \
+	  -e 'p <- c("jose", "sodium", "testthat", "roxygen2")' \
+	  -e 'repo <- getOption("repos")["CRAN"]' \
+	  -e 'if (is.na(repo) || !nzchar(repo) || repo == "@CRAN@") repo <- "https://cloud.r-project.org"' \
+	  -e 'cat("installing from:", repo, "\n")' \
+	  -e 'm <- p[!p %in% rownames(installed.packages())]' \
+	  -e 'if (length(m)) install.packages(m, repos = repo)' \
+	  -e 'bad <- p[!vapply(p, requireNamespace, logical(1), quietly = TRUE)]' \
+	  -e 'if (length(bad)) stop("R packages missing after install: ", paste(bad, collapse = ", "), call. = FALSE)'
 
 # check-r-identity runs R CMD check over the helper package. testthat exercises
 # the code; check is what validates everything around it: that the docs match

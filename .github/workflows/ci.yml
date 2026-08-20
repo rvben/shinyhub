@@ -303,10 +303,13 @@ jobs:
           use-public-rspm: true
 
       # sodium binds libsodium; jose binds openssl (already on the runner).
+      # libuv is for fs, a testthat dependency: use-public-rspm above serves
+      # prebuilt binaries so nothing should compile, but a package with no
+      # binary for the runner's distro falls back to source without saying so.
       - name: Install R helper dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsodium-dev
+          sudo apt-get install -y libsodium-dev libuv1-dev
           make bootstrap-r-identity
 
       - name: Identity helper tests
