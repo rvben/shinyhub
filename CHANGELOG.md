@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.18](https://github.com/rvben/shinyhub/compare/v0.11.17...v0.11.18) - 2026-08-20
+
+### Added
+
+- **proxy**: explain mid-session disconnects with an injected status overlay ([e874322](https://github.com/rvben/shinyhub/commit/e874322646f31fa7fa936be17ae1baea383fa53f))
+- **identity**: ship test-token minters in both client SDKs ([179eae1](https://github.com/rvben/shinyhub/commit/179eae16ec176c7d28af834808f8869c534ff045))
+
 ## [0.11.17](https://github.com/rvben/shinyhub/compare/v0.11.16...v0.11.17) - 2026-08-19
 
 ### Breaking Changes
