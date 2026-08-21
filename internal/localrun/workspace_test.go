@@ -260,6 +260,62 @@ func TestWorkspaceSyncComposesAndRemovesIndexedInput(t *testing.T) {
 	}
 }
 
+func TestWorkspaceInputReplacesMutableSymlinkAncestor(t *testing.T) {
+	source := t.TempDir()
+	w, err := workspaceFor(source, t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := bundle.FileInputSnapshot{From: "_shared/theme.py", To: "helpers/theme.py", Mode: 0o644, Data: []byte("orange\n")}
+	if _, err := w.syncSourceWithInputs(source, []bundle.FileInputSnapshot{input}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(w.BundleDir, "helpers")); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(w.BundleDir, "helpers")); err != nil {
+		t.Skipf("create workspace symlink: %v", err)
+	}
+	if _, err := w.syncSourceWithInputs(source, []bundle.FileInputSnapshot{input}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(filepath.Join(w.BundleDir, "helpers")); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("input ancestor was not restored as a real directory: info=%v err=%v", info, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(w.BundleDir, "helpers", "theme.py")); err != nil || string(got) != "orange\n" {
+		t.Fatalf("composed input = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "theme.py")); !os.IsNotExist(err) {
+		t.Fatalf("input escaped workspace through symlink ancestor: %v", err)
+	}
+}
+
+func TestWorkspaceFailedSyncDiscardsUnindexedWrites(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "copied-before-error.py"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w, err := workspaceFor(source, t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := bundle.FileInputSnapshot{From: "_shared/bad.py", To: "../unsafe.py", Mode: 0o644, Data: []byte("bad\n")}
+	if _, err := w.syncSourceWithInputs(source, []bundle.FileInputSnapshot{invalid}); err == nil {
+		t.Fatal("sync unexpectedly accepted an unsafe post-copy input")
+	}
+	entries, err := os.ReadDir(w.BundleDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed sync left unindexed workspace entries: %v", entries)
+	}
+	if _, err := os.Stat(w.indexPath); !os.IsNotExist(err) {
+		t.Fatalf("failed sync left a source index: %v", err)
+	}
+}
+
 func TestWorkspaceComposedDependencyInputInvalidatesPreparation(t *testing.T) {
 	source := t.TempDir()
 	w, err := workspaceFor(source, t.TempDir(), "")

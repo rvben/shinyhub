@@ -142,17 +142,22 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		return validationErrorf("port must be between 0 and 65535, got %d", o.Port)
 	}
 	manifestPath := ""
+	manifestRoot := ""
 	if o.ManifestPath != "" {
-		manifestPath, err = filepath.Abs(o.ManifestPath)
-		if err != nil {
-			return validationErrorf("resolve fleet manifest: %v", err)
+		invocationPath, absErr := filepath.Abs(o.ManifestPath)
+		if absErr != nil {
+			return validationErrorf("resolve fleet manifest: %v", absErr)
 		}
-		manifestPath, err = filepath.EvalSymlinks(manifestPath)
+		manifestRoot, err = filepath.EvalSymlinks(filepath.Dir(invocationPath))
+		if err != nil {
+			return validationErrorf("resolve fleet manifest root: %v", err)
+		}
+		manifestPath, err = filepath.EvalSymlinks(invocationPath)
 		if err != nil {
 			return validationErrorf("resolve fleet manifest: %v", err)
 		}
 	}
-	inputSnapshots, err := resolveInputSnapshots(manifestPath, sourceDir, o.BundleInputs)
+	inputSnapshots, err := resolveInputSnapshots(manifestRoot, sourceDir, o.BundleInputs)
 	if err != nil {
 		return &ValidationError{Err: fmt.Errorf("resolve bundle inputs: %w", err)}
 	}
@@ -174,7 +179,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := w.validateLocations(sourceDir); err != nil {
+	if err := w.validateLocations(sourceDir, manifestRoot); err != nil {
 		return &ValidationError{Err: err}
 	}
 	releaseWorkspace, err := w.acquireLock()
@@ -213,7 +218,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	changeCh := make(chan struct{}, 1)
 	if !o.NoReload {
 		watchReady := make(chan struct{})
-		inputWatchPaths := bundleInputWatchPaths(manifestPath, o.BundleInputs)
+		inputWatchPaths := bundleInputWatchPaths(manifestRoot, o.BundleInputs)
 		go func() {
 			_ = watchAndRestartSourcesReady(ctx, sourceDir,
 				[]string{".shinyhub-run", ".venv", ".git", "__pycache__", "node_modules", ".renv", ".Rproj.user"},
@@ -283,7 +288,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			return errors.New("app exited unexpectedly")
 		case <-changeCh:
 			fmt.Fprintln(stdout, "==> change detected; staging reload")
-			stagedInputs, resolveErr := resolveInputSnapshots(manifestPath, sourceDir, o.BundleInputs)
+			stagedInputs, resolveErr := resolveInputSnapshots(manifestRoot, sourceDir, o.BundleInputs)
 			if resolveErr != nil {
 				fmt.Fprintf(stderr, "reload failed; keeping the current app: resolve bundle inputs: %v\n", resolveErr)
 				continue
@@ -334,26 +339,25 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	}
 }
 
-func bundleInputWatchPaths(manifestPath string, specs []bundle.FileInputSpec) []string {
-	if manifestPath == "" || len(specs) == 0 {
+func bundleInputWatchPaths(manifestRoot string, specs []bundle.FileInputSpec) []string {
+	if manifestRoot == "" || len(specs) == 0 {
 		return nil
 	}
-	root := filepath.Dir(manifestPath)
 	paths := make([]string, 0, len(specs))
 	for _, spec := range specs {
-		paths = append(paths, filepath.Join(root, filepath.FromSlash(spec.From)))
+		paths = append(paths, filepath.Join(manifestRoot, filepath.FromSlash(spec.From)))
 	}
 	return paths
 }
 
-func resolveInputSnapshots(manifestPath, sourceDir string, specs []bundle.FileInputSpec) ([]bundle.FileInputSnapshot, error) {
+func resolveInputSnapshots(manifestRoot, sourceDir string, specs []bundle.FileInputSpec) ([]bundle.FileInputSnapshot, error) {
 	if len(specs) == 0 {
 		return nil, nil
 	}
-	if manifestPath == "" {
+	if manifestRoot == "" {
 		return nil, fmt.Errorf("bundle inputs require a fleet manifest identity")
 	}
-	resolved, err := bundle.ResolveFileInputs(filepath.Dir(manifestPath), sourceDir, specs)
+	resolved, err := bundle.ResolveFileInputs(manifestRoot, sourceDir, specs)
 	if err != nil {
 		return nil, err
 	}

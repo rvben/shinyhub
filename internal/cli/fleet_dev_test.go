@@ -91,6 +91,58 @@ source = "./apps/does-not-exist"
 	}
 }
 
+func TestFleetDevSymlinkedManifestUsesInvocationDirectoryForSourcesAndInputs(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+	invocationRoot := t.TempDir()
+	manifestStore := t.TempDir()
+	appDir := filepath.Join(invocationRoot, "app")
+	if err := os.MkdirAll(filepath.Join(appDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, body := range map[string]string{
+		filepath.Join(appDir, "server.py"): `import http.server, os
+assert open("helpers/theme.py").read() == "orange\n"
+http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), http.server.SimpleHTTPRequestHandler).serve_forever()
+`,
+		filepath.Join(appDir, "shinyhub.toml"):               "[app]\ncommand = [\"python3\", \"server.py\"]\n",
+		filepath.Join(invocationRoot, "_shared", "theme.py"): "orange\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	realManifest := filepath.Join(manifestStore, "fleet.toml")
+	if err := os.WriteFile(realManifest, []byte(`
+fleet_id = "analytics"
+[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = ["sales"]
+[[app]]
+slug = "sales"
+source = "app"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkedManifest := filepath.Join(invocationRoot, "fleet.toml")
+	if err := os.Symlink(realManifest, linkedManifest); err != nil {
+		t.Skipf("create manifest symlink: %v", err)
+	}
+
+	cmd := newFleetDevCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"sales", "-f", linkedManifest, "--check", "--no-sync", "--state-dir", t.TempDir()})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("fleet dev through symlinked manifest: %v", err)
+	}
+}
+
 func TestFleetDevRejectsUnknownAndGitAppsBeforeLocalState(t *testing.T) {
 	root := t.TempDir()
 	manifest := filepath.Join(root, "fleet.toml")

@@ -140,6 +140,17 @@ func (w *workspace) syncSource(sourceDir string) (depsChanged bool, err error) {
 }
 
 func (w *workspace) syncSourceWithInputs(sourceDir string, inputs []bundle.FileInputSnapshot) (depsChanged bool, err error) {
+	depsChanged, err = w.syncSourceWithInputsOnce(sourceDir, inputs)
+	if err == nil {
+		return depsChanged, nil
+	}
+	if cleanupErr := w.resetBundle(); cleanupErr != nil {
+		return false, errors.Join(err, fmt.Errorf("discard incomplete local workspace sync: %w", cleanupErr))
+	}
+	return false, err
+}
+
+func (w *workspace) syncSourceWithInputsOnce(sourceDir string, inputs []bundle.FileInputSnapshot) (depsChanged bool, err error) {
 	if err := os.MkdirAll(w.BundleDir, 0o750); err != nil {
 		return false, fmt.Errorf("create local workspace bundle: %w", err)
 	}
@@ -199,7 +210,7 @@ func (w *workspace) syncSourceWithInputs(sourceDir string, inputs []bundle.FileI
 		if _, exists := current[input.To]; exists {
 			return false, fmt.Errorf("bundle input destination %q collides with app source", input.To)
 		}
-		if err := writeInputSnapshot(filepath.Join(w.BundleDir, clean), input); err != nil {
+		if err := writeInputSnapshot(w.BundleDir, clean, input); err != nil {
 			return false, fmt.Errorf("apply bundle input %q: %w", input.To, err)
 		}
 		entry := sourceEntry{Path: input.To, Mode: uint32(input.Mode)}
@@ -253,8 +264,36 @@ func (w *workspace) syncSourceWithInputs(sourceDir string, inputs []bundle.FileI
 	return depsChanged, nil
 }
 
-func writeInputSnapshot(destination string, input bundle.FileInputSnapshot) error {
-	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
+func writeInputSnapshot(bundleRoot, relativeDestination string, input bundle.FileInputSnapshot) error {
+	parent := filepath.Dir(relativeDestination)
+	current := bundleRoot
+	if parent != "." {
+		for _, component := range strings.Split(filepath.ToSlash(parent), "/") {
+			current = filepath.Join(current, filepath.FromSlash(component))
+			info, err := os.Lstat(current)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				if err := os.Mkdir(current, 0o750); err != nil {
+					return err
+				}
+			case err != nil:
+				return err
+			case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
+				if err := os.RemoveAll(current); err != nil {
+					return err
+				}
+				if err := os.Mkdir(current, 0o750); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	destination := filepath.Join(bundleRoot, relativeDestination)
+	if info, err := os.Lstat(destination); err == nil && !info.Mode().IsRegular() {
+		if err := os.RemoveAll(destination); err != nil {
+			return err
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(destination), ".shinyhub-input-*")
@@ -299,7 +338,7 @@ func (w *workspace) acquireLock() (func(), error) {
 	}, nil
 }
 
-func (w *workspace) validateLocations(sourceDir string) error {
+func (w *workspace) validateLocations(sourceDir string, protectedRoots ...string) error {
 	bundlesDir := filepath.Join(w.Root, "bundles")
 	if pathsOverlap(sourceDir, bundlesDir) {
 		return fmt.Errorf("local workspace must be outside the app source: %s", w.Root)
@@ -309,6 +348,17 @@ func (w *workspace) validateLocations(sourceDir string) error {
 	}
 	if pathsOverlap(bundlesDir, w.DataDir) {
 		return fmt.Errorf("local data directory must be outside generated bundles: %s", w.DataDir)
+	}
+	for _, root := range protectedRoots {
+		if root == "" {
+			continue
+		}
+		if pathsOverlap(root, w.Root) {
+			return fmt.Errorf("local workspace must be outside the fleet manifest root: %s", w.Root)
+		}
+		if pathsOverlap(root, w.DataDir) {
+			return fmt.Errorf("local data directory must be outside the fleet manifest root: %s", w.DataDir)
+		}
 	}
 	return nil
 }
