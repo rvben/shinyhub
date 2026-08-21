@@ -31,8 +31,44 @@ func TestFleetPreflight_ReturnsDiffSourcesAndHost(t *testing.T) {
 	if pf.host == "" {
 		t.Fatal("host empty")
 	}
-	if got := pf.sources["ops"]; got != filepath.Join(dir, "a") {
-		t.Fatalf("sources[ops] = %q, want %q", got, filepath.Join(dir, "a"))
+	if got := pf.bundles["ops"].Dir; got != filepath.Join(dir, "a") {
+		t.Fatalf("bundles[ops].Dir = %q, want %q", got, filepath.Join(dir, "a"))
+	}
+}
+
+func TestFleetPreflight_UsesImmutableComposedBundleSpec(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `[]`)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "_shared", "theme.py"), "orange\n")
+	mustWrite(t, filepath.Join(dir, "sales", "app.py"), "print(1)\n")
+	writeFleetManifest(t, dir, `fleet_id = "analytics"
+[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = ["sales"]
+[[app]]
+slug = "sales"
+source = "./sales"
+`)
+
+	var errBuf bytes.Buffer
+	pf, err := fleetPreflight(filepath.Join(dir, "shinyhub-fleet.toml"), &errBuf, "plan", 0)
+	if err != nil {
+		t.Fatalf("preflight: %v\n%s", err, errBuf.String())
+	}
+	defer pf.cleanup()
+	spec := pf.bundles["sales"]
+	if spec.Dir != filepath.Join(dir, "sales") || len(spec.Inputs) != 1 || string(spec.Inputs[0].Data) != "orange\n" {
+		t.Fatalf("bundle spec = %+v", spec)
+	}
+	mustWrite(t, filepath.Join(dir, "_shared", "theme.py"), "green\n")
+	preview, err := buildBundlePreviewFromSpec(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.diff) != 1 || pf.diff[0].LocalDigest != preview.Digest {
+		t.Fatalf("preflight digest=%v rebuilt snapshot digest=%s", pf.diff, preview.Digest)
 	}
 }
 

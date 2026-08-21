@@ -435,6 +435,7 @@ type applyJSONEnvelope struct {
 	FleetID       string             `json:"fleet_id"`
 	Server        string             `json:"server"`
 	GeneratedAt   string             `json:"generated_at"`
+	BundleFiles   []jsonBundleFile   `json:"bundle_files"`
 	Projects      []applyJSONProject `json:"projects"`
 	Apps          []applyJSONApp     `json:"apps"`
 	Summary       jsonSummary        `json:"summary"`
@@ -530,6 +531,7 @@ func writeFleetApplyJSONWithContext(out io.Writer, ctx applyReportContext, m *fl
 		FleetID:       m.FleetID,
 		Server:        host,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		BundleFiles:   jsonBundleFilesFromManifest(m, diff),
 		Projects:      jsonProjects,
 		Apps:          apps,
 		Summary: jsonSummary{

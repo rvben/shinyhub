@@ -26,7 +26,9 @@ func newFleetValidateCmd() *cobra.Command {
 			"Checks: TOML parses; fleet_id is present and valid; every slug is valid\n" +
 			"and unique; each [[app]] source resolves to a local directory (git URLs\n" +
 			"are syntax-checked, not cloned); and each local source's shinyhub.toml\n" +
-			"parses (delegating to the same parser used at deploy time).\n\n" +
+			"parses (delegating to the same parser used at deploy time). Declared\n" +
+			"[[bundle_file]] inputs are resolved for every local consumer, including\n" +
+			"path, symlink, collision, ignore, and bundle-policy checks.\n\n" +
 			"Exit codes:\n" +
 			"  0  manifest is valid\n" +
 			"  1  manifest is invalid (every problem is listed)\n\n" +
@@ -76,6 +78,12 @@ func runFleetValidate(cmd *cobra.Command, f *fleetValidateFlags) error {
 	}
 	fmt.Fprintf(out, "%s: OK (valid)\n", f.file)
 	fmt.Fprintf(out, "  fleet_id: %s\n", m.FleetID)
+	if len(m.BundleFiles) > 0 {
+		fmt.Fprintf(out, "  shared bundle inputs: %d bundle file(s)\n", len(m.BundleFiles))
+		for _, input := range m.BundleFiles {
+			fmt.Fprintf(out, "    %s -> %s (consumers: %v)\n", input.From, input.To, input.Consumers)
+		}
+	}
 	if len(m.Apps) == 0 {
 		// An empty fleet is accepted (it matches what `fleet apply --prune`
 		// accepts: a converge that removes every managed app). Surface it
@@ -110,6 +118,7 @@ func validateFleetManifest(file string, data []byte) (*fleet.Manifest, []string)
 	}
 
 	manifestDir := filepath.Dir(file)
+	localSources := make(map[string]string)
 	for _, app := range m.Apps {
 		if app.Source == "" {
 			// Already reported as "source is required" by ParseManifest.
@@ -123,10 +132,13 @@ func validateFleetManifest(file string, data []byte) (*fleet.Manifest, []string)
 		// Git sources are syntax-only here (no clone). For a local source,
 		// parse its shinyhub.toml exactly as the server does at deploy time.
 		if ps.Kind == fleet.SourceLocal {
+			localSources[app.Slug] = ps.LocalPath
 			if _, err := deploy.LoadManifest(ps.LocalPath); err != nil {
 				msgs = append(msgs, fmt.Sprintf("app %q: shinyhub.toml: %v", app.Slug, err))
 			}
 		}
 	}
+	_, bundleProblems := resolveLocalFleetBundleSpecs(m, file, localSources)
+	msgs = append(msgs, bundleProblems...)
 	return m, msgs
 }

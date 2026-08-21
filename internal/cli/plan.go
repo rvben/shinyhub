@@ -296,6 +296,9 @@ func runPlan(cmd *cobra.Command, args []string, f *planFlags) error {
 		return err
 	}
 	defer source.cleanup()
+	if f.git == "" {
+		warnFleetCompositionOmission(cmd.ErrOrStderr(), source.Dir, fleetOmissionPlan, quietFlag)
+	}
 
 	bundle, launch, err := prepareDeployment(source.Dir)
 	if err != nil {

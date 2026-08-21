@@ -18,8 +18,6 @@ import (
 	"strings"
 	"time"
 
-	gitignore "github.com/sabhiram/go-gitignore"
-
 	"github.com/rvben/shinyhub/internal/appstatus"
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/db"
@@ -153,6 +151,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	defer source.cleanup()
 	abs, slug := source.Dir, source.Slug
 	f.visibility = source.Visibility
+	if f.git == "" {
+		warnFleetCompositionOmission(cmd.ErrOrStderr(), abs, fleetOmissionDeploy, quietFlag)
+	}
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -935,8 +936,17 @@ type bundleSkippedPaths struct {
 	Paths  []string `json:"paths"`
 }
 
+type bundleBuildSpec struct {
+	Dir    string
+	Inputs []bundle.FileInputSnapshot
+}
+
 func zipDir(dir string) (*bytes.Buffer, string, error) {
-	preview, err := buildBundlePreview(dir)
+	return zipDirFromSpec(bundleBuildSpec{Dir: dir})
+}
+
+func zipDirFromSpec(spec bundleBuildSpec) (*bytes.Buffer, string, error) {
+	preview, err := buildBundlePreviewFromSpec(spec)
 	if err != nil {
 		return nil, "", err
 	}
@@ -944,25 +954,30 @@ func zipDir(dir string) (*bytes.Buffer, string, error) {
 }
 
 func buildBundlePreview(dir string) (*bundlePreview, error) {
+	return buildBundlePreviewFromSpec(bundleBuildSpec{Dir: dir})
+}
+
+func buildBundlePreviewFromSpec(spec bundleBuildSpec) (*bundlePreview, error) {
+	dir := spec.Dir
+	inputs, err := validateBundleInputSnapshots(dir, spec.Inputs)
+	if err != nil {
+		return nil, err
+	}
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
 	rules := bundle.DefaultRules()
 	rejected := map[bundle.FilterDecision][]string{}
 	preview := &bundlePreview{Files: []string{}, Buffer: &buf}
 
-	matcher, ignoreHasNegation, matcherErr := loadIgnoreMatcher(dir)
+	matcher, matcherErr := bundle.LoadIgnoreMatcher(dir)
 	if matcherErr != nil {
 		return nil, fmt.Errorf("load ignore file: %w", matcherErr)
 	}
 	if matcher != nil {
-		if _, err := os.Stat(filepath.Join(dir, ".shinyhubignore")); err == nil {
-			preview.IgnoreFile = ".shinyhubignore"
-		} else {
-			preview.IgnoreFile = ".gitignore"
-		}
+		preview.IgnoreFile = matcher.Filename
 	}
 
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -989,7 +1004,7 @@ func buildBundlePreview(dir string) (*bundlePreview, error) {
 					// Only prune the subtree when no negation pattern could
 					// re-include a descendant; otherwise descend and let
 					// file-level matching handle each child.
-					if !ignoreHasNegation {
+					if !matcher.HasNegation {
 						return filepath.SkipDir
 					}
 					return nil
@@ -1049,6 +1064,25 @@ func buildBundlePreview(dir string) (*bundlePreview, error) {
 		_ = w.Close()
 		return nil, err
 	}
+	for _, input := range inputs {
+		h := &zip.FileHeader{
+			Name:     input.To,
+			Method:   zip.Deflate,
+			Modified: time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC),
+		}
+		h.SetMode(input.Mode)
+		zw, createErr := w.CreateHeader(h)
+		if createErr != nil {
+			_ = w.Close()
+			return nil, createErr
+		}
+		if _, writeErr := zw.Write(input.Data); writeErr != nil {
+			_ = w.Close()
+			return nil, writeErr
+		}
+		preview.Files = append(preview.Files, input.To)
+		preview.UncompressedBytes += int64(len(input.Data))
+	}
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
@@ -1076,6 +1110,74 @@ func buildBundlePreview(dir string) (*bundlePreview, error) {
 	return preview, nil
 }
 
+func validateBundleInputSnapshots(dir string, inputs []bundle.FileInputSnapshot) ([]bundle.FileInputSnapshot, error) {
+	if len(inputs) == 0 {
+		return nil, nil
+	}
+	matcher, err := bundle.LoadIgnoreMatcher(dir)
+	if err != nil {
+		return nil, fmt.Errorf("load ignore file: %w", err)
+	}
+	rules := bundle.DefaultRules()
+	sorted := append([]bundle.FileInputSnapshot(nil), inputs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].To < sorted[j].To })
+	for i, input := range sorted {
+		if !validBundleInputDestination(input.To) {
+			return nil, fmt.Errorf("bundle input from %q has invalid destination %q", input.From, input.To)
+		}
+		if decision := rules.Inspect(input.To, int64(len(input.Data))); decision != bundle.FilterAccept {
+			return nil, fmt.Errorf("bundle input %q is not allowed: %s", input.To, decision)
+		}
+		for j := 0; j < i; j++ {
+			previous := sorted[j].To
+			if previous == input.To || strings.HasPrefix(previous, input.To+"/") || strings.HasPrefix(input.To, previous+"/") {
+				return nil, fmt.Errorf("bundle input destination conflict: %q conflicts with %q", input.To, previous)
+			}
+		}
+		parts := strings.Split(input.To, "/")
+		for j := 1; j < len(parts); j++ {
+			ancestorSlash := strings.Join(parts[:j], "/")
+			if matcher.MatchesPath(ancestorSlash + "/") {
+				return nil, fmt.Errorf("bundle input %q has ignored ancestor %q", input.To, ancestorSlash)
+			}
+			info, statErr := os.Lstat(filepath.Join(dir, filepath.FromSlash(ancestorSlash)))
+			switch {
+			case statErr == nil && info.Mode()&os.ModeSymlink != 0:
+				return nil, fmt.Errorf("bundle input %q has symlink ancestor %q", input.To, ancestorSlash)
+			case statErr == nil && !info.IsDir():
+				return nil, fmt.Errorf("bundle input %q has non-directory ancestor %q", input.To, ancestorSlash)
+			case statErr != nil && !os.IsNotExist(statErr):
+				return nil, fmt.Errorf("inspect bundle input ancestor %q: %w", ancestorSlash, statErr)
+			}
+		}
+		if matcher.MatchesPath(input.To) {
+			return nil, fmt.Errorf("bundle input %q is ignored by %s", input.To, matcher.Filename)
+		}
+		if _, statErr := os.Lstat(filepath.Join(dir, filepath.FromSlash(input.To))); statErr == nil {
+			return nil, fmt.Errorf("bundle input destination %q already exists", input.To)
+		} else if !os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("inspect bundle input destination %q: %w", input.To, statErr)
+		}
+	}
+	return sorted, nil
+}
+
+func validBundleInputDestination(path string) bool {
+	if path == "" || strings.Contains(path, `\`) || strings.HasPrefix(path, "/") || strings.HasSuffix(path, "/") {
+		return false
+	}
+	if len(path) >= 3 && ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) &&
+		path[1] == ':' && path[2] == '/' {
+		return false
+	}
+	for _, component := range strings.Split(path, "/") {
+		if component == "" || component == "." || component == ".." {
+			return false
+		}
+	}
+	return path == filepath.ToSlash(filepath.Clean(path))
+}
+
 func summarizeSkippedPaths(groups []bundleSkippedPaths) string {
 	parts := make([]string, 0, len(groups))
 	for _, group := range groups {
@@ -1097,46 +1199,6 @@ func summarizeDeploymentRejections(groups []bundleSkippedPaths) string {
 		}
 	}
 	return summarizeSkippedPaths(filtered)
-}
-
-// loadIgnoreMatcher returns a gitignore-style matcher built from the first
-// of .shinyhubignore or .gitignore found in dir. Returns (nil, false, nil)
-// when neither file exists. The ignoreHasNegation bool reports whether the
-// source file contains any negation patterns (`!`-prefixed lines), which
-// determines whether directory matches can safely `filepath.SkipDir`-prune
-// their subtree. Non-ENOENT read errors are surfaced rather than silently
-// swallowed.
-func loadIgnoreMatcher(dir string) (*gitignore.GitIgnore, bool, error) {
-	for _, name := range []string{".shinyhubignore", ".gitignore"} {
-		p := filepath.Join(dir, name)
-		raw, err := os.ReadFile(p)
-		if err == nil {
-			matcher := gitignore.CompileIgnoreLines(strings.Split(string(raw), "\n")...)
-			return matcher, ignoreFileHasNegation(raw), nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, false, fmt.Errorf("read %s: %w", name, err)
-		}
-	}
-	return nil, false, nil
-}
-
-// ignoreFileHasNegation reports whether the gitignore-format content has any
-// negation line (a non-comment, non-blank line whose first non-space rune is
-// `!`). Used to decide if directory pruning is safe: when no negation patterns
-// exist, a directory match means no descendant can be re-included, so
-// filepath.SkipDir is correct. When negation patterns are present, the walker
-// must descend and apply per-file matching instead.
-func ignoreFileHasNegation(raw []byte) bool {
-	for _, line := range strings.Split(string(raw), "\n") {
-		t := strings.TrimSpace(line)
-		if t == "" || strings.HasPrefix(t, "#") {
-			continue
-		}
-		if strings.HasPrefix(t, "!") {
-			return true
-		}
-	}
-	return false
 }
 
 func summarizeRejections(r map[bundle.FilterDecision][]string) string {

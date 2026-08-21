@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rvben/shinyhub/internal/bundle"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
 
@@ -949,6 +950,91 @@ func TestZipDir_HonorsShinyhubIgnore(t *testing.T) {
 	}
 }
 
+func TestBuildBundlePreview_ComposesFileInputSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "print('hi')")
+	preview, err := buildBundlePreviewFromSpec(bundleBuildSpec{
+		Dir: dir,
+		Inputs: []bundle.FileInputSnapshot{{
+			From: "_shared/theme.py",
+			To:   "helpers/theme.py",
+			Mode: 0o755,
+			Data: []byte("COLOR = 'orange'\n"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildBundlePreviewFromSpec: %v", err)
+	}
+	if preview.FileCount != 2 || !contains(preview.Files, "helpers/theme.py") {
+		t.Fatalf("preview files = %v (count %d)", preview.Files, preview.FileCount)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(preview.Buffer.Bytes()), int64(preview.Buffer.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range zr.File {
+		if f.Name != "helpers/theme.py" {
+			continue
+		}
+		rc, openErr := f.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		data, readErr := io.ReadAll(rc)
+		_ = rc.Close()
+		if readErr != nil || string(data) != "COLOR = 'orange'\n" {
+			t.Fatalf("composed data = %q, err=%v", data, readErr)
+		}
+		if f.Mode().Perm() != 0o755 {
+			t.Fatalf("composed mode = %o, want 755", f.Mode().Perm())
+		}
+		if got := f.Modified.UTC().Format(time.RFC3339); got != "1980-01-01T00:00:00Z" {
+			t.Fatalf("composed mtime = %s", got)
+		}
+		return
+	}
+	t.Fatal("composed entry not found")
+}
+
+func TestBuildBundlePreview_RejectsEscapingInputSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "print('hi')")
+	_, err := buildBundlePreviewFromSpec(bundleBuildSpec{
+		Dir: dir,
+		Inputs: []bundle.FileInputSnapshot{{
+			From: "_shared/theme.py", To: "../theme.py", Mode: 0o644, Data: []byte("theme"),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid destination") {
+		t.Fatalf("escaping input snapshot error = %v", err)
+	}
+}
+
+func TestBuildBundlePreview_NoInputCompatibilityFixture(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "print('fixture')\n")
+	writeFile(t, dir, "requirements.txt", "shiny==1.4.0\n")
+	fixed := time.Date(2026, time.August, 21, 10, 0, 0, 0, time.UTC)
+	for _, name := range []string{"app.py", "requirements.txt"} {
+		if err := os.Chtimes(filepath.Join(dir, name), fixed, fixed); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	preview, err := buildBundlePreviewFromSpec(bundleBuildSpec{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(preview.Files, ","), "app.py,requirements.txt"; got != want {
+		t.Fatalf("files = %q, want %q", got, want)
+	}
+	if preview.FileCount != 2 || preview.UncompressedBytes != 30 || preview.CompressedBytes != 328 ||
+		preview.Digest != "sha256:8d4257a1c7de06c39c3547f5c14c7f4eb6142ab56e7a4e6311abf12219e94d11" {
+		t.Fatalf("compatibility fixture: digest=%q count=%d uncompressed=%d compressed=%d",
+			preview.Digest, preview.FileCount, preview.UncompressedBytes, preview.CompressedBytes)
+	}
+}
+
 func TestZipDir_FallsBackToGitignore(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "app.py", "print('hi')")
@@ -1103,12 +1189,12 @@ func TestLoadIgnoreMatcher_DetectsNegation(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, ".shinyhubignore"), []byte(tc.content), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, hasNeg, err := loadIgnoreMatcher(dir)
+			matcher, err := bundle.LoadIgnoreMatcher(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if hasNeg != tc.wantNeg {
-				t.Errorf("hasNegation = %v, want %v", hasNeg, tc.wantNeg)
+			if matcher.HasNegation != tc.wantNeg {
+				t.Errorf("hasNegation = %v, want %v", matcher.HasNegation, tc.wantNeg)
 			}
 		})
 	}
@@ -1135,7 +1221,7 @@ func TestZipDir_StatErrorOnIgnoreFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "subroot"), 0o755) })
 
-	if _, _, err := loadIgnoreMatcher(filepath.Join(dir, "subroot")); err == nil {
+	if _, err := bundle.LoadIgnoreMatcher(filepath.Join(dir, "subroot")); err == nil {
 		t.Errorf("expected error from read-on-unreadable parent, got nil")
 	}
 }

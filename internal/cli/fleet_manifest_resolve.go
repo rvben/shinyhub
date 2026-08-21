@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
@@ -32,10 +33,25 @@ func chooseFleetManifest(explicit bool, flagValue string, exists func(string) bo
 	if explicit {
 		return flagValue, false
 	}
-	if !exists(defaultFleetManifest) && exists(legacyFleetManifest) {
-		return legacyFleetManifest, true
+	path, _, usedLegacy = chooseFleetManifestInDir("", exists)
+	return path, usedLegacy
+}
+
+// chooseFleetManifestInDir applies the same default-name precedence within a
+// particular directory. The found result distinguishes "use the modern name
+// in an eventual not-found error" from a manifest that actually exists. Plain
+// command omission discovery shares this function with fleet commands so the
+// two paths cannot disagree when both modern and legacy files are present.
+func chooseFleetManifestInDir(dir string, exists func(string) bool) (path string, found, usedLegacy bool) {
+	modern := filepath.Join(dir, defaultFleetManifest)
+	if exists(modern) {
+		return modern, true, false
 	}
-	return defaultFleetManifest, false
+	legacy := filepath.Join(dir, legacyFleetManifest)
+	if exists(legacy) {
+		return legacy, true, true
+	}
+	return modern, false, false
 }
 
 // resolveFleetManifest applies chooseFleetManifest against the real filesystem

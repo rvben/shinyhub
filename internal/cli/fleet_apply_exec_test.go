@@ -754,17 +754,17 @@ func buildConcurrencyPreflight(n int, dir string) *preflightResult {
 	apps := make([]fleet.AppEntry, n)
 	diff := make([]fleet.AppDiff, n)
 	observed := make(map[string]fleet.ObservedApp, n)
-	sources := make(map[string]string, n)
+	bundles := make(map[string]bundleBuildSpec, n)
 	for i := 0; i < n; i++ {
 		s := fmt.Sprintf("app%d", i)
 		apps[i] = fleet.AppEntry{Slug: s, Source: "./x", Visibility: "private"}
 		diff[i] = fleet.AppDiff{Slug: s, Action: fleet.ActionUpdateSource, Owned: true, ServerDigest: "sha256:OLD"}
 		observed[s] = fleet.ObservedApp{Slug: s}
-		sources[s] = dir
+		bundles[s] = bundleBuildSpec{Dir: dir}
 	}
 	return &preflightResult{
 		manifest: &fleet.Manifest{FleetID: "eu", Apps: apps},
-		diff:     diff, observed: observed, sources: sources,
+		diff:     diff, observed: observed, bundles: bundles,
 	}
 }
 

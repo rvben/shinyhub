@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/deployfail"
 )
 
@@ -239,6 +241,57 @@ func TestDeployAppBundle_DeploysThenReadsPromotedDigest(t *testing.T) {
 	}
 	if atomic.LoadInt32(&listHits) == 0 {
 		t.Fatal("post-deploy health poll never reached the running-state branch")
+	}
+}
+
+func TestDeployAppBundleFromSpec_UploadsSharedSnapshot(t *testing.T) {
+	var uploaded []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/apps/demo/deploy":
+			if err := r.ParseMultipartForm(2 << 20); err != nil {
+				t.Errorf("ParseMultipartForm: %v", err)
+				w.WriteHeader(400)
+				return
+			}
+			f, _, err := r.FormFile("bundle")
+			if err != nil {
+				t.Errorf("FormFile: %v", err)
+				w.WriteHeader(400)
+				return
+			}
+			data, _ := io.ReadAll(f)
+			_ = f.Close()
+			zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+			if err != nil {
+				t.Errorf("zip.NewReader: %v", err)
+				w.WriteHeader(400)
+				return
+			}
+			for _, entry := range zr.File {
+				uploaded = append(uploaded, entry.Name)
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_, _ = w.Write([]byte(`[{"slug":"demo","content_digest":"sha256:PROMOTED"}]`))
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	_, _, _, _, err := deployAppBundleFromSpec(&cliConfig{Host: srv.URL, Token: "shk_test"}, "demo", bundleBuildSpec{
+		Dir:    dir,
+		Inputs: []bundle.FileInputSnapshot{{From: "_shared/theme.py", To: "helpers/theme.py", Mode: 0o644, Data: []byte("orange\n")}},
+	}, "private", "", io.Discard, "run-1", 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(uploaded, "helpers/theme.py") {
+		t.Fatalf("uploaded entries = %v", uploaded)
 	}
 }
 

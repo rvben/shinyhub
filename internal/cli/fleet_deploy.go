@@ -50,10 +50,14 @@ func healthTimeoutDuration(seconds int) time.Duration {
 // callers that care (adopt) resolve that authoritatively with a digest
 // readback.
 func deployAppBundle(cfg *cliConfig, slug, dir, visibility, project string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, firstFires []firstFireRef, kind deployfail.Kind, err error) {
+	return deployAppBundleFromSpec(cfg, slug, bundleBuildSpec{Dir: dir}, visibility, project, out, runID, timeout)
+}
+
+func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, firstFires []firstFireRef, kind deployfail.Kind, err error) {
 	if err := ensureFleetAppWithRun(cfg, slug, visibility, project, out, runID); err != nil {
 		return "", false, nil, deployfail.Unknown, err
 	}
-	buf, summary, err := zipDir(dir)
+	buf, summary, err := zipDirFromSpec(spec)
 	if err != nil {
 		return "", false, nil, deployfail.ZipError, fmt.Errorf("bundle %s: %w", slug, err)
 	}

@@ -58,6 +58,7 @@ stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 			if len(args) > 0 {
 				dir = args[0]
 			}
+			warnFleetCompositionOmission(cmd.ErrOrStderr(), dir, fleetOmissionRun, false)
 
 			// Resolve env vars from --env-file. If the user passed an explicit
 			// path that does not exist, error. If not passed, default to

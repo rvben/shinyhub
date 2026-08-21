@@ -26,7 +26,7 @@ type preflightResult struct {
 	// which case no GET /api/projects is issued at all, so a manifest that does
 	// not use the feature behaves exactly as before.
 	projectDiff []fleet.ProjectDiff
-	sources     map[string]string
+	bundles     map[string]bundleBuildSpec
 	observed    map[string]fleet.ObservedApp
 	cleanup     func()
 }
@@ -71,6 +71,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 	manifestDir := filepath.Dir(file)
 	type sourceCheck struct{ slug, msg string }
 	var srcProbs []sourceCheck
+	localSources := make(map[string]string)
 	// m is non-nil when the TOML decoded without a hard parse error, even if
 	// there are structural problems (fleet_id missing, dup slug, etc.).
 	if m != nil {
@@ -79,13 +80,17 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 				// Already reported as "source is required" by ParseManifest.
 				continue
 			}
-			if _, sp := fleet.ParseSource(app.Source, manifestDir); sp != nil {
+			parsed, sp := fleet.ParseSource(app.Source, manifestDir)
+			if sp != nil {
 				srcProbs = append(srcProbs, sourceCheck{app.Slug, sp.Msg})
+			} else if parsed.Kind == fleet.SourceLocal {
+				localSources[app.Slug] = parsed.LocalPath
 			}
 		}
 	}
+	localBundles, bundleProbs := resolveLocalFleetBundleSpecs(m, file, localSources)
 
-	if len(probs) > 0 || len(srcProbs) > 0 {
+	if len(probs) > 0 || len(srcProbs) > 0 || len(bundleProbs) > 0 {
 		fmt.Fprintf(errOut, "shinyhub fleet %s: validating %s\n\n", cmdName, file)
 		for _, p := range probs {
 			fmt.Fprintf(errOut, "  %s %s\n", s.failMark(), p.Error())
@@ -93,7 +98,10 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		for _, sc := range srcProbs {
 			fmt.Fprintf(errOut, "  %s %s  app %q: %s\n", s.failMark(), file, sc.slug, sc.msg)
 		}
-		total := len(probs) + len(srcProbs)
+		for _, problem := range bundleProbs {
+			fmt.Fprintf(errOut, "  %s %s  %s\n", s.failMark(), file, problem)
+		}
+		total := len(probs) + len(srcProbs) + len(bundleProbs)
 		fmt.Fprintf(errOut, "\n%d problem(s) found. Nothing was changed. Fix these and re-run.\n", total)
 		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("%d manifest problem(s)", total), Reported: true}
 	}
@@ -124,7 +132,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 	caps := fetchServerCaps(cfg)
 
 	localDigests := map[string]string{}
-	sources := map[string]string{}
+	bundles := localBundles
 	var resolveProblems []string
 	for i := range m.Apps {
 		app := &m.Apps[i]
@@ -142,14 +150,19 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			}
 			cleanups = append(cleanups, clean)
 			dir = gd
+			bundles[app.Slug] = bundleBuildSpec{Dir: dir}
 		}
-		dg, derr := digestLocalDir(dir)
+		spec, ok := bundles[app.Slug]
+		if !ok {
+			spec = bundleBuildSpec{Dir: dir}
+			bundles[app.Slug] = spec
+		}
+		dg, derr := digestBundleSpec(spec)
 		if derr != nil {
 			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, derr))
 			continue
 		}
 		localDigests[app.Slug] = dg
-		sources[app.Slug] = dir
 		bm, merr := deploy.LoadManifest(dir)
 		if merr != nil {
 			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, merr))
@@ -232,7 +245,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 
 	return &preflightResult{
 		manifest: m, caps: caps, host: cfg.Host, diff: diff, projectDiff: projectDiff,
-		sources: sources, observed: observedBySlug, cleanup: runCleanups,
+		bundles: bundles, observed: observedBySlug, cleanup: runCleanups,
 	}, nil
 }
 

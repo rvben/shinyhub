@@ -129,6 +129,46 @@ func TestWriteFleetApplyJSON_HasResultAndSummary(t *testing.T) {
 	}
 }
 
+func TestWriteFleetApplyJSON_IncludesSharedBundleInputs(t *testing.T) {
+	var out bytes.Buffer
+	m := &fleet.Manifest{
+		FleetID: "eu",
+		BundleFiles: []fleet.BundleFileEntry{{
+			From: "_shared/theme.py", To: "helpers/theme.py", Consumers: []string{"sales", "ops"},
+		}},
+	}
+	diff := []fleet.AppDiff{
+		{Slug: "sales", Action: fleet.ActionUpdateSource},
+		{Slug: "ops", Action: fleet.ActionUpdateConfig},
+	}
+	if err := writeFleetApplyJSON(&out, m, "https://h", diff, nil, applyOutcome{}, 0, "OK - all converged"); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	var env struct {
+		SchemaVersion int              `json:"schema_version"`
+		BundleFiles   []jsonBundleFile `json:"bundle_files"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if env.SchemaVersion != 3 {
+		t.Fatalf("schema_version = %d, want 3", env.SchemaVersion)
+	}
+	if len(env.BundleFiles) != 1 {
+		t.Fatalf("bundle_files = %+v, want one declaration", env.BundleFiles)
+	}
+	got := env.BundleFiles[0]
+	if got.From != "_shared/theme.py" || got.To != "helpers/theme.py" {
+		t.Fatalf("bundle file mapping = %+v", got)
+	}
+	if strings.Join(got.Consumers, ",") != "sales,ops" {
+		t.Fatalf("consumers = %v, want sales,ops", got.Consumers)
+	}
+	if strings.Join(got.PlannedConsumers, ",") != "sales" {
+		t.Fatalf("planned_consumers = %v, want sales", got.PlannedConsumers)
+	}
+}
+
 func TestApplyReport_PartialRunNamesCommittedWorkAndRecovery(t *testing.T) {
 	ctx := applyReportContext{
 		RunID: "run-0123456789", FleetID: "eu",
