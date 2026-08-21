@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.0](https://github.com/rvben/shinyhub/compare/v0.11.19...v0.12.0) - 2026-08-21
+
+### Added
+
+- **fleet**: add shared bundle inputs ([0075bbe](https://github.com/rvben/shinyhub/commit/0075bbe526e25153b798adbec49538d5dbd379f6))
+- **fleet**: add local development command ([6b1c821](https://github.com/rvben/shinyhub/commit/6b1c82135d34681fa3654ad9dbe169bdfe6c0c97))
+- **localrun**: stage fleet bundle inputs ([f9fa45d](https://github.com/rvben/shinyhub/commit/f9fa45ddde1fda66acf37735fb84cce71a487cdb))
+- **fleet**: compose shared bundle inputs ([af7a1f2](https://github.com/rvben/shinyhub/commit/af7a1f28b2a4848d404fb6a72b666232e2156a3e))
+- **ui,api**: scale Overview resource usage to the host when no app sets limits ([f88343f](https://github.com/rvben/shinyhub/commit/f88343f26304d52721c8947b5d32fac075ed5d87))
+
+### Fixed
+
+- **localrun**: serialize process output ([e6bd3ee](https://github.com/rvben/shinyhub/commit/e6bd3eea283ec3a079bb9906649bbf8db9f1641c))
+- **localrun**: confine fleet input workspaces ([768e6d7](https://github.com/rvben/shinyhub/commit/768e6d7ff19acd0f3302ded1a5c42d1170aaffb2))
+- **fleet**: render shared input fan-out ([a508549](https://github.com/rvben/shinyhub/commit/a5085490be3992ed2d48fa68850a33f209f26dd5))
+- **fleet**: preserve bundle inputs during force init ([32e353a](https://github.com/rvben/shinyhub/commit/32e353ae7814a2965cfd94cf71a5ca2dc085803a))
+- **worker**: stop reporting an unreachable worker as a replica crash ([7685377](https://github.com/rvben/shinyhub/commit/7685377156c5fd8f391c50101ab85fe0771fb5b8))
+
 ## [0.11.19](https://github.com/rvben/shinyhub/compare/v0.11.18...v0.11.19) - 2026-08-21
 
 ### Added
