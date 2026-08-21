@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"syscall"
@@ -32,6 +33,12 @@ const (
 	startDialRetries      = 5
 	startDialRetryBackoff = 200 * time.Millisecond
 )
+
+// waitRetryBackoff paces Wait's re-dial of a worker it could not reach. The
+// interval only has to be small against the heartbeat timeout that resolves the
+// question (90s), since the registry - not this loop - decides when a silent
+// worker is gone.
+const waitRetryBackoff = 2 * time.Second
 
 // WorkerLookup resolves workers for routing. Implemented by *Registry in
 // production; a stub is used in tests. PlanPlacementForTier plans where to place
@@ -64,10 +71,12 @@ type remoteRuntime struct {
 	lookup WorkerLookup
 	tier   string
 	dialer AgentDialer
+	// waitRetry paces Wait's re-dial of an unreachable worker. Tests shorten it.
+	waitRetry time.Duration
 }
 
 func newRemoteRuntime(lookup WorkerLookup, tier string, dialer AgentDialer) *remoteRuntime {
-	return &remoteRuntime{lookup: lookup, tier: tier, dialer: dialer}
+	return &remoteRuntime{lookup: lookup, tier: tier, dialer: dialer, waitRetry: waitRetryBackoff}
 }
 
 // NewRemoteRuntime builds a tier-bound runtime that delegates to whichever
@@ -367,28 +376,63 @@ func (r *remoteRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
 
 // Wait blocks until the remote replica exits. It returns only an error; the
 // Manager calls Wait purely to detect exit, so exit codes are not surfaced here.
+//
+// A transport failure is not an exit. The Manager reads every return from Wait
+// as "this replica is gone", so answering a dial failure would fabricate a crash
+// -- with an invented exit reason and a spent restart budget -- for a container
+// that may still be running, long before anything has established that its
+// worker is actually dead. Reachability is unknown then, not zero, so Wait holds
+// that unknown and re-dials. The heartbeat monitor is the single authority on
+// worker liveness; once it marks the worker down, workerForHandle reports
+// process.ErrNoLiveWorker and Wait returns it, which the Manager renders as a
+// lost replica rather than a crashed one.
 func (r *remoteRuntime) Wait(ctx context.Context, h process.RunHandle) error {
+	holding := false
+	for {
+		done, err := r.waitOnce(ctx, h)
+		if done {
+			if holding {
+				slog.Info("remote wait: replica state resolved after worker was unreachable",
+					"handle", h.ContainerID, "tier", r.tier, "err", err)
+			}
+			return err
+		}
+		if !holding {
+			holding = true
+			slog.Warn("remote wait: worker unreachable; holding replica state until the heartbeat monitor rules",
+				"handle", h.ContainerID, "tier", r.tier, "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(r.waitRetry):
+		}
+	}
+}
+
+// waitOnce performs one wait attempt and reports whether its outcome is final.
+// An answer from the worker (an exit, or an error status) and a registry verdict
+// on the worker are both final. A dial or transport failure is not: it leaves
+// the replica's state unknown, which only the registry can resolve.
+func (r *remoteRuntime) waitOnce(ctx context.Context, h process.RunHandle) (bool, error) {
 	w, containerID, err := r.workerForHandle(h)
 	if err != nil {
-		return err
+		return true, err
 	}
 	client, base, err := r.dialer.DialWorker(w)
 	if err != nil {
-		return err
+		return false, err
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/v1/replicas/%s/wait", base, containerID), nil)
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNoContent {
-		return nil
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+		return true, nil
 	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("worker wait returned %d", resp.StatusCode)
-	}
-	return nil
+	return true, fmt.Errorf("worker wait returned %d", resp.StatusCode)
 }
 
 func (r *remoteRuntime) Stats(ctx context.Context, h process.RunHandle) (*float64, uint64, error) {

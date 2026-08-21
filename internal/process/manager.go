@@ -739,9 +739,18 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 				// Record the exit verdict BEFORE flipping Status, so no reader under
 				// m.mu can observe the crash without its cause and restart count.
 				e.info.OOMKilled = oom
-				if e.stopped {
+				switch {
+				case e.stopped:
 					e.info.Status = StatusStopped
-				} else {
+				case errors.Is(waitErr, ErrNoLiveWorker):
+					// The worker holding this replica is gone, so nothing ever
+					// established whether its container exited. That is a different
+					// fact from a crash and carries no exit cause, so no verdict is
+					// recorded: inventing one would spend the app's restart budget
+					// re-placing onto a dead worker and persist a fabricated reason.
+					// The worker-down sweep owns the transition and the re-placement.
+					e.info.Status = StatusLost
+				default:
 					m.lastExit[key] = replicaExitVerdict(waitErr, oom, p.MemoryLimitMB, m.lastExit[key])
 					e.info.Status = StatusCrashed
 				}
@@ -1339,9 +1348,14 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 			if e := p[info.Index]; e != nil && e.handle == handle {
 				key := replicaKey{slug, info.Index}
 				e.info.OOMKilled = oom
-				if e.stopped {
+				switch {
+				case e.stopped:
 					e.info.Status = StatusStopped
-				} else {
+				case errors.Is(waitErr, ErrNoLiveWorker):
+					// See the Start monitor: a lost worker is not a crash and has no
+					// exit cause to record.
+					e.info.Status = StatusLost
+				default:
 					// MemoryLimitMB is unknown for an adopted process (no StartParams);
 					// the watcher falls back to the app's stored limit when it is 0.
 					m.lastExit[key] = replicaExitVerdict(waitErr, oom, 0, m.lastExit[key])
