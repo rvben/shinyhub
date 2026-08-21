@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.1](https://github.com/rvben/shinyhub/compare/v0.12.0...v0.12.1) - 2026-08-21
+
+### Fixed
+
+- **ci**: stabilize compatibility warning assertion ([795472f](https://github.com/rvben/shinyhub/commit/795472f7d507edba4fa412c9f4abdd2e131c152a))
+
 ## [0.12.0](https://github.com/rvben/shinyhub/compare/v0.11.19...v0.12.0) - 2026-08-21
 
 ### Added
