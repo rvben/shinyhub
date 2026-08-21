@@ -24,7 +24,7 @@ convenience. Pass `-f <path>` to point at any other location.
 fleet_id = "prod-eu"
 
 [[bundle_file]]
-from      = "./_shared/plotly_template.py"
+from      = "_shared/plotly_template.py"
 to        = "helpers/plotly_template.py"
 consumers = ["sales-dashboard"]
 
@@ -184,7 +184,7 @@ across several local app bundles:
 
 ```toml
 [[bundle_file]]
-from      = "./_shared/plotly_template.py"
+from      = "_shared/plotly_template.py"
 to        = "helpers/plotly_template.py"
 consumers = ["sales", "operations"]
 ```
