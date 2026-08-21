@@ -733,6 +733,14 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	}, Notes: "Per-app results carry failure_kind (set when status is failed) and attempt_details (failed attempts only) so the reason a deploy attempt failed is visible without reading server logs. --restart-after-warm implies --wait-for-warm and cycles serving replicas only after every run_on_register first-fire succeeds. --concurrency (default 3, 1 = serial) bounds how many apps deploy in parallel; lower it on CPU- or memory-constrained hosts since concurrent uv sync / renv restore builds compete for resources. Every deployed app is health-waited for up to --health-timeout seconds whether or not --wait-for-warm is set; healthy means status running, or idle for an elastic (grouped/per_session) pool, which boots workers on demand and reports idle with none running. min_warm_replicas keeps multiplex replicas warm and is inert under elastic isolation (the server reports it as a manifest warning; use [app.worker] warm_spares to pre-boot elastic workers)."},
 	"fleet validate": {Mutating: ro},
 	"fleet plan":     {Mutating: ro},
+	"fleet dev": {Mutating: ro, Streaming: true,
+		ArgTypes: map[string]string{"--file": "path", "--data-dir": "path", "--env-file": "path", "--state-dir": "path"},
+		OutputFields: []fieldSpec{
+			{Name: "slug", Type: "string"},
+			{Name: "url", Type: "string"},
+			{Name: "port", Type: "integer"},
+			{Name: "status", Type: "string"},
+		}},
 	"fleet status": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "slug", Type: "string"},
 		{Name: "managed_by", Type: "string"},
