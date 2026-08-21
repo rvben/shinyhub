@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -99,10 +100,30 @@ type childProcess struct {
 	plan   *deploy.LaunchPlan
 }
 
+// synchronizedWriterPair keeps runner status and child-process output from
+// writing the caller's stdout/stderr concurrently. A shared lock covers both
+// streams because callers may intentionally route them to the same writer.
+func synchronizedWriterPair(stdout, stderr io.Writer) (io.Writer, io.Writer) {
+	mu := &sync.Mutex{}
+	return &synchronizedWriter{mu: mu, w: stdout}, &synchronizedWriter{mu: mu, w: stderr}
+}
+
+type synchronizedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (w *synchronizedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.w.Write(p)
+}
+
 // Run boots the app bundle and blocks until the context is cancelled (or, in
 // --check mode, until the first healthy poll or crash). It streams all app
 // output to stdout/stderr and returns a non-nil error on any failure.
 func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
+	stdout, stderr = synchronizedWriterPair(stdout, stderr)
 	sourceDir, err := filepath.Abs(o.BundleDir)
 	if err != nil {
 		return validationErrorf("resolve bundle dir: %v", err)
