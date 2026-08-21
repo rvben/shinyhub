@@ -395,6 +395,52 @@ func TestRun_InvalidFleetInputLeavesNoLocalState(t *testing.T) {
 	}
 }
 
+func TestRun_FleetWorkspaceAndDataMustStayOutsideManifestRoot(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "app")
+	sharedDir := filepath.Join(root, "_shared")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "shinyhub.toml"), []byte("[app]\ncommand = [\"missing-command\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedDir, "helper.py"), []byte("shared\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(root, "fleet.toml")
+	if err := os.WriteFile(manifest, []byte("fleet_id = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		state   string
+		data    string
+		created string
+	}{
+		{name: "state", state: filepath.Join(sharedDir, "state"), created: filepath.Join(sharedDir, "state")},
+		{name: "data", state: t.TempDir(), data: filepath.Join(sharedDir, "data"), created: filepath.Join(sharedDir, "data")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Run(context.Background(), Options{
+				BundleDir: source, ManifestPath: manifest, StateDir: tc.state, DataDir: tc.data,
+				BundleInputs: []bundle.FileInputSpec{{From: "_shared/helper.py", To: "helpers/shared.py"}},
+			}, io.Discard, io.Discard)
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) || !strings.Contains(err.Error(), "fleet manifest root") {
+				t.Fatalf("error = %v, want protected fleet-root validation error", err)
+			}
+			if _, statErr := os.Stat(tc.created); !os.IsNotExist(statErr) {
+				t.Fatalf("rejected location was created: %v", statErr)
+			}
+		})
+	}
+}
+
 func waitForBody(t *testing.T, url, want string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
