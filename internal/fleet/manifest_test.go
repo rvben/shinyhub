@@ -1,9 +1,30 @@
 package fleet
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestParseManifest_DocumentedFleetExample(t *testing.T) {
+	doc, err := os.ReadFile("../../docs/fleet.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fence = "```toml\n"
+	start := strings.Index(string(doc), fence)
+	if start < 0 {
+		t.Fatal("docs/fleet.md has no TOML example")
+	}
+	example := string(doc)[start+len(fence):]
+	end := strings.Index(example, "\n```")
+	if end < 0 {
+		t.Fatal("docs/fleet.md TOML example has no closing fence")
+	}
+	if _, problems := ParseManifest([]byte(example[:end]), "fleet.toml"); len(problems) != 0 {
+		t.Fatalf("documented fleet manifest is invalid: %v", problems)
+	}
+}
 
 func TestParseManifest_Valid(t *testing.T) {
 	src := `
