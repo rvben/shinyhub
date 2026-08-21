@@ -39,10 +39,16 @@ function replica(index, cpu, rssMB, memMB = 512, cpuQuota = 100) {
   };
 }
 
-function resourcesFor(apps, metrics) {
+function resourcesFor(apps, metrics, host = null) {
   return buildOverviewModel(apps, {
-    state: 'ready', metrics, generatedAt: new Date().toISOString(),
+    state: 'ready', metrics, generatedAt: new Date().toISOString(), host,
   }).resources;
+}
+
+// An app with neither a limit nor an enforcement flag: the shape prod carries
+// when no operator has ever set one.
+function unlimited(index, cpu, rssMB) {
+  return { ...replica(index, cpu, rssMB, 0, 0), memory_limit_enforced: false, cpu_quota_enforced: false };
 }
 
 test('resource renderer shows stable capacity ratios, semantic meters, labels, and coverage', () => {
@@ -109,14 +115,96 @@ test('overflow alerts are disclosed with an operable view-all control', () => {
 });
 
 test('partial coverage uses explicit copy instead of an all-clear', () => {
-  const rep = replica(0, 20, 100, 0, 0);
-  const resources = resourcesFor([{ slug: 'unlimited', status: 'running' }], {
-    unlimited: { status: 'running', replicas: [rep] },
+  const resources = resourcesFor([{ slug: 'limited', status: 'running' }, { slug: 'free', status: 'running' }], {
+    limited: { status: 'running', replicas: [replica(0, 20, 100)] },
+    free: { status: 'running', replicas: [unlimited(0, 20, 100)] },
   });
   const node = renderResourcePressure(resources);
-  assert.match(node.textContent, /Capacity unavailable/);
+  assert.match(node.textContent, /1 of 2 running replicas covered/);
   assert.match(node.textContent, /1 unlimited/);
   assert.doesNotMatch(node.textContent, /All covered replicas/);
+});
+
+// The panel a fleet with no limits set actually gets: usage against the box,
+// never a row that reports its own capacity as unavailable.
+test('a fleet with no limits is measured against the host, not reported as immeasurable', () => {
+  const resources = resourcesFor(
+    [{ slug: 'forecast', name: 'Forecast', status: 'running' }],
+    { forecast: { status: 'running', replicas: [unlimited(0, 150, 2048)] } },
+    { cores: 4, cores_source: 'affinity', memory_mb: 8192, memory_source: 'host-total' },
+  );
+  const node = renderResourcePressure(resources);
+  assert.match(node.textContent, /Fleet resource usage/);
+  assert.match(node.textContent, /No per-app limits set · measured against host capacity/);
+  assert.match(node.textContent, /1\.5 cores \/ 4\.0 cores/);
+  assert.match(node.textContent, /2\.0 GB \/ 8\.0 GB/);
+  assert.match(node.textContent, /Across 1 running replica/);
+  assert.doesNotMatch(node.textContent, /Capacity unavailable/);
+  assert.doesNotMatch(node.textContent, /Trend unavailable/);
+  assert.doesNotMatch(node.textContent, /unlimited|not enforced/);
+
+  const meters = node.querySelectorAll('meter');
+  assert.equal(meters.length, 2);
+  assert.match(meters[0].getAttribute('aria-label'), /CPU allocation, 38 percent of host capacity/);
+  assert.equal(Number(meters[1].value.toFixed(2)), 0.25);
+});
+
+test('an unmeasurable host reports live usage rather than an invented percentage', () => {
+  const resources = resourcesFor([{ slug: 'forecast', name: 'Forecast', status: 'running' }], {
+    forecast: { status: 'running', replicas: [unlimited(0, 150, 2048)] },
+  });
+  const node = renderResourcePressure(resources);
+  assert.match(node.textContent, /No per-app limits set · host capacity unknown/);
+  assert.match(node.textContent, /1\.5 cores in use/);
+  assert.match(node.textContent, /2\.0 GB in use/);
+  assert.match(node.textContent, /Live/);
+  assert.doesNotMatch(node.textContent, /Capacity unavailable/);
+  // No denominator means no meter and no percentage: the value is the whole
+  // truth, and a bar would need a full length it cannot justify.
+  assert.equal(node.querySelector('meter'), null);
+  assert.doesNotMatch(node.textContent, /\d+%/);
+});
+
+test('a no-limit fleet attributes its usage to the apps behind it', () => {
+  const sizes = [['alpha', 400], ['beta', 300], ['gamma', 200], ['delta', 100]];
+  const resources = resourcesFor(
+    sizes.map(([slug]) => ({ slug, name: slug, status: 'running' })),
+    Object.fromEntries(sizes.map(([slug, mb]) => [slug, { status: 'running', replicas: [unlimited(0, 10, mb)] }])),
+    { cores: 4, cores_source: 'affinity', memory_mb: 8192, memory_source: 'host-total' },
+  );
+  const node = renderResourcePressure(resources);
+  assert.match(node.textContent, /Top memory consumers/);
+  const rows = [...node.querySelectorAll('.ov-consumer-row')];
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].querySelector('a').getAttribute('href'), '/apps/alpha/configuration');
+  assert.match(rows[0].textContent, /400 MB/);
+  assert.match(rows[0].textContent, /40% of fleet/);
+  // Attribution, not alarm: no pressure alerts and no all-clear about limits
+  // that were never set.
+  assert.equal(node.querySelector('.ov-hotspot-row'), null);
+  assert.doesNotMatch(node.textContent, /All covered replicas/);
+});
+
+test('a single app is not ranked against itself', () => {
+  const resources = resourcesFor([{ slug: 'only', name: 'Only', status: 'running' }], {
+    only: { status: 'running', replicas: [unlimited(0, 10, 100)] },
+  });
+  const node = renderResourcePressure(resources);
+  assert.equal(node.querySelector('.ov-consumer-row'), null);
+  assert.doesNotMatch(node.textContent, /Top memory consumers/);
+});
+
+test('host-scale pressure keeps the severity treatment a full box deserves', () => {
+  const resources = resourcesFor(
+    [{ slug: 'hog', name: 'Hog', status: 'running' }],
+    { hog: { status: 'running', replicas: [unlimited(0, 10, 7900)] } },
+    { cores: 4, cores_source: 'affinity', memory_mb: 8192, memory_source: 'host-total' },
+  );
+  const node = renderResourcePressure(resources);
+  const memoryRow = node.querySelectorAll('.ov-capacity-row')[1];
+  assert.ok(memoryRow.classList.contains('ov-capacity-row--critical'));
+  assert.match(memoryRow.textContent, /Critical/);
+  assert.ok(memoryRow.querySelector('.ov-capacity-meter--critical'));
 });
 
 test('poll replacement preserves focus on a stable pressure link', () => {

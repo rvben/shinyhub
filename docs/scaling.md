@@ -187,6 +187,12 @@ Pacing:      1.3s/render
 below the host's core count), or `affinity` (the cores the process may run
 on).
 
+The Overview panel detects the same three sources for the scale it reports
+fleet usage against, but takes its override from
+`server.host_capacity_cores` ([Host capacity](configuration.md#host-capacity)).
+Keep them separate: lowering the pacing budget to throttle admission should not
+shrink the box the dashboard says you have.
+
 The suggested cap is what the same host sustains for *steady* interaction:
 N sessions each triggering a render every couple of seconds demand
 `N × render_seconds / cadence` cores. It is advisory and deliberately

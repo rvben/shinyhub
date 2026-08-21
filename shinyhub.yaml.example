@@ -34,6 +34,12 @@ server:
   pid_file: ""                        # e.g. /run/shinyhub/shinyhub.pid (required for systemd)  # SHINYHUB_PID_FILE
   upgrade_timeout: 60s                # wait for the successor to become ready before aborting  # SHINYHUB_UPGRADE_TIMEOUT
   stop_grace: 10s                     # SIGTERM-to-SIGKILL window when stopping an app replica  # SHINYHUB_STOP_GRACE
+  # Scale the Overview reports fleet CPU/memory against when no app carries an
+  # enforced per-replica limit. Detected at startup from cgroup limits and the
+  # host itself; set these only when that number is wrong for the deployment
+  # (ShinyHub shares the box, or apps run in separately capped containers).
+  # host_capacity_cores: 8              # 0 = detect  # SHINYHUB_HOST_CAPACITY_CORES
+  # host_capacity_memory_mb: 16384      # 0 = detect  # SHINYHUB_HOST_CAPACITY_MEMORY_MB
 
 auth:
   # REQUIRED. 32+ characters. Generate with: openssl rand -hex 32

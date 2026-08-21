@@ -31,3 +31,25 @@ func TestMainWiresRenderAdmission(t *testing.T) {
 		}
 	}
 }
+
+// The Overview's resource panel measures a limit-free fleet against the host
+// itself. That denominator is detected once at startup in main.go and handed to
+// the API server; without these two calls the panel has no capacity to report
+// and every row degrades to "Capacity unavailable".
+func TestMainWiresHostCapacity(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	s := string(src)
+	for _, needle := range []string{
+		"admission.DetectMemory(",    // host memory is detected (cgroup limit, then host total)
+		"cfg.HostCapacityCores()",    // the operator's core override is honoured
+		"cfg.HostCapacityMemoryMB()", // and the memory override with it
+		"srv.SetHostCapacity(",       // the result reaches the API server
+	} {
+		if !strings.Contains(s, needle) {
+			t.Errorf("main.go is missing the host-capacity wiring call %q", needle)
+		}
+	}
+}

@@ -476,6 +476,24 @@ type ServerConfig struct {
 	// worker plus every session bound to it. Negative values disable too.
 	MinAvailableMemoryMB *int `yaml:"min_available_memory_mb"`
 
+	// HostCapacityCores and HostCapacityMemoryMB describe the size of the box
+	// ShinyHub runs on. Overview measures fleet usage against them when no app
+	// carries an enforced per-replica limit, so an operator who has set no
+	// limits still sees where the fleet sits rather than "capacity unavailable".
+	//
+	// Both are optional and both autodetect when unset or 0: cores from the
+	// cgroup CPU quota, else CPU affinity; memory from the cgroup memory limit,
+	// else the host total. Set them when the detected number is wrong for the
+	// deployment - a VM whose hypervisor over-commits, a host shared with other
+	// services, or a container runtime whose limits ShinyHub cannot read.
+	//
+	// These are a reporting scale, not a budget: nothing is admitted or
+	// rejected against them. HostBudgetMB and MinAvailableMemoryMB remain the
+	// enforcement knobs, and RenderCapacityCores remains the pacer's sizing
+	// override.
+	HostCapacityCores    *float64 `yaml:"host_capacity_cores"`
+	HostCapacityMemoryMB *int     `yaml:"host_capacity_memory_mb"`
+
 	// Render-aware admission knobs. All optional; pointer distinguishes unset
 	// (use the default) from an explicit value. See the accessors below for
 	// defaults. Every default is a no-op: pacing is disabled per-app via
@@ -2608,6 +2626,20 @@ func applyEnv(cfg *Config) error {
 		// unset, which applies the default).
 		cfg.Server.MinAvailableMemoryMB = &n
 	}
+	if v := os.Getenv("SHINYHUB_HOST_CAPACITY_CORES"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_HOST_CAPACITY_CORES: %q is not a number: %w", v, err)
+		}
+		cfg.Server.HostCapacityCores = &f
+	}
+	if v := os.Getenv("SHINYHUB_HOST_CAPACITY_MEMORY_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_HOST_CAPACITY_MEMORY_MB: %q is not an integer: %w", v, err)
+		}
+		cfg.Server.HostCapacityMemoryMB = &n
+	}
 	if v := os.Getenv("SHINYHUB_TRUSTED_PROXIES"); v != "" {
 		cfg.Server.TrustedProxies = splitCSV(v)
 	}
@@ -3092,6 +3124,26 @@ func (c *Config) MinAvailableMemoryMB() int {
 	default:
 		return *c.Server.MinAvailableMemoryMB
 	}
+}
+
+// HostCapacityCores returns the operator's override for the host's core count,
+// or 0 to autodetect via admission.Detect. A negative value is treated as unset
+// so a typo cannot describe the host as having negative capacity.
+func (c *Config) HostCapacityCores() float64 {
+	if c.Server.HostCapacityCores != nil && *c.Server.HostCapacityCores > 0 {
+		return *c.Server.HostCapacityCores
+	}
+	return 0
+}
+
+// HostCapacityMemoryMB returns the operator's override for the host's memory
+// (in MiB), or 0 to autodetect via admission.DetectMemory. A negative value is
+// treated as unset for the same reason as HostCapacityCores.
+func (c *Config) HostCapacityMemoryMB() int {
+	if c.Server.HostCapacityMemoryMB != nil && *c.Server.HostCapacityMemoryMB > 0 {
+		return *c.Server.HostCapacityMemoryMB
+	}
+	return 0
 }
 
 const (

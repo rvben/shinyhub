@@ -4663,6 +4663,9 @@ footer.brand-footer a { color:inherit; }
 .ov-pressure-state--partial,
 .ov-pressure-state--stale { color: var(--yellow); background: var(--yellow-bg); }
 .ov-pressure-state--unavailable { color: var(--text-soft); background: var(--surface-3); }
+/* "Live" is a reading with no threshold behind it, so it stays neutral rather
+   than borrowing the green that means "inside its limit". */
+.ov-pressure-state--live { color: var(--text-soft); background: var(--surface-3); }
 
 .ov-capacity-meter {
   display: block; width: 100%; height: 8px; margin-top: 10px; border: 0;
@@ -4713,6 +4716,19 @@ footer.brand-footer a { color:inherit; }
 .ov-res-toggle:hover { color: var(--cyan-bright); }
 .ov-res-clear { margin-top: 14px; color: var(--text-soft); font-size: 0.8rem; line-height: 1.45; }
 
+/* Top consumers: attribution, not alarm. The share bar is one neutral weight
+   throughout, so a large app reads as large rather than as a problem. */
+.ov-consumer-list { display: flex; flex-direction: column; list-style: none; }
+.ov-consumer-row {
+  display: grid; grid-template-columns: minmax(90px, 1fr) minmax(80px, 1.15fr) auto;
+  align-items: center; gap: 10px 14px; padding: 9px 0;
+}
+.ov-consumer-row:not(:last-child) { border-bottom: 1px solid var(--line); }
+.ov-consumer-share { display: block; width: 100%; height: 8px; border-radius: 999px; overflow: hidden; background: var(--surface-3); }
+.ov-consumer-fill { display: block; height: 100%; border-radius: 999px; background: var(--cyan); }
+.ov-consumer-values { display: flex; flex-direction: column; align-items: flex-end; color: var(--text-soft); font-family: var(--mono); font-size: 0.7rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ov-consumer-values b { color: var(--text); font-size: 0.78rem; }
+
 /* Recent activity timeline. */
 .ov-timeline { list-style: none; display: flex; flex-direction: column; }
 .ov-tl-row { display: flex; gap: 12px; padding: 8px 0; }
@@ -4761,12 +4777,16 @@ footer.brand-footer a { color:inherit; }
   .ov-hotspot-row .ov-capacity-meter { grid-column: 1 / -1; grid-row: 2; }
   .ov-hotspot-values { grid-column: 1; align-items: flex-start; }
   .ov-hotspot-row .ov-pressure-state { grid-column: 2; grid-row: 3; }
+  .ov-consumer-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .ov-consumer-share { grid-column: 1 / -1; grid-row: 2; }
+  .ov-consumer-values { grid-column: 1 / -1; align-items: flex-start; }
   .ov-res-scope,
   .ov-res-updated,
   .ov-capacity-context,
   .ov-capacity-coverage,
   .ov-hotspot-meta,
   .ov-hotspot-values,
+  .ov-consumer-values,
   .ov-pressure-state,
   .ov-res-toggle,
   .ov-res-clear { font-size: 0.875rem; }
