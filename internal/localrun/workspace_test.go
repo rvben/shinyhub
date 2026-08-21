@@ -3,7 +3,10 @@ package localrun
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/bundle"
 )
 
 func TestWorkspaceSyncKeepsGeneratedStateOutsideSource(t *testing.T) {
@@ -224,6 +227,111 @@ func TestWorkspaceLockRejectsConcurrentRunner(t *testing.T) {
 	defer release()
 	if _, err := w.acquireLock(); err == nil {
 		t.Fatal("second runner unexpectedly acquired the same workspace")
+	} else if !strings.Contains(err.Error(), "this local workspace already has a runner") {
+		t.Fatalf("lock error = %q", err)
+	}
+}
+
+func TestWorkspaceSyncComposesAndRemovesIndexedInput(t *testing.T) {
+	source := t.TempDir()
+	w, err := workspaceFor(source, t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := bundle.FileInputSnapshot{From: "_shared/old.py", To: "helpers/old.py", Mode: 0o644, Data: []byte("old\n")}
+	if _, err := w.syncSourceWithInputs(source, []bundle.FileInputSnapshot{first}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(w.BundleDir, "helpers", "old.py")); err != nil || string(got) != "old\n" {
+		t.Fatalf("composed input = %q, %v", got, err)
+	}
+	second := bundle.FileInputSnapshot{From: "_shared/new.py", To: "helpers/new.py", Mode: 0o644, Data: []byte("new\n")}
+	if _, err := w.syncSourceWithInputs(source, []bundle.FileInputSnapshot{second}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(w.BundleDir, "helpers", "old.py")); !os.IsNotExist(err) {
+		t.Fatalf("stale input survived composition change: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(w.BundleDir, "helpers", "new.py")); err != nil || string(got) != "new\n" {
+		t.Fatalf("replacement input = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(source, "helpers")); !os.IsNotExist(err) {
+		t.Fatalf("composition mutated app source: %v", err)
+	}
+}
+
+func TestWorkspaceComposedDependencyInputInvalidatesPreparation(t *testing.T) {
+	source := t.TempDir()
+	w, err := workspaceFor(source, t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := bundle.FileInputSnapshot{From: "_shared/requirements.txt", To: "requirements.txt", Mode: 0o644, Data: []byte("shiny\n")}
+	changed, err := w.syncSourceWithInputs(source, []bundle.FileInputSnapshot{input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("first composed dependency input was not marked changed")
+	}
+	if err := w.markDependenciesReady(); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = w.syncSourceWithInputs(source, []bundle.FileInputSnapshot{input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("unchanged composed dependency input invalidated preparation")
+	}
+	input.Data = []byte("shiny\nplotly\n")
+	changed, err = w.syncSourceWithInputs(source, []bundle.FileInputSnapshot{input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("edited composed dependency input did not invalidate preparation")
+	}
+}
+
+func TestFleetWorkspaceIdentitySeparatesSlugsAndOrdinaryRun(t *testing.T) {
+	source := t.TempDir()
+	manifest := filepath.Join(t.TempDir(), "fleet.toml")
+	ordinary, err := workspaceForIdentity(source, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sales, err := workspaceForIdentity(source, "", "", manifest+"\x00sales")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finance, err := workspaceForIdentity(source, "", "", manifest+"\x00finance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.Root == sales.Root || sales.Root == finance.Root || ordinary.Root == finance.Root {
+		t.Fatalf("identity roots must be distinct: ordinary=%s sales=%s finance=%s", ordinary.Root, sales.Root, finance.Root)
+	}
+	if ordinary.DataDir == sales.DataDir || sales.DataDir == finance.DataDir {
+		t.Fatalf("default data dirs must follow distinct identities: ordinary=%s sales=%s finance=%s", ordinary.DataDir, sales.DataDir, finance.DataDir)
+	}
+
+	explicitState := t.TempDir()
+	first, err := workspaceForIdentity(source, explicitState, "", manifest+"\x00sales")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := workspaceForIdentity(source, explicitState, "", manifest+"\x00finance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := first.acquireLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := second.acquireLock(); err == nil || !strings.Contains(err.Error(), "this local workspace already has a runner") {
+		t.Fatalf("same explicit workspace contention error = %v", err)
 	}
 }
 

@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+
+	"github.com/rvben/shinyhub/internal/bundle"
 )
 
 var workspaceExcludedDirs = map[string]bool{
@@ -38,14 +40,24 @@ type workspace struct {
 }
 
 func workspaceFor(sourceDir, stateDir, dataDir string) (*workspace, error) {
+	return workspaceForIdentity(sourceDir, stateDir, dataDir, "")
+}
+
+func workspaceForIdentity(sourceDir, stateDir, dataDir, identity string) (*workspace, error) {
 	root := stateDir
 	if root == "" {
 		cacheDir, err := os.UserCacheDir()
 		if err != nil || cacheDir == "" {
 			cacheDir = os.TempDir()
 		}
-		digest := sha256.Sum256([]byte(sourceDir))
-		root = filepath.Join(cacheDir, "shinyhub", "run", hex.EncodeToString(digest[:8]))
+		namespace := "run"
+		key := sourceDir
+		if identity != "" {
+			namespace = "fleet-dev"
+			key = identity
+		}
+		digest := sha256.Sum256([]byte(key))
+		root = filepath.Join(cacheDir, "shinyhub", namespace, hex.EncodeToString(digest[:8]))
 	} else {
 		abs, err := canonicalPath(root)
 		if err != nil {
@@ -124,6 +136,10 @@ func (w *workspace) alternate() *workspace {
 // saved source index lets deletions propagate without ever treating generated
 // workspace files as source-owned.
 func (w *workspace) syncSource(sourceDir string) (depsChanged bool, err error) {
+	return w.syncSourceWithInputs(sourceDir, nil)
+}
+
+func (w *workspace) syncSourceWithInputs(sourceDir string, inputs []bundle.FileInputSnapshot) (depsChanged bool, err error) {
 	if err := os.MkdirAll(w.BundleDir, 0o750); err != nil {
 		return false, fmt.Errorf("create local workspace bundle: %w", err)
 	}
@@ -175,6 +191,24 @@ func (w *workspace) syncSource(sourceDir string) (depsChanged bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("sync source into local workspace: %w", err)
 	}
+	for _, input := range inputs {
+		clean, ok := safeRelativePath(input.To)
+		if !ok || filepath.ToSlash(clean) != input.To {
+			return false, fmt.Errorf("bundle input has unsafe destination %q", input.To)
+		}
+		if _, exists := current[input.To]; exists {
+			return false, fmt.Errorf("bundle input destination %q collides with app source", input.To)
+		}
+		if err := writeInputSnapshot(filepath.Join(w.BundleDir, clean), input); err != nil {
+			return false, fmt.Errorf("apply bundle input %q: %w", input.To, err)
+		}
+		entry := sourceEntry{Path: input.To, Mode: uint32(input.Mode)}
+		if isDependencyInput(input.To) {
+			sum := sha256.Sum256(input.Data)
+			entry.Digest = hex.EncodeToString(sum[:])
+		}
+		current[input.To] = entry
+	}
 
 	for rel := range previous {
 		if _, ok := current[rel]; ok {
@@ -219,6 +253,30 @@ func (w *workspace) syncSource(sourceDir string) (depsChanged bool, err error) {
 	return depsChanged, nil
 }
 
+func writeInputSnapshot(destination string, input bundle.FileInputSnapshot) error {
+	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(destination), ".shinyhub-input-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(input.Mode.Perm()); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(input.Data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, destination)
+}
+
 // acquireLock prevents two local runners from mutating the same persistent
 // mirror. Developers can still run two copies by assigning distinct
 // --state-dir values; the default remains safe and deterministic.
@@ -233,7 +291,7 @@ func (w *workspace) acquireLock() (func(), error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("this app already has a local runner; use --state-dir to run another copy")
+		return nil, fmt.Errorf("this local workspace already has a runner; use --state-dir to run another copy")
 	}
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
