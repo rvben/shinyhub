@@ -122,6 +122,9 @@ overwrite a vendored copy.
 The ignore file still comes from the consumer app's bundle root; a shared
 source directory's own ignore files have no effect. The three bundle control
 files (`shinyhub.toml`, `.shinyhubignore`, and `.gitignore`) cannot be composed.
+`shinyhub fleet dev <slug>` applies these same destination checks while
+composing the selected app's generated local workspace; ordinary `shinyhub
+run` does not compose them.
 See [Fleet shared bundle inputs](../fleet.md#shared-bundle-inputs) for the full
 contract.
 
