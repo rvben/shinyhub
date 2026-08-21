@@ -17,20 +17,7 @@ import (
 // newRunCmd returns the `shinyhub run [dir]` command, which boots a Shiny app
 // bundle locally in the foreground. It requires no server login or credentials.
 func newRunCmd() *cobra.Command {
-	var (
-		port     int
-		noSync   bool
-		noReload bool
-		env      []string
-		envFile  string
-		dataDir  string
-		stateDir string
-		fresh    bool
-		slug     string
-		open     bool
-		check    bool
-	)
-
+	f := &localRunFlags{}
 	cmd := &cobra.Command{
 		Use:   "run [dir]",
 		Short: "Run a Shiny app bundle locally in the foreground",
@@ -48,72 +35,15 @@ Use --check to run a preflight: boot, verify the app becomes healthy, then
 stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			for _, name := range []string{"config", "host", "output", "quiet", "no-color"} {
-				if cmd.Flags().Changed(name) {
-					return &ExitCodeError{Code: 1, Kind: KindValidation,
-						Err: fmt.Errorf("--%s does not apply to local app runs", name)}
-				}
+			if err := rejectLocalRunGlobalFlags(cmd); err != nil {
+				return err
 			}
 			dir := "."
 			if len(args) > 0 {
 				dir = args[0]
 			}
 			warnFleetCompositionOmission(cmd.ErrOrStderr(), dir, fleetOmissionRun, false)
-
-			// Resolve env vars from --env-file. If the user passed an explicit
-			// path that does not exist, error. If not passed, default to
-			// <dir>/.env and load it only when present (missing default is fine).
-			var fileEnv []envFileEntry
-			if envFile != "" {
-				// Explicit path: error if missing.
-				fe, err := readRunEnvFile(envFile)
-				if err != nil {
-					return &ExitCodeError{Code: 1, Kind: KindValidation,
-						Err: fmt.Errorf("--env-file %q: %w", envFile, err)}
-				}
-				fileEnv = fe
-			} else {
-				// Default: <dir>/.env, silently skip if absent.
-				defaultEnvFile := filepath.Join(dir, ".env")
-				if fe, err := readRunEnvFile(defaultEnvFile); err == nil {
-					fileEnv = fe
-				} else if !errors.Is(err, os.ErrNotExist) {
-					return &ExitCodeError{Code: 1, Kind: KindValidation,
-						Err: fmt.Errorf("default .env file: %w", err)}
-				}
-			}
-
-			// File values are the base layer; repeatable --env flags replace a
-			// matching key. Both paths use the exact parser used by `env apply`.
-			combinedEntries := append([]envFileEntry(nil), fileEnv...)
-			positions := make(map[string]int, len(combinedEntries))
-			for i, entry := range combinedEntries {
-				positions[entry.Key] = i
-			}
-			for _, assignment := range env {
-				parsed, err := parseEnvFile(strings.NewReader(assignment + "\n"))
-				if err != nil || len(parsed) != 1 {
-					if err == nil {
-						err = fmt.Errorf("expected KEY=VALUE")
-					}
-					return &ExitCodeError{Code: 1, Kind: KindValidation,
-						Err: fmt.Errorf("--env %q: %w", assignment, err)}
-				}
-				entry := parsed[0]
-				if i, ok := positions[entry.Key]; ok {
-					combinedEntries[i] = entry
-				} else {
-					positions[entry.Key] = len(combinedEntries)
-					combinedEntries = append(combinedEntries, entry)
-				}
-			}
-			combined := make([]string, 0, len(combinedEntries))
-			for _, entry := range combinedEntries {
-				combined = append(combined, entry.Key+"="+entry.Value)
-			}
-
-			// Default slug to the dir's base name.
-			effectiveSlug := slug
+			effectiveSlug := f.slug
 			if effectiveSlug == "" {
 				abs, err := filepath.Abs(dir)
 				if err != nil {
@@ -127,61 +57,145 @@ stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 				return &ExitCodeError{Code: 1, Kind: KindValidation,
 					Err: fmt.Errorf("invalid slug %q: must be %s", effectiveSlug, slugpkg.HumanRule)}
 			}
-
-			opts := localrun.Options{
-				BundleDir: dir,
-				Slug:      effectiveSlug,
-				DataDir:   dataDir,
-				StateDir:  stateDir,
-				Port:      port,
-				Env:       combined,
-				NoSync:    noSync,
-				NoReload:  noReload,
-				Fresh:     fresh,
-				Open:      open,
-				Check:     check,
-			}
-
-			// The root command is invoked via Execute() (not ExecuteContext), so
-			// cmd.Context() returns context.Background() without signal handling.
-			// Wire SIGINT/SIGTERM here so Ctrl-C tears down the child cleanly.
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-
-			if err := localrun.Run(ctx, opts, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
-				kind := KindInternal
-				var validationErr *localrun.ValidationError
-				if errors.As(err, &validationErr) {
-					kind = KindValidation
-				}
-				return &ExitCodeError{Code: 1, Kind: kind, Err: err}
-			}
-			return nil
+			return executeLocalRun(cmd, dir, effectiveSlug, f, nil)
 		},
 	}
+	configureLocalRunCommand(cmd, f, true)
+	return cmd
+}
+
+type localRunFlags struct {
+	port     int
+	noSync   bool
+	noReload bool
+	env      []string
+	envFile  string
+	dataDir  string
+	stateDir string
+	fresh    bool
+	slug     string
+	open     bool
+	check    bool
+}
+
+func configureLocalRunCommand(cmd *cobra.Command, f *localRunFlags, includeSlug bool) {
 	// Server-selection and structured-output globals do not affect a foreground
-	// local process. Keep them out of this command's help instead of presenting
-	// controls that are silently ignored; RunE also rejects them if supplied.
+	// local process. Keep them out of help instead of presenting controls that
+	// are rejected by both local-run entry points.
 	cmd.SetUsageTemplate(`Usage:
   {{.UseLine}}{{if .HasAvailableLocalFlags}}
 
 Flags:
 {{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}
 `)
+	cmd.Flags().IntVarP(&f.port, "port", "p", 0, "Local TCP port to bind (0 = auto-allocate)")
+	cmd.Flags().BoolVar(&f.noSync, "no-sync", false, "Skip dep-prep steps (uv sync / renv restore)")
+	cmd.Flags().BoolVar(&f.noReload, "no-reload", false, "Disable staged reload when source files change")
+	cmd.Flags().BoolVar(&f.fresh, "fresh", false, "Rebuild generated workspace state from scratch (preserves app data)")
+	cmd.Flags().StringArrayVar(&f.env, "env", nil, "Extra environment variables in KEY=VALUE form (repeatable)")
+	cmd.Flags().StringVar(&f.envFile, "env-file", "", "Load environment variables from a file (default: <dir>/.env if present)")
+	cmd.Flags().StringVar(&f.dataDir, "data-dir", "", "Host path for app data dir (default: ShinyHub user cache)")
+	cmd.Flags().StringVar(&f.stateDir, "state-dir", "", "Local workspace/state directory (default: ShinyHub user cache keyed by app path)")
+	if includeSlug {
+		cmd.Flags().StringVar(&f.slug, "slug", "", "App slug used by the local /app/<slug>/ proxy (default: sanitized dir name)")
+	}
+	cmd.Flags().BoolVar(&f.open, "open", false, "Open the serving URL in the default browser after readiness")
+	cmd.Flags().BoolVar(&f.check, "check", false, "Preflight mode: boot, verify healthy, stop, exit 0/1")
+}
 
-	cmd.Flags().IntVarP(&port, "port", "p", 0, "Local TCP port to bind (0 = auto-allocate)")
-	cmd.Flags().BoolVar(&noSync, "no-sync", false, "Skip dep-prep steps (uv sync / renv restore)")
-	cmd.Flags().BoolVar(&noReload, "no-reload", false, "Disable staged reload when source files change")
-	cmd.Flags().BoolVar(&fresh, "fresh", false, "Rebuild generated workspace state from scratch (preserves app data)")
-	cmd.Flags().StringArrayVar(&env, "env", nil, "Extra environment variables in KEY=VALUE form (repeatable)")
-	cmd.Flags().StringVar(&envFile, "env-file", "", "Load environment variables from a file (default: <dir>/.env if present)")
-	cmd.Flags().StringVar(&dataDir, "data-dir", "", "Host path for app data dir (default: ShinyHub user cache)")
-	cmd.Flags().StringVar(&stateDir, "state-dir", "", "Local workspace/state directory (default: ShinyHub user cache keyed by app path)")
-	cmd.Flags().StringVar(&slug, "slug", "", "App slug used by the local /app/<slug>/ proxy (default: sanitized dir name)")
-	cmd.Flags().BoolVar(&open, "open", false, "Open the serving URL in the default browser after readiness")
-	cmd.Flags().BoolVar(&check, "check", false, "Preflight mode: boot, verify healthy, stop, exit 0/1")
+func rejectLocalRunGlobalFlags(cmd *cobra.Command) error {
+	for _, name := range []string{"config", "host", "output", "quiet", "no-color"} {
+		if cmd.Flags().Changed(name) {
+			return &ExitCodeError{Code: 1, Kind: KindValidation,
+				Err: fmt.Errorf("--%s does not apply to local app runs", name)}
+		}
+	}
+	return nil
+}
 
-	return cmd
+func executeLocalRun(cmd *cobra.Command, dir, slug string, f *localRunFlags, configure func(*localrun.Options)) error {
+	combined, err := resolveLocalRunEnvironment(dir, f)
+	if err != nil {
+		return err
+	}
+	opts := localrun.Options{
+		BundleDir: dir,
+		Slug:      slug,
+		DataDir:   f.dataDir,
+		StateDir:  f.stateDir,
+		Port:      f.port,
+		Env:       combined,
+		NoSync:    f.noSync,
+		NoReload:  f.noReload,
+		Fresh:     f.fresh,
+		Open:      f.open,
+		Check:     f.check,
+	}
+	if configure != nil {
+		configure(&opts)
+	}
+
+	// The root command is invoked via Execute() (not ExecuteContext), so wire
+	// SIGINT/SIGTERM here to tear down the child cleanly.
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := localrun.Run(ctx, opts, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+		kind := KindInternal
+		var validationErr *localrun.ValidationError
+		if errors.As(err, &validationErr) {
+			kind = KindValidation
+		}
+		return &ExitCodeError{Code: 1, Kind: kind, Err: err}
+	}
+	return nil
+}
+
+func resolveLocalRunEnvironment(dir string, f *localRunFlags) ([]string, error) {
+	var fileEnv []envFileEntry
+	if f.envFile != "" {
+		entries, err := readRunEnvFile(f.envFile)
+		if err != nil {
+			return nil, &ExitCodeError{Code: 1, Kind: KindValidation,
+				Err: fmt.Errorf("--env-file %q: %w", f.envFile, err)}
+		}
+		fileEnv = entries
+	} else {
+		defaultEnvFile := filepath.Join(dir, ".env")
+		if entries, err := readRunEnvFile(defaultEnvFile); err == nil {
+			fileEnv = entries
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, &ExitCodeError{Code: 1, Kind: KindValidation,
+				Err: fmt.Errorf("default .env file: %w", err)}
+		}
+	}
+
+	combinedEntries := append([]envFileEntry(nil), fileEnv...)
+	positions := make(map[string]int, len(combinedEntries))
+	for i, entry := range combinedEntries {
+		positions[entry.Key] = i
+	}
+	for _, assignment := range f.env {
+		parsed, err := parseEnvFile(strings.NewReader(assignment + "\n"))
+		if err != nil || len(parsed) != 1 {
+			if err == nil {
+				err = fmt.Errorf("expected KEY=VALUE")
+			}
+			return nil, &ExitCodeError{Code: 1, Kind: KindValidation,
+				Err: fmt.Errorf("--env %q: %w", assignment, err)}
+		}
+		entry := parsed[0]
+		if i, ok := positions[entry.Key]; ok {
+			combinedEntries[i] = entry
+		} else {
+			positions[entry.Key] = len(combinedEntries)
+			combinedEntries = append(combinedEntries, entry)
+		}
+	}
+	combined := make([]string, 0, len(combinedEntries))
+	for _, entry := range combinedEntries {
+		combined = append(combined, entry.Key+"="+entry.Value)
+	}
+	return combined, nil
 }
 
 // readRunEnvFile deliberately shares env apply's parser so local and deployed

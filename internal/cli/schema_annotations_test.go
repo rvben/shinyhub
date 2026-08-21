@@ -66,3 +66,21 @@ func TestFleetApplyAnnotation_DocumentsConcurrency(t *testing.T) {
 		t.Fatalf("fleet apply Notes must mention concurrency, got %q", ann.Notes)
 	}
 }
+
+func TestFleetDevAnnotation_IsReadOnlyStreamingAndPathAware(t *testing.T) {
+	ann, ok := schemaAnnotations["fleet dev"]
+	if !ok {
+		t.Fatal("fleet dev must have a schema annotation")
+	}
+	if ann.Mutating == nil || *ann.Mutating {
+		t.Fatal("fleet dev must be read-only with respect to ShinyHub server state")
+	}
+	if !ann.Streaming {
+		t.Fatal("fleet dev must document streaming process output")
+	}
+	for _, flag := range []string{"--file", "--data-dir", "--env-file", "--state-dir"} {
+		if ann.ArgTypes[flag] != "path" {
+			t.Errorf("fleet dev %s schema type = %q, want path", flag, ann.ArgTypes[flag])
+		}
+	}
+}
