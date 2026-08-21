@@ -121,8 +121,12 @@ fi
 "${CURRENT_BIN}" connect "${OLD_HOST}" --name released \
   --token-file "${WORK}/deploy-token" --config "${WORK}/current-client.json" --output table \
   >"${WORK}/current-connect.log" 2>&1 || fail "current connect to released server"
-grep -Fq 'legacy capability negotiation' "${WORK}/current-connect.log" \
-  || fail "current connect did not make legacy negotiation visible"
+# The exact warning changes when a release crosses a pre-1.0 minor boundary:
+# within a minor it describes legacy negotiation, while across minors it names
+# the older server. Both must preserve the stable safety contract that commands
+# remain capability-gated when the old server has no protocol_version field.
+grep -Fq 'capability-gated' "${WORK}/current-connect.log" \
+  || fail "current connect did not make capability-gated legacy negotiation visible"
 "${CURRENT_BIN}" doctor "${WORK}/app-current-to-old" --slug compat-current-old \
   --config "${WORK}/current-client.json" --output table \
   >"${WORK}/current-doctor.log" 2>&1 || fail "current doctor against released server"
