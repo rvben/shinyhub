@@ -121,6 +121,10 @@ test('app-detail logs cross HTTP for replicas, history, switching, and cursor-sa
   const openStreams = new Set();
   let replicaZeroConnections = 0;
   let replicaOneConnections = 0;
+  // Replica zero's first stream is dropped by the test body, not by a timer, so
+  // the reconnect transition always starts from a UI that has finished painting
+  // its fully-connected state.
+  let dropReplicaZero = () => assert.fail('replica zero never connected');
 
   const server = createServer((request, response) => {
     const url = new URL(request.url, 'http://shinyhub.test');
@@ -161,9 +165,7 @@ test('app-detail logs cross HTTP for replicas, history, switching, and cursor-sa
       replicaZeroConnections++;
       if (replicaZeroConnections === 1) {
         response.write('id: 7\ndata: zero before drop\n\n');
-        // Keep the first connection live long enough for the UI to paint its
-        // fully-connected state before exercising the reconnect transition.
-        setTimeout(() => response.end(), 150);
+        dropReplicaZero = () => response.end();
       } else {
         response.write('id: 28\ndata: zero after reconnect\n\n');
       }
@@ -207,8 +209,9 @@ test('app-detail logs cross HTTP for replicas, history, switching, and cursor-sa
     output().includes('zero before drop') && output().includes('one live 1'));
   assert.equal(panel.querySelector('#logs-source').firstElementChild.textContent,
     'All current replicas (2 live, 2 total)');
-  assert.equal(status(), 'Live · 2 connected sources');
+  await waitFor('fully connected status', () => status() === 'Live · 2 connected sources');
 
+  dropReplicaZero();
   await waitFor('visible reconnecting state', () => status().startsWith('Reconnecting · 1 of 2'));
   await waitFor('cursor-resumed replica zero output', () => output().includes('zero after reconnect'));
   assert.equal(status(), 'Live · 2 connected sources');
