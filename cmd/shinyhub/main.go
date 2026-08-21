@@ -1720,6 +1720,21 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	renderCores, coreSource := admission.Detect(cfg.RenderCapacityCores())
 	slog.Info("render admission: effective cores", "cores", renderCores, "source", coreSource)
 
+	// Host capacity: the scale Overview measures fleet usage against when no app
+	// carries an enforced per-replica limit. Separate override from the pacer's
+	// render_capacity_cores, because one is a reporting scale and the other is a
+	// pacing budget; the detection behind both is the same.
+	hostCores, hostCoreSource := admission.Detect(cfg.HostCapacityCores())
+	hostMemoryMB, hostMemorySource, hostMemoryOK := admission.DetectMemory(cfg.HostCapacityMemoryMB())
+	if !hostMemoryOK {
+		hostMemoryMB, hostMemorySource = 0, ""
+		slog.Warn("host capacity: memory could not be detected; Overview will report usage without a memory scale",
+			"hint", "set server.host_capacity_memory_mb to supply it")
+	}
+	srv.SetHostCapacity(hostCores, hostCoreSource, hostMemoryMB, hostMemorySource)
+	slog.Info("host capacity", "cores", hostCores, "cores_source", hostCoreSource,
+		"memory_mb", hostMemoryMB, "memory_source", hostMemorySource)
+
 	// Host CPU watermark, only when enabled. It samples on its own goroutine;
 	// cpu.Percent blocks, so it is never called from the admission path. Under
 	// runtime.mode docker this is sized against the ShinyHub process, not each

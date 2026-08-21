@@ -236,6 +236,108 @@ func keysOfRaw(m map[string]json.RawMessage) []string {
 	return out
 }
 
+// The batch response carries the size of the box, because the Overview's
+// resource panel has nothing to measure a limit-free fleet against otherwise.
+// It rides this endpoint rather than its own so the denominator and the usage
+// it scales always describe the same instant.
+func TestBatchMetrics_PublishesHostCapacity(t *testing.T) {
+	srv, store := newTestServer(t)
+	ownerID, _ := mkUser(t, store, "owner", "developer")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: ownerID}); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetHostCapacity(4, "cgroup-quota", 8192, "cgroup-limit")
+
+	token, _ := auth.IssueJWT(ownerID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/metrics", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Host *struct {
+			Cores        float64 `json:"cores"`
+			CoresSource  string  `json:"cores_source"`
+			MemoryMB     int     `json:"memory_mb"`
+			MemorySource string  `json:"memory_source"`
+		} `json:"host"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Host == nil {
+		t.Fatalf("host capacity missing from the batch response: %s", rec.Body.String())
+	}
+	if body.Host.Cores != 4 || body.Host.MemoryMB != 8192 {
+		t.Errorf("host = %+v, want 4 cores / 8192 MB", *body.Host)
+	}
+	// The source is what tells an operator whether the number describes their
+	// container or the whole machine it happens to share.
+	if body.Host.CoresSource != "cgroup-quota" || body.Host.MemorySource != "cgroup-limit" {
+		t.Errorf("host sources = %q/%q, want cgroup-quota/cgroup-limit", body.Host.CoresSource, body.Host.MemorySource)
+	}
+}
+
+// A host nobody could measure must be absent, not zero: the dashboard draws a
+// meter from this number, and a 0-core host is a full bar at any usage.
+func TestBatchMetrics_OmitsUnknownHostCapacity(t *testing.T) {
+	srv, store := newTestServer(t)
+	ownerID, _ := mkUser(t, store, "owner", "developer")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: ownerID}); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetHostCapacity(0, "", 0, "")
+
+	token, _ := auth.IssueJWT(ownerID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/metrics", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if raw, ok := body["host"]; ok {
+		t.Errorf("host = %s, want the key absent when no source could size the box", raw)
+	}
+	// Positive control: the response is otherwise intact, so the absence above
+	// is about the host block and not an empty body.
+	if _, ok := body["metrics"]; !ok {
+		t.Errorf("metrics missing too; this test proves nothing: %s", rec.Body.String())
+	}
+}
+
+// Cores measured but memory not: the panel can scale CPU and must not invent a
+// memory ceiling from the same block.
+func TestBatchMetrics_HostCapacityOmitsUnknownMemory(t *testing.T) {
+	srv, store := newTestServer(t)
+	ownerID, _ := mkUser(t, store, "owner", "developer")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: ownerID}); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetHostCapacity(2, "affinity", 0, "")
+
+	token, _ := auth.IssueJWT(ownerID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/metrics", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	var body struct {
+		Host map[string]json.RawMessage `json:"host"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := body.Host["cores"]; !ok {
+		t.Fatalf("cores missing from a host that reported them: %s", rec.Body.String())
+	}
+	if raw, ok := body.Host["memory_mb"]; ok {
+		t.Errorf("memory_mb = %s, want absent when only the core count is known", raw)
+	}
+}
+
 // Unauthenticated callers are rejected.
 func TestBatchMetrics_RequiresAuth(t *testing.T) {
 	srv, _ := newTestServer(t)

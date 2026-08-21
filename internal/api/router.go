@@ -66,6 +66,11 @@ type Server struct {
 	renderPacingCores  float64
 	renderPacingSource string
 
+	// hostCapacity is the size of the box this server runs on, resolved once at
+	// startup via SetHostCapacity and published on the batch-metrics response.
+	// nil until then, and nil whenever no source could report the host's cores.
+	hostCapacity *HostCapacity
+
 	// sleepNow performs an operator-requested hibernation (lifecycle.Watcher's
 	// SleepNow). Injected via SetSleepOp because the teardown lives on the
 	// watcher, which is constructed after this Server. nil makes the sleep
@@ -652,6 +657,27 @@ func (s *Server) SetMetrics(m *metrics.Registry) { s.metrics = m }
 func (s *Server) SetRenderPacingCores(cores float64, source string) {
 	s.renderPacingCores = cores
 	s.renderPacingSource = source
+}
+
+// SetHostCapacity records the size of the box this server runs on, so Overview
+// can measure fleet usage against something real when no app carries an
+// enforced per-replica limit. Called once at startup; the detection reads
+// (cgroup files, sysctl) never happen on the request path.
+//
+// memoryMB is 0 when no source could report the host's memory. That is
+// published as an absent key rather than as a host with no memory, so the
+// dashboard can say it does not know instead of drawing a full meter.
+func (s *Server) SetHostCapacity(cores float64, coresSource string, memoryMB int, memorySource string) {
+	if cores <= 0 {
+		s.hostCapacity = nil
+		return
+	}
+	hc := &HostCapacity{Cores: cores, CoresSource: coresSource}
+	if memoryMB > 0 {
+		hc.MemoryMB = memoryMB
+		hc.MemorySource = memorySource
+	}
+	s.hostCapacity = hc
 }
 
 // recordDeploy increments the deploy-outcome counter when metrics are enabled.

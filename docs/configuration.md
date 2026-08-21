@@ -241,6 +241,53 @@ export SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB=512
 Prefer environment variables or a secrets manager for credentials such as OAuth
 client secrets and database passwords.
 
+## Host capacity
+
+The Overview measures fleet CPU and memory against each application's enforced
+per-replica limits. When no application carries one - the common case on a
+single-purpose host - it measures against the box itself instead, so the panel
+reports what the server is actually using rather than declining to answer.
+
+The size of the box is detected at startup and needs no configuration. Override
+it only when the detected number is wrong for your deployment:
+
+```yaml
+server:
+  host_capacity_cores: 0        # 0 = detect
+  host_capacity_memory_mb: 0    # 0 = detect
+```
+
+Env vars: `SHINYHUB_HOST_CAPACITY_CORES`, `SHINYHUB_HOST_CAPACITY_MEMORY_MB`.
+
+The startup log records what was found and which source supplied it:
+
+```
+INFO host capacity cores=4 cores_source=cgroup-quota memory_mb=8192 memory_source=cgroup-limit
+```
+
+Sources for `cores_source` are `config` (you set `host_capacity_cores`),
+`cgroup-quota` (a container CPU limit binds below the host's core count), and
+`affinity` (the cores this process may run on). For `memory_source` they are
+`config`, `cgroup-limit` (a container memory limit binds below the host total),
+and `host-total` (what the OS reports for the machine).
+
+Detection can fail - a platform with no cgroup files and no readable total.
+When it does, that capacity is reported as unknown rather than as a host with
+none: the Overview then shows CPU and memory in use with no percentage and no
+meter, since a zero denominator would draw a full bar at any load. The startup
+log warns when memory specifically could not be read.
+
+Two cases are worth an explicit override. Under `runtime.mode: docker` the
+detected figures describe the shared box, not any one worker's container; those
+applications normally carry enforced limits and are measured against those
+instead. And on a host ShinyHub shares with other services, the detected total
+is the whole machine, so set these keys to the share you intend ShinyHub to
+have if you want the panel scaled to that.
+
+These keys are separate from `server.render_capacity_cores`
+([Render pacing](scaling.md#render-pacing)), which is a pacing budget rather
+than a reporting scale, although both are detected the same way.
+
 ## Scale-to-zero application tier
 
 ShinyHub can retain each application replica as a private Scaleway Serverless

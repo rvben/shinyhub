@@ -2683,6 +2683,31 @@ func TestOverviewContract(t *testing.T) {
 		"the empty Overview must provide a concrete first-value action")
 }
 
+// TestOverviewHostCapacityContract pins the host-capacity block that the
+// resource panel falls back to when no app carries an enforced limit. Drop any
+// one of these reads and the panel silently regresses to the state this feature
+// replaced: "Capacity unavailable" on every row of a perfectly healthy fleet.
+func TestOverviewHostCapacityContract(t *testing.T) {
+	// GET /api/apps/metrics returns {metrics, generated_at, host?} where host is
+	// {cores, cores_source, memory_mb, memory_source} (internal/api/apps.go,
+	// type HostCapacity). The key is absent when detection fails, so the reader
+	// must tolerate its absence rather than assume the object.
+	assertContains(t, "views/overview.js", "b.host",
+		"GET /api/apps/metrics returns an optional {host}; the Overview reads body.host")
+	assertContains(t, "views/overview-model.js", "host.cores",
+		"the CPU denominator comes from host.cores (internal/api HostCapacity.Cores)")
+	assertContains(t, "views/overview-model.js", "host.memory_mb",
+		"the memory denominator comes from host.memory_mb (internal/api HostCapacity.MemoryMB)")
+	assertContains(t, "views/overview-model.js", "host.cores_source",
+		"the CPU capacity records where it came from (HostCapacity.CoresSource)")
+	assertContains(t, "views/overview-model.js", "host.memory_source",
+		"the memory capacity records where it came from (HostCapacity.MemorySource)")
+	// A host that reports neither must not become a zero denominator: an absent
+	// capacity is not a capacity of nothing.
+	assertContains(t, "views/overview-model.js", "cores <= 0) return null",
+		"an absent or non-positive core count must yield no capacity, never a zero denominator")
+}
+
 // TestLaunchpadContract pins the viewer Launchpad (the non-operator / home) to
 // the API shape and DOM/routing wiring it depends on.
 func TestLaunchpadContract(t *testing.T) {

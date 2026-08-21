@@ -108,6 +108,10 @@ export function mountOverview(ctx) {
         state: 'ready',
         metrics: (b && b.metrics) || {},
         generatedAt: (b && b.generated_at) || new Date().toISOString(),
+        // The host block is the scale the fleet is measured against when no app
+        // carries an enforced limit. Absent when the server could not size the
+        // box, which the model reports as unknown rather than as a full one.
+        host: (b && b.host) || null,
       };
       return lastMetricsSnapshot;
     } catch {
@@ -337,10 +341,10 @@ export function renderResourcePressure(res) {
 
   const head = el('div', 'ov-res-head');
   const titleWrap = el('div', 'ov-res-heading');
-  const title = el('h2', 'ov-section-title', 'App allocation pressure');
+  const title = el('h2', 'ov-section-title', panelTitle(res.scale));
   title.id = 'ov-resources-title';
   titleWrap.appendChild(title);
-  titleWrap.appendChild(el('p', 'ov-res-scope', 'Against enforced per-replica limits'));
+  titleWrap.appendChild(el('p', 'ov-res-scope', panelScope(res.scale)));
   head.appendChild(titleWrap);
   head.appendChild(el('p', 'ov-res-updated', updatedText(res)));
   sec.appendChild(head);
@@ -358,9 +362,16 @@ export function renderResourcePressure(res) {
   }
 
   const rows = el('div', 'ov-capacity-list');
-  rows.appendChild(renderCapacityRow('CPU', res.cpu));
-  rows.appendChild(renderCapacityRow('Memory', res.memory));
+  rows.appendChild(renderCapacityRow('CPU', res.cpu, res.runningReplicas));
+  rows.appendChild(renderCapacityRow('Memory', res.memory, res.runningReplicas));
   sec.appendChild(rows);
+
+  // With no limits anywhere there are no per-replica thresholds to alert on, so
+  // the panel answers the next question instead: which apps account for this.
+  if (res.scale !== 'limits') {
+    if (res.topConsumers) sec.appendChild(renderTopConsumers(res.topConsumers));
+    return sec;
+  }
 
   if (res.hotspots.length > 0) {
     const hotspotHead = el('div', 'ov-hotspot-head');
@@ -413,9 +424,9 @@ export function replaceOverviewContent(body, next) {
   restoreFocus(body, focusKey);
 }
 
-function renderCapacityRow(label, metric) {
+function renderCapacityRow(label, metric, runningReplicas) {
   const row = el('section', 'ov-capacity-row ov-capacity-row--' + metric.severity);
-  row.setAttribute('aria-label', label + ' allocation pressure');
+  row.setAttribute('aria-label', `${label} ${metric.scale === 'limits' ? 'allocation pressure' : 'usage'}`);
 
   const top = el('div', 'ov-capacity-top');
   top.appendChild(el('h3', 'ov-capacity-label', label));
@@ -425,12 +436,13 @@ function renderCapacityRow(label, metric) {
   const values = el('div', 'ov-capacity-values');
   values.appendChild(el('b', 'ov-capacity-value', capacityValue(metric)));
   const context = el('span', 'ov-capacity-context');
+  // A percentage needs a denominator. Without one the value beside it already
+  // says everything that is known, so nothing stands in for the missing share.
   if (metric.fraction != null) context.appendChild(el('strong', null, `${Math.round(metric.fraction * 100)}%`));
-  else context.appendChild(el('strong', null, 'Capacity unavailable'));
   if (metric.peakFraction != null && metric.fraction != null && metric.peakFraction - metric.fraction >= 0.05) {
     context.appendChild(el('span', 'ov-capacity-peak', `Peak replica ${Math.round(metric.peakFraction * 100)}%`));
   }
-  context.appendChild(el('span', null, trendText(metric.trend)));
+  context.appendChild(el('span', null, trendText(metric.trend, metric.kind)));
   values.appendChild(context);
   row.appendChild(values);
 
@@ -443,12 +455,60 @@ function renderCapacityRow(label, metric) {
     meter.high = 0.95;
     meter.optimum = 0;
     meter.value = Math.min(1, Math.max(0, metric.fraction));
-    meter.setAttribute('aria-label', meterLabel(label, metric));
+    meter.setAttribute('aria-label', meterLabel(label, metric, runningReplicas));
     meter.textContent = `${Math.round(metric.fraction * 100)}%`;
     row.appendChild(meter);
   }
-  row.appendChild(el('p', 'ov-capacity-coverage', coverageText(metric)));
+  row.appendChild(el('p', 'ov-capacity-coverage', coverageText(metric, runningReplicas)));
   return row;
+}
+
+// renderTopConsumers attributes fleet usage to the apps behind it. It replaces
+// the pressure alerts on a fleet with no limits: nothing can be near a
+// threshold that does not exist, so the useful question is who is using it.
+function renderTopConsumers(top) {
+  const wrap = document.createDocumentFragment();
+  const head = el('div', 'ov-hotspot-head');
+  head.appendChild(el('h3', 'ov-res-subhead', `Top ${top.kind === 'cpu' ? 'CPU' : 'memory'} consumers`));
+  wrap.appendChild(head);
+
+  const list = el('ul', 'ov-consumer-list');
+  for (const item of top.items) {
+    const li = el('li', 'ov-consumer-row');
+    const link = el('a', 'ov-hotspot-name', item.name);
+    link.href = '/apps/' + encodeURIComponent(item.slug) + '/configuration';
+    link.setAttribute('data-nav', '');
+    link.dataset.focusKey = `consumer:${item.slug}:${top.kind}`;
+    li.appendChild(link);
+
+    const share = el('span', 'ov-consumer-share');
+    share.setAttribute('role', 'img');
+    share.setAttribute('aria-label', `${Math.round(item.fraction * 100)} percent of fleet ${top.kind}`);
+    const fill = el('span', 'ov-consumer-fill');
+    fill.style.width = `${Math.max(2, Math.round(item.fraction * 100))}%`;
+    share.appendChild(fill);
+    li.appendChild(share);
+
+    const values = el('span', 'ov-consumer-values');
+    values.appendChild(el('b', null, formatResource(top.kind, item.used)));
+    values.appendChild(el('span', null, `${Math.round(item.fraction * 100)}% of fleet`));
+    li.appendChild(values);
+    list.appendChild(li);
+  }
+  wrap.appendChild(list);
+  return wrap;
+}
+
+function panelTitle(scale) {
+  return scale === 'limits' ? 'App allocation pressure' : 'Fleet resource usage';
+}
+
+// The scope line says what the numbers are measured against, and on a fleet
+// with no limits it also says why the panel is answering a different question.
+function panelScope(scale) {
+  if (scale === 'limits') return 'Against enforced per-replica limits';
+  if (scale === 'host') return 'No per-app limits set · measured against host capacity';
+  return 'No per-app limits set · host capacity unknown';
 }
 
 function renderHotspot(item) {
@@ -486,7 +546,7 @@ function capacityValue(metric) {
   if (metric.capacity > 0) {
     return `${formatResource(metric.kind, metric.used)} / ${formatResource(metric.kind, metric.capacity)}`;
   }
-  if (metric.coverage.observedReplicas > 0) return `${formatResource(metric.kind, metric.observedUsed)} observed`;
+  if (metric.coverage.observedReplicas > 0) return `${formatResource(metric.kind, metric.observedUsed)} in use`;
   return 'Unavailable';
 }
 
@@ -504,6 +564,9 @@ function stateTone(metric) {
   if (metric.state === 'unavailable' || metric.state === 'stale') return metric.state;
   if (metric.severity === 'critical' || metric.severity === 'warning') return metric.severity;
   if (metric.state === 'partial') return metric.state;
+  // With no denominator there is no threshold to be inside of, so the pill
+  // reports that the number is live rather than claiming it is normal.
+  if (metric.scale === 'none') return 'live';
   return metric.severity;
 }
 
@@ -514,11 +577,26 @@ function stateLabel(metric) {
     if (metric.severity === 'critical' || metric.severity === 'warning') return `${titleCase(metric.severity)} · Partial`;
     return 'Partial';
   }
+  if (metric.scale === 'none') return 'Live';
   return titleCase(metric.severity === 'unknown' ? 'Unavailable' : metric.severity);
 }
 
-function coverageText(metric) {
+/**
+ * coverageText says how much of the fleet the row's number actually covers.
+ * What counts as covered depends on the scale: against enforced limits it is
+ * the replicas that have one, and against the host (or against nothing) it is
+ * the replicas that are reporting, since an unlimited replica is fully measured
+ * on those scales.
+ */
+function coverageText(metric, runningReplicas) {
   const c = metric.coverage;
+  if (metric.scale !== 'limits') {
+    const total = runningReplicas ?? c.runningReplicas;
+    if (c.observedReplicas === total) {
+      return `Across ${total} running ${total === 1 ? 'replica' : 'replicas'}`;
+    }
+    return `${c.observedReplicas} of ${total} running replicas reporting`;
+  }
   const parts = [`${c.coveredReplicas} of ${c.runningReplicas} running replicas covered`];
   if (c.unlimitedReplicas) parts.push(`${c.unlimitedReplicas} unlimited`);
   if (c.unenforcedReplicas) parts.push(`${c.unenforcedReplicas} not enforced`);
@@ -527,19 +605,28 @@ function coverageText(metric) {
   return parts.join(' · ');
 }
 
-function trendText(trend) {
+/**
+ * trendText renders the direction in whichever unit the trend was measured in:
+ * percentage points where there is a denominator, and the quantity itself where
+ * there is not. A trend with no number attached would read as more certain than
+ * it is, so the delta is always shown.
+ */
+function trendText(trend, kind) {
   if (!trend || trend.state === 'unavailable') return 'Trend unavailable';
   if (trend.state === 'collecting') return 'Collecting trend';
   const window = trend.windowSeconds >= 12 * 60 ? '15m' : `${Math.max(2, Math.round(trend.windowSeconds / 60))}m`;
   if (trend.state === 'steady') return `Steady / ${window}`;
-  const points = Math.abs(Math.round(trend.deltaFraction * 100));
-  return `${titleCase(trend.state)} ${points} pts / ${window}`;
+  const delta = trend.deltaFraction != null
+    ? `${Math.abs(Math.round(trend.deltaFraction * 100))} pts`
+    : formatResource(kind, Math.abs(trend.deltaValue));
+  return `${titleCase(trend.state)} ${delta} / ${window}`;
 }
 
-function meterLabel(label, metric) {
+function meterLabel(label, metric, runningReplicas) {
   const peak = metric.peakFraction != null && metric.peakFraction - metric.fraction >= 0.05
     ? ` Hottest replica is ${Math.round(metric.peakFraction * 100)} percent.` : '';
-  return `${label} allocation, ${Math.round(metric.fraction * 100)} percent of enforced limits.${peak} ${stateLabel(metric).toLowerCase()}. ${coverageText(metric)}.`;
+  const against = metric.scale === 'limits' ? 'enforced limits' : 'host capacity';
+  return `${label} allocation, ${Math.round(metric.fraction * 100)} percent of ${against}.${peak} ${stateLabel(metric).toLowerCase()}. ${coverageText(metric, runningReplicas)}.`;
 }
 
 function hotspotLabel(item) {

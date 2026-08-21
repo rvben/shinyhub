@@ -3694,7 +3694,33 @@ func (s *Server) handleBatchMetrics(w http.ResponseWriter, r *http.Request) {
 		ev, found := autoscaleBySlug[app.Slug]
 		out[app.Slug] = s.buildAppMetricsFrom(app.Slug, app, replicasByApp[app.ID], ev, found)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"metrics": out, "generated_at": time.Now().UTC()})
+	body := map[string]any{"metrics": out, "generated_at": time.Now().UTC()}
+	// The host block is the scale Overview measures against when no app carries
+	// an enforced per-replica limit. Omitted when unknown, so the dashboard can
+	// say so rather than infer a size.
+	if s.hostCapacity != nil {
+		body["host"] = s.hostCapacity
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// HostCapacity is the size of the box ShinyHub runs on: how much CPU and memory
+// exist in total, and which source reported each. Cores come from the cgroup
+// quota, CPU affinity, or server.host_capacity_cores; memory from the cgroup
+// limit, the host total, or server.host_capacity_memory_mb.
+//
+// This is a reporting scale, not a budget. Nothing is admitted or rejected
+// against it; it exists so an operator with no per-app limits set still sees
+// where the fleet sits.
+//
+// The memory pair is omitted rather than zeroed when no source could answer:
+// "this host has no memory" is a plausible-looking value for something that is
+// simply not known, and it would render as a full meter.
+type HostCapacity struct {
+	Cores        float64 `json:"cores"`
+	CoresSource  string  `json:"cores_source"`
+	MemoryMB     int     `json:"memory_mb,omitempty"`
+	MemorySource string  `json:"memory_source,omitempty"`
 }
 
 // metricAppsForUser resolves a batch-observability request to the exact apps
