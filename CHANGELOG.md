@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.19](https://github.com/rvben/shinyhub/compare/v0.11.18...v0.11.19) - 2026-08-21
+
+### Added
+
+- **proxy,api**: offer an app switcher on application pages ([767ce0d](https://github.com/rvben/shinyhub/commit/767ce0d41c3995f1b49fdebfb6a71cf083cfcaf0))
+
 ## [0.11.18](https://github.com/rvben/shinyhub/compare/v0.11.17...v0.11.18) - 2026-08-20
 
 ### Added
