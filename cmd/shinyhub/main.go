@@ -1213,6 +1213,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Explain a mid-session disconnect to the visitor. The app process cannot:
 	// it does not know whether it was hibernated, redeployed, or killed.
 	prx.SetStatusOverlay(cfg.Server.StatusOverlayEnabled())
+	// Give the visitor a way out of the app they opened. Without it an app page
+	// is a dead end: it fills the tab and links nowhere else in the fleet.
+	prx.SetAppNav(cfg.Server.AppNavEnabled(), appNavHomeURL(cfg))
 	// Identity forwarding: the proxy injects the authenticated user's
 	// identity headers + per-app signed token. The provider owns the groups
 	// TTL cache and minting; the proxy holds no secret and no store.
@@ -2120,17 +2123,44 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	} else {
 		slog.Warn("session recheck disabled: revoking a user will not close the app sessions they already have open")
 	}
-	proxyEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets)(prx)
-	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(proxyEmptyState)
+	// The pages these two middlewares answer with instead of the app - denied,
+	// and awaiting a first deploy - are dead ends for the same reason app pages
+	// are, so they carry the same switcher. Nothing but the switcher varies:
+	// with app_nav off, navOpts is empty and every page is what it was.
+	var navOpts []access.Option
+	if cfg.Server.AppNavEnabled() {
+		navOpts = append(navOpts, access.WithAppNav(appNavHomeURL(cfg)))
+	}
+	proxyEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets, navOpts...)(prx)
+	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, navOpts...)(proxyEmptyState)
 	var parsedAppOrigin *url.URL
 	if cfg.Server.AppOrigin != "" {
 		parsedAppOrigin, _ = url.Parse(cfg.Server.AppOrigin) // validated by config.Load
 		redirect := appOriginRedirectHandler(store, parsedAppOrigin)
-		redirectEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets)(redirect)
-		controlAppHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(redirectEmptyState)
+		redirectEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets, navOpts...)(redirect)
+		controlAppHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, navOpts...)(redirectEmptyState)
 		appHandler = appOriginDispatch(parsedAppOrigin, cfg.TrustedProxyNets, store, cfg.Auth.Secret, controlAppHandler, appHandler)
 	}
 	mux.Handle("/app/", appHandler)
+	// The switcher's own data, served from under /app/ because that is the only
+	// prefix the isolated app origin admits (appOriginBoundary) - a fleet-wide
+	// path would be unreachable from the very pages that need it. Registered as
+	// its own pattern rather than behind the access middleware: the answer is
+	// the caller's own app list, so being refused THIS app must not refuse it.
+	// A more specific pattern than "/app/", so ServeMux prefers it here and
+	// leaves every other app path to the proxy.
+	//
+	// Registered only when the switcher is on, so app_nav: false means the
+	// feature is absent rather than merely unused: nothing under /app/ answers
+	// differently than it did before the switcher existed.
+	if cfg.Server.AppNavEnabled() {
+		mux.HandleFunc("GET /app/{slug}/.shinyhub/nav.json", func(w http.ResponseWriter, r *http.Request) {
+			if u := access.ResolveOptionalUser(r, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup); u != nil {
+				r = r.WithContext(auth.WithUser(r.Context(), u))
+			}
+			srv.HandleAppNavJSON(w, r)
+		})
+	}
 	mux.Handle("/healthz", probeMethods(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
@@ -2378,6 +2408,21 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 
 	slog.Info("shutdown complete")
 	return nil
+}
+
+// appNavHomeURL is the dashboard the app switcher links back to.
+//
+// It must be absolute whenever apps are served from their own origin: a bare
+// "/" on an app page then addresses the app origin's root, which serves nothing
+// - and that origin exists precisely so app pages cannot reach the dashboard by
+// a relative path. config.Load requires base_url in exactly that case, so the
+// fallback only ever applies to a single-origin deployment, where "/" is both
+// correct and immune to a stale base_url.
+func appNavHomeURL(cfg *config.Config) string {
+	if cfg.Server.BaseURL != "" {
+		return strings.TrimSuffix(cfg.Server.BaseURL, "/") + "/"
+	}
+	return "/"
 }
 
 // registerBrandingRoutes wires all branding-aware frontend routes onto mux.

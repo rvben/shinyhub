@@ -505,12 +505,30 @@ type ServerConfig struct {
 	// who wants strictly untouched app bytes can say so and be believed: set it
 	// false and no response body is ever rewritten.
 	StatusOverlay *bool `yaml:"status_overlay"`
+
+	// AppNav controls whether an app's pages get ShinyHub's app switcher: the
+	// rail that lets a visitor inside one app reach the others they can open.
+	// Without it, opening an app is a one-way trip - the app fills the tab and
+	// nothing on the page leads back out.
+	//
+	// On by default for the same reason as StatusOverlay: it closes a gap in
+	// the product rather than adding an opinion, and it is only ever drawn for
+	// the apps the visitor is already authorized to see. A pointer so an
+	// operator who wants app pages left strictly untouched can say so and be
+	// believed.
+	AppNav *bool `yaml:"app_nav"`
 }
 
 // StatusOverlayEnabled reports whether app page loads get the status overlay.
 // Absent means enabled.
 func (s *ServerConfig) StatusOverlayEnabled() bool {
 	return s.StatusOverlay == nil || *s.StatusOverlay
+}
+
+// AppNavEnabled reports whether app pages get the app switcher. Absent means
+// enabled.
+func (s *ServerConfig) AppNavEnabled() bool {
+	return s.AppNav == nil || *s.AppNav
 }
 
 // defaultSessionRecheckInterval bounds how long a revoked user keeps a session
@@ -2458,6 +2476,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_SERVER_STATUS_OVERLAY: %w", err)
 		}
 		cfg.Server.StatusOverlay = &b
+	}
+	if v := os.Getenv("SHINYHUB_SERVER_APP_NAV"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SERVER_APP_NAV: %w", err)
+		}
+		cfg.Server.AppNav = &b
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v

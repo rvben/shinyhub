@@ -397,6 +397,16 @@ type Proxy struct {
 	// HTML of an app it serves. Atomic for a lock-free read per response.
 	statusOverlay atomic.Bool
 
+	// appNav enables injecting the app switcher, so a visitor inside an app can
+	// reach another one without going back to the dashboard first. Off unless
+	// main.go wires it from config, for the same reason as statusOverlay.
+	//
+	// Enablement and the switcher's home URL travel together in one pointer
+	// rather than two atomics, so a reader can never observe the switcher
+	// enabled with a home link that has not been set yet. A nil pointer means
+	// off, which is the zero value.
+	appNav atomic.Pointer[appNavSettings]
+
 	// stickySecret is the HMAC key that signs the per-app sticky-routing cookie.
 	// When set, the cookie value carries a signature bound to the app slug and
 	// replica index, so a client cannot forge or replay it to pin itself to a
@@ -997,6 +1007,34 @@ func (p *Proxy) StatusOverlayEnabled() bool {
 	return p.statusOverlay.Load()
 }
 
+// appNavSettings is the app switcher's live configuration. Stored behind one
+// pointer so both fields change atomically together.
+type appNavSettings struct {
+	// homeURL is where the switcher's "All apps" link points: the control
+	// origin's dashboard, which is a different host from the app page whenever
+	// server.app_origin is set.
+	homeURL string
+}
+
+// SetAppNav turns the injected app switcher on or off, and sets where its "All
+// apps" link points. It takes effect on the next response from every backend,
+// including ones already registered.
+//
+// An empty homeURL leaves the link relative, which is correct only when apps
+// and the dashboard share an origin.
+func (p *Proxy) SetAppNav(enabled bool, homeURL string) {
+	if !enabled {
+		p.appNav.Store(nil)
+		return
+	}
+	p.appNav.Store(&appNavSettings{homeURL: homeURL})
+}
+
+// AppNavEnabled reports whether the app switcher is currently being injected.
+func (p *Proxy) AppNavEnabled() bool {
+	return p.appNav.Load() != nil
+}
+
 // getWakeTrigger returns the current wake trigger under the read lock.
 func (p *Proxy) getWakeTrigger() func(string) {
 	p.mu.RLock()
@@ -1087,12 +1125,12 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(s
 		case "crashed":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(renderAppDownPage("crashed", slug, reason))) //nolint:errcheck
+			w.Write([]byte(p.withAppNav(renderAppDownPage("crashed", slug, reason), slug))) //nolint:errcheck
 			return
 		case "stopped":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(renderAppDownPage("stopped", slug, ""))) //nolint:errcheck
+			w.Write([]byte(p.withAppNav(renderAppDownPage("stopped", slug, ""), slug))) //nolint:errcheck
 			return
 		case "deploying":
 			// A deployment is in flight for this slug (the deploy tears the
@@ -1103,14 +1141,14 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(s
 			// wake trigger itself: on the miss path holdForWake already fired
 			// it, and on the upstream-error path dead-replica recovery belongs
 			// to the watchdog.
-			writeWaitPage(w, http.StatusOK, deployingPage)
+			writeWaitPage(w, http.StatusOK, p.withAppNav(deployingPage, slug))
 			return
 		}
 	}
 	if trigger != nil {
 		go trigger(slug)
 	}
-	writeWaitPage(w, http.StatusOK, loadingPage)
+	writeWaitPage(w, http.StatusOK, p.withAppNav(loadingPage, slug))
 }
 
 // SetSlugExists registers a synchronous predicate that the proxy uses to
@@ -1515,8 +1553,8 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		// Strip inbound platform identity headers and (when enabled for
 		// this pool and a user is authenticated) inject the real ones.
 		applyIdentityHeaders(req, pool, slugCopy, &p.identityProvider)
-		// Ask for a body ModifyResponse can splice the status overlay into.
-		p.relaxEncodingForOverlay(req)
+		// Ask for a body ModifyResponse can splice ShinyHub's scripts into.
+		p.relaxEncodingForInjection(req)
 
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
@@ -1612,8 +1650,8 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 		applyForwardingHeaders(req, scheme, clientIP, proxytrust.PeerIsTrusted(req, p.trustedProxyNets()))
 		stripInternalCookies(req)
 		applyIdentityHeaders(req, pool, slugCopy, &p.identityProvider)
-		// Ask for a body ModifyResponse can splice the status overlay into.
-		p.relaxEncodingForOverlay(req)
+		// Ask for a body ModifyResponse can splice ShinyHub's scripts into.
+		p.relaxEncodingForInjection(req)
 
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host

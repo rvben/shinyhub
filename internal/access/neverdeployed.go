@@ -35,7 +35,12 @@ type neverDeployedStore interface {
 // honoured when reconstructing the origin for the manager's `shinyhub login
 // --host <origin>` snippet. Without the gate any direct caller could inject
 // a phishing host into a snippet that the manager copy-pastes into a shell.
-func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked auth.RevocationChecker, userLookup auth.UserLookup, trustedProxyNets []*net.IPNet) func(http.Handler) http.Handler {
+//
+// WithAppNav adds the app switcher to the page. It matters most here for the
+// non-manager notice, which is the one ShinyHub page that offers a visitor no
+// link at all: the manager variant at least ends with "Back to dashboard".
+func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked auth.RevocationChecker, userLookup auth.UserLookup, trustedProxyNets []*net.IPNet, opts ...Option) func(http.Handler) http.Handler {
+	cfg := newOptions(opts)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			slug := extractSlug(r.URL.Path)
@@ -73,7 +78,8 @@ func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked au
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(renderNeverDeployedPage(app, user, manager, requestOrigin(r, trustedProxyNets))))
+			page := []byte(renderNeverDeployedPage(app, user, manager, requestOrigin(r, trustedProxyNets)))
+			_, _ = w.Write(cfg.withAppNav(page, slug))
 		})
 	}
 }

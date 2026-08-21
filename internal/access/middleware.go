@@ -29,7 +29,11 @@ type store interface {
 // token expires (potentially hours), even after being demoted to "user" or
 // deleted entirely. Production wiring MUST supply this; tests may pass nil
 // when they want to assert behaviour purely from the JWT claims.
-func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) func(http.Handler) http.Handler {
+//
+// See WithAppNav for the one optional behaviour: injecting the app switcher
+// into the access-denied pages this middleware writes.
+func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, userLookup auth.UserLookup, opts ...Option) func(http.Handler) http.Handler {
+	cfg := newOptions(opts)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			slug := extractSlug(r.URL.Path)
@@ -72,9 +76,9 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 			}
 			switch status {
 			case http.StatusUnauthorized:
-				writeAccessDenied(w, r, http.StatusUnauthorized, "Sign in to access this app")
+				writeAccessDenied(w, r, http.StatusUnauthorized, "Sign in to access this app", slug, cfg)
 			case http.StatusForbidden:
-				writeAccessDenied(w, r, http.StatusForbidden, "You don't have access to this app")
+				writeAccessDenied(w, r, http.StatusForbidden, "You don't have access to this app", slug, cfg)
 			default:
 				next.ServeHTTP(w, r)
 			}
@@ -167,13 +171,15 @@ func resolveSession(r *http.Request, secret string, revoked auth.RevocationCheck
 // The HTML page intentionally does NOT include the app's name. Anything in
 // app metadata (name, project) is private — leaking it on the access-denied
 // path would let an unauthenticated caller enumerate private app titles by
-// guessing slugs.
-func writeAccessDenied(w http.ResponseWriter, r *http.Request, status int, headline string) {
+// guessing slugs. The app switcher cfg may add does not weaken that: it names
+// only apps the caller is separately authorized to see, and the denied app is
+// by definition not among them.
+func writeAccessDenied(w http.ResponseWriter, r *http.Request, status int, headline, slug string, cfg options) {
 	if wantsHTML(r) {
 		nextURL := r.URL.RequestURI()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(status)
-		_, _ = w.Write(renderAccessDeniedPage(status, headline, nextURL))
+		_, _ = w.Write(cfg.withAppNav(renderAccessDeniedPage(status, headline, nextURL), slug))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

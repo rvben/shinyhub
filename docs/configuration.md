@@ -187,6 +187,45 @@ On by default. What it does, and what it deliberately does not do:
 Set it to `false` for byte-for-byte untouched application responses. No response
 body is rewritten while it is off.
 
+## Application switcher
+
+An open application fills the browser tab, and nothing in it leads anywhere
+else: a visitor who reaches one application has no way to get to another, or
+back to the dashboard, short of editing the URL. ShinyHub injects a switcher
+into application pages that lists the applications this visitor can open,
+grouped by project.
+
+```yaml
+server:
+  app_nav: false   # SHINYHUB_SERVER_APP_NAV
+```
+
+On by default. What it does, and what it deliberately does not do:
+
+- It appends one `<script>` before `</body>`, on the same top-level HTML
+  navigations the status overlay uses and under the same rules: sub-resources,
+  XHR, JSON, WebSocket upgrades, redirects, and error responses are never
+  touched. When both are enabled they share a single pass over the response.
+- It renders inside a closed shadow root, so the application's own CSS and the
+  switcher's cannot reach each other.
+- It lists only applications the caller is already authorized to see, resolved
+  per request against the same rules as the dashboard. An anonymous visitor
+  sees the public ones. It names no application the caller could not have
+  listed for themselves.
+- A visitor can dismiss it for the tab; it comes back on reload.
+- It is also added to the pages ShinyHub serves in the application's place -
+  starting, deploying, at capacity, stopped, crashed, awaiting a first deploy,
+  and the two access-denied pages - which are the surfaces where a visitor is
+  most stuck.
+- If the application sets a `Content-Security-Policy`, ShinyHub adds the
+  switcher's `sha256` script hash to it and nothing else. A policy that forbids
+  scripts outright (`'none'`) is honoured by skipping the injection, never by
+  relaxing the policy.
+
+Set it to `false` to leave application pages without it. Off is absent rather
+than idle: no page is rewritten, and the endpoint the switcher reads its list
+from is not served at all.
+
 ## Environment overrides
 
 Configuration keys generally map to `SHINYHUB_<UPPER_SNAKE_CASE>` variables.

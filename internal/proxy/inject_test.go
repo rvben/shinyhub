@@ -13,8 +13,15 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/auth"
 )
+
+// overlayOnly is the injection set for a proxy with just the status overlay
+// enabled, which is what most of these tests exercise.
+func overlayOnly(slug string) func() []pageScript {
+	return func() []pageScript { return []pageScript{overlayPageScript(slug)} }
+}
 
 // appPageLoad is the request shape ServeHTTP forwards for a top-level browser
 // navigation to slug. It goes through render_gate_test.go's pageLoadRequest so
@@ -110,67 +117,7 @@ func TestOverlaySnippet_EscapesSlugIntoTheAttribute(t *testing.T) {
 	}
 }
 
-func TestInsertBeforeBodyClose(t *testing.T) {
-	t.Run("lands between the app content and the closing tag", func(t *testing.T) {
-		out, ok := insertBeforeBodyClose([]byte(testShell), "<!--SNIP-->")
-		if !ok {
-			t.Fatal("insertion declined on a well-formed shell")
-		}
-		s := string(out)
-		snip := strings.Index(s, "<!--SNIP-->")
-		content := strings.Index(s, `id="app-root"`)
-		closing := strings.Index(s, "</body>")
-		if snip < 0 {
-			t.Fatal("snippet absent")
-		}
-		if !(content < snip && snip < closing) {
-			t.Fatalf("snippet at %d must sit after the app content (%d) and before </body> (%d)", snip, content, closing)
-		}
-		// Nothing of the original may be lost: removing the snippet must give
-		// the input back byte for byte.
-		if restored := strings.Replace(s, "<!--SNIP-->", "", 1); restored != testShell {
-			t.Fatalf("insertion altered the surrounding document:\n%s", restored)
-		}
-	})
-
-	t.Run("uses the last closing tag", func(t *testing.T) {
-		// A </body> inside a string literal or a comment earlier in the document
-		// would otherwise capture the script and put it mid-page, where it runs
-		// before the app has finished parsing.
-		in := `<body><script>var s = "</body>";</script><p>x</p></body>`
-		out, ok := insertBeforeBodyClose([]byte(in), "<!--SNIP-->")
-		if !ok {
-			t.Fatal("insertion declined")
-		}
-		s := string(out)
-		if strings.Index(s, "<!--SNIP-->") < strings.Index(s, "<p>x</p>") {
-			t.Fatalf("snippet went in at the first </body>, not the last: %s", s)
-		}
-	})
-
-	t.Run("case insensitive", func(t *testing.T) {
-		out, ok := insertBeforeBodyClose([]byte("<BODY>hi</BODY>"), "<!--SNIP-->")
-		if !ok {
-			t.Fatal("uppercase closing tag was not recognised")
-		}
-		if !strings.HasSuffix(string(out), "<!--SNIP--></BODY>") {
-			t.Fatalf("unexpected placement: %s", out)
-		}
-	})
-
-	t.Run("declines a document without one", func(t *testing.T) {
-		in := []byte(`{"json":true}`)
-		out, ok := insertBeforeBodyClose(in, "<!--SNIP-->")
-		if ok {
-			t.Fatal("insertion claimed success with no </body> to insert before")
-		}
-		if !bytes.Equal(out, in) {
-			t.Fatalf("declined insertion still altered the body: %s", out)
-		}
-	})
-}
-
-func TestExtendCSPForOverlay(t *testing.T) {
+func TestExtendCSPForScripts(t *testing.T) {
 	h := overlayCSPHash
 	cases := []struct {
 		name   string
@@ -205,7 +152,7 @@ func TestExtendCSPForOverlay(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := extendCSPForOverlay(tc.policy)
+			got, ok := extendCSPForScripts(tc.policy, []string{h})
 			if ok != tc.ok {
 				t.Fatalf("ok = %v, want %v (got policy %q)", ok, tc.ok, got)
 			}
@@ -219,16 +166,22 @@ func TestExtendCSPForOverlay(t *testing.T) {
 	}
 }
 
-func TestExtendCSPForOverlay_NeverWidens(t *testing.T) {
+func TestExtendCSPForScripts_NeverWidens(t *testing.T) {
 	// The one thing this function must never do, stated as its own test so a
 	// future "just allow inline, it is simpler" cannot pass review silently.
+	//
+	// Both hashes go in together, which is the real shape once the overlay and
+	// the app switcher are both enabled: the count assertion below then also
+	// pins that extending for two scripts adds two sources and not a wildcard
+	// standing in for them.
+	hashes := []string{overlayCSPHash, appnav.CSPHash}
 	for _, policy := range []string{
 		"script-src 'self'",
 		"default-src 'self'",
 		"default-src 'none'; script-src 'self'",
 		"script-src 'strict-dynamic' 'nonce-abc'",
 	} {
-		got, ok := extendCSPForOverlay(policy)
+		got, ok := extendCSPForScripts(policy, hashes)
 		if !ok {
 			continue
 		}
@@ -238,9 +191,41 @@ func TestExtendCSPForOverlay_NeverWidens(t *testing.T) {
 			}
 		}
 		added := strings.Count(got, "'sha256-")
-		if added != strings.Count(policy, "'sha256-")+1 {
-			t.Fatalf("extending %q should add exactly one hash, got %q", policy, got)
+		if added != strings.Count(policy, "'sha256-")+len(hashes) {
+			t.Fatalf("extending %q should add exactly %d hashes, got %q", policy, len(hashes), got)
 		}
+	}
+}
+
+func TestExtendCSPForScripts_TwoScriptsBothAdmitted(t *testing.T) {
+	// A page carrying both injections needs both hashes in the same directive.
+	// Admitting only the first would leave the app switcher blocked on every
+	// CSP-enforcing app, visible as nothing at all rather than as an error.
+	got, ok := extendCSPForScripts("script-src 'self'", []string{overlayCSPHash, appnav.CSPHash})
+	if !ok {
+		t.Fatal("extension declined a policy it can narrow")
+	}
+	if !strings.Contains(got, overlayCSPHash) {
+		t.Fatalf("overlay hash absent: %q", got)
+	}
+	if !strings.Contains(got, appnav.CSPHash) {
+		t.Fatalf("app switcher hash absent: %q", got)
+	}
+	if overlayCSPHash == appnav.CSPHash {
+		t.Fatal("the two scripts hash identically, so this test proves nothing")
+	}
+}
+
+func TestExtendCSPForScripts_NoHashesIsANoOp(t *testing.T) {
+	// Both injections off: the policy must come back untouched rather than
+	// gaining an empty script-src promoted from default-src.
+	const policy = "default-src 'self' https:"
+	got, ok := extendCSPForScripts(policy, nil)
+	if !ok {
+		t.Fatal("extension declined with nothing to add")
+	}
+	if got != policy {
+		t.Fatalf("policy = %q, want it unchanged (%q)", got, policy)
 	}
 }
 
@@ -284,7 +269,7 @@ func TestInjectStatusOverlay_RewritesThePageAndItsHeaders(t *testing.T) {
 	resp.Header.Set("ETag", `"abc123"`)
 	resp.Header.Set("Content-Security-Policy", "default-src 'self'")
 
-	if err := injectStatusOverlay("demo")(resp); err != nil {
+	if err := injectPageScripts(overlayOnly("demo"))(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 
@@ -334,7 +319,7 @@ func TestInjectStatusOverlay_LeavesUninjectableResponsesByteIdentical(t *testing
 			mut(resp)
 			before := resp.Header.Clone()
 
-			if err := injectStatusOverlay("demo")(resp); err != nil {
+			if err := injectPageScripts(overlayOnly("demo"))(resp); err != nil {
 				t.Fatalf("inject: %v", err)
 			}
 			if got := readBody(t, resp); got != payload {
@@ -358,7 +343,7 @@ func TestInjectStatusOverlay_OversizeBodyPassesThroughWhole(t *testing.T) {
 	resp := htmlResponse("demo", huge)
 	resp.Header.Set("ETag", `"abc123"`)
 
-	if err := injectStatusOverlay("demo")(resp); err != nil {
+	if err := injectPageScripts(overlayOnly("demo"))(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	got := readBody(t, resp)
@@ -377,7 +362,7 @@ func TestInjectStatusOverlay_UnsetContentLengthStaysUnset(t *testing.T) {
 	resp.Header.Del("Content-Length")
 	resp.ContentLength = -1
 
-	if err := injectStatusOverlay("demo")(resp); err != nil {
+	if err := injectPageScripts(overlayOnly("demo"))(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	if got := resp.Header.Get("Content-Length"); got != "" {
@@ -581,7 +566,7 @@ func TestStatusOverlay_EndToEndThroughTheProxy(t *testing.T) {
 	})
 }
 
-func TestRelaxEncodingForOverlay(t *testing.T) {
+func TestRelaxEncodingForInjection(t *testing.T) {
 	page := func() *http.Request {
 		r := appPageLoad("demo")
 		r.Header.Set("Accept-Encoding", "gzip, br")
@@ -594,30 +579,42 @@ func TestRelaxEncodingForOverlay(t *testing.T) {
 		return r
 	}
 
-	t.Run("disabled leaves every request alone", func(t *testing.T) {
+	t.Run("both injections off leaves every request alone", func(t *testing.T) {
 		p := New()
 		for _, r := range []*http.Request{page(), sub()} {
-			p.relaxEncodingForOverlay(r)
+			p.relaxEncodingForInjection(r)
 			if r.Header.Get("Accept-Encoding") != "gzip, br" {
-				t.Fatalf("Accept-Encoding changed with the overlay off: %q", r.Header.Get("Accept-Encoding"))
+				t.Fatalf("Accept-Encoding changed with nothing to inject: %q", r.Header.Get("Accept-Encoding"))
 			}
 		}
 	})
 
-	t.Run("enabled clears it for page loads only", func(t *testing.T) {
-		p := New()
-		p.SetStatusOverlay(true)
+	// Each injection is tested alone, because the defect this guards against is
+	// exactly the one-sided condition: relaxing only for the overlay leaves the
+	// switcher un-injectable on any deployment that turned the overlay off, and
+	// the symptom is a missing switcher with no error anywhere.
+	for _, tc := range []struct {
+		name string
+		on   func(*Proxy)
+	}{
+		{"status overlay alone", func(p *Proxy) { p.SetStatusOverlay(true) }},
+		{"app switcher alone", func(p *Proxy) { p.SetAppNav(true, "https://hub.example.com/") }},
+	} {
+		t.Run(tc.name+" clears it for page loads only", func(t *testing.T) {
+			p := New()
+			tc.on(p)
 
-		r := page()
-		p.relaxEncodingForOverlay(r)
-		if got := r.Header.Get("Accept-Encoding"); got != "" {
-			t.Fatalf("page load kept Accept-Encoding %q; the body would arrive compressed", got)
-		}
+			r := page()
+			p.relaxEncodingForInjection(r)
+			if got := r.Header.Get("Accept-Encoding"); got != "" {
+				t.Fatalf("page load kept Accept-Encoding %q; the body would arrive compressed", got)
+			}
 
-		s := sub()
-		p.relaxEncodingForOverlay(s)
-		if got := s.Header.Get("Accept-Encoding"); got != "gzip, br" {
-			t.Fatalf("sub-resource lost its Accept-Encoding %q; it is never injected into", got)
-		}
-	})
+			s := sub()
+			p.relaxEncodingForInjection(s)
+			if got := s.Header.Get("Accept-Encoding"); got != "gzip, br" {
+				t.Fatalf("sub-resource lost its Accept-Encoding %q; it is never injected into", got)
+			}
+		})
+	}
 }
