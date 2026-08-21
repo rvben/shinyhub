@@ -63,6 +63,50 @@ validation. Values are never printed; startup diagnostics list keys only.
 `PORT`, `SHINYHUB_APP_DATA`, and `SHINYHUB_APP_SLUG` are platform-managed and
 cannot be overridden.
 
+Plain `shinyhub run` uses only the selected app directory; it does not compose
+`[[bundle_file]]` entries from a fleet manifest. If the app is a consumer in a
+valid nearest-parent `fleet.toml`, the command warns on stderr so an incomplete
+local bundle is not mistaken for fleet parity. This discovery is advisory and
+cannot see a manifest passed elsewhere with `-f`.
+
+### Run a fleet app with shared inputs
+
+Use the fleet-aware local entry point when an app consumes shared bundle files:
+
+```bash
+shinyhub fleet dev sales-dashboard
+shinyhub fleet dev sales-dashboard -f config/fleet.toml --check
+```
+
+`fleet dev` selects the app by its manifest slug, mirrors its local source into
+a generated workspace, and composes the selected app's `[[bundle_file]]`
+destinations there. It never writes vendored copies into either the app or the
+shared source tree, and it does not contact a ShinyHub server. Git-backed apps
+are not supported by this V1 local workflow.
+
+The command accepts the local-run flags `--port`, `--no-sync`, `--no-reload`,
+`--fresh`, `--env`, `--env-file`, `--data-dir`, `--state-dir`, `--open`, and
+`--check`. The app slug is authoritative, so there is no `--slug` flag.
+`--no-sync` skips dependency preparation but still mirrors the source and
+composes shared files. The default `.env` is read from the selected app source,
+not from the fleet manifest directory.
+
+Edits to the app source or any declared shared source trigger the same staged,
+health-checked reload as ordinary `run`. A missing shared file, a newly
+colliding destination, or a candidate that fails startup leaves the last
+healthy process serving. `--no-reload` composes once and runs without watching.
+Changes to `fleet.toml` itself—including consumer or destination changes—require
+restarting `fleet dev` in V1.
+
+Default fleet-development state is keyed by the canonical manifest path plus
+app slug. Two slugs may therefore use the same read-only source concurrently,
+and an ordinary `run` may coexist with `fleet dev`; each gets a separate
+workspace, automatic port, and default data directory. This also means their
+default app data is intentionally not shared. Pass the same explicit
+`--data-dir` when both workflows should see one local data set. Passing the same
+explicit `--state-dir` to concurrent commands instead produces an actionable
+workspace-lock error.
+
 Use `[app] readiness_path` when `/` is not a meaningful health endpoint. By
 default, any 2xx or 3xx response is healthy; add `readiness_status` to require
 one exact status:

@@ -66,6 +66,24 @@ func TestDigestLocalDir_StableAndContentSensitive(t *testing.T) {
 	}
 }
 
+func TestDigestBundleSpec_IncludesSharedSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print('hi')\n")
+	base, err := digestLocalDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withInput, err := digestBundleSpec(bundleBuildSpec{Dir: dir, Inputs: []bundle.FileInputSnapshot{{
+		From: "_shared/theme.py", To: "helpers/theme.py", Mode: 0o644, Data: []byte("orange\n"),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withInput == base {
+		t.Fatal("shared snapshot did not affect the bundle digest")
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

@@ -1,9 +1,30 @@
 package fleet
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestParseManifest_DocumentedFleetExample(t *testing.T) {
+	doc, err := os.ReadFile("../../docs/fleet.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fence = "```toml\n"
+	start := strings.Index(string(doc), fence)
+	if start < 0 {
+		t.Fatal("docs/fleet.md has no TOML example")
+	}
+	example := string(doc)[start+len(fence):]
+	end := strings.Index(example, "\n```")
+	if end < 0 {
+		t.Fatal("docs/fleet.md TOML example has no closing fence")
+	}
+	if _, problems := ParseManifest([]byte(example[:end]), "fleet.toml"); len(problems) != 0 {
+		t.Fatalf("documented fleet manifest is invalid: %v", problems)
+	}
+}
 
 func TestParseManifest_Valid(t *testing.T) {
 	src := `
@@ -43,6 +64,104 @@ source = "git+https://example.com/beta.git"
 	}
 	if m.Apps[1].Config.HibernateTimeoutMinutes == nil || *m.Apps[1].Config.HibernateTimeoutMinutes != 30 {
 		t.Fatalf("app[1].Config.HibernateTimeoutMinutes = %v, want 30", m.Apps[1].Config.HibernateTimeoutMinutes)
+	}
+}
+
+func TestParseManifest_BundleFileValid(t *testing.T) {
+	src := `
+fleet_id = "analytics"
+
+[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = ["sales", "operations"]
+
+[[app]]
+slug = "sales"
+source = "./sales"
+
+[[app]]
+slug = "operations"
+source = "./operations"
+`
+	m, probs := ParseManifest([]byte(src), "fleet.toml")
+	if len(probs) != 0 {
+		t.Fatalf("unexpected problems: %v", probs)
+	}
+	if len(m.BundleFiles) != 1 {
+		t.Fatalf("len(BundleFiles) = %d, want 1", len(m.BundleFiles))
+	}
+	got := m.BundleFiles[0]
+	if got.From != "_shared/theme.py" || got.To != "helpers/theme.py" ||
+		len(got.Consumers) != 2 || got.Consumers[0] != "sales" || got.Consumers[1] != "operations" {
+		t.Fatalf("BundleFiles[0] = %+v", got)
+	}
+}
+
+func TestParseManifest_BundleFileProblems(t *testing.T) {
+	const app = `
+[[app]]
+slug = "sales"
+source = "./sales"
+`
+	cases := []struct {
+		name, declarations, want string
+	}{
+		{"missing from", `[[bundle_file]]
+to = "helpers/theme.py"
+consumers = ["sales"]
+`, "from is required"},
+		{"missing to", `[[bundle_file]]
+from = "_shared/theme.py"
+consumers = ["sales"]
+`, "to is required"},
+		{"empty consumers", `[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = []
+`, "consumers must not be empty"},
+		{"parent traversal", `[[bundle_file]]
+from = "../theme.py"
+to = "helpers/theme.py"
+consumers = ["sales"]
+`, `from "../theme.py"`},
+		{"native separator", `[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers\\theme.py"
+consumers = ["sales"]
+`, "forward slashes"},
+		{"reserved control file", `[[bundle_file]]
+from = "_shared/shinyhub.toml"
+to = "shinyhub.toml"
+consumers = ["sales"]
+`, "bundle control file"},
+		{"unknown consumer", `[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = ["missing"]
+`, `unknown consumer "missing"`},
+		{"duplicate consumer", `[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = ["sales", "sales"]
+`, `duplicate consumer "sales"`},
+		{"destination prefix collision", `[[bundle_file]]
+from = "_shared/a"
+to = "helpers"
+consumers = ["sales"]
+[[bundle_file]]
+from = "_shared/b"
+to = "helpers/theme.py"
+consumers = ["sales"]
+`, "destination conflict"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, probs := ParseManifest([]byte("fleet_id = \"analytics\"\n"+tc.declarations+app), "fleet.toml")
+			if got := problemsString(probs); !strings.Contains(got, tc.want) {
+				t.Fatalf("problems must contain %q\n--- got ---\n%s", tc.want, got)
+			}
+		})
 	}
 }
 
@@ -106,6 +225,24 @@ source = "./a"
 	}
 }
 
+func TestParseManifest_UnknownKeyRetainsPathWithoutSelfSuggestion(t *testing.T) {
+	src := `
+fleet_id = "eu"
+
+[[project]]
+slug = "analytics"
+source = "./not-valid-for-a-project"
+`
+	_, probs := ParseManifest([]byte(src), "fleet.toml")
+	joined := problemsString(probs)
+	if !strings.Contains(joined, `unknown key "project.source"`) {
+		t.Fatalf("unknown key must retain its dotted TOML path\n--- got ---\n%s", joined)
+	}
+	if strings.Contains(joined, `did you mean "source"`) {
+		t.Fatalf("an exact leaf match must not suggest itself\n--- got ---\n%s", joined)
+	}
+}
+
 func TestParseManifest_AggregatesAllProblems(t *testing.T) {
 	src := `
 [[app]]
@@ -128,7 +265,7 @@ hibernate_timout_minutes = 5
 		"fleet_id is required",
 		`duplicate slug "dup"`,
 		`invalid visibility "secret"`,
-		`unknown key "hibernate_timout_minutes"`,
+		`unknown key "app.hibernate_timout_minutes"`,
 		`did you mean "hibernate_timeout_minutes"`,
 	} {
 		if !strings.Contains(joined, want) {

@@ -297,3 +297,69 @@ func TestFleetInitCmd_RefusesOverwriteWithoutForce(t *testing.T) {
 		t.Fatal("--force did not overwrite the file")
 	}
 }
+
+func TestFleetInitCmd_ForcePreservesBundleFilesInBrokenManifest(t *testing.T) {
+	_, reqs, _ := setupCLITest(t)
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "fleet.toml")
+	original := []byte(`fleet_id = "analytics"
+[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = ["sales"]
+this is not valid TOML
+`)
+	if err := os.WriteFile(manifest, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := execCLI(t, "fleet", "init", "--fleet-id", "analytics", "-f", manifest, "--force")
+	if err == nil || !strings.Contains(err.Error(), "bundle_file") {
+		t.Fatalf("force-init must refuse to erase bundle declarations, got %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Fatalf("refusal must happen before server contact, got %d request(s)", len(*reqs))
+	}
+	if got, readErr := os.ReadFile(manifest); readErr != nil || string(got) != string(original) {
+		t.Fatalf("refused manifest changed: readErr=%v\n--- got ---\n%s", readErr, got)
+	}
+}
+
+func TestFleetInitCmd_ForceConservativelyDetectsBundleFileHeaders(t *testing.T) {
+	cases := []struct {
+		name, original string
+	}{
+		{"valid manifest", `fleet_id = "analytics"
+[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = ["sales"]
+[[app]]
+slug = "sales"
+source = "./sales"
+`},
+		{"comment in broken manifest", `fleet_id =
+# preserve this before retrying: [[ bundle_file ]]
+`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, reqs, _ := setupCLITest(t)
+			manifest := filepath.Join(t.TempDir(), "fleet.toml")
+			if err := os.WriteFile(manifest, []byte(tc.original), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := execCLI(t, "fleet", "init", "--fleet-id", "analytics", "-f", manifest, "--force")
+			if err == nil || !strings.Contains(err.Error(), "bundle_file") {
+				t.Fatalf("force-init must conservatively refuse, got %v", err)
+			}
+			if len(*reqs) != 0 {
+				t.Fatalf("refusal must precede server contact, got %d request(s)", len(*reqs))
+			}
+			if got, readErr := os.ReadFile(manifest); readErr != nil || string(got) != tc.original {
+				t.Fatalf("refused manifest changed: readErr=%v\n--- got ---\n%s", readErr, got)
+			}
+		})
+	}
+}

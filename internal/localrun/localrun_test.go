@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/deploy"
 )
 
@@ -269,6 +270,174 @@ http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever(
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("runner did not stop")
+	}
+}
+
+func TestRun_FleetInputReloadKeepsLastHealthyAppAndRecovers(t *testing.T) {
+	skipIfNoPython3(t)
+	root := t.TempDir()
+	source := filepath.Join(root, "app")
+	shared := filepath.Join(root, "_shared", "version.txt")
+	if err := os.MkdirAll(filepath.Dir(shared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := `import http.server, os, sys
+version = open("helpers/version.txt").read().strip()
+if version == "bad": sys.exit(3)
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = open("helpers/version.txt").read().strip().encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, fmt, *args): pass
+http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
+`
+	for path, body := range map[string]string{
+		filepath.Join(source, "server.py"):     server,
+		filepath.Join(source, "shinyhub.toml"): "[app]\ncommand = [\"python3\", \"server.py\"]\n",
+		filepath.Join(root, "fleet.toml"):      "fleet_id = \"test\"\n",
+		shared:                                 "v1\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	port := deploy.AllocatePort()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			BundleDir: source, ManifestPath: filepath.Join(root, "fleet.toml"),
+			BundleInputs: []bundle.FileInputSpec{{From: "_shared/version.txt", To: "helpers/version.txt"}},
+			StateDir:     t.TempDir(), Slug: "fleet-input-reload", Port: port, NoSync: true,
+		}, io.Discard, io.Discard)
+	}()
+	url := fmt.Sprintf("http://127.0.0.1:%d/app/fleet-input-reload/", port)
+	waitForBody(t, url, "v1", 5*time.Second)
+
+	if err := os.WriteFile(shared, []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitForBody(t, url, "v2", 6*time.Second)
+	if err := os.MkdirAll(filepath.Join(source, "helpers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "helpers", "version.txt"), []byte("collision\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1 * time.Second)
+	waitForBody(t, url, "v2", 2*time.Second)
+	if err := os.RemoveAll(filepath.Join(source, "helpers")); err != nil {
+		t.Fatal(err)
+	}
+	waitForBody(t, url, "v2", 3*time.Second)
+
+	if err := os.WriteFile(shared, []byte("bad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	waitForBody(t, url, "v2", 2*time.Second)
+	if err := os.Remove(shared); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1 * time.Second)
+	waitForBody(t, url, "v2", 2*time.Second)
+
+	if err := os.WriteFile(shared, []byte("v3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitForBody(t, url, "v3", 6*time.Second)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runner shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not stop")
+	}
+	if _, err := os.Stat(filepath.Join(source, "helpers")); !os.IsNotExist(err) {
+		t.Fatalf("fleet input leaked into app source: %v", err)
+	}
+}
+
+func TestRun_InvalidFleetInputLeavesNoLocalState(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "app")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "shinyhub.toml"), []byte("[app]\ncommand = [\"missing-command\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(root, "fleet.toml")
+	if err := os.WriteFile(manifest, []byte("fleet_id = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(root, "state")
+	err := Run(context.Background(), Options{
+		BundleDir: source, ManifestPath: manifest, StateDir: state,
+		BundleInputs: []bundle.FileInputSpec{{From: "_shared/missing.py", To: "helpers/shared.py"}},
+	}, io.Discard, io.Discard)
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) || !strings.Contains(err.Error(), "missing.py") {
+		t.Fatalf("error = %v, want missing-input validation error", err)
+	}
+	if _, statErr := os.Stat(state); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid input created local state: %v", statErr)
+	}
+}
+
+func TestRun_FleetWorkspaceAndDataMustStayOutsideManifestRoot(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "app")
+	sharedDir := filepath.Join(root, "_shared")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "shinyhub.toml"), []byte("[app]\ncommand = [\"missing-command\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedDir, "helper.py"), []byte("shared\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(root, "fleet.toml")
+	if err := os.WriteFile(manifest, []byte("fleet_id = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		state   string
+		data    string
+		created string
+	}{
+		{name: "state", state: filepath.Join(sharedDir, "state"), created: filepath.Join(sharedDir, "state")},
+		{name: "data", state: t.TempDir(), data: filepath.Join(sharedDir, "data"), created: filepath.Join(sharedDir, "data")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Run(context.Background(), Options{
+				BundleDir: source, ManifestPath: manifest, StateDir: tc.state, DataDir: tc.data,
+				BundleInputs: []bundle.FileInputSpec{{From: "_shared/helper.py", To: "helpers/shared.py"}},
+			}, io.Discard, io.Discard)
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) || !strings.Contains(err.Error(), "fleet manifest root") {
+				t.Fatalf("error = %v, want protected fleet-root validation error", err)
+			}
+			if _, statErr := os.Stat(tc.created); !os.IsNotExist(statErr) {
+				t.Fatalf("rejected location was created: %v", statErr)
+			}
+		})
 	}
 }
 

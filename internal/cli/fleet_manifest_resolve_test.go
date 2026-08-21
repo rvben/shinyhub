@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 // chooseFleetManifest decides which manifest a fleet command reads when -f may
 // have been omitted. An explicit -f wins outright; otherwise fleet.toml is
@@ -54,5 +57,17 @@ func TestChooseFleetManifest(t *testing.T) {
 				t.Errorf("usedLegacy = %v, want %v", gotLegacy, tc.wantLegacy)
 			}
 		})
+	}
+}
+
+func TestChooseFleetManifestInDirUsesSharedPrecedence(t *testing.T) {
+	dir := filepath.Join("repo", "team")
+	present := map[string]bool{
+		filepath.Join(dir, defaultFleetManifest): true,
+		filepath.Join(dir, legacyFleetManifest):  true,
+	}
+	path, found, legacy := chooseFleetManifestInDir(dir, func(path string) bool { return present[path] })
+	if !found || legacy || path != filepath.Join(dir, defaultFleetManifest) {
+		t.Fatalf("selection = %q, found=%v legacy=%v", path, found, legacy)
 	}
 }

@@ -13,7 +13,7 @@ import (
 )
 
 // fleetPlanSchemaVersion is the stable --json envelope version.
-const fleetPlanSchemaVersion = 2
+const fleetPlanSchemaVersion = 3
 
 // planLegend is the one-line glyph key printed under the plan's app list so the
 // column glyphs are self-describing.
@@ -184,7 +184,7 @@ func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *
 		fmt.Fprintln(out, summary)
 		return planExit(f, diff, projects)
 	}
-	renderFleetPlanHuman(out, model, m.FleetID, cmdLabel, planOutputWidth(out), stylerFor(out))
+	renderFleetPlanHumanWithBundleFiles(out, model, m.FleetID, cmdLabel, planOutputWidth(out), stylerFor(out), jsonBundleFilesFromManifest(m, diff))
 	return planExit(f, diff, projects)
 }
 
@@ -257,15 +257,52 @@ type jsonSummary struct {
 	ExitReason string         `json:"exit_reason"`
 }
 
+type jsonBundleFile struct {
+	From             string   `json:"from"`
+	To               string   `json:"to"`
+	Consumers        []string `json:"consumers"`
+	PlannedConsumers []string `json:"planned_consumers"`
+}
+
 type jsonEnvelope struct {
-	SchemaVersion int           `json:"schema_version"`
-	FleetID       string        `json:"fleet_id"`
-	Server        string        `json:"server"`
-	GeneratedAt   string        `json:"generated_at"`
-	Projects      []jsonProject `json:"projects"`
-	Apps          []jsonApp     `json:"apps"`
-	Summary       jsonSummary   `json:"summary"`
-	Plan          planDocument  `json:"plan"`
+	SchemaVersion int              `json:"schema_version"`
+	FleetID       string           `json:"fleet_id"`
+	Server        string           `json:"server"`
+	GeneratedAt   string           `json:"generated_at"`
+	BundleFiles   []jsonBundleFile `json:"bundle_files"`
+	Projects      []jsonProject    `json:"projects"`
+	Apps          []jsonApp        `json:"apps"`
+	Summary       jsonSummary      `json:"summary"`
+	Plan          planDocument     `json:"plan"`
+}
+
+func jsonBundleFilesFromManifest(m *fleet.Manifest, diff []fleet.AppDiff) []jsonBundleFile {
+	actions := make(map[string]fleet.Action, len(diff))
+	for _, app := range diff {
+		actions[app.Slug] = app.Action
+	}
+	files := make([]jsonBundleFile, 0, len(m.BundleFiles))
+	for _, declaration := range m.BundleFiles {
+		consumers := append([]string(nil), declaration.Consumers...)
+		planned := make([]string, 0, len(consumers))
+		for _, consumer := range consumers {
+			switch actions[consumer] {
+			case fleet.ActionCreate, fleet.ActionAdopt, fleet.ActionUpdateSource, fleet.ActionUpdateSourceConfig:
+				planned = append(planned, consumer)
+			}
+		}
+		files = append(files, jsonBundleFile{
+			From: declaration.From, To: declaration.To,
+			Consumers: consumers, PlannedConsumers: planned,
+		})
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		if files[i].From != files[j].From {
+			return files[i].From < files[j].From
+		}
+		return files[i].To < files[j].To
+	})
+	return files
 }
 
 // jsonProjectsFromDiff maps the project diff to its JSON shape, sorted by slug
@@ -319,6 +356,7 @@ func writeFleetPlanJSONWithFile(out interface{ Write([]byte) (int, error) }, m *
 		FleetID:       m.FleetID,
 		Server:        host,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		BundleFiles:   jsonBundleFilesFromManifest(m, diff),
 		Projects:      jsonProjectsFromDiff(projects),
 		Apps:          apps,
 		Summary: jsonSummary{

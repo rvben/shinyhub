@@ -39,6 +39,103 @@ func TestFleetValidate_GoodManifestOffline(t *testing.T) {
 	}
 }
 
+func TestFleetValidate_MissingBundleFileFailsOffline(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "apps", "sales", "app.py"), "print(1)\n")
+	writeFleetManifest(t, dir, `fleet_id = "analytics"
+
+[[bundle_file]]
+from = "_shared/missing.py"
+to = "helpers/theme.py"
+consumers = ["sales"]
+
+[[app]]
+slug = "sales"
+source = "./apps/sales"
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHINYHUB_HOST", "")
+	t.Setenv("SHINYHUB_TOKEN", "")
+
+	out, err := execCLI(t, "fleet", "validate", "-f", filepath.Join(dir, "shinyhub-fleet.toml"))
+	if err == nil || exitCode(err) != 1 {
+		t.Fatalf("missing shared file must fail offline: err=%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "_shared/missing.py") || !strings.Contains(out, "sales") {
+		t.Fatalf("error must name the source and consumer\n%s", out)
+	}
+}
+
+func TestFleetValidate_SharedBundleInputSummary(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "_shared", "theme.py"), "COLOR = 'orange'\n")
+	mustWrite(t, filepath.Join(dir, "apps", "sales", "app.py"), "print(1)\n")
+	writeFleetManifest(t, dir, `fleet_id = "analytics"
+[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = ["sales"]
+[[app]]
+slug = "sales"
+source = "./apps/sales"
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHINYHUB_HOST", "")
+	t.Setenv("SHINYHUB_TOKEN", "")
+
+	out, err := execCLI(t, "fleet", "validate", "-f", filepath.Join(dir, "shinyhub-fleet.toml"))
+	if err != nil {
+		t.Fatalf("valid shared input failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "1 bundle file") || !strings.Contains(out, "sales") {
+		t.Fatalf("validation summary must report declaration and consumer\n%s", out)
+	}
+}
+
+func TestFleetValidate_SharedBundleInputRejectsCollisionAndGitConsumer(t *testing.T) {
+	cases := []struct {
+		name, source string
+		prepare      func(t *testing.T, dir string)
+		want         string
+	}{
+		{
+			name:   "destination collision",
+			source: "./apps/sales",
+			prepare: func(t *testing.T, dir string) {
+				mustWrite(t, filepath.Join(dir, "apps", "sales", "app.py"), "print(1)\n")
+				mustWrite(t, filepath.Join(dir, "apps", "sales", "helpers", "theme.py"), "stale\n")
+			},
+			want: "already exists",
+		},
+		{
+			name:    "git consumer",
+			source:  "git+https://example.com/sales.git",
+			prepare: func(t *testing.T, _ string) {},
+			want:    "local app sources only",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWrite(t, filepath.Join(dir, "_shared", "theme.py"), "COLOR = 'orange'\n")
+			tc.prepare(t, dir)
+			writeFleetManifest(t, dir, `fleet_id = "analytics"
+[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = ["sales"]
+[[app]]
+slug = "sales"
+source = "`+tc.source+`"
+`)
+			out, err := execCLI(t, "fleet", "validate", "-f", filepath.Join(dir, "shinyhub-fleet.toml"))
+			if err == nil || !strings.Contains(out, tc.want) {
+				t.Fatalf("validation err=%v, want %q\n%s", err, tc.want, out)
+			}
+		})
+	}
+}
+
 // A duplicate slug is a hard error: exit 1 naming the offending slug.
 func TestFleetValidate_DuplicateSlug(t *testing.T) {
 	dir := t.TempDir()

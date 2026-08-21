@@ -146,11 +146,21 @@ type ProjectEntry struct {
 	Icon        *string `toml:"icon"`
 }
 
+// BundleFileEntry declares one canonical local file that is composed into the
+// bundles of the explicitly named consumers. Filesystem resolution is owned by
+// the bundle/CLI layers; this package validates only the manifest contract.
+type BundleFileEntry struct {
+	From      string   `toml:"from"`
+	To        string   `toml:"to"`
+	Consumers []string `toml:"consumers"`
+}
+
 // Manifest is a validated fleet.toml.
 type Manifest struct {
-	FleetID  string         `toml:"fleet_id"`
-	Projects []ProjectEntry `toml:"project"`
-	Apps     []AppEntry     `toml:"app"`
+	FleetID     string            `toml:"fleet_id"`
+	Projects    []ProjectEntry    `toml:"project"`
+	BundleFiles []BundleFileEntry `toml:"bundle_file"`
+	Apps        []AppEntry        `toml:"app"`
 }
 
 var fleetIDRe = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
@@ -165,7 +175,8 @@ var validVisibility = map[string]bool{"private": true, "shared": true, "public":
 // knownKeys is the set of accepted manifest keys, used for "did you mean"
 // suggestions on unknown-key rejection.
 var knownKeys = []string{
-	"fleet_id", "app", "project", "slug", "source", "visibility", "config",
+	"fleet_id", "app", "project", "bundle_file", "from", "to", "consumers",
+	"slug", "source", "visibility", "config",
 	"name", "description", "icon",
 	"hibernate_timeout_minutes", "replicas", "max_sessions_per_replica",
 	"autoscale", "enabled", "min_replicas", "max_replicas", "target",
@@ -202,7 +213,7 @@ func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 			if i := strings.LastIndexByte(k, '.'); i >= 0 {
 				leaf = k[i+1:]
 			}
-			msg := fmt.Sprintf("unknown key %q", leaf)
+			msg := fmt.Sprintf("unknown key %q", k)
 			if s := suggest(leaf, knownKeys); s != "" {
 				msg += fmt.Sprintf(`; did you mean %q?`, s)
 			}
@@ -251,6 +262,7 @@ func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 			}
 		}
 	}
+	probs = append(probs, validateBundleFiles(file, &m, seen)...)
 
 	probs = append(probs, validateProjects(file, &m)...)
 
@@ -262,6 +274,98 @@ func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 		return &m, probs
 	}
 	return &m, nil
+}
+
+var bundleControlFiles = map[string]bool{
+	"shinyhub.toml":   true,
+	".shinyhubignore": true,
+	".gitignore":      true,
+}
+
+// validateBundleFiles checks the I/O-free portion of the shared-input
+// contract. Existence, symlinks, filtering and collisions with source-tree
+// entries are checked later, once the CLI has resolved local sources.
+func validateBundleFiles(file string, m *Manifest, appSlugs map[string]bool) []Problem {
+	var probs []Problem
+	destinations := make(map[string][]string)
+	for i, bf := range m.BundleFiles {
+		who := fmt.Sprintf("bundle_file[%d]", i)
+		if bf.From == "" {
+			probs = append(probs, Problem{File: file, Msg: who + ": from is required"})
+		} else if err := validateBundleRelativePath(bf.From); err != nil {
+			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("%s: from %q: %v", who, bf.From, err)})
+		}
+
+		toOK := true
+		if bf.To == "" {
+			toOK = false
+			probs = append(probs, Problem{File: file, Msg: who + ": to is required"})
+		} else if err := validateBundleRelativePath(bf.To); err != nil {
+			toOK = false
+			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("%s: to %q: %v", who, bf.To, err)})
+		} else if bundleControlFiles[bf.To] {
+			toOK = false
+			probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
+				"%s: to %q is a bundle control file and cannot be composed in V1", who, bf.To)})
+		}
+
+		if len(bf.Consumers) == 0 {
+			probs = append(probs, Problem{File: file, Msg: who + ": consumers must not be empty"})
+		}
+		seenConsumers := make(map[string]bool, len(bf.Consumers))
+		for _, consumer := range bf.Consumers {
+			if seenConsumers[consumer] {
+				probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
+					"%s: duplicate consumer %q", who, consumer)})
+				continue
+			}
+			seenConsumers[consumer] = true
+			if !appSlugs[consumer] {
+				probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
+					"%s: unknown consumer %q; declare it in an [[app]] block", who, consumer)})
+				continue
+			}
+			if !toOK {
+				continue
+			}
+			for _, previous := range destinations[consumer] {
+				if bundleDestinationConflict(previous, bf.To) {
+					probs = append(probs, Problem{File: file, Msg: fmt.Sprintf(
+						"%s: destination conflict for app %q: %q conflicts with %q",
+						who, consumer, bf.To, previous)})
+				}
+			}
+			destinations[consumer] = append(destinations[consumer], bf.To)
+		}
+	}
+	return probs
+}
+
+func validateBundleRelativePath(value string) error {
+	if strings.Contains(value, `\`) {
+		return fmt.Errorf("use forward slashes")
+	}
+	if strings.HasPrefix(value, "/") || looksLikeWindowsAbsolutePath(value) {
+		return fmt.Errorf("must be relative")
+	}
+	if strings.HasSuffix(value, "/") {
+		return fmt.Errorf("must name a file, not end in a slash")
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return fmt.Errorf("must be normalized and contain no empty, . or .. segments")
+		}
+	}
+	return nil
+}
+
+func looksLikeWindowsAbsolutePath(value string) bool {
+	return len(value) >= 3 && ((value[0] >= 'a' && value[0] <= 'z') ||
+		(value[0] >= 'A' && value[0] <= 'Z')) && value[1] == ':' && value[2] == '/'
+}
+
+func bundleDestinationConflict(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
 // validateConfig validates one [app.config] block and normalizes it in place:
@@ -407,6 +511,9 @@ func validateProjects(file string, m *Manifest) []Problem {
 func suggest(in string, known []string) string {
 	best, bestD := "", 3
 	for _, k := range known {
+		if in == k {
+			return ""
+		}
 		if d := levenshtein(in, k); d < bestD {
 			best, bestD = k, d
 		}

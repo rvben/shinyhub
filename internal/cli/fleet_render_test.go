@@ -42,6 +42,48 @@ func TestRenderFleetPlan_NoProjectsOmitsSection(t *testing.T) {
 	}
 }
 
+func TestFleetPlan_ReportsSharedBundleFanoutWithoutCausality(t *testing.T) {
+	m := &fleet.Manifest{
+		FleetID: "analytics",
+		BundleFiles: []fleet.BundleFileEntry{{
+			From: "_shared/theme.py", To: "helpers/theme.py", Consumers: []string{"sales", "operations"},
+		}},
+	}
+	diff := []fleet.AppDiff{
+		{Slug: "sales", Action: fleet.ActionUpdateSource},
+		{Slug: "operations", Action: fleet.ActionUpdateConfig},
+	}
+	out := renderPlanToString(t, &fleetPlanFlags{file: defaultFleetManifest}, "shinyhub fleet plan", m, diff)
+	for _, want := range []string{"Shared bundle inputs", "_shared/theme.py", "helpers/theme.py", "consumers: 2", "1 has a planned source update"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("human fan-out missing %q\n%s", want, out)
+		}
+	}
+	if strings.Contains(strings.ToLower(out), "caused") {
+		t.Fatalf("plan must not claim unavailable file-level causality\n%s", out)
+	}
+
+	var buf bytes.Buffer
+	if err := writeFleetPlanJSON(&buf, m, "http://s", diff, nil, 0, "report only"); err != nil {
+		t.Fatal(err)
+	}
+	var env struct {
+		SchemaVersion int `json:"schema_version"`
+		BundleFiles   []struct {
+			From             string   `json:"from"`
+			Consumers        []string `json:"consumers"`
+			PlannedConsumers []string `json:"planned_consumers"`
+		} `json:"bundle_files"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.SchemaVersion != 3 || len(env.BundleFiles) != 1 || len(env.BundleFiles[0].Consumers) != 2 ||
+		len(env.BundleFiles[0].PlannedConsumers) != 1 || env.BundleFiles[0].PlannedConsumers[0] != "sales" {
+		t.Fatalf("bundle fan-out JSON = %+v", env)
+	}
+}
+
 // Declared project drift must print in its own "Projects (%d)" section, ahead
 // of the Apps table, so a project rename is visible without reaching for
 // -o json.
@@ -187,8 +229,8 @@ func TestPlanOutput_ExposesUnmanagedConfigWithoutChangingAction(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 		t.Fatal(err)
 	}
-	if env.SchemaVersion != 2 {
-		t.Fatalf("schema_version = %d, want 2", env.SchemaVersion)
+	if env.SchemaVersion != 3 {
+		t.Fatalf("schema_version = %d, want 3", env.SchemaVersion)
 	}
 	if len(env.Apps) != 1 || env.Apps[0].Action != "unchanged" || len(env.Apps[0].Unmanaged) != 1 {
 		t.Fatalf("JSON unmanaged signal missing or changed action: %+v", env.Apps)

@@ -57,8 +57,8 @@ func convergeFleet(cfg *cliConfig, pf *preflightResult, opt convergeOpts, out io
 func convergeSerial(cfg *cliConfig, pf *preflightResult, entries map[string]fleet.AppEntry, opt convergeOpts, marker string, out io.Writer) []applyResult {
 	results := make([]applyResult, 0, len(pf.diff))
 	for _, d := range pf.diff {
-		results = append(results, convergeApp(
-			cfg, d, entries[d.Slug], pf.observed[d.Slug], pf.sources[d.Slug],
+		results = append(results, convergeAppFromSpec(
+			cfg, d, entries[d.Slug], pf.observed[d.Slug], pf.bundles[d.Slug],
 			opt, marker, out))
 	}
 	return results
@@ -79,8 +79,8 @@ func convergeParallel(cfg *cliConfig, pf *preflightResult, entries map[string]fl
 		go func(i int, d fleet.AppDiff) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = convergeApp(
-				cfg, d, entries[d.Slug], pf.observed[d.Slug], pf.sources[d.Slug],
+			results[i] = convergeAppFromSpec(
+				cfg, d, entries[d.Slug], pf.observed[d.Slug], pf.bundles[d.Slug],
 				opt, marker, sw)
 		}(i, d)
 	}
@@ -128,13 +128,13 @@ func declaredProject(c fleet.Config) string {
 // committed is true if any attempt's bundle was accepted by the server, so
 // callers can tell a pre-commit failure (safe to roll back) from a post-commit
 // one (this fleet's source is already live).
-func deployWithRetry(cfg *cliConfig, slug, dir, visibility, project string, opt convergeOpts, out io.Writer) (promoted string, attempts int, committed bool, firstFires []firstFireRef, failed []attemptOutcome, err error) {
+func deployWithRetry(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, opt convergeOpts, out io.Writer) (promoted string, attempts int, committed bool, firstFires []firstFireRef, failed []attemptOutcome, err error) {
 	total := 1 + opt.retries
 	for attempts = 1; attempts <= total; attempts++ {
 		var c bool
 		var ff []firstFireRef
 		var kind deployfail.Kind
-		promoted, c, ff, kind, err = deployAppBundle(cfg, slug, dir, visibility, project, out, opt.runID, opt.healthTimeout)
+		promoted, c, ff, kind, err = deployAppBundleFromSpec(cfg, slug, spec, visibility, project, out, opt.runID, opt.healthTimeout)
 		committed = committed || c
 		// Keep the first-fire refs from whichever attempt actually fired them.
 		// A later retry of an already-created schedule returns none (the gate is
@@ -402,6 +402,10 @@ func releaseAdoptReservation(cfg *cliConfig, slug string, prior *string, marker 
 // convergeApp reconciles one app. It is total over fleet.Action; an
 // unrecognized action is reported as skipped rather than silently dropped.
 func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs fleet.ObservedApp, srcDir string, opt convergeOpts, marker string, out io.Writer) applyResult {
+	return convergeAppFromSpec(cfg, d, entry, obs, bundleBuildSpec{Dir: srcDir}, opt, marker, out)
+}
+
+func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs fleet.ObservedApp, spec bundleBuildSpec, opt convergeOpts, marker string, out io.Writer) applyResult {
 	start := time.Now()
 	res := applyResult{slug: d.Slug, action: d.Action, mutation: mutationNone}
 	done := func(s applyStatus) applyResult {
@@ -476,7 +480,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		// (2xx, or an ambiguous error whose readback shows the promoted digest
 		// advanced past the pre-deploy one), the reservation is KEPT because
 		// this fleet's source is now the app's bundle.
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attemptsDetail = failed
 		if err != nil {
 			wentLive := committed
@@ -525,7 +529,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		return done(statusDeleted)
 
 	case fleet.ActionCreate:
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
@@ -578,7 +582,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		return done(statusCreated)
 
 	case fleet.ActionUpdateSource:
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
@@ -616,7 +620,7 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 		// Mandatory ordering: deploy first, then patch fleet config
 		// on top with a precondition built from the FRESHLY promoted digest -
 		// never the stale pre-deploy one.
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, srcDir, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt, out)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {

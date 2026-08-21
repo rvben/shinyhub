@@ -8,9 +8,13 @@ import "fmt"
 // over the received zip. Reusing both halves guarantees client/server parity
 // by construction; we never re-walk or re-filter independently.
 func digestLocalDir(dir string) (string, error) {
-	preview, err := buildBundlePreview(dir)
+	return digestBundleSpec(bundleBuildSpec{Dir: dir})
+}
+
+func digestBundleSpec(spec bundleBuildSpec) (string, error) {
+	preview, err := buildBundlePreviewFromSpec(spec)
 	if err != nil {
-		return "", fmt.Errorf("bundle %s: %w", dir, err)
+		return "", fmt.Errorf("bundle %s: %w", spec.Dir, err)
 	}
 	return preview.Digest, nil
 }

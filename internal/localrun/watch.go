@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -17,6 +20,18 @@ import (
 // exclude lists directory-name basenames (e.g. ".venv", ".git") whose entire
 // subtree is skipped during the snapshot. No external dependencies: stdlib only.
 func watchAndRestart(ctx context.Context, dir string, exclude []string, onChange func()) error {
+	return watchAndRestartSources(ctx, dir, exclude, nil, onChange)
+}
+
+// watchAndRestartSources observes the app tree plus explicit files that live
+// outside it, such as fleet bundle inputs. External files are content-hashed:
+// they are few, bounded bundle inputs, and content hashing avoids missing an
+// edit that preserves both size and coarse filesystem timestamps.
+func watchAndRestartSources(ctx context.Context, dir string, exclude, externalFiles []string, onChange func()) error {
+	return watchAndRestartSourcesReady(ctx, dir, exclude, externalFiles, nil, onChange)
+}
+
+func watchAndRestartSourcesReady(ctx context.Context, dir string, exclude, externalFiles []string, ready chan<- struct{}, onChange func()) error {
 	excludeSet := make(map[string]bool, len(exclude))
 	for _, e := range exclude {
 		excludeSet[e] = true
@@ -24,7 +39,10 @@ func watchAndRestart(ctx context.Context, dir string, exclude []string, onChange
 
 	// Initial scan: establish the baseline so a pre-existing recent
 	// modification does not immediately trigger onChange.
-	lastSnapshot := scanSnapshot(dir, excludeSet)
+	lastSnapshot := scanSourcesSnapshot(dir, excludeSet, externalFiles)
+	if ready != nil {
+		close(ready)
+	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -34,13 +52,47 @@ func watchAndRestart(ctx context.Context, dir string, exclude []string, onChange
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			current := scanSnapshot(dir, excludeSet)
+			current := scanSourcesSnapshot(dir, excludeSet, externalFiles)
 			if current != lastSnapshot {
 				lastSnapshot = current
 				onChange()
 			}
 		}
 	}
+}
+
+func scanSourcesSnapshot(dir string, excludeSet map[string]bool, externalFiles []string) [sha256.Size]byte {
+	h := sha256.New()
+	tree := scanSnapshot(dir, excludeSet)
+	_, _ = fmt.Fprintf(h, "tree:%x\n", tree)
+	paths := append([]string(nil), externalFiles...)
+	sort.Strings(paths)
+	last := ""
+	for _, path := range paths {
+		if path == last {
+			continue
+		}
+		last = path
+		info, err := os.Lstat(path)
+		if err != nil {
+			_, _ = fmt.Fprintf(h, "external:%s:error:%v\n", path, err)
+			continue
+		}
+		_, _ = fmt.Fprintf(h, "external:%s:%d:%d:%d\n", path, info.Mode(), info.Size(), info.ModTime().UnixNano())
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			_, _ = fmt.Fprintf(h, "open-error:%v\n", err)
+			continue
+		}
+		_, _ = io.Copy(h, f)
+		_ = f.Close()
+	}
+	var snapshot [sha256.Size]byte
+	copy(snapshot[:], h.Sum(nil))
+	return snapshot
 }
 
 // scanSnapshot fingerprints metadata, not contents, keeping frequent scans

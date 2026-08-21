@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-func TestFleetHelp_ListsAllFourSubcommandsAndExample(t *testing.T) {
+func TestFleetHelp_ListsAllSubcommandsAndExample(t *testing.T) {
 	out, err := execCLI(t, "fleet", "--help")
 	if err != nil {
 		t.Fatalf("fleet --help error: %v\n%s", err, out)
 	}
-	for _, sub := range []string{"init", "plan", "apply", "status"} {
+	for _, sub := range []string{"init", "validate", "plan", "apply", "status", "dev"} {
 		if !strings.Contains(out, sub) {
 			t.Fatalf("fleet --help omits %q:\n%s", sub, out)
 		}
