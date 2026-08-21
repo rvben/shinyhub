@@ -23,6 +23,11 @@ convenience. Pass `-f <path>` to point at any other location.
 ```toml
 fleet_id = "prod-eu"
 
+[[bundle_file]]
+from      = "./_shared/plotly_template.py"
+to        = "helpers/plotly_template.py"
+consumers = ["sales-dashboard"]
+
 [[app]]
 slug       = "sales-dashboard"
 source     = "./apps/sales-dashboard"
@@ -48,6 +53,7 @@ visibility = "public"
 | `fleet_id` | yes | Ownership scope. Must match `[a-z0-9-]`, 1-64 chars. Stamped onto every app this manifest manages as `managed_by = fleet:<fleet_id>`. |
 | `[[app]]` | yes (>=1) | One block per app the fleet should own. |
 | `[[project]]` | no | One block per project the fleet should name. Optional: an app can declare a `project` without a matching block, and the project is then created unnamed. |
+| `[[bundle_file]]` | no | Copy one canonical local file into the bundles of explicitly named consumers. |
 
 ### `[[app]]`
 
@@ -171,6 +177,68 @@ a valid state an operator may be preparing. Remove one with
   root. The URL format is validated when the manifest is parsed; the clone
   happens during pre-flight.
 
+## Shared bundle inputs
+
+Use `[[bundle_file]]` when a small number of files are intentionally identical
+across several local app bundles:
+
+```toml
+[[bundle_file]]
+from      = "./_shared/plotly_template.py"
+to        = "helpers/plotly_template.py"
+consumers = ["sales", "operations"]
+```
+
+`from` resolves against the directory containing `fleet.toml`. `to` is the
+path inside each consumer's bundle. `consumers` is explicit: an app receives
+the file only when its slug is listed. V1 supports local app sources only; a
+declaration that names a `git+` consumer fails validation. This is bundle-time
+composition, not a shared runtime or shared environment. Each resulting bundle
+is still self-contained and independently deployable.
+
+Validation is intentionally strict:
+
+- `from` and `to` must be normalized, portable, relative slash paths. The
+  source must be a regular file inside the manifest root. Every source path
+  component is checked without following symlinks; this also rejects the common
+  monorepo layout where `_shared` itself is a symlink.
+- A destination may not already exist in the app source. Exact and
+  file/directory-prefix conflicts between declarations are also errors.
+- `.shinyhubignore` (or its `.gitignore` fallback) applies to the destination
+  and every destination ancestor. Declaring an ignored destination is an error,
+  not a silent omission. The normal reserved-path, extension, and file-size
+  bundle rules apply too.
+- `shinyhub.toml`, `.shinyhubignore`, and `.gitignore` cannot be composed. These
+  control how the base bundle is interpreted and must live in the app source.
+
+Preflight resolves and snapshots every canonical shared source before any
+server mutation. The same source is read once per invocation even when several
+apps consume it, and each successful consumer deploy uses that immutable
+snapshot. A later edit during the apply is picked up on the next invocation.
+Executable owner mode is normalized to `0755`; other files use `0644`, with a
+fixed archive timestamp for reproducible bundles. The checks reduce file-swap
+risk but are not a hostile-filesystem sandbox; V1 assumes the local checkout is
+trusted while the command runs.
+
+Plan output reports each declaration's consumers and which of those consumers
+already have a planned source-bearing action. That is fan-out visibility, not
+file-level remote causality: the server stores a bundle digest, not the prior
+contents of each shared file. Apply remains non-atomic and continue-on-error,
+so one consumer can fail after another has deployed; the report names that
+partial outcome.
+
+Single-app `shinyhub run`, `shinyhub plan`, and `shinyhub deploy` do not compose
+fleet inputs. When they can discover a valid nearest-parent fleet manifest for
+the selected local source, they warn on stderr and point to the corresponding
+fleet command. Discovery is best-effort and cannot find a manifest supplied
+elsewhere with `-f`; absence of a warning is not proof that the source has no
+fleet composition.
+
+To migrate hand-copied files, add the canonical files under a directory such
+as `_shared`, declare their destinations and consumers, and delete the old
+vendored targets in the same commit. Then run `shinyhub fleet validate`, review
+`shinyhub fleet plan`, and converge with `shinyhub fleet apply`.
+
 ## Config precedence
 
 When the same setting can come from more than one place, the fleet manifest
@@ -215,9 +283,24 @@ you set each path explicitly; an unset source trips the pre-flight check with
 a precise message rather than a confusing parse error.
 
 `--fleet-id` is required (prompted when run interactively); the file is not
-overwritten unless `--force` is passed.
+overwritten unless `--force` is passed. Even with `--force`, init refuses to
+replace an existing manifest that contains `[[bundle_file]]` declarations,
+because regenerating app inventory cannot preserve those hand-authored inputs.
 
-### 2. `shinyhub fleet plan`
+### 2. `shinyhub fleet validate`
+
+Validate the complete manifest locally before contacting a server:
+
+```
+shinyhub fleet validate
+```
+
+Besides schema and source checks, validation resolves every shared input for
+every consumer and rejects missing or escaping sources, symlinks, target
+collisions, ignored destinations, and bundle-policy violations. This is the
+authoritative offline pre-merge gate for supported local consumers.
+
+### 3. `shinyhub fleet plan`
 
 Show what `apply` would do, and change nothing:
 
@@ -233,11 +316,13 @@ envelope; `-q/--quiet` collapses to the summary.
 An operational setting omitted from both manifest layers is not drift and is
 never changed by `apply`. When its stored value is an override rather than the
 field's unset/default representation, `plan` nevertheless labels it
-`unmanaged` in the app row. JSON schema version 2 exposes the same information
+`unmanaged` in the app row. JSON schema version 3 exposes the same information
 as `apps[].unmanaged`, with `key`, `server`, and `default` fields. This signal
-is informational and does not change the action or detailed exit code.
+is informational and does not change the action or detailed exit code. Schema
+version 3 also exposes `bundle_files[]` in both plan and apply envelopes, with
+the declared `consumers` and the source-bearing `planned_consumers`.
 
-### 3. `shinyhub fleet apply`
+### 4. `shinyhub fleet apply`
 
 Converge the fleet:
 

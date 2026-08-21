@@ -110,6 +110,21 @@ This split is intentional. Ignore-file matches are user intent and need no
 follow-up. Policy rejections indicate content that the operator must actively
 move to the data directory before the app can use it at runtime.
 
+## Fleet-composed files
+
+Fleet `[[bundle_file]]` destinations pass through the same ignore matcher and
+`bundle.Rules` policy as files already present in an app source. The declaration
+fails validation if the destination itself or any destination ancestor is
+ignored, if the extension or size is forbidden, or if an entry already exists
+at that path. An explicit shared input is never silently filtered or allowed to
+overwrite a vendored copy.
+
+The ignore file still comes from the consumer app's bundle root; a shared
+source directory's own ignore files have no effect. The three bundle control
+files (`shinyhub.toml`, `.shinyhubignore`, and `.gitignore`) cannot be composed.
+See [Fleet shared bundle inputs](../fleet.md#shared-bundle-inputs) for the full
+contract.
+
 ## `shinyhub deploy --git --subdir`
 
 When deploying a subdirectory of a cloned repository, the bundle root is set

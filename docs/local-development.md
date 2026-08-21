@@ -63,6 +63,12 @@ validation. Values are never printed; startup diagnostics list keys only.
 `PORT`, `SHINYHUB_APP_DATA`, and `SHINYHUB_APP_SLUG` are platform-managed and
 cannot be overridden.
 
+Plain `shinyhub run` uses only the selected app directory; it does not compose
+`[[bundle_file]]` entries from a fleet manifest. If the app is a consumer in a
+valid nearest-parent `fleet.toml`, the command warns on stderr so an incomplete
+local bundle is not mistaken for fleet parity. This discovery is advisory and
+cannot see a manifest passed elsewhere with `-f`.
+
 Use `[app] readiness_path` when `/` is not a meaningful health endpoint. By
 default, any 2xx or 3xx response is healthy; add `readiness_status` to require
 one exact status:

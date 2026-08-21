@@ -34,3 +34,25 @@ func TestManifestDocLinksToFleetPrecedence(t *testing.T) {
 		t.Error("fleet.md must keep the '## Config precedence' heading that manifest.md links to")
 	}
 }
+
+func TestFleetDocsDescribeSharedBundleInputBoundaries(t *testing.T) {
+	fleetDoc, err := os.ReadFile("../../docs/fleet.md")
+	if err != nil {
+		t.Fatalf("read fleet.md: %v", err)
+	}
+	text := strings.Join(strings.Fields(string(fleetDoc)), " ")
+	for _, want := range []string{
+		"## Shared bundle inputs",
+		"consumers = [\"sales\", \"operations\"]",
+		"local app sources only",
+		"Every source path component is checked without following symlinks",
+		"fan-out visibility, not file-level remote causality",
+		"do not compose fleet inputs",
+		"cannot find a manifest supplied elsewhere with `-f`",
+		"non-atomic and continue-on-error",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("fleet.md must document %q", want)
+		}
+	}
+}
