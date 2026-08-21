@@ -96,6 +96,10 @@ func renderDeploymentPlanWith(out io.Writer, plan deploymentPlan, opts planRende
 }
 
 func renderFleetPlanHuman(out io.Writer, model planDocument, fleetID, command string, width int, s styler) {
+	renderFleetPlanHumanWithBundleFiles(out, model, fleetID, command, width, s, nil)
+}
+
+func renderFleetPlanHumanWithBundleFiles(out io.Writer, model planDocument, fleetID, command string, width int, s styler, bundleFiles []jsonBundleFile) {
 	if width <= 0 {
 		width = defaultPlanWidth
 	}
@@ -164,6 +168,19 @@ func renderFleetPlanHuman(out io.Writer, model planDocument, fleetID, command st
 			lines = append(lines, planPaint(s, planSeverityDestructive, heading))
 		}
 		lines = append(lines, fleetResourceLines(s, deletes, width, false)...)
+	}
+	if len(bundleFiles) > 0 {
+		lines = append(lines, "", "Shared bundle inputs")
+		for _, input := range bundleFiles {
+			lines = append(lines, wrapPlanValue("  ", input.From+" -> "+input.To, width)...)
+			verb := "have"
+			if len(input.PlannedConsumers) == 1 {
+				verb = "has"
+			}
+			summary := fmt.Sprintf("consumers: %d (%d %s a planned source update)",
+				len(input.Consumers), len(input.PlannedConsumers), verb)
+			lines = append(lines, wrapPlanValue("    ", summary, width)...)
+		}
 	}
 
 	lines = append(lines, "")
