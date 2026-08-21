@@ -239,6 +239,22 @@ as `_shared`, declare their destinations and consumers, and delete the old
 vendored targets in the same commit. Then run `shinyhub fleet validate`, review
 `shinyhub fleet plan`, and converge with `shinyhub fleet apply`.
 
+Develop a composed consumer through the same declaration rather than restoring
+a vendored copy:
+
+```bash
+shinyhub fleet dev sales -f fleet.toml
+```
+
+This offline command filesystem-validates and runs only the selected local app;
+an unrelated app with a missing local source does not block focused development.
+The whole manifest's syntax and cross-references must still be valid. Shared
+file and app-source edits trigger staged reload, while a broken or missing
+shared input leaves the current healthy process online. Manifest-structure
+edits require restarting the command in V1. See
+[Run a fleet app with shared inputs](local-development.md#run-a-fleet-app-with-shared-inputs)
+for flags, `.env`, state identity, data-directory, and concurrency behavior.
+
 ## Config precedence
 
 When the same setting can come from more than one place, the fleet manifest
