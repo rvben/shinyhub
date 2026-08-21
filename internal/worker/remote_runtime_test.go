@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/db"
@@ -21,13 +22,28 @@ import (
 // round-robins the tier's up workers (sorted by node id) across the requested
 // count, so a single placement is deterministic (lowest node id) and a batch
 // spreads; the load-aware greedy spread is exercised against the real
-// registry/store in registry_test. Worker resolves any node by id.
+// registry/store in registry_test. Worker resolves any node by id. Reads are
+// mutex-guarded so a test can demote a worker (setStatus) while a runtime call
+// is in flight, the way the heartbeat monitor does in production.
 type stubLookup struct {
+	mu      sync.RWMutex
 	workers []db.Worker
 }
 
 func newStubLookup(ws ...db.Worker) *stubLookup {
 	return &stubLookup{workers: ws}
+}
+
+// setStatus changes a worker's registry status, standing in for the heartbeat
+// down-sweep marking a silent worker down.
+func (s *stubLookup) setStatus(nodeID, status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.workers {
+		if s.workers[i].NodeID == nodeID {
+			s.workers[i].Status = status
+		}
+	}
 }
 
 func (s *stubLookup) PlanPlacementForTier(tier, _ string, count int) []db.Worker {
@@ -43,6 +59,8 @@ func (s *stubLookup) PlanPlacementForTier(tier, _ string, count int) []db.Worker
 }
 
 func (s *stubLookup) WorkersForTier(tier string) []db.Worker {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	var out []db.Worker
 	for _, w := range s.workers {
 		if w.Tier == tier && w.Status == "up" {
@@ -54,6 +72,8 @@ func (s *stubLookup) WorkersForTier(tier string) []db.Worker {
 }
 
 func (s *stubLookup) Worker(nodeID string) (db.Worker, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, w := range s.workers {
 		if w.NodeID == nodeID {
 			return w, true
@@ -443,6 +463,98 @@ func TestRemoteRuntime_StartRetriesOnConnectionRefused(t *testing.T) {
 	}
 	if !strings.HasPrefix(ep.URL, "https://w:8443/v1/data/") {
 		t.Errorf("endpoint URL = %q, want tunnel URL", ep.URL)
+	}
+}
+
+// unreachableTransport fails every round trip with a connection-refused dial
+// error. It models a worker whose process is gone while its registry row still
+// says "up": the heartbeat timeout has not elapsed, so nothing yet knows whether
+// the replica it hosts is alive.
+type unreachableTransport struct{}
+
+func (unreachableTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+}
+
+// TestRemoteRuntime_WaitHoldsWhileWorkerUnreachable asserts an unreachable
+// worker is never reported as a replica exit. The Manager calls Wait purely to
+// detect exit and reads any return as "this replica is gone", so returning the
+// moment a worker stops answering fabricates a crash - with an invented exit
+// reason and a spent restart budget - for a container that may still be running.
+// Reachability is unknown, not zero: Wait must hold it and defer to the
+// heartbeat monitor, which is the single authority on worker liveness, and only
+// report the loss once that monitor has ruled.
+func TestRemoteRuntime_WaitHoldsWhileWorkerUnreachable(t *testing.T) {
+	lookup := newStubLookup(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "w:8443", Status: "up"})
+	rt := newRemoteRuntime(lookup, "remote",
+		&stubDialer{client: &http.Client{Transport: unreachableTransport{}}, base: "https://w:8443"})
+	rt.waitRetry = time.Millisecond
+
+	done := make(chan error, 1)
+	go func() {
+		done <- rt.Wait(context.Background(), process.RunHandle{ContainerID: encodeRemoteHandle("node-a", "c1")})
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Wait returned (%v) while the worker was merely unreachable; the Manager reads that as a replica exit", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The heartbeat monitor marks the silent worker down. Now - and only now -
+	// the replica is known lost, which Wait reports as ErrNoLiveWorker so the
+	// Manager can distinguish it from an exit.
+	lookup.setStatus("node-a", "down")
+	select {
+	case err := <-done:
+		if !errors.Is(err, process.ErrNoLiveWorker) {
+			t.Fatalf("Wait after the worker was marked down = %v, want errors.Is(err, process.ErrNoLiveWorker)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return after the worker was marked down")
+	}
+}
+
+// TestRemoteRuntime_WaitReturnsOnReplicaExit is the positive control for the
+// test above: a worker that answers still ends the wait promptly and exactly
+// once, so holding an unreachable worker open costs nothing on the real exit
+// path.
+func TestRemoteRuntime_WaitReturnsOnReplicaExit(t *testing.T) {
+	var mu sync.Mutex
+	var hits int
+	router := chi.NewRouter()
+	router.Get("/v1/replicas/{id}/wait", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	ts := httptest.NewServer(router)
+	defer func() { ts.CloseClientConnections(); ts.Close() }()
+
+	rt := newRemoteRuntime(
+		newStubLookup(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "w:8443", Status: "up"}),
+		"remote",
+		&stubDialer{client: ts.Client(), base: ts.URL},
+	)
+	rt.waitRetry = time.Millisecond
+
+	done := make(chan error, 1)
+	go func() {
+		done <- rt.Wait(context.Background(), process.RunHandle{ContainerID: encodeRemoteHandle("node-a", "c1")})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Wait on a reported exit = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return on a reported replica exit")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 1 {
+		t.Fatalf("worker wait endpoint hit %d times, want 1", hits)
 	}
 }
 
