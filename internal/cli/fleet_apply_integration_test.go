@@ -276,6 +276,92 @@ func TestFleetApply_Acceptance_CreateThenIdempotent(t *testing.T) {
 	}
 }
 
+func TestFleetApply_Acceptance_SharedInputEditRestagesEveryConsumer(t *testing.T) {
+	fake := newFleetFake(true)
+	_ = fake.httptest(t)
+	cfgFile := writeCLIConfig(t, fake)
+	root := t.TempDir()
+	for _, slug := range []string{"sales", "operations"} {
+		mustWrite(t, filepath.Join(root, "apps", slug, "app.py"), "print('app')\n")
+	}
+	mustWrite(t, filepath.Join(root, "_shared", "theme.py"), "COLOR = 'orange'\n")
+	manifestPath := writeFleetManifest(t, root, `fleet_id = "eu"
+
+[[bundle_file]]
+from = "_shared/theme.py"
+to = "helpers/theme.py"
+consumers = ["sales", "operations"]
+
+[[app]]
+slug = "sales"
+source = "./apps/sales"
+visibility = "private"
+
+[[app]]
+slug = "operations"
+source = "./apps/operations"
+visibility = "private"
+`)
+	run := func(args ...string) (string, error) {
+		full := append([]string{"--config", cfgFile}, args...)
+		return execCLI(t, full...)
+	}
+
+	if out, err := run("fleet", "validate", "-f", manifestPath, "-o", "table"); err != nil {
+		t.Fatalf("validate composed fleet: %v\n%s", err, out)
+	}
+	plan, err := run("fleet", "plan", "-f", manifestPath, "-o", "table", "--no-color")
+	if err != nil {
+		t.Fatalf("initial plan: %v\n%s", err, plan)
+	}
+	for _, want := range []string{"_shared/theme.py -> helpers/theme.py", "consumers: 2 (2 have a planned source update)", "2 to create"} {
+		if !strings.Contains(plan, want) {
+			t.Fatalf("initial plan missing %q:\n%s", want, plan)
+		}
+	}
+	if out, err := run("fleet", "apply", "-f", manifestPath, "-o", "table"); err != nil {
+		t.Fatalf("initial apply: %v\n%s", err, out)
+	} else if !strings.Contains(out, "2 created") {
+		t.Fatalf("initial apply did not create both consumers:\n%s", out)
+	}
+
+	cleanPlan, err := run("fleet", "plan", "-f", manifestPath, "-o", "table", "--no-color")
+	if err != nil {
+		t.Fatalf("clean plan: %v\n%s", err, cleanPlan)
+	}
+	for _, want := range []string{"consumers: 2 (0 have a planned source update)", "2 unchanged"} {
+		if !strings.Contains(cleanPlan, want) {
+			t.Fatalf("clean plan missing %q:\n%s", want, cleanPlan)
+		}
+	}
+
+	mustWrite(t, filepath.Join(root, "_shared", "theme.py"), "COLOR = 'green'\n")
+	changedPlan, err := run("fleet", "plan", "-f", manifestPath, "-o", "table", "--no-color")
+	if err != nil {
+		t.Fatalf("changed plan: %v\n%s", err, changedPlan)
+	}
+	for _, want := range []string{"consumers: 2 (2 have a planned source update)", "2 to update"} {
+		if !strings.Contains(changedPlan, want) {
+			t.Fatalf("changed plan missing %q:\n%s", want, changedPlan)
+		}
+	}
+	if out, err := run("fleet", "apply", "-f", manifestPath, "-o", "table"); err != nil {
+		t.Fatalf("changed apply: %v\n%s", err, out)
+	} else if !strings.Contains(out, "2 updated") {
+		t.Fatalf("changed apply did not restage both consumers:\n%s", out)
+	}
+
+	finalPlan, err := run("fleet", "plan", "-f", manifestPath, "-o", "table", "--no-color")
+	if err != nil {
+		t.Fatalf("final plan: %v\n%s", err, finalPlan)
+	}
+	for _, want := range []string{"consumers: 2 (0 have a planned source update)", "2 unchanged"} {
+		if !strings.Contains(finalPlan, want) {
+			t.Fatalf("final plan missing %q:\n%s", want, finalPlan)
+		}
+	}
+}
+
 // TestFleetApply_Acceptance_CreateAppliesDeclaredConfig guards that a create
 // applies the manifest's [app.config], not just the source bundle. Otherwise a
 // freshly applied app runs with server-default config and the very next plan
