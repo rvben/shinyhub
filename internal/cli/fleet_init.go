@@ -237,9 +237,17 @@ func runFleetInit(cmd *cobra.Command, f *fleetInitFlags) error {
 			"fleet_id %q invalid: must match [a-z0-9-], 1-64 chars", id)}
 	}
 
-	if _, serr := os.Stat(f.file); serr == nil && !f.force {
-		return &ExitCodeError{Code: 1, Err: fmt.Errorf(
-			"%s already exists; pass --force to overwrite", f.file)}
+	if existing, serr := os.ReadFile(f.file); serr == nil {
+		if !f.force {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf(
+				"%s already exists; pass --force to overwrite", f.file)}
+		}
+		if existingManifestHasBundleFiles(existing) {
+			return &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf(
+				"refusing --force: %s contains [[bundle_file]] declarations; preserve or remove them explicitly before regenerating the manifest", f.file)}
+		}
+	} else if !os.IsNotExist(serr) {
+		return &ExitCodeError{Code: 1, Err: fmt.Errorf("inspect %s: %w", f.file, serr)}
 	}
 
 	cfg, err := loadConfig()
@@ -270,4 +278,23 @@ func runFleetInit(cmd *cobra.Command, f *fleetInitFlags) error {
 			strings.TrimRight(f.sourceRoot, "/"), f.file)
 	}
 	return nil
+}
+
+// existingManifestHasBundleFiles protects operator-authored composition from
+// the intentionally destructive fleet init --force path. A normal decode is
+// authoritative. If the manifest is syntactically broken, conservatively scan
+// normalized lines; a comment false positive is safer than silently erasing
+// declarations from the exact kind of file an operator is likely to repair.
+func existingManifestHasBundleFiles(data []byte) bool {
+	m, _ := fleet.ParseManifest(data, "")
+	if m != nil {
+		return len(m.BundleFiles) > 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		compact := strings.NewReplacer(" ", "", "\t", "").Replace(line)
+		if strings.Contains(compact, "[[bundle_file]]") {
+			return true
+		}
+	}
+	return false
 }
