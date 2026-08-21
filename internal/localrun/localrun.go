@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
@@ -35,6 +36,12 @@ type Options struct {
 	// StateDir is the ShinyHub-owned workspace and state directory. Empty uses
 	// the OS user cache, keyed by the absolute source path.
 	StateDir string
+	// ManifestPath identifies a fleet-aware run. When set, the default workspace
+	// is keyed by the canonical manifest path plus Slug rather than BundleDir.
+	ManifestPath string
+	// BundleInputs are manifest-relative files composed into the generated
+	// workspace. They are resolved and snapshotted again for every reload.
+	BundleInputs []bundle.FileInputSpec
 	// Port is the local TCP port to bind. When 0, a free port is allocated.
 	Port int
 	// Env is additional environment in KEY=VALUE form, layered above the
@@ -134,15 +141,36 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	if o.Port < 0 || o.Port > 65535 {
 		return validationErrorf("port must be between 0 and 65535, got %d", o.Port)
 	}
+	manifestPath := ""
+	if o.ManifestPath != "" {
+		manifestPath, err = filepath.Abs(o.ManifestPath)
+		if err != nil {
+			return validationErrorf("resolve fleet manifest: %v", err)
+		}
+		manifestPath, err = filepath.EvalSymlinks(manifestPath)
+		if err != nil {
+			return validationErrorf("resolve fleet manifest: %v", err)
+		}
+	}
+	inputSnapshots, err := resolveInputSnapshots(manifestPath, sourceDir, o.BundleInputs)
+	if err != nil {
+		return &ValidationError{Err: fmt.Errorf("resolve bundle inputs: %w", err)}
+	}
 	// Read-only source preflight. This deliberately runs before workspace or
 	// data creation, so a typo or invalid manifest leaves no filesystem state.
-	if _, err := deploy.ResolveLaunch(sourceDir, deploy.LaunchOptions{
-		Port: 1, BindHost: "127.0.0.1", Reload: false,
-	}); err != nil {
-		return &ValidationError{Err: fmt.Errorf("resolve launch: %w", err)}
+	if len(inputSnapshots) == 0 {
+		if _, err := deploy.ResolveLaunch(sourceDir, deploy.LaunchOptions{
+			Port: 1, BindHost: "127.0.0.1", Reload: false,
+		}); err != nil {
+			return &ValidationError{Err: fmt.Errorf("resolve launch: %w", err)}
+		}
 	}
 
-	w, err := workspaceFor(sourceDir, o.StateDir, o.DataDir)
+	workspaceIdentity := ""
+	if manifestPath != "" {
+		workspaceIdentity = manifestPath + "\x00" + slug
+	}
+	w, err := workspaceForIdentity(sourceDir, o.StateDir, o.DataDir, workspaceIdentity)
 	if err != nil {
 		return err
 	}
@@ -160,7 +188,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		}
 		fmt.Fprintln(stdout, "==> cleared generated workspace (app data preserved)")
 	}
-	depsChanged, err := w.syncSource(sourceDir)
+	depsChanged, err := w.syncSourceWithInputs(sourceDir, inputSnapshots)
 	if err != nil {
 		return err
 	}
@@ -173,10 +201,34 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	proxyErrCh := make(chan error, 1)
 
 	fmt.Fprintf(stdout, "==> source: %s\n", sourceDir)
+	for _, input := range inputSnapshots {
+		fmt.Fprintf(stdout, "==> bundle input: %s -> %s\n", input.From, input.To)
+	}
 	fmt.Fprintf(stdout, "==> workspace: %s\n", w.BundleDir)
 	fmt.Fprintf(stdout, "==> data: %s\n", w.DataDir)
 	if len(userEnv) > 0 {
 		fmt.Fprintf(stdout, "==> environment: %s\n", strings.Join(environmentKeys(userEnv), ", "))
+	}
+
+	changeCh := make(chan struct{}, 1)
+	if !o.NoReload {
+		watchReady := make(chan struct{})
+		inputWatchPaths := bundleInputWatchPaths(manifestPath, o.BundleInputs)
+		go func() {
+			_ = watchAndRestartSourcesReady(ctx, sourceDir,
+				[]string{".shinyhub-run", ".venv", ".git", "__pycache__", "node_modules", ".renv", ".Rproj.user"},
+				inputWatchPaths, watchReady, func() {
+					select {
+					case changeCh <- struct{}{}:
+					default:
+					}
+				})
+		}()
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-watchReady:
+		}
 	}
 
 	current, err := startCandidate(ctx, w, slug, userEnv, o.NoSync, depsChanged, stdout, stderr)
@@ -212,16 +264,6 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	currentWorkspace := w
 	stagingWorkspace := w.alternate()
 
-	changeCh := make(chan struct{}, 1)
-	go func() {
-		_ = watchAndRestart(ctx, sourceDir, []string{".shinyhub-run", ".venv", ".git", "__pycache__", "node_modules", ".renv", ".Rproj.user"}, func() {
-			select {
-			case changeCh <- struct{}{}:
-			default:
-			}
-		})
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -241,7 +283,12 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			return errors.New("app exited unexpectedly")
 		case <-changeCh:
 			fmt.Fprintln(stdout, "==> change detected; staging reload")
-			depsChanged, syncErr := stagingWorkspace.syncSource(sourceDir)
+			stagedInputs, resolveErr := resolveInputSnapshots(manifestPath, sourceDir, o.BundleInputs)
+			if resolveErr != nil {
+				fmt.Fprintf(stderr, "reload failed; keeping the current app: resolve bundle inputs: %v\n", resolveErr)
+				continue
+			}
+			depsChanged, syncErr := stagingWorkspace.syncSourceWithInputs(sourceDir, stagedInputs)
 			if syncErr != nil {
 				fmt.Fprintf(stderr, "reload failed; keeping the current app: %v\n", syncErr)
 				continue
@@ -285,6 +332,32 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			fmt.Fprintln(stdout, "==> reloaded and healthy")
 		}
 	}
+}
+
+func bundleInputWatchPaths(manifestPath string, specs []bundle.FileInputSpec) []string {
+	if manifestPath == "" || len(specs) == 0 {
+		return nil
+	}
+	root := filepath.Dir(manifestPath)
+	paths := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		paths = append(paths, filepath.Join(root, filepath.FromSlash(spec.From)))
+	}
+	return paths
+}
+
+func resolveInputSnapshots(manifestPath, sourceDir string, specs []bundle.FileInputSpec) ([]bundle.FileInputSnapshot, error) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	if manifestPath == "" {
+		return nil, fmt.Errorf("bundle inputs require a fleet manifest identity")
+	}
+	resolved, err := bundle.ResolveFileInputs(filepath.Dir(manifestPath), sourceDir, specs)
+	if err != nil {
+		return nil, err
+	}
+	return bundle.SnapshotFileInputs(resolved)
 }
 
 var errReloadSuperseded = errors.New("reload superseded by a newer change")

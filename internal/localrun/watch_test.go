@@ -81,6 +81,31 @@ func TestWatchAndRestart_FiresOnDeletion(t *testing.T) {
 	}
 }
 
+func TestWatchAndRestart_FiresOnSharedInputChange(t *testing.T) {
+	source := t.TempDir()
+	sharedDir := t.TempDir()
+	shared := filepath.Join(sharedDir, "theme.py")
+	if err := os.WriteFile(filepath.Join(source, "app.py"), []byte("app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shared, []byte("orange\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fired := make(chan struct{}, 1)
+	go watchAndRestartSources(ctx, source, nil, []string{shared}, func() { fired <- struct{}{} })
+	time.Sleep(600 * time.Millisecond)
+	if err := os.WriteFile(shared, []byte("green\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not fire when a shared input changed")
+	}
+}
+
 func TestWatchAndRestart_Debounce(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "app.py")
