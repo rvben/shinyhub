@@ -48,7 +48,7 @@ jobs:
       - name: Check per-page descriptions
         run: python scripts/docs-descriptions.py site
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: docs-site
           path: site/
