@@ -56,13 +56,11 @@ jobs:
         run: go test ./deploy/cloudflare-demo
 
       - name: Deploy the demo Worker and container
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: deploy/cloudflare-demo
-          packageManager: npm
-          command: deploy
+        working-directory: deploy/cloudflare-demo
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy
 
       - name: Smoke-test the deployed release
         run: |
