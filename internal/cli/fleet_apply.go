@@ -203,6 +203,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		concurrency:        f.concurrency,
 		fleetID:            pf.manifest.FleetID,
 		runID:              runID,
+		fleetState:         pf.caps.FleetState && pf.caps.FleetProvenance,
 	}
 	// Per-app deploy progress (zip summary, health-wait lines) is diagnostic,
 	// not the report. In --json mode it must not pollute stdout, which has to

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/rvben/shinyhub/internal/fleet"
 	"github.com/rvben/shinyhub/internal/provenance"
 )
 
@@ -25,6 +26,11 @@ func newRunID() string {
 
 // fleetUserAgent identifies fleet-originated requests in server logs/audit.
 var fleetUserAgent = "shinyhub-fleet/" + version
+
+const (
+	fleetConvergenceInSync     = "in_sync"
+	fleetConvergenceIncomplete = "incomplete"
+)
 
 // decorateFleetRequest stamps the run correlation id and a descriptive
 // User-Agent on every fleet-originated request.
@@ -133,6 +139,30 @@ func registerFleetRun(cfg *cliConfig, runID, fleetID string, metadata provenance
 		return fmt.Errorf("register fleet run: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	return nil
+}
+
+// recordAppFleetState commits the declaration baseline only after an app has
+// converged. On failure, status=incomplete records the attempt without replacing
+// the prior successful baseline. Older servers never receive this request
+// because fleet apply gates it on the advertised fleet_state capability.
+func recordAppFleetState(cfg *cliConfig, slug, status, digest string, declared []fleet.ConfigDriftItem, message, runID string) error {
+	values := make([]map[string]string, 0, len(declared))
+	for _, item := range declared {
+		values = append(values, map[string]string{"key": item.Key, "desired": item.Desired})
+	}
+	body, err := json.Marshal(map[string]any{
+		"status": status, "desired_content_digest": digest,
+		"declaration": values, "error": message,
+	})
+	if err != nil {
+		return fmt.Errorf("encode fleet state for %s: %w", slug, err)
+	}
+	req, err := http.NewRequest(http.MethodPut, cfg.Host+"/api/apps/"+slug+"/fleet-state", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return sendFleetMutation(cfg, req, slug, nil, nil, runID)
 }
 
 // setPrecondition applies the If-Match-style headers the server enforces.

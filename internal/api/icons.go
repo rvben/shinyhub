@@ -201,5 +201,6 @@ func (s *Server) auditIcon(r *http.Request, action, slug string, extra map[strin
 		ResourceID:   slug,
 		Detail:       string(detail),
 		IPAddress:    s.ClientIP(r),
+		RunID:        s.knownFleetRunID(r),
 	})
 }

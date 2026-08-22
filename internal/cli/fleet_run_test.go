@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/fleet"
 )
 
 func TestNewRunID_UniqueAndShaped(t *testing.T) {
@@ -85,5 +89,36 @@ func TestBuildFleetProvenance_NoneRejectsExplicitFields(t *testing.T) {
 	_, err := buildFleetProvenance(&fleetApplyFlags{provenanceMode: "none", sourceURL: "https://example.test/p"}, func(string) string { return "" })
 	if err == nil {
 		t.Fatal("expected conflict between none and explicit source")
+	}
+}
+
+func TestRecordAppFleetStateSendsNormalizedDeclarationAndRun(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/apps/demo/fleet-state" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("X-Shinyhub-Run-Id") != "run-42" {
+			t.Fatalf("run header = %q", r.Header.Get("X-Shinyhub-Run-Id"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	err := recordAppFleetState(&cliConfig{Host: srv.URL, Token: "token"}, "demo",
+		fleetConvergenceInSync, "sha256:expected",
+		[]fleet.ConfigDriftItem{{Key: "replicas", Desired: "3"}}, "", "run-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["status"] != fleetConvergenceInSync || got["desired_content_digest"] != "sha256:expected" {
+		t.Fatalf("body = %#v", got)
+	}
+	declared := got["declaration"].([]any)
+	if len(declared) != 1 || declared[0].(map[string]any)["desired"] != "3" {
+		t.Fatalf("declaration = %#v", declared)
 	}
 }

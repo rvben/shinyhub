@@ -322,6 +322,23 @@ func autoscaleDisplay(enabled bool, min, max int, target float64) string {
 	return fmt.Sprintf("on(%d-%d @ default)", min, max)
 }
 
+// AutoscaleDisplay exposes the canonical fleet comparison format to the API.
+// Persisted declarations and live app values must use one formatter or a
+// cosmetic difference could be mistaken for temporary drift.
+func AutoscaleDisplay(enabled bool, min, max int, target float64) string {
+	return autoscaleDisplay(enabled, min, max, target)
+}
+
+// DeclaredState returns every value governed by the effective declaration
+// (outer fleet config over source-bundle config), including visibility. Values
+// use the same normalized strings as plan output so they can be stored as a
+// compact, version-tolerant drift baseline.
+func DeclaredState(app AppEntry) []ConfigDriftItem {
+	d := []ConfigDriftItem{{Key: "visibility", Server: "(unset)", Desired: app.Visibility}}
+	d = append(d, configDrift(app, ObservedApp{})...)
+	return d
+}
+
 // DeclaredConfig returns the manifest's declared numeric config for an app as
 // drift items against an unset server, suitable for applying to a freshly
 // created app (which starts at server defaults). Visibility is excluded because

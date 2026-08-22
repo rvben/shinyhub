@@ -33,6 +33,7 @@ type convergeOpts struct {
 	concurrency        int // max apps converged in parallel; <=1 means serial
 	fleetID            string
 	runID              string
+	fleetState         bool // server persists per-app declaration/convergence state
 }
 
 // convergeFleet drives every diff entry, continue-on-error, returning one
@@ -408,11 +409,19 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs fleet.ObservedApp, spec bundleBuildSpec, opt convergeOpts, marker string, out io.Writer) applyResult {
 	start := time.Now()
 	res := applyResult{slug: d.Slug, action: d.Action, mutation: mutationNone}
+	stateAlreadyRecorded := false
+	declaredState := fleet.DeclaredState(entry)
 	done := func(s applyStatus) applyResult {
 		res.status, res.duration = s, time.Since(start)
 		switch s {
 		case statusCreated, statusUpdated, statusDeleted, statusAdopted:
 			res.mutation = mutationCommitted
+		}
+		if opt.fleetState && !stateAlreadyRecorded && s != statusDeleted && s != statusSkipped {
+			if err := recordAppFleetState(cfg, d.Slug, fleetConvergenceInSync, d.LocalDigest, declaredState, "", opt.runID); err != nil {
+				res.status = statusFailed
+				res.err = fmt.Errorf("record fleet convergence: %w", err)
+			}
 		}
 		return res
 	}
@@ -422,6 +431,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			res.status = statusConflict
 		} else {
 			res.status = statusFailed
+		}
+		if opt.fleetState && !stateAlreadyRecorded {
+			_ = recordAppFleetState(cfg, d.Slug, fleetConvergenceIncomplete, d.LocalDigest, declaredState, err.Error(), opt.runID)
+			stateAlreadyRecorded = true
 		}
 		return res
 	}
@@ -649,6 +662,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// manifest still wins.
 		if err := reassertFleetConfig(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
 			res.note = "updated; declared config not fully reasserted, next plan corrects it: " + err.Error()
+			if opt.fleetState {
+				_ = recordAppFleetState(cfg, d.Slug, fleetConvergenceIncomplete, d.LocalDigest, declaredState, err.Error(), opt.runID)
+				stateAlreadyRecorded = true
+			}
 			return done(statusUpdated)
 		}
 		return done(statusUpdated)

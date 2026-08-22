@@ -24,6 +24,7 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 			CLIConnect         bool `json:"cli_connect"`
 			DeployEvents       bool `json:"deploy_events"`
 			FleetProvenance    bool `json:"fleet_provenance"`
+			FleetState         bool `json:"fleet_state"`
 		} `json:"capabilities"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
@@ -46,6 +47,9 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 	if !got.Capabilities.FleetProvenance {
 		t.Errorf("fleet_provenance not advertised")
+	}
+	if !got.Capabilities.FleetState {
+		t.Errorf("fleet_state not advertised")
 	}
 }
 
