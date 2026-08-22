@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.2](https://github.com/rvben/shinyhub/compare/v0.12.1...v0.12.2) - 2026-08-22
+
+### Added
+
+- **branding**: adopt Orbit Hub identity ([0ddf5f6](https://github.com/rvben/shinyhub/commit/0ddf5f69f30e29afc8222e7fff85bcf9113fb040))
+
+### Fixed
+
+- **auth**: report deploy token app scope ([bc663ef](https://github.com/rvben/shinyhub/commit/bc663ef1aa31f729b6dcefa6b5b36ed6554bac59))
+
 ## [0.12.1](https://github.com/rvben/shinyhub/compare/v0.12.0...v0.12.1) - 2026-08-21
 
 ### Fixed
