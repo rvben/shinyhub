@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.3](https://github.com/rvben/shinyhub/compare/v0.12.2...v0.12.3) - 2026-08-22
+
+### Added
+
+- **app-details**: merge fleet convergence state ([56ac611](https://github.com/rvben/shinyhub/commit/56ac611d72bc5f24e475ab5c529b488bb5b24d26))
+- **app-details**: surface fleet convergence state ([eef7984](https://github.com/rvben/shinyhub/commit/eef79846b9117f8dff5c31b96e61c6e5d67aafdc))
+
+### Fixed
+
+- **fleet**: avoid redeploying matching adoptions ([50763cf](https://github.com/rvben/shinyhub/commit/50763cf2304f7d729ba25707d94db9ea19aa4a8b))
+- **fleet**: merge convergence capability decoder ([9340339](https://github.com/rvben/shinyhub/commit/9340339f9979e6ca4d0ab0c8d17dcb1b66cfe6e3))
+- **fleet**: decode convergence capability ([d2d4626](https://github.com/rvben/shinyhub/commit/d2d462664b8329a1dfd2cef10e0a63802531f171))
+
 ## [0.12.2](https://github.com/rvben/shinyhub/compare/v0.12.1...v0.12.2) - 2026-08-22
 
 ### Added
