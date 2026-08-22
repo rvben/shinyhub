@@ -36,16 +36,25 @@ check "$base_url/" 200 302
 check "$base_url/login" 200
 
 if [ -n "${SHINYHUB_DEMO_EXPECTED_VERSION:-}" ]; then
-  server_info=$(curl --silent --show-error --fail "$base_url/api/server-info")
-  case "$server_info" in
-    *'"version":"'"$SHINYHUB_DEMO_EXPECTED_VERSION"'"'*)
-      printf '%s -> version %s\n' "$base_url/api/server-info" "$SHINYHUB_DEMO_EXPECTED_VERSION"
-      ;;
-    *)
-      echo "$base_url/api/server-info -> expected version $SHINYHUB_DEMO_EXPECTED_VERSION, got $server_info" >&2
+  attempt=1
+  server_info=
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if server_info=$(curl --silent --show-error --fail \
+      --connect-timeout 10 --max-time 30 "$base_url/api/server-info"); then
+      case "$server_info" in
+        *'"version":"'"$SHINYHUB_DEMO_EXPECTED_VERSION"'"'*)
+          printf '%s -> version %s\n' "$base_url/api/server-info" "$SHINYHUB_DEMO_EXPECTED_VERSION"
+          break
+          ;;
+      esac
+    fi
+    if [ "$attempt" -eq "$max_attempts" ]; then
+      echo "$base_url/api/server-info -> expected version $SHINYHUB_DEMO_EXPECTED_VERSION after $max_attempts attempts, got $server_info" >&2
       exit 1
-      ;;
-  esac
+    fi
+    sleep "$retry_delay"
+    attempt=$((attempt + 1))
+  done
 fi
 
 login_html=$(curl --silent --show-error --fail "$base_url/login")
