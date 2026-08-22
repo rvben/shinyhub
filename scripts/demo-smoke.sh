@@ -35,6 +35,19 @@ check "$base_url/healthz" 200
 check "$base_url/" 200 302
 check "$base_url/login" 200
 
+if [ -n "${SHINYHUB_DEMO_EXPECTED_VERSION:-}" ]; then
+  server_info=$(curl --silent --show-error --fail "$base_url/api/server-info")
+  case "$server_info" in
+    *'"version":"'"$SHINYHUB_DEMO_EXPECTED_VERSION"'"'*)
+      printf '%s -> version %s\n' "$base_url/api/server-info" "$SHINYHUB_DEMO_EXPECTED_VERSION"
+      ;;
+    *)
+      echo "$base_url/api/server-info -> expected version $SHINYHUB_DEMO_EXPECTED_VERSION, got $server_info" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 login_html=$(curl --silent --show-error --fail "$base_url/login")
 case "$login_html" in
   *'/__demo/assets/v1/login.css'*'/__demo/session'*'/__demo/assets/v1/login.js'*)

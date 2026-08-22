@@ -120,6 +120,37 @@ func TestCloudflareDemoOneClickEntryIsReadOnlyAndCoveredBySmokeTest(t *testing.T
 	}
 }
 
+func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/demo.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowSource := string(workflow)
+	for _, required := range []string{
+		`workflows: ["release"]`,
+		`github.event.workflow_run.conclusion == 'success'`,
+		`github.event.workflow_run.head_sha`,
+		`cloudflare/wrangler-action@v4`,
+		`SHINYHUB_DEMO_EXPECTED_VERSION`,
+		`./scripts/demo-smoke.sh`,
+	} {
+		if !strings.Contains(workflowSource, required) {
+			t.Errorf("demo deployment workflow is missing %q", required)
+		}
+	}
+
+	dockerfile, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfileSource := string(dockerfile)
+	for _, required := range []string{`COPY package.json ./`, `-X main.version=${VERSION}`} {
+		if !strings.Contains(dockerfileSource, required) {
+			t.Errorf("demo image does not embed the release version: missing %q", required)
+		}
+	}
+}
+
 func TestCloudflareDemoViewerHasCompleteIdentityClaims(t *testing.T) {
 	bootstrap, err := os.ReadFile("bootstrap-viewer.py")
 	if err != nil {

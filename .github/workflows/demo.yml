@@ -1,0 +1,70 @@
+name: Demo deployment
+
+on:
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to deploy
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-demo
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: public-demo
+      url: https://demo.shinyhub.dev
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: deploy/cloudflare-demo/package-lock.json
+
+      - name: Install and validate the demo Worker
+        working-directory: deploy/cloudflare-demo
+        run: |
+          npm ci
+          npm run check
+
+      - name: Test the demo configuration
+        run: go test ./deploy/cloudflare-demo
+
+      - name: Deploy the demo Worker and container
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: deploy/cloudflare-demo
+          packageManager: npm
+          command: deploy
+
+      - name: Smoke-test the deployed release
+        run: |
+          expected_version=$(node -p "require('./package.json').version")
+          SHINYHUB_DEMO_EXPECTED_VERSION="$expected_version" ./scripts/demo-smoke.sh

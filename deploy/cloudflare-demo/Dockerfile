@@ -4,10 +4,12 @@ FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+COPY package.json ./
 COPY cmd ./cmd
 COPY internal ./internal
-ARG VERSION=cloudflare-demo
-RUN CGO_ENABLED=0 go build \
+RUN VERSION="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' package.json)" \
+    && test -n "$VERSION" \
+    && CGO_ENABLED=0 go build \
     -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/shinyhub ./cmd/shinyhub

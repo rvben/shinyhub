@@ -79,6 +79,7 @@ nav = [
 [project.theme]
 language = "en"
 favicon = "images/favicon.png"
+logo = "images/favicon.png"
 features = [
   "content.action.edit",
   "content.action.view",
@@ -113,7 +114,6 @@ toggle.icon = "lucide/sun"
 toggle.name = "Switch to dark mode"
 
 [project.theme.icon]
-logo = "lucide/sparkles"
 repo = "fontawesome/brands/github"
 
 [[project.extra.social]]
