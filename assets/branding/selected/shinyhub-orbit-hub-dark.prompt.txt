@@ -1,0 +1,12 @@
+Use case: precise-object-edit
+Asset type: ShinyHub production dark-mode logo lockup
+Input image: shinyhub-orbit-hub.png is the edit target.
+Primary request: Create the reversed dark-mode version of this exact Orbit Hub logo. Change every deep navy or near-black logo element to starlight white #E8EEFF: the word “Shiny”, all orbit strokes, and every dark node ring or outline.
+Keep unchanged: the complete geometry, proportions, spacing, alignment, transparent canvas, exact wordmark spelling “ShinyHub”, typography, cyan “Hub”, cyan central four-point sparkle, pale center, and pale node centers. Preserve all edges and the original wide horizontal composition exactly.
+Background: genuinely transparent alpha, not black, white, or checkerboard.
+Constraints: color substitution only; no redesign, no new elements, no glow, no shadow, no extra border, no crop, no changes to lettering or shape.
+Avoid: altered text, warped typography, missing nodes, changed orbit paths, added effects, opaque background, watermark.
+
+Production note: the built-in image-editing pass established the reversed color treatment but did not preserve alpha. The shipping PNG was therefore derived from the selected transparent source by replacing only deep-navy pixels with #E8EEFF and then copying the source alpha channel byte-for-byte, retaining the original geometry and edge transparency exactly.
+
+Production geometry repair: reconstruct the lower-right node/orbit join with an antialiased Starlight #E8EEFF underlay, confined to x495–550 / y425–490 of the 2172×724 lockup. Close the lower concavity from the source alpha contour with Disk:16, then replace the remaining one-to-three-pixel crown dip with a supersampled cubic tangent so the node flows monotonically into the orbit. Composite the existing reversed artwork over the repair so every original visible pixel remains authoritative. Add no pixels outside that join and change nothing else.

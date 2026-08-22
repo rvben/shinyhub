@@ -2,12 +2,12 @@
 // shell by internal/ui/branding.go RenderIndex) to the static markup.
 //
 // Every `.brand` node in the shell is a brand slot: the sidebar, the mobile top
-// bar, the boot splash, and the login card. A slot carries the stock ShinyHub
-// wordmark until an operator overrides it, so a self-hosted install shows its
+// bar, the boot splash, and the login card. A slot carries the stock Orbit Hub
+// lockup until an operator overrides it, so a self-hosted install shows its
 // own identity everywhere the product shows ours - the login card included,
 // which is the only chrome an anonymous visitor ever sees.
 //
-// Precedence per slot: logo image > site title text > stock wordmark.
+// Precedence per slot: logo image > site title text > stock lockup.
 //
 // DOM-free by default: applyBranding takes an explicit document so it is
 // unit-testable with jsdom (jstests/branding.test.js). app.js owns the wiring.
@@ -42,14 +42,13 @@ function renderLogo(doc, slot, src, alt) {
   slot.replaceChildren(img);
 }
 
-function renderWordmark(doc, slot, text) {
-  const sparkle = doc.createElement('span');
-  sparkle.className = 'sparkle sparkle-brand';
-  sparkle.setAttribute('aria-hidden', 'true');
+function renderSiteTitle(doc, slot, text) {
   const name = doc.createElement('span');
   name.className = 'brand-name';
   name.textContent = text;
-  slot.replaceChildren(sparkle, name);
+  // A title-only override is the operator's complete identity. Keeping the
+  // stock Orbit Hub mark beside it would leak ShinyHub into a white-label.
+  slot.replaceChildren(name);
 }
 
 function renderFooter(doc, links) {
@@ -78,7 +77,7 @@ export function applyBranding(doc, branding) {
     if (intent.logo) {
       renderLogo(doc, slot, intent.logo, intent.logoAlt);
     } else if (intent.brandText) {
-      renderWordmark(doc, slot, intent.brandText);
+      renderSiteTitle(doc, slot, intent.brandText);
     }
   }
   if (intent.footerLinks.length) renderFooter(doc, intent.footerLinks);

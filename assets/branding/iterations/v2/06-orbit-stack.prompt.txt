@@ -1,0 +1,20 @@
+Origin generation prompt:
+Use case: logo-brand
+Asset type: V2 ShinyHub logo exploration for die-cut stickers, app branding, and marketing
+Input images: Image 1 is the selected Orbit Hub logo, used only as brand-DNA reference
+Primary request: Create option 06, “Orbit Stack,” for ShinyHub. Surround the familiar central cyan spark with three short offset navy arcs stacked vertically, like three dashboard layers bending into one orbit. Use a single cyan endpoint node on the outermost arc. The silhouette should suggest several applications converging into one hub.
+Scene/backdrop: genuinely transparent background with clean alpha
+Style/medium: flat vector-logo aesthetic, layered but minimal, calm technical precision
+Composition/framing: compact horizontal lockup, emblem left, complete exact wordmark right, generous transparent padding
+Color palette: deep navy #060914, signal cyan #38BDF8, starlight #E8EEFF; flat fills only
+Text (verbatim): “ShinyHub” — exact spelling, one word, capital S and H; “Shiny” deep navy, “Hub” signal cyan, rounded Manrope-like sans
+Constraints: three arcs only; one node only; legible at 32px; visibly different from a planet
+Avoid: gradients, glow, shadows, black background, thin concentric rings, generic database-stack icon, extra words, misspelling, watermark
+
+Final background-extraction prompt:
+Use case: background-extraction
+Asset type: final transparent ShinyHub logo option
+Input images: Image 1 is the edit target, Orbit Stack logo
+Primary request: Isolate the complete logo and wordmark from the pale checkerboard. Delete every background pixel and output a PNG with real alpha transparency.
+Constraints: preserve the exact Orbit Stack emblem, exact ShinyHub wordmark, colors, geometry, proportions, edges, and padding; change only background pixels; transparent areas must have alpha 0.
+Avoid: drawn checkerboard, white canvas, opaque matte, black canvas, redesign, crop, recolor, new text, watermark

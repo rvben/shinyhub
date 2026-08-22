@@ -1,0 +1,11 @@
+Use case: logo-brand
+Asset type: V2 ShinyHub logo exploration for die-cut stickers, app branding, and marketing
+Input images: Image 1 is the selected Orbit Hub logo, used only as brand-DNA reference
+Primary request: Create option 05, “Spark Portal,” for ShinyHub. Form the emblem from two thick opposing navy brackets, like a rounded portal or open capital H, with a cyan four-point spark exactly in the center. Add one small cyan node at each outer bracket midpoint. The negative space must make the spark feel like an app launching through a controlled gateway.
+Scene/backdrop: genuinely transparent background with clean alpha; show transparency, never black
+Style/medium: crisp flat vector-logo aesthetic, architectural, minimal, robust
+Composition/framing: horizontal lockup, emblem left, exact wordmark right, generous transparent padding
+Color palette: deep navy #060914, signal cyan #38BDF8, starlight #E8EEFF; flat fills only
+Text (verbatim): “ShinyHub” — render the complete exact word once, capital S and H; “Shiny” deep navy, “Hub” signal cyan
+Constraints: no orbit ring; sturdy die-cut silhouette; reads at 32px; exactly two nodes
+Avoid: gradients, glow, shadows, dark background, thin lines, browser-window icons, extra words, missing letters, watermark

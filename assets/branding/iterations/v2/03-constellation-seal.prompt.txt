@@ -1,0 +1,11 @@
+Use case: logo-brand
+Asset type: V2 ShinyHub logo exploration for die-cut stickers, app branding, and marketing
+Input images: Image 1 is the selected Orbit Hub logo, used only as brand-DNA reference
+Primary request: Create option 03, “Constellation Seal,” for ShinyHub. Keep a small central cyan four-point spark, but place it inside a bold rounded navy hexagonal seal whose six corners are softened. Cut three simple cyan notches into the perimeter to suggest connected applications. The mark should feel like reliable infrastructure and an open-source project badge.
+Scene/backdrop: genuinely transparent background with clean alpha
+Style/medium: flat vector-logo aesthetic, compact emblem, confident geometric construction
+Composition/framing: horizontal lockup, emblem left, exact wordmark right, generous transparent padding
+Color palette: deep navy #060914, signal cyan #38BDF8, starlight #E8EEFF; strictly flat fills
+Text (verbatim): “ShinyHub” — exact spelling, one word, capital S and H; “Shiny” deep navy, “Hub” signal cyan, rounded Manrope-like sans
+Constraints: no circular orbit; distinctive die-cut silhouette; readable at 32px; maximum three perimeter notches
+Avoid: gradients, glow, shadows, shields with pointed bottoms, security symbolism, tiny stars, extra words, misspelling, watermark, background

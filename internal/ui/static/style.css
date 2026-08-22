@@ -80,6 +80,8 @@ summary:focus-visible {
   --font:        'Manrope', -apple-system, system-ui, 'Segoe UI', sans-serif;
   --mono:        'Space Mono', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
   --ease:        200ms cubic-bezier(.2,.7,.2,1);
+  --stock-brand-lockup: url('/static/brand/orbit-hub-lockup-dark.png');
+  --stock-brand-mark: url('/static/brand/orbit-hub-mark-dark.png');
   color-scheme: dark;
 }
 
@@ -123,6 +125,8 @@ summary:focus-visible {
   --surface-rgb:   255, 255, 255;
   --inset-rgb:   232, 237, 246;
   --shadow-card: 0 18px 40px -24px rgba(22,32,58,0.28);
+  --stock-brand-lockup: url('/static/brand/orbit-hub-lockup-light.png');
+  --stock-brand-mark: url('/static/brand/orbit-hub-mark-light.png');
   color-scheme: light;
 }
 
@@ -201,18 +205,6 @@ body::before {
   vertical-align: -0.12em;
 }
 
-@keyframes pulse-glow {
-  0%, 100% { filter: drop-shadow(0 0 5px rgba(56,189,248,0.25)); opacity: 0.95; }
-  50%      { filter: drop-shadow(0 0 12px rgba(56,189,248,0.85)); opacity: 1; }
-}
-
-.sparkle-brand {
-  color: var(--cyan-bright);
-  font-size: 1.35em;
-  animation: pulse-glow 3.5s ease-in-out infinite;
-  align-self: center;
-}
-
 /* ── App shell: persistent left sidebar + content column ── */
 :root { --sidebar-w: 248px; --sidebar-w-collapsed: 68px; }
 
@@ -250,7 +242,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   justify-content: center;
   animation: boot-splash-pulse 1.5s ease-in-out infinite;
 }
-[data-auth="loading"] #boot-splash .brand { font-size: 1.5rem; }
+[data-auth="loading"] #boot-splash .brand-art { width: 15rem; height: 4rem; }
 @keyframes boot-splash-pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   [data-auth="loading"] #boot-splash { animation: none; opacity: 0.85; }
@@ -272,18 +264,35 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 
 .brand {
   display: inline-flex;
-  align-items: baseline;
-  gap: 0.55rem;
-  font-weight: 800;
-  font-size: 1rem;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
   color: var(--text);
-  letter-spacing: -0.02em;
   font-family: var(--font);
-  text-transform: none;
 }
-.brand-hub { color: var(--cyan-bright); font-weight: 300; letter-spacing: -0.02em; }
+.brand-art {
+  display: block;
+  flex: none;
+  width: 11.5rem;
+  height: 3.05rem;
+  background-image: var(--stock-brand-lockup);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+}
+.brand-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
-.sidebar-brand { display: flex; align-items: center; padding: 0.3rem 0.6rem 1rem; }
+.sidebar-brand { display: flex; align-items: center; min-height: 4rem; padding: 0.2rem 0.5rem 0.85rem; }
+.sidebar-brand .brand-art { width: 11.45rem; height: 3.05rem; }
 
 /* Primary section nav */
 #primary-nav { display: flex; flex-direction: column; gap: 0.12rem; }
@@ -556,8 +565,11 @@ body.sidebar-collapsed .sidebar-collapse { justify-content: center; }
 body.sidebar-collapsed .identity-card { justify-content: center; gap: 0; padding-left: 0; padding-right: 0; }
 body.sidebar-collapsed .sidebar-collapse .nav-ico { transform: rotate(180deg); }
 body.sidebar-collapsed .sidebar-brand { justify-content: center; padding: 0.3rem 0 1rem; }
-body.sidebar-collapsed .sidebar-brand .brand { font-size: 0; gap: 0; }
-body.sidebar-collapsed .sidebar-brand .sparkle { width: 22px; height: 22px; }
+body.sidebar-collapsed .sidebar-brand .brand-art {
+  width: 2.45rem;
+  height: 2.1rem;
+  background-image: var(--stock-brand-mark);
+}
 
 /* Mobile top bar (drawer trigger), hidden on desktop. */
 #mobile-topbar {
@@ -573,6 +585,7 @@ body.sidebar-collapsed .sidebar-brand .sparkle { width: 22px; height: 22px; }
   top: 0;
   z-index: 50;
 }
+#mobile-topbar .brand-art { width: 9.25rem; height: 2.5rem; }
 .icon-btn {
   display: inline-flex;
   align-items: center;
@@ -608,10 +621,15 @@ main {
     position: fixed;
     inset: 0 auto 0 0;
     width: min(86vw, 320px);
+    padding-top: 4.25rem;
     z-index: 60;
     transform: translateX(-100%);
     transition: transform var(--ease);
   }
+  /* The sticky top bar remains visible above the drawer and already carries
+     the complete lockup. Suppress the duplicate drawer lockup and reserve the
+     bar's height so no brand fragment or navigation item sits underneath it. */
+  #sidebar .sidebar-brand { display: none; }
   body.sidebar-open #sidebar { transform: translateX(0); }
   /* The collapsed icon-rail mode does not apply inside the mobile drawer. */
   body.sidebar-collapsed .nav-label,
@@ -620,7 +638,11 @@ main {
   body.sidebar-collapsed .identity-cog { display: revert; }
   body.sidebar-collapsed .nav-item { justify-content: flex-start; }
   body.sidebar-collapsed .identity-card { justify-content: flex-start; gap: 0.6rem; padding-left: 0.45rem; padding-right: 0.45rem; }
-  body.sidebar-collapsed .sidebar-brand .brand { font-size: 1rem; gap: 0.55rem; }
+  body.sidebar-collapsed .sidebar-brand .brand-art {
+    width: 11.45rem;
+    height: 3.05rem;
+    background-image: var(--stock-brand-lockup);
+  }
   body.sidebar-open #sidebar-backdrop {
     display: block;
     position: fixed;
@@ -674,15 +696,14 @@ body[data-auth="out"] {
   [data-auth="out"] .login-box { animation: none; }
 }
 
-/* Brand slot: the stock wordmark, or the operator's logo/site title once
+/* Brand slot: the stock Orbit Hub lockup, or the operator's logo/site title once
    views/branding.js swaps it in. */
 .login-brand {
   display: flex;
   justify-content: center;
   margin-bottom: 1.35rem;
 }
-.login-brand .brand { font-size: 1.45rem; }
-.login-brand .sparkle-brand { animation: none; filter: none; }
+.login-brand .brand-art { width: min(15rem, 72vw); height: 4rem; }
 /* A logo replaces the wordmark, so it is sized for the card, not the sidebar,
    and clamped so a wide operator lockup cannot overflow. */
 .login-brand .brand-logo { height: 2.5rem; max-width: 100%; object-fit: contain; }
@@ -5152,14 +5173,16 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 .about-card { max-width: 26rem; }
 .about-wordmark {
   margin: 0;
-  font-size: 1.35rem;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  color: var(--text);
+  width: fit-content;
 }
-/* The stock two-tone wordmark. Not a .brand slot: branding.js rewrites those,
-   and this line has to survive a white-label. */
-.about-wordmark-accent { color: var(--cyan-bright); }
+/* Static product identity, deliberately not a .brand slot: the About dialog
+   remains diagnosable after an operator white-labels the rest of the shell. */
+.about-brand-art {
+  display: block;
+  width: 12rem;
+  height: 3.2rem;
+  background: var(--stock-brand-lockup) left center / contain no-repeat;
+}
 .about-version {
   margin: 0.15rem 0 0;
   color: var(--text-soft);

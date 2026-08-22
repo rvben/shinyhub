@@ -132,8 +132,10 @@ func TestLoginProvidersGated(t *testing.T) {
 func TestLoginBrandSlot(t *testing.T) {
 	assertContains(t, "index.html", `<div class="login-brand">`,
 		"the login card must carry a brand slot, or the signed-out page shows no identity (sidebar/top bar are display:none when out)")
-	assertContains(t, "index.html", `<span class="brand-name">Shiny<span class="brand-hub">Hub</span></span>`,
-		"the wordmark must be one .brand-name node, or .brand's flex gap splits it into 'Shiny Hub'")
+	assertContains(t, "index.html", `<span class="brand-art" aria-hidden="true"></span>`,
+		"the stock brand slots must render the theme-aware Orbit Hub artwork")
+	assertContains(t, "index.html", `<span class="sr-only">ShinyHub</span>`,
+		"the image-based stock lockup must keep an accessible product name")
 	assertContains(t, "app.js", "applyBranding(document",
 		"app.js must delegate branding to views/branding.js so the swap stays covered by jstests/branding.test.js")
 	assertContains(t, "views/branding.js", `doc.querySelectorAll('.brand')`,
@@ -142,6 +144,33 @@ func TestLoginBrandSlot(t *testing.T) {
 		"style.css must size an operator logo for the login card, or a full-size asset blows out the box")
 	assertContains(t, "style.css", `[data-auth="out"] #login-view`,
 		"the signed-out login view must be centred in the viewport, not hung from the top")
+}
+
+func TestStockBrandAssetSet(t *testing.T) {
+	for _, name := range []string{
+		"brand/orbit-hub-lockup-light.png",
+		"brand/orbit-hub-lockup-dark.png",
+		"brand/orbit-hub-mark-light.png",
+		"brand/orbit-hub-mark-dark.png",
+		"brand/favicon-light-16.png",
+		"brand/favicon-dark-16.png",
+		"brand/favicon-light-32.png",
+		"brand/favicon-dark-32.png",
+		"brand/favicon.ico",
+		"brand/apple-touch-icon.png",
+	} {
+		if _, err := fs.Stat(ui.Static(), name); err != nil {
+			t.Errorf("stock brand asset %q must be embedded: %v", name, err)
+		}
+	}
+	assertContains(t, "index.html", `data-stock-icon`,
+		"stock favicon links must be identifiable so white-label rendering can remove the complete set")
+	assertContains(t, "style.css", `--stock-brand-lockup: url('/static/brand/orbit-hub-lockup-dark.png')`,
+		"dark mode must select the purpose-built dark Orbit Hub lockup")
+	assertContains(t, "style.css", `--stock-brand-lockup: url('/static/brand/orbit-hub-lockup-light.png')`,
+		"light mode must select the light Orbit Hub lockup")
+	assertContains(t, "style.css", `background-image: var(--stock-brand-mark)`,
+		"the collapsed sidebar must use the compact mark rather than shrinking the full wordmark")
 }
 
 // TestAboutDialog pins the one surface that tells a signed-in operator which
@@ -155,8 +184,8 @@ func TestLoginBrandSlot(t *testing.T) {
 func TestAboutDialog(t *testing.T) {
 	assertContains(t, "index.html", `<div id="about-modal" class="modal-overlay" hidden`,
 		"index.html must carry the About dialog")
-	assertContains(t, "index.html", `<p class="about-wordmark">Shiny<span class="about-wordmark-accent">Hub</span></p>`,
-		"the product name must be static markup with no .brand class, so branding.js cannot swap the software name away")
+	assertContains(t, "index.html", `<p class="about-wordmark" role="img" aria-label="ShinyHub">`,
+		"the product identity must be static accessible markup with no .brand class, so branding.js cannot swap the software name away")
 	assertContains(t, "index.html", `<p id="about-version" class="about-version"></p>`,
 		"the dialog must carry the version slot")
 	assertContains(t, "index.html", `<dl id="about-runtimes" class="about-runtimes"></dl>`,

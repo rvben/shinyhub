@@ -12,10 +12,10 @@ import { brandingIntent, applyBranding } from '../static/views/branding.js';
 // bar, sidebar, and the login card.
 function shellDoc() {
   return new JSDOM(`<!DOCTYPE html><body>
-    <div id="boot-splash"><span class="brand"><span class="sparkle sparkle-brand" aria-hidden="true"></span><span class="brand-name">Shiny<span class="brand-hub">Hub</span></span></span></div>
-    <header id="topbar"><span class="brand"><span class="sparkle sparkle-brand" aria-hidden="true"></span><span class="brand-name">Shiny<span class="brand-hub">Hub</span></span></span></header>
-    <nav id="sidebar"><span class="brand"><span class="sparkle sparkle-brand" aria-hidden="true"></span><span class="brand-name">Shiny<span class="brand-hub">Hub</span></span></span></nav>
-    <section id="login-view"><div class="login-box"><div class="login-brand"><span class="brand"><span class="sparkle sparkle-brand" aria-hidden="true"></span><span class="brand-name">Shiny<span class="brand-hub">Hub</span></span></span></div></div></section>
+    <div id="boot-splash"><span class="brand"><span class="brand-art" aria-hidden="true"></span><span class="sr-only">ShinyHub</span></span></div>
+    <header id="topbar"><span class="brand"><span class="brand-art" aria-hidden="true"></span><span class="sr-only">ShinyHub</span></span></header>
+    <nav id="sidebar"><span class="brand"><span class="brand-art" aria-hidden="true"></span><span class="sr-only">ShinyHub</span></span></nav>
+    <section id="login-view"><div class="login-box"><div class="login-brand"><span class="brand"><span class="brand-art" aria-hidden="true"></span><span class="sr-only">ShinyHub</span></span></div></div></section>
   </body>`).window.document;
 }
 
@@ -81,7 +81,8 @@ test('zero branding leaves every stock wordmark untouched', () => {
   const doc = shellDoc();
   applyBranding(doc, {});
   for (const slot of doc.querySelectorAll('.brand')) {
-    assert.equal(slot.querySelector('.brand-name').textContent, 'ShinyHub');
+    assert.ok(slot.querySelector('.brand-art'));
+    assert.equal(slot.querySelector('.sr-only').textContent, 'ShinyHub');
     assert.equal(slot.querySelector('img'), null);
   }
 });
@@ -109,12 +110,13 @@ test('every brand slot gets the logo, so the identity is consistent across views
   }
 });
 
-test('a site title with no logo rewrites the wordmark text and keeps the sparkle', () => {
+test('a site title with no logo fully replaces the stock identity', () => {
   const doc = shellDoc();
   applyBranding(doc, { site_title: 'ACME Analytics' });
   const slot = loginSlot(doc);
   assert.equal(slot.querySelector('.brand-name').textContent, 'ACME Analytics');
-  assert.ok(slot.querySelector('.sparkle'), 'sparkle mark stays');
+  assert.equal(slot.querySelector('.brand-art'), null, 'stock Orbit Hub mark must not leak into a white-label');
+  assert.equal(slot.querySelector('.sr-only'), null);
   assert.equal(slot.querySelector('img'), null);
 });
 

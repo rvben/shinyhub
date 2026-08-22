@@ -1,0 +1,2 @@
+Origin: deterministic emblem-only crop of `01-signal-hierarchy.png`.
+Production request: preserve the complete Orbit Hub emblem exactly--the cyan sparkle, full Muted Starlight orbit, all three Soft Starlight node rings and pale cores, geometry, colors, and alpha--while removing only the wordmark. Trim transparent canvas around the emblem and add 48px transparent clear space on every side. No recoloring, redraw, filter, shadow, or background.

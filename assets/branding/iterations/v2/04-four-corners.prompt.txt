@@ -1,0 +1,20 @@
+Origin generation prompt:
+Use case: logo-brand
+Asset type: V2 ShinyHub logo exploration for die-cut stickers, app branding, and marketing
+Input images: Image 1 is the selected Orbit Hub logo, used only as brand-DNA reference
+Primary request: Regenerate option 04 as “Four Corners.” Create a compact emblem with one cyan four-point spark centered between four thick navy quarter-circle corner brackets. The four brackets face inward but never touch; each represents one deployed app controlled by the central hub. Add no nodes. This replaces a rejected render and must be a complete usable horizontal lockup.
+Scene/backdrop: actual transparent alpha background; absolutely no dark rectangle, no colored canvas, no glow
+Style/medium: strictly flat vector-logo aesthetic, simple bold geometry, professional open-source developer tooling
+Composition/framing: compact horizontal lockup; Four Corners emblem on the left; full exact wordmark on the right; generous transparent padding
+Color palette: deep navy #060914, signal cyan #38BDF8, starlight #E8EEFF; flat solid fills only
+Text (verbatim): “ShinyHub” — show this complete exact word once, S-h-i-n-y-H-u-b, capital S and H; “Shiny” deep navy, “Hub” signal cyan, rounded Manrope-like sans
+Constraints: four corner brackets only, no nodes, central spark, legible at 32px, strong die-cut silhouette
+Avoid: gradients, glow, shadows, opaque background, missing “Shiny”, atoms, molecule diagrams, thin spokes, extra words, misspelling, watermark
+
+Final background-extraction prompt:
+Use case: background-extraction
+Asset type: final transparent ShinyHub logo option
+Input images: Image 1 is the edit target, Four Corners logo
+Primary request: Isolate the complete logo and wordmark from the pale checkerboard. Delete every background pixel and output a PNG with real alpha transparency.
+Constraints: preserve the exact Four Corners emblem, exact ShinyHub wordmark, colors, geometry, proportions, edges, and padding; change only background pixels; transparent areas must have alpha 0.
+Avoid: drawn checkerboard, white canvas, opaque matte, black canvas, redesign, crop, recolor, new text, watermark

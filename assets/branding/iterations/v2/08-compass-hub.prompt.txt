@@ -1,0 +1,20 @@
+Origin generation prompt:
+Use case: logo-brand
+Asset type: V2 ShinyHub logo exploration for die-cut stickers, app branding, and marketing
+Input images: Image 1 is the selected Orbit Hub logo, used only as brand-DNA reference
+Primary request: Create option 08, “Compass Hub,” for ShinyHub. Transform the central spark into a compact four-direction compass hub. Surround it with four short curved navy corner arcs that never join into a full circle; add a single cyan node on the upper-right arc. The result should suggest clear orientation across many deployed apps, not navigation software.
+Scene/backdrop: genuinely transparent background with clean alpha
+Style/medium: crisp flat vector-logo aesthetic, precise, calm, iconic
+Composition/framing: compact horizontal lockup, emblem left, complete exact wordmark right, generous transparent padding
+Color palette: deep navy #060914, signal cyan #38BDF8, starlight #E8EEFF; flat fills only
+Text (verbatim): “ShinyHub” — exact spelling, one word, capital S and H; “Shiny” deep navy, “Hub” signal cyan, rounded Manrope-like sans
+Constraints: four separated arcs, one node; no complete orbit; legible at 32px
+Avoid: gradients, glow, shadows, black background, map pins, compass letters, nautical imagery, extra words, misspelling, watermark
+
+Final background-extraction prompt:
+Use case: background-extraction
+Asset type: final transparent ShinyHub logo option
+Input images: Image 1 is the edit target, Compass Hub logo
+Primary request: Remove the entire pale checkerboard canvas and replace it with genuine transparent alpha. Output only the complete logo and wordmark floating on transparency.
+Constraints: keep the exact emblem, ShinyHub spelling, colors, size, proportions, and edge shapes unchanged; alpha must be 0 outside the artwork.
+Avoid: fake checkerboard, white background, dark background, matte, redesign, crop, recolor, blur, shadow, watermark

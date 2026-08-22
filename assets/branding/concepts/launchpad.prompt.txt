@@ -1,0 +1,10 @@
+Use case: logo-brand
+Asset type: alternate logo concept for die-cut sticker and social marketing
+Primary request: Design an original alternate logo for a self-hosted dashboard deployment product named ShinyHub. Create a compact emblem plus the exact wordmark ShinyHub. Concept direction: “Launchpad Monogram” — build a clever, simple capital H from four rounded dashboard tiles, with a small four-point cyan spark occupying the center bridge; the negative space should read like a doorway or launch portal. It should communicate many apps, one calm hub, and instant launch.
+Scene/backdrop: genuinely transparent background with clean alpha edges; no mockup, no paper, no wall, no sticker border
+Style/medium: crisp flat vector-logo aesthetic, bold geometric shapes, professional but slightly playful open-source developer tooling brand
+Composition/framing: centered compact horizontal lockup, emblem on the left and wordmark on the right; strong, continuous outer silhouette for die-cut sticker production; generous transparent padding
+Color palette: deep navy #060914, signal cyan #38BDF8, starlight #E8EEFF; strictly flat fills, maximum 3 colors
+Text (verbatim): “ShinyHub” — spell exactly S-h-i-n-y-H-u-b, one word, capital S and H; use a rounded geometric sans similar in character to Manrope, with “Shiny” in deep navy and “Hub” in signal cyan
+Constraints: legible at 32px; sturdy simplified geometry; minimal internal detail; works on light and dark surfaces; production-ready logo presentation; original, no resemblance to existing commercial marks; preserve real transparency
+Avoid: gradients, glow, shadows, outlines thinner than 4px, orbit rings, planets, generic cloud icons, complex constellations, extra words, slogans, misspelled text, watermark, enclosing square or circular background

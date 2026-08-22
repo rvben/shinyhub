@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/branding/selected/shinyhub-orbit-hub-dark.png">
+    <img src="assets/branding/selected/shinyhub-orbit-hub.png" alt="ShinyHub" width="520">
+  </picture>
+</p>
+
 # ShinyHub
 
 [![PyPI](https://img.shields.io/pypi/v/shinyhub)](https://pypi.org/project/shinyhub/)

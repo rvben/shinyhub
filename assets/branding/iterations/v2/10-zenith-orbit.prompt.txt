@@ -1,0 +1,11 @@
+Use case: logo-brand
+Asset type: V2 ShinyHub logo exploration for die-cut stickers, app branding, and marketing
+Input images: Image 1 is the selected Orbit Hub logo, used only as brand-DNA reference
+Primary request: Create option 10, “Zenith Orbit,” for ShinyHub. Use one bold navy crescent arc cradling a cyan central four-point spark from below and left. Place three cyan nodes rising in a clean diagonal toward the upper-right, with the largest node at the top, expressing dashboards waking and reaching healthy state. Keep the whole mark compact and balanced.
+Scene/backdrop: genuinely transparent background with clean alpha
+Style/medium: crisp flat vector-logo aesthetic, optimistic, technical, minimal
+Composition/framing: compact horizontal lockup, emblem left, complete exact wordmark right, generous transparent padding
+Color palette: deep navy #060914, signal cyan #38BDF8, starlight #E8EEFF; flat fills only
+Text (verbatim): “ShinyHub” — exact spelling, one word, capital S and H; “Shiny” deep navy, “Hub” signal cyan, rounded Manrope-like sans
+Constraints: one crescent, three nodes, one spark; distinct upward silhouette; works at 32px
+Avoid: gradients, glow, shadows, black background, charts, arrows, planetary illustration, extra words, misspelling, watermark

@@ -895,6 +895,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // reopen is instant; the first open fills in as soon as the fetch lands.
   function openAboutModal() {
     if (!aboutModal) return;
+    // On mobile the drawer and modal live in separate stacking contexts. Close
+    // the drawer before presenting About so the dialog is visible immediately
+    // and focus never lands behind the navigation plane.
+    if (sidebarDrawer) sidebarDrawer.close();
     loadServerInfo().then((info) => renderAbout(document, info));
     aboutModal.hidden = false;
     modalTrap(aboutModal).activate();
