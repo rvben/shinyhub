@@ -78,7 +78,7 @@ nav = [
 
 [project.theme]
 language = "en"
-favicon = "images/favicon.svg"
+favicon = "images/favicon.png"
 features = [
   "content.action.edit",
   "content.action.view",

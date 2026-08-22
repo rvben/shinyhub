@@ -1,0 +1,11 @@
+Use case: logo-brand
+Asset type: V2 ShinyHub logo exploration for die-cut stickers, app branding, and marketing
+Input images: Image 1 is the selected Orbit Hub logo, used only as brand-DNA reference
+Primary request: Create option 07, “Signal Loop,” for ShinyHub. Draw one thick continuous navy loop that crosses itself once to create a subtle lowercase h silhouette around a cyan four-point spark. Place one cyan node at the loop’s endpoint. The mark should communicate an always-ready application lifecycle without resembling an infinity symbol.
+Scene/backdrop: genuinely transparent background with clean alpha
+Style/medium: crisp flat vector-logo aesthetic, fluid but geometric, restrained
+Composition/framing: horizontal lockup, emblem left, complete exact wordmark right, generous transparent padding
+Color palette: deep navy #060914, signal cyan #38BDF8, starlight #E8EEFF; flat fills only
+Text (verbatim): “ShinyHub” — exact spelling, one word, capital S and H; “Shiny” deep navy, “Hub” signal cyan, rounded Manrope-like sans
+Constraints: one continuous loop, one node, one central spark; strong at 32px
+Avoid: gradients, glow, shadows, black background, infinity sign, chain links, extra words, missing letters, watermark

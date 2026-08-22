@@ -128,7 +128,7 @@ components:
 
 **Creative North Star: "The Calm Control Room"**
 
-ShinyHub is a precise, quietly energetic control surface for delivering performant dashboards. Its existing Constellation identity uses deep tonal layers, starlight text, and sparing cyan signals to make operational state legible without turning the interface into a wall of instrumentation.
+ShinyHub is a precise, quietly energetic control surface for delivering performant dashboards. Its Constellation identity uses deep tonal layers, starlight text, and sparing cyan signals to make operational state legible without turning the interface into a wall of instrumentation. The Orbit Hub lockup—a crystalline signal held by three connected orbital nodes—is the product signature; it appears as a full wordmark where recognition matters and as the standalone mark only where space is genuinely compact.
 
 The system is dark-first but not dark-only. The light theme carries the same semantic hierarchy with contrast-adjusted colors, while white-label branding can replace front-door identity without weakening the operator console. Density is purposeful: familiar controls, compact information, and clear grouping keep experts moving without making occasional users decode an unfamiliar system.
 
@@ -150,14 +150,14 @@ The Constellation palette is a restrained deep-space neutral system animated by 
 
 ### Primary
 
-- **Signal Cyan** (#38BDF8): the dark-theme brand signal for primary actions, active navigation icons, focus, links, and the sparkle identity.
+- **Signal Cyan** (#38BDF8): the dark-theme brand signal for primary actions, active navigation icons, focus, links, and the Orbit Hub identity.
 - **Daylight Signal** (#0369A1): the contrast-safe light-theme equivalent of Signal Cyan.
 
 ### Secondary
 
 - **Soft Cyan** (#7DD3FC): supporting information and technical readouts on dark surfaces.
 - **Electric Blue** (#60A5FA): the second stop in primary-action gradients; it strengthens action hierarchy without introducing another hue family.
-- **Sparkle Blue** (#BAE6FD): the brightest identity glint, reserved for the star motif and subtle highlights.
+- **Sparkle Blue** (#BAE6FD): the brightest identity glint, reserved for the Orbit Hub core and subtle highlights.
 
 ### Tertiary
 

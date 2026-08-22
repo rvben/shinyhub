@@ -83,8 +83,9 @@ func ImageSources(p Public) []string {
 }
 
 var (
-	titleRe = regexp.MustCompile(`(?s)<title>.*?</title>`)
-	headRe  = regexp.MustCompile(`</head>`)
+	titleRe     = regexp.MustCompile(`(?s)<title>.*?</title>`)
+	headRe      = regexp.MustCompile(`</head>`)
+	stockIconRe = regexp.MustCompile(`(?m)^[ \t]*<link[^>\n]*data-stock-icon[^>\n]*>\r?\n?`)
 )
 
 // BrandingAssetHandler serves ONLY the basenames in the allow-list. There is
@@ -196,6 +197,12 @@ func RenderIndex(raw []byte, p Public) ([]byte, error) {
 	out := raw
 	if p.SiteTitle != "" {
 		out = titleRe.ReplaceAllLiteral(out, []byte("<title>"+html.EscapeString(p.SiteTitle)+"</title>"))
+	}
+	// A configured identity must never compete with the stock favicon set. A
+	// logo/title-only white-label gets no icon rather than leaking ShinyHub into
+	// the browser tab; a configured favicon replaces the whole stock set below.
+	if p.Favicon != "" || p.Logo != "" || p.SiteTitle != "" {
+		out = stockIconRe.ReplaceAll(out, nil)
 	}
 
 	var head bytes.Buffer

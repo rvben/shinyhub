@@ -1,0 +1,2 @@
+Origin: deterministic dark-mode optical derivative of `assets/branding/selected/shinyhub-orbit-hub.png`.
+Production request: preserve the exact Orbit Hub geometry, typography, cyan gradient, pale node cores, transparent dimensions, and source alpha. Reassign only the source deep-navy pixels by visual role: set "Shiny" to Soft Starlight #A8B4D4, the orbital structure to Muted Starlight #6B7AA3, and the three node rings to Soft Starlight #A8B4D4. Keep "Hub" and the central sparkle cyan. No redraw, crop, filter, shadow, glow, background, or geometry change.

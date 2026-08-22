@@ -115,6 +115,44 @@ func TestRenderIndexInjectsHeadAndEscapesScript(t *testing.T) {
 	}
 }
 
+func TestRenderIndexReplacesStockIconsForWhiteLabel(t *testing.T) {
+	raw := []byte(`<html><head><title>ShinyHub</title>
+  <link rel="icon" href="/static/brand/favicon.ico" data-stock-icon>
+  <link rel="apple-touch-icon" href="/static/brand/apple-touch-icon.png" data-stock-icon>
+</head><body></body></html>`)
+
+	withFavicon, err := ui.RenderIndex(raw, ui.Public{
+		SiteTitle: "Acme",
+		Favicon:   "/branding/acme.ico",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(withFavicon)
+	if strings.Contains(got, "data-stock-icon") || strings.Contains(got, "/static/brand/") {
+		t.Fatalf("operator favicon must replace the complete stock icon set: %s", got)
+	}
+	if strings.Count(got, `<link rel="icon" href="/branding/acme.ico">`) != 1 {
+		t.Fatalf("operator favicon must be injected exactly once: %s", got)
+	}
+
+	logoOnly, err := ui.RenderIndex(raw, ui.Public{Logo: "/branding/acme.svg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logoOnly), "data-stock-icon") {
+		t.Fatalf("logo-only white-label must remove stock icons rather than leak ShinyHub: %s", logoOnly)
+	}
+
+	colorOnly, err := ui.RenderIndex(raw, ui.Public{PrimaryColor: "#123456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(colorOnly), "data-stock-icon") {
+		t.Fatalf("a color-only customization must keep the stock product favicon: %s", colorOnly)
+	}
+}
+
 func TestBrandingAssetHandler(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "logo.svg")

@@ -4,6 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ShinyHub</title>
+  <!-- Stock product icons. RenderIndex removes the complete set when an
+       operator supplies branding.favicon, so white-label favicon overrides do
+       not compete with or leak the ShinyHub identity. -->
+  <link rel="icon" href="/static/brand/favicon.ico" sizes="16x16 32x32 48x48" data-stock-icon>
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/brand/favicon-light-16.png" media="(prefers-color-scheme: light)" data-stock-icon>
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/brand/favicon-dark-16.png" media="(prefers-color-scheme: dark)" data-stock-icon>
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/favicon-light-32.png" media="(prefers-color-scheme: light)" data-stock-icon>
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/favicon-dark-32.png" media="(prefers-color-scheme: dark)" data-stock-icon>
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/brand/apple-touch-icon.png" data-stock-icon>
   <!-- Apply the saved theme before first paint so there is no dark/light flash.
        Mirrors resolveTheme() in views/theme.js (preference 'system'|'light'|'dark';
        'system' follows prefers-color-scheme). theme.js re-applies and keeps it in
@@ -38,8 +47,8 @@
        are served with data-auth="in" stamped by the server, skipping this. -->
   <div id="boot-splash" aria-hidden="true">
     <span class="brand">
-      <span class="sparkle sparkle-brand" aria-hidden="true"></span>
-      <span class="brand-name">Shiny<span class="brand-hub">Hub</span></span>
+      <span class="brand-art" aria-hidden="true"></span>
+      <span class="sr-only">ShinyHub</span>
     </span>
   </div>
 
@@ -48,8 +57,8 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
     </button>
     <span class="brand">
-      <span class="sparkle sparkle-brand" aria-hidden="true"></span>
-      <span class="brand-name">Shiny<span class="brand-hub">Hub</span></span>
+      <span class="brand-art" aria-hidden="true"></span>
+      <span class="sr-only">ShinyHub</span>
     </span>
   </header>
 
@@ -57,8 +66,8 @@
     <aside id="sidebar" aria-label="Primary navigation">
       <div class="sidebar-brand">
         <span class="brand">
-          <span class="sparkle sparkle-brand" aria-hidden="true"></span>
-          <span class="brand-name">Shiny<span class="brand-hub">Hub</span></span>
+          <span class="brand-art" aria-hidden="true"></span>
+          <span class="sr-only">ShinyHub</span>
         </span>
       </div>
 
@@ -133,8 +142,8 @@
              identity the sidebar carries once signed in. -->
         <div class="login-brand">
           <span class="brand">
-            <span class="sparkle sparkle-brand" aria-hidden="true"></span>
-            <span class="brand-name">Shiny<span class="brand-hub">Hub</span></span>
+            <span class="brand-art" aria-hidden="true"></span>
+            <span class="sr-only">ShinyHub</span>
           </span>
         </div>
         <!-- The lockup is the card's visible title; the heading is the view's
@@ -1056,7 +1065,9 @@
           <button id="about-close" type="button" aria-label="Close about"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
         </div>
         <div class="modal-body">
-          <p class="about-wordmark">Shiny<span class="about-wordmark-accent">Hub</span></p>
+          <p class="about-wordmark" role="img" aria-label="ShinyHub">
+            <span class="about-brand-art" aria-hidden="true"></span>
+          </p>
           <p id="about-version" class="about-version"></p>
           <p id="about-build" class="about-build" hidden></p>
 
