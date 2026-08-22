@@ -130,6 +130,7 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 		`workflows: ["release"]`,
 		`github.event.workflow_run.conclusion == 'success'`,
 		`github.event.workflow_run.head_sha`,
+		`node-version: "24"`,
 		`run: npm run deploy`,
 		`SHINYHUB_DEMO_EXPECTED_VERSION`,
 		`./scripts/demo-smoke.sh`,
