@@ -35,6 +35,7 @@ type fleetFakeServer struct {
 	apps       map[string]*fakeApp
 	preconds   bool
 	nextDigest string // digest a deploy will promote to
+	deploys    int
 	url        string
 }
 
@@ -109,6 +110,7 @@ func (s *fleetFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": a.status}})
 
 	case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+		s.deploys++
 		slug := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/apps/"), "/deploy")
 		a := s.apps[slug]
 		if a == nil {
@@ -273,6 +275,36 @@ func TestFleetApply_Acceptance_CreateThenIdempotent(t *testing.T) {
 	}
 	if !strings.Contains(out2, "1 unchanged") || strings.Contains(out2, "created") && !strings.Contains(out2, "0 created") {
 		t.Fatalf("second apply must be idempotent (all unchanged):\n%s", out2)
+	}
+}
+
+func TestFleetApply_Acceptance_AdoptMatchingAppWithoutRedeploy(t *testing.T) {
+	fake := newFleetFake(true)
+	_ = fake.httptest(t)
+	man := "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./src\"\nvisibility=\"private\"\n"
+
+	if out, err := applyManifest(t, fake, man); err != nil {
+		t.Fatalf("seed apply: %v\n%s", err, out)
+	}
+	fake.mu.Lock()
+	fake.apps["ops"].ManagedBy = nil
+	seedDeploys := fake.deploys
+	fake.mu.Unlock()
+
+	out, err := applyManifest(t, fake, man, "--adopt")
+	if err != nil {
+		t.Fatalf("adopt matching app: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "1 adopted") {
+		t.Fatalf("want 1 adopted:\n%s", out)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.deploys != seedDeploys {
+		t.Fatalf("matching adoption issued %d new deploys, want 0", fake.deploys-seedDeploys)
+	}
+	if mb := fake.apps["ops"].ManagedBy; mb == nil || *mb != "fleet:eu" {
+		t.Fatalf("marker not stamped: %#v", mb)
 	}
 }
 

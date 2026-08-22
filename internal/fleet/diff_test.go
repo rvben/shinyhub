@@ -163,6 +163,23 @@ func TestDiff_AdoptFromForeignFleet(t *testing.T) {
 	}
 }
 
+func TestDiff_AdoptRetainsDeclaredConfigDrift(t *testing.T) {
+	m := mani("eu", AppEntry{
+		Slug: "legacy", Source: "./legacy", Visibility: "private",
+		Config: Config{Replicas: ptr(3)},
+	})
+	got := Diff(m, map[string]string{"legacy": "sha256:same"}, []ObservedApp{{
+		Slug: "legacy", ManagedBy: nil, Access: "private",
+		ContentDigest: "sha256:same", Replicas: ptr(1),
+	}})
+	if len(got) != 1 || got[0].Action != ActionAdopt {
+		t.Fatalf("diff = %+v, want one adopt", got)
+	}
+	if len(got[0].ConfigDrift) != 1 || got[0].ConfigDrift[0].Key != "replicas" {
+		t.Fatalf("adopt config drift = %+v, want replicas drift", got[0].ConfigDrift)
+	}
+}
+
 func TestDiff_OrderIndependence(t *testing.T) {
 	a := AppEntry{Slug: "a", Source: "./a", Visibility: "private"}
 	b := AppEntry{Slug: "b", Source: "./b", Visibility: "private"}

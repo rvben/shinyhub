@@ -353,6 +353,14 @@ ownership. Convergence is non-atomic and
 continue-on-error: one failing app does not abort the rest, and the exit code
 reflects the worst outcome.
 
+Adopting an existing app does not create a deployment when its non-empty
+content digest and every declared setting already match. On servers that
+support fleet preconditions, apply transfers ownership with one conditional
+metadata update that asserts both the observed digest and prior owner. A source
+or declared-config difference still follows the normal convergence path. Older
+servers without precondition support conservatively redeploy during adoption
+rather than trusting a stale observation.
+
 | Flag | Effect |
 |---|---|
 | `--dry-run` | Identical to `fleet plan`; makes no changes. |

@@ -473,18 +473,35 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// unmanaged"). Reserving before the deploy means a concurrent ownership
 		// change is rejected as a 409 BEFORE we upload a bundle - otherwise we
 		// could overwrite an app we no longer own.
-		var ifMB *string
+		var ifD, ifMB *string
 		if opt.preconditions {
+			// Assert the source observed during plan as well as its owner. Without
+			// the digest guard, a concurrent deploy could land between preflight
+			// and this reservation and then be silently claimed by the fleet.
+			if d.ServerDigest != "" {
+				digest := d.ServerDigest
+				ifD = &digest
+			}
 			cur := ""
 			if obs.ManagedBy != nil {
 				cur = *obs.ManagedBy
 			}
 			ifMB = &cur
 		}
-		if err := patchManagedBy(cfg, d.Slug, &marker, nil, ifMB, opt.runID); err != nil {
+		if err := patchManagedBy(cfg, d.Slug, &marker, ifD, ifMB, opt.runID); err != nil {
 			return fail(err, 1)
 		}
 		res.mutation = mutationUnknown
+		// A conditional ownership PATCH is sufficient when source and every
+		// declared setting already match. The digest and owner preconditions make
+		// this atomic with respect to the preflight observation, so no release or
+		// health check is needed and no redundant deployment is manufactured. Older
+		// servers without preconditions retain the conservative redeploy path.
+		if opt.preconditions && d.LocalDigest != "" && d.LocalDigest == d.ServerDigest && len(d.ConfigDrift) == 0 {
+			res.attempts = 1
+			res.note = "ownership adopted; source and declared config already matched"
+			return done(statusAdopted)
+		}
 		// Redeploy (idempotent if identical). If it fails without the new
 		// bundle going live, RELEASE the reservation - restore managed_by to
 		// its observed prior value - so a deploy failure never leaves an "owned

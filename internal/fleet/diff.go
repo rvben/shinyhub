@@ -132,6 +132,12 @@ func Diff(m *Manifest, localDigests map[string]string, observed []ObservedApp) [
 		d.ServerDigest = o.ContentDigest
 		owned := o.ManagedBy != nil && *o.ManagedBy == marker
 		d.Owned = owned
+		// Compute drift before the ownership decision. Adoption still remains a
+		// single top-level action, but apply needs to know whether the observed
+		// app already matches completely and can therefore transfer ownership
+		// without creating a redundant deployment.
+		d.ConfigDrift = configDrift(app, o)
+		d.Unmanaged = unmanagedConfig(app, o)
 		if !owned {
 			d.Action = ActionAdopt
 			d.AdoptRequired = true
@@ -145,8 +151,6 @@ func Diff(m *Manifest, localDigests map[string]string, observed []ObservedApp) [
 		}
 
 		srcChanged := d.LocalDigest == "" || o.ContentDigest == "" || d.LocalDigest != o.ContentDigest
-		d.ConfigDrift = configDrift(app, o)
-		d.Unmanaged = unmanagedConfig(app, o)
 		cfgChanged := len(d.ConfigDrift) > 0
 
 		switch {

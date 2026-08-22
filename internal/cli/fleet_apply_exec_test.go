@@ -85,6 +85,49 @@ func TestConvergeApp_AdoptSkippedWithoutFlag(t *testing.T) {
 	}
 }
 
+func TestConvergeApp_AdoptMatchingAppPatchesOwnershipWithoutDeploy(t *testing.T) {
+	var deploys int
+	var gotDigest, gotManagedBy string
+	var sawManagedByHeader bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/apps/legacy":
+			gotDigest = r.Header.Get("X-Shinyhub-If-Content-Digest")
+			values, ok := r.Header["X-Shinyhub-If-Managed-By"]
+			sawManagedByHeader = ok
+			if len(values) > 0 {
+				gotManagedBy = values[0]
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/deploy"):
+			deploys++
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	d := fleet.AppDiff{
+		Slug: "legacy", Action: fleet.ActionAdopt,
+		LocalDigest: "sha256:SAME", ServerDigest: "sha256:SAME",
+	}
+	r := convergeApp(&cliConfig{Host: srv.URL, Token: "shk_test"}, d,
+		fleet.AppEntry{Slug: "legacy", Visibility: "private"},
+		fleet.ObservedApp{Slug: "legacy", Access: "private"}, "",
+		convergeOpts{adopt: true, preconditions: true, fleetID: "eu", runID: "r"},
+		"fleet:eu", io.Discard)
+	if r.status != statusAdopted || r.err != nil {
+		t.Fatalf("result = %#v, want adopted", r)
+	}
+	if deploys != 0 {
+		t.Fatalf("matching adoption issued %d deploys, want 0", deploys)
+	}
+	if gotDigest != "sha256:SAME" || !sawManagedByHeader || gotManagedBy != "" {
+		t.Fatalf("ownership preconditions: digest=%q managed_by=%q present=%v", gotDigest, gotManagedBy, sawManagedByHeader)
+	}
+}
+
 func TestConvergeApp_DeleteSkippedWithoutPrune(t *testing.T) {
 	cfg := &cliConfig{Host: "http://unused", Token: "x"}
 	d := fleet.AppDiff{Slug: "retired", Action: fleet.ActionDelete}
@@ -373,7 +416,10 @@ func TestConvergeApp_AdoptDegradedDoesNotReleaseUnguarded(t *testing.T) {
 	// no If-Managed-By guard, so it could clear or overwrite a new owner that
 	// took the app between our reservation and the deploy failure. We therefore
 	// must NOT issue an unguarded release in degraded mode - the documented
-	// degraded race is accepted rather than risking a clobber.
+	// degraded race is accepted rather than risking a clobber. Matching digests
+	// deliberately do not enable metadata-only adoption here: without a digest
+	// precondition, the observation could already be stale, so deploy remains
+	// the conservative path.
 	var mbValues []any
 	var mu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -400,7 +446,10 @@ func TestConvergeApp_AdoptDegradedDoesNotReleaseUnguarded(t *testing.T) {
 	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
-	d := fleet.AppDiff{Slug: "legacy", Action: fleet.ActionAdopt}
+	d := fleet.AppDiff{
+		Slug: "legacy", Action: fleet.ActionAdopt,
+		LocalDigest: "sha256:SAME", ServerDigest: "sha256:SAME",
+	}
 	entry := fleet.AppEntry{Slug: "legacy", Source: "./x", Visibility: "private"}
 	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "legacy"}, dir,
 		convergeOpts{adopt: true, preconditions: false, retries: 0, fleetID: "eu", runID: "r"},
