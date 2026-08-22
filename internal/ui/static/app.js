@@ -12,7 +12,7 @@ import { mountWorkers, workerDisplay } from '/static/views/workers.js';
 import { summariseFleetHealth, degradedTooltip } from '/static/views/fleet-health.js';
 import { createFocusTrap } from '/static/views/focus-trap.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
-import { mountAppDetail } from '/static/views/app-detail.js';
+import { mountAppDetail, refreshFleetSurfaces } from '/static/views/app-detail.js';
 import { appCardBadge, updateCardStatusBadge, updateStatusPill } from '/static/views/app-card-badge.js';
 import { renderSidebarApps, highlightSidebarApp, isPrimaryNavActive } from '/static/views/sidebar-nav.js';
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
@@ -2093,6 +2093,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let settingsSlug = null;
 
+  // A successful settings mutation can create (or clear) a temporary fleet
+  // override. Re-read the server-owned convergence envelope and repaint only
+  // fleet surfaces so the current form, focus, and unrelated unsaved edits stay
+  // intact. Failure is deliberately non-fatal: the save already succeeded and
+  // the next route mount will recover the display.
+  async function refreshDetailFleetState(slug) {
+    if (!slug || !detailApp || detailApp.slug !== slug) return;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}`);
+    } catch {
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) return;
+    let body;
+    try { body = await resp.json(); } catch { return; }
+    // The user may have navigated while the refresh was in flight.
+    if (!detailApp || detailApp.slug !== slug) return;
+    if (body && body.app) Object.assign(detailApp, body.app);
+    detailLastEnvelope = body || {};
+    refreshFleetSurfaces(document, detailApp, body && body.fleet_state);
+  }
+
   // --- Settings dirty-state tracking (explicit-save model) ---
   // Every settings section registers the inputs it owns. populate*() snapshots a
   // baseline; when live values diverge the section is "dirty": its Save button
@@ -2234,6 +2258,7 @@ document.addEventListener('DOMContentLoaded', () => {
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
     snapshotSettingsSection('visibility');
+    await refreshDetailFleetState(slug);
     flashToast('Access updated', 'success');
   }
 
@@ -2483,6 +2508,7 @@ document.addEventListener('DOMContentLoaded', () => {
     applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' });
     statusEl.textContent = 'Icon updated.';
     setHidden(statusEl, false);
+    await refreshDetailFleetState(app.slug);
   }
 
   async function removeIcon(app) {
@@ -2501,6 +2527,7 @@ document.addEventListener('DOMContentLoaded', () => {
     applyIconChange(app, { mime: '', emoji: '' });
     statusEl.textContent = 'Icon removed.';
     setHidden(statusEl, false);
+    await refreshDetailFleetState(app.slug);
   }
 
   // setEmojiIcon PATCHes a single emoji as the app's icon (server-side this
@@ -2542,6 +2569,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (input) input.value = '';
     statusEl.textContent = 'Icon updated.';
     setHidden(statusEl, false);
+    await refreshDetailFleetState(app.slug);
   }
 
   // clearEmojiIcon PATCHes icon_emoji back to empty. Unlike removeIcon (the
@@ -2583,6 +2611,7 @@ document.addEventListener('DOMContentLoaded', () => {
     applyIconChange(app, { mime, emoji: '' });
     statusEl.textContent = 'Icon updated.';
     setHidden(statusEl, false);
+    await refreshDetailFleetState(app.slug);
   }
 
   // applyIconChange records the new icon state on the app and every cached copy
@@ -2612,6 +2641,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function saveGeneralInfo() {
     if (!settingsSlug) return;
+    const slug = settingsSlug;
     const errEl = document.getElementById('general-error');
     const statusEl = document.getElementById('general-status');
     setError(errEl, '');
@@ -2634,7 +2664,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.disabled = true;
     let resp;
     try {
-      resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
         method: 'PATCH',
         body: JSON.stringify({ name, description, project_slug: project }),
       });
@@ -2666,10 +2696,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if (preview) preview.replaceChildren(renderAppAvatar(document, avatarView(detailApp), 'icon-picker-preview'));
     }
     await loadApps();
+    await refreshDetailFleetState(slug);
   }
 
   async function saveResources() {
     if (!settingsSlug) return;
+    const slug = settingsSlug;
     const errEl = document.getElementById('resources-error');
     const statusEl = document.getElementById('resources-status');
     setError(errEl, '');
@@ -2719,7 +2751,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.disabled = true;
     let resp;
     try {
-      resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
         method: 'PATCH',
         body: JSON.stringify({ memory_limit_mb: memory, cpu_quota_percent: cpu }),
       });
@@ -2740,6 +2772,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(statusEl, false);
     snapshotSettingsSection('resources');
     await loadApps();
+    await refreshDetailFleetState(slug);
   }
 
   function updateMinWarmWarning(replicas, minWarm, isolation) {
@@ -2807,6 +2840,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function saveHibernateSettings() {
     if (!settingsSlug) return;
+    const slug = settingsSlug;
     const errEl = document.getElementById('hibernate-error');
     const statusEl = document.getElementById('hibernate-status');
     setError(errEl, '');
@@ -2847,7 +2881,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.disabled = true;
     let resp;
     try {
-      resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
         method: 'PATCH',
         body: JSON.stringify(payload),
       });
@@ -2874,10 +2908,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const savedMinWarm = minWarm;
     updateMinWarmWarning(Number.isFinite(savedReplicas) ? savedReplicas : 1, savedMinWarm, currentIsolationChoice());
     await loadApps();
+    await refreshDetailFleetState(slug);
   }
 
   async function saveScalingSettings() {
     if (!settingsSlug) return;
+    const slug = settingsSlug;
     const errEl = document.getElementById('scaling-error');
     const statusEl = document.getElementById('scaling-status');
     setError(errEl, '');
@@ -2954,7 +2990,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.disabled = true;
     let resp;
     try {
-      resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
         method: 'PATCH',
         body: JSON.stringify(payload),
       });
@@ -2981,6 +3017,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // floor the operator has in the field.
     updateMinWarmWarning(replicas, parseInt(document.getElementById('min-warm-replicas').value, 10) || 0, workerIsolation);
     await loadApps();
+    await refreshDetailFleetState(slug);
     // Isolation is the one saved field the header menu is derived from, and the
     // metrics poller only ever merges status and deploying. Without folding the
     // reloaded app back into detailApp, switching multiplex to grouped leaves
@@ -3044,14 +3081,14 @@ document.addEventListener('DOMContentLoaded', () => {
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
     snapshotSettingsSection('render');
+    await refreshDetailFleetState(slug);
   }
 
   // populateAutoscaleTab seeds the autoscale fieldset from the GET envelope
   // (app.autoscale_* columns and replicas) and gates editing on the same
-  // canManageApp permission the rest of the General tab uses. The fleet-managed
-  // case is not read-only here either: the fleet badge in the app-detail header
-  // already tells the operator a plan apply will revert manual edits, matching
-  // hibernate / scaling / cap which are likewise editable for managed apps.
+  // canManageApp permission the rest of the General tab uses. Fleet-managed
+  // apps remain editable; app-detail.js marks proven temporary overrides beside
+  // the affected fields after this function seeds their current values.
   function populateAutoscaleTab(app) {
     const enabledInput = document.getElementById('autoscale-enabled');
     const minInput = document.getElementById('autoscale-min');
@@ -3139,6 +3176,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function saveAutoscaleSettings() {
     if (!settingsSlug) return;
+    const slug = settingsSlug;
     const errEl = document.getElementById('autoscale-error');
     const statusEl = document.getElementById('autoscale-status');
     setError(errEl, '');
@@ -3154,7 +3192,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.disabled = true;
     let resp;
     try {
-      resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}`, {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
         method: 'PATCH',
         body: JSON.stringify({ autoscale: payload }),
       });
@@ -3177,6 +3215,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(statusEl, false);
     snapshotSettingsSection('autoscale');
     await loadApps();
+    await refreshDetailFleetState(slug);
   }
 
   function resetDangerZone() {
@@ -4927,12 +4966,17 @@ document.addEventListener('DOMContentLoaded', () => {
         ? `<span class="replica-reason" title="${escapeHtml(reason)}">${escapeHtml(reason)}</span>`
         : '';
       li.innerHTML = `
-        <span class="replica-index">#${r.index}</span>
-        <span class="badge badge-${status}"${reason ? ` title="${escapeHtml(reason)}"` : ''}>${formatStatus(status)}</span>
-        <span class="replica-backend" title="Backend/tier">${backend}</span>${reasonHTML}
-        <span class="replica-sessions${saturated ? ' replica-sessions-saturated' : ''}" title="Active sessions${cap > 0 ? ' / cap' : ''}">${sessionsText} sessions</span>
-        <span class="replica-cpu">CPU ${cpuDisplay}</span>
-        <span class="replica-ram"${note ? ` title="${note}"` : ''}>RAM ${ramDisplay}</span>
+        <div class="replica-identity">
+          <span class="replica-index">#${r.index}</span>
+          <span class="badge badge-${status}"${reason ? ` title="${escapeHtml(reason)}"` : ''}>${formatStatus(status)}</span>
+          <span class="replica-backend" title="Backend/tier">${backend}</span>
+        </div>
+        ${reasonHTML}
+        <div class="replica-measures">
+          <span class="replica-measure replica-sessions${saturated ? ' replica-sessions-saturated' : ''}" title="Active sessions${cap > 0 ? ' / cap' : ''}"><span class="replica-measure-label">Sessions</span><span class="replica-measure-value">${sessionsText}</span></span>
+          <span class="replica-measure replica-cpu"><span class="replica-measure-label">CPU</span><span class="replica-measure-value">${cpuDisplay}</span></span>
+          <span class="replica-measure replica-ram"${note ? ` title="${note}"` : ''}><span class="replica-measure-label">Memory</span><span class="replica-measure-value">${ramDisplay}</span></span>
+        </div>
       `;
       listEl.appendChild(li);
     }
@@ -5108,10 +5152,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (menu) menu.hidden = !anyShown;
   }
 
-  // Wire the app-detail header kebab once. The button + menu are static markup
-  // in index.html; before this they had no handler, so the menu never opened
-  // and "Restart" was unreachable from the detail page.
+  // Wire the app-detail header actions once. They are static markup and always
+  // act on detailApp, which is refreshed whenever a detail route mounts.
   {
+    const dDeploy = document.getElementById('app-detail-deploy');
+    if (dDeploy) {
+      dDeploy.addEventListener('click', () => { if (detailApp) openDeployModal(detailApp); });
+    }
     const dBtn = document.getElementById('app-detail-kebab');
     const dList = document.getElementById('app-detail-kebab-menu');
     wireKebab(dBtn, dList, dBtn && dBtn.closest('.kebab-menu'));

@@ -1376,12 +1376,13 @@ func TestGrantByUsernameUsesServerResolution(t *testing.T) {
 // wiring by source string-search. The fleet logic itself is unit-tested in
 // internal/ui/jstests/fleet-ui.test.js.
 func TestDashboardFleetSurfaceWiring(t *testing.T) {
-	// The helper module is the single source of fleet truth and reads the
-	// two API fields. If db.App renames either, fleet-ui.js breaks here.
+	// The helper module is the single source of fleet truth and reads both the
+	// ownership field and the server-derived convergence envelope. If either
+	// contract changes, fleet-ui.js breaks here.
 	assertContains(t, "views/fleet-ui.js", "app.managed_by",
 		"fleet ownership derives from the managed_by API field")
-	assertContains(t, "views/fleet-ui.js", "content_digest",
-		"the live deployment digest derives from the content_digest API field")
+	assertContains(t, "views/app-detail.js", "body.fleet_state",
+		"app detail passes the fleet_state API envelope to the fleet presentation helpers")
 
 	// Apps grid wiring: imports the helper, preserves fleet context as a quiet
 	// card fact, and segments the list.
@@ -1413,13 +1414,29 @@ func TestDashboardFleetSurfaceWiring(t *testing.T) {
 	assertContains(t, "index.html", "apps-segment",
 		"apps toolbar exposes the All/Fleet-managed/Unmanaged control")
 
-	// App-detail wiring: header badge + live digest slot (next task).
+	// App-detail wiring: neutral ownership, proven convergence state, and the
+	// aligned Overview review card. The old digest disclaimer/CLI coaching slot
+	// is intentionally gone.
 	assertContains(t, "views/app-detail.js", "/static/views/fleet-ui.js",
 		"app detail imports the fleet-ui helper module")
-	assertContains(t, "views/app-detail.js", "renderFleetDigest",
-		"app detail renders the live deployment digest line")
-	assertContains(t, "index.html", "app-detail-fleet",
-		"app detail exposes the live deployment digest slot")
+	assertContains(t, "views/app-detail.js", "renderFleetBadges",
+		"app detail renders fleet ownership and meaningful convergence badges")
+	assertContains(t, "views/app-detail.js", "makeFleetStateCard",
+		"the Overview renders the always-reviewable temporary changes or incomplete convergence card")
+	assertContains(t, "views/app-detail.js", "annotateFleetChanges",
+		"configuration fields show which saved values are temporary and what the fleet declares")
+	assertContains(t, "app.js", "await refreshDetailFleetState(slug)",
+		"successful settings saves immediately re-fetch proven fleet state instead of leaving mount-time indicators stale")
+	assertContains(t, "views/app-detail.js", "refreshFleetSurfaces",
+		"the fleet refresh repaints badges, the Overview card, and field annotations without remounting the form")
+	assertContains(t, "style.css", ".overview-grid.has-fleet-state",
+		"fleet state participates in an explicit grid row instead of being randomly inserted")
+	assertNotContains(t, "views/fleet-ui.js", "shinyhub fleet",
+		"dashboard fleet state must not coach operators to run CLI commands")
+	assertNotContains(t, "views/fleet-ui.js", "Hide changes",
+		"temporary changes stay reviewable without a redundant disclosure toggle")
+	assertNotContains(t, "index.html", `id="app-detail-fleet"`,
+		"the obsolete top digest/disclaimer bar must not return")
 }
 
 // TestAutoscaleSurfaceWiring pins the read-only autoscale overview surface to
@@ -2419,6 +2436,16 @@ func TestAppDetailHeaderTiles(t *testing.T) {
 	// schedules .status-pill (status-on/status-off).
 	assertContains(t, "style.css", ".app-detail-header .status-pill::before",
 		"the header status-pill dot must be scoped to .app-detail-header, not global")
+}
+
+// TestAppDetailHeaderDeployWired guards the page-level primary action. The
+// empty-state Deploy button already opened the uploader, but the static header
+// button used to have no listener and silently did nothing.
+func TestAppDetailHeaderDeployWired(t *testing.T) {
+	assertContains(t, "app.js", "const dDeploy = document.getElementById('app-detail-deploy')",
+		"the app-detail header Deploy button must be wired")
+	assertContains(t, "app.js", "openDeployModal(detailApp)",
+		"the app-detail header Deploy button must open the uploader for the mounted app")
 }
 
 // TestDetailTabsScrollAffordanceOnMobile pins the mobile tab-strip polish: it

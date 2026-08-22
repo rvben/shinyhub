@@ -39,6 +39,42 @@ func TestConvergeApp_UnchangedIsNoNetwork(t *testing.T) {
 	}
 }
 
+func TestConvergeApp_UnchangedRecordsFleetStateWhenAdvertised(t *testing.T) {
+	var body struct {
+		Status      string `json:"status"`
+		Digest      string `json:"desired_content_digest"`
+		Declaration []struct {
+			Key     string `json:"key"`
+			Desired string `json:"desired"`
+		} `json:"declaration"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/apps/a/fleet-state" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	replicas := 2
+	d := fleet.AppDiff{Slug: "a", Action: fleet.ActionUnchanged, LocalDigest: "sha256:local"}
+	r := convergeApp(&cliConfig{Host: srv.URL, Token: "shk_test"}, d,
+		fleet.AppEntry{Slug: "a", Visibility: "private", Config: fleet.Config{Replicas: &replicas}},
+		fleet.ObservedApp{}, "", convergeOpts{fleetState: true, fleetID: "eu", runID: "r"},
+		"fleet:eu", io.Discard)
+	if r.status != statusUnchanged || r.err != nil {
+		t.Fatalf("result = %#v", r)
+	}
+	if body.Status != fleetConvergenceInSync || body.Digest != "sha256:local" {
+		t.Fatalf("body = %#v", body)
+	}
+	if len(body.Declaration) != 2 || body.Declaration[0].Key != "visibility" || body.Declaration[1].Desired != "2" {
+		t.Fatalf("declaration = %#v", body.Declaration)
+	}
+}
+
 func TestConvergeApp_AdoptSkippedWithoutFlag(t *testing.T) {
 	cfg := &cliConfig{Host: "http://unused", Token: "x"}
 	d := fleet.AppDiff{Slug: "legacy", Action: fleet.ActionAdopt}

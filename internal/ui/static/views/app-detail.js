@@ -2,7 +2,7 @@
 // the requested tab. Tabs other than Overview are added in later tasks; for
 // now Overview is the only one with a renderer and other tabs show "Coming
 // soon" placeholders.
-import { makeFleetBadge, renderFleetDigest } from '/static/views/fleet-ui.js';
+import { formatFleetValue, makeFleetStateCard, renderFleetBadges } from '/static/views/fleet-ui.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 import { makeTraceRow, formatPollStatus } from '/static/views/traces-ui.js';
 import {
@@ -210,12 +210,8 @@ export function mountAppDetail(ctx) {
 
     const fleetSlot = document.getElementById('app-detail-fleet-badge');
     if (fleetSlot) {
-      fleetSlot.textContent = '';
-      const fb = makeFleetBadge(document, app);
-      if (fb) fleetSlot.appendChild(fb);
+      renderFleetBadges(fleetSlot, app, body.fleet_state);
     }
-    const fleetDigest = document.getElementById('app-detail-fleet');
-    if (fleetDigest) renderFleetDigest(fleetDigest, app);
     renderHeaderProvenance(document.getElementById('app-detail-provenance'), app.deployment_provenance);
 
     // Show the selected panel, hide the rest.
@@ -245,7 +241,7 @@ export function mountAppDetail(ctx) {
       renderData(panels.data, app, ctx);
     }
     if (tab === 'access') {
-      renderAccess(panels.access, app, ctx);
+      renderAccess(panels.access, app, ctx, body);
     }
 
     view.hidden = false;
@@ -611,37 +607,54 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
     return;
   }
   panel.innerHTML = `
-    <section class="overview-card">
-      <h3>Current deployment</h3>
-      <dl class="overview-dl">
-        <dt>Version</dt><dd class="overview-version"${app.released_version ? ` title="bundle ${app.released_version}"` : ''}>${app.release_number != null ? 'v' + app.release_number : '—'}</dd>
-        <dt>Deployed</dt><dd${(app.released_at || app.last_deployed_at) ? ` title="${new Date(app.released_at || app.last_deployed_at).toLocaleString()}"` : ''}>${(app.released_at || app.last_deployed_at) ? relativeTime(new Date(app.released_at || app.last_deployed_at)) : '—'}</dd>
-        <dt>Deploys</dt><dd>${app.deploy_count}</dd>
-      </dl>
-      <div class="overview-links">
-        <a href="/apps/${app.slug}/logs" data-nav>View logs →</a>
-        <a href="/apps/${app.slug}/deployments" data-nav>Deployment history →</a>
+    <div class="overview-grid">
+      <section class="overview-card overview-release">
+        <div class="overview-card-heading">
+          <h2>Current deployment</h2>
+          <span class="overview-version"${app.released_version ? ` title="bundle ${app.released_version}"` : ''}>${app.release_number != null ? 'v' + app.release_number : '—'}</span>
+        </div>
+        <dl class="overview-dl">
+          <dt>Deployed</dt><dd${(app.released_at || app.last_deployed_at) ? ` title="${new Date(app.released_at || app.last_deployed_at).toLocaleString()}"` : ''}>${(app.released_at || app.last_deployed_at) ? relativeTime(new Date(app.released_at || app.last_deployed_at)) : '—'}</dd>
+          <dt>Total deploys</dt><dd>${app.deploy_count}</dd>
+        </dl>
+        <div class="overview-links">
+          <a href="/apps/${app.slug}/logs" data-nav>View logs</a>
+          <a href="/apps/${app.slug}/deployments" data-nav>Deployment history</a>
+        </div>
+      </section>
+      <div id="overview-trends" class="overview-card overview-trends">
+        <h3>Trends</h3>
+        <p class="trends-empty">Collecting...</p>
       </div>
-    </section>
-    <div id="overview-trends" class="overview-card overview-trends">
-      <h3>Trends</h3>
-      <p class="trends-empty">Collecting...</p>
+      <section class="overview-card overview-autoscale">
+        <h2>Autoscale</h2>
+        <dl id="autoscale-summary" class="overview-dl"></dl>
+      </section>
+      <section class="overview-card overview-replicas">
+        <div class="overview-card-heading overview-replicas-heading">
+          <h2>Replicas</h2>
+          <span id="overview-replicas-cap" class="overview-replicas-cap"></span>
+        </div>
+        <ul id="overview-replicas-list" class="replicas-list" aria-live="polite">
+          <li class="replicas-empty">Waiting for metrics…</li>
+        </ul>
+      </section>
+      <section id="overview-rejects-by-reason" class="overview-card overview-rejects" hidden>
+        <h2>Recent rejections <span class="overview-heading-context">Last 10 minutes</span></h2>
+        <ul id="overview-rejects-by-reason-list" class="rejects-list" aria-live="polite"></ul>
+      </section>
     </div>
-    <section class="overview-card overview-autoscale">
-      <h3>Autoscale</h3>
-      <dl id="autoscale-summary" class="overview-dl"></dl>
-    </section>
-    <section class="overview-card overview-replicas">
-      <h3>Replicas <span id="overview-replicas-cap" class="overview-replicas-cap"></span></h3>
-      <ul id="overview-replicas-list" class="replicas-list" aria-live="polite">
-        <li class="replicas-empty">Waiting for metrics…</li>
-      </ul>
-    </section>
-    <section id="overview-rejects-by-reason" class="overview-card overview-rejects" hidden>
-      <h3>Recent rejections (10 min)</h3>
-      <ul id="overview-rejects-by-reason-list" class="rejects-list" aria-live="polite"></ul>
-    </section>
   `;
+
+  const overviewGrid = panel.querySelector('.overview-grid');
+  const fleetCard = makeFleetStateCard(document, envelope && envelope.fleet_state, {
+    configurationHref: `/apps/${app.slug}/configuration`,
+    relativeTime,
+  });
+  if (overviewGrid && fleetCard) {
+    overviewGrid.classList.add('has-fleet-state');
+    overviewGrid.prepend(fleetCard);
+  }
 
   // A crashed app shows a prominent failure banner (the reason + a Restart) above
   // the overview cards so the operator immediately sees why it is down and can
@@ -739,13 +752,17 @@ function seedReplicasFromStatus(app, replicasStatus) {
     // Build the li via innerHTML for fixed strings, but set backend + reason via
     // textContent to avoid XSS from operator-controlled values.
     li.innerHTML = `
-      <span class="replica-index">#${r.index}</span>
-      <span class="badge badge-${status}"></span>
-      <span class="replica-backend" title="Backend/tier"></span>
+      <div class="replica-identity">
+        <span class="replica-index">#${r.index}</span>
+        <span class="badge badge-${status}"></span>
+        <span class="replica-backend" title="Backend/tier"></span>
+      </div>
       <span class="replica-reason"></span>
-      <span class="replica-sessions">— sessions</span>
-      <span class="replica-cpu">CPU ${cpuDisplay}</span>
-      <span class="replica-ram"${note ? ` title="${note}"` : ''}>RAM ${ramDisplay}</span>
+      <div class="replica-measures">
+        <span class="replica-measure replica-sessions"><span class="replica-measure-label">Sessions</span><span class="replica-measure-value">—</span></span>
+        <span class="replica-measure replica-cpu"><span class="replica-measure-label">CPU</span><span class="replica-measure-value">${cpuDisplay}</span></span>
+        <span class="replica-measure replica-ram"${note ? ` title="${note}"` : ''}><span class="replica-measure-label">Memory</span><span class="replica-measure-value">${ramDisplay}</span></span>
+      </div>
     `;
     const badgeEl = li.querySelector('.badge');
     badgeEl.textContent = formatStatus(status);
@@ -766,6 +783,7 @@ function renderConfiguration(panel, app, ctx, envelope) {
   ctx.populateAutoscaleTab(app);
   ctx.refreshEnvList(app.slug);
   ctx.loadSchedules(app.slug);
+  annotateFleetChanges(panel, envelope && envelope.fleet_state);
 }
 
 function renderData(panel, app, ctx) {
@@ -777,11 +795,100 @@ function renderData(panel, app, ctx) {
   ctx.loadSharedData(app.slug);
 }
 
-function renderAccess(panel, app, ctx) {
+function renderAccess(panel, app, ctx, envelope) {
   ctx.setSettingsSlug(app.slug);
   ctx.populateAccessPanel(app);
   ctx.refreshMemberList();
   ctx.refreshGroupAccessList();
+  annotateFleetChanges(panel, envelope && envelope.fleet_state);
+}
+
+const FLEET_FIELD_TARGETS = {
+  visibility: 'input[name="access-level"]',
+  name: '#general-name',
+  description: '#general-description',
+  icon: '#general-icon-preview',
+  project: '#general-project',
+  hibernate_timeout_minutes: 'input[name="hibernate-mode"]',
+  replicas: '#scaling-replicas',
+  max_sessions_per_replica: '#scaling-cap',
+  render_seconds: '#render-seconds',
+  min_warm_replicas: '#min-warm-replicas',
+  memory_limit_mb: '#resources-memory',
+  cpu_quota_percent: '#resources-cpu',
+  worker_isolation: '#worker-isolation',
+  worker_grouped_size: '#worker-grouped-size',
+  worker_max_workers: '#worker-max-workers',
+  worker_warm_spares: '#worker-warm-spares',
+  autoscale: '#autoscale-options',
+};
+
+// Marks only persisted differences already proven by the server. Saving a new
+// edit is not called temporary until the next GET observes it against the last
+// successful fleet baseline.
+function annotateFleetChanges(panel, state) {
+  panel.querySelectorAll('.fleet-state-context, .fleet-field-state').forEach(el => el.remove());
+  panel.querySelectorAll('.fleet-temporary-field').forEach(el => el.classList.remove('fleet-temporary-field'));
+  if (!state || state.status !== 'temporary_changes' || !Array.isArray(state.changes)) return;
+
+  const visible = state.changes.filter(change => FLEET_FIELD_TARGETS[change.key]);
+  if (visible.length === 0) return;
+
+  const context = document.createElement('p');
+  context.className = 'fleet-state-context';
+  context.textContent = 'Fleet-managed values with temporary overrides are marked below, together with their declared values.';
+  panel.prepend(context);
+
+  for (const change of visible) {
+    const target = panel.querySelector(FLEET_FIELD_TARGETS[change.key]);
+    if (!target) continue;
+    let row = target.closest('.scaling-row');
+    if (!row) row = target.closest('.settings-block');
+    if (!row) continue;
+    row.classList.add('fleet-temporary-field');
+
+    const title = row.querySelector('.scaling-option-title, .settings-block-title, legend');
+    if (title && !title.querySelector('.fleet-field-badge')) {
+      const badge = document.createElement('span');
+      badge.className = 'fleet-field-state fleet-field-badge';
+      badge.textContent = 'Temporary';
+      title.append(badge);
+    }
+
+    const note = document.createElement('span');
+    note.className = 'fleet-field-state fleet-field-note';
+    note.append('Fleet value: ');
+    const value = document.createElement('strong');
+    value.textContent = formatFleetValue(change.key, change.fleet);
+    note.append(value);
+    const copyHost = row.querySelector('.scaling-row > span, .settings-block-desc') || row;
+    copyHost.append(note);
+  }
+}
+
+// Refreshes only fleet-derived presentation after a successful dashboard
+// mutation. This preserves the active form, focus, and unrelated unsaved edits
+// while replacing the mount-time convergence envelope with a freshly proven
+// server result.
+export function refreshFleetSurfaces(doc, app, state) {
+  const fleetSlot = doc.getElementById('app-detail-fleet-badge');
+  if (fleetSlot) renderFleetBadges(fleetSlot, app, state);
+
+  const overviewGrid = doc.querySelector('#detail-overview-panel .overview-grid');
+  if (overviewGrid) {
+    overviewGrid.querySelector(':scope > .overview-fleet-state')?.remove();
+    const card = makeFleetStateCard(doc, state, {
+      configurationHref: `/apps/${app.slug}/configuration`,
+      relativeTime,
+    });
+    overviewGrid.classList.toggle('has-fleet-state', !!card);
+    if (card) overviewGrid.prepend(card);
+  }
+
+  const configuration = doc.getElementById('detail-configuration-panel');
+  const access = doc.getElementById('detail-access-panel');
+  if (configuration) annotateFleetChanges(configuration, state);
+  if (access) annotateFleetChanges(access, state);
 }
 
 // renderTraces polls /api/apps/<slug>/traces every 5 s and renders recent

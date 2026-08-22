@@ -385,6 +385,11 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		"redeploy_in_flight":                  s.isRedeployInFlight(slug),
 		"can_manage":                          canManage,
 	}
+	if fleetState, err := s.appFleetState(app); err == nil && fleetState != nil {
+		envelope["fleet_state"] = fleetState
+	} else if err != nil {
+		reqLog(r).Error("load app fleet state failed", "slug", slug, "err", err)
+	}
 	if p, err := s.store.CurrentDeploymentProvenance(app.ID); err == nil && p != nil {
 		envelope["deployment_provenance"] = p
 	}

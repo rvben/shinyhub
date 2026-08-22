@@ -320,21 +320,29 @@
 
     <section id="app-detail-view" hidden aria-labelledby="app-detail-heading">
       <nav class="breadcrumb" aria-label="Breadcrumb">
-        <a href="/" data-nav>← Apps</a>
+        <a href="/" data-nav>
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 3.5 6 8l4.5 4.5"/></svg>
+          Apps
+        </a>
       </nav>
       <header class="app-detail-header">
         <div class="app-detail-bar">
           <div class="app-detail-identity">
             <span id="app-detail-icon" class="app-detail-icon-slot" aria-hidden="true"></span>
             <h1 id="app-detail-heading" class="app-detail-title"></h1>
-            <span id="app-detail-status" class="status-pill"></span>
+            <span id="app-detail-status" class="status-pill" role="status" aria-live="polite"></span>
             <span id="app-detail-fleet-badge"></span>
           </div>
           <div class="app-detail-actions">
-            <a id="app-detail-open" href="" target="_blank" rel="noopener noreferrer" hidden>Open</a>
-            <button id="app-detail-deploy" type="button" class="btn-primary">Deploy</button>
+            <a id="app-detail-open" href="" target="_blank" rel="noopener noreferrer" hidden>
+              Open app
+              <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h7v7M13 3 5 11"/><path d="M11 9v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h3"/></svg>
+            </a>
+            <button id="app-detail-deploy" type="button" class="btn-primary" aria-label="Deploy a new app bundle">Deploy</button>
             <div class="kebab-menu">
-              <button id="app-detail-kebab" type="button" aria-label="More actions" aria-haspopup="menu" aria-expanded="false">⋯</button>
+              <button id="app-detail-kebab" type="button" aria-label="More actions" aria-haspopup="menu" aria-expanded="false">
+                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="3" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="13" cy="8" r="1.25"/></svg>
+              </button>
               <ul id="app-detail-kebab-menu" class="kebab-list" role="menu" hidden>
                 <li role="none"><button id="app-detail-restart" type="button" role="menuitem">Restart</button></li>
                 <li role="none"><button id="app-detail-sleep" type="button" role="menuitem">Sleep</button></li>
@@ -350,9 +358,8 @@
           <span id="app-detail-deploy-count"></span>
           <span id="app-detail-deployed"></span>
         </div>
-        <div id="app-detail-fleet" class="app-detail-fleet" hidden></div>
         <div id="app-detail-provenance" class="app-detail-provenance" hidden></div>
-        <dl class="app-detail-stats">
+        <dl class="app-detail-stats" aria-label="Current app metrics">
           <div class="stat">
             <dt class="stat-label">CPU</dt>
             <dd class="stat-value" id="app-detail-cpu">—</dd>
