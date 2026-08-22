@@ -199,6 +199,7 @@ type serverCaps struct {
 	DeployEvents       bool `json:"deploy_events"`
 	PlanApply          bool `json:"plan_apply"`
 	FleetProvenance    bool `json:"fleet_provenance"`
+	FleetState         bool `json:"fleet_state"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just
