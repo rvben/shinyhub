@@ -39,7 +39,36 @@ type remoteIdentity struct {
 	Role               string
 	CanCreateApps      bool
 	CanCreateAppsKnown bool
+	AppScope           []string
 	Credential         *remoteCredential
+}
+
+func deployPermissionSummary(identity remoteIdentity) string {
+	if !identity.CanCreateApps {
+		return "No — ask a server administrator for developer access"
+	}
+	if len(identity.AppScope) > 0 {
+		return "Yes — restricted to " + strings.Join(identity.AppScope, ", ")
+	}
+	return "Yes"
+}
+
+func deployNextStep(identity remoteIdentity) string {
+	if !identity.CanCreateApps {
+		return "Next: ask a ShinyHub administrator to grant developer access, then run `shinyhub whoami` to verify it."
+	}
+	if len(identity.AppScope) > 0 {
+		return "Next: deploy one of the allowlisted apps: " + strings.Join(identity.AppScope, ", ") + "."
+	}
+	return "Next: run `shinyhub deploy . --open` from your app directory."
+}
+
+func addAppScope(result map[string]any, identity remoteIdentity) {
+	scope := identity.AppScope
+	if scope == nil {
+		scope = []string{}
+	}
+	result["app_scope"] = scope
 }
 
 func newConnectCmd() *cobra.Command {
@@ -494,14 +523,9 @@ func finishConnect(cmd *cobra.Command, st *credentialStore, host, name, token st
 	}
 	saved := st.Hosts[host]
 	runtimes := availableRuntimes(info.Runtimes)
-	permission := "No — ask a server administrator for developer access"
-	if identity.CanCreateApps {
-		permission = "Yes"
-	}
-	next := "Next: run `shinyhub deploy . --open` from your app directory."
-	if !identity.CanCreateApps {
-		next = "Next: ask a ShinyHub administrator to grant developer access, then run `shinyhub whoami` to verify it."
-	} else if refresh {
+	permission := deployPermissionSummary(identity)
+	next := deployNextStep(identity)
+	if refresh && identity.CanCreateApps && len(identity.AppScope) == 0 {
 		next = "Next: run `shinyhub doctor --remote` to verify the refreshed connection."
 	}
 	compatibility := diagnoseCompatibility(version, info)
@@ -518,6 +542,7 @@ func finishConnect(cmd *cobra.Command, st *credentialStore, host, name, token st
 		"runtimes": runtimes, "credentials_path": configPath(), "switched_from": switchedFrom(previous, host),
 		"credential": credentialLifecycleAt(identity.Credential, time.Now()),
 	}
+	addAppScope(result, identity)
 	if refresh {
 		result["previous_credential_revoked"] = previousRevoked
 		result["revoke_warning"] = revokeWarning
@@ -553,24 +578,20 @@ func finishCurrentConnect(cmd *cobra.Command, st *credentialStore, host, name st
 	}
 
 	runtimes := availableRuntimes(info.Runtimes)
-	permission := "No — ask a server administrator for developer access"
-	if identity.CanCreateApps {
-		permission = "Yes"
-	}
-	next := "Next: run `shinyhub deploy . --open` from your app directory."
-	if !identity.CanCreateApps {
-		next = "Next: ask a ShinyHub administrator to grant developer access, then run `shinyhub whoami` to verify it."
-	}
+	permission := deployPermissionSummary(identity)
+	next := deployNextStep(identity)
 	compatibility := diagnoseCompatibility(version, info)
 	prose := fmt.Sprintf("Already connected to %s\n  Identity: %s (%s)\n  Can deploy apps: %s\n  Runtimes: %s\n  Compatibility: %s\n  Credentials: %s\n\n%s",
 		st.label(host), identity.Username, identity.Role, permission, strings.Join(runtimes, ", "), compatibility.Detail, configPath(), next)
-	return renderAction(cmd, "current", map[string]any{
+	result := map[string]any{
 		"host": host, "name": saved.Name, "user": identity.Username, "role": identity.Role,
 		"can_create_apps": identity.CanCreateApps, "cli_version": version, "server_version": info.Version,
 		"protocol_version": info.ProtocolVersion, "compatibility": compatibility.Level,
 		"runtimes": runtimes, "credentials_path": configPath(), "switched_from": switchedFrom(previous, host),
 		"credential": credentialLifecycleAt(identity.Credential, time.Now()),
-	}, prose)
+	}
+	addAppScope(result, identity)
+	return renderAction(cmd, "current", result, prose)
 }
 
 func revokeCredential(host, token string, id int64) error {

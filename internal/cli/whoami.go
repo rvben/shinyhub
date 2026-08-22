@@ -60,6 +60,7 @@ question that matters when a server is down - use ` + "`shinyhub hosts`" + `.`,
 		lines := []string{
 			fmt.Sprintf("Username:   %s", me.Username),
 			fmt.Sprintf("Role:       %s", me.Role),
+			fmt.Sprintf("Can deploy: %s", deployPermissionSummary(me)),
 			fmt.Sprintf("Server:     %s", cfg.Host),
 			fmt.Sprintf("Credential: %s", credentialSummary(credential)),
 		}
@@ -73,13 +74,15 @@ question that matters when a server is down - use ` + "`shinyhub hosts`" + `.`,
 		if credential.Status == "expiring" {
 			lines = append(lines, "Action:     Refresh now with `shinyhub connect --refresh`.")
 		}
-		return renderAction(cmd, "ok", map[string]any{
+		result := map[string]any{
 			"username":        me.Username,
 			"role":            me.Role,
 			"host":            cfg.Host,
 			"can_create_apps": me.CanCreateApps,
 			"credential":      credential,
-		}, strings.Join(lines, "\n"))
+		}
+		addAppScope(result, me)
+		return renderAction(cmd, "ok", result, strings.Join(lines, "\n"))
 	}
 	return cmd
 }

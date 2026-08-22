@@ -40,3 +40,31 @@ func TestWhoami_ShowsIdentity(t *testing.T) {
 		t.Errorf("expected one GET /api/auth/me, got %+v", *reqs)
 	}
 }
+
+func TestWhoami_ReportsCredentialAppScope(t *testing.T) {
+	srv, _, setResp := setupCLITest(t)
+	setResp(200, `{"user":{"id":3,"username":"__deploy__","role":"developer"},"can_create_apps":true,"app_scope":["energy","observability"],"credential":{"type":"deploy_token"}}`)
+
+	cmd := newWhoamiCmd()
+	var out, errb bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result struct {
+		CanCreateApps bool     `json:"can_create_apps"`
+		AppScope      []string `json:"app_scope"`
+		Host          string   `json:"host"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode whoami output: %v", err)
+	}
+	if !result.CanCreateApps || result.Host != srv.URL {
+		t.Fatalf("identity result = %+v", result)
+	}
+	if got := strings.Join(result.AppScope, ","); got != "energy,observability" {
+		t.Fatalf("app_scope = %q, want energy,observability", got)
+	}
+}

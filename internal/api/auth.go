@@ -195,6 +195,10 @@ func newSessionUser(u *db.User) *sessionUserResponse {
 type sessionResponse struct {
 	User          *sessionUserResponse `json:"user"`
 	CanCreateApps bool                 `json:"can_create_apps"`
+	// AppScope is non-empty when this credential may act only on the named app
+	// slugs. CanCreateApps remains the role capability within that scope; callers
+	// must not interpret it as permission to create an arbitrary slug.
+	AppScope []string `json:"app_scope,omitempty"`
 	// CanReadAudit advertises audit-log access (admin, or operator behind
 	// auth.operator_audit_access) so the UI shows the Audit tab and the
 	// Overview activity feed to exactly the users who can load them.
@@ -351,6 +355,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          newSessionUser(user),
 		CanCreateApps: canCreateApps(ctxUser),
+		AppScope:      ctxUser.AppScope,
 		CanReadAudit:  s.canReadAudit(ctxUser),
 	})
 }
@@ -423,6 +428,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          su,
 		CanCreateApps: canCreateApps(u),
+		AppScope:      u.AppScope,
 		CanReadAudit:  s.canReadAudit(u),
 		Credential:    requestCredential(r),
 	})
@@ -565,6 +571,7 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          newSessionUser(fresh),
 		CanCreateApps: canCreateApps(u),
+		AppScope:      u.AppScope,
 		CanReadAudit:  s.canReadAudit(u),
 	})
 }

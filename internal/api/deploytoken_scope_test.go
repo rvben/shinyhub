@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -63,6 +64,24 @@ func TestDeployTokenScope_RestrictsAppSurface(t *testing.T) {
 	}
 	tok := scopedDeployToken(t, srv, store, "admin", []string{"inscope", "newapp"})
 
+	me := doToken(t, srv, "GET", "/api/auth/me", tok, nil)
+	if me.Code != http.StatusOK {
+		t.Fatalf("GET /api/auth/me = %d, want 200", me.Code)
+	}
+	var identity struct {
+		CanCreateApps bool     `json:"can_create_apps"`
+		AppScope      []string `json:"app_scope"`
+	}
+	if err := json.NewDecoder(me.Body).Decode(&identity); err != nil {
+		t.Fatalf("decode /api/auth/me: %v", err)
+	}
+	if !identity.CanCreateApps {
+		t.Error("scoped admin token should retain create capability within its scope")
+	}
+	if got := strings.Join(identity.AppScope, ","); got != "inscope,newapp" {
+		t.Errorf("app_scope = %q, want inscope,newapp", got)
+	}
+
 	get := func(path string) *int {
 		rec := doToken(t, srv, "GET", path, tok, nil)
 		return &rec.Code
@@ -113,6 +132,13 @@ func TestDeployTokenScope_EmptyScopeUnrestricted(t *testing.T) {
 		t.Fatal(err)
 	}
 	tok := scopedDeployToken(t, srv, store, "admin", nil)
+	me := doToken(t, srv, "GET", "/api/auth/me", tok, nil)
+	if me.Code != http.StatusOK {
+		t.Fatalf("GET /api/auth/me = %d, want 200", me.Code)
+	}
+	if strings.Contains(me.Body.String(), "app_scope") {
+		t.Errorf("unrestricted identity must omit app_scope, got %s", me.Body.String())
+	}
 	rec := doToken(t, srv, "GET", "/api/apps/anyapp", tok, nil)
 	if rec.Code != http.StatusOK {
 		t.Errorf("unscoped deploy token GET = %d, want 200", rec.Code)

@@ -40,6 +40,7 @@ func decodeRemoteIdentity(body []byte) (remoteIdentity, error) {
 			Role     string `json:"role"`
 		} `json:"user"`
 		CanCreateApps *bool             `json:"can_create_apps"`
+		AppScope      []string          `json:"app_scope"`
 		Credential    *remoteCredential `json:"credential,omitempty"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -50,7 +51,7 @@ func decodeRemoteIdentity(body []byte) (remoteIdentity, error) {
 	}
 	identity := remoteIdentity{
 		Username: payload.User.Username, Role: payload.User.Role,
-		Credential: payload.Credential,
+		AppScope: append([]string(nil), payload.AppScope...), Credential: payload.Credential,
 	}
 	if payload.CanCreateApps != nil {
 		identity.CanCreateApps = *payload.CanCreateApps

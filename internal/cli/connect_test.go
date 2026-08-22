@@ -24,6 +24,19 @@ func connectTestCommand() (*cobra.Command, *strings.Builder, *strings.Builder) {
 	return cmd, out, errOut
 }
 
+func TestDeployPermissionSummaryReportsAppScope(t *testing.T) {
+	identity := remoteIdentity{
+		CanCreateApps: true,
+		AppScope:      []string{"energy", "observability"},
+	}
+	if got := deployPermissionSummary(identity); got != "Yes — restricted to energy, observability" {
+		t.Fatalf("permission summary = %q", got)
+	}
+	if got := deployNextStep(identity); got != "Next: deploy one of the allowlisted apps: energy, observability." {
+		t.Fatalf("next step = %q", got)
+	}
+}
+
 func TestConnectTargetHostAcceptsGlobalHostSelectors(t *testing.T) {
 	isolatedCredentials(t)
 	st := &credentialStore{
@@ -70,7 +83,7 @@ func TestConnect_WithTokenVerifiesAndSavesRemoteContext(t *testing.T) {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			_, _ = io.WriteString(w, `{"user":{"username":"alice","role":"developer"},"can_create_apps":true}`)
+			_, _ = io.WriteString(w, `{"user":{"username":"alice","role":"developer"},"can_create_apps":true,"app_scope":["energy","observability"]}`)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -87,6 +100,9 @@ func TestConnect_WithTokenVerifiesAndSavesRemoteContext(t *testing.T) {
 	}
 	if result["status"] != "connected" || result["user"] != "alice" || result["can_create_apps"] != true {
 		t.Errorf("result = %+v", result)
+	}
+	if got := result["app_scope"].([]any); len(got) != 2 || got[0] != "energy" || got[1] != "observability" {
+		t.Errorf("app_scope = %#v", got)
 	}
 	if !strings.Contains(progress.String(), "ShinyHub 1.4.0 is ready · python") {
 		t.Errorf("progress should report verified version/runtime, got %q", progress.String())
