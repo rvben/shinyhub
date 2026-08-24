@@ -1,7 +1,7 @@
 // Pure SVG sparkline renderer for the app detail "Trends" card. DOM-free except
 // for an injected `document`, so it unit-tests under jsdom and embeds with no
 // build step. SVG (not canvas) keeps it crisp on HiDPI for free, themeable via
-// `currentColor`, and accessible via an aria-label carrying the current value.
+// `currentColor`, and accessible through a caller-supplied chart description.
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -11,29 +11,31 @@ function fmt(n) {
   return String(Number(n.toFixed(2)));
 }
 
-// sparklinePoints maps a numeric series to "x,y" polyline points scaled into a
-// width x height box (min at the bottom, max at the top). Returns [] for an empty
-// series. A single point or a flat series (all equal) renders along the vertical
-// middle, avoiding a divide-by-zero and a misleading full-height line. With
-// `step: true` it emits a stepped path (2n-1 points) for discrete signals like
-// instance count.
+// sparklineSegments maps a numeric series to contiguous groups of "x,y" points
+// scaled into a width x height box (min at the bottom, max at the top). A single
+// point or a flat series (all equal) renders along the vertical middle unless an
+// explicit domain supplies an honest position. With `step: true` it emits a
+// stepped path for discrete signals like instance count.
 //
 // A null or undefined entry means the server had no measurement for that
-// instant. Such a point is left out of the line and out of the min/max scale, so
-// the stroke joins its neighbours straight across the gap while every remaining
-// point keeps the x position its index earns. Plotting it as 0 instead would
-// draw a dip to the floor, which on a CPU series is indistinguishable from the
-// app going idle and lands exactly on restarts, when the first sample of a new
-// process has no rate yet. Other non-finite values (NaN, Infinity) are malformed
-// rather than absent and still collapse to 0.
-export function sparklinePoints(values, opts = {}) {
-  const { width = 120, height = 28, step = false } = opts;
+// instant. It is excluded from the scale and splits the stroke, while every
+// surviving point keeps the x position its timestamp earns. Plotting it as 0
+// would invent a dip; joining across it would invent continuity. Other
+// non-finite values (NaN, Infinity) are malformed rather than absent and still
+// collapse to 0.
+export function sparklineSegments(values, opts = {}) {
+  const {
+    width = 120,
+    height = 28,
+    step = false,
+    domainMin,
+    domainMax,
+  } = opts;
   const vals = values.map((v) =>
     v === null || v === undefined ? null : Number.isFinite(v) ? v : 0,
   );
   const n = vals.length;
   if (n === 0) return [];
-  if (n === 1) return vals[0] === null ? [] : [`0,${fmt(height / 2)}`];
 
   const drawn = [];
   for (let i = 0; i < n; i++) {
@@ -41,8 +43,7 @@ export function sparklinePoints(values, opts = {}) {
   }
   if (drawn.length === 0) return [];
 
-  const stepX = width / (n - 1);
-  if (drawn.length === 1) return [`${fmt(drawn[0] * stepX)},${fmt(height / 2)}`];
+  const stepX = n > 1 ? width / (n - 1) : 0;
 
   let min = Infinity;
   let max = -Infinity;
@@ -50,6 +51,8 @@ export function sparklinePoints(values, opts = {}) {
     if (vals[i] < min) min = vals[i];
     if (vals[i] > max) max = vals[i];
   }
+  if (Number.isFinite(domainMin)) min = domainMin;
+  if (Number.isFinite(domainMax)) max = domainMax;
   const span = max - min;
   const coord = (i) => {
     const x = i * stepX;
@@ -57,24 +60,50 @@ export function sparklinePoints(values, opts = {}) {
     return [x, y];
   };
 
-  const out = [];
-  for (let k = 0; k < drawn.length; k++) {
-    const [x, y] = coord(drawn[k]);
-    if (step && k > 0) {
-      const [, yPrev] = coord(drawn[k - 1]);
-      out.push(`${fmt(x)},${fmt(yPrev)}`);
+  const segments = [];
+  let segment = [];
+  for (let i = 0; i < vals.length; i++) {
+    if (vals[i] === null) {
+      if (segment.length > 0) segments.push(segment);
+      segment = [];
+      continue;
     }
-    out.push(`${fmt(x)},${fmt(y)}`);
+
+    const [x, y] = coord(i);
+    if (step && segment.length > 0) {
+      const [, yPrev] = coord(i - 1);
+      segment.push(`${fmt(x)},${fmt(yPrev)}`);
+    }
+    segment.push(`${fmt(x)},${fmt(y)}`);
   }
-  return out;
+  if (segment.length > 0) segments.push(segment);
+  return segments;
+}
+
+// sparklinePoints remains the compact coordinate helper used by callers that do
+// not need the segment boundaries. renderSparkline uses the boundaries so gaps
+// are visible rather than bridged.
+export function sparklinePoints(values, opts = {}) {
+  return sparklineSegments(values, opts).flat();
 }
 
 // renderSparkline returns an <svg> element drawing `values` as a sparkline. An
 // empty series yields an <svg> with no polyline so the caller can still place it
-// (the caller decides whether to show "collecting..." instead). Options:
-// width, height, step, ariaLabel, className.
+// (the caller decides whether to show "collecting..." instead). Options include
+// dimensions, step mode, an explicit domain, grid lines, an endpoint marker,
+// an accessible label, and a CSS class.
 export function renderSparkline(document, values, opts = {}) {
-  const { width = 120, height = 28, step = false, ariaLabel = '', className = 'sparkline' } = opts;
+  const {
+    width = 120,
+    height = 28,
+    step = false,
+    ariaLabel = '',
+    className = 'sparkline',
+    domainMin,
+    domainMax,
+    grid = false,
+    endPoint = false,
+  } = opts;
   const svg = document.createElementNS(SVG_NS, 'svg');
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   svg.setAttribute('preserveAspectRatio', 'none');
@@ -82,9 +111,35 @@ export function renderSparkline(document, values, opts = {}) {
   svg.setAttribute('role', 'img');
   if (ariaLabel) svg.setAttribute('aria-label', ariaLabel);
 
-  const pts = sparklinePoints(values, { width, height, step });
-  if (pts.length > 0) {
+  if (grid) {
+    for (const y of [0.5, height / 2, height - 0.5]) {
+      const line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('class', 'sparkline-grid');
+      line.setAttribute('x1', '0');
+      line.setAttribute('x2', String(width));
+      line.setAttribute('y1', String(y));
+      line.setAttribute('y2', String(y));
+      line.setAttribute('vector-effect', 'non-scaling-stroke');
+      svg.appendChild(line);
+    }
+  }
+
+  const segments = sparklineSegments(values, { width, height, step, domainMin, domainMax });
+  for (const pts of segments) {
+    if (pts.length === 1) {
+      const [x, y] = pts[0].split(',');
+      const sample = document.createElementNS(SVG_NS, 'circle');
+      sample.setAttribute('class', 'sparkline-sample');
+      sample.setAttribute('cx', x);
+      sample.setAttribute('cy', y);
+      sample.setAttribute('r', '2');
+      sample.setAttribute('vector-effect', 'non-scaling-stroke');
+      svg.appendChild(sample);
+      continue;
+    }
+
     const poly = document.createElementNS(SVG_NS, 'polyline');
+    poly.setAttribute('class', 'sparkline-series');
     poly.setAttribute('points', pts.join(' '));
     poly.setAttribute('fill', 'none');
     poly.setAttribute('stroke', 'currentColor');
@@ -93,6 +148,20 @@ export function renderSparkline(document, values, opts = {}) {
     poly.setAttribute('stroke-linejoin', 'round');
     poly.setAttribute('stroke-linecap', 'round');
     svg.appendChild(poly);
+  }
+
+  const latestIsPresent = values.length > 0 && values[values.length - 1] !== null
+    && values[values.length - 1] !== undefined;
+  if (endPoint && latestIsPresent && segments.length > 0) {
+    const latestSegment = segments[segments.length - 1];
+    const [x, y] = latestSegment[latestSegment.length - 1].split(',');
+    const dot = document.createElementNS(SVG_NS, 'circle');
+    dot.setAttribute('class', 'sparkline-endpoint');
+    dot.setAttribute('cx', x);
+    dot.setAttribute('cy', y);
+    dot.setAttribute('r', '2.5');
+    dot.setAttribute('vector-effect', 'non-scaling-stroke');
+    svg.appendChild(dot);
   }
   return svg;
 }

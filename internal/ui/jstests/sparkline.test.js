@@ -29,6 +29,16 @@ test('intermediate values scale proportionally', () => {
   assert.deepEqual(pts, ['0,20', '50,10', '100,0']);
 });
 
+test('an explicit domain keeps a series on an honest external scale', () => {
+  const pts = sparklinePoints([25, 50], {
+    width: 100,
+    height: 20,
+    domainMin: 0,
+    domainMax: 100,
+  });
+  assert.deepEqual(pts, ['0,15', '100,10']);
+});
+
 test('step mode produces a stepped path of 2n-1 points', () => {
   const pts = sparklinePoints([0, 10], { width: 100, height: 20, step: true });
   // (x0,y0) -> (x1,y0) -> (x1,y1)
@@ -86,9 +96,9 @@ test('one surviving point sits at the middle, at its own x', () => {
   assert.deepEqual(pts, ['50,10']);
 });
 
-test('step mode steps across a gap without dipping', () => {
+test('step mode does not invent a step across a telemetry gap', () => {
   const pts = sparklinePoints([0, null, 10], { width: 100, height: 20, step: true });
-  assert.deepEqual(pts, ['0,20', '100,20', '100,0']);
+  assert.deepEqual(pts, ['0,20', '100,0']);
 });
 
 test('renderSparkline omits the polyline when every point is absent', () => {
@@ -106,6 +116,54 @@ test('renderSparkline builds an accessible svg with a polyline', () => {
   assert.ok(poly, 'expected a polyline');
   assert.equal(poly.getAttribute('points'), '0,20 100,0');
   assert.equal(poly.getAttribute('stroke'), 'currentColor');
+});
+
+test('renderSparkline can add reference grid lines and a latest-value marker', () => {
+  const svg = renderSparkline(doc(), [0, 10], {
+    width: 100,
+    height: 20,
+    grid: true,
+    endPoint: true,
+  });
+  assert.equal(svg.querySelectorAll('.sparkline-grid').length, 3);
+  const point = svg.querySelector('.sparkline-endpoint');
+  assert.ok(point);
+  assert.equal(point.getAttribute('cx'), '100');
+  assert.equal(point.getAttribute('cy'), '0');
+});
+
+test('renderSparkline breaks the stroke at missing samples', () => {
+  const svg = renderSparkline(doc(), [0, 5, null, 10, 15], {
+    width: 100,
+    height: 20,
+    domainMin: 0,
+    domainMax: 20,
+  });
+  const strokes = [...svg.querySelectorAll('.sparkline-series')].map((line) =>
+    line.getAttribute('points'));
+  assert.deepEqual(strokes, ['0,20 25,15', '75,10 100,5']);
+});
+
+test('renderSparkline does not mark a missing latest sample as current', () => {
+  const svg = renderSparkline(doc(), [0, 10, null], {
+    width: 100,
+    height: 20,
+    endPoint: true,
+  });
+  assert.equal(svg.querySelector('.sparkline-endpoint'), null);
+});
+
+test('renderSparkline keeps an isolated surviving sample visible', () => {
+  const svg = renderSparkline(doc(), [null, 25, null], {
+    width: 100,
+    height: 20,
+    domainMin: 0,
+    domainMax: 100,
+  });
+  const sample = svg.querySelector('.sparkline-sample');
+  assert.ok(sample);
+  assert.equal(sample.getAttribute('cx'), '50');
+  assert.equal(sample.getAttribute('cy'), '15');
 });
 
 test('renderSparkline on an empty series omits the polyline', () => {
