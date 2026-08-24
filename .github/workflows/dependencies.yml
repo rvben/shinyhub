@@ -20,8 +20,8 @@ env:
   # Pinned by digest as well as by version, so a replaced or re-tagged release
   # fails the checksum instead of running an unreviewed binary against this
   # repo. Bump both together.
-  UPD_VERSION: v0.6.0
-  UPD_SHA256: 340417c75b1aecc25e26df109809b9a3a819f3c37ae549c25df33ea90a4a3e29
+  UPD_VERSION: v0.6.2
+  UPD_SHA256: 47b2504ff86197ec0097d6e767b5d9ff98f6e105166b8dcdb719a5281e8c5e8c
   UPD_BRANCH: deps/upd
 
 jobs:
@@ -55,7 +55,9 @@ jobs:
       # Named explicitly rather than left to discovery: these are the manifests
       # the checks below cover. The tree also holds example, demo and load-test
       # manifests that nothing in CI builds, and a positional path is what keeps
-      # this run off them. `--lock` refreshes package-lock.json.
+      # this run off them. The leading `./` matters as well, since a bare
+      # filename leaves upd with an empty parent directory for the `--lock`
+      # refresh and the run dies on a misleading "cargo/go not found".
       - name: Apply updates
         id: upd
         env:
@@ -64,8 +66,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          upd --apply --max-bump minor --min-age 7d --lock --no-color \
-            --format text go.mod package.json 2>&1 | tee /tmp/upd.txt
+          upd update ./go.mod ./package.json --apply --lock \
+            --max-bump minor --min-age 7d --no-color -o text 2>&1 | tee /tmp/upd.txt
 
           # go.sum carries a hash per module version, so a rewritten go.mod
           # without this leaves every subsequent go command failing on a missing
@@ -88,8 +90,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          upd --dry-run --max-bump minor --min-age 7d --no-color \
-            --format text -l actions,pre-commit > /tmp/upd-actions.txt 2>&1 || true
+          upd update . --dry-run --max-bump minor --min-age 7d --no-color \
+            -o text -l actions,pre-commit > /tmp/upd-actions.txt 2>&1 || true
           {
             echo "### Action and hook updates (not applied)"
             echo '```'
@@ -174,12 +176,14 @@ jobs:
             echo '```'
           } > /tmp/pr-body.md
 
-          if [ -n "$(gh pr list --head "${UPD_BRANCH}" --state open --json number --jq '.[0].number // empty')" ]; then
-            echo "Existing pull request updated in place."
-          else
+          # Edited rather than left alone, so a rolling branch never carries a
+          # body describing an earlier week's updates.
+          if [ -z "$(gh pr list --head "${UPD_BRANCH}" --state open --json number --jq '.[0].number // empty')" ]; then
             gh pr create --base main --head "${UPD_BRANCH}" \
               --title "chore(deps): weekly dependency update" \
               --body-file /tmp/pr-body.md
+          else
+            gh pr edit "${UPD_BRANCH}" --body-file /tmp/pr-body.md
           fi
 
       - name: Nothing to update

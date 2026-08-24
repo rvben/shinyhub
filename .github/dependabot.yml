@@ -1,25 +1,7 @@
 version: 2
 updates:
-  # Go module dependencies.
-  - package-ecosystem: gomod
-    directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
-    groups:
-      go-dependencies:
-        patterns:
-          - "*"
-
   # GitHub Actions used by the CI and release workflows.
   - package-ecosystem: github-actions
-    directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-
-  # Dashboard test/build dependencies (including transitive jsdom tooling).
-  - package-ecosystem: npm
     directory: "/"
     schedule:
       interval: weekly
