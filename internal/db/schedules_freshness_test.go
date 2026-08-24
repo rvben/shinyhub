@@ -176,3 +176,39 @@ func TestScheduleFreshness_NeverRun(t *testing.T) {
 		t.Fatalf("never-run schedule should have nil last-run/last-success, got %+v", rows[0])
 	}
 }
+
+func TestScheduleFreshness_ActiveRunSurvivesNewerOverlapRecord(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "overlap")
+	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "refresh", CronExpr: "* * * * *",
+		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 600,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeAt := time.Now().Add(-time.Minute)
+	activeID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "running", Trigger: "schedule", StartedAt: activeAt, LogPath: "active.log",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "skipped_overlap", Trigger: "schedule", StartedAt: time.Now(), LogPath: "",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.ScheduleFreshness()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ScheduleFreshness = %+v, %v", rows, err)
+	}
+	fr := rows[0]
+	if fr.LastRunStatus != "skipped_overlap" {
+		t.Fatalf("last status = %q, want skipped_overlap", fr.LastRunStatus)
+	}
+	if fr.ActiveRunID == nil || *fr.ActiveRunID != activeID || fr.ActiveRunAt == nil || fr.ActiveRunAt.Unix() != activeAt.Unix() {
+		t.Fatalf("active run = id %v at %v, want %d at %v", fr.ActiveRunID, fr.ActiveRunAt, activeID, activeAt)
+	}
+}

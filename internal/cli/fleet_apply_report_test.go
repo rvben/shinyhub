@@ -162,6 +162,28 @@ func TestWriteFleetApplyJSON_HasResultAndSummary(t *testing.T) {
 	}
 }
 
+func TestWriteFleetApplyJSON_CarriesReasonAndWarnings(t *testing.T) {
+	var out bytes.Buffer
+	m := &fleet.Manifest{FleetID: "eu"}
+	diff := []fleet.AppDiff{{Slug: "legacy", Action: fleet.ActionAdopt}}
+	res := []applyResult{{
+		slug: "legacy", action: fleet.ActionAdopt, status: statusSkipped,
+		note:     "present, not owned; re-run with --adopt",
+		warnings: []string{"post-deploy hooks were skipped"},
+	}}
+	code, reason := applyExitCode(res)
+	if err := writeFleetApplyJSON(&out, m, "https://h", diff, nil, applyOutcome{apps: res}, code, reason); err != nil {
+		t.Fatal(err)
+	}
+	var env applyJSONEnvelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Status != "skipped" || env.Apps[0].Result.Reason == "" || len(env.Apps[0].Result.Warnings) != 1 {
+		t.Fatalf("structured skipped result = %+v", env)
+	}
+}
+
 func TestWriteFleetApplyJSON_IncludesSharedBundleInputs(t *testing.T) {
 	var out bytes.Buffer
 	m := &fleet.Manifest{

@@ -20,6 +20,31 @@ type scheduleListItem struct {
 	LastSuccessAgeS *int64  `json:"last_success_age_s"`
 	Stale           *bool   `json:"stale"`
 	Refreshing      *bool   `json:"refreshing"`
+	ActiveRunID     *int64  `json:"active_run_id"`
+	FreshnessError  string  `json:"freshness_error"`
+}
+
+func TestListSchedules_InvalidStoredCronReportsUnknownFreshness(t *testing.T) {
+	srv, store := newTestServer(t)
+	ownerID, tok := mkUser(t, store, "owner", "developer")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "corrupt", Name: "corrupt", OwnerID: ownerID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("corrupt")
+	id, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 6 * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE app_schedules SET cron_expr = 'invalid' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	items := listSchedules(t, srv, "corrupt", tok)
+	if len(items) != 1 || items[0].Stale != nil || items[0].FreshnessError == "" {
+		t.Fatalf("invalid schedule freshness = %+v, want stale=null with an explanation", items)
+	}
 }
 
 func listSchedules(t *testing.T, srv interface{ Router() http.Handler }, slug, tok string) []scheduleListItem {

@@ -73,6 +73,28 @@ func TestFleetHealthLoop_ReturnsReadyAndStops(t *testing.T) {
 	}
 }
 
+func TestFleetHealthLoop_MeasuresDeadlineAfterSlowPollAndCapsSleep(t *testing.T) {
+	base := time.Unix(0, 0)
+	nowValue := base
+	now := func() time.Time { return nowValue }
+	var sleeps []time.Duration
+	poll := func() (bool, string, error) {
+		nowValue = nowValue.Add(9 * time.Second)
+		return false, "starting", nil
+	}
+	sleep := func(d time.Duration) {
+		sleeps = append(sleeps, d)
+		nowValue = nowValue.Add(d)
+	}
+	err := waitForFleetHealthLoop("demo", 10*time.Second, 2*time.Second, time.Hour, poll, now, sleep, io.Discard)
+	if err == nil {
+		t.Fatal("want timeout")
+	}
+	if len(sleeps) != 1 || sleeps[0] != time.Second {
+		t.Fatalf("sleeps = %v, want exactly the one remaining second", sleeps)
+	}
+}
+
 // FLT-7: a terminal startup failure (crashed) fails fast without burning the
 // full timeout.
 func TestFleetHealthLoop_TerminalStatusFailsFast(t *testing.T) {
@@ -151,6 +173,14 @@ func TestFleetApplyCmd_HasVerifySchedulesFlag(t *testing.T) {
 	}
 	if f.DefValue != "false" {
 		t.Fatalf("--verify-schedules default = %q, want false", f.DefValue)
+	}
+}
+
+func TestFleetApplyCmd_HasVerifyHealthFlag(t *testing.T) {
+	cmd := newFleetApplyCmd()
+	f := cmd.Flags().Lookup("verify-health")
+	if f == nil || f.DefValue != "false" {
+		t.Fatalf("--verify-health = %#v, want an opt-in flag", f)
 	}
 }
 

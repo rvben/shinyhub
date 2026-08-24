@@ -113,6 +113,11 @@ func (s *fleetFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		s.deploys++
 		slug := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/apps/"), "/deploy")
 		a := s.apps[slug]
+		if s.precondFail(r, a) {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"precondition failed (re-run plan)"}`))
+			return
+		}
 		if a == nil {
 			a = &fakeApp{Slug: slug, status: "running"}
 			s.apps[slug] = a

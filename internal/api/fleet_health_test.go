@@ -16,7 +16,9 @@ import (
 )
 
 type fleetHealthEnvelope struct {
-	ServerVersion string `json:"server_version"`
+	ServerVersion string   `json:"server_version"`
+	Complete      bool     `json:"complete"`
+	Unavailable   []string `json:"unavailable_components"`
 	Apps          struct {
 		Total    int `json:"total"`
 		Degraded int `json:"degraded"`
@@ -45,6 +47,38 @@ type fleetHealthEnvelope struct {
 		Lost   int    `json:"lost"`
 		Reason string `json:"reason"`
 	} `json:"degraded_apps"`
+}
+
+func TestFleetHealth_InvalidScheduleMakesObservationIncomplete(t *testing.T) {
+	srv, store := newFleetHealthServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	admin, _ := store.GetUserByUsername("admin")
+	tok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+	store.CreateApp(db.CreateAppParams{Slug: "corrupt", Name: "corrupt", OwnerID: admin.ID})
+	app, _ := store.GetAppBySlug("corrupt")
+	id, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 6 * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE app_schedules SET cron_expr = 'invalid' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodGet, "/api/fleet/health", nil, tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got fleetHealthEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Complete || len(got.Unavailable) != 1 || got.Unavailable[0] != "schedule:corrupt/refresh" {
+		t.Fatalf("health completeness = %v unavailable=%v", got.Complete, got.Unavailable)
+	}
 }
 
 func newFleetHealthServer(t *testing.T) (*api.Server, *db.Store) {

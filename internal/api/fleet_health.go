@@ -14,6 +14,8 @@ import (
 // GET /api/fleet/health. It answers "is my fleet healthy across all backends?"
 // in one call, and is generic enough to drive an external status page.
 type fleetHealthResponse struct {
+	Complete          bool                  `json:"complete"`
+	Unavailable       []string              `json:"unavailable_components"`
 	ServerVersion     string                `json:"server_version"`
 	Apps              fleetAppCounts        `json:"apps"`
 	Replicas          fleetReplicaCounts    `json:"replicas"`
@@ -89,6 +91,8 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := fleetHealthResponse{
+		Complete:      true,
+		Unavailable:   []string{},
 		ServerVersion: s.version,
 		Apps:          fleetAppCounts{Total: len(apps)},
 		Tiers:         []fleetHealthTier{},
@@ -174,6 +178,9 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			resp.Workers = wc
+		} else {
+			resp.Complete = false
+			resp.Unavailable = append(resp.Unavailable, "workers")
 		}
 	}
 
@@ -241,7 +248,13 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 		def := s.cfg.Scheduler.Location
 		now := time.Now()
 		for _, fr := range frs {
-			if scheduleStale(fr, def, now) {
+			stale, staleErr := scheduleStale(fr, def, now)
+			if staleErr != nil {
+				resp.Complete = false
+				resp.Unavailable = append(resp.Unavailable, "schedule:"+fr.Slug+"/"+fr.Name)
+				continue
+			}
+			if stale {
 				resp.StaleSchedules++
 				if len(resp.StaleScheduleList) < maxDegradedApps {
 					resp.StaleScheduleList = append(resp.StaleScheduleList, staleScheduleItem{
@@ -251,6 +264,9 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	} else {
+		resp.Complete = false
+		resp.Unavailable = append(resp.Unavailable, "schedules")
 	}
 
 	writeJSON(w, http.StatusOK, resp)

@@ -2,16 +2,32 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/deployfail"
 )
+
+type fleetWarningSink interface {
+	addFleetWarning(string)
+}
+
+func emitFleetWarning(out io.Writer, slug, message string) {
+	if message == "" {
+		return
+	}
+	fmt.Fprintf(out, "  %s: %s\n", slug, message)
+	if sink, ok := out.(fleetWarningSink); ok {
+		sink.addFleetWarning(message)
+	}
+}
 
 // fleetHealthTimeout bounds the post-deploy health wait. First-run uv syncs
 // can take minutes, so this is generous relative to the 60s interactive
@@ -65,7 +81,7 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility, project string, out 
 	return deployAppBundleFromSpec(cfg, slug, bundleBuildSpec{Dir: dir}, visibility, project, out, runID, timeout)
 }
 
-func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, firstFires []firstFireRef, kind deployfail.Kind, err error) {
+func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, out io.Writer, runID string, timeout time.Duration, preconditions ...*string) (promoted string, committed bool, firstFires []firstFireRef, kind deployfail.Kind, err error) {
 	if err := ensureFleetAppWithRun(cfg, slug, visibility, project, out, runID); err != nil {
 		return "", false, nil, deployfail.Unknown, err
 	}
@@ -97,6 +113,10 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	decorateFleetRequest(req, runID)
+	preconditioned := len(preconditions) >= 2 && (preconditions[0] != nil || preconditions[1] != nil)
+	if preconditioned {
+		setPrecondition(req, preconditions[0], preconditions[1])
+	}
 	// Deploy can take several minutes on first run (uv downloads packages).
 	// Use the untimed client to match the SSE logs command.
 	resp, err := streamClient.Do(req)
@@ -106,6 +126,9 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 	rb, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusConflict && preconditioned {
+			return "", false, nil, deployfail.Unknown, &conflictError{slug: slug, msg: strings.TrimSpace(string(rb))}
+		}
 		return "", false, nil, failureKindFromBody(resp.StatusCode, rb), &httpStatusError{
 			Status: resp.StatusCode,
 			msg:    fmt.Sprintf("deploy %s failed: HTTP %d: %s", slug, resp.StatusCode, string(rb)),
@@ -125,21 +148,21 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 			fmt.Fprintf(out, "  %s: %s\n", slug, summary)
 		}
 		if warn := formatHooksSkippedWarning(deployResp["hooks_skipped"]); warn != "" {
-			fmt.Fprintf(out, "  %s: %s\n", slug, warn)
+			emitFleetWarning(out, slug, warn)
 		}
 		// Same reasoning as the hooks-skipped warning above: a fleet operator
 		// gets the same shadowed-upload notice the single-app `deploy` prints,
 		// since they are the most likely person to have uploaded the image a
 		// manifest icon now shadows.
 		if warn := formatIconShadowWarning(deployResp["manifest"]); warn != "" {
-			fmt.Fprintf(out, "  %s: %s\n", slug, warn)
+			emitFleetWarning(out, slug, warn)
 		}
 		// Server advisories about declared-but-inert settings (for example a
 		// keep-warm floor under elastic isolation). Printed before the health
 		// wait so the operator reads why an app will sit at idle instead of
 		// discovering it from the wait itself.
 		for _, warn := range formatManifestWarnings(deployResp["manifest"]) {
-			fmt.Fprintf(out, "  %s: %s\n", slug, warn)
+			emitFleetWarning(out, slug, warn)
 		}
 	}
 
@@ -152,7 +175,7 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 	// fail - and be retried - a deploy the server already accepted, so the wait
 	// is skipped and the state is reported instead.
 	if keptStopped {
-		fmt.Fprintf(out, "  %s: stopped, so the new version is not serving yet; start it with `shinyhub apps start %s`\n", slug, slug)
+		emitFleetWarning(out, slug, fmt.Sprintf("stopped, so the new version is not serving yet; start it with `shinyhub apps start %s`", slug))
 	} else if err := waitForFleetHealthy(cfg, slug, out, timeout); err != nil {
 		return "", true, firstFires, deployfail.Unknown, err
 	}
@@ -231,7 +254,34 @@ func waitForFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout tim
 	if timeout <= 0 {
 		timeout = fleetHealthTimeout
 	}
-	poll := func() (bool, string, error) { return pollAppStatus(cfg, slug) }
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	poll := func() (bool, string, error) { return pollAppStatusContext(ctx, cfg, slug) }
+	err := waitForFleetHealthLoop(slug, timeout, 2*time.Second, fleetHealthProgressInterval,
+		poll, time.Now, time.Sleep, out)
+	if err != nil {
+		printLogTail(cfg, slug, out)
+	}
+	return err
+}
+
+// verifyFleetHealthy applies the serving-state gate to every fleet action,
+// including unchanged apps. An explicitly stopped app is an intentional
+// operational state and is therefore reported but excluded from the serving
+// requirement.
+func verifyFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = fleetHealthTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	poll := func() (bool, string, error) {
+		ready, status, err := pollAppStatusContext(ctx, cfg, slug)
+		if err == nil && status == "stopped" {
+			return true, status, nil
+		}
+		return ready, status, err
+	}
 	err := waitForFleetHealthLoop(slug, timeout, 2*time.Second, fleetHealthProgressInterval,
 		poll, time.Now, time.Sleep, out)
 	if err != nil {
@@ -256,9 +306,15 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 	var lastStatus string
 	unknownReported := false
 	for {
-		t := now()
 		ready, status, err := poll()
+		// A poll may consume the remaining request budget. Measure after it returns
+		// so the loop never sleeps past the advertised deadline.
+		t := now()
 		if err == nil && ready {
+			if status == "stopped" {
+				fmt.Fprintf(out, "  %s: %s\n", slug, s.dim("stopped (excluded from --verify-health)"))
+				return nil
+			}
 			fmt.Fprintf(out, "  %s: %s after %s\n",
 				slug, s.status("healthy"), s.dim(t.Sub(start).Round(time.Second).String()))
 			return nil
@@ -290,7 +346,13 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 				s.dim(fmt.Sprintf("(%s/%s)", t.Sub(start).Round(time.Second), timeout)))
 			lastProgress = t
 		}
-		sleep(pollEvery)
+		delay := pollEvery
+		if remaining := deadline.Sub(t); remaining < delay {
+			delay = remaining
+		}
+		if delay > 0 {
+			sleep(delay)
+		}
 	}
 	// The timeout names what the server last said, so a 15-minute wait ends
 	// in a diagnosis rather than a bare "timed out".

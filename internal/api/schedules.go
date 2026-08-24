@@ -58,16 +58,28 @@ type scheduleDTO struct {
 	LastRunStatus   *string `json:"last_run_status,omitempty"`
 	LastSuccessAt   *string `json:"last_success_at,omitempty"`
 	LastSuccessAgeS *int64  `json:"last_success_age_s,omitempty"`
-	Stale           *bool   `json:"stale,omitempty"`
+	Stale           **bool  `json:"stale,omitempty"`
 	Refreshing      *bool   `json:"refreshing,omitempty"`
+	ActiveRunID     **int64 `json:"active_run_id,omitempty"`
+	FreshnessError  *string `json:"freshness_error,omitempty"`
 }
 
 // applyFreshness fills the freshness half of the DTO from a freshness row.
 func (d *scheduleDTO) applyFreshness(fr db.ScheduleFreshness, def *time.Location, now time.Time) {
-	stale := scheduleStale(fr, def, now)
+	stale, staleErr := scheduleStale(fr, def, now)
 	refreshing := schedulespec.IsRefreshing(scheduleFreshnessPolicy(fr), now)
-	d.Stale = &stale
+	freshnessError := ""
+	if staleErr != nil {
+		freshnessError = "freshness could not be computed"
+		var unknown *bool
+		d.Stale = &unknown
+	} else {
+		value := &stale
+		d.Stale = &value
+	}
 	d.Refreshing = &refreshing
+	d.ActiveRunID = &fr.ActiveRunID
+	d.FreshnessError = &freshnessError
 	d.LastRunID = fr.LastRunID
 	if fr.LastRunAt != nil {
 		v := fr.LastRunAt.UTC().Format(time.RFC3339)

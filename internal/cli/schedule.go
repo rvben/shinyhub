@@ -54,6 +54,8 @@ type scheduleDTO struct {
 	LastSuccessAt     *string  `json:"last_success_at"`
 	Stale             *bool    `json:"stale"`
 	Refreshing        *bool    `json:"refreshing"`
+	ActiveRunID       *int64   `json:"active_run_id"`
+	FreshnessError    string   `json:"freshness_error"`
 }
 
 // lookupScheduleID resolves a schedule name to its numeric ID by listing all
@@ -163,7 +165,9 @@ func newScheduleLsCmd() *cobra.Command {
 					age = txt(humanizeAgeSeconds(item["last_success_age_s"]))
 				}
 				stale := dimTxt("-")
-				if b, ok := item["stale"].(bool); ok && b {
+				if msg, ok := item["freshness_error"].(string); ok && msg != "" {
+					stale = alertTxt("unknown")
+				} else if b, ok := item["stale"].(bool); ok && b {
 					stale = alertTxt("yes")
 				}
 				refreshing := dimTxt("-")
@@ -832,7 +836,9 @@ func newScheduleStatusCmd() *cobra.Command {
 				// A stale schedule is the reason to read this table at all, so the
 				// "yes" is the one thing in the row allowed to shout.
 				stale := dimTxt("-")
-				if b, ok := r["stale"].(bool); ok && b {
+				if msg, ok := r["freshness_error"].(string); ok && msg != "" {
+					stale = alertTxt("unknown")
+				} else if b, ok := r["stale"].(bool); ok && b {
 					stale = alertTxt("yes")
 				}
 				refreshing := dimTxt("-")

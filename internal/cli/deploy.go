@@ -467,7 +467,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		if firstFireErr != nil {
 			return firstFireErr
 		}
-		gateRes, gateErr := verifyPostDeployWarmGate(cfg, slug, abs)
+		gateRes, gateErr := verifyPostDeployWarmGate(cfg, slug, abs, time.Until(deadline), errW)
 		if gateErr != nil {
 			for _, log := range gateRes.scheduleLogs {
 				for _, line := range log.Tail {
@@ -572,16 +572,26 @@ func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
 // are treated as transient and keep the loop going.
 func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration, errOut io.Writer) error {
 	deadline := time.Now().Add(timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	p := newProgress(errOut, fmt.Sprintf("Waiting for %s to be healthy", slug))
 	var lastErr error
 	var lastPollOK bool
 	var lastStatus string
 	unknownReported := false
-	for time.Now().Before(deadline) {
-		ready, status, err := pollAppStatus(cfg, slug)
+	for {
+		ready, status, err := pollAppStatusContext(ctx, cfg, slug)
 		if err == nil && ready {
 			p.done(" ready.", slug+" is healthy")
 			return nil
+		}
+		// A deadline-cancelled final poll is the wait budget expiring, not new
+		// evidence that the server became unreachable. Preserve the most recent
+		// successful observation so the timeout still says "starting"/"idle" (or
+		// names an unknown status) instead of misclassifying cancellation as a
+		// 30-second transport failure.
+		if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) && lastStatus != "" {
+			break
 		}
 		lastPollOK = err == nil
 		if err != nil {
@@ -603,7 +613,15 @@ func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration
 			printLogTail(cfg, slug, errOut)
 			return fmt.Errorf("%s %s during startup - check logs above or run: shinyhub apps logs %s", slug, status, slug)
 		}
-		p.step(healthPollInterval)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		delay := healthPollInterval
+		if remaining < delay {
+			delay = remaining
+		}
+		p.step(delay)
 	}
 	p.stop()
 	printLogTail(cfg, slug, errOut)
@@ -738,7 +756,11 @@ func (e *deployHTTPError) fatal() bool {
 // A non-2xx response is returned as a *deployHTTPError so the caller can
 // distinguish "permanent" failures (401/403/404) from transient ones (5xx).
 func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
+	return pollAppStatusContext(context.Background(), cfg, slug)
+}
+
+func pollAppStatusContext(ctx context.Context, cfg *cliConfig, slug string) (bool, string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
 		return false, "", fmt.Errorf("build request: %w", err)
 	}

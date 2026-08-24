@@ -126,6 +126,44 @@ run_on_register = true
 	}
 }
 
+func TestConvergeApp_UnchangedJoinsActiveWarmRun(t *testing.T) {
+	var pollHits, postHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postHits++
+		}
+		switch r.URL.Path {
+		case "/api/apps/warm/schedules":
+			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","enabled":true,"stale":true,"refreshing":true,"active_run_id":17,"last_run_id":18,"last_run_status":"skipped_overlap"}]}`)
+		case "/api/apps/warm/schedules/7/runs/17":
+			pollHits++
+			_, _ = io.WriteString(w, `{"status":"succeeded"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "shinyhub.toml"), `[[schedule]]
+name = "refresh-data"
+cron = "0 5 * * *"
+cmd = "true"
+run_on_register = true
+`)
+	r := convergeApp(
+		&cliConfig{Host: srv.URL, Token: "test"},
+		fleet.AppDiff{Slug: "warm", Action: fleet.ActionUnchanged},
+		fleet.AppEntry{Slug: "warm"}, fleet.ObservedApp{}, dir,
+		convergeOpts{waitForWarm: true, warmTimeout: time.Second, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
+	)
+	if r.status != statusUnchanged || r.err != nil {
+		t.Fatalf("result = %#v, want unchanged after active run succeeds", r)
+	}
+	if pollHits != 1 || postHits != 0 {
+		t.Fatalf("polls=%d posts=%d, want one join poll and no re-fire", pollHits, postHits)
+	}
+}
+
 func TestConvergeApp_LegacyWarmGateFindsOlderSuccessBehindLatestFailure(t *testing.T) {
 	var logHits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -580,6 +618,54 @@ func TestConvergeApp_UpdateSourceConfigReassertsAutoscale(t *testing.T) {
 	}
 	if !sawAutoscalePatch {
 		t.Error("autoscale must be reasserted after a source+config deploy even when absent from the pre-deploy drift")
+	}
+}
+
+func TestConvergeApp_UpdateSourceConfigReassertFailureIsPartial(t *testing.T) {
+	var patches int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
+			_, _ = io.WriteString(w, `{"status":"ok"}`)
+		case r.Method == "GET" && r.URL.Path == "/api/apps/sc":
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+		case r.Method == "GET" && r.URL.Path == "/api/apps":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "sc", "content_digest": "sha256:NEW"}})
+		case r.Method == "PATCH" && r.URL.Path == "/api/apps/sc":
+			patches++
+			if patches == 2 {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"error":"reassert failed"}`)
+			}
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	enabled := true
+	entry := fleet.AppEntry{Slug: "sc", Config: fleet.Config{
+		Replicas:  stateInt(2),
+		Autoscale: &fleet.AutoscaleConfig{Enabled: &enabled, MinReplicas: 1, MaxReplicas: 3, Target: .8},
+	}}
+	d := fleet.AppDiff{Slug: "sc", Action: fleet.ActionUpdateSourceConfig, LocalDigest: "sha256:NEW",
+		ConfigDrift: []fleet.ConfigDriftItem{{Key: "replicas", Server: "1", Desired: "2"}}}
+	r := convergeApp(&cliConfig{Host: srv.URL, Token: "tok"}, d, entry, fleet.ObservedApp{}, dir,
+		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+	if r.status != statusFailed || r.failureKind != failureConfigReassertFailed || r.mutation != mutationPartial {
+		t.Fatalf("result = %+v, want failed/config_reassert_failed/partial", r)
+	}
+	if code, _ := applyExitCode([]applyResult{r}); code != 4 {
+		t.Fatalf("exit = %d, want 4", code)
+	}
+}
+
+func TestConvergeApp_UnknownActionFailsClosed(t *testing.T) {
+	r := convergeApp(&cliConfig{}, fleet.AppDiff{Slug: "mystery", Action: fleet.Action("future")},
+		fleet.AppEntry{}, fleet.ObservedApp{}, "", convergeOpts{}, "fleet:eu", io.Discard)
+	if r.status != statusFailed || r.failureKind != failureInvalidAction {
+		t.Fatalf("unknown action result = %+v, want failed/invalid_action", r)
 	}
 }
 
@@ -1119,6 +1205,80 @@ func TestConvergeApp_RetriedSuccessRecordsFailedAttemptKind(t *testing.T) {
 	}
 	if r.attemptsDetail[0].Kind != deployfail.ReadinessTimeout || r.attemptsDetail[0].Attempt != 1 {
 		t.Fatalf("attempt 1 record = %+v, want {Attempt:1 Kind:readiness_timeout}", r.attemptsDetail[0])
+	}
+}
+
+func TestDeployWithRetry_CommittedAttemptDoesNotUploadAgain(t *testing.T) {
+	var deployHits int
+	deployed := false
+	healthHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo" && !deployed:
+			_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/deploy":
+			deployHits++
+			deployed = true
+			_, _ = io.WriteString(w, `{"status":"ok"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo":
+			healthHits++
+			if healthHits == 1 {
+				time.Sleep(20 * time.Millisecond)
+				_, _ = io.WriteString(w, `{"app":{"status":"starting"}}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps":
+			_, _ = io.WriteString(w, `[{"slug":"demo","content_digest":"sha256:new"}]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	promoted, attempts, committed, _, failed, err := deployWithRetry(
+		&cliConfig{Host: srv.URL, Token: "test"}, "demo", bundleBuildSpec{Dir: dir},
+		"private", "", convergeOpts{retries: 1, preconditions: true, healthTimeout: 5 * time.Millisecond, runID: "run"},
+		io.Discard, "sha256:old", "fleet:prod",
+	)
+	if err != nil || promoted != "sha256:new" || !committed || attempts != 2 || len(failed) != 1 {
+		t.Fatalf("result promoted=%q attempts=%d committed=%v failed=%+v err=%v", promoted, attempts, committed, failed, err)
+	}
+	if deployHits != 1 {
+		t.Fatalf("deploy uploads = %d, want 1; committed retry must only re-check convergence", deployHits)
+	}
+}
+
+func TestConvergeApp_UpdateSourceDeployUsesPlanPreconditions(t *testing.T) {
+	var digest, managedBy string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo":
+			_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/deploy":
+			digest = r.Header.Get("X-Shinyhub-If-Content-Digest")
+			managedBy = r.Header.Get("X-Shinyhub-If-Managed-By")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":"precondition failed: content changed"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	r := convergeApp(
+		&cliConfig{Host: srv.URL, Token: "test"},
+		fleet.AppDiff{Slug: "demo", Action: fleet.ActionUpdateSource, ServerDigest: "sha256:planned"},
+		fleet.AppEntry{Slug: "demo", Visibility: "private"}, fleet.ObservedApp{}, dir,
+		convergeOpts{preconditions: true, fleetID: "prod", runID: "run"}, "fleet:prod", io.Discard,
+	)
+	if r.status != statusConflict || resultMutationState(r) != mutationNone {
+		t.Fatalf("result = %#v, want a pre-mutation conflict", r)
+	}
+	if digest != "sha256:planned" || managedBy != "fleet:prod" {
+		t.Fatalf("deploy preconditions digest=%q managed_by=%q", digest, managedBy)
 	}
 }
 

@@ -126,3 +126,25 @@ func TestIsStale_WeeklyCadence(t *testing.T) {
 		t.Fatal("weekly schedule that ran this Monday should not be stale on Tuesday")
 	}
 }
+
+func TestEvaluateStale_InvalidCronIsUnknown(t *testing.T) {
+	_, err := EvaluateStale(Freshness{
+		Enabled: true, CronExpr: "not a cron", CreatedAt: time.Now().Add(-24 * time.Hour),
+	}, time.UTC, time.Now())
+	if err == nil {
+		t.Fatal("invalid cron returned a freshness value; want an error")
+	}
+}
+
+func TestIsRefreshing_UsesActiveRunWhenLatestRunIsTerminal(t *testing.T) {
+	now := time.Now()
+	active := now.Add(-time.Minute)
+	latest := now.Add(-30 * time.Second)
+	f := Freshness{
+		Enabled: true, TimeoutSeconds: 300,
+		LastRunStatus: "skipped_overlap", LastRunAt: &latest, ActiveRunAt: &active,
+	}
+	if !IsRefreshing(f, now) {
+		t.Fatal("an active run hidden by a newer overlap record must still be refreshing")
+	}
+}

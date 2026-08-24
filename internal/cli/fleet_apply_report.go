@@ -69,10 +69,17 @@ type applyResult struct {
 	scheduleLogs []scheduleFailureLog
 	// warmRestarted records the opt-in post-first-fire replica cycle.
 	warmRestarted bool
+	// warmDeadline is the one per-app budget shared by fresh first-fire waits and
+	// the final level check (including joining an overlapping active run).
+	warmDeadline time.Time
 	// logTail holds the failing app's last process-log lines, populated only
 	// when a deploy-bearing action fails (e.g. the app crashed on startup), so
 	// the operator sees the cause without a second round-trip to the host.
 	logTail []string
+	// warnings carries structured copies of operator-facing deploy advisories.
+	// They are still printed live, but JSON callers must not have to scrape
+	// stderr to discover skipped hooks, inert settings, or a kept-stopped app.
+	warnings []string
 	// attemptsDetail holds one record per FAILED deploy attempt (empty when the
 	// first attempt succeeded). It is populated even on a retried-then-succeeded
 	// deploy so the operator can see why an earlier attempt failed.
@@ -479,6 +486,8 @@ type jsonResult struct {
 	AttemptDetails []jsonAttempt        `json:"attempt_details,omitempty"`
 	DurationMS     int64                `json:"duration_ms"`
 	Error          string               `json:"error,omitempty"`
+	Reason         string               `json:"reason,omitempty"`
+	Warnings       []string             `json:"warnings,omitempty"`
 	LogTail        []string             `json:"log_tail,omitempty"`
 	ScheduleLogs   []scheduleFailureLog `json:"schedule_logs,omitempty"`
 }
@@ -556,6 +565,8 @@ func resultToJSON(r applyResult) *jsonResult {
 		DurationMS:    r.duration.Milliseconds(),
 		LogTail:       r.logTail,
 		ScheduleLogs:  r.scheduleLogs,
+		Reason:        r.note,
+		Warnings:      r.warnings,
 	}
 	if r.err != nil {
 		jr.Error = r.err.Error()

@@ -18,15 +18,21 @@ type scheduleStatusItem struct {
 	LastRunStatus   string  `json:"last_run_status"`    // "" if never run
 	LastSuccessAt   *string `json:"last_success_at"`    // RFC3339, null if never succeeded
 	LastSuccessAgeS *int64  `json:"last_success_age_s"` // null if never succeeded
-	Stale           bool    `json:"stale"`
+	Stale           *bool   `json:"stale"`
 	Refreshing      bool    `json:"refreshing"`
+	ActiveRunID     *int64  `json:"active_run_id"`
+	FreshnessError  string  `json:"freshness_error"`
 }
 
 // scheduleStale maps a db.ScheduleFreshness to the policy struct and applies
 // schedulespec.IsStale, resolving the per-schedule timezone against def. Shared
 // by the status endpoint and the fleet-health banner.
-func scheduleStale(fr db.ScheduleFreshness, def *time.Location, now time.Time) bool {
-	return schedulespec.IsStale(scheduleFreshnessPolicy(fr), fr.EffectiveLocation(def), now)
+func scheduleStale(fr db.ScheduleFreshness, def *time.Location, now time.Time) (bool, error) {
+	loc, err := fr.EffectiveLocationChecked(def)
+	if err != nil {
+		return false, err
+	}
+	return schedulespec.EvaluateStale(scheduleFreshnessPolicy(fr), loc, now)
 }
 
 func scheduleFreshnessPolicy(fr db.ScheduleFreshness) schedulespec.Freshness {
@@ -38,6 +44,7 @@ func scheduleFreshnessPolicy(fr db.ScheduleFreshness) schedulespec.Freshness {
 		LastRunStatus:  fr.LastRunStatus,
 		LastRunAt:      fr.LastRunAt,
 		LastSuccessAt:  fr.LastSuccessAt,
+		ActiveRunAt:    fr.ActiveRunAt,
 	}
 }
 
@@ -70,14 +77,20 @@ func (s *Server) handleFleetScheduleStatus(w http.ResponseWriter, r *http.Reques
 		if !u.AppInScope(fr.Slug) {
 			continue
 		}
+		stale, staleErr := scheduleStale(fr, def, now)
 		item := scheduleStatusItem{
 			Slug:          fr.Slug,
 			Schedule:      fr.Name,
 			Enabled:       fr.Enabled,
 			LastRunID:     fr.LastRunID,
 			LastRunStatus: fr.LastRunStatus,
-			Stale:         scheduleStale(fr, def, now),
 			Refreshing:    schedulespec.IsRefreshing(scheduleFreshnessPolicy(fr), now),
+			ActiveRunID:   fr.ActiveRunID,
+		}
+		if staleErr != nil {
+			item.FreshnessError = "freshness could not be computed"
+		} else {
+			item.Stale = &stale
 		}
 		if fr.LastRunAt != nil {
 			v := fr.LastRunAt.UTC().Format(time.RFC3339)

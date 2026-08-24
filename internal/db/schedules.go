@@ -43,15 +43,22 @@ type Schedule struct {
 // server default. nil/empty or an unloadable zone falls back to def (UTC if
 // def is nil). Single source of truth for schedule timezone inheritance.
 func resolveLocation(tz *string, def *time.Location) *time.Location {
+	loc, _ := resolveLocationChecked(tz, def)
+	return loc
+}
+
+func resolveLocationChecked(tz *string, def *time.Location) (*time.Location, error) {
 	if def == nil {
 		def = time.UTC
 	}
 	if tz != nil && *tz != "" {
-		if loc, err := time.LoadLocation(*tz); err == nil {
-			return loc
+		loc, err := time.LoadLocation(*tz)
+		if err != nil {
+			return def, fmt.Errorf("load schedule timezone %q: %w", *tz, err)
 		}
+		return loc, nil
 	}
-	return def
+	return def, nil
 }
 
 // EffectiveLocation resolves the schedule's timezone with the given server
@@ -807,12 +814,21 @@ type ScheduleFreshness struct {
 	LastRunAt      *time.Time // started_at of the most recent run, nil if never run
 	LastRunStatus  string     // status of that run, "" if never run
 	LastSuccessAt  *time.Time // finished_at of the most recent succeeded run, nil if never
+	ActiveRunID    *int64     // newest status=running row, nil when none is active
+	ActiveRunAt    *time.Time // started_at for ActiveRunID
 }
 
 // EffectiveLocation resolves this schedule's timezone against the server
 // default, mirroring Schedule.EffectiveLocation.
 func (f *ScheduleFreshness) EffectiveLocation(def *time.Location) *time.Location {
 	return resolveLocation(f.Timezone, def)
+}
+
+// EffectiveLocationChecked preserves an invalid stored timezone as unknown for
+// strict health/convergence consumers. Runtime scheduling retains the tolerant
+// fallback above so one corrupted row cannot crash scheduler startup.
+func (f *ScheduleFreshness) EffectiveLocationChecked(def *time.Location) (*time.Location, error) {
+	return resolveLocationChecked(f.Timezone, def)
 }
 
 // ScheduleFreshness returns one row per schedule across all apps, with the last
@@ -839,7 +855,9 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 		  (SELECT id          FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT started_at  FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT status      FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
-		  (SELECT finished_at FROM schedule_runs WHERE schedule_id=sc.id AND status='succeeded' ORDER BY started_at DESC, id DESC LIMIT 1)
+		  (SELECT finished_at FROM schedule_runs WHERE schedule_id=sc.id AND status='succeeded' ORDER BY started_at DESC, id DESC LIMIT 1),
+		  (SELECT id         FROM schedule_runs WHERE schedule_id=sc.id AND status='running' ORDER BY started_at DESC, id DESC LIMIT 1),
+		  (SELECT started_at FROM schedule_runs WHERE schedule_id=sc.id AND status='running' ORDER BY started_at DESC, id DESC LIMIT 1)
 		FROM app_schedules sc JOIN apps a ON a.id = sc.app_id
 		`+where+`
 		ORDER BY a.slug, sc.name`, args...)
@@ -856,8 +874,11 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 		var lastRunAt sql.NullTime
 		var lastStatus sql.NullString
 		var lastSuccess sql.NullTime
+		var activeRunID sql.NullInt64
+		var activeRunAt sql.NullTime
 		if err := rows.Scan(&fr.ScheduleID, &fr.Slug, &fr.Name, &enabled, &fr.CronExpr, &tz,
-			&fr.CreatedAt, &fr.TimeoutSeconds, &lastRunID, &lastRunAt, &lastStatus, &lastSuccess); err != nil {
+			&fr.CreatedAt, &fr.TimeoutSeconds, &lastRunID, &lastRunAt, &lastStatus, &lastSuccess,
+			&activeRunID, &activeRunAt); err != nil {
 			return nil, err
 		}
 		fr.Enabled = enabled != 0
@@ -879,6 +900,14 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 		if lastSuccess.Valid {
 			v := lastSuccess.Time
 			fr.LastSuccessAt = &v
+		}
+		if activeRunID.Valid {
+			v := activeRunID.Int64
+			fr.ActiveRunID = &v
+		}
+		if activeRunAt.Valid {
+			v := activeRunAt.Time
+			fr.ActiveRunAt = &v
 		}
 		out = append(out, fr)
 	}

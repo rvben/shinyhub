@@ -21,14 +21,15 @@ type Freshness struct {
 	LastRunStatus  string     // "" if never run
 	LastRunAt      *time.Time // started_at of the most recent run, nil if never
 	LastSuccessAt  *time.Time // finished_at of the most recent succeeded run, nil if never
+	ActiveRunAt    *time.Time // started_at of the newest running run, even if a later overlap row is terminal
 }
 
-// IsStale reports whether a schedule's data is overdue. loc is the location to
-// evaluate the cron in (the caller applies the per-schedule zone or the server
-// default). now is injected for testability.
-func IsStale(f Freshness, loc *time.Location, now time.Time) bool {
+// EvaluateStale reports whether a schedule's data is overdue and preserves an
+// invalid cron as an error. Strict callers must never turn an unreadable
+// schedule into "fresh" merely because its next fire could not be computed.
+func EvaluateStale(f Freshness, loc *time.Location, now time.Time) (bool, error) {
 	if !f.Enabled {
-		return false
+		return false, nil
 	}
 	// Anchor on the last success (finished) if it ever succeeded, else creation.
 	anchor := f.CreatedAt
@@ -37,20 +38,29 @@ func IsStale(f Freshness, loc *time.Location, now time.Time) bool {
 	}
 	next, err := NextFire(f.CronExpr, loc, anchor)
 	if err != nil {
-		// Stored crons are gated by Validate, so this should not happen; treat
-		// an unparseable expression as not-stale rather than crash a health path.
-		return false
+		return false, err
 	}
-	return next.Add(staleMargin).Before(now)
+	return next.Add(staleMargin).Before(now), nil
+}
+
+// IsStale is the compatibility predicate for callers that cannot represent an
+// unknown state. New health and convergence surfaces use EvaluateStale.
+func IsStale(f Freshness, loc *time.Location, now time.Time) bool {
+	stale, _ := EvaluateStale(f, loc, now)
+	return stale
 }
 
 // IsRefreshing reports a live, non-zombie run independently of data freshness.
 // A stale schedule can therefore be both stale and refreshing until the active
 // run succeeds; callers never have to infer data delivery from process activity.
 func IsRefreshing(f Freshness, now time.Time) bool {
-	if !f.Enabled || f.LastRunStatus != "running" || f.LastRunAt == nil || f.TimeoutSeconds <= 0 {
+	activeAt := f.ActiveRunAt
+	if activeAt == nil && f.LastRunStatus == "running" {
+		activeAt = f.LastRunAt
+	}
+	if !f.Enabled || activeAt == nil || f.TimeoutSeconds <= 0 {
 		return false
 	}
-	age := now.Sub(*f.LastRunAt)
+	age := now.Sub(*activeAt)
 	return age < time.Duration(f.TimeoutSeconds)*time.Second
 }

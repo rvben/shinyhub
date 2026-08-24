@@ -62,6 +62,19 @@ test('summariseFleetHealth: no workers block (worker hosting off) is fine', () =
   assert.doesNotMatch(s.headline, /workers/);
 });
 
+test('summariseFleetHealth: incomplete observation is unknown, never healthy', () => {
+  const s = summariseFleetHealth({
+    complete: false,
+    unavailable_components: ['workers', 'schedule:billing/refresh'],
+    apps: { total: 4, running: 4 },
+    replicas: { lost: 0 },
+    workers: { total: 1, up: 1, down: 0 },
+  });
+  assert.equal(s.statusLabel, 'unknown');
+  assert.equal(s.statusClass, 'stopped');
+  assert.match(s.headline, /health unavailable: workers, schedule:billing\/refresh/);
+});
+
 test('summariseFleetHealth: tolerates null/empty input', () => {
   const s = summariseFleetHealth(null);
   assert.equal(s.statusClass, 'running');

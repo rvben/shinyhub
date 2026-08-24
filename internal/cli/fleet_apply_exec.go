@@ -32,11 +32,32 @@ type convergeOpts struct {
 	warmTimeout        time.Duration
 	waitForWarm        bool
 	verifySchedules    bool
+	verifyHealth       bool
 	restartAfterWarm   bool
 	concurrency        int // max apps converged in parallel; <=1 means serial
 	fleetID            string
 	runID              string
 	fleetState         bool // server persists per-app declaration/convergence state
+}
+
+const (
+	failureConfigReassertFailed = "config_reassert_failed"
+	failureInvalidAction        = "invalid_action"
+	failureHealthVerification   = "health_verification_failed"
+)
+
+// resultWarningWriter preserves live progress output while collecting the
+// warning as structured per-app result data for --json callers.
+type resultWarningWriter struct {
+	io.Writer
+	result *applyResult
+}
+
+func (w *resultWarningWriter) addFleetWarning(message string) {
+	if message == "" {
+		return
+	}
+	w.result.warnings = append(w.result.warnings, message)
 }
 
 // convergeFleet drives every diff entry, continue-on-error, returning one
@@ -127,18 +148,21 @@ func declaredProject(c fleet.Config) string {
 }
 
 // deployWithRetry runs the per-app deploy up to 1+retries times and returns
-// the freshly promoted digest. Deploy carries no precondition (last-writer-
-// wins); a transient failure is retried, the attempt count is reported.
+// the freshly promoted digest. Current servers fence the upload against the
+// exact digest and fleet owner observed by plan, so overlapping applies cannot
+// silently become last-writer-wins.
 // committed is true if any attempt's bundle was accepted by the server, so
 // callers can tell a pre-commit failure (safe to roll back) from a post-commit
-// one (this fleet's source is already live).
-func deployWithRetry(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, opt convergeOpts, out io.Writer) (promoted string, attempts int, committed bool, firstFires []firstFireRef, failed []attemptOutcome, err error) {
+// one (this fleet's source is already live). Once committed, retries only
+// re-check health and digest readback; they never upload the bundle again.
+func deployWithRetry(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, opt convergeOpts, out io.Writer, expectedDigest, expectedManagedBy string) (promoted string, attempts int, committed bool, firstFires []firstFireRef, failed []attemptOutcome, err error) {
 	total := 1 + opt.retries
+	ifDigest, ifManagedBy := precondPtrs(opt, expectedDigest, expectedManagedBy)
 	for attempts = 1; attempts <= total; attempts++ {
 		var c bool
 		var ff []firstFireRef
 		var kind deployfail.Kind
-		promoted, c, ff, kind, err = deployAppBundleFromSpec(cfg, slug, spec, visibility, project, out, opt.runID, opt.healthTimeout)
+		promoted, c, ff, kind, err = deployAppBundleFromSpec(cfg, slug, spec, visibility, project, out, opt.runID, opt.healthTimeout, ifDigest, ifManagedBy)
 		committed = committed || c
 		// Keep the first-fire refs from whichever attempt actually fired them.
 		// A later retry of an already-created schedule returns none (the gate is
@@ -150,11 +174,31 @@ func deployWithRetry(cfg *cliConfig, slug string, spec bundleBuildSpec, visibili
 			return promoted, attempts, committed, firstFires, failed, nil
 		}
 		failed = append(failed, attemptOutcome{Attempt: attempts, Kind: kind, Err: err.Error()})
-		if attempts == total || !retryableDeployFailure(kind) {
+		if attempts == total {
 			return "", attempts, committed, firstFires, failed, err
+		}
+		if committed {
+			for attempts++; attempts <= total; attempts++ {
+				promoted, err = completeCommittedDeploy(cfg, slug, out, opt.healthTimeout)
+				if err == nil {
+					return promoted, attempts, true, firstFires, failed, nil
+				}
+				failed = append(failed, attemptOutcome{Attempt: attempts, Kind: deployfail.ReadinessTimeout, Err: err.Error()})
+			}
+			return "", total, true, firstFires, failed, err
+		}
+		if !retryableDeployFailure(kind) {
+			return "", attempts, false, firstFires, failed, err
 		}
 	}
 	return "", total, committed, firstFires, failed, err
+}
+
+func completeCommittedDeploy(cfg *cliConfig, slug string, out io.Writer, timeout time.Duration) (string, error) {
+	if err := verifyFleetHealthy(cfg, slug, out, timeout); err != nil {
+		return "", err
+	}
+	return readPromotedDigest(cfg, slug)
 }
 
 // retryableDeployFailure is intentionally narrow. Infrastructure and timing
@@ -179,9 +223,12 @@ func retryableDeployFailure(kind deployfail.Kind) bool {
 // level check, which may pass only if the overlapping run actually succeeded.
 func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt convergeOpts, res *applyResult, out io.Writer) error {
 	timeout := warmTimeoutDuration(opt.warmTimeout)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	if res.warmDeadline.IsZero() {
+		res.warmDeadline = time.Now().Add(timeout)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), res.warmDeadline)
 	defer cancel()
-	deadline := time.Now().Add(timeout)
+	deadline := res.warmDeadline
 	for _, ref := range refs {
 		oc := firstFireOutcome{Schedule: ref.Schedule, RunID: ref.RunID}
 		if opt.waitForWarm || opt.restartAfterWarm {
@@ -469,12 +516,27 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 	}
 	finish := func(status applyStatus, attempts int) applyResult {
 		if opt.waitForWarm {
-			if err := verifyExistingWarmGate(cfg, d.Slug, spec.Dir, &res); err != nil {
+			warmBudget := warmTimeoutDuration(opt.warmTimeout)
+			if res.warmDeadline.IsZero() {
+				res.warmDeadline = time.Now().Add(warmBudget)
+			}
+			remaining := time.Until(res.warmDeadline)
+			if remaining <= 0 {
+				res.failureKind = failureWarmWaitTimeout
+				return fail(fmt.Errorf("warm gate not confirmed within --warm-timeout %s: %w", warmBudget, errFirstFireTimeout), attempts)
+			}
+			if err := verifyExistingWarmGateWithWait(cfg, d.Slug, spec.Dir, &res, remaining, out); err != nil {
 				return fail(err, attempts)
 			}
 		}
 		if opt.verifySchedules {
 			if err := verifyEnabledScheduleFreshness(cfg, d.Slug, &res); err != nil {
+				return fail(err, attempts)
+			}
+		}
+		if opt.verifyHealth {
+			if err := verifyFleetHealthy(cfg, d.Slug, out, opt.healthTimeout); err != nil {
+				res.failureKind = failureHealthVerification
 				return fail(err, attempts)
 			}
 		}
@@ -540,7 +602,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// (2xx, or an ambiguous error whose readback shows the promoted digest
 		// advanced past the pre-deploy one), the reservation is KEPT because
 		// this fleet's source is now the app's bundle.
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(
+			cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt,
+			&resultWarningWriter{Writer: out, result: &res}, d.ServerDigest, marker,
+		)
 		res.attemptsDetail = failed
 		if err != nil {
 			wentLive := committed
@@ -589,7 +654,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		return done(statusDeleted)
 
 	case fleet.ActionCreate:
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(
+			cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt,
+			&resultWarningWriter{Writer: out, result: &res}, "", "",
+		)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
@@ -642,7 +710,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		return finish(statusCreated, attempts)
 
 	case fleet.ActionUpdateSource:
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(
+			cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt,
+			&resultWarningWriter{Writer: out, result: &res}, d.ServerDigest, marker,
+		)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
@@ -681,7 +752,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// Mandatory ordering: deploy first, then patch fleet config
 		// on top with a precondition built from the FRESHLY promoted digest -
 		// never the stale pre-deploy one.
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt, out)
+		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(
+			cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt,
+			&resultWarningWriter{Writer: out, result: &res}, d.ServerDigest, marker,
+		)
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
@@ -709,16 +783,12 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// applied above; idempotent and non-redeploy-triggering) so the fleet
 		// manifest still wins.
 		if err := reassertFleetConfig(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
-			res.note = "updated; declared config not fully reasserted, next plan corrects it: " + err.Error()
-			if opt.fleetState {
-				_ = recordAppFleetState(cfg, d.Slug, fleetConvergenceIncomplete, d.LocalDigest, declaredState, err.Error(), opt.runID)
-				stateAlreadyRecorded = true
-			}
-			return finish(statusUpdated, attempts)
+			res.failureKind = failureConfigReassertFailed
+			return fail(fmt.Errorf("source updated but declared config was not fully reasserted: %w", err), attempts)
 		}
 		return finish(statusUpdated, attempts)
 	}
 
-	res.note = "unknown action " + string(d.Action)
-	return done(statusSkipped)
+	res.failureKind = failureInvalidAction
+	return fail(fmt.Errorf("unknown fleet action %q", d.Action), 0)
 }

@@ -986,16 +986,19 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       resp = await api('/api/fleet/health');
     } catch {
-      fleetHealthEl.hidden = true;
+      renderFleetHealth(summariseFleetHealth({ complete: false, unavailable_components: ['fleet health request'] }));
       return;
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) { fleetHealthEl.hidden = true; return; }
+    if (!resp.ok) {
+      renderFleetHealth(summariseFleetHealth({ complete: false, unavailable_components: [`fleet health HTTP ${resp.status}`] }));
+      return;
+    }
     let body;
     try {
       body = await resp.json();
     } catch {
-      fleetHealthEl.hidden = true;
+      renderFleetHealth(summariseFleetHealth({ complete: false, unavailable_components: ['invalid fleet health response'] }));
       return;
     }
     renderFleetHealth(summariseFleetHealth(body));

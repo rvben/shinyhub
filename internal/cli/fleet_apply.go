@@ -23,6 +23,7 @@ type fleetApplyFlags struct {
 	warmTimeout              time.Duration
 	waitForWarm              bool
 	verifySchedules          bool
+	verifyHealth             bool
 	restartAfterWarm         bool
 	waitForServer            time.Duration
 	concurrency              int
@@ -76,6 +77,7 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&f.warmTimeout, "warm-timeout", fleetWarmTimeout, "Maximum total time per app to confirm every run_on_register schedule has succeeded")
 	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Require run_on_register schedules to have succeeded, including on unchanged apps; fresh first-fires wait within --warm-timeout")
 	cmd.Flags().BoolVar(&f.verifySchedules, "verify-schedules", false, "Require every enabled schedule to be fresh according to the server; verification never triggers a run")
+	cmd.Flags().BoolVar(&f.verifyHealth, "verify-health", false, "Require every non-stopped app to be serving, including unchanged apps")
 	cmd.Flags().BoolVar(&f.restartAfterWarm, "restart-after-warm", false, "Wait for first-fires, then restart serving replicas so startup-loaded data is refreshed")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before proceeding")
 	cmd.Flags().IntVar(&f.concurrency, "concurrency", 3, "Number of apps to deploy concurrently (default 3, 1 = serial); lower it on CPU- or memory-constrained hosts, raise it for network/IO-bound deploys")
@@ -209,6 +211,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		warmTimeout:        warmTimeoutDuration(f.warmTimeout),
 		waitForWarm:        f.waitForWarm,
 		verifySchedules:    f.verifySchedules,
+		verifyHealth:       f.verifyHealth,
 		restartAfterWarm:   f.restartAfterWarm,
 		concurrency:        f.concurrency,
 		fleetID:            pf.manifest.FleetID,
@@ -296,6 +299,9 @@ func fleetApplyRecoveryCommand(f *fleetApplyFlags) string {
 		parts = append(parts, "--restart-after-warm")
 	} else if f.waitForWarm {
 		parts = append(parts, "--wait-for-warm")
+	}
+	if f.verifyHealth {
+		parts = append(parts, "--verify-health")
 	}
 	if f.verifySchedules {
 		parts = append(parts, "--verify-schedules")

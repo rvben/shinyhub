@@ -43,6 +43,7 @@ type scheduleGateOutcome struct {
 	LastRunAt     string `json:"last_run_at,omitempty"`
 	LastSuccessAt string `json:"last_success_at,omitempty"`
 	Refreshing    bool   `json:"refreshing,omitempty"`
+	ActiveRunID   int64  `json:"active_run_id,omitempty"`
 }
 
 // scheduleFailureLog identifies the schedule-run log relevant to a warm-gate
@@ -241,6 +242,14 @@ type scheduleRunBrief struct {
 // It performs no remote work when the manifest has no enabled run_on_register
 // schedule and never triggers a run.
 func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyResult) error {
+	return verifyExistingWarmGateWithWait(cfg, slug, bundleDir, res, 0, io.Discard)
+}
+
+// verifyExistingWarmGateWithWait extends the level check by joining an active
+// run when the caller supplied a deadline. This makes a retried apply patient
+// with work that is already repairing the condition, without dispatching a
+// duplicate query or accepting "running" as proof of delivered data.
+func verifyExistingWarmGateWithWait(cfg *cliConfig, slug, bundleDir string, res *applyResult, timeout time.Duration, out io.Writer) error {
 	m, err := deploy.LoadManifest(bundleDir)
 	if err != nil {
 		res.failureKind = failureWarmStateUnavailable
@@ -270,6 +279,14 @@ func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyRe
 	}
 
 	var failures []string
+	var ctx context.Context
+	var cancel context.CancelFunc
+	var deadline time.Time
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		deadline = time.Now().Add(timeout)
+	}
 	origin := warmGateOrigin(res.action)
 	for _, name := range declared {
 		schedule, ok := byName[name]
@@ -305,6 +322,9 @@ func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyRe
 			if schedule.Refreshing != nil {
 				outcome.Refreshing = *schedule.Refreshing
 			}
+			if schedule.ActiveRunID != nil {
+				outcome.ActiveRunID = *schedule.ActiveRunID
+			}
 		} else {
 			succeeded, latest, lerr := legacyScheduleSuccessState(cfg, slug, schedule.ID)
 			if lerr != nil {
@@ -324,7 +344,40 @@ func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyRe
 				}
 			}
 		}
-		if outcome.LastRunID > 0 && scheduleStatusHasFailureLog(outcome.LastRunStatus) {
+		logCount := len(res.scheduleLogs)
+		if outcome.Refreshing && outcome.ActiveRunID > 0 && timeout > 0 {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				res.warmGate = append(res.warmGate, outcome)
+				res.failureKind = failureWarmWaitTimeout
+				appendScheduleLog(cfg, slug, schedule.ID, outcome.ActiveRunID, name, res)
+				return fmt.Errorf("schedule %q active warm-up not confirmed within --warm-timeout %s: %w", name, timeout, errFirstFireTimeout)
+			}
+			poll := func() (string, error) {
+				return pollScheduleRunStatusContext(ctx, cfg, slug, schedule.ID, outcome.ActiveRunID)
+			}
+			status, waitErr := waitForFirstFireLoop(poll, remaining, 2*time.Second, fleetHealthProgressInterval,
+				time.Now, time.Sleep, out, fleetFirstFireLabel(slug, name)+" (active)")
+			if waitErr != nil {
+				res.warmGate = append(res.warmGate, outcome)
+				res.failureKind = failureWarmStateUnavailable
+				if errors.Is(waitErr, errFirstFireTimeout) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					res.failureKind = failureWarmWaitTimeout
+				}
+				appendScheduleLog(cfg, slug, schedule.ID, outcome.ActiveRunID, name, res)
+				return fmt.Errorf("schedule %q active warm-up not confirmed within --warm-timeout %s: %w", name, timeout, waitErr)
+			}
+			if firstFireStatusOK(status) {
+				continue
+			}
+			outcome.LastRunID = outcome.ActiveRunID
+			outcome.LastRunStatus = status
+			outcome.Refreshing = false
+			if scheduleStatusHasFailureLog(status) {
+				appendScheduleLog(cfg, slug, schedule.ID, outcome.ActiveRunID, name, res)
+			}
+		}
+		if outcome.LastRunID > 0 && scheduleStatusHasFailureLog(outcome.LastRunStatus) && len(res.scheduleLogs) == logCount {
 			appendScheduleLog(cfg, slug, schedule.ID, outcome.LastRunID, name, res)
 		}
 		res.warmGate = append(res.warmGate, outcome)
@@ -350,9 +403,9 @@ func warmGateOrigin(action fleet.Action) string {
 	}
 }
 
-func verifyPostDeployWarmGate(cfg *cliConfig, slug, bundleDir string) (applyResult, error) {
+func verifyPostDeployWarmGate(cfg *cliConfig, slug, bundleDir string, timeout time.Duration, out io.Writer) (applyResult, error) {
 	res := applyResult{slug: slug, action: fleet.ActionUpdateSource}
-	err := verifyExistingWarmGate(cfg, slug, bundleDir, &res)
+	err := verifyExistingWarmGateWithWait(cfg, slug, bundleDir, &res, timeout, out)
 	return res, err
 }
 

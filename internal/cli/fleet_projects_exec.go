@@ -67,7 +67,9 @@ func convergeProjects(cfg *cliConfig, pf *preflightResult, opt convergeOpts, out
 			}
 			r.duration = time.Since(start)
 		default:
-			r.status, r.note = statusSkipped, "unrecognized project action"
+			r.status = statusFailed
+			r.failureKind = failureInvalidAction
+			r.err = fmt.Errorf("unknown project action %q", d.Action)
 			r.duration = time.Since(start)
 		}
 		if r.err != nil {
