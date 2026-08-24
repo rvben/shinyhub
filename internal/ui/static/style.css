@@ -5124,17 +5124,121 @@ footer.brand-footer a { color:inherit; }
 .ov-consumer-values { display: flex; flex-direction: column; align-items: flex-end; color: var(--text-soft); font-family: var(--mono); font-size: 0.7rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ov-consumer-values b { color: var(--text); font-size: 0.78rem; }
 
-/* Recent activity timeline. */
-.ov-timeline { list-style: none; display: flex; flex-direction: column; }
-.ov-tl-row { display: flex; gap: 12px; padding: 8px 0; }
-.ov-tl-row:not(:last-child) { border-bottom: 1px solid var(--line); }
-.ov-tl-rail { flex: none; width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: var(--electric); box-shadow: 0 0 8px var(--accent-glow); }
-.ov-tl-main { min-width: 0; }
-.ov-tl-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
-.ov-tl-action { color: var(--text); font-weight: 600; font-size: 0.85rem; }
-.ov-tl-target { font-family: var(--mono); font-size: 0.78rem; color: var(--cyan); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ov-tl-meta { display: flex; gap: 8px; font-size: 0.76rem; color: var(--text-soft); margin-top: 1px; }
-.ov-tl-time { color: var(--text-muted); }
+/* Recent changes — an operational brief, grouped by fleet run where possible. */
+.ov-activity-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.ov-activity-heading { min-width: 0; }
+.ov-activity-heading .ov-section-title { margin-bottom: 2px; font-size: 1.05rem; }
+.ov-activity-freshness {
+  display: flex; align-items: center; gap: 7px;
+  color: var(--text-muted); font-size: 0.75rem; line-height: 1.4;
+}
+.ov-activity-freshness-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--green); }
+.ov-activity--stale .ov-activity-freshness-dot { background: var(--yellow); }
+.ov-activity-audit {
+  display: inline-flex; align-items: center; gap: 6px; flex: none; min-height: 32px;
+  color: var(--cyan); font-size: 0.75rem; font-weight: 650; text-decoration: none;
+}
+.ov-activity-audit:hover { color: var(--text); }
+.ov-activity-audit .ov-activity-icon { width: 14px; height: 14px; border: 0; background: transparent; }
+.ov-activity-audit:hover .ov-activity-icon { transform: translateX(2px); }
+
+.ov-activity-list { list-style: none; display: flex; flex-direction: column; margin-top: 10px; }
+.ov-activity-item { position: relative; border-radius: var(--radius); transition: background var(--ease); }
+.ov-activity-item:hover { background: color-mix(in oklab, var(--surface-3) 48%, transparent); }
+.ov-activity-item:not(:last-child)::after {
+  content: ''; position: absolute; inset: auto 10px 0 46px; height: 1px; background: var(--line);
+}
+.ov-activity-operation {
+  display: grid; grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: start; gap: 11px; padding: 11px 10px;
+}
+.ov-activity-icon {
+  display: grid; place-items: center; flex: none; width: 34px; height: 34px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  color: var(--text-soft); background: var(--surface-2);
+  transition: color var(--ease), border-color var(--ease), transform var(--ease);
+}
+.ov-activity-icon svg { width: 16px; height: 16px; }
+.ov-activity-icon--fleet { color: var(--standby); border-color: color-mix(in oklab, var(--standby) 20%, var(--line)); background: var(--standby-bg); }
+.ov-activity-icon--attention { color: var(--red); border-color: color-mix(in oklab, var(--red) 24%, var(--line)); background: var(--red-bg); }
+.ov-activity-icon--security { color: var(--yellow); border-color: color-mix(in oklab, var(--yellow) 22%, var(--line)); background: var(--yellow-bg); }
+.ov-activity-copy { min-width: 0; padding-top: 1px; }
+.ov-activity-titleline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 7px; line-height: 1.4; }
+.ov-activity-action { color: var(--text); font-size: 0.875rem; font-weight: 650; }
+.ov-activity-target {
+  min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--cyan); font-family: var(--mono); font-size: 0.82rem;
+  text-decoration: underline; text-decoration-color: transparent; text-underline-offset: 3px;
+}
+.ov-activity-target:hover { color: var(--text); text-decoration-color: currentColor; }
+.ov-activity-target--static { text-decoration: none; }
+.ov-activity-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 3px;
+  color: var(--text-muted); font-size: 0.75rem; line-height: 1.4;
+}
+.ov-activity-actor { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-activity-separator { color: var(--text-dim); }
+.ov-activity-status {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px;
+  border: 1px solid var(--line-2); border-radius: 999px;
+  color: var(--text-soft); background: var(--surface-2); font-size: 0.75rem; font-weight: 700;
+}
+.ov-activity-status::before { content: ''; width: 5px; height: 5px; border-radius: 999px; background: currentColor; }
+.ov-activity-status--working { color: var(--standby); border-color: color-mix(in oklab, var(--standby) 20%, var(--line)); background: var(--standby-bg); }
+.ov-activity-status--attention { color: var(--yellow); border-color: color-mix(in oklab, var(--yellow) 20%, var(--line)); background: var(--yellow-bg); }
+.ov-activity-status--critical { color: var(--red); border-color: color-mix(in oklab, var(--red) 20%, var(--line)); background: var(--red-bg); }
+.ov-activity-time {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 1px; padding-top: 2px;
+  color: var(--text-soft); font-family: var(--mono); font-size: 0.75rem;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.ov-activity-time span { color: var(--text-muted); font-family: var(--font); }
+.ov-activity-time--unknown { color: var(--text-muted); font-family: var(--font); }
+.ov-activity-disclosure {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 36px;
+  margin: 4px 0 0 -7px; padding: 5px 7px; border: 0; border-radius: var(--radius);
+  color: var(--text-soft); background: transparent; font: inherit; font-size: 0.75rem; font-weight: 650; cursor: pointer;
+}
+.ov-activity-disclosure:hover { color: var(--cyan); background: var(--surface-3); }
+.ov-activity-disclosure .ov-activity-icon { width: 13px; height: 13px; border: 0; background: transparent; }
+.ov-activity-disclosure .ov-activity-icon svg { width: 13px; height: 13px; }
+.ov-activity-disclosure[aria-expanded='true'] .ov-activity-icon { transform: rotate(180deg); }
+.ov-activity-children { list-style: none; margin: 0 10px 10px 55px; padding: 2px 0; border-top: 1px solid var(--line); }
+.ov-activity-child {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline;
+  gap: 12px; min-height: 38px; padding: 8px 0; color: var(--text-soft); font-size: 0.75rem;
+}
+.ov-activity-child + .ov-activity-child { border-top: 1px solid var(--line); }
+.ov-activity-child-main { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.ov-activity-child-action { flex: none; }
+.ov-activity-child .ov-activity-target { font-size: 0.75rem; }
+.ov-activity-child-time { color: var(--text-muted); font-family: var(--mono); font-size: 0.75rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ov-activity-child-time span { display: none; }
+.ov-activity-note {
+  display: flex; align-items: center; gap: 8px; margin: 4px 0 0; padding: 12px 2px 0;
+  border-top: 1px solid var(--line); color: var(--text-muted); font-size: 0.75rem; line-height: 1.45;
+}
+.ov-activity-note .ov-activity-icon { width: 14px; height: 14px; border: 0; background: transparent; }
+.ov-activity-note .ov-activity-icon svg { width: 14px; height: 14px; }
+
+.ov-activity-stale {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  margin-top: 14px; padding: 10px 0; border-block: 1px solid var(--line);
+  color: var(--text-soft); font-size: 0.75rem; line-height: 1.45;
+}
+.ov-activity-unavailable {
+  display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center;
+  gap: 12px; padding: 36px 2px 18px;
+}
+.ov-activity-unavailable-copy { min-width: 0; }
+.ov-activity-unavailable-copy b { color: var(--text); font-size: 0.875rem; font-weight: 700; }
+.ov-activity-unavailable-copy p { max-width: 42ch; margin-top: 3px; color: var(--text-soft); font-size: 0.75rem; line-height: 1.5; }
+.ov-activity-loading { display: grid; gap: 10px; margin-top: 18px; }
+.ov-activity-loading-row {
+  display: block; height: 48px; border-radius: var(--radius);
+  background: linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%);
+  background-size: 200% 100%; animation: ovShimmer 1.4s linear infinite;
+}
 .ov-empty-note { font-size: 0.84rem; color: var(--text-soft); }
 
 /* First run + error. The empty fleet is one focused setup surface: no health
@@ -5175,6 +5279,13 @@ footer.brand-footer a { color:inherit; }
   .ov-consumer-row { grid-template-columns: minmax(0, 1fr) auto; }
   .ov-consumer-share { grid-column: 1 / -1; grid-row: 2; }
   .ov-consumer-values { grid-column: 1 / -1; align-items: flex-start; }
+  .ov-activity-operation { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; padding-inline: 8px; }
+  .ov-activity-operation > .ov-activity-icon { width: 32px; height: 32px; }
+  .ov-activity-time { grid-column: 2; flex-direction: row; align-items: baseline; gap: 5px; margin-top: -3px; }
+  .ov-activity-children { margin-left: 50px; margin-right: 8px; }
+  .ov-activity-unavailable { grid-template-columns: 32px minmax(0, 1fr); padding-top: 28px; }
+  .ov-activity-unavailable .ov-activity-retry { grid-column: 2; justify-self: start; }
+  .ov-activity-stale { align-items: flex-start; flex-direction: column; }
   .ov-res-scope,
   .ov-res-updated,
   .ov-capacity-context,
@@ -5189,7 +5300,8 @@ footer.brand-footer a { color:inherit; }
 
 @media (prefers-reduced-motion: reduce) {
   .ov-pulse-dot { animation: none; }
-  .ov-skeleton .ov-skel { animation: none; }
+  .ov-skeleton .ov-skel,
+  .ov-activity-loading-row { animation: none; }
 }
 
 /* ───────────────────────────────────────────────────────────────────────────

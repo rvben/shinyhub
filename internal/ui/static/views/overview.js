@@ -8,6 +8,7 @@ import { buildOverviewModel, pulseMeta } from './overview-model.js';
 import { formatBytes } from './stat-format.js';
 import { formatStatus } from './status-label.js';
 import { appCardBadge } from './app-card-badge.js';
+import { activityTime, buildActivityBrief } from './overview-activity.js';
 
 const POLL_MS = 10000;
 const REQUEST_TIMEOUT_MS = 8000;
@@ -24,6 +25,8 @@ export function mountOverview(ctx) {
   let lastMetricsSnapshot = null;
   let lastLiveSignature = '';
   let lastLiveResources = null;
+  let activityInFlight = false;
+  let activitySnapshot = null;
   const pendingControllers = new Set();
   let live = document.getElementById('overview-live');
   if (!live) {
@@ -37,6 +40,7 @@ export function mountOverview(ctx) {
   // Server-computed capability: admins always, operators behind the
   // auth.operator_audit_access flag. Gates the recent-activity feed.
   const canReadAudit = !!(ctx.state && ctx.state.canReadAudit);
+  if (canReadAudit) activitySnapshot = { state: 'loading', events: [], updatedAt: null };
 
   // stop ends the liveness poll (on unmount or after a 401), so a logged-out or
   // navigated-away Overview never keeps fetching in the background.
@@ -77,15 +81,15 @@ export function mountOverview(ctx) {
       ctx.state.apps = apps;
       if (typeof ctx.syncSidebar === 'function') ctx.syncSidebar();
 
-      const [metrics, history, events] = await Promise.all([
+      if (canReadAudit && apps.length > 0) void refreshActivity();
+      const [metrics, history] = await Promise.all([
         fetchMetrics(apps.length),
         fetchHistory(apps.length),
-        canReadAudit && apps.length > 0 ? fetchActivity() : Promise.resolve(null),
       ]);
       if (disposed) return;
 
       const model = buildOverviewModel(apps, metrics, history);
-      replaceOverviewContent(body, render(model, events));
+      replaceOverviewContent(body, render(model, activitySnapshot));
       const signature = resourceLiveSignature(model.resources);
       if (!initial && lastLiveSignature && signature !== lastLiveSignature) {
         live.textContent = resourceLiveSummary(model.resources, lastLiveResources);
@@ -131,15 +135,52 @@ export function mountOverview(ctx) {
     }
   }
 
-  async function fetchActivity() {
+  async function refreshActivity() {
+    if (activityInFlight || disposed) return;
+    activityInFlight = true;
+    const previous = activitySnapshot;
     try {
-      const { response: resp, body: b } = await requestJSON('/api/audit?limit=6');
-      if (!resp.ok) return null;
-      return (b && Array.isArray(b.events)) ? b.events : null;
-    } catch { return null; }
+      const { response: resp, body: b } = await requestJSON('/api/audit?limit=12');
+      if (disposed) return;
+      if (resp.status === 401) { stop(); ctx.onUnauthorized(); return; }
+      if (!resp.ok || !b || !Array.isArray(b.events)) throw new Error('activity request failed');
+      activitySnapshot = {
+        state: 'ready',
+        events: b.events,
+        updatedAt: new Date().toISOString(),
+      };
+    } catch {
+      if (disposed) return;
+      activitySnapshot = previous && Array.isArray(previous.events) && previous.events.length > 0
+        ? { ...previous, state: 'stale' }
+        : { state: 'unavailable', events: [], updatedAt: null };
+    } finally {
+      activityInFlight = false;
+    }
+    if (!disposed) replaceActivityPanel();
   }
 
-  function render(model, events) {
+  function retryActivity() {
+    if (activityInFlight || disposed) return;
+    if (!activitySnapshot || activitySnapshot.state === 'unavailable') {
+      activitySnapshot = { state: 'loading', events: [], updatedAt: null };
+      replaceActivityPanel();
+    }
+    void refreshActivity();
+  }
+
+  function replaceActivityPanel() {
+    const current = body.querySelector('.ov-activity');
+    if (!current || !activitySnapshot) return;
+    const focusKey = focusedKey(current);
+    const disclosures = expandedDisclosureKeys(current);
+    const next = renderActivityBrief(activitySnapshot, retryActivity);
+    current.replaceWith(next);
+    restoreDisclosures(next, disclosures);
+    restoreFocus(next, focusKey);
+  }
+
+  function render(model, activity) {
     const root = el('div', 'ov-grid');
     if (model.total === 0) {
       root.appendChild(renderFirstRun());
@@ -147,7 +188,7 @@ export function mountOverview(ctx) {
     }
     root.appendChild(renderPulse(model));
     if (model.attention.length > 0) root.appendChild(renderAttention(model.attention));
-    root.appendChild(renderFooter(model, events));
+    root.appendChild(renderFooter(model, activity));
     return root;
   }
 
@@ -253,44 +294,16 @@ export function mountOverview(ctx) {
   }
 
   // ── Footer: resource pressure + (admin) recent activity. ──
-  function renderFooter(model, events) {
+  function renderFooter(model, activity) {
     const footer = el('div', 'ov-footer');
     if (!canReadAudit) footer.classList.add('ov-footer--single');
     footer.appendChild(renderResources(model.resources));
-    if (canReadAudit) footer.appendChild(renderActivity(events));
+    if (canReadAudit) footer.appendChild(renderActivityBrief(activity, retryActivity));
     return footer;
   }
 
   function renderResources(res) {
     return renderResourcePressure(res);
-  }
-
-  function renderActivity(events) {
-    const sec = el('section', 'ov-panel ov-activity');
-    sec.appendChild(sectionTitle('Recent activity'));
-    if (!events || events.length === 0) {
-      sec.appendChild(el('p', 'ov-empty-note', 'No recent activity.'));
-      return sec;
-    }
-    const list = el('ul', 'ov-timeline');
-    for (const ev of events.slice(0, 6)) {
-      const li = el('li', 'ov-tl-row');
-      li.appendChild(el('span', 'ov-tl-rail'));
-      const main = el('div', 'ov-tl-main');
-      const head = el('p', 'ov-tl-head');
-      head.appendChild(el('b', 'ov-tl-action', humanAction(ev.action)));
-      const target = ev.resource_id || ev.resource_type;
-      if (target) head.appendChild(el('span', 'ov-tl-target', target));
-      main.appendChild(head);
-      const meta = el('p', 'ov-tl-meta');
-      meta.appendChild(el('span', 'ov-tl-actor', ev.username || 'system'));
-      meta.appendChild(el('span', 'ov-tl-time', relTime(ev.created_at)));
-      main.appendChild(meta);
-      li.appendChild(main);
-      list.appendChild(li);
-    }
-    sec.appendChild(list);
-    return sec;
   }
 
   // ── helpers ──
@@ -331,6 +344,231 @@ export function mountOverview(ctx) {
       view.hidden = true;
     },
   };
+}
+
+// renderActivityBrief turns the audit tail into a compact operational summary.
+// It stays exported so grouping, states, semantics, and disclosure behavior can
+// be verified without mounting the complete Overview route.
+export function renderActivityBrief(snapshot, onRetry = null) {
+  const state = snapshot && snapshot.state ? snapshot.state : 'loading';
+  const sec = el('section', 'ov-panel ov-activity ov-activity--' + state);
+  sec.setAttribute('aria-labelledby', 'ov-activity-title');
+
+  const head = el('div', 'ov-activity-head');
+  const heading = el('div', 'ov-activity-heading');
+  const title = el('h2', 'ov-section-title', 'Recent changes');
+  title.id = 'ov-activity-title';
+  heading.appendChild(title);
+  if ((state === 'ready' || state === 'stale') && snapshot.updatedAt) {
+    const freshness = el('p', 'ov-activity-freshness');
+    const dot = el('span', 'ov-activity-freshness-dot');
+    dot.setAttribute('aria-hidden', 'true');
+    freshness.appendChild(dot);
+    const prefix = state === 'stale' ? 'Last updated' : 'Updated';
+    freshness.appendChild(document.createTextNode(`${prefix} ${relativeAge(snapshot.updatedAt)}`));
+    heading.appendChild(freshness);
+  }
+  head.appendChild(heading);
+
+  const audit = el('a', 'ov-activity-audit', 'View audit log');
+  audit.href = '/audit-log';
+  audit.setAttribute('data-nav', '');
+  audit.dataset.focusKey = 'activity:audit-log';
+  audit.appendChild(activityIcon('arrow'));
+  head.appendChild(audit);
+  sec.appendChild(head);
+
+  if (state === 'loading') {
+    sec.setAttribute('aria-busy', 'true');
+    const loading = el('div', 'ov-activity-loading');
+    loading.setAttribute('role', 'status');
+    loading.setAttribute('aria-label', 'Loading recent changes');
+    for (let i = 0; i < 3; i += 1) loading.appendChild(el('span', 'ov-activity-loading-row'));
+    sec.appendChild(loading);
+    return sec;
+  }
+
+  if (state === 'unavailable') {
+    sec.appendChild(activityUnavailable(onRetry));
+    return sec;
+  }
+
+  if (state === 'stale') {
+    const stale = el('div', 'ov-activity-stale');
+    const copy = el('p', null, 'Recent changes could not be refreshed. Showing the last successful update.');
+    stale.appendChild(copy);
+    if (typeof onRetry === 'function') stale.appendChild(activityRetry(onRetry));
+    sec.appendChild(stale);
+  }
+
+  const brief = buildActivityBrief(snapshot.events);
+  if (brief.operations.length === 0) {
+    sec.appendChild(el('p', 'ov-empty-note', 'No changes recorded yet.'));
+    return sec;
+  }
+
+  const list = el('ul', 'ov-activity-list');
+  for (const [index, operation] of brief.operations.entries()) {
+    list.appendChild(renderActivityOperation(operation, index));
+  }
+  sec.appendChild(list);
+
+  if (brief.grouped) {
+    const note = el('p', 'ov-activity-note');
+    note.appendChild(activityIcon('info'));
+    note.appendChild(document.createTextNode('Grouped by operation. Exact times use your local timezone.'));
+    sec.appendChild(note);
+  }
+  return sec;
+}
+
+function renderActivityOperation(operation, index) {
+  const li = el('li', 'ov-activity-item');
+  const row = el('div', 'ov-activity-operation');
+  row.appendChild(activityIcon(operation.icon));
+
+  const copy = el('div', 'ov-activity-copy');
+  const title = el('p', 'ov-activity-titleline');
+  title.appendChild(el('b', 'ov-activity-action', operation.actionLabel));
+  appendActivityTarget(title, operation.target, operation.targetHref, `${operation.key}:target`);
+  if (operation.tone) {
+    title.appendChild(el('span', `ov-activity-status ov-activity-status--${operation.tone.name}`, operation.tone.label));
+  }
+  copy.appendChild(title);
+
+  const meta = el('p', 'ov-activity-meta');
+  if (operation.kind === 'group') {
+    const count = operation.children.length;
+    const allAppChanges = operation.children.every((child) => child.resourceType === 'app');
+    const changeLabel = count === 1 ? 'change' : 'changes';
+    meta.appendChild(el('span', null, `${count} ${allAppChanges ? `app ${changeLabel}` : changeLabel}`));
+    meta.appendChild(el('span', 'ov-activity-separator', '·'));
+  }
+  meta.appendChild(el('span', 'ov-activity-actor', operation.actorLabel));
+  if (operation.kind !== 'group' && operation.resourceTypeLabel) {
+    meta.appendChild(el('span', 'ov-activity-separator', '·'));
+    meta.appendChild(el('span', null, operation.resourceTypeLabel));
+  }
+  copy.appendChild(meta);
+
+  if (operation.kind === 'group') {
+    const childrenID = `ov-activity-children-${index}-${safeDOMID(operation.runID || operation.key)}`;
+    const toggle = el('button', 'ov-activity-disclosure', `Show ${operation.children.length} changes`);
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', childrenID);
+    toggle.dataset.disclosureKey = `activity:${operation.runID || operation.key}`;
+    toggle.dataset.focusKey = `activity:${operation.runID || operation.key}:toggle`;
+    toggle.appendChild(activityIcon('chevron'));
+    copy.appendChild(toggle);
+
+    const children = el('ul', 'ov-activity-children');
+    children.id = childrenID;
+    children.hidden = true;
+    for (const child of operation.children) children.appendChild(renderActivityChild(child, operation.key));
+    li.appendChild(row);
+    li.appendChild(children);
+    toggle.addEventListener('click', () => {
+      const expanded = toggle.getAttribute('aria-expanded') === 'true';
+      toggle.setAttribute('aria-expanded', String(!expanded));
+      children.hidden = expanded;
+      toggle.firstChild.textContent = expanded
+        ? `Show ${operation.children.length} changes`
+        : 'Hide changes';
+    });
+  } else {
+    li.appendChild(row);
+  }
+
+  row.appendChild(copy);
+  row.appendChild(renderActivityTime(operation.createdAt));
+  return li;
+}
+
+function renderActivityChild(event, operationKey) {
+  const li = el('li', 'ov-activity-child');
+  const main = el('p', 'ov-activity-child-main');
+  main.appendChild(el('span', 'ov-activity-child-action', event.actionLabel));
+  appendActivityTarget(main, event.target, event.targetHref, `${operationKey}:${event.id}:target`);
+  li.appendChild(main);
+  li.appendChild(renderActivityTime(event.createdAt, 'ov-activity-child-time'));
+  return li;
+}
+
+function appendActivityTarget(parent, target, href, focusKey) {
+  if (!target) return;
+  if (href) {
+    const link = el('a', 'ov-activity-target', target);
+    link.href = href;
+    link.setAttribute('data-nav', '');
+    link.dataset.focusKey = `activity:${focusKey}`;
+    parent.appendChild(link);
+    return;
+  }
+  parent.appendChild(el('span', 'ov-activity-target ov-activity-target--static', target));
+}
+
+function renderActivityTime(createdAt, cls = 'ov-activity-time') {
+  const formatted = activityTime(createdAt);
+  if (!formatted.valid) return el('span', `${cls} ov-activity-time--unknown`, formatted.exact);
+  const time = el('time', cls, formatted.exact);
+  time.dateTime = formatted.datetime;
+  time.title = formatted.title;
+  time.setAttribute('aria-label', `${formatted.title}, ${formatted.relative}`);
+  time.appendChild(el('span', null, formatted.relative));
+  return time;
+}
+
+function activityUnavailable(onRetry) {
+  const state = el('div', 'ov-activity-unavailable');
+  state.appendChild(activityIcon('attention'));
+  const copy = el('div', 'ov-activity-unavailable-copy');
+  copy.appendChild(el('b', null, 'Activity unavailable'));
+  copy.appendChild(el('p', null, 'Fleet health is still current. Recent changes could not be loaded.'));
+  state.appendChild(copy);
+  if (typeof onRetry === 'function') state.appendChild(activityRetry(onRetry));
+  return state;
+}
+
+function activityRetry(onRetry) {
+  const retry = el('button', 'ov-btn ov-activity-retry', 'Try again');
+  retry.type = 'button';
+  retry.dataset.focusKey = 'activity:retry';
+  retry.addEventListener('click', onRetry);
+  return retry;
+}
+
+function activityIcon(kind) {
+  const span = el('span', `ov-activity-icon ov-activity-icon--${kind}`);
+  span.setAttribute('aria-hidden', 'true');
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 20 20');
+  svg.setAttribute('fill', 'none');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', activityIconPath(kind));
+  path.setAttribute('stroke', 'currentColor');
+  path.setAttribute('stroke-width', '1.5');
+  path.setAttribute('stroke-linecap', 'round');
+  path.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(path);
+  span.appendChild(svg);
+  return span;
+}
+
+function activityIconPath(kind) {
+  if (kind === 'restart') return 'M15.2 7.1A5.8 5.8 0 1 0 15.6 13M15.2 3.8v3.7h-3.7';
+  if (kind === 'deploy') return 'M10 3v9m0 0 3-3m-3 3L7 9M4 14.5h12';
+  if (kind === 'fleet') return 'm10 3 6 3-6 3-6-3 6-3Zm6 7-6 3-6-3m12 4-6 3-6-3';
+  if (kind === 'attention') return 'M10 6.2v4.4m0 3v.1M3.4 15.5l5.2-10a1.57 1.57 0 0 1 2.8 0l5.2 10A1 1 0 0 1 15.7 17H4.3a1 1 0 0 1-.9-1.5Z';
+  if (kind === 'security') return 'M10 2.8 15 5v4.1c0 3.4-2 6.3-5 8.1-3-1.8-5-4.7-5-8.1V5l5-2.2Z';
+  if (kind === 'arrow') return 'M3 10h12m-4-4 4 4-4 4';
+  if (kind === 'chevron') return 'm5 8 5 5 5-5';
+  if (kind === 'info') return 'M10 9v5m0-8v.2M3.5 10a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z';
+  return 'M4 6.5h12M4 10h12M4 13.5h8';
+}
+
+function safeDOMID(value) {
+  return String(value || 'activity').replace(/[^a-zA-Z0-9_-]/g, '-');
 }
 
 // Exported as a small, state-complete renderer so its meter semantics and
@@ -743,24 +981,4 @@ function el(tag, cls, text) {
   if (cls) n.className = cls;
   if (text != null) n.textContent = text;
   return n;
-}
-
-function humanAction(action) {
-  if (!action || typeof action !== 'string') return 'Activity';
-  const s = action.replace(/[._]/g, ' ');
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-// relTime renders an ISO timestamp as a compact "3m ago" / "2h ago" string.
-function relTime(iso) {
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return '';
-  const secs = Math.max(0, Math.round((Date.now() - t) / 1000));
-  if (secs < 60) return 'just now';
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return mins + 'm ago';
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return hrs + 'h ago';
-  const days = Math.round(hrs / 24);
-  return days + 'd ago';
 }

@@ -133,3 +133,67 @@ test('fleet metrics requests do not encode every app slug into the URL', async (
   assert.deepEqual(calls, ['/api/apps', '/api/apps/metrics', '/api/apps/metrics/history']);
   assert.equal(calls.some((path) => path.includes('?slugs=')), false);
 });
+
+test('activity loads independently and never holds the health-first Overview skeleton', async () => {
+  const audit = deferred();
+  const app = { slug: 'forecast', name: 'Forecast', status: 'running', replicas: 1 };
+  const replica = {
+    index: 0,
+    status: 'running',
+    metrics_available: true,
+    cpu_percent: 12,
+    rss_bytes: 64 * 1024 * 1024,
+    effective_memory_limit_mb: 512,
+    effective_cpu_quota_percent: 100,
+    memory_limit_enforced: true,
+    cpu_quota_enforced: true,
+    resource_enforcement_known: true,
+  };
+  const ctx = context(async (path) => {
+    if (path === '/api/apps') return { ok: true, status: 200, json: async () => ({ items: [app] }) };
+    if (path === '/api/apps/metrics') {
+      return { ok: true, status: 200, json: async () => ({ metrics: { forecast: { status: 'running', replicas: [replica] } } }) };
+    }
+    if (path === '/api/apps/metrics/history') return { ok: true, status: 200, json: async () => ({ history: {} }) };
+    if (path === '/api/audit?limit=12') return audit.promise;
+    throw new Error(`unexpected request: ${path}`);
+  });
+  ctx.state.canReadAudit = true;
+  mounted = mountOverview(ctx);
+
+  await eventually(() => document.getElementById('overview-body').textContent.includes('App allocation pressure'));
+  assert.equal(document.querySelector('.ov-activity').getAttribute('aria-busy'), 'true');
+  assert.match(document.getElementById('overview-body').textContent, /Recent changes/);
+
+  audit.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({ events: [{
+      id: 1,
+      action: 'deploy',
+      resource_type: 'app',
+      resource_id: 'forecast',
+      username: '__deploy__',
+      created_at: new Date().toISOString(),
+    }] }),
+  });
+  await eventually(() => document.getElementById('overview-body').textContent.includes('Deployment automation'));
+  assert.equal(document.querySelector('.ov-activity').getAttribute('aria-busy'), null);
+});
+
+test('activity request failure renders an unavailable state instead of false emptiness', async () => {
+  const app = { slug: 'forecast', name: 'Forecast', status: 'running', replicas: 1 };
+  const ctx = context(async (path) => {
+    if (path === '/api/apps') return { ok: true, status: 200, json: async () => ({ items: [app] }) };
+    if (path === '/api/apps/metrics') return { ok: true, status: 200, json: async () => ({ metrics: {} }) };
+    if (path === '/api/apps/metrics/history') return { ok: true, status: 200, json: async () => ({ history: {} }) };
+    if (path === '/api/audit?limit=12') return { ok: false, status: 500, json: async () => ({}) };
+    throw new Error(`unexpected request: ${path}`);
+  });
+  ctx.state.canReadAudit = true;
+  mounted = mountOverview(ctx);
+
+  await eventually(() => document.getElementById('overview-body').textContent.includes('Activity unavailable'));
+  assert.doesNotMatch(document.getElementById('overview-body').textContent, /No changes recorded/);
+  assert.match(document.getElementById('overview-body').textContent, /Fleet health is still current/);
+});
