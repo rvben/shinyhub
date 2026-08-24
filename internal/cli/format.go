@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 type outputFormat string
@@ -39,10 +40,26 @@ func currentFormat() outputFormat {
 	case formatTable, formatJSON, formatNDJSON:
 		return outputFormat(outputFlagValue)
 	}
-	if isTTY(os.Stdout) {
+	if isTTY(os.Stdout) || isCIEnvironment(os.Getenv) {
 		return formatTable
 	}
 	return formatJSON
+}
+
+// isCIEnvironment reports whether output is being captured by a CI job log.
+// CI stdout is not a TTY, but its default audience is still a person reading
+// the job. Machine consumers can select JSON or NDJSON explicitly with -o.
+func isCIEnvironment(getenv func(string) string) bool {
+	return envEnabled(getenv("CI")) || envEnabled(getenv("GITLAB_CI"))
+}
+
+func envEnabled(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func isTTY(f *os.File) bool {
@@ -69,7 +86,7 @@ func authErr(msg, hint string) error {
 // a line stream. On success, resolvedFormat is updated so the error renderer
 // matches the success-path format.
 func resolveFormat(legacyJSON bool, streaming bool) (outputFormat, error) {
-	f, err := resolveFormatWith(outputFlagValue, legacyJSON, isTTY(os.Stdout), streaming)
+	f, err := resolveFormatWith(outputFlagValue, legacyJSON, isTTY(os.Stdout), isCIEnvironment(os.Getenv), streaming)
 	if err == nil {
 		resolvedFormat = f
 	}
@@ -96,7 +113,7 @@ func resolveLegacyTextJSON(legacyFmt string) (outputFormat, error) {
 	}
 }
 
-func resolveFormatWith(flagValue string, legacyJSON, stdoutTTY, streaming bool) (outputFormat, error) {
+func resolveFormatWith(flagValue string, legacyJSON, stdoutTTY, ci, streaming bool) (outputFormat, error) {
 	explicit := outputFormat(flagValue)
 	switch explicit {
 	case "", formatTable, formatJSON, formatNDJSON:
@@ -114,6 +131,9 @@ func resolveFormatWith(flagValue string, legacyJSON, stdoutTTY, streaming bool) 
 		}
 	}
 	if explicit == "" {
+		if ci {
+			return formatTable, nil
+		}
 		if !stdoutTTY {
 			if streaming {
 				return formatNDJSON, nil

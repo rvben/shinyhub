@@ -99,7 +99,7 @@ echo "==> deploy the skill's example app"
   || { "${BIN}" apps logs "${SLUG}" --no-follow --config "${CREDS}" >&2 2>/dev/null || true; fail "deploy"; }
 
 echo "==> assert app is running"
-# Force table output: piping makes the CLI emit JSON (non-TTY default), which the
+# Force table output: an ordinary pipe emits JSON by default, which the
 # table-anchored grep would never match. The table is "SLUG STATUS DEPLOYS", so
 # the status is the column immediately after the slug.
 "${BIN}" apps list -o table --config "${CREDS}" | grep -Eq "^${SLUG}[[:space:]]+running([[:space:]]|\$)" \

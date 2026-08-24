@@ -11,25 +11,30 @@ func TestResolveFormat(t *testing.T) {
 		flagValue string // -o value, "" = unset
 		legacy    bool   // --json given
 		stdoutTTY bool
+		ci        bool
 		streaming bool
 		want      outputFormat
 		wantErr   bool
 	}{
-		{"tty default table", "", false, true, false, formatTable, false},
-		{"piped document json", "", false, false, false, formatJSON, false},
-		{"piped streaming ndjson", "", false, false, true, formatNDJSON, false},
-		{"explicit json wins on tty", "json", false, true, false, formatJSON, false},
-		{"explicit table wins when piped", "table", false, false, false, formatTable, false},
-		{"legacy json alias", "", true, true, false, formatJSON, false},
-		{"legacy agrees with -o", "json", true, true, false, formatJSON, false},
-		{"legacy conflicts with -o table", "table", true, true, false, "", true},
-		{"json rejected for streaming", "json", false, false, true, "", true},
-		{"ndjson rejected for document", "ndjson", false, false, false, "", true},
-		{"unknown format", "yaml", false, true, false, "", true},
+		{"tty default table", "", false, true, false, false, formatTable, false},
+		{"piped document json", "", false, false, false, false, formatJSON, false},
+		{"piped streaming ndjson", "", false, false, false, true, formatNDJSON, false},
+		{"ci document defaults table", "", false, false, true, false, formatTable, false},
+		{"ci stream defaults table", "", false, false, true, true, formatTable, false},
+		{"explicit json wins in ci", "json", false, false, true, false, formatJSON, false},
+		{"explicit ndjson wins in ci", "ndjson", false, false, true, true, formatNDJSON, false},
+		{"explicit json wins on tty", "json", false, true, false, false, formatJSON, false},
+		{"explicit table wins when piped", "table", false, false, false, false, formatTable, false},
+		{"legacy json alias", "", true, true, false, false, formatJSON, false},
+		{"legacy agrees with -o", "json", true, true, false, false, formatJSON, false},
+		{"legacy conflicts with -o table", "table", true, true, false, false, "", true},
+		{"json rejected for streaming", "json", false, false, false, true, "", true},
+		{"ndjson rejected for document", "ndjson", false, false, false, false, "", true},
+		{"unknown format", "yaml", false, true, false, false, "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveFormatWith(tc.flagValue, tc.legacy, tc.stdoutTTY, tc.streaming)
+			got, err := resolveFormatWith(tc.flagValue, tc.legacy, tc.stdoutTTY, tc.ci, tc.streaming)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("want error, got %q", got)
@@ -57,6 +62,42 @@ func resetFormatState(t *testing.T) {
 		noColorFlag = false
 		resolvedFormat = ""
 	})
+}
+
+func TestIsCIEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{name: "none", env: map[string]string{}, want: false},
+		{name: "generic", env: map[string]string{"CI": "true"}, want: true},
+		{name: "gitlab", env: map[string]string{"GITLAB_CI": "true"}, want: true},
+		{name: "explicit false", env: map[string]string{"CI": "false", "GITLAB_CI": "0"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isCIEnvironment(func(key string) string { return tc.env[key] })
+			if got != tc.want {
+				t.Fatalf("isCIEnvironment() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveFormatDefaultsToTableInGitLabCI(t *testing.T) {
+	resetFormatState(t)
+	t.Setenv("GITLAB_CI", "true")
+
+	got, err := resolveFormat(false, false)
+	if err != nil || got != formatTable {
+		t.Fatalf("GitLab CI default = %q, %v; want table", got, err)
+	}
+
+	outputFlagValue, resolvedFormat = "json", ""
+	got, err = resolveFormat(false, false)
+	if err != nil || got != formatJSON {
+		t.Fatalf("GitLab CI explicit JSON = %q, %v; want json", got, err)
+	}
 }
 
 // TestCurrentFormat_ExplicitOutputFlagBeforeTTYFallback verifies that when
@@ -87,7 +128,7 @@ func TestCurrentFormat_InvalidOutputFlagFallsBackToTTYPath(t *testing.T) {
 	outputFlagValue = "bogus"
 	// resolvedFormat stays "" and stdout is not a TTY in tests.
 	got := currentFormat()
-	// Expect TTY fallback: not a TTY in CI/test => formatJSON
+	// Expect TTY fallback: stdout is normally not a TTY in the test process.
 	if got != formatJSON && got != formatTable {
 		t.Errorf("currentFormat() = %q, want table or json (TTY-based), not the invalid flag value", got)
 	}

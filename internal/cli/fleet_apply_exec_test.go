@@ -959,8 +959,8 @@ func TestConvergeApp_FailedDeployAttachesLogTail(t *testing.T) {
 		t.Fatalf("result log tail must contain the crash exception; got %q", r.logTail)
 	}
 
-	// The JSON envelope must carry log_tail too, so non-TTY/CI callers get the
-	// cause without a second call.
+	// The JSON envelope must carry log_tail too, so explicit machine-mode
+	// callers get the cause without a second call.
 	var buf strings.Builder
 	m := &fleet.Manifest{FleetID: "eu"}
 	if err := writeFleetApplyJSON(&buf, m, cfg.Host, []fleet.AppDiff{d}, nil, applyOutcome{apps: []applyResult{r}}, 4, "PARTIAL"); err != nil {

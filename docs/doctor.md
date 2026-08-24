@@ -90,8 +90,9 @@ new one. Doctor performs no probe writes and never creates the app.
 
 ## Automation
 
-Redirected output defaults to one JSON document; `--output json` makes that
-choice explicit:
+Outside CI, redirected output defaults to one JSON document. In CI, where the
+job log is normally read by a person, table output is the default; use
+`--output json` to make machine consumption explicit:
 
 ```bash
 shinyhub doctor . --output json

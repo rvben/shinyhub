@@ -151,8 +151,9 @@ flow.
 `shinyhub doctor .` checks the complete path before a deploy: bundle and
 manifest, local launcher, credential-file safety, server connectivity,
 authentication, exact app permission, and remote runtime availability. It
-lists every problem with a concrete fix in one run, emits JSON when piped, and
-does not change local or remote state. See [Doctor](docs/doctor.md).
+lists every problem with a concrete fix in one run, emits JSON through an
+ordinary pipe outside CI, and does not change local or remote state. See
+[Doctor](docs/doctor.md).
 
 `shinyhub plan .` then shows the exact archive, content digest, ignored paths,
 launch and manifest effects, remote create-or-update state, permissions, and
@@ -270,11 +271,13 @@ restarts: it signs sessions and derives the key used to encrypt app secrets.
 
 ### CLI output
 
-Client commands render a table on a terminal and JSON when their output is
-piped or redirected, so `shinyhub apps list` is readable by a person and
-parseable by a script without either having to ask. `-o table|json|ndjson`
-forces one, `-q` suppresses non-essential prose, and `shinyhub schema`
-describes every command, flag, and error kind as JSON.
+Client commands render a table on a terminal or in a recognized CI job. An
+ordinary pipe or redirect emits JSON, so `shinyhub apps list` is readable by a
+person and parseable by a script without either having to ask. CI automation
+that consumes stdout should request `-o json` or `-o ndjson` explicitly.
+`-o table|json|ndjson` always forces the selected format, `-q` suppresses
+non-essential prose, and `shinyhub schema` describes every command, flag, and
+error kind as JSON.
 
 Color and glyphs are decoration only: a status is always spelled out as a word
 and a result always carries `✓` or `✗`, so nothing is lost when they are off.
@@ -287,6 +290,7 @@ controlled explicitly:
 | `NO_COLOR=1` | No ANSI color ([no-color.org](https://no-color.org)). |
 | `CLICOLOR=0` | No ANSI color. |
 | `TERM=dumb` | No color, and no in-place redraw: the deploy progress line becomes one line per step. |
+| `CI=1` or `GITLAB_CI=1` | Default to the human-readable table for job logs. Explicit `--output` still wins. |
 | `CLICOLOR_FORCE=1` | Color even when piped, for a CI log that renders ANSI. `FORCE_COLOR` is an alias. |
 | `LANG=C` (any non-UTF-8 locale) | ASCII glyphs (`v`, `x`, `\|/-\`) instead of Unicode. |
 

@@ -3,10 +3,20 @@ package cli
 import (
 	"bytes"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/spf13/cobra"
 )
+
+// TestMain prevents the test runner's own CI markers from changing the output
+// assumptions of tests that intentionally exercise ordinary piped output.
+// Individual CI-format tests opt back in with t.Setenv.
+func TestMain(m *testing.M) {
+	_ = os.Unsetenv("CI")
+	_ = os.Unsetenv("GITLAB_CI")
+	os.Exit(m.Run())
+}
 
 // forceWriters points cmd and every descendant at w so captured output is
 // deterministic. AddCommandsTo now builds a fresh command tree per call with

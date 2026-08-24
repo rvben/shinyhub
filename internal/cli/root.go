@@ -64,7 +64,7 @@ func AddCommandsTo(root *cobra.Command) {
 	root.PersistentFlags().StringVar(&hostFlagOverride, "host", "",
 		"Saved host name or server URL to target for this command (overrides the current host; does not change it)")
 	root.PersistentFlags().StringVarP(&outputFlagValue, "output", "o", "",
-		"Output format: table, json, or ndjson (default: table on a terminal, json/ndjson when piped)")
+		"Output format: table, json, or ndjson (default: table on a terminal or in CI; otherwise json/ndjson when piped)")
 	root.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false,
 		"Suppress non-essential output")
 	root.PersistentFlags().BoolVar(&noColorFlag, "no-color", false,

@@ -258,6 +258,29 @@ func TestFleetApply_JSONStdoutIsPureEnvelope(t *testing.T) {
 	}
 }
 
+func TestFleetApply_GitLabCIDefaultsToHumanReport(t *testing.T) {
+	t.Setenv("GITLAB_CI", "true")
+	fake := newFleetFake(true)
+	_ = fake.httptest(t)
+	cfgFile := writeCLIConfig(t, fake)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "src", "app.py"), "print(1)\n")
+	manifest := "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./src\"\nvisibility=\"private\"\n"
+	manifestPath := filepath.Join(dir, "shinyhub-fleet.toml")
+	mustWrite(t, manifestPath, manifest)
+
+	stdout, _, err := execCLISplit(t, "--config", cfgFile, "fleet", "apply", "-f", manifestPath)
+	if err != nil {
+		t.Fatalf("apply in GitLab CI: %v\nstdout=%s", err, stdout)
+	}
+	if !strings.Contains(stdout, "shinyhub fleet apply") || !strings.Contains(stdout, "1 created") {
+		t.Fatalf("GitLab CI output is not the human report:\n%s", stdout)
+	}
+	if json.Valid([]byte(strings.TrimSpace(stdout))) {
+		t.Fatalf("GitLab CI unexpectedly defaulted to JSON:\n%s", stdout)
+	}
+}
+
 func TestFleetApply_Acceptance_CreateThenIdempotent(t *testing.T) {
 	fake := newFleetFake(true)
 	_ = fake.httptest(t)

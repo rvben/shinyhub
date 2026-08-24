@@ -37,7 +37,9 @@ that the deployment became healthy.
 
 ## Automation
 
-The default for redirected stdout remains one JSON result document:
+Outside CI, redirected stdout defaults to one JSON result document. In CI the
+default is the human-readable report, so request JSON explicitly when saving or
+parsing the result:
 
 ```sh
 shinyhub deploy . --output json > deploy-result.json
