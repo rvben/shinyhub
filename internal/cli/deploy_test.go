@@ -1348,6 +1348,42 @@ func TestDeploy_FirstFire_FailureIsFatal(t *testing.T) {
 	}
 }
 
+func TestDeploy_WaitForWarmFailsClosedWhenDispatchRefIsMissing(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
+	})
+	mux.HandleFunc("/api/apps/warmapp/deploy", func(w http.ResponseWriter, r *http.Request) {
+		// The server accepted the manifest but omitted first_fire. The final
+		// schedule state is authoritative and must keep the deploy red.
+		_, _ = io.WriteString(w, `{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5}]}}`)
+	})
+	mux.HandleFunc("/api/apps/warmapp/schedules", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"items":[{"id":5,"name":"warm","enabled":true,"stale":true}]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "# shiny\n")
+	writeFile(t, dir, "shinyhub.toml", `[[schedule]]
+name = "warm"
+cron = "0 6 * * *"
+cmd = "python refresh.py"
+run_on_register = true
+`)
+	writeTestCLIConfig(t, srv.URL)
+
+	cmd := newDeployCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{dir, "--slug", "warmapp", "--wait-for-warm"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "never succeeded") {
+		t.Fatalf("error = %v, want fail-closed never-succeeded postcondition", err)
+	}
+}
+
 func TestEnsureAppCoreCreatesWithProject(t *testing.T) {
 	var created map[string]any
 	cfg := fleetProjectSrv(t, func(w http.ResponseWriter, r *http.Request) {

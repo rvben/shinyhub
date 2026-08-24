@@ -120,7 +120,7 @@ func TestFleetApplyCmd_HasHealthTimeoutFlag(t *testing.T) {
 }
 
 // FLT-SCH: fleet apply exposes a --wait-for-warm flag so an operator can block
-// until run_on_register first-fires complete within the health timeout.
+// until run_on_register first-fires complete within the separate warm timeout.
 func TestFleetApplyCmd_HasWaitForWarmFlag(t *testing.T) {
 	cmd := newFleetApplyCmd()
 	f := cmd.Flags().Lookup("wait-for-warm")
@@ -129,6 +129,17 @@ func TestFleetApplyCmd_HasWaitForWarmFlag(t *testing.T) {
 	}
 	if f.DefValue != "false" {
 		t.Fatalf("--wait-for-warm default = %q, want false", f.DefValue)
+	}
+}
+
+func TestFleetApplyCmd_HasWarmTimeoutFlag(t *testing.T) {
+	cmd := newFleetApplyCmd()
+	f := cmd.Flags().Lookup("warm-timeout")
+	if f == nil {
+		t.Fatal("fleet apply must expose a --warm-timeout flag")
+	}
+	if f.DefValue != "15m0s" {
+		t.Fatalf("--warm-timeout default = %q, want 15m0s", f.DefValue)
 	}
 }
 

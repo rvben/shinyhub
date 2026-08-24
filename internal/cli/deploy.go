@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -430,27 +431,33 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	for _, ref := range refs {
 		fmt.Fprintf(errW, "%s: first-fire triggered (run #%d)\n", ref.Schedule, ref.RunID)
 	}
-	if f.waitForWarm && len(refs) > 0 {
+	if f.waitForWarm {
 		timeout := time.Duration(f.waitTimeout) * time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
 		var firstFireErr error
-		allSucceeded := true
+		deadline := time.Now().Add(timeout)
 		for _, ref := range refs {
-			poll := func() (string, error) { return pollScheduleRunStatus(cfg, slug, ref.ScheduleID, ref.RunID) }
-			status, werr := waitForFirstFireLoop(poll, timeout, healthPollInterval, 15*time.Second, time.Now, time.Sleep, errW, ref.Schedule)
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return fmt.Errorf("%s first-fire not confirmed within --wait-timeout %s: %w", ref.Schedule, timeout, errFirstFireTimeout)
+			}
+			poll := func() (string, error) {
+				return pollScheduleRunStatusContext(ctx, cfg, slug, ref.ScheduleID, ref.RunID)
+			}
+			status, werr := waitForFirstFireLoop(poll, remaining, healthPollInterval, 15*time.Second, time.Now, time.Sleep, errW, ref.Schedule)
 			switch {
 			case werr != nil:
-				allSucceeded = false
-				// A timeout or transient poll error is not a hard failure: the run
-				// may still be warming and the next deploy self-heals. This matches
-				// fleet apply, which also treats an unfinished wait as non-fatal.
-				fmt.Fprintf(errW, "%s: first-fire not confirmed: %v (warming may still be in progress)\n", ref.Schedule, werr)
+				// The run may still be active, so a non-following log stream is not a
+				// reliable terminal cause and must not extend the wait indefinitely.
+				fmt.Fprintf(errW, "-> shinyhub schedule logs %s %s --run %d\n", slug, ref.Schedule, ref.RunID)
+				firstFireErr = errors.Join(firstFireErr,
+					fmt.Errorf("%s first-fire not confirmed within --wait-timeout %s: %w", ref.Schedule, timeout, werr))
 			case status == "skipped_overlap":
-				allSucceeded = false
-				fmt.Fprintf(errW, "%s: first-fire skipped (another run is warming the cache); warming in progress\n", ref.Schedule)
+				fmt.Fprintf(errW, "%s: first-fire skipped (another run is active); verifying recorded success\n", ref.Schedule)
 			case firstFireStatusOK(status):
 				fmt.Fprintf(errW, "%s: first-fire %s\n", ref.Schedule, status)
 			default:
-				allSucceeded = false
 				// Dump the failed run's own log so the operator sees why the warm-up
 				// failed.
 				_ = streamRunLogs(cfg, slug, ref.ScheduleID, ref.RunID, false, cmd)
@@ -460,10 +467,17 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		if firstFireErr != nil {
 			return firstFireErr
 		}
-		if f.restartAfterWarm {
-			if !allSucceeded {
-				return fmt.Errorf("cannot restart after warm: not every first-fire completed successfully")
+		gateRes, gateErr := verifyPostDeployWarmGate(cfg, slug, abs)
+		if gateErr != nil {
+			for _, log := range gateRes.scheduleLogs {
+				for _, line := range log.Tail {
+					fmt.Fprintln(errW, line)
+				}
+				fmt.Fprintf(errW, "-> shinyhub schedule logs %s %s --run %d\n", slug, log.Schedule, log.RunID)
 			}
+			return gateErr
+		}
+		if f.restartAfterWarm && len(refs) > 0 {
 			restarted, err := restartAppAfterWarm(cfg, slug, errW)
 			if err != nil {
 				return err

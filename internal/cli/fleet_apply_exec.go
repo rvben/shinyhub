@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ type convergeOpts struct {
 	preconditions      bool // server supports If-Match-style headers
 	retries            int  // attempts AFTER the first for deploys/transient config PATCHes
 	healthTimeout      time.Duration
+	warmTimeout        time.Duration
 	waitForWarm        bool
 	verifySchedules    bool
 	restartAfterWarm   bool
@@ -171,49 +173,51 @@ func retryableDeployFailure(kind deployfail.Kind) bool {
 // resolveFirstFires records the per-schedule first-fire outcomes on res and,
 // when --wait-for-warm or --restart-after-warm is set, polls each run to
 // completion. Without either it only records that the runs were triggered.
-// When waiting, a non-nil error is returned only for genuine run failures:
-// skipped_overlap is treated as success by firstFireStatusOK, and a timeout
-// (werr != nil) is non-fatal under wait-only because the run is still warming
-// and a later successful completion still closes the level gate. Restart-after-
-// warm is stricter: every run must have succeeded before replicas are cycled.
+// The warm timeout is one deadline shared by every first-fire for the app. A
+// timeout is a convergence failure: "still warming" is not equivalent to
+// "successfully warmed." skipped_overlap is recorded but left to the final
+// level check, which may pass only if the overlapping run actually succeeded.
 func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt convergeOpts, res *applyResult, out io.Writer) error {
-	allSucceeded := len(refs) > 0
+	timeout := warmTimeoutDuration(opt.warmTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	deadline := time.Now().Add(timeout)
 	for _, ref := range refs {
 		oc := firstFireOutcome{Schedule: ref.Schedule, RunID: ref.RunID}
 		if opt.waitForWarm || opt.restartAfterWarm {
-			poll := func() (string, error) { return pollScheduleRunStatus(cfg, slug, ref.ScheduleID, ref.RunID) }
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				res.failureKind = failureWarmWaitTimeout
+				appendScheduleLog(cfg, slug, ref.ScheduleID, ref.RunID, ref.Schedule, res)
+				return fmt.Errorf("schedule %q first-fire not confirmed within --warm-timeout %s: %w", ref.Schedule, timeout, errFirstFireTimeout)
+			}
+			poll := func() (string, error) { return pollScheduleRunStatusContext(ctx, cfg, slug, ref.ScheduleID, ref.RunID) }
 			// Fleet apps converge concurrently, and schedule names are only unique
 			// within an app. Include the slug in live progress so two apps with a
 			// same-named schedule remain distinguishable when their lines interleave.
 			label := fleetFirstFireLabel(slug, ref.Schedule)
-			status, werr := waitForFirstFireLoop(poll, opt.healthTimeout, 2*time.Second, fleetHealthProgressInterval, time.Now, time.Sleep, out, label)
+			status, werr := waitForFirstFireLoop(poll, remaining, 2*time.Second, fleetHealthProgressInterval, time.Now, time.Sleep, out, label)
 			oc.Status = status
 			res.firstFires = append(res.firstFires, oc)
-			if werr == nil && !firstFireStatusOK(status) {
-				tail, _ := fetchScheduleLogTail(cfg, slug, ref.ScheduleID, ref.RunID, scheduleLogTailLines)
-				res.scheduleLogs = append(res.scheduleLogs, scheduleFailureLog{
-					Schedule: ref.Schedule, RunID: ref.RunID, Tail: tail,
-				})
+			if werr != nil {
+				res.failureKind = failureWarmStateUnavailable
+				if errors.Is(werr, errFirstFireTimeout) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					res.failureKind = failureWarmWaitTimeout
+				}
+				appendScheduleLog(cfg, slug, ref.ScheduleID, ref.RunID, ref.Schedule, res)
+				return fmt.Errorf("schedule %q first-fire not confirmed within --warm-timeout %s: %w", ref.Schedule, timeout, werr)
+			}
+			if status == "skipped_overlap" {
+				continue
+			}
+			if !firstFireStatusOK(status) {
+				res.failureKind = failureWarmFirstFireFailed
+				appendScheduleLog(cfg, slug, ref.ScheduleID, ref.RunID, ref.Schedule, res)
 				return fmt.Errorf("schedule %q first-fire %s", ref.Schedule, status)
 			}
-			if werr != nil || status != "succeeded" {
-				allSucceeded = false
-			}
-			// A timeout (werr != nil) is reported but not fatal: the run is still
-			// warming and the next apply self-heals.
 			continue
 		}
 		res.firstFires = append(res.firstFires, oc)
-	}
-	if opt.restartAfterWarm && len(refs) > 0 {
-		if !allSucceeded {
-			return fmt.Errorf("cannot restart after warm: not every first-fire completed successfully")
-		}
-		restarted, err := restartAppAfterWarm(cfg, slug, out)
-		if err != nil {
-			return err
-		}
-		res.warmRestarted = restarted
 	}
 	return nil
 }
@@ -464,21 +468,29 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		return res
 	}
 	finish := func(status applyStatus, attempts int) applyResult {
+		if opt.waitForWarm {
+			if err := verifyExistingWarmGate(cfg, d.Slug, spec.Dir, &res); err != nil {
+				return fail(err, attempts)
+			}
+		}
 		if opt.verifySchedules {
 			if err := verifyEnabledScheduleFreshness(cfg, d.Slug, &res); err != nil {
 				return fail(err, attempts)
 			}
+		}
+		if opt.restartAfterWarm && len(res.firstFires) > 0 {
+			restarted, err := restartAppAfterWarm(cfg, d.Slug, out)
+			if err != nil {
+				res.failureKind = failureWarmRestartFailed
+				return fail(err, attempts)
+			}
+			res.warmRestarted = restarted
 		}
 		return done(status)
 	}
 
 	switch d.Action {
 	case fleet.ActionUnchanged:
-		if opt.waitForWarm {
-			if err := verifyExistingWarmGate(cfg, d.Slug, spec.Dir, &res); err != nil {
-				return fail(err, 0)
-			}
-		}
 		return finish(statusUnchanged, 0)
 
 	case fleet.ActionAdopt:
@@ -663,11 +675,6 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		}
 		res.attempts = attempts
 		res.mutation = mutationPartial
-		if opt.waitForWarm {
-			if err := verifyExistingWarmGate(cfg, d.Slug, spec.Dir, &res); err != nil {
-				return fail(err, attempts)
-			}
-		}
 		return finish(statusUpdated, attempts)
 
 	case fleet.ActionUpdateSourceConfig:

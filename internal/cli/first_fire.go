@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/fleet"
 )
 
 // firstFireRef identifies a run_on_register first-fire dispatched by the server
@@ -35,19 +37,33 @@ type firstFireOutcome struct {
 type scheduleGateOutcome struct {
 	Schedule      string `json:"schedule"`
 	State         string `json:"state"`
+	Origin        string `json:"origin,omitempty"`
 	LastRunID     int64  `json:"last_run_id,omitempty"`
 	LastRunStatus string `json:"last_run_status,omitempty"`
 	LastRunAt     string `json:"last_run_at,omitempty"`
+	LastSuccessAt string `json:"last_success_at,omitempty"`
+	Refreshing    bool   `json:"refreshing,omitempty"`
 }
 
 // scheduleFailureLog identifies the schedule-run log relevant to a warm-gate
 // failure. Tail is best-effort; the identity is retained even when fetching
 // the log fails so the report can still print the correct command.
 type scheduleFailureLog struct {
-	Schedule string   `json:"schedule"`
-	RunID    int64    `json:"run_id"`
-	Tail     []string `json:"tail,omitempty"`
+	Schedule   string   `json:"schedule"`
+	RunID      int64    `json:"run_id"`
+	Tail       []string `json:"tail,omitempty"`
+	FetchError string   `json:"fetch_error,omitempty"`
 }
+
+const (
+	failureWarmWaitTimeout      = "warm_wait_timeout"
+	failureWarmStateUnavailable = "warm_state_unavailable"
+	failureWarmFirstFireFailed  = "warm_first_fire_failed"
+	failureWarmNeverSucceeded   = "warm_never_succeeded"
+	failureWarmRestartFailed    = "warm_restart_failed"
+	failureScheduleStale        = "schedule_stale"
+	failureScheduleStateMissing = "schedule_state_unavailable"
+)
 
 // scheduleLogTailLines keeps enough of a typical Python/R traceback to include
 // the terminal cause while keeping fleet output compact.
@@ -84,11 +100,11 @@ func firstFireRefsFromDeployResponse(body []byte) []firstFireRef {
 // reach a terminal state within the timeout.
 var errFirstFireTimeout = errors.New("first-fire wait timed out")
 
-// firstFireStatusOK reports whether a terminal run status counts as "cache
-// warmed" for first-fire purposes. A succeeded run warmed it; a skipped_overlap
-// means another run is already warming the schedule (not a failure).
+// firstFireStatusOK reports whether a terminal run status proves the cache was
+// warmed. An overlap skip proves only that another process exists, never that
+// data was successfully delivered.
 func firstFireStatusOK(status string) bool {
-	return status == "succeeded" || status == "skipped_overlap"
+	return status == "succeeded"
 }
 
 // waitForFirstFireLoop polls the run's status until it leaves "running" or the
@@ -105,8 +121,11 @@ func waitForFirstFireLoop(poll func() (string, error), timeout, pollEvery, progr
 	lastProgress := start
 	lastStatus := "running"
 	for {
-		t := now()
 		status, err := poll()
+		// Measure the deadline after the request returns. A context-aware poll can
+		// consume the entire remaining budget; using its start time here would
+		// sleep that budget a second time before noticing the timeout.
+		t := now()
 		if err == nil {
 			lastStatus = status
 			if status != "running" {
@@ -130,15 +149,25 @@ func waitForFirstFireLoop(poll func() (string, error), timeout, pollEvery, progr
 				s.dim(fmt.Sprintf("(%s/%s)", t.Sub(start).Round(time.Second), timeout)))
 			lastProgress = t
 		}
-		sleep(pollEvery)
+		delay := pollEvery
+		if remaining := deadline.Sub(t); remaining < delay {
+			delay = remaining
+		}
+		if delay > 0 {
+			sleep(delay)
+		}
 	}
 }
 
 // pollScheduleRunStatus fetches GET /api/apps/{slug}/schedules/{id}/runs/{run}
 // and returns the run's status string.
 func pollScheduleRunStatus(cfg *cliConfig, slug string, scheduleID, runID int64) (string, error) {
+	return pollScheduleRunStatusContext(context.Background(), cfg, slug, scheduleID, runID)
+}
+
+func pollScheduleRunStatusContext(ctx context.Context, cfg *cliConfig, slug string, scheduleID, runID int64) (string, error) {
 	url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/runs/%d", cfg.Host, slug, scheduleID, runID)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -159,6 +188,24 @@ func pollScheduleRunStatus(cfg *cliConfig, slug string, scheduleID, runID int64)
 		return "", err
 	}
 	return run.Status, nil
+}
+
+func appendScheduleLog(cfg *cliConfig, slug string, scheduleID, runID int64, schedule string, res *applyResult) {
+	tail, err := fetchScheduleLogTail(cfg, slug, scheduleID, runID, scheduleLogTailLines)
+	entry := scheduleFailureLog{Schedule: schedule, RunID: runID, Tail: tail}
+	if err != nil {
+		entry.FetchError = err.Error()
+	}
+	res.scheduleLogs = append(res.scheduleLogs, entry)
+}
+
+func scheduleStatusHasFailureLog(status string) bool {
+	switch status {
+	case "failed", "timed_out", "cancelled", "interrupted":
+		return true
+	default:
+		return false
+	}
 }
 
 // fetchScheduleLogTail returns the last n non-empty lines of one schedule run.
@@ -188,49 +235,15 @@ type scheduleRunBrief struct {
 	StartedAt string `json:"started_at"`
 }
 
-func latestScheduleRun(cfg *cliConfig, slug string, scheduleID int64) (*scheduleRunBrief, error) {
-	url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/runs?limit=1", cfg.Host, slug, scheduleID)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, httpError(cfg.Token, "list schedule runs", resp, body)
-	}
-	var env struct {
-		Items []scheduleRunBrief `json:"items"`
-	}
-	if err := json.Unmarshal(body, &env); err == nil && env.Items != nil {
-		if len(env.Items) == 0 {
-			return nil, nil
-		}
-		return &env.Items[0], nil
-	}
-	var bare []scheduleRunBrief
-	if err := json.Unmarshal(body, &bare); err != nil {
-		return nil, fmt.Errorf("decode schedule runs: %w", err)
-	}
-	if len(bare) == 0 {
-		return nil, nil
-	}
-	return &bare[0], nil
-}
-
-// verifyExistingWarmGate evaluates run_on_register as a convergence level for
-// an app whose bundle was not registered during this apply. It performs no
-// remote work when the local manifest has no enabled run_on_register schedule,
-// and never triggers a schedule. A prior success closes the gate; otherwise the
-// app remains failed until an operator fixes the job and a run succeeds.
+// verifyExistingWarmGate evaluates run_on_register as a convergence level after
+// every non-delete action. It therefore catches both standing failures and a
+// current registration whose best-effort dispatch produced no first-fire ref.
+// It performs no remote work when the manifest has no enabled run_on_register
+// schedule and never triggers a run.
 func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyResult) error {
 	m, err := deploy.LoadManifest(bundleDir)
 	if err != nil {
+		res.failureKind = failureWarmStateUnavailable
 		return fmt.Errorf("verify warm gate: %w", err)
 	}
 	if m == nil {
@@ -248,6 +261,7 @@ func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyRe
 
 	remote, err := listSchedules(cfg, slug)
 	if err != nil {
+		res.failureKind = failureWarmStateUnavailable
 		return fmt.Errorf("verify run_on_register schedules: %w", err)
 	}
 	byName := make(map[string]scheduleDTO, len(remote))
@@ -256,10 +270,11 @@ func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyRe
 	}
 
 	var failures []string
+	origin := warmGateOrigin(res.action)
 	for _, name := range declared {
 		schedule, ok := byName[name]
 		if !ok {
-			res.warmGate = append(res.warmGate, scheduleGateOutcome{Schedule: name, State: "missing"})
+			res.warmGate = append(res.warmGate, scheduleGateOutcome{Schedule: name, State: "missing", Origin: origin})
 			failures = append(failures, fmt.Sprintf("schedule %q is missing", name))
 			continue
 		}
@@ -267,33 +282,50 @@ func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyRe
 			continue
 		}
 
-		outcome := scheduleGateOutcome{Schedule: name, State: "never_succeeded"}
+		outcome := scheduleGateOutcome{Schedule: name, State: "never_succeeded", Origin: origin}
 		if schedule.LastRunStatus != nil {
 			outcome.LastRunStatus = *schedule.LastRunStatus
 		}
 		if schedule.LastRunAt != nil {
 			outcome.LastRunAt = *schedule.LastRunAt
 		}
-		latest, lerr := latestScheduleRun(cfg, slug, schedule.ID)
-		if lerr != nil {
-			return fmt.Errorf("verify schedule %q run history: %w", name, lerr)
+		if schedule.LastSuccessAt != nil {
+			outcome.LastSuccessAt = *schedule.LastSuccessAt
 		}
-		// A server predating last_success_at may still expose run history. The
-		// newest succeeded run is sufficient to close the gate without treating
-		// an absent freshness field as a never-succeeded claim.
-		if latest != nil && latest.Status == "succeeded" {
-			continue
+
+		// stale is the capability marker for the atomic freshness fields. On a
+		// current server, consume the run identity from the same snapshot as the
+		// success decision. For older servers, scan run history until a success
+		// is found rather than mistaking "latest run failed" for "never ran
+		// successfully".
+		if schedule.Stale != nil {
+			if schedule.LastRunID != nil {
+				outcome.LastRunID = *schedule.LastRunID
+			}
+			if schedule.Refreshing != nil {
+				outcome.Refreshing = *schedule.Refreshing
+			}
+		} else {
+			succeeded, latest, lerr := legacyScheduleSuccessState(cfg, slug, schedule.ID)
+			if lerr != nil {
+				res.failureKind = failureWarmStateUnavailable
+				return fmt.Errorf("verify schedule %q run history: %w", name, lerr)
+			}
+			if succeeded {
+				continue
+			}
+			if latest != nil {
+				outcome.LastRunID = latest.ID
+				if outcome.LastRunStatus == "" {
+					outcome.LastRunStatus = latest.Status
+				}
+				if outcome.LastRunAt == "" {
+					outcome.LastRunAt = latest.StartedAt
+				}
+			}
 		}
-		if latest != nil {
-			outcome.LastRunID = latest.ID
-			if outcome.LastRunStatus == "" {
-				outcome.LastRunStatus = latest.Status
-			}
-			if outcome.LastRunAt == "" {
-				outcome.LastRunAt = latest.StartedAt
-			}
-			tail, _ := fetchScheduleLogTail(cfg, slug, schedule.ID, latest.ID, scheduleLogTailLines)
-			res.scheduleLogs = append(res.scheduleLogs, scheduleFailureLog{Schedule: name, RunID: latest.ID, Tail: tail})
+		if outcome.LastRunID > 0 && scheduleStatusHasFailureLog(outcome.LastRunStatus) {
+			appendScheduleLog(cfg, slug, schedule.ID, outcome.LastRunID, name, res)
 		}
 		res.warmGate = append(res.warmGate, outcome)
 		failures = append(failures, describeNeverSucceeded(outcome, time.Now()))
@@ -301,7 +333,89 @@ func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyRe
 	if len(failures) == 0 {
 		return nil
 	}
-	return fmt.Errorf("warm gate already unsatisfied before this apply: %s", strings.Join(failures, "; "))
+	res.failureKind = failureWarmNeverSucceeded
+	prefix := "warm gate already unsatisfied before this apply"
+	if origin == "current_apply" {
+		prefix = "warm gate unsatisfied after this apply"
+	}
+	return fmt.Errorf("%s: %s", prefix, strings.Join(failures, "; "))
+}
+
+func warmGateOrigin(action fleet.Action) string {
+	switch action {
+	case fleet.ActionCreate, fleet.ActionAdopt, fleet.ActionUpdateSource, fleet.ActionUpdateSourceConfig:
+		return "current_apply"
+	default:
+		return "pre_existing"
+	}
+}
+
+func verifyPostDeployWarmGate(cfg *cliConfig, slug, bundleDir string) (applyResult, error) {
+	res := applyResult{slug: slug, action: fleet.ActionUpdateSource}
+	err := verifyExistingWarmGate(cfg, slug, bundleDir, &res)
+	return res, err
+}
+
+// legacyScheduleSuccessState provides an honest fallback for servers predating
+// atomic last_success_at/stale fields. It scans bounded pages until it either
+// finds a success or exhausts history; inspecting only the newest run would
+// falsely report "never succeeded" after a later failure.
+func legacyScheduleSuccessState(cfg *cliConfig, slug string, scheduleID int64) (bool, *scheduleRunBrief, error) {
+	const pageSize = 100
+	var latest *scheduleRunBrief
+	for offset := 0; ; offset += pageSize {
+		url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/runs?limit=%d&offset=%d", cfg.Host, slug, scheduleID, pageSize, offset)
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return false, latest, err
+		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return false, latest, err
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return false, latest, readErr
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return false, latest, httpError(cfg.Token, "list schedule runs", resp, body)
+		}
+		var env struct {
+			Items []scheduleRunBrief `json:"items"`
+			Total int                `json:"total"`
+		}
+		if err := json.Unmarshal(body, &env); err == nil && env.Items != nil {
+			if latest == nil && len(env.Items) > 0 {
+				v := env.Items[0]
+				latest = &v
+			}
+			for _, run := range env.Items {
+				if run.Status == "succeeded" {
+					return true, latest, nil
+				}
+			}
+			if len(env.Items) < pageSize || (env.Total > 0 && offset+len(env.Items) >= env.Total) {
+				return false, latest, nil
+			}
+			continue
+		}
+		var bare []scheduleRunBrief
+		if err := json.Unmarshal(body, &bare); err != nil {
+			return false, latest, fmt.Errorf("decode schedule runs: %w", err)
+		}
+		if latest == nil && len(bare) > 0 {
+			v := bare[0]
+			latest = &v
+		}
+		for _, run := range bare {
+			if run.Status == "succeeded" {
+				return true, latest, nil
+			}
+		}
+		return false, latest, nil
+	}
 }
 
 func describeNeverSucceeded(outcome scheduleGateOutcome, now time.Time) string {
@@ -310,6 +424,9 @@ func describeNeverSucceeded(outcome scheduleGateOutcome, now time.Time) string {
 		return detail + " (no runs recorded)"
 	}
 	detail += fmt.Sprintf(" (last run %s", outcome.LastRunStatus)
+	if outcome.Refreshing {
+		detail += ", refreshing"
+	}
 	if outcome.LastRunID > 0 {
 		detail += fmt.Sprintf(", run #%d", outcome.LastRunID)
 	}
@@ -332,6 +449,7 @@ func describeNeverSucceeded(outcome scheduleGateOutcome, now time.Time) string {
 func verifyEnabledScheduleFreshness(cfg *cliConfig, slug string, res *applyResult) error {
 	schedules, err := listSchedules(cfg, slug)
 	if err != nil {
+		res.failureKind = failureScheduleStateMissing
 		return fmt.Errorf("verify schedule freshness: %w", err)
 	}
 	var failures []string
@@ -341,6 +459,7 @@ func verifyEnabledScheduleFreshness(cfg *cliConfig, slug string, res *applyResul
 		}
 		if schedule.Stale == nil {
 			res.freshnessGate = append(res.freshnessGate, scheduleGateOutcome{Schedule: schedule.Name, State: "unavailable"})
+			res.failureKind = failureScheduleStateMissing
 			return fmt.Errorf("verify schedule freshness: server did not report stale state for schedule %q; upgrade the server or omit --verify-schedules", schedule.Name)
 		}
 		if !*schedule.Stale {
@@ -348,26 +467,27 @@ func verifyEnabledScheduleFreshness(cfg *cliConfig, slug string, res *applyResul
 		}
 
 		outcome := scheduleGateOutcome{Schedule: schedule.Name, State: "stale"}
+		if schedule.Refreshing != nil && *schedule.Refreshing {
+			outcome.State = "stale_refreshing"
+			outcome.Refreshing = true
+		}
+		if schedule.LastRunID != nil {
+			outcome.LastRunID = *schedule.LastRunID
+		}
 		if schedule.LastRunStatus != nil {
 			outcome.LastRunStatus = *schedule.LastRunStatus
 		}
 		if schedule.LastRunAt != nil {
 			outcome.LastRunAt = *schedule.LastRunAt
 		}
-		latest, lerr := latestScheduleRun(cfg, slug, schedule.ID)
-		if lerr != nil {
-			return fmt.Errorf("verify schedule %q run history: %w", schedule.Name, lerr)
+		if schedule.LastSuccessAt != nil {
+			outcome.LastSuccessAt = *schedule.LastSuccessAt
 		}
-		if latest != nil {
-			outcome.LastRunID = latest.ID
-			if outcome.LastRunStatus == "" {
-				outcome.LastRunStatus = latest.Status
-			}
-			if outcome.LastRunAt == "" {
-				outcome.LastRunAt = latest.StartedAt
-			}
-			tail, _ := fetchScheduleLogTail(cfg, slug, schedule.ID, latest.ID, scheduleLogTailLines)
-			res.scheduleLogs = append(res.scheduleLogs, scheduleFailureLog{Schedule: schedule.Name, RunID: latest.ID, Tail: tail})
+		// A successful-but-old run or a currently running refresh does not have
+		// a failure traceback. Only attach logs when this exact atomic snapshot
+		// identifies a terminal unsuccessful run.
+		if outcome.LastRunID > 0 && scheduleStatusHasFailureLog(outcome.LastRunStatus) {
+			appendScheduleLog(cfg, slug, schedule.ID, outcome.LastRunID, schedule.Name, res)
 		}
 		res.freshnessGate = append(res.freshnessGate, outcome)
 		failures = append(failures, describeStaleSchedule(outcome, time.Now()))
@@ -375,11 +495,15 @@ func verifyEnabledScheduleFreshness(cfg *cliConfig, slug string, res *applyResul
 	if len(failures) == 0 {
 		return nil
 	}
+	res.failureKind = failureScheduleStale
 	return fmt.Errorf("schedule freshness gate unsatisfied: %s", strings.Join(failures, "; "))
 }
 
 func describeStaleSchedule(outcome scheduleGateOutcome, now time.Time) string {
 	detail := fmt.Sprintf("schedule %q is stale", outcome.Schedule)
+	if outcome.Refreshing {
+		detail += " and refreshing"
+	}
 	if outcome.LastRunStatus == "" {
 		return detail + " (no runs recorded)"
 	}

@@ -44,15 +44,19 @@ const (
 // skipped / self-healed states; err carries the failure/conflict cause.
 // firstFires holds the per-schedule run_on_register outcomes for this deploy.
 type applyResult struct {
-	slug       string
-	action     fleet.Action
-	status     applyStatus
-	mutation   applyMutationState
-	attempts   int
-	duration   time.Duration
-	err        error
-	note       string
-	firstFires []firstFireOutcome
+	slug     string
+	action   fleet.Action
+	status   applyStatus
+	mutation applyMutationState
+	attempts int
+	duration time.Duration
+	err      error
+	// failureKind is a stable machine classification for non-deploy convergence
+	// failures such as schedule gates. Deploy failures continue to use the
+	// deploy attempt's deployfail.Kind.
+	failureKind string
+	note        string
+	firstFires  []firstFireOutcome
 	// warmGate records level checks on apps whose bundle was not registered by
 	// this apply. These are not first-fires: they describe pre-existing state.
 	warmGate []scheduleGateOutcome
@@ -187,8 +191,8 @@ func slugColumnWidth(res []applyResult) int {
 func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 	for _, r := range res {
 		statusWord := s.status(string(r.status))
-		if r.status == statusFailed && r.deployFailed {
-			if k := finalFailureKind(r); k != "" {
+		if r.status == statusFailed {
+			if k := resultFailureKind(r); k != "" {
 				statusWord += " " + s.dim("["+string(k)+"]")
 			}
 		}
@@ -227,11 +231,15 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 			}
 		}
 		for _, gate := range r.warmGate {
+			when := "before this apply"
+			if gate.Origin == "current_apply" {
+				when = "after this apply"
+			}
 			switch gate.State {
 			case "missing":
-				fmt.Fprintf(out, "     %s: warm gate unsatisfied before this apply (schedule missing)\n", gate.Schedule)
+				fmt.Fprintf(out, "     %s: warm gate unsatisfied %s (schedule missing)\n", gate.Schedule, when)
 			default:
-				fmt.Fprintf(out, "     %s: warm gate unsatisfied before this apply (never succeeded", gate.Schedule)
+				fmt.Fprintf(out, "     %s: warm gate unsatisfied %s (never succeeded", gate.Schedule, when)
 				if gate.LastRunStatus != "" {
 					fmt.Fprintf(out, "; last run %s", gate.LastRunStatus)
 				}
@@ -247,6 +255,9 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 				continue
 			}
 			fmt.Fprintf(out, "     %s: schedule freshness gate unsatisfied (stale", gate.Schedule)
+			if gate.Refreshing {
+				fmt.Fprint(out, "; refreshing")
+			}
 			if gate.LastRunStatus != "" {
 				fmt.Fprintf(out, "; last run %s", gate.LastRunStatus)
 			}
@@ -387,6 +398,9 @@ func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o apply
 						fmt.Fprintf(out, "      %s\n", s.dim(l))
 					}
 				}
+				if scheduleLog.FetchError != "" {
+					fmt.Fprintf(out, "    %s\n", s.dim("schedule log tail unavailable: "+scheduleLog.FetchError))
+				}
 				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub schedule logs %s %s --run %d", r.slug, scheduleLog.Schedule, scheduleLog.RunID)))
 			}
 			if len(r.logTail) > 0 {
@@ -453,6 +467,16 @@ func finalFailureKind(r applyResult) deployfail.Kind {
 	return deployfail.Unknown
 }
 
+func resultFailureKind(r applyResult) string {
+	if r.failureKind != "" {
+		return r.failureKind
+	}
+	if r.deployFailed {
+		return string(finalFailureKind(r))
+	}
+	return ""
+}
+
 type applyJSONApp struct {
 	Slug                 string                `json:"slug"`
 	AppURL               string                `json:"app_url"`
@@ -514,8 +538,8 @@ func resultToJSON(r applyResult) *jsonResult {
 			Attempt: a.Attempt, FailureKind: string(a.Kind), Error: a.Err,
 		})
 	}
-	if r.status == statusFailed && r.deployFailed {
-		jr.FailureKind = string(finalFailureKind(r))
+	if r.status == statusFailed {
+		jr.FailureKind = resultFailureKind(r)
 	}
 	return jr
 }

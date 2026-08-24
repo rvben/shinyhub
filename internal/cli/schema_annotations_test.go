@@ -34,13 +34,28 @@ func TestFleetApplyAnnotation_DocumentsFailureKind(t *testing.T) {
 	for _, f := range ann.OutputFields {
 		switch f.Name {
 		case "failure_kind":
-			hasKind = true
+			hasKind = strings.Contains(f.Desc, failureWarmNeverSucceeded) && strings.Contains(f.Desc, failureScheduleStale)
 		case "attempt_details":
 			hasDetails = true
 		}
 	}
 	if !hasKind || !hasDetails {
-		t.Fatalf("fleet apply OutputFields must document failure_kind and attempt_details, got %+v", ann.OutputFields)
+		t.Fatalf("fleet apply OutputFields must document deploy and schedule gate failure kinds plus attempt_details, got %+v", ann.OutputFields)
+	}
+}
+
+func TestScheduleAnnotations_DocumentAtomicFreshnessState(t *testing.T) {
+	for _, command := range []string{"schedule ls", "schedule status"} {
+		ann := schemaAnnotations[command]
+		fields := map[string]bool{}
+		for _, f := range ann.OutputFields {
+			fields[f.Name] = true
+		}
+		for _, name := range []string{"last_run_id", "stale", "refreshing"} {
+			if !fields[name] {
+				t.Errorf("%s must document %s, got %+v", command, name, ann.OutputFields)
+			}
+		}
 	}
 }
 

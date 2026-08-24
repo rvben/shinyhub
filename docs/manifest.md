@@ -412,17 +412,20 @@ schedule's `overlap` policy (default `skip`) records as `skipped_overlap` rather
 than running the job twice.
 
 By default the fire is fire-and-forget: the deploy returns immediately and the
-run warms the cache in the background. Pass `--wait-for-warm` to `shinyhub deploy`
-or `shinyhub fleet apply` to block until the run completes (within the deploy's
-wait/health timeout); a genuine warm failure then exits non-zero, while a
-`skipped_overlap` (another run is already warming the same schedule) is treated
-as "in progress", not a failure. For `fleet apply`, the gate also checks an
-unchanged bundle: an enabled `run_on_register` schedule with no successful run
-on record remains unconverged without being re-fired. Waiting does not reload a
-replica that already read the old cache at startup. For that application pattern, pass
-`--restart-after-warm` instead; it implies the wait and cycles serving replicas
-only after every first-fire succeeds. An app that was deliberately stopped
-remains stopped and sees the warmed data on its next start. The imperative
+run warms the cache in the background. Pass `--wait-for-warm` to require a
+recorded success. `shinyhub deploy` uses `--wait-timeout`; `shinyhub fleet
+apply` uses one `--warm-timeout` deadline per app (default 15 minutes) across
+all first-fires. A failure, timeout, missing dispatch reference, or unreadable
+final schedule state exits non-zero. A `skipped_overlap` proves only that
+another run existed and passes only when the final state already records a
+success. For `fleet apply`, the level gate runs after every non-delete action,
+including an unchanged bundle: an enabled `run_on_register` schedule with no
+successful run remains unconverged without being re-fired. Waiting does not
+reload a replica that already read the old cache at startup. For that
+application pattern, pass `--restart-after-warm` instead; it implies the wait
+and cycles serving replicas only after the final success check passes. An app
+that was deliberately stopped remains stopped and sees the warmed data on its
+next start. The imperative
 `shinyhub schedule add --run-on-register` fires the same way and reports the
 triggered run id (add `--follow` to stream it).
 
@@ -602,9 +605,12 @@ when serving replicas were cycled after those runs succeeded.
 For a broader data-freshness policy, `fleet apply --verify-schedules` checks the
 server-computed `stale` state of every enabled schedule, including schedules
 without `run_on_register` and schedules whose last success has aged out. The
-check never dispatches a run. Human output labels these as schedule-freshness
-failures; JSON reports them in `schedule_verification` and includes relevant
-run tails under `result.schedule_logs` when available.
+check never dispatches a run. `stale` describes proven data age independently
+from `refreshing`, which reports a live run; a schedule can be both. Human
+output labels these as schedule-freshness failures; JSON reports them in
+`schedule_verification`, gives failures stable `failure_kind` values, and
+includes the exact atomic `last_run_id` plus relevant run tails under
+`result.schedule_logs` when available.
 
 ## Worked example
 

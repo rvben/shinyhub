@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -51,15 +52,15 @@ func TestWaitForFirstFireLoop_Succeeded(t *testing.T) {
 	}
 }
 
-func TestWaitForFirstFireLoop_SkippedOverlapIsNotFailure(t *testing.T) {
+func TestWaitForFirstFireLoop_SkippedOverlapDoesNotProveSuccess(t *testing.T) {
 	poll := func() (string, error) { return "skipped_overlap", nil }
 	now := func() time.Time { return time.Unix(0, 0) }
 	status, err := waitForFirstFireLoop(poll, 10*time.Second, time.Millisecond, time.Hour, now, func(time.Duration) {}, io.Discard, "warm")
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if !firstFireStatusOK(status) {
-		t.Errorf("firstFireStatusOK(%q) = false, want true", status)
+	if firstFireStatusOK(status) {
+		t.Errorf("firstFireStatusOK(%q) = true, want false", status)
 	}
 }
 
@@ -130,13 +131,28 @@ func TestWaitForFirstFireLoop_Timeout(t *testing.T) {
 	}
 }
 
-func TestFirstFireStatusOK(t *testing.T) {
-	for _, s := range []string{"succeeded", "skipped_overlap"} {
-		if !firstFireStatusOK(s) {
-			t.Errorf("firstFireStatusOK(%q) = false, want true", s)
-		}
+func TestWaitForFirstFireLoop_PollThatConsumesDeadlineDoesNotSleepAgain(t *testing.T) {
+	cur := time.Unix(0, 0)
+	poll := func() (string, error) {
+		cur = cur.Add(5 * time.Second)
+		return "running", context.DeadlineExceeded
 	}
-	for _, s := range []string{"failed", "interrupted", "cancelled", "timed_out"} {
+	var slept time.Duration
+	_, err := waitForFirstFireLoop(poll, 5*time.Second, time.Second, time.Hour,
+		func() time.Time { return cur }, func(d time.Duration) { slept += d }, io.Discard, "warm")
+	if !errors.Is(err, errFirstFireTimeout) {
+		t.Fatalf("err = %v, want errFirstFireTimeout", err)
+	}
+	if slept != 0 {
+		t.Fatalf("slept %s after poll exhausted deadline, want 0", slept)
+	}
+}
+
+func TestFirstFireStatusOK(t *testing.T) {
+	if !firstFireStatusOK("succeeded") {
+		t.Error("firstFireStatusOK(succeeded) = false, want true")
+	}
+	for _, s := range []string{"skipped_overlap", "failed", "interrupted", "cancelled", "timed_out"} {
 		if firstFireStatusOK(s) {
 			t.Errorf("firstFireStatusOK(%q) = true, want false", s)
 		}

@@ -385,7 +385,7 @@ func TestWriteFleetApplyJSON_RetriedSuccessHasDetailsButNoTopLevelKind(t *testin
 // A failure AFTER the deploy succeeded (config patch, or a first-fire after a
 // retried-then-succeeded deploy) must NOT inherit a deploy attempt's kind at the
 // top level, even though attempt_details may still record the earlier flake.
-func TestWriteFleetApplyJSON_PostDeployFailureOmitsFailureKind(t *testing.T) {
+func TestWriteFleetApplyJSON_UnclassifiedPostDeployFailureOmitsFailureKind(t *testing.T) {
 	d := fleet.AppDiff{Slug: "pp", Action: fleet.ActionUpdateSourceConfig}
 	r := applyResult{
 		slug: "pp", action: fleet.ActionUpdateSourceConfig, status: statusFailed, attempts: 2,
@@ -411,6 +411,25 @@ func TestWriteFleetApplyJSON_PostDeployFailureOmitsFailureKind(t *testing.T) {
 	}
 	if len(got.AttemptDetails) != 1 || got.AttemptDetails[0].FailureKind != "readiness_timeout" {
 		t.Fatalf("attempt_details should still record the deploy flake, got %+v", got.AttemptDetails)
+	}
+}
+
+func TestWriteFleetApplyJSON_ScheduleGateFailureHasStableKind(t *testing.T) {
+	d := fleet.AppDiff{Slug: "projects", Action: fleet.ActionUnchanged}
+	r := applyResult{
+		slug: "projects", action: fleet.ActionUnchanged, status: statusFailed,
+		err: errors.New("schedule freshness gate unsatisfied"), failureKind: failureScheduleStale,
+	}
+	var buf bytes.Buffer
+	if err := writeFleetApplyJSON(&buf, &fleet.Manifest{FleetID: "eu"}, "http://h", []fleet.AppDiff{d}, nil, applyOutcome{apps: []applyResult{r}}, 4, "PARTIAL"); err != nil {
+		t.Fatalf("writeFleetApplyJSON: %v", err)
+	}
+	var env applyJSONEnvelope
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	if got := env.Apps[0].Result.FailureKind; got != failureScheduleStale {
+		t.Fatalf("failure_kind = %q, want %q", got, failureScheduleStale)
 	}
 }
 
@@ -493,7 +512,7 @@ func TestWriteFleetApplyJSON_DistinguishesStandingWarmFailure(t *testing.T) {
 func TestRenderApplyReport_StaleScheduleIsDistinct(t *testing.T) {
 	res := []applyResult{{
 		slug: "projects", action: fleet.ActionUnchanged, status: statusFailed,
-		err: errors.New("schedule freshness gate unsatisfied"),
+		err: errors.New("schedule freshness gate unsatisfied"), failureKind: failureScheduleStale,
 		freshnessGate: []scheduleGateOutcome{{
 			Schedule: "refresh-pend-data", State: "stale", LastRunID: 804, LastRunStatus: "failed",
 		}},
@@ -503,6 +522,7 @@ func TestRenderApplyReport_StaleScheduleIsDistinct(t *testing.T) {
 	_ = renderApplyReport(&buf, "eu", applyOutcome{apps: res}, false)
 	out := buf.String()
 	for _, want := range []string{
+		"failed [schedule_stale]",
 		"schedule freshness gate unsatisfied (stale; last run failed #804)",
 		"shinyhub schedule logs projects refresh-pend-data --run 804",
 	} {

@@ -125,8 +125,8 @@ shinyhub schedule status fetch        # one app
 ```
 
 ```
-APP    SCHEDULE      LAST RUN   LAST SUCCESS          AGE  STALE
-fetch  daily-fetch   succeeded  2026-08-18T06:00:12Z  30h  yes
+APP    SCHEDULE      LAST RUN   LAST SUCCESS          AGE  STALE  REFRESHING
+fetch  daily-fetch   running    2026-08-18T06:00:12Z  30h  yes    yes
 ```
 
 **Per app** (anyone with access to that app):
@@ -136,8 +136,10 @@ shinyhub schedule ls fetch
 ```
 
 `schedule ls` carries the same freshness fields per schedule -
-`last_run_at`, `last_run_status`, `last_success_at`, `last_success_age_s`
-and `stale`.
+`last_run_id`, `last_run_at`, `last_run_status`, `last_success_at`,
+`last_success_age_s`, `stale`, and `refreshing`. The latest run's id, status,
+and timestamp come from one database snapshot, so a diagnostic can fetch the
+log for exactly the run whose state it reports.
 
 `stale` is cron-aware rather than a fixed threshold. It takes the last
 **success** as the anchor (the schedule's creation time if it has never
@@ -146,13 +148,13 @@ that anchor in its effective timezone, and reports stale once that time is more
 than 10 minutes in the past. So a schedule that runs and fails every night is
 stale: a failure does not advance the data.
 
-Two deliberate exceptions:
+Two deliberate properties:
 
 - A **disabled** schedule is never stale. It is not supposed to be firing.
-- A run still **in progress** is not stale until it exceeds the schedule's
-  `timeout`. Past that it is treated as a zombie and staleness applies again.
-  The timeout is not otherwise added to the grace period, so a daily schedule
-  with a 24h timeout still flags at ~24h, not 48h.
+- `stale` describes the age of proven data, while `refreshing` describes a live
+  run that is still within its timeout. They are independent: overdue data can
+  be `stale: true, refreshing: true` until the active run succeeds. A run past
+  its timeout is no longer refreshing.
 
 `last_success_at` / `last_success_age_s` are absent when a schedule has never
 succeeded (`schedule status` reports them as `null`; `schedule ls` omits the
@@ -213,13 +215,16 @@ Semantics:
   cache in the background (a `register`-triggered run, visible in the run
   history).
 - **Opt-in wait.** Pass `--wait-for-warm` to `shinyhub deploy` or
-  `shinyhub fleet apply` to block until the run finishes (within the deploy's
-  wait timeout). A genuine warm failure then exits non-zero; a `skipped_overlap`
-  (another run is already warming the schedule) is reported as "in progress",
-  not a failure. On `fleet apply`, this is a convergence level: an unchanged
-  app whose enabled `run_on_register` schedule has never succeeded also exits
-  non-zero. This verification reads schedule state but does not re-fire the
-  schedule; a prior success keeps the unchanged path free of schedule work.
+  `shinyhub fleet apply` to require proven success. Standalone deploy uses
+  `--wait-timeout`; fleet apply uses one `--warm-timeout` deadline per app
+  (default 15 minutes) across all first-fires. A failure, timeout, missing
+  dispatch reference, or unreadable final state exits non-zero. A
+  `skipped_overlap` proves only that another run existed, so it passes only if
+  the final schedule state already records a success. On `fleet apply`, this is
+  a convergence level checked after every non-delete action: an unchanged app
+  whose enabled `run_on_register` schedule has never succeeded also exits
+  non-zero. The check is read-only and never re-fires an unchanged schedule; a
+  prior success keeps the common path free of extra run-history or log work.
 - **Startup-loaded caches.** Waiting alone does not reload a process that read
   the empty cache before the schedule ran. Pass `--restart-after-warm` to wait
   for every first-fire to succeed and then cycle serving replicas. The flag
@@ -231,7 +236,18 @@ including schedules without `run_on_register`, against the server-computed
 `stale` boolean (one cron interval plus the server's grace policy). It is a
 read-only gate: stale schedules fail convergence, but the apply does not trigger
 them. Combine it with `--wait-for-warm` when both first-deploy warm-up and
-ongoing schedule freshness are required.
+ongoing schedule freshness are required. If a stale schedule is actively
+running, the report says `stale · refreshing`; activity does not substitute for
+a successful data refresh.
+
+Failed fleet gates have stable JSON `failure_kind` values such as
+`warm_wait_timeout`, `warm_never_succeeded`, and `schedule_stale`. When the
+latest atomic state identifies a failed run, `fleet apply` includes the last 25
+non-empty schedule-log lines and prints the exact follow-up command:
+
+```bash
+shinyhub schedule logs <app> <schedule> --run <run-id>
+```
 
 ## Sharing data between apps
 

@@ -19,6 +19,11 @@ import (
 // unset or non-positive, so the flag can extend the wait but never disable it.
 const fleetHealthTimeout = 120 * time.Second
 
+// fleetWarmTimeout is deliberately separate from readiness: data refreshes
+// commonly take much longer than starting the serving process. The deadline is
+// shared by every first-fire for one app rather than renewed per schedule.
+const fleetWarmTimeout = 15 * time.Minute
+
 // fleetHealthProgressInterval is how often the health wait emits a progress
 // line so a long first-run sync looks like progress, not a hang.
 const fleetHealthProgressInterval = 15 * time.Second
@@ -31,6 +36,13 @@ func healthTimeoutDuration(seconds int) time.Duration {
 		return fleetHealthTimeout
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func warmTimeoutDuration(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return fleetWarmTimeout
+	}
+	return timeout
 }
 
 // deployAppBundle deploys one app's local directory through the existing
