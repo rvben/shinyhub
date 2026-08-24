@@ -1209,20 +1209,19 @@ func TestConvergeApp_RetriedSuccessRecordsFailedAttemptKind(t *testing.T) {
 }
 
 func TestDeployWithRetry_CommittedAttemptDoesNotUploadAgain(t *testing.T) {
-	var deployHits int
-	deployed := false
-	healthHits := 0
+	var deployHits atomic.Int32
+	var deployed atomic.Bool
+	var healthHits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo" && !deployed:
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo" && !deployed.Load():
 			_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/deploy":
-			deployHits++
-			deployed = true
+			deployHits.Add(1)
+			deployed.Store(true)
 			_, _ = io.WriteString(w, `{"status":"ok"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo":
-			healthHits++
-			if healthHits == 1 {
+			if healthHits.Add(1) == 1 {
 				time.Sleep(20 * time.Millisecond)
 				_, _ = io.WriteString(w, `{"app":{"status":"starting"}}`)
 				return
@@ -1245,8 +1244,8 @@ func TestDeployWithRetry_CommittedAttemptDoesNotUploadAgain(t *testing.T) {
 	if err != nil || promoted != "sha256:new" || !committed || attempts != 2 || len(failed) != 1 {
 		t.Fatalf("result promoted=%q attempts=%d committed=%v failed=%+v err=%v", promoted, attempts, committed, failed, err)
 	}
-	if deployHits != 1 {
-		t.Fatalf("deploy uploads = %d, want 1; committed retry must only re-check convergence", deployHits)
+	if deployHits.Load() != 1 {
+		t.Fatalf("deploy uploads = %d, want 1; committed retry must only re-check convergence", deployHits.Load())
 	}
 }
 
