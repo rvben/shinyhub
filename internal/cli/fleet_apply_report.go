@@ -53,6 +53,16 @@ type applyResult struct {
 	err        error
 	note       string
 	firstFires []firstFireOutcome
+	// warmGate records level checks on apps whose bundle was not registered by
+	// this apply. These are not first-fires: they describe pre-existing state.
+	warmGate []scheduleGateOutcome
+	// freshnessGate records failures of the opt-in all-enabled-schedules stale
+	// check. Like warmGate, it describes state and never dispatches work.
+	freshnessGate []scheduleGateOutcome
+	// scheduleLogs identifies the schedule-run logs relevant to warm failures.
+	// The identity remains even when fetching the tail fails, so the report can
+	// still print the exact diagnostic command.
+	scheduleLogs []scheduleFailureLog
 	// warmRestarted records the opt-in post-first-fire replica cycle.
 	warmRestarted bool
 	// logTail holds the failing app's last process-log lines, populated only
@@ -216,6 +226,35 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 				fmt.Fprintf(out, "     %s: first-fire %s\n", ff.Schedule, ff.Status)
 			}
 		}
+		for _, gate := range r.warmGate {
+			switch gate.State {
+			case "missing":
+				fmt.Fprintf(out, "     %s: warm gate unsatisfied before this apply (schedule missing)\n", gate.Schedule)
+			default:
+				fmt.Fprintf(out, "     %s: warm gate unsatisfied before this apply (never succeeded", gate.Schedule)
+				if gate.LastRunStatus != "" {
+					fmt.Fprintf(out, "; last run %s", gate.LastRunStatus)
+				}
+				if gate.LastRunID > 0 {
+					fmt.Fprintf(out, " #%d", gate.LastRunID)
+				}
+				fmt.Fprintln(out, ")")
+			}
+		}
+		for _, gate := range r.freshnessGate {
+			if gate.State == "unavailable" {
+				fmt.Fprintf(out, "     %s: schedule freshness unavailable from server\n", gate.Schedule)
+				continue
+			}
+			fmt.Fprintf(out, "     %s: schedule freshness gate unsatisfied (stale", gate.Schedule)
+			if gate.LastRunStatus != "" {
+				fmt.Fprintf(out, "; last run %s", gate.LastRunStatus)
+			}
+			if gate.LastRunID > 0 {
+				fmt.Fprintf(out, " #%d", gate.LastRunID)
+			}
+			fmt.Fprintln(out, ")")
+		}
 		if r.warmRestarted {
 			fmt.Fprintln(out, "     replicas restarted after first-fire warm-up")
 		}
@@ -341,13 +380,24 @@ func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o apply
 		switch r.status {
 		case statusFailed:
 			fmt.Fprintf(out, "  %s: %v\n", s.red(r.slug), r.err)
+			for _, scheduleLog := range r.scheduleLogs {
+				if len(scheduleLog.Tail) > 0 {
+					fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("last %d lines of %s schedule run #%d:", len(scheduleLog.Tail), scheduleLog.Schedule, scheduleLog.RunID)))
+					for _, l := range scheduleLog.Tail {
+						fmt.Fprintf(out, "      %s\n", s.dim(l))
+					}
+				}
+				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub schedule logs %s %s --run %d", r.slug, scheduleLog.Schedule, scheduleLog.RunID)))
+			}
 			if len(r.logTail) > 0 {
 				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("last %d lines of app log:", len(r.logTail))))
 				for _, l := range r.logTail {
 					fmt.Fprintf(out, "      %s\n", s.dim(l))
 				}
 			}
-			fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub apps logs %s --tail 200", r.slug)))
+			if len(r.scheduleLogs) == 0 && len(r.warmGate) == 0 && len(r.freshnessGate) == 0 {
+				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub apps logs %s --tail 200", r.slug)))
+			}
 		case statusConflict:
 			fmt.Fprintf(out, "  %s: %v\n    %s\n", s.red(r.slug), r.err,
 				s.dim("-> shinyhub fleet plan   (re-review before re-applying)"))
@@ -382,14 +432,15 @@ type jsonAttempt struct {
 }
 
 type jsonResult struct {
-	Status         string        `json:"status"`
-	MutationState  string        `json:"mutation_state"`
-	Attempts       int           `json:"attempts"`
-	FailureKind    string        `json:"failure_kind,omitempty"`
-	AttemptDetails []jsonAttempt `json:"attempt_details,omitempty"`
-	DurationMS     int64         `json:"duration_ms"`
-	Error          string        `json:"error,omitempty"`
-	LogTail        []string      `json:"log_tail,omitempty"`
+	Status         string               `json:"status"`
+	MutationState  string               `json:"mutation_state"`
+	Attempts       int                  `json:"attempts"`
+	FailureKind    string               `json:"failure_kind,omitempty"`
+	AttemptDetails []jsonAttempt        `json:"attempt_details,omitempty"`
+	DurationMS     int64                `json:"duration_ms"`
+	Error          string               `json:"error,omitempty"`
+	LogTail        []string             `json:"log_tail,omitempty"`
+	ScheduleLogs   []scheduleFailureLog `json:"schedule_logs,omitempty"`
 }
 
 // finalFailureKind returns the kind to report at the top level for a failed
@@ -403,19 +454,21 @@ func finalFailureKind(r applyResult) deployfail.Kind {
 }
 
 type applyJSONApp struct {
-	Slug          string              `json:"slug"`
-	AppURL        string              `json:"app_url"`
-	Action        string              `json:"action"`
-	Owned         bool                `json:"owned"`
-	Digest        jsonDigest          `json:"digest"`
-	ConfigDrift   []jsonDriftItem     `json:"config_drift"`
-	Unmanaged     []jsonUnmanagedItem `json:"unmanaged"`
-	AdoptRequired bool                `json:"adopt_required"`
-	AdoptFrom     string              `json:"adopt_from,omitempty"`
-	PruneEligible bool                `json:"prune_eligible"`
-	Result        *jsonResult         `json:"result,omitempty"`
-	FirstFires    []firstFireOutcome  `json:"first_fires,omitempty"`
-	WarmRestarted bool                `json:"warm_restarted,omitempty"`
+	Slug                 string                `json:"slug"`
+	AppURL               string                `json:"app_url"`
+	Action               string                `json:"action"`
+	Owned                bool                  `json:"owned"`
+	Digest               jsonDigest            `json:"digest"`
+	ConfigDrift          []jsonDriftItem       `json:"config_drift"`
+	Unmanaged            []jsonUnmanagedItem   `json:"unmanaged"`
+	AdoptRequired        bool                  `json:"adopt_required"`
+	AdoptFrom            string                `json:"adopt_from,omitempty"`
+	PruneEligible        bool                  `json:"prune_eligible"`
+	Result               *jsonResult           `json:"result,omitempty"`
+	FirstFires           []firstFireOutcome    `json:"first_fires,omitempty"`
+	WarmGate             []scheduleGateOutcome `json:"warm_gate,omitempty"`
+	ScheduleVerification []scheduleGateOutcome `json:"schedule_verification,omitempty"`
+	WarmRestarted        bool                  `json:"warm_restarted,omitempty"`
 }
 
 // applyJSONProject is a project row in the apply JSON envelope: display
@@ -451,6 +504,7 @@ func resultToJSON(r applyResult) *jsonResult {
 		Attempts:      r.attempts,
 		DurationMS:    r.duration.Milliseconds(),
 		LogTail:       r.logTail,
+		ScheduleLogs:  r.scheduleLogs,
 	}
 	if r.err != nil {
 		jr.Error = r.err.Error()
@@ -498,6 +552,8 @@ func writeFleetApplyJSONWithContext(out io.Writer, ctx applyReportContext, m *fl
 		if r, ok := bySlug[d.Slug]; ok {
 			aj.Result = resultToJSON(r)
 			aj.FirstFires = r.firstFires
+			aj.WarmGate = r.warmGate
+			aj.ScheduleVerification = r.freshnessGate
 			aj.WarmRestarted = r.warmRestarted
 		}
 		apps = append(apps, aj)

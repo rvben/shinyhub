@@ -132,6 +132,17 @@ func TestFleetApplyCmd_HasWaitForWarmFlag(t *testing.T) {
 	}
 }
 
+func TestFleetApplyCmd_HasVerifySchedulesFlag(t *testing.T) {
+	cmd := newFleetApplyCmd()
+	f := cmd.Flags().Lookup("verify-schedules")
+	if f == nil {
+		t.Fatal("fleet apply must expose a --verify-schedules flag")
+	}
+	if f.DefValue != "false" {
+		t.Fatalf("--verify-schedules default = %q, want false", f.DefValue)
+	}
+}
+
 func TestFleetApplyCmd_HasConcurrencyFlag(t *testing.T) {
 	cmd := newFleetApplyCmd()
 	f := cmd.Flags().Lookup("concurrency")

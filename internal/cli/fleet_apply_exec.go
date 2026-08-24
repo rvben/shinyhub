@@ -29,6 +29,7 @@ type convergeOpts struct {
 	retries            int  // attempts AFTER the first for deploys/transient config PATCHes
 	healthTimeout      time.Duration
 	waitForWarm        bool
+	verifySchedules    bool
 	restartAfterWarm   bool
 	concurrency        int // max apps converged in parallel; <=1 means serial
 	fleetID            string
@@ -173,8 +174,8 @@ func retryableDeployFailure(kind deployfail.Kind) bool {
 // When waiting, a non-nil error is returned only for genuine run failures:
 // skipped_overlap is treated as success by firstFireStatusOK, and a timeout
 // (werr != nil) is non-fatal under wait-only because the run is still warming
-// and the next apply self-heals. Restart-after-warm is stricter: every run must
-// have succeeded before replicas are cycled.
+// and a later successful completion still closes the level gate. Restart-after-
+// warm is stricter: every run must have succeeded before replicas are cycled.
 func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt convergeOpts, res *applyResult, out io.Writer) error {
 	allSucceeded := len(refs) > 0
 	for _, ref := range refs {
@@ -189,6 +190,10 @@ func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt con
 			oc.Status = status
 			res.firstFires = append(res.firstFires, oc)
 			if werr == nil && !firstFireStatusOK(status) {
+				tail, _ := fetchScheduleLogTail(cfg, slug, ref.ScheduleID, ref.RunID, scheduleLogTailLines)
+				res.scheduleLogs = append(res.scheduleLogs, scheduleFailureLog{
+					Schedule: ref.Schedule, RunID: ref.RunID, Tail: tail,
+				})
 				return fmt.Errorf("schedule %q first-fire %s", ref.Schedule, status)
 			}
 			if werr != nil || status != "succeeded" {
@@ -458,10 +463,23 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		}
 		return res
 	}
+	finish := func(status applyStatus, attempts int) applyResult {
+		if opt.verifySchedules {
+			if err := verifyEnabledScheduleFreshness(cfg, d.Slug, &res); err != nil {
+				return fail(err, attempts)
+			}
+		}
+		return done(status)
+	}
 
 	switch d.Action {
 	case fleet.ActionUnchanged:
-		return done(statusUnchanged)
+		if opt.waitForWarm {
+			if err := verifyExistingWarmGate(cfg, d.Slug, spec.Dir, &res); err != nil {
+				return fail(err, 0)
+			}
+		}
+		return finish(statusUnchanged, 0)
 
 	case fleet.ActionAdopt:
 		if !opt.adopt {
@@ -541,7 +559,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 				return fail(err, attempts)
 			}
 		}
-		return done(statusAdopted)
+		return finish(statusAdopted, attempts)
 
 	case fleet.ActionDelete:
 		if !opt.prune {
@@ -609,7 +627,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 				return fail(fmt.Errorf("created but declared config was not fully applied: %w", err), attempts)
 			}
 		}
-		return done(statusCreated)
+		return finish(statusCreated, attempts)
 
 	case fleet.ActionUpdateSource:
 		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt, out)
@@ -634,7 +652,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		if err := reassertFleetConfig(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
 			return fail(fmt.Errorf("source updated but declared config was not reasserted: %w", err), attempts)
 		}
-		return done(statusUpdated)
+		return finish(statusUpdated, attempts)
 
 	case fleet.ActionUpdateConfig:
 		res.mutation = mutationUnknown
@@ -644,7 +662,13 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return fail(err, attempts)
 		}
 		res.attempts = attempts
-		return done(statusUpdated)
+		res.mutation = mutationPartial
+		if opt.waitForWarm {
+			if err := verifyExistingWarmGate(cfg, d.Slug, spec.Dir, &res); err != nil {
+				return fail(err, attempts)
+			}
+		}
+		return finish(statusUpdated, attempts)
 
 	case fleet.ActionUpdateSourceConfig:
 		// Mandatory ordering: deploy first, then patch fleet config
@@ -683,9 +707,9 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 				_ = recordAppFleetState(cfg, d.Slug, fleetConvergenceIncomplete, d.LocalDigest, declaredState, err.Error(), opt.runID)
 				stateAlreadyRecorded = true
 			}
-			return done(statusUpdated)
+			return finish(statusUpdated, attempts)
 		}
-		return done(statusUpdated)
+		return finish(statusUpdated, attempts)
 	}
 
 	res.note = "unknown action " + string(d.Action)

@@ -216,11 +216,22 @@ Semantics:
   `shinyhub fleet apply` to block until the run finishes (within the deploy's
   wait timeout). A genuine warm failure then exits non-zero; a `skipped_overlap`
   (another run is already warming the schedule) is reported as "in progress",
-  not a failure.
+  not a failure. On `fleet apply`, this is a convergence level: an unchanged
+  app whose enabled `run_on_register` schedule has never succeeded also exits
+  non-zero. This verification reads schedule state but does not re-fire the
+  schedule; a prior success keeps the unchanged path free of schedule work.
 - **Startup-loaded caches.** Waiting alone does not reload a process that read
   the empty cache before the schedule ran. Pass `--restart-after-warm` to wait
   for every first-fire to succeed and then cycle serving replicas. The flag
   does not start an app that was deliberately stopped.
+
+For fleet-wide freshness beyond first-fire warm-up, pass
+`shinyhub fleet apply --verify-schedules`. This checks every enabled schedule,
+including schedules without `run_on_register`, against the server-computed
+`stale` boolean (one cron interval plus the server's grace policy). It is a
+read-only gate: stale schedules fail convergence, but the apply does not trigger
+them. Combine it with `--wait-for-warm` when both first-deploy warm-up and
+ongoing schedule freshness are required.
 
 ## Sharing data between apps
 

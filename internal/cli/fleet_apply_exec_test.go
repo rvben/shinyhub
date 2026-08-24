@@ -39,6 +39,178 @@ func TestConvergeApp_UnchangedIsNoNetwork(t *testing.T) {
 	}
 }
 
+// A retry of an identical fleet apply must evaluate run_on_register as a
+// level, not silently turn the previous first-fire failure into "unchanged".
+func TestConvergeApp_UnchangedNeverSucceededFailsWarmGate(t *testing.T) {
+	var postHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postHits++
+		}
+		switch r.URL.Path {
+		case "/api/apps/token-finops/schedules":
+			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","last_run_at":"2026-08-24T10:00:00Z","last_run_status":"failed"}]}`)
+		case "/api/apps/token-finops/schedules/7/runs":
+			_, _ = io.WriteString(w, `{"items":[{"id":703,"status":"failed","started_at":"2026-08-24T10:00:00Z"}]}`)
+		case "/api/apps/token-finops/schedules/7/runs/703/logs":
+			_, _ = io.WriteString(w, "Traceback (most recent call last):\nTABLE_NOT_FOUND\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "shinyhub.toml"), `[[schedule]]
+name = "refresh-data"
+cron = "0 5 * * *"
+cmd = "python helpers/fetch_data.py"
+run_on_register = true
+`)
+	r := convergeApp(
+		&cliConfig{Host: srv.URL, Token: "shk_test"},
+		fleet.AppDiff{Slug: "token-finops", Action: fleet.ActionUnchanged},
+		fleet.AppEntry{Slug: "token-finops"}, fleet.ObservedApp{}, dir,
+		convergeOpts{waitForWarm: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
+	)
+	if r.status != statusFailed || r.err == nil {
+		t.Fatalf("result = %#v, want failed warm gate", r)
+	}
+	if !strings.Contains(r.err.Error(), "already unsatisfied before this apply") ||
+		!strings.Contains(r.err.Error(), "never succeeded") {
+		t.Fatalf("error must identify the standing failure, got %v", r.err)
+	}
+	if len(r.warmGate) != 1 || r.warmGate[0].LastRunID != 703 {
+		t.Fatalf("warm gate = %+v, want last run 703", r.warmGate)
+	}
+	if len(r.scheduleLogs) != 1 || !strings.Contains(strings.Join(r.scheduleLogs[0].Tail, "\n"), "TABLE_NOT_FOUND") {
+		t.Fatalf("schedule logs = %+v, want failing run tail", r.scheduleLogs)
+	}
+	if code, _ := applyExitCode([]applyResult{r}); code != 4 {
+		t.Fatalf("unchanged never-succeeded app exit = %d, want 4", code)
+	}
+	if postHits != 0 {
+		t.Fatalf("verification must not re-fire the schedule, got %d POST requests", postHits)
+	}
+}
+
+func TestConvergeApp_UnchangedSucceededWarmGateStaysFree(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/api/apps/warm/schedules" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","last_success_at":"2026-08-24T10:00:00Z"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "shinyhub.toml"), `[[schedule]]
+name = "refresh-data"
+cron = "0 5 * * *"
+cmd = "true"
+run_on_register = true
+`)
+	r := convergeApp(
+		&cliConfig{Host: srv.URL, Token: "shk_test"},
+		fleet.AppDiff{Slug: "warm", Action: fleet.ActionUnchanged},
+		fleet.AppEntry{Slug: "warm"}, fleet.ObservedApp{}, dir,
+		convergeOpts{waitForWarm: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
+	)
+	if r.status != statusUnchanged || r.err != nil {
+		t.Fatalf("result = %#v, want unchanged", r)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("successful common path made %d requests, want one metadata read: %v", len(paths), paths)
+	}
+}
+
+func TestConvergeApp_VerifySchedulesRejectsStaleNonFirstFire(t *testing.T) {
+	var postHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postHits++
+		}
+		switch r.URL.Path {
+		case "/api/apps/projects/schedules":
+			_, _ = io.WriteString(w, `{"items":[{"id":8,"name":"refresh-pend-data","enabled":true,"stale":true,"last_run_at":"2026-08-24T10:00:00Z","last_run_status":"failed"}]}`)
+		case "/api/apps/projects/schedules/8/runs":
+			_, _ = io.WriteString(w, `{"items":[{"id":804,"status":"failed","started_at":"2026-08-24T10:00:00Z"}]}`)
+		case "/api/apps/projects/schedules/8/runs/804/logs":
+			_, _ = io.WriteString(w, "Athena query failed\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	r := convergeApp(
+		&cliConfig{Host: srv.URL, Token: "shk_test"},
+		fleet.AppDiff{Slug: "projects", Action: fleet.ActionUnchanged},
+		fleet.AppEntry{Slug: "projects"}, fleet.ObservedApp{}, t.TempDir(),
+		convergeOpts{verifySchedules: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
+	)
+	if r.status != statusFailed || r.err == nil || !strings.Contains(r.err.Error(), "schedule freshness gate unsatisfied") {
+		t.Fatalf("result = %#v, want stale schedule failure", r)
+	}
+	if len(r.freshnessGate) != 1 || r.freshnessGate[0].Schedule != "refresh-pend-data" {
+		t.Fatalf("freshness gate = %+v", r.freshnessGate)
+	}
+	if len(r.scheduleLogs) != 1 || r.scheduleLogs[0].RunID != 804 {
+		t.Fatalf("schedule logs = %+v", r.scheduleLogs)
+	}
+	if postHits != 0 {
+		t.Fatalf("--verify-schedules must be read-only, got %d POST requests", postHits)
+	}
+}
+
+func TestConvergeApp_VerifySchedulesIgnoresFreshAndDisabled(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path != "/api/apps/projects/schedules" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		_, _ = io.WriteString(w, `{"items":[`+
+			`{"id":8,"name":"fresh","enabled":true,"stale":false},`+
+			`{"id":9,"name":"disabled-stale","enabled":false,"stale":true}]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	r := convergeApp(
+		&cliConfig{Host: srv.URL, Token: "shk_test"},
+		fleet.AppDiff{Slug: "projects", Action: fleet.ActionUnchanged},
+		fleet.AppEntry{Slug: "projects"}, fleet.ObservedApp{}, t.TempDir(),
+		convergeOpts{verifySchedules: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
+	)
+	if r.status != statusUnchanged || r.err != nil {
+		t.Fatalf("result = %#v, want unchanged", r)
+	}
+	if hits != 1 {
+		t.Fatalf("freshness common path made %d requests, want one metadata read", hits)
+	}
+}
+
+func TestConvergeApp_VerifySchedulesFailsClosedWithoutServerStaleState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"items":[{"id":8,"name":"refresh","enabled":true}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	r := convergeApp(
+		&cliConfig{Host: srv.URL, Token: "shk_test"},
+		fleet.AppDiff{Slug: "projects", Action: fleet.ActionUnchanged},
+		fleet.AppEntry{Slug: "projects"}, fleet.ObservedApp{}, t.TempDir(),
+		convergeOpts{verifySchedules: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
+	)
+	if r.status != statusFailed || r.err == nil || !strings.Contains(r.err.Error(), "upgrade the server") {
+		t.Fatalf("result = %#v, want actionable unsupported-server failure", r)
+	}
+	if len(r.freshnessGate) != 1 || r.freshnessGate[0].State != "unavailable" {
+		t.Fatalf("freshness gate = %+v", r.freshnessGate)
+	}
+}
+
 func TestConvergeApp_UnchangedRecordsFleetStateWhenAdvertised(t *testing.T) {
 	var body struct {
 		Status      string `json:"status"`
@@ -1086,6 +1258,37 @@ func TestResolveFirstFires_RestartAfterWarm(t *testing.T) {
 	}
 	if restartHits != 1 || !res.warmRestarted {
 		t.Fatalf("restartHits=%d warmRestarted=%v, want 1/true", restartHits, res.warmRestarted)
+	}
+}
+
+func TestResolveFirstFires_FailureAttachesScheduleLog(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/apps/demo/schedules/7/runs/9":
+			_, _ = io.WriteString(w, `{"status":"failed"}`)
+		case "/api/apps/demo/schedules/7/runs/9/logs":
+			_, _ = io.WriteString(w, "Traceback\nTABLE_NOT_FOUND\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	res := applyResult{}
+	err := resolveFirstFires(
+		&cliConfig{Host: srv.URL, Token: "test"}, "demo",
+		[]firstFireRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
+		convergeOpts{waitForWarm: true, healthTimeout: time.Second},
+		&res, io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), "first-fire failed") {
+		t.Fatalf("error = %v, want first-fire failure", err)
+	}
+	if len(res.scheduleLogs) != 1 || res.scheduleLogs[0].RunID != 9 {
+		t.Fatalf("schedule logs = %+v, want run 9", res.scheduleLogs)
+	}
+	if !strings.Contains(strings.Join(res.scheduleLogs[0].Tail, "\n"), "TABLE_NOT_FOUND") {
+		t.Fatalf("schedule tail = %q, want cause", res.scheduleLogs[0].Tail)
 	}
 }
 

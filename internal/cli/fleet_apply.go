@@ -21,6 +21,7 @@ type fleetApplyFlags struct {
 	retries                  int
 	healthTimeout            int
 	waitForWarm              bool
+	verifySchedules          bool
 	restartAfterWarm         bool
 	waitForServer            time.Duration
 	concurrency              int
@@ -71,7 +72,8 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
 	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for transient deploy and config failures (deterministic deploy failures are never retried)")
 	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app after deploy for a healthy status: running, or idle for an elastic (grouped/per_session) pool that boots workers on demand")
-	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Wait for run_on_register first-fires to finish (within --health-timeout); a genuine failure fails that app")
+	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Require run_on_register schedules to have succeeded, including on unchanged apps; fresh first-fires wait within --health-timeout")
+	cmd.Flags().BoolVar(&f.verifySchedules, "verify-schedules", false, "Require every enabled schedule to be fresh according to the server; verification never triggers a run")
 	cmd.Flags().BoolVar(&f.restartAfterWarm, "restart-after-warm", false, "Wait for first-fires, then restart serving replicas so startup-loaded data is refreshed")
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before proceeding")
 	cmd.Flags().IntVar(&f.concurrency, "concurrency", 3, "Number of apps to deploy concurrently (default 3, 1 = serial); lower it on CPU- or memory-constrained hosts, raise it for network/IO-bound deploys")
@@ -199,6 +201,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		retries:            f.retries,
 		healthTimeout:      healthTimeoutDuration(f.healthTimeout),
 		waitForWarm:        f.waitForWarm,
+		verifySchedules:    f.verifySchedules,
 		restartAfterWarm:   f.restartAfterWarm,
 		concurrency:        f.concurrency,
 		fleetID:            pf.manifest.FleetID,
@@ -277,6 +280,9 @@ func fleetApplyRecoveryCommand(f *fleetApplyFlags) string {
 		parts = append(parts, "--restart-after-warm")
 	} else if f.waitForWarm {
 		parts = append(parts, "--wait-for-warm")
+	}
+	if f.verifySchedules {
+		parts = append(parts, "--verify-schedules")
 	}
 	if f.concurrency != 3 {
 		parts = append(parts, "--concurrency", fmt.Sprintf("%d", f.concurrency))

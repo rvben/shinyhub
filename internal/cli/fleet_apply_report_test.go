@@ -431,3 +431,83 @@ func TestRenderApplyReport_PostDeployFailureNoKindTag(t *testing.T) {
 		t.Fatalf("the deploy flake should still be listed, got:\n%s", out)
 	}
 }
+
+func TestRenderApplyReport_WarmFailureUsesScheduleLogHint(t *testing.T) {
+	res := []applyResult{{
+		slug: "token-finops", action: fleet.ActionUnchanged, status: statusFailed,
+		err: errors.New("warm gate already unsatisfied before this apply"),
+		warmGate: []scheduleGateOutcome{{
+			Schedule: "refresh-data", State: "never_succeeded", LastRunID: 703, LastRunStatus: "failed",
+		}},
+		scheduleLogs: []scheduleFailureLog{{
+			Schedule: "refresh-data", RunID: 703, Tail: []string{"Traceback", "TABLE_NOT_FOUND"},
+		}},
+	}}
+	var buf bytes.Buffer
+	_ = renderApplyReport(&buf, "eu", applyOutcome{apps: res}, false)
+	out := buf.String()
+	for _, want := range []string{
+		"warm gate unsatisfied before this apply (never succeeded; last run failed #703)",
+		"TABLE_NOT_FOUND",
+		"shinyhub schedule logs token-finops refresh-data --run 703",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("report missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "shinyhub apps logs token-finops") {
+		t.Fatalf("warm failure must not point at the replica log:\n%s", out)
+	}
+}
+
+func TestWriteFleetApplyJSON_DistinguishesStandingWarmFailure(t *testing.T) {
+	d := fleet.AppDiff{Slug: "token-finops", Action: fleet.ActionUnchanged}
+	r := applyResult{
+		slug: "token-finops", action: fleet.ActionUnchanged, status: statusFailed,
+		err: errors.New("warm gate already unsatisfied before this apply"),
+		warmGate: []scheduleGateOutcome{{
+			Schedule: "refresh-data", State: "never_succeeded", LastRunID: 703, LastRunStatus: "failed",
+		}},
+		scheduleLogs: []scheduleFailureLog{{Schedule: "refresh-data", RunID: 703, Tail: []string{"TABLE_NOT_FOUND"}}},
+	}
+	var buf bytes.Buffer
+	if err := writeFleetApplyJSON(&buf, &fleet.Manifest{FleetID: "eu"}, "http://h", []fleet.AppDiff{d}, nil, applyOutcome{apps: []applyResult{r}}, 4, "PARTIAL"); err != nil {
+		t.Fatalf("writeFleetApplyJSON: %v", err)
+	}
+	var env applyJSONEnvelope
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	if len(env.Apps) != 1 || len(env.Apps[0].WarmGate) != 1 {
+		t.Fatalf("warm_gate missing from app JSON: %+v", env.Apps)
+	}
+	if env.Apps[0].WarmGate[0].State != "never_succeeded" {
+		t.Fatalf("warm gate = %+v", env.Apps[0].WarmGate[0])
+	}
+	if env.Apps[0].Result == nil || len(env.Apps[0].Result.ScheduleLogs) != 1 ||
+		env.Apps[0].Result.ScheduleLogs[0].RunID != 703 {
+		t.Fatalf("schedule_logs missing from result JSON: %+v", env.Apps[0].Result)
+	}
+}
+
+func TestRenderApplyReport_StaleScheduleIsDistinct(t *testing.T) {
+	res := []applyResult{{
+		slug: "projects", action: fleet.ActionUnchanged, status: statusFailed,
+		err: errors.New("schedule freshness gate unsatisfied"),
+		freshnessGate: []scheduleGateOutcome{{
+			Schedule: "refresh-pend-data", State: "stale", LastRunID: 804, LastRunStatus: "failed",
+		}},
+		scheduleLogs: []scheduleFailureLog{{Schedule: "refresh-pend-data", RunID: 804}},
+	}}
+	var buf bytes.Buffer
+	_ = renderApplyReport(&buf, "eu", applyOutcome{apps: res}, false)
+	out := buf.String()
+	for _, want := range []string{
+		"schedule freshness gate unsatisfied (stale; last run failed #804)",
+		"shinyhub schedule logs projects refresh-pend-data --run 804",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("report missing %q:\n%s", want, out)
+		}
+	}
+}

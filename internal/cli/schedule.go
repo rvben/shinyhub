@@ -48,6 +48,10 @@ type scheduleDTO struct {
 	TimezoneInherited bool     `json:"timezone_inherited"`
 	DSTAdvisory       *string  `json:"dst_advisory"`
 	FirstFireRunID    *int64   `json:"first_fire_run_id"`
+	LastRunAt         *string  `json:"last_run_at"`
+	LastRunStatus     *string  `json:"last_run_status"`
+	LastSuccessAt     *string  `json:"last_success_at"`
+	Stale             *bool    `json:"stale"`
 }
 
 // lookupScheduleID resolves a schedule name to its numeric ID by listing all
