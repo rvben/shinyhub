@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.5](https://github.com/rvben/shinyhub/compare/v0.12.4...v0.12.5) - 2026-08-24
+
+### Added
+
+- **ui**: redesign recent activity brief ([e95a310](https://github.com/rvben/shinyhub/commit/e95a310f07d4842b1e607f5db8101525ce3ff15a))
+
 ## [0.12.4](https://github.com/rvben/shinyhub/compare/v0.12.3...v0.12.4) - 2026-08-24
 
 ### Fixed
