@@ -1,8 +1,9 @@
-.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-score test-identity test-py-identity test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
 CLISPEC ?= clispec
+CLISPEC_MIN_VERSION := 0.3.1
 
 # bootstrap installs the exact project dependencies and a repo-local, pinned
 # live-reload binary. Nothing is written to a developer's global Go bin.
@@ -507,7 +508,7 @@ release-major:
 	vership bump major
 
 # clispec-score builds the binary and scores it against The CLI Spec v0.3.
-# Requires a clispec v0.3 build with output.ci and
+# Requires clispec v0.3.1+ for output.ci and
 # error.exit_code_passthrough support.
 # Exits 0 only when score == max. Runtime probes use `hosts`, which reads only
 # the local credentials file and succeeds without a server or authentication.
@@ -515,6 +516,10 @@ release-major:
 # (internal/cli/schema_test.go, cmd/shinyhub/schema_conformance_test.go);
 # this target is an outside-in floor. Pass the probe subcommand explicitly
 # because nested subcommand discovery varies by clispec version.
-clispec-score: build ## Score the binary against clispec v0.3
+clispec-check:
+	@command -v $(CLISPEC) >/dev/null 2>&1 || { echo "clispec $(CLISPEC_MIN_VERSION)+ is required; install it with: cargo install clispec --version '^$(CLISPEC_MIN_VERSION)' --locked"; exit 1; }
+	@$(CLISPEC) --version | awk -v minimum="$(CLISPEC_MIN_VERSION)" '{ split($$2, found, "."); split(minimum, need, "."); if (found[1] > need[1] || (found[1] == need[1] && found[2] > need[2]) || (found[1] == need[1] && found[2] == need[2] && found[3] >= need[3])) exit 0; printf "clispec %s+ is required (found %s)\n", minimum, $$2 > "/dev/stderr"; exit 1 }'
+
+clispec-score: clispec-check build ## Score the binary against clispec v0.3
 	@$(CLISPEC) --output json score ./bin/shinyhub hosts > /tmp/clispec-score.json
 	@python3 -c "import json; d=json.load(open('/tmp/clispec-score.json')); s,m=d['score'],d['max']; print(f'clispec score: {s}/{m}'); raise SystemExit(0 if s==m else 1)"
