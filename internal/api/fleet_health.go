@@ -7,6 +7,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/appstatus"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
 // fleetHealthResponse is the aggregate, admin-only fleet overview returned by
@@ -24,8 +25,9 @@ type fleetHealthResponse struct {
 }
 
 type staleScheduleItem struct {
-	Slug     string `json:"slug"`
-	Schedule string `json:"schedule"`
+	Slug       string `json:"slug"`
+	Schedule   string `json:"schedule"`
+	Refreshing bool   `json:"refreshing"`
 }
 
 type fleetAppCounts struct {
@@ -242,7 +244,10 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 			if scheduleStale(fr, def, now) {
 				resp.StaleSchedules++
 				if len(resp.StaleScheduleList) < maxDegradedApps {
-					resp.StaleScheduleList = append(resp.StaleScheduleList, staleScheduleItem{Slug: fr.Slug, Schedule: fr.Name})
+					resp.StaleScheduleList = append(resp.StaleScheduleList, staleScheduleItem{
+						Slug: fr.Slug, Schedule: fr.Name,
+						Refreshing: schedulespec.IsRefreshing(scheduleFreshnessPolicy(fr), now),
+					})
 				}
 			}
 		}

@@ -56,7 +56,9 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 		Items []struct {
 			Slug            string `json:"slug"`
 			Schedule        string `json:"schedule"`
+			LastRunID       *int64 `json:"last_run_id"`
 			Stale           bool   `json:"stale"`
+			Refreshing      bool   `json:"refreshing"`
 			LastRunStatus   string `json:"last_run_status"`
 			LastSuccessAgeS *int64 `json:"last_success_age_s"`
 		} `json:"items"`
@@ -73,6 +75,12 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	}
 	if !got[0].Stale {
 		t.Fatalf("a daily schedule last-succeeded 30h ago should be stale: %+v", got[0])
+	}
+	if got[0].LastRunID == nil || *got[0].LastRunID != runID {
+		t.Fatalf("last_run_id = %v, want %d", got[0].LastRunID, runID)
+	}
+	if got[0].Refreshing {
+		t.Fatalf("refreshing = true for a terminal run: %+v", got[0])
 	}
 	if got[0].LastSuccessAgeS == nil || *got[0].LastSuccessAgeS < 100000 {
 		t.Fatalf("last_success_age_s = %v, want ~108000 (30h)", got[0].LastSuccessAgeS)

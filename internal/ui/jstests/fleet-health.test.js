@@ -122,7 +122,7 @@ test('summariseFleetHealth: stale schedules escalate to degraded', () => {
     degraded_apps: [],
     stale_schedules: 2,
     stale_schedule_list: [
-      { slug: 'alpha-dash', schedule: 'refresh-data' },
+      { slug: 'alpha-dash', schedule: 'refresh-data', refreshing: true },
       { slug: 'beta-kpi', schedule: 'refresh-data' },
     ],
   });
@@ -130,6 +130,7 @@ test('summariseFleetHealth: stale schedules escalate to degraded', () => {
   assert.equal(s.statusLabel, 'degraded');
   assert.match(s.headline, /2 schedules stale/);
   assert.equal(s.staleSchedules.length, 2);
+  assert.equal(s.staleSchedules[0].refreshing, true);
 });
 
 test('summariseFleetHealth: no stale schedules stays healthy', () => {

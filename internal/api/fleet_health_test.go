@@ -241,6 +241,11 @@ func TestFleetHealth_CountsStaleSchedules(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("FinishScheduleRun: %v", err)
 	}
+	if _, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "running", Trigger: "schedule", StartedAt: time.Now(), LogPath: "active.log",
+	}); err != nil {
+		t.Fatalf("Insert active ScheduleRun: %v", err)
+	}
 
 	req := authedRequest(t, "GET", "/api/fleet/health", nil, adminTok)
 	rec := httptest.NewRecorder()
@@ -251,8 +256,9 @@ func TestFleetHealth_CountsStaleSchedules(t *testing.T) {
 	var got struct {
 		StaleSchedules    int `json:"stale_schedules"`
 		StaleScheduleList []struct {
-			Slug     string `json:"slug"`
-			Schedule string `json:"schedule"`
+			Slug       string `json:"slug"`
+			Schedule   string `json:"schedule"`
+			Refreshing bool   `json:"refreshing"`
 		} `json:"stale_schedule_list"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
@@ -263,5 +269,8 @@ func TestFleetHealth_CountsStaleSchedules(t *testing.T) {
 	}
 	if len(got.StaleScheduleList) != 1 || got.StaleScheduleList[0].Slug != "alpha-dash" {
 		t.Fatalf("stale_schedule_list = %+v, want [alpha-dash/refresh-data]", got.StaleScheduleList)
+	}
+	if !got.StaleScheduleList[0].Refreshing {
+		t.Fatalf("stale schedule with an active run must report refreshing: %+v", got.StaleScheduleList[0])
 	}
 }

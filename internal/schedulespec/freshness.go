@@ -5,9 +5,8 @@ import "time"
 // staleMargin is the grace added to a schedule's next expected fire before it
 // is treated as stale. It covers clock jitter and the scheduler's start delay.
 // The schedule's own timeout is deliberately NOT added here: a legitimately
-// long run is covered by the running-status check in IsStale, and folding the
-// timeout into the grace would only delay alerts (a daily schedule with a 24h
-// timeout would otherwise flag stale at T+48h instead of T+24h).
+// long run is reported separately by IsRefreshing; folding the timeout into
+// freshness would make process activity look like successful data delivery.
 const staleMargin = 10 * time.Minute
 
 // Freshness is the policy-package view of a schedule's run history, mapped from
@@ -31,13 +30,6 @@ func IsStale(f Freshness, loc *time.Location, now time.Time) bool {
 	if !f.Enabled {
 		return false
 	}
-	// A run legitimately in progress within its timeout is not stale. The
-	// timeout bounds how long a "running" row is trusted; beyond it the run is
-	// a zombie and staleness applies on its own merits.
-	if f.LastRunStatus == "running" && f.LastRunAt != nil &&
-		now.Sub(*f.LastRunAt) < time.Duration(f.TimeoutSeconds)*time.Second {
-		return false
-	}
 	// Anchor on the last success (finished) if it ever succeeded, else creation.
 	anchor := f.CreatedAt
 	if f.LastSuccessAt != nil {
@@ -50,4 +42,15 @@ func IsStale(f Freshness, loc *time.Location, now time.Time) bool {
 		return false
 	}
 	return next.Add(staleMargin).Before(now)
+}
+
+// IsRefreshing reports a live, non-zombie run independently of data freshness.
+// A stale schedule can therefore be both stale and refreshing until the active
+// run succeeds; callers never have to infer data delivery from process activity.
+func IsRefreshing(f Freshness, now time.Time) bool {
+	if !f.Enabled || f.LastRunStatus != "running" || f.LastRunAt == nil || f.TimeoutSeconds <= 0 {
+		return false
+	}
+	age := now.Sub(*f.LastRunAt)
+	return age < time.Duration(f.TimeoutSeconds)*time.Second
 }

@@ -803,6 +803,7 @@ type ScheduleFreshness struct {
 	Timezone       *string
 	CreatedAt      time.Time
 	TimeoutSeconds int
+	LastRunID      *int64     // id of the most recent run, nil if never run
 	LastRunAt      *time.Time // started_at of the most recent run, nil if never run
 	LastRunStatus  string     // status of that run, "" if never run
 	LastSuccessAt  *time.Time // finished_at of the most recent succeeded run, nil if never
@@ -835,9 +836,10 @@ func (s *Store) ScheduleFreshnessByApp(appID int64) ([]ScheduleFreshness, error)
 func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshness, error) {
 	rows, err := s.db.Query(`
 		SELECT sc.id, a.slug, sc.name, sc.enabled, sc.cron_expr, sc.timezone, sc.created_at, sc.timeout_seconds,
-		  (SELECT started_at  FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC LIMIT 1),
-		  (SELECT status      FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC LIMIT 1),
-		  (SELECT finished_at FROM schedule_runs WHERE schedule_id=sc.id AND status='succeeded' ORDER BY started_at DESC LIMIT 1)
+		  (SELECT id          FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
+		  (SELECT started_at  FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
+		  (SELECT status      FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
+		  (SELECT finished_at FROM schedule_runs WHERE schedule_id=sc.id AND status='succeeded' ORDER BY started_at DESC, id DESC LIMIT 1)
 		FROM app_schedules sc JOIN apps a ON a.id = sc.app_id
 		`+where+`
 		ORDER BY a.slug, sc.name`, args...)
@@ -850,17 +852,22 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 		var fr ScheduleFreshness
 		var enabled int // SQLite stores BOOLEAN as INTEGER; database/sql has no int->bool scan
 		var tz sql.NullString
+		var lastRunID sql.NullInt64
 		var lastRunAt sql.NullTime
 		var lastStatus sql.NullString
 		var lastSuccess sql.NullTime
 		if err := rows.Scan(&fr.ScheduleID, &fr.Slug, &fr.Name, &enabled, &fr.CronExpr, &tz,
-			&fr.CreatedAt, &fr.TimeoutSeconds, &lastRunAt, &lastStatus, &lastSuccess); err != nil {
+			&fr.CreatedAt, &fr.TimeoutSeconds, &lastRunID, &lastRunAt, &lastStatus, &lastSuccess); err != nil {
 			return nil, err
 		}
 		fr.Enabled = enabled != 0
 		if tz.Valid && tz.String != "" {
 			v := tz.String
 			fr.Timezone = &v
+		}
+		if lastRunID.Valid {
+			v := lastRunID.Int64
+			fr.LastRunID = &v
 		}
 		if lastRunAt.Valid {
 			v := lastRunAt.Time

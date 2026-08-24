@@ -48,10 +48,12 @@ type scheduleDTO struct {
 	TimezoneInherited bool     `json:"timezone_inherited"`
 	DSTAdvisory       *string  `json:"dst_advisory"`
 	FirstFireRunID    *int64   `json:"first_fire_run_id"`
+	LastRunID         *int64   `json:"last_run_id"`
 	LastRunAt         *string  `json:"last_run_at"`
 	LastRunStatus     *string  `json:"last_run_status"`
 	LastSuccessAt     *string  `json:"last_success_at"`
 	Stale             *bool    `json:"stale"`
+	Refreshing        *bool    `json:"refreshing"`
 }
 
 // lookupScheduleID resolves a schedule name to its numeric ID by listing all
@@ -142,7 +144,7 @@ func newScheduleLsCmd() *cobra.Command {
 				fmt.Fprintln(w, "No schedules.")
 				return
 			}
-			t := newTable("ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "LAST RUN", "AGE", "STALE", "COMMAND").alignRight(0)
+			t := newTable("ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "LAST RUN", "AGE", "STALE", "REFRESHING", "COMMAND").alignRight(0)
 			for _, item := range rendered {
 				// A disabled schedule is dimmed: it is still listed, but it is not
 				// going to run, and that is the thing worth seeing at a glance.
@@ -164,10 +166,14 @@ func newScheduleLsCmd() *cobra.Command {
 				if b, ok := item["stale"].(bool); ok && b {
 					stale = alertTxt("yes")
 				}
+				refreshing := dimTxt("-")
+				if b, ok := item["refreshing"].(bool); ok && b {
+					refreshing = txt("yes")
+				}
 				cmdParts, _ := item["command"].([]string)
 				t.row(dimTxt(item["id"]), txt(item["name"]), txt(item["cron_expr"]),
 					enabled, dimTxt(tzDisplay), statusTxt(strOrDash(item["last_run_status"])),
-					age, stale, txt(strings.Join(cmdParts, " ")))
+					age, stale, refreshing, txt(strings.Join(cmdParts, " ")))
 			}
 			t.render(w)
 		})
@@ -813,7 +819,7 @@ func newScheduleStatusCmd() *cobra.Command {
 				fmt.Fprintln(w, "No schedules.")
 				return
 			}
-			t := newTable("APP", "SCHEDULE", "LAST RUN", "LAST SUCCESS", "AGE", "STALE")
+			t := newTable("APP", "SCHEDULE", "LAST RUN", "LAST SUCCESS", "AGE", "STALE", "REFRESHING")
 			for _, r := range rows {
 				lastSuccess := dimTxt("never")
 				age := dimTxt("-")
@@ -829,8 +835,12 @@ func newScheduleStatusCmd() *cobra.Command {
 				if b, ok := r["stale"].(bool); ok && b {
 					stale = alertTxt("yes")
 				}
+				refreshing := dimTxt("-")
+				if b, ok := r["refreshing"].(bool); ok && b {
+					refreshing = txt("yes")
+				}
 				t.row(txt(r["slug"]), txt(r["schedule"]),
-					statusTxt(strOrDash(r["last_run_status"])), lastSuccess, age, stale)
+					statusTxt(strOrDash(r["last_run_status"])), lastSuccess, age, stale, refreshing)
 			}
 			t.render(w)
 		})

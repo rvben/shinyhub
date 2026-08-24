@@ -53,17 +53,22 @@ type scheduleDTO struct {
 	// "never run", a claim those responses cannot make about an existing
 	// schedule. Stale is present on every list row, including never-run
 	// schedules, which can themselves be overdue.
+	LastRunID       *int64  `json:"last_run_id,omitempty"`
 	LastRunAt       *string `json:"last_run_at,omitempty"`
 	LastRunStatus   *string `json:"last_run_status,omitempty"`
 	LastSuccessAt   *string `json:"last_success_at,omitempty"`
 	LastSuccessAgeS *int64  `json:"last_success_age_s,omitempty"`
 	Stale           *bool   `json:"stale,omitempty"`
+	Refreshing      *bool   `json:"refreshing,omitempty"`
 }
 
 // applyFreshness fills the freshness half of the DTO from a freshness row.
 func (d *scheduleDTO) applyFreshness(fr db.ScheduleFreshness, def *time.Location, now time.Time) {
 	stale := scheduleStale(fr, def, now)
+	refreshing := schedulespec.IsRefreshing(scheduleFreshnessPolicy(fr), now)
 	d.Stale = &stale
+	d.Refreshing = &refreshing
+	d.LastRunID = fr.LastRunID
 	if fr.LastRunAt != nil {
 		v := fr.LastRunAt.UTC().Format(time.RFC3339)
 		d.LastRunAt = &v

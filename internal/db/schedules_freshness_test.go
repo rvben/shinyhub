@@ -62,7 +62,8 @@ func TestScheduleFreshness(t *testing.T) {
 		t.Fatalf("scalar fields wrong: %+v", fr)
 	}
 	// Last run is the NEWER failed run (ordered by started_at DESC).
-	if fr.LastRunStatus != "failed" || fr.LastRunAt == nil || fr.LastRunAt.Unix() != base.Unix() {
+	if fr.LastRunID == nil || *fr.LastRunID != r2 || fr.LastRunStatus != "failed" ||
+		fr.LastRunAt == nil || fr.LastRunAt.Unix() != base.Unix() {
 		t.Fatalf("last run = %q @ %v, want failed @ %v", fr.LastRunStatus, fr.LastRunAt, base)
 	}
 	// Last success is the OLDER succeeded run's finished_at (only succeeded counts).
@@ -171,7 +172,7 @@ func TestScheduleFreshness_NeverRun(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("got %d rows, want 1", len(rows))
 	}
-	if rows[0].LastRunAt != nil || rows[0].LastSuccessAt != nil || rows[0].LastRunStatus != "" {
+	if rows[0].LastRunID != nil || rows[0].LastRunAt != nil || rows[0].LastSuccessAt != nil || rows[0].LastRunStatus != "" {
 		t.Fatalf("never-run schedule should have nil last-run/last-success, got %+v", rows[0])
 	}
 }

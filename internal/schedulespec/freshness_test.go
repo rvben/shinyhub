@@ -43,13 +43,13 @@ func TestIsStale(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "running within timeout: not stale even though overdue",
+			name: "running within timeout: data remains stale until the run succeeds",
 			f: Freshness{
 				Enabled: true, CronExpr: daily, TimeoutSeconds: 7200,
 				LastSuccessAt: ptr(now.Add(-48 * time.Hour)),
 				LastRunStatus: "running", LastRunAt: ptr(now.Add(-30 * time.Minute)),
 			},
-			want: false,
+			want: true,
 		},
 		{
 			name: "running but past its timeout (zombie): stale applies",
@@ -73,6 +73,44 @@ func TestIsStale(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := IsStale(tc.f, loc, now); got != tc.want {
 				t.Fatalf("IsStale = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsRefreshing(t *testing.T) {
+	now := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		f    Freshness
+		want bool
+	}{
+		{
+			name: "active run within timeout",
+			f: Freshness{Enabled: true, TimeoutSeconds: 3600,
+				LastRunStatus: "running", LastRunAt: ptr(now.Add(-5 * time.Minute))},
+			want: true,
+		},
+		{
+			name: "zombie run past timeout",
+			f: Freshness{Enabled: true, TimeoutSeconds: 60,
+				LastRunStatus: "running", LastRunAt: ptr(now.Add(-5 * time.Minute))},
+		},
+		{
+			name: "disabled schedule",
+			f: Freshness{Enabled: false, TimeoutSeconds: 3600,
+				LastRunStatus: "running", LastRunAt: ptr(now.Add(-5 * time.Minute))},
+		},
+		{
+			name: "terminal run",
+			f: Freshness{Enabled: true, TimeoutSeconds: 3600,
+				LastRunStatus: "failed", LastRunAt: ptr(now.Add(-5 * time.Minute))},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsRefreshing(tc.f, now); got != tc.want {
+				t.Fatalf("IsRefreshing = %v, want %v", got, tc.want)
 			}
 		})
 	}

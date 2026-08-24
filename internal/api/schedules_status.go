@@ -13,18 +13,24 @@ type scheduleStatusItem struct {
 	Slug            string  `json:"slug"`
 	Schedule        string  `json:"schedule"`
 	Enabled         bool    `json:"enabled"`
+	LastRunID       *int64  `json:"last_run_id"`        // null if never run
 	LastRunAt       *string `json:"last_run_at"`        // RFC3339, null if never run
 	LastRunStatus   string  `json:"last_run_status"`    // "" if never run
 	LastSuccessAt   *string `json:"last_success_at"`    // RFC3339, null if never succeeded
 	LastSuccessAgeS *int64  `json:"last_success_age_s"` // null if never succeeded
 	Stale           bool    `json:"stale"`
+	Refreshing      bool    `json:"refreshing"`
 }
 
 // scheduleStale maps a db.ScheduleFreshness to the policy struct and applies
 // schedulespec.IsStale, resolving the per-schedule timezone against def. Shared
 // by the status endpoint and the fleet-health banner.
 func scheduleStale(fr db.ScheduleFreshness, def *time.Location, now time.Time) bool {
-	return schedulespec.IsStale(schedulespec.Freshness{
+	return schedulespec.IsStale(scheduleFreshnessPolicy(fr), fr.EffectiveLocation(def), now)
+}
+
+func scheduleFreshnessPolicy(fr db.ScheduleFreshness) schedulespec.Freshness {
+	return schedulespec.Freshness{
 		Enabled:        fr.Enabled,
 		CronExpr:       fr.CronExpr,
 		CreatedAt:      fr.CreatedAt,
@@ -32,7 +38,7 @@ func scheduleStale(fr db.ScheduleFreshness, def *time.Location, now time.Time) b
 		LastRunStatus:  fr.LastRunStatus,
 		LastRunAt:      fr.LastRunAt,
 		LastSuccessAt:  fr.LastSuccessAt,
-	}, fr.EffectiveLocation(def), now)
+	}
 }
 
 // handleFleetScheduleStatus returns per-schedule freshness across the fleet:
@@ -68,8 +74,10 @@ func (s *Server) handleFleetScheduleStatus(w http.ResponseWriter, r *http.Reques
 			Slug:          fr.Slug,
 			Schedule:      fr.Name,
 			Enabled:       fr.Enabled,
+			LastRunID:     fr.LastRunID,
 			LastRunStatus: fr.LastRunStatus,
 			Stale:         scheduleStale(fr, def, now),
+			Refreshing:    schedulespec.IsRefreshing(scheduleFreshnessPolicy(fr), now),
 		}
 		if fr.LastRunAt != nil {
 			v := fr.LastRunAt.UTC().Format(time.RFC3339)

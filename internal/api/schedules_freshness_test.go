@@ -13,11 +13,13 @@ import (
 // scheduleListItem mirrors the freshness half of the schedule list payload.
 type scheduleListItem struct {
 	Name            string  `json:"name"`
+	LastRunID       *int64  `json:"last_run_id"`
 	LastRunAt       *string `json:"last_run_at"`
 	LastRunStatus   *string `json:"last_run_status"`
 	LastSuccessAt   *string `json:"last_success_at"`
 	LastSuccessAgeS *int64  `json:"last_success_age_s"`
 	Stale           *bool   `json:"stale"`
+	Refreshing      *bool   `json:"refreshing"`
 }
 
 func listSchedules(t *testing.T, srv interface{ Router() http.Handler }, slug, tok string) []scheduleListItem {
@@ -81,12 +83,40 @@ func TestListSchedules_CarriesFreshness(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A currently running refresh does not make overdue data fresh. Surface
+	// both facts so callers can say "stale · refreshing" without conflation.
+	refreshingID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refreshing", CronExpr: "0 6 * * *",
+		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,
+		OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSuccessID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: refreshingID, Status: "running", Trigger: "schedule", StartedAt: old, LogPath: "old.log",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishScheduleRun(db.FinishScheduleRunParams{
+		RunID: oldSuccessID, Status: "succeeded", ExitCode: &exit, FinishedAt: old.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	activeID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: refreshingID, Status: "running", Trigger: "schedule", StartedAt: time.Now().Add(-5 * time.Minute), LogPath: "active.log",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	byName := map[string]scheduleListItem{}
 	for _, it := range listSchedules(t, srv, "billing", tok) {
 		byName[it.Name] = it
 	}
-	if len(byName) != 2 {
-		t.Fatalf("got %d schedules, want 2: %+v", len(byName), byName)
+	if len(byName) != 3 {
+		t.Fatalf("got %d schedules, want 3: %+v", len(byName), byName)
 	}
 
 	got := byName["overdue"]
@@ -95,6 +125,12 @@ func TestListSchedules_CarriesFreshness(t *testing.T) {
 	}
 	if got.LastRunStatus == nil || *got.LastRunStatus != "succeeded" {
 		t.Errorf("overdue.last_run_status = %v, want succeeded", got.LastRunStatus)
+	}
+	if got.LastRunID == nil || *got.LastRunID != runID {
+		t.Errorf("overdue.last_run_id = %v, want %d", got.LastRunID, runID)
+	}
+	if got.Refreshing == nil || *got.Refreshing {
+		t.Errorf("overdue.refreshing = %v, want false", got.Refreshing)
 	}
 	if got.LastRunAt == nil || got.LastSuccessAt == nil {
 		t.Errorf("overdue last_run_at/last_success_at = %v/%v, want both set", got.LastRunAt, got.LastSuccessAt)
@@ -106,7 +142,7 @@ func TestListSchedules_CarriesFreshness(t *testing.T) {
 	// Second bound: a never-run schedule must NOT report a fabricated run.
 	// An implementation that zero-fills would pass every assertion above.
 	never := byName["never"]
-	if never.LastRunAt != nil || never.LastSuccessAt != nil || never.LastSuccessAgeS != nil {
+	if never.LastRunID != nil || never.LastRunAt != nil || never.LastSuccessAt != nil || never.LastSuccessAgeS != nil {
 		t.Errorf("never-run schedule must report null run fields, got %+v", never)
 	}
 	if never.LastRunStatus != nil && *never.LastRunStatus != "" {
@@ -116,6 +152,17 @@ func TestListSchedules_CarriesFreshness(t *testing.T) {
 	// must be present rather than omitted.
 	if never.Stale == nil {
 		t.Errorf("never-run schedule must still carry a computed stale flag")
+	}
+	if never.Refreshing == nil || *never.Refreshing {
+		t.Errorf("never-run refreshing = %v, want false", never.Refreshing)
+	}
+
+	refreshing := byName["refreshing"]
+	if refreshing.Stale == nil || !*refreshing.Stale || refreshing.Refreshing == nil || !*refreshing.Refreshing {
+		t.Errorf("refreshing schedule must be stale and refreshing, got %+v", refreshing)
+	}
+	if refreshing.LastRunID == nil || *refreshing.LastRunID != activeID {
+		t.Errorf("refreshing.last_run_id = %v, want %d", refreshing.LastRunID, activeID)
 	}
 }
 
@@ -141,7 +188,7 @@ func TestCreateSchedule_OmitsFreshness(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&raw); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	for _, k := range []string{"last_run_at", "last_run_status", "last_success_at", "last_success_age_s", "stale"} {
+	for _, k := range []string{"last_run_id", "last_run_at", "last_run_status", "last_success_at", "last_success_age_s", "stale", "refreshing"} {
 		if _, present := raw[k]; present {
 			t.Errorf("create response carries %q; freshness belongs only where it is computed", k)
 		}

@@ -1032,7 +1032,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Name stale schedules in the tooltip/aria (slug: schedule); written via
     // the .title and aria-label attributes (not innerHTML), so the
     // operator-controlled slug/schedule strings are XSS-safe.
-    const staleNames = (s.staleSchedules || []).map((x) => `${x.slug}: ${x.schedule}`);
+    const staleNames = (s.staleSchedules || []).map((x) =>
+      `${x.slug}: ${x.schedule}${x.refreshing ? ' (refreshing)' : ''}`);
     const baseTip = degradedTooltip(s);
     const tipParts = [];
     if (baseTip) tipParts.push(baseTip);
