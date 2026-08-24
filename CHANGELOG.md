@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.4](https://github.com/rvben/shinyhub/compare/v0.12.3...v0.12.4) - 2026-08-24
+
+### Fixed
+
+- **ui**: make trend charts readable and gap-aware ([4449d82](https://github.com/rvben/shinyhub/commit/4449d82c788777f42b6f6c2d84660cfe4617fdb5))
+- **ci**: wait for demo container rollout ([3cbbc84](https://github.com/rvben/shinyhub/commit/3cbbc84bc203487cb07d9570632a22fa1d60e286))
+- **ci**: run demo deploy on supported Node ([804ef5f](https://github.com/rvben/shinyhub/commit/804ef5fb0c737766b8832126e0fee4d93ef5fc3b))
+- **ci**: use pinned Wrangler for demo deploy ([be1e6bd](https://github.com/rvben/shinyhub/commit/be1e6bd4b3732214ea23977df86a1073367ef74f))
+- **sites**: deploy branded surfaces consistently ([d718ac9](https://github.com/rvben/shinyhub/commit/d718ac9c31871bf767facc5aa2b14f794dddfe38))
+
 ## [0.12.3](https://github.com/rvben/shinyhub/compare/v0.12.2...v0.12.3) - 2026-08-22
 
 ### Added
