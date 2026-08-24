@@ -2,18 +2,40 @@ package cli
 
 // fieldSpec describes one field of a command's structured output.
 type fieldSpec struct {
-	Name string `json:"name"`
+	Name     string    `json:"name"`
+	Type     string    `json:"type"`
+	Items    *typeSpec `json:"items,omitempty"`
+	Nullable bool      `json:"nullable,omitempty"`
+	Desc     string    `json:"description,omitempty"`
+}
+
+type typeSpec struct {
 	Type string `json:"type"`
-	Desc string `json:"description,omitempty"`
+}
+
+func v03Fields(fields []fieldSpec) []fieldSpec {
+	out := make([]fieldSpec, len(fields))
+	copy(out, fields)
+	for i := range out {
+		if out[i].Type == "boolean|null" {
+			out[i].Type = "boolean"
+			out[i].Nullable = true
+		}
+		if out[i].Type == "array" && out[i].Items == nil {
+			out[i].Items = &typeSpec{Type: "object"}
+		}
+	}
+	return out
 }
 
 // cmdAnnotation supplies what the cobra tree cannot know about a command.
-// Mutating is a *bool because clispec v0.2 treats omitted as UNKNOWN; every
-// command must state it explicitly. The conformance tests in cmd/shinyhub
-// enforce full-tree coverage.
+// Mutating remains a *bool because the registry predates v0.3 and nil still
+// means "not reviewed". Generation converts it to the required v0.3 effects
+// value, and the full-tree conformance test rejects missing annotations.
 type cmdAnnotation struct {
 	Mutating            *bool
 	Stability           string // absent (empty) means unspecified; omitted from document
+	Cardinality         string // v0.3 data cardinality override; inferred as single/unbounded when empty
 	OutputFields        []fieldSpec
 	EnvelopeFields      []fieldSpec       // list commands: envelope-level keys
 	Streaming           bool              // stdout is a line stream (ndjson mode)
@@ -736,7 +758,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"fleet": {Mutating: ro},
 
 	"fleet init": {Mutating: mut},
-	"fleet apply": {Mutating: mut, OutputFields: []fieldSpec{
+	"fleet apply": {Mutating: mut, Cardinality: "bounded", OutputFields: []fieldSpec{
 		{Name: "failure_kind", Type: "string", Desc: "stable failed-app classification: deploy kinds plus warm_wait_timeout, warm_state_unavailable, warm_first_fire_failed, warm_never_succeeded, warm_restart_failed, schedule_stale, and schedule_state_unavailable"},
 		{Name: "attempt_details", Type: "array", Desc: "one entry per failed deploy attempt {attempt int, failure_kind string, error string}; present whenever any attempt failed, including a deploy that succeeded on retry"},
 		{Name: "warm_gate", Type: "array", Desc: "standing run_on_register checks that failed because a schedule was missing or had never succeeded before this apply"},

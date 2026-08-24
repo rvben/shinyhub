@@ -133,7 +133,7 @@ var cobraErrorPrefixes = []string{
 }
 
 // errEnvelope is the structured failure record read by scripts and agents.
-// Per clispec v0.2 it is written as a single line of JSON, as the last line of
+// Per clispec it is written as a single line of JSON, as the last line of
 // stderr, on every failure of every machine-readable invocation: a redirected
 // stderr, --output json, --output ndjson. An interactive table is the one form
 // it is withheld from, because there the reader is a person.

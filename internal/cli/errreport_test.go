@@ -227,7 +227,7 @@ func TestClassify_CobraArgErrors(t *testing.T) {
 
 // TestReport_JobFailedPassthrough pins three invariants of the KindJobFailed
 // contract: the process exit code is the job's own code, the envelope kind is
-// "job_failed", and the envelope omits exit_code (clispec v0.2 passthrough).
+// "job_failed", and the envelope omits exit_code (declared passthrough).
 func TestReport_JobFailedPassthrough(t *testing.T) {
 	err := &ExitCodeError{Code: 7, Kind: KindJobFailed, Err: fmt.Errorf("run failed")}
 

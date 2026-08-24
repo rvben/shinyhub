@@ -25,7 +25,7 @@ const (
 // kindInfo describes one error kind for the schema document and the renderer.
 // ExitCode 0 means passthrough: the process exit code is not fixed by the
 // kind (schedule --follow propagates the remote job's own code) and the
-// schema entry omits exit_code, which clispec v0.2 permits.
+// schema entry declares exit_code_passthrough instead of a fixed exit_code.
 type kindInfo struct {
 	Kind      Kind
 	ExitCode  int

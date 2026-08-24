@@ -21,11 +21,17 @@ func testRoot() *cobra.Command {
 
 func TestGenerateSchema_TopLevel(t *testing.T) {
 	doc := generateSchema(testRoot())
-	if doc.Clispec != "0.2" || doc.Name != "shinyhub" {
+	if doc.Clispec != "0.3" || doc.Name != "shinyhub" {
 		t.Errorf("clispec=%q name=%q", doc.Clispec, doc.Name)
 	}
 	if doc.Version == "" {
 		t.Error("version must be set")
+	}
+	if doc.Output.TTY != "table" || doc.Output.Piped != "json" || doc.Output.CI != "table" {
+		t.Errorf("output defaults = %+v", doc.Output)
+	}
+	if len(doc.Output.CIEnvVars) != 2 || doc.Output.CIEnvVars[0] != "CI" || doc.Output.CIEnvVars[1] != "GITLAB_CI" {
+		t.Errorf("CI output markers = %v", doc.Output.CIEnvVars)
 	}
 	if len(doc.Errors) != len(kindTable) {
 		t.Errorf("errors len = %d, want %d", len(doc.Errors), len(kindTable))
@@ -101,10 +107,9 @@ func TestPositionalsFromUse(t *testing.T) {
 
 func TestGenerateSchema_CommandsAndFlags(t *testing.T) {
 	doc := generateSchema(testRoot())
-	apps := findCommand(t, doc.Commands, "apps")
-	list := findSub(t, apps, "list")
-	if list.Mutating == nil || *list.Mutating {
-		t.Error("apps list must be mutating=false in the document")
+	list := findCommand(t, doc.Commands, "apps list")
+	if list.Effects != "read_only" || list.Cardinality != "unbounded" {
+		t.Errorf("apps list contract = effects %q, cardinality %q", list.Effects, list.Cardinality)
 	}
 	var hasJSON bool
 	for _, a := range list.Args {
@@ -123,6 +128,88 @@ func TestGenerateSchema_CommandsAndFlags(t *testing.T) {
 	}
 }
 
+func TestGenerateSchema_BoundedOutputContractsResolve(t *testing.T) {
+	doc := generateSchema(testRoot())
+	globalArgs := map[string]bool{}
+	for _, arg := range doc.GlobalArgs {
+		globalArgs[arg.Name] = true
+	}
+	for _, command := range doc.Commands {
+		if command.OutputKind == "stream" {
+			if command.Cardinality != "" || command.Pagination != nil || command.FieldsArg != "" {
+				t.Errorf("stream %q declares data bounds: %+v", command.Name, command)
+			}
+			continue
+		}
+		if command.Cardinality == "" {
+			t.Errorf("data command %q has no cardinality", command.Name)
+			continue
+		}
+		if command.Cardinality != "unbounded" {
+			if command.Pagination != nil || command.FieldsArg != "" {
+				t.Errorf("%s command %q must not declare unbounded controls", command.Cardinality, command.Name)
+			}
+			continue
+		}
+		knownArgs := map[string]bool{}
+		for name := range globalArgs {
+			knownArgs[name] = true
+		}
+		for _, arg := range command.Args {
+			knownArgs[arg.Name] = true
+		}
+		if command.Pagination == nil {
+			t.Errorf("unbounded command %q has no pagination", command.Name)
+			continue
+		}
+		for label, name := range map[string]string{
+			"pagination.limit_arg":  command.Pagination.LimitArg,
+			"pagination.offset_arg": command.Pagination.OffsetArg,
+			"fields_arg":            command.FieldsArg,
+		} {
+			if !knownArgs[name] {
+				t.Errorf("command %q %s=%q does not resolve to an argument", command.Name, label, name)
+			}
+		}
+	}
+
+	apply := findCommand(t, doc.Commands, "fleet apply")
+	if apply.Cardinality != "bounded" || apply.Pagination != nil || apply.FieldsArg != "" {
+		t.Errorf("fleet apply output bounds = cardinality %q pagination %+v fields %q", apply.Cardinality, apply.Pagination, apply.FieldsArg)
+	}
+}
+
+func TestGenerateSchema_EffectsReflectRetryGuarantees(t *testing.T) {
+	doc := generateSchema(testRoot())
+	for path, want := range map[string]string{
+		"apps list":     "read_only",
+		"apps start":    "idempotent",
+		"fleet apply":   "idempotent",
+		"apps restart":  "non_idempotent",
+		"tokens create": "non_idempotent",
+		"plan":          "non_idempotent",
+		"run":           "non_idempotent",
+	} {
+		if got := findCommand(t, doc.Commands, path).Effects; got != want {
+			t.Errorf("%s effects = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestGenerateSchema_UnannotatedCommandHasNoEffectsClaim(t *testing.T) {
+	root := &cobra.Command{Use: "test", Short: "test root"}
+	root.AddCommand(&cobra.Command{
+		Use:   "future",
+		Short: "A newly added command",
+		RunE:  func(*cobra.Command, []string) error { return nil },
+	})
+	doc := generateSchema(root)
+	command := findCommand(t, doc.Commands, "future")
+	if command.Effects != "" {
+		t.Fatalf("unannotated command effects = %q, want empty so v0.3 validation fails closed", command.Effects)
+	}
+}
+
 func TestGenerateSchema_JobFailedOmitsExitCode(t *testing.T) {
 	doc := generateSchema(testRoot())
 	raw, _ := json.Marshal(doc)
@@ -134,6 +221,9 @@ func TestGenerateSchema_JobFailedOmitsExitCode(t *testing.T) {
 			if _, has := em["exit_code"]; has {
 				t.Error("job_failed must omit exit_code")
 			}
+			if em["exit_code_passthrough"] != true {
+				t.Error("job_failed must declare exit_code_passthrough=true")
+			}
 			return
 		}
 	}
@@ -142,8 +232,7 @@ func TestGenerateSchema_JobFailedOmitsExitCode(t *testing.T) {
 
 func TestGenerateSchema_TokensCreateNameRequired(t *testing.T) {
 	doc := generateSchema(testRoot())
-	tokens := findCommand(t, doc.Commands, "tokens")
-	create := findSub(t, tokens, "create")
+	create := findCommand(t, doc.Commands, "tokens create")
 	for _, a := range create.Args {
 		if a.Name == "--name" && a.Required {
 			return
@@ -163,17 +252,6 @@ func findCommand(t *testing.T, cmds []schemaCommand, name string) schemaCommand 
 	return schemaCommand{}
 }
 
-func findSub(t *testing.T, c schemaCommand, name string) schemaCommand {
-	t.Helper()
-	for _, s := range c.Subcommands {
-		if s.Name == name {
-			return s
-		}
-	}
-	t.Fatalf("subcommand %q not in %q", name, c.Name)
-	return schemaCommand{}
-}
-
 // TestGenerateSchema_NoRawUseCharsInPositionalNames asserts that no emitted
 // positional or flag name contains cobra Use-string punctuation. This catches
 // future Use strings like "set <slug> <a|b|c>" before they reach the schema.
@@ -181,10 +259,9 @@ func findSub(t *testing.T, c schemaCommand, name string) schemaCommand {
 // the registry propagates to the emitted JSON document.
 func TestGenerateSchema_StreamingAnnotationWired(t *testing.T) {
 	doc := generateSchema(testRoot())
-	apps := findCommand(t, doc.Commands, "apps")
-	logs := findSub(t, apps, "logs")
-	if !logs.Streaming {
-		t.Error("apps logs must have streaming=true in the schema document")
+	logs := findCommand(t, doc.Commands, "apps logs")
+	if logs.OutputKind != "stream" || logs.StreamFormat != "ndjson" {
+		t.Errorf("apps logs output = kind %q, format %q", logs.OutputKind, logs.StreamFormat)
 	}
 }
 
@@ -201,14 +278,9 @@ func TestGenerateSchema_NoRawUseCharsInPositionalNames(t *testing.T) {
 			}
 		}
 	}
-	var walk func(cmds []schemaCommand)
-	walk = func(cmds []schemaCommand) {
-		for _, c := range cmds {
-			checkArgs(c.Name, c.Args)
-			walk(c.Subcommands)
-		}
+	for _, c := range doc.Commands {
+		checkArgs(c.Name, c.Args)
 	}
-	walk(doc.Commands)
 }
 
 func TestSchemaCommand_EmitsValidJSON(t *testing.T) {
@@ -237,11 +309,11 @@ func TestSchemaCommand_RejectsTableFormat(t *testing.T) {
 	}
 }
 
-// TestSchemaDocument_ValidatesAgainstClispecV02 validates the emitted
+// TestSchemaDocument_ValidatesAgainstClispecV03 validates the emitted
 // document against the vendored published schema.
-func TestSchemaDocument_ValidatesAgainstClispecV02(t *testing.T) {
+func TestSchemaDocument_ValidatesAgainstClispecV03(t *testing.T) {
 	compiler := jsonschema.NewCompiler()
-	f, err := os.Open("testdata/clispec-v0.2.json")
+	f, err := os.Open("testdata/clispec-v0.3.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,10 +322,10 @@ func TestSchemaDocument_ValidatesAgainstClispecV02(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := compiler.AddResource("clispec-v0.2.json", rawSchema); err != nil {
+	if err := compiler.AddResource("clispec-v0.3.json", rawSchema); err != nil {
 		t.Fatal(err)
 	}
-	sch, err := compiler.Compile("clispec-v0.2.json")
+	sch, err := compiler.Compile("clispec-v0.3.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +335,6 @@ func TestSchemaDocument_ValidatesAgainstClispecV02(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := sch.Validate(inst); err != nil {
-		t.Fatalf("schema document does not validate against clispec v0.2: %v", err)
+		t.Fatalf("schema document does not validate against clispec v0.3: %v", err)
 	}
 }

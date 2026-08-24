@@ -22,35 +22,29 @@ func schemaJSON(t *testing.T) map[string]any {
 	return doc
 }
 
-// collectPaths walks the emitted document and returns every command path.
-func collectPaths(prefix string, cmds []any, out map[string]map[string]any) {
+// collectPaths indexes the v0.3 flat command list.
+func collectPaths(cmds []any, out map[string]map[string]any) {
 	for _, c := range cmds {
 		cm := c.(map[string]any)
 		path := cm["name"].(string)
-		if prefix != "" {
-			path = prefix + " " + path
-		}
 		out[path] = cm
-		if subs, ok := cm["subcommands"].([]any); ok {
-			collectPaths(path, subs, out)
-		}
 	}
 }
 
-// TestSchema_EveryCommandHasExplicitMutating is the anti-drift gate: a new
+// TestSchema_EveryCommandHasExplicitEffects is the anti-drift gate: a new
 // command without a registry annotation fails this test.
-func TestSchema_EveryCommandHasExplicitMutating(t *testing.T) {
+func TestSchema_EveryCommandHasExplicitEffects(t *testing.T) {
 	doc := schemaJSON(t)
 	paths := map[string]map[string]any{}
-	collectPaths("", doc["commands"].([]any), paths)
+	collectPaths(doc["commands"].([]any), paths)
 	for _, required := range []string{"init", "serve", "backup", "restore", "worker", "schema", "apps list", "fleet status"} {
 		if _, ok := paths[required]; !ok {
 			t.Errorf("command %q missing from schema document", required)
 		}
 	}
 	for path, cm := range paths {
-		if _, ok := cm["mutating"]; !ok {
-			t.Errorf("command %q has no explicit mutating marker (v0.2: omitted means unknown)", path)
+		if _, ok := cm["effects"]; !ok {
+			t.Errorf("command %q has no explicit effects declaration", path)
 		}
 	}
 }
@@ -60,7 +54,7 @@ func TestSchema_EveryCommandHasExplicitMutating(t *testing.T) {
 func TestSchema_TreeCoverage(t *testing.T) {
 	doc := schemaJSON(t)
 	paths := map[string]map[string]any{}
-	collectPaths("", doc["commands"].([]any), paths)
+	collectPaths(doc["commands"].([]any), paths)
 	var walk func(c *cobra.Command, prefix string)
 	walk = func(c *cobra.Command, prefix string) {
 		for _, sub := range c.Commands() {
@@ -71,8 +65,10 @@ func TestSchema_TreeCoverage(t *testing.T) {
 			if prefix != "" {
 				path = prefix + " " + sub.Name()
 			}
-			if _, ok := paths[path]; !ok {
-				t.Errorf("live command %q missing from schema document", path)
+			if sub.Runnable() {
+				if _, ok := paths[path]; !ok {
+					t.Errorf("live command %q missing from schema document", path)
+				}
 			}
 			walk(sub, path)
 		}
@@ -108,7 +104,7 @@ func TestSchemaCommand_NoConfigNoNetwork(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("schema must succeed with no config: %v", err)
 	}
-	if !strings.Contains(out.String(), `"clispec": "0.2"`) {
+	if !strings.Contains(out.String(), `"clispec": "0.3"`) {
 		t.Error("schema output missing clispec version marker")
 	}
 }

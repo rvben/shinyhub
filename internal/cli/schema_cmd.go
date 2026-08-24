@@ -14,7 +14,7 @@ import (
 func newSchemaCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "schema",
-		Short: "Print a machine-readable description of this CLI (clispec v0.2)",
+		Short: "Print a machine-readable description of this CLI (clispec v0.3)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if outputFlagValue != "" && outputFlagValue != string(formatJSON) {

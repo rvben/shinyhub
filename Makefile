@@ -2,6 +2,7 @@
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
+CLISPEC ?= clispec
 
 # bootstrap installs the exact project dependencies and a repo-local, pinned
 # live-reload binary. Nothing is written to a developer's global Go bin.
@@ -505,15 +506,15 @@ release-minor:
 release-major:
 	vership bump major
 
-# clispec-score builds the binary and scores it against The CLI Spec v0.2.
-# Requires clispec >= 0.2.0 installed (cargo install clispec --force).
-# Exits 0 only when score == max. Note: the runtime probes execute a real
-# list command, so full marks requires SHINYHUB_HOST/SHINYHUB_TOKEN pointing
-# at a reachable server; unauthenticated runs lose the four probe checks.
+# clispec-score builds the binary and scores it against The CLI Spec v0.3.
+# Requires a clispec v0.3 build with output.ci and
+# error.exit_code_passthrough support.
+# Exits 0 only when score == max. Runtime probes use `hosts`, which reads only
+# the local credentials file and succeeds without a server or authentication.
 # The authoritative conformance gate is the local test suite
 # (internal/cli/schema_test.go, cmd/shinyhub/schema_conformance_test.go);
 # this target is an outside-in floor. Pass the probe subcommand explicitly
 # because nested subcommand discovery varies by clispec version.
-clispec-score: build ## Score the binary against clispec (requires clispec >= 0.2.0)
-	@clispec score ./bin/shinyhub apps list --json > /tmp/clispec-score.json || true
+clispec-score: build ## Score the binary against clispec v0.3
+	@$(CLISPEC) --output json score ./bin/shinyhub hosts > /tmp/clispec-score.json
 	@python3 -c "import json; d=json.load(open('/tmp/clispec-score.json')); s,m=d['score'],d['max']; print(f'clispec score: {s}/{m}'); raise SystemExit(0 if s==m else 1)"
