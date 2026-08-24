@@ -15,7 +15,7 @@ import (
 //   - table set (same tables in both backends)
 //   - column set per table (same column names)
 //   - column nullability (NOT NULL vs nullable)
-//   - unique-constraint column tuples (order-independent set)
+//   - unique-index/constraint column tuples (order-independent set)
 //   - foreign-key edges: fromCol -> referencedTable.referencedCol
 //
 // What it intentionally does NOT compare:
@@ -357,37 +357,47 @@ func sqliteUniqueIndex(store *db.Store, table string) ([]uniqueTuple, error) {
 	return tuples, nil
 }
 
-// introspectPostgresUnique returns a map of table -> set of unique constraint tuples.
+// introspectPostgresUnique returns a map of table -> set of unique index tuples.
+// PostgreSQL backs UNIQUE constraints with unique indexes, while migrations may
+// also declare a unique index directly. Querying pg_index covers both forms and
+// therefore matches SQLite's PRAGMA index_list semantics.
 func introspectPostgresUnique(t *testing.T, store *db.Store) map[string][]uniqueTuple {
 	t.Helper()
-	// Group columns by (table, constraint) to reconstruct multi-column tuples.
-	type key struct{ table, constraint string }
+	// Group columns by (table, index) to reconstruct multi-column tuples.
+	type key struct{ table, index string }
 	grouped := make(map[key][]string)
 	tableForKey := make(map[key]string)
 
 	rows, err := store.DB().Query(`
-		SELECT tc.table_name, tc.constraint_name, kcu.column_name
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu
-		  ON kcu.constraint_name = tc.constraint_name
-		 AND kcu.table_schema    = tc.table_schema
-		WHERE tc.table_schema    = 'public'
-		  AND tc.constraint_type = 'UNIQUE'
-		ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position`)
+		SELECT tbl.relname, idx.relname, col.attname
+		FROM pg_catalog.pg_index AS ind
+		JOIN pg_catalog.pg_class AS tbl ON tbl.oid = ind.indrelid
+		JOIN pg_catalog.pg_namespace AS ns ON ns.oid = tbl.relnamespace
+		JOIN pg_catalog.pg_class AS idx ON idx.oid = ind.indexrelid
+		JOIN LATERAL unnest(ind.indkey::smallint[]) WITH ORDINALITY AS key(attnum, position)
+		  ON key.position <= ind.indnkeyatts
+		JOIN pg_catalog.pg_attribute AS col
+		  ON col.attrelid = tbl.oid AND col.attnum = key.attnum
+		WHERE ns.nspname = 'public'
+		  AND ind.indisunique
+		  AND NOT ind.indisprimary
+		  AND ind.indexprs IS NULL
+		  AND ind.indpred IS NULL
+		ORDER BY tbl.relname, idx.relname, key.position`)
 	if err != nil {
-		t.Fatalf("postgres unique constraints query: %v", err)
+		t.Fatalf("postgres unique indexes query: %v", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var tbl, constraint, col string
-		if err := rows.Scan(&tbl, &constraint, &col); err != nil {
+		var tbl, index, col string
+		if err := rows.Scan(&tbl, &index, &col); err != nil {
 			t.Fatalf("scan unique row: %v", err)
 		}
 		if tbl == "schema_migrations" {
 			continue
 		}
-		k := key{tbl, constraint}
+		k := key{tbl, index}
 		grouped[k] = append(grouped[k], col)
 		tableForKey[k] = tbl
 	}

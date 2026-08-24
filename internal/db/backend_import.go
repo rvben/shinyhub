@@ -13,9 +13,9 @@ import (
 var ErrTargetNotEmpty = errors.New("target database is not empty")
 
 // ImportFrom copies every data table from src into the receiver, preserving row
-// IDs and referential integrity, in a single transaction. It is the engine
+// IDs and referential integrity, in a single locked transaction. It is the engine
 // behind a one-time SQLite->Postgres backend migration: the receiver must be a
-// freshly migrated, empty Postgres store, and src the existing SQLite store.
+// freshly migrated, unused Postgres store, and src the existing SQLite store.
 //
 // Correctness is driven by the TARGET's real column types (queried at runtime),
 // so a value SQLite stores as an int epoch or a text timestamp is coerced to the
@@ -33,27 +33,35 @@ func (dst *Store) ImportFrom(src *Store) (map[string]int, error) {
 		return nil, err
 	}
 
-	// Refuse a non-empty target on ANY data table so an existing deployment is
-	// never partially overwritten. A freshly migrated target has every table
-	// empty (no migration seeds data), so this only rejects a target that has
-	// been used - including one merely started once, which would have created a
-	// worker CA or ownership-lease row that a narrower check would miss while
-	// the copy silently skipped the source's version.
-	for _, t := range tables {
-		var exists bool
-		if err := dst.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ` + quoteIdent(t) + `)`).Scan(&exists); err != nil {
-			return nil, fmt.Errorf("check target %s: %w", t, err)
-		}
-		if exists {
-			return nil, fmt.Errorf("%w (found rows in %s); the target must be a freshly-initialized, unused database", ErrTargetNotEmpty, t)
-		}
-	}
-
 	tx, err := dst.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	// Hold every target table exclusively from validation through commit. This
+	// closes the check-then-copy race where a live server could write its first
+	// row after the emptiness check and have that row overwritten or mixed into
+	// the import.
+	for _, table := range tables {
+		if _, err := tx.Exec(`LOCK TABLE ` + quoteIdent(table) + ` IN ACCESS EXCLUSIVE MODE`); err != nil {
+			return nil, fmt.Errorf("lock target %s: %w", table, err)
+		}
+	}
+
+	// Refuse application data in ANY target table. The fleet sequence allocator
+	// is the sole migration-owned seed: a freshly migrated database contains its
+	// canonical (1, 0) row, which is safe to replace with the source high-water
+	// mark. Any other allocator state proves the target has been used or altered.
+	for _, table := range tables {
+		pristine, err := importTargetTablePristine(tx, table)
+		if err != nil {
+			return nil, fmt.Errorf("check target %s: %w", table, err)
+		}
+		if !pristine {
+			return nil, fmt.Errorf("%w (found non-initial state in %s); the target must be a freshly-initialized, unused database", ErrTargetNotEmpty, table)
+		}
+	}
 
 	// Disable FK triggers for the bulk load; the source is already consistent,
 	// so out-of-order inserts are safe. Scoped to this transaction.
@@ -63,6 +71,11 @@ func (dst *Store) ImportFrom(src *Store) (map[string]int, error) {
 
 	counts := make(map[string]int, len(tables))
 	for _, table := range tables {
+		if table == "fleet_run_sequence" {
+			if _, err := tx.Exec(`DELETE FROM fleet_run_sequence`); err != nil {
+				return nil, fmt.Errorf("clear migration seed %s: %w", table, err)
+			}
+		}
 		n, err := copyTable(src, tx, dst, table)
 		if err != nil {
 			return nil, fmt.Errorf("copy %s: %w", table, err)
@@ -81,6 +94,22 @@ func (dst *Store) ImportFrom(src *Store) (map[string]int, error) {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return counts, nil
+}
+
+// importTargetTablePristine reports whether a locked target table still has
+// exactly the state produced by migrations. Most tables are empty; the fleet
+// run allocator has one canonical seed row.
+func importTargetTablePristine(tx *boundTx, table string) (bool, error) {
+	if table == "fleet_run_sequence" {
+		var rows, seeds int64
+		err := tx.QueryRow(`SELECT COUNT(*),
+			COALESCE(SUM(CASE WHEN singleton = 1 AND last_sequence = 0 THEN 1 ELSE 0 END), 0)
+			FROM fleet_run_sequence`).Scan(&rows, &seeds)
+		return rows == 1 && seeds == 1, err
+	}
+	var exists bool
+	err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM ` + quoteIdent(table) + `)`).Scan(&exists)
+	return !exists, err
 }
 
 // srcTables lists the source SQLite data tables to copy, excluding the schema

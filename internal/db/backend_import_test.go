@@ -6,6 +6,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
+	"github.com/rvben/shinyhub/internal/provenance"
 	"github.com/rvben/shinyhub/internal/secrets"
 )
 
@@ -77,6 +78,16 @@ func TestImportFrom_SQLiteToPostgresRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Migration-owned allocator state is data too: preserve its high-water mark
+	// so imported fleet run sequences can never be reused.
+	sourceRun, created, err := src.CreateFleetRun(db.CreateFleetRunParams{
+		ID: "11111111111111111111111111111111", FleetID: "prod", Kind: "fleet_apply",
+		UserID: &owner.ID, Provenance: provenance.Metadata{Provider: "gitlab"},
+	})
+	if err != nil || !created {
+		t.Fatalf("create source fleet run: created=%v err=%v", created, err)
+	}
+
 	// Migrate.
 	counts, err := target.ImportFrom(src)
 	if err != nil {
@@ -142,6 +153,16 @@ func TestImportFrom_SQLiteToPostgresRoundTrip(t *testing.T) {
 	if charlie.ID <= alpha.ID {
 		t.Errorf("new app id %d must exceed migrated max; sequence was not reset", charlie.ID)
 	}
+	nextRun, created, err := target.CreateFleetRun(db.CreateFleetRunParams{
+		ID: "22222222222222222222222222222222", FleetID: "prod", Kind: "fleet_apply",
+		UserID: &owner.ID,
+	})
+	if err != nil || !created {
+		t.Fatalf("create fleet run on migrated target: created=%v err=%v", created, err)
+	}
+	if nextRun.Sequence != sourceRun.Sequence+1 {
+		t.Errorf("new fleet run sequence = %d, want %d after imported high-water mark", nextRun.Sequence, sourceRun.Sequence+1)
+	}
 }
 
 // TestImportFrom_RefusesTargetWithNonCoreData guards that a target which has
@@ -165,6 +186,25 @@ func TestImportFrom_RefusesTargetWithNonCoreData(t *testing.T) {
 	}
 	if _, err := target.ImportFrom(src); !errors.Is(err, db.ErrTargetNotEmpty) {
 		t.Fatalf("want ErrTargetNotEmpty for a target with a worker CA row, got %v", err)
+	}
+}
+
+func TestImportFrom_RefusesAdvancedFleetRunSequence(t *testing.T) {
+	target, _ := dbtest.NewPostgres(t)
+	srcPath := t.TempDir() + "/src.db"
+	src, err := db.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if err := src.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.DB().Exec(`UPDATE fleet_run_sequence SET last_sequence = 1 WHERE singleton = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.ImportFrom(src); !errors.Is(err, db.ErrTargetNotEmpty) {
+		t.Fatalf("want ErrTargetNotEmpty for advanced fleet allocator state, got %v", err)
 	}
 }
 

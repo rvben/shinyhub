@@ -1,9 +1,10 @@
 ALTER TABLE fleet_runs ADD COLUMN run_sequence INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE fleet_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'running'
     CHECK (status IN ('running', 'succeeded', 'partial', 'conflict', 'failed'));
--- SQLite rejects non-constant defaults on ALTER TABLE. Existing rows are
--- backfilled here; new registrations always write heartbeat_at explicitly.
-ALTER TABLE fleet_runs ADD COLUMN heartbeat_at DATETIME;
+-- SQLite rejects CURRENT_TIMESTAMP as an ALTER TABLE default. Use a constant
+-- migration sentinel to preserve the cross-backend NOT NULL invariant, then
+-- backfill existing rows below. New registrations write heartbeat_at explicitly.
+ALTER TABLE fleet_runs ADD COLUMN heartbeat_at DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00';
 ALTER TABLE fleet_runs ADD COLUMN finished_at DATETIME;
 ALTER TABLE fleet_runs ADD COLUMN exit_code INTEGER;
 ALTER TABLE fleet_runs ADD COLUMN exit_reason TEXT NOT NULL DEFAULT '';
