@@ -420,8 +420,10 @@ final schedule state exits non-zero. A `skipped_overlap` proves only that
 another run existed and passes only when the final state already records a
 success. For `fleet apply`, the level gate runs after every non-delete action,
 including an unchanged bundle: an enabled `run_on_register` schedule with no
-successful run remains unconverged without being re-fired. Waiting does not
-reload a replica that already read the old cache at startup. For that
+successful run remains unconverged without being re-fired. When an active run
+is already repairing that condition, fleet apply joins its exact run ID within
+the existing per-app deadline; a later overlap-skip row cannot hide it. Waiting
+does not reload a replica that already read the old cache at startup. For that
 application pattern, pass `--restart-after-warm` instead; it implies the wait
 and cycles serving replicas only after the final success check passes. An app
 that was deliberately stopped remains stopped and sees the warmed data on its

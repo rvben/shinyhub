@@ -368,6 +368,11 @@ rather than trusting a stale observation.
 | `--prune` | Delete fleet-owned apps that are absent from the manifest. **This also removes their persistent data directory and all bundles.** |
 | `-y/--yes` | Skip the interactive destructive-action confirmation. `--prune` in a non-interactive shell requires `--yes`. |
 | `--retries N` | Retry attempts *after* the first for deploys and transient config PATCH failures. Default 1 (so two attempts total). |
+| `--wait-for-warm` | Require every enabled `run_on_register` schedule to have a recorded success, including on unchanged apps. If repair is already running, join that run within the per-app warm deadline instead of dispatching a duplicate. |
+| `--warm-timeout DURATION` | Per-app deadline shared by first-fire waits and the final warm-state check. Default 15 minutes. |
+| `--verify-schedules` | Require every enabled schedule to satisfy the server-computed freshness policy; read-only and never dispatches work. |
+| `--verify-health` | Require serving health for unchanged as well as changed apps. Intentionally stopped apps remain excluded. |
+| `--restart-after-warm` | After warm-up succeeds, cycle replicas so startup-loaded caches see the new data. Deliberately stopped apps stay stopped. |
 | `--allow-unsafe-degraded-prune` | Permit prune against a server without precondition support, accepting a documented race (see [Degraded mode](#degraded-mode)). |
 | `--json` | Emit the machine-readable result envelope. |
 | `-q/--quiet` | Collapse to the summary plus result line. |
@@ -379,6 +384,14 @@ On servers that advertise the `fleet_provenance` capability, `fleet apply`
 registers one immutable run before it makes any changes. Every deployment and
 audit event produced by that apply carries the run ID, so the dashboard can
 link the live version and deployment history back to its source.
+
+Current servers also allocate a monotonic sequence to each run, heartbeat it
+while the CLI is active, and record an immutable terminal result. This has two
+important failure semantics: an older overlapping apply cannot overwrite app
+convergence recorded by a newer run, and a process killed before it reports a
+result remains observably abandoned rather than looking successful. If the CLI
+cannot persist the terminal result after convergence, the apply itself exits
+partial and reports the run-recording failure instead of printing a false OK.
 
 GitLab CI works without extra credentials. In `auto` mode the CLI reads
 GitLab's predefined `CI_PIPELINE_*`, `CI_JOB_*`, `CI_COMMIT_*`, and
@@ -421,6 +434,9 @@ Fleet preconditions let `apply` patch config and prune against a precise
 expected state (a compare-and-set). If the server does not advertise
 precondition support, `apply` runs in degraded mode:
 
+- Source deploys cannot be fenced against the planned digest and owner, so a
+  concurrent writer can win the upload race. On a current server, a mismatch is
+  a pre-mutation conflict and the bundle is not promoted.
 - Config patches fall back to a re-GET immediately before the write (a
   smaller TOCTOU window, not zero).
 - `--prune` is disabled unless `--allow-unsafe-degraded-prune` is set, which

@@ -127,8 +127,12 @@ project:
 - `unknown`: the client cannot prove whether the remote mutation committed.
 
 Every run has a cryptographically random run ID for correlation with server
-audit records. On failure, human and JSON output identify committed, partial,
-and unknown resources and provide one of three recovery strategies:
+audit records. Current servers add a monotonic sequence, client heartbeat, and
+immutable terminal status. Late writes from an older overlapping run cannot
+replace newer per-app convergence, and a run that stops heartbeating without a
+terminal result is distinguishable from success. On failure, human and JSON
+output identify committed, partial, and unknown resources and provide one of
+three recovery strategies:
 
 - `resume`: transient failure; re-run apply;
 - `repair_then_resume`: fix the deterministic or post-commit failure, then
@@ -140,7 +144,11 @@ become unchanged, so they are not applied twice. Deploy attempts automatically
 retry only readiness timeouts, transport failures, and server errors; config
 patches retry only server-side failures. Invalid bundles, missing runtimes,
 build/hook failures, validation errors, conflicts, and crashes are not repeated
-implicitly.
+implicitly. Once an upload has committed, its retry budget re-checks health and
+digest readback without uploading the bundle again. Source uploads on current
+servers are also fenced by the digest and fleet owner observed by plan, so a
+late overlapping apply conflicts before promotion instead of becoming the last
+writer.
 
 Older servers without fleet preconditions remain usable in a clearly marked
 degraded mode. Config reconciliation narrows the race with a fresh read, while

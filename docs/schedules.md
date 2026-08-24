@@ -224,7 +224,11 @@ Semantics:
   a convergence level checked after every non-delete action: an unchanged app
   whose enabled `run_on_register` schedule has never succeeded also exits
   non-zero. The check is read-only and never re-fires an unchanged schedule; a
-  prior success keeps the common path free of extra run-history or log work.
+  prior success keeps the common path free of extra run-history or log work. If
+  the unsatisfied schedule already has a live run, fleet apply joins that exact
+  run for the remaining warm deadline. A newer `skipped_overlap` history row
+  cannot hide the active process, and activity becomes convergence only after
+  the joined run records success.
 - **Startup-loaded caches.** Waiting alone does not reload a process that read
   the empty cache before the schedule ran. Pass `--restart-after-warm` to wait
   for every first-fire to succeed and then cycle serving replicas. The flag
@@ -238,7 +242,9 @@ read-only gate: stale schedules fail convergence, but the apply does not trigger
 them. Combine it with `--wait-for-warm` when both first-deploy warm-up and
 ongoing schedule freshness are required. If a stale schedule is actively
 running, the report says `stale · refreshing`; activity does not substitute for
-a successful data refresh.
+a successful data refresh. If the stored cron or timezone cannot be evaluated,
+freshness is `unknown` and strict gates fail closed; the fleet-health banner is
+also `unknown`, never healthy, until the observation is complete.
 
 Failed fleet gates have stable JSON `failure_kind` values such as
 `warm_wait_timeout`, `warm_never_succeeded`, and `schedule_stale`. When the
