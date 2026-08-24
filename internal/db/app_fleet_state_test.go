@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -45,5 +46,29 @@ func TestAppFleetStatePreservesSuccessfulBaselineAcrossIncompleteRun(t *testing.
 	}
 	if state.DesiredContentDigest != "sha256:first" || len(state.Declaration) != 2 || state.AppliedAt == nil {
 		t.Fatalf("successful baseline was not preserved: %#v", state)
+	}
+}
+
+func TestAppFleetStateRejectsLateOlderRun(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "ordered-owner", "admin")
+	app := mustCreateApp(t, store, "ordered-app", owner.ID)
+	oldID := "11111111111111111111111111111111"
+	newID := "22222222222222222222222222222222"
+	for _, id := range []string{oldID, newID} {
+		if _, _, err := store.CreateFleetRun(db.CreateFleetRunParams{ID: id, FleetID: "prod", Kind: "fleet_apply", UserID: &owner.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decl := []db.FleetDeclaredValue{{Key: "replicas", Desired: "2"}}
+	if err := store.RecordAppFleetSuccess(app.ID, newID, "sha256:new", decl); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAppFleetIncomplete(app.ID, oldID, "older apply finished late"); !errors.Is(err, db.ErrFleetStateSuperseded) {
+		t.Fatalf("older write = %v, want ErrFleetStateSuperseded", err)
+	}
+	state, err := store.GetAppFleetState(app.ID)
+	if err != nil || state.ConvergenceStatus != "in_sync" || state.LatestRun == nil || state.LatestRun.ID != newID {
+		t.Fatalf("state = %+v err=%v", state, err)
 	}
 }

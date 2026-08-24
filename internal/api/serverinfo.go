@@ -44,6 +44,7 @@ type serverCapabilities struct {
 	PlanApply          bool `json:"plan_apply"`
 	FleetProvenance    bool `json:"fleet_provenance"`
 	FleetState         bool `json:"fleet_state"`
+	FleetRunLifecycle  bool `json:"fleet_run_lifecycle"`
 }
 
 // handleServerInfo advertises server capability flags so a fleet-aware CLI
@@ -62,6 +63,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			PlanApply:          true,
 			FleetProvenance:    true,
 			FleetState:         true,
+			FleetRunLifecycle:  true,
 		},
 		Runtimes: detectRuntimes(),
 	})

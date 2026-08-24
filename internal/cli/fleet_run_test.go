@@ -122,3 +122,29 @@ func TestRecordAppFleetStateSendsNormalizedDeclarationAndRun(t *testing.T) {
 		t.Fatalf("declaration = %#v", declared)
 	}
 }
+
+func TestFleetRunTrackerRecordsTerminalOutcome(t *testing.T) {
+	var got struct {
+		Status     string `json:"status"`
+		ExitCode   *int   `json:"exit_code"`
+		ExitReason string `json:"exit_reason"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/fleet/runs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	tracker := startFleetRunTracker(&cliConfig{Host: srv.URL, Token: "test"}, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err := tracker.finish(4, "PARTIAL - 1 failed"); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "partial" || got.ExitCode == nil || *got.ExitCode != 4 || got.ExitReason != "PARTIAL - 1 failed" {
+		t.Fatalf("terminal update = %+v", got)
+	}
+}

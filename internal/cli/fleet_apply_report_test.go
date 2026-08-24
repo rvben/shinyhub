@@ -41,6 +41,39 @@ func TestApplyExitCode_AllGood(t *testing.T) {
 	}
 }
 
+func TestApplyExitCode_SkippedDoesNotClaimConvergence(t *testing.T) {
+	res := []applyResult{{slug: "legacy", status: statusSkipped, note: "re-run with --adopt"}}
+	code, reason := applyExitCode(res)
+	if code != 0 {
+		t.Fatalf("code = %d, want the intentional-skip compatibility code 0", code)
+	}
+	if strings.Contains(reason, "all converged") || !strings.Contains(reason, "skipped") {
+		t.Fatalf("reason = %q, must describe the skip without claiming convergence", reason)
+	}
+	if got := applyRunStatus(code, tallyResults(res)); got != "skipped" {
+		t.Fatalf("run status = %q, want skipped", got)
+	}
+	if got := applyRecoveryFor(applyReportContext{}, res).Strategy; got != "review_skipped" {
+		t.Fatalf("recovery strategy = %q, want review_skipped", got)
+	}
+}
+
+func TestApplyOutcomeExitFailsWhenRunCompletionIsUnrecorded(t *testing.T) {
+	o := applyOutcome{
+		apps:     []applyResult{{slug: "ok", status: statusUnchanged}},
+		runError: errors.New("connection reset"),
+	}
+	code, reason := applyOutcomeExit(o)
+	if code != 4 || !strings.Contains(reason, "completion was not recorded") {
+		t.Fatalf("exit = %d %q, want partial run-recording failure", code, reason)
+	}
+	var out bytes.Buffer
+	_ = renderApplyReport(&out, "prod", o, false)
+	if !strings.Contains(out.String(), "fleet run completion was not recorded") || !strings.Contains(out.String(), "connection reset") {
+		t.Fatalf("report = %q", out.String())
+	}
+}
+
 func TestRenderApplyReport_TableSummaryAndNextCommand(t *testing.T) {
 	var out bytes.Buffer
 	res := []applyResult{

@@ -142,9 +142,22 @@ func applyExitCode(res []applyResult) (int, string) {
 		return 5, fmt.Sprintf("CONFLICTS - %d app(s) changed under us; re-run plan", t.conflicts)
 	case t.failed > 0:
 		return 4, fmt.Sprintf("PARTIAL - %d failed", t.failed)
+	case t.skipped > 0:
+		return 0, fmt.Sprintf("OK - %d skipped; convergence not requested for those resources", t.skipped)
 	default:
 		return 0, "OK - all converged"
 	}
+}
+
+func applyOutcomeExit(o applyOutcome) (int, string) {
+	code, reason := applyExitCode(o.all())
+	if o.runError == nil {
+		return code, reason
+	}
+	if code == 0 {
+		return 4, "PARTIAL - convergence finished but fleet run completion was not recorded"
+	}
+	return code, reason + "; fleet run completion was not recorded"
 }
 
 // applyExitErr is returned after the apply report (or its JSON envelope) has
@@ -289,6 +302,13 @@ type applyRecovery struct {
 func applyRecoveryFor(ctx applyReportContext, results []applyResult) applyRecovery {
 	t := tallyResults(results)
 	if t.failed == 0 && t.conflicts == 0 {
+		if t.skipped > 0 {
+			return applyRecovery{
+				Strategy: "review_skipped", SafeToRetry: true,
+				Summary:  "Some changes were intentionally skipped; review their reasons and re-run with the required flags to converge them.",
+				Commands: []string{},
+			}
+		}
 		return applyRecovery{Strategy: "none", SafeToRetry: true, Summary: "all resources converged", Commands: []string{}}
 	}
 	if t.conflicts > 0 {
@@ -353,7 +373,7 @@ func renderApplyReport(out io.Writer, fleetID string, o applyOutcome, quiet bool
 func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o applyOutcome, quiet bool) error {
 	s := stylerFor(out)
 	all := o.all()
-	code, reason := applyExitCode(all)
+	code, reason := applyOutcomeExit(o)
 	t := tallyResults(all)
 	summary := fmt.Sprintf(
 		"Applied: %d created, %d updated, %d deleted, %d unchanged, %d adopted, %d skipped, %d failed, %d conflicts.",
@@ -361,6 +381,9 @@ func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o apply
 
 	if quiet {
 		fmt.Fprintln(out, summary)
+		if o.runError != nil {
+			fmt.Fprintf(out, "Fleet run recording: failed: %v\n", o.runError)
+		}
 		fmt.Fprintf(out, "Result: %s. Exit %d.\n", reason, code)
 		return applyExitErr(code, reason)
 	}
@@ -384,6 +407,9 @@ func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o apply
 		renderResultRows(out, s, o.apps, slugColumnWidth(o.apps))
 	}
 	fmt.Fprintf(out, "\n%s\nResult: %s. Exit %d.\n", summary, reason, code)
+	if o.runError != nil {
+		fmt.Fprintf(out, "  %s: %v\n", s.red("fleet run completion was not recorded"), o.runError)
+	}
 
 	// Failures end with the single most useful next command; conflicts point
 	// back at plan.
@@ -506,17 +532,18 @@ type applyJSONProject struct {
 }
 
 type applyJSONEnvelope struct {
-	SchemaVersion int                `json:"schema_version"`
-	RunID         string             `json:"run_id,omitempty"`
-	Status        string             `json:"status"`
-	FleetID       string             `json:"fleet_id"`
-	Server        string             `json:"server"`
-	GeneratedAt   string             `json:"generated_at"`
-	BundleFiles   []jsonBundleFile   `json:"bundle_files"`
-	Projects      []applyJSONProject `json:"projects"`
-	Apps          []applyJSONApp     `json:"apps"`
-	Summary       jsonSummary        `json:"summary"`
-	Recovery      applyRecovery      `json:"recovery"`
+	SchemaVersion     int                `json:"schema_version"`
+	RunID             string             `json:"run_id,omitempty"`
+	Status            string             `json:"status"`
+	FleetID           string             `json:"fleet_id"`
+	Server            string             `json:"server"`
+	GeneratedAt       string             `json:"generated_at"`
+	BundleFiles       []jsonBundleFile   `json:"bundle_files"`
+	Projects          []applyJSONProject `json:"projects"`
+	Apps              []applyJSONApp     `json:"apps"`
+	Summary           jsonSummary        `json:"summary"`
+	Recovery          applyRecovery      `json:"recovery"`
+	RunRecordingError string             `json:"run_recording_error,omitempty"`
 }
 
 // resultToJSON maps one applyResult onto the shared jsonResult shape used by
@@ -607,7 +634,7 @@ func writeFleetApplyJSONWithContext(out io.Writer, ctx applyReportContext, m *fl
 	env := applyJSONEnvelope{
 		SchemaVersion: fleetPlanSchemaVersion,
 		RunID:         ctx.RunID,
-		Status:        applyRunStatus(code),
+		Status:        applyRunStatus(code, t),
 		FleetID:       m.FleetID,
 		Server:        host,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
@@ -625,6 +652,9 @@ func writeFleetApplyJSONWithContext(out io.Writer, ctx applyReportContext, m *fl
 		},
 		Recovery: applyRecoveryFor(ctx, o.all()),
 	}
+	if o.runError != nil {
+		env.RunRecordingError = o.runError.Error()
+	}
 	b, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("marshal apply json: %w", err)
@@ -633,9 +663,12 @@ func writeFleetApplyJSONWithContext(out io.Writer, ctx applyReportContext, m *fl
 	return err
 }
 
-func applyRunStatus(code int) string {
+func applyRunStatus(code int, tally applyTally) string {
 	switch code {
 	case 0:
+		if tally.skipped > 0 {
+			return "skipped"
+		}
 		return "converged"
 	case 5:
 		return "conflict"

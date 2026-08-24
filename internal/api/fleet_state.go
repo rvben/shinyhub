@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
@@ -201,6 +203,11 @@ func (s *Server) handleRecordAppFleetState(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusUnprocessableEntity, "unknown fleet run")
 		return
 	}
+	u := auth.UserFromContext(r.Context())
+	if u == nil || (u.Role != "admin" && (run.UserID == nil || *run.UserID != u.ID)) {
+		writeError(w, http.StatusForbidden, "fleet run belongs to another actor")
+		return
+	}
 	if fleetIDFromMarker(app.ManagedBy) != run.FleetID {
 		writeError(w, http.StatusConflict, "app is not owned by this fleet run")
 		return
@@ -233,7 +240,10 @@ func (s *Server) handleRecordAppFleetState(w http.ResponseWriter, r *http.Reques
 				return
 			}
 		}
-		if err := s.store.RecordAppFleetSuccess(app.ID, runID, req.DesiredContentDigest, req.Declaration); err != nil {
+		if err := s.store.RecordAppFleetSuccess(app.ID, runID, req.DesiredContentDigest, req.Declaration); errors.Is(err, db.ErrFleetStateSuperseded) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		} else if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
@@ -242,7 +252,10 @@ func (s *Server) handleRecordAppFleetState(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusUnprocessableEntity, "invalid convergence error")
 			return
 		}
-		if err := s.store.RecordAppFleetIncomplete(app.ID, runID, req.Error); err != nil {
+		if err := s.store.RecordAppFleetIncomplete(app.ID, runID, req.Error); errors.Is(err, db.ErrFleetStateSuperseded) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		} else if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}

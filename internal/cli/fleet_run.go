@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/fleet"
 	"github.com/rvben/shinyhub/internal/provenance"
@@ -139,6 +140,84 @@ func registerFleetRun(cfg *cliConfig, runID, fleetID string, metadata provenance
 		return fmt.Errorf("register fleet run: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	return nil
+}
+
+type fleetRunTracker struct {
+	cfg   *cliConfig
+	runID string
+	stop  chan struct{}
+	done  chan struct{}
+}
+
+func startFleetRunTracker(cfg *cliConfig, runID string) *fleetRunTracker {
+	t := &fleetRunTracker{cfg: cfg, runID: runID, stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(t.done)
+		ticker := time.NewTicker(45 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = updateFleetRun(cfg, runID, "running", nil, "")
+			case <-t.stop:
+				return
+			}
+		}
+	}()
+	return t
+}
+
+func (t *fleetRunTracker) finish(code int, reason string) error {
+	close(t.stop)
+	<-t.done
+	status := "failed"
+	switch code {
+	case 0:
+		status = "succeeded"
+	case 4:
+		status = "partial"
+	case 5:
+		status = "conflict"
+	}
+	return updateFleetRun(t.cfg, t.runID, status, &code, reason)
+}
+
+func updateFleetRun(cfg *cliConfig, runID, status string, exitCode *int, reason string) error {
+	body, err := json.Marshal(map[string]any{"status": status, "exit_code": exitCode, "exit_reason": reason})
+	if err != nil {
+		return err
+	}
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		req, err := http.NewRequest(http.MethodPatch, cfg.Host+"/api/fleet/runs/"+runID, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
+		req.Header.Set("Content-Type", "application/json")
+		decorateFleetRequest(req, runID)
+		resp, err := httpClient.Do(req)
+		if err == nil {
+			raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if readErr != nil {
+				last = readErr
+			} else if resp.StatusCode == http.StatusNoContent {
+				return nil
+			} else {
+				last = fmt.Errorf("update fleet run: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+				if resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+					return last
+				}
+			}
+		} else {
+			last = err
+		}
+		if attempt < 2 {
+			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+		}
+	}
+	return last
 }
 
 // recordAppFleetState commits the declaration baseline only after an app has

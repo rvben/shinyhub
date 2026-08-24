@@ -794,6 +794,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Patch("/api/auth/me", s.handlePatchMe) // self-service profile: display name + own password
 		r.Get("/api/apps", s.handleListApps)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/fleet/runs", s.handleRegisterFleetRun)
+		r.Get("/api/fleet/runs/{id}", s.handleGetFleetRun)
+		r.With(rateLimitByUser(s.actionLimiter)).Patch("/api/fleet/runs/{id}", s.handleUpdateFleetRun)
 		// Per-user rate limit on app creation so a developer cannot cheaply grow
 		// the apps table (and degrade every user's list-view latency). Uses the
 		// shared per-user action limiter (30/min) - generous for fleet apply.

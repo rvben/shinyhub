@@ -10,6 +10,8 @@ import (
 	"github.com/rvben/shinyhub/internal/provenance"
 )
 
+var ErrFleetStateSuperseded = errors.New("fleet state belongs to a newer run")
+
 // FleetDeclaredValue is one fleet-owned app field in its normalized display
 // form. The CLI records only fields declared by the effective fleet+bundle
 // manifest; omitted fields deliberately remain dashboard-owned.
@@ -61,7 +63,7 @@ func (s *Store) RecordAppFleetSuccess(appID int64, runID, digest string, values 
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`
+	res, err := s.db.Exec(`
 		INSERT INTO app_fleet_state (
 			app_id, successful_run_id, declaration, desired_content_digest,
 			applied_at, latest_run_id, convergence_status, convergence_error,
@@ -75,10 +77,15 @@ func (s *Store) RecordAppFleetSuccess(appID int64, runID, digest string, values 
 			latest_run_id = excluded.latest_run_id,
 			convergence_status = 'in_sync',
 			convergence_error = '',
-			convergence_updated_at = CURRENT_TIMESTAMP`,
+			convergence_updated_at = CURRENT_TIMESTAMP
+		WHERE (SELECT run_sequence FROM fleet_runs WHERE id = excluded.latest_run_id) >=
+		      COALESCE((SELECT run_sequence FROM fleet_runs WHERE id = app_fleet_state.latest_run_id), 0)`,
 		appID, runID, decl, digest, runID)
 	if err != nil {
 		return fmt.Errorf("record app fleet success: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrFleetStateSuperseded
 	}
 	return nil
 }
@@ -86,7 +93,7 @@ func (s *Store) RecordAppFleetSuccess(appID int64, runID, digest string, values 
 // RecordAppFleetIncomplete preserves the last successful declaration while
 // recording that the newest convergence attempt did not finish.
 func (s *Store) RecordAppFleetIncomplete(appID int64, runID, message string) error {
-	_, err := s.db.Exec(`
+	res, err := s.db.Exec(`
 		INSERT INTO app_fleet_state (
 			app_id, latest_run_id, convergence_status, convergence_error,
 			convergence_updated_at
@@ -95,10 +102,15 @@ func (s *Store) RecordAppFleetIncomplete(appID int64, runID, message string) err
 			latest_run_id = excluded.latest_run_id,
 			convergence_status = 'incomplete',
 			convergence_error = excluded.convergence_error,
-			convergence_updated_at = CURRENT_TIMESTAMP`,
+			convergence_updated_at = CURRENT_TIMESTAMP
+		WHERE (SELECT run_sequence FROM fleet_runs WHERE id = excluded.latest_run_id) >=
+		      COALESCE((SELECT run_sequence FROM fleet_runs WHERE id = app_fleet_state.latest_run_id), 0)`,
 		appID, runID, message)
 	if err != nil {
 		return fmt.Errorf("record app fleet incomplete: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrFleetStateSuperseded
 	}
 	return nil
 }

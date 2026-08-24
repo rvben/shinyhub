@@ -190,9 +190,13 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 	}
 
 	runID := newRunID()
+	var runTracker *fleetRunTracker
 	if pf.caps.FleetProvenance {
 		if err := registerFleetRun(cfg, runID, pf.manifest.FleetID, metadata); err != nil {
 			return &ExitCodeError{Code: 3, Err: err}
+		}
+		if pf.caps.FleetRunLifecycle {
+			runTracker = startFleetRunTracker(cfg, runID)
 		}
 	}
 	opt := convergeOpts{
@@ -224,13 +228,19 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		projects: convergeProjects(cfg, pf, opt, progressOut),
 	}
 	outcome.apps = convergeFleet(cfg, pf, opt, progressOut)
+	if runTracker != nil {
+		code, reason := applyExitCode(outcome.all())
+		if err := runTracker.finish(code, reason); err != nil {
+			outcome.runError = fmt.Errorf("record fleet run %s completion: %w", runID, err)
+		}
+	}
 	reportCtx := applyReportContext{
 		RunID: runID, FleetID: pf.manifest.FleetID,
 		PlanCommand: fleetPlanRecoveryCommand(f.file), ResumeCommand: fleetApplyRecoveryCommand(f),
 	}
 
 	if f.jsonOutput {
-		code, reason := applyExitCode(outcome.all())
+		code, reason := applyOutcomeExit(outcome)
 		if jerr := writeFleetApplyJSONWithContext(out, reportCtx, pf.manifest, pf.host, pf.diff, pf.projectDiff, outcome, code, reason); jerr != nil {
 			return &ExitCodeError{Code: 1, Err: jerr}
 		}

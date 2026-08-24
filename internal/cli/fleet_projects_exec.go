@@ -19,6 +19,7 @@ import (
 type applyOutcome struct {
 	projects []applyResult
 	apps     []applyResult
+	runError error
 }
 
 func (o applyOutcome) all() []applyResult {

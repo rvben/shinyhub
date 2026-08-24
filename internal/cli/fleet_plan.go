@@ -200,6 +200,7 @@ type serverCaps struct {
 	PlanApply          bool `json:"plan_apply"`
 	FleetProvenance    bool `json:"fleet_provenance"`
 	FleetState         bool `json:"fleet_state"`
+	FleetRunLifecycle  bool `json:"fleet_run_lifecycle"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just

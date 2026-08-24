@@ -55,6 +55,48 @@ func TestFleetRunDeploymentAttributionAndRollbackSource(t *testing.T) {
 	}
 }
 
+func TestFleetRunLifecycleIsSequencedAndImmutable(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "runner", "developer")
+	makeRun := func(id string) *db.FleetRun {
+		run, created, err := store.CreateFleetRun(db.CreateFleetRunParams{
+			ID: id, FleetID: "prod", Kind: "fleet_apply", UserID: &owner.ID,
+		})
+		if err != nil || !created {
+			t.Fatalf("CreateFleetRun(%s): created=%v err=%v", id, created, err)
+		}
+		return run
+	}
+	first := makeRun("11111111111111111111111111111111")
+	second := makeRun("22222222222222222222222222222222")
+	if first.Sequence <= 0 || second.Sequence != first.Sequence+1 {
+		t.Fatalf("sequences = %d, %d; want consecutive server order", first.Sequence, second.Sequence)
+	}
+	if first.Status != "running" || first.ExitCode != nil || first.FinishedAt != nil {
+		t.Fatalf("new run = %+v", first)
+	}
+	if err := store.TouchFleetRun(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishFleetRun(first.ID, "succeeded", 0, "OK - all converged"); err != nil {
+		t.Fatal(err)
+	}
+	// Lost-response retries are harmless, but a different terminal truth is not.
+	if err := store.FinishFleetRun(first.ID, "succeeded", 0, "OK - all converged"); err != nil {
+		t.Fatalf("idempotent finish: %v", err)
+	}
+	if err := store.FinishFleetRun(first.ID, "partial", 4, "different"); !errors.Is(err, db.ErrFleetRunFinished) {
+		t.Fatalf("different finish = %v, want ErrFleetRunFinished", err)
+	}
+	if err := store.TouchFleetRun(first.ID); !errors.Is(err, db.ErrFleetRunFinished) {
+		t.Fatalf("heartbeat after finish = %v, want ErrFleetRunFinished", err)
+	}
+	finished, err := store.GetFleetRun(first.ID)
+	if err != nil || finished.FinishedAt == nil || finished.ExitCode == nil || *finished.ExitCode != 0 {
+		t.Fatalf("finished run = %+v err=%v", finished, err)
+	}
+}
+
 func TestDeploymentOriginsDistinguishDirectRollbackAndLegacy(t *testing.T) {
 	store := mustOpenDB(t)
 	owner := mustCreateUser(t, store, "operator", "developer")

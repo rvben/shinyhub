@@ -25,6 +25,7 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 			DeployEvents       bool `json:"deploy_events"`
 			FleetProvenance    bool `json:"fleet_provenance"`
 			FleetState         bool `json:"fleet_state"`
+			FleetRunLifecycle  bool `json:"fleet_run_lifecycle"`
 		} `json:"capabilities"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
@@ -50,6 +51,9 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 	if !got.Capabilities.FleetState {
 		t.Errorf("fleet_state not advertised")
+	}
+	if !got.Capabilities.FleetRunLifecycle {
+		t.Errorf("fleet_run_lifecycle not advertised")
 	}
 }
 
