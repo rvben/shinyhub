@@ -51,7 +51,7 @@ func TestScheduleAnnotations_DocumentAtomicFreshnessState(t *testing.T) {
 		for _, f := range ann.OutputFields {
 			fields[f.Name] = true
 		}
-		for _, name := range []string{"last_run_id", "stale", "refreshing"} {
+		for _, name := range []string{"last_run_id", "stale", "refreshing", "active_run_id", "freshness_error"} {
 			if !fields[name] {
 				t.Errorf("%s must document %s, got %+v", command, name, ann.OutputFields)
 			}
