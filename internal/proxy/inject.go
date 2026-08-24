@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/rvben/shinyhub/internal/appnav"
+	"github.com/rvben/shinyhub/internal/favicon"
 )
 
 // overlayScript is the status overlay injected into app page loads. See
@@ -176,25 +177,25 @@ func hasNoneSource(directive string) bool {
 // the shell itself the edge (Caddy in the reference deployment) still
 // compresses on the way out.
 //
-// It relaxes when EITHER injection is on, because either one alone needs a
-// readable body. Tying it to the overlay alone would leave the switcher silently
-// un-injectable whenever an operator turned the overlay off.
+// It relaxes whenever any page enhancement is on, because each needs a readable
+// body. Tying it to the overlay alone would leave the switcher or favicon
+// silently uninjectable whenever an operator turned the overlay off.
 func (p *Proxy) relaxEncodingForInjection(req *http.Request) {
-	if !p.injectsScripts() || !isPageLoad(req) {
+	if !p.injectsPageHTML() || !isPageLoad(req) {
 		return
 	}
 	req.Header.Del("Accept-Encoding")
 }
 
-// injectsScripts reports whether any injection is currently enabled.
-func (p *Proxy) injectsScripts() bool {
-	return p.statusOverlay.Load() || p.appNav.Load() != nil
+// injectsPageHTML reports whether any page-level enhancement is enabled.
+func (p *Proxy) injectsPageHTML() bool {
+	return p.statusOverlay.Load() || p.appNav.Load() != nil || p.appFavicon.Load()
 }
 
-// withAppNav returns one of ShinyHub's own pages with the app switcher spliced
-// in, or the page unchanged when the switcher is off or the page has no </body>.
+// decorateAppPage gives one of ShinyHub's own app pages its contextual favicon
+// and, when enabled, splices in the app switcher.
 //
-// This is the deliberately simpler sibling of injectPageScripts. These pages are
+// This is the deliberately simpler sibling of injectPageHTML. These pages are
 // ShinyHub's, not the app's: there is no CSP of someone else's to narrow, no
 // compressed body to reason about, and no risk of breaking markup this server
 // did not write. It matters most precisely here, on the surfaces a visitor lands
@@ -203,14 +204,18 @@ func (p *Proxy) injectsScripts() bool {
 //
 // The status overlay is deliberately not added to these pages. They carry their
 // own reload logic, which is the same job.
-func (p *Proxy) withAppNav(page, slug string) string {
+func (p *Proxy) decorateAppPage(page, slug string) string {
+	out := []byte(page)
+	if p.appFavicon.Load() {
+		out, _ = favicon.Ensure(out, favicon.AppURL(slug))
+	}
 	nav := p.appNav.Load()
 	if nav == nil {
-		return page
+		return string(out)
 	}
-	out, ok := appnav.SpliceIntoBody([]byte(page), appnav.Snippet(slug, nav.homeURL))
+	out, ok := appnav.SpliceIntoBody(out, appnav.Snippet(slug, nav.homeURL))
 	if !ok {
-		return page
+		return string(out)
 	}
 	return string(out)
 }
@@ -235,9 +240,10 @@ func (p *Proxy) pageScriptsFor(slug string) []pageScript {
 // injectableResponse reports whether resp is a top-level HTML page load this
 // proxy may rewrite.
 //
-// Every condition is a reason to decline, and declining costs nothing but the
-// overlay: a mangled response would cost the app. In particular a body that
-// arrived compressed is passed through rather than decompressed, because the
+// Every condition is a reason to decline, and declining costs only ShinyHub's
+// optional page enhancements: a mangled response would cost the app. In
+// particular a body that arrived compressed is passed through rather than
+// decompressed, because the
 // Director drops Accept-Encoding on page loads precisely so this case is the
 // rare one (a backend that compresses unasked), and handling it would mean
 // re-encoding a body to match a header the backend chose.
@@ -267,12 +273,24 @@ func injectableResponse(resp *http.Response) bool {
 // are spliced in one pass: a second pass would mean buffering and copying the
 // whole page again for no gain.
 func injectPageScripts(scripts func() []pageScript) func(*http.Response) error {
+	return injectPageHTML(scripts, nil)
+}
+
+// injectPageHTML adds ShinyHub's optional scripts and contextual favicon in a
+// single bounded buffering pass. Script CSP changes and favicon insertion are
+// independent: an app that refuses ShinyHub's scripts can still receive its
+// favicon when its image policy permits same-origin resources.
+func injectPageHTML(scripts func() []pageScript, faviconHref func() string) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		if !injectableResponse(resp) {
 			return nil
 		}
 		wanted := scripts()
-		if len(wanted) == 0 {
+		href := ""
+		if faviconHref != nil {
+			href = faviconHref()
+		}
+		if len(wanted) == 0 && href == "" {
 			return nil
 		}
 
@@ -297,35 +315,42 @@ func injectPageScripts(scripts func() []pageScript) func(*http.Response) error {
 			resp.Body = io.NopCloser(bytes.NewReader(buf))
 		}
 
-		hashes := make([]string, 0, len(wanted))
-		var snippets strings.Builder
-		for _, s := range wanted {
-			hashes = append(hashes, s.cspHash)
-			snippets.WriteString(s.snippet)
+		out := buf
+		changed := false
+		if href != "" && cspAllowsSelfImage(resp.Header.Get("Content-Security-Policy")) {
+			if withIcon, inserted := favicon.Ensure(out, href); inserted {
+				out = withIcon
+				changed = true
+			}
 		}
 
-		policy, ok := extendCSPForScripts(resp.Header.Get("Content-Security-Policy"), hashes)
-		if !ok {
-			restore()
-			return nil
-		}
-		reportPolicy, ok := extendCSPForScripts(resp.Header.Get("Content-Security-Policy-Report-Only"), hashes)
-		if !ok {
-			restore()
-			return nil
+		if len(wanted) > 0 {
+			hashes := make([]string, 0, len(wanted))
+			var snippets strings.Builder
+			for _, s := range wanted {
+				hashes = append(hashes, s.cspHash)
+				snippets.WriteString(s.snippet)
+			}
+
+			policy, policyOK := extendCSPForScripts(resp.Header.Get("Content-Security-Policy"), hashes)
+			reportPolicy, reportOK := extendCSPForScripts(resp.Header.Get("Content-Security-Policy-Report-Only"), hashes)
+			if policyOK && reportOK {
+				if withScripts, injected := appnav.SpliceIntoBody(out, snippets.String()); injected {
+					out = withScripts
+					changed = true
+					if policy != "" {
+						resp.Header.Set("Content-Security-Policy", policy)
+					}
+					if reportPolicy != "" {
+						resp.Header.Set("Content-Security-Policy-Report-Only", reportPolicy)
+					}
+				}
+			}
 		}
 
-		out, injected := appnav.SpliceIntoBody(buf, snippets.String())
-		if !injected {
+		if !changed {
 			restore()
 			return nil
-		}
-
-		if policy != "" {
-			resp.Header.Set("Content-Security-Policy", policy)
-		}
-		if reportPolicy != "" {
-			resp.Header.Set("Content-Security-Policy-Report-Only", reportPolicy)
 		}
 		// The body no longer matches whatever the backend hashed it to.
 		resp.Header.Del("ETag")
@@ -336,6 +361,41 @@ func injectPageScripts(scripts func() []pageScript) func(*http.Response) error {
 		resp.ContentLength = int64(len(out))
 		return nil
 	}
+}
+
+// cspAllowsSelfImage conservatively reports whether a same-origin favicon is
+// admitted by the effective img-src directive. Unknown explicit source forms
+// decline injection rather than widening or rewriting an app's policy.
+func cspAllowsSelfImage(policy string) bool {
+	if strings.TrimSpace(policy) == "" {
+		return true
+	}
+	var fallback []string
+	for _, part := range strings.Split(policy, ";") {
+		fields := strings.Fields(strings.TrimSpace(part))
+		if len(fields) == 0 {
+			continue
+		}
+		switch strings.ToLower(fields[0]) {
+		case "img-src":
+			return hasSelfImageSource(fields[1:])
+		case "default-src":
+			fallback = fields[1:]
+		}
+	}
+	if fallback != nil {
+		return hasSelfImageSource(fallback)
+	}
+	return true
+}
+
+func hasSelfImageSource(sources []string) bool {
+	for _, source := range sources {
+		if source == "*" || strings.EqualFold(source, "'self'") {
+			return true
+		}
+	}
+	return false
 }
 
 // chainModifyResponse runs each hook in order, stopping at the first error.
@@ -354,11 +414,17 @@ func chainModifyResponse(hooks ...func(*http.Response) error) func(*http.Respons
 }
 
 // modifyResponseFor builds the ModifyResponse chain for one backend. The
-// Set-Cookie filter is unconditional; both injections are opt-in, wired by
-// main.go from config so tests and embedders are not implicitly rewriting app
-// HTML. See pageScriptsFor for why the toggles are read per response.
+// Set-Cookie filter is unconditional; page enhancements are opt-in, wired by
+// main.go so tests and embedders are not implicitly rewriting app HTML. See
+// pageScriptsFor for why the toggles are read per response.
 func (p *Proxy) modifyResponseFor(slug string) func(*http.Response) error {
-	return chainModifyResponse(filterReservedSetCookies, injectPageScripts(func() []pageScript {
-		return p.pageScriptsFor(slug)
-	}))
+	return chainModifyResponse(filterReservedSetCookies, injectPageHTML(
+		func() []pageScript { return p.pageScriptsFor(slug) },
+		func() string {
+			if !p.appFavicon.Load() {
+				return ""
+			}
+			return favicon.AppURL(slug)
+		},
+	))
 }

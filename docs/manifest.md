@@ -321,6 +321,10 @@ Set the app's icon to a single emoji, declaratively.
 icon = "🚀"
 ```
 
+The icon appears in ShinyHub's launchpad, app details, app switcher, lifecycle
+pages, and the browser tab when the running app does not provide a favicon of
+its own. An app-authored favicon always takes precedence.
+
 The field states who owns the app's icon rather than encoding three
 mechanical outcomes:
 

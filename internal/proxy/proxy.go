@@ -407,6 +407,11 @@ type Proxy struct {
 	// off, which is the zero value.
 	appNav atomic.Pointer[appNavSettings]
 
+	// appFavicon adds the app's ShinyHub identity only when its HTML does not
+	// already declare a favicon. Off by default for embedders and tests; main.go
+	// enables it for the product server.
+	appFavicon atomic.Bool
+
 	// stickySecret is the HMAC key that signs the per-app sticky-routing cookie.
 	// When set, the cookie value carries a signature bound to the app slug and
 	// replica index, so a client cannot forge or replay it to pin itself to a
@@ -1035,6 +1040,12 @@ func (p *Proxy) AppNavEnabled() bool {
 	return p.appNav.Load() != nil
 }
 
+// SetAppFavicon enables or disables contextual favicons on proxied app HTML and
+// ShinyHub-owned lifecycle pages. App-authored rel=icon links always win.
+func (p *Proxy) SetAppFavicon(enabled bool) {
+	p.appFavicon.Store(enabled)
+}
+
 // getWakeTrigger returns the current wake trigger under the read lock.
 func (p *Proxy) getWakeTrigger() func(string) {
 	p.mu.RLock()
@@ -1125,12 +1136,12 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(s
 		case "crashed":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(p.withAppNav(renderAppDownPage("crashed", slug, reason), slug))) //nolint:errcheck
+			w.Write([]byte(p.decorateAppPage(renderAppDownPage("crashed", slug, reason), slug))) //nolint:errcheck
 			return
 		case "stopped":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(p.withAppNav(renderAppDownPage("stopped", slug, ""), slug))) //nolint:errcheck
+			w.Write([]byte(p.decorateAppPage(renderAppDownPage("stopped", slug, ""), slug))) //nolint:errcheck
 			return
 		case "deploying":
 			// A deployment is in flight for this slug (the deploy tears the
@@ -1141,14 +1152,14 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(s
 			// wake trigger itself: on the miss path holdForWake already fired
 			// it, and on the upstream-error path dead-replica recovery belongs
 			// to the watchdog.
-			writeWaitPage(w, http.StatusOK, p.withAppNav(deployingPage, slug))
+			writeWaitPage(w, http.StatusOK, p.decorateAppPage(deployingPage, slug))
 			return
 		}
 	}
 	if trigger != nil {
 		go trigger(slug)
 	}
-	writeWaitPage(w, http.StatusOK, p.withAppNav(loadingPage, slug))
+	writeWaitPage(w, http.StatusOK, p.decorateAppPage(loadingPage, slug))
 }
 
 // SetSlugExists registers a synchronous predicate that the proxy uses to

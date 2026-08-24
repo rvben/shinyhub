@@ -35,7 +35,7 @@ branding:
 | `site_title` | Replaces the `<title>` tag in the SPA shell, and the ShinyHub wordmark in every brand slot when no `logo` is set. |
 | `assets_dir` | Directory that backs all local asset references. Required when any field references a local file. |
 | `logo` | Brand logo: a filename inside `assets_dir` or an absolute `http(s)://` URL. Replaces the wordmark in every brand slot, including the login card. |
-| `favicon` | Favicon: a filename inside `assets_dir` or an absolute `http(s)://` URL. |
+| `favicon` | Browser-tab icon: a filename inside `assets_dir` or an absolute `http(s)://` URL. Used by the dashboard, login, custom landing fallback, and ShinyHub-owned app status/access pages. |
 | `theme.primary_color` | CSS hex color (`#rgb` or `#rrggbb`). Injected as the `--brand-primary` CSS variable. |
 | `landing_page` | Filename inside `assets_dir` that replaces the stock app catalog at `/`. `/login` always serves the SPA shell. |
 | `footer_links` | List of `{ label, url }` objects. URLs accept `http`, `https`, `mailto`, or an absolute `/path`. |
@@ -43,6 +43,22 @@ branding:
 `assets_dir` is validated at startup: the directory must exist and every
 referenced local file must resolve inside it (a symlink-aware containment
 check).
+
+### Browser-tab identity
+
+ShinyHub-owned pages use the configured `favicon` consistently, including app
+starting, deploying, stopped, crashed, access-denied, and first-deploy pages.
+A custom `landing_page` may declare its own `<link rel="icon">`; when it does
+not, browsers fall back to the configured icon through `/favicon.ico`.
+
+Running apps keep a favicon declared by their own HTML. When an app does not
+declare one, ShinyHub uses the app icon selected in its configuration (emoji or
+uploaded image), which keeps several open app tabs distinguishable. An app with
+no icon falls back to the platform favicon.
+
+If `site_title` or `logo` replaces the stock identity but no `favicon` is set,
+ShinyHub deliberately serves no stock fallback. This prevents the Orbit Hub
+mark from leaking into an otherwise white-labelled browser tab.
 
 ### Brand slots
 

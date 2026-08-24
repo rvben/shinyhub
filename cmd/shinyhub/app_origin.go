@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/favicon"
 	"github.com/rvben/shinyhub/internal/proxytrust"
 )
 
@@ -21,9 +22,9 @@ type appLaunchStore interface {
 }
 
 // appOriginBoundary makes the configured app origin a narrow virtual host. It
-// deliberately exposes only app proxy traffic and liveness probes; the API,
-// dashboard, static assets, and internal bundle endpoint remain unreachable on
-// an origin whose JavaScript is not trusted.
+// deliberately exposes only app proxy traffic, liveness probes, and the public
+// platform favicon; the API, dashboard, static assets, and internal bundle
+// endpoint remain unreachable on an origin whose JavaScript is not trusted.
 func appOriginBoundary(next http.Handler, appOrigin *url.URL, trustedNets []*net.IPNet) http.Handler {
 	if appOrigin == nil {
 		return next
@@ -33,7 +34,7 @@ func appOriginBoundary(next http.Handler, appOrigin *url.URL, trustedNets []*net
 			next.ServeHTTP(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/app/") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+		if strings.HasPrefix(r.URL.Path, "/app/") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == favicon.RootURL {
 			next.ServeHTTP(w, r)
 			return
 		}

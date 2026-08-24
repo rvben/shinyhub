@@ -1,6 +1,7 @@
 package ui_test
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -10,6 +11,32 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/ui"
 )
+
+func TestFaviconHandler(t *testing.T) {
+	t.Run("stock", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		ui.FaviconHandler(config.BrandingConfig{}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+		if rr.Code != http.StatusOK || !strings.HasPrefix(rr.Header().Get("Content-Type"), "image/") || rr.Body.Len() == 0 {
+			t.Fatalf("stock favicon = %d %q %d bytes", rr.Code, rr.Header().Get("Content-Type"), rr.Body.Len())
+		}
+	})
+
+	t.Run("remote branding", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		ui.FaviconHandler(config.BrandingConfig{Favicon: "https://cdn.example.com/acme.ico"}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+		if rr.Code != http.StatusTemporaryRedirect || rr.Header().Get("Location") != "https://cdn.example.com/acme.ico" {
+			t.Fatalf("remote favicon = %d %q", rr.Code, rr.Header().Get("Location"))
+		}
+	})
+
+	t.Run("white-label identity without icon", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		ui.FaviconHandler(config.BrandingConfig{Logo: "acme.svg"}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rr.Code)
+		}
+	})
+}
 
 func TestPublicBrandingMapsResolvedURLs(t *testing.T) {
 	b := config.BrandingConfig{

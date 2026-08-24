@@ -9,6 +9,8 @@ import (
 	"net/textproto"
 	"strings"
 	"sync"
+
+	"github.com/rvben/shinyhub/internal/favicon"
 )
 
 // ErrUserNotFound is returned by ForwardAuthUserStore.GetForwardAuthUser when no
@@ -128,6 +130,13 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			}
 			username := userHdr
 			if username == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// The diagnostic page below must be able to load its public favicon
+			// even when the proxy credential is precisely what is misconfigured.
+			// These two endpoints expose only operator-selected public branding.
+			if r.URL.Path == favicon.RootURL || r.URL.Path == favicon.PlatformURL {
 				next.ServeHTTP(w, r)
 				return
 			}

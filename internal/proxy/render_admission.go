@@ -301,5 +301,5 @@ func (p *Proxy) renderGateBlocks(r *http.Request, slug string) bool {
 func (p *Proxy) serveRenderWaitPage(rec http.ResponseWriter, slug string) {
 	p.recordReject(rec, slug, ReasonRenderDeferred, true)
 	rec.Header().Set("Retry-After", renderRetryAfter())
-	writeWaitPage(rec, http.StatusServiceUnavailable, p.withAppNav(waitingPage, slug))
+	writeWaitPage(rec, http.StatusServiceUnavailable, p.decorateAppPage(waitingPage, slug))
 }

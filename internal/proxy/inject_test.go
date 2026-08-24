@@ -15,6 +15,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/favicon"
 )
 
 // overlayOnly is the injection set for a proxy with just the status overlay
@@ -291,6 +292,66 @@ func TestInjectStatusOverlay_RewritesThePageAndItsHeaders(t *testing.T) {
 	}
 	if resp.ContentLength != int64(len(body)) {
 		t.Fatalf("resp.ContentLength = %d, want %d", resp.ContentLength, len(body))
+	}
+}
+
+func TestInjectAppFavicon_PreservesAuthoredIdentity(t *testing.T) {
+	const authored = `<!doctype html><html><head><link rel="shortcut icon" href="/app-owned.ico"></head><body>App</body></html>`
+	resp := htmlResponse("demo", authored)
+	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") })(resp); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	if got := readBody(t, resp); got != authored {
+		t.Fatalf("app-authored favicon was altered: %s", got)
+	}
+}
+
+func TestInjectAppFavicon_AddsContextualIdentity(t *testing.T) {
+	resp := htmlResponse("demo", testShell)
+	resp.Header.Set("ETag", `"app-shell"`)
+	resp.Header.Set("Content-Security-Policy", "default-src 'self'")
+	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") })(resp); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, favicon.Link(favicon.AppURL("demo"))) {
+		t.Fatalf("contextual favicon missing: %s", body)
+	}
+	if resp.Header.Get("ETag") != "" {
+		t.Fatal("ETag survived the favicon body rewrite")
+	}
+}
+
+func TestInjectAppFavicon_RespectsImageCSP(t *testing.T) {
+	resp := htmlResponse("demo", testShell)
+	resp.Header.Set("Content-Security-Policy", "default-src 'none'; img-src data:")
+	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") })(resp); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	if got := readBody(t, resp); got != testShell {
+		t.Fatalf("favicon was injected through a CSP that blocks same-origin images: %s", got)
+	}
+}
+
+func TestCSPAllowsSelfImage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy string
+		want   bool
+	}{
+		{name: "no policy", want: true},
+		{name: "self in default", policy: "default-src 'self'", want: true},
+		{name: "img overrides denied default", policy: "default-src 'none'; img-src 'self'", want: true},
+		{name: "img overrides allowed default", policy: "default-src 'self'; img-src data:", want: false},
+		{name: "denied default", policy: "default-src 'none'", want: false},
+		{name: "unrelated directive", policy: "script-src 'none'", want: true},
+		{name: "wildcard images", policy: "img-src *", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cspAllowsSelfImage(tc.policy); got != tc.want {
+				t.Fatalf("cspAllowsSelfImage(%q) = %v, want %v", tc.policy, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -599,6 +660,7 @@ func TestRelaxEncodingForInjection(t *testing.T) {
 	}{
 		{"status overlay alone", func(p *Proxy) { p.SetStatusOverlay(true) }},
 		{"app switcher alone", func(p *Proxy) { p.SetAppNav(true, "https://hub.example.com/") }},
+		{"app favicon alone", func(p *Proxy) { p.SetAppFavicon(true) }},
 	} {
 		t.Run(tc.name+" clears it for page loads only", func(t *testing.T) {
 			p := New()

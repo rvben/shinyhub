@@ -8,6 +8,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/favicon"
 )
 
 type store interface {
@@ -246,10 +247,14 @@ func wantsHTML(r *http.Request) bool {
 // The button label tracks the same distinction: "Log in" for 401,
 // "Sign in as a different user" for 403.
 func renderAccessDeniedPage(status int, headline, nextURL string) []byte {
+	var page []byte
 	if status == http.StatusForbidden {
-		return renderHandoffPage(headline, nextURL)
+		page = renderHandoffPage(headline, nextURL)
+	} else {
+		page = renderLoginRedirectPage(headline, nextURL)
 	}
-	return renderLoginRedirectPage(headline, nextURL)
+	page, _ = favicon.Ensure(page, favicon.PlatformURL)
+	return page
 }
 
 func renderLoginRedirectPage(headline, nextURL string) []byte {

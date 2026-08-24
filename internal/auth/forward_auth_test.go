@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/favicon"
 )
 
 // fakeUserStore implements ForwardAuthUserStore for tests.
@@ -859,6 +861,9 @@ func TestForwardAuth_ProxyCredentialFailure_BrowserGetsDeploymentPage(t *testing
 			if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "style-src 'sha256-") || !strings.Contains(csp, "default-src 'none'") {
 				t.Fatalf("Content-Security-Policy = %q, want a locked-down inline-style hash", csp)
 			}
+			if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "img-src 'self'") {
+				t.Fatalf("Content-Security-Policy = %q, want the same-origin favicon allowance", csp)
+			}
 			body := rec.Body.String()
 			for _, want := range []string{
 				"Reverse proxy setup incomplete",
@@ -873,6 +878,9 @@ func TestForwardAuth_ProxyCredentialFailure_BrowserGetsDeploymentPage(t *testing
 			}
 			if strings.Contains(body, cfg.SharedSecret) {
 				t.Fatal("deployment page leaked the configured proxy secret")
+			}
+			if !strings.Contains(body, `rel="icon" href="/app/.shinyhub/favicon.ico"`) {
+				t.Fatal("deployment page has no resilient platform favicon")
 			}
 		})
 	}
@@ -914,6 +922,29 @@ func TestForwardAuth_ProxyCredentialFailure_APIResponseIsMachineReadable(t *test
 	}
 	if strings.Contains(rec.Body.String(), cfg.SharedSecret) {
 		t.Fatal("API response leaked the configured proxy secret")
+	}
+}
+
+func TestForwardAuth_ProxyCredentialFailure_DoesNotBlockPublicFavicon(t *testing.T) {
+	cfg := ForwardAuthConfig{
+		Enabled:      true,
+		UserHeader:   "X-Forwarded-User",
+		SharedSecret: "01234567890123456789012345678901",
+		SecretHeader: "X-ShinyHub-Forward-Auth-Secret",
+		DefaultRole:  "developer",
+	}
+	trusted := []*net.IPNet{mustCIDR(t, "127.0.0.0/8")}
+	next := &reachedHandler{}
+	mw := ForwardAuthMiddleware(newFakeStore(), cfg, trusted)(next)
+	req := httptest.NewRequest(http.MethodGet, favicon.PlatformURL, nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set(cfg.UserHeader, "alice")
+	rec := httptest.NewRecorder()
+
+	mw.ServeHTTP(rec, req)
+
+	if !next.called || rec.Code != http.StatusOK {
+		t.Fatalf("favicon was blocked by the broken credential: called=%v status=%d", next.called, rec.Code)
 	}
 }
 

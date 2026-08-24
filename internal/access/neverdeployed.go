@@ -8,6 +8,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/favicon"
 	"github.com/rvben/shinyhub/internal/proxytrust"
 )
 
@@ -79,6 +80,7 @@ func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked au
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusOK)
 			page := []byte(renderNeverDeployedPage(app, user, manager, requestOrigin(r, trustedProxyNets)))
+			page, _ = favicon.Ensure(page, favicon.AppURL(slug))
 			_, _ = w.Write(cfg.withAppNav(page, slug))
 		})
 	}

@@ -106,7 +106,7 @@ func TestAppOriginBoundaryHidesControlPlaneRoutes(t *testing.T) {
 			t.Errorf("%s status = %d, want 404", path, rec.Code)
 		}
 	}
-	for _, path := range []string{"/app/sales/", "/healthz", "/readyz"} {
+	for _, path := range []string{"/app/sales/", "/healthz", "/readyz", "/favicon.ico"} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "https://apps.example.com"+path, nil))
 		if rec.Code != http.StatusNoContent {

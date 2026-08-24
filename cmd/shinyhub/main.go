@@ -47,6 +47,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fargate"
+	"github.com/rvben/shinyhub/internal/favicon"
 	"github.com/rvben/shinyhub/internal/history"
 	"github.com/rvben/shinyhub/internal/identity"
 	"github.com/rvben/shinyhub/internal/jobs"
@@ -1216,6 +1217,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Give the visitor a way out of the app they opened. Without it an app page
 	// is a dead end: it fills the tab and links nowhere else in the fleet.
 	prx.SetAppNav(cfg.Server.AppNavEnabled(), appNavHomeURL(cfg))
+	// Give every app a stable tab identity without overriding a favicon the app
+	// authored itself. The proxy only injects the fallback into HTML pages that
+	// do not already declare rel=icon.
+	prx.SetAppFavicon(true)
 	// Identity forwarding: the proxy injects the authenticated user's
 	// identity headers + per-app signed token. The provider owns the groups
 	// TTL cache and minting; the proxy holds no secret and no store.
@@ -2157,6 +2162,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		appHandler = appOriginDispatch(parsedAppOrigin, cfg.TrustedProxyNets, store, cfg.Auth.Secret, controlAppHandler, appHandler)
 	}
 	mux.Handle("/app/", appHandler)
+	// The per-app favicon is access-controlled exactly like the app. Register it
+	// as a more-specific pattern than /app/ so it never reaches the app backend.
+	platformFavicon := ui.FaviconHandler(cfg.Branding)
+	appIconHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(
+		appFaviconHandler(store, platformFavicon),
+	)
+	mux.Handle("GET /app/{slug}"+favicon.AppSuffix, appIconHandler)
 	// The switcher's own data, served from under /app/ because that is the only
 	// prefix the isolated app origin admits (appOriginBoundary) - a fleet-wide
 	// path would be unreachable from the very pages that need it. Registered as
@@ -2446,6 +2458,7 @@ func appNavHomeURL(cfg *config.Config) string {
 //
 // Routes registered:
 //   - /apps/, /users, /audit-log, /login  - SPA shell (branded or stock)
+//   - /favicon.ico, app-origin favicon    - effective platform tab identity
 //   - /branding/                          - operator asset files (only when assets present)
 //   - /.shinyhub/branding.json            - public branding metadata
 //   - /.shinyhub/apps.json                - app list (optional auth)
@@ -2460,6 +2473,13 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 	// or the branded render when active (re-reading index.html per request so
 	// dev live-reload still works).
 	pub := ui.PublicBranding(cfg.Branding, resolved)
+	// One canonical handler backs explicit links on standalone ShinyHub pages
+	// and the browser's implicit /favicon.ico request for custom landing pages.
+	// PlatformURL stays under /app/ so it is also reachable on an isolated app
+	// origin, whose virtual-host boundary rejects every other frontend path.
+	platformFavicon := ui.FaviconHandler(cfg.Branding)
+	mux.Handle("GET "+favicon.RootURL, platformFavicon)
+	mux.Handle("GET "+favicon.PlatformURL, platformFavicon)
 	serveShell := func(w http.ResponseWriter, r *http.Request) {
 		// An authenticated request (the request that fetches the shell is itself
 		// behind forward auth or a session) gets the shell pre-marked "in" so the

@@ -107,6 +107,29 @@ func TestBrandingRoutes(t *testing.T) {
 		}
 	})
 
+	t.Run("favicon_routes_serve_stock_identity", func(t *testing.T) {
+		mux, _ := buildBrandingMux(t, config.BrandingConfig{})
+		for _, route := range []string{"/favicon.ico", "/app/.shinyhub/favicon.ico"} {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, route, nil))
+			if rr.Code != http.StatusOK {
+				t.Fatalf("GET %s status = %d, want 200", route, rr.Code)
+			}
+			if !strings.HasPrefix(rr.Header().Get("Content-Type"), "image/") || rr.Body.Len() == 0 {
+				t.Fatalf("GET %s did not serve an image (%q, %d bytes)", route, rr.Header().Get("Content-Type"), rr.Body.Len())
+			}
+		}
+	})
+
+	t.Run("white_label_without_favicon_does_not_leak_stock_identity", func(t *testing.T) {
+		mux, _ := buildBrandingMux(t, config.BrandingConfig{SiteTitle: "Acme Analytics"})
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("GET /favicon.ico status = %d, want 404", rr.Code)
+		}
+	})
+
 	t.Run("branding_active_no_landing_root_injects_branding", func(t *testing.T) {
 		branding := config.BrandingConfig{SiteTitle: "AcmeCorp"}
 		mux, _ := buildBrandingMux(t, branding)
@@ -354,7 +377,6 @@ func TestBrandingRoutes(t *testing.T) {
 		paths := []string{
 			"/nope",
 			"/apps/",
-			"/favicon.ico",
 		}
 		for _, path := range paths {
 			t.Run(path, func(t *testing.T) {

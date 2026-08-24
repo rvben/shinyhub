@@ -10,6 +10,7 @@ import (
 	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/favicon"
 )
 
 const navHome = "https://hub.example.com/"
@@ -65,6 +66,9 @@ func TestAccessDenied_Unauthorized_CarriesTheSwitcher(t *testing.T) {
 		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 	assertHasSwitcher(t, rec.Body.String())
+	if !strings.Contains(rec.Body.String(), favicon.Link(favicon.PlatformURL)) {
+		t.Fatal("access-denied page does not carry the privacy-safe platform favicon")
+	}
 }
 
 func TestAccessDenied_Forbidden_CarriesTheSwitcher(t *testing.T) {
@@ -190,6 +194,9 @@ func TestNeverDeployed_CarriesTheSwitcher(t *testing.T) {
 		t.Fatalf("this is not the non-manager never-deployed page:\n%s", body)
 	}
 	assertHasSwitcher(t, body)
+	if !strings.Contains(body, favicon.Link(favicon.AppURL("fresh"))) {
+		t.Fatal("never-deployed page does not carry its app favicon")
+	}
 }
 
 // A deployed app must reach the proxy untouched: this middleware forwards, and
