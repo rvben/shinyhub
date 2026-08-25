@@ -11,7 +11,7 @@ and dark masters.
 
 | Candidate | Shiny | Complete orbital structure | Intent |
 |---|---|---|---|
-| 01 Signal Hierarchy | Soft Starlight `#A8B4D4` | Muted Starlight `#6B7AA3` | Balanced recommended master |
+| 01 Signal Hierarchy | Starlight `#E8EEFF` | Muted Starlight `#6B7AA3` | Balanced recommended master |
 | 02 Crisp Ensemble | Starlight `#E8EEFF` | Soft Starlight `#A8B4D4` | Highest neutral contrast |
 | 03 Deep Orbit | Soft Starlight `#A8B4D4` | Strong Line `#2B3A63` | Maximum cyan-signal emphasis |
 
