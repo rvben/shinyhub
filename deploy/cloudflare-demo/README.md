@@ -42,6 +42,20 @@ npx wrangler deploy
 The smoke suite verifies the one-click viewer session as well as HTTP and
 WebSocket traffic for the bundled applications.
 
+Release deployments use the GitHub `public-demo` environment. Configure the
+Cloudflare account ID as the environment variable `CLOUDFLARE_ACCOUNT_ID` and
+the deployment token as the environment secret `CLOUDFLARE_API_TOKEN`. The
+token should use Cloudflare's **Edit Cloudflare Workers** template, restricted
+to the demo account and the `shinyhub.dev` zone. Keep these credentials at the
+environment level rather than repository-wide so only this deployment job can
+read them.
+
+Rotate the token without creating a deployment gap: create the replacement,
+update the environment secret, manually dispatch **Demo deployment** against
+`main`, wait for its smoke test to pass, and only then revoke the superseded
+token. The workflow validates the token and account scope before it starts the
+container build, so authentication failures stay fast and explicit.
+
 The Worker owns both custom domains and routes them to the named `public-demo`
 container. `standard-1` supplies 0.5 vCPU, 4 GiB memory, and 8 GB ephemeral disk;
 the ten-minute sleep timer limits idle spend.

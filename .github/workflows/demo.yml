@@ -55,11 +55,21 @@ jobs:
       - name: Test the demo configuration
         run: go test ./deploy/cloudflare-demo
 
+      - name: Verify Cloudflare deployment credentials
+        working-directory: deploy/cloudflare-demo
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN is not configured in the public-demo environment" >&2; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "CLOUDFLARE_ACCOUNT_ID is not configured in the public-demo environment" >&2; exit 1; }
+          npx wrangler whoami --account "$CLOUDFLARE_ACCOUNT_ID"
+
       - name: Deploy the demo Worker and container
         working-directory: deploy/cloudflare-demo
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: npm run deploy
 
       - name: Smoke-test the deployed release
