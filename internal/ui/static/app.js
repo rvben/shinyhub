@@ -4957,9 +4957,10 @@ document.addEventListener('DOMContentLoaded', () => {
         : (cap > 0 ? `${sessions}/${cap}` : String(sessions));
       const saturated = cap > 0 && sessions >= cap;
       // Use metricsText for honest display: PID-less replicas get "n/a".
-      const { cpuText, ramText, note } = metricsText(r);
+      const { cpuText, ramText, physicalText, attributionNote, note } = metricsText(r);
       const cpuDisplay = (status === 'running') ? cpuText : '—';
       const ramDisplay = (status === 'running') ? ramText : '—';
+      const physicalDisplay = (status === 'running') ? physicalText : '—';
       // Escape the backend label: r.tier/r.provider come from operator YAML config
       // and could contain HTML metacharacters if misconfigured.
       const backend = escapeHtml(backendLabel(r));
@@ -4980,6 +4981,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <span class="replica-measure replica-sessions${saturated ? ' replica-sessions-saturated' : ''}" title="Active sessions${cap > 0 ? ' / cap' : ''}"><span class="replica-measure-label">Sessions</span><span class="replica-measure-value">${sessionsText}</span></span>
           <span class="replica-measure replica-cpu"><span class="replica-measure-label">CPU</span><span class="replica-measure-value">${cpuDisplay}</span></span>
           <span class="replica-measure replica-ram"${note ? ` title="${note}"` : ''}><span class="replica-measure-label">Memory</span><span class="replica-measure-value">${ramDisplay}</span></span>
+          <span class="replica-measure replica-physical"${attributionNote ? ` title="${escapeHtml(attributionNote)}"` : ''}><span class="replica-measure-label">PSS</span><span class="replica-measure-value">${physicalDisplay}</span></span>
         </div>
       `;
       listEl.appendChild(li);

@@ -56,16 +56,20 @@ type topMetrics struct {
 // computed for it yet", and MetricsAvailable says whether the sample succeeded
 // at all - a replica on a tier with no PID reports neither CPU nor memory.
 type topReplica struct {
-	Index            int      `json:"index"`
-	Status           string   `json:"status"`
-	PID              *int     `json:"pid"`
-	CPUPercent       *float64 `json:"cpu_percent"`
-	RSSBytes         int64    `json:"rss_bytes"`
-	Sessions         int64    `json:"sessions"`
-	Tier             string   `json:"tier"`
-	Provider         string   `json:"provider"`
-	Reason           string   `json:"reason"`
-	MetricsAvailable bool     `json:"metrics_available"`
+	Index                    int      `json:"index"`
+	Status                   string   `json:"status"`
+	PID                      *int     `json:"pid"`
+	CPUPercent               *float64 `json:"cpu_percent"`
+	RSSBytes                 int64    `json:"rss_bytes"`
+	PSSBytes                 *int64   `json:"pss_bytes"`
+	USSBytes                 *int64   `json:"uss_bytes"`
+	SwapPSSBytes             *int64   `json:"swap_pss_bytes"`
+	MemoryAttributionPartial bool     `json:"memory_attribution_partial"`
+	Sessions                 int64    `json:"sessions"`
+	Tier                     string   `json:"tier"`
+	Provider                 string   `json:"provider"`
+	Reason                   string   `json:"reason"`
+	MetricsAvailable         bool     `json:"metrics_available"`
 }
 
 // topRow is one app's line in the view.
@@ -87,11 +91,17 @@ type topRow struct {
 	Replicas           int
 	MetricsUnavailable bool
 
-	CPUPercent *float64
-	CPUPartial bool
-	RSSBytes   *int64
-	RSSPartial bool
-	Sessions   *int64
+	CPUPercent     *float64
+	CPUPartial     bool
+	RSSBytes       *int64
+	RSSPartial     bool
+	PSSBytes       *int64
+	PSSPartial     bool
+	USSBytes       *int64
+	USSPartial     bool
+	SwapPSSBytes   *int64
+	SwapPSSPartial bool
+	Sessions       *int64
 	// Ceiling is the app's admission ceiling: how many sessions it will accept
 	// before rejecting with 503. 0 means uncapped.
 	Ceiling int
@@ -121,12 +131,14 @@ func topRowFor(slug string, m topMetrics) topRow {
 	}
 
 	var (
-		cpu       float64
-		rss       int64
-		sessions  int64
-		cpuKnown  bool
-		rssKnown  bool
-		sessKnown bool
+		cpu                              float64
+		rss                              int64
+		sessions                         int64
+		cpuKnown                         bool
+		rssKnown                         bool
+		sessKnown                        bool
+		pss, uss, swapPSS                int64
+		pssKnown, ussKnown, swapPSSKnown bool
 	)
 	for _, r := range m.Replicas {
 		// A negative session count is the proxy's "this slot is empty", not a
@@ -141,10 +153,32 @@ func topRowFor(slug string, m topMetrics) topRow {
 		row.Running++
 		if !r.MetricsAvailable {
 			row.CPUPartial, row.RSSPartial = true, true
+			row.PSSPartial, row.USSPartial, row.SwapPSSPartial = true, true, true
 			continue
 		}
 		rss += r.RSSBytes
 		rssKnown = true
+		if r.PSSBytes != nil {
+			pss += *r.PSSBytes
+			pssKnown = true
+		} else {
+			row.PSSPartial = true
+		}
+		if r.USSBytes != nil {
+			uss += *r.USSBytes
+			ussKnown = true
+		} else {
+			row.USSPartial = true
+		}
+		if r.SwapPSSBytes != nil {
+			swapPSS += *r.SwapPSSBytes
+			swapPSSKnown = true
+		} else {
+			row.SwapPSSPartial = true
+		}
+		if r.MemoryAttributionPartial {
+			row.PSSPartial, row.USSPartial, row.SwapPSSPartial = true, true, true
+		}
 		if r.CPUPercent == nil {
 			row.CPUPartial = true
 			continue
@@ -161,6 +195,15 @@ func topRowFor(slug string, m topMetrics) topRow {
 	}
 	if rssKnown {
 		row.RSSBytes = &rss
+	}
+	if pssKnown {
+		row.PSSBytes = &pss
+	}
+	if ussKnown {
+		row.USSBytes = &uss
+	}
+	if swapPSSKnown {
+		row.SwapPSSBytes = &swapPSS
 	}
 	if sessKnown {
 		row.Sessions = &sessions
@@ -260,18 +303,26 @@ type topTotals struct {
 	CPUPartial      bool
 	RSSBytes        *int64
 	RSSPartial      bool
+	PSSBytes        *int64
+	PSSPartial      bool
+	USSBytes        *int64
+	USSPartial      bool
+	SwapPSSBytes    *int64
+	SwapPSSPartial  bool
 	Sessions        *int64
 }
 
 func topTotalsFor(rows []topRow) topTotals {
 	t := topTotals{Apps: len(rows)}
 	var (
-		cpu       float64
-		rss       int64
-		sessions  int64
-		cpuKnown  bool
-		rssKnown  bool
-		sessKnown bool
+		cpu                              float64
+		rss                              int64
+		sessions                         int64
+		cpuKnown                         bool
+		rssKnown                         bool
+		sessKnown                        bool
+		pss, uss, swapPSS                int64
+		pssKnown, ussKnown, swapPSSKnown bool
 	)
 	for _, r := range rows {
 		t.Replicas += r.Replicas
@@ -287,6 +338,18 @@ func topTotalsFor(rows []topRow) topTotals {
 			rss += *r.RSSBytes
 			rssKnown = true
 		}
+		if r.PSSBytes != nil {
+			pss += *r.PSSBytes
+			pssKnown = true
+		}
+		if r.USSBytes != nil {
+			uss += *r.USSBytes
+			ussKnown = true
+		}
+		if r.SwapPSSBytes != nil {
+			swapPSS += *r.SwapPSSBytes
+			swapPSSKnown = true
+		}
 		if r.Sessions != nil {
 			sessions += *r.Sessions
 			sessKnown = true
@@ -299,12 +362,30 @@ func topTotalsFor(rows []topRow) topTotals {
 		if r.RSSPartial || (r.Running > 0 && r.RSSBytes == nil) {
 			t.RSSPartial = true
 		}
+		if r.PSSPartial || (r.Running > 0 && r.PSSBytes == nil) {
+			t.PSSPartial = true
+		}
+		if r.USSPartial || (r.Running > 0 && r.USSBytes == nil) {
+			t.USSPartial = true
+		}
+		if r.SwapPSSPartial || (r.Running > 0 && r.SwapPSSBytes == nil) {
+			t.SwapPSSPartial = true
+		}
 	}
 	if cpuKnown {
 		t.CPUPercent = &cpu
 	}
 	if rssKnown {
 		t.RSSBytes = &rss
+	}
+	if pssKnown {
+		t.PSSBytes = &pss
+	}
+	if ussKnown {
+		t.USSBytes = &uss
+	}
+	if swapPSSKnown {
+		t.SwapPSSBytes = &swapPSS
 	}
 	if sessKnown {
 		t.Sessions = &sessions
@@ -893,8 +974,8 @@ func topInspector(s styler, r topRow) []string {
 	if len(r.ReplicaRows) == 0 {
 		return append(lines, s.dim("  No replicas reported."))
 	}
-	t := newTable("#", "STATUS", "PID", "CPU%", "RSS", "SESS", "PLACEMENT").
-		alignRight(0, 2, 3, 4, 5).indent(2)
+	t := newTable("#", "STATUS", "PID", "CPU%", "RSS", "PSS", "PRIVATE", "SWAP PSS", "SESS", "PLACEMENT").
+		alignRight(0, 2, 3, 4, 5, 6, 7, 8).indent(2)
 	for _, replica := range r.ReplicaRows {
 		pid := "-"
 		if replica.PID != nil {
@@ -906,7 +987,9 @@ func topInspector(s styler, r topRow) []string {
 		}
 		placement := strings.Trim(replica.Tier+"/"+replica.Provider, "/")
 		t.row(txt(replica.Index), statusTxt(replica.Status), dimTxt(pid), txt(cpu),
-			txt(humanBytes(replica.RSSBytes)), txt(replica.Sessions), dimTxt(placement)).
+			txt(humanBytes(replica.RSSBytes)), txt(optionalBytes(replica.PSSBytes)),
+			txt(optionalBytes(replica.USSBytes)), txt(optionalBytes(replica.SwapPSSBytes)),
+			txt(replica.Sessions), dimTxt(placement)).
 			note(replica.Reason)
 	}
 	var buf bytes.Buffer
@@ -1012,19 +1095,25 @@ func topItems(rows []topRow) []map[string]any {
 	items := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		items = append(items, map[string]any{
-			"slug":                r.Slug,
-			"status":              r.Status,
-			"replicas_running":    r.Running,
-			"workers_running":     r.Workers,
-			"replicas_desired":    r.Replicas,
-			"replicas_total":      r.Replicas,
-			"metrics_unavailable": r.MetricsUnavailable,
-			"cpu_percent":         r.CPUPercent,
-			"cpu_percent_partial": r.CPUPartial,
-			"rss_bytes":           r.RSSBytes,
-			"rss_bytes_partial":   r.RSSPartial,
-			"sessions":            r.Sessions,
-			"sessions_ceiling":    r.Ceiling,
+			"slug":                   r.Slug,
+			"status":                 r.Status,
+			"replicas_running":       r.Running,
+			"workers_running":        r.Workers,
+			"replicas_desired":       r.Replicas,
+			"replicas_total":         r.Replicas,
+			"metrics_unavailable":    r.MetricsUnavailable,
+			"cpu_percent":            r.CPUPercent,
+			"cpu_percent_partial":    r.CPUPartial,
+			"rss_bytes":              r.RSSBytes,
+			"rss_bytes_partial":      r.RSSPartial,
+			"pss_bytes":              r.PSSBytes,
+			"pss_bytes_partial":      r.PSSPartial,
+			"uss_bytes":              r.USSBytes,
+			"uss_bytes_partial":      r.USSPartial,
+			"swap_pss_bytes":         r.SwapPSSBytes,
+			"swap_pss_bytes_partial": r.SwapPSSPartial,
+			"sessions":               r.Sessions,
+			"sessions_ceiling":       r.Ceiling,
 		})
 	}
 	return items
@@ -1033,12 +1122,18 @@ func topItems(rows []topRow) []map[string]any {
 // topTotalsMap is the envelope-level summary of the same figures.
 func topTotalsMap(t topTotals) map[string]any {
 	return map[string]any{
-		"apps":                t.Apps,
-		"running":             t.Running,
-		"cpu_percent":         t.CPUPercent,
-		"cpu_percent_partial": t.CPUPartial,
-		"rss_bytes":           t.RSSBytes,
-		"rss_bytes_partial":   t.RSSPartial,
-		"sessions":            t.Sessions,
+		"apps":                   t.Apps,
+		"running":                t.Running,
+		"cpu_percent":            t.CPUPercent,
+		"cpu_percent_partial":    t.CPUPartial,
+		"rss_bytes":              t.RSSBytes,
+		"rss_bytes_partial":      t.RSSPartial,
+		"pss_bytes":              t.PSSBytes,
+		"pss_bytes_partial":      t.PSSPartial,
+		"uss_bytes":              t.USSBytes,
+		"uss_bytes_partial":      t.USSPartial,
+		"swap_pss_bytes":         t.SwapPSSBytes,
+		"swap_pss_bytes_partial": t.SwapPSSPartial,
+		"sessions":               t.Sessions,
 	}
 }

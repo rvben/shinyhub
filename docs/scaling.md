@@ -75,9 +75,12 @@ Scale **horizontally** (raise `replicas`) when:
 - Each replica's memory footprint × N still fits within your host
   budget.
 
-Each replica is an independent process with its own memory, Python
-interpreter, and warm state. Expect memory to scale linearly: 3
-replicas use ~3× the RSS of one.
+Each replica is an independent process with its own Python interpreter and warm
+state. Summed RSS generally scales close to linearly, but RSS double-counts
+shared pages. On native Linux, `shinyhub apps metrics` and the replica inspector
+also show PSS (shared pages charged proportionally), private memory (USS), and
+swap PSS. Sum PSS when attributing physical memory to replicas; use RSS as the
+conservative per-process working-set signal. See [Memory measurement](metrics.md#memory-measurement).
 
 In measured terms, adding replicas at the saturation point is a
 near-linear throughput win with no tail cost. One run at
@@ -432,6 +435,12 @@ enforced (the app runs uncapped) and a warning is logged; the Configuration
 tab shows whether enforcement is active. Each controller is independent: CPU
 enforcement needs `Delegate=cpu`, memory works with `Delegate=memory` alone, and
 the fork-bomb cap needs `Delegate=pids`.
+
+The kernel enforces `memory.max` against cgroup memory, not PSS. ShinyHub's
+elastic-worker admission floor likewise uses host `MemAvailable`, not summed
+per-replica PSS. This is intentional: PSS is an attribution metric whose value
+changes as sharers enter and leave; it is useful for capacity analysis but not
+a stable safety boundary.
 
 ### Native mode under systemd requires `Delegate=`
 

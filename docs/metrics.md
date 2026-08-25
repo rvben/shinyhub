@@ -10,6 +10,31 @@ enabled - records control-plane spans correlated with that access log. This is
 separate from the per-app CPU/RAM sampling shown in the dashboard and from the
 per-app proxy trace buffer documented in [tracing.md](tracing.md).
 
+## Memory measurement
+
+The live app metrics API always reports RSS for a PID-backed replica. Native
+Linux replicas also report three nullable attribution counters read from
+`/proc/<pid>/smaps_rollup` and summed across the replica's process group:
+
+| Field | Meaning | Operator use |
+|---|---|---|
+| `rss_bytes` | Resident pages mapped by the process; shared pages appear in every sharer's RSS. | Working-set signal and continuity with existing dashboards. |
+| `pss_bytes` | Resident shared pages divided proportionally among their current sharers. | Additive physical-memory attribution and pre-fork evaluation. |
+| `uss_bytes` | Private clean, dirty, and private huge pages. | Memory that should be reclaimed when the replica exits. |
+| `swap_pss_bytes` | Swapped pages divided proportionally among sharers. | Detect attributed swap use without double-counting. |
+
+The fields are `null` on unsupported hosts and remote/PID-less backends. If a
+process exits or its rollup cannot be read while the process group is sampled,
+`memory_attribution_partial` is true and the non-null counters are lower bounds.
+`shinyhub top --json` sums the attribution fields across running replicas and
+preserves the same `*_partial` distinction. The dashboard keeps RSS labelled as
+Memory and shows PSS separately; the CLI replica inspector exposes all four.
+
+PSS is for attribution, not enforcement or admission. Per-replica limits remain
+cgroup/container limits, and the elastic-worker safety floor remains host
+`MemAvailable`. A PSS value can move merely because another sharer starts or
+stops, so using it as a hard cap would make the cap non-local and unstable.
+
 ## The /metrics endpoint
 
 Metrics are opt-in and served on their own listener, separate from the main

@@ -69,6 +69,9 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 			PID              *int     `json:"pid"`
 			CPUPercent       *float64 `json:"cpu_percent"`
 			RSSBytes         int64    `json:"rss_bytes"`
+			PSSBytes         *int64   `json:"pss_bytes"`
+			USSBytes         *int64   `json:"uss_bytes"`
+			SwapPSSBytes     *int64   `json:"swap_pss_bytes"`
 			Sessions         int      `json:"sessions"`
 			Tier             string   `json:"tier"`
 			Provider         string   `json:"provider"`
@@ -97,8 +100,8 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 		fmt.Fprintln(w, "No running replicas.")
 		return nil
 	}
-	t := newTable("REPLICA", "STATUS", "PID", "CPU%", "RSS", "SESSIONS", "PLACEMENT").
-		alignRight(0, 2, 3, 4, 5)
+	t := newTable("REPLICA", "STATUS", "PID", "CPU%", "RSS", "PSS", "PRIVATE", "SWAP PSS", "SESSIONS", "PLACEMENT").
+		alignRight(0, 2, 3, 4, 5, 6, 7, 8)
 	for _, r := range m.Replicas {
 		pid := "-"
 		if r.PID != nil {
@@ -119,8 +122,17 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 			placement += r.Provider
 		}
 		t.row(txt(r.Index), statusTxt(r.Status), dimTxt(pid), txt(cpu),
-			txt(humanBytes(r.RSSBytes)), txt(r.Sessions), dimTxt(placement))
+			txt(humanBytes(r.RSSBytes)), txt(optionalBytes(r.PSSBytes)),
+			txt(optionalBytes(r.USSBytes)), txt(optionalBytes(r.SwapPSSBytes)),
+			txt(r.Sessions), dimTxt(placement))
 	}
 	t.render(w)
 	return nil
+}
+
+func optionalBytes(v *int64) string {
+	if v == nil {
+		return "-"
+	}
+	return humanBytes(*v)
 }

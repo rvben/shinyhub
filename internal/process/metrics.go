@@ -20,11 +20,18 @@ import (
 // and reporting the single measurement as 0 would be indistinguishable from an
 // app that is genuinely idle.
 //
-// Both figures cover the replica's whole process group, not just the PID the
-// runtime recorded. See GopsutilSampler.
+// All figures cover the replica's whole process group, not just the PID the
+// runtime recorded. See GopsutilSampler. PSS, USS, and swap PSS are optional:
+// Linux native processes can expose them through smaps_rollup, while remote
+// runtimes and other operating systems leave them nil. AttributionPartial is
+// true when at least one process-group member could not be attributed.
 type Stats struct {
-	CPUPercent *float64
-	RSSBytes   int64
+	CPUPercent         *float64
+	RSSBytes           int64
+	PSSBytes           *int64
+	USSBytes           *int64
+	SwapPSSBytes       *int64
+	AttributionPartial bool
 }
 
 // Sampler reads CPU and memory stats for a running app process.
@@ -187,9 +194,14 @@ func (g *GopsutilSampler) Sample(handle RunHandle) (Stats, error) {
 	seen := make(map[int32]struct{}, len(live))
 
 	var (
-		cpu        float64
-		rss        uint64
-		rootPrimed bool
+		cpu                float64
+		rss                uint64
+		pss                uint64
+		uss                uint64
+		swapPSS            uint64
+		attributedMembers  int
+		attributionPartial bool
+		rootPrimed         bool
 	)
 	for _, pid := range live {
 		seen[pid] = struct{}{}
@@ -225,6 +237,17 @@ func (g *GopsutilSampler) Sample(handle RunHandle) (Stats, error) {
 		}
 
 		rss += mem.RSS
+		if attribution, err := readMemoryAttribution(pid); err == nil {
+			pss += attribution.PSS
+			uss += attribution.USS
+			swapPSS += attribution.SwapPSS
+			attributedMembers++
+		} else {
+			// smaps_rollup is supplementary observability. Permissions, kernel
+			// support, or a process exiting mid-sample must not make the existing
+			// CPU/RSS sample fail.
+			attributionPartial = true
+		}
 		if primed {
 			cpu += pct
 			if pid == root {
@@ -246,6 +269,15 @@ func (g *GopsutilSampler) Sample(handle RunHandle) (Stats, error) {
 		return Stats{}, fmt.Errorf("rss %d overflows int64", rss)
 	}
 	stats := Stats{RSSBytes: int64(rss)}
+	if attributedMembers > 0 {
+		if pss > math.MaxInt64 || uss > math.MaxInt64 || swapPSS > math.MaxInt64 {
+			return Stats{}, fmt.Errorf("memory attribution overflows int64")
+		}
+		stats.PSSBytes = Int64(int64(pss))
+		stats.USSBytes = Int64(int64(uss))
+		stats.SwapPSSBytes = Int64(int64(swapPSS))
+		stats.AttributionPartial = attributionPartial
+	}
 	if rootPrimed {
 		stats.CPUPercent = &cpu
 	}
@@ -293,3 +325,7 @@ func (r *RuntimeSampler) Sample(handle RunHandle) (Stats, error) {
 // whose CPU rate is known. A runtime that cannot yet compute a rate returns nil
 // instead.
 func Float(v float64) *float64 { return &v }
+
+// Int64 returns a pointer to v. It keeps optional byte counters readable at
+// API and test call sites without assigning through temporary variables.
+func Int64(v int64) *int64 { return &v }

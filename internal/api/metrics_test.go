@@ -160,7 +160,11 @@ func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 	// Inject two running replicas and a fake sampler with known stats.
 	mgr.ForceEntry("myapp", process.ProcessInfo{Slug: "myapp", Index: 0, PID: 1001, Status: process.StatusRunning})
 	mgr.ForceEntry("myapp", process.ProcessInfo{Slug: "myapp", Index: 1, PID: 1002, Status: process.StatusRunning})
-	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{CPUPercent: process.Float(3.25), RSSBytes: 1 << 21}})
+	srv.SetSampler(fakeMetricsSampler{stats: process.Stats{
+		CPUPercent: process.Float(3.25), RSSBytes: 1 << 21,
+		PSSBytes: process.Int64(1500 << 10), USSBytes: process.Int64(1200 << 10),
+		SwapPSSBytes: process.Int64(8 << 10), AttributionPartial: true,
+	}})
 
 	// Register the proxy pool with two replicas and a known cap. The
 	// backend URLs are placeholders — the metrics endpoint only reads
@@ -189,12 +193,17 @@ func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 		PID         int     `json:"pid"`
 		CPUPercent  float64 `json:"cpu_percent"`
 		RSSBytes    int64   `json:"rss_bytes"`
+		PSSBytes    *int64  `json:"pss_bytes"`
 		Replicas    []struct {
 			Index                    int     `json:"index"`
 			Status                   string  `json:"status"`
 			PID                      int     `json:"pid"`
 			CPUPercent               float64 `json:"cpu_percent"`
 			RSSBytes                 int64   `json:"rss_bytes"`
+			PSSBytes                 *int64  `json:"pss_bytes"`
+			USSBytes                 *int64  `json:"uss_bytes"`
+			SwapPSSBytes             *int64  `json:"swap_pss_bytes"`
+			AttributionPartial       bool    `json:"memory_attribution_partial"`
 			Sessions                 int64   `json:"sessions"`
 			EffectiveMemoryLimitMB   int     `json:"effective_memory_limit_mb"`
 			EffectiveCPUQuotaPercent int     `json:"effective_cpu_quota_percent"`
@@ -228,6 +237,12 @@ func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 		if rm.RSSBytes != 1<<21 {
 			t.Errorf("replica[%d]: expected rss_bytes=%d, got %d", i, 1<<21, rm.RSSBytes)
 		}
+		if rm.PSSBytes == nil || *rm.PSSBytes != 1500<<10 || rm.USSBytes == nil || *rm.USSBytes != 1200<<10 || rm.SwapPSSBytes == nil || *rm.SwapPSSBytes != 8<<10 {
+			t.Errorf("replica[%d]: unexpected memory attribution: pss=%v uss=%v swap=%v", i, rm.PSSBytes, rm.USSBytes, rm.SwapPSSBytes)
+		}
+		if !rm.AttributionPartial {
+			t.Errorf("replica[%d]: expected partial attribution", i)
+		}
 		if rm.Sessions != 0 {
 			t.Errorf("replica[%d]: expected sessions=0 (no in-flight), got %d", i, rm.Sessions)
 		}
@@ -252,6 +267,9 @@ func TestGetMetrics_FansOutAcrossReplicas(t *testing.T) {
 	}
 	if resp.RSSBytes != 1<<21 {
 		t.Errorf("expected legacy rss_bytes=%d, got %d", 1<<21, resp.RSSBytes)
+	}
+	if resp.PSSBytes == nil || *resp.PSSBytes != 1500<<10 {
+		t.Errorf("expected legacy pss_bytes=%d, got %v", 1500<<10, resp.PSSBytes)
 	}
 }
 

@@ -54,9 +54,12 @@ test('metricsText returns n/a + note when metrics_available is false', () => {
 });
 
 test('metricsText returns formatted numbers when metrics_available is true', () => {
-  const got = metricsText({ metrics_available: true, cpu_percent: 1.5, rss_bytes: 104857600 });
+  const got = metricsText({ metrics_available: true, cpu_percent: 1.5, rss_bytes: 104857600,
+    pss_bytes: 80 << 20, uss_bytes: 64 << 20, swap_pss_bytes: 0 });
   assert.equal(got.cpuText, '1.5%');
   assert.equal(got.ramText, '100 MB');
+  assert.equal(got.physicalText, '80 MB');
+  assert.match(got.attributionNote, /PSS 80 MB · private 64 MB · swap PSS 0 KB/);
   assert.equal(got.note, null);
 });
 

@@ -177,6 +177,23 @@ approved mirror; a host with no suitable interpreter and no reachable source
 still cannot build. The Docker and Fargate runtimes are unaffected - they bake
 the interpreter into the image.
 
+### Supported interpreter builds
+
+ShinyHub's production native path supports the standard, GIL-enabled CPython
+build selected by the application's `requires-python` constraint. ShinyHub does
+not maintain a second compatibility promise for free-threaded (`cp313t`,
+`cp314t`, and later `t`-ABI) interpreters today. They are experimental: the
+control plane does not reject them, but deployment success depends on every
+binary dependency in the application publishing a compatible wheel or building
+successfully from source.
+
+This boundary is deliberately app-level. ShinyHub cannot infer thread safety
+from a successful install, and should not claim fleet support while core app
+dependencies remain unavailable. Operators evaluating a free-threaded build
+must resolve with source builds disabled first, run the application's complete
+test suite, and load-test real sessions. Standard CPython remains the supported
+default.
+
 ## Caveat: rotating `SHINYHUB_AUTH_SECRET`
 
 The encryption key is derived from `SHINYHUB_AUTH_SECRET`. Rotating that secret

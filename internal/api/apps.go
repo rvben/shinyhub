@@ -3294,6 +3294,13 @@ type replicaMetrics struct {
 	// render both as an absent key.
 	CPUPercent *float64 `json:"cpu_percent"`
 	RSSBytes   int64    `json:"rss_bytes,omitempty"`
+	// Linux native replicas additionally expose proportional set size (PSS),
+	// unique/private memory (USS), and proportionally attributed swap. These are
+	// pointers so unsupported backends remain distinguishable from a real zero.
+	PSSBytes                 *int64 `json:"pss_bytes"`
+	USSBytes                 *int64 `json:"uss_bytes"`
+	SwapPSSBytes             *int64 `json:"swap_pss_bytes"`
+	MemoryAttributionPartial bool   `json:"memory_attribution_partial"`
 	// Sessions is the proxy's best-effort live connection count for this
 	// replica. Omitted (and -1 internally) when the replica slot is empty.
 	Sessions int64  `json:"sessions"`
@@ -3369,9 +3376,13 @@ type metricsResponse struct {
 	// Legacy fields preserved so existing clients (dashboard card poller)
 	// keep working while they adopt the per-replica view. These mirror the
 	// first running replica.
-	PID        int      `json:"pid,omitempty"`
-	CPUPercent *float64 `json:"cpu_percent"`
-	RSSBytes   int64    `json:"rss_bytes,omitempty"`
+	PID                      int      `json:"pid,omitempty"`
+	CPUPercent               *float64 `json:"cpu_percent"`
+	RSSBytes                 int64    `json:"rss_bytes,omitempty"`
+	PSSBytes                 *int64   `json:"pss_bytes"`
+	USSBytes                 *int64   `json:"uss_bytes"`
+	SwapPSSBytes             *int64   `json:"swap_pss_bytes"`
+	MemoryAttributionPartial bool     `json:"memory_attribution_partial"`
 }
 
 // buildAutoscaleStatus computes the autoscale_status object from the latest
@@ -3495,6 +3506,10 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 				if stats, err := s.sampler.Sample(handle); err == nil {
 					rm.CPUPercent = stats.CPUPercent
 					rm.RSSBytes = stats.RSSBytes
+					rm.PSSBytes = stats.PSSBytes
+					rm.USSBytes = stats.USSBytes
+					rm.SwapPSSBytes = stats.SwapPSSBytes
+					rm.MemoryAttributionPartial = stats.AttributionPartial
 					// MetricsAvailable is true only when the sample succeeded for a
 					// PID-backed handle; a zero PID (Fargate/remote_docker) or a
 					// failed sample both mean live CPU/RAM are not available.
@@ -3510,6 +3525,10 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 				resp.PID = rm.PID
 				resp.CPUPercent = rm.CPUPercent
 				resp.RSSBytes = rm.RSSBytes
+				resp.PSSBytes = rm.PSSBytes
+				resp.USSBytes = rm.USSBytes
+				resp.SwapPSSBytes = rm.SwapPSSBytes
+				resp.MemoryAttributionPartial = rm.MemoryAttributionPartial
 			}
 		}
 		resp.Replicas = append(resp.Replicas, rm)

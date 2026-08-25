@@ -51,20 +51,20 @@ const METRICS_NA_NOTE =
  *                                  advertise unavailability for a replica that
  *                                  may turn out to be PID-backed.
  *
- * @param {{ metrics_available?: boolean, cpu_percent?: number, rss_bytes?: number }} replica
- * @returns {{ cpuText: string, ramText: string, note: string|null }}
+ * @param {{ metrics_available?: boolean, cpu_percent?: number, rss_bytes?: number, pss_bytes?: number|null, uss_bytes?: number|null, swap_pss_bytes?: number|null, memory_attribution_partial?: boolean }} replica
+ * @returns {{ cpuText: string, ramText: string, physicalText: string, attributionNote: string, note: string|null }}
  */
 export function metricsText(replica) {
   if (!replica) {
-    return { cpuText: 'n/a', ramText: 'n/a', note: METRICS_NA_NOTE };
+    return { cpuText: 'n/a', ramText: 'n/a', physicalText: 'n/a', attributionNote: '', note: METRICS_NA_NOTE };
   }
   // Pending / not-yet-polled: availability unknown, show neutral dashes.
   if (replica.metrics_available === undefined) {
-    return { cpuText: '—', ramText: '—', note: '' };
+    return { cpuText: '—', ramText: '—', physicalText: '—', attributionNote: '', note: '' };
   }
   // Confirmed PID-less: show n/a with the monitoring hint.
   if (replica.metrics_available !== true) {
-    return { cpuText: 'n/a', ramText: 'n/a', note: METRICS_NA_NOTE };
+    return { cpuText: 'n/a', ramText: 'n/a', physicalText: 'n/a', attributionNote: '', note: METRICS_NA_NOTE };
   }
   // A null cpu_percent on a PID-backed replica means the rate is not in yet
   // (first poll after it started), which the neutral dash already covers. Zero
@@ -80,5 +80,17 @@ export function metricsText(replica) {
   } else {
     ramText = `${(rss / 1024).toFixed(0)} KB`;
   }
-  return { cpuText, ramText, note: null };
+  const formatBytes = (value) => {
+    if (typeof value !== 'number') return '—';
+    if (value >= 1 << 20) return `${(value / (1 << 20)).toFixed(0)} MB`;
+    return `${(value / 1024).toFixed(0)} KB`;
+  };
+  const physicalText = formatBytes(replica.pss_bytes);
+  const attribution = [];
+  if (typeof replica.pss_bytes === 'number') attribution.push(`PSS ${formatBytes(replica.pss_bytes)}`);
+  if (typeof replica.uss_bytes === 'number') attribution.push(`private ${formatBytes(replica.uss_bytes)}`);
+  if (typeof replica.swap_pss_bytes === 'number') attribution.push(`swap PSS ${formatBytes(replica.swap_pss_bytes)}`);
+  let attributionNote = attribution.join(' · ');
+  if (attributionNote && replica.memory_attribution_partial === true) attributionNote += ' · partial';
+  return { cpuText, ramText, physicalText, attributionNote, note: null };
 }

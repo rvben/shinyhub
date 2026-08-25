@@ -4290,7 +4290,7 @@ fieldset.settings-block { min-width: 0; }
 .replica-reason:empty { display: none; }
 .replica-measures {
   display: grid;
-  grid-template-columns: repeat(3, minmax(4.8rem, auto));
+  grid-template-columns: repeat(4, minmax(4.4rem, auto));
   gap: 1.25rem;
 }
 .replica-measure {
@@ -4348,7 +4348,7 @@ fieldset.settings-block { min-width: 0; }
   .fleet-change-table td { padding-inline: 18px; }
   .fleet-change-footer { align-items: flex-start; flex-direction: column; }
   .replica-row { grid-template-columns: minmax(0, 1fr); gap: 12px; }
-  .replica-measures { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; }
+  .replica-measures { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; }
   .replica-measure { text-align: left; }
 }
 

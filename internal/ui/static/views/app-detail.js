@@ -741,11 +741,12 @@ function seedReplicasFromStatus(app, replicasStatus) {
     const backend = backendLabel({ tier: r.tier, provider: r.provider });
     // Show n/a immediately for known-PID-less replicas so the initial panel state
     // is honest before the first metrics poll fills in real values.
-    const { cpuText: cpuInit, ramText: ramInit, note } = metricsText({
+    const { cpuText: cpuInit, ramText: ramInit, physicalText: physicalInit, note } = metricsText({
       metrics_available: r.metrics_available,
     });
     const cpuDisplay = status === 'running' ? cpuInit : '—';
     const ramDisplay = status === 'running' ? ramInit : '—';
+    const physicalDisplay = status === 'running' ? physicalInit : '—';
     // reason explains a degraded state (e.g. "worker unavailable" for a lost
     // replica); empty for healthy replicas.
     const reason = reasonLabel(r);
@@ -762,6 +763,7 @@ function seedReplicasFromStatus(app, replicasStatus) {
         <span class="replica-measure replica-sessions"><span class="replica-measure-label">Sessions</span><span class="replica-measure-value">—</span></span>
         <span class="replica-measure replica-cpu"><span class="replica-measure-label">CPU</span><span class="replica-measure-value">${cpuDisplay}</span></span>
         <span class="replica-measure replica-ram"${note ? ` title="${note}"` : ''}><span class="replica-measure-label">Memory</span><span class="replica-measure-value">${ramDisplay}</span></span>
+        <span class="replica-measure replica-physical"><span class="replica-measure-label">PSS</span><span class="replica-measure-value">${physicalDisplay}</span></span>
       </div>
     `;
     const badgeEl = li.querySelector('.badge');
