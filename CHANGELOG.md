@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.6](https://github.com/rvben/shinyhub/compare/v0.12.5...v0.12.6) - 2026-08-25
+
+### Breaking Changes
+
+- **cli**: migrate schema to clispec v0.3 ([ad4c875](https://github.com/rvben/shinyhub/commit/ad4c87506e88e88590b3b4a662929df7c5fa94b5))
+- **cli**: default CI output to human-readable tables ([32697c9](https://github.com/rvben/shinyhub/commit/32697c9c903850ac4a94b0ede36ca2ea4fc67440))
+
+### Added
+
+- **cli**: migrate schema to clispec v0.3 ([ad4c875](https://github.com/rvben/shinyhub/commit/ad4c87506e88e88590b3b4a662929df7c5fa94b5))
+- **cli**: default CI output to human-readable tables ([32697c9](https://github.com/rvben/shinyhub/commit/32697c9c903850ac4a94b0ede36ca2ea4fc67440))
+- **fleet**: persist apply run outcomes ([094f6af](https://github.com/rvben/shinyhub/commit/094f6afb34e6a21a88795a3a2a905db96f21c831))
+
+### Fixed
+
+- **db**: align postgres import and schema invariants ([9646f58](https://github.com/rvben/shinyhub/commit/9646f58028a140418237d3f3e4a3a3954b6815bf))
+- **fleet**: harden convergence verification ([e105a7f](https://github.com/rvben/shinyhub/commit/e105a7f5a25d89985373ece343e124db7e4438de))
+- **fleet**: fail closed on incomplete warm-up ([72a62d9](https://github.com/rvben/shinyhub/commit/72a62d930e1b6896e9caede6f2039a73c0188976))
+- **schedules**: separate freshness from run activity ([4e1c811](https://github.com/rvben/shinyhub/commit/4e1c811bcc9007f1de03934bf86ab14e4a9c4e7b))
+- **fleet**: enforce schedule convergence gates ([c84786e](https://github.com/rvben/shinyhub/commit/c84786e8ae85a5888e08ee489858d745a025d5d3))
+
 ## [0.12.5](https://github.com/rvben/shinyhub/compare/v0.12.4...v0.12.5) - 2026-08-24
 
 ### Added
