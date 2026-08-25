@@ -207,52 +207,6 @@ func TestAppsStatusAndCountsFollowReplicaReality(t *testing.T) {
 	}
 }
 
-func TestListApps_PreviewAsViewer(t *testing.T) {
-	srv, store := newTestServer(t)
-	hash, _ := testHashPassword("pass")
-	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
-	admin, _ := store.GetUserByUsername("admin")
-	// One app of each visibility, all owned by the admin.
-	store.CreateApp(db.CreateAppParams{Slug: "pub", Name: "Pub", OwnerID: admin.ID, Access: "public"})
-	store.CreateApp(db.CreateAppParams{Slug: "shr", Name: "Shr", OwnerID: admin.ID, Access: "shared"})
-	store.CreateApp(db.CreateAppParams{Slug: "prv", Name: "Prv", OwnerID: admin.ID, Access: "private"})
-	token, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
-
-	slugs := func(rec *httptest.ResponseRecorder) map[string]bool {
-		var env struct {
-			Items []struct {
-				Slug string `json:"slug"`
-			} `json:"items"`
-		}
-		json.NewDecoder(rec.Body).Decode(&env)
-		out := map[string]bool{}
-		for _, a := range env.Items {
-			out[a.Slug] = true
-		}
-		return out
-	}
-
-	// Without the param, an admin sees all three apps.
-	rec := httptest.NewRecorder()
-	srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps", nil, token))
-	all := slugs(rec)
-	if !all["pub"] || !all["shr"] || !all["prv"] {
-		t.Fatalf("admin GET /api/apps should list all three, got %v", all)
-	}
-
-	// With ?as=viewer, the admin sees only the viewer baseline (public + shared);
-	// the private app is excluded.
-	rec = httptest.NewRecorder()
-	srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps?as=viewer", nil, token))
-	preview := slugs(rec)
-	if !preview["pub"] || !preview["shr"] {
-		t.Errorf("preview should include public + shared, got %v", preview)
-	}
-	if preview["prv"] {
-		t.Error("preview must exclude the private app (viewers do not see it by default)")
-	}
-}
-
 func TestUnauthenticatedRejected(t *testing.T) {
 	srv, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/api/apps", nil) // no auth header
@@ -466,6 +420,50 @@ func TestListApps_FilteredByAccess(t *testing.T) {
 		if app.Slug == "private-app" {
 			t.Fatalf("viewer should not see private-app: %+v", env.Items)
 		}
+	}
+}
+
+func TestListAppsIncludesPerAppManageCapability(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	store.CreateUser(db.CreateUserParams{Username: "manager", PasswordHash: hash, Role: "viewer"})
+	store.CreateUser(db.CreateUserParams{Username: "reader", PasswordHash: hash, Role: "viewer"})
+	owner, _ := store.GetUserByUsername("owner")
+	manager, _ := store.GetUserByUsername("manager")
+	reader, _ := store.GetUserByUsername("reader")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "shared", Name: "Shared", OwnerID: owner.ID, Access: "shared"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.GrantAppAccessWithRole("shared", manager.ID, "manager"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.GrantAppAccess("shared", reader.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	get := func(user *db.User) db.App {
+		t.Helper()
+		token, _ := auth.IssueJWT(user.ID, user.Username, user.Role, "test-secret")
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps", nil, token))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list for %s: %d: %s", user.Username, rec.Code, rec.Body.String())
+		}
+		var env struct {
+			Items []db.App `json:"items"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&env); err != nil || len(env.Items) != 1 {
+			t.Fatalf("decode for %s: items=%d err=%v", user.Username, len(env.Items), err)
+		}
+		return env.Items[0]
+	}
+
+	if !get(manager).CanManage {
+		t.Error("direct app manager must receive can_manage=true on the Apps list")
+	}
+	if get(reader).CanManage {
+		t.Error("view-only member must receive can_manage=false on the Apps list")
 	}
 }
 

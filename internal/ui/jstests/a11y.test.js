@@ -49,6 +49,23 @@ function formatViolations(violations) {
 
 const indexHTML = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8');
 
+test('the consolidated Apps navigation remains named in icon-rail mode', () => {
+  const dom = new JSDOM(indexHTML);
+  const d = dom.window.document;
+  const primaryLinks = [...d.querySelectorAll('#primary-nav a')];
+
+  assert.equal(d.querySelector('#tab-launchpad'), null, 'Launchpad must not remain a second top-level destination');
+  assert.equal(d.querySelectorAll('#primary-nav a[href="/apps"]').length, 1);
+  for (const link of primaryLinks) {
+    assert.ok(link.getAttribute('aria-label'), `${link.id} needs an accessible icon-rail name`);
+    assert.ok(link.dataset.tooltip, `${link.id} needs a visible hover/focus tooltip`);
+  }
+
+  const collapse = d.querySelector('#sidebar-collapse');
+  assert.equal(collapse.getAttribute('aria-controls'), 'sidebar');
+  assert.equal(collapse.getAttribute('aria-expanded'), 'true');
+});
+
 test('index.html has no WCAG A/AA violations with every view revealed', async () => {
   const violations = await runAxeOn(indexHTML, (d) => {
     // Reveal every hidden section so axe audits the full markup, not just the

@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/rvben/shinyhub/internal/auth"
@@ -38,6 +39,36 @@ func canCreateApps(u *auth.ContextUser) bool {
 		return false
 	}
 	return isPrivilegedAppOperator(u) || u.Role == "developer"
+}
+
+// canUseAppsManagement decides whether the session should receive the Apps
+// management surface. Global management roles always do; a viewer may also
+// manage an individual app through ownership, direct membership, or group
+// membership, which the browser cannot safely reconstruct on its own.
+func (s *Server) canUseAppsManagement(u *auth.ContextUser) bool {
+	if u == nil {
+		return false
+	}
+	if u.Role != "viewer" {
+		return true
+	}
+	ok, err := s.store.UserCanManageAnyApp(u.ID)
+	if err != nil {
+		slog.Warn("auth: check app management capability", "user_id", u.ID, "error", err)
+		return false
+	}
+	return ok
+}
+
+// effectiveCanManageApp extends the global-role/ownership check with direct and
+// group manager grants. It is used for presentation capabilities only; every
+// mutation endpoint still performs its own authorization check.
+func (s *Server) effectiveCanManageApp(u *auth.ContextUser, app *db.App) bool {
+	if canManageApp(u, app) {
+		return true
+	}
+	role, ok, err := s.effectiveAppMemberRole(u, app)
+	return err == nil && ok && role == "manager"
 }
 
 func (s *Server) canViewApp(u *auth.ContextUser, app *db.App) (bool, error) {

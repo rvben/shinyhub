@@ -41,11 +41,11 @@ test('resolveDetailAccess passes a valid tab through with no redirect for a mana
   assert.equal(r.redirect, null);
 });
 
-test('resolveDetailAccess bounces a pure viewer off the detail page to /', () => {
+test('resolveDetailAccess returns a pure viewer to canonical Apps', () => {
   const r = resolveDetailAccess({
     user: { role: 'viewer' }, canManage: false, requestedTab: 'logs', slug: 'demo',
   });
-  assert.deepEqual(r.redirect, { path: '/', replace: true });
+  assert.deepEqual(r.redirect, { path: '/apps', replace: true });
 });
 
 test('resolveDetailAccess keeps a viewer who manages THIS app on the page', () => {
@@ -75,12 +75,12 @@ test('resolveDetailAccess lets a non-manager view a non-manager tab', () => {
 });
 
 test('resolveDetailAccess: the viewer / redirect wins over the manager-only tab redirect', () => {
-  // A pure viewer requesting a manager-only tab is bounced to / (the page-level
+  // A pure viewer requesting a manager-only tab is returned to /apps (the page-level
   // gate), not to /apps/<slug>. The page gate runs first in the original code.
   const r = resolveDetailAccess({
     user: { role: 'viewer' }, canManage: false, requestedTab: 'access', slug: 'demo',
   });
-  assert.deepEqual(r.redirect, { path: '/', replace: true });
+  assert.deepEqual(r.redirect, { path: '/apps', replace: true });
 });
 
 test('resolveDetailAccess tolerates a null user (unauthenticated render)', () => {

@@ -5,7 +5,6 @@ import { mountOverview } from '/static/views/overview.js';
 import { mountLaunchpad } from '/static/views/launchpad.js';
 import { renderAppAvatar, avatarView } from '/static/views/app-avatar.js';
 import { isSingleEmoji, renderEmojiPicker } from '/static/views/emoji-picker.js';
-import { launchReadiness } from '/static/views/launchpad-model.js';
 import { mountUsers } from '/static/views/users.js';
 import { tokenListModels, renderTokenList } from '/static/views/tokens.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
@@ -14,7 +13,13 @@ import { createFocusTrap } from '/static/views/focus-trap.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { mountAppDetail, refreshFleetSurfaces } from '/static/views/app-detail.js';
 import { appCardBadge, updateCardStatusBadge, updateStatusPill } from '/static/views/app-card-badge.js';
-import { renderSidebarApps, highlightSidebarApp, isPrimaryNavActive } from '/static/views/sidebar-nav.js';
+import {
+  appsSurfaceForSession,
+  homeSurfaceForSession,
+  renderSidebarApps,
+  highlightSidebarApp,
+  isPrimaryNavActive,
+} from '/static/views/sidebar-nav.js';
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { headerStats } from '/static/views/stat-format.js';
 import { appCardFacts } from '/static/views/app-card-facts.js';
@@ -182,6 +187,7 @@ document.addEventListener('DOMContentLoaded', () => {
     auditPage: 0,
     auditHasMore: false,
     canCreateApps: false,
+    canManageApps: false,
     resetPwTargetId: null,
     resetPwTargetUsername: '',
   };
@@ -260,7 +266,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const tabUsers    = document.getElementById('tab-users');
   const tabWorkers  = document.getElementById('tab-workers');
   const tabOverview = document.getElementById('tab-overview');
-  const tabLaunchpad = document.getElementById('tab-launchpad');
   const tabApps     = document.getElementById('tab-apps');
   let   sidebarDrawer = null; // mobile off-canvas drawer controller (wired below)
   const workersView    = document.getElementById('workers-view');
@@ -597,7 +602,9 @@ document.addEventListener('DOMContentLoaded', () => {
       titleLink.href = `/apps/${app.slug}`;
       titleLink.setAttribute('data-nav', '');
       titleLink.className = 'app-card-title';
-      titleLink.setAttribute('aria-label', `Manage ${app.name}`);
+      titleLink.setAttribute('aria-label', canManageApp(state.user, app)
+        ? `Manage ${app.name}`
+        : `View ${app.name}`);
       const name = document.createElement('strong');
       name.textContent = app.name;
       const manageArrow = document.createElement('span');
@@ -727,6 +734,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderApps() {
     const searchEl = document.getElementById('apps-search');
     const sortEl   = document.getElementById('apps-sort');
+    const resultsStatus = document.getElementById('apps-results-status');
 
     let apps = state.apps.slice();
 
@@ -741,6 +749,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Filter by fleet management segment.
     const segEl = document.getElementById('apps-segment');
     apps = segmentApps(apps, segEl ? segEl.value : 'all');
+    if (resultsStatus) {
+      const filtered = !!q || !!(segEl && segEl.value !== 'all');
+      resultsStatus.textContent = filtered
+        ? `${apps.length} ${apps.length === 1 ? 'app' : 'apps'} shown.`
+        : '';
+    }
 
     // Sort is applied WITHIN each project group, using the same comparators as
     // before (they now live in app-grid-groups.js). Groups themselves keep the
@@ -764,6 +778,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.auditPage = 0;
     state.auditHasMore = false;
     state.canCreateApps = false;
+    state.canManageApps = false;
     appRestartFeedback.clear();
     appCardLifecycleControls.clear();
     newAppButton.hidden = true;
@@ -794,6 +809,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function showLoggedIn(payload) {
     state.user = payload.user;
     state.canCreateApps = !!payload.can_create_apps;
+    state.canManageApps = !!payload.can_manage_apps;
     state.canReadAudit = !!payload.can_read_audit;
     renderIdentity(payload.user);
     setHidden(logoutButton, false);
@@ -805,20 +821,23 @@ document.addEventListener('DOMContentLoaded', () => {
     tabUsers.hidden = payload.user.role !== 'admin';
     tabWorkers.hidden = payload.user.role !== 'admin';
     // The home (/) is role-adaptive: fleet operators (admin/operator) get the
-    // Overview, everyone else the Launchpad. The dedicated Launchpad remains
-    // available to every signed-in user; the operator-flavoured Apps grid stays
-    // hidden from pure viewers.
+    // Overview, while Apps is the one application destination for every role.
+    // Its route renders an opening gallery for viewers and the management grid
+    // for developers/operators/admins.
     const isOperator = payload.user.role === 'admin' || payload.user.role === 'operator';
     tabOverview.hidden = !isOperator;
-    tabLaunchpad.hidden = false;
-    tabApps.hidden = payload.user.role === 'viewer';
+    tabApps.hidden = false;
     newAppButton.hidden = !state.canCreateApps;
+    // Apply the new session's sidebar policy before any asynchronous list load
+    // so switching identities in one tab cannot flash the previous catalog.
+    syncSidebar();
     // Load the admin fleet-health banner now that state.user is set; loadApps
     // can fire before this during boot, when the admin gate would skip it.
     loadFleetHealth();
-    // Populate the sidebar app list regardless of which view the router mounts
-    // (fire-and-forget; renders when it resolves, self-guards on state.user).
-    loadAppsIndex();
+    // Viewers use the Apps gallery as their complete catalog, so repeating the
+    // same inventory in the sidebar adds a second competing navigation tree.
+    // Management roles retain the sidebar quick-switch list.
+    if (appsSurfaceForSession(payload.user.role, state.canManageApps) === 'manage') loadAppsIndex();
     // Warm the server-info cache so the About dialog paints on first open
     // rather than filling in a beat late. One small request per session.
     loadServerInfo();
@@ -1193,35 +1212,26 @@ document.addEventListener('DOMContentLoaded', () => {
     populateProjectDatalist();
   }
 
-  // syncSidebar renders the project->app quick-switch list from the FULL app
+  // syncSidebar renders the management quick-switch list from the FULL app
   // index (state.apps), never the grid-filtered set, so dashboard search/sort
-  // never hides apps from the sidebar.
-  // While the viewer-home preview owns the sidebar, suppress the operator-scoped
-  // syncSidebar so a late-resolving loadAppsIndex (fired on login) can't clobber
-  // the viewer-scoped list and flash the operator's private apps. state.apps is
-  // still updated by those loaders; the preview restores the real list on exit.
-  let sidebarPreviewActive = false;
-
-  // operatorSidebarBadge shows the full status vocabulary (Running/Sleeping/...);
-  // viewerSidebarBadge collapses it to the one distinction a viewer can act on,
-  // matching the Launchpad tiles: openable apps carry no status, only an app they
-  // cannot open is flagged. Viewers/developers (the Launchpad audience) get the
-  // collapsed badge so the sidebar never leaks internal app state.
-  const operatorSidebarBadge = (a) => appCardBadge(a, formatStatus);
-  function viewerSidebarBadge(a) {
-    return launchReadiness(a).openable
-      ? { cls: 'badge badge-ok', text: '' }
-      : { cls: 'badge badge-unavailable', text: 'Unavailable' };
-  }
+  // never hides apps from the sidebar. Viewers get one catalog—the Apps gallery—
+  // rather than a second, differently behaving copy in the sidebar.
+  const sidebarBadge = (a) => appCardBadge(a, formatStatus);
   function isOperatorRole(u) {
     return !!u && (u.role === 'admin' || u.role === 'operator');
   }
 
   function syncSidebar() {
-    if (sidebarPreviewActive) return;
     const el = document.getElementById('sidebar-apps');
-    const badge = isOperatorRole(state.user) ? operatorSidebarBadge : viewerSidebarBadge;
-    if (el) renderSidebarApps(el, state.apps, location.pathname, badge, document);
+    if (!el) return;
+    const role = state.user && state.user.role;
+    if (appsSurfaceForSession(role, state.canManageApps) === 'viewer') {
+      el.replaceChildren();
+      el.hidden = true;
+      return;
+    }
+    el.hidden = false;
+    renderSidebarApps(el, state.apps, location.pathname, sidebarBadge, document);
   }
 
   // loadAppsIndex populates the sidebar app list independently of which view is
@@ -4785,7 +4795,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const COLLAPSE_KEY = 'shinyhub.sidebarCollapsed';
     const applyCollapsed = (on) => {
       document.body.classList.toggle('sidebar-collapsed', on);
-      if (collapseBtn) collapseBtn.setAttribute('aria-expanded', on ? 'false' : 'true');
+      delete document.body.dataset.sidebarTooltipHidden;
+      if (collapseBtn) {
+        const label = on ? 'Expand sidebar' : 'Collapse sidebar';
+        collapseBtn.setAttribute('aria-expanded', on ? 'false' : 'true');
+        collapseBtn.setAttribute('aria-label', label);
+        collapseBtn.dataset.tooltip = label;
+      }
     };
     try { applyCollapsed(localStorage.getItem(COLLAPSE_KEY) === '1'); } catch {}
     if (collapseBtn) {
@@ -4795,6 +4811,18 @@ document.addEventListener('DOMContentLoaded', () => {
         try { localStorage.setItem(COLLAPSE_KEY, on ? '1' : '0'); } catch {}
       });
     }
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && document.body.classList.contains('sidebar-collapsed')) {
+        document.body.dataset.sidebarTooltipHidden = 'true';
+      }
+    });
+    const restoreTooltip = (e) => {
+      if (e.target && typeof e.target.closest === 'function' && e.target.closest('[data-tooltip]')) {
+        delete document.body.dataset.sidebarTooltipHidden;
+      }
+    };
+    document.addEventListener('focusin', restoreTooltip);
+    document.addEventListener('mouseover', restoreTooltip);
   }
 
   // Mobile drawer: hamburger toggles, backdrop click + Escape close, and the
@@ -5058,19 +5086,6 @@ document.addEventListener('DOMContentLoaded', () => {
     showError: (m) => { if (appError) setError(appError, m); },
     updateActiveNav,
     syncSidebar,
-    // Render an explicit app list into the sidebar without touching state.apps.
-    // The viewer-home preview uses this to show the viewer-scoped list, then
-    // calls syncSidebar() on exit to restore the operator's real list.
-    renderSidebarAppsList: (apps) => {
-      const el = document.getElementById('sidebar-apps');
-      // Always the viewer badge: this is only used by the viewer-home preview, so
-      // the previewed sidebar must collapse status like a real viewer's.
-      if (el) renderSidebarApps(el, apps, location.pathname, viewerSidebarBadge, document);
-    },
-    // While true, syncSidebar() is suppressed so background loaders can't clobber
-    // the preview's viewer-scoped sidebar. The preview sets it on mount, clears it
-    // on exit, then restores the real list.
-    setSidebarPreview: (on) => { sidebarPreviewActive = on; },
     setSettingsSlug: (slug) => { settingsSlug = slug; },
     populateGeneralTab,
     populateAutoscaleTab,
@@ -5231,42 +5246,33 @@ document.addEventListener('DOMContentLoaded', () => {
     if (tokensView) tokensView.hidden = true;
   }
 
-  // Role-adaptive home: fleet operators land on the Overview, everyone else on
-  // the Launchpad. Falls back to the Launchpad when the user is unknown (the
-  // fetch then 401s to the login view, as before). Mounted at both `/` (the
-  // contextual root) and `/home` (the stable authenticated alias the branding
-  // landing page links to, so it never loops back to itself).
-  const mountHome = () => {
+  // Apps is one role-adaptive destination: viewers get the focused opening
+  // gallery; every management-capable role gets the operational grid.
+  const mountAppsDestination = () => {
     hideAllPageViews();
     const role = ctx.state.user && ctx.state.user.role;
-    const isOperator = role === 'admin' || role === 'operator';
-    return isOperator ? mountOverview(ctx) : mountLaunchpad(ctx);
-  };
-  router.register('/', mountHome);
-  router.register('/home', mountHome);
-  router.register('/launchpad', () => {
-    hideAllPageViews();
-    const role = ctx.state.user && ctx.state.user.role;
-    const isOperator = role === 'admin' || role === 'operator';
-    // Preview is an explicit operator diagnostic mode. A viewer who receives
-    // the query parameter still gets their ordinary Launchpad.
-    const preview = isOperator
-      && new URLSearchParams(location.search).get('preview') === 'viewer';
-    return mountLaunchpad(ctx, { preview });
-  });
-  router.register('/apps', () => {
-    hideAllPageViews();
-    // The Apps grid is operator-flavoured; pure viewers don't get it (the nav
-    // item is hidden for them). Gate the route too so a typed/bookmarked /apps
-    // bounces back to their Launchpad home rather than mounting the grid.
-    if (ctx.state.user && ctx.state.user.role === 'viewer') {
-      ctx.navigate('/', { replace: true });
-      return;
-    }
+    if (appsSurfaceForSession(role, ctx.state.canManageApps) === 'viewer') return mountLaunchpad(ctx);
     const view = mountAppsGrid(ctx);
     updateActiveNav(location.pathname);
     return view;
-  });
+  };
+
+  // Role-adaptive home: fleet operators land on Overview; every other signed-in
+  // role lands on its version of Apps. Mounted at both `/` and `/home` so a
+  // branded landing page can link to a stable authenticated home.
+  const mountHome = () => {
+    const role = ctx.state.user && ctx.state.user.role;
+    if (homeSurfaceForSession(role) === 'overview') {
+      hideAllPageViews();
+      return mountOverview(ctx);
+    }
+    return mountAppsDestination();
+  };
+  router.register('/', mountHome);
+  router.register('/home', mountHome);
+  // Preserve old bookmarks without preserving a second navigation concept.
+  router.register('/launchpad', () => ctx.navigate('/apps', { replace: true }));
+  router.register('/apps', mountAppsDestination);
   router.register('/users', () => {
     hideAllPageViews();
     return mountUsers({ ...ctx, loadUsers });

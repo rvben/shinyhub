@@ -14,6 +14,61 @@ type AppGroupRule struct {
 	Source string
 }
 
+// UserCanManageAnyApp reports whether userID owns an app or holds an effective
+// manager grant through either direct membership or a snapshotted IdP group.
+// It powers session-level UI routing; per-app mutation endpoints still perform
+// their own authorization checks.
+func (s *Store) UserCanManageAnyApp(userID int64) (bool, error) {
+	var canManage bool
+	err := s.db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM apps WHERE owner_id = ?
+			UNION ALL
+			SELECT 1 FROM app_members WHERE user_id = ? AND role = 'manager'
+			UNION ALL
+			SELECT 1
+			FROM app_group_access aga
+			JOIN user_groups ug ON ug.group_name = aga.group_name
+			WHERE ug.user_id = ? AND aga.role = 'manager'
+		)`, userID, userID, userID).Scan(&canManage)
+	if err != nil {
+		return false, fmt.Errorf("check user app management: %w", err)
+	}
+	return canManage, nil
+}
+
+// ManagedAppSlugsForUser returns every app the user owns or manages through a
+// direct/group grant. List endpoints use this batch lookup instead of issuing
+// two membership queries for every visible app.
+func (s *Store) ManagedAppSlugsForUser(userID int64) (map[string]struct{}, error) {
+	rows, err := s.db.Query(`
+		SELECT slug FROM apps WHERE owner_id = ?
+		UNION
+		SELECT app_slug FROM app_members WHERE user_id = ? AND role = 'manager'
+		UNION
+		SELECT aga.app_slug
+		FROM app_group_access aga
+		JOIN user_groups ug ON ug.group_name = aga.group_name
+		WHERE ug.user_id = ? AND aga.role = 'manager'`, userID, userID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list user managed apps: %w", err)
+	}
+	defer rows.Close()
+
+	slugs := make(map[string]struct{})
+	for rows.Next() {
+		var slug string
+		if err := rows.Scan(&slug); err != nil {
+			return nil, fmt.Errorf("scan user managed app: %w", err)
+		}
+		slugs[slug] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list user managed apps: %w", err)
+	}
+	return slugs, nil
+}
+
 // GrantAppGroupAccess upserts a group rule (role) on slug. role must be a valid
 // member role (validated by callers); source is "manual" for UI/API/CLI grants.
 func (s *Store) GrantAppGroupAccess(slug, group, role, source string) error {

@@ -608,12 +608,16 @@ func TestMeIncludesCanCreateApps_Admin(t *testing.T) {
 			Role     string `json:"role"`
 		} `json:"user"`
 		CanCreateApps bool `json:"can_create_apps"`
+		CanManageApps bool `json:"can_manage_apps"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if !payload.CanCreateApps {
 		t.Errorf("admin should see can_create_apps=true, got false")
+	}
+	if !payload.CanManageApps {
+		t.Error("admin should receive the Apps management surface")
 	}
 }
 
@@ -636,12 +640,45 @@ func TestMeIncludesCanCreateApps_Viewer(t *testing.T) {
 			Role     string `json:"role"`
 		} `json:"user"`
 		CanCreateApps bool `json:"can_create_apps"`
+		CanManageApps bool `json:"can_manage_apps"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if payload.CanCreateApps {
 		t.Errorf("viewer should see can_create_apps=false, got true")
+	}
+	if payload.CanManageApps {
+		t.Error("view-only user must not receive the Apps management surface")
+	}
+}
+
+func TestMeIncludesCanManageApps_ViewerManager(t *testing.T) {
+	srv, store := newTestServer(t)
+	_, ownerID := seedUserAndJWT(t, store, "owner", "admin")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "managed", Name: "Managed", OwnerID: ownerID, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	token, viewerID := seedUserAndJWT(t, store, "viewer-manager", "viewer")
+	if err := store.GrantAppAccessWithRole("managed", viewerID, "manager"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		CanManageApps bool `json:"can_manage_apps"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.CanManageApps {
+		t.Error("viewer with an app-manager grant must retain the Apps management surface")
 	}
 }
 
@@ -666,12 +703,16 @@ func TestSessionLoginIncludesCanCreateApps_Developer(t *testing.T) {
 			Role     string `json:"role"`
 		} `json:"user"`
 		CanCreateApps bool `json:"can_create_apps"`
+		CanManageApps bool `json:"can_manage_apps"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if !payload.CanCreateApps {
 		t.Errorf("developer should see can_create_apps=true, got false")
+	}
+	if !payload.CanManageApps {
+		t.Error("developer should receive the Apps management surface")
 	}
 }
 

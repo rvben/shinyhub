@@ -13,17 +13,28 @@
 import { groupApps, UNGROUPED } from './project-groups.js';
 import { createGroupDisclosure } from './group-disclosure.js';
 
-// Section navigation has a contextual home: operators see Overview at `/`
-// while everyone else sees the Launchpad. `/home` is the stable alias used by
-// branded landing pages, so it follows the same role-aware selection. The
-// dedicated `/launchpad` route is always the app-opening surface.
+// The server computes canManageApps because a global viewer can still manage an
+// individual app through ownership, direct membership, or an IdP group grant.
+// Keeping this policy pure makes every role/session combination testable.
+export function appsSurfaceForSession(role, canManageApps = false) {
+  return role === 'viewer' && !canManageApps ? 'viewer' : 'manage';
+}
+
+export function homeSurfaceForSession(role) {
+  return role === 'admin' || role === 'operator' ? 'overview' : 'apps';
+}
+
+// Section navigation has a contextual home: operators see Overview at `/`,
+// while viewers and developers land on their role-appropriate Apps surface.
+// `/home` is the stable alias used by branded landing pages. `/launchpad` is a
+// backwards-compatible alias that redirects to Apps.
 export function isPrimaryNavActive(hrefPath, currentPath, role) {
   const href = hrefPath || '';
   const current = currentPath || '/';
-  const isOperator = role === 'admin' || role === 'operator';
   if (current === '/' || current === '/home') {
-    return isOperator ? href === '/' : href === '/launchpad';
+    return homeSurfaceForSession(role) === 'overview' ? href === '/' : href === '/apps';
   }
+  if (current === '/launchpad') return href === '/apps';
   if (current.startsWith('/apps/') && href === '/apps') return true;
   return href === current;
 }

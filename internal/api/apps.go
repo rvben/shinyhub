@@ -55,16 +55,9 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		apps []*db.App
 		err  error
 	)
-	switch {
-	case isPrivilegedAppOperator(u) && r.URL.Query().Get("as") == "viewer":
-		// Admin/operator previewing the viewer home: scope to the default viewer
-		// baseline (public + shared) so the preview shows what viewers actually see
-		// rather than the operator's full list. Read-only; the param is ignored for
-		// non-privileged callers, who are already scoped by ListAppsVisibleToUser.
-		apps, err = s.store.ListViewerBaselineApps(0, 0)
-	case isPrivilegedAppOperator(u):
+	if isPrivilegedAppOperator(u) {
 		apps, err = s.store.ListApps(0, 0)
-	default:
+	} else {
 		apps, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
 	}
 	if err != nil {
@@ -82,6 +75,14 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		}
 		apps = scoped
 	}
+	managedSlugs := map[string]struct{}{}
+	if !isPrivilegedAppOperator(u) {
+		managedSlugs, err = s.store.ManagedAppSlugsForUser(u.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
 	// One project lookup for the whole page: decorate() is a map read, so the
 	// per-app cost stays constant however many apps the page carries.
 	appIDs := make([]int64, len(apps))
@@ -96,6 +97,11 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	disp := s.loadProjectDisplay()
 	for _, a := range apps {
 		s.decorateApp(a)
+		if isPrivilegedAppOperator(u) {
+			a.CanManage = true
+		} else {
+			_, a.CanManage = managedSlugs[a.Slug]
+		}
 		replicas := s.liveReplicaView(a.Slug, replicasByApp[a.ID])
 		pool := s.elasticObservation(a.Slug)
 		// A server built without a process manager (unit tests and API-only
@@ -368,12 +374,8 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	// via a per-app member or group manager role (the client cannot derive this
 	// from global role + ownership alone). A lookup error degrades to false; the
 	// management endpoints enforce authorization regardless.
-	canManage := canManageApp(u, app)
-	if !canManage {
-		if role, ok, err := s.effectiveAppMemberRole(u, app); err == nil && ok && role == "manager" {
-			canManage = true
-		}
-	}
+	canManage := s.effectiveCanManageApp(u, app)
+	app.CanManage = canManage
 
 	envelope := map[string]any{
 		"app":                                 app,

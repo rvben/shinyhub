@@ -72,27 +72,23 @@
       </div>
 
       <nav id="primary-nav" aria-label="Sections">
-        <a href="/" data-nav class="nav-item" id="tab-overview" hidden>
+        <a href="/" data-nav class="nav-item" id="tab-overview" aria-label="Overview" data-tooltip="Overview" hidden>
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="8" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
           <span class="nav-label">Overview</span>
         </a>
-        <a href="/launchpad" data-nav class="nav-item" id="tab-launchpad" hidden>
-          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h3v-6h4v6h3a1 1 0 0 0 1-1v-9"/></svg>
-          <span class="nav-label">Launchpad</span>
-        </a>
-        <a href="/apps" data-nav class="nav-item" id="tab-apps">
+        <a href="/apps" data-nav class="nav-item" id="tab-apps" aria-label="Apps" data-tooltip="Apps">
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
           <span class="nav-label">Apps</span>
         </a>
-        <a href="/users" data-nav class="nav-item" id="tab-users" hidden>
+        <a href="/users" data-nav class="nav-item" id="tab-users" aria-label="Users" data-tooltip="Users" hidden>
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.6 19.2a6 6 0 0 1 10.8 0"/><path d="M16.4 5.4a3 3 0 0 1 0 5.2"/><path d="M18 13.7a6 6 0 0 1 3 4"/></svg>
           <span class="nav-label">Users</span>
         </a>
-        <a href="/workers" data-nav class="nav-item" id="tab-workers" hidden>
+        <a href="/workers" data-nav class="nav-item" id="tab-workers" aria-label="Workers" data-tooltip="Workers" hidden>
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1.6"/><rect x="3" y="13" width="18" height="7" rx="1.6"/><line x1="6.6" y1="7.5" x2="6.6" y2="7.5"/><line x1="6.6" y1="16.5" x2="6.6" y2="16.5"/></svg>
           <span class="nav-label">Workers</span>
         </a>
-        <a href="/audit-log" data-nav class="nav-item" id="tab-audit" hidden>
+        <a href="/audit-log" data-nav class="nav-item" id="tab-audit" aria-label="Audit Log" data-tooltip="Audit Log" hidden>
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="4.6" cy="7" r="1.1"/><circle cx="4.6" cy="12" r="1.1"/><circle cx="4.6" cy="17" r="1.1"/><line x1="9" y1="7" x2="20" y2="7"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="17" x2="20" y2="17"/></svg>
           <span class="nav-label">Audit Log</span>
         </a>
@@ -101,7 +97,7 @@
       <nav id="sidebar-apps" class="sidebar-apps" aria-label="Applications"></nav>
 
       <div class="sidebar-footer">
-        <button id="identity-card" type="button" class="identity-card" aria-haspopup="dialog" aria-label="Open your profile">
+        <button id="identity-card" type="button" class="identity-card" aria-haspopup="dialog" aria-label="Open your profile" data-tooltip="Profile">
           <span id="identity-avatar" class="identity-avatar" aria-hidden="true">?</span>
           <span class="identity-meta">
             <span id="identity-name" class="identity-name">&nbsp;</span>
@@ -111,11 +107,11 @@
         </button>
         <!-- About: server identity, one click from anywhere. Neutral label so a
              white-labeled instance gives nothing away until it is opened. -->
-        <button id="about-button" type="button" class="sidebar-about" aria-haspopup="dialog" aria-label="About this server">
+        <button id="about-button" type="button" class="sidebar-about" aria-haspopup="dialog" aria-label="About this server" data-tooltip="About">
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16.5"/><line x1="12" y1="7.6" x2="12" y2="7.6"/></svg>
           <span class="nav-label">About</span>
         </button>
-        <button id="sidebar-collapse" type="button" class="sidebar-collapse" aria-label="Collapse sidebar" aria-expanded="true">
+        <button id="sidebar-collapse" type="button" class="sidebar-collapse" aria-label="Collapse sidebar" aria-controls="sidebar" aria-expanded="true" data-tooltip="Collapse sidebar">
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="14 7 9 12 14 17"/></svg>
           <span class="nav-label">Collapse</span>
         </button>
@@ -170,19 +166,18 @@
     <section id="overview-view" hidden aria-labelledby="overview-heading">
       <div class="toolbar">
         <h1 id="overview-heading">Overview</h1>
-        <a class="ov-btn" id="overview-preview-viewer" href="/launchpad?preview=viewer" data-nav>Preview viewer home</a>
       </div>
       <div id="overview-body"></div>
     </section>
 
     <section id="launchpad-view" hidden aria-labelledby="launchpad-heading">
-      <h1 id="launchpad-heading" class="sr-only">Your apps</h1>
+      <h1 id="launchpad-heading" class="lp-page-title">Apps</h1>
       <div id="launchpad-body"></div>
     </section>
 
-    <section id="apps-view" hidden>
+    <section id="apps-view" hidden aria-labelledby="apps-heading">
       <div class="toolbar">
-        <h1>Apps</h1>
+        <h1 id="apps-heading">Apps</h1>
         <div class="toolbar-actions">
           <label for="apps-search" class="sr-only">Search apps</label>
           <input id="apps-search" type="search" class="apps-search" placeholder="Search…" autocomplete="off" aria-label="Filter apps by name or slug">
@@ -200,7 +195,8 @@
             <option value="unmanaged">Unmanaged</option>
           </select>
           <button id="new-app-button" type="button" hidden>+ New app</button>
-          <button id="refresh-button" type="button">Refresh</button>
+          <button id="refresh-button" class="toolbar-btn-quiet" type="button">Refresh</button>
+          <span id="apps-results-status" class="sr-only" role="status" aria-live="polite"></span>
         </div>
       </div>
       <p id="app-error" class="error" hidden></p>
@@ -407,14 +403,14 @@
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Description</span>
-                  <span class="scaling-option-help">A one-line summary shown on the home Launchpad.</span>
+                  <span class="scaling-option-help">A one-line summary shown in Apps.</span>
                 </span>
                 <input id="general-description" type="text" autocomplete="off" placeholder="(optional)" aria-label="App description">
               </label>
               <div class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Icon</span>
-                  <span class="scaling-option-help">Shown on the Launchpad and app pages. Upload a PNG, JPEG, WebP, or SVG (up to 512&nbsp;KB), or pick an emoji. Saved immediately.</span>
+                  <span class="scaling-option-help">Shown in Apps and on app pages. Upload a PNG, JPEG, WebP, or SVG (up to 512&nbsp;KB), or pick an emoji. Saved immediately.</span>
                 </span>
                 <div class="icon-picker">
                   <span id="general-icon-preview" class="icon-picker-preview" aria-hidden="true"></span>

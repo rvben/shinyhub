@@ -15,16 +15,16 @@ export const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
 // Rules, in the same precedence the mount used:
 //   1. An unknown requested tab falls back to 'overview'.
 //   2. A pure viewer (global role 'viewer') who does NOT manage this app has no
-//      business on the operator detail page — bounce to '/' (the Launchpad).
+//      business on the operator detail page — return to the canonical Apps page.
 //   3. A non-manager on a manager-only tab (configuration/data/access) is sent
 //      to the app root '/apps/<slug>'.
 // Rule 2 is checked before rule 3, so a pure viewer requesting a manager-only
-// tab is bounced to '/', not to the app root.
+// tab is returned to '/apps', not to the app root.
 export function resolveDetailAccess({ user, canManage, requestedTab, slug }) {
   const tab = TAB_ROUTES.includes(requestedTab) ? requestedTab : 'overview';
 
   if (user && user.role === 'viewer' && !canManage) {
-    return { tab, redirect: { path: '/', replace: true } };
+    return { tab, redirect: { path: '/apps', replace: true } };
   }
   if (!canManage && MANAGER_ONLY_TABS.has(tab)) {
     return { tab, redirect: { path: `/apps/${slug}`, replace: true } };

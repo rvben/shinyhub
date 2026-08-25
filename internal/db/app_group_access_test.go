@@ -77,6 +77,57 @@ func TestGroupRoleForUserOnApp(t *testing.T) {
 	}
 }
 
+func TestUserCanManageAnyAppIncludesOwnershipDirectAndGroupManagers(t *testing.T) {
+	store := dbtest.New(t)
+	ownerID := agaOwner(t, store)
+	store.CreateApp(db.CreateAppParams{Slug: "managed", Name: "Managed", OwnerID: ownerID})
+
+	if ok, err := store.UserCanManageAnyApp(ownerID); err != nil || !ok {
+		t.Fatalf("owner capability = %v, %v; want true, nil", ok, err)
+	}
+
+	store.CreateUser(db.CreateUserParams{Username: "direct-manager", PasswordHash: "h", Role: "viewer"})
+	direct, _ := store.GetUserByUsername("direct-manager")
+	store.GrantAppAccessWithRole("managed", direct.ID, "manager")
+	if ok, err := store.UserCanManageAnyApp(direct.ID); err != nil || !ok {
+		t.Fatalf("direct manager capability = %v, %v; want true, nil", ok, err)
+	}
+
+	store.CreateUser(db.CreateUserParams{Username: "group-manager", PasswordHash: "h", Role: "viewer"})
+	group, _ := store.GetUserByUsername("group-manager")
+	store.ReplaceUserGroups(group.ID, []string{"leads"})
+	store.GrantAppGroupAccess("managed", "leads", "manager", "manual")
+	if ok, err := store.UserCanManageAnyApp(group.ID); err != nil || !ok {
+		t.Fatalf("group manager capability = %v, %v; want true, nil", ok, err)
+	}
+
+	store.CreateUser(db.CreateUserParams{Username: "view-only", PasswordHash: "h", Role: "viewer"})
+	viewer, _ := store.GetUserByUsername("view-only")
+	store.GrantAppAccess("managed", viewer.ID)
+	if ok, err := store.UserCanManageAnyApp(viewer.ID); err != nil || ok {
+		t.Fatalf("view-only capability = %v, %v; want false, nil", ok, err)
+	}
+
+	for label, userID := range map[string]int64{
+		"owner": ownerID, "direct manager": direct.ID, "group manager": group.ID,
+	} {
+		slugs, err := store.ManagedAppSlugsForUser(userID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := slugs["managed"]; !ok || len(slugs) != 1 {
+			t.Fatalf("%s slugs = %v; want managed only", label, slugs)
+		}
+	}
+	slugs, err := store.ManagedAppSlugsForUser(viewer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(slugs) != 0 {
+		t.Fatalf("view-only slugs = %v; want none", slugs)
+	}
+}
+
 func TestUserCanAccessApp_ViaGroup(t *testing.T) {
 	store := dbtest.New(t)
 	ownerID := agaOwner(t, store)

@@ -709,6 +709,11 @@ type App struct {
 	// consumer never has to tell "absent" from "empty".
 	ProjectName      string `json:"project_name"`
 	ProjectIconEmoji string `json:"project_icon_emoji"`
+	// CanManage is a request-scoped presentation capability computed by the API.
+	// It includes ownership plus direct and group manager grants; database reads
+	// leave it false. Keeping it on list items lets role-adaptive Apps cards expose
+	// only actions the current caller can actually perform.
+	CanManage bool `json:"can_manage"`
 	// ReplicaPlacement is the per-app replica placement as a JSON object
 	// {"tier": count}, or "" when no placement is set (all Replicas on the
 	// default tier). The Replicas column remains the authoritative total.
@@ -1248,36 +1253,6 @@ func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
-		ORDER BY created_at DESC
-		LIMIT ? OFFSET ?`, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
-}
-
-// ListViewerBaselineApps returns the apps every authenticated viewer sees
-// regardless of per-app membership: access IN ('public','shared'). It powers the
-// admin "preview viewer home" scope (GET /api/apps?as=viewer), which shows the
-// default viewer experience without impersonating a specific user. Private apps
-// (member-only) are intentionally excluded - those vary per viewer.
-func (s *Store) ListViewerBaselineApps(limit, offset int) ([]*App, error) {
-	if limit <= 0 {
-		limit = s.d.noLimit()
-	}
-	rows, err := s.db.Query(`
-		SELECT `+appColumns+deploymentSummarySQL+`
-		FROM apps
-		WHERE access = 'public' OR access = 'shared'
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {

@@ -305,6 +305,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 /* Primary section nav */
 #primary-nav { display: flex; flex-direction: column; gap: 0.25rem; }
 .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
   min-height: 2rem;
@@ -578,6 +579,42 @@ body.sidebar-collapsed .identity-cog { display: none; }
 body.sidebar-collapsed .nav-item,
 body.sidebar-collapsed .sidebar-about,
 body.sidebar-collapsed .sidebar-collapse { justify-content: center; padding-left: 0; padding-right: 0; }
+body.sidebar-collapsed #sidebar { overflow: visible; }
+body.sidebar-collapsed [data-tooltip] { position: relative; }
+body.sidebar-collapsed [data-tooltip]::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 100%;
+  width: 0.65rem;
+  height: 100%;
+}
+body.sidebar-collapsed [data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 80;
+  top: 50%;
+  left: calc(100% + 0.65rem);
+  padding: 0.38rem 0.58rem;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.2;
+  opacity: 0;
+  pointer-events: auto;
+  transform: translate(-0.25rem, -50%);
+  transition: opacity var(--ease), transform var(--ease);
+  white-space: nowrap;
+  box-shadow: 0 8px 24px -14px rgba(0,0,0,0.75);
+}
+body.sidebar-collapsed:not([data-sidebar-tooltip-hidden]) [data-tooltip]:hover::after,
+body.sidebar-collapsed:not([data-sidebar-tooltip-hidden]) [data-tooltip]:focus-visible::after {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
 body.sidebar-collapsed .sidebar-footer { margin-top: auto; }
 body.sidebar-collapsed .identity-card { justify-content: center; gap: 0; padding-left: 0; padding-right: 0; }
 body.sidebar-collapsed .sidebar-collapse .nav-ico { transform: rotate(180deg); }
@@ -650,17 +687,22 @@ main {
   body.sidebar-open #sidebar { transform: translateX(0); }
   /* The collapsed icon-rail mode does not apply inside the mobile drawer. */
   body.sidebar-collapsed .nav-label,
-  body.sidebar-collapsed .sidebar-apps,
   body.sidebar-collapsed .identity-meta,
   body.sidebar-collapsed .identity-cog { display: revert; }
+  body.sidebar-collapsed .sidebar-apps:not([hidden]) { display: revert; }
   body.sidebar-collapsed .nav-item { justify-content: flex-start; padding-left: 0.5rem; padding-right: 0.5rem; }
   body.sidebar-collapsed .sidebar-about { justify-content: flex-start; padding-left: 0.4375rem; padding-right: 0.4375rem; }
   body.sidebar-collapsed .identity-card { justify-content: flex-start; gap: 0.6rem; padding-left: 0.45rem; padding-right: 0.45rem; }
+  body.sidebar-collapsed #sidebar { overflow: hidden; }
+  body.sidebar-collapsed [data-tooltip]::before,
+  body.sidebar-collapsed [data-tooltip]::after { display: none; }
+  .sidebar-collapse { display: none; }
   #sidebar-toggle,
   #sidebar .nav-item,
   #sidebar .sidebar-app,
   #sidebar .identity-card,
   #sidebar .sidebar-about { min-height: 44px; }
+  #sidebar-toggle { min-width: 44px; }
   body.sidebar-collapsed .sidebar-brand .brand-art {
     width: 11.45rem;
     height: 3.05rem;
@@ -917,6 +959,24 @@ body[data-auth="out"] {
 .toolbar button:hover {
   transform: translateY(-2px);
   box-shadow: 0 8px 28px rgba(56,189,248,0.45), inset 0 1px 0 rgba(255,255,255,0.3);
+}
+
+.toolbar button.toolbar-btn-quiet {
+  border: 1px solid var(--line-2);
+  background: var(--surface-2);
+  color: var(--text-soft);
+  box-shadow: none;
+}
+.toolbar button.toolbar-btn-quiet:hover {
+  border-color: var(--cyan-bright);
+  background: var(--surface-3);
+  color: var(--cyan-bright);
+  box-shadow: none;
+  transform: none;
+}
+.toolbar button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px rgba(56,189,248,0.55);
 }
 
 /* ── App Grid ── */
@@ -2583,6 +2643,7 @@ fieldset.settings-block { min-width: 0; }
 .apps-search:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 .apps-search::placeholder { color: var(--text-muted); }
 
@@ -5334,25 +5395,17 @@ footer.brand-footer a { color:inherit; }
    Warmth comes from the colorful per-app monogram avatars and generous tiles,
    not a palette change - it stays in the Constellation system.
    ─────────────────────────────────────────────────────────────────────────── */
+.lp-page-title {
+  margin: 0 0 0.35rem;
+  color: var(--text);
+  font-size: 2.6rem;
+  font-weight: 200;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
 .lp { display: flex; flex-direction: column; gap: 20px; max-width: 1100px; }
 
-/* Admin "preview viewer home" banner: a clear, dismissible context strip. */
-.lp-preview-banner {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px 18px; flex-wrap: wrap;
-  margin-bottom: 4px; padding: 11px 16px; border-radius: var(--radius);
-  background: var(--accent-dim); border: 1px solid var(--cyan-bright);
-  color: var(--text); font-size: 0.85rem;
-}
-.lp-preview-text strong { font-weight: 700; color: var(--cyan-bright); }
-.lp-preview-exit {
-  flex: none; font-weight: 600; font-size: 0.82rem; color: var(--text);
-  text-decoration: none; padding: 5px 12px; border-radius: var(--radius);
-  border: 1px solid var(--line-2); transition: border-color var(--ease), background var(--ease);
-}
-.lp-preview-exit:hover { border-color: var(--cyan-bright); background: var(--surface-2); }
-
 .lp-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 24px; flex-wrap: wrap; }
-.lp-welcome { font-size: 2rem; font-weight: 350; color: var(--text); letter-spacing: -0.035em; line-height: 1.1; text-wrap: balance; }
 .lp-sub { font-size: 0.9rem; color: var(--text-soft); margin-top: 3px; }
 .lp-search {
   font: inherit; font-size: 0.9rem; color: var(--text);
@@ -5539,6 +5592,7 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
   background-size: 200% 100%; animation: ovShimmer 1.4s linear infinite; }
 
 @media (max-width: 600px) {
+  .lp-page-title { font-size: 2rem; }
   .lp-search { width: 100%; }
   .lp-grid { grid-template-columns: 1fr; }
   .lp-empty { padding: 38px 20px; }

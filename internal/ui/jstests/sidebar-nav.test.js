@@ -8,6 +8,8 @@ import {
   renderSidebarApps,
   highlightSidebarApp,
   isPrimaryNavActive,
+  appsSurfaceForSession,
+  homeSurfaceForSession,
 } from '../static/views/sidebar-nav.js';
 import { appCardBadge } from '../static/views/app-card-badge.js';
 
@@ -20,14 +22,26 @@ function container() {
   return new JSDOM('<!DOCTYPE html><div id="c"></div>').window.document;
 }
 
-test('isPrimaryNavActive: contextual home and dedicated Launchpad follow the signed-in role', () => {
+test('role surfaces: one Apps destination adapts without hiding viewer-managers', () => {
+  assert.equal(appsSurfaceForSession('viewer', false), 'viewer');
+  assert.equal(appsSurfaceForSession('viewer', true), 'manage');
+  assert.equal(appsSurfaceForSession('developer', false), 'manage');
+  assert.equal(appsSurfaceForSession('operator', false), 'manage');
+  assert.equal(appsSurfaceForSession('admin', false), 'manage');
+  assert.equal(homeSurfaceForSession('viewer'), 'apps');
+  assert.equal(homeSurfaceForSession('developer'), 'apps');
+  assert.equal(homeSurfaceForSession('operator'), 'overview');
+  assert.equal(homeSurfaceForSession('admin'), 'overview');
+});
+
+test('isPrimaryNavActive: contextual home and legacy Launchpad alias select Apps', () => {
   assert.equal(isPrimaryNavActive('/', '/', 'admin'), true);
-  assert.equal(isPrimaryNavActive('/launchpad', '/', 'admin'), false);
-  assert.equal(isPrimaryNavActive('/launchpad', '/', 'viewer'), true);
-  assert.equal(isPrimaryNavActive('/', '/', 'viewer'), false);
+  assert.equal(isPrimaryNavActive('/apps', '/', 'admin'), false);
+  assert.equal(isPrimaryNavActive('/apps', '/', 'viewer'), true);
+  assert.equal(isPrimaryNavActive('/apps', '/', 'developer'), true);
   assert.equal(isPrimaryNavActive('/', '/home', 'operator'), true);
-  assert.equal(isPrimaryNavActive('/launchpad', '/home', 'viewer'), true);
-  assert.equal(isPrimaryNavActive('/launchpad', '/launchpad', 'admin'), true);
+  assert.equal(isPrimaryNavActive('/apps', '/home', 'viewer'), true);
+  assert.equal(isPrimaryNavActive('/apps', '/launchpad', 'admin'), true);
   assert.equal(isPrimaryNavActive('/apps', '/apps/demo/logs', 'admin'), true);
 });
 

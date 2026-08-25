@@ -98,7 +98,7 @@ export function mountAppDetail(ctx) {
     // who pasted/bookmarked the explicit overview URL.
 
     const resp = await ctx.api(`/api/apps/${slug}`);
-    if (resp.status === 404) { ctx.navigate('/'); return {}; }
+    if (resp.status === 404) { ctx.navigate('/apps', { replace: true }); return {}; }
     if (resp.status === 401) { ctx.onUnauthorized(); return {}; }
     // A silent `return {}` here used to leave the main panel totally blank with
     // no error or retry (a 500/502 read as a successful, empty mount). Throw so
@@ -115,7 +115,7 @@ export function mountAppDetail(ctx) {
     const canManage = ctx.canManageApp(ctx.state.user, app);
 
     // Resolve which tab to show and whether the visitor must be redirected:
-    // a pure viewer who doesn't manage this app is bounced to the Launchpad ('/'),
+    // a pure viewer who doesn't manage this app is returned to Apps (`/apps`),
     // and a non-manager on a manager-only tab (configuration/data/access) is sent
     // to the app root. An unknown tab falls back to overview. See
     // views/app-detail-nav.js. The gate runs after the app loads, so it covers
