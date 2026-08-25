@@ -206,12 +206,13 @@ body::before {
 }
 
 /* ── App shell: persistent left sidebar + content column ── */
-:root { --sidebar-w: 248px; --sidebar-w-collapsed: 68px; }
+:root { --sidebar-w: 232px; --sidebar-w-collapsed: 48px; }
 
 #app-shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   min-height: 100vh;
+  transition: grid-template-columns var(--ease);
 }
 body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-collapsed) minmax(0, 1fr); }
 /* Pre-auth and boot: no sidebar chrome, single full-width column. The login
@@ -254,7 +255,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 1.1rem 0.7rem 0.8rem;
+  padding: 0.75rem 0.5rem 0.65rem;
   background: rgba(var(--inset-rgb),0.72);
   backdrop-filter: blur(14px) saturate(1.3);
   -webkit-backdrop-filter: blur(14px) saturate(1.3);
@@ -291,16 +292,17 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   white-space: nowrap;
 }
 
-.sidebar-brand { display: flex; align-items: center; min-height: 4rem; padding: 0.2rem 0.5rem 0.85rem; }
-.sidebar-brand .brand-art { width: 11.45rem; height: 3.05rem; }
+.sidebar-brand { display: flex; flex: none; align-items: center; height: 3rem; padding: 0 0.35rem 0.5rem; }
+.sidebar-brand .brand-art { width: 10.5rem; height: 2.4rem; }
 
 /* Primary section nav */
-#primary-nav { display: flex; flex-direction: column; gap: 0.12rem; }
+#primary-nav { display: flex; flex-direction: column; gap: 0.25rem; }
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 0.7rem;
-  padding: 0.55rem 0.7rem;
+  min-height: 2rem;
+  gap: 0.625rem;
+  padding: 0 0.5rem;
   border-radius: var(--radius);
   color: var(--text-muted);
   text-decoration: none;
@@ -327,7 +329,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   background: var(--surface);
   box-shadow: inset 0 0 0 1px var(--line);
 }
-.nav-ico { width: 18px; height: 18px; flex-shrink: 0; color: var(--text-muted); }
+.nav-ico { width: 16px; height: 16px; flex-shrink: 0; color: var(--text-muted); }
 .nav-item.tab-active .nav-ico { color: var(--cyan-bright); }
 .nav-label { overflow: hidden; text-overflow: ellipsis; }
 
@@ -456,9 +458,9 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .sidebar-footer {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  margin-top: 0.6rem;
-  padding-top: 0.7rem;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
   border-top: 1px solid var(--line);
 }
 /* Identity card: clickable profile entry. Scoped under .sidebar-footer so it
@@ -466,9 +468,11 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .sidebar-footer .identity-card {
   display: flex;
   align-items: center;
+  height: 2.5rem;
+  min-height: 2.5rem;
   gap: 0.6rem;
   width: 100%;
-  padding: 0.42rem 0.45rem;
+  padding: 0.25rem 0.0625rem;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius);
@@ -488,9 +492,9 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .identity-avatar {
   --avatar-hue: 205;
   flex: none;
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -515,6 +519,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   color: var(--text);
   font-size: 0.82rem;
   font-weight: 600;
+  line-height: 1.2;
   letter-spacing: -0.01em;
   white-space: nowrap;
   overflow: hidden;
@@ -523,6 +528,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .identity-role {
   color: var(--text-muted);
   font-size: 0.7rem;
+  line-height: 1.15;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -538,8 +544,9 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .sidebar-footer button {
   background: transparent;
   border: 1px solid var(--line-2);
+  min-height: 2rem;
   color: var(--text-soft);
-  padding: 0.42rem 0.8rem;
+  padding: 0 0.4375rem;
   border-radius: var(--radius);
   cursor: pointer;
   font-size: 0.78rem;
@@ -555,19 +562,22 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .sidebar-collapse { display: flex; align-items: center; gap: 0.6rem; width: 100%; }
 .sidebar-collapse .nav-ico { width: 16px; height: 16px; transition: transform var(--ease); }
 
-/* Collapsed icon rail: labels/text hidden, icons centered. */
+/* Collapsed icon rail: labels/text hide into a dense, centered tool rail. The
+   shared control heights keep every icon on the same vertical coordinate. */
 body.sidebar-collapsed .nav-label,
 body.sidebar-collapsed .sidebar-apps,
 body.sidebar-collapsed .identity-meta,
 body.sidebar-collapsed .identity-cog { display: none; }
 body.sidebar-collapsed .nav-item,
-body.sidebar-collapsed .sidebar-collapse { justify-content: center; }
+body.sidebar-collapsed .sidebar-about,
+body.sidebar-collapsed .sidebar-collapse { justify-content: center; padding-left: 0; padding-right: 0; }
+body.sidebar-collapsed .sidebar-footer { margin-top: auto; }
 body.sidebar-collapsed .identity-card { justify-content: center; gap: 0; padding-left: 0; padding-right: 0; }
 body.sidebar-collapsed .sidebar-collapse .nav-ico { transform: rotate(180deg); }
-body.sidebar-collapsed .sidebar-brand { justify-content: center; padding: 0.3rem 0 1rem; }
+body.sidebar-collapsed .sidebar-brand { justify-content: center; padding: 0 0 0.5rem; }
 body.sidebar-collapsed .sidebar-brand .brand-art {
-  width: 2.45rem;
-  height: 2.1rem;
+  width: 1.75rem;
+  height: 1.75rem;
   background-image: var(--stock-brand-mark);
 }
 
@@ -636,8 +646,14 @@ main {
   body.sidebar-collapsed .sidebar-apps,
   body.sidebar-collapsed .identity-meta,
   body.sidebar-collapsed .identity-cog { display: revert; }
-  body.sidebar-collapsed .nav-item { justify-content: flex-start; }
+  body.sidebar-collapsed .nav-item { justify-content: flex-start; padding-left: 0.5rem; padding-right: 0.5rem; }
+  body.sidebar-collapsed .sidebar-about { justify-content: flex-start; padding-left: 0.4375rem; padding-right: 0.4375rem; }
   body.sidebar-collapsed .identity-card { justify-content: flex-start; gap: 0.6rem; padding-left: 0.45rem; padding-right: 0.45rem; }
+  #sidebar-toggle,
+  #sidebar .nav-item,
+  #sidebar .sidebar-app,
+  #sidebar .identity-card,
+  #sidebar .sidebar-about { min-height: 44px; }
   body.sidebar-collapsed .sidebar-brand .brand-art {
     width: 11.45rem;
     height: 3.05rem;
@@ -653,6 +669,7 @@ main {
   main { padding: 1.75rem 1.25rem 3rem; }
 }
 @media (prefers-reduced-motion: reduce) {
+  #app-shell,
   #sidebar { transition: none; }
   .group-disclosure-chevron { transition: none; }
 }
@@ -5736,7 +5753,6 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
    a nav destination, so it borrows the collapse button's layout. */
 .sidebar-about { display: flex; align-items: center; gap: 0.6rem; width: 100%; }
 .sidebar-about .nav-ico { width: 16px; height: 16px; }
-body.sidebar-collapsed .sidebar-about { justify-content: center; }
 
 /* Profile modal → tokens link */
 .profile-tokens-link { margin: 0.25rem 0 0.5rem; }

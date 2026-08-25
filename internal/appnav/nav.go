@@ -9,7 +9,7 @@
 // the asset and the splice live here and both callers reach for the same ones.
 //
 // The data the switcher renders never depends on the app being viewed, only on
-// who is asking. That is what lets the same rail work on a 401: a visitor
+// who is asking. That is what lets the same bar work on a 401: a visitor
 // refused one app can still be offered the apps they do hold.
 package appnav
 

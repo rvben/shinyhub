@@ -2373,6 +2373,24 @@ func TestSidebarLayoutCSS(t *testing.T) {
 	for _, needle := range []string{"#app-shell", "--sidebar-w", "body.sidebar-collapsed", "body.sidebar-open", "@media (max-width: 860px)"} {
 		assertContains(t, "style.css", needle, "style.css must define sidebar layout primitive "+needle)
 	}
+	assertContains(t, "style.css", ":root { --sidebar-w: 232px; --sidebar-w-collapsed: 48px; }",
+		"desktop sidebar must use the compact expanded panel and tool rail widths")
+	assertContains(t, "style.css", "body.sidebar-collapsed .nav-item,\nbody.sidebar-collapsed .sidebar-about,\nbody.sidebar-collapsed .sidebar-collapse { justify-content: center; padding-left: 0; padding-right: 0; }",
+		"collapsed sidebar controls must center their icons in the compact rail")
+	assertContains(t, "style.css", "body.sidebar-collapsed .sidebar-footer { margin-top: auto; }",
+		"collapsed sidebar footer controls must stay pinned to the bottom")
+	assertContains(t, "style.css", "body.sidebar-collapsed .nav-item { justify-content: flex-start; padding-left: 0.5rem; padding-right: 0.5rem; }",
+		"mobile drawer navigation must restore expanded alignment and padding")
+	assertContains(t, "style.css", "#sidebar-toggle,\n  #sidebar .nav-item,\n  #sidebar .sidebar-app,\n  #sidebar .identity-card,\n  #sidebar .sidebar-about { min-height: 44px; }",
+		"mobile drawer controls must retain accessible touch targets")
+	assertContains(t, "style.css", ".sidebar-brand { display: flex; flex: none; align-items: center; height: 3rem;",
+		"sidebar brand slot must keep the primary navigation at a stable vertical position")
+	assertContains(t, "style.css", "  min-height: 2.5rem;",
+		"identity control must keep the same compact height when its metadata is hidden")
+	assertContains(t, "style.css", "  height: 2.5rem;",
+		"identity control must not grow when its metadata is visible")
+	assertContains(t, "style.css", "  min-height: 2rem;",
+		"navigation rows must keep the same height when their labels are hidden")
 }
 
 // TestVersionDisplayUsesReleaseNumber pins the human-friendly version display:

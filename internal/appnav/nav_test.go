@@ -184,23 +184,16 @@ func TestWireContract_EveryPayloadFieldIsReadByTheScript(t *testing.T) {
 	}
 }
 
-// The rail is appended after the panel, so it paints on top of it. Without a
-// rule retiring the rail while the panel is open, the strip lies across
-// whichever rows land at mid-height and hides them - which is what it did
-// until a browser was pointed at it.
-func TestScript_RetiresTheRailWhileThePanelIsOpen(t *testing.T) {
-	const rule = ".root.open .rail {"
-	idx := strings.Index(Script, rule)
-	if idx < 0 {
-		t.Fatalf("assets/nav.js declares no %q rule, so the rail paints over the panel it opened", rule)
-	}
-	body := Script[idx+len(rule):]
-	if end := strings.Index(body, "}"); end >= 0 {
-		body = body[:end]
-	}
-	for _, want := range []string{"opacity: 0", "pointer-events: none"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the %q rule does not set %q (rule body: %q)", rule, want, body)
+// Apps own their layouts, so the switcher must offer more than one intentional
+// placement rather than assuming the default top centre is always clear. These
+// selectors also pin the bar and its panel to the same placement model.
+func TestScript_OffersFourAnchoredPlacements(t *testing.T) {
+	for _, position := range []string{"top-center", "top-right", "left-center", "right-center"} {
+		for _, surface := range []string{".bar", ".panel", ".restore"} {
+			selector := "[data-position='" + position + "'] " + surface
+			if !strings.Contains(Script, selector) {
+				t.Errorf("assets/nav.js has no %q rule", selector)
+			}
 		}
 	}
 }

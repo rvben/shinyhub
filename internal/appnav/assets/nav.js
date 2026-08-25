@@ -5,7 +5,7 @@
  * every app the visitor can reach, but the moment they open one, that sidebar
  * is gone: the app owns the whole viewport and the only route to a second app
  * is the browser's back button or a URL they were never shown. This puts the
- * dashboard's own app list back on screen as a rail the app cannot see.
+ * dashboard's own app list back on screen as a compact bar the app cannot see.
  *
  * The same properties that keep the status overlay from becoming a fleet-wide
  * outage apply here, and one more that is specific to chrome:
@@ -15,17 +15,19 @@
  *   2. Every entry point is wrapped. A throw here must never escape into the
  *      app's page.
  *   3. Everything it renders lives inside a shadow root, so the app's CSS
- *      cannot restyle the rail and the rail's CSS cannot reach the app. An
+ *      cannot restyle the switcher and the switcher's CSS cannot reach the app. An
  *      injected stylesheet without that boundary would be a fleet-wide
  *      restyling of applications this server did not write.
- *   4. It occupies a fixed 26px strip and nothing else. An app whose own
- *      controls sit at the far left is the reason the rail is dismissible.
+ *   4. It starts at the top centre, then lets the visitor snap it to another
+ *      viewport edge or reduce it to a restore tab. Apps own their layouts;
+ *      collision recovery therefore belongs in the control, not in a host
+ *      page heuristic that guesses where an app put its important controls.
  *
  * Styles are installed through the CSSOM (a constructed stylesheet, or
  * insertRule into an empty one) rather than as a <style> block with text in
  * it. CSP's style-src governs markup; CSSOM writes are not markup. That keeps
  * the whole feature inside a single script-src hash and means an app with a
- * strict style-src still gets a correctly styled rail.
+ * strict style-src still gets correctly styled navigation chrome.
  *
  * Every value that varies per page rides on the script tag's data-* attributes
  * and never in this body. A CSP hash covers script text only, so keeping the
@@ -37,7 +39,9 @@
 
   var TAG_ID = "shinyhub-app-nav";
   var DISMISS_KEY = "shinyhub-app-nav:dismissed";
+  var POSITION_KEY = "shinyhub-app-nav:position:";
   var FILTER_THRESHOLD = 8;
+  var POSITIONS = ["top-center", "top-right", "left-center", "right-center"];
 
   var tag = document.currentScript || document.getElementById(TAG_ID);
   if (!tag) {
@@ -45,7 +49,7 @@
   }
 
   // A framed app is furniture inside someone else's page, not a destination.
-  // Floating our rail over an embed would put ShinyHub's chrome in a layout it
+  // Floating our switcher over an embed would put ShinyHub's chrome in a layout it
   // knows nothing about. A cross-origin parent throws on access, which is
   // itself proof we are framed.
   try {
@@ -86,7 +90,7 @@
 
   // sessionStorage is unavailable in some privacy modes and throws on access
   // rather than returning null, so both sides are guarded. A tab that cannot
-  // remember a dismissal simply shows the rail again, which is the safe way to
+  // remember a dismissal simply shows the full switcher again, which is the safe way to
   // be wrong.
   function dismissed() {
     try {
@@ -96,17 +100,36 @@
     }
   }
 
-  function rememberDismissal() {
+  function rememberDismissal(next) {
     try {
-      window.sessionStorage.setItem(DISMISS_KEY, "1");
+      if (next) {
+        window.sessionStorage.setItem(DISMISS_KEY, "1");
+      } else {
+        window.sessionStorage.removeItem(DISMISS_KEY);
+      }
     } catch (e) {
       /* not remembering is acceptable; showing it again is not a fault */
     }
   }
 
-  if (dismissed()) {
-    return;
+  function rememberedPosition() {
+    try {
+      var saved = window.localStorage.getItem(POSITION_KEY + currentSlug);
+      return POSITIONS.indexOf(saved) === -1 ? "top-center" : saved;
+    } catch (e) {
+      return "top-center";
+    }
   }
+
+  function rememberPosition(next) {
+    try {
+      window.localStorage.setItem(POSITION_KEY + currentSlug, next);
+    } catch (e) {
+      /* placement persistence is convenience, never a page requirement */
+    }
+  }
+
+  var initiallyDismissed = dismissed();
 
   /* ---------------------------------------------------------------------
    * Grouping. This is a deliberate copy of the rule in
@@ -210,68 +233,102 @@
   var CSS = [
     ":host { all: initial; }",
     ".root {" +
-      "  --sh-deep: #030510;" +
-      "  --sh-surface: #0E1426;" +
-      "  --sh-raised: #141B32;" +
-      "  --sh-hover: #1B2444;" +
-      "  --sh-line: #1E2A4A;" +
-      "  --sh-line-strong: #2B3A63;" +
-      "  --sh-text: #E8EEFF;" +
-      "  --sh-soft: #A8B4D4;" +
-      "  --sh-muted: #6B7AA3;" +
-      "  --sh-signal: #38BDF8;" +
-      "  --sh-coral: #F87171;" +
+      "  --sh-deep: #030510; --sh-surface: #0E1426; --sh-raised: #141B32;" +
+      "  --sh-hover: #1B2444; --sh-line: #1E2A4A; --sh-line-strong: #2B3A63;" +
+      "  --sh-text: #E8EEFF; --sh-soft: #A8B4D4; --sh-muted: #6B7AA3;" +
+      "  --sh-signal: #38BDF8; --sh-coral: #F87171;" +
       "  --sh-r-sm: 4px; --sh-r-md: 8px; --sh-r-lg: 14px; --sh-r-pill: 99px;" +
-      "  position: fixed; inset: 0 auto 0 0; z-index: 2147483646;" +
+      "  position: fixed; inset: 0; z-index: 2147483646;" +
       "  font-family: Manrope, -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', sans-serif;" +
       "  font-size: 14px; line-height: 1.55; letter-spacing: -0.005em; color: var(--sh-text);" +
-      "  pointer-events: none;" +
+      "  pointer-events: none; user-select: none; -webkit-user-select: none;" +
       "}",
-    // The rail is the only thing that overlaps the app while closed, so it is
-    // kept to a strip and fades up on approach rather than sitting at full
-    // strength over someone's controls.
-    ".rail {" +
-      "  position: absolute; top: 50%; left: 0; transform: translateY(-50%);" +
-      "  display: flex; flex-direction: column; align-items: center; gap: 4px;" +
-      "  padding: 8px 4px; pointer-events: auto;" +
-      "  background: var(--sh-surface);" +
-      "  border: 1px solid var(--sh-line); border-left: 0;" +
-      "  border-radius: 0 var(--sh-r-md) var(--sh-r-md) 0;" +
-      "  opacity: 0.6; transition: opacity 140ms ease, border-color 140ms ease;" +
+    ".bar {" +
+      "  position: absolute; width: min(264px, calc(100vw - 24px)); height: 40px; box-sizing: border-box;" +
+      "  display: flex; align-items: center; pointer-events: auto; overflow: hidden;" +
+      "  color: var(--sh-text); background: var(--sh-surface); border: 1px solid var(--sh-line-strong);" +
+      "  border-radius: var(--sh-r-md); box-shadow: 0 10px 30px -16px rgba(0,0,0,0.8);" +
+      "  transition: border-color 140ms ease, box-shadow 140ms ease, opacity 140ms ease;" +
       "}",
-    ".rail:hover, .rail:focus-within { opacity: 1; border-color: var(--sh-line-strong); }",
-    // The rail sits above the panel, so leaving it visible once the panel is
-    // open lays the strip across whichever rows happen to fall at mid-height.
-    // The panel carries its own close control, so the rail has nothing left to
-    // offer while it is open.
-    ".root.open .rail { opacity: 0; pointer-events: none; }",
-    ".railbtn {" +
-      "  appearance: none; -webkit-appearance: none; background: transparent;" +
-      "  border: 0; margin: 0; padding: 6px 4px; cursor: pointer; color: var(--sh-soft);" +
-      "  border-radius: var(--sh-r-sm); display: block;" +
+    ".bar:hover, .bar:focus-within, .root.open .bar, .root.placing .bar {" +
+      "  border-color: var(--sh-signal); box-shadow: 0 10px 30px -16px rgba(0,0,0,0.8);" +
       "}",
-    ".railbtn:hover { color: var(--sh-signal); background: var(--sh-hover); }",
-    ".railbtn:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 1px; }",
-    ".railbtn svg { display: block; width: 16px; height: 16px; }",
-    ".rule { width: 12px; height: 1px; background: var(--sh-line-strong); }",
-    ".close { color: var(--sh-muted); padding: 4px; }",
-    ".close svg { width: 12px; height: 12px; }",
+    ".root.dismissed .bar { display: none; }",
+    ".root[data-position='top-center'] .bar { top: 12px; left: 50%; transform: translateX(-50%); }",
+    ".root[data-position='top-right'] .bar { top: 12px; right: 12px; }",
+    ".root[data-position='left-center'] .bar { top: 50%; left: 12px; transform: translateY(-50%); }",
+    ".root[data-position='right-center'] .bar { top: 50%; right: 12px; transform: translateY(-50%); }",
+    ".root[data-position='left-center'] .bar, .root[data-position='right-center'] .bar {" +
+      "  width: 40px; height: 104px; flex-direction: column;" +
+      "}",
+    ".control {" +
+      "  appearance: none; -webkit-appearance: none; border: 0; margin: 0; padding: 0;" +
+      "  height: 38px; display: flex; align-items: center; justify-content: center;" +
+      "  color: var(--sh-soft); background: transparent; font: inherit; cursor: pointer;" +
+      "}",
+    ".control:hover { color: var(--sh-text); background: var(--sh-hover); }",
+    ".control:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: -3px; }",
+    ".control svg { width: 16px; height: 16px; display: block; }",
+    ".move { width: 30px; flex: none; cursor: grab; color: var(--sh-muted); touch-action: none; }",
+    ".root[data-position='left-center'] .move, .root[data-position='right-center'] .move { width: 38px; height: 30px; }",
+    ".root.dragging .move { cursor: grabbing; color: var(--sh-signal); }",
+    ".move svg { width: 14px; height: 14px; }",
+    ".switch {" +
+      "  min-width: 0; flex: 1; justify-content: flex-start; gap: 8px; padding: 0 8px;" +
+      "  border-left: 1px solid var(--sh-line); border-right: 1px solid var(--sh-line);" +
+      "}",
+    ".root[data-position='left-center'] .switch, .root[data-position='right-center'] .switch {" +
+      "  width: 38px; height: 40px; flex: none; justify-content: center; padding: 0;" +
+      "  border: 0; border-top: 1px solid var(--sh-line); border-bottom: 1px solid var(--sh-line);" +
+      "}",
+    ".switchmark {" +
+      "  width: 24px; height: 24px; flex: none; display: flex; align-items: center; justify-content: center;" +
+      "  color: var(--sh-signal); background: var(--sh-raised); border-radius: var(--sh-r-sm);" +
+      "}",
+    ".switchmark svg { width: 14px; height: 14px; }",
+    ".root[data-position='left-center'] .switchmark, .root[data-position='right-center'] .switchmark { background: transparent; }",
+    ".current-meta { min-width: 0; flex: 1; text-align: left; }",
+    ".compact-label { display: none; color: var(--sh-text); font-size: 12px; font-weight: 600; }",
+    ".current-label {" +
+      "  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" +
+      "  color: var(--sh-text); font-size: 13px; font-weight: 600; line-height: 1.2;" +
+      "}",
+    ".current-action { display: block; color: var(--sh-soft); font-size: 12px; line-height: 1.2; }",
+    ".root[data-position='left-center'] .current-meta, .root[data-position='right-center'] .current-meta," +
+      " .root[data-position='left-center'] .chevron, .root[data-position='right-center'] .chevron { display: none; }",
+    ".chevron { flex: none; transition: transform 140ms ease; }",
+    ".root.open .chevron { transform: rotate(180deg); }",
+    ".close { width: 32px; flex: none; color: var(--sh-muted); }",
+    ".root[data-position='left-center'] .close, .root[data-position='right-center'] .close { width: 38px; height: 32px; }",
     ".close:hover { color: var(--sh-coral); background: var(--sh-raised); }",
+    ".close svg { width: 13px; height: 13px; }",
 
     ".scrim {" +
-      "  position: absolute; inset: 0; background: var(--sh-deep);" +
-      "  opacity: 0; pointer-events: none; transition: opacity 160ms ease;" +
+      "  position: absolute; inset: 0; background: var(--sh-deep); opacity: 0;" +
+      "  pointer-events: none; transition: opacity 160ms ease;" +
       "}",
-    ".root.open .scrim { opacity: 0.66; pointer-events: auto; }",
+    ".root.open .scrim { opacity: 0.14; pointer-events: auto; }",
+    ".root.placing .scrim { opacity: 0; pointer-events: auto; }",
 
     ".panel {" +
-      "  position: absolute; top: 0; bottom: 0; left: 0; width: 292px; max-width: 86vw;" +
-      "  display: flex; flex-direction: column; pointer-events: auto;" +
-      "  background: var(--sh-surface); border-right: 1px solid var(--sh-line-strong);" +
-      "  transform: translateX(-100%); transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);" +
-      "  visibility: hidden;" +
+      "  position: absolute; width: 320px; max-width: calc(100vw - 24px);" +
+      "  max-height: min(560px, calc(100vh - 72px)); box-sizing: border-box;" +
+      "  display: flex; flex-direction: column; pointer-events: auto; overflow: hidden;" +
+      "  color: var(--sh-text); background: var(--sh-surface);" +
+      "  border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg);" +
+      "  box-shadow: 0 32px 80px rgba(0,0,0,0.7);" +
+      "  opacity: 0; visibility: hidden; transform: translateY(-8px) scale(0.98);" +
+      "  transform-origin: top center; transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 180ms;" +
       "}",
-    ".root.open .panel { transform: translateX(0); visibility: visible; }",
+    ".root[data-position='top-center'] .panel { top: 60px; left: 50%; transform-origin: top center; }",
+    ".root[data-position='top-right'] .panel { top: 60px; right: 12px; transform-origin: top right; }",
+    ".root[data-position='left-center'] .panel { top: 50%; left: 60px; transform-origin: left center; }",
+    ".root[data-position='right-center'] .panel { top: 50%; right: 60px; transform-origin: right center; }",
+    ".root.open[data-position='top-center'] .panel { transform: translateX(-50%) translateY(0) scale(1); }",
+    ".root.open[data-position='top-right'] .panel { transform: translateY(0) scale(1); }",
+    ".root.open[data-position='left-center'] .panel { transform: translateY(-50%) scale(1); }",
+    ".root.open[data-position='right-center'] .panel { transform: translateY(-50%) scale(1); }",
+    ".root.open .panel { opacity: 1; visibility: visible; }",
     // The panel takes focus itself while the list loads, so it needs a ring for
     // the seconds it holds it - otherwise a keyboard visitor is somewhere with
     // nothing on screen saying where. :focus-visible keeps it to the visitors
@@ -281,14 +338,14 @@
 
     ".head {" +
       "  display: flex; align-items: center; gap: 8px;" +
-      "  padding: 16px 16px 8px; border-bottom: 1px solid var(--sh-line);" +
+      "  padding: 14px 16px 10px; border-bottom: 1px solid var(--sh-line);" +
       "}",
     ".title {" +
       "  font-size: 12px; font-weight: 600; line-height: 1.35; letter-spacing: 0.02em;" +
       "  text-transform: uppercase; color: var(--sh-soft);" +
       "}",
     ".count {" +
-      "  font-size: 12px; font-weight: 600; color: var(--sh-muted); background: var(--sh-raised);" +
+      "  font-size: 12px; font-weight: 600; color: var(--sh-soft); background: var(--sh-raised);" +
       "  border-radius: var(--sh-r-pill); padding: 4px 10px; font-variant-numeric: tabular-nums;" +
       "}",
     ".spacer { flex: 1; }",
@@ -307,14 +364,15 @@
       "  border-radius: var(--sh-r-md); padding: 9px 12px; color: var(--sh-text);" +
       "  font-family: inherit; font-size: 14px;" +
       "}",
-    ".filter::placeholder { color: var(--sh-muted); }",
+    ".filter::placeholder { color: var(--sh-soft); }",
     ".filter:focus { outline: none; border-color: var(--sh-signal); }",
 
-    ".list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 8px; }",
+    ".list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px; }",
+    ".list { scrollbar-color: var(--sh-line-strong) transparent; scrollbar-width: thin; }",
     ".grouphead {" +
       "  display: flex; align-items: center; gap: 8px; padding: 16px 8px 4px;" +
       "  font-size: 12px; font-weight: 600; line-height: 1.35; letter-spacing: 0.02em;" +
-      "  text-transform: uppercase; color: var(--sh-muted);" +
+      "  text-transform: uppercase; color: var(--sh-soft);" +
       "}",
     ".item {" +
       "  display: flex; align-items: center; gap: 8px; padding: 8px;" +
@@ -344,11 +402,11 @@
       "  flex: none; font-size: 12px; font-weight: 600; letter-spacing: 0.02em;" +
       "  text-transform: uppercase;" +
       "}",
-    ".flag { color: var(--sh-muted); }",
+    ".flag { color: var(--sh-soft); }",
     ".here { color: var(--sh-signal); }",
 
-    ".note { padding: 16px 8px; color: var(--sh-muted); }",
-    ".more { padding: 8px 8px 16px; color: var(--sh-muted); font-size: 12px; line-height: 1.35; }",
+    ".note { padding: 16px 8px; color: var(--sh-soft); }",
+    ".more { padding: 8px 8px 16px; color: var(--sh-soft); font-size: 12px; line-height: 1.35; }",
     ".retry {" +
       "  margin-top: 16px; appearance: none; -webkit-appearance: none; font-family: inherit;" +
       "  font-size: 12px; font-weight: 600; letter-spacing: 0.02em;" +
@@ -365,12 +423,96 @@
     ".home:hover { text-decoration: underline; }",
     ".home:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 2px; }",
     ".who {" +
-      "  margin-left: auto; font-size: 12px; color: var(--sh-muted); max-width: 45%;" +
+      "  margin-left: auto; font-size: 12px; color: var(--sh-soft); max-width: 45%;" +
       "  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" +
       "}",
 
+    ".position-menu {" +
+      "  position: absolute; width: 212px; box-sizing: border-box; padding: 8px;" +
+      "  pointer-events: auto; color: var(--sh-text); background: var(--sh-surface);" +
+      "  border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg);" +
+      "  box-shadow: 0 32px 80px rgba(0,0,0,0.7);" +
+      "  opacity: 0; visibility: hidden; transform: translateY(-6px);" +
+      "  transition: opacity 140ms ease, transform 160ms cubic-bezier(0.22,1,0.36,1), visibility 160ms;" +
+      "}",
+    ".root.placing .position-menu { opacity: 1; visibility: visible; transform: none; }",
+    ".root[data-position='top-center'] .position-menu { top: 60px; left: 50%; margin-left: -132px; }",
+    ".root[data-position='top-right'] .position-menu { top: 60px; right: 12px; }",
+    ".root[data-position='left-center'] .position-menu { top: 50%; left: 60px; margin-top: -106px; }",
+    ".root[data-position='right-center'] .position-menu { top: 50%; right: 60px; margin-top: -106px; }",
+    ".menu-title { padding: 4px 8px 8px; color: var(--sh-soft); font-size: 12px; font-weight: 600; }",
+    ".place-option {" +
+      "  appearance: none; -webkit-appearance: none; width: 100%; min-height: 36px;" +
+      "  display: flex; align-items: center; gap: 10px; margin: 0; padding: 7px 8px;" +
+      "  border: 0; border-radius: var(--sh-r-md); background: transparent; color: var(--sh-soft);" +
+      "  font: inherit; font-size: 13px; text-align: left; cursor: pointer;" +
+      "}",
+    ".place-option:hover { color: var(--sh-text); background: var(--sh-hover); }",
+    ".place-option:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: -2px; }",
+    ".place-option[aria-checked='true'] { color: var(--sh-text); background: var(--sh-raised); }",
+    ".place-map {" +
+      "  position: relative; width: 24px; height: 16px; flex: none; box-sizing: border-box;" +
+      "  border: 1px solid var(--sh-line-strong); border-radius: 3px;" +
+      "}",
+    ".place-map::after {" +
+      "  content: ''; position: absolute; width: 8px; height: 3px; border-radius: var(--sh-r-sm); background: var(--sh-signal);" +
+      "}",
+    ".place-option[data-position='top-center'] .place-map::after { top: 2px; left: 7px; }",
+    ".place-option[data-position='top-right'] .place-map::after { top: 2px; right: 2px; }",
+    ".place-option[data-position='left-center'] .place-map::after { top: 6px; left: 2px; }",
+    ".place-option[data-position='right-center'] .place-map::after { top: 6px; right: 2px; }",
+
+    ".snap-guides { position: absolute; inset: 0; opacity: 0; visibility: hidden; transition: opacity 100ms ease; }",
+    ".root.dragging .snap-guides { opacity: 1; visibility: visible; }",
+    ".guide {" +
+      "  position: absolute; width: 74px; height: 18px; box-sizing: border-box;" +
+      "  border: 1px dashed var(--sh-line-strong); border-radius: var(--sh-r-md);" +
+      "  background: rgba(14,20,38,0.58); transition: border-color 100ms ease, background 100ms ease;" +
+      "}",
+    ".guide.nearest { border-color: var(--sh-signal); background: rgba(56,189,248,0.18); }",
+    ".guide[data-position='top-center'] { top: 12px; left: 50%; transform: translateX(-50%); }",
+    ".guide[data-position='top-right'] { top: 12px; right: 12px; }",
+    ".guide[data-position='left-center'] { top: 50%; left: 12px; transform: translateY(-50%) rotate(90deg); }",
+    ".guide[data-position='right-center'] { top: 50%; right: 12px; transform: translateY(-50%) rotate(90deg); }",
+
+    ".restore {" +
+      "  position: absolute; width: 30px; height: 30px; box-sizing: border-box;" +
+      "  display: none; align-items: center; justify-content: center; pointer-events: auto;" +
+      "  appearance: none; -webkit-appearance: none; margin: 0; padding: 0; cursor: pointer;" +
+      "  color: var(--sh-signal); background: var(--sh-surface); border: 1px solid var(--sh-line-strong);" +
+      "  box-shadow: 0 10px 30px -16px rgba(0,0,0,0.8);" +
+      "}",
+    ".root.dismissed .restore { display: flex; }",
+    ".restore:hover { color: var(--sh-text); background: var(--sh-hover); }",
+    ".restore:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 2px; }",
+    ".restore svg { width: 14px; height: 14px; }",
+    ".root[data-position='top-center'] .restore { top: 0; left: 50%; transform: translateX(-50%); border-top: 0; border-radius: 0 0 var(--sh-r-md) var(--sh-r-md); }",
+    ".root[data-position='top-right'] .restore { top: 0; right: 12px; border-top: 0; border-radius: 0 0 var(--sh-r-md) var(--sh-r-md); }",
+    ".root[data-position='left-center'] .restore { top: 50%; left: 0; transform: translateY(-50%); border-left: 0; border-radius: 0 var(--sh-r-md) var(--sh-r-md) 0; }",
+    ".root[data-position='right-center'] .restore { top: 50%; right: 0; transform: translateY(-50%); border-right: 0; border-radius: var(--sh-r-md) 0 0 var(--sh-r-md); }",
+
+    "@media (max-width: 520px) {" +
+      " .bar { width: min(240px, calc(100vw - 24px)); }" +
+      " .root.compact[data-position='top-center'] .bar, .root.compact[data-position='top-right'] .bar { width: 140px; }" +
+      " .root.compact[data-position='top-center'] .current-meta, .root.compact[data-position='top-right'] .current-meta," +
+      " .root.compact[data-position='top-center'] .chevron, .root.compact[data-position='top-right'] .chevron { display: none; }" +
+      " .root.compact[data-position='top-center'] .compact-label, .root.compact[data-position='top-right'] .compact-label { display: block; }" +
+      " .root.compact[data-position='top-center'] .switch, .root.compact[data-position='top-right'] .switch { justify-content: center; }" +
+      " .panel, .root[data-position='top-center'] .panel, .root[data-position='top-right'] .panel," +
+      " .root[data-position='left-center'] .panel, .root[data-position='right-center'] .panel {" +
+      "   top: 60px; right: auto; bottom: auto; left: 12px; width: calc(100vw - 24px);" +
+      "   max-width: none; max-height: calc(100vh - 72px); margin: 0; transform-origin: top center;" +
+      " }" +
+      " .root.open[data-position='top-center'] .panel, .root.open[data-position='top-right'] .panel," +
+      " .root.open[data-position='left-center'] .panel, .root.open[data-position='right-center'] .panel { transform: none; }" +
+      " .position-menu, .root[data-position='top-center'] .position-menu, .root[data-position='top-right'] .position-menu," +
+      " .root[data-position='left-center'] .position-menu, .root[data-position='right-center'] .position-menu {" +
+      "   top: 60px; right: 12px; left: auto; margin: 0;" +
+      " }" +
+      "}",
+
     "@media (prefers-reduced-motion: reduce) {" +
-      "  .panel, .scrim, .rail { transition: none; }" +
+      "  .panel, .scrim, .bar, .position-menu, .snap-guides, .guide, .chevron { transition: none; }" +
       "}"
   ];
 
@@ -430,6 +572,11 @@
     return n;
   }
 
+  function readableSlug(slug) {
+    var text = String(slug || "").replace(/[-_]+/g, " ").trim();
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : "Current app";
+  }
+
   // Monogram fallback matches the dashboard's own: the emoji when the app has
   // one, otherwise the first character of the display name.
   function iconFor(app) {
@@ -451,6 +598,9 @@
   installStyles(shadow);
 
   var root = div("root");
+  var position = rememberedPosition();
+  root.setAttribute("data-position", position);
+  root.classList.toggle("dismissed", initiallyDismissed);
   var scrim = div("scrim");
   var panel = document.createElement("nav");
   panel.className = "panel";
@@ -462,14 +612,115 @@
   // it is a landing place and never a stop.
   panel.setAttribute("tabindex", "-1");
 
-  var rail = div("rail");
+  var bar = div("bar");
+  bar.setAttribute("role", "toolbar");
+  bar.setAttribute("aria-label", "ShinyHub app navigation");
+
+  var moveBtn = document.createElement("button");
+  moveBtn.type = "button";
+  moveBtn.className = "control move";
+  moveBtn.setAttribute("aria-label", "Move the app switcher");
+  moveBtn.setAttribute("aria-haspopup", "menu");
+  moveBtn.setAttribute("aria-expanded", "false");
+  moveBtn.title = "Move switcher";
+  moveBtn.appendChild(
+    svg(
+      [
+        "M7 5h.01", "M13 5h.01",
+        "M7 10h.01", "M13 10h.01",
+        "M7 15h.01", "M13 15h.01"
+      ],
+      20
+    )
+  );
+
   var openBtn = document.createElement("button");
   openBtn.type = "button";
-  openBtn.className = "railbtn";
-  openBtn.setAttribute("aria-label", "Show all apps");
+  openBtn.className = "control switch";
+  openBtn.setAttribute("aria-label", "Switch apps");
   openBtn.setAttribute("aria-expanded", "false");
-  openBtn.title = "All apps";
-  openBtn.appendChild(
+  openBtn.title = "Switch app";
+  var switchMark = div("switchmark");
+  switchMark.appendChild(
+    svg(
+      [
+        "M3 3h6v6H3z",
+        "M11 3h6v6h-6z",
+        "M3 11h6v6H3z",
+        "M11 11h6v6h-6z"
+      ],
+      20
+    )
+  );
+  var current = div("current-meta");
+  var compactLabel = div("compact-label", "Apps");
+  var currentLabel = div("current-label", readableSlug(currentSlug));
+  var currentAction = div("current-action", "Switch app");
+  current.appendChild(currentLabel);
+  current.appendChild(currentAction);
+  var chevron = div("chevron");
+  chevron.appendChild(svg(["M6 8l4 4 4-4"], 20));
+  openBtn.appendChild(switchMark);
+  openBtn.appendChild(compactLabel);
+  openBtn.appendChild(current);
+  openBtn.appendChild(chevron);
+
+  var closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "control close";
+  closeBtn.setAttribute("aria-label", "Hide the app switcher for this tab");
+  // A dismissal is remembered in sessionStorage, so it outlives a reload and
+  // ends when the tab does. Wording it as "until this tab is reloaded" would
+  // promise a way back that reloading does not deliver.
+  closeBtn.title = "Hide the switcher in this tab";
+  closeBtn.appendChild(svg(["M4 4l12 12", "M16 4L4 16"], 20));
+
+  bar.appendChild(moveBtn);
+  bar.appendChild(openBtn);
+  bar.appendChild(closeBtn);
+
+  var positionMenu = div("position-menu");
+  positionMenu.setAttribute("role", "menu");
+  positionMenu.setAttribute("aria-label", "App switcher position");
+  positionMenu.setAttribute("aria-hidden", "true");
+  positionMenu.appendChild(div("menu-title", "Move switcher"));
+  var positionNames = {
+    "top-center": "Top centre",
+    "top-right": "Top right",
+    "left-center": "Left centre",
+    "right-center": "Right centre"
+  };
+  var positionButtons = [];
+  for (var pi = 0; pi < POSITIONS.length; pi++) {
+    var optionPosition = POSITIONS[pi];
+    var option = document.createElement("button");
+    option.type = "button";
+    option.className = "place-option";
+    option.setAttribute("role", "menuitemradio");
+    option.setAttribute("data-position", optionPosition);
+    option.setAttribute("aria-checked", optionPosition === position ? "true" : "false");
+    option.setAttribute("tabindex", optionPosition === position ? "0" : "-1");
+    option.appendChild(div("place-map"));
+    option.appendChild(document.createTextNode(positionNames[optionPosition]));
+    positionMenu.appendChild(option);
+    positionButtons.push(option);
+  }
+
+  var snapGuides = div("snap-guides");
+  var guides = [];
+  for (var gi = 0; gi < POSITIONS.length; gi++) {
+    var guide = div("guide");
+    guide.setAttribute("data-position", POSITIONS[gi]);
+    snapGuides.appendChild(guide);
+    guides.push(guide);
+  }
+
+  var restoreBtn = document.createElement("button");
+  restoreBtn.type = "button";
+  restoreBtn.className = "restore";
+  restoreBtn.setAttribute("aria-label", "Show the app switcher");
+  restoreBtn.title = "Show app switcher";
+  restoreBtn.appendChild(
     svg(
       [
         "M3 3h6v6H3z",
@@ -481,22 +732,8 @@
     )
   );
 
-  var closeBtn = document.createElement("button");
-  closeBtn.type = "button";
-  closeBtn.className = "railbtn close";
-  closeBtn.setAttribute("aria-label", "Hide the app switcher for this tab");
-  // A dismissal is remembered in sessionStorage, so it outlives a reload and
-  // ends when the tab does. Wording it as "until this tab is reloaded" would
-  // promise a way back that reloading does not deliver.
-  closeBtn.title = "Hide the switcher in this tab";
-  closeBtn.appendChild(svg(["M4 4l12 12", "M16 4L4 16"], 20));
-
-  rail.appendChild(openBtn);
-  rail.appendChild(div("rule"));
-  rail.appendChild(closeBtn);
-
   var head = div("head");
-  var title = div("title", "Apps");
+  var title = div("title", "Switch app");
   var countBadge = div("count", "");
   countBadge.setAttribute("aria-hidden", "true");
   var headClose = document.createElement("button");
@@ -536,7 +773,10 @@
   panel.appendChild(foot);
   root.appendChild(scrim);
   root.appendChild(panel);
-  root.appendChild(rail);
+  root.appendChild(positionMenu);
+  root.appendChild(snapGuides);
+  root.appendChild(bar);
+  root.appendChild(restoreBtn);
   shadow.appendChild(root);
   document.body.appendChild(host);
 
@@ -545,10 +785,47 @@
    * ------------------------------------------------------------------- */
 
   var open = false;
+  var placing = false;
   var loaded = false;
   var loading = false;
   var payload = null;
   var lastFocus = null;
+  var compactTimer = null;
+
+  function mobileViewport() {
+    try {
+      return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 520px)").matches;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function revealBar(schedule) {
+    if (compactTimer !== null) {
+      window.clearTimeout(compactTimer);
+      compactTimer = null;
+    }
+    root.classList.remove("compact");
+    if (!schedule || !mobileViewport() || root.classList.contains("dismissed")) {
+      return;
+    }
+    compactTimer = window.setTimeout(
+      guard(function () {
+        compactTimer = null;
+        if (
+          mobileViewport() &&
+          !open &&
+          !placing &&
+          !drag &&
+          !root.classList.contains("dismissed") &&
+          !(shadow.activeElement && bar.contains(shadow.activeElement))
+        ) {
+          root.classList.add("compact");
+        }
+      }),
+      8000
+    );
+  }
 
   function clear(node) {
     while (node.firstChild) {
@@ -696,6 +973,16 @@
     countBadge.textContent = String(total) + (payload.truncated ? "+" : "");
     filterWrap.hidden = total <= FILTER_THRESHOLD;
     who.textContent = payload.username ? "Signed in as " + payload.username : "";
+    for (var ci = 0; ci < (payload.apps || []).length; ci++) {
+      if (payload.apps[ci] && payload.apps[ci].slug === currentSlug) {
+        currentLabel.textContent = String(payload.apps[ci].name || currentSlug || "Current app");
+        break;
+      }
+    }
+    openBtn.setAttribute(
+      "aria-label",
+      "Switch apps, current app " + (currentLabel.textContent || currentSlug || "unknown")
+    );
     renderList();
     // The list has arrived. If focus is still parked on the panel waiting for
     // something worth landing on, hand it over now. The open check is what
@@ -755,7 +1042,7 @@
   // Where focus goes when the panel opens. The list is not there yet on a first
   // open - the fetch is still in flight - so this runs twice: the panel itself
   // holds focus while the list loads, and the first real control takes over as
-  // soon as one exists. Leaving focus on the rail button instead would strand a
+  // soon as one exists. Leaving focus on the bar button instead would strand a
   // keyboard visitor on a control the open panel has just hidden.
   //
   // The order below is deliberate and is not DOM order. The filter is what a
@@ -765,6 +1052,42 @@
   // either turns the visitor's first Enter into "leave" - the opposite of what
   // opening the panel asked for.
   var pendingFocus = false;
+
+  function updatePositionControls() {
+    for (var i = 0; i < positionButtons.length; i++) {
+      positionButtons[i].setAttribute(
+        "aria-checked",
+        positionButtons[i].getAttribute("data-position") === position ? "true" : "false"
+      );
+      positionButtons[i].setAttribute(
+        "tabindex",
+        positionButtons[i].getAttribute("data-position") === position ? "0" : "-1"
+      );
+    }
+  }
+
+  function setPosition(next, persist) {
+    if (POSITIONS.indexOf(next) === -1) {
+      return;
+    }
+    position = next;
+    root.setAttribute("data-position", position);
+    updatePositionControls();
+    if (persist !== false) {
+      rememberPosition(position);
+    }
+  }
+
+  function setPlacing(next) {
+    placing = !!next;
+    revealBar(!placing);
+    root.classList.toggle("placing", placing);
+    positionMenu.setAttribute("aria-hidden", placing ? "false" : "true");
+    moveBtn.setAttribute("aria-expanded", placing ? "true" : "false");
+    if (placing && open) {
+      setOpen(false);
+    }
+  }
 
   function placeFocus() {
     var wanted = [];
@@ -790,6 +1113,10 @@
       return;
     }
     open = next;
+    revealBar(!open);
+    if (open && placing) {
+      setPlacing(false);
+    }
     root.classList.toggle("open", open);
     panel.setAttribute("aria-hidden", open ? "false" : "true");
     openBtn.setAttribute("aria-expanded", open ? "true" : "false");
@@ -797,7 +1124,7 @@
       // Focus inside a shadow root is reported by the root, not by the
       // document: document.activeElement retargets to the host, which here is
       // a plain div that cannot take focus back. Reading the root first is
-      // what makes the rail button restorable, and it is the only way to see
+      // what makes the bar button restorable, and it is the only way to see
       // it at all - a keyboard visitor opens the panel from that button, so
       // the document's answer is the host every single time. Falling through
       // to the document covers the visitor who was in the app when they
@@ -820,10 +1147,163 @@
 
   closeBtn.addEventListener("click", guard(function () {
     setOpen(false);
-    rememberDismissal();
-    if (host.parentNode) {
-      host.parentNode.removeChild(host);
+    setPlacing(false);
+    rememberDismissal(true);
+    root.classList.add("dismissed");
+    restoreBtn.focus();
+  }));
+
+  restoreBtn.addEventListener("click", guard(function () {
+    rememberDismissal(false);
+    root.classList.remove("dismissed");
+    revealBar(true);
+    openBtn.focus();
+  }));
+
+  moveBtn.addEventListener("click", guard(function () {
+    if (suppressMoveClick) {
+      suppressMoveClick = false;
+      return;
     }
+    setPlacing(!placing);
+    if (placing && positionButtons.length) {
+      for (var i = 0; i < positionButtons.length; i++) {
+        if (positionButtons[i].getAttribute("aria-checked") === "true") {
+          positionButtons[i].focus();
+          break;
+        }
+      }
+    }
+  }));
+
+  for (var pbi = 0; pbi < positionButtons.length; pbi++) {
+    positionButtons[pbi].addEventListener("click", guard(function (ev) {
+      setPosition(ev.currentTarget.getAttribute("data-position"));
+      setPlacing(false);
+      moveBtn.focus();
+    }));
+  }
+
+  var drag = null;
+  var suppressMoveClick = false;
+
+  function nearestPosition(x, y) {
+    var width = window.innerWidth || document.documentElement.clientWidth || 1;
+    var height = window.innerHeight || document.documentElement.clientHeight || 1;
+    var barWidth = bar.offsetWidth || Math.min(264, Math.max(1, width - 24));
+    var half = barWidth / 2;
+    var points = {
+      "top-center": [width / 2, 32],
+      "top-right": [width - 12 - half, 32],
+      "left-center": [12 + half, height / 2],
+      "right-center": [width - 12 - half, height / 2]
+    };
+    var closest = POSITIONS[0];
+    var best = Infinity;
+    for (var i = 0; i < POSITIONS.length; i++) {
+      var point = points[POSITIONS[i]];
+      var dx = x - point[0];
+      var dy = y - point[1];
+      var distance = dx * dx + dy * dy;
+      if (distance < best) {
+        best = distance;
+        closest = POSITIONS[i];
+      }
+    }
+    return closest;
+  }
+
+  function markNearest(next) {
+    for (var i = 0; i < guides.length; i++) {
+      guides[i].classList.toggle(
+        "nearest",
+        guides[i].getAttribute("data-position") === next
+      );
+    }
+  }
+
+  moveBtn.addEventListener("pointerdown", guard(function (ev) {
+    if (ev.button !== undefined && ev.button !== 0) {
+      return;
+    }
+    drag = {
+      id: ev.pointerId,
+      startX: ev.clientX,
+      startY: ev.clientY,
+      x: ev.clientX,
+      y: ev.clientY,
+      moved: false
+    };
+    setPlacing(false);
+    setOpen(false);
+    revealBar(false);
+    if (typeof moveBtn.setPointerCapture === "function") {
+      moveBtn.setPointerCapture(ev.pointerId);
+    }
+  }));
+
+  moveBtn.addEventListener("pointermove", guard(function (ev) {
+    if (!drag || (ev.pointerId !== undefined && ev.pointerId !== drag.id)) {
+      return;
+    }
+    drag.x = ev.clientX;
+    drag.y = ev.clientY;
+    var dx = drag.x - drag.startX;
+    var dy = drag.y - drag.startY;
+    if (!drag.moved && dx * dx + dy * dy < 25) {
+      return;
+    }
+    drag.moved = true;
+    ev.preventDefault();
+    var width = window.innerWidth || document.documentElement.clientWidth || 1;
+    var height = window.innerHeight || document.documentElement.clientHeight || 1;
+    var halfWidth = (bar.offsetWidth || 264) / 2;
+    var halfHeight = 20;
+    var x = Math.max(12 + halfWidth, Math.min(width - 12 - halfWidth, drag.x));
+    var y = Math.max(12 + halfHeight, Math.min(height - 12 - halfHeight, drag.y));
+    root.classList.add("dragging");
+    bar.style.top = String(y - halfHeight) + "px";
+    bar.style.right = "auto";
+    bar.style.left = String(x - halfWidth) + "px";
+    bar.style.transform = "none";
+    markNearest(nearestPosition(drag.x, drag.y));
+  }));
+
+  function finishDrag(ev) {
+    if (!drag || (ev.pointerId !== undefined && ev.pointerId !== drag.id)) {
+      return;
+    }
+    if (drag.moved) {
+      suppressMoveClick = true;
+      setPosition(nearestPosition(drag.x, drag.y));
+    }
+    root.classList.remove("dragging");
+    bar.style.top = "";
+    bar.style.right = "";
+    bar.style.left = "";
+    bar.style.transform = "";
+    markNearest("");
+    drag = null;
+    revealBar(true);
+  }
+
+  moveBtn.addEventListener("pointerup", guard(finishDrag));
+  moveBtn.addEventListener("pointercancel", guard(finishDrag));
+
+  bar.addEventListener("pointerenter", guard(function () {
+    revealBar(false);
+  }));
+  bar.addEventListener("pointerleave", guard(function () {
+    revealBar(true);
+  }));
+  bar.addEventListener("focusin", guard(function () {
+    revealBar(false);
+  }));
+  bar.addEventListener("focusout", guard(function () {
+    revealBar(true);
+  }));
+  window.addEventListener("resize", guard(function () {
+    revealBar(true);
   }));
 
   headClose.addEventListener("click", guard(function () {
@@ -831,6 +1311,11 @@
   }));
 
   scrim.addEventListener("click", guard(function () {
+    if (placing) {
+      setPlacing(false);
+      moveBtn.focus();
+      return;
+    }
     setOpen(false);
   }));
 
@@ -842,6 +1327,41 @@
   // listens for its own shortcuts on document must not see the visitor typing
   // into our filter box, and we must not see theirs.
   root.addEventListener("keydown", guard(function (ev) {
+    if (placing) {
+      if (ev.key === "Escape") {
+        ev.stopPropagation();
+        setPlacing(false);
+        moveBtn.focus();
+        return;
+      }
+      if (ev.key === "Tab") {
+        setPlacing(false);
+        return;
+      }
+      var activePosition = positionButtons.indexOf(shadow.activeElement);
+      if (activePosition === -1) {
+        return;
+      }
+      var nextPosition = activePosition;
+      if (ev.key === "ArrowDown" || ev.key === "ArrowRight") {
+        nextPosition = (activePosition + 1) % positionButtons.length;
+      } else if (ev.key === "ArrowUp" || ev.key === "ArrowLeft") {
+        nextPosition = (activePosition - 1 + positionButtons.length) % positionButtons.length;
+      } else if (ev.key === "Home") {
+        nextPosition = 0;
+      } else if (ev.key === "End") {
+        nextPosition = positionButtons.length - 1;
+      } else {
+        return;
+      }
+      ev.preventDefault();
+      ev.stopPropagation();
+      for (var mi = 0; mi < positionButtons.length; mi++) {
+        positionButtons[mi].setAttribute("tabindex", mi === nextPosition ? "0" : "-1");
+      }
+      positionButtons[nextPosition].focus();
+      return;
+    }
     if (!open) {
       return;
     }
@@ -869,4 +1389,6 @@
       firstItem.focus();
     }
   }));
+
+  revealBar(true);
 })();

@@ -39,7 +39,7 @@ type App struct {
 type Payload struct {
 	Apps []App `json:"apps"`
 	// Username identifies whose list this is, so a visitor holding two
-	// accounts can tell which one the rail is showing before wondering where
+	// accounts can tell which one the switcher is showing before wondering where
 	// an app went. Empty for an anonymous caller.
 	Username string `json:"username,omitempty"`
 	// Truncated reports that more apps exist than MaxApps returned.
