@@ -148,6 +148,10 @@ func TestLoginBrandSlot(t *testing.T) {
 
 func TestStockBrandAssetSet(t *testing.T) {
 	for _, name := range []string{
+		"brand/orbit-hub-lockup-light.svg",
+		"brand/orbit-hub-lockup-dark.svg",
+		"brand/orbit-hub-mark-light.svg",
+		"brand/orbit-hub-mark-dark.svg",
 		"brand/orbit-hub-lockup-light.png",
 		"brand/orbit-hub-lockup-dark.png",
 		"brand/orbit-hub-mark-light.png",
@@ -156,6 +160,7 @@ func TestStockBrandAssetSet(t *testing.T) {
 		"brand/favicon-dark-16.png",
 		"brand/favicon-light-32.png",
 		"brand/favicon-dark-32.png",
+		"brand/favicon-64.png",
 		"brand/favicon.ico",
 		"brand/apple-touch-icon.png",
 	} {
@@ -163,11 +168,31 @@ func TestStockBrandAssetSet(t *testing.T) {
 			t.Errorf("stock brand asset %q must be embedded: %v", name, err)
 		}
 	}
+	for _, name := range []string{
+		"brand/orbit-hub-lockup-light.svg",
+		"brand/orbit-hub-lockup-dark.svg",
+		"brand/orbit-hub-mark-light.svg",
+		"brand/orbit-hub-mark-dark.svg",
+	} {
+		asset, err := fs.ReadFile(ui.Static(), name)
+		if err != nil {
+			t.Fatalf("read stock vector brand asset %q: %v", name, err)
+		}
+		source := string(asset)
+		if !strings.Contains(source, "<path") {
+			t.Errorf("stock vector brand asset %q must contain outlined paths", name)
+		}
+		for _, forbidden := range []string{"<image", "data:image", "<text", "font-family"} {
+			if strings.Contains(source, forbidden) {
+				t.Errorf("stock vector brand asset %q must not contain %q", name, forbidden)
+			}
+		}
+	}
 	assertContains(t, "index.html", `data-stock-icon`,
 		"stock favicon links must be identifiable so white-label rendering can remove the complete set")
-	assertContains(t, "style.css", `--stock-brand-lockup: url('/static/brand/orbit-hub-lockup-dark.png')`,
+	assertContains(t, "style.css", `--stock-brand-lockup: url('/static/brand/orbit-hub-lockup-dark.svg')`,
 		"dark mode must select the purpose-built dark Orbit Hub lockup")
-	assertContains(t, "style.css", `--stock-brand-lockup: url('/static/brand/orbit-hub-lockup-light.png')`,
+	assertContains(t, "style.css", `--stock-brand-lockup: url('/static/brand/orbit-hub-lockup-light.svg')`,
 		"light mode must select the light Orbit Hub lockup")
 	assertContains(t, "style.css", `background-image: var(--stock-brand-mark)`,
 		"the collapsed sidebar must use the compact mark rather than shrinking the full wordmark")
@@ -2843,6 +2868,12 @@ func TestPreviewViewerHomeUIContract(t *testing.T) {
 func TestRootHomeUIContract(t *testing.T) {
 	assertContains(t, "app.js", "router.register('/home'",
 		"the SPA registers /home as the stable authenticated home alias")
+	assertContains(t, "index.html", `href="/home" data-nav class="brand brand-home" aria-label="ShinyHub home"`,
+		"the signed-in desktop and mobile brand marks must be accessible links to the stable home route")
+	assertContains(t, "views/branding.js", "`${intent.siteTitle || 'ShinyHub'} home`",
+		"white-label home links must use the configured site title in their accessible name")
+	assertContains(t, "style.css", ".brand-home:hover",
+		"the brand home link must provide restrained pointer feedback")
 	assertContains(t, "app.js", "router.register('/launchpad'",
 		"the SPA registers the dedicated app-opening destination")
 	assertContains(t, "app.js", "window.location.assign('/')",

@@ -13,8 +13,8 @@ import { brandingIntent, applyBranding } from '../static/views/branding.js';
 function shellDoc() {
   return new JSDOM(`<!DOCTYPE html><body>
     <div id="boot-splash"><span class="brand"><span class="brand-art" aria-hidden="true"></span><span class="sr-only">ShinyHub</span></span></div>
-    <header id="topbar"><span class="brand"><span class="brand-art" aria-hidden="true"></span><span class="sr-only">ShinyHub</span></span></header>
-    <nav id="sidebar"><span class="brand"><span class="brand-art" aria-hidden="true"></span><span class="sr-only">ShinyHub</span></span></nav>
+    <header id="topbar"><a href="/home" data-nav class="brand brand-home" aria-label="ShinyHub home"><span class="brand-art" aria-hidden="true"></span><span class="sr-only">ShinyHub</span></a></header>
+    <nav id="sidebar"><a href="/home" data-nav class="brand brand-home" aria-label="ShinyHub home"><span class="brand-art" aria-hidden="true"></span><span class="sr-only">ShinyHub</span></a></nav>
     <section id="login-view"><div class="login-box"><div class="login-brand"><span class="brand"><span class="brand-art" aria-hidden="true"></span><span class="sr-only">ShinyHub</span></span></div></div></section>
   </body>`).window.document;
 }
@@ -107,6 +107,18 @@ test('every brand slot gets the logo, so the identity is consistent across views
   assert.equal(slots.length, 4);
   for (const slot of slots) {
     assert.equal(slot.querySelectorAll('img.brand-logo').length, 1);
+  }
+});
+
+test('signed-in brand links identify the configured site as home', () => {
+  const doc = shellDoc();
+  applyBranding(doc, { site_title: 'ACME Analytics' });
+  const homeLinks = [...doc.querySelectorAll('a.brand-home')];
+  assert.equal(homeLinks.length, 2);
+  for (const link of homeLinks) {
+    assert.equal(link.getAttribute('href'), '/home');
+    assert.ok(link.hasAttribute('data-nav'));
+    assert.equal(link.getAttribute('aria-label'), 'ACME Analytics home');
   }
 });
 

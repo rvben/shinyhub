@@ -74,6 +74,9 @@ export function applyBranding(doc, branding) {
   const intent = brandingIntent(branding);
   const slots = doc.querySelectorAll('.brand');
   for (const slot of slots) {
+    if (slot.classList.contains('brand-home')) {
+      slot.setAttribute('aria-label', `${intent.siteTitle || 'ShinyHub'} home`);
+    }
     if (intent.logo) {
       renderLogo(doc, slot, intent.logo, intent.logoAlt);
     } else if (intent.brandText) {
