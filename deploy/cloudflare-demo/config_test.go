@@ -133,6 +133,8 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 		`node-version: "24"`,
 		`Verify Cloudflare deployment credentials`,
 		`CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}`,
+		`CLOUDFLARE_API_TOKEN must contain only the bare token value`,
+		`CLOUDFLARE_ACCOUNT_ID must be a 32-character lowercase hexadecimal account ID`,
 		`npx wrangler whoami --account "$CLOUDFLARE_ACCOUNT_ID"`,
 		`run: npm run deploy`,
 		`SHINYHUB_DEMO_EXPECTED_VERSION`,

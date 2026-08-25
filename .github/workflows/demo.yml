@@ -63,6 +63,8 @@ jobs:
         run: |
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN is not configured in the public-demo environment" >&2; exit 1; }
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "CLOUDFLARE_ACCOUNT_ID is not configured in the public-demo environment" >&2; exit 1; }
+          [[ ! "$CLOUDFLARE_API_TOKEN" =~ [[:space:]] ]] || { echo "CLOUDFLARE_API_TOKEN must contain only the bare token value, not Cloudflare's verification command" >&2; exit 1; }
+          [[ "$CLOUDFLARE_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]] || { echo "CLOUDFLARE_ACCOUNT_ID must be a 32-character lowercase hexadecimal account ID" >&2; exit 1; }
           npx wrangler whoami --account "$CLOUDFLARE_ACCOUNT_ID"
 
       - name: Deploy the demo Worker and container

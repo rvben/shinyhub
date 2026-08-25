@@ -46,9 +46,10 @@ Release deployments use the GitHub `public-demo` environment. Configure the
 Cloudflare account ID as the environment variable `CLOUDFLARE_ACCOUNT_ID` and
 the deployment token as the environment secret `CLOUDFLARE_API_TOKEN`. The
 token should use Cloudflare's **Edit Cloudflare Workers** template, restricted
-to the demo account and the `shinyhub.dev` zone. Keep these credentials at the
-environment level rather than repository-wide so only this deployment job can
-read them.
+to the demo account and the `shinyhub.dev` zone. Store only the bare token
+value—not the `curl` verification command Cloudflare displays beside it. Keep
+these credentials at the environment level rather than repository-wide so only
+this deployment job can read them.
 
 Rotate the token without creating a deployment gap: create the replacement,
 update the environment secret, manually dispatch **Demo deployment** against
