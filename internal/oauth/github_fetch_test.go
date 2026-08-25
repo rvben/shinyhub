@@ -28,7 +28,7 @@ func newGitHubStub(t *testing.T, userBody, emailsBody string) (*GitHub, *httptes
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	g := NewGitHub("id", "secret", "http://localhost/cb")
+	g := NewGitHub("id", "secret", "http://localhost/callback")
 	g.apiBase = srv.URL
 	return g, srv
 }

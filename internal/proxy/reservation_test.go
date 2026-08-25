@@ -265,15 +265,15 @@ func TestDeregisterElasticWorker_RemovesWorkerAndClient(t *testing.T) {
 		t.Fatalf("RegisterElasticWorker: %v", err)
 	}
 	// Bind two clients to it.
-	p.bindClient(slug, "cA", 7)
-	p.bindClient(slug, "cB", 7)
+	p.bindClient(slug, "client-a", 7)
+	p.bindClient(slug, "client-b", 7)
 
 	p.mu.RLock()
 	_, workerIn := p.pools[slug].workers[7]
-	_, cAIn := p.clients[slug]["cA"]
-	_, cBIn := p.clients[slug]["cB"]
+	_, clientAIn := p.clients[slug]["client-a"]
+	_, clientBIn := p.clients[slug]["client-b"]
 	p.mu.RUnlock()
-	if !workerIn || !cAIn || !cBIn {
+	if !workerIn || !clientAIn || !clientBIn {
 		t.Fatal("precondition: worker and clients must be present before deregister")
 	}
 
@@ -281,14 +281,14 @@ func TestDeregisterElasticWorker_RemovesWorkerAndClient(t *testing.T) {
 
 	p.mu.RLock()
 	_, workerStill := p.pools[slug].workers[7]
-	_, cAStill := p.clients[slug]["cA"]
-	_, cBStill := p.clients[slug]["cB"]
+	_, clientAStill := p.clients[slug]["client-a"]
+	_, clientBStill := p.clients[slug]["client-b"]
 	p.mu.RUnlock()
 
 	if workerStill {
 		t.Error("worker still in pool after DeregisterElasticWorker")
 	}
-	if cAStill || cBStill {
+	if clientAStill || clientBStill {
 		t.Error("client slots still present after DeregisterElasticWorker")
 	}
 }

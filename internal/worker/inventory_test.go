@@ -42,7 +42,7 @@ func TestRemoteRuntime_Inventory_QueriesWorkersConcurrently(t *testing.T) {
 	}
 	sa := httptest.NewServer(handler("ca"))
 	defer sa.Close()
-	sb := httptest.NewServer(handler("cb"))
+	sb := httptest.NewServer(handler("beta"))
 	defer sb.Close()
 
 	lookup := newStubLookup(
@@ -220,7 +220,7 @@ func TestRemoteRuntime_InventoryAggregatesAllUpWorkers(t *testing.T) {
 	}
 	sa := mk("ca")
 	defer sa.Close()
-	sb := mk("cb")
+	sb := mk("beta")
 	defer sb.Close()
 
 	lookup := newStubLookup(
@@ -241,8 +241,8 @@ func TestRemoteRuntime_InventoryAggregatesAllUpWorkers(t *testing.T) {
 	for _, it := range items {
 		got[it.ContainerID] = true
 	}
-	if !got["ca"] || !got["cb"] {
-		t.Fatalf("inventory = %+v, want items from both workers (ca, cb)", items)
+	if !got["ca"] || !got["beta"] {
+		t.Fatalf("inventory = %+v, want items from both workers (ca, beta)", items)
 	}
 }
 

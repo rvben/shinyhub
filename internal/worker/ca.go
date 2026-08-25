@@ -127,11 +127,11 @@ func OpenCA(dir string, joinTokens []string) (*CA, error) {
 }
 
 func loadCA(certPEM, keyPEM []byte, joinTokens []string) (*CA, error) {
-	cb, _ := pem.Decode(certPEM)
-	if cb == nil {
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil {
 		return nil, fmt.Errorf("decode ca cert pem")
 	}
-	cert, err := x509.ParseCertificate(cb.Bytes)
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse ca cert: %w", err)
 	}

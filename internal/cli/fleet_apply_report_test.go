@@ -340,9 +340,9 @@ func (e errStub) Error() string { return string(e) }
 
 func TestRenderApplyReport_ShowsFailureKindAndPerAttempt(t *testing.T) {
 	res := []applyResult{{
-		slug: "cb", action: fleet.ActionUpdateSource, status: statusFailed, attempts: 2,
+		slug: "app-b", action: fleet.ActionUpdateSource, status: statusFailed, attempts: 2,
 		deployFailed: true,
-		err:          errors.New("deploy cb failed: HTTP 500"),
+		err:          errors.New("deploy app-b failed: HTTP 500"),
 		attemptsDetail: []attemptOutcome{
 			{Attempt: 1, Kind: deployfail.ReadinessTimeout, Err: "x"},
 			{Attempt: 2, Kind: deployfail.Crashed, Err: "y"},
@@ -380,9 +380,9 @@ func TestRenderApplyReport_RetriedSuccessShowsEarlierFailure(t *testing.T) {
 // failure_kind from the failure_kind keys nested in attempt_details, so it would
 // reject correct output; assert on the decoded struct instead.
 func TestWriteFleetApplyJSON_FailureKindAndAttemptDetails(t *testing.T) {
-	d := fleet.AppDiff{Slug: "cb", Action: fleet.ActionUpdateSource}
+	d := fleet.AppDiff{Slug: "app-b", Action: fleet.ActionUpdateSource}
 	r := applyResult{
-		slug: "cb", action: fleet.ActionUpdateSource, status: statusFailed, attempts: 2,
+		slug: "app-b", action: fleet.ActionUpdateSource, status: statusFailed, attempts: 2,
 		deployFailed: true,
 		err:          errors.New("boom"),
 		attemptsDetail: []attemptOutcome{

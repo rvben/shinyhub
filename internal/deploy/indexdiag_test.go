@@ -48,7 +48,7 @@ func TestCollectIndexEnv_Redaction(t *testing.T) {
 // never passed through" (the v0.9.6 regression class took a two-release
 // bisect to diagnose without this).
 func TestIndexResolutionHint(t *testing.T) {
-	notFound := []byte("x  No solution found: because hda-common was not found in the package registry and ...")
+	notFound := []byte("x  No solution found: because private-package was not found in the package registry and ...")
 
 	if err := indexResolutionHint(notFound, nil, nil); err != nil {
 		t.Errorf("nil error must pass through, got %v", err)
@@ -79,7 +79,7 @@ func TestIndexResolutionHint(t *testing.T) {
 // helper: a failing build whose output carries the registry-miss signature
 // returns an annotated error.
 func TestRunSandboxedBuildStep_AnnotatesRegistryMiss(t *testing.T) {
-	argv := []string{"sh", "-c", `echo "because hda-common was not found in the package registry"; exit 1`}
+	argv := []string{"sh", "-c", `echo "because private-package was not found in the package registry"; exit 1`}
 	_, err := runSandboxedBuildStep(context.Background(), t.TempDir(), argv, nil)
 	if err == nil || !strings.Contains(err.Error(), "no package-index configuration reached this build") {
 		t.Errorf("registry-miss failure not annotated: %v", err)

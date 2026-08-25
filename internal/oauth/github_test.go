@@ -19,7 +19,7 @@ func TestGitHub_AuthURLContainsState(t *testing.T) {
 }
 
 func TestGitHub_AuthURLContainsScopes(t *testing.T) {
-	p := oauth.NewGitHub("id", "secret", "http://localhost/cb")
+	p := oauth.NewGitHub("id", "secret", "http://localhost/callback")
 	url := p.AuthURL("state")
 	if !strings.Contains(url, "scope") {
 		t.Errorf("AuthURL missing scope: %s", url)
