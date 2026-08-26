@@ -961,7 +961,8 @@ func TestSPALogoutButtonRespectsServerOutcome(t *testing.T) {
 //   - timezone: the raw stored value (null = inherit)
 //
 // The table renders next_fire in the effective_timezone via Intl.DateTimeFormat,
-// so operators see fire times in the schedule's own zone, not browser-local.
+// so operators see fire times in the schedule's own zone. The form must not
+// present a browser-local preview as if it were authoritative server behavior.
 func TestScheduleTimezoneFields(t *testing.T) {
 	assertContains(t, "app.js", "s.effective_timezone",
 		"schedule table must read s.effective_timezone from the DTO to render the zone and next_fire correctly")
@@ -971,8 +972,8 @@ func TestScheduleTimezoneFields(t *testing.T) {
 		"schedule form must read s.timezone when editing an existing schedule to populate the timezone field")
 	assertContains(t, "app.js", "sched-timezone",
 		"schedule form must reference sched-timezone so the timezone input is populated and submitted")
-	assertContains(t, "app.js", "Preview (browser-local)",
-		"cron preview label must clarify it shows browser-local time so operators are not misled about the schedule's effective timezone")
+	assertContains(t, "app.js", "evaluated in ${zone}",
+		"cron form hint must name the selected or server timezone without inventing browser-local fire times")
 	assertContains(t, "index.html", "sched-timezone",
 		"schedule form modal in index.html must have a sched-timezone input for the optional per-schedule timezone")
 }
@@ -983,12 +984,51 @@ func TestScheduleTimezoneFields(t *testing.T) {
 // the dstAdvisoryMarkup helper. If the import or the call site is dropped the
 // double-fire footgun goes silent in the UI again.
 func TestScheduleDSTAdvisoryWired(t *testing.T) {
-	assertContains(t, "app.js", "import { dstAdvisoryMarkup } from '/static/views/schedule-ui.js'",
+	assertContains(t, "app.js", "dstAdvisoryMarkup,",
 		"app.js must import dstAdvisoryMarkup so the schedule table can surface the DST fall-back advisory")
 	assertContains(t, "app.js", "dstAdvisoryMarkup(s)",
 		"schedule table cron cell must call dstAdvisoryMarkup(s) to render the dst_advisory from the DTO")
 	assertContains(t, "views/schedule-ui.js", "schedule.dst_advisory",
 		"schedule-ui helper must read dst_advisory from the schedule DTO computed by the server")
+}
+
+func TestScheduleRunActivationErrorsAreVisibleAndEscaped(t *testing.T) {
+	assertContains(t, "app.js", "activationErrorDetail(run)",
+		"schedule run history must read the activation_error field returned by the API")
+	assertContains(t, "app.js", "escapeHtml(activationError)",
+		"historical activation errors are external process text and must be HTML-escaped")
+	assertContains(t, "style.css", ".schedule-run-activation-error",
+		"historical activation errors need a resilient visible treatment in run history")
+}
+
+// TestScheduleSurfaceSafetyContracts guards the operator-facing semantics that
+// are easiest to regress when schedule API fields evolve. Mutation controls
+// start hidden until the capability envelope proves they are allowed, form
+// failures are announced, and the selected detail is invalidated when its DTO
+// changes between polls.
+func TestScheduleSurfaceSafetyContracts(t *testing.T) {
+	assertContains(t, "index.html", `id="schedules-add-btn" hidden`,
+		"the Add schedule control must fail closed until can_manage is known")
+	assertContains(t, "index.html", "Job success alone does not prove",
+		"the schedules introduction must not imply that job success proves serving-data activation")
+	assertContains(t, "index.html", `id="schedule-form-error" class="error" role="alert"`,
+		"schedule form failures must be announced to assistive technology")
+	assertContains(t, "views/schedule-ui.js", "No future app action",
+		"a disabled activation policy must be described as controlling future runs")
+	assertContains(t, "app.js", "Earlier policy ·",
+		"retained activation attribution must be labelled as originating under an earlier policy")
+	assertContains(t, "app.js", "surface.renderedDetailSignature === detailSignature",
+		"selected schedule detail must be invalidated when its DTO changes during polling")
+	assertContains(t, "views/schedule-ui.js", "last_success_age_s advances on every poll",
+		"volatile relative age must not invalidate selected detail or discard run-history pagination")
+	assertContains(t, "views/schedule-ui.js", "case 'skipped_overlap':",
+		"schedule status labels must recognize the backend skipped-overlap outcome")
+	assertContains(t, "views/schedule-ui.js", "case 'register': return 'On registration';",
+		"run history must label the backend registration trigger honestly")
+	assertContains(t, "views/schedule-ui.js", "case 'missed': return 'Missed run';",
+		"run history must label the backend missed-run trigger honestly")
+	assertContains(t, "views/schedule-ui.js", "case 'schedule':",
+		"run history must label the backend cron-boundary trigger honestly")
 }
 
 // TestSharedDataReadOnlyHelpIsHonest guards the shared-data help text. Under the
@@ -1015,12 +1055,10 @@ func TestScheduleRunHistoryReadsSnakeCase(t *testing.T) {
 			"run-history list must read snake_case ScheduleRun fields; see internal/db/schedules.go json tags")
 	}
 	// exit_code is null until a terminal state and stays null for an
-	// interrupted run, so the UI must gate the exit-code display on both
-	// finished_at AND a non-null exit_code to avoid rendering "exit null".
-	assertContains(t, "app.js", "run.finished_at",
-		"run-history must gate the exit-code display on run.finished_at; a running run has a null exit_code")
-	assertContains(t, "app.js", "run.exit_code != null",
-		"run-history must gate the exit-code display on a non-null exit_code; an interrupted run is finished but has a null exit_code")
+	// interrupted run, so the UI must render a neutral placeholder rather than
+	// coercing null to exit 0 or the string "null".
+	assertContains(t, "app.js", "run.exit_code == null ? '—'",
+		"run-history must render a neutral placeholder for a null exit_code")
 	// The PascalCase reads must be gone so the regression cannot creep back.
 	b, err := fs.ReadFile(ui.Static(), "app.js")
 	if err != nil {
@@ -1966,6 +2004,10 @@ func TestResponsiveAndStatePolish(t *testing.T) {
 		"fleet-health.js must export degradedTooltip so the banner can name the degraded apps")
 	assertContains(t, "app.js", "degradedTooltip(s)",
 		"renderFleetHealth must surface the degraded-app detail via degradedTooltip")
+	assertContains(t, "views/fleet-health.js", "export function activationAttentionTooltip",
+		"fleet-health.js must expose attributable activation-attention detail")
+	assertContains(t, "app.js", "activationAttentionTooltip(s)",
+		"renderFleetHealth must include activation-attention detail in the banner tooltip and accessible name")
 }
 
 // TestAutoscaleActionBadgeCSS guards that the two new autoscale audit action
@@ -2722,6 +2764,10 @@ func TestCrashedAppUX(t *testing.T) {
 		"fleet-health headline must include the stale-schedule count part")
 	assertContains(t, "app.js", "s.staleSchedules",
 		"renderFleetHealth must surface the stale schedule list in the banner tooltip/aria")
+	assertContains(t, "views/fleet-health.js", "activation_attention_list",
+		"fleet-health summary must read activation_attention_list from GET /api/fleet/health")
+	assertContains(t, "views/fleet-health.js", "data activation${activationAttentionCount === 1 ? '' : 's'}",
+		"fleet-health headline must include the activation-attention count")
 }
 
 // TestAppCardFactsStayOperational pins the deliberately small information
@@ -3179,7 +3225,7 @@ func TestScheduleAndSharedDataHandlersHardened(t *testing.T) {
 		if !strings.Contains(body, "} catch {") {
 			t.Fatalf("%s must catch a network failure from api(), not let it propagate uncaught", label)
 		}
-		if !strings.Contains(body, "r.status === 401") && !strings.Contains(body, "resp.status === 401") {
+		if !strings.Contains(body, "r.status === 401") && !strings.Contains(body, "resp.status === 401") && !strings.Contains(body, "response.status === 401") {
 			t.Fatalf("%s must check for a 401 and call handleUnauthorized()", label)
 		}
 		if !strings.Contains(body, "handleUnauthorized()") {
@@ -3190,11 +3236,25 @@ func TestScheduleAndSharedDataHandlersHardened(t *testing.T) {
 		}
 	}
 
-	checkHandler("async function runScheduleNow(slug, id, btn)", "runScheduleNow")
+	checkHandler("async function runScheduleNow(slug, id, name, btn)", "runScheduleNow")
 	checkHandler("async function deleteSchedule(slug, id, name, btn)", "deleteSchedule")
-	checkHandler("async function openScheduleHistory(slug, schedID)", "openScheduleHistory")
 	checkHandler("container.querySelectorAll('[data-action=\"revoke\"]')", "the shared-data unmount handler")
 	checkHandler("document.getElementById('shared-data-add-btn')", "the shared-data mount handler")
+
+	historyStart := strings.Index(src, "async function loadScheduleRunPage(")
+	if historyStart < 0 {
+		t.Fatal("app.js: could not find paginated schedule run-history loader")
+	}
+	historyEnd := historyStart + 3200
+	if historyEnd > len(src) {
+		historyEnd = len(src)
+	}
+	historyBody := src[historyStart:historyEnd]
+	for _, want := range []string{"} catch {", "response.status === 401", "handleUnauthorized()", "data-run-history-retry"} {
+		if !strings.Contains(historyBody, want) {
+			t.Fatalf("schedule run-history loader must contain %q for recoverable, authenticated reads", want)
+		}
+	}
 
 	// The schedule add/edit submit handler is inside openScheduleForm; anchor on
 	// its addEventListener('submit', ...) call specifically.
@@ -3252,23 +3312,24 @@ func TestLoginHandlesRateLimitAndDoubleSubmit(t *testing.T) {
 	}
 }
 
-// TestSchedulesTableResponsiveOverflow guards UX-5: unlike the other wide
-// admin tables (audit/users/workers), the schedules table is rebuilt at
-// runtime by loadSchedules() with no fixed id, so it was missing from the
-// shared 640px overflow-x rule and could overflow the viewport on mobile.
-func TestSchedulesTableResponsiveOverflow(t *testing.T) {
+// TestSchedulesTableResponsiveCards guards the schedule workspace's mobile
+// contract: operational rows reflow into labelled cards instead of requiring
+// horizontal scrolling, which hides state and actions off-screen.
+func TestSchedulesTableResponsiveCards(t *testing.T) {
 	b, err := fs.ReadFile(ui.Static(), "style.css")
 	if err != nil {
 		t.Fatalf("read style.css: %v", err)
 	}
 	css := string(b)
-	i := strings.Index(css, ".schedules-table {")
-	if i < 0 {
-		t.Fatal("style.css: no .schedules-table rule found (a 640px overflow-x rule is expected)")
-	}
-	end := strings.Index(css[i:], "}")
-	if end < 0 || !strings.Contains(css[i:i+end], "overflow-x: auto") {
-		t.Fatal("style.css: .schedules-table must set overflow-x:auto (in a 640px media block) so a wide schedules table scrolls within itself instead of overflowing the viewport")
+	for _, want := range []string{
+		".schedules-table thead",
+		".schedules-table td::before",
+		"content: attr(data-label)",
+		"grid-template-columns: 6.8rem minmax(0, 1fr)",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("style.css: responsive schedules contract missing %q", want)
+		}
 	}
 }
 

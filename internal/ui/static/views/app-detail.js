@@ -39,6 +39,7 @@ export function mountAppDetail(ctx) {
     logs:          document.getElementById('detail-logs-panel'),
     traces:        document.getElementById('detail-traces-panel'),
     deployments:   document.getElementById('detail-deployments-panel'),
+    schedules:     document.getElementById('detail-schedules-panel'),
     configuration: document.getElementById('detail-configuration-panel'),
     data:          document.getElementById('detail-data-panel'),
     access:        document.getElementById('detail-access-panel'),
@@ -233,6 +234,9 @@ export function mountAppDetail(ctx) {
     }
     if (tab === 'deployments') {
       await renderDeployments(panels.deployments, app, ctx);
+    }
+    if (tab === 'schedules') {
+      tabCleanup = await renderSchedules(panels.schedules, app, ctx, params.scheduleId);
     }
     if (tab === 'configuration') {
       renderConfiguration(panels.configuration, app, ctx, body);
@@ -784,8 +788,22 @@ function renderConfiguration(panel, app, ctx, envelope) {
   ctx.populateGeneralTab(app, envelope);
   ctx.populateAutoscaleTab(app);
   ctx.refreshEnvList(app.slug);
-  ctx.loadSchedules(app.slug);
   annotateFleetChanges(panel, envelope && envelope.fleet_state);
+}
+
+async function renderSchedules(panel, app, ctx, selectedScheduleID) {
+  ctx.setSettingsSlug(app.slug);
+  const declared = app.schedule_capabilities || {};
+  const canManage = typeof declared.can_manage === 'boolean'
+    ? declared.can_manage
+    : ctx.canManageApp(ctx.state.user, app);
+  return ctx.loadSchedules(app.slug, {
+    canManage,
+    canReadLogs: declared.can_read_logs === true || canManage,
+    canCancel: declared.can_cancel === true || canManage,
+    selectedScheduleID: selectedScheduleID || null,
+		latestActivations: app.latest_schedule_activations || [],
+  });
 }
 
 function renderData(panel, app, ctx) {

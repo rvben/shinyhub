@@ -15,23 +15,31 @@ test('normalizeAppEnvelope unwraps body.app and copies envelope fields onto it',
     app: { slug: 'demo', name: 'Demo', deploy_count: 3 },
     replicas_status: [{ index: 0, status: 'running' }],
     can_manage: true,
+    schedule_capabilities: {
+      can_read: true, can_manage: true, can_read_logs: true, can_cancel: true,
+    },
     runtime_mode: 'docker',
     resource_enforcement: { memory: true, cpu: false },
     release_number: 4,
     released_at: '2026-07-01T00:00:00Z',
     released_version: '1717200000',
     deployment_provenance: { run_id: '0123456789abcdef0123456789abcdef', metadata: { provider: 'gitlab' } },
+    latest_schedule_activations: [{schedule_id: 7, status: 'failed'}],
   };
   const { app, replicasStatus } = normalizeAppEnvelope(body);
   assert.equal(app.slug, 'demo');
   assert.equal(app.name, 'Demo');
   assert.equal(app.can_manage, true);
+  assert.deepEqual(app.schedule_capabilities, {
+    can_read: true, can_manage: true, can_read_logs: true, can_cancel: true,
+  });
   assert.equal(app.runtime_mode, 'docker');
   assert.deepEqual(app.resource_enforcement, { memory: true, cpu: false });
   assert.equal(app.release_number, 4);
   assert.equal(app.released_at, '2026-07-01T00:00:00Z');
   assert.equal(app.released_version, '1717200000');
   assert.equal(app.deployment_provenance.metadata.provider, 'gitlab');
+  assert.deepEqual(app.latest_schedule_activations, [{schedule_id: 7, status: 'failed'}]);
   assert.deepEqual(replicasStatus, [{ index: 0, status: 'running' }]);
 });
 
@@ -42,6 +50,7 @@ test('normalizeAppEnvelope tolerates an unwrapped body (no app key)', () => {
   const { app, replicasStatus } = normalizeAppEnvelope(body);
   assert.equal(app.slug, 'demo');
   assert.deepEqual(replicasStatus, []);
+  assert.deepEqual(app.latest_schedule_activations, []);
 });
 
 test('normalizeAppEnvelope nulls absent release fields (hides the version chip)', () => {
@@ -74,6 +83,19 @@ test('normalizeAppEnvelope ignores non-conforming envelope field types', () => {
   assert.equal('resource_enforcement' in app, false);
   assert.equal(app.release_number, null);
   assert.deepEqual(replicasStatus, []);
+});
+
+test('normalizeAppEnvelope defaults malformed schedule capability values to false', () => {
+  const body = {
+    app: { slug: 'demo' },
+    schedule_capabilities: {
+      can_read: 'yes', can_manage: 1, can_read_logs: null, can_cancel: false,
+    },
+  };
+  const { app } = normalizeAppEnvelope(body);
+  assert.deepEqual(app.schedule_capabilities, {
+    can_read: false, can_manage: false, can_read_logs: false, can_cancel: false,
+  });
 });
 
 test('normalizeAppEnvelope: falsy released_at/released_version normalize to null', () => {

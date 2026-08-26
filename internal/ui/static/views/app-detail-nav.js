@@ -5,7 +5,7 @@
 // The tab order shown in the settings tab strip, and the tabs that require
 // manage rights on the app. Single source of truth for both app-detail.js and
 // this module's callers.
-export const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access'];
+export const TAB_ROUTES = ['overview', 'logs', 'traces', 'deployments', 'schedules', 'configuration', 'data', 'access'];
 export const MANAGER_ONLY_TABS = new Set(['configuration', 'data', 'access']);
 
 // resolveDetailAccess decides which tab to render and whether the visitor must

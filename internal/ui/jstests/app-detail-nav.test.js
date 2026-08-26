@@ -16,13 +16,14 @@ import {
 
 test('TAB_ROUTES and MANAGER_ONLY_TABS match the app-detail contract', () => {
   assert.deepEqual(TAB_ROUTES, [
-    'overview', 'logs', 'traces', 'deployments', 'configuration', 'data', 'access',
+    'overview', 'logs', 'traces', 'deployments', 'schedules', 'configuration', 'data', 'access',
   ]);
   assert.equal(MANAGER_ONLY_TABS.has('configuration'), true);
   assert.equal(MANAGER_ONLY_TABS.has('data'), true);
   assert.equal(MANAGER_ONLY_TABS.has('access'), true);
   assert.equal(MANAGER_ONLY_TABS.has('overview'), false);
   assert.equal(MANAGER_ONLY_TABS.has('logs'), false);
+  assert.equal(MANAGER_ONLY_TABS.has('schedules'), false);
 });
 
 test('resolveDetailAccess falls back to overview for an unknown tab', () => {
@@ -127,6 +128,7 @@ test('tabViewModels hides manager-only tabs from a non-manager', () => {
   assert.equal(hiddenByRoute.logs, false);
   assert.equal(hiddenByRoute.traces, false);
   assert.equal(hiddenByRoute.deployments, false);
+  assert.equal(hiddenByRoute.schedules, false);
 });
 
 test('tabViewModels shows every tab to a manager', () => {

@@ -310,6 +310,7 @@
             <th scope="col">User</th>
             <th scope="col">Action</th>
             <th scope="col">Resource</th>
+            <th scope="col">Details</th>
             <th scope="col">IP</th>
           </tr>
         </thead>
@@ -387,6 +388,7 @@
         <a href="" data-nav class="settings-tab" role="tab" data-tab="logs"          id="detail-tab-logs"          aria-controls="detail-logs-panel"          aria-selected="false" >Logs</a>
         <a href="" data-nav class="settings-tab" role="tab" data-tab="traces"        id="detail-tab-traces"        aria-controls="detail-traces-panel"        aria-selected="false" >Traces</a>
         <a href="" data-nav class="settings-tab" role="tab" data-tab="deployments"   id="detail-tab-deployments"   aria-controls="detail-deployments-panel"   aria-selected="false" >Deployments</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="schedules"     id="detail-tab-schedules"     aria-controls="detail-schedules-panel"     aria-selected="false" >Schedules</a>
         <a href="" data-nav class="settings-tab" role="tab" data-tab="configuration" id="detail-tab-configuration" aria-controls="detail-configuration-panel" aria-selected="false" >Configuration</a>
         <a href="" data-nav class="settings-tab" role="tab" data-tab="data"          id="detail-tab-data"          aria-controls="detail-data-panel"          aria-selected="false" >Data</a>
         <a href="" data-nav class="settings-tab" role="tab" data-tab="access"        id="detail-tab-access"        aria-controls="detail-access-panel"        aria-selected="false" >Access</a>
@@ -396,6 +398,37 @@
         <section id="detail-logs-panel"          class="settings-tab-panel" role="tabpanel" hidden></section>
         <section id="detail-traces-panel"        class="settings-tab-panel" role="tabpanel" hidden></section>
         <section id="detail-deployments-panel"   class="settings-tab-panel" role="tabpanel" hidden></section>
+        <section id="detail-schedules-panel"     class="settings-tab-panel" role="tabpanel" aria-labelledby="detail-tab-schedules" hidden>
+          <div class="schedules-surface">
+            <header class="schedules-heading">
+              <div>
+                <h2>Scheduled jobs</h2>
+                <p>Run short-lived commands against this app's deployed bundle. Job success alone does not prove that a serving process reloaded its data; when a schedule is configured to roll the app, its serving-data activation is reported separately.</p>
+              </div>
+              <div class="schedules-heading-actions">
+                <button type="button" class="env-btn-secondary" id="schedules-refresh-btn">Refresh</button>
+                <button type="button" class="btn-primary" id="schedules-add-btn" hidden>Add schedule</button>
+              </div>
+            </header>
+
+            <dl id="schedules-summary" class="schedules-summary" aria-label="Schedule summary">
+              <div><dt>Configured</dt><dd id="schedules-summary-configured">—</dd></div>
+              <div><dt>Enabled</dt><dd id="schedules-summary-enabled">—</dd></div>
+              <div><dt>Jobs running</dt><dd id="schedules-summary-running">—</dd></div>
+              <div><dt>Activations</dt><dd id="schedules-summary-activating">—</dd></div>
+              <div><dt>Needs attention</dt><dd id="schedules-summary-attention">—</dd></div>
+              <div class="schedules-summary-next"><dt>Next run</dt><dd id="schedules-summary-next">—</dd></div>
+            </dl>
+
+            <p id="schedules-surface-status" class="schedules-surface-status" role="status" aria-live="polite"></p>
+            <div id="schedules-workspace" class="schedules-workspace">
+              <div class="schedules-list-pane">
+                <div id="schedules-list" class="schedules-table" aria-busy="true"><p class="schedule-loading">Loading scheduled jobs…</p></div>
+              </div>
+              <aside id="schedule-detail" class="schedule-detail" role="region" aria-labelledby="schedule-detail-title" hidden></aside>
+            </div>
+          </div>
+        </section>
         <section id="detail-configuration-panel" class="settings-tab-panel" role="tabpanel" hidden>
           <section class="settings-block">
             <h3 class="settings-block-title">General</h3>
@@ -719,15 +752,6 @@
                 <button type="button" id="env-form-cancel" class="env-btn-secondary">Cancel</button>
               </div>
             </form>
-          </section>
-
-          <section class="settings-block">
-            <h3 class="settings-block-title">Schedules</h3>
-            <p class="settings-block-desc">Cron-style jobs that run as short-lived processes against this app's bundle. Runs do not wake a hibernated app.</p>
-            <div class="settings-block-body">
-              <div id="schedules-list" class="schedules-table"></div>
-              <div><button type="button" class="btn-primary" id="schedules-add-btn">+ Add schedule</button></div>
-            </div>
           </section>
 
           <section id="danger-zone" class="settings-block danger-zone" hidden>
@@ -1276,31 +1300,58 @@
           <button id="schedule-form-close" type="button" aria-label="Close schedule form"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
         </div>
         <div class="modal-body">
-          <form id="schedule-form">
-            <label for="sched-name">Name</label>
-            <input id="sched-name" name="name" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
-            <label for="sched-cron">Cron expression</label>
-            <input id="sched-cron" name="cron_expr" required placeholder="0 6 * * *" autocomplete="off">
-            <div id="cron-preview" class="hint">Preview (browser-local time - server uses schedule timezone)</div>
-            <label for="sched-timezone">Timezone (optional)</label>
-            <input id="sched-timezone" name="timezone" placeholder="e.g. Europe/Amsterdam — leave empty to inherit server default" autocomplete="off">
-            <label for="sched-command">Command (one token per line)</label>
-            <textarea id="sched-command" name="command" rows="3" required placeholder="python&#10;fetch.py"></textarea>
-            <label for="sched-timeout">Timeout (seconds)</label>
-            <input id="sched-timeout" name="timeout_seconds" type="number" min="1" max="86400" value="3600">
-            <label for="sched-overlap">Overlap policy</label>
-            <select id="sched-overlap" name="overlap_policy">
-              <option value="skip">skip (default)</option>
-              <option value="queue">queue (1-deep)</option>
-              <option value="concurrent">concurrent</option>
-            </select>
-            <label for="sched-missed">Missed-run policy</label>
-            <select id="sched-missed" name="missed_policy">
-              <option value="skip">skip</option>
-              <option value="run_once">run once on startup</option>
-            </select>
-            <label><input type="checkbox" id="sched-enabled" name="enabled" checked> Enabled</label>
-            <p id="schedule-form-error" class="error" hidden></p>
+          <form id="schedule-form" class="schedule-form">
+            <fieldset>
+              <legend>Job</legend>
+              <p class="schedule-form-intro">Name the job and enter the command exactly as the runtime should execute it.</p>
+              <label for="sched-name">Name</label>
+              <input id="sched-name" name="name" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
+              <label for="sched-command">Command <span>one token per line</span></label>
+              <textarea id="sched-command" name="command" rows="3" required placeholder="python&#10;fetch.py" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea>
+            </fieldset>
+
+            <fieldset>
+              <legend>Timing</legend>
+              <label for="sched-cron">Cron expression</label>
+              <input id="sched-cron" name="cron_expr" required placeholder="0 6 * * *" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="cron-preview">
+              <div id="cron-preview" class="hint">Five-field cron · evaluated in the server timezone</div>
+              <label for="sched-timezone">Timezone <span>optional</span></label>
+              <input id="sched-timezone" name="timezone" placeholder="Europe/Amsterdam — empty inherits the server default" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+              <label class="schedule-enabled-row"><input type="checkbox" id="sched-enabled" name="enabled" checked> Enabled</label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Execution</legend>
+              <label for="sched-timeout">Timeout <span>seconds</span></label>
+              <input id="sched-timeout" name="timeout_seconds" type="number" min="1" max="86400" value="3600">
+              <label for="sched-overlap">When a previous run is active</label>
+              <select id="sched-overlap" name="overlap_policy">
+                <option value="skip">Skip this run</option>
+                <option value="queue">Queue one run</option>
+                <option value="concurrent">Run concurrently</option>
+              </select>
+              <label for="sched-missed">After downtime</label>
+              <select id="sched-missed" name="missed_policy">
+                <option value="skip">Skip missed runs</option>
+                <option value="run_once">Run once on startup</option>
+              </select>
+            </fieldset>
+
+            <section class="schedule-after-success" aria-labelledby="schedule-after-success-title">
+              <h3 id="schedule-after-success-title">After success</h3>
+              <label for="sched-on-success">Serving app action</label>
+              <select id="sched-on-success" name="on_success" aria-describedby="sched-on-success-help">
+                <option value="none">No app action</option>
+                <option value="roll">Gracefully roll this app</option>
+              </select>
+              <p id="sched-on-success-help">A roll starts one temporary surge replica, waits for health, then replaces serving replicas one at a time without dropping below the warm floor.</p>
+              <div id="sched-roll-options" hidden>
+                <label for="sched-min-roll-interval">Minimum roll interval <span>seconds · optional</span></label>
+                <input id="sched-min-roll-interval" name="min_roll_interval_seconds" type="number" min="0" step="60" value="0" inputmode="numeric" aria-describedby="sched-min-roll-help">
+                <p id="sched-min-roll-help">Coalesces high-cadence successes. For example, 3600 rolls at most once per hour.</p>
+              </div>
+            </section>
+            <p id="schedule-form-error" class="error" role="alert" aria-live="assertive" hidden></p>
             <div class="modal-actions">
               <button type="button" id="schedule-form-cancel">Cancel</button>
               <button type="submit" class="btn-primary">Save</button>

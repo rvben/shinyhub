@@ -14,6 +14,17 @@ export function normalizeAppEnvelope(body) {
   // can_manage tells the view whether this visitor manages the app (drives the
   // manager-only tabs + header kebab); only trust a real boolean.
   if (typeof body.can_manage === 'boolean') app.can_manage = body.can_manage;
+  if (body.schedule_capabilities && typeof body.schedule_capabilities === 'object') {
+    app.schedule_capabilities = {
+      can_read: body.schedule_capabilities.can_read === true,
+      can_manage: body.schedule_capabilities.can_manage === true,
+      can_read_logs: body.schedule_capabilities.can_read_logs === true,
+      can_cancel: body.schedule_capabilities.can_cancel === true,
+    };
+  }
+  app.latest_schedule_activations = Array.isArray(body.latest_schedule_activations)
+    ? body.latest_schedule_activations.filter(item => item && typeof item === 'object')
+    : [];
 
   // runtime_mode + resource_enforcement drive the Resources controls: limits
   // apply in both native and docker mode, and resource_enforcement {memory,cpu}

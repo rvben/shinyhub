@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { summariseFleetHealth, degradedTooltip } from '../static/views/fleet-health.js';
+import {
+  activationAttentionTooltip,
+  degradedTooltip,
+  summariseFleetHealth,
+} from '../static/views/fleet-health.js';
 
 test('summariseFleetHealth: all-healthy → running/green', () => {
   const s = summariseFleetHealth({
@@ -154,6 +158,62 @@ test('summariseFleetHealth: no stale schedules stays healthy', () => {
   });
   assert.equal(s.statusLabel, 'healthy');
   assert.equal(s.staleSchedules.length, 0);
+});
+
+test('summariseFleetHealth: activation attention escalates to degraded and is counted', () => {
+  const s = summariseFleetHealth({
+    apps: { total: 3, running: 3, degraded: 0, crashed: 0 },
+    replicas: { running: 3, lost: 0, stopped: 0 },
+    tiers: [],
+    degraded_apps: [],
+    stale_schedules: 0,
+    activation_attention: 2,
+    activation_attention_list: [
+      {
+        slug: 'alpha-dash', schedule: 'refresh-data', status: 'failed',
+        phase: 'complete', age_seconds: 125, error: 'replacement did not become ready',
+      },
+      {
+        slug: 'beta-kpi', schedule: 'refresh-kpis', status: 'deferred_capacity',
+        phase: 'pending', age_seconds: 35,
+      },
+    ],
+  });
+  assert.equal(s.statusClass, 'lost');
+  assert.equal(s.statusLabel, 'degraded');
+  assert.match(s.headline, /2 data activations need attention/);
+  assert.equal(s.activationAttentionCount, 2);
+  assert.equal(s.activationAttentionItems[0].status, 'failed');
+});
+
+test('activationAttentionTooltip: names app, schedule, status, phase, age and error safely as text', () => {
+  const s = summariseFleetHealth({
+    activation_attention: 1,
+    activation_attention_list: [{
+      slug: '<alpha>',
+      schedule: 'refresh-data',
+      status: 'blocked_unsupported',
+      phase: 'complete',
+      age_seconds: 3660,
+      error: '<runtime unavailable>',
+    }],
+  });
+  assert.equal(
+    activationAttentionTooltip(s),
+    '<alpha>: refresh-data (blocked unsupported, phase complete, 1h old, error: <runtime unavailable>)',
+  );
+});
+
+test('activationAttentionTooltip: honours the uncapped total when the detail list is bounded', () => {
+  const s = summariseFleetHealth({
+    activation_attention: 7,
+    activation_attention_list: Array.from({ length: 7 }, (_, i) => ({
+      slug: `app${i}`, schedule: 'refresh', status: 'repairing',
+    })),
+  });
+  const tip = activationAttentionTooltip(s, 5);
+  assert.match(tip, /^app0: refresh \(repairing\);/);
+  assert.match(tip, /; \+2 more$/);
 });
 
 test('summariseFleetHealth: idle elastic apps are healthy and named in the headline', () => {
