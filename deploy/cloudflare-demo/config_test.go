@@ -157,6 +157,35 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 	}
 }
 
+func TestDocumentationDeployUsesScopedCloudflareCredentials(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/docs.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowSource := string(workflow)
+	for _, required := range []string{
+		`group: documentation-production`,
+		`cancel-in-progress: true`,
+		`name: documentation`,
+		`url: https://shinyhub.dev`,
+		`Verify Cloudflare deployment credentials`,
+		`CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}`,
+		`CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}`,
+		`CLOUDFLARE_API_TOKEN must contain only the bare token value`,
+		`CLOUDFLARE_ACCOUNT_ID must be a 32-character lowercase hexadecimal account ID`,
+		`accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}`,
+		`wranglerVersion: "4.126.0"`,
+		`command: pages deploy site --project-name=shinyhub-dev`,
+	} {
+		if !strings.Contains(workflowSource, required) {
+			t.Errorf("documentation deployment workflow is missing %q", required)
+		}
+	}
+	if strings.Contains(workflowSource, `accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}`) {
+		t.Error("documentation deployment must source the non-secret account ID from the environment variable")
+	}
+}
+
 func TestCloudflareDemoViewerHasCompleteIdentityClaims(t *testing.T) {
 	bootstrap, err := os.ReadFile("bootstrap-viewer.py")
 	if err != nil {

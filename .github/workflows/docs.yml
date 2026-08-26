@@ -57,6 +57,15 @@ jobs:
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: documentation-production
+      cancel-in-progress: true
+    # Keep documentation credentials and deployment history isolated from the
+    # separately operated public demo.
+    environment:
+      name: documentation
+      url: https://shinyhub.dev
     permissions:
       contents: read
       deployments: write
@@ -66,9 +75,20 @@ jobs:
           name: docs-site
           path: site/
 
+      - name: Verify Cloudflare deployment credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN is not configured in the documentation environment" >&2; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "CLOUDFLARE_ACCOUNT_ID is not configured in the documentation environment" >&2; exit 1; }
+          [[ ! "$CLOUDFLARE_API_TOKEN" =~ [[:space:]] ]] || { echo "CLOUDFLARE_API_TOKEN must contain only the bare token value" >&2; exit 1; }
+          [[ "$CLOUDFLARE_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]] || { echo "CLOUDFLARE_ACCOUNT_ID must be a 32-character lowercase hexadecimal account ID" >&2; exit 1; }
+
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.126.0"
           command: pages deploy site --project-name=shinyhub-dev
