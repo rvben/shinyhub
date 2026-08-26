@@ -1288,12 +1288,13 @@ func (s *Store) ListWakingApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
-// ListRunningApps returns all apps whose status is 'running'. Used on startup
-// to re-adopt processes that survived a server restart.
+// ListRunningApps returns apps whose pools may still contain live processes.
+// Degraded apps are included because a schedule activation can legitimately
+// start from that state and leave a recoverable surge across server restart.
 func (s *Store) ListRunningApps() ([]*App, error) {
 	rows, err := s.db.Query(`
 		SELECT ` + appColumns + deploymentSummarySQL + `
-		FROM apps WHERE status = 'running'`)
+		FROM apps WHERE status IN ('running', 'degraded')`)
 	if err != nil {
 		return nil, err
 	}
@@ -3314,9 +3315,11 @@ type Replica struct {
 	// ExitCode, Signal, and RestartCount describe the most recent unexpected
 	// exit of this replica slot. They are populated by the process manager/read
 	// layer even before the watchdog exhausts its restart budget.
-	ExitCode     *int   `json:"exit_code,omitempty"`
-	Signal       string `json:"signal,omitempty"`
-	RestartCount int    `json:"restart_count"`
+	ExitCode       *int   `json:"exit_code,omitempty"`
+	Signal         string `json:"signal,omitempty"`
+	RestartCount   int    `json:"restart_count"`
+	DataGeneration int64  `json:"data_generation"`
+	ActivationID   *int64 `json:"activation_id,omitempty"`
 }
 
 // UpsertReplicaParams holds the fields for inserting or updating a replica row.
@@ -3414,7 +3417,7 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
 		       deployment_id, updated_at, exit_code, exit_signal, exit_reason,
-		       restart_count
+		       restart_count, data_generation, activation_id
 		FROM replicas WHERE app_id = ? ORDER BY idx`, appID)
 	if err != nil {
 		return nil, err
@@ -3427,7 +3430,7 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.ExitCode, &r.Signal,
-			&r.Reason, &r.RestartCount); err != nil {
+			&r.Reason, &r.RestartCount, &r.DataGeneration, &r.ActivationID); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
@@ -3449,7 +3452,7 @@ func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
 		       deployment_id, updated_at, exit_code, exit_signal, exit_reason,
-		       restart_count
+		       restart_count, data_generation, activation_id
 		FROM replicas WHERE app_id IN (`+ph+`) ORDER BY app_id, idx`, args...)
 	if err != nil {
 		return nil, err
@@ -3462,7 +3465,7 @@ func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.ExitCode, &r.Signal,
-			&r.Reason, &r.RestartCount); err != nil {
+			&r.Reason, &r.RestartCount, &r.DataGeneration, &r.ActivationID); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
@@ -4574,7 +4577,7 @@ func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
 	rows, err := s.db.Query(`
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
-		       deployment_id, updated_at
+		       deployment_id, updated_at, data_generation, activation_id
 		FROM replicas WHERE worker_id = ? ORDER BY app_id, idx`, nodeID)
 	if err != nil {
 		return nil, err
@@ -4586,7 +4589,7 @@ func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
 		var updatedAt int64
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
-			&r.DesiredState, &r.DeploymentID, &updatedAt); err != nil {
+			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.DataGeneration, &r.ActivationID); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)

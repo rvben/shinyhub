@@ -22,15 +22,17 @@ var ErrScheduleNameExists = errors.New("schedule with that name already exists f
 // --- app_schedules ---
 
 type Schedule struct {
-	ID             int64
-	AppID          int64
-	Name           string
-	CronExpr       string
-	CommandJSON    string
-	Enabled        bool
-	TimeoutSeconds int
-	OverlapPolicy  string
-	MissedPolicy   string
+	ID                     int64
+	AppID                  int64
+	Name                   string
+	CronExpr               string
+	CommandJSON            string
+	Enabled                bool
+	TimeoutSeconds         int
+	OverlapPolicy          string
+	MissedPolicy           string
+	OnSuccess              string
+	MinRollIntervalSeconds int
 	// Timezone is the optional per-schedule IANA timezone. nil means "inherit
 	// the server default". A non-nil pointer to an empty string is normalised
 	// to nil at the API layer before reaching the DB (empty = inherit).
@@ -76,25 +78,29 @@ func (s *Schedule) EffectiveLocation(def *time.Location) *time.Location {
 }
 
 type CreateScheduleParams struct {
-	AppID          int64
-	Name           string
-	CronExpr       string
-	CommandJSON    string
-	Enabled        bool
-	TimeoutSeconds int
-	OverlapPolicy  string
-	MissedPolicy   string
-	Timezone       *string
+	AppID                  int64
+	Name                   string
+	CronExpr               string
+	CommandJSON            string
+	Enabled                bool
+	TimeoutSeconds         int
+	OverlapPolicy          string
+	MissedPolicy           string
+	Timezone               *string
+	OnSuccess              string
+	MinRollIntervalSeconds int
 }
 
 type UpdateScheduleParams struct {
-	Name           *string
-	CronExpr       *string
-	CommandJSON    *string
-	Enabled        *bool
-	TimeoutSeconds *int
-	OverlapPolicy  *string
-	MissedPolicy   *string
+	Name                   *string
+	CronExpr               *string
+	CommandJSON            *string
+	Enabled                *bool
+	TimeoutSeconds         *int
+	OverlapPolicy          *string
+	MissedPolicy           *string
+	OnSuccess              *string
+	MinRollIntervalSeconds *int
 	// Timezone uses a sentinel to distinguish three states:
 	//   nil       - field not provided; leave as-is.
 	//   non-nil pointer to empty string - clear to NULL (inherit).
@@ -115,10 +121,12 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 	var id int64
 	err := s.db.QueryRow(`
 		INSERT INTO app_schedules
-			(app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone,
+			 on_success, min_roll_interval_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id`,
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
+		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
 	).Scan(&id)
 	if err != nil {
 		if s.d.isUniqueViolation(err) {
@@ -132,7 +140,7 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 	row := s.db.QueryRow(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds, created_at, updated_at
 		FROM app_schedules WHERE id = ?`, id)
 	return scanSchedule(row)
 }
@@ -142,7 +150,7 @@ func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 func (s *Store) GetScheduleByName(appID int64, name string) (*Schedule, error) {
 	row := s.db.QueryRow(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds, created_at, updated_at
 		FROM app_schedules WHERE app_id = ? AND name = ?`, appID, name)
 	return scanSchedule(row)
 }
@@ -150,7 +158,7 @@ func (s *Store) GetScheduleByName(appID int64, name string) (*Schedule, error) {
 func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds, created_at, updated_at
 		FROM app_schedules WHERE app_id = ? ORDER BY name`, appID)
 	if err != nil {
 		return nil, err
@@ -170,7 +178,7 @@ func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 func (s *Store) ListEnabledSchedules() ([]*Schedule, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds, created_at, updated_at
 		FROM app_schedules WHERE enabled = 1`)
 	if err != nil {
 		return nil, err
@@ -218,6 +226,14 @@ func (s *Store) UpdateSchedule(id int64, p UpdateScheduleParams) error {
 		sets = append(sets, "missed_policy = ?")
 		args = append(args, *p.MissedPolicy)
 	}
+	if p.OnSuccess != nil {
+		sets = append(sets, "on_success = ?")
+		args = append(args, normalizeScheduleAction(*p.OnSuccess))
+	}
+	if p.MinRollIntervalSeconds != nil {
+		sets = append(sets, "min_roll_interval_seconds = ?")
+		args = append(args, *p.MinRollIntervalSeconds)
+	}
 	if p.SetTimezone {
 		sets = append(sets, "timezone = ?")
 		if p.Timezone != nil && *p.Timezone != "" {
@@ -255,6 +271,30 @@ func (s *Store) DeleteSchedule(id int64) error {
 	return nil
 }
 
+// DeleteScheduleIfIdle atomically preserves an executing run and any durable
+// activation outcome that has not reached a terminal state. Keeping both
+// predicates in this DELETE is important: a run completion changes its run to
+// terminal and inserts the activation in one transaction, so every statement
+// snapshot sees at least one blocker. A separate preflight query would leave a
+// check-then-delete window that could cascade the source run out from under the
+// newly-created activation.
+func (s *Store) DeleteScheduleIfIdle(id int64) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM app_schedules
+		WHERE id = ? AND NOT EXISTS (
+			SELECT 1 FROM schedule_runs WHERE schedule_id = ? AND status = 'running'
+		) AND NOT EXISTS (
+			SELECT 1 FROM schedule_activations
+			WHERE schedule_id = ? AND status IN (
+				'pending', 'deferred_interval', 'deferred_capacity', 'repairing', 'running'
+			)
+		)`, id, id, id)
+	if err != nil {
+		return false, fmt.Errorf("delete idle schedule: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // --- schedule_runs ---
 
 type ScheduleRun struct {
@@ -275,15 +315,26 @@ type ScheduleRun struct {
 	// is an internal detail consumed only by the log-streaming handler and
 	// must never be serialized to API clients.
 	LogPath string `json:"-"`
+	// Activation fields keep the job outcome and its serving-data outcome
+	// attributable on the same history row without conflating their states.
+	OnSuccess              string `json:"on_success"`
+	MinRollIntervalSeconds int    `json:"min_roll_interval_seconds"`
+	TargetGeneration       *int64 `json:"target_generation,omitempty"`
+	ActivationID           *int64 `json:"activation_id,omitempty"`
+	ActivationStatus       string `json:"activation_status,omitempty"`
+	ActivationPhase        string `json:"activation_phase,omitempty"`
+	ActivationError        string `json:"activation_error,omitempty"`
 }
 
 type InsertScheduleRunParams struct {
-	ScheduleID        int64
-	Status            string
-	Trigger           string
-	TriggeredByUserID *int64
-	StartedAt         time.Time
-	LogPath           string
+	ScheduleID             int64
+	Status                 string
+	Trigger                string
+	TriggeredByUserID      *int64
+	StartedAt              time.Time
+	LogPath                string
+	OnSuccess              string
+	MinRollIntervalSeconds int
 }
 
 type FinishScheduleRunParams struct {
@@ -303,10 +354,12 @@ func (s *Store) InsertScheduleRun(p InsertScheduleRunParams) (int64, error) {
 	}
 	var id int64
 	err := s.db.QueryRow(`
-		INSERT INTO schedule_runs (schedule_id, status, trigger, triggered_by_user_id, started_at, log_path)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO schedule_runs (schedule_id, status, trigger, triggered_by_user_id, started_at, log_path,
+		                           on_success, min_roll_interval_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id`,
 		p.ScheduleID, p.Status, p.Trigger, uid, p.StartedAt, p.LogPath,
+		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert schedule run: %w", err)
@@ -378,6 +431,10 @@ func (s *Store) PruneScheduleRuns(scheduleID int64, keep int) (int64, error) {
 		DELETE FROM schedule_runs
 		WHERE schedule_id = ?
 		  AND id NOT IN (
+		    SELECT schedule_run_id FROM schedule_activations
+		    WHERE schedule_run_id IS NOT NULL
+		  )
+		  AND id NOT IN (
 		    SELECT id FROM schedule_runs
 		    WHERE schedule_id = ?
 		    ORDER BY started_at DESC, id DESC
@@ -400,10 +457,12 @@ func (s *Store) CountScheduleRuns(scheduleID int64) (int, error) {
 
 func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*ScheduleRun, error) {
 	rows, err := s.db.Query(`
-		SELECT id, schedule_id, status, trigger, triggered_by_user_id, started_at,
-		       finished_at, exit_code, log_path
-		FROM schedule_runs WHERE schedule_id = ?
-		ORDER BY started_at DESC LIMIT ? OFFSET ?`, scheduleID, limit, offset)
+		SELECT r.id, r.schedule_id, r.status, r.trigger, r.triggered_by_user_id, r.started_at,
+		       r.finished_at, r.exit_code, r.log_path, r.on_success, r.min_roll_interval_seconds,
+		       r.target_generation, a.id, COALESCE(a.status, ''), COALESCE(a.phase, ''), COALESCE(a.last_error, '')
+		FROM schedule_runs r LEFT JOIN schedule_activations a ON a.schedule_run_id = r.id
+		WHERE r.schedule_id = ?
+		ORDER BY r.started_at DESC LIMIT ? OFFSET ?`, scheduleID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -411,11 +470,12 @@ func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*Schedu
 	out := []*ScheduleRun{}
 	for rows.Next() {
 		var r ScheduleRun
-		var uid sql.NullInt64
+		var uid, targetGeneration, activationID sql.NullInt64
 		var fin sql.NullTime
 		var ex sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
-			&r.StartedAt, &fin, &ex, &r.LogPath); err != nil {
+			&r.StartedAt, &fin, &ex, &r.LogPath, &r.OnSuccess, &r.MinRollIntervalSeconds,
+			&targetGeneration, &activationID, &r.ActivationStatus, &r.ActivationPhase, &r.ActivationError); err != nil {
 			return nil, err
 		}
 		if uid.Valid {
@@ -430,6 +490,14 @@ func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*Schedu
 			v := int(ex.Int64)
 			r.ExitCode = &v
 		}
+		if targetGeneration.Valid {
+			v := targetGeneration.Int64
+			r.TargetGeneration = &v
+		}
+		if activationID.Valid {
+			v := activationID.Int64
+			r.ActivationID = &v
+		}
 		out = append(out, &r)
 	}
 	return out, rows.Err()
@@ -437,15 +505,18 @@ func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*Schedu
 
 func (s *Store) GetScheduleRun(runID int64) (*ScheduleRun, error) {
 	row := s.db.QueryRow(`
-		SELECT id, schedule_id, status, trigger, triggered_by_user_id, started_at,
-		       finished_at, exit_code, log_path
-		FROM schedule_runs WHERE id = ?`, runID)
+		SELECT r.id, r.schedule_id, r.status, r.trigger, r.triggered_by_user_id, r.started_at,
+		       r.finished_at, r.exit_code, r.log_path, r.on_success, r.min_roll_interval_seconds,
+		       r.target_generation, a.id, COALESCE(a.status, ''), COALESCE(a.phase, ''), COALESCE(a.last_error, '')
+		FROM schedule_runs r LEFT JOIN schedule_activations a ON a.schedule_run_id = r.id
+		WHERE r.id = ?`, runID)
 	var r ScheduleRun
-	var uid sql.NullInt64
+	var uid, targetGeneration, activationID sql.NullInt64
 	var fin sql.NullTime
 	var ex sql.NullInt64
 	err := row.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
-		&r.StartedAt, &fin, &ex, &r.LogPath)
+		&r.StartedAt, &fin, &ex, &r.LogPath, &r.OnSuccess, &r.MinRollIntervalSeconds,
+		&targetGeneration, &activationID, &r.ActivationStatus, &r.ActivationPhase, &r.ActivationError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -463,6 +534,14 @@ func (s *Store) GetScheduleRun(runID int64) (*ScheduleRun, error) {
 	if ex.Valid {
 		v := int(ex.Int64)
 		r.ExitCode = &v
+	}
+	if targetGeneration.Valid {
+		v := targetGeneration.Int64
+		r.TargetGeneration = &v
+	}
+	if activationID.Valid {
+		v := activationID.Int64
+		r.ActivationID = &v
 	}
 	return &r, nil
 }
@@ -483,16 +562,19 @@ func (s *Store) MarkRunningSchedulesInterrupted() (int64, error) {
 // by missed-run catch-up. Returns ErrNotFound if there's never been one.
 func (s *Store) LastSuccessfulRun(scheduleID int64) (*ScheduleRun, error) {
 	row := s.db.QueryRow(`
-		SELECT id, schedule_id, status, trigger, triggered_by_user_id, started_at,
-		       finished_at, exit_code, log_path
-		FROM schedule_runs WHERE schedule_id = ? AND status = 'succeeded'
-		ORDER BY started_at DESC LIMIT 1`, scheduleID)
+		SELECT r.id, r.schedule_id, r.status, r.trigger, r.triggered_by_user_id, r.started_at,
+		       r.finished_at, r.exit_code, r.log_path, r.on_success, r.min_roll_interval_seconds,
+		       r.target_generation, a.id, COALESCE(a.status, ''), COALESCE(a.phase, ''), COALESCE(a.last_error, '')
+		FROM schedule_runs r LEFT JOIN schedule_activations a ON a.schedule_run_id = r.id
+		WHERE r.schedule_id = ? AND r.status = 'succeeded'
+		ORDER BY r.started_at DESC LIMIT 1`, scheduleID)
 	var r ScheduleRun
-	var uid sql.NullInt64
+	var uid, targetGeneration, activationID sql.NullInt64
 	var fin sql.NullTime
 	var ex sql.NullInt64
 	err := row.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
-		&r.StartedAt, &fin, &ex, &r.LogPath)
+		&r.StartedAt, &fin, &ex, &r.LogPath, &r.OnSuccess, &r.MinRollIntervalSeconds,
+		&targetGeneration, &activationID, &r.ActivationStatus, &r.ActivationPhase, &r.ActivationError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -510,6 +592,14 @@ func (s *Store) LastSuccessfulRun(scheduleID int64) (*ScheduleRun, error) {
 	if ex.Valid {
 		v := int(ex.Int64)
 		r.ExitCode = &v
+	}
+	if targetGeneration.Valid {
+		v := targetGeneration.Int64
+		r.TargetGeneration = &v
+	}
+	if activationID.Valid {
+		v := activationID.Int64
+		r.ActivationID = &v
 	}
 	return &r, nil
 }
@@ -585,15 +675,17 @@ func (s *Store) SchedulesNeedingFirstFireRetry() ([]int64, error) {
 }
 
 type UpsertScheduleByNameParams struct {
-	AppID          int64
-	Name           string
-	CronExpr       string
-	CommandJSON    string
-	Enabled        bool
-	TimeoutSeconds int
-	OverlapPolicy  string
-	MissedPolicy   string
-	Timezone       *string
+	AppID                  int64
+	Name                   string
+	CronExpr               string
+	CommandJSON            string
+	Enabled                bool
+	TimeoutSeconds         int
+	OverlapPolicy          string
+	MissedPolicy           string
+	Timezone               *string
+	OnSuccess              string
+	MinRollIntervalSeconds int
 }
 
 // UpsertScheduleByName performs an atomic insert-or-update keyed on
@@ -623,12 +715,14 @@ func (s *Store) UpsertScheduleByName(p UpsertScheduleByNameParams) (int64, bool,
 	var insertedID int64
 	scanErr := tx.QueryRow(`
 INSERT INTO app_schedules
-  (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone,
+   on_success, min_roll_interval_seconds)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(app_id, name) DO NOTHING
 RETURNING id`,
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON,
 		boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
+		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
 	).Scan(&insertedID)
 	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
 		return 0, false, fmt.Errorf("insert schedule: %w", scanErr)
@@ -645,11 +739,13 @@ RETURNING id`,
 	err = tx.QueryRow(`
 UPDATE app_schedules
    SET cron_expr = ?, command_json = ?, enabled = ?, timeout_seconds = ?,
-       overlap_policy = ?, missed_policy = ?, timezone = ?, updated_at = CURRENT_TIMESTAMP
+	   overlap_policy = ?, missed_policy = ?, timezone = ?, on_success = ?,
+	   min_roll_interval_seconds = ?, updated_at = CURRENT_TIMESTAMP
  WHERE app_id = ? AND name = ?
 RETURNING id`,
 		p.CronExpr, p.CommandJSON, boolToInt(p.Enabled),
 		p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
+		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
 		p.AppID, p.Name,
 	).Scan(&id)
 	if err != nil {
@@ -802,20 +898,27 @@ func (s *Store) ListSharedDataSources(consumerAppID int64) ([]*SharedDataMount, 
 // joined to its app, plus the last run and last successful run. It feeds the
 // Prometheus collector, the `schedule status` CLI, and the admin banner.
 type ScheduleFreshness struct {
-	ScheduleID     int64
-	Slug           string
-	Name           string
-	Enabled        bool
-	CronExpr       string
-	Timezone       *string
-	CreatedAt      time.Time
-	TimeoutSeconds int
-	LastRunID      *int64     // id of the most recent run, nil if never run
-	LastRunAt      *time.Time // started_at of the most recent run, nil if never run
-	LastRunStatus  string     // status of that run, "" if never run
-	LastSuccessAt  *time.Time // finished_at of the most recent succeeded run, nil if never
-	ActiveRunID    *int64     // newest status=running row, nil when none is active
-	ActiveRunAt    *time.Time // started_at for ActiveRunID
+	ScheduleID           int64
+	Slug                 string
+	Name                 string
+	Enabled              bool
+	CronExpr             string
+	Timezone             *string
+	CreatedAt            time.Time
+	TimeoutSeconds       int
+	LastRunID            *int64     // id of the most recent run, nil if never run
+	LastRunAt            *time.Time // started_at of the most recent run, nil if never run
+	LastRunStatus        string     // status of that run, "" if never run
+	LastSuccessAt        *time.Time // finished_at of the most recent succeeded run, nil if never
+	ActiveRunID          *int64     // newest status=running row, nil when none is active
+	ActiveRunAt          *time.Time // started_at for ActiveRunID
+	ActivationStatus     string
+	ActivationPhase      string
+	ActivationCreatedAt  *time.Time
+	ActivationUpdatedAt  *time.Time
+	ActivationDueAt      *time.Time
+	ActivationGeneration *int64
+	ActivationError      string
 }
 
 // EffectiveLocation resolves this schedule's timezone against the server
@@ -851,14 +954,23 @@ func (s *Store) ScheduleFreshnessByApp(appID int64) ([]ScheduleFreshness, error)
 // The clause is a constant supplied by the callers above, never user input.
 func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshness, error) {
 	rows, err := s.db.Query(`
-		SELECT sc.id, a.slug, sc.name, sc.enabled, sc.cron_expr, sc.timezone, sc.created_at, sc.timeout_seconds,
+		SELECT sc.id, a.slug, sc.name, CASE WHEN sc.enabled THEN 1 ELSE 0 END,
+		  sc.cron_expr, sc.timezone, sc.created_at, sc.timeout_seconds,
 		  (SELECT id          FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT started_at  FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT status      FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT finished_at FROM schedule_runs WHERE schedule_id=sc.id AND status='succeeded' ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT id         FROM schedule_runs WHERE schedule_id=sc.id AND status='running' ORDER BY started_at DESC, id DESC LIMIT 1),
-		  (SELECT started_at FROM schedule_runs WHERE schedule_id=sc.id AND status='running' ORDER BY started_at DESC, id DESC LIMIT 1)
+		  (SELECT started_at FROM schedule_runs WHERE schedule_id=sc.id AND status='running' ORDER BY started_at DESC, id DESC LIMIT 1),
+		  sa.status, sa.phase, sa.created_at, sa.updated_at, sa.due_at, sa.target_generation,
+		  CASE WHEN sa.last_error <> '' THEN sa.last_error ELSE sa.defer_reason END
 		FROM app_schedules sc JOIN apps a ON a.id = sc.app_id
+		LEFT JOIN schedule_activations sa ON sa.id = (
+			SELECT id FROM schedule_activations
+			WHERE schedule_id = sc.id
+			ORDER BY CASE WHEN status IN ('running', 'repairing') THEN 0 ELSE 1 END, id DESC
+			LIMIT 1
+		)
 		`+where+`
 		ORDER BY a.slug, sc.name`, args...)
 	if err != nil {
@@ -876,9 +988,13 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 		var lastSuccess sql.NullTime
 		var activeRunID sql.NullInt64
 		var activeRunAt sql.NullTime
+		var activationStatus, activationPhase, activationError sql.NullString
+		var activationCreated, activationUpdated, activationDue sql.NullTime
+		var activationGeneration sql.NullInt64
 		if err := rows.Scan(&fr.ScheduleID, &fr.Slug, &fr.Name, &enabled, &fr.CronExpr, &tz,
 			&fr.CreatedAt, &fr.TimeoutSeconds, &lastRunID, &lastRunAt, &lastStatus, &lastSuccess,
-			&activeRunID, &activeRunAt); err != nil {
+			&activeRunID, &activeRunAt, &activationStatus, &activationPhase, &activationCreated,
+			&activationUpdated, &activationDue, &activationGeneration, &activationError); err != nil {
 			return nil, err
 		}
 		fr.Enabled = enabled != 0
@@ -909,6 +1025,25 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 			v := activeRunAt.Time
 			fr.ActiveRunAt = &v
 		}
+		fr.ActivationStatus = activationStatus.String
+		fr.ActivationPhase = activationPhase.String
+		fr.ActivationError = activationError.String
+		if activationCreated.Valid {
+			v := activationCreated.Time
+			fr.ActivationCreatedAt = &v
+		}
+		if activationUpdated.Valid {
+			v := activationUpdated.Time
+			fr.ActivationUpdatedAt = &v
+		}
+		if activationDue.Valid {
+			v := activationDue.Time
+			fr.ActivationDueAt = &v
+		}
+		if activationGeneration.Valid {
+			v := activationGeneration.Int64
+			fr.ActivationGeneration = &v
+		}
 		out = append(out, fr)
 	}
 	return out, rows.Err()
@@ -926,7 +1061,7 @@ func scanSchedule(s rowScanner) (*Schedule, error) {
 	var tz sql.NullString
 	err := s.Scan(&sched.ID, &sched.AppID, &sched.Name, &sched.CronExpr, &sched.CommandJSON,
 		&enabled, &sched.TimeoutSeconds, &sched.OverlapPolicy, &sched.MissedPolicy,
-		&tz, &sched.CreatedAt, &sched.UpdatedAt)
+		&tz, &sched.OnSuccess, &sched.MinRollIntervalSeconds, &sched.CreatedAt, &sched.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -938,4 +1073,11 @@ func scanSchedule(s rowScanner) (*Schedule, error) {
 		sched.Timezone = &tz.String
 	}
 	return &sched, nil
+}
+
+func normalizeScheduleAction(action string) string {
+	if strings.TrimSpace(action) == "" {
+		return "none"
+	}
+	return strings.TrimSpace(action)
 }

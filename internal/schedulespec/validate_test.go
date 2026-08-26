@@ -3,6 +3,7 @@ package schedulespec_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
@@ -10,6 +11,55 @@ import (
 // validArgs returns arguments that pass all validation rules.
 func validArgs() (name, cron, timezone string, cmd []string, timeout int, overlap, missed string) {
 	return "my-schedule", "0 6 * * *", "", []string{"echo", "hi"}, 3600, "skip", "skip"
+}
+
+func TestValidateActivation_DefaultAndRollContract(t *testing.T) {
+	tests := []struct {
+		name        string
+		action      string
+		minInterval time.Duration
+		wantAction  string
+		wantErr     string
+	}{
+		{name: "unset defaults to none", wantAction: "none"},
+		{name: "explicit none", action: "none", wantAction: "none"},
+		{name: "roll", action: "roll", wantAction: "roll"},
+		{name: "roll with damper", action: "roll", minInterval: time.Hour, wantAction: "roll"},
+		{name: "signal is not a v1 action", action: "signal", wantErr: "none|roll"},
+		{name: "unknown action", action: "restart", wantErr: "none|roll"},
+		{name: "none cannot carry roll interval", action: "none", minInterval: time.Minute, wantErr: "requires on_success=roll"},
+		{name: "negative interval", action: "roll", minInterval: -time.Second, wantErr: "must not be negative"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := schedulespec.ValidateActivation(tc.action, tc.minInterval)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("ValidateActivation() error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateActivation() error = %v", err)
+			}
+			if got != tc.wantAction {
+				t.Fatalf("ValidateActivation() action = %q, want %q", got, tc.wantAction)
+			}
+		})
+	}
+}
+
+func TestValidateActivationSeconds_RejectsOverflowBeforeConversion(t *testing.T) {
+	if _, err := schedulespec.ValidateActivationSeconds("roll", schedulespec.MaxRollIntervalSeconds); err != nil {
+		t.Fatalf("maximum safe interval rejected: %v", err)
+	}
+	if _, err := schedulespec.ValidateActivationSeconds("roll", schedulespec.MaxRollIntervalSeconds+1); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("overflow interval error = %v, want explicit upper bound", err)
+	}
+	if _, err := schedulespec.ValidateActivationSeconds("roll", -1); err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Fatalf("negative interval error = %v", err)
+	}
 }
 
 func TestValidate_ValidInput(t *testing.T) {

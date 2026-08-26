@@ -112,6 +112,11 @@ type Manager struct {
 	// wg tracks every launched run goroutine so Stop can wait for them to
 	// observe cancellation and finalize their DB rows before the process exits.
 	wg sync.WaitGroup
+	// terminalCtx bounds durable terminal-state retries only when shutdown's
+	// caller gives up. During normal operation a transient store outage can last
+	// arbitrarily long without turning a successful run into lost activation.
+	terminalCtx    context.Context
+	terminalCancel context.CancelFunc
 }
 
 // ErrManagerStopped is returned by Run once Stop has been called.
@@ -140,6 +145,7 @@ func NewManager(procMgr *process.Manager, tierOrder []string, defaultTier string
 		}
 		appDataDir = abs
 	}
+	terminalCtx, terminalCancel := context.WithCancel(context.Background())
 	return &Manager{
 		procMgr:           procMgr,
 		tierOrder:         tierOrder,
@@ -153,6 +159,8 @@ func NewManager(procMgr *process.Manager, tierOrder []string, defaultTier string
 		queues:            make(map[int64]chan struct{}),
 		active:            make(map[int64]context.CancelFunc),
 		operatorCancelled: make(map[int64]bool),
+		terminalCtx:       terminalCtx,
+		terminalCancel:    terminalCancel,
 	}, nil
 }
 
@@ -275,7 +283,9 @@ func (m *Manager) Stop(ctx context.Context) {
 	}()
 	select {
 	case <-done:
+		m.terminalCancel()
 	case <-ctx.Done():
+		m.terminalCancel()
 		slog.Warn("jobs: shutdown timeout; abandoning in-flight runs")
 	}
 }
@@ -470,12 +480,14 @@ func (m *Manager) buildRunContext() (context.Context, context.CancelFunc) {
 // insertRunRow creates a schedule_runs row with status "running" and returns its ID.
 func (m *Manager) insertRunRow(sched *db.Schedule, trigger string, userID *int64) (int64, error) {
 	return m.store.InsertScheduleRun(db.InsertScheduleRunParams{
-		ScheduleID:        sched.ID,
-		Status:            "running",
-		Trigger:           trigger,
-		TriggeredByUserID: userID,
-		StartedAt:         time.Now().UTC(),
-		LogPath:           "", // updated after log file creation
+		ScheduleID:             sched.ID,
+		Status:                 "running",
+		Trigger:                trigger,
+		TriggeredByUserID:      userID,
+		StartedAt:              time.Now().UTC(),
+		LogPath:                "", // updated after log file creation
+		OnSuccess:              sched.OnSuccess,
+		MinRollIntervalSeconds: sched.MinRollIntervalSeconds,
 	})
 }
 
@@ -483,11 +495,13 @@ func (m *Manager) insertRunRow(sched *db.Schedule, trigger string, userID *int64
 // status "skipped_overlap". Returns the run ID.
 func (m *Manager) recordSkipped(sched *db.Schedule, trigger string, userID *int64) (int64, error) {
 	runID, err := m.store.InsertScheduleRun(db.InsertScheduleRunParams{
-		ScheduleID:        sched.ID,
-		Status:            "skipped_overlap",
-		Trigger:           trigger,
-		TriggeredByUserID: userID,
-		StartedAt:         time.Now().UTC(),
+		ScheduleID:             sched.ID,
+		Status:                 "skipped_overlap",
+		Trigger:                trigger,
+		TriggeredByUserID:      userID,
+		StartedAt:              time.Now().UTC(),
+		OnSuccess:              sched.OnSuccess,
+		MinRollIntervalSeconds: sched.MinRollIntervalSeconds,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("insert skipped run: %w", err)
@@ -716,12 +730,38 @@ func intPtr(i int) *int { return &i }
 // recorded as SQL NULL, used for a run that finished without observing a
 // process exit (interrupted by a service restart).
 func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exitCode *int, trigger string, userID *int64) {
-	_ = m.store.FinishScheduleRun(db.FinishScheduleRunParams{
-		RunID:      runID,
-		Status:     status,
-		ExitCode:   exitCode,
-		FinishedAt: time.Now().UTC(),
-	})
+	finishedAt := time.Now().UTC()
+	var activation *db.ScheduleActivation
+	var err error
+	retryDelay := 50 * time.Millisecond
+	for {
+		activation, err = m.store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+			RunID: runID, Status: status, ExitCode: exitCode, FinishedAt: finishedAt,
+		})
+		if err == nil {
+			break
+		}
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-timer.C:
+			if retryDelay < time.Second {
+				retryDelay *= 2
+				if retryDelay > time.Second {
+					retryDelay = time.Second
+				}
+			}
+		case <-m.terminalCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			slog.Error("schedule run: terminal persistence abandoned at shutdown",
+				"schedule_id", sched.ID, "run_id", runID, "status", status, "error", err)
+			return
+		}
+	}
 
 	if m.metrics != nil {
 		slug := ""
@@ -731,11 +771,16 @@ func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exit
 		m.metrics.RecordScheduleRun(slug, sched.Name, status)
 	}
 
+	detail := fmt.Sprintf(`{"trigger":%q,"run_id":%d}`, trigger, runID)
+	if activation != nil {
+		detail = fmt.Sprintf(`{"trigger":%q,"run_id":%d,"activation_id":%d,"target_generation":%d}`,
+			trigger, runID, activation.ID, activation.TargetGeneration)
+	}
 	m.store.LogAuditEvent(db.AuditEventParams{
 		UserID:       userID,
 		Action:       "schedule_run_" + status,
 		ResourceType: "schedule",
 		ResourceID:   fmt.Sprintf("%d", sched.ID),
-		Detail:       fmt.Sprintf(`{"trigger":%q,"run_id":%d}`, trigger, runID),
+		Detail:       detail,
 	})
 }

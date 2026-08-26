@@ -13,5 +13,6 @@ type Store interface {
 	InsertScheduleRun(p db.InsertScheduleRunParams) (int64, error)
 	SetScheduleRunLogPath(runID int64, logPath string) error
 	FinishScheduleRun(p db.FinishScheduleRunParams) error
+	CompleteScheduleRunAndEnqueueActivation(p db.CompleteScheduleRunParams) (*db.ScheduleActivation, error)
 	LogAuditEvent(p db.AuditEventParams)
 }

@@ -63,3 +63,42 @@ func Validate(name, cronExpr, timezone string, cmd []string, timeoutSec int, ove
 	}
 	return nil
 }
+
+// ValidateActivation normalizes and validates the post-success serving action.
+// The first release deliberately supports only no action and a self rollout;
+// signal and cross-app activation need separate runtime and authorization
+// contracts and must fail closed instead of being silently ignored.
+func ValidateActivation(action string, minRollInterval time.Duration) (string, error) {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		action = "none"
+	}
+	if action != "none" && action != "roll" {
+		return "", errors.New("on_success: must be none|roll")
+	}
+	if minRollInterval < 0 {
+		return "", errors.New("min_roll_interval: must not be negative")
+	}
+	if action != "roll" && minRollInterval != 0 {
+		return "", errors.New("min_roll_interval: requires on_success=roll")
+	}
+	return action, nil
+}
+
+// MaxRollIntervalSeconds is the largest whole-second interval that can be
+// represented by time.Duration. API payloads use integer seconds, so they must
+// be bounded before multiplication by time.Second; converting first would let
+// sufficiently large positive values wrap to a small positive duration.
+const MaxRollIntervalSeconds = int64(time.Duration(1<<63-1) / time.Second)
+
+// ValidateActivationSeconds safely validates the integer-seconds form used by
+// the HTTP API before converting it to time.Duration.
+func ValidateActivationSeconds(action string, minRollIntervalSeconds int64) (string, error) {
+	if minRollIntervalSeconds < 0 {
+		return "", errors.New("min_roll_interval: must not be negative")
+	}
+	if minRollIntervalSeconds > MaxRollIntervalSeconds {
+		return "", fmt.Errorf("min_roll_interval: must be at most %d seconds", MaxRollIntervalSeconds)
+	}
+	return ValidateActivation(action, time.Duration(minRollIntervalSeconds)*time.Second)
+}

@@ -102,10 +102,12 @@ type fakeStore struct {
 	mounts      []*db.SharedDataMount
 	deployments []*db.Deployment
 
-	runs        map[int64]*db.ScheduleRun
-	nextRunID   int64
-	finishCalls []db.FinishScheduleRunParams
-	logPaths    []struct {
+	runs             map[int64]*db.ScheduleRun
+	nextRunID        int64
+	finishCalls      []db.FinishScheduleRunParams
+	terminalFailures int
+	terminalAttempts int
+	logPaths         []struct {
 		RunID int64
 		Path  string
 	}
@@ -190,6 +192,53 @@ func (f *fakeStore) FinishScheduleRun(p db.FinishScheduleRunParams) error {
 	r.FinishedAt = &t
 	f.finishCalls = append(f.finishCalls, p)
 	return nil
+}
+
+func (f *fakeStore) CompleteScheduleRunAndEnqueueActivation(p db.CompleteScheduleRunParams) (*db.ScheduleActivation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.terminalAttempts++
+	if f.terminalFailures > 0 {
+		f.terminalFailures--
+		return nil, fmt.Errorf("temporary store outage")
+	}
+	r, ok := f.runs[p.RunID]
+	if !ok {
+		return nil, db.ErrNotFound
+	}
+	r.Status = p.Status
+	r.ExitCode = p.ExitCode
+	t := p.FinishedAt
+	r.FinishedAt = &t
+	f.finishCalls = append(f.finishCalls, db.FinishScheduleRunParams{
+		RunID: p.RunID, Status: p.Status, ExitCode: p.ExitCode, FinishedAt: p.FinishedAt,
+	})
+	return nil, nil
+}
+
+func TestManager_RetriesTerminalPersistenceUntilStoreRecovers(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	st.terminalFailures = 6 // exceeds the former five-attempt/~1s retry window
+	m := newTestManager(t, rt, st)
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		st.mu.Lock()
+		finished, attempts := len(st.finishCalls), st.terminalAttempts
+		st.mu.Unlock()
+		if finished == 1 {
+			if attempts != 7 {
+				t.Fatalf("terminal attempts=%d, want 7", attempts)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("terminal outcome was not persisted after the store recovered")
 }
 
 func (f *fakeStore) LogAuditEvent(p db.AuditEventParams) {}

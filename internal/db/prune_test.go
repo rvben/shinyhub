@@ -83,3 +83,77 @@ func TestPruneScheduleRuns(t *testing.T) {
 		t.Fatalf("remaining runs = %d, want 2", len(runs))
 	}
 }
+
+func TestPruneScheduleActivations_PreservesWorkDamperAnchorAndAttribution(t *testing.T) {
+	store := openTestStore(t)
+	u := mustCreateUser(t, store, "activation-owner", "developer")
+	app := mustCreateApp(t, store, "activation-retention", u.ID)
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 * * * *",
+		CommandJSON: `["true"]`, Enabled: true, TimeoutSeconds: 60,
+		OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	var activationIDs, runIDs []int64
+	statuses := []string{"succeeded", "failed", "failed", "failed"}
+	for i, status := range statuses {
+		at := start.Add(time.Duration(i) * time.Minute)
+		runID := insertActivationRun(t, store, scheduleID, at, "roll", 0)
+		runIDs = append(runIDs, runID)
+		created, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+			RunID: runID, Status: "succeeded", ExitCode: intPtr(0), FinishedAt: at,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		activationIDs = append(activationIDs, created.ID)
+		claimed, err := store.ClaimNextScheduleActivation(at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.FinishScheduleActivation(claimed.ID, status, "", at.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pendingAt := start.Add(4 * time.Minute)
+	pendingRun := insertActivationRun(t, store, scheduleID, pendingAt, "roll", 0)
+	pending, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: pendingRun, Status: "succeeded", ExitCode: intPtr(0), FinishedAt: pendingAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runIDs = append(runIDs, pendingRun)
+
+	deleted, err := store.PruneScheduleActivations(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted activations=%d, want 1", deleted)
+	}
+	for _, id := range []int64{activationIDs[0], activationIDs[2], activationIDs[3], pending.ID} {
+		if _, err := store.GetScheduleActivation(id); err != nil {
+			t.Fatalf("retained activation %d: %v", id, err)
+		}
+	}
+	if _, err := store.GetScheduleActivation(activationIDs[1]); err != db.ErrNotFound {
+		t.Fatalf("pruned activation %d err=%v, want ErrNotFound", activationIDs[1], err)
+	}
+
+	deletedRuns, err := store.PruneScheduleRuns(scheduleID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deletedRuns != 1 {
+		t.Fatalf("deleted runs=%d, want only the source of the pruned activation", deletedRuns)
+	}
+	for _, index := range []int{0, 2, 3, 4} {
+		if _, err := store.GetScheduleRun(runIDs[index]); err != nil {
+			t.Fatalf("attributed run %d: %v", runIDs[index], err)
+		}
+	}
+}
