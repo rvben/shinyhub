@@ -6,7 +6,7 @@ import { GROUP_ORDER_FIXTURE, GROUP_ORDER_EXPECTED } from './group-order-fixture
 
 // The app switcher is JavaScript ShinyHub splices into pages it did not write.
 // No Go test executes it: the Go side proves the tag is in the body, and stops
-// there. Everything the visitor actually sees - the rail, the panel, the
+// there. Everything the visitor actually sees - the bar, the panel, the
 // grouping, the dismissal - happens after that tag runs, which makes this file
 // the only place those are checked at all.
 //
@@ -27,6 +27,7 @@ const HOST_ID = 'shinyhub-app-nav-host';
 const NAV_URL = '/app/demo/.shinyhub/nav.json';
 const HOME_URL = 'https://hub.example.com/';
 const DISMISS_KEY = 'shinyhub-app-nav:dismissed';
+const POSITION_KEY = 'shinyhub-app-nav:position:demo';
 
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -46,6 +47,8 @@ function mount({
   html = '<!DOCTYPE html><html><head></head><body><div id="app-root">app</div></body></html>',
   url = 'http://apps.example.com/app/demo/',
   dismissed = false,
+  position = null,
+  compactImmediately = false,
   deferred = false,
 } = {}) {
   const jsdomErrors = [];
@@ -55,6 +58,12 @@ function mount({
   const dom = new JSDOM(html, { runScripts: 'dangerously', url, virtualConsole });
   const w = dom.window;
   const d = w.document;
+
+  if (compactImmediately) {
+    w.matchMedia = (query) => ({ matches: query.includes('max-width: 520px') });
+    const nativeSetTimeout = w.setTimeout.bind(w);
+    w.setTimeout = (fn, delay, ...args) => nativeSetTimeout(fn, delay === 8000 ? 0 : delay, ...args);
+  }
 
   // jsdom computes no layout, so it answers offsetParent with null for every
   // element, always. The switcher's focusable() filters on exactly that, so
@@ -79,6 +88,7 @@ function mount({
   });
 
   if (dismissed) w.sessionStorage.setItem(DISMISS_KEY, '1');
+  if (position) w.localStorage.setItem(POSITION_KEY, position);
 
   const fetches = [];
   let releaseFetch = null;
@@ -121,7 +131,7 @@ function mount({
 
   const q = (sel) => (shadow ? shadow.querySelector(sel) : null);
   const qa = (sel) => (shadow ? Array.from(shadow.querySelectorAll(sel)) : []);
-  const openBtn = () => q('button[aria-label="Show all apps"]');
+  const openBtn = () => q('button.switch');
 
   return {
     dom,
@@ -134,7 +144,9 @@ function mount({
     q,
     qa,
     openBtn,
+    moveBtn: () => q('button.move'),
     closeBtn: () => q('button.close'),
+    restoreBtn: () => q('button.restore'),
     panel: () => q('nav.panel'),
     root: () => q('.root'),
     items: () => qa('a.item'),
@@ -163,11 +175,104 @@ function mount({
 
 const app = (slug, extra = {}) => ({ slug, name: slug, openable: true, ...extra });
 
-test('mounts a rail into the app page without being asked for anything', async () => {
+test('mounts a recognizable app bar into the page without fetching anything', async () => {
   const m = mount();
   assert.ok(m.host(), 'no switcher host was added to the page');
-  assert.ok(m.openBtn(), 'the rail has no control to open the panel');
+  assert.ok(m.openBtn(), 'the bar has no control to open the panel');
+  assert.equal(m.q('.current-label').textContent, 'Demo');
+  assert.match(m.q('.current-action').textContent, /Switch app/);
+  assert.equal(m.root().getAttribute('data-position'), 'top-center');
+  assert.equal(m.fetches.length, 0);
   assert.equal(m.jsdomErrors.length, 0, `script errored: ${m.jsdomErrors.join('; ')}`);
+});
+
+test('opening resolves the current slug to the app display name', async () => {
+  const m = mount({ payload: { apps: [app('demo', { name: 'Revenue forecast' })] } });
+  await m.open();
+
+  assert.equal(m.q('.current-label').textContent, 'Revenue forecast');
+  assert.match(m.openBtn().getAttribute('aria-label'), /current app Revenue forecast/);
+});
+
+test('the placement menu offers four deliberate anchors and persists the choice per app', async () => {
+  const m = mount();
+  m.moveBtn().click();
+
+  assert.ok(m.root().classList.contains('placing'));
+  assert.equal(m.moveBtn().getAttribute('aria-expanded'), 'true');
+  const choices = m.qa('button.place-option');
+  assert.deepEqual(choices.map((button) => button.getAttribute('data-position')), [
+    'top-center', 'top-right', 'left-center', 'right-center',
+  ]);
+
+  m.q('button.place-option[data-position="right-center"]').click();
+  await flush();
+  assert.equal(m.root().getAttribute('data-position'), 'right-center');
+  assert.equal(m.window.localStorage.getItem(POSITION_KEY), 'right-center');
+  assert.equal(m.root().classList.contains('placing'), false);
+
+  const next = mount({ position: 'right-center' });
+  assert.equal(next.root().getAttribute('data-position'), 'right-center');
+});
+
+test('dragging the handle previews anchors and snaps to the nearest one', async () => {
+  const m = mount();
+  const pointer = (type, x, y) => new m.window.MouseEvent(type, {
+    bubbles: true, clientX: x, clientY: y, button: 0,
+  });
+
+  m.moveBtn().dispatchEvent(pointer('pointerdown', 512, 20));
+  m.moveBtn().dispatchEvent(pointer('pointermove', 1000, 380));
+  assert.ok(m.root().classList.contains('dragging'));
+  assert.equal(m.q('.guide.nearest').getAttribute('data-position'), 'right-center');
+
+  m.moveBtn().dispatchEvent(pointer('pointerup', 1000, 380));
+  assert.equal(m.root().classList.contains('dragging'), false);
+  assert.equal(m.root().getAttribute('data-position'), 'right-center');
+  assert.equal(m.window.localStorage.getItem(POSITION_KEY), 'right-center');
+});
+
+test('Escape closes the placement menu and returns focus to its trigger', async () => {
+  const m = mount();
+  m.moveBtn().click();
+  m.root().dispatchEvent(
+    new m.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true })
+  );
+  await flush();
+
+  assert.equal(m.root().classList.contains('placing'), false);
+  assert.equal(m.moveBtn().getAttribute('aria-expanded'), 'false');
+  assert.equal(m.focused(), m.moveBtn());
+});
+
+test('the placement menu uses arrow-key roving focus', async () => {
+  const m = mount();
+  m.moveBtn().click();
+  const choices = m.qa('button.place-option');
+  assert.equal(m.focused(), choices[0]);
+  assert.deepEqual(choices.map((choice) => choice.tabIndex), [0, -1, -1, -1]);
+
+  choices[0].dispatchEvent(
+    new m.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, composed: true })
+  );
+  assert.equal(m.focused(), choices[1]);
+  assert.deepEqual(choices.map((choice) => choice.tabIndex), [-1, 0, -1, -1]);
+
+  choices[1].dispatchEvent(
+    new m.window.KeyboardEvent('keydown', { key: 'End', bubbles: true, composed: true })
+  );
+  assert.equal(m.focused(), choices[3]);
+});
+
+test('on a narrow screen the taught bar compacts to an Apps pill and expands on use', async () => {
+  const m = mount({ compactImmediately: true, payload: { apps: [app('demo')] } });
+  await new Promise((resolve) => m.window.setTimeout(resolve, 5));
+  assert.ok(m.root().classList.contains('compact'));
+  assert.equal(m.q('.compact-label').textContent, 'Apps');
+
+  await m.open();
+  assert.equal(m.root().classList.contains('compact'), false);
+  assert.ok(m.root().classList.contains('open'));
 });
 
 test('renders inside a CLOSED shadow root, so the app cannot reach the chrome', async () => {
@@ -181,7 +286,7 @@ test('renders inside a CLOSED shadow root, so the app cannot reach the chrome', 
 
 test('the app list is fetched only when the visitor opens the panel', async () => {
   // Every app page load would otherwise carry a request nobody asked for, on a
-  // rail most visitors never touch.
+  // switcher most visitors never touch.
   const m = mount({ payload: { apps: [app('one'), app('two')] } });
   await flush();
   assert.equal(m.fetches.length, 0, 'the switcher fetched the app list before it was opened');
@@ -207,7 +312,7 @@ test('lists the apps the endpoint returned, linking each to its own page', async
 });
 
 test('groups apps in the same order as the dashboard sidebar', async () => {
-  // The visitor came from that sidebar. A rail that orders the same apps
+  // The visitor came from that sidebar. A switcher that orders the same apps
   // differently is not a second view of one fleet, it is a contradiction they
   // have to resolve themselves. The rule is copied into nav.js because an
   // injected inline script cannot import an ES module, and a copy is exactly
@@ -219,7 +324,7 @@ test('groups apps in the same order as the dashboard sidebar', async () => {
   const sidebar = groupApps(GROUP_ORDER_FIXTURE).map((g) => g.project);
   assert.deepEqual(sidebar, GROUP_ORDER_EXPECTED, 'precondition: the sidebar rule changed');
 
-  // The rail draws headings, not keys: the ungrouped bucket is titled "Other
+  // The switcher draws headings, not keys: the ungrouped bucket is titled "Other
   // apps" once real projects exist, and named projects by their display name.
   assert.deepEqual(m.headings(), ['Other apps', 'Aaa', 'Bbb']);
   assert.deepEqual(m.labels(), ['Mike', 'Zulu', 'Alpha']);
@@ -317,7 +422,7 @@ test('filtering narrows the list by name and by slug, and says when nothing matc
 });
 
 test('a clipped list says it is clipped, in the list and in the count', async () => {
-  // The server caps the answer. A rail that renders the first page with nothing
+  // The server caps the answer. A switcher that renders the first page with nothing
   // to mark the edge is telling the visitor this is their whole fleet, and the
   // app they are looking for has been taken away from them.
   const apps = Array.from({ length: 12 }, (_, i) => app(`a${i}`, { name: `App ${i}` }));
@@ -399,19 +504,33 @@ test('the dashboard link points at the configured home, not the app origin root'
   assert.equal(m.q('a.home').getAttribute('href'), HOME_URL);
 });
 
-test('dismissing removes the chrome for this tab, and it stays gone on the next page', async () => {
+test('dismissing reduces the chrome to a restore tab, and the dismissal follows the tab', async () => {
   const m = mount({ payload: { apps: [app('one')] } });
   m.closeBtn().click();
   await flush();
 
-  assert.equal(m.host(), null, 'dismissing left the chrome on the page');
+  assert.ok(m.host(), 'dismissing removed the only route that can restore the switcher');
+  assert.ok(m.root().classList.contains('dismissed'));
+  assert.ok(m.restoreBtn(), 'dismissing left no restore control');
   assert.equal(m.window.sessionStorage.getItem(DISMISS_KEY), '1');
 
   // A dismissal that did not survive the app's own navigations would be no
   // dismissal at all: a Shiny app reloads its page for plenty of reasons.
   const next = mount({ dismissed: true });
-  assert.equal(next.host(), null, 'the switcher came back in a tab that dismissed it');
+  assert.ok(next.root().classList.contains('dismissed'), 'the full bar came back in a tab that dismissed it');
+  assert.ok(next.restoreBtn(), 'a returning dismissed page has no recovery path');
   assert.equal(next.fetches.length, 0);
+});
+
+test('the restore tab brings the full switcher back without fetching the list', async () => {
+  const m = mount({ dismissed: true });
+  m.restoreBtn().click();
+  await flush();
+
+  assert.equal(m.root().classList.contains('dismissed'), false);
+  assert.equal(m.window.sessionStorage.getItem(DISMISS_KEY), null);
+  assert.equal(m.focused(), m.openBtn());
+  assert.equal(m.fetches.length, 0, 'restoring the bar fetched a list the visitor did not open');
 });
 
 test('the dismiss control does not promise that reloading brings the switcher back', async () => {
@@ -426,7 +545,7 @@ test('the dismiss control does not promise that reloading brings the switcher ba
 });
 
 test('the panel carries its own close control', async () => {
-  // The rail is hidden while the panel is open, so the panel has to offer a way
+  // The panel has to offer a way
   // out that is not the scrim or the keyboard.
   const m = mount({ payload: { apps: [app('one'), app('two')] } });
   await m.open();
@@ -440,16 +559,13 @@ test('the panel carries its own close control', async () => {
   assert.equal(m.openBtn().getAttribute('aria-expanded'), 'false');
 });
 
-test('opening moves focus into the panel, not onto the control it just hid', async () => {
-  // Opening hides the rail, so leaving focus on the rail button strands a
-  // keyboard visitor on something invisible and outside the panel's Tab trap:
-  // the panel is open and every key they press goes nowhere near it.
+test('opening moves focus into the panel instead of leaving it on the bar', async () => {
   const m = mount({ payload: { apps: [app('one'), app('two')] } });
   await m.open();
 
   const landed = m.focused();
   assert.ok(landed, 'nothing inside the panel has focus after opening');
-  assert.notEqual(landed, m.openBtn(), 'focus stayed on the rail button the open panel hides');
+  assert.notEqual(landed, m.openBtn(), 'focus stayed on the bar button after the panel opened');
   assert.ok(m.panel().contains(landed), `focus landed outside the panel: ${landed.outerHTML}`);
   assert.notEqual(landed, m.q('button.headclose'),
     'focus landed on the close button, so the first Enter closes what was just opened');
@@ -469,7 +585,7 @@ test('a long list opens with focus in the filter, ready to type', async () => {
 test('focus enters the panel while the list is still loading, and moves on when it arrives', async () => {
   // The list is fetched on the first open, so for the first visitor the panel is
   // empty at the moment it opens: there is nothing to focus yet. Waiting for the
-  // fetch would leave focus on the hidden rail for the length of a network round
+  // fetch would leave focus on the bar for the length of a network round
   // trip, so the panel takes focus itself and hands it over when the list lands.
   const m = mount({ payload: { apps: [app('one'), app('two')] }, deferred: true });
   await m.openPending();
@@ -497,31 +613,31 @@ test('a list that arrives after the visitor gave up does not pull focus back', a
   assert.equal(m.focused(), afterClose, 'the late list pulled focus back into a closed panel');
 });
 
-test('closing returns focus to the rail button a keyboard visitor opened it from', async () => {
+test('closing returns focus to the bar button a keyboard visitor opened it from', async () => {
   // The trap here is that document.activeElement retargets to the shadow host,
   // which is a plain div and cannot take focus. A keyboard visitor is always on
-  // the rail button when they open, so reading the document instead of the root
+  // the bar button when they open, so reading the document instead of the root
   // records the host every time, and closing drops them to the top of the app's
   // document instead of back where they were.
   const m = mount({ payload: { apps: [app('one')] } });
 
   m.openBtn().focus();
-  assert.equal(m.focused(), m.openBtn(), 'the rail button did not take focus');
+  assert.equal(m.focused(), m.openBtn(), 'the bar button did not take focus');
   // Proof the trap is live in this environment rather than assumed: the
   // document really does answer with the host, so a fix reading it would look
   // correct here and fail in a browser for the same reason.
   assert.equal(m.document.activeElement, m.host(), 'jsdom did not retarget to the host');
 
   await m.open();
-  assert.notEqual(m.focused(), m.openBtn(), 'focus never left the rail button');
+  assert.notEqual(m.focused(), m.openBtn(), 'focus never left the bar button');
 
   m.q('button.headclose').click();
   await flush();
-  assert.equal(m.focused(), m.openBtn(), 'closing did not return focus to the rail button');
+  assert.equal(m.focused(), m.openBtn(), 'closing did not return focus to the bar button');
 });
 
 test('closing returns focus into the app when the visitor opened the panel from there', async () => {
-  // The other half of the same line: a visitor who clicked the rail while their
+  // The other half of the same line: a visitor who clicked the bar while their
   // cursor was in the app has focus outside the root, where the root reports
   // nothing. Falling through to the document is what puts them back.
   const m = mount({ payload: { apps: [app('one')] } });
