@@ -359,8 +359,9 @@ func sqliteUniqueIndex(store *db.Store, table string) ([]uniqueTuple, error) {
 
 // introspectPostgresUnique returns a map of table -> set of unique index tuples.
 // PostgreSQL backs UNIQUE constraints with unique indexes, while migrations may
-// also declare a unique index directly. Querying pg_index covers both forms and
-// therefore matches SQLite's PRAGMA index_list semantics.
+// also declare a unique index directly. Querying pg_index covers both forms,
+// including partial unique indexes, and therefore matches SQLite's PRAGMA
+// index_list semantics used above.
 func introspectPostgresUnique(t *testing.T, store *db.Store) map[string][]uniqueTuple {
 	t.Helper()
 	// Group columns by (table, index) to reconstruct multi-column tuples.
@@ -382,7 +383,6 @@ func introspectPostgresUnique(t *testing.T, store *db.Store) map[string][]unique
 		  AND ind.indisunique
 		  AND NOT ind.indisprimary
 		  AND ind.indexprs IS NULL
-		  AND ind.indpred IS NULL
 		ORDER BY tbl.relname, idx.relname, key.position`)
 	if err != nil {
 		t.Fatalf("postgres unique indexes query: %v", err)
