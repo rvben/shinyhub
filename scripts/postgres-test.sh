@@ -3,7 +3,8 @@
 # Mirrors the env-gated pattern: the suite reads SHINYHUB_TEST_POSTGRES_DSN.
 set -euo pipefail
 
-NAME="shinyhub-pg-test"
+# Override both name and port when multiple suites share one Docker host.
+NAME="${SHINYHUB_TEST_PG_NAME:-shinyhub-pg-test}"
 PORT="${SHINYHUB_TEST_PG_PORT:-55432}"
 PASS="shinyhub"
 IMAGE="postgres:16"

@@ -4,6 +4,7 @@ AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
 CLISPEC ?= clispec
 CLISPEC_MIN_VERSION := 0.3.1
+RACE_TIMEOUT ?= 45m
 
 # bootstrap installs the exact project dependencies and a repo-local, pinned
 # live-reload binary. Nothing is written to a developer's global Go bin.
@@ -34,10 +35,10 @@ test-go:
 # test-go, so it is its own target/CI job rather than folded into test-go. The
 # control plane crosses many goroutine boundaries (watcher, proxy poolsync,
 # autoscale, worker agent), so this is the primary guard against data races.
-# A raised per-package -timeout accommodates the slowest packages under the
-# race detector's overhead (the default 10m is exceeded by the api package).
+# A raised, overridable per-package timeout accommodates slower native hosts;
+# the default 10m is exceeded by the api package under race instrumentation.
 test-race:
-	go test -race ./... -count=1 -timeout 30m
+	go test -race ./... -count=1 -timeout $(RACE_TIMEOUT)
 
 # vuln scans the module (and its dependencies) against the Go vulnerability
 # database. Run via `go run` so no separate install step is needed and it works

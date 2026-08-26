@@ -53,7 +53,9 @@ jobs:
   # in parallel with the fast feedback of the `test` job.
   test-race:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # Keep the job ceiling above Makefile's 45m per-package timeout so Go emits
+    # the actionable package/test timeout instead of GitHub killing the runner.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v7
 
