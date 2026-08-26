@@ -251,6 +251,10 @@ Components are compact, familiar, and confident. Every interactive primitive mus
 
 The desktop shell uses a 248px translucent sidebar that can collapse to a 68px icon rail. Navigation items use 8px corners, muted text at rest, a tonal hover, and an inset one-pixel boundary for the active item. At 860px and below, the sidebar becomes an off-canvas drawer behind a sticky mobile top bar. Active state, keyboard focus, and availability remain distinct.
 
+Top-level app pages use separate injected navigation chrome that identifies itself and the current app without reserving app layout. Excluded inside frames and isolated from the app in a closed shadow root, it defaults to a 264px × 40px top-centre bar with the current app name and a switch action. The control stays in the Constellation world through a dark surface, compact Manrope type, cyan focus, and restrained elevation; it opens a bounded 320px app-list popover and retains lazy loading, deliberate focus handling, Escape-to-close behavior, and explicit unavailable, error/retry, empty, and filtered-empty states.
+
+Visitors can drag the control with a pointer or touch, or use its keyboard-operable position menu, to snap it to top-centre, top-right, left-centre, or right-centre. Side placements become 40px × 104px vertical controls, and the chosen position is stored per app in localStorage. Closing the control reduces it to a 30px restore tab and scopes that dismissal to the current browser tab in sessionStorage. At 520px and below, the initial 240px teaching bar contracts after eight seconds idle to a 140px **Apps** pill and expands again on use.
+
 ### Application Status
 
 Application state is information, not decoration. Use a dot-and-label badge or a labeled metric; reserve animated glow for live healthy state, disable it under reduced motion, and keep viewer-facing availability less revealing than operator-facing health.
