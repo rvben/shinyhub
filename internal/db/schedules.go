@@ -954,7 +954,7 @@ func (s *Store) ScheduleFreshnessByApp(appID int64) ([]ScheduleFreshness, error)
 // The clause is a constant supplied by the callers above, never user input.
 func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshness, error) {
 	rows, err := s.db.Query(`
-		SELECT sc.id, a.slug, sc.name, CASE WHEN sc.enabled THEN 1 ELSE 0 END,
+		SELECT sc.id, a.slug, sc.name, CASE WHEN sc.enabled = 1 THEN 1 ELSE 0 END,
 		  sc.cron_expr, sc.timezone, sc.created_at, sc.timeout_seconds,
 		  (SELECT id          FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT started_at  FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),

@@ -592,11 +592,12 @@ func TestScheduleActivationRoll_RecoversAfterConfirmedStopCheckpointFailure(t *t
 		t.Fatal(err)
 	}
 	a := seedClaimedActivation(t, srv.store, app)
-	if _, err := srv.store.DB().Exec(`CREATE TRIGGER fail_activation_identity_clear
-		BEFORE UPDATE ON replicas WHEN OLD.app_id = ` + strconv.FormatInt(app.ID, 10) + ` AND OLD.idx = 1 AND NEW.status = 'stopped'
-		BEGIN SELECT RAISE(ABORT, 'injected identity clear failure'); END`); err != nil {
-		t.Fatal(err)
-	}
+	dropFailure := installDBFailureTrigger(t, srv.store, dbFailureTrigger{
+		name:      "fail_activation_identity_clear",
+		table:     "replicas",
+		event:     "UPDATE",
+		condition: "OLD.app_id = " + strconv.FormatInt(app.ID, 10) + " AND OLD.idx = 1 AND NEW.status = 'stopped'",
+	})
 	const stoppedPID = 2147483647
 	srv.deployReplica = func(p deploy.Params, index int) (*deploy.Result, error) {
 		started := deploy.Result{Index: index, PID: stoppedPID, Port: 20541, Provider: "native", Tier: "default", EndpointURL: "http://127.0.0.1:20541"}
@@ -609,9 +610,7 @@ func TestScheduleActivationRoll_RecoversAfterConfirmedStopCheckpointFailure(t *t
 	if err := srv.Roll(context.Background(), a); !errors.As(err, &repair) {
 		t.Fatalf("Roll error=%v, want repair when stop checkpoint fails", err)
 	}
-	if _, err := srv.store.DB().Exec(`DROP TRIGGER fail_activation_identity_clear`); err != nil {
-		t.Fatal(err)
-	}
+	dropFailure()
 	srv.deployReplica = successfulActivationTestDeployer(t, srv, app, 20550)
 	if err := srv.Roll(context.Background(), a); err != nil {
 		t.Fatalf("repair could not prove stopped PID absent and retry: %v", err)
@@ -763,44 +762,46 @@ func TestConfirmActivationReplicaStopped_DockerAbsenceIsProvenWithoutSyntheticPI
 
 func TestScheduleActivationRoll_PostSurgeCheckpointFailuresStayInRepair(t *testing.T) {
 	cases := []struct {
-		name    string
-		trigger string
+		name      string
+		table     string
+		event     string
+		condition string
 	}{
 		{
-			name: "persist surge identity",
-			trigger: `CREATE TRIGGER fail_activation_checkpoint BEFORE UPDATE ON replicas
-				WHEN NEW.idx = 1 AND NEW.status = 'running'
-				BEGIN SELECT RAISE(FAIL, 'persist surge failed'); END`,
+			name:      "persist surge identity",
+			table:     "replicas",
+			event:     "UPDATE",
+			condition: "NEW.idx = 1 AND NEW.status = 'running'",
 		},
 		{
-			name: "record surge ready",
-			trigger: `CREATE TRIGGER fail_activation_checkpoint BEFORE UPDATE OF phase ON schedule_activations
-				WHEN NEW.phase = 'surge_ready'
-				BEGIN SELECT RAISE(FAIL, 'surge ready checkpoint failed'); END`,
+			name:      "record surge ready",
+			table:     "schedule_activations",
+			event:     "UPDATE OF phase",
+			condition: "NEW.phase = 'surge_ready'",
 		},
 		{
-			name: "record draining slot",
-			trigger: `CREATE TRIGGER fail_activation_checkpoint BEFORE UPDATE OF phase ON schedule_activations
-				WHEN NEW.phase = 'draining_slot'
-				BEGIN SELECT RAISE(FAIL, 'draining checkpoint failed'); END`,
+			name:      "record draining slot",
+			table:     "schedule_activations",
+			event:     "UPDATE OF phase",
+			condition: "NEW.phase = 'draining_slot'",
 		},
 		{
-			name: "record starting slot",
-			trigger: `CREATE TRIGGER fail_activation_checkpoint BEFORE UPDATE OF phase ON schedule_activations
-				WHEN NEW.phase = 'starting_slot'
-				BEGIN SELECT RAISE(FAIL, 'starting checkpoint failed'); END`,
+			name:      "record starting slot",
+			table:     "schedule_activations",
+			event:     "UPDATE OF phase",
+			condition: "NEW.phase = 'starting_slot'",
 		},
 		{
-			name: "persist canonical replacement",
-			trigger: `CREATE TRIGGER fail_activation_checkpoint BEFORE UPDATE ON replicas
-				WHEN NEW.idx = 0 AND NEW.status = 'running' AND NEW.activation_id IS NOT NULL
-				BEGIN SELECT RAISE(FAIL, 'persist canonical failed'); END`,
+			name:      "persist canonical replacement",
+			table:     "replicas",
+			event:     "UPDATE",
+			condition: "NEW.idx = 0 AND NEW.status = 'running' AND NEW.activation_id IS NOT NULL",
 		},
 		{
-			name: "record retiring surge",
-			trigger: `CREATE TRIGGER fail_activation_checkpoint BEFORE UPDATE OF phase ON schedule_activations
-				WHEN NEW.phase = 'retiring_surge'
-				BEGIN SELECT RAISE(FAIL, 'retiring checkpoint failed'); END`,
+			name:      "record retiring surge",
+			table:     "schedule_activations",
+			event:     "UPDATE OF phase",
+			condition: "NEW.phase = 'retiring_surge'",
 		},
 	}
 	for _, tc := range cases {
@@ -822,9 +823,10 @@ func TestScheduleActivationRoll_PostSurgeCheckpointFailuresStayInRepair(t *testi
 			srv.deployReplica = successfulActivationTestDeployer(t, srv, app, 20800)
 			a := seedClaimedActivation(t, srv.store, app)
 			a.Attempts = 99
-			if _, err := srv.store.DB().Exec(tc.trigger); err != nil {
-				t.Fatal(err)
-			}
+			installDBFailureTrigger(t, srv.store, dbFailureTrigger{
+				name: "fail_activation_checkpoint", table: tc.table,
+				event: tc.event, condition: tc.condition,
+			})
 
 			err := srv.Roll(context.Background(), a)
 			var repair *activation.RepairRequiredError
@@ -859,10 +861,9 @@ func TestScheduleActivationRoll_FailedFinalDeleteLeavesRetryableStopTombstone(t 
 	srv.deployReplica = successfulActivationTestDeployer(t, srv, app, 21500)
 	a := seedClaimedActivation(t, srv.store, app)
 	a.Attempts = 99
-	if _, err := srv.store.DB().Exec(`CREATE TRIGGER fail_surge_delete BEFORE DELETE ON replicas
-		WHEN OLD.idx = 1 BEGIN SELECT RAISE(FAIL, 'delete surge failed'); END`); err != nil {
-		t.Fatal(err)
-	}
+	dropFailure := installDBFailureTrigger(t, srv.store, dbFailureTrigger{
+		name: "fail_surge_delete", table: "replicas", event: "DELETE", condition: "OLD.idx = 1",
+	})
 	var repair *activation.RepairRequiredError
 	if err := srv.Roll(context.Background(), a); !errors.As(err, &repair) {
 		t.Fatalf("Roll error=%v, want repair after final delete failure", err)
@@ -876,9 +877,7 @@ func TestScheduleActivationRoll_FailedFinalDeleteLeavesRetryableStopTombstone(t 
 			t.Fatalf("failed final delete did not leave a safe stop tombstone: %+v", row)
 		}
 	}
-	if _, err := srv.store.DB().Exec(`DROP TRIGGER fail_surge_delete`); err != nil {
-		t.Fatal(err)
-	}
+	dropFailure()
 	if err := srv.Roll(context.Background(), a); err != nil {
 		t.Fatalf("repair retry could not finish stop tombstone cleanup: %v", err)
 	}
@@ -1048,17 +1047,15 @@ func TestScheduleActivationRoll_DockerContractRecoversSurgeSweepsOrphansAndCompl
 	}
 	srv.deployReplica = successfulActivationTestDeployer(t, srv, app, 21100)
 	a := seedClaimedActivation(t, srv.store, app)
-	if _, err := srv.store.DB().Exec(`CREATE TRIGGER interrupt_after_surge BEFORE UPDATE OF phase ON schedule_activations
-		WHEN NEW.phase = 'surge_ready' BEGIN SELECT RAISE(FAIL, 'simulated control-plane crash'); END`); err != nil {
-		t.Fatal(err)
-	}
+	dropFailure := installDBFailureTrigger(t, srv.store, dbFailureTrigger{
+		name: "interrupt_after_surge", table: "schedule_activations", event: "UPDATE OF phase",
+		condition: "NEW.phase = 'surge_ready'",
+	})
 	var repair *activation.RepairRequiredError
 	if err := srv.Roll(context.Background(), a); !errors.As(err, &repair) {
 		t.Fatalf("first Docker roll error=%v, want repairable post-surge interruption", err)
 	}
-	if _, err := srv.store.DB().Exec(`DROP TRIGGER interrupt_after_surge`); err != nil {
-		t.Fatal(err)
-	}
+	dropFailure()
 	if _, err := srv.store.RequeueRunningScheduleActivations(time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
