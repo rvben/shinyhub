@@ -190,7 +190,16 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 		} `json:"render_pacing"`
 		EffectiveMaxSessionsPerReplica *int     `json:"effective_max_sessions_per_replica"`
 		EffectiveAutoscaleTarget       *float64 `json:"effective_autoscale_target"`
-		ReplicasStatus                 []struct {
+		LatestScheduleActivations      []struct {
+			ScheduleName     string `json:"schedule_name"`
+			ScheduleRunID    *int64 `json:"schedule_run_id"`
+			Status           string `json:"status"`
+			Phase            string `json:"phase"`
+			TargetGeneration int64  `json:"target_generation"`
+			LastError        string `json:"last_error"`
+			DeferReason      string `json:"defer_reason"`
+		} `json:"latest_schedule_activations"`
+		ReplicasStatus []struct {
 			Index        int    `json:"index"`
 			Status       string `json:"status"`
 			PID          *int   `json:"pid"`
@@ -240,6 +249,29 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	fmt.Fprintf(w, "Status:      %s\n", stylerFor(w).status(a.Status))
 	if a.DesiredStatus != "" && a.DesiredStatus != a.Status {
 		fmt.Fprintf(w, "Desired:     %s\n", stylerFor(w).status(a.DesiredStatus))
+	}
+	if len(resp2.LatestScheduleActivations) > 0 {
+		fmt.Fprintln(w, "Activations:")
+		for _, activation := range resp2.LatestScheduleActivations {
+			detail := activation.Status
+			if activation.Phase != "" && activation.Phase != "pending" && activation.Phase != "complete" {
+				detail += " / " + activation.Phase
+			}
+			if activation.TargetGeneration > 0 {
+				detail += fmt.Sprintf(" · generation %d", activation.TargetGeneration)
+			}
+			if activation.ScheduleRunID != nil {
+				detail += fmt.Sprintf(" · run #%d", *activation.ScheduleRunID)
+			}
+			fmt.Fprintf(w, "  %s: %s\n", activation.ScheduleName, detail)
+			reason := activation.LastError
+			if reason == "" {
+				reason = activation.DeferReason
+			}
+			if reason != "" {
+				fmt.Fprintf(w, "    %s\n", reason)
+			}
+		}
 	}
 	fmt.Fprintf(w, "Access:      %s\n", a.Access)
 	fmt.Fprintf(w, "Owner:       user #%d\n", a.OwnerID)

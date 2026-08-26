@@ -3328,9 +3328,17 @@ func TestGetApp_CanManage_ViaGroupManager(t *testing.T) {
 	}
 	if env := get(gm.ID, "gm"); env["can_manage"] != true {
 		t.Fatalf("group-manager can_manage = %v, want true", env["can_manage"])
+	} else if caps, ok := env["schedule_capabilities"].(map[string]any); !ok ||
+		caps["can_read"] != true || caps["can_manage"] != true ||
+		caps["can_read_logs"] != true || caps["can_cancel"] != true {
+		t.Fatalf("group-manager schedule capabilities = %#v, want all true", env["schedule_capabilities"])
 	}
 	if env := get(gv.ID, "gv"); env["can_manage"] != false {
 		t.Fatalf("group-viewer can_manage = %v, want false", env["can_manage"])
+	} else if caps, ok := env["schedule_capabilities"].(map[string]any); !ok ||
+		caps["can_read"] != true || caps["can_manage"] != false ||
+		caps["can_read_logs"] != false || caps["can_cancel"] != false {
+		t.Fatalf("group-viewer schedule capabilities = %#v, want metadata-only access", env["schedule_capabilities"])
 	}
 }
 

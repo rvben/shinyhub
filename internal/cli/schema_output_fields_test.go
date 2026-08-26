@@ -57,6 +57,7 @@ func TestSchema_AppOutputFieldsBackedByStruct(t *testing.T) {
 		"worker_pool":                        true,
 		"render_pacing":                      true,
 		"rejects_by_reason":                  true,
+		"latest_schedule_activations":        true,
 	}
 
 	for _, cmd := range []string{"apps list", "apps show"} {

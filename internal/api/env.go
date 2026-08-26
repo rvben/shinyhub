@@ -266,6 +266,9 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	// us relaunch a stale bundle after it promoted a newer one.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	if err := s.guardActivationLifecycle(app.ID, "restart after environment change "+slug); err != nil {
+		return false, err
+	}
 
 	deployments, err := s.store.ListDeployments(app.ID)
 	if err != nil || len(deployments) == 0 {

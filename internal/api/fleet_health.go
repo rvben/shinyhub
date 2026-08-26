@@ -14,22 +14,33 @@ import (
 // GET /api/fleet/health. It answers "is my fleet healthy across all backends?"
 // in one call, and is generic enough to drive an external status page.
 type fleetHealthResponse struct {
-	Complete          bool                  `json:"complete"`
-	Unavailable       []string              `json:"unavailable_components"`
-	ServerVersion     string                `json:"server_version"`
-	Apps              fleetAppCounts        `json:"apps"`
-	Replicas          fleetReplicaCounts    `json:"replicas"`
-	Workers           *fleetWorkerCounts    `json:"workers,omitempty"`
-	Tiers             []fleetHealthTier     `json:"tiers"`
-	DegradedApps      []fleetHealthDegraded `json:"degraded_apps"`
-	StaleSchedules    int                   `json:"stale_schedules"`
-	StaleScheduleList []staleScheduleItem   `json:"stale_schedule_list"`
+	Complete                bool                     `json:"complete"`
+	Unavailable             []string                 `json:"unavailable_components"`
+	ServerVersion           string                   `json:"server_version"`
+	Apps                    fleetAppCounts           `json:"apps"`
+	Replicas                fleetReplicaCounts       `json:"replicas"`
+	Workers                 *fleetWorkerCounts       `json:"workers,omitempty"`
+	Tiers                   []fleetHealthTier        `json:"tiers"`
+	DegradedApps            []fleetHealthDegraded    `json:"degraded_apps"`
+	StaleSchedules          int                      `json:"stale_schedules"`
+	StaleScheduleList       []staleScheduleItem      `json:"stale_schedule_list"`
+	ActivationAttention     int                      `json:"activation_attention"`
+	ActivationAttentionList []activationScheduleItem `json:"activation_attention_list"`
 }
 
 type staleScheduleItem struct {
 	Slug       string `json:"slug"`
 	Schedule   string `json:"schedule"`
 	Refreshing bool   `json:"refreshing"`
+}
+
+type activationScheduleItem struct {
+	Slug       string `json:"slug"`
+	Schedule   string `json:"schedule"`
+	Status     string `json:"status"`
+	Phase      string `json:"phase,omitempty"`
+	AgeSeconds int64  `json:"age_seconds,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 type fleetAppCounts struct {
@@ -244,10 +255,28 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	// bound used for degraded apps, so the response stays bounded on a large
 	// unhealthy fleet. The count (StaleSchedules) is uncapped.
 	resp.StaleScheduleList = []staleScheduleItem{}
+	resp.ActivationAttentionList = []activationScheduleItem{}
 	if frs, ferr := s.store.ScheduleFreshness(); ferr == nil {
 		def := s.cfg.Scheduler.Location
 		now := time.Now()
 		for _, fr := range frs {
+			_, activationAttention := activationServingState(fr.ActivationStatus)
+			if activationAttention {
+				resp.ActivationAttention++
+				if len(resp.ActivationAttentionList) < maxDegradedApps {
+					item := activationScheduleItem{
+						Slug: fr.Slug, Schedule: fr.Name, Status: fr.ActivationStatus,
+						Phase: fr.ActivationPhase, Error: fr.ActivationError,
+					}
+					if fr.ActivationCreatedAt != nil {
+						item.AgeSeconds = int64(now.Sub(*fr.ActivationCreatedAt).Seconds())
+						if item.AgeSeconds < 0 {
+							item.AgeSeconds = 0
+						}
+					}
+					resp.ActivationAttentionList = append(resp.ActivationAttentionList, item)
+				}
+			}
 			stale, staleErr := scheduleStale(fr, def, now)
 			if staleErr != nil {
 				resp.Complete = false

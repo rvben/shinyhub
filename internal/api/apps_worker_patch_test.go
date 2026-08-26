@@ -85,6 +85,34 @@ func TestPatchApp_WorkerIsolationPerSessionSucceeds(t *testing.T) {
 	}
 }
 
+func TestPatchApp_RejectsTopologyThatInvalidatesRollSchedule(t *testing.T) {
+	srv, store := newWorkerPatchServer(t)
+	_, token := seedWorkerApp(t, store)
+	app, err := store.GetAppBySlug("wapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := patchWorkerApp(t, srv, token,
+		[]byte(`{"worker_isolation":"per_session","worker_max_workers":2}`))
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "refresh") {
+		t.Fatalf("expected 422 naming invalidated schedule, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, err = store.GetAppBySlug("wapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.WorkerIsolation == "per_session" {
+		t.Fatal("invalid topology was persisted")
+	}
+}
+
 func TestPatchApp_WorkerWarmSparesCannotExceedMaxWorkers(t *testing.T) {
 	srv, store := newWorkerPatchServer(t)
 	_, token := seedWorkerApp(t, store)

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -19,15 +20,17 @@ import (
 )
 
 type scheduleDTO struct {
-	ID             int64    `json:"id"`
-	AppID          int64    `json:"app_id"`
-	Name           string   `json:"name"`
-	CronExpr       string   `json:"cron_expr"`
-	Command        []string `json:"command"`
-	Enabled        bool     `json:"enabled"`
-	TimeoutSeconds int      `json:"timeout_seconds"`
-	OverlapPolicy  string   `json:"overlap_policy"`
-	MissedPolicy   string   `json:"missed_policy"`
+	ID                     int64    `json:"id"`
+	AppID                  int64    `json:"app_id"`
+	Name                   string   `json:"name"`
+	CronExpr               string   `json:"cron_expr"`
+	Command                []string `json:"command"`
+	Enabled                bool     `json:"enabled"`
+	TimeoutSeconds         int      `json:"timeout_seconds"`
+	OverlapPolicy          string   `json:"overlap_policy"`
+	MissedPolicy           string   `json:"missed_policy"`
+	OnSuccess              string   `json:"on_success"`
+	MinRollIntervalSeconds int      `json:"min_roll_interval_seconds"`
 	// Timezone is the raw stored value; null/nil means "inherit server default".
 	Timezone *string `json:"timezone"`
 	// EffectiveTimezone is the resolved IANA zone name that will actually be
@@ -53,15 +56,16 @@ type scheduleDTO struct {
 	// "never run", a claim those responses cannot make about an existing
 	// schedule. Stale is present on every list row, including never-run
 	// schedules, which can themselves be overdue.
-	LastRunID       *int64  `json:"last_run_id,omitempty"`
-	LastRunAt       *string `json:"last_run_at,omitempty"`
-	LastRunStatus   *string `json:"last_run_status,omitempty"`
-	LastSuccessAt   *string `json:"last_success_at,omitempty"`
-	LastSuccessAgeS *int64  `json:"last_success_age_s,omitempty"`
-	Stale           **bool  `json:"stale,omitempty"`
-	Refreshing      *bool   `json:"refreshing,omitempty"`
-	ActiveRunID     **int64 `json:"active_run_id,omitempty"`
-	FreshnessError  *string `json:"freshness_error,omitempty"`
+	LastRunID        *int64                 `json:"last_run_id,omitempty"`
+	LastRunAt        *string                `json:"last_run_at,omitempty"`
+	LastRunStatus    *string                `json:"last_run_status,omitempty"`
+	LastSuccessAt    *string                `json:"last_success_at,omitempty"`
+	LastSuccessAgeS  *int64                 `json:"last_success_age_s,omitempty"`
+	Stale            **bool                 `json:"stale,omitempty"`
+	Refreshing       *bool                  `json:"refreshing,omitempty"`
+	ActiveRunID      **int64                `json:"active_run_id,omitempty"`
+	FreshnessError   *string                `json:"freshness_error,omitempty"`
+	LatestActivation *db.ScheduleActivation `json:"latest_activation,omitempty"`
 }
 
 // applyFreshness fills the freshness half of the DTO from a freshness row.
@@ -109,6 +113,7 @@ func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Loca
 		ID: sc.ID, AppID: sc.AppID, Name: sc.Name, CronExpr: sc.CronExpr,
 		Command: cmd, Enabled: sc.Enabled, TimeoutSeconds: sc.TimeoutSeconds,
 		OverlapPolicy: sc.OverlapPolicy, MissedPolicy: sc.MissedPolicy,
+		OnSuccess: sc.OnSuccess, MinRollIntervalSeconds: sc.MinRollIntervalSeconds,
 		Timezone:          sc.Timezone,
 		EffectiveTimezone: loc.String(),
 		TimezoneInherited: inherited,
@@ -145,6 +150,19 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 	for _, fr := range fresh {
 		byID[fr.ScheduleID] = fr
 	}
+	activations, err := s.store.LatestScheduleActivationsByApp(app.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	latestActivation := make(map[int64]*db.ScheduleActivation)
+	for _, activation := range activations {
+		if activation.ScheduleID != nil {
+			if _, exists := latestActivation[*activation.ScheduleID]; !exists {
+				latestActivation[*activation.ScheduleID] = activation
+			}
+		}
+	}
 	def := s.cfg.Scheduler.Location
 	now := time.Now()
 	out := make([]scheduleDTO, 0, len(rows))
@@ -159,6 +177,7 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 		if fr, ok := byID[sc.ID]; ok {
 			dto.applyFreshness(fr, def, now)
 		}
+		dto.LatestActivation = latestActivation[sc.ID]
 		out = append(out, dto)
 	}
 	limit, offset := parsePagination(r)
@@ -172,15 +191,17 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name           string   `json:"name"`
-		CronExpr       string   `json:"cron_expr"`
-		Command        []string `json:"command"`
-		Enabled        *bool    `json:"enabled"`
-		TimeoutSeconds int      `json:"timeout_seconds"`
-		OverlapPolicy  string   `json:"overlap_policy"`
-		MissedPolicy   string   `json:"missed_policy"`
-		Timezone       *string  `json:"timezone"`
-		RunOnRegister  bool     `json:"run_on_register"`
+		Name                   string   `json:"name"`
+		CronExpr               string   `json:"cron_expr"`
+		Command                []string `json:"command"`
+		Enabled                *bool    `json:"enabled"`
+		TimeoutSeconds         int      `json:"timeout_seconds"`
+		OverlapPolicy          string   `json:"overlap_policy"`
+		MissedPolicy           string   `json:"missed_policy"`
+		Timezone               *string  `json:"timezone"`
+		RunOnRegister          bool     `json:"run_on_register"`
+		OnSuccess              string   `json:"on_success"`
+		MinRollIntervalSeconds int      `json:"min_roll_interval_seconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
@@ -192,6 +213,15 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := schedulespec.Validate(req.Name, req.CronExpr, tzStr, req.Command, req.TimeoutSeconds, req.OverlapPolicy, req.MissedPolicy); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	onSuccess, err := schedulespec.ValidateActivationSeconds(req.OnSuccess, int64(req.MinRollIntervalSeconds))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.validateScheduleActivationForApp(app, onSuccess); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	// Normalise empty string to nil (inherit server default).
@@ -209,6 +239,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		CommandJSON: string(cmdJSON), Enabled: enabled,
 		TimeoutSeconds: req.TimeoutSeconds, OverlapPolicy: req.OverlapPolicy,
 		MissedPolicy: req.MissedPolicy, Timezone: storedTZ,
+		OnSuccess: onSuccess, MinRollIntervalSeconds: req.MinRollIntervalSeconds,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrScheduleNameExists) {
@@ -228,6 +259,8 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 				existing.TimeoutSeconds == req.TimeoutSeconds &&
 				existing.OverlapPolicy == req.OverlapPolicy &&
 				existing.MissedPolicy == req.MissedPolicy &&
+				existing.OnSuccess == onSuccess &&
+				existing.MinRollIntervalSeconds == req.MinRollIntervalSeconds &&
 				tzMatch {
 				// Identical config: idempotent no-op.
 				dto := toScheduleDTO(existing, nil, s.cfg.Scheduler.Location)
@@ -244,7 +277,10 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "scheduler reload: "+err.Error())
 		return
 	}
-	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(`{"app":%q,"name":%q,"effective_timezone":%q}`, app.Slug, req.Name, effectiveTZLabel(storedTZ, s.cfg.Scheduler.Location)))
+	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
+		`{"app":%q,"name":%q,"effective_timezone":%q,"on_success":%q,"min_roll_interval_seconds":%d}`,
+		app.Slug, req.Name, effectiveTZLabel(storedTZ, s.cfg.Scheduler.Location), onSuccess, req.MinRollIntervalSeconds,
+	))
 
 	firstFireRunID := s.maybeFirstFire(id, req.RunOnRegister, !enabled, app.Slug, req.Name)
 	sc, _ := s.store.GetSchedule(id)
@@ -292,13 +328,15 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name           *string   `json:"name,omitempty"`
-		CronExpr       *string   `json:"cron_expr,omitempty"`
-		Command        *[]string `json:"command,omitempty"`
-		Enabled        *bool     `json:"enabled,omitempty"`
-		TimeoutSeconds *int      `json:"timeout_seconds,omitempty"`
-		OverlapPolicy  *string   `json:"overlap_policy,omitempty"`
-		MissedPolicy   *string   `json:"missed_policy,omitempty"`
+		Name                   *string   `json:"name,omitempty"`
+		CronExpr               *string   `json:"cron_expr,omitempty"`
+		Command                *[]string `json:"command,omitempty"`
+		Enabled                *bool     `json:"enabled,omitempty"`
+		TimeoutSeconds         *int      `json:"timeout_seconds,omitempty"`
+		OverlapPolicy          *string   `json:"overlap_policy,omitempty"`
+		MissedPolicy           *string   `json:"missed_policy,omitempty"`
+		OnSuccess              *string   `json:"on_success,omitempty"`
+		MinRollIntervalSeconds *int      `json:"min_roll_interval_seconds,omitempty"`
 	}
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
@@ -350,6 +388,24 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	if req.MissedPolicy != nil {
 		missed = *req.MissedPolicy
 	}
+	onSuccess := sc.OnSuccess
+	if req.OnSuccess != nil {
+		onSuccess = *req.OnSuccess
+	}
+	minRollInterval := sc.MinRollIntervalSeconds
+	if req.MinRollIntervalSeconds != nil {
+		minRollInterval = *req.MinRollIntervalSeconds
+	} else if req.OnSuccess != nil {
+		requested := strings.TrimSpace(*req.OnSuccess)
+		if requested == "" || requested == "none" {
+			// Disabling rollout also disables its damper. Requiring every PATCH
+			// client to discover and explicitly clear a stored dependent field
+			// makes a valid state transition needlessly fail.
+			minRollInterval = 0
+			zero := 0
+			req.MinRollIntervalSeconds = &zero
+		}
+	}
 	// Compose timezone for validation: use the incoming value when the key was
 	// present (empty string = clear = validate as ""); fall back to the existing
 	// stored value when the key was absent (unchanged semantics).
@@ -365,6 +421,18 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	normalizedAction, err := schedulespec.ValidateActivationSeconds(onSuccess, int64(minRollInterval))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.validateScheduleActivationForApp(app, normalizedAction); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if req.OnSuccess != nil {
+		*req.OnSuccess = normalizedAction
+	}
 
 	var cmdJSONPtr *string
 	if req.Command != nil {
@@ -377,6 +445,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		Name: req.Name, CronExpr: req.CronExpr, CommandJSON: cmdJSONPtr,
 		Enabled: req.Enabled, TimeoutSeconds: req.TimeoutSeconds,
 		OverlapPolicy: req.OverlapPolicy, MissedPolicy: req.MissedPolicy,
+		OnSuccess: req.OnSuccess, MinRollIntervalSeconds: req.MinRollIntervalSeconds,
 	}
 	if tzPresent {
 		// Key was in the body: update the column regardless of value.
@@ -393,9 +462,63 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "scheduler reload: "+err.Error())
 		return
 	}
-	s.audit(r, "schedule_update", "schedule", fmt.Sprintf("%d", id), "")
-	fresh, _ := s.store.GetSchedule(id)
+	fresh, err := s.store.GetSchedule(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "reload updated schedule: "+err.Error())
+		return
+	}
+	s.audit(r, "schedule_update", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
+		`{"app":%q,"name":%q,"activation_policy":{"before":{"on_success":%q,"min_roll_interval_seconds":%d},"after":{"on_success":%q,"min_roll_interval_seconds":%d}}}`,
+		app.Slug, sc.Name, sc.OnSuccess, sc.MinRollIntervalSeconds, fresh.OnSuccess, fresh.MinRollIntervalSeconds,
+	))
 	writeJSON(w, http.StatusOK, toScheduleDTO(fresh, nil, s.cfg.Scheduler.Location))
+}
+
+// validateScheduleActivationForApp fails closed for topologies the first
+// rollout engine cannot recover safely. This validation belongs at every write
+// boundary (REST and manifest), so unsupported intent is never persisted and
+// then silently ignored.
+func (s *Server) validateScheduleActivationForApp(app *db.App, action string) error {
+	if action != "roll" {
+		return nil
+	}
+	if s.clustered {
+		return errors.New("on_success=roll is currently supported only on a single control-plane instance")
+	}
+	isolation := app.WorkerIsolation
+	if isolation == "" {
+		isolation = s.cfg.Runtime.DefaultWorkerIsolation
+	}
+	if isolation == "" {
+		isolation = "multiplex"
+	}
+	if isolation != "multiplex" {
+		return fmt.Errorf("on_success=roll requires multiplex worker isolation; app uses %s", isolation)
+	}
+	placement := app.PlacementMap()
+	if len(placement) == 0 {
+		placement = map[string]int{s.cfg.Runtime.DefaultTierName(): app.Replicas}
+	}
+	for tier := range placement {
+		runtimeName, ok := s.cfg.Runtime.RuntimeForTier(tier)
+		if !ok && tier == s.cfg.Runtime.DefaultTierName() && len(s.cfg.Runtime.Tiers) == 0 {
+			runtimeName = s.cfg.Runtime.Mode
+			if runtimeName == "" {
+				runtimeName = "native"
+			}
+			ok = true
+		}
+		if !ok {
+			return fmt.Errorf("on_success=roll cannot resolve runtime tier %q", tier)
+		}
+		if runtimeName != "native" && runtimeName != "docker" {
+			return fmt.Errorf("on_success=roll supports only local native or Docker tiers; tier %q uses %s", tier, runtimeName)
+		}
+		if s.nodeForTier != nil && s.nodeForTier(tier) != "" {
+			return fmt.Errorf("on_success=roll does not yet support remote worker tier %q", tier)
+		}
+	}
+	return nil
 }
 
 // DELETE /api/apps/{slug}/schedules/{id}
@@ -414,8 +537,13 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if err := s.store.DeleteSchedule(id); err != nil {
+	deleted, err := s.store.DeleteScheduleIfIdle(id)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !deleted {
+		writeError(w, http.StatusConflict, "cannot delete a schedule while a run or data activation is active")
 		return
 	}
 	if s.scheduler != nil {

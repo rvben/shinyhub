@@ -108,6 +108,37 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 	return nil
 }
 
+// validateManifestActivationTopology evaluates post-success actions against the
+// projected post-manifest app, before the live pool is touched. This covers
+// both newly declared roll schedules and existing roll schedules that a worker
+// isolation change would otherwise strand after deployment.
+func (s *Server) validateManifestActivationTopology(app *db.App, manifest *deploy.Manifest) *validationError {
+	if manifest == nil {
+		return nil
+	}
+	projected := *app
+	if manifest.App.Worker != nil && manifest.App.Worker.Isolation != nil {
+		projected.WorkerIsolation = *manifest.App.Worker.Isolation
+	}
+	for _, spec := range manifest.Schedules {
+		if err := s.validateScheduleActivationForApp(&projected, spec.OnSuccess); err != nil {
+			return newValidationError("schedule %q: %v", spec.Name, err)
+		}
+	}
+	if manifest.App.Worker != nil && manifest.App.Worker.Isolation != nil {
+		existing, err := s.store.ListSchedulesByApp(app.ID)
+		if err != nil {
+			return newValidationError("validate existing schedules: %v", err)
+		}
+		for _, schedule := range existing {
+			if err := s.validateScheduleActivationForApp(&projected, schedule.OnSuccess); err != nil {
+				return newValidationError("existing schedule %q: %v", schedule.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
 // applyManifestAppSettings (Phase A) writes [app] settings to the DB in a
 // single transaction. Replica shrink (delete obsolete replica rows) is
 // part of that transaction.
@@ -280,6 +311,9 @@ type FirstFireRef struct {
 func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []deploy.ScheduleSpec) ([]ManifestScheduleResult, error) {
 	results := make([]ManifestScheduleResult, 0, len(specs))
 	for _, spec := range specs {
+		if err := s.validateScheduleActivationForApp(app, spec.OnSuccess); err != nil {
+			return results, fmt.Errorf("schedule %q: %w", spec.Name, err)
+		}
 		cmdJSON, err := json.Marshal(spec.Command)
 		if err != nil {
 			return results, fmt.Errorf("schedule %q: marshal command: %w", spec.Name, err)
@@ -294,15 +328,17 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 			tzPtr = &spec.Timezone
 		}
 		id, created, err := s.store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
-			AppID:          app.ID,
-			Name:           spec.Name,
-			CronExpr:       spec.Cron,
-			CommandJSON:    string(cmdJSON),
-			Enabled:        !spec.Disabled,
-			TimeoutSeconds: timeout,
-			OverlapPolicy:  spec.Overlap,
-			MissedPolicy:   spec.Missed,
-			Timezone:       tzPtr,
+			AppID:                  app.ID,
+			Name:                   spec.Name,
+			CronExpr:               spec.Cron,
+			CommandJSON:            string(cmdJSON),
+			Enabled:                !spec.Disabled,
+			TimeoutSeconds:         timeout,
+			OverlapPolicy:          spec.Overlap,
+			MissedPolicy:           spec.Missed,
+			Timezone:               tzPtr,
+			OnSuccess:              spec.OnSuccess,
+			MinRollIntervalSeconds: int(spec.MinRollInterval / time.Second),
 		})
 		if err != nil {
 			return results, fmt.Errorf("schedule %q: %w", spec.Name, err)

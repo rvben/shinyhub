@@ -95,6 +95,166 @@ func TestSchedules_CreateAndList_HappyPath(t *testing.T) {
 	}
 }
 
+func TestSchedules_ActivationContractPersistsAndFailsClosed(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner-activation", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	owner, _ := store.GetUserByUsername("owner-activation")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "activation-app", Name: "Activation", OwnerID: owner.ID}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+
+	body, _ := json.Marshal(map[string]any{
+		"name": "refresh", "cron_expr": "*/15 * * * *", "command": []string{"python", "fetch.py"},
+		"enabled": true, "timeout_seconds": 300, "overlap_policy": "skip", "missed_policy": "skip",
+		"on_success": "roll", "min_roll_interval_seconds": 3600,
+	})
+	req := authedRequest(t, "POST", "/api/apps/activation-app/schedules", body, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("roll create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	if created["on_success"] != "roll" || created["min_roll_interval_seconds"] != float64(3600) {
+		t.Fatalf("activation fields = %#v", created)
+	}
+
+	// Explicitly disabling rollout clears an inherited/stored damper when the
+	// client omits that field. PATCH remains ergonomic for every API client,
+	// while an explicitly contradictory non-zero damper is still rejected.
+	scheduleID := int(created["id"].(float64))
+	disableBody, _ := json.Marshal(map[string]any{"on_success": "none"})
+	req = authedRequest(t, "PATCH", fmt.Sprintf("/api/apps/activation-app/schedules/%d", scheduleID), disableBody, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable roll status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var disabled map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &disabled)
+	if disabled["on_success"] != "none" || disabled["min_roll_interval_seconds"] != float64(0) {
+		t.Fatalf("disabled activation fields=%#v", disabled)
+	}
+
+	// Signal is intentionally not accepted by v1; silently persisting an action
+	// no runtime can execute would recreate the original freshness bug.
+	bad := map[string]any{}
+	_ = json.Unmarshal(body, &bad)
+	bad["name"] = "unsupported-signal"
+	bad["on_success"] = "signal"
+	badBody, _ := json.Marshal(bad)
+	req = authedRequest(t, "POST", "/api/apps/activation-app/schedules", badBody, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "none|roll") {
+		t.Fatalf("signal status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Validate the seconds value before converting it to time.Duration. This
+	// particular positive integer used to wrap to roughly 290ms and silently
+	// disable the intended multi-century damper.
+	overflow := map[string]any{}
+	_ = json.Unmarshal(body, &overflow)
+	overflow["name"] = "overflow-damper"
+	overflow["min_roll_interval_seconds"] = int64(18_446_744_074)
+	overflowBody, _ := json.Marshal(overflow)
+	req = authedRequest(t, "POST", "/api/apps/activation-app/schedules", overflowBody, token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "at most") {
+		t.Fatalf("overflow damper status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	clustered, clusteredStore, _ := newManagerTestServer(t)
+	clustered.SetCluster("instance-a")
+	if err := clusteredStore.CreateUser(db.CreateUserParams{Username: "cluster-owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatalf("create clustered user: %v", err)
+	}
+	clusterOwner, _ := clusteredStore.GetUserByUsername("cluster-owner")
+	_, _ = clusteredStore.CreateApp(db.CreateAppParams{Slug: "cluster-app", Name: "Cluster", OwnerID: clusterOwner.ID})
+	clusterToken, _ := auth.IssueJWT(clusterOwner.ID, clusterOwner.Username, clusterOwner.Role, "test-secret")
+	req = authedRequest(t, "POST", "/api/apps/cluster-app/schedules", body, clusterToken)
+	rec = httptest.NewRecorder()
+	clustered.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "single control-plane") {
+		t.Fatalf("clustered roll status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSchedules_DeleteBlocksNonterminalActivationThenAllowsTerminalHistory(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "activation-delete-owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("activation-delete-owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "activation-delete", Name: "Activation delete", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("activation-delete")
+	token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: now, OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit := 0
+	created, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: &exit, FinishedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	show := httptest.NewRecorder()
+	srv.Router().ServeHTTP(show, authedRequest(t, http.MethodGet, "/api/apps/activation-delete", nil, token))
+	if show.Code != http.StatusOK {
+		t.Fatalf("show app status=%d body=%s", show.Code, show.Body.String())
+	}
+	var showEnvelope struct {
+		Activations []db.ScheduleActivation `json:"latest_schedule_activations"`
+	}
+	if err := json.NewDecoder(show.Body).Decode(&showEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(showEnvelope.Activations) != 1 || showEnvelope.Activations[0].ID != created.ID ||
+		showEnvelope.Activations[0].ScheduleRunID == nil || *showEnvelope.Activations[0].ScheduleRunID != runID {
+		t.Fatalf("apps show activation attribution=%+v", showEnvelope.Activations)
+	}
+
+	path := fmt.Sprintf("/api/apps/activation-delete/schedules/%d", scheduleID)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodDelete, path, nil, token))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "data activation") {
+		t.Fatalf("delete during activation status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	claimed, err := store.ClaimNextScheduleActivation(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishScheduleActivation(claimed.ID, "not_needed", "", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodDelete, path, nil, token))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete after terminal activation status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestSchedules_Create_SurfacesDSTAdvisory verifies the create response carries
 // a dst_advisory when a fixed-hour schedule will fire twice on a DST fall-back
 // day, and omits it for a UTC schedule that never overlaps a transition.

@@ -378,6 +378,14 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	// management endpoints enforce authorization regardless.
 	canManage := s.effectiveCanManageApp(u, app)
 	app.CanManage = canManage
+	latestActivations, err := s.store.LatestScheduleActivationsByApp(app.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if latestActivations == nil {
+		latestActivations = []*db.ScheduleActivation{}
+	}
 
 	envelope := map[string]any{
 		"app":                                 app,
@@ -388,6 +396,17 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		"effective_hibernate_timeout_minutes": app.EffectiveHibernateTimeoutMinutes,
 		"redeploy_in_flight":                  s.isRedeployInFlight(slug),
 		"can_manage":                          canManage,
+		"latest_schedule_activations":         latestActivations,
+		// Schedule capabilities are computed server-side because app-manager
+		// membership can come from direct or group grants the browser cannot
+		// reconstruct. Run metadata is safe for readers; command logs can contain
+		// secret-derived output and remain manager-only.
+		"schedule_capabilities": map[string]bool{
+			"can_read":      true,
+			"can_manage":    canManage,
+			"can_read_logs": canManage,
+			"can_cancel":    canManage,
+		},
 	}
 	if fleetState, err := s.appFleetState(app); err == nil && fleetState != nil {
 		envelope["fleet_state"] = fleetState
@@ -1000,6 +1019,37 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An app topology change must not strand an already-valid roll schedule in
+	// an unsupported state. Validate the projected app before any setting is
+	// written, using the same gate as schedule create/update and manifest apply.
+	if setWorkerIsolation || setPlacement || clearPlacement {
+		projected := *app
+		if setWorkerIsolation {
+			projected.WorkerIsolation = newWorkerIsolation
+		}
+		if setPlacement {
+			projected.ReplicaPlacement = placementJSON
+			projected.Replicas = placementTotal
+		} else if clearPlacement {
+			projected.ReplicaPlacement = ""
+		}
+		schedules, err := s.store.ListSchedulesByApp(app.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		for _, schedule := range schedules {
+			if schedule.OnSuccess != "roll" {
+				continue
+			}
+			if err := s.validateScheduleActivationForApp(&projected, schedule.OnSuccess); err != nil {
+				writeError(w, http.StatusUnprocessableEntity,
+					fmt.Sprintf("app topology would invalidate schedule %q: %v", schedule.Name, err))
+				return
+			}
+		}
+	}
+
 	// In native mode, memory_limit_mb and cpu_quota_percent are enforced via a
 	// per-app cgroup v2 (memory.max / cpu.max). Enforcement requires the relevant
 	// controller to be delegated (systemd Delegate=memory / Delegate=cpu); the
@@ -1026,8 +1076,27 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Serialize the settings commit with rollout and fence lifecycle-affecting
+	// changes across the gaps between repair attempts. Cosmetic/access metadata
+	// remains editable while repair is pending.
+	releaseSettings := s.acquireDeployLock(slug)
+	defer releaseSettings()
+	app, err = s.store.GetAppBySlug(slug)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
 	if checkAppPreconditions(w, r, app) {
 		return
+	}
+	lifecycleMutation := setReplicas || setPlacement || clearPlacement || setMemoryLimitMB || setCPUQuotaPercent ||
+		setMinWarmReplicas || setAutoscale || setWorkerIsolation || setWorkerGroupedSize ||
+		setWorkerMaxWorkers || setWorkerWarmSpares || setWorkerMaxSessionLifetime
+	if lifecycleMutation {
+		if err := s.guardActivationLifecycle(app.ID, "update app "+slug); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 	}
 
 	// Capture old worker values before the update so the audit record can include
@@ -1601,6 +1670,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// the same slug can't tear down the pool we are about to bring up.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	if err := s.guardActivationLifecycle(app.ID, "deploy "+slug); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	// Registered AFTER the lock defer so LIFO order removes uncommitted
 	// files before the lock is released. The broad defer above only covers
@@ -1658,6 +1731,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if manifest != nil {
 		if ve := s.validateManifestForServer(app, manifest.App); ve != nil {
+			writeError(w, http.StatusBadRequest, ve.Error())
+			return
+		}
+		if ve := s.validateManifestActivationTopology(app, manifest); ve != nil {
 			writeError(w, http.StatusBadRequest, ve.Error())
 			return
 		}
@@ -2194,6 +2271,10 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	// Serialize against concurrent deploy/restart/stop on the same slug.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	if err := s.guardActivationLifecycle(app.ID, "rollback "+slug); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	// Validate that the target bundle still exists on disk BEFORE we tear
 	// down the running app. If the directory was pruned out from under us
@@ -2379,6 +2460,10 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	// boot the stale bundle while the DB records the new one as succeeded.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	if err := s.guardActivationLifecycle(app.ID, "restart "+slug); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	deployments, err := s.store.ListDeployments(app.ID)
 	if err != nil {
@@ -2511,6 +2596,10 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	// race the process manager into an inconsistent state mid-teardown.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	if err := s.guardActivationLifecycle(app.ID, "delete "+slug); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	// app was loaded by requireManageApp before acquireDeployLock. Checking the
 	// precondition here (under the deploy lock) serializes it against in-flight
@@ -2595,6 +2684,10 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	// Serialize with any in-flight deploy/restart on this slug.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	if err := s.guardActivationLifecycle(app.ID, "stop "+slug); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	// Stop the process if managed; ignore error if already stopped.
 	if s.manager != nil {
@@ -2655,7 +2748,8 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 // until an operator starts the app again.
 func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, ok := s.requireManageApp(w, r, slug); !ok {
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
 		return
 	}
 	if s.sleepNow == nil {
@@ -2666,6 +2760,10 @@ func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
 	// Serialize with any in-flight deploy/restart/stop on this slug.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	if err := s.guardActivationLifecycle(app.ID, "sleep "+slug); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	if err := s.sleepNow(slug); err != nil {
 		switch {

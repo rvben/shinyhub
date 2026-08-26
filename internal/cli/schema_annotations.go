@@ -287,6 +287,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "autoscale_status", Type: "object"},
 		{Name: "global_autoscale_enabled", Type: "boolean"},
 		{Name: "runtime_mode", Type: "string", Desc: "native | docker"},
+		{Name: "latest_schedule_activations", Type: "array", Desc: "Latest durable serving-data activation per schedule snapshot, including deleted schedules"},
 		{Name: "resource_enforcement", Type: "object", Desc: "{memory,cpu} booleans: whether each per-app limit is actually enforced (native is best-effort, gated on cgroup delegation)"},
 		{Name: "worker_isolation", Type: "string", Desc: "Session isolation mode as stored: multiplex | grouped | per_session, or empty when the app inherits the fleet default"},
 		{Name: "effective_worker_isolation", Type: "string", Desc: "worker_isolation resolved against the fleet default, so never empty; read this to decide what the app's pool supports"},

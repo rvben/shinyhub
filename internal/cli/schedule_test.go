@@ -579,6 +579,24 @@ func TestSchedule_Update_SendsOnlyChangedFields(t *testing.T) {
 	}
 }
 
+func TestSchedule_Update_DisablingRollAlsoClearsStoredDamper(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job","cron_expr":"0 * * * *","command":["python","x.py"],"on_success":"roll","min_roll_interval_seconds":3600}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--on-success", "none"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[1].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["on_success"] != "none" || body["min_roll_interval_seconds"] != float64(0) {
+		t.Fatalf("disable payload=%v, want on_success=none and zero damper", body)
+	}
+}
+
 // SCH-1 timezone tri-state: --clear-timezone must send an explicit JSON null so
 // the server clears the per-schedule zone back to inherit-server-default.
 func TestSchedule_Update_ClearTimezoneSendsNull(t *testing.T) {

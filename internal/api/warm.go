@@ -30,6 +30,9 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 	if err != nil {
 		return false, fmt.Errorf("warm shrink %s: get app: %w", slug, err)
 	}
+	if err := s.guardActivationLifecycle(app.ID, "warm shrink "+slug); err != nil {
+		return false, err
+	}
 	// Honour a concurrent stop/delete that won the lock first: a torn-down app
 	// must not have its replica rows mutated.
 	if app.Status != "running" && app.Status != "degraded" {
@@ -275,6 +278,9 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		return false, fmt.Errorf("warm expand %s: get app: %w", slug, err)
+	}
+	if err := s.guardActivationLifecycle(app.ID, "warm expand "+slug); err != nil {
+		return false, err
 	}
 	// Honour a concurrent stop/delete that won the lock first: do not resurrect
 	// a pool that the operator just tore down.

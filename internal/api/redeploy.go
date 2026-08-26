@@ -38,17 +38,36 @@ func (s *Server) deployLockFor(slug string) *sync.Mutex {
 func (s *Server) acquireDeployLock(slug string) (release func()) {
 	m := s.deployLockFor(slug)
 	m.Lock()
+	return s.markAppOperationHeld(slug, m)
+}
+
+// TryAcquireAppOperation atomically acquires the same per-app exclusion used by
+// deploy, scale, stop, warm maintenance, and schedule activation. Background
+// lifecycle work uses the non-blocking form so one slow app never stalls the
+// fleet watcher; a busy app is reconsidered on its next tick.
+func (s *Server) TryAcquireAppOperation(slug string) (release func(), ok bool) {
+	m := s.deployLockFor(slug)
+	if !m.TryLock() {
+		return nil, false
+	}
+	return s.markAppOperationHeld(slug, m), true
+}
+
+func (s *Server) markAppOperationHeld(slug string, m *sync.Mutex) func() {
 	s.deployLocksMu.Lock()
 	if s.deployInFlight == nil {
 		s.deployInFlight = make(map[string]struct{})
 	}
 	s.deployInFlight[slug] = struct{}{}
 	s.deployLocksMu.Unlock()
+	var once sync.Once
 	return func() {
-		s.deployLocksMu.Lock()
-		delete(s.deployInFlight, slug)
-		s.deployLocksMu.Unlock()
-		m.Unlock()
+		once.Do(func() {
+			s.deployLocksMu.Lock()
+			delete(s.deployInFlight, slug)
+			s.deployLocksMu.Unlock()
+			m.Unlock()
+		})
 	}
 }
 
@@ -291,6 +310,10 @@ func (s *Server) redeployApp(slug string) {
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		slog.Error("redeployApp: get app", "slug", slug, "err", err)
+		return
+	}
+	if err := s.guardActivationLifecycle(app.ID, "redeploy "+slug); err != nil {
+		slog.Info("redeployApp: deferred for scheduled data activation", "slug", slug, "err", err)
 		return
 	}
 

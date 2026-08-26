@@ -19,13 +19,14 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	var got struct {
 		ProtocolVersion int `json:"protocol_version"`
 		Capabilities    struct {
-			FleetPreconditions bool `json:"fleet_preconditions"`
-			ContentDigest      bool `json:"content_digest"`
-			CLIConnect         bool `json:"cli_connect"`
-			DeployEvents       bool `json:"deploy_events"`
-			FleetProvenance    bool `json:"fleet_provenance"`
-			FleetState         bool `json:"fleet_state"`
-			FleetRunLifecycle  bool `json:"fleet_run_lifecycle"`
+			FleetPreconditions        bool `json:"fleet_preconditions"`
+			ContentDigest             bool `json:"content_digest"`
+			CLIConnect                bool `json:"cli_connect"`
+			DeployEvents              bool `json:"deploy_events"`
+			FleetProvenance           bool `json:"fleet_provenance"`
+			FleetState                bool `json:"fleet_state"`
+			FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
+			ServiceAccountCredentials bool `json:"service_account_credentials"`
 		} `json:"capabilities"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
@@ -54,6 +55,9 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 	if !got.Capabilities.FleetRunLifecycle {
 		t.Errorf("fleet_run_lifecycle not advertised")
+	}
+	if !got.Capabilities.ServiceAccountCredentials {
+		t.Errorf("service_account_credentials not advertised")
 	}
 }
 

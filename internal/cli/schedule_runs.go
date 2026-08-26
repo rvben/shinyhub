@@ -44,8 +44,8 @@ func newScheduleRunsCmd() *cobra.Command {
 				fmt.Fprintln(w, "No runs yet.")
 				return
 			}
-			t := newTable("ID", "STATUS", "TRIGGER", "EXIT", "STARTED", "DURATION").
-				alignRight(0, 3, 5)
+			t := newTable("ID", "STATUS", "TRIGGER", "EXIT", "STARTED", "DURATION", "ACTIVATION", "GEN", "ACTIVATION ERROR").
+				alignRight(0, 3, 5, 7)
 			for _, r := range items {
 				finished, _ := r["finished_at"].(string)
 				// exit_code is null while running and stays null for an
@@ -58,9 +58,25 @@ func newScheduleRunsCmd() *cobra.Command {
 						exit = alertTxt(code)
 					}
 				}
+				activationStatus := fmt.Sprintf("%v", r["activation_status"])
+				if activationStatus == "<nil>" || activationStatus == "" {
+					activationStatus = "-"
+				} else if phase := fmt.Sprintf("%v", r["activation_phase"]); phase != "<nil>" && phase != "" && phase != "complete" {
+					activationStatus += "/" + phase
+				}
+				generation := "-"
+				if r["target_generation"] != nil {
+					generation = fmt.Sprintf("%v", r["target_generation"])
+				}
+				activationErr := fmt.Sprintf("%v", r["activation_error"])
+				activationErrCell := dimTxt("-")
+				if activationErr != "<nil>" && activationErr != "" {
+					activationErrCell = alertTxt(truncateVisible(activationErr, 64, "…"))
+				}
 				t.row(dimTxt(r["id"]), statusTxt(r["status"]), txt(r["trigger"]), exit,
 					dimTxt(fmtRunTime(r["started_at"])),
-					txt(fmtRunDuration(r["started_at"], r["finished_at"])))
+					txt(fmtRunDuration(r["started_at"], r["finished_at"])),
+					statusTxt(activationStatus), dimTxt(generation), activationErrCell)
 			}
 			t.render(w)
 		})

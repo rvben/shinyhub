@@ -47,6 +47,72 @@ type fleetHealthEnvelope struct {
 		Lost   int    `json:"lost"`
 		Reason string `json:"reason"`
 	} `json:"degraded_apps"`
+	ActivationAttention     int `json:"activation_attention"`
+	ActivationAttentionList []struct {
+		Slug     string `json:"slug"`
+		Schedule string `json:"schedule"`
+		Status   string `json:"status"`
+		Phase    string `json:"phase"`
+		Error    string `json:"error"`
+	} `json:"activation_attention_list"`
+}
+
+func TestFleetHealth_ReportsActivationRepairAttention(t *testing.T) {
+	srv, store := newFleetHealthServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	admin, _ := store.GetUserByUsername("admin")
+	tok, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+	store.CreateApp(db.CreateAppParams{Slug: "repairing-app", Name: "Repairing", OwnerID: admin.ID})
+	app, _ := store.GetAppBySlug("repairing-app")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(-time.Minute)
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: now, OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit := 0
+	if _, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: &exit, FinishedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimNextScheduleActivation(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateScheduleActivationProgress(claimed.ID, "draining_slot", 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeferScheduleActivation(claimed.ID, "repairing", "canonical stop unconfirmed", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodGet, "/api/fleet/health", nil, tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got fleetHealthEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ActivationAttention != 1 || len(got.ActivationAttentionList) != 1 {
+		t.Fatalf("activation attention=%d list=%+v, want one", got.ActivationAttention, got.ActivationAttentionList)
+	}
+	item := got.ActivationAttentionList[0]
+	if item.Slug != "repairing-app" || item.Schedule != "refresh" || item.Status != "repairing" ||
+		item.Phase != "draining_slot" || item.Error != "canonical stop unconfirmed" {
+		t.Fatalf("activation attention item=%+v", item)
+	}
 }
 
 func TestFleetHealth_InvalidScheduleMakesObservationIncomplete(t *testing.T) {

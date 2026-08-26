@@ -14,6 +14,7 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -133,17 +134,29 @@ func TestHandleGetApp_AdvertisesRedeployInFlight(t *testing.T) {
 
 // TestPatchApp_ResourceLimitChangeTriggersRedeploy proves a memory/cpu limit
 // change on a running app cycles the pool (so the new cgroup ceiling reaches the
-// running replicas), the same way a replica-count change does. The pre-held
-// deploy lock blocks the launched redeployApp goroutine so the synchronously-set
-// marker can be observed deterministically.
+// running replicas), the same way a replica-count change does. A blocking deploy
+// hook makes the asynchronous lifecycle visible without pre-holding the app lock:
+// PATCH now owns that lock while committing lifecycle settings, so doing so would
+// correctly block the request itself.
 func TestPatchApp_ResourceLimitChangeTriggersRedeploy(t *testing.T) {
 	const slug = "limited"
-	store, _ := newRedeployTestStore(t, slug, "running")
+	store, app := newRedeployTestStore(t, slug, "running")
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
 	s := New(&config.Config{Auth: config.AuthConfig{Secret: "test-secret"}}, store,
-		process.NewManager(t.TempDir(), process.NewNativeRuntime()), proxy.New())
-
-	release := s.acquireDeployLock(slug)
-	defer release()
+		nil, proxy.New())
+	entered := make(chan struct{})
+	unblock := make(chan struct{})
+	s.SetDeployRunForTest(func(deploy.Params) (*deploy.PoolResult, error) {
+		close(entered)
+		<-unblock
+		return &deploy.PoolResult{}, nil
+	})
 
 	patch := map[string]any{"cpu_quota_percent": 150}
 	body, _ := json.Marshal(patch)
@@ -156,10 +169,15 @@ func TestPatchApp_ResourceLimitChangeTriggersRedeploy(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("PATCH cpu_quota_percent: got %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resource-limit PATCH did not launch the pool redeploy")
+	}
 	if !s.isRedeployInFlight(slug) {
 		t.Fatal("a resource-limit change on a running app must mark redeploy_in_flight (cycle the pool)")
 	}
+	close(unblock)
 }
 
 func TestPatchApp_WarmSparesReconcileLiveWithoutRedeploy(t *testing.T) {

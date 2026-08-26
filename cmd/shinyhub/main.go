@@ -34,6 +34,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/access"
+	"github.com/rvben/shinyhub/internal/activation"
 	"github.com/rvben/shinyhub/internal/admission"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/appenv"
@@ -480,6 +481,11 @@ func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manag
 			}
 		}
 		if keepRuns > 0 {
+			if n, err := store.PruneScheduleActivations(keepRuns); err != nil {
+				slog.Warn("prune_schedule_activations_failed", "err", err)
+			} else if n > 0 {
+				slog.Info("pruned_schedule_activations", "removed", n, "keep_terminal_per_schedule", keepRuns)
+			}
 			ids, err := store.ListAllScheduleIDs()
 			if err != nil {
 				slog.Warn("prune_schedule_runs_list_failed", "err", err)
@@ -1401,10 +1407,18 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			}
 			out := make([]metrics.ScheduleSample, len(rows))
 			for i, fr := range rows {
-				s := metrics.ScheduleSample{Slug: fr.Slug, Name: fr.Name}
+				s := metrics.ScheduleSample{
+					Slug: fr.Slug, Name: fr.Name, ActivationStatus: fr.ActivationStatus,
+				}
 				if fr.LastSuccessAt != nil {
 					s.LastSuccessUnix = fr.LastSuccessAt.Unix()
 					s.OK = true
+				}
+				if fr.ActivationCreatedAt != nil {
+					s.ActivationCreatedUnix = fr.ActivationCreatedAt.Unix()
+				}
+				if fr.ActivationGeneration != nil {
+					s.ActivationGeneration = *fr.ActivationGeneration
 				}
 				out[i] = s
 			}
@@ -1666,6 +1680,8 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 	watcher := lifecycle.New(lcCfg, mgr, prx, store, deployFn)
 	watcher.SetResume(resumeFn)
+	watcher.SetOperationInFlight(srv.DeployInFlight)
+	watcher.SetTryAppOperation(srv.TryAcquireAppOperation)
 
 	// Wire pre-warming ops: when an app has min_warm_replicas > 0 the watcher
 	// calls WarmShrink instead of fully hibernating. The drain grace matches
@@ -1905,6 +1921,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	})
 	sched := scheduler.New(jobsMgr, store, cfg.Scheduler.Location)
 	srv.SetJobs(jobsMgr, sched)
+	activationCoordinator := activation.New(store, srv, 2*time.Second)
 
 	// Push scheduled-run outcomes into Prometheus when metrics are enabled.
 	if metricsReg != nil {
@@ -2027,10 +2044,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// apps. Elastic workers are ephemeral and must not be re-adopted; the
 		// pool starts empty and clients trigger fresh spawns on next request.
 		lifecycle.ReapElasticOrphans(store, mgr)
-		// Remove ShinyHub-managed containers no live replica re-adopted.
-		if sweeper, ok := rt.(lifecycle.ContainerSweeper); ok {
-			lifecycle.SweepOrphanContainers(mgr, sweeper)
-		}
+		// Remove ShinyHub-managed containers no live replica re-adopted across
+		// every configured local container tier. Shared Docker daemons are
+		// deduplicated by endpoint.
+		lifecycle.SweepOrphanContainersForTiers(mgr, cfg.Runtime.TierOrder())
 		// Sweep orphan Fargate tasks across ALL registered tiers.
 		sweepCtx, cancelSweep := context.WithTimeout(octx, 60*time.Second)
 		for _, tierName := range cfg.Runtime.TierOrder() {
@@ -2041,6 +2058,17 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 		cancelSweep()
 
+		// A crash may leave an activation marked running. Process/container
+		// recovery above has adopted or swept any surviving surge first; generation
+		// stamps then let the retried rollout skip canonical slots already replaced.
+		if !isClustered(cfg) {
+			if n, err := store.RequeueRunningScheduleActivations(time.Now().UTC()); err != nil {
+				slog.Error("requeue interrupted schedule activations", "err", err)
+			} else if n > 0 {
+				slog.Info("requeued interrupted schedule activations", "count", n)
+			}
+		}
+
 		var loops sync.WaitGroup
 		if monitor != nil {
 			loops.Add(1)
@@ -2049,6 +2077,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 		loops.Add(1)
 		go func() { defer loops.Done(); watcher.Start(octx) }()
+		if !isClustered(cfg) {
+			loops.Add(1)
+			go func() { defer loops.Done(); activationCoordinator.Start(octx) }()
+			slog.Info("schedule activation coordinator started", "concurrency", 1)
+		}
 		// Database housekeeping (audit + schedule-run retention) runs on the owner
 		// only, so HA standbys never prune concurrently. A no-op unless retention
 		// is configured.

@@ -994,6 +994,24 @@ func TestAppsShow(t *testing.T) {
 	}
 }
 
+func TestAppsShow_AttributesLatestScheduleActivation(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":1},"replicas_status":[],"latest_schedule_activations":[{"schedule_name":"refresh-pend-data","schedule_run_id":42,"status":"repairing","phase":"draining_slot","target_generation":7,"defer_reason":"canonical stop unconfirmed"}]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Activations:", "refresh-pend-data: repairing / draining_slot · generation 7 · run #42",
+		"canonical stop unconfirmed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("apps show missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // DEP-5: when an app's per-replica cap is 0 (inherit), `apps show` must
 // annotate it with the resolved runtime default and print the admission ceiling
 // (replicas × effective cap) instead of a bare, cryptic "0".

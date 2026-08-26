@@ -26,7 +26,7 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
 		AppID: app.ID, Name: "refresh-data", CronExpr: "0 6 * * *",
 		CommandJSON: `["echo","hi"]`, Enabled: true, TimeoutSeconds: 3600,
-		OverlapPolicy: "skip", MissedPolicy: "skip",
+		OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
 	})
 	if err != nil {
 		t.Fatalf("CreateSchedule: %v", err)
@@ -35,15 +35,24 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	old := time.Now().Add(-30 * time.Hour)
 	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
 		ScheduleID: schedID, Status: "running", Trigger: "schedule", StartedAt: old, LogPath: "x.log",
+		OnSuccess: "roll",
 	})
 	if err != nil {
 		t.Fatalf("InsertScheduleRun: %v", err)
 	}
 	exit := 0
-	if err := store.FinishScheduleRun(db.FinishScheduleRunParams{
+	activation, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
 		RunID: runID, Status: "succeeded", ExitCode: &exit, FinishedAt: old.Add(time.Minute),
-	}); err != nil {
-		t.Fatalf("FinishScheduleRun: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("CompleteScheduleRunAndEnqueueActivation: %v", err)
+	}
+	claimed, err := store.ClaimNextScheduleActivation(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeferScheduleActivation(claimed.ID, "deferred_capacity", "host memory", time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
 	}
 
 	req := authedRequest(t, "GET", "/api/fleet/schedules/status", nil, adminTok)
@@ -54,13 +63,17 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	}
 	var env struct {
 		Items []struct {
-			Slug            string `json:"slug"`
-			Schedule        string `json:"schedule"`
-			LastRunID       *int64 `json:"last_run_id"`
-			Stale           bool   `json:"stale"`
-			Refreshing      bool   `json:"refreshing"`
-			LastRunStatus   string `json:"last_run_status"`
-			LastSuccessAgeS *int64 `json:"last_success_age_s"`
+			Slug                 string `json:"slug"`
+			Schedule             string `json:"schedule"`
+			LastRunID            *int64 `json:"last_run_id"`
+			Stale                bool   `json:"stale"`
+			Refreshing           bool   `json:"refreshing"`
+			LastRunStatus        string `json:"last_run_status"`
+			LastSuccessAgeS      *int64 `json:"last_success_age_s"`
+			ActivationStatus     string `json:"activation_status"`
+			ActivationGeneration *int64 `json:"activation_target_generation"`
+			ActivationAttention  bool   `json:"activation_attention"`
+			ServingFreshness     string `json:"serving_freshness"`
 		} `json:"items"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
@@ -84,5 +97,11 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	}
 	if got[0].LastSuccessAgeS == nil || *got[0].LastSuccessAgeS < 100000 {
 		t.Fatalf("last_success_age_s = %v, want ~108000 (30h)", got[0].LastSuccessAgeS)
+	}
+	if got[0].ActivationStatus != "deferred_capacity" || !got[0].ActivationAttention || got[0].ServingFreshness != "pending" {
+		t.Fatalf("activation observability = %+v, want capacity-deferred pending attention", got[0])
+	}
+	if got[0].ActivationGeneration == nil || *got[0].ActivationGeneration != activation.TargetGeneration {
+		t.Fatalf("activation generation=%v, want %d", got[0].ActivationGeneration, activation.TargetGeneration)
 	}
 }

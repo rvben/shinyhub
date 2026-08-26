@@ -37,14 +37,15 @@ type serverInfoResponse struct {
 // rely on precondition headers and content-digest tracking, or must degrade
 // gracefully against an older server.
 type serverCapabilities struct {
-	FleetPreconditions bool `json:"fleet_preconditions"`
-	ContentDigest      bool `json:"content_digest"`
-	CLIConnect         bool `json:"cli_connect"`
-	DeployEvents       bool `json:"deploy_events"`
-	PlanApply          bool `json:"plan_apply"`
-	FleetProvenance    bool `json:"fleet_provenance"`
-	FleetState         bool `json:"fleet_state"`
-	FleetRunLifecycle  bool `json:"fleet_run_lifecycle"`
+	FleetPreconditions        bool `json:"fleet_preconditions"`
+	ContentDigest             bool `json:"content_digest"`
+	CLIConnect                bool `json:"cli_connect"`
+	DeployEvents              bool `json:"deploy_events"`
+	PlanApply                 bool `json:"plan_apply"`
+	FleetProvenance           bool `json:"fleet_provenance"`
+	FleetState                bool `json:"fleet_state"`
+	FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
+	ServiceAccountCredentials bool `json:"service_account_credentials"`
 }
 
 // handleServerInfo advertises server capability flags so a fleet-aware CLI
@@ -56,14 +57,15 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		Commit:          buildCommit(),
 		ProtocolVersion: protocol.CurrentVersion,
 		Capabilities: serverCapabilities{
-			FleetPreconditions: true,
-			ContentDigest:      true,
-			CLIConnect:         true,
-			DeployEvents:       true,
-			PlanApply:          true,
-			FleetProvenance:    true,
-			FleetState:         true,
-			FleetRunLifecycle:  true,
+			FleetPreconditions:        true,
+			ContentDigest:             true,
+			CLIConnect:                true,
+			DeployEvents:              true,
+			PlanApply:                 true,
+			FleetProvenance:           true,
+			FleetState:                true,
+			FleetRunLifecycle:         true,
+			ServiceAccountCredentials: true,
 		},
 		Runtimes: detectRuntimes(),
 	})

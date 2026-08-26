@@ -35,27 +35,29 @@ func newScheduleCmd() *cobra.Command {
 
 // scheduleDTO mirrors the server's JSON representation of a schedule.
 type scheduleDTO struct {
-	ID                int64    `json:"id"`
-	Name              string   `json:"name"`
-	CronExpr          string   `json:"cron_expr"`
-	Command           []string `json:"command"`
-	Enabled           bool     `json:"enabled"`
-	TimeoutSeconds    int      `json:"timeout_seconds"`
-	OverlapPolicy     string   `json:"overlap_policy"`
-	MissedPolicy      string   `json:"missed_policy"`
-	Timezone          *string  `json:"timezone"`
-	EffectiveTimezone string   `json:"effective_timezone"`
-	TimezoneInherited bool     `json:"timezone_inherited"`
-	DSTAdvisory       *string  `json:"dst_advisory"`
-	FirstFireRunID    *int64   `json:"first_fire_run_id"`
-	LastRunID         *int64   `json:"last_run_id"`
-	LastRunAt         *string  `json:"last_run_at"`
-	LastRunStatus     *string  `json:"last_run_status"`
-	LastSuccessAt     *string  `json:"last_success_at"`
-	Stale             *bool    `json:"stale"`
-	Refreshing        *bool    `json:"refreshing"`
-	ActiveRunID       *int64   `json:"active_run_id"`
-	FreshnessError    string   `json:"freshness_error"`
+	ID                     int64    `json:"id"`
+	Name                   string   `json:"name"`
+	CronExpr               string   `json:"cron_expr"`
+	Command                []string `json:"command"`
+	Enabled                bool     `json:"enabled"`
+	TimeoutSeconds         int      `json:"timeout_seconds"`
+	OverlapPolicy          string   `json:"overlap_policy"`
+	MissedPolicy           string   `json:"missed_policy"`
+	OnSuccess              string   `json:"on_success"`
+	MinRollIntervalSeconds int      `json:"min_roll_interval_seconds"`
+	Timezone               *string  `json:"timezone"`
+	EffectiveTimezone      string   `json:"effective_timezone"`
+	TimezoneInherited      bool     `json:"timezone_inherited"`
+	DSTAdvisory            *string  `json:"dst_advisory"`
+	FirstFireRunID         *int64   `json:"first_fire_run_id"`
+	LastRunID              *int64   `json:"last_run_id"`
+	LastRunAt              *string  `json:"last_run_at"`
+	LastRunStatus          *string  `json:"last_run_status"`
+	LastSuccessAt          *string  `json:"last_success_at"`
+	Stale                  *bool    `json:"stale"`
+	Refreshing             *bool    `json:"refreshing"`
+	ActiveRunID            *int64   `json:"active_run_id"`
+	FreshnessError         string   `json:"freshness_error"`
 }
 
 // lookupScheduleID resolves a schedule name to its numeric ID by listing all
@@ -146,7 +148,7 @@ func newScheduleLsCmd() *cobra.Command {
 				fmt.Fprintln(w, "No schedules.")
 				return
 			}
-			t := newTable("ID", "NAME", "CRON", "ENABLED", "TIMEZONE", "LAST RUN", "AGE", "STALE", "REFRESHING", "COMMAND").alignRight(0)
+			t := newTable("ID", "NAME", "CRON", "ENABLED", "AFTER SUCCESS", "ACTIVATION", "LAST RUN", "AGE", "STALE", "COMMAND").alignRight(0)
 			for _, item := range rendered {
 				// A disabled schedule is dimmed: it is still listed, but it is not
 				// going to run, and that is the thing worth seeing at a glance.
@@ -170,14 +172,18 @@ func newScheduleLsCmd() *cobra.Command {
 				} else if b, ok := item["stale"].(bool); ok && b {
 					stale = alertTxt("yes")
 				}
-				refreshing := dimTxt("-")
-				if b, ok := item["refreshing"].(bool); ok && b {
-					refreshing = txt("yes")
+				action := strOrDash(item["on_success"])
+				if seconds, ok := item["min_roll_interval_seconds"].(float64); ok && seconds > 0 {
+					action += " / " + (time.Duration(seconds) * time.Second).String()
+				}
+				activation := "-"
+				if latest, ok := item["latest_activation"].(map[string]any); ok {
+					activation = strOrDash(latest["status"])
 				}
 				cmdParts, _ := item["command"].([]string)
 				t.row(dimTxt(item["id"]), txt(item["name"]), txt(item["cron_expr"]),
-					enabled, dimTxt(tzDisplay), statusTxt(strOrDash(item["last_run_status"])),
-					age, stale, refreshing, txt(strings.Join(cmdParts, " ")))
+					enabled, txt(action), statusTxt(activation), statusTxt(strOrDash(item["last_run_status"])),
+					age, stale, txt(strings.Join(cmdParts, " ")))
 			}
 			t.render(w)
 		})
@@ -187,18 +193,20 @@ func newScheduleLsCmd() *cobra.Command {
 
 func newScheduleAddCmd() *cobra.Command {
 	var flags struct {
-		name          string
-		cron          string
-		cmd           string
-		cmdJSON       string
-		timeout       int
-		overlap       string
-		missed        string
-		disabled      bool
-		ifNotExists   bool
-		timezone      string
-		runOnRegister bool
-		follow        bool
+		name            string
+		cron            string
+		cmd             string
+		cmdJSON         string
+		timeout         int
+		overlap         string
+		missed          string
+		disabled        bool
+		ifNotExists     bool
+		timezone        string
+		runOnRegister   bool
+		follow          bool
+		onSuccess       string
+		minRollInterval time.Duration
 	}
 
 	addCmd := &cobra.Command{
@@ -218,6 +226,8 @@ func newScheduleAddCmd() *cobra.Command {
 	addCmd.Flags().StringVar(&flags.timezone, "timezone", "", "IANA timezone for this schedule (e.g. Europe/Amsterdam); empty inherits server default")
 	addCmd.Flags().BoolVar(&flags.runOnRegister, "run-on-register", false, "Fire this schedule once now if it has never succeeded (warms the cache on first deploy)")
 	addCmd.Flags().BoolVar(&flags.follow, "follow", false, "With --run-on-register, stream the first-fire run's logs until it finishes")
+	addCmd.Flags().StringVar(&flags.onSuccess, "on-success", "none", "After a successful run: none|roll")
+	addCmd.Flags().DurationVar(&flags.minRollInterval, "min-roll-interval", 0, "Minimum interval between successful replica rolls (for example 1h)")
 	_ = addCmd.MarkFlagRequired("name")
 	_ = addCmd.MarkFlagRequired("cron")
 
@@ -257,15 +267,17 @@ func newScheduleAddCmd() *cobra.Command {
 
 		enabled := !flags.disabled
 		payload := map[string]any{
-			"name":            flags.name,
-			"cron_expr":       flags.cron,
-			"command":         command,
-			"enabled":         enabled,
-			"timeout_seconds": flags.timeout,
-			"overlap_policy":  flags.overlap,
-			"missed_policy":   flags.missed,
-			"timezone":        flags.timezone,
-			"run_on_register": flags.runOnRegister,
+			"name":                      flags.name,
+			"cron_expr":                 flags.cron,
+			"command":                   command,
+			"enabled":                   enabled,
+			"timeout_seconds":           flags.timeout,
+			"overlap_policy":            flags.overlap,
+			"missed_policy":             flags.missed,
+			"timezone":                  flags.timezone,
+			"run_on_register":           flags.runOnRegister,
+			"on_success":                flags.onSuccess,
+			"min_roll_interval_seconds": int(flags.minRollInterval / time.Second),
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
@@ -350,15 +362,17 @@ func newScheduleAddCmd() *cobra.Command {
 
 func newScheduleUpdateCmd() *cobra.Command {
 	var flags struct {
-		cron     string
-		cmd      string
-		cmdJSON  string
-		timeout  int
-		overlap  string
-		missed   string
-		enabled  bool
-		timezone string
-		clearTZ  bool
+		cron            string
+		cmd             string
+		cmdJSON         string
+		timeout         int
+		overlap         string
+		missed          string
+		enabled         bool
+		timezone        string
+		clearTZ         bool
+		onSuccess       string
+		minRollInterval time.Duration
 	}
 
 	updateCmd := &cobra.Command{
@@ -385,6 +399,8 @@ Timezone is tri-state:
 	updateCmd.Flags().BoolVar(&flags.enabled, "enabled", true, "Enabled state (use --enabled=false to disable)")
 	updateCmd.Flags().StringVar(&flags.timezone, "timezone", "", "Set the per-schedule IANA timezone")
 	updateCmd.Flags().BoolVar(&flags.clearTZ, "clear-timezone", false, "Clear the per-schedule timezone (inherit server default)")
+	updateCmd.Flags().StringVar(&flags.onSuccess, "on-success", "", "After a successful run: none|roll")
+	updateCmd.Flags().DurationVar(&flags.minRollInterval, "min-roll-interval", 0, "Minimum interval between successful replica rolls")
 
 	updateCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug, name := args[0], args[1]
@@ -426,6 +442,15 @@ Timezone is tri-state:
 		}
 		if changed("enabled") {
 			payload["enabled"] = flags.enabled
+		}
+		if changed("on-success") {
+			payload["on_success"] = flags.onSuccess
+			if !changed("min-roll-interval") && strings.TrimSpace(flags.onSuccess) == "none" {
+				payload["min_roll_interval_seconds"] = 0
+			}
+		}
+		if changed("min-roll-interval") {
+			payload["min_roll_interval_seconds"] = int(flags.minRollInterval / time.Second)
 		}
 		switch {
 		case flags.clearTZ:

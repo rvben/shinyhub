@@ -10,18 +10,45 @@ import (
 
 // scheduleStatusItem is one row of GET /api/fleet/schedules/status.
 type scheduleStatusItem struct {
-	Slug            string  `json:"slug"`
-	Schedule        string  `json:"schedule"`
-	Enabled         bool    `json:"enabled"`
-	LastRunID       *int64  `json:"last_run_id"`        // null if never run
-	LastRunAt       *string `json:"last_run_at"`        // RFC3339, null if never run
-	LastRunStatus   string  `json:"last_run_status"`    // "" if never run
-	LastSuccessAt   *string `json:"last_success_at"`    // RFC3339, null if never succeeded
-	LastSuccessAgeS *int64  `json:"last_success_age_s"` // null if never succeeded
-	Stale           *bool   `json:"stale"`
-	Refreshing      bool    `json:"refreshing"`
-	ActiveRunID     *int64  `json:"active_run_id"`
-	FreshnessError  string  `json:"freshness_error"`
+	Slug                 string  `json:"slug"`
+	Schedule             string  `json:"schedule"`
+	Enabled              bool    `json:"enabled"`
+	LastRunID            *int64  `json:"last_run_id"`        // null if never run
+	LastRunAt            *string `json:"last_run_at"`        // RFC3339, null if never run
+	LastRunStatus        string  `json:"last_run_status"`    // "" if never run
+	LastSuccessAt        *string `json:"last_success_at"`    // RFC3339, null if never succeeded
+	LastSuccessAgeS      *int64  `json:"last_success_age_s"` // null if never succeeded
+	Stale                *bool   `json:"stale"`
+	Refreshing           bool    `json:"refreshing"`
+	ActiveRunID          *int64  `json:"active_run_id"`
+	FreshnessError       string  `json:"freshness_error"`
+	ActivationStatus     string  `json:"activation_status"`
+	ActivationPhase      string  `json:"activation_phase,omitempty"`
+	ActivationAgeS       *int64  `json:"activation_age_s,omitempty"`
+	ActivationDueAt      *string `json:"activation_due_at,omitempty"`
+	ActivationGeneration *int64  `json:"activation_target_generation,omitempty"`
+	ActivationError      string  `json:"activation_error,omitempty"`
+	ActivationAttention  bool    `json:"activation_attention"`
+	ServingFreshness     string  `json:"serving_freshness"`
+}
+
+func activationServingState(status string) (string, bool) {
+	switch status {
+	case "succeeded", "not_needed":
+		return "current", false
+	case "pending", "deferred_interval", "running":
+		return "pending", false
+	case "deferred_capacity", "repairing":
+		return "pending", true
+	case "failed", "blocked_unsupported":
+		return "stale", true
+	case "target_deleted":
+		return "unavailable", true
+	case "superseded":
+		return "superseded", false
+	default:
+		return "unknown", false
+	}
 }
 
 // scheduleStale maps a db.ScheduleFreshness to the policy struct and applies
@@ -79,13 +106,29 @@ func (s *Server) handleFleetScheduleStatus(w http.ResponseWriter, r *http.Reques
 		}
 		stale, staleErr := scheduleStale(fr, def, now)
 		item := scheduleStatusItem{
-			Slug:          fr.Slug,
-			Schedule:      fr.Name,
-			Enabled:       fr.Enabled,
-			LastRunID:     fr.LastRunID,
-			LastRunStatus: fr.LastRunStatus,
-			Refreshing:    schedulespec.IsRefreshing(scheduleFreshnessPolicy(fr), now),
-			ActiveRunID:   fr.ActiveRunID,
+			Slug:                 fr.Slug,
+			Schedule:             fr.Name,
+			Enabled:              fr.Enabled,
+			LastRunID:            fr.LastRunID,
+			LastRunStatus:        fr.LastRunStatus,
+			Refreshing:           schedulespec.IsRefreshing(scheduleFreshnessPolicy(fr), now),
+			ActiveRunID:          fr.ActiveRunID,
+			ActivationStatus:     fr.ActivationStatus,
+			ActivationPhase:      fr.ActivationPhase,
+			ActivationGeneration: fr.ActivationGeneration,
+			ActivationError:      fr.ActivationError,
+		}
+		item.ServingFreshness, item.ActivationAttention = activationServingState(fr.ActivationStatus)
+		if fr.ActivationCreatedAt != nil {
+			age := int64(now.Sub(*fr.ActivationCreatedAt).Seconds())
+			if age < 0 {
+				age = 0
+			}
+			item.ActivationAgeS = &age
+		}
+		if fr.ActivationDueAt != nil {
+			v := fr.ActivationDueAt.UTC().Format(time.RFC3339)
+			item.ActivationDueAt = &v
 		}
 		if staleErr != nil {
 			item.FreshnessError = "freshness could not be computed"

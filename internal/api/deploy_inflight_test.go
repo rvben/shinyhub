@@ -33,3 +33,28 @@ func TestDeployInFlight_TracksLockWindow(t *testing.T) {
 		t.Fatal("in-flight still reported after release")
 	}
 }
+
+func TestTryAcquireAppOperation_UsesTheDeployMutexPerSlug(t *testing.T) {
+	srv := New(&config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: t.TempDir()},
+	}, dbtest.New(t), nil, nil)
+
+	release := srv.acquireDeployLock("demo")
+	if backgroundRelease, ok := srv.TryAcquireAppOperation("demo"); ok {
+		backgroundRelease()
+		t.Fatal("background operation acquired a slug held by deploy")
+	}
+	otherRelease, ok := srv.TryAcquireAppOperation("other")
+	if !ok {
+		t.Fatal("unrelated slug was unnecessarily excluded")
+	}
+	otherRelease()
+	release()
+
+	backgroundRelease, ok := srv.TryAcquireAppOperation("demo")
+	if !ok {
+		t.Fatal("background operation could not acquire released slug")
+	}
+	backgroundRelease()
+}

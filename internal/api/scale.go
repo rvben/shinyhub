@@ -33,6 +33,9 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("scale up %s: get app: %w", slug, err)
 	}
+	if err := s.guardActivationLifecycle(app.ID, "scale up "+slug); err != nil {
+		return false, err
+	}
 	// Only grow a pool the operator still wants running; a concurrent stop or
 	// delete that won the lock first must not be resurrected by a queued scale.
 	if app.Status != "running" && app.Status != "degraded" {
@@ -246,6 +249,9 @@ func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		return false, fmt.Errorf("scale down %s: get app: %w", slug, err)
+	}
+	if err := s.guardActivationLifecycle(app.ID, "scale down "+slug); err != nil {
+		return false, err
 	}
 	// Honour a concurrent stop/delete that won the lock first: a torn-down app
 	// must not have its DB rows mutated or a phantom proxy pool fabricated by
