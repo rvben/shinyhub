@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.7](https://github.com/rvben/shinyhub/compare/v0.12.6...v0.12.7) - 2026-08-26
+
+### Added
+
+- **overview**: make recent changes fully actionable ([a71f943](https://github.com/rvben/shinyhub/commit/a71f943234b209886d95eb06b6b605d106ea17bf))
+- **ui**: expose schedule activation outcomes ([edafb89](https://github.com/rvben/shinyhub/commit/edafb89fe7c11e30149e371515084ee1daac8027))
+- **schedules**: roll apps after successful jobs ([ea4bf25](https://github.com/rvben/shinyhub/commit/ea4bf2538bb7942ac5afb6614c4da3d37521cf94))
+- **lifecycle**: add crash-safe replica replacement primitives ([5647d74](https://github.com/rvben/shinyhub/commit/5647d74819971880f9e0f5052d6e0329bf0be71f))
+- **schedules**: add durable activation state ([6e972b7](https://github.com/rvben/shinyhub/commit/6e972b7d2cd8147b6e0e5f3e71dd51862e8fc15d))
+- **auth**: add scoped deployment service accounts ([c406db6](https://github.com/rvben/shinyhub/commit/c406db69bdc98480e243a7d67e37d59a25a95f8f))
+- **navigation**: unify apps destinations ([10599e3](https://github.com/rvben/shinyhub/commit/10599e3766db4bc77784bae3bc220f8d8cc6fee9))
+- **branding**: link the product mark to home ([c48e9fb](https://github.com/rvben/shinyhub/commit/c48e9fb136db413a21695667a31219ab701212cd))
+- **branding**: add production SVG logo assets ([03f2bcf](https://github.com/rvben/shinyhub/commit/03f2bcf80462b80b7452a6ffbda0e2904f37e716))
+- **navigation**: refine app chrome and sidebar ([cf4c6f6](https://github.com/rvben/shinyhub/commit/cf4c6f6424d43424514cb2136a650fd1f90714e0))
+- **favicon**: add contextual browser tab identity ([40c1d83](https://github.com/rvben/shinyhub/commit/40c1d83de98d9b73a77137313de4155d4b9ec897))
+- **metrics**: add proportional memory attribution ([d7b27b5](https://github.com/rvben/shinyhub/commit/d7b27b52c8138280ddc097f6a954c8714929719a))
+
+### Fixed
+
+- **ui**: restore pressure disclosure state ([cec2362](https://github.com/rvben/shinyhub/commit/cec2362c4ed836fd082a58f69d40426e509b167e))
+- **schedules**: support PostgreSQL activation validation ([4141e22](https://github.com/rvben/shinyhub/commit/4141e223786cdecc8ca6aa1a76fc328667b936e2))
+- **ci**: validate demo credential formats ([e5e07f0](https://github.com/rvben/shinyhub/commit/e5e07f0892973409a2a269275d323ac0e6568667))
+- **ci**: harden demo deployment credentials ([5be150d](https://github.com/rvben/shinyhub/commit/5be150dddc6b8d6937da3cdba080615a6699b12e))
+
 ## [0.12.6](https://github.com/rvben/shinyhub/compare/v0.12.5...v0.12.6) - 2026-08-25
 
 ### Breaking Changes
