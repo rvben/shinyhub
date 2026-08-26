@@ -979,12 +979,10 @@ function restoreDisclosures(root, keys) {
     const match = [...root.querySelectorAll('[data-disclosure-key]')]
       .find((node) => node.dataset.disclosureKey === key);
     if (!match || match.getAttribute('aria-expanded') === 'true') continue;
-    match.setAttribute('aria-expanded', 'true');
-    const count = Number.parseInt(match.dataset.changeCount || '0', 10);
-    if (match.firstChild) match.firstChild.textContent = disclosureLabel('Hide', count, match.dataset.truncated === 'true');
-    const controlledID = match.getAttribute('aria-controls');
-    const controlled = [...root.querySelectorAll('[id]')].find((node) => node.id === controlledID);
-    if (controlled) controlled.hidden = false;
+    // Each disclosure owns the details of expanding its controlled content.
+    // Replaying that behavior keeps restoration correct for both activity
+    // groups (one hidden list) and pressure alerts (individually hidden rows).
+    match.click();
   }
 }
 
