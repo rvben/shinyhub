@@ -6,14 +6,12 @@ on:
     paths:
       - "docs/**"
       - "zensical.toml"
-      - "scripts/docs-smoke.py"
       - "scripts/docs-descriptions.py"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "docs/**"
       - "zensical.toml"
-      - "scripts/docs-smoke.py"
       - "scripts/docs-descriptions.py"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -36,11 +34,34 @@ jobs:
       - name: Install Zensical
         run: python -m pip install zensical==0.0.31
 
+      - name: Refuse tracked internal material
+        run: |
+          private_files="$(git ls-files -- docs/superpowers docs/reports 'docs/**/*.html')"
+          if [[ -n "$private_files" ]]; then
+            echo "Internal planning/report files must not be tracked:" >&2
+            echo "$private_files" >&2
+            exit 1
+          fi
+
       - name: Build documentation
         run: zensical build --clean
 
-      - name: Smoke-test built site
-        run: python scripts/docs-smoke.py site
+      - name: Verify public documentation payload
+        run: |
+          test -f site/index.html
+          test -f site/getting-started/installation/index.html
+          test -f site/demo/index.html
+          test -f site/images/favicon.png
+          test -f site/search.json
+          test -f site/stylesheets/extra.css
+          test ! -e site/superpowers
+          test ! -e site/reports
+          unexpected_html="$(find site -mindepth 1 -maxdepth 1 -type f -name '*.html' ! -name index.html ! -name 404.html -print)"
+          if [[ -n "$unexpected_html" ]]; then
+            echo "Unexpected standalone HTML in the public documentation payload:" >&2
+            echo "$unexpected_html" >&2
+            exit 1
+          fi
 
       # Asserted against the built HTML, not the frontmatter: an unquoted colon
       # in a description makes Zensical drop the key and serve the site-wide
