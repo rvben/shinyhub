@@ -84,7 +84,8 @@ func replaceGroupsTx(ctx context.Context, tx writeTx, userID int64, groups []str
 func countAdminsExceptTx(ctx context.Context, tx writeTx, exceptID int64) (int, error) {
 	var n int
 	err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM users WHERE role = 'admin' AND id <> ?`, exceptID).Scan(&n)
+		`SELECT COUNT(*) FROM users
+		 WHERE role = 'admin' AND principal_type <> 'service_account' AND id <> ?`, exceptID).Scan(&n)
 	return n, err
 }
 

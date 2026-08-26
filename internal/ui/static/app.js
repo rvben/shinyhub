@@ -85,7 +85,14 @@ function canManageApp(user, app) {
 }
 
 function relativeTime(date) {
+	if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '—';
   const diff = Math.floor((Date.now() - date.getTime()) / 1000);
+	if (diff < 0) {
+		const remaining = Math.abs(diff);
+		if (remaining < 3600) return `in ${Math.max(1, Math.ceil(remaining / 60))}m`;
+		if (remaining < 86400) return `in ${Math.ceil(remaining / 3600)}h`;
+		return `in ${Math.ceil(remaining / 86400)}d`;
+	}
   if (diff < 60)    return `${diff}s ago`;
   if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
@@ -288,6 +295,33 @@ document.addEventListener('DOMContentLoaded', () => {
   const newUserError    = document.getElementById('new-user-error');
   const newUserSnippet  = document.getElementById('new-user-snippet');
   const newUserSnippetCopy = document.getElementById('new-user-snippet-copy');
+  const identityPeopleTab = document.getElementById('identity-people-tab');
+  const identityServicesTab = document.getElementById('identity-services-tab');
+  const identityPeoplePanel = document.getElementById('identity-people-panel');
+  const identityServicesPanel = document.getElementById('identity-services-panel');
+  const serviceAccountsList = document.getElementById('service-accounts-list');
+  const serviceAccountsError = document.getElementById('service-accounts-error');
+  const serviceAccountsStatus = document.getElementById('service-accounts-status');
+  const serviceCredentialModal = document.getElementById('service-credential-modal');
+  const serviceCredentialForm = document.getElementById('service-credential-form');
+  const serviceCredentialSecret = document.getElementById('service-credential-secret');
+  const serviceCredentialName = document.getElementById('service-credential-name');
+  const serviceCredentialRole = document.getElementById('service-credential-role');
+  const serviceCredentialApps = document.getElementById('service-credential-apps');
+  const serviceCredentialAppList = document.getElementById('service-credential-app-list');
+  const serviceCredentialExpiry = document.getElementById('service-credential-expiry');
+  const serviceCredentialError = document.getElementById('service-credential-error');
+  const serviceCredentialToken = document.getElementById('service-credential-token');
+  const serviceCredentialRoleHelp = document.getElementById('service-credential-role-help');
+  const serviceCredentialRoleWarning = document.getElementById('service-credential-role-warning');
+  const serviceCredentialPlan = document.getElementById('service-credential-plan');
+  const serviceCredentialCreatedSummary = document.getElementById('service-credential-created-summary');
+  const serviceCredentialCreatedWarning = document.getElementById('service-credential-created-warning');
+  const serviceCredentialHeading = document.getElementById('service-credential-heading');
+  const serviceCredentialContext = document.getElementById('service-credential-context');
+  let serviceCredentialAccountKey = 'deployment';
+  let serviceCredentialSecretRevealed = false;
+  let serviceCredentialRotation = null;
   // API tokens page + new-token modal
   const tokensView      = document.getElementById('tokens-view');
   const tokensList      = document.getElementById('tokens-list');
@@ -1480,7 +1514,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     catch { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Invalid response'); return; }
     clearUsersLoading();
-    renderUsers(users);
+    renderUsers(users.filter(u => u.principal_type !== 'service_account'));
   }
 
   function renderUsers(users) {
@@ -1593,6 +1627,323 @@ document.addEventListener('DOMContentLoaded', () => {
 
       usersBody.appendChild(tr);
     }
+  }
+
+  function showIdentityPanel(kind) {
+    const services = kind === 'services';
+    identityPeoplePanel.hidden = services;
+    identityServicesPanel.hidden = !services;
+    identityPeopleTab.setAttribute('aria-selected', String(!services));
+    identityServicesTab.setAttribute('aria-selected', String(services));
+	identityPeopleTab.tabIndex = services ? -1 : 0;
+	identityServicesTab.tabIndex = services ? 0 : -1;
+    newUserButton.hidden = services;
+    if (services) loadServiceAccounts();
+  }
+
+  async function loadServiceAccounts() {
+    if (!serviceAccountsList) return;
+    setError(serviceAccountsError, '');
+    const hadInventory = Boolean(serviceAccountsList.querySelector('.service-account-card'));
+    serviceAccountsList.setAttribute('aria-busy', 'true');
+    serviceAccountsStatus.textContent = 'Loading service accounts.';
+    if (!serviceAccountsList.childElementCount) {
+      serviceAccountsList.innerHTML = '<p class="grid-loading" role="status">Loading service accounts…</p>';
+    }
+    let accountsResp;
+    try {
+      accountsResp = await api('/api/service-accounts');
+    } catch {
+      serviceAccountsList.removeAttribute('aria-busy');
+      if (!hadInventory) serviceAccountsList.textContent = '';
+      setError(serviceAccountsError, 'Service accounts could not be loaded. Check your connection and try again.');
+      serviceAccountsStatus.textContent = 'Service accounts could not be loaded.';
+      return;
+    }
+    if (accountsResp.status === 401) { await handleUnauthorized(); return; }
+    if (!accountsResp.ok) {
+      serviceAccountsList.removeAttribute('aria-busy');
+      if (!hadInventory) serviceAccountsList.textContent = '';
+      setError(serviceAccountsError, accountsResp.status === 403 ? 'Human administrators manage service accounts.' : 'Service accounts could not be loaded. Try again.');
+      serviceAccountsStatus.textContent = 'Service accounts could not be loaded.';
+      return;
+    }
+    const accountBody = await accountsResp.json();
+    const accounts = Array.isArray(accountBody?.items) ? accountBody.items : [];
+    const hydrated = await Promise.all(accounts.map(async account => {
+      try {
+        const response = await api(`/api/service-accounts/${encodeURIComponent(account.key)}/credentials`);
+        if (!response.ok) return {...account, credentials: [], credentialsError: true};
+        const body = await response.json();
+        return {...account, credentials: Array.isArray(body?.items) ? body.items : []};
+      } catch { return {...account, credentials: [], credentialsError: true}; }
+    }));
+    renderServiceAccounts(hydrated);
+    serviceAccountsList.removeAttribute('aria-busy');
+    serviceAccountsStatus.textContent = hydrated.some(account => account.credentialsError)
+      ? 'Some credentials could not be loaded.'
+      : 'Service accounts loaded.';
+  }
+
+  function serviceCredentialScopeMarkup(credential) {
+    if (credential.unrestricted) return '<span class="service-scope-all">All apps</span>';
+    const apps = Array.isArray(credential.apps) ? credential.apps : [];
+    if (!apps.length) return 'No apps';
+    const visible = apps.slice(0, 3).map(escapeHtml).join(', ');
+    const remaining = apps.slice(3);
+    const overflow = remaining.length
+      ? ` <details class="service-scope-more"><summary aria-label="Show ${remaining.length} more app ${remaining.length === 1 ? 'scope' : 'scopes'}">+${remaining.length} more</summary><span>${remaining.map(escapeHtml).join(', ')}</span></details>`
+      : '';
+    return visible + overflow;
+  }
+
+  function serviceCredentialTimeMarkup(value, kind) {
+    if (!value) return '<span class="service-time-state">Never</span>';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '—';
+    const exact = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(date);
+    const expired = kind === 'expiry' && date.getTime() <= Date.now();
+    const state = expired ? 'Expired' : relativeTime(date);
+    const stateClass = expired ? ' service-time-state--expired' : '';
+    return `<span class="service-time-state${stateClass}">${escapeHtml(state)}</span><time datetime="${escapeHtml(date.toISOString())}">${escapeHtml(exact)}</time>`;
+  }
+
+  function renderServiceAccounts(accounts) {
+    if (!accounts.length) {
+      serviceAccountsList.innerHTML = '<div class="schedules-empty"><h3>No service accounts available</h3><p>The platform-managed deployment account is created when the server starts.</p></div>';
+      return;
+    }
+    serviceAccountsList.innerHTML = accounts.map(account => {
+      const tableKey = String(account.key || 'account').replace(/[^a-zA-Z0-9_-]/g, '-');
+      const headers = {
+        credential: `service-${tableKey}-credential`, role: `service-${tableKey}-role`, apps: `service-${tableKey}-apps`,
+        expires: `service-${tableKey}-expires`, used: `service-${tableKey}-used`, action: `service-${tableKey}-action`,
+      };
+      const credentials = Array.isArray(account.credentials) ? account.credentials : [];
+      const rows = credentials.map(credential => {
+        const apps = Array.isArray(credential.apps) ? credential.apps : [];
+        const expired = credential.expires_at && new Date(credential.expires_at).getTime() <= Date.now();
+        const searchText = [credential.name, credential.role, ...apps, credential.unrestricted ? 'all apps' : '', credential.managed_by ? 'platform managed' : ''].join(' ').toLowerCase();
+        const actions = credential.managed_by
+          ? '<span class="service-managed-note">Change server configuration to revoke</span>'
+          : `<div class="service-row-actions"><button type="button" class="btn-row" data-service-rotate="${credential.id}" data-service-key="${escapeHtml(account.key)}" data-service-name="${escapeHtml(credential.name)}" data-service-role="${escapeHtml(credential.role || 'developer')}" data-service-apps="${escapeHtml(JSON.stringify(apps))}" data-service-unrestricted="${credential.unrestricted ? 'true' : 'false'}">Rotate</button><button type="button" class="btn-row btn-row-danger" data-service-revoke="${credential.id}" data-service-key="${escapeHtml(account.key)}" data-service-name="${escapeHtml(credential.name)}">Revoke</button></div><span class="service-revoke-error" role="alert" hidden></span>`;
+        return `<tr role="row" data-service-credential-row data-service-search="${escapeHtml(searchText)}" data-service-state="${expired ? 'expired' : 'active'}">
+        <td role="cell" headers="${headers.credential}" data-label="Credential"><strong>${escapeHtml(credential.name)}</strong>${credential.managed_by ? `<span class="service-managed-tag">Platform-managed</span>` : ''}</td>
+        <td role="cell" headers="${headers.role}" data-label="Role">${escapeHtml((credential.role || 'developer').replace(/^./, value => value.toUpperCase()))}</td>
+        <td role="cell" headers="${headers.apps}" data-label="Apps">${serviceCredentialScopeMarkup(credential)}</td>
+        <td role="cell" headers="${headers.expires}" data-label="Expires" class="service-time-cell">${serviceCredentialTimeMarkup(credential.expires_at, 'expiry')}</td>
+        <td role="cell" headers="${headers.used}" data-label="Last used" class="service-time-cell">${serviceCredentialTimeMarkup(credential.last_used_at, 'used')}</td>
+        <td role="cell" headers="${headers.action}" data-label="Action">${actions}</td>
+      </tr>`;
+      }).join('');
+      const body = account.credentialsError
+        ? '<tr role="row"><td role="cell" colspan="6" class="service-credentials-load-error"><strong>Credentials could not be loaded.</strong><button type="button" class="btn-row" data-service-retry>Retry</button></td></tr>'
+        : rows || '<tr role="row"><td role="cell" colspan="6" class="env-empty">No credentials. Create one for each team or pipeline.</td></tr>';
+      const tools = credentials.length >= 5 && !account.credentialsError
+        ? `<div class="service-credential-tools"><label><span class="sr-only">Search credentials</span><input type="search" placeholder="Search credentials" data-service-search-input></label><label><span class="sr-only">Filter credential status</span><select data-service-state-filter><option value="all">All statuses</option><option value="active">Active</option><option value="expired">Expired</option></select></label><span class="service-filter-status" role="status" data-service-filter-status>${credentials.length} credentials</span></div>`
+        : '';
+      return `<article class="service-account-card">
+        <header><div><h3>${escapeHtml(account.name)}</h3><p>Compatibility username <code>${escapeHtml(account.username)}</code> · Platform-managed</p></div><button type="button" class="btn-primary" data-service-create="${escapeHtml(account.key)}">New credential</button></header>
+        ${tools}
+        <div class="service-credential-table"><table role="table"><thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col" id="${headers.credential}">Credential</th><th role="columnheader" scope="col" id="${headers.role}">Role</th><th role="columnheader" scope="col" id="${headers.apps}">Apps</th><th role="columnheader" scope="col" id="${headers.expires}">Expires</th><th role="columnheader" scope="col" id="${headers.used}">Last used</th><th role="columnheader" scope="col" id="${headers.action}"><span class="sr-only">Action</span></th></tr></thead><tbody role="rowgroup">${body}</tbody></table></div>
+      </article>`;
+    }).join('');
+  }
+
+  function updateServiceCredentialPlan() {
+    const role = serviceCredentialRole.value || 'developer';
+    const scope = serviceCredentialForm.querySelector('input[name="service-scope"]:checked')?.value || 'apps';
+    const days = Number(serviceCredentialExpiry.value) || 90;
+    const roleCopy = {
+      viewer: 'Can inspect apps inside this credential’s scope, but cannot change or deploy them.',
+      developer: 'Can deploy and manage apps inside this credential’s scope.',
+      operator: 'Can manage scoped apps. Project catalog changes and the global audit log require All apps.',
+      admin: 'Can administer people and server settings platform-wide. App scope limits app-specific operations only.',
+    };
+    serviceCredentialRoleHelp.textContent = roleCopy[role] || roleCopy.developer;
+    const warning = role === 'admin'
+      ? 'Admin authority over people and server settings is platform-wide, even with Selected apps. App scope limits app-specific operations; project catalog changes and global audit require All apps.'
+      : '';
+    serviceCredentialRoleWarning.textContent = warning;
+    serviceCredentialRoleWarning.hidden = !warning;
+    const allApps = scope === 'all';
+    serviceCredentialAppList.hidden = allApps;
+    serviceCredentialApps.disabled = allApps;
+    const appPlan = `App operations: ${allApps ? 'all apps' : 'selected apps'}`;
+    const platformPlan = role === 'admin' ? 'Platform administration: global' : '';
+    serviceCredentialPlan.textContent = [role.replace(/^./, value => value.toUpperCase()), appPlan, platformPlan, `Expires after ${days} days`].filter(Boolean).join(' · ');
+    serviceCredentialPlan.classList.toggle('credential-plan--elevated', role === 'admin' && allApps);
+  }
+
+  function openServiceCredentialModal(key, rotation = null) {
+    serviceCredentialAccountKey = key;
+    serviceCredentialRotation = rotation;
+    serviceCredentialForm.hidden = false;
+    serviceCredentialSecret.hidden = true;
+    serviceCredentialForm.reset();
+    serviceCredentialRole.value = 'developer';
+    serviceCredentialExpiry.value = '90';
+    serviceCredentialName.removeAttribute('aria-invalid');
+    serviceCredentialName.removeAttribute('aria-describedby');
+    serviceCredentialName.removeAttribute('aria-errormessage');
+    serviceCredentialApps.removeAttribute('aria-invalid');
+    serviceCredentialHeading.textContent = rotation ? 'Rotate automation credential' : 'New automation credential';
+    serviceCredentialContext.textContent = rotation ? `Create a replacement for “${rotation.name}”. The old credential stays active until you revoke it.` : '';
+    serviceCredentialContext.hidden = !rotation;
+    if (rotation) {
+      const suffix = ` replacement ${new Date().toISOString().slice(0, 10)}`;
+      serviceCredentialName.value = `${rotation.name.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
+      serviceCredentialRole.value = rotation.role || 'developer';
+      const allRadio = serviceCredentialForm.querySelector('input[name="service-scope"][value="all"]');
+      const appsRadio = serviceCredentialForm.querySelector('input[name="service-scope"][value="apps"]');
+      allRadio.checked = Boolean(rotation.unrestricted);
+      appsRadio.checked = !rotation.unrestricted;
+      serviceCredentialApps.value = Array.isArray(rotation.apps) ? rotation.apps.join(', ') : '';
+    }
+    serviceCredentialSecretRevealed = false;
+    serviceCredentialCreatedSummary.textContent = '';
+    serviceCredentialCreatedWarning.textContent = '';
+    serviceCredentialCreatedWarning.hidden = true;
+    setError(serviceCredentialError, '');
+    updateServiceCredentialPlan();
+    serviceCredentialModal.hidden = false;
+    serviceCredentialModal.querySelector('.service-credential-modal-box').scrollTop = 0;
+    modalTrap(serviceCredentialModal).activate();
+    serviceCredentialName.focus();
+  }
+
+  function closeServiceCredentialModal({acknowledged = false} = {}) {
+    if (serviceCredentialSecretRevealed && !acknowledged &&
+        !confirm('This credential cannot be shown again. Close only after you have stored it securely.')) {
+      return false;
+    }
+    const completedRotation = acknowledged && serviceCredentialSecretRevealed && serviceCredentialRotation;
+    modalTrap(serviceCredentialModal).release();
+    serviceCredentialModal.hidden = true;
+    serviceCredentialToken.textContent = '';
+    serviceCredentialSecretRevealed = false;
+    serviceCredentialRotation = null;
+    if (completedRotation) flashToast(`Replacement created. Update pipelines, then revoke “${completedRotation.name}”.`, 'success');
+    return true;
+  }
+
+  async function submitServiceCredential(event) {
+    event.preventDefault();
+    const scope = serviceCredentialForm.querySelector('input[name="service-scope"]:checked')?.value;
+    const apps = serviceCredentialApps.value.split(',').map(value => value.trim()).filter(Boolean);
+    const credentialName = serviceCredentialName.value.trim();
+    serviceCredentialName.removeAttribute('aria-invalid');
+    serviceCredentialName.removeAttribute('aria-describedby');
+    serviceCredentialName.removeAttribute('aria-errormessage');
+    serviceCredentialApps.removeAttribute('aria-invalid');
+    if (credentialName.toUpperCase() === 'SHINYHUB_DEPLOY_TOKEN') {
+      setError(serviceCredentialError, 'That name is reserved for the credential managed by server configuration.');
+      serviceCredentialName.setAttribute('aria-invalid', 'true');
+      serviceCredentialName.setAttribute('aria-describedby', 'service-credential-error');
+      serviceCredentialName.setAttribute('aria-errormessage', 'service-credential-error');
+      serviceCredentialName.focus();
+      return;
+    }
+    if (scope === 'apps' && !apps.length) {
+      setError(serviceCredentialError, 'Add at least one app, or choose All apps.');
+      serviceCredentialApps.setAttribute('aria-invalid', 'true');
+      serviceCredentialApps.focus();
+      return;
+    }
+    const invalid = apps.find(value => !SLUG_RE.test(value));
+    if (scope === 'apps' && invalid) {
+      setError(serviceCredentialError, `“${invalid}” is not a valid app slug. Use lowercase letters, numbers, and internal hyphens.`);
+      serviceCredentialApps.setAttribute('aria-invalid', 'true');
+      serviceCredentialApps.focus();
+      return;
+    }
+    const duplicate = apps.find((value, index) => apps.indexOf(value) !== index);
+    if (scope === 'apps' && duplicate) {
+      setError(serviceCredentialError, `Remove the duplicate app slug “${duplicate}”.`);
+      serviceCredentialApps.setAttribute('aria-invalid', 'true');
+      serviceCredentialApps.focus();
+      return;
+    }
+    const submit = document.getElementById('service-credential-submit');
+    submit.disabled = true;
+    submit.textContent = 'Creating…';
+    serviceCredentialForm.setAttribute('aria-busy', 'true');
+    let response;
+    try {
+      response = await api(`/api/service-accounts/${encodeURIComponent(serviceCredentialAccountKey)}/credentials`, {method: 'POST', body: JSON.stringify({
+        name: credentialName, role: serviceCredentialRole.value,
+        apps: scope === 'apps' ? apps : [], unrestricted: scope === 'all',
+        expires_in_days: Number(serviceCredentialExpiry.value),
+      })});
+    } catch {
+      setError(serviceCredentialError, 'Network error. The credential was not created.');
+      submit.disabled = false;
+      submit.textContent = 'Create credential';
+      serviceCredentialForm.removeAttribute('aria-busy');
+      return;
+    }
+    submit.disabled = false;
+    submit.textContent = 'Create credential';
+    serviceCredentialForm.removeAttribute('aria-busy');
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      setError(serviceCredentialError, body.error || 'Credential could not be created.');
+      return;
+    }
+    const credential = await response.json();
+    serviceCredentialToken.textContent = credential.token;
+    const scopeSummary = credential.unrestricted ? 'All apps' : (credential.apps || []).join(', ');
+    const expirySummary = credential.expires_at
+      ? new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(new Date(credential.expires_at))
+      : 'No expiry';
+    const rotationSummary = serviceCredentialRotation ? `Replacement for ${serviceCredentialRotation.name} · ` : '';
+    serviceCredentialCreatedSummary.textContent = `${rotationSummary}${(credential.role || 'developer').replace(/^./, value => value.toUpperCase())} · ${scopeSummary} · Expires ${expirySummary}`;
+    serviceCredentialCreatedWarning.textContent = [credential.warning, serviceCredentialRotation ? 'The old credential is still active. Update pipelines to use this replacement, then revoke the old credential from the inventory.' : ''].filter(Boolean).join(' ');
+    serviceCredentialCreatedWarning.hidden = !serviceCredentialCreatedWarning.textContent;
+    serviceCredentialForm.hidden = true;
+    serviceCredentialSecret.hidden = false;
+    serviceCredentialSecretRevealed = true;
+    document.getElementById('service-credential-copy').focus();
+    await loadServiceAccounts();
+    serviceAccountsStatus.textContent = `Credential ${credential.name || ''} created. Store the secret now.`;
+  }
+
+  async function revokeServiceCredential(key, id, name, button) {
+    if (!confirm(`Revoke automation credential "${name}"? Pipelines using it will stop working.`)) return;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.textContent = 'Revoking…';
+    const error = button.closest('td')?.querySelector('.service-revoke-error');
+    if (error) { error.hidden = true; error.textContent = ''; }
+    const response = await api(`/api/service-accounts/${encodeURIComponent(key)}/credentials/${id}`, {method: 'DELETE'}).catch(() => null);
+    if (!response || !response.ok) {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      button.textContent = 'Retry revoke';
+      if (error) { error.textContent = 'Could not revoke. Check your connection, then retry.'; error.hidden = false; }
+      else setError(serviceAccountsError, 'Credential could not be revoked. Check your connection, then retry.');
+      return;
+    }
+    flashToast(`Credential ${name} revoked.`, 'success');
+    await loadServiceAccounts();
+    serviceAccountsStatus.textContent = `Credential ${name} revoked.`;
+  }
+
+  function applyServiceCredentialFilters(control) {
+    const card = control.closest('.service-account-card');
+    if (!card) return;
+    const query = (card.querySelector('[data-service-search-input]')?.value || '').trim().toLowerCase();
+    const stateFilter = card.querySelector('[data-service-state-filter]')?.value || 'all';
+    let shown = 0;
+    const rows = [...card.querySelectorAll('[data-service-credential-row]')];
+    for (const row of rows) {
+      const matchesQuery = !query || (row.dataset.serviceSearch || '').includes(query);
+      const matchesState = stateFilter === 'all' || row.dataset.serviceState === stateFilter;
+      row.hidden = !(matchesQuery && matchesState);
+      if (!row.hidden) shown++;
+    }
+    const status = card.querySelector('[data-service-filter-status]');
+    if (status) status.textContent = `${shown} of ${rows.length} credentials shown`;
   }
 
   async function updateUserRole(id, username, selectEl) {
@@ -3687,7 +4038,79 @@ document.addEventListener('DOMContentLoaded', () => {
 
   logPaneClose.addEventListener('click', closeLogs);
 
-  usersRefresh.addEventListener('click', () => loadUsers());
+  usersRefresh.addEventListener('click', async () => {
+    usersRefresh.disabled = true;
+    usersRefresh.textContent = 'Refreshing…';
+    try {
+      if (identityServicesTab?.getAttribute('aria-selected') === 'true') await loadServiceAccounts();
+      else await loadUsers();
+    } finally {
+      usersRefresh.disabled = false;
+      usersRefresh.textContent = 'Refresh';
+    }
+  });
+  identityPeopleTab?.addEventListener('click', () => showIdentityPanel('people'));
+  identityServicesTab?.addEventListener('click', () => showIdentityPanel('services'));
+	for (const tab of [identityPeopleTab, identityServicesTab].filter(Boolean)) {
+		tab.addEventListener('keydown', event => {
+			if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+			event.preventDefault();
+			const destination = event.key === 'Home' ? identityPeopleTab
+				: event.key === 'End' ? identityServicesTab
+				: tab === identityPeopleTab ? identityServicesTab : identityPeopleTab;
+			destination.focus();
+			destination.click();
+		});
+	}
+  serviceAccountsList?.addEventListener('click', event => {
+    const create = event.target.closest('[data-service-create]');
+    if (create) openServiceCredentialModal(create.dataset.serviceCreate);
+    if (event.target.closest('[data-service-retry]')) loadServiceAccounts();
+    const revoke = event.target.closest('[data-service-revoke]');
+    if (revoke) revokeServiceCredential(revoke.dataset.serviceKey, revoke.dataset.serviceRevoke, revoke.dataset.serviceName, revoke);
+    const rotate = event.target.closest('[data-service-rotate]');
+    if (rotate) openServiceCredentialModal(rotate.dataset.serviceKey, {
+      id: rotate.dataset.serviceRotate,
+      name: rotate.dataset.serviceName,
+      role: rotate.dataset.serviceRole,
+      apps: JSON.parse(rotate.dataset.serviceApps || '[]'),
+      unrestricted: rotate.dataset.serviceUnrestricted === 'true',
+    });
+  });
+  serviceAccountsList?.addEventListener('input', event => {
+    if (event.target.matches('[data-service-search-input]')) applyServiceCredentialFilters(event.target);
+  });
+  serviceAccountsList?.addEventListener('change', event => {
+    if (event.target.matches('[data-service-state-filter]')) applyServiceCredentialFilters(event.target);
+  });
+  serviceCredentialForm?.addEventListener('submit', submitServiceCredential);
+  serviceCredentialRole?.addEventListener('change', updateServiceCredentialPlan);
+  serviceCredentialExpiry?.addEventListener('change', updateServiceCredentialPlan);
+  serviceCredentialForm?.addEventListener('change', event => {
+    if (event.target.matches('input[name="service-scope"]')) updateServiceCredentialPlan();
+  });
+  serviceCredentialApps?.addEventListener('input', () => {
+    const ownsError = serviceCredentialApps.getAttribute('aria-invalid') === 'true';
+    serviceCredentialApps.removeAttribute('aria-invalid');
+    if (ownsError && !serviceCredentialError.hidden) setError(serviceCredentialError, '');
+  });
+  serviceCredentialName?.addEventListener('input', () => {
+    const ownsError = serviceCredentialName.getAttribute('aria-invalid') === 'true';
+    serviceCredentialName.removeAttribute('aria-invalid');
+    serviceCredentialName.removeAttribute('aria-describedby');
+    serviceCredentialName.removeAttribute('aria-errormessage');
+    if (ownsError && !serviceCredentialError.hidden) setError(serviceCredentialError, '');
+  });
+  document.getElementById('service-credential-close')?.addEventListener('click', () => closeServiceCredentialModal());
+  document.getElementById('service-credential-cancel')?.addEventListener('click', () => closeServiceCredentialModal());
+  document.getElementById('service-credential-done')?.addEventListener('click', () => closeServiceCredentialModal({acknowledged: true}));
+  serviceCredentialModal?.addEventListener('click', event => { if (event.target === event.currentTarget) closeServiceCredentialModal(); });
+  document.getElementById('service-credential-copy')?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(serviceCredentialToken.textContent);
+      document.getElementById('service-credential-copy-status').textContent = 'Copied to clipboard';
+    } catch { document.getElementById('service-credential-copy-status').textContent = 'Copy is unavailable in this browser'; }
+  });
   document.getElementById('workers-refresh')?.addEventListener('click', () => loadWorkers());
   newUserButton.addEventListener('click', openNewUserModal);
   newUserClose.addEventListener('click', closeNewUserModal);
@@ -3836,6 +4259,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Without this branch, Escape left the modal open after the secret
         // token value was already revealed in the DOM once (tokenRevealValue).
         closeNewTokenModal();
+      } else if (serviceCredentialModal && !serviceCredentialModal.hidden) {
+        closeServiceCredentialModal();
       } else if (!projectEditModal.hidden) {
         closeProjectEditModal();
       } else if (!document.getElementById('log-pane').hidden) {

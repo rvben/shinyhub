@@ -48,7 +48,7 @@ func (s *Server) refuseSystemUser(w http.ResponseWriter, id int64) bool {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return true
 	}
-	if db.IsSystemUser(u.Username) {
+	if u.PrincipalType == "service_account" {
 		writeError(w, http.StatusForbidden, "cannot modify system user")
 		return true
 	}
@@ -57,20 +57,26 @@ func (s *Server) refuseSystemUser(w http.ResponseWriter, id int64) bool {
 
 // userResponse is the safe public view of a user (no password hash).
 type userResponse struct {
-	ID          int64  `json:"id"`
-	Username    string `json:"username"`
-	Role        string `json:"role"`
-	DisplayName string `json:"display_name"`
-	CreatedAt   string `json:"created_at"`
+	ID                int64  `json:"id"`
+	Username          string `json:"username"`
+	Role              string `json:"role"`
+	DisplayName       string `json:"display_name"`
+	PrincipalType     string `json:"principal_type"`
+	ServiceAccountKey string `json:"service_account_key,omitempty"`
+	ManagedBy         string `json:"managed_by,omitempty"`
+	CreatedAt         string `json:"created_at"`
 }
 
 func toUserResponse(u *db.User) userResponse {
 	return userResponse{
-		ID:          u.ID,
-		Username:    u.Username,
-		Role:        u.Role,
-		DisplayName: u.DisplayName,
-		CreatedAt:   u.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		ID:                u.ID,
+		Username:          u.Username,
+		Role:              u.Role,
+		DisplayName:       u.DisplayName,
+		PrincipalType:     u.PrincipalType,
+		ServiceAccountKey: u.ServiceAccountKey,
+		ManagedBy:         u.ManagedBy,
+		CreatedAt:         u.CreatedAt.Format("2006-01-02T15:04:05Z"),
 	}
 }
 
@@ -85,9 +91,12 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := make([]userResponse, len(users))
-	for i, u := range users {
-		resp[i] = toUserResponse(u)
+	resp := make([]userResponse, 0, len(users))
+	for _, u := range users {
+		if u.PrincipalType == "service_account" {
+			continue
+		}
+		resp = append(resp, toUserResponse(u))
 	}
 	// ListUsers already orders by username, so the page is stably sorted.
 	limit, offset := parsePagination(r)
@@ -112,6 +121,10 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Username == "" {
 		writeError(w, http.StatusBadRequest, "username is required")
+		return
+	}
+	if db.IsReservedUsername(req.Username) {
+		writeError(w, http.StatusConflict, "username is reserved for deployment automation")
 		return
 	}
 	if err := auth.ValidateNewPassword(req.Password); err != nil {
@@ -148,7 +161,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       callerID(r),
 		Action:       "create_user",
 		ResourceType: "user",
@@ -235,7 +248,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	roleDetail, _ := json.Marshal(map[string]string{"old_role": oldRole, "new_role": user.Role})
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       callerID(r),
 		Action:       "update_user",
 		ResourceType: "user",
@@ -296,7 +309,7 @@ func (s *Server) handlePatchUserPassword(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       callerID(r),
 		Action:       "reset_user_password",
 		ResourceType: "user",
@@ -331,7 +344,7 @@ func (s *Server) handleRevokeUserSessions(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       callerID(r),
 		Action:       "revoke_sessions",
 		ResourceType: "user",
@@ -380,7 +393,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       callerID(r),
 		Action:       "delete_user",
 		ResourceType: "user",

@@ -19,26 +19,33 @@ var (
 const fleetRunSequenceLock int64 = 0x466c65657452756e // "FleetRun"
 
 type FleetRun struct {
-	ID          string              `json:"id"`
-	FleetID     string              `json:"fleet_id"`
-	Kind        string              `json:"kind"`
-	Provenance  provenance.Metadata `json:"provenance"`
-	Sequence    int64               `json:"sequence"`
-	Status      string              `json:"status"`
-	HeartbeatAt time.Time           `json:"heartbeat_at"`
-	FinishedAt  *time.Time          `json:"finished_at,omitempty"`
-	ExitCode    *int                `json:"exit_code,omitempty"`
-	ExitReason  string              `json:"exit_reason,omitempty"`
-	CreatedAt   time.Time           `json:"created_at"`
-	UserID      *int64              `json:"-"`
+	ID             string              `json:"id"`
+	FleetID        string              `json:"fleet_id"`
+	Kind           string              `json:"kind"`
+	Provenance     provenance.Metadata `json:"provenance"`
+	Sequence       int64               `json:"sequence"`
+	Status         string              `json:"status"`
+	HeartbeatAt    time.Time           `json:"heartbeat_at"`
+	FinishedAt     *time.Time          `json:"finished_at,omitempty"`
+	ExitCode       *int                `json:"exit_code,omitempty"`
+	ExitReason     string              `json:"exit_reason,omitempty"`
+	CreatedAt      time.Time           `json:"created_at"`
+	UserID         *int64              `json:"-"`
+	PrincipalID    *int64              `json:"principal_id,omitempty"`
+	CredentialID   *int64              `json:"credential_id,omitempty"`
+	CredentialType string              `json:"credential_type,omitempty"`
+	CredentialName string              `json:"credential_name,omitempty"`
 }
 
 type CreateFleetRunParams struct {
-	ID         string
-	FleetID    string
-	Kind       string
-	Provenance provenance.Metadata
-	UserID     *int64
+	ID             string
+	FleetID        string
+	Kind           string
+	Provenance     provenance.Metadata
+	UserID         *int64
+	CredentialID   *int64
+	CredentialType string
+	CredentialName string
 }
 
 func (s *Store) CreateFleetRun(p CreateFleetRunParams) (*FleetRun, bool, error) {
@@ -71,8 +78,10 @@ func (s *Store) CreateFleetRun(p CreateFleetRunParams) (*FleetRun, bool, error) 
 		return nil, false, fmt.Errorf("allocate fleet run sequence: %w", err)
 	}
 	if _, err := tx.Exec(`INSERT INTO fleet_runs
-		(id, fleet_id, kind, provenance, user_id, run_sequence, heartbeat_at)
-		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, p.ID, p.FleetID, p.Kind, string(encoded), p.UserID, sequence); err != nil {
+		(id, fleet_id, kind, provenance, user_id, run_sequence, heartbeat_at,
+		 credential_id, credential_type, credential_name)
+		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)`, p.ID, p.FleetID, p.Kind,
+		string(encoded), p.UserID, sequence, p.CredentialID, p.CredentialType, p.CredentialName); err != nil {
 		return nil, false, fmt.Errorf("create fleet run: %w", err)
 	}
 	run, err := getFleetRunFrom(tx, p.ID)
@@ -97,13 +106,16 @@ func getFleetRunFrom(q fleetRunQueryer, id string) (*FleetRun, error) {
 	var run FleetRun
 	var raw string
 	var uid sql.NullInt64
+	var credentialID sql.NullInt64
 	var finished sql.NullTime
 	var exitCode sql.NullInt64
 	if err := q.QueryRow(`SELECT id, fleet_id, kind, provenance, user_id, run_sequence,
-		status, heartbeat_at, finished_at, exit_code, exit_reason, created_at
+		status, heartbeat_at, finished_at, exit_code, exit_reason, created_at,
+		credential_id, credential_type, credential_name
 		FROM fleet_runs WHERE id = ?`, id).Scan(
 		&run.ID, &run.FleetID, &run.Kind, &raw, &uid, &run.Sequence,
 		&run.Status, &run.HeartbeatAt, &finished, &exitCode, &run.ExitReason, &run.CreatedAt,
+		&credentialID, &run.CredentialType, &run.CredentialName,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -116,6 +128,11 @@ func getFleetRunFrom(q fleetRunQueryer, id string) (*FleetRun, error) {
 	if uid.Valid {
 		v := uid.Int64
 		run.UserID = &v
+		run.PrincipalID = &v
+	}
+	if credentialID.Valid {
+		v := credentialID.Int64
+		run.CredentialID = &v
 	}
 	if finished.Valid {
 		v := finished.Time
@@ -129,7 +146,8 @@ func getFleetRunFrom(q fleetRunQueryer, id string) (*FleetRun, error) {
 }
 
 func sameFleetRun(run *FleetRun, p CreateFleetRunParams, encoded []byte) bool {
-	return run.FleetID == p.FleetID && run.Kind == p.Kind && string(encoded) == mustMarshal(run.Provenance) && sameNullableID(run.UserID, p.UserID)
+	return run.FleetID == p.FleetID && run.Kind == p.Kind && string(encoded) == mustMarshal(run.Provenance) &&
+		sameNullableID(run.UserID, p.UserID) && sameNullableID(run.CredentialID, p.CredentialID)
 }
 
 // TouchFleetRun proves that a live client still owns an unfinished apply.

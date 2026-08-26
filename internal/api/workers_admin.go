@@ -101,7 +101,7 @@ func (s *Server) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
 	if err := lifecycle.LoseWorkerReplicas(s.store, nodeID, deregister, evict); err != nil {
 		slog.Error("revoke worker: evict replicas", "node", nodeID, "err", err)
 	}
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       callerID(r),
 		Action:       "revoke_worker",
 		ResourceType: "worker",

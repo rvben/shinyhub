@@ -169,10 +169,13 @@ type loginResponse struct {
 }
 
 type sessionUserResponse struct {
-	ID          int64  `json:"id"`
-	Username    string `json:"username"`
-	Role        string `json:"role"`
-	DisplayName string `json:"display_name"`
+	ID                int64  `json:"id"`
+	Username          string `json:"username"`
+	Role              string `json:"role"`
+	DisplayName       string `json:"display_name"`
+	PrincipalType     string `json:"principal_type"`
+	ServiceAccountKey string `json:"service_account_key,omitempty"`
+	ManagedBy         string `json:"managed_by,omitempty"`
 	// CanSetPassword is true for local accounts (a real bcrypt password is on
 	// file) and false for SSO/forward-auth accounts. The profile UI uses it to
 	// show the change-password fields only when they would actually work.
@@ -184,11 +187,14 @@ type sessionUserResponse struct {
 // authenticated response.
 func newSessionUser(u *db.User) *sessionUserResponse {
 	return &sessionUserResponse{
-		ID:             u.ID,
-		Username:       u.Username,
-		Role:           u.Role,
-		DisplayName:    u.DisplayName,
-		CanSetPassword: db.HasLocalPassword(u.PasswordHash),
+		ID:                u.ID,
+		Username:          u.Username,
+		Role:              u.Role,
+		DisplayName:       u.DisplayName,
+		PrincipalType:     u.PrincipalType,
+		ServiceAccountKey: u.ServiceAccountKey,
+		ManagedBy:         u.ManagedBy,
+		CanSetPassword:    db.HasLocalPassword(u.PasswordHash),
 	}
 }
 
@@ -214,6 +220,7 @@ type credentialResponse struct {
 	Type       string     `json:"type"`
 	ID         int64      `json:"id,omitempty"`
 	Name       string     `json:"name,omitempty"`
+	ManagedBy  string     `json:"managed_by,omitempty"`
 	CreatedAt  *time.Time `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	ExpiresAt  *time.Time `json:"expires_at"`
@@ -225,7 +232,7 @@ func requestCredential(r *http.Request) *credentialResponse {
 		return nil
 	}
 	return &credentialResponse{
-		Type: info.Type, ID: info.ID, Name: info.Name, CreatedAt: info.CreatedAt,
+		Type: info.Type, ID: info.ID, Name: info.Name, ManagedBy: info.ManagedBy, CreatedAt: info.CreatedAt,
 		LastUsedAt: info.LastUsedAt, ExpiresAt: info.ExpiresAt,
 	}
 }
@@ -241,6 +248,10 @@ func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
 	}
 
 	if err := auth.VerifyPassword(user.PasswordHash, req.Password); err != nil {
+		return nil, db.ErrNotFound
+	}
+	if user.PrincipalType == "service_account" || db.IsReservedUsername(user.Username) {
+		auth.VerifyPassword(dummyHash, req.Password)
 		return nil, db.ErrNotFound
 	}
 
@@ -276,7 +287,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	user, err := s.authenticateCredentials(req)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			s.store.LogAuditEvent(db.AuditEventParams{
+			s.logAuditEvent(r, db.AuditEventParams{
 				Action:       "login_failed",
 				ResourceType: "user",
 				ResourceID:   req.Username,
@@ -295,7 +306,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       &user.ID,
 		Action:       "login",
 		ResourceType: "user",
@@ -325,7 +336,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 	user, err := s.authenticateCredentials(req)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			s.store.LogAuditEvent(db.AuditEventParams{
+			s.logAuditEvent(r, db.AuditEventParams{
 				Action:       "login_failed",
 				ResourceType: "user",
 				ResourceID:   req.Username,
@@ -344,7 +355,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       &user.ID,
 		Action:       "login",
 		ResourceType: "user",
@@ -373,7 +384,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 				slog.Warn("revoke token on logout", "user", u.Username, "err", err)
 			}
 		}
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "logout",
 			ResourceType: "user",
@@ -423,9 +434,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// Prefer the full DB record so display name + password capability ride
 	// along. Fall back to the JWT claims if the read fails (e.g. the row was
 	// removed mid-session) so /api/auth/me stays available for logout/redirect.
-	su := &sessionUserResponse{ID: u.ID, Username: u.Username, Role: u.Role}
+	su := &sessionUserResponse{ID: u.ID, Username: u.Username, Role: u.Role, PrincipalType: u.PrincipalType,
+		ServiceAccountKey: u.ServiceAccountKey, ManagedBy: u.ManagedBy}
 	if dbUser, err := s.store.GetUserByID(u.ID); err == nil {
 		su = newSessionUser(dbUser)
+	}
+	// API-key authentication may apply a credential-specific role to a shared
+	// service principal. Keep the richer DB identity metadata, but never replace
+	// that effective request role with the account's compatibility role.
+	if u.IsServiceAccount() {
+		su.Role = u.Role
 	}
 	writeJSON(w, http.StatusOK, sessionResponse{
 		User:          su,
@@ -457,7 +475,7 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// System accounts (e.g. __deploy__) are owned by env/config, not the UI.
-	if db.IsSystemUser(u.Username) {
+	if u.IsServiceAccount() {
 		writeError(w, http.StatusForbidden, "system users cannot edit their profile")
 		return
 	}
@@ -547,7 +565,7 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "change_own_password",
 			ResourceType: "user",
@@ -557,7 +575,7 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if changedDisplayName {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "update_profile",
 			ResourceType: "user",
@@ -654,7 +672,7 @@ func (s *Server) handleConnectCLIToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if db.IsSystemUser(u.Username) {
+	if u.IsServiceAccount() {
 		writeError(w, http.StatusForbidden, "system users cannot connect a CLI")
 		return
 	}
@@ -693,10 +711,14 @@ func (s *Server) handleConnectCLIToken(w http.ResponseWriter, r *http.Request) {
 		UserID: u.ID, KeyHash: strings.ToLower(req.TokenHash), Name: req.Name, ExpiresAt: &expiresAt,
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrAPIKeyNameExists) {
+			writeError(w, http.StatusConflict, "token name already in use")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID: &u.ID, Action: "connect_cli", ResourceType: "token", ResourceID: req.Name,
 		Detail: fmt.Sprintf("expires_in_days=%d", cliConnectionExpiryDays), IPAddress: s.ClientIP(r),
 	})
@@ -712,7 +734,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if db.IsSystemUser(u.Username) {
+	if u.IsServiceAccount() {
 		writeError(w, http.StatusForbidden, "system users cannot create persistent tokens")
 		return
 	}
@@ -761,12 +783,16 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: expiresAt,
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrAPIKeyNameExists) {
+			writeError(w, http.StatusConflict, "token name already in use")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
 	auditDetail := fmt.Sprintf("expires_in_days=%d", req.ExpiresInDays)
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       &u.ID,
 		Action:       "create_token",
 		ResourceType: "token",
@@ -845,7 +871,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       &u.ID,
 		Action:       "delete_token",
 		ResourceType: "token",
@@ -893,7 +919,7 @@ func (s *Server) handleSessionHandoff(w http.ResponseWriter, r *http.Request) {
 			if err := s.store.RevokeToken(claims.ID, claims.UserID, expiry); err != nil {
 				slog.Warn("revoke token on handoff", "user", claims.Subject, "err", err)
 			}
-			s.store.LogAuditEvent(db.AuditEventParams{
+			s.logAuditEvent(r, db.AuditEventParams{
 				UserID:       &claims.UserID,
 				Action:       "logout_handoff",
 				ResourceType: "user",

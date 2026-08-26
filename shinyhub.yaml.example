@@ -358,9 +358,11 @@ branding:
 # --- Env-only settings (no YAML key) ---
 #
 # SHINYHUB_DEPLOY_TOKEN
-#   Pre-shared bearer token for CI deploys. When set, authenticates as the
-#   synthetic system user "__deploy__" without requiring an admin to bootstrap
-#   a token via POST /api/tokens. Not persisted; rotation = change env, restart.
+#   Compatibility bearer credential for CI deploys. It belongs to the built-in
+#   Deployment automation service account (compatibility username "__deploy__").
+#   Only its SHA-256 hash and non-secret metadata are persisted. The elected
+#   control-plane owner applies changes. In HA, update every replica before
+#   handing over ownership; removing it everywhere and rolling restarts revokes it.
 #   Format: opaque operator-chosen secret, at least 32 characters. Hex, base64,
 #   or UUID values from your secrets manager all work as-is.
 #   Generate: openssl rand -hex 32  (or any equivalent ≥32-char random value)
@@ -369,5 +371,13 @@ branding:
 #   but you may add it if you want leaked env values to match the same scans.
 #
 # SHINYHUB_DEPLOY_TOKEN_ROLE
-#   Role assigned to the synthetic deploy user. Default: developer.
-#   Must be one of: viewer, developer, operator, admin.
+#   Effective role assigned to the configuration-managed credential. Default:
+#   developer. Other credentials on the service account keep their own roles.
+#   Must be one of: viewer, developer, operator, admin. Admin authority over
+#   people and server settings remains platform-wide even when an app allowlist
+#   is configured; prefer developer for normal CI deployment.
+#
+# SHINYHUB_DEPLOY_TOKEN_APPS
+#   Optional comma-separated app allowlist. This is both the explicit grant to
+#   those apps and the ceiling on app-specific operations. Scoped credentials
+#   cannot change the shared project catalog or read the global audit log.

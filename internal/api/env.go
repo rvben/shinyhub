@@ -167,7 +167,7 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 		if u != nil {
 			userID = &u.ID
 		}
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       userID,
 			Action:       "env.set",
 			ResourceType: "app",
@@ -223,7 +223,7 @@ func (s *Server) handleDeleteAppEnv(w http.ResponseWriter, r *http.Request) {
 	if u != nil {
 		userID = &u.ID
 	}
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       userID,
 		Action:       "env.delete",
 		ResourceType: "app",

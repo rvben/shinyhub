@@ -17,6 +17,14 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+var (
+	ErrReservedUsername        = errors.New("username is reserved")
+	ErrServiceAccountCollision = errors.New("reserved deployment identity is already used by a human account")
+	ErrManagedCredential       = errors.New("credential is managed by server configuration")
+	ErrAPIKeyNameExists        = errors.New("credential name already in use")
+	ErrReservedCredentialName  = errors.New("credential name is reserved for server configuration")
+)
+
 // ErrSlugTaken is returned by CreateApp when the requested slug is already
 // used by another app. Callers should surface this as HTTP 409 Conflict.
 var ErrSlugTaken = errors.New("slug already taken")
@@ -55,7 +63,10 @@ type User struct {
 	// TokenEpoch is the session-revocation counter. JWTs embed the epoch they
 	// were issued at; a bump (admin revoke-sessions, password change)
 	// invalidates every outstanding session token at the next request.
-	TokenEpoch int64
+	TokenEpoch        int64
+	PrincipalType     string
+	ServiceAccountKey string
+	ManagedBy         string
 }
 
 // ContextUser maps a persisted user row to the auth.ContextUser carried through
@@ -66,12 +77,15 @@ type User struct {
 // native sessions.
 func (u *User) ContextUser() *auth.ContextUser {
 	return &auth.ContextUser{
-		ID:          u.ID,
-		Username:    u.Username,
-		Role:        u.Role,
-		Email:       u.Email,
-		DisplayName: u.DisplayName,
-		TokenEpoch:  u.TokenEpoch,
+		ID:                u.ID,
+		Username:          u.Username,
+		Role:              u.Role,
+		PrincipalType:     u.PrincipalType,
+		ServiceAccountKey: u.ServiceAccountKey,
+		ManagedBy:         u.ManagedBy,
+		Email:             u.Email,
+		DisplayName:       u.DisplayName,
+		TokenEpoch:        u.TokenEpoch,
 	}
 }
 
@@ -91,6 +105,9 @@ type CreateUserParams struct {
 }
 
 func (s *Store) CreateUser(p CreateUserParams) error {
+	if IsReservedUsername(p.Username) {
+		return ErrReservedUsername
+	}
 	_, err := s.db.Exec(
 		`INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)`,
 		p.Username, p.PasswordHash, p.Role,
@@ -103,11 +120,13 @@ func (s *Store) CreateUser(p CreateUserParams) error {
 
 func (s *Store) GetUserByUsername(username string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch FROM users WHERE username = ?`,
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
+		        principal_type, service_account_key, managed_by FROM users WHERE username = ?`,
 		username,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
+		&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -118,11 +137,13 @@ func (s *Store) GetUserByUsername(username string) (*User, error) {
 
 func (s *Store) GetUserByID(id int64) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch FROM users WHERE id = ?`,
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
+		        principal_type, service_account_key, managed_by FROM users WHERE id = ?`,
 		id,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
+		&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -142,13 +163,17 @@ func (s *Store) LookupContextUser(id int64) (*auth.ContextUser, error) {
 	if err != nil {
 		return nil, err
 	}
+	if u.PrincipalType == "service_account" {
+		return nil, ErrNotFound
+	}
 	return u.ContextUser(), nil
 }
 
 // ListUsers returns all users ordered by username.
 func (s *Store) ListUsers() ([]*User, error) {
 	rows, err := s.db.Query(
-		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch FROM users ORDER BY username`)
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
+		        principal_type, service_account_key, managed_by FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +181,8 @@ func (s *Store) ListUsers() ([]*User, error) {
 	var users []*User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
+			&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy); err != nil {
 			return nil, err
 		}
 		users = append(users, &u)
@@ -196,6 +222,9 @@ func (s *Store) GetForwardAuthUser(username string) (*auth.ContextUser, error) {
 	if err != nil {
 		return nil, err
 	}
+	if u.PrincipalType == "service_account" || IsReservedUsername(username) {
+		return nil, auth.ErrUserNotFound
+	}
 	return u.ContextUser(), nil
 }
 
@@ -208,6 +237,9 @@ func (s *Store) CreateForwardAuthUser(username, role string) (*auth.ContextUser,
 		PasswordHash: systemUserPasswordHash, // "!disabled" sentinel: no local password login path
 		Role:         role,
 	}); err != nil {
+		if errors.Is(err, ErrReservedUsername) {
+			return nil, auth.ErrReservedIdentity
+		}
 		return nil, fmt.Errorf("create forward auth user: %w", err)
 	}
 	u, err := s.GetUserByUsername(username)
@@ -360,58 +392,63 @@ func (s *Store) DeleteUser(id int64) error {
 	return nil
 }
 
-// SystemUsernameDeploy is the username of the synthetic system user that owns
-// requests authenticated by SHINYHUB_DEPLOY_TOKEN. Treated as immutable by the
-// users API: role, password, and existence are owned by the env var and the
-// startup upsert, not by admins clicking around the UI.
+// SystemUsernameDeploy is the compatibility username of the built-in deployment
+// service account. It is reserved from every interactive provisioning path.
 const SystemUsernameDeploy = "__deploy__"
 
-// systemUsernames is the canonical set of usernames managed exclusively by the
-// server bootstrap. Membership is constant for the lifetime of a release; no
-// runtime mutation. Add new entries here when introducing further system
-// users.
+// systemUsernames is the canonical set of reserved compatibility usernames.
 var systemUsernames = map[string]struct{}{
 	SystemUsernameDeploy: {},
 }
 
-// IsSystemUser reports whether username names a server-managed system user.
-// The user-management handlers consult this to refuse role changes, password
-// resets, and deletions targeting these accounts.
-func IsSystemUser(username string) bool {
+// IsReservedUsername reports whether username is reserved for a built-in
+// principal. Persisted principal metadata, rather than this name, drives
+// authorization after provisioning.
+func IsReservedUsername(username string) bool {
 	_, ok := systemUsernames[username]
 	return ok
 }
 
+// IsSystemUser is retained for source compatibility. Authorization code must
+// use persisted principal metadata instead of inferring identity from a name.
+func IsSystemUser(username string) bool { return IsReservedUsername(username) }
+
 // systemUserPasswordHash is a sentinel that bcrypt.CompareHashAndPassword will
-// never match (length below the bcrypt format minimum). The synthetic deploy
-// user has no password login path; storing a real bcrypt hash would imply one
-// exists, which would be a footgun.
+// never match. Service accounts have no password login path.
 const systemUserPasswordHash = "!disabled"
 
-// UpsertSystemUser inserts the synthetic user named username at the given role,
-// or updates the existing row's role to match. Returns the resulting row.
-// Idempotent: safe to call on every startup.
-//
-// The INSERT ... ON CONFLICT DO NOTHING plus UPDATE sequence is atomic under
-// the database's unique constraint: a concurrent caller cannot race between the
-// read and the insert because the constraint is enforced by the engine.
+// UpsertSystemUser ensures the built-in deployment service account exists. The
+// account-level role is only a compatibility default; each credential carries
+// its own effective role. A conflicting human row fails closed.
 func (s *Store) UpsertSystemUser(username, role string) (*User, error) {
-	if !IsSystemUser(username) {
+	if !IsReservedUsername(username) {
 		return nil, fmt.Errorf("upsert system user: %q is not a system username", username)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?) ON CONFLICT (username) DO NOTHING`,
+		`INSERT INTO users (username, password_hash, role, display_name, principal_type, service_account_key, managed_by)
+		 VALUES (?, ?, ?, 'Deployment automation', 'service_account', 'deployment', 'platform')
+		 ON CONFLICT (username) DO NOTHING`,
 		username, systemUserPasswordHash, role,
 	); err != nil {
 		return nil, fmt.Errorf("insert system user: %w", err)
 	}
-	if _, err := s.db.Exec(
-		`UPDATE users SET role = ? WHERE username = ?`,
-		role, username,
-	); err != nil {
-		return nil, fmt.Errorf("update system user role: %w", err)
+	u, err := s.GetUserByUsername(username)
+	if err != nil {
+		return nil, err
 	}
-	return s.GetUserByUsername(username)
+	if u.PrincipalType != "service_account" || u.ServiceAccountKey != "deployment" || u.PasswordHash != systemUserPasswordHash {
+		return nil, ErrServiceAccountCollision
+	}
+	// The account-level role is deliberately inert. Normalize legacy rows that
+	// carried the configured deploy-token role so they cannot count as a human
+	// administrator or leak a stale role through identity responses.
+	if u.Role != "developer" {
+		if _, err := s.db.Exec(`UPDATE users SET role = 'developer' WHERE id = ?`, u.ID); err != nil {
+			return nil, fmt.Errorf("normalize system user role: %w", err)
+		}
+		u.Role = "developer"
+	}
+	return u, nil
 }
 
 // --- API Keys ---
@@ -422,20 +459,58 @@ type CreateAPIKeyParams struct {
 	Name    string
 	// ExpiresAt, when non-nil, makes the key unusable past that instant.
 	// nil = never expires.
-	ExpiresAt *time.Time
+	ExpiresAt       *time.Time
+	CredentialType  string
+	CredentialRole  string
+	AppScope        []string
+	Unrestricted    bool
+	CreatedByUserID *int64
+	ExternalID      string
 }
 
 // CreateAPIKey inserts a new API key and returns the inserted row's ID and
 // creation timestamp.
 func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
+	if p.CredentialType == "" {
+		p.CredentialType = "personal"
+	}
+	if (p.CredentialType == "service" || p.CredentialType == "deploy_token") &&
+		strings.EqualFold(strings.TrimSpace(p.Name), DeployTokenCredentialName) &&
+		p.ExternalID != DeployTokenExternalID {
+		return 0, time.Time{}, ErrReservedCredentialName
+	}
+	scope, err := json.Marshal(p.AppScope)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("encode api key scope: %w", err)
+	}
+	ctx := context.Background()
+	tx, err := s.d.beginWrite(ctx, s.db.real, p.UserID)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("begin api key creation: %w", err)
+	}
+	defer tx.Rollback()
+	var existing int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND name = ?`, p.UserID, p.Name).Scan(&existing); err != nil {
+		return 0, time.Time{}, fmt.Errorf("check api key name: %w", err)
+	}
+	if existing > 0 {
+		return 0, time.Time{}, ErrAPIKeyNameExists
+	}
 	var id int64
 	var createdAt time.Time
-	err := s.db.QueryRow(
-		`INSERT INTO api_keys (user_id, key_hash, name, expires_at) VALUES (?, ?, ?, ?) RETURNING id, created_at`,
-		p.UserID, p.KeyHash, p.Name, p.ExpiresAt,
+	err = tx.QueryRowContext(ctx,
+		`INSERT INTO api_keys (user_id, key_hash, name, expires_at, credential_type, credential_role,
+		 app_scope, unrestricted, created_by_user_id, external_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at`,
+		p.UserID, p.KeyHash, p.Name, p.ExpiresAt, p.CredentialType, p.CredentialRole,
+		string(scope), p.Unrestricted, p.CreatedByUserID, p.ExternalID,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("create api key: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, time.Time{}, fmt.Errorf("commit api key creation: %w", err)
 	}
 	return id, createdAt, nil
 }
@@ -448,15 +523,22 @@ func (s *Store) CreateAPIKey(p CreateAPIKeyParams) (int64, time.Time, error) {
 func (s *Store) AuthenticateAPIKey(hash string) (*User, APIKeyInfo, error) {
 	row := s.db.QueryRow(`
 		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch,
-		       k.id, k.name, k.created_at, k.expires_at, k.last_used_at
+		       u.principal_type, u.service_account_key, u.managed_by,
+		       k.id, k.name, k.created_at, k.expires_at, k.last_used_at,
+		       k.credential_type, k.credential_role, k.app_scope, k.unrestricted,
+		       k.created_by_user_id, k.external_id
 		FROM users u JOIN api_keys k ON k.user_id = u.id
 		WHERE k.key_hash = ? AND (k.expires_at IS NULL OR k.expires_at > ?)`,
 		hash, time.Now().UTC())
 	var u User
 	var key APIKeyInfo
 	var expires, lastUsed sql.NullTime
+	var scope string
+	var createdBy sql.NullInt64
 	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
-		&key.ID, &key.Name, &key.CreatedAt, &expires, &lastUsed); err != nil {
+		&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy,
+		&key.ID, &key.Name, &key.CreatedAt, &expires, &lastUsed, &key.CredentialType,
+		&key.CredentialRole, &scope, &key.Unrestricted, &createdBy, &key.ExternalID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, APIKeyInfo{}, ErrNotFound
 		}
@@ -469,6 +551,16 @@ func (s *Store) AuthenticateAPIKey(hash string) (*User, APIKeyInfo, error) {
 	if lastUsed.Valid {
 		t := lastUsed.Time
 		key.LastUsedAt = &t
+	}
+	if err := json.Unmarshal([]byte(scope), &key.AppScope); err != nil {
+		return nil, APIKeyInfo{}, fmt.Errorf("decode api key scope: %w", err)
+	}
+	if createdBy.Valid {
+		v := createdBy.Int64
+		key.CreatedByUserID = &v
+	}
+	if key.ExternalID != "" {
+		key.ManagedBy = "configuration"
 	}
 	return &u, key, nil
 }
@@ -510,7 +602,14 @@ type APIKeyInfo struct {
 	// ExpiresAt is nil for a never-expiring key.
 	ExpiresAt *time.Time `json:"expires_at"`
 	// LastUsedAt is nil for a key that has never authenticated a request.
-	LastUsedAt *time.Time `json:"last_used_at"`
+	LastUsedAt      *time.Time `json:"last_used_at"`
+	CredentialType  string     `json:"type"`
+	CredentialRole  string     `json:"role,omitempty"`
+	AppScope        []string   `json:"apps"`
+	Unrestricted    bool       `json:"unrestricted"`
+	CreatedByUserID *int64     `json:"created_by_user_id,omitempty"`
+	ExternalID      string     `json:"-"`
+	ManagedBy       string     `json:"managed_by,omitempty"`
 }
 
 // APIKeyAdminInfo is APIKeyInfo plus the owning user, for the admin-only
@@ -523,7 +622,10 @@ type APIKeyAdminInfo struct {
 
 func scanAPIKeyInfo(rows *sql.Rows, k *APIKeyInfo, extra ...any) error {
 	var expires, lastUsed sql.NullTime
-	dest := append([]any{&k.ID, &k.Name, &k.CreatedAt, &expires, &lastUsed}, extra...)
+	var createdBy sql.NullInt64
+	var scope string
+	dest := append([]any{&k.ID, &k.Name, &k.CreatedAt, &expires, &lastUsed,
+		&k.CredentialType, &k.CredentialRole, &scope, &k.Unrestricted, &createdBy, &k.ExternalID}, extra...)
 	if err := rows.Scan(dest...); err != nil {
 		return err
 	}
@@ -535,13 +637,25 @@ func scanAPIKeyInfo(rows *sql.Rows, k *APIKeyInfo, extra ...any) error {
 		t := lastUsed.Time
 		k.LastUsedAt = &t
 	}
+	if err := json.Unmarshal([]byte(scope), &k.AppScope); err != nil {
+		return fmt.Errorf("decode api key scope: %w", err)
+	}
+	if createdBy.Valid {
+		v := createdBy.Int64
+		k.CreatedByUserID = &v
+	}
+	if k.ExternalID != "" {
+		k.ManagedBy = "configuration"
+	}
 	return nil
 }
 
 // ListAPIKeys returns all tokens owned by userID, newest first.
 func (s *Store) ListAPIKeys(userID int64) ([]APIKeyInfo, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, created_at, expires_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`,
+		`SELECT id, name, created_at, expires_at, last_used_at, credential_type, credential_role,
+		        app_scope, unrestricted, created_by_user_id, external_id
+		 FROM api_keys WHERE user_id = ? AND credential_type = 'personal' ORDER BY created_at DESC`,
 		userID)
 	if err != nil {
 		return nil, err
@@ -563,8 +677,11 @@ func (s *Store) ListAPIKeys(userID int64) ([]APIKeyInfo, error) {
 // revocation possible without trawling the audit log for IDs.
 func (s *Store) ListAllAPIKeys() ([]APIKeyAdminInfo, error) {
 	rows, err := s.db.Query(`
-		SELECT k.id, k.name, k.created_at, k.expires_at, k.last_used_at, k.user_id, u.username
+		SELECT k.id, k.name, k.created_at, k.expires_at, k.last_used_at, k.credential_type,
+		       k.credential_role, k.app_scope, k.unrestricted, k.created_by_user_id, k.external_id,
+		       k.user_id, u.username
 		FROM api_keys k JOIN users u ON u.id = k.user_id
+		WHERE k.credential_type = 'personal'
 		ORDER BY k.created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -587,22 +704,185 @@ func (s *Store) ListAllAPIKeys() ([]APIKeyAdminInfo, error) {
 // For admin callers pass ownerID = 0 to bypass the ownership check.
 // Returns ErrNotFound if no matching row is deleted.
 func (s *Store) DeleteAPIKey(id int64, ownerID int64) error {
-	var result sql.Result
+	var deletedID int64
 	var err error
 	if ownerID == 0 {
-		result, err = s.db.Exec(`DELETE FROM api_keys WHERE id = ?`, id)
+		err = s.db.QueryRow(`DELETE FROM api_keys
+			WHERE id = ? AND credential_type = 'personal' AND external_id = ''
+			RETURNING id`, id).Scan(&deletedID)
 	} else {
-		result, err = s.db.Exec(`DELETE FROM api_keys WHERE id = ? AND user_id = ?`, id, ownerID)
+		err = s.db.QueryRow(`DELETE FROM api_keys
+			WHERE id = ? AND user_id = ? AND credential_type = 'personal' AND external_id = ''
+			RETURNING id`, id, ownerID).Scan(&deletedID)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("delete api key: %w", err)
 	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("delete api key rows: %w", err)
+	return nil
+}
+
+// DeleteServiceCredential deletes an unmanaged service credential owned by the
+// specified service-account principal. Keeping this separate from DeleteAPIKey
+// prevents the generic personal-token endpoint from crossing credential-type
+// boundaries merely because both credentials share a user ID.
+func (s *Store) DeleteServiceCredential(id, ownerID int64) error {
+	var deletedID int64
+	err := s.db.QueryRow(`DELETE FROM api_keys
+		WHERE id = ? AND user_id = ? AND credential_type IN ('service', 'deploy_token') AND external_id = ''
+		RETURNING id`, id, ownerID).Scan(&deletedID)
+	if err == nil {
+		return nil
 	}
-	if n == 0 {
-		return ErrNotFound
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("delete service credential: %w", err)
+	}
+	var credentialType, externalID string
+	if scanErr := s.db.QueryRow(`SELECT credential_type, external_id FROM api_keys WHERE id = ? AND user_id = ?`, id, ownerID).
+		Scan(&credentialType, &externalID); scanErr == nil &&
+		(credentialType == "service" || credentialType == "deploy_token") && externalID != "" {
+		return ErrManagedCredential
+	}
+	return ErrNotFound
+}
+
+const DeploymentServiceAccountKey = "deployment"
+const DeployTokenExternalID = "env:SHINYHUB_DEPLOY_TOKEN"
+const DeployTokenCredentialName = "SHINYHUB_DEPLOY_TOKEN"
+
+func (s *Store) GetServiceAccount(key string) (*User, error) {
+	row := s.db.QueryRow(`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
+		principal_type, service_account_key, managed_by
+		FROM users WHERE principal_type = 'service_account' AND service_account_key = ?`, key)
+	var u User
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email,
+		&u.CreatedAt, &u.TokenEpoch, &u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (s *Store) ListServiceAccounts() ([]*User, error) {
+	rows, err := s.db.Query(`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
+		principal_type, service_account_key, managed_by
+		FROM users WHERE principal_type = 'service_account' ORDER BY service_account_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	accounts := []*User{}
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email,
+			&u.CreatedAt, &u.TokenEpoch, &u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, &u)
+	}
+	return accounts, rows.Err()
+}
+
+func (s *Store) ListServiceCredentials(userID int64) ([]APIKeyInfo, error) {
+	rows, err := s.db.Query(`SELECT id, name, created_at, expires_at, last_used_at, credential_type,
+		credential_role, app_scope, unrestricted, created_by_user_id, external_id
+		FROM api_keys WHERE user_id = ? AND credential_type IN ('service', 'deploy_token')
+		ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := []APIKeyInfo{}
+	for rows.Next() {
+		var k APIKeyInfo
+		if err := scanAPIKeyInfo(rows, &k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// SyncDeployCredential atomically creates or rotates the configuration-owned
+// compatibility token while keeping one stable database identity.
+func (s *Store) SyncDeployCredential(userID int64, keyHash, role string, appScope []string) (APIKeyInfo, error) {
+	scope, err := json.Marshal(appScope)
+	if err != nil {
+		return APIKeyInfo{}, err
+	}
+	ctx := context.Background()
+	tx, err := s.d.beginWrite(ctx, s.db.real, userID)
+	if err != nil {
+		return APIKeyInfo{}, fmt.Errorf("begin deploy credential sync: %w", err)
+	}
+	defer tx.Rollback()
+
+	// One bearer secret must resolve to one principal. If an administrator moves
+	// an existing API credential's raw value into SHINYHUB_DEPLOY_TOKEN, adopt
+	// that row as configuration-managed instead of leaving owner readiness in a
+	// unique-key retry loop. The configuration path is authoritative because it
+	// is the only place where the raw secret can have been supplied again.
+	lookupID := func(query string, arg any) (int64, bool, error) {
+		var id int64
+		err := tx.QueryRowContext(ctx, query, arg).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, nil
+		}
+		return id, err == nil, err
+	}
+	targetID, hasTarget, err := lookupID(`SELECT id FROM api_keys WHERE key_hash = ?`, keyHash)
+	if err != nil {
+		return APIKeyInfo{}, fmt.Errorf("find deploy credential secret: %w", err)
+	}
+	managedID, hasManaged, err := lookupID(`SELECT id FROM api_keys WHERE external_id = ?`, DeployTokenExternalID)
+	if err != nil {
+		return APIKeyInfo{}, fmt.Errorf("find managed deploy credential: %w", err)
+	}
+	if hasTarget && hasManaged && targetID != managedID {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM api_keys WHERE id = ?`, managedID); err != nil {
+			return APIKeyInfo{}, fmt.Errorf("replace managed deploy credential: %w", err)
+		}
+	}
+	credentialID := targetID
+	if !hasTarget && hasManaged {
+		credentialID = managedID
+	}
+
+	var id int64
+	var createdAt time.Time
+	if credentialID != 0 {
+		err = tx.QueryRowContext(ctx, `UPDATE api_keys SET
+			user_id = ?, key_hash = ?, name = ?, expires_at = NULL,
+			credential_type = 'deploy_token', credential_role = ?, app_scope = ?,
+			unrestricted = ?, created_by_user_id = NULL, external_id = ?
+			WHERE id = ? RETURNING id, created_at`, userID, keyHash, DeployTokenCredentialName,
+			role, string(scope), len(appScope) == 0, DeployTokenExternalID, credentialID).Scan(&id, &createdAt)
+	} else {
+		err = tx.QueryRowContext(ctx, `INSERT INTO api_keys
+			(user_id, key_hash, name, credential_type, credential_role, app_scope, unrestricted, external_id)
+			VALUES (?, ?, ?, 'deploy_token', ?, ?, ?, ?)
+			RETURNING id, created_at`, userID, keyHash, DeployTokenCredentialName,
+			role, string(scope), len(appScope) == 0, DeployTokenExternalID).Scan(&id, &createdAt)
+	}
+	if err != nil {
+		return APIKeyInfo{}, fmt.Errorf("sync deploy credential: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return APIKeyInfo{}, fmt.Errorf("commit deploy credential sync: %w", err)
+	}
+	return APIKeyInfo{ID: id, Name: DeployTokenCredentialName, CreatedAt: createdAt,
+		CredentialType: "deploy_token", CredentialRole: role, AppScope: appScope,
+		Unrestricted: len(appScope) == 0, ExternalID: DeployTokenExternalID, ManagedBy: "configuration"}, nil
+}
+
+func (s *Store) DeleteDeployCredential() error {
+	_, err := s.db.Exec(`DELETE FROM api_keys WHERE external_id = ?`, DeployTokenExternalID)
+	if err != nil {
+		return fmt.Errorf("delete deploy credential: %w", err)
 	}
 	return nil
 }
@@ -1471,10 +1751,13 @@ const (
 // created. Actor is an immutable username snapshot: UserID keeps relational
 // identity while the snapshot survives a later rename or user deletion.
 type DeploymentOrigin struct {
-	Kind    string `json:"kind"`
-	Channel string `json:"channel,omitempty"`
-	UserID  *int64 `json:"user_id,omitempty"`
-	Actor   string `json:"actor,omitempty"`
+	Kind           string `json:"kind"`
+	Channel        string `json:"channel,omitempty"`
+	UserID         *int64 `json:"user_id,omitempty"`
+	Actor          string `json:"actor,omitempty"`
+	CredentialID   *int64 `json:"credential_id,omitempty"`
+	CredentialType string `json:"credential_type,omitempty"`
+	CredentialName string `json:"credential_name,omitempty"`
 }
 
 func normalizeDeploymentOrigin(runID string, origin DeploymentOrigin) (DeploymentOrigin, error) {
@@ -1503,6 +1786,9 @@ func normalizeDeploymentOrigin(runID string, origin DeploymentOrigin) (Deploymen
 		origin.Channel = ""
 		origin.UserID = nil
 		origin.Actor = ""
+		origin.CredentialID = nil
+		origin.CredentialType = ""
+		origin.CredentialName = ""
 	default:
 		return DeploymentOrigin{}, fmt.Errorf("invalid deployment origin kind %q", origin.Kind)
 	}
@@ -1533,10 +1819,12 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	}
 	var id int64
 	err = s.db.QueryRow(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, origin_user_id, origin_actor)
-		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?) RETURNING id`,
+		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, origin_user_id, origin_actor,
+		 origin_credential_id, origin_credential_type, origin_credential_name)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		p.AppID, p.Version, p.BundleDir, status, p.RunID, p.RestoredFromID,
 		origin.Kind, origin.Channel, origin.UserID, origin.Actor,
+		origin.CredentialID, origin.CredentialType, origin.CredentialName,
 	).Scan(&id)
 	if err != nil {
 		return nil, err
@@ -1581,10 +1869,12 @@ func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID
 	}
 	var id int64
 	err = s.db.QueryRow(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, origin_user_id, origin_actor)
-		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?) RETURNING id`,
+		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, origin_user_id, origin_actor,
+		 origin_credential_id, origin_credential_type, origin_credential_name)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		appID, version, bundleDir, DeploymentPending, runID, restoredFromID,
 		origin.Kind, origin.Channel, origin.UserID, origin.Actor,
+		origin.CredentialID, origin.CredentialType, origin.CredentialName,
 	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
@@ -1714,6 +2004,7 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		           WHERE d3.app_id = d.app_id AND d3.status = 'succeeded' AND d3.id <= d.restored_from_id
 		       ) END AS restored_from_release_number,
 		       d.origin_kind, d.origin_channel, d.origin_user_id, d.origin_actor,
+		       d.origin_credential_id, d.origin_credential_type, d.origin_credential_name,
 		       fr.id, fr.fleet_id, fr.kind, fr.provenance, fr.created_at
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
@@ -1730,10 +2021,13 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		var release, restoredID, restoredRelease sql.NullInt64
 		var originKind, originChannel, originActor string
 		var originUserID sql.NullInt64
+		var originCredentialID sql.NullInt64
+		var originCredentialType, originCredentialName string
 		var runID, fleetID, kind, raw sql.NullString
 		var runCreated sql.NullTime
 		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.FailureReason, &d.CreatedAt, &release,
 			&restoredID, &restoredRelease, &originKind, &originChannel, &originUserID, &originActor,
+			&originCredentialID, &originCredentialType, &originCredentialName,
 			&runID, &fleetID, &kind, &raw, &runCreated); err != nil {
 			return nil, err
 		}
@@ -1754,6 +2048,12 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 			id := originUserID.Int64
 			origin.UserID = &id
 		}
+		if originCredentialID.Valid {
+			id := originCredentialID.Int64
+			origin.CredentialID = &id
+		}
+		origin.CredentialType = originCredentialType
+		origin.CredentialName = originCredentialName
 		p := &DeploymentProvenance{Origin: origin}
 		if runID.Valid {
 			p.RunID, p.FleetID, p.Kind = runID.String, fleetID.String, kind.String
@@ -1805,13 +2105,17 @@ func (s *Store) CurrentDeploymentProvenance(appID int64) (*DeploymentProvenance,
 	var p DeploymentProvenance
 	var originKind, originChannel, originActor string
 	var originUserID sql.NullInt64
+	var originCredentialID sql.NullInt64
+	var originCredentialType, originCredentialName string
 	var runID, fleetID, kind, raw sql.NullString
 	var started sql.NullTime
 	err := s.db.QueryRow(`SELECT d.origin_kind, d.origin_channel, d.origin_user_id, d.origin_actor,
+		       d.origin_credential_id, d.origin_credential_type, d.origin_credential_name,
 		       fr.id, fr.fleet_id, fr.kind, fr.provenance, fr.created_at
 		FROM deployments d LEFT JOIN fleet_runs fr ON fr.id = d.run_id
 		WHERE d.app_id = ? AND d.status = 'succeeded' ORDER BY d.id DESC LIMIT 1`, appID).
 		Scan(&originKind, &originChannel, &originUserID, &originActor,
+			&originCredentialID, &originCredentialType, &originCredentialName,
 			&runID, &fleetID, &kind, &raw, &started)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1827,6 +2131,12 @@ func (s *Store) CurrentDeploymentProvenance(appID int64) (*DeploymentProvenance,
 		id := originUserID.Int64
 		p.Origin.UserID = &id
 	}
+	if originCredentialID.Valid {
+		id := originCredentialID.Int64
+		p.Origin.CredentialID = &id
+	}
+	p.Origin.CredentialType = originCredentialType
+	p.Origin.CredentialName = originCredentialName
 	if runID.Valid {
 		p.RunID, p.FleetID, p.Kind = runID.String, fleetID.String, kind.String
 		if started.Valid {
@@ -2333,16 +2643,21 @@ func (s *Store) CreateOAuthAccount(p CreateOAuthAccountParams) error {
 
 func (s *Store) GetUserByOAuthAccount(provider, providerID string) (*User, error) {
 	row := s.db.QueryRow(`
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch,
+		       u.principal_type, u.service_account_key, u.managed_by
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`, provider, providerID)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
+		&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	if IsReservedUsername(u.Username) || u.PrincipalType == "service_account" {
+		return nil, ErrReservedUsername
 	}
 	return &u, nil
 }
@@ -2385,7 +2700,8 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 	scanUser := func(row *sql.Row) (*User, error) {
 		var u User
-		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch); err != nil {
+		if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
+			&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, ErrNotFound
 			}
@@ -2394,15 +2710,20 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		return &u, nil
 	}
 	const linkedQuery = `
-		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch
+		SELECT u.id, u.username, u.password_hash, u.role, u.display_name, u.email, u.created_at, u.token_epoch,
+		       u.principal_type, u.service_account_key, u.managed_by
 		FROM users u
 		JOIN oauth_accounts o ON o.user_id = u.id
 		WHERE o.provider = ? AND o.provider_id = ?`
 	const userByIDQuery = `
-		SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch
+		SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
+		       principal_type, service_account_key, managed_by
 		FROM users WHERE id = ?`
 
 	if u, gerr := scanUser(tx.QueryRowContext(ctx, linkedQuery, p.Provider, p.ProviderID)); gerr == nil {
+		if IsReservedUsername(u.Username) || u.PrincipalType == "service_account" {
+			return nil, false, ErrReservedUsername
+		}
 		if cerr := tx.Commit(); cerr != nil {
 			return nil, false, fmt.Errorf("commit: %w", cerr)
 		}
@@ -2414,6 +2735,9 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 	var userID int64
 	for _, name := range p.UsernameCandidates {
+		if IsReservedUsername(name) {
+			continue
+		}
 		// Wrap each attempt in a savepoint so a unique-constraint violation
 		// does not abort the outer transaction on Postgres (which marks any
 		// transaction with a failed statement as aborted until rolled back).
@@ -2560,27 +2884,35 @@ const (
 // AuditEventParams holds the fields for a new audit event.
 // UserID is a pointer because some actions (login_failed) have no authenticated user.
 type AuditEventParams struct {
-	UserID       *int64
-	Action       string
-	ResourceType string
-	ResourceID   string
-	Detail       string
-	IPAddress    string
-	RunID        string
+	UserID         *int64
+	Action         string
+	ResourceType   string
+	ResourceID     string
+	Detail         string
+	IPAddress      string
+	RunID          string
+	CredentialID   *int64
+	CredentialType string
+	CredentialName string
 }
 
 // AuditEvent is a row from the audit_events table.
 type AuditEvent struct {
-	ID           int64     `json:"id"`
-	UserID       *int64    `json:"user_id,omitempty"`
-	Username     *string   `json:"username,omitempty"`
-	Action       string    `json:"action"`
-	ResourceType string    `json:"resource_type"`
-	ResourceID   string    `json:"resource_id"`
-	Detail       string    `json:"detail"`
-	IPAddress    string    `json:"ip_address"`
-	CreatedAt    time.Time `json:"created_at"`
-	RunID        string    `json:"run_id,omitempty"`
+	ID                int64     `json:"id"`
+	UserID            *int64    `json:"user_id,omitempty"`
+	Username          *string   `json:"username,omitempty"`
+	Action            string    `json:"action"`
+	ResourceType      string    `json:"resource_type"`
+	ResourceID        string    `json:"resource_id"`
+	Detail            string    `json:"detail"`
+	IPAddress         string    `json:"ip_address"`
+	CreatedAt         time.Time `json:"created_at"`
+	RunID             string    `json:"run_id,omitempty"`
+	PrincipalType     string    `json:"principal_type,omitempty"`
+	ServiceAccountKey string    `json:"service_account_key,omitempty"`
+	CredentialID      *int64    `json:"credential_id,omitempty"`
+	CredentialType    string    `json:"credential_type,omitempty"`
+	CredentialName    string    `json:"credential_name,omitempty"`
 }
 
 // LogAuditEvent inserts an audit event. A write failure is logged and surfaced
@@ -2588,9 +2920,11 @@ type AuditEvent struct {
 // never break normal operation.
 func (s *Store) LogAuditEvent(p AuditEventParams) {
 	_, err := s.db.Exec(`
-		INSERT INTO audit_events (user_id, action, resource_type, resource_id, detail, ip_address, run_id)
-		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''))`,
-		p.UserID, p.Action, p.ResourceType, p.ResourceID, p.Detail, p.IPAddress, p.RunID)
+		INSERT INTO audit_events (user_id, action, resource_type, resource_id, detail, ip_address, run_id,
+		 credential_id, credential_type, credential_name)
+		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?)`,
+		p.UserID, p.Action, p.ResourceType, p.ResourceID, p.Detail, p.IPAddress, p.RunID,
+		p.CredentialID, p.CredentialType, p.CredentialName)
 	var userID any
 	if p.UserID != nil {
 		userID = *p.UserID
@@ -2607,6 +2941,9 @@ func (s *Store) LogAuditEvent(p AuditEventParams) {
 		"detail", p.Detail,
 		"ip_address", p.IPAddress,
 		"run_id", p.RunID,
+		"credential_id", p.CredentialID,
+		"credential_type", p.CredentialType,
+		"credential_name", p.CredentialName,
 		"persisted", err == nil,
 	)
 	if err != nil {
@@ -2647,7 +2984,9 @@ func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent,
 	query := `
 		SELECT ae.id, ae.user_id, u.username,
 		       ae.action, ae.resource_type, ae.resource_id,
-		       ae.detail, ae.ip_address, ae.created_at, ae.run_id
+		       ae.detail, ae.ip_address, ae.created_at, ae.run_id,
+		       COALESCE(u.principal_type, ''), COALESCE(u.service_account_key, ''),
+		       ae.credential_id, ae.credential_type, ae.credential_name
 		FROM audit_events ae
 		LEFT JOIN users u ON u.id = ae.user_id`
 	args := []any{}
@@ -2670,6 +3009,7 @@ func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent,
 			&e.ID, &e.UserID, &e.Username,
 			&e.Action, &e.ResourceType, &e.ResourceID,
 			&e.Detail, &e.IPAddress, &e.CreatedAt, &runID,
+			&e.PrincipalType, &e.ServiceAccountKey, &e.CredentialID, &e.CredentialType, &e.CredentialName,
 		); err != nil {
 			return nil, err
 		}

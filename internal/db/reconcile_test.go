@@ -147,6 +147,21 @@ func TestDeleteUser_LastAdminRejected(t *testing.T) {
 	}
 }
 
+func TestServiceAccountDoesNotSatisfyLastHumanAdminGuard(t *testing.T) {
+	store := dbtest.New(t)
+	humanID := seedUser(t, store, "root", "admin")
+	service, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE users SET role = 'admin' WHERE id = ?`, service.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetManualRole(humanID, "viewer"); !errors.Is(err, db.ErrLastAdmin) {
+		t.Fatalf("demoting last human admin with service admin present=%v, want ErrLastAdmin", err)
+	}
+}
+
 func TestDeleteUser_NonLastAdminAllowed(t *testing.T) {
 	store := dbtest.New(t)
 	store.CreateUser(db.CreateUserParams{Username: "a", PasswordHash: "h", Role: "admin"})

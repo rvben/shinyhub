@@ -45,6 +45,11 @@ Recommended hardening for native mode:
   or production workloads.
 - Restrict who can obtain a deploy token or an interactive `developer`/
   `operator`/`admin` account.
+- Give each team or pipeline its own expiring service credential. App
+  allowlists grant only the named apps and do not constrain global Admin
+  powers over people or server settings; prefer Developer for CI. Scoped
+  credentials cannot mutate the shared project catalog or read the global
+  audit log.
 
 Native filesystem isolation defaults to `standard` on Linux: Landlock makes the
 host filesystem read-only to app processes except for their own bundle/data and
@@ -381,14 +386,16 @@ task startup windows so in-flight tasks do not fail bundle fetch mid-cold-start.
 
 ## Secret handling
 
-All server secrets are sourced from the environment and are never written to
-the database or app-visible state.
+Raw server secrets are sourced from the environment and are never written to
+the database or app-visible state. ShinyHub persists a one-way SHA-256 hash of
+the environment deployment credential so it can use the same lifecycle and
+attribution path as other credentials; the original value cannot be recovered.
 
 | Secret | Source | Notes |
 |--------|--------|-------|
 | `auth.secret` | `SHINYHUB_AUTH_SECRET` | Session/JWT signing key. Must be at least 32 characters and not the example placeholder; the server refuses to start otherwise. Generate with `openssl rand -hex 32`. |
 | OAuth client secrets | `SHINYHUB_GITHUB_CLIENT_SECRET`, `SHINYHUB_GOOGLE_CLIENT_SECRET`, `SHINYHUB_OIDC_CLIENT_SECRET` | Only the configured providers need a value. |
-| Deploy token | `SHINYHUB_DEPLOY_TOKEN` (+ `SHINYHUB_DEPLOY_TOKEN_ROLE`) | Pre-shared CI bearer credential. At least 32 characters. Not persisted. |
+| Deployment credential | `SHINYHUB_DEPLOY_TOKEN` (+ role/apps settings) | Compatibility CI bearer credential. At least 32 characters. Only its hash and non-secret metadata are persisted. |
 | Scaleway API key | `SCW_ACCESS_KEY`, `SCW_SECRET_KEY` | Required only for `scaleway_serverless` tiers. Used for provider management and private-origin invocation; never written to YAML or injected into apps. |
 
 Server secrets are kept out of the environment exposed to deployed app
@@ -397,19 +404,33 @@ own process environment.
 
 ## Deploy-token rotation
 
-Two kinds of deploy credentials exist:
+Three credential paths can deploy:
 
-- **Env deploy token** (`SHINYHUB_DEPLOY_TOKEN`): a single pre-shared token for
-  CI. It is not stored anywhere. Rotation is: set a new value in the
-  environment and restart the server. The old token stops working immediately
-  on restart.
-- **API-minted tokens** (`POST /api/tokens`): per-token credentials carrying an
-  `shk_` prefix, stored hashed. Rotate by minting a replacement, updating the
-  consumer, then revoking the old token. Revocation takes effect immediately
-  without a restart.
+- **Configuration-managed deployment credential** (`SHINYHUB_DEPLOY_TOKEN`):
+  the compatibility CI path on the built-in Deployment automation service
+  account. The elected control-plane owner reconciles it, so HA standbys cannot
+  overwrite it during a rolling change. On one server, rotation is: set a new
+  value and restart. In HA, update every replica before handing over ownership.
+  Removing the variable everywhere and rolling restarts deletes the corresponding
+  database hash. The raw value is never
+  persisted. The `SHINYHUB_DEPLOY_TOKEN` credential label is reserved
+  case-insensitively for this configuration-managed entry. If its raw value is
+  deliberately reused from an existing API credential, configuration becomes
+  authoritative and ShinyHub atomically adopts that credential as this managed
+  entry; one bearer secret never represents two principals.
+- **Service-account credentials** (`service-accounts credentials create` or
+  the Identity UI): use one credential per team or pipeline, each with its own
+  effective role, app allowlist, expiry, last-used timestamp, and revocation
+  path. Rotate by creating a replacement, updating the consumer, then revoking
+  the old credential.
+- **Personal tokens** (`POST /api/tokens`): credentials attributed to an
+  interactive person. Developers, operators, and admins may deploy with these
+  or with their signed-in browser session; automation does not have to replace
+  normal human deployment.
 
-Scope every token to the least role that works (`viewer`, `developer`,
-`operator`, `admin`). The env deploy token defaults to `developer`.
+All API-minted credentials carry an `shk_` prefix and are stored hashed. Scope
+automation to the least role and smallest app allowlist that works. The
+configuration-managed credential defaults to `developer`.
 
 ## Network trust
 

@@ -14,6 +14,12 @@ func (s *Server) canReadAudit(u *auth.ContextUser) bool {
 	if u == nil {
 		return false
 	}
+	// Audit rows include global user, project, and app details and cannot be
+	// losslessly filtered by an app allowlist. Do not let a scoped automation
+	// credential turn the global log into an out-of-scope discovery surface.
+	if u.IsServiceAccount() && u.HasAppScopeRestriction() {
+		return false
+	}
 	return u.Role == "admin" || (u.Role == "operator" && s.cfg.Auth.OperatorAuditAccess)
 }
 

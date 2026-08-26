@@ -38,5 +38,13 @@ func deploymentOriginForRequest(r *http.Request, runID string, rollback bool) db
 		origin.UserID = &id
 		origin.Actor = u.Username
 	}
+	if credential := auth.CredentialInfoFromContext(r.Context()); credential != nil {
+		origin.CredentialType = credential.Type
+		origin.CredentialName = credential.Name
+		if credential.ID != 0 {
+			id := credential.ID
+			origin.CredentialID = &id
+		}
+	}
 	return origin
 }

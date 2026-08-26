@@ -22,6 +22,12 @@ type ContextUser struct {
 	ID       int64
 	Username string
 	Role     string
+	// PrincipalType distinguishes interactive people from non-interactive
+	// service accounts. Empty is treated as "human" for compatibility with
+	// callers that construct ContextUser values directly.
+	PrincipalType     string
+	ServiceAccountKey string
+	ManagedBy         string
 	// DisplayName is the user's friendly name. Populated for forward-auth
 	// requests (from the resolved DB user) so the middleware can skip a write
 	// when the IdP name header is unchanged; empty on JWT/API-key paths, which
@@ -38,16 +44,32 @@ type ContextUser struct {
 	// slugs across every app surface, regardless of role. Set on the deploy
 	// token identity from auth.deploy_token_apps; nil for every normal user.
 	AppScope []string
+	// AppScopeRestricted distinguishes an intentionally empty allowlist from an
+	// unrestricted credential. Legacy identities with a non-empty AppScope are
+	// restricted automatically.
+	AppScopeRestricted bool
 	// TokenEpoch is the user's live session-revocation counter (users.token_epoch).
 	// JWT validation rejects tokens whose embedded epoch differs.
 	TokenEpoch int64
+}
+
+func (u *ContextUser) IsServiceAccount() bool {
+	return u != nil && u.PrincipalType == "service_account"
+}
+
+// HasAppScopeRestriction reports whether the request identity carries an app
+// allowlist, including an intentionally empty one. Callers must not infer this
+// from len(AppScope): an empty restricted scope means "no apps", not
+// unrestricted access.
+func (u *ContextUser) HasAppScopeRestriction() bool {
+	return u != nil && (u.AppScopeRestricted || len(u.AppScope) > 0)
 }
 
 // AppInScope reports whether this identity may touch the app named by slug.
 // An identity with no AppScope is unrestricted; a scoped identity is limited
 // to its allowlist even when its role would otherwise grant broader access.
 func (u *ContextUser) AppInScope(slug string) bool {
-	if u == nil || len(u.AppScope) == 0 {
+	if u == nil || !u.HasAppScopeRestriction() {
 		return true
 	}
 	for _, s := range u.AppScope {
@@ -77,6 +99,7 @@ type CredentialInfo struct {
 	Type       string
 	ID         int64
 	Name       string
+	ManagedBy  string
 	CreatedAt  *time.Time
 	LastUsedAt *time.Time
 	ExpiresAt  *time.Time

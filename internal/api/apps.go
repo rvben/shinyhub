@@ -55,7 +55,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		apps []*db.App
 		err  error
 	)
-	if isPrivilegedAppOperator(u) {
+	if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
 		apps, err = s.store.ListApps(0, 0)
 	} else {
 		apps, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
@@ -66,7 +66,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	}
 	// A scoped identity (deploy token with an app allowlist) sees only its
 	// allowlisted apps, matching the per-slug gates.
-	if len(u.AppScope) > 0 {
+	if u.HasAppScopeRestriction() {
 		scoped := apps[:0]
 		for _, a := range apps {
 			if u.AppInScope(a.Slug) {
@@ -76,7 +76,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		apps = scoped
 	}
 	managedSlugs := map[string]struct{}{}
-	if !isPrivilegedAppOperator(u) {
+	if !u.IsServiceAccount() && !isPrivilegedAppOperator(u) {
 		managedSlugs, err = s.store.ManagedAppSlugsForUser(u.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal server error")
@@ -97,7 +97,9 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	disp := s.loadProjectDisplay()
 	for _, a := range apps {
 		s.decorateApp(a)
-		if isPrivilegedAppOperator(u) {
+		if u.IsServiceAccount() {
+			a.CanManage = canManageApp(u, a)
+		} else if isPrivilegedAppOperator(u) {
 			a.CanManage = true
 		} else {
 			_, a.CanManage = managedSlugs[a.Slug]
@@ -312,7 +314,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       &u.ID,
 		Action:       "create_app",
 		ResourceType: "app",
@@ -1269,7 +1271,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			setWorkerWarmSpares, oldWorkerWarmSpares, newWorkerWarmSpares,
 			setWorkerMaxSessionLifetime, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime,
 			setProjectSlug, oldProjectSlug, newProjectSlug)
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
 			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r), RunID: s.knownFleetRunID(r),
 		})
@@ -2047,7 +2049,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 					applied++
 				}
 			}
-			s.store.LogAuditEvent(db.AuditEventParams{
+			s.logAuditEvent(r, db.AuditEventParams{
 				UserID:       &u.ID,
 				Action:       "reconcile_group_access",
 				ResourceType: "app",
@@ -2080,7 +2082,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "deploy",
 			ResourceType: "app",
@@ -2331,7 +2333,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "rollback",
 			ResourceType: "app",
@@ -2487,7 +2489,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "restart",
 			ResourceType: "app",
@@ -2570,7 +2572,7 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "delete_app",
 			ResourceType: "app",
@@ -2636,7 +2638,7 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "stop",
 			ResourceType: "app",
@@ -2687,7 +2689,7 @@ func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "sleep",
 			ResourceType: "app",
@@ -2734,7 +2736,7 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		accessDetail, _ := json.Marshal(map[string]string{"from": oldAccess, "to": req.Access})
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &u.ID, Action: "set_access", ResourceType: "app",
 			ResourceID: slug, Detail: string(accessDetail), IPAddress: s.ClientIP(r), RunID: s.knownFleetRunID(r),
 		})
@@ -2753,7 +2755,11 @@ func (s *Server) handleTransferAppOwnership(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if !isPrivilegedAppOperator(u) && app.OwnerID != u.ID {
+	// A service credential's shared principal may own the app, but ownership is
+	// not a credential-specific grant. Only an operator/admin credential may
+	// perform this platform-level reassignment.
+	if (u.IsServiceAccount() && !isPrivilegedAppOperator(u)) ||
+		(!u.IsServiceAccount() && !isPrivilegedAppOperator(u) && app.OwnerID != u.ID) {
 		writeError(w, http.StatusForbidden, "only the app's owner or a platform admin/operator can transfer ownership")
 		return
 	}
@@ -2784,7 +2790,7 @@ func (s *Server) handleTransferAppOwnership(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if db.IsSystemUser(target.Username) {
+	if target.PrincipalType == "service_account" {
 		writeError(w, http.StatusForbidden, "cannot transfer ownership to a system user")
 		return
 	}
@@ -2793,7 +2799,7 @@ func (s *Server) handleTransferAppOwnership(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &u.ID, Action: "transfer_ownership", ResourceType: "app",
 			ResourceID: slug,
 			Detail:     fmt.Sprintf("from_user_id=%d to_user_id=%d to_username=%s", app.OwnerID, target.ID, target.Username),
@@ -2881,7 +2887,7 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 		auditDetail = fmt.Sprintf("user_id=%d role=%s", userID, role)
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "grant_access",
 			ResourceType: "app",
@@ -2978,7 +2984,7 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "revoke_access",
 			ResourceType: "app",
@@ -3026,7 +3032,7 @@ func (s *Server) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "set_member_role",
 			ResourceType: "app",
@@ -3094,7 +3100,7 @@ func (s *Server) handleGrantAppGroupAccess(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &u.ID, Action: "grant_group_access", ResourceType: "app",
 			ResourceID: slug, Detail: fmt.Sprintf("group=%s role=%s", req.Group, role),
 			IPAddress: s.ClientIP(r),
@@ -3149,7 +3155,7 @@ func (s *Server) handleRevokeAppGroupAccess(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &u.ID, Action: "revoke_group_access", ResourceType: "app",
 			ResourceID: slug, Detail: fmt.Sprintf("group=%s", group), IPAddress: s.ClientIP(r),
 		})
@@ -3834,7 +3840,7 @@ func (s *Server) logQuotaRejected(r *http.Request, slug string, usedBytes int64)
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		userID = &u.ID
 	}
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       userID,
 		Action:       "deploy_rejected_quota",
 		ResourceType: "app",

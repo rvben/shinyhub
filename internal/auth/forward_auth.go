@@ -18,6 +18,11 @@ import (
 // has no DB-driver dependency.
 var ErrUserNotFound = errors.New("forward auth: user not found")
 
+// ErrReservedIdentity is returned when an upstream identity collides with a
+// built-in non-interactive principal. It is an intentional denial, not a store
+// failure, so middleware surfaces it as 403.
+var ErrReservedIdentity = errors.New("forward auth: identity is reserved")
+
 // ForwardAuthConfig mirrors config.ForwardAuthConfig. Duplicated here so the auth
 // package has no import cycle on config.
 type ForwardAuthConfig struct {
@@ -164,6 +169,10 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			user, err := store.GetForwardAuthUser(username)
 			if errors.Is(err, ErrUserNotFound) {
 				user, err = store.CreateForwardAuthUser(username, cfg.DefaultRole)
+			}
+			if errors.Is(err, ErrReservedIdentity) {
+				http.Error(w, "forward auth: identity is reserved", http.StatusForbidden)
+				return
 			}
 			if err != nil || user == nil {
 				http.Error(w, "forward auth: store error", http.StatusInternalServerError)

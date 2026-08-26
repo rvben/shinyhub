@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -148,12 +149,17 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		Role: s.jitOAuthRole(),
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrReservedUsername) {
+			reqLog(r).Warn("oidc_reserved_identity_refused")
+			writeError(w, http.StatusForbidden, "this identity cannot sign in")
+			return
+		}
 		reqLog(r).Error("oidc_provision_user_failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	if created {
-		s.store.LogAuditEvent(db.AuditEventParams{
+		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &user.ID, Action: "create_user", ResourceType: "user",
 			ResourceID: user.Username, IPAddress: s.ClientIP(r),
 		})
@@ -201,7 +207,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	auth.SetSessionCookie(w, r, jwtToken, s.cfg.TrustedProxyNets)
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),
 	})

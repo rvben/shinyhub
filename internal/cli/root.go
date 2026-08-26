@@ -84,6 +84,7 @@ func AddCommandsTo(root *cobra.Command) {
 		newAppsCmd(),
 		newTopCmd(),
 		newTokensCmd(),
+		newServiceAccountsCmd(),
 		newEnvCmd(),
 		newDataCmd(),
 		newScheduleCmd(),

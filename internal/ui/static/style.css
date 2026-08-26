@@ -1811,6 +1811,143 @@ body[data-auth="out"] {
   cursor: help;
 }
 
+/* Identity separates interactive people from deployment automation. */
+.identity-page-intro { margin: 0.35rem 0 0; color: var(--text-soft); font-size: 0.88rem; }
+.identity-tabs { display: flex; gap: 0.25rem; margin: 0 0 1.25rem; border-bottom: 1px solid var(--line-2); }
+.identity-tabs button {
+  min-height: 2.75rem; padding: 0 0.9rem; border: 0; border-bottom: 2px solid transparent;
+  border-radius: 0; background: transparent; color: var(--text-soft); box-shadow: none;
+}
+.identity-tabs button[aria-selected="true"] { border-bottom-color: var(--cyan-bright); color: var(--text); }
+.identity-tabs button:hover { color: var(--cyan-bright); background: transparent; box-shadow: none; transform: none; }
+.service-account-explainer {
+  display: grid; grid-template-columns: minmax(16rem, 0.8fr) minmax(20rem, 1.2fr); gap: 2rem;
+  align-items: end; padding: 0.5rem 0 1.5rem; border-bottom: 1px solid var(--line-2);
+}
+.service-account-explainer h2 { margin: 0; font-size: 1.05rem; font-weight: 600; text-wrap: balance; }
+.service-account-explainer-copy { display: grid; gap: 0.45rem; justify-items: start; }
+.service-account-explainer-copy p { margin: 0; max-width: 46rem; color: var(--text-soft); line-height: 1.65; }
+.service-account-explainer-copy a { color: var(--cyan-bright); font-size: 0.8rem; font-weight: 650; text-underline-offset: 0.2em; }
+.service-accounts-list { display: grid; gap: 1rem; padding-top: 1.25rem; }
+.service-account-card { overflow: hidden; border: 1px solid var(--line-2); border-radius: 14px; background: var(--surface-2); }
+.service-account-card > header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.15rem; border-bottom: 1px solid var(--line-2); }
+.service-account-card h3 { margin: 0; font-size: 1.05rem; }
+.service-account-card header p { margin: 0.28rem 0 0; color: var(--text-muted); font-size: 0.75rem; }
+.service-account-card table { width: 100%; margin: 0; border: 0; border-collapse: collapse; }
+.service-account-card th { padding: 0.65rem; text-align: left; color: var(--text-muted); font: 700 0.75rem var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.service-account-card td { padding: 0.75rem 0.65rem; border-top: 1px solid var(--line); color: var(--text-soft); font-size: 0.875rem; vertical-align: middle; }
+.service-account-card td strong { color: var(--text); }
+.service-account-card th:first-child { min-width: 10rem; }
+.service-account-card th:nth-child(3) { width: 28%; }
+.service-account-card th:last-child { width: 1%; }
+.service-account-card td:nth-child(2), .service-account-card td:nth-child(4), .service-account-card td:nth-child(5) { white-space: nowrap; }
+.service-account-card th:first-child, .service-account-card td:first-child { padding-left: 1.15rem; }
+.service-account-card th:last-child, .service-account-card td:last-child { padding-right: 1.15rem; text-align: right; }
+.service-managed-tag { display: inline-flex; margin-left: 0.5rem; padding: 0.12rem 0.4rem; border: 1px solid var(--line-2); border-radius: 99px; color: var(--text-muted); font: 0.75rem var(--mono); }
+.service-managed-note { display: inline-block; max-width: 13rem; color: var(--text-muted); font-size: 0.75rem; line-height: 1.35; }
+.service-scope-all { color: var(--yellow); font-weight: 650; }
+.service-scope-more { display: inline; color: var(--cyan-bright); }
+.service-scope-more summary { display: inline; cursor: pointer; font-weight: 650; white-space: nowrap; }
+.service-scope-more summary::-webkit-details-marker { display: none; }
+.service-scope-more summary::marker { content: ''; }
+.service-scope-more[open] { display: block; margin-top: 0.3rem; }
+.service-scope-more[open] summary { margin-right: 0.35rem; }
+.service-scope-more > span { color: var(--text-soft); overflow-wrap: anywhere; }
+.service-time-cell { min-width: 9rem; }
+.service-time-cell time { display: block; margin-top: 0.18rem; color: var(--text-muted); font-size: 0.75rem; white-space: normal; }
+.service-time-state { color: var(--text-soft); font-weight: 650; }
+.service-time-state--expired { color: var(--red); }
+.service-credentials-load-error { padding-block: 1rem !important; color: var(--red) !important; text-align: left !important; }
+.service-credentials-load-error button { margin-inline-start: 0.75rem; }
+.service-credential-tools { display: flex; align-items: center; gap: 0.65rem; padding: 0.75rem 1.15rem; border-bottom: 1px solid var(--line); background: var(--surface-3); }
+.service-credential-tools input, .service-credential-tools select {
+  min-height: 2.35rem;
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: 0.8rem var(--font);
+  box-sizing: border-box;
+  transition: border-color var(--ease), box-shadow var(--ease);
+}
+.service-credential-tools input::placeholder { color: var(--text-muted); }
+.service-credential-tools input:focus, .service-credential-tools select:focus {
+  outline: none;
+  border-color: var(--cyan-bright);
+  box-shadow: 0 0 0 3px rgba(56,189,248,0.2);
+}
+.service-credential-tools input { width: min(18rem, 40vw); }
+.service-credential-tools select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 2rem;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%), linear-gradient(-45deg, transparent 50%, var(--text-muted) 50%);
+  background-position: calc(100% - 18px) 55%, calc(100% - 12px) 55%;
+  background-size: 6px 6px;
+  background-repeat: no-repeat;
+}
+.service-filter-status { margin-inline-start: auto; color: var(--text-muted); font-size: 0.75rem; }
+.service-row-actions { display: flex; justify-content: flex-end; gap: 0.35rem; }
+.service-revoke-error { display: block; max-width: 14rem; margin-top: 0.35rem; color: var(--red); font-size: 0.75rem; line-height: 1.35; }
+.service-revoke-error[hidden] { display: none; }
+.service-credential-modal-box { max-width: 34rem; }
+#service-credential-form { display: grid; gap: 0.55rem; }
+#service-credential-form[hidden] { display: none; }
+.service-scope-fieldset { display: grid; gap: 0.65rem; margin: 0.75rem 0; padding: 0; border: 0; }
+.service-scope-fieldset legend { margin-bottom: 0.5rem; font-weight: 650; }
+#service-credential-form .service-scope-choice { display: flex; gap: 0.65rem; align-items: flex-start; margin: 0; cursor: pointer; }
+#service-credential-form .service-scope-choice input { width: auto; flex: 0 0 auto; margin: 0.2rem 0 0; accent-color: var(--cyan-bright); }
+.service-scope-choice span { display: grid; gap: 0.12rem; }
+.service-scope-choice small, .field-hint { color: var(--text-muted); font-size: 0.75rem; }
+.service-credential-app-list { display: grid; gap: 0.3rem; }
+.service-credential-app-list[hidden] { display: none; }
+.service-field-label { margin: 0; color: var(--text-soft); font-size: 0.8rem; font-weight: 650; }
+.credential-plan { margin-top: 0.4rem; padding: 0.7rem 0.8rem; border-radius: 10px; background: var(--surface-3); color: var(--text-soft); font-size: 0.875rem; font-weight: 650; }
+.credential-plan--elevated { color: var(--yellow); }
+.credential-privilege-warning { margin: 0.15rem 0 0; color: var(--yellow); font-size: 0.875rem; line-height: 1.5; }
+.credential-created-summary { margin: 0.85rem 0 0; padding: 0.7rem 0.8rem; border-radius: 10px; background: var(--surface-3); color: var(--text); font-size: 0.875rem; font-weight: 650; overflow-wrap: anywhere; }
+.credential-secret { padding: 0.25rem 0; }
+.credential-secret h3 { margin: 0 0 0.35rem; }
+.credential-secret > p { color: var(--text-soft); }
+.credential-secret-value { display: flex; gap: 0.5rem; align-items: stretch; margin: 1rem 0 0.5rem; }
+.credential-secret-value code { min-width: 0; flex: 1; overflow-wrap: anywhere; padding: 0.75rem; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-deep); color: var(--cyan-bright); }
+
+@media (max-width: 760px) {
+  .service-account-explainer { grid-template-columns: 1fr; gap: 0.75rem; }
+  .service-account-card > header { align-items: flex-start; flex-direction: column; }
+  .service-account-card > header button { width: 100%; }
+  .service-credential-tools { display: grid; grid-template-columns: 1fr 1fr; padding-inline: 1rem; }
+  .service-credential-tools input { width: 100%; }
+  .service-credential-tools input, .service-credential-tools select,
+  .service-account-card > header button, .service-row-actions .btn-row,
+  .service-scope-more summary, .service-credential-modal-box input,
+  .service-credential-modal-box select, .service-credential-modal-box .modal-actions button {
+    min-height: 44px;
+  }
+  .service-scope-more summary { display: inline-flex; align-items: center; }
+  .service-filter-status { grid-column: 1 / -1; margin: 0; }
+  .service-credential-table table, .service-credential-table tbody, .service-credential-table tr { display: block; }
+  .service-credential-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  .service-credential-table tr { padding: 0.7rem 0; border-top: 1px solid var(--line); }
+  .service-credential-table td { display: grid; grid-template-columns: 6rem minmax(0, 1fr); gap: 0.75rem; padding: 0.35rem 1rem; border: 0; white-space: normal !important; text-align: left !important; }
+  .service-credential-table td::before { content: attr(data-label); color: var(--text-muted); font: 700 0.75rem var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
+  .service-credential-table td[colspan] { display: block; padding-block: 0.75rem; }
+  .service-credential-table td[colspan]::before { content: none; }
+  .credential-secret-value { flex-direction: column; }
+  .modal-card.service-credential-modal-box { max-height: calc(100dvh - 2rem); }
+  .service-credential-modal-box .modal-actions {
+    position: sticky;
+    bottom: -1px;
+    z-index: 2;
+    margin-inline: -0.25rem;
+    padding: 0.75rem 0.25rem 0.25rem;
+    background: linear-gradient(180deg, transparent, var(--surface-2) 24%);
+  }
+  .service-row-actions { justify-content: flex-start; }
+}
+
 /* ── Pagination ── */
 .pagination {
   display: flex;

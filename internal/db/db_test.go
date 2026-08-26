@@ -1099,7 +1099,7 @@ func TestSetDeploymentDigest(t *testing.T) {
 	}
 }
 
-func TestUpsertSystemUser_CreatesThenUpdatesRole(t *testing.T) {
+func TestUpsertSystemUser_CreatesExplicitServiceAccount(t *testing.T) {
 	store := dbtest.New(t)
 
 	u1, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
@@ -1117,8 +1117,11 @@ func TestUpsertSystemUser_CreatesThenUpdatesRole(t *testing.T) {
 	if u2.ID != u1.ID {
 		t.Errorf("upsert should preserve ID: got %d, want %d", u2.ID, u1.ID)
 	}
-	if u2.Role != "operator" {
-		t.Errorf("role not updated: got %q", u2.Role)
+	if u2.Role != "developer" {
+		t.Errorf("account role should remain compatibility-only: got %q", u2.Role)
+	}
+	if u2.PrincipalType != "service_account" || u2.ServiceAccountKey != "deployment" || u2.ManagedBy != "platform" {
+		t.Errorf("service principal metadata = %+v", u2)
 	}
 }
 

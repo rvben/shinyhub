@@ -751,7 +751,11 @@ func (s *Server) handleListSharedData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]sharedDataDTO, 0, len(rows))
+	u := auth.UserFromContext(r.Context())
 	for _, m := range rows {
+		if u != nil && !u.AppInScope(m.SourceSlug) {
+			continue
+		}
 		out = append(out, sharedDataDTO{SourceSlug: m.SourceSlug, SourceID: m.SourceAppID})
 	}
 	limit, offset := parsePagination(r)
@@ -771,12 +775,16 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "source_slug required")
 		return
 	}
+	user := auth.UserFromContext(r.Context())
+	if user == nil || !user.AppInScope(req.SourceSlug) {
+		writeError(w, http.StatusNotFound, "source app not found")
+		return
+	}
 	src, err := s.store.GetApp(req.SourceSlug)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "source app not found")
 		return
 	}
-	user := auth.UserFromContext(r.Context())
 	// The caller must have explicit access to the source app. Public or
 	// shared visibility is not enough — granting a read-only mount of
 	// another app's data dir into your own would otherwise let anyone with
@@ -819,6 +827,11 @@ func (s *Server) handleRevokeSharedData(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	sourceSlug := chi.URLParam(r, "source_slug")
+	u := auth.UserFromContext(r.Context())
+	if u == nil || !u.AppInScope(sourceSlug) {
+		writeError(w, http.StatusNotFound, "source app not found")
+		return
+	}
 	src, err := s.store.GetApp(sourceSlug)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "source app not found")

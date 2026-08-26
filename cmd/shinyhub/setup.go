@@ -192,7 +192,7 @@ func runSetup(cmd *cobra.Command, f *setupFlags) (setupResult, error) {
 		return result, fmt.Errorf("inspect users: %w", err)
 	}
 	for _, user := range users {
-		if !db.IsSystemUser(user.Username) && user.Role == "admin" && db.HasLocalPassword(user.PasswordHash) {
+		if user.PrincipalType != "service_account" && user.Role == "admin" && db.HasLocalPassword(user.PasswordHash) {
 			result.Username = user.Username
 			return result, nil
 		}
@@ -306,7 +306,7 @@ func ensureUsableFirstLogin(cfg *config.Config, store *db.Store, configPath stri
 		return fmt.Errorf("inspect users: %w", err)
 	}
 	for _, user := range users {
-		if !db.IsSystemUser(user.Username) && user.Role == "admin" && db.HasLocalPassword(user.PasswordHash) {
+		if user.PrincipalType != "service_account" && user.Role == "admin" && db.HasLocalPassword(user.PasswordHash) {
 			return nil
 		}
 	}

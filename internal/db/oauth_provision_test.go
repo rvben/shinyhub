@@ -1,12 +1,36 @@
 package db_test
 
 import (
+	"errors"
 	"sync"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
 )
+
+func TestProvisionOAuthUser_RejectsLinkedServiceAccount(t *testing.T) {
+	store := newMigratedStore(t, ":memory:")
+	service, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatalf("create service account: %v", err)
+	}
+	if err := store.CreateOAuthAccount(db.CreateOAuthAccountParams{
+		UserID: service.ID, Provider: "oidc", ProviderID: "reserved-subject",
+	}); err != nil {
+		t.Fatalf("seed oauth link: %v", err)
+	}
+
+	if _, err := store.GetUserByOAuthAccount("oidc", "reserved-subject"); !errors.Is(err, db.ErrReservedUsername) {
+		t.Fatalf("lookup error = %v, want ErrReservedUsername", err)
+	}
+	if _, _, err := store.ProvisionOAuthUser(db.ProvisionOAuthUserParams{
+		Provider: "oidc", ProviderID: "reserved-subject",
+		UsernameCandidates: []string{"ordinary-user"}, Role: "viewer",
+	}); !errors.Is(err, db.ErrReservedUsername) {
+		t.Fatalf("provision error = %v, want ErrReservedUsername", err)
+	}
+}
 
 func newMigratedStore(t *testing.T, dsn string) *db.Store {
 	t.Helper()

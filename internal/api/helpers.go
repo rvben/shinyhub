@@ -106,7 +106,7 @@ func (s *Server) audit(r *http.Request, action, resourceType, resourceID, detail
 		v := u.ID
 		uid = &v
 	}
-	s.store.LogAuditEvent(db.AuditEventParams{
+	p := db.AuditEventParams{
 		UserID:       uid,
 		Action:       action,
 		ResourceType: resourceType,
@@ -114,7 +114,25 @@ func (s *Server) audit(r *http.Request, action, resourceType, resourceID, detail
 		Detail:       detail,
 		IPAddress:    s.ClientIP(r),
 		RunID:        s.knownFleetRunID(r),
-	})
+	}
+	requestAuditCredential(r, &p)
+	s.store.LogAuditEvent(p)
+}
+
+func requestAuditCredential(r *http.Request, p *db.AuditEventParams) {
+	if credential := auth.CredentialInfoFromContext(r.Context()); credential != nil {
+		p.CredentialType = credential.Type
+		p.CredentialName = credential.Name
+		if credential.ID != 0 {
+			id := credential.ID
+			p.CredentialID = &id
+		}
+	}
+}
+
+func (s *Server) logAuditEvent(r *http.Request, p db.AuditEventParams) {
+	requestAuditCredential(r, &p)
+	s.store.LogAuditEvent(p)
 }
 
 // ClientIP returns the best-effort client IP, honouring X-Forwarded-For only

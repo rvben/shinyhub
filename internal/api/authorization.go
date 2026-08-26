@@ -49,6 +49,11 @@ func (s *Server) canUseAppsManagement(u *auth.ContextUser) bool {
 	if u == nil {
 		return false
 	}
+	// Service credentials never inherit the shared principal's ownership or
+	// membership. Their own role is the complete management boundary.
+	if u.IsServiceAccount() {
+		return u.Role != "viewer"
+	}
 	if u.Role != "viewer" {
 		return true
 	}
@@ -67,6 +72,9 @@ func (s *Server) effectiveCanManageApp(u *auth.ContextUser, app *db.App) bool {
 	if canManageApp(u, app) {
 		return true
 	}
+	if u != nil && u.IsServiceAccount() {
+		return false
+	}
 	role, ok, err := s.effectiveAppMemberRole(u, app)
 	return err == nil && ok && role == "manager"
 }
@@ -81,6 +89,13 @@ func (s *Server) canViewApp(u *auth.ContextUser, app *db.App) (bool, error) {
 	if !u.AppInScope(app.Slug) {
 		return false, nil
 	}
+	// For a service credential the allowlist is both the explicit grant and the
+	// ceiling. This keeps team automation independent of the shared service
+	// account's owner/member rows while still letting viewer credentials inspect
+	// the apps they were deliberately issued for.
+	if u.IsServiceAccount() {
+		return true, nil
+	}
 	if isPrivilegedAppOperator(u) || app.Access == "public" || app.Access == "shared" || app.OwnerID == u.ID {
 		return true, nil
 	}
@@ -93,6 +108,9 @@ func canManageApp(u *auth.ContextUser, app *db.App) bool {
 	}
 	if !u.AppInScope(app.Slug) {
 		return false
+	}
+	if u.IsServiceAccount() {
+		return u.Role == "developer" || u.Role == "operator" || u.Role == "admin"
 	}
 	return isPrivilegedAppOperator(u) || app.OwnerID == u.ID
 }
@@ -182,6 +200,9 @@ func (s *Server) hasExplicitAccess(u *auth.ContextUser, app *db.App) (bool, erro
 	if !u.AppInScope(app.Slug) {
 		return false, nil
 	}
+	if u.IsServiceAccount() {
+		return true, nil
+	}
 	if isPrivilegedAppOperator(u) || app.OwnerID == u.ID {
 		return true, nil
 	}
@@ -252,6 +273,14 @@ func (s *Server) requireManageApp(w http.ResponseWriter, r *http.Request, slug s
 	}
 	if canManageApp(u, app) {
 		return app, true
+	}
+	// A service credential that failed the role+scope check above must not fall
+	// through to account-level membership: every credential shares the same
+	// service-account user ID, so doing so would let a viewer borrow a sibling's
+	// manager grant.
+	if u.IsServiceAccount() {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return nil, false
 	}
 	// A member OR group rule with role "manager" may also manage the app.
 	role, ok, err := s.effectiveAppMemberRole(u, app)

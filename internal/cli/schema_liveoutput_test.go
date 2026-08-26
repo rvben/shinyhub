@@ -238,7 +238,7 @@ func bootContractServer(t *testing.T) (host, token string) {
 	srv.SetDeployToken(auth.NewDeployToken(rawToken, &auth.ContextUser{
 		ID:       sysUser.ID,
 		Username: sysUser.Username,
-		Role:     sysUser.Role,
+		Role:     cfg.Auth.DeployTokenRole,
 	}))
 
 	seedContractFixtures(t, store, cfg, dataDir, sysUser.ID)

@@ -19,7 +19,9 @@ instead of the JSON the CLI expects.
 ## The fix: target the app port directly
 
 For CLI and CI operations, bypass the proxy entirely. Talk directly to the
-ShinyHub port (default `:8080`) and authenticate with a pre-shared deploy token.
+ShinyHub port (default `:8080`) and authenticate with a service-account
+credential. This deploys applications and fleets *into ShinyHub*; it does not
+deploy or upgrade the ShinyHub server itself.
 
 ```
 Browser --> Proxy (auth) --> ShinyHub :8080
@@ -32,7 +34,8 @@ The two pieces are:
 
 1. **Server side:** set `SHINYHUB_DEPLOY_TOKEN` (at least 32 characters) on the
    server process. Optionally set `SHINYHUB_DEPLOY_TOKEN_ROLE` to control what
-   the synthetic deploy user can do (default: `developer`), and
+   the configuration-managed deployment credential can do (default:
+   `developer`), and
    `SHINYHUB_DEPLOY_TOKEN_APPS` (comma-separated slugs) to restrict the token
    to specific apps.
 
@@ -50,16 +53,41 @@ SHINYHUB_DEPLOY_TOKEN_ROLE=developer               # optional; default is develo
 SHINYHUB_DEPLOY_TOKEN_APPS=sales,hr-dashboard      # optional; restrict the token to these apps
 ```
 
-The token is never persisted to disk. To rotate it, change the env var and
-restart the server.
+ShinyHub persists only the token's SHA-256 hash and non-secret metadata under
+the built-in **Deployment automation** service account. The elected control-plane
+owner applies this configuration. On one server, change the variable and restart
+to rotate it; removing the variable and restarting revokes the credential. In HA,
+update every replica first and then perform the normal ownership handover/rolling
+restart. A standby never overwrites the shared credential with stale rollout
+configuration. The compatibility username remains
+`__deploy__`, but it is not an interactive user and cannot sign in.
+
+For multiple teams, prefer a separate scoped credential per team or pipeline:
+
+```bash
+shinyhub service-accounts credentials create deployment \
+  --name "analytics production CI" --role developer \
+  --app sales --app forecasting --expires-in-days 90
+```
+
+Human users are not displaced by the service account. A person with the
+`developer`, `operator`, or `admin` role can still deploy with their own session
+or personal token; those deployments remain attributed to that person.
 
 **Scope the token to what CI actually deploys.** With
 `SHINYHUB_DEPLOY_TOKEN_APPS` set, the token can only see, deploy, and manage
 the listed slugs (it may create them if they do not exist yet); every other
-app returns 404, regardless of the token's role. This caps the blast radius of
-a leaked CI secret. Avoid `SHINYHUB_DEPLOY_TOKEN_ROLE=admin`: it grants the
-token user management on top of every app, and the server logs a warning at
-startup when it sees that configuration.
+app returns 404 on app-specific surfaces, regardless of the token's role. The
+allowlist is also the explicit grant for private apps, so a team credential
+does not need shared ownership or membership rows. Scoped credentials cannot
+change the shared project catalog or read the global audit log; pre-provision
+project metadata with a human admin or an unrestricted operator credential.
+This caps the blast radius of a leaked CI secret.
+
+App scope does not turn an `admin` credential into a scoped administrator:
+people and server-setting authority remains platform-wide. Avoid
+`SHINYHUB_DEPLOY_TOKEN_ROLE=admin` unless the pipeline genuinely manages the
+platform; the server and credential-creation UI warn about that distinction.
 
 ## Worked example
 
@@ -134,8 +162,8 @@ In that case, prefer one of these approaches:
 
 - Set `defaults.app_visibility: private`. Users who reach ShinyHub through the
   auth proxy still get a valid identity (forward-auth), so they are authenticated
-  and see apps they have access to. Admins who connect directly with the deploy
-  token can access everything. No app is exposed without auth.
+  and see apps they have access to. Direct CLI clients use their own personal or
+  scoped service-account credential. No app is exposed without auth.
 
 - Keep `public` and firewall the app port so only the auth proxy host can reach
   it. Direct CLI access then goes through the proxy or via a side-channel (such

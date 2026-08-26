@@ -19,6 +19,7 @@ type fakeUserStore struct {
 	users            map[string]*ContextUser
 	created          []string // usernames passed to CreateForwardAuthUser
 	getErr           error    // if set, GetForwardAuthUser returns this error
+	createErr        error    // if set, CreateForwardAuthUser returns this error
 	reconcileErr     error    // if set, ReconcileUserFromGroups returns this error
 	getUserGroupsErr error    // if set, GetUserGroups returns this error
 
@@ -60,9 +61,31 @@ func (f *fakeUserStore) GetForwardAuthUser(username string) (*ContextUser, error
 
 func (f *fakeUserStore) CreateForwardAuthUser(username, role string) (*ContextUser, error) {
 	f.created = append(f.created, username)
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	u := &ContextUser{ID: int64(len(f.users) + 1), Username: username, Role: role}
 	f.users[username] = u
 	return u, nil
+}
+
+func TestForwardAuth_ReservedIdentityReturnsForbidden(t *testing.T) {
+	store := newFakeStore()
+	store.createErr = ErrReservedIdentity
+	cfg := ForwardAuthConfig{Enabled: true, UserHeader: "X-Forwarded-User", DefaultRole: "developer"}
+	h := &reachedHandler{}
+	mw := ForwardAuthMiddleware(store, cfg, []*net.IPNet{mustCIDR(t, "127.0.0.0/8")})(h)
+	r := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	r.Header.Set("X-Forwarded-User", "__deploy__")
+	w := httptest.NewRecorder()
+	mw.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if h.called {
+		t.Fatal("reserved identity reached downstream handler")
+	}
 }
 
 func (f *fakeUserStore) GetUserGroups(userID int64) ([]string, error) {

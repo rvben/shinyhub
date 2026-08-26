@@ -194,7 +194,7 @@ func (s *Server) auditIcon(r *http.Request, action, slug string, extra map[strin
 	if u != nil {
 		userID = &u.ID
 	}
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       userID,
 		Action:       action,
 		ResourceType: "app",

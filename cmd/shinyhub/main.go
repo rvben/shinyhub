@@ -1005,28 +1005,38 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 	}
 
-	var deployToken *auth.DeployToken
+	// The built-in deployment identity always exists as an explicit service
+	// account. The compatibility environment token is persisted only as a hash,
+	// so it follows the same lifecycle and attribution path as managed service
+	// credentials.
+	sysUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		return fmt.Errorf("ensure deployment service account: %w", err)
+	}
 	if cfg.Auth.DeployToken != "" {
 		if err := auth.ValidateDeployTokenFormat(cfg.Auth.DeployToken); err != nil {
 			return fmt.Errorf("SHINYHUB_DEPLOY_TOKEN: %w", err)
 		}
-		sysUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, cfg.Auth.DeployTokenRole)
-		if err != nil {
-			return fmt.Errorf("upsert deploy system user: %w", err)
+	}
+	// Only the elected control-plane owner reconciles configuration-managed
+	// credentials. In HA this prevents a restarting standby with stale rollout
+	// configuration from rotating or deleting the cluster-wide credential.
+	syncDeployCredential := func() error {
+		if cfg.Auth.DeployToken == "" {
+			return store.DeleteDeployCredential()
 		}
-		deployToken = auth.NewDeployToken(cfg.Auth.DeployToken, &auth.ContextUser{
-			ID:       sysUser.ID,
-			Username: sysUser.Username,
-			Role:     sysUser.Role,
-			AppScope: cfg.Auth.DeployTokenApps,
-		})
+		if _, err := store.SyncDeployCredential(sysUser.ID, auth.HashAPIKey(cfg.Auth.DeployToken),
+			cfg.Auth.DeployTokenRole, cfg.Auth.DeployTokenApps); err != nil {
+			return err
+		}
 		slog.Info("deploy token registered",
 			"username", sysUser.Username,
-			"role", sysUser.Role,
+			"role", cfg.Auth.DeployTokenRole,
 			"apps", cfg.Auth.DeployTokenApps)
-		if warning := auth.DeployTokenRoleWarning(sysUser.Role); warning != "" {
+		if warning := auth.DeployTokenRoleWarning(cfg.Auth.DeployTokenRole); warning != "" {
 			slog.Warn(warning)
 		}
+		return nil
 	}
 
 	// A local-login server without a password-backed administrator can render a
@@ -1314,9 +1324,6 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 	if isClustered(cfg) {
 		srv.SetCluster(cfg.Server.InstanceID)
-	}
-	if deployToken != nil {
-		srv.SetDeployToken(deployToken)
 	}
 	srv.SetSecretsKey(secretsKey)
 	srv.SetTraceBuffer(traceBuffer)
@@ -1968,6 +1975,22 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		ownerReady.Store(false)       // closed at the start of every ownership span
 		defer ownerReady.Store(false) // and on span exit (ownership lost / shutdown)
 		slog.Info("became control-plane owner", "epoch", epoch, "instance", cfg.Server.InstanceID)
+
+		// Reconcile the environment-managed deploy credential before opening the
+		// owner readiness gate. Standbys authenticate against the same database but
+		// never write this singleton configuration state themselves.
+		for {
+			if err := syncDeployCredential(); err == nil {
+				break
+			} else {
+				slog.Error("reconcile deploy token configuration", "err", err)
+			}
+			select {
+			case <-octx.Done():
+				return
+			case <-time.After(registryRefreshBackoff):
+			}
+		}
 
 		// Rebuild the worker routing index from the authoritative DB so this new
 		// active reflects every worker row the previous owner wrote before it died.

@@ -41,7 +41,7 @@ func scopedDeployToken(t *testing.T, srv interface {
 	}
 	raw := "shk_" + strings.Repeat("c", 64)
 	srv.SetDeployToken(auth.NewDeployToken(raw, &auth.ContextUser{
-		ID: sysUser.ID, Username: sysUser.Username, Role: sysUser.Role, AppScope: scope,
+		ID: sysUser.ID, Username: sysUser.Username, Role: role, AppScope: scope,
 	}))
 	return raw
 }

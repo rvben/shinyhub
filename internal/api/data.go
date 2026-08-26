@@ -141,7 +141,7 @@ func (s *Server) handleDataDelete(w http.ResponseWriter, r *http.Request) {
 	if u != nil {
 		userID = &u.ID
 	}
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       userID,
 		Action:       db.AuditDataDelete,
 		ResourceType: "app",
@@ -273,7 +273,7 @@ func (s *Server) handleDataPut(w http.ResponseWriter, r *http.Request) {
 	if u != nil {
 		userID = &u.ID
 	}
-	s.store.LogAuditEvent(db.AuditEventParams{
+	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       userID,
 		Action:       db.AuditDataPush,
 		ResourceType: "app",

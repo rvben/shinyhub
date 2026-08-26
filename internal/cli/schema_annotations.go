@@ -507,6 +507,27 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "token_id", Type: "string"},
 	}},
 
+	// ── service accounts ─────────────────────────────────────────────────────
+	"service-accounts": {Mutating: ro},
+	"service-accounts list": {Mutating: ro, Cardinality: "unbounded", OutputFields: []fieldSpec{
+		{Name: "key", Type: "string"}, {Name: "name", Type: "string"},
+		{Name: "username", Type: "string"}, {Name: "managed_by", Type: "string"},
+	}},
+	"service-accounts credentials": {Mutating: ro},
+	"service-accounts credentials list": {Mutating: ro, Cardinality: "unbounded", OutputFields: []fieldSpec{
+		{Name: "id", Type: "integer"}, {Name: "name", Type: "string"}, {Name: "role", Type: "string"},
+		{Name: "apps", Type: "array"}, {Name: "unrestricted", Type: "boolean"},
+		{Name: "expires_at", Type: "string"}, {Name: "last_used_at", Type: "string"},
+	}},
+	"service-accounts credentials create": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "id", Type: "integer"}, {Name: "name", Type: "string"}, {Name: "token", Type: "string", Desc: "Shown once"},
+		{Name: "role", Type: "string"}, {Name: "apps", Type: "array"}, {Name: "unrestricted", Type: "boolean"},
+		{Name: "expires_at", Type: "string"},
+	}},
+	"service-accounts credentials revoke": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string"}, {Name: "service_account", Type: "string"}, {Name: "credential_id", Type: "string"},
+	}},
+
 	// ── env ───────────────────────────────────────────────────────────────────
 	"env": {Mutating: ro},
 

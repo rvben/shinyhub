@@ -634,13 +634,13 @@ type AuthConfig struct {
 	GroupRoleMappings []GroupRoleMapping `yaml:"group_role_mappings"`
 
 	// DeployToken is a pre-shared bearer token sourced from
-	// SHINYHUB_DEPLOY_TOKEN. When non-empty it authenticates as the synthetic
-	// system user `__deploy__` with role DeployTokenRole. Not persisted; rotation
-	// is "change the env var, restart the service."
+	// SHINYHUB_DEPLOY_TOKEN. When non-empty it is synchronized into the hashed
+	// credential store for the deployment service account. Rotation is
+	// "change the env var, restart the service"; removing it revokes the row.
 	DeployToken string `yaml:"-"`
 
-	// DeployTokenRole is the role granted to the synthetic system user when the
-	// env-token is active. Sourced from SHINYHUB_DEPLOY_TOKEN_ROLE; default
+	// DeployTokenRole is the effective role granted to that credential. Sourced
+	// from SHINYHUB_DEPLOY_TOKEN_ROLE; default
 	// "developer". Must be one of viewer, developer, operator, admin.
 	DeployTokenRole string `yaml:"-"`
 

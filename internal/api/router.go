@@ -115,9 +115,8 @@ type Server struct {
 	// (its exact local count is already handled by the local drain wait).
 	instanceID string
 
-	// deployToken, when non-nil, registers a pre-shared bearer credential that
-	// authenticates as the synthetic system user without a DB lookup. Set via
-	// SetDeployToken at startup when SHINYHUB_DEPLOY_TOKEN is configured.
+	// deployToken is the legacy in-memory adapter used by SetDeployToken. Normal
+	// production startup persists the environment credential hash in api_keys.
 	deployToken *auth.DeployToken
 	deployRun   func(deploy.Params) (*deploy.PoolResult, error)
 	// deployReplica boots a single replica at one index, used by the autoscale
@@ -695,25 +694,34 @@ func (s *Server) recordDeploy(result string) {
 // ServeHTTP.
 func (s *Server) SetTracer(t *servertrace.Tracer) { s.tracer = t }
 
-// keyLookup satisfies auth.APIKeyLookup by first checking the pre-shared
-// deploy token (no DB hit) and falling back to the api_keys table. DB-backed
-// keys owned by system users are refused: those accounts authenticate only
-// through their bootstrap-provisioned mechanism (the env token), never through
-// a persisted api_keys row.
+// keyLookup satisfies auth.APIKeyLookup by checking the legacy in-memory
+// deploy-token adapter first, then falling back to persisted credentials. New
+// production startup paths sync the environment token into api_keys; the
+// adapter remains for compatibility tests and embedders using SetDeployToken.
 func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, *auth.CredentialInfo, error) {
 	if s.deployToken != nil && s.deployToken.Matches(keyHash) {
 		u := s.deployToken.User()
 		if u == nil {
 			return nil, nil, fmt.Errorf("deploy token has no associated user")
 		}
-		return u, &auth.CredentialInfo{Type: "deploy_token"}, nil
+		// SetDeployToken predates explicit principals, so callers may provide a
+		// legacy ContextUser. The credential kind itself is authoritative here:
+		// it always represents the platform deployment service account.
+		u.PrincipalType = "service_account"
+		u.ServiceAccountKey = "deployment"
+		u.ManagedBy = "platform"
+		return u, &auth.CredentialInfo{Type: "deploy_token", ManagedBy: "configuration"}, nil
 	}
 	u, key, err := s.store.AuthenticateAPIKey(keyHash)
 	if err != nil {
 		return nil, nil, err
 	}
-	if db.IsSystemUser(u.Username) {
-		return nil, nil, fmt.Errorf("api key owned by system user is not honored")
+	if u.PrincipalType == "service_account" {
+		if key.CredentialType != "service" && key.CredentialType != "deploy_token" {
+			return nil, nil, fmt.Errorf("service account credential has invalid type")
+		}
+	} else if key.CredentialType != "personal" {
+		return nil, nil, fmt.Errorf("service credential is not owned by a service account")
 	}
 	// Refresh the usage stamp at most about once a minute per key: coarse
 	// enough to keep the write off the auth hot path, fresh enough for a
@@ -723,10 +731,19 @@ func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, *auth.CredentialI
 			slog.Warn("api key touch failed", "key_id", key.ID, "err", err)
 		}
 	}
-	return u.ContextUser(), &auth.CredentialInfo{
-		Type:       "api_key",
+	contextUser := u.ContextUser()
+	credentialType := "api_key"
+	if u.PrincipalType == "service_account" {
+		contextUser.Role = key.CredentialRole
+		contextUser.AppScope = key.AppScope
+		contextUser.AppScopeRestricted = !key.Unrestricted
+		credentialType = key.CredentialType
+	}
+	return contextUser, &auth.CredentialInfo{
+		Type:       credentialType,
 		ID:         key.ID,
 		Name:       key.Name,
+		ManagedBy:  key.ManagedBy,
 		CreatedAt:  &key.CreatedAt,
 		LastUsedAt: key.LastUsedAt,
 		ExpiresAt:  key.ExpiresAt,
@@ -866,6 +883,11 @@ func (s *Server) buildRouter() chi.Router {
 		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/tokens/connect", s.handleConnectCLIToken)
 		r.Get("/api/tokens", s.handleListTokens)
 		r.Delete("/api/tokens/{id}", s.handleDeleteToken)
+		r.Get("/api/service-accounts", s.handleListServiceAccounts)
+		r.Get("/api/service-accounts/{key}", s.handleGetServiceAccount)
+		r.Get("/api/service-accounts/{key}/credentials", s.handleListServiceCredentials)
+		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/service-accounts/{key}/credentials", s.handleCreateServiceCredential)
+		r.Delete("/api/service-accounts/{key}/credentials/{id}", s.handleDeleteServiceCredential)
 		r.Get("/api/users", s.handleListUsers)                                        // admin: list all users
 		r.With(rateLimitByUser(s.userLimiter)).Post("/api/users", s.handleCreateUser) // admin: create user
 		r.Get("/api/users/{username}", s.handleGetUser)                               // any auth: lookup by username

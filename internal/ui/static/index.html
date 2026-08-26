@@ -80,9 +80,9 @@
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
           <span class="nav-label">Apps</span>
         </a>
-        <a href="/users" data-nav class="nav-item" id="tab-users" aria-label="Users" data-tooltip="Users" hidden>
+        <a href="/users" data-nav class="nav-item" id="tab-users" aria-label="Identity" data-tooltip="Identity" hidden>
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.6 19.2a6 6 0 0 1 10.8 0"/><path d="M16.4 5.4a3 3 0 0 1 0 5.2"/><path d="M18 13.7a6 6 0 0 1 3 4"/></svg>
-          <span class="nav-label">Users</span>
+          <span class="nav-label">Identity</span>
         </a>
         <a href="/workers" data-nav class="nav-item" id="tab-workers" aria-label="Workers" data-tooltip="Workers" hidden>
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1.6"/><rect x="3" y="13" width="18" height="7" rx="1.6"/><line x1="6.6" y1="7.5" x2="6.6" y2="7.5"/><line x1="6.6" y1="16.5" x2="6.6" y2="16.5"/></svg>
@@ -213,26 +213,34 @@
       </div>
     </section>
 
-    <section id="users-view" hidden>
+    <section id="users-view" hidden aria-labelledby="identity-heading">
       <div class="toolbar">
-        <h1>Users</h1>
+        <div><h1 id="identity-heading">Identity</h1><p class="identity-page-intro">People sign in. Service accounts give automation its own scoped credentials.</p></div>
         <div class="toolbar-actions">
-          <button id="new-user-button" type="button">+ New user</button>
-          <button id="users-refresh" type="button">Refresh</button>
+          <button id="new-user-button" type="button">+ New person</button>
+          <button id="users-refresh" class="toolbar-btn-quiet" type="button">Refresh</button>
         </div>
       </div>
-      <p id="users-error" class="error" hidden></p>
-      <table id="users-table">
-        <thead>
-          <tr>
-            <th scope="col">Username</th>
-            <th scope="col">Role</th>
-            <th scope="col">Created</th>
-            <th scope="col" class="users-actions-col">Actions</th>
-          </tr>
-        </thead>
-        <tbody id="users-body"></tbody>
-      </table>
+      <div class="identity-tabs" role="tablist" aria-label="Identity type">
+        <button id="identity-people-tab" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="identity-people-panel">People</button>
+        <button id="identity-services-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="identity-services-panel">Service accounts</button>
+      </div>
+      <section id="identity-people-panel" role="tabpanel" aria-labelledby="identity-people-tab">
+        <p id="users-error" class="error" hidden></p>
+        <table id="users-table">
+          <thead><tr><th scope="col">Person</th><th scope="col">Role</th><th scope="col">Created</th><th scope="col" class="users-actions-col">Actions</th></tr></thead>
+          <tbody id="users-body"></tbody>
+        </table>
+      </section>
+      <section id="identity-services-panel" role="tabpanel" aria-labelledby="identity-services-tab" hidden>
+        <div class="service-account-explainer">
+          <div><h2>Deployment automation, not another admin</h2></div>
+          <div class="service-account-explainer-copy"><p>Use a separate credential for each team or pipeline. Every credential has its own role, app scope, expiry, and audit trail. Human admins can still deploy with their own accounts.</p><a href="/audit-log" data-nav>Review automation activity in Audit</a></div>
+        </div>
+        <p id="service-accounts-error" class="error" role="alert" hidden></p>
+        <p id="service-accounts-status" class="sr-only" role="status"></p>
+        <div id="service-accounts-list" class="service-accounts-list"></div>
+      </section>
     </section>
 
     <section id="tokens-view" hidden aria-labelledby="tokens-heading">
@@ -1194,6 +1202,44 @@
               </button>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="service-credential-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="service-credential-heading">
+      <div class="modal-card service-credential-modal-box">
+        <div class="modal-header"><div><h2 id="service-credential-heading" class="modal-title">New automation credential</h2><p id="service-credential-context" class="modal-context" hidden></p></div><button id="service-credential-close" type="button" aria-label="Close credential dialog"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button></div>
+        <div class="modal-body">
+          <form id="service-credential-form">
+            <label for="service-credential-name">Name</label>
+            <input id="service-credential-name" type="text" required maxlength="64" placeholder="analytics production CI" autocomplete="off">
+            <label for="service-credential-role">Role</label>
+            <select id="service-credential-role" aria-describedby="service-credential-role-help service-credential-role-warning"><option value="developer" selected>Developer</option><option value="operator">Operator</option><option value="viewer">Viewer</option><option value="admin">Admin — platform-wide</option></select>
+            <small id="service-credential-role-help" class="field-hint">Can deploy and manage apps inside this credential’s scope.</small>
+            <p id="service-credential-role-warning" class="credential-privilege-warning" role="status" hidden></p>
+            <fieldset class="service-scope-fieldset"><legend>App operations</legend>
+              <label class="service-scope-choice"><input type="radio" name="service-scope" value="apps" checked><span><strong>Selected apps</strong><small>Recommended for a team or pipeline</small></span></label>
+              <div id="service-credential-app-list" class="service-credential-app-list">
+                <label for="service-credential-apps" class="service-field-label">App slugs</label>
+                <input id="service-credential-apps" type="text" placeholder="sales-dashboard, forecasting" aria-describedby="service-credential-apps-help service-credential-error" aria-errormessage="service-credential-error">
+                <small id="service-credential-apps-help" class="field-hint">Comma-separated app slugs. Apps may be created later.</small>
+              </div>
+              <label class="service-scope-choice"><input type="radio" name="service-scope" value="all"><span><strong>All apps</strong><small>Use only for platform-wide automation</small></span></label>
+            </fieldset>
+            <label for="service-credential-expiry">Expires after</label>
+            <select id="service-credential-expiry"><option value="30">30 days</option><option value="90" selected>90 days</option><option value="180">180 days</option><option value="365">365 days</option></select>
+            <div id="service-credential-plan" class="credential-plan" role="status"></div>
+            <p id="service-credential-error" class="error" role="alert" hidden></p>
+            <div class="modal-actions"><button id="service-credential-cancel" type="button">Cancel</button><button id="service-credential-submit" type="submit" class="btn-primary">Create credential</button></div>
+          </form>
+          <section id="service-credential-secret" class="credential-secret" hidden aria-labelledby="service-credential-secret-heading">
+            <h3 id="service-credential-secret-heading">Store this one-time credential now</h3><p>ShinyHub stores only its hash. You cannot reveal it again.</p>
+            <p id="service-credential-created-summary" class="credential-created-summary"></p>
+            <p id="service-credential-created-warning" class="credential-privilege-warning" role="alert" hidden></p>
+            <div class="credential-secret-value"><code id="service-credential-token"></code><button id="service-credential-copy" type="button" class="copy-btn">Copy</button></div>
+            <p id="service-credential-copy-status" class="field-hint" role="status"></p>
+            <div class="modal-actions"><button id="service-credential-done" type="button" class="btn-primary">I’ve stored this credential</button></div>
+          </section>
         </div>
       </div>
     </div>

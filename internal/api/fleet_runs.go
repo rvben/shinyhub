@@ -45,8 +45,19 @@ func (s *Server) handleRegisterFleetRun(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	credential := auth.CredentialInfoFromContext(r.Context())
+	var credentialID *int64
+	var credentialType, credentialName string
+	if credential != nil {
+		credentialType, credentialName = credential.Type, credential.Name
+		if credential.ID != 0 {
+			id := credential.ID
+			credentialID = &id
+		}
+	}
 	run, created, err := s.store.CreateFleetRun(db.CreateFleetRunParams{
 		ID: req.RunID, FleetID: req.FleetID, Kind: req.Kind, Provenance: req.Provenance, UserID: &u.ID,
+		CredentialID: credentialID, CredentialType: credentialType, CredentialName: credentialName,
 	})
 	if errors.Is(err, db.ErrFleetRunConflict) {
 		writeError(w, http.StatusConflict, err.Error())
@@ -57,7 +68,9 @@ func (s *Server) handleRegisterFleetRun(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if created {
-		s.store.LogAuditEvent(db.AuditEventParams{UserID: &u.ID, Action: "fleet_apply_started", ResourceType: "fleet", ResourceID: req.FleetID, IPAddress: s.ClientIP(r), RunID: req.RunID})
+		p := db.AuditEventParams{UserID: &u.ID, Action: "fleet_apply_started", ResourceType: "fleet", ResourceID: req.FleetID, IPAddress: s.ClientIP(r), RunID: req.RunID}
+		requestAuditCredential(r, &p)
+		s.store.LogAuditEvent(p)
 	}
 	status := http.StatusOK
 	if created {
@@ -99,7 +112,13 @@ func (s *Server) authorizedFleetRun(w http.ResponseWriter, r *http.Request) (*db
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return nil, nil, false
 	}
-	if u.Role != "admin" && (run.UserID == nil || *run.UserID != u.ID) {
+	credential := auth.CredentialInfoFromContext(r.Context())
+	if u.IsServiceAccount() {
+		if credential == nil || credential.ID == 0 || run.CredentialID == nil || *run.CredentialID != credential.ID {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return nil, nil, false
+		}
+	} else if u.Role != "admin" && (run.UserID == nil || *run.UserID != u.ID) {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return nil, nil, false
 	}
@@ -149,7 +168,9 @@ func (s *Server) handleUpdateFleetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Status != "running" {
-		s.store.LogAuditEvent(db.AuditEventParams{UserID: &u.ID, Action: "fleet_apply_finished", ResourceType: "fleet", ResourceID: run.FleetID, IPAddress: s.ClientIP(r), RunID: run.ID})
+		p := db.AuditEventParams{UserID: &u.ID, Action: "fleet_apply_finished", ResourceType: "fleet", ResourceID: run.FleetID, IPAddress: s.ClientIP(r), RunID: run.ID}
+		requestAuditCredential(r, &p)
+		s.store.LogAuditEvent(p)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -162,7 +183,20 @@ func (s *Server) knownFleetRunID(r *http.Request) string {
 	if !provenance.ValidRunID(id) {
 		return ""
 	}
-	if _, err := s.store.GetFleetRun(id); err != nil {
+	run, err := s.store.GetFleetRun(id)
+	if err != nil {
+		return ""
+	}
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		return ""
+	}
+	if u.IsServiceAccount() {
+		credential := auth.CredentialInfoFromContext(r.Context())
+		if credential == nil || credential.ID == 0 || run.CredentialID == nil || *run.CredentialID != credential.ID {
+			return ""
+		}
+	} else if u.Role != "admin" && (run.UserID == nil || *run.UserID != u.ID) {
 		return ""
 	}
 	return id

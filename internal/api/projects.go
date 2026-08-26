@@ -42,7 +42,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		err   error
 	)
 	switch {
-	case len(u.AppScope) > 0:
+	case u.HasAppScopeRestriction():
 		items, err = s.scopedProjects(u)
 	case isPrivilegedAppOperator(u):
 		items, err = s.store.ListProjects(0, 0)
@@ -77,7 +77,7 @@ func (s *Server) scopedProjects(u *auth.ContextUser) ([]*db.ProjectListItem, err
 		apps []*db.App
 		err  error
 	)
-	if isPrivilegedAppOperator(u) {
+	if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
 		apps, err = s.store.ListApps(0, 0)
 	} else {
 		apps, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
@@ -173,6 +173,14 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
+	// Project metadata is shared by every app in the project and cannot be
+	// safely bounded by an app-slug allowlist. Scoped automation may deploy its
+	// allowed apps into pre-provisioned projects, but project-catalog writes
+	// require an unrestricted operator or admin credential.
+	if u.HasAppScopeRestriction() {
+		writeError(w, http.StatusForbidden, "project management requires unrestricted app access")
+		return
+	}
 	var req projectWriteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
@@ -223,6 +231,10 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
+	if u.HasAppScopeRestriction() {
+		writeError(w, http.StatusForbidden, "project management requires unrestricted app access")
+		return
+	}
 	slug := chi.URLParam(r, "slug")
 	var req projectWriteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -267,6 +279,10 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if !isPrivilegedAppOperator(u) {
 		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if u.HasAppScopeRestriction() {
+		writeError(w, http.StatusForbidden, "project management requires unrestricted app access")
 		return
 	}
 	slug := chi.URLParam(r, "slug")

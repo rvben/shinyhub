@@ -26,6 +26,33 @@ history, and optional process or container isolation.
 - Enable metrics, structured logs, and retention appropriate to the installation.
 - Back up the database, bundles, and persistent app-data directory together.
 
+## Deployment identities
+
+Interactive people and non-interactive automation are separate principal
+types. Human admins can still deploy apps and fleets with their own account.
+CI should use the built-in **Deployment automation** service account, with one
+credential per team or pipeline so each has an independent role, app allowlist,
+expiry, last-used timestamp, and revocation path.
+
+For service credentials, an app allowlist is both an explicit grant to those
+apps (including human-owned private apps) and a hard ceiling on app-specific
+operations. It does not scope global platform administration. A scoped admin
+can still manage people and server settings, while project-catalog writes and
+the global audit log require an unrestricted operator/admin credential. Use
+Developer for ordinary deployment automation and issue Admin only when a
+pipeline intentionally manages the platform.
+
+The legacy `SHINYHUB_DEPLOY_TOKEN` remains supported as a configuration-managed
+credential on that account. ShinyHub stores its hash, refuses interactive login
+for the compatibility username `__deploy__`, and fails startup rather than
+silently taking over a human account with that name. Its credential label is
+reserved, case-insensitively, so team-managed credentials need a descriptive
+name such as `analytics production CI`. If the configured raw value is reused
+from an existing API credential, ShinyHub atomically adopts it as the managed
+credential so one bearer secret never represents two principals. Fleet runs are bound to
+the exact credential that registered them, so another credential on the same
+service account cannot take over the run lifecycle.
+
 ## Report a vulnerability
 
 Do not open a public issue for a suspected vulnerability. Follow the private
