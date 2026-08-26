@@ -2955,19 +2955,49 @@ func (s *Store) LogAuditEvent(p AuditEventParams) {
 	}
 }
 
+// AuditEventFilter narrows the audit stream for contextual UI destinations.
+// Fields combine when more than one is set.
+type AuditEventFilter struct {
+	Action  string
+	EventID int64
+	RunID   string
+}
+
+func auditEventWhere(filter AuditEventFilter) (string, []any) {
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 3)
+	if filter.Action != "" {
+		clauses = append(clauses, "ae.action = ?")
+		args = append(args, filter.Action)
+	}
+	if filter.EventID > 0 {
+		clauses = append(clauses, "ae.id = ?")
+		args = append(args, filter.EventID)
+	}
+	if filter.RunID != "" {
+		clauses = append(clauses, "ae.run_id = ?")
+		args = append(args, filter.RunID)
+	}
+	if len(clauses) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
 // CountAuditEvents returns the total number of rows in audit_events. Used by
 // the API handler to compute has_more for pagination — without a total the UI
 // can only guess and ends up disabling Next/Prev when more rows exist.
 // A non-empty action filters the count to that action so has_more matches the
 // filtered listing.
 func (s *Store) CountAuditEvents(action string) (int64, error) {
+	return s.CountAuditEventsFiltered(AuditEventFilter{Action: action})
+}
+
+// CountAuditEventsFiltered counts rows matching an exact contextual filter.
+func (s *Store) CountAuditEventsFiltered(filter AuditEventFilter) (int64, error) {
 	var n int64
-	query := `SELECT COUNT(*) FROM audit_events`
-	args := []any{}
-	if action != "" {
-		query += ` WHERE action = ?`
-		args = append(args, action)
-	}
+	where, args := auditEventWhere(filter)
+	query := `SELECT COUNT(*) FROM audit_events ae` + where
 	if err := s.db.QueryRow(query, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count audit events: %w", err)
 	}
@@ -2979,6 +3009,12 @@ func (s *Store) CountAuditEvents(action string) (int64, error) {
 // so anonymous events (no user_id) are still returned with a nil Username.
 // A non-empty action restricts the listing to that action.
 func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent, error) {
+	return s.ListAuditEventsFiltered(AuditEventFilter{Action: action}, limit, offset)
+}
+
+// ListAuditEventsFiltered returns audit events matching an exact contextual
+// filter, ordered newest-first with pagination.
+func (s *Store) ListAuditEventsFiltered(filter AuditEventFilter, limit, offset int) ([]AuditEvent, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -2990,11 +3026,8 @@ func (s *Store) ListAuditEvents(action string, limit, offset int) ([]AuditEvent,
 		       ae.credential_id, ae.credential_type, ae.credential_name
 		FROM audit_events ae
 		LEFT JOIN users u ON u.id = ae.user_id`
-	args := []any{}
-	if action != "" {
-		query += ` WHERE ae.action = ?`
-		args = append(args, action)
-	}
+	where, args := auditEventWhere(filter)
+	query += where
 	query += ` ORDER BY ae.created_at DESC, ae.id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(query, args...)

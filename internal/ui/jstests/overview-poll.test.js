@@ -197,3 +197,74 @@ test('activity request failure renders an unavailable state instead of false emp
   assert.doesNotMatch(document.getElementById('overview-body').textContent, /No changes recorded/);
   assert.match(document.getElementById('overview-body').textContent, /Fleet health is still current/);
 });
+
+test('activity retry stays busy in place and restores focus when it still fails', async () => {
+  const retryResponse = deferred();
+  const app = { slug: 'forecast', name: 'Forecast', status: 'running', replicas: 1 };
+  let auditCalls = 0;
+  const ctx = context(async (path) => {
+    if (path === '/api/apps') return { ok: true, status: 200, json: async () => ({ items: [app] }) };
+    if (path === '/api/apps/metrics') return { ok: true, status: 200, json: async () => ({ metrics: {} }) };
+    if (path === '/api/apps/metrics/history') return { ok: true, status: 200, json: async () => ({ history: {} }) };
+    if (path === '/api/audit?limit=12') {
+      auditCalls += 1;
+      if (auditCalls === 1) return { ok: false, status: 500, json: async () => ({}) };
+      return retryResponse.promise;
+    }
+    throw new Error(`unexpected request: ${path}`);
+  });
+  ctx.state.canReadAudit = true;
+  mounted = mountOverview(ctx);
+
+  await eventually(() => document.querySelector('.ov-activity-retry'));
+  const retry = document.querySelector('.ov-activity-retry');
+  retry.focus();
+  retry.click();
+  assert.equal(retry.disabled, true);
+  assert.equal(retry.textContent, 'Trying again…');
+  assert.equal(document.querySelector('.ov-activity').getAttribute('aria-busy'), 'true');
+
+  retryResponse.resolve({ ok: false, status: 500, json: async () => ({}) });
+  await eventually(() => document.querySelector('.ov-activity-retry') !== retry);
+  assert.equal(document.activeElement, document.querySelector('.ov-activity-retry'));
+  assert.match(document.getElementById('overview-live').textContent, /still unavailable/);
+});
+
+test('successful activity retry moves focus to the stable heading and announces recovery', async () => {
+  const retryResponse = deferred();
+  const app = { slug: 'forecast', name: 'Forecast', status: 'running', replicas: 1 };
+  let auditCalls = 0;
+  const ctx = context(async (path) => {
+    if (path === '/api/apps') return { ok: true, status: 200, json: async () => ({ items: [app] }) };
+    if (path === '/api/apps/metrics') return { ok: true, status: 200, json: async () => ({ metrics: {} }) };
+    if (path === '/api/apps/metrics/history') return { ok: true, status: 200, json: async () => ({ history: {} }) };
+    if (path === '/api/audit?limit=12') {
+      auditCalls += 1;
+      if (auditCalls === 1) return { ok: false, status: 500, json: async () => ({}) };
+      return retryResponse.promise;
+    }
+    throw new Error(`unexpected request: ${path}`);
+  });
+  ctx.state.canReadAudit = true;
+  mounted = mountOverview(ctx);
+
+  await eventually(() => document.querySelector('.ov-activity-retry'));
+  document.querySelector('.ov-activity-retry').focus();
+  document.querySelector('.ov-activity-retry').click();
+  retryResponse.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({ events: [{
+      id: 1,
+      action: 'deploy',
+      resource_type: 'app',
+      resource_id: 'forecast',
+      username: '__deploy__',
+      created_at: new Date().toISOString(),
+    }] }),
+  });
+
+  await eventually(() => document.querySelector('.ov-activity-action-link'));
+  assert.equal(document.activeElement, document.getElementById('ov-activity-title'));
+  assert.equal(document.getElementById('overview-live').textContent, 'Recent changes updated.');
+});

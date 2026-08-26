@@ -2,8 +2,11 @@ package api
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 // canReadAudit reports whether u may read the audit log: admins always, and
@@ -36,13 +39,28 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := parsePagination(r)
-	action := r.URL.Query().Get("action")
-	events, err := s.store.ListAuditEvents(action, limit, offset)
+	filter := db.AuditEventFilter{
+		Action: strings.TrimSpace(r.URL.Query().Get("action")),
+		RunID:  strings.TrimSpace(r.URL.Query().Get("run")),
+	}
+	if len(filter.RunID) > 128 {
+		writeError(w, http.StatusBadRequest, "invalid audit run filter")
+		return
+	}
+	if rawEvent := strings.TrimSpace(r.URL.Query().Get("event")); rawEvent != "" {
+		eventID, err := strconv.ParseInt(rawEvent, 10, 64)
+		if err != nil || eventID <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid audit event filter")
+			return
+		}
+		filter.EventID = eventID
+	}
+	events, err := s.store.ListAuditEventsFiltered(filter, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	total, err := s.store.CountAuditEvents(action)
+	total, err := s.store.CountAuditEventsFiltered(filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

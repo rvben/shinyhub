@@ -14,7 +14,14 @@ import {
   summariseFleetHealth,
 } from '/static/views/fleet-health.js';
 import { createFocusTrap } from '/static/views/focus-trap.js';
-import { mountAuditLog } from '/static/views/audit-log.js';
+import {
+  auditEmptyMessage,
+  auditListPath,
+  auditLoadError,
+  auditLoadingMessage,
+  createLatestRequestGate,
+  mountAuditLog,
+} from '/static/views/audit-log.js';
 import { mountAppDetail, refreshFleetSurfaces } from '/static/views/app-detail.js';
 import { appCardBadge, updateCardStatusBadge, updateStatusPill } from '/static/views/app-card-badge.js';
 import {
@@ -212,11 +219,13 @@ document.addEventListener('DOMContentLoaded', () => {
     apps: [],
     auditPage: 0,
     auditHasMore: false,
+    auditSelection: { event: '', run: '', action: '' },
     canCreateApps: false,
     canManageApps: false,
     resetPwTargetId: null,
     resetPwTargetUsername: '',
   };
+  const auditRequests = createLatestRequestGate();
 
   // Project rows from GET /api/projects, keyed by slug. The grid group objects
   // carry only what an app row can carry (slug, name, icon), so the edit modal
@@ -285,9 +294,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const auditError  = document.getElementById('audit-error');
   const auditBody   = document.getElementById('audit-body');
   const auditEmpty  = document.getElementById('audit-empty');
+  const auditLoading = document.getElementById('audit-loading');
   const auditPrev   = document.getElementById('audit-prev');
   const auditNext   = document.getElementById('audit-next');
   const auditRange  = document.getElementById('audit-range');
+  const auditContext = document.getElementById('audit-context');
+  const auditContextCopy = document.getElementById('audit-context-copy');
+  const auditPagination = document.getElementById('audit-pagination');
   const tabAudit    = document.getElementById('tab-audit');
   const tabUsers    = document.getElementById('tab-users');
   const tabWorkers  = document.getElementById('tab-workers');
@@ -830,6 +843,8 @@ document.addEventListener('DOMContentLoaded', () => {
     state.apps = [];
     state.auditPage = 0;
     state.auditHasMore = false;
+    state.auditSelection = { event: '', run: '', action: '' };
+    auditRequests.invalidate();
     state.canCreateApps = false;
     state.canManageApps = false;
     appRestartFeedback.clear();
@@ -1376,26 +1391,53 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function loadAuditEvents(page) {
+  async function loadAuditEvents(page, selection = state.auditSelection) {
+    const requestID = auditRequests.begin();
     setError(auditError, '');
-    const offset = page * 100;
+    state.auditSelection = selection;
+    updateAuditContext(selection);
+    if (auditLoading) {
+      auditLoading.textContent = auditLoadingMessage(selection);
+      auditLoading.hidden = false;
+    }
+    if (auditPagination) auditPagination.hidden = true;
+    auditBody.textContent = '';
+    if (auditEmpty) auditEmpty.hidden = true;
+    const auditTable = document.getElementById('audit-table');
+    if (auditTable) {
+      auditTable.hidden = false;
+      auditTable.setAttribute('aria-busy', 'true');
+    }
     let resp;
     try {
-      resp = await api(`/api/audit?limit=100&offset=${offset}`);
+      resp = await api(auditListPath(page, selection));
     } catch {
-      setError(auditError, 'Network error');
+      if (!auditRequests.isCurrent(requestID)) return;
+      if (auditLoading) auditLoading.hidden = true;
+      if (auditTable) { auditTable.removeAttribute('aria-busy'); auditTable.hidden = true; }
+      setError(auditError, auditLoadError(selection));
       return;
     }
+    if (!auditRequests.isCurrent(requestID)) return;
     if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) { setError(auditError, 'Failed to load audit log'); return; }
+    if (!resp.ok) {
+      if (auditLoading) auditLoading.hidden = true;
+      if (auditTable) { auditTable.removeAttribute('aria-busy'); auditTable.hidden = true; }
+      setError(auditError, auditLoadError(selection));
+      return;
+    }
 
     let body;
     try {
       body = await resp.json();
     } catch {
-      setError(auditError, 'Invalid response from server');
+      if (!auditRequests.isCurrent(requestID)) return;
+      if (auditLoading) auditLoading.hidden = true;
+      if (auditTable) { auditTable.removeAttribute('aria-busy'); auditTable.hidden = true; }
+      setError(auditError, auditLoadError(selection));
       return;
     }
+    if (!auditRequests.isCurrent(requestID)) return;
     // Server returns {events, total, has_more}; legacy callers may still get
     // a bare array if anything reverts the API, so be defensive.
     const events = Array.isArray(body) ? body : (body.events || []);
@@ -1408,15 +1450,22 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderAuditEvents(events) {
+    if (auditLoading) auditLoading.hidden = true;
     auditBody.textContent = '';
     const noEvents = events.length === 0;
-    if (auditEmpty) auditEmpty.hidden = !noEvents;
+    if (auditEmpty) {
+      auditEmpty.textContent = auditEmptyMessage(state.auditSelection);
+      auditEmpty.hidden = !noEvents;
+    }
     const auditTable = document.getElementById('audit-table');
-    if (auditTable) auditTable.hidden = noEvents;
+    if (auditTable) {
+      auditTable.removeAttribute('aria-busy');
+      auditTable.hidden = noEvents;
+    }
 
     const knownActions = [
       // Deployment actions (green)
-      'deploy', 'restart', 'rollback',
+      'deploy', 'restart', 'rollback', 'fleet_apply_started', 'fleet_apply_finished',
       // Auth actions
       'login', 'login_failed', 'logout',
       // App lifecycle (blue - config)
@@ -1448,6 +1497,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     for (const e of events) {
       const tr = document.createElement('tr');
+      tr.id = `audit-event-${e.id}`;
+      const selectedEvent = state.auditSelection.event === String(e.id);
+      if (selectedEvent) {
+        tr.className = 'audit-event-selected';
+        tr.tabIndex = -1;
+        tr.setAttribute('aria-label', `Selected audit event ${e.id}`);
+      }
 
       // Time
       const timeCell = document.createElement('td');
@@ -1512,6 +1568,10 @@ document.addEventListener('DOMContentLoaded', () => {
       auditBody.appendChild(tr);
     }
 
+    const selection = state.auditSelection;
+    updateAuditContext(selection);
+    if (auditPagination) auditPagination.hidden = !!selection.event;
+
     const start = state.auditPage * 100 + 1;
     const end   = state.auditPage * 100 + events.length;
     if (events.length === 0) {
@@ -1523,6 +1583,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     auditPrev.disabled = state.auditPage === 0;
     auditNext.disabled = !state.auditHasMore;
+    const selectedRow = state.auditSelection.event
+      ? document.getElementById(`audit-event-${state.auditSelection.event}`)
+      : null;
+    if (selectedRow) selectedRow.focus({ preventScroll: false });
+  }
+
+  function updateAuditContext(selection) {
+    const filtered = !!(selection.event || selection.run || selection.action);
+    if (auditContext && auditContextCopy) {
+      auditContext.hidden = !filtered;
+      if (selection.event) auditContextCopy.textContent = `Showing audit event ${selection.event}.`;
+      else if (selection.run) auditContextCopy.textContent = `Showing events from run ${selection.run}.`;
+      else if (selection.action) auditContextCopy.textContent = `Showing ${selection.action} events.`;
+      else auditContextCopy.textContent = '';
+    }
   }
 
   async function loadUsers() {
@@ -4248,8 +4323,8 @@ document.addEventListener('DOMContentLoaded', () => {
   resetPwClose.addEventListener('click', closeResetPasswordModal);
   resetPwCancel.addEventListener('click', closeResetPasswordModal);
   resetPwForm.addEventListener('submit', submitResetPassword);
-  auditPrev.addEventListener('click', () => loadAuditEvents(state.auditPage - 1));
-  auditNext.addEventListener('click', () => loadAuditEvents(state.auditPage + 1));
+  auditPrev.addEventListener('click', () => loadAuditEvents(state.auditPage - 1, state.auditSelection));
+  auditNext.addEventListener('click', () => loadAuditEvents(state.auditPage + 1, state.auditSelection));
 
   // Apps search + sort. Restore previous values from sessionStorage.
   const appsSearchEl = document.getElementById('apps-search');
@@ -5761,9 +5836,9 @@ document.addEventListener('DOMContentLoaded', () => {
     hideAllPageViews();
     return mountWorkers({ ...ctx, loadWorkers });
   });
-  router.register('/audit-log', () => {
+  router.register('/audit-log', (_, search) => {
     hideAllPageViews();
-    return mountAuditLog({ ...ctx, loadAuditEvents });
+    return mountAuditLog({ ...ctx, loadAuditEvents }, search);
   });
   router.register('/apps/:slug', (p) => {
     hideAllPageViews();

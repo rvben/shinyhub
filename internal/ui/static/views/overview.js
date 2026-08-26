@@ -27,6 +27,7 @@ export function mountOverview(ctx) {
   let lastLiveResources = null;
   let activityInFlight = false;
   let activitySnapshot = null;
+  let activityRetryPending = false;
   const pendingControllers = new Set();
   let live = document.getElementById('overview-live');
   if (!live) {
@@ -37,6 +38,7 @@ export function mountOverview(ctx) {
     live.setAttribute('aria-atomic', 'true');
     view.appendChild(live);
   }
+  live.textContent = '';
   // Server-computed capability: admins always, operators behind the
   // auth.operator_audit_access flag. Gates the recent-activity feed.
   const canReadAudit = !!(ctx.state && ctx.state.canReadAudit);
@@ -63,6 +65,7 @@ export function mountOverview(ctx) {
   async function load(initial) {
     if (loadInFlight) return;
     loadInFlight = true;
+    if (!initial) live.textContent = '';
     try {
       let apps = [];
       try {
@@ -92,7 +95,7 @@ export function mountOverview(ctx) {
       replaceOverviewContent(body, render(model, activitySnapshot));
       const signature = resourceLiveSignature(model.resources);
       if (!initial && lastLiveSignature && signature !== lastLiveSignature) {
-        live.textContent = resourceLiveSummary(model.resources, lastLiveResources);
+        appendOverviewAnnouncement(live, resourceLiveSummary(model.resources, lastLiveResources));
       }
       lastLiveSignature = signature;
       lastLiveResources = model.resources;
@@ -147,6 +150,7 @@ export function mountOverview(ctx) {
       activitySnapshot = {
         state: 'ready',
         events: b.events,
+        hasMore: !!b.has_more,
         updatedAt: new Date().toISOString(),
       };
     } catch {
@@ -157,27 +161,43 @@ export function mountOverview(ctx) {
     } finally {
       activityInFlight = false;
     }
-    if (!disposed) replaceActivityPanel();
+    if (!disposed) {
+      const wasRetry = activityRetryPending;
+      const announcement = activityLiveMessage(previous, activitySnapshot, wasRetry);
+      activityRetryPending = false;
+      replaceActivityPanel(wasRetry ? 'activity:heading' : '');
+      appendOverviewAnnouncement(live, announcement);
+    }
   }
 
   function retryActivity() {
     if (activityInFlight || disposed) return;
-    if (!activitySnapshot || activitySnapshot.state === 'unavailable') {
-      activitySnapshot = { state: 'loading', events: [], updatedAt: null };
-      replaceActivityPanel();
+    activityRetryPending = true;
+    live.textContent = '';
+    const current = body.querySelector('.ov-activity');
+    if (current) {
+      current.setAttribute('aria-busy', 'true');
+      const retry = current.querySelector('.ov-activity-retry');
+      if (retry) {
+        retry.disabled = true;
+        retry.textContent = 'Trying again…';
+      }
     }
     void refreshActivity();
   }
 
-  function replaceActivityPanel() {
+  function replaceActivityPanel(fallbackFocusKey = '') {
     const current = body.querySelector('.ov-activity');
     if (!current || !activitySnapshot) return;
     const focusKey = focusedKey(current);
     const disclosures = expandedDisclosureKeys(current);
-    const next = renderActivityBrief(activitySnapshot, retryActivity);
+    const next = renderActivityBrief(activitySnapshot, retryActivity, {
+      availableAppSlugs: new Set((ctx.state.apps || []).map((app) => app.slug)),
+      retryPending: activityRetryPending,
+    });
     current.replaceWith(next);
     restoreDisclosures(next, disclosures);
-    restoreFocus(next, focusKey);
+    if (!restoreFocus(next, focusKey) && (fallbackFocusKey || focusKey)) restoreFocus(next, fallbackFocusKey || 'activity:heading');
   }
 
   function render(model, activity) {
@@ -298,7 +318,10 @@ export function mountOverview(ctx) {
     const footer = el('div', 'ov-footer');
     if (!canReadAudit) footer.classList.add('ov-footer--single');
     footer.appendChild(renderResources(model.resources));
-    if (canReadAudit) footer.appendChild(renderActivityBrief(activity, retryActivity));
+    if (canReadAudit) footer.appendChild(renderActivityBrief(activity, retryActivity, {
+      availableAppSlugs: new Set((ctx.state.apps || []).map((app) => app.slug)),
+      retryPending: activityRetryPending,
+    }));
     return footer;
   }
 
@@ -349,15 +372,18 @@ export function mountOverview(ctx) {
 // renderActivityBrief turns the audit tail into a compact operational summary.
 // It stays exported so grouping, states, semantics, and disclosure behavior can
 // be verified without mounting the complete Overview route.
-export function renderActivityBrief(snapshot, onRetry = null) {
+export function renderActivityBrief(snapshot, onRetry = null, options = {}) {
   const state = snapshot && snapshot.state ? snapshot.state : 'loading';
   const sec = el('section', 'ov-panel ov-activity ov-activity--' + state);
   sec.setAttribute('aria-labelledby', 'ov-activity-title');
+  if (options.retryPending) sec.setAttribute('aria-busy', 'true');
 
   const head = el('div', 'ov-activity-head');
   const heading = el('div', 'ov-activity-heading');
   const title = el('h2', 'ov-section-title', 'Recent changes');
   title.id = 'ov-activity-title';
+  title.tabIndex = -1;
+  title.dataset.focusKey = 'activity:heading';
   heading.appendChild(title);
   if ((state === 'ready' || state === 'stale') && snapshot.updatedAt) {
     const freshness = el('p', 'ov-activity-freshness');
@@ -389,7 +415,7 @@ export function renderActivityBrief(snapshot, onRetry = null) {
   }
 
   if (state === 'unavailable') {
-    sec.appendChild(activityUnavailable(onRetry));
+    sec.appendChild(activityUnavailable(onRetry, options.retryPending));
     return sec;
   }
 
@@ -397,11 +423,11 @@ export function renderActivityBrief(snapshot, onRetry = null) {
     const stale = el('div', 'ov-activity-stale');
     const copy = el('p', null, 'Recent changes could not be refreshed. Showing the last successful update.');
     stale.appendChild(copy);
-    if (typeof onRetry === 'function') stale.appendChild(activityRetry(onRetry));
+    if (typeof onRetry === 'function') stale.appendChild(activityRetry(onRetry, options.retryPending));
     sec.appendChild(stale);
   }
 
-  const brief = buildActivityBrief(snapshot.events);
+  const brief = buildActivityBrief(snapshot.events, undefined, options.availableAppSlugs || null, !!snapshot.hasMore);
   if (brief.operations.length === 0) {
     sec.appendChild(el('p', 'ov-empty-note', 'No changes recorded yet.'));
     return sec;
@@ -413,12 +439,6 @@ export function renderActivityBrief(snapshot, onRetry = null) {
   }
   sec.appendChild(list);
 
-  if (brief.grouped) {
-    const note = el('p', 'ov-activity-note');
-    note.appendChild(activityIcon('info'));
-    note.appendChild(document.createTextNode('Grouped by operation. Exact times use your local timezone.'));
-    sec.appendChild(note);
-  }
   return sec;
 }
 
@@ -429,7 +449,13 @@ function renderActivityOperation(operation, index) {
 
   const copy = el('div', 'ov-activity-copy');
   const title = el('p', 'ov-activity-titleline');
-  title.appendChild(el('b', 'ov-activity-action', operation.actionLabel));
+  title.appendChild(activityActionLink(
+    operation.actionLabel,
+    operation.auditHref,
+    `${operation.key}:audit`,
+    '',
+    operation.runID ? 'run' : 'event',
+  ));
   appendActivityTarget(title, operation.target, operation.targetHref, `${operation.key}:target`);
   if (operation.tone) {
     title.appendChild(el('span', `ov-activity-status ov-activity-status--${operation.tone.name}`, operation.tone.label));
@@ -441,7 +467,8 @@ function renderActivityOperation(operation, index) {
     const count = operation.children.length;
     const allAppChanges = operation.children.every((child) => child.resourceType === 'app');
     const changeLabel = count === 1 ? 'change' : 'changes';
-    meta.appendChild(el('span', null, `${count} ${allAppChanges ? `app ${changeLabel}` : changeLabel}`));
+    const recent = operation.truncated ? 'recent ' : '';
+    meta.appendChild(el('span', null, `${count} ${recent}${allAppChanges ? `app ${changeLabel}` : changeLabel}`));
     meta.appendChild(el('span', 'ov-activity-separator', '·'));
   }
   meta.appendChild(el('span', 'ov-activity-actor', operation.actorLabel));
@@ -453,12 +480,14 @@ function renderActivityOperation(operation, index) {
 
   if (operation.kind === 'group') {
     const childrenID = `ov-activity-children-${index}-${safeDOMID(operation.runID || operation.key)}`;
-    const toggle = el('button', 'ov-activity-disclosure', `Show ${operation.children.length} changes`);
+    const toggle = el('button', 'ov-activity-disclosure', disclosureLabel('Show', operation.children.length, operation.truncated));
     toggle.type = 'button';
     toggle.setAttribute('aria-expanded', 'false');
     toggle.setAttribute('aria-controls', childrenID);
     toggle.dataset.disclosureKey = `activity:${operation.runID || operation.key}`;
     toggle.dataset.focusKey = `activity:${operation.runID || operation.key}:toggle`;
+    toggle.dataset.changeCount = String(operation.children.length);
+    toggle.dataset.truncated = String(operation.truncated);
     toggle.appendChild(activityIcon('chevron'));
     copy.appendChild(toggle);
 
@@ -473,8 +502,8 @@ function renderActivityOperation(operation, index) {
       toggle.setAttribute('aria-expanded', String(!expanded));
       children.hidden = expanded;
       toggle.firstChild.textContent = expanded
-        ? `Show ${operation.children.length} changes`
-        : 'Hide changes';
+        ? disclosureLabel('Show', operation.children.length, operation.truncated)
+        : disclosureLabel('Hide', operation.children.length, operation.truncated);
     });
   } else {
     li.appendChild(row);
@@ -488,11 +517,35 @@ function renderActivityOperation(operation, index) {
 function renderActivityChild(event, operationKey) {
   const li = el('li', 'ov-activity-child');
   const main = el('p', 'ov-activity-child-main');
-  main.appendChild(el('span', 'ov-activity-child-action', event.actionLabel));
+  main.appendChild(activityActionLink(
+    event.actionLabel,
+    event.auditHref,
+    `${operationKey}:${event.id}:audit`,
+    'ov-activity-child-action',
+  ));
   appendActivityTarget(main, event.target, event.targetHref, `${operationKey}:${event.id}:target`);
+  if (event.tone) {
+    main.appendChild(el('span', `ov-activity-status ov-activity-status--${event.tone.name}`, event.tone.label));
+  }
   li.appendChild(main);
   li.appendChild(renderActivityTime(event.createdAt, 'ov-activity-child-time'));
   return li;
+}
+
+function activityActionLink(label, href, focusKey, extraClass = '', auditScope = 'event') {
+  const link = el('a', `ov-activity-action ov-activity-action-link ${extraClass}`.trim(), label);
+  link.href = href || '/audit-log';
+  link.setAttribute('data-nav', '');
+  link.dataset.focusKey = `activity:${focusKey}`;
+  const destinationLabel = `Open audit ${auditScope} for ${label}`;
+  link.setAttribute('aria-label', destinationLabel);
+  link.title = destinationLabel;
+  link.appendChild(activityLinkIcon('history'));
+  return link;
+}
+
+function disclosureLabel(verb, count, truncated = false) {
+  return `${verb} ${count} ${truncated ? 'recent ' : ''}${count === 1 ? 'change' : 'changes'}`;
 }
 
 function appendActivityTarget(parent, target, href, focusKey) {
@@ -502,6 +555,11 @@ function appendActivityTarget(parent, target, href, focusKey) {
     link.href = href;
     link.setAttribute('data-nav', '');
     link.dataset.focusKey = `activity:${focusKey}`;
+    const tab = decodeURIComponent(href.split('/').filter(Boolean).at(-1) || 'overview');
+    const destinationLabel = `Open ${titleCase(tab)} for the ${target} app`;
+    link.setAttribute('aria-label', destinationLabel);
+    link.title = destinationLabel;
+    link.appendChild(activityLinkIcon('destination'));
     parent.appendChild(link);
     return;
   }
@@ -519,20 +577,21 @@ function renderActivityTime(createdAt, cls = 'ov-activity-time') {
   return time;
 }
 
-function activityUnavailable(onRetry) {
+function activityUnavailable(onRetry, retryPending = false) {
   const state = el('div', 'ov-activity-unavailable');
   state.appendChild(activityIcon('attention'));
   const copy = el('div', 'ov-activity-unavailable-copy');
   copy.appendChild(el('b', null, 'Activity unavailable'));
   copy.appendChild(el('p', null, 'Fleet health is still current. Recent changes could not be loaded.'));
   state.appendChild(copy);
-  if (typeof onRetry === 'function') state.appendChild(activityRetry(onRetry));
+  if (typeof onRetry === 'function') state.appendChild(activityRetry(onRetry, retryPending));
   return state;
 }
 
-function activityRetry(onRetry) {
-  const retry = el('button', 'ov-btn ov-activity-retry', 'Try again');
+function activityRetry(onRetry, pending = false) {
+  const retry = el('button', 'ov-btn ov-activity-retry', pending ? 'Trying again…' : 'Try again');
   retry.type = 'button';
+  retry.disabled = pending;
   retry.dataset.focusKey = 'activity:retry';
   retry.addEventListener('click', onRetry);
   return retry;
@@ -555,12 +614,20 @@ function activityIcon(kind) {
   return span;
 }
 
+function activityLinkIcon(kind) {
+  const icon = activityIcon(kind);
+  icon.className = `ov-activity-link-icon ov-activity-link-icon--${kind}`;
+  return icon;
+}
+
 function activityIconPath(kind) {
   if (kind === 'restart') return 'M15.2 7.1A5.8 5.8 0 1 0 15.6 13M15.2 3.8v3.7h-3.7';
   if (kind === 'deploy') return 'M10 3v9m0 0 3-3m-3 3L7 9M4 14.5h12';
   if (kind === 'fleet') return 'm10 3 6 3-6 3-6-3 6-3Zm6 7-6 3-6-3m12 4-6 3-6-3';
   if (kind === 'attention') return 'M10 6.2v4.4m0 3v.1M3.4 15.5l5.2-10a1.57 1.57 0 0 1 2.8 0l5.2 10A1 1 0 0 1 15.7 17H4.3a1 1 0 0 1-.9-1.5Z';
   if (kind === 'security') return 'M10 2.8 15 5v4.1c0 3.4-2 6.3-5 8.1-3-1.8-5-4.7-5-8.1V5l5-2.2Z';
+  if (kind === 'history') return 'M3.8 6.5V3.4m0 3.1h3.1M4.2 6.1A6.5 6.5 0 1 1 3.7 12M10 6.4V10l2.4 1.5';
+  if (kind === 'destination') return 'M4.5 10h11m-4-4 4 4-4 4';
   if (kind === 'arrow') return 'M3 10h12m-4-4 4 4-4 4';
   if (kind === 'chevron') return 'm5 8 5 5 5-5';
   if (kind === 'info') return 'M10 9v5m0-8v.2M3.5 10a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z';
@@ -659,7 +726,9 @@ export function replaceOverviewContent(body, next) {
   const disclosures = expandedDisclosureKeys(body);
   body.replaceChildren(next);
   restoreDisclosures(body, disclosures);
-  restoreFocus(body, focusKey);
+  if (!restoreFocus(body, focusKey) && focusKey && focusKey.startsWith('activity:')) {
+    restoreFocus(body, 'activity:heading');
+  }
 }
 
 function renderCapacityRow(label, metric, runningReplicas) {
@@ -893,9 +962,11 @@ function focusedKey(root) {
 }
 
 function restoreFocus(root, key) {
-  if (!key) return;
+  if (!key) return false;
   const match = [...root.querySelectorAll('[data-focus-key]')].find((node) => node.dataset.focusKey === key);
-  if (match) match.focus({ preventScroll: true });
+  if (!match) return false;
+  match.focus({ preventScroll: true });
+  return true;
 }
 
 function expandedDisclosureKeys(root) {
@@ -907,8 +978,55 @@ function restoreDisclosures(root, keys) {
   for (const key of keys) {
     const match = [...root.querySelectorAll('[data-disclosure-key]')]
       .find((node) => node.dataset.disclosureKey === key);
-    if (match && match.getAttribute('aria-expanded') !== 'true') match.click();
+    if (!match || match.getAttribute('aria-expanded') === 'true') continue;
+    match.setAttribute('aria-expanded', 'true');
+    const count = Number.parseInt(match.dataset.changeCount || '0', 10);
+    if (match.firstChild) match.firstChild.textContent = disclosureLabel('Hide', count, match.dataset.truncated === 'true');
+    const controlledID = match.getAttribute('aria-controls');
+    const controlled = [...root.querySelectorAll('[id]')].find((node) => node.id === controlledID);
+    if (controlled) controlled.hidden = false;
   }
+}
+
+export function activityLiveMessage(previous, next, retry = false) {
+  const before = previous && previous.state ? previous : null;
+  const after = next && next.state ? next : null;
+  if (!after) return '';
+  if (!before || before.state === 'loading') {
+    if (after.state === 'unavailable') return 'Recent changes are unavailable.';
+    return retry && after.state === 'ready' ? 'Recent changes updated.' : '';
+  }
+  if (retry) {
+    if (after.state === 'ready') return 'Recent changes updated.';
+    if (after.state === 'stale') return 'Recent changes could not be refreshed. Showing the last successful update.';
+    if (after.state === 'unavailable') return 'Recent changes are still unavailable.';
+  }
+  if (before.state === 'ready' && after.state === 'stale') {
+    return 'Recent changes could not be refreshed. Showing the last successful update.';
+  }
+  if ((before.state === 'stale' || before.state === 'unavailable') && after.state === 'ready') {
+    return 'Recent changes are available again.';
+  }
+  if (before.state === 'ready' && after.state === 'ready') {
+    const priorIDs = new Set((before.events || []).map((event) => String(event && event.id)));
+    const newCount = (after.events || []).filter((event) => event && !priorIDs.has(String(event.id))).length;
+    if (newCount === 1) return '1 new recent change.';
+    if (newCount > 1) return `${newCount} new recent changes.`;
+  }
+  return '';
+}
+
+export function appendOverviewAnnouncement(live, message) {
+  if (!live || !message) return;
+  const current = live.textContent.trim();
+  let messages = [];
+  if (current) {
+    try { messages = JSON.parse(live.dataset.overviewMessages || '[]'); } catch { messages = [current]; }
+    if (!Array.isArray(messages) || messages.length === 0) messages = [current];
+  }
+  if (!messages.includes(message)) messages.push(message);
+  live.dataset.overviewMessages = JSON.stringify(messages);
+  live.textContent = messages.join(' ');
 }
 
 export function resourceLiveSignature(res) {

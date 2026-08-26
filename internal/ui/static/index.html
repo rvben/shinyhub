@@ -301,7 +301,12 @@
       <div class="toolbar">
         <h1>Audit Log</h1>
       </div>
-      <p id="audit-error" class="error" hidden></p>
+      <div id="audit-context" class="audit-context" hidden>
+        <p id="audit-context-copy"></p>
+        <a href="/audit-log" data-nav>View all events</a>
+      </div>
+      <p id="audit-loading" class="env-empty" role="status" hidden>Loading audit events…</p>
+      <p id="audit-error" class="error" role="alert" hidden></p>
       <p id="audit-empty" class="env-empty" hidden>No audit events recorded yet — every mutating action will appear here.</p>
       <table id="audit-table">
         <thead>

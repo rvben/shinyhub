@@ -5,6 +5,7 @@ const ACTION_LABELS = new Map([
   ['restart', 'Restarted'],
   ['rollback', 'Rolled back'],
   ['fleet_apply_started', 'Fleet apply'],
+  ['fleet_apply_finished', 'Fleet apply'],
   ['create_app', 'Created'],
   ['update_app', 'Updated'],
   ['delete_app', 'Deleted'],
@@ -16,13 +17,22 @@ const ACTION_LABELS = new Map([
   ['data.push', 'Data updated'],
   ['data.delete', 'Data updated'],
   ['schedule_create', 'Schedule created'],
+  ['schedule_update', 'Schedule updated'],
   ['schedule_delete', 'Schedule deleted'],
+  ['schedule_run_manual', 'Schedule started'],
+  ['schedule_run_succeeded', 'Schedule succeeded'],
+  ['schedule_run_failed', 'Schedule failed'],
+  ['schedule_run_timed_out', 'Schedule timed out'],
+  ['schedule_run_cancelled', 'Schedule cancelled'],
+  ['schedule_run_interrupted', 'Schedule interrupted'],
+  ['schedule_activation_roll', 'Activation started'],
+  ['schedule_activation_outcome', 'Activation completed'],
   ['deploy_rejected_quota', 'Deploy rejected'],
   ['autoscale_scale_up', 'Scaled up'],
   ['autoscale_scale_down', 'Scaled down'],
 ]);
 
-export function buildActivityBrief(events, maxGroups = MAX_ACTIVITY_GROUPS) {
+export function buildActivityBrief(events, maxGroups = MAX_ACTIVITY_GROUPS, availableAppSlugs = null, sourceHasMore = false) {
   const normalized = Array.isArray(events)
     ? events.map(normalizeEvent).filter(Boolean)
     : [];
@@ -36,13 +46,26 @@ export function buildActivityBrief(events, maxGroups = MAX_ACTIVITY_GROUPS) {
 
   const operations = [...buckets.values()].map((bucket) => {
     bucket.events.sort((a, b) => b.createdMs - a.createdMs);
-    const parent = bucket.events.find((event) => event.action === 'fleet_apply_started') || bucket.events[0];
-    const children = bucket.runID && bucket.events.length > 1
-      ? bucket.events.filter((event) => event !== parent).sort((a, b) => a.createdMs - b.createdMs)
+    const start = bucket.events.find((event) => event.action === 'fleet_apply_started');
+    const finish = bucket.events.find((event) => event.action === 'fleet_apply_finished');
+    const lifecycle = new Set(['fleet_apply_started', 'fleet_apply_finished']);
+    const baseParent = start || finish || bucket.events[0];
+    const parent = bucket.runID && !start && !finish
+      ? { ...baseParent, action: 'fleet_apply_started', resourceType: 'fleet', resourceID: '' }
+      : baseParent;
+    const children = bucket.runID
+      ? bucket.events.filter((event) => !lifecycle.has(event.action))
+        .sort((a, b) => a.createdMs - b.createdMs)
       : [];
+    const isGroupedRun = !!bucket.runID && (children.length > 0 || !!start || !!finish);
+    const hasDisclosure = children.length > 0;
+    const childTones = children.map((event) => actionTone(event.action)).filter(Boolean);
+    const groupTone = childTones.find((tone) => tone.name === 'critical')
+      || childTones.find((tone) => tone.name === 'attention')
+      || (finish ? { name: 'neutral', label: 'Completed' } : null);
     return {
       key: bucket.key,
-      kind: children.length > 0 ? 'group' : 'event',
+      kind: hasDisclosure ? 'group' : 'event',
       runID: bucket.runID,
       action: parent.action,
       actionLabel: actionLabel(parent.action),
@@ -50,19 +73,22 @@ export function buildActivityBrief(events, maxGroups = MAX_ACTIVITY_GROUPS) {
       resourceType: parent.resourceType,
       resourceTypeLabel: resourceTypeLabel(parent.resourceType),
       target: parent.resourceID || parent.resourceType,
-      targetHref: resourceHref(parent.resourceType, parent.resourceID),
-      tone: actionTone(parent.action),
+      targetHref: resourceHref(parent.resourceType, parent.resourceID, parent.action, availableAppSlugs),
+      auditHref: auditHref(parent.id, bucket.runID),
+      tone: isGroupedRun ? groupTone : actionTone(parent.action),
       icon: actionIcon(parent.action, parent.resourceType),
-      createdAt: parent.createdAt,
-      createdMs: parent.createdMs,
+      createdAt: finish ? finish.createdAt : parent.createdAt,
+      createdMs: finish ? finish.createdMs : parent.createdMs,
       sortMs: Math.max(...bucket.events.map((event) => event.createdMs)),
+      truncated: !!sourceHasMore && !!bucket.runID && !start,
       children: children.map((event) => ({
         ...event,
         actionLabel: actionLabel(event.action),
         actorLabel: actorLabel(event.username),
         resourceTypeLabel: resourceTypeLabel(event.resourceType),
         target: event.resourceID || event.resourceType,
-        targetHref: resourceHref(event.resourceType, event.resourceID),
+        targetHref: resourceHref(event.resourceType, event.resourceID, event.action, availableAppSlugs),
+        auditHref: auditHref(event.id),
         tone: actionTone(event.action),
         icon: actionIcon(event.action, event.resourceType),
       })),
@@ -132,9 +158,16 @@ function normalizeEvent(raw, index) {
 
 function actionTone(action) {
   const value = stringValue(action).toLowerCase();
+  if (/succeeded/.test(value)) return { name: 'success', label: 'Succeeded' };
+  if (/timed_out/.test(value)) return { name: 'critical', label: 'Timed out' };
+  if (/cancelled/.test(value)) return { name: 'neutral', label: 'Cancelled' };
+  if (/interrupted/.test(value)) return { name: 'attention', label: 'Interrupted' };
   if (/rejected|quota/.test(value)) return { name: 'attention', label: 'Attention' };
   if (/failed|failure|crash|error/.test(value)) return { name: 'critical', label: 'Failed' };
-  if (/started|starting|waking/.test(value)) return { name: 'working', label: 'Started' };
+  if (value === 'fleet_apply_started') return null;
+  if (/started|starting|waking|schedule_run_manual|schedule_activation_roll/.test(value)) {
+    return { name: 'working', label: 'In progress' };
+  }
   return null;
 }
 
@@ -154,9 +187,23 @@ function resourceTypeLabel(resourceType) {
   return value.charAt(0).toUpperCase() + value.slice(1).replace(/[._-]+/g, ' ');
 }
 
-function resourceHref(resourceType, resourceID) {
-  if (resourceType !== 'app' || !resourceID) return '';
-  return `/apps/${encodeURIComponent(resourceID)}/overview`;
+function resourceHref(resourceType, resourceID, action, availableAppSlugs) {
+  if (resourceType !== 'app' || !resourceID || action === 'delete_app') return '';
+  if (availableAppSlugs instanceof Set && !availableAppSlugs.has(resourceID)) return '';
+  const value = stringValue(action).toLowerCase();
+  let tab = 'overview';
+  if (/^(deploy|rollback|deploy_rejected_quota)$/.test(value)) tab = 'deployments';
+  else if (/^env\./.test(value) || value === 'update_app') tab = 'configuration';
+  else if (/^(data\.|shared_data_)/.test(value)) tab = 'data';
+  else if (/access|member|group/.test(value)) tab = 'access';
+  else if (/^schedule_/.test(value)) tab = 'schedules';
+  return `/apps/${encodeURIComponent(resourceID)}/${tab}`;
+}
+
+function auditHref(eventID, runID = '') {
+  if (runID) return `/audit-log?run=${encodeURIComponent(runID)}`;
+  if (eventID) return `/audit-log?event=${encodeURIComponent(eventID)}`;
+  return '/audit-log';
 }
 
 function relativeTime(createdMs, nowMs) {
