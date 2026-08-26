@@ -1,5 +1,9 @@
 .superpowers/
 docs/superpowers/
+# Raw HTML under docs is an internal design/review artifact, not product
+# documentation. Keep reports and their assets out of Git and deployments.
+/docs/**/*.html
+/docs/reports/
 .claire/
 .codex/
 .impeccable/
