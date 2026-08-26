@@ -3,7 +3,6 @@ package process
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -340,23 +339,38 @@ func TestDockerClientCreateContainer_NoPortsOmitsBindings(t *testing.T) {
 	}
 }
 
-func TestDockerClientListByLabel(t *testing.T) {
+func TestDockerClientListByLabelUsesExactManagedFilterAndIncludesExited(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/containers/json" {
+			if got := r.URL.Query().Get("all"); got != "1" {
+				t.Errorf("all query = %q, want 1", got)
+			}
+			if got := r.URL.Query().Get("filters"); got != ManagedContainerFilterJSON {
+				t.Errorf("filters query = %q, want %q", got, ManagedContainerFilterJSON)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode([]map[string]any{
-				{"Id": "cid1", "Labels": map[string]string{"shinyhub.slug": "my-app"}, "State": "running"},
+				{"Id": "cid-running", "Labels": map[string]string{LabelManaged: "true"}, "State": "running"},
+				{"Id": "cid-exited", "Labels": map[string]string{LabelManaged: "true"}, "State": "exited"},
 			})
+			return
 		}
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	c := newTestDockerClient(srv)
-	containers, err := c.listContainers(fmt.Sprintf(`{"label":[%q]}`, "shinyhub.managed=true"))
+	containers, err := c.listContainers(ManagedContainerFilterJSON)
 	if err != nil {
 		t.Fatalf("listContainers: %v", err)
 	}
-	if len(containers) != 1 || containers[0].ID != "cid1" {
-		t.Errorf("unexpected containers: %v", containers)
+	if len(containers) != 2 {
+		t.Fatalf("containers = %v, want running and exited managed containers", containers)
+	}
+	if containers[0].ID != "cid-running" || containers[0].State != "running" {
+		t.Errorf("running container = %+v", containers[0])
+	}
+	if containers[1].ID != "cid-exited" || containers[1].State != "exited" {
+		t.Errorf("exited container = %+v", containers[1])
 	}
 }

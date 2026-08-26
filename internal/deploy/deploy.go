@@ -508,6 +508,15 @@ type Params struct {
 	// Progress receives safe, user-facing lifecycle updates. Run may call it
 	// concurrently while replicas boot; callers must serialize their sink.
 	Progress func(deployevent.Event)
+	// ReplicaStarted runs immediately after the runtime returns a concrete PID /
+	// container and endpoint, before the potentially long health check. Schedule
+	// activation uses it to durably record ownership of an in-flight replacement
+	// so startup recovery can reap or retry it after a control-plane crash.
+	ReplicaStarted func(Result) error
+	// LaunchReservationHeld and GuardUntilAcknowledged are activation-only launch
+	// controls. See process.StartParams for their safety contract.
+	LaunchReservationHeld  bool
+	GuardUntilAcknowledged bool
 }
 
 func (p Params) report(event deployevent.Event) {
@@ -525,6 +534,45 @@ type Result struct {
 	Tier        string
 	Provider    string
 	WorkerID    string
+}
+
+// ReplicaStartError reports a failure after the runtime returned a concrete
+// replica identity. CleanupConfirmed is true only when the manager proved that
+// exact runtime instance stopped. Activation callers use that proof to clear
+// the durable pre-health identity before retrying; without it, the identity
+// must remain quarantined for repair.
+type ReplicaStartError struct {
+	Cause            error
+	CleanupError     error
+	CleanupConfirmed bool
+}
+
+func (e *ReplicaStartError) Error() string {
+	if e == nil {
+		return "replica start failed"
+	}
+	if e.CleanupError != nil {
+		return fmt.Sprintf("%v; replacement cleanup: %v", e.Cause, e.CleanupError)
+	}
+	return e.Cause.Error()
+}
+
+func (e *ReplicaStartError) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	if e.CleanupError != nil {
+		return []error{e.Cause, e.CleanupError}
+	}
+	return []error{e.Cause}
+}
+
+func stoppedReplicaStartError(cause, cleanupErr error) error {
+	return &ReplicaStartError{
+		Cause:            cause,
+		CleanupError:     cleanupErr,
+		CleanupConfirmed: cleanupErr == nil || errors.Is(cleanupErr, process.ErrReplicaNotFound),
+	}
 }
 
 // PoolResult contains the full set of replicas that were successfully booted.
@@ -1364,24 +1412,46 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	env := append(append([]string{}, p.Env...), plan.Env...)
 
 	info, err := p.Manager.Start(process.StartParams{
-		Slug:            p.Slug,
-		AppID:           p.AppID,
-		Index:           idx,
-		Tier:            tier,
-		Dir:             p.BundleDir,
-		Command:         cmd,
-		Port:            port,
-		Env:             env,
-		MemoryLimitMB:   p.MemoryLimitMB,
-		CPUQuotaPercent: p.CPUQuotaPercent,
-		AppVersion:      p.AppVersion,
-		DeploymentID:    p.DeploymentID,
-		ContentDigest:   p.ContentDigest,
-		TargetWorker:    targetWorker,
-		MaxSessions:     p.MaxSessionsPerReplica,
+		Slug:                   p.Slug,
+		AppID:                  p.AppID,
+		Index:                  idx,
+		Tier:                   tier,
+		Dir:                    p.BundleDir,
+		Command:                cmd,
+		Port:                   port,
+		Env:                    env,
+		MemoryLimitMB:          p.MemoryLimitMB,
+		CPUQuotaPercent:        p.CPUQuotaPercent,
+		AppVersion:             p.AppVersion,
+		DeploymentID:           p.DeploymentID,
+		ContentDigest:          p.ContentDigest,
+		TargetWorker:           targetWorker,
+		MaxSessions:            p.MaxSessionsPerReplica,
+		LaunchReservationHeld:  p.LaunchReservationHeld,
+		GuardUntilAcknowledged: p.GuardUntilAcknowledged,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("start: %w", err)
+	}
+	startedResult := Result{
+		Index: idx, PID: info.PID, Port: port, EndpointURL: info.EndpointURL,
+		Tier: info.Tier, Provider: info.Provider, WorkerID: info.WorkerID,
+	}
+	if p.ReplicaStarted != nil {
+		if err := p.ReplicaStarted(startedResult); err != nil {
+			stopErr := p.Manager.StopReplicaConfirmed(p.Slug, idx)
+			if stopErr != nil {
+				slog.Warn("deploy: confirmed stop after start-persistence failure", "slug", p.Slug, "index", idx, "err", stopErr)
+			}
+			return Result{}, stoppedReplicaStartError(fmt.Errorf("record started replica: %w", err), stopErr)
+		}
+	}
+	if err := p.Manager.AcknowledgeReplicaStart(p.Slug, idx); err != nil {
+		stopErr := p.Manager.StopReplicaConfirmed(p.Slug, idx)
+		if stopErr != nil {
+			slog.Warn("deploy: confirmed stop after start-acknowledgement failure", "slug", p.Slug, "index", idx, "err", stopErr)
+		}
+		return Result{}, stoppedReplicaStartError(fmt.Errorf("acknowledge started replica: %w", err), stopErr)
 	}
 	replica := idx + 1
 	e := deployevent.Phase("replicas", deployevent.StatusProgress, fmt.Sprintf("Replica %d started; checking readiness", replica))
@@ -1407,27 +1477,29 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		})
 	}
 	if healthErr != nil {
-		if serr := p.Manager.StopReplica(p.Slug, idx); serr != nil {
+		stop := p.Manager.StopReplica
+		if p.GuardUntilAcknowledged {
+			stop = p.Manager.StopReplicaConfirmed
+		}
+		serr := stop(p.Slug, idx)
+		if serr != nil {
 			slog.Warn("deploy: stop replica after failed health check", "slug", p.Slug, "index", idx, "err", serr)
 		}
-		return Result{}, fmt.Errorf("health: %w", healthErr)
+		return Result{}, stoppedReplicaStartError(fmt.Errorf("health: %w", healthErr), serr)
 	}
 
 	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport, p.DeploymentID); err != nil {
-		if serr := p.Manager.StopReplica(p.Slug, idx); serr != nil {
+		stop := p.Manager.StopReplica
+		if p.GuardUntilAcknowledged {
+			stop = p.Manager.StopReplicaConfirmed
+		}
+		serr := stop(p.Slug, idx)
+		if serr != nil {
 			slog.Warn("deploy: stop replica after failed proxy register", "slug", p.Slug, "index", idx, "err", serr)
 		}
-		return Result{}, fmt.Errorf("register: %w", err)
+		return Result{}, stoppedReplicaStartError(fmt.Errorf("register: %w", err), serr)
 	}
-	return Result{
-		Index:       idx,
-		PID:         info.PID,
-		Port:        port,
-		EndpointURL: info.EndpointURL,
-		Tier:        info.Tier,
-		Provider:    info.Provider,
-		WorkerID:    info.WorkerID,
-	}, nil
+	return startedResult, nil
 }
 
 // RunReplica boots a single replica at the given index. The proxy pool size

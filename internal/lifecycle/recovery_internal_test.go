@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,6 +11,15 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
 )
+
+func TestValidateNativeProcessCWD_FailsClosedWhenIdentityCannotBeRead(t *testing.T) {
+	err := validateNativeProcessCWD(1234, t.TempDir(), func() (string, error) {
+		return "", errors.New("permission denied")
+	})
+	if err == nil || !strings.Contains(err.Error(), "read pid 1234 cwd") {
+		t.Fatalf("identity read error=%v, want fail-closed cwd error", err)
+	}
+}
 
 // TestValidateNativeProcess is the P1 regression: recovery must not adopt a
 // PID/port pair unless the process is really our app (working dir matches the
@@ -61,6 +71,15 @@ func TestValidateNativeProcess(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "not accepting connections") {
 			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("pre-health identity does not require a listening port", func(t *testing.T) {
+		if err := validateNativeProcessIdentity(pid, cwd); err != nil {
+			t.Fatalf("matching pre-health process identity rejected: %v", err)
+		}
+		if err := validateNativeProcessIdentity(pid, "/definitely/not/our/bundle"); err == nil {
+			t.Fatal("pre-health identity accepted a mismatched bundle")
 		}
 	})
 

@@ -696,6 +696,41 @@ cmd = "echo hi"
 	}
 }
 
+func TestLoadManifest_ScheduleActivationContract(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "refresh"
+cron = "*/15 * * * *"
+cmd = "python fetch.py"
+on_success = "roll"
+min_roll_interval = "1h"
+`)
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	s := m.Schedules[0]
+	if s.OnSuccess != "roll" {
+		t.Fatalf("OnSuccess = %q, want roll", s.OnSuccess)
+	}
+	if s.MinRollInterval != time.Hour {
+		t.Fatalf("MinRollInterval = %s, want 1h", s.MinRollInterval)
+	}
+
+	dir = t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "refresh"
+cron = "*/15 * * * *"
+cmd = "python fetch.py"
+on_success = "signal"
+`)
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "none|roll") {
+		t.Fatalf("signal error = %v, want fail-closed v1 action error", err)
+	}
+}
+
 func TestLoadManifest_Schedule_ExplicitTimezone(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir, `

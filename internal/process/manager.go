@@ -224,6 +224,11 @@ type StartParams struct {
 	// RunOnce, not Start). It namespaces the job's own cgroup (job-<slug>-<runID>)
 	// so a capped job never shares replica 0's app-<slug>-0 cgroup.
 	JobRunID int64
+	// LaunchReservationHeld tells Manager.Start that the caller already owns the
+	// host launch reservation. GuardUntilAcknowledged is used by activation:
+	// native app code cannot exec until ReplicaStarted durably records its PID.
+	LaunchReservationHeld  bool
+	GuardUntilAcknowledged bool
 }
 
 // LogRun describes the durable lifecycle metadata emitted for one process
@@ -258,12 +263,13 @@ type LogRunRecorder struct {
 type LogRunSinkFactory func(LogRun) (io.WriteCloser, error)
 
 type entry struct {
-	info    *ProcessInfo
-	handle  RunHandle
-	tier    string
-	logRun  *LogRun
-	done    chan struct{}
-	stopped bool
+	info         *ProcessInfo
+	handle       RunHandle
+	tier         string
+	logRun       *LogRun
+	done         chan struct{}
+	stopped      bool
+	startupGuard io.WriteCloser
 }
 
 // replicaKey identifies a specific replica by slug and index.
@@ -276,6 +282,7 @@ type replicaKey struct {
 // entries maps slug → slice indexed by replica index; nil means that slot is down.
 type Manager struct {
 	mu             sync.Mutex
+	launchMu       sync.Mutex
 	entries        map[string][]*entry
 	logFiles       map[replicaKey]io.WriteCloser
 	lastExit       map[replicaKey]ExitVerdict
@@ -534,6 +541,10 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	if len(p.Command) == 0 {
 		return nil, fmt.Errorf("start: command must not be empty")
 	}
+	if !p.LaunchReservationHeld {
+		m.launchMu.Lock()
+		defer m.launchMu.Unlock()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -706,7 +717,10 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		LogRunID:     run.RunID,
 	}
 	done := make(chan struct{})
-	pool[p.Index] = &entry{info: info, handle: handle, tier: tier, logRun: &run, done: done}
+	pool[p.Index] = &entry{
+		info: info, handle: handle, tier: tier, logRun: &run, done: done,
+		startupGuard: ep.StartupGuard,
+	}
 	m.entries[p.Slug] = pool
 
 	go func() {
@@ -736,6 +750,10 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		if pool := m.entries[p.Slug]; p.Index < len(pool) {
 			if e := pool[p.Index]; e != nil && e.handle == handle {
 				key := replicaKey{p.Slug, p.Index}
+				if e.startupGuard != nil {
+					_ = e.startupGuard.Close()
+					e.startupGuard = nil
+				}
 				// Record the exit verdict BEFORE flipping Status, so no reader under
 				// m.mu can observe the crash without its cause and restart count.
 				e.info.OOMKilled = oom
@@ -769,6 +787,42 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	return info, nil
 }
 
+// AcknowledgeReplicaStart releases a guarded native child only after its PID
+// and activation identity have been durably recorded. The supervisor then
+// execs the real app under the same PID, so normal restart adoption still works.
+func (m *Manager) AcknowledgeReplicaStart(slug string, index int) error {
+	m.mu.Lock()
+	pool := m.entries[slug]
+	if index >= len(pool) || pool[index] == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
+	}
+	guard := pool[index].startupGuard
+	pool[index].startupGuard = nil
+	m.mu.Unlock()
+	if guard == nil {
+		return nil
+	}
+	if _, err := io.WriteString(guard, "ready\n"); err != nil {
+		_ = guard.Close()
+		return fmt.Errorf("acknowledge guarded start: %w", err)
+	}
+	if err := guard.Close(); err != nil {
+		return fmt.Errorf("close guarded start: %w", err)
+	}
+	return nil
+}
+
+// AcquireLaunchReservation prevents any other Manager.Start from allocating
+// host resources until the returned release function is called. Activation
+// uses it to make its final capacity sample and surge start one admission
+// transaction. Callers must pass LaunchReservationHeld on the nested Start.
+func (m *Manager) AcquireLaunchReservation() func() {
+	m.launchMu.Lock()
+	var once sync.Once
+	return func() { once.Do(m.launchMu.Unlock) }
+}
+
 func (m *Manager) finishLogRun(run LogRun) {
 	if m.logRunRecorder.Finish == nil {
 		return
@@ -782,6 +836,18 @@ func (m *Manager) finishLogRun(run LogRun) {
 // If the process does not exit within the stop grace (default defaultStopGrace,
 // configurable via SetStopGrace), SIGKILL is sent.
 func (m *Manager) StopReplica(slug string, index int) error {
+	return m.stopReplica(slug, index, false)
+}
+
+// StopReplicaConfirmed is the replacement-safe variant of StopReplica. It
+// returns ErrStopUnconfirmed and keeps the manager entry when neither SIGTERM
+// nor SIGKILL produces an observed exit. This prevents two processes from
+// occupying the same canonical slot during a rollout.
+func (m *Manager) StopReplicaConfirmed(slug string, index int) error {
+	return m.stopReplica(slug, index, true)
+}
+
+func (m *Manager) stopReplica(slug string, index int, requireConfirmed bool) error {
 	m.mu.Lock()
 	pool := m.entries[slug]
 	if index >= len(pool) || pool[index] == nil {
@@ -791,9 +857,16 @@ func (m *Manager) StopReplica(slug string, index int) error {
 	e := pool[index]
 	done := e.done
 	handle := e.handle
+	startupGuard := e.startupGuard
+	e.startupGuard = nil
 	e.stopped = true
 	tier := e.tier
 	m.mu.Unlock()
+	if startupGuard != nil {
+		// Close without acknowledgement: the pre-exec supervisor exits and app
+		// code never begins.
+		_ = startupGuard.Close()
+	}
 
 	rt := m.runtimeFor(tier)
 	// A container may be frozen - either intentionally suspended, or left paused
@@ -821,14 +894,17 @@ func (m *Manager) StopReplica(slug string, index int) error {
 	if grace <= 0 {
 		grace = defaultStopGrace
 	}
+	confirmed := false
 	select {
 	case <-done:
+		confirmed = true
 	case <-time.After(grace):
 		slog.Warn("manager: replica did not exit within grace; sending SIGKILL",
 			"slug", slug, "idx", index, "grace", grace)
 		rt.Signal(handle, syscall.SIGKILL) //nolint:errcheck
 		select {
 		case <-done:
+			confirmed = true
 		case <-time.After(grace):
 			// SIGKILL did not take effect within a second grace window: the
 			// process is likely in uninterruptible sleep (e.g. a hung NFS /
@@ -839,6 +915,9 @@ func (m *Manager) StopReplica(slug string, index int) error {
 			slog.Error("manager: replica did not exit after SIGKILL within grace; proceeding (process may be in uninterruptible sleep)",
 				"slug", slug, "idx", index, "grace", grace)
 		}
+	}
+	if requireConfirmed && !confirmed {
+		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrStopUnconfirmed)
 	}
 
 	m.mu.Lock()

@@ -226,6 +226,12 @@ type ScheduleSpec struct {
 	// "inherit the server default". Validated against time.LoadLocation at
 	// manifest parse time.
 	Timezone string `toml:"timezone"`
+	// OnSuccess controls the serving-data action after a successful run. The
+	// first release supports only "none" (default) and a self "roll".
+	OnSuccess string `toml:"on_success"`
+	// MinRollInterval dampens high-cadence successful runs. It is meaningful
+	// only when OnSuccess is "roll" and is stored as seconds by the API layer.
+	MinRollInterval time.Duration `toml:"min_roll_interval"`
 
 	// RunOnRegister, when true, fires this schedule once immediately the first
 	// time it is registered on an app that has never had a successful run of it
@@ -526,6 +532,10 @@ func resolveAndValidateSchedule(s *ScheduleSpec) error {
 	if err := schedulespec.Validate(s.Name, s.Cron, s.Timezone, s.Command, timeout, overlap, missed); err != nil {
 		return err
 	}
+	onSuccess, err := schedulespec.ValidateActivation(s.OnSuccess, s.MinRollInterval)
+	if err != nil {
+		return err
+	}
 
 	if s.TimeoutSeconds == nil {
 		s.TimeoutSeconds = &timeout
@@ -536,6 +546,7 @@ func resolveAndValidateSchedule(s *ScheduleSpec) error {
 	if s.Missed == "" {
 		s.Missed = missed
 	}
+	s.OnSuccess = onSuccess
 	return nil
 }
 

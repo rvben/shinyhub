@@ -49,9 +49,11 @@ type fakeSweeper struct {
 	containers []process.ContainerInfo
 	removed    []string
 	removeErr  error
+	listCalls  int
 }
 
 func (f *fakeSweeper) ListByLabel(string) ([]process.ContainerInfo, error) {
+	f.listCalls++
 	return f.containers, nil
 }
 
@@ -62,6 +64,14 @@ func (f *fakeSweeper) RemoveHandle(h process.RunHandle) error {
 	f.removed = append(f.removed, h.ContainerID)
 	return nil
 }
+
+type tierSweepRuntime struct {
+	*blockingRuntime
+	*fakeSweeper
+	scope string
+}
+
+func (r *tierSweepRuntime) ContainerSweepScope() string { return r.scope }
 
 // TestSweepOrphanContainers verifies the startup sweep removes app-replica
 // containers that no live replica re-adopted, while protecting (1) containers
@@ -104,4 +114,30 @@ func TestSweepOrphanContainers(t *testing.T) {
 func TestSweepOrphanContainers_NilSweeperNoop(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	lifecycle.SweepOrphanContainers(mgr, nil) // must not panic
+}
+
+func TestSweepOrphanContainersForTiers_IncludesNonDefaultAndDeduplicatesDaemon(t *testing.T) {
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	sweeper := &fakeSweeper{containers: []process.ContainerInfo{{
+		ID: "burst-orphan", Labels: map[string]string{
+			process.LabelManaged: "true", process.LabelSlug: "mixed", process.LabelReplicaIndex: "1",
+		},
+	}}}
+	runtime := &tierSweepRuntime{
+		blockingRuntime: &blockingRuntime{done: make(chan struct{})},
+		fakeSweeper:     sweeper,
+		scope:           "unix:///var/run/docker.sock",
+	}
+	t.Cleanup(func() { close(runtime.done) })
+	mgr.RegisterRuntime("burst", runtime)
+	mgr.RegisterRuntime("burst-alias", runtime)
+
+	lifecycle.SweepOrphanContainersForTiers(mgr, []string{"local", "burst", "burst-alias"})
+
+	if sweeper.listCalls != 1 {
+		t.Fatalf("container inventory calls=%d, want 1 for shared daemon", sweeper.listCalls)
+	}
+	if len(sweeper.removed) != 1 || sweeper.removed[0] != "burst-orphan" {
+		t.Fatalf("removed=%v, want [burst-orphan]", sweeper.removed)
+	}
 }

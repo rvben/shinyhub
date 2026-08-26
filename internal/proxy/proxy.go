@@ -1765,6 +1765,39 @@ func (p *Proxy) DeregisterReplicaIfTarget(slug string, index int, expectURL stri
 	return true
 }
 
+// DetachResult reports whether a target-gated draining slot was detached. A
+// matched slot with ActiveConns > 0 is left attached unless force is true.
+type DetachResult struct {
+	Matched     bool
+	Detached    bool
+	ActiveConns int64
+}
+
+// DetachDrainedReplica atomically verifies, drains, and removes a backend under
+// the proxy write lock. ServeHTTP holds the corresponding read lock through
+// route selection and the active-connection increment, closing the race where
+// a sticky request could enter after a zero-count poll but before deregistration.
+func (p *Proxy) DetachDrainedReplica(slug string, index int, expectURL string, force bool) DetachResult {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool, ok := p.pools[slug]
+	if !ok || index < 0 || index >= len(pool.replicas) {
+		return DetachResult{}
+	}
+	rb := pool.replicas[index]
+	if rb == nil || rb.targetURL != expectURL || !rb.draining.Load() {
+		return DetachResult{}
+	}
+	result := DetachResult{Matched: true, ActiveConns: rb.activeConns.Load()}
+	if result.ActiveConns > 0 && !force {
+		return result
+	}
+	pool.replicas[index] = nil
+	result.Detached = true
+	p.clearWSReady(slug)
+	return result
+}
+
 // DrainReplica marks the slot at index in slug's pool as draining and reports
 // whether a live backend was marked. A draining slot is skipped by the least-
 // connections picker (no new cookie-less sessions) while the sticky-cookie path

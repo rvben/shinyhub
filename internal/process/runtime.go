@@ -28,6 +28,11 @@ var ErrReplicaAlreadyRunning = errors.New("replica already running")
 // may still be running and its control-plane state must be left intact.
 var ErrReplicaNotFound = errors.New("replica not found")
 
+// ErrStopUnconfirmed means the runtime accepted termination signals but the
+// replica did not report an exit within the bounded grace windows. Callers
+// replacing a slot must not start a successor at the same index in this state.
+var ErrStopUnconfirmed = errors.New("replica stop unconfirmed")
+
 // ErrExternalLogsThrottled marks a provider rate-limit response. API callers
 // use it to return a bounded Retry-After hint without exposing provider errors.
 var ErrExternalLogsThrottled = errors.New("external logs throttled")
@@ -42,6 +47,9 @@ type ReplicaEndpoint struct {
 	WorkerID     string        // stable identity: PID (stringified), container ID, task ARN
 	Handle       RunHandle     // operational handle
 	ExternalLogs *ExternalLogs // provider-owned log destination, when ShinyHub cannot stream output
+	// StartupGuard is non-nil only for a guarded native launch. The child blocks
+	// before exec until the control plane acknowledges durable PID persistence.
+	StartupGuard io.WriteCloser
 }
 
 // ExternalLogs is a durable handoff to a provider-owned logging surface.
@@ -329,10 +337,13 @@ type RunHandle struct {
 	ContainerID string // set by DockerRuntime
 }
 
-// ContainerInfo is a summary of a running container used during process recovery.
+// ContainerInfo is a summary of a managed container used during recovery and
+// orphan cleanup. State is the Docker state (for example "running" or
+// "exited"); an empty state is tolerated for non-Docker test/runtime adapters.
 type ContainerInfo struct {
 	ID     string
 	Labels map[string]string
+	State  string
 }
 
 // TaskRef identifies one Fargate task returned by a FargateTaskSweeper. It

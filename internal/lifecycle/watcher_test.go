@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -197,6 +198,9 @@ type fakeStore struct {
 	// fleetLastActivity is the Unix epoch returned by AppFleetLastActivity.
 	// 0 means no fleet rows; a value > shrinkMoment.Unix() triggers expansion.
 	fleetLastActivity int64
+
+	activationInFlight    bool
+	activationInFlightErr error
 }
 
 func newFakeStore(apps map[string]*db.App, deployments []*db.Deployment) *fakeStore {
@@ -220,6 +224,12 @@ func (f *fakeStore) GetAppBySlug(slug string) (*db.App, error) {
 		return nil, db.ErrNotFound
 	}
 	return app, nil
+}
+
+func (f *fakeStore) ScheduleActivationInFlight(_ int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.activationInFlight, f.activationInFlightErr
 }
 func (f *fakeStore) UpdateAppStatus(p db.UpdateAppStatusParams) error {
 	f.mu.Lock()
@@ -546,6 +556,59 @@ func TestWatchdog_RestartsOnCrash(t *testing.T) {
 	defer mu.Unlock()
 	if len(deployed) != 1 || deployed[0] != "myapp" {
 		t.Errorf("expected deployFn called once for myapp, got %v", deployed)
+	}
+}
+
+func TestWatcher_ActivationFenceBlocksRuntimeMutationBetweenRepairAttempts(t *testing.T) {
+	app := &db.App{
+		ID: 1, Slug: "myapp", Status: "running", Replicas: 1,
+		UpdatedAt: time.Now().Add(-2 * time.Hour),
+	}
+	st := newFakeStore(map[string]*db.App{"myapp": app}, []*db.Deployment{{BundleDir: "/bundles/v1"}})
+	st.activationInFlight = true
+	mgr := &fakeManager{entries: []*process.ProcessInfo{{Slug: "myapp", Index: 0, Status: process.StatusCrashed}}}
+	prx := newFakeProxy()
+	prx.seen["myapp"] = time.Now().Add(-2 * time.Hour)
+	deployCalls := 0
+	w := newTestWatcher(Config{HibernateTimeout: time.Minute, RestartMaxAttempts: 5}, mgr, prx, st,
+		func(string, string, int) (*deploy.Result, error) {
+			deployCalls++
+			return &deploy.Result{}, nil
+		})
+
+	w.handleCrashed("myapp", 0)
+	w.restartSlot(app, 0)
+	w.handleIdle("myapp", 1)
+	if err := w.SleepNow("myapp"); err == nil {
+		t.Fatal("SleepNow succeeded while activation owned runtime")
+	}
+
+	if deployCalls != 0 {
+		t.Fatalf("watcher restarted a replica during activation repair: calls=%d", deployCalls)
+	}
+	if len(mgr.stopped) != 0 || mgr.suspendCalls != 0 {
+		t.Fatalf("watcher stopped or suspended activation-owned runtime: stops=%v suspends=%d", mgr.stopped, mgr.suspendCalls)
+	}
+	if len(prx.deregistered) != 0 || len(prx.hibernated) != 0 {
+		t.Fatalf("watcher changed activation-owned routing: deregistered=%v hibernated=%v", prx.deregistered, prx.hibernated)
+	}
+}
+
+func TestWatcher_ActivationFenceFailsClosedWhenStoreUnavailable(t *testing.T) {
+	app := &db.App{ID: 1, Slug: "myapp", Status: "running", Replicas: 1}
+	st := newFakeStore(map[string]*db.App{"myapp": app}, []*db.Deployment{{BundleDir: "/bundles/v1"}})
+	st.activationInFlightErr = errors.New("database unavailable")
+	deployCalls := 0
+	w := newTestWatcher(Config{RestartMaxAttempts: 5},
+		&fakeManager{}, newFakeProxy(), st,
+		func(string, string, int) (*deploy.Result, error) {
+			deployCalls++
+			return &deploy.Result{}, nil
+		})
+
+	w.restartSlot(app, 0)
+	if deployCalls != 0 {
+		t.Fatal("watcher mutated runtime without a trustworthy activation fence")
 	}
 }
 
@@ -2548,6 +2611,27 @@ func TestWakeTrigger_RunningAppWithoutWarmRows_DoesNothing(t *testing.T) {
 	st.mu.Unlock()
 	if status != "running" {
 		t.Errorf("WakeTrigger on fully-running app must not change status; got %q", status)
+	}
+}
+
+func TestWakeTrigger_SkipsWarmExpansionDuringAppOperation(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "running", Replicas: 2}},
+		[]*db.Deployment{{BundleDir: "/tmp/app"}},
+	)
+	st.replicas = map[int64][]*db.Replica{1: {
+		{AppID: 1, Index: 0, Status: "running", DesiredState: "running"},
+		{AppID: 1, Index: 1, Status: "stopped", DesiredState: db.ReplicaDesiredWarm},
+	}}
+	w := newTestWatcher(Config{}, &fakeManager{}, prx, st, nil)
+	expanded := false
+	w.SetWarmOps(nil, func(string) (bool, error) { expanded = true; return true, nil })
+	w.SetOperationInFlight(func(slug string) bool { return slug == "app" })
+
+	w.WakeTrigger("app")
+	if expanded {
+		t.Fatal("warm expansion raced an in-flight app operation")
 	}
 }
 

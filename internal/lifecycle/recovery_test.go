@@ -42,6 +42,21 @@ type fakeDockerRuntime struct {
 	containers []process.ContainerInfo
 	pids       map[string]int // containerID → host PID
 	removed    []string       // container IDs passed to RemoveContainer
+	listErr    error
+	removeErr  error
+}
+
+type scopedDockerSweeper struct {
+	runtime *process.DockerRuntime
+	slug    string
+}
+
+func (s scopedDockerSweeper) ListByLabel(string) ([]process.ContainerInfo, error) {
+	return s.runtime.ListByLabel(`{"label":["` + process.LabelSlug + `=` + s.slug + `"]}`)
+}
+
+func (s scopedDockerSweeper) RemoveHandle(handle process.RunHandle) error {
+	return s.runtime.RemoveContainer(handle.ContainerID)
 }
 
 func (f *fakeDockerRuntime) Start(context.Context, process.StartParams, io.Writer) (process.ReplicaEndpoint, error) {
@@ -60,6 +75,9 @@ func (f *fakeDockerRuntime) AppBindHost() string       { return "0.0.0.0" }
 func (f *fakeDockerRuntime) HostProvidesAppData() bool { return true }
 
 func (f *fakeDockerRuntime) ListByLabel(_ string) ([]process.ContainerInfo, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.containers, nil
 }
 
@@ -71,8 +89,15 @@ func (f *fakeDockerRuntime) InspectPID(id string) (int, error) {
 }
 
 func (f *fakeDockerRuntime) RemoveContainer(id string) error {
+	if f.removeErr != nil {
+		return f.removeErr
+	}
 	f.removed = append(f.removed, id)
 	return nil
+}
+
+func (f *fakeDockerRuntime) RemoveHandle(handle process.RunHandle) error {
+	return f.RemoveContainer(handle.ContainerID)
 }
 
 // mustCreateApp creates a test app and returns it.
@@ -128,6 +153,134 @@ func TestRecoverProcesses_DeadPID(t *testing.T) {
 	if a.Status != "hibernated" {
 		t.Errorf("expected status=hibernated after recovery of dead PID, got %s", a.Status)
 	}
+}
+
+func TestRecoverProcesses_DockerActivationSurgeRealDaemon(t *testing.T) {
+	runtime, err := process.NewDockerRuntime("/var/run/docker.sock", "alpine:3", "alpine:3", "host")
+	if err != nil {
+		t.Skipf("Docker daemon unavailable: %v", err)
+	}
+	store := mustOpenStore(t)
+	slug := fmt.Sprintf("activation-docker-%d", time.Now().UnixNano())
+	app := mustCreateApp(t, store, slug)
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE id=?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: now, OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit := 0
+	activation, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: &exit, FinishedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := func(deploymentID int64, version string, port int) process.ReplicaEndpoint {
+		t.Helper()
+		endpoint, startErr := runtime.Start(context.Background(), process.StartParams{
+			Slug: slug, Index: 1, Dir: dep.BundleDir, Port: port, Tier: "local",
+			Command: []string{"sh", "-c", "sleep 120"}, DeploymentID: deploymentID, AppVersion: version,
+		}, io.Discard)
+		if startErr != nil {
+			t.Skipf("Docker image/runtime precondition unavailable: %v", startErr)
+		}
+		return endpoint
+	}
+	owned := start(dep.ID, dep.Version, 22301)
+	t.Cleanup(func() { _ = runtime.RemoveContainer(owned.WorkerID) })
+	orphan := start(dep.ID+999, "wrong-deployment", 22302)
+	t.Cleanup(func() { _ = runtime.RemoveContainer(orphan.WorkerID) })
+	pid, err := runtime.InspectPID(owned.WorkerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := 22301
+	if err := store.UpsertActivationReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 1, PID: &pid, Port: &port, Status: db.ReplicaStatusRunning,
+		Provider: "docker", Tier: "local", EndpointURL: owned.URL, WorkerID: owned.WorkerID,
+		AppVersion: dep.Version, DesiredState: "running", DeploymentID: &dep.ID,
+	}, activation.TargetGeneration, activation.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := process.NewManager(t.TempDir(), runtime)
+	prx := proxy.New()
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	info, ok := mgr.GetReplica(slug, 1)
+	if !ok || info.WorkerID != owned.WorkerID || info.DeploymentID != dep.ID || info.AppVersion != dep.Version {
+		t.Fatalf("recovered Docker surge=%+v ok=%v, want exact owned container %s", info, ok, owned.WorkerID)
+	}
+
+	lifecycle.SweepOrphanContainers(mgr, scopedDockerSweeper{runtime: runtime, slug: slug})
+	if _, err := runtime.InspectPID(owned.WorkerID); err != nil {
+		t.Fatalf("owned activation container removed by sweep: %v", err)
+	}
+	if _, err := runtime.InspectPID(orphan.WorkerID); err == nil {
+		t.Fatal("same-slot wrong-deployment orphan survived sweep")
+	}
+}
+
+func TestRecoverProcesses_QuarantinesActivationPIDWithMismatchedBundleIdentity(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "activation-quarantine")
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE id=?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+	pid, port, activationID := os.Getpid(), 21300, int64(99)
+	if err := store.UpsertActivationReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 1, PID: &pid, Port: &port, Status: "starting",
+		Provider: "native", Tier: "local", EndpointURL: "http://127.0.0.1:21300",
+		AppVersion: dep.Version, DesiredState: "running", DeploymentID: &dep.ID,
+	}, 1, activationID); err != nil {
+		t.Fatal(err)
+	}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	prx := proxy.New()
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	rows, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Index == 1 {
+			if row.Status != "starting" || row.PID == nil || *row.PID != pid {
+				t.Fatalf("quarantined activation identity changed: %+v", row)
+			}
+			if _, ok := mgr.GetReplica(app.Slug, 1); ok {
+				t.Fatal("mismatched PID was adopted despite failing bundle identity")
+			}
+			return
+		}
+	}
+	t.Fatal("recovery deleted activation row whose PID identity was unverifiable")
 }
 
 func TestRecoverProcesses_NoPID(t *testing.T) {
@@ -287,6 +440,43 @@ func TestRecoverDockerProcesses(t *testing.T) {
 	}
 	if info.PID != pid {
 		t.Errorf("expected pid %d, got %d", pid, info.PID)
+	}
+}
+
+func TestRecoverDockerProcesses_ExitedContainerIsRejectedThenSwept(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "docker-exited")
+	port, pid := 20510, 99002
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &pid, Port: &port, Status: "running",
+		Provider: "docker", Tier: "default", WorkerID: "cont-exited",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE slug='docker-exited'`); err != nil {
+		t.Fatal(err)
+	}
+	rt := &fakeDockerRuntime{
+		containers: []process.ContainerInfo{{
+			ID: "cont-exited", State: "exited", Labels: map[string]string{
+				process.LabelManaged: "true", process.LabelSlug: "docker-exited", process.LabelReplicaIndex: "0",
+			},
+		}},
+		pids: map[string]int{"cont-exited": 0},
+	}
+	mgr := process.NewManager(t.TempDir(), rt)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	if _, adopted := mgr.GetReplica("docker-exited", 0); adopted {
+		t.Fatal("exited container was adopted and exposed as running")
+	}
+	if target := prx.ReplicaTargetURL("docker-exited", 0); target != "" {
+		t.Fatalf("exited container was routed at %q", target)
+	}
+	lifecycle.SweepOrphanContainers(mgr, rt)
+	if len(rt.removed) != 1 || rt.removed[0] != "cont-exited" {
+		t.Fatalf("exited container sweep=%v, want [cont-exited]", rt.removed)
 	}
 }
 
@@ -550,6 +740,108 @@ func TestRecoverProcesses_MixedTier(t *testing.T) {
 	a, _ := store.GetAppBySlug("mixed-tier")
 	if a.Status != "running" {
 		t.Errorf("expected running, got %s", a.Status)
+	}
+}
+
+func TestRecoverProcesses_MixedTierStartingActivationPreservesDockerIdentityUntilRemoval(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "mixed-tier-starting-activation")
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE id=?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: now, OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitCode := 0
+	activation, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: &exitCode, FinishedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pid, port := 99100, 21910
+	const containerID = "burst-starting"
+	if err := store.UpsertActivationReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 1, PID: &pid, Port: &port, Status: "starting",
+		Provider: "docker", Tier: "burst", EndpointURL: "http://127.0.0.1:21910", WorkerID: containerID,
+		AppVersion: dep.Version, DesiredState: "running", DeploymentID: &dep.ID,
+	}, activation.TargetGeneration, activation.ID); err != nil {
+		t.Fatal(err)
+	}
+	burst := &fakeDockerRuntime{
+		containers: []process.ContainerInfo{{
+			ID: containerID, State: "running", Labels: map[string]string{
+				process.LabelManaged: "true", process.LabelSlug: app.Slug,
+				process.LabelReplicaIndex: "1", process.LabelTier: "burst",
+			},
+		}},
+		pids: map[string]int{containerID: pid},
+	}
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	mgr.RegisterRuntime("burst", burst)
+
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	rows, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered *db.Replica
+	for _, row := range rows {
+		if row.Index == 1 {
+			recovered = row
+			break
+		}
+	}
+	if recovered == nil {
+		t.Fatal("starting activation row disappeared during recovery")
+	}
+	if recovered.Status != "crashed" || recovered.Tier != "burst" || recovered.WorkerID != containerID ||
+		recovered.PID == nil || *recovered.PID != pid || recovered.ActivationID == nil || *recovered.ActivationID != activation.ID {
+		t.Fatalf("recovery erased activation container identity: %+v", recovered)
+	}
+	if _, adopted := mgr.GetReplica(app.Slug, 1); adopted {
+		t.Fatal("pre-health activation container was adopted into routing")
+	}
+
+	burst.removeErr = errors.New("daemon unavailable")
+	lifecycle.SweepOrphanContainersForTiers(mgr, []string{"local", "burst"})
+	if len(burst.removed) != 0 {
+		t.Fatalf("failed removal reported success: %v", burst.removed)
+	}
+	rows, err = store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Index == 1 && (row.Tier != "burst" || row.WorkerID != containerID) {
+			t.Fatalf("best-effort sweep failure erased durable ownership: %+v", row)
+		}
+	}
+
+	burst.removeErr = nil
+	lifecycle.SweepOrphanContainersForTiers(mgr, []string{"local", "burst"})
+	if len(burst.removed) != 1 || burst.removed[0] != containerID {
+		t.Fatalf("cross-tier sweep removed=%v, want [%s]", burst.removed, containerID)
 	}
 }
 

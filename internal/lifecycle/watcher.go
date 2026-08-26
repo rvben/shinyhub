@@ -164,6 +164,10 @@ type appStore interface {
 	// ListHibernatedApps returns apps whose status is 'hibernated'. The startup
 	// warm-restore pass re-boots and re-freezes exactly this set.
 	ListHibernatedApps() ([]*db.App, error)
+	// ScheduleActivationInFlight reports whether durable activation work owns
+	// serving runtime or routing state for the app. Callers hold the shared app
+	// lifecycle lease before consulting it, closing check-then-act races.
+	ScheduleActivationInFlight(appID int64) (bool, error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -199,6 +203,15 @@ type Watcher struct {
 	// When nil (tests or unconfigured setups) the instance is treated as owner
 	// so single-node behaviour is byte-for-byte unchanged.
 	isOwner func() bool
+
+	// operationInFlight reports app lifecycle mutations that own the same
+	// per-slug lock as deploy/scale/activation. The watcher must not race those
+	// operations with restart, hibernate, wake, or warm-cap maintenance.
+	operationInFlight func(slug string) bool
+	// tryAppOperation atomically acquires the API's per-slug lifecycle mutex.
+	// The predicate above is only a cheap skip hint; mutations use this lease for
+	// correctness so a check-then-act race cannot overlap activation/deploy.
+	tryAppOperation func(slug string) (release func(), ok bool)
 
 	mu        sync.Mutex
 	stopping  bool                     // set when Start's ctx is cancelled; rejects new wakes
@@ -278,6 +291,40 @@ func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 // single-node wake behaviour is byte-for-byte unchanged.
 func (w *Watcher) SetIsOwner(fn func() bool) {
 	w.isOwner = fn
+}
+
+// SetOperationInFlight wires the app lifecycle exclusion predicate. It is set
+// once during startup before the watcher begins running.
+func (w *Watcher) SetOperationInFlight(fn func(slug string) bool) {
+	w.operationInFlight = fn
+}
+
+// SetTryAppOperation wires the shared per-app lifecycle mutex. It is set once
+// at startup before background work begins.
+func (w *Watcher) SetTryAppOperation(fn func(slug string) (release func(), ok bool)) {
+	w.tryAppOperation = fn
+}
+
+func (w *Watcher) tryAppLease(slug string) (func(), bool) {
+	if w.tryAppOperation == nil {
+		return func() {}, true
+	}
+	return w.tryAppOperation(slug)
+}
+
+func (w *Watcher) appOperationInFlight(slug string) bool {
+	return w.operationInFlight != nil && w.operationInFlight(slug)
+}
+
+func (w *Watcher) activationOwnsRuntime(app *db.App, operation string) bool {
+	owned, err := w.store.ScheduleActivationInFlight(app.ID)
+	if err != nil {
+		// Runtime mutation without a trustworthy fence is unsafe. Fail closed and
+		// let the next watcher tick retry after the store recovers.
+		slog.Warn("watcher: activation fence unavailable", "slug", app.Slug, "operation", operation, "err", err)
+		return true
+	}
+	return owned
 }
 
 // Start launches the background watchdog/hibernation loop. Blocks until ctx is
@@ -495,6 +542,9 @@ func (w *Watcher) SleepNow(slug string) error {
 	if !isUpStatus(app.Status) {
 		return fmt.Errorf("%w: app is %s", ErrAppNotRunning, app.Status)
 	}
+	if w.activationOwnsRuntime(app, "sleep") {
+		return fmt.Errorf("scheduled data activation owns serving runtime state")
+	}
 	resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
 	if isElasticIsolation(resolvedIso) {
 		return ErrElasticNotSleepable
@@ -558,6 +608,10 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		if isElasticIsolation(resolvedIso) {
 			continue
 		}
+		release, ok := w.tryAppLease(app.Slug)
+		if !ok {
+			continue
+		}
 
 		// Claim the app so a concurrent user wake (WakeTrigger -> BeginWake) cannot
 		// double-boot it. CAS hibernated->waking; if it fails another path already
@@ -565,9 +619,11 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		won, werr := w.store.BeginWake(app.Slug)
 		if werr != nil {
 			slog.Warn("warm restore: begin wake failed", "slug", app.Slug, "err", werr)
+			release()
 			continue
 		}
 		if !won {
+			release()
 			continue
 		}
 
@@ -577,6 +633,7 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 				slog.Warn("warm restore: list deployments failed", "slug", app.Slug, "err", derr)
 			}
 			w.abortWarmClaim(app.Slug) // never deployed; release claim, leave cold
+			release()
 			continue
 		}
 		bundleDir := deployments[0].BundleDir
@@ -630,8 +687,10 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 			}
 			w.abortWarmClaim(app.Slug)
 			if ctx.Err() != nil {
+				release()
 				return
 			}
+			release()
 			continue
 		}
 
@@ -648,11 +707,13 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 				slog.Warn("warm restore: finish wake failed", "slug", app.Slug, "err", ferr)
 			}
 			slog.Info("warm restore: app served a request during restore; left running", "slug", app.Slug)
+			release()
 			continue
 		}
 		w.hibernatePool(app)
 		// Restore the hibernated status: AbortWake is the waking->hibernated CAS.
 		w.abortWarmClaim(app.Slug)
+		release()
 		restored++
 		slog.Info("warm restore: re-froze hibernated app", "slug", app.Slug, "replicas", app.Replicas)
 	}
@@ -779,8 +840,31 @@ func (w *Watcher) enforceSuspendedCap() {
 	}
 	for i := 0; i < excess; i++ {
 		r := susp[i] // oldest-first
+		release, ok := w.tryAppLease(r.Slug)
+		if !ok {
+			continue
+		}
+		stillSuspended := w.tryAppOperation == nil
+		if !stillSuspended {
+			rows, lerr := w.store.ListReplicas(r.AppID)
+			if lerr != nil {
+				release()
+				continue
+			}
+			for _, current := range rows {
+				if current.Index == r.Index && current.Status == db.ReplicaStatusSuspended {
+					stillSuspended = true
+					break
+				}
+			}
+		}
+		if !stillSuspended {
+			release()
+			continue
+		}
 		if err := w.mgr.StopReplica(r.Slug, r.Index); err != nil {
 			slog.Warn("watcher: evict suspended replica failed", "slug", r.Slug, "index", r.Index, "err", err)
+			release()
 			continue
 		}
 		if err := w.store.UpsertReplica(db.UpsertReplicaParams{
@@ -788,6 +872,7 @@ func (w *Watcher) enforceSuspendedCap() {
 		}); err != nil {
 			slog.Warn("watcher: persist evicted replica failed", "slug", r.Slug, "index", r.Index, "err", err)
 		}
+		release()
 	}
 }
 
@@ -831,6 +916,9 @@ func (w *Watcher) runOnce() {
 	idleChecked := make(map[string]bool)
 	handled := make(map[replicaKey]bool)
 	for _, info := range all {
+		if w.appOperationInFlight(info.Slug) {
+			continue
+		}
 		switch info.Status {
 		case process.StatusCrashed:
 			handled[replicaKey{info.Slug, info.Index}] = true
@@ -851,6 +939,13 @@ func (w *Watcher) runOnce() {
 	if err != nil {
 		apps = nil
 	}
+	filtered := apps[:0]
+	for _, app := range apps {
+		if !w.appOperationInFlight(app.Slug) {
+			filtered = append(filtered, app)
+		}
+	}
+	apps = filtered
 	appIDs := make([]int64, len(apps))
 	for i, app := range apps {
 		appIDs[i] = app.ID
@@ -901,6 +996,9 @@ func (w *Watcher) runOnce() {
 		slog.Warn("watcher: list waking apps failed", "err", err)
 	} else {
 		for _, app := range wakingApps {
+			if w.appOperationInFlight(app.Slug) {
+				continue
+			}
 			w.driveWakingApp(app.Slug)
 		}
 	}
@@ -951,6 +1049,31 @@ const crashLoopWindow = 2 * time.Minute
 // boot failures (the replica never starts) are handled by restartSlot's budget +
 // reconcileAppStatus instead.
 func (w *Watcher) handleCrashed(slug string, index int) {
+	release, ok := w.tryAppLease(slug)
+	if !ok {
+		return
+	}
+	defer release()
+	app, err := w.store.GetAppBySlug(slug)
+	if err != nil || w.activationOwnsRuntime(app, "crash handling") {
+		return
+	}
+	if w.tryAppOperation != nil {
+		trackedCrashed := false
+		for _, info := range w.mgr.All() {
+			if info.Slug == slug && info.Index == index && info.Status == process.StatusCrashed {
+				trackedCrashed = true
+				break
+			}
+		}
+		if !trackedCrashed {
+			return
+		}
+	}
+	w.handleCrashedLocked(slug, index)
+}
+
+func (w *Watcher) handleCrashedLocked(slug string, index int) {
 	app, err := w.store.GetAppBySlug(slug)
 	if err != nil {
 		return
@@ -1006,7 +1129,7 @@ func (w *Watcher) handleCrashed(slug string, index int) {
 		slog.Warn("watcher: app crash-looped; marked crashed", "slug", slug, "index", index, "crashes", count)
 		return
 	}
-	w.restartSlot(app, index)
+	w.restartSlotLocked(app, index)
 }
 
 // restartSlot is the single deploy+persist+backoff core shared by the crash path
@@ -1016,6 +1139,22 @@ func (w *Watcher) handleCrashed(slug string, index int) {
 // consumed); any other deploy error consumes one attempt and schedules backoff.
 // Status promotion is left to reconcileStatuses (the single status authority).
 func (w *Watcher) restartSlot(app *db.App, index int) {
+	release, ok := w.tryAppLease(app.Slug)
+	if !ok {
+		return
+	}
+	defer release()
+	fresh, err := w.store.GetAppBySlug(app.Slug)
+	if err != nil || !isUpStatus(fresh.Status) {
+		return
+	}
+	if w.activationOwnsRuntime(fresh, "replica restart") {
+		return
+	}
+	w.restartSlotLocked(fresh, index)
+}
+
+func (w *Watcher) restartSlotLocked(app *db.App, index int) {
 	k := replicaKey{app.Slug, index}
 
 	w.mu.Lock()
@@ -1101,7 +1240,26 @@ func (w *Watcher) scheduleBackoffLocked(k replicaKey, attempt int) {
 // runOnce (see its comment for why the replica map is refetched per phase).
 func (w *Watcher) reconcileStatuses(apps []*db.App, repMap map[int64][]*db.Replica) {
 	for _, app := range apps {
-		w.reconcileAppStatus(app, repMap[app.ID])
+		if w.tryAppOperation == nil {
+			w.reconcileAppStatus(app, repMap[app.ID])
+			continue
+		}
+		release, ok := w.tryAppLease(app.Slug)
+		if !ok {
+			continue
+		}
+		fresh, err := w.store.GetAppBySlug(app.Slug)
+		if err != nil {
+			release()
+			continue
+		}
+		reps, err := w.store.ListReplicas(fresh.ID)
+		if err != nil {
+			release()
+			continue
+		}
+		w.reconcileAppStatus(fresh, reps)
+		release()
 	}
 }
 
@@ -1274,6 +1432,27 @@ func (w *Watcher) handleIdle(slug string, runningCount int) {
 		}
 		return
 	}
+	release, ok := w.tryAppLease(slug)
+	if !ok {
+		return
+	}
+	defer release()
+	// The timeout/app snapshot predates lock acquisition. Re-read the intent and
+	// final activity edge while holding the same mutex as activation/deploy.
+	app, err = w.store.GetAppBySlug(slug)
+	if err != nil || !isUpStatus(app.Status) {
+		return
+	}
+	if w.activationOwnsRuntime(app, "hibernate") {
+		return
+	}
+	lastActivity = w.prx.LastSeen(slug)
+	if lastActivity.IsZero() {
+		lastActivity = app.UpdatedAt
+	}
+	if time.Since(lastActivity) < timeout {
+		return
+	}
 
 	// CAS-style hibernate: atomically remove the pool from routing iff no
 	// activity has been recorded since the snapshot AND no request is in
@@ -1384,6 +1563,26 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration, runnin
 		if _, err := w.warmShrink(slug, app.MinWarmReplicas); err != nil {
 			slog.Warn("watcher: warm shrink failed", "slug", slug, "err", err)
 		}
+		return
+	}
+	release, ok := w.tryAppLease(slug)
+	if !ok {
+		return
+	}
+	defer release()
+	fresh, err := w.store.GetAppBySlug(slug)
+	if err != nil || !isUpStatus(fresh.Status) {
+		return
+	}
+	app = fresh
+	if w.activationOwnsRuntime(app, "clustered hibernate") {
+		return
+	}
+	lastActivity = w.prx.LastSeen(slug)
+	if lastActivity.IsZero() {
+		lastActivity = app.UpdatedAt
+	}
+	if time.Since(lastActivity) < timeout {
 		return
 	}
 
@@ -1515,7 +1714,15 @@ func (w *Watcher) handleWarmExpand(apps []*db.App, repMap map[int64][]*db.Replic
 // restored without waiting for the next tick. Duplicate triggers are safe
 // because warmExpand is idempotent and deploy-lock-guarded.
 func (w *Watcher) WakeTrigger(slug string) {
+	if w.appOperationInFlight(slug) {
+		return
+	}
+	release, ok := w.tryAppLease(slug)
+	if !ok {
+		return
+	}
 	won, err := w.store.BeginWake(slug)
+	release()
 	if err != nil {
 		slog.Warn("watcher: begin wake failed", "slug", slug, "err", err)
 		return
@@ -1607,6 +1814,13 @@ func (w *Watcher) driveWakingApp(slug string) {
 			w.mu.Unlock()
 			w.wakeWG.Done()
 		}()
+		release, ok := w.tryAppLease(slug)
+		if !ok {
+			// Keep the durable waking intent. The next owner tick retries it after
+			// the conflicting deploy/activation releases the app mutex.
+			return
+		}
+		defer release()
 
 		_, endSpan := w.traceOp(context.Background(), "lifecycle.wake", slug)
 		var opErr error

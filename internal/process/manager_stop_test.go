@@ -1,6 +1,7 @@
 package process
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -31,5 +32,22 @@ func TestStopReplica_BoundedWaitOnWedgedProcess(t *testing.T) {
 		// Returned within the bounded window - correct.
 	case <-time.After(3 * time.Second):
 		t.Fatal("StopReplica hung on a process that never exits after SIGKILL")
+	}
+}
+
+func TestStopReplicaConfirmed_LeavesWedgedReplicaTracked(t *testing.T) {
+	rt := &captureRuntime{}
+	m := NewManager(t.TempDir(), rt)
+	m.SetStopGrace(20 * time.Millisecond)
+	if _, err := m.Start(StartParams{Slug: "wedged", Dir: t.TempDir(), Command: []string{"true"}, Port: 19951}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	err := m.StopReplicaConfirmed("wedged", 0)
+	if !errors.Is(err, ErrStopUnconfirmed) {
+		t.Fatalf("StopReplicaConfirmed error = %v, want ErrStopUnconfirmed", err)
+	}
+	if _, ok := m.GetReplica("wedged", 0); !ok {
+		t.Fatal("unconfirmed replica was removed from the manager")
 	}
 }

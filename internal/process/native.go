@@ -500,6 +500,21 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		return ReplicaEndpoint{}, err
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
+	var startupGuardReader, startupGuardWriter *os.File
+	if p.GuardUntilAcknowledged {
+		startupGuardReader, startupGuardWriter, err = os.Pipe()
+		if err != nil {
+			return ReplicaEndpoint{}, fmt.Errorf("create startup guard: %w", err)
+		}
+		// Original argv elements are passed as positional arguments and never
+		// interpolated by the shell. The supervisor blocks before app code starts,
+		// then execs under the same PID after durable acknowledgement. A control-
+		// plane crash closes the pipe, so it exits without launching the app.
+		guardScript := `if IFS= read -r startup_guard <&3; then exec 3<&-; exec "$@"; fi; exit 125`
+		guardArgv := append([]string{"/bin/sh", "-c", guardScript, "shinyhub-startup-guard"}, argv...)
+		cmd = exec.Command(guardArgv[0], guardArgv[1:]...)
+		cmd.ExtraFiles = []*os.File{startupGuardReader}
+	}
 	cmd.Dir = p.Dir
 	cmd.Env = append(nativeChildEnv(p), extraEnv...)
 	cmd.Stdout = logWriter
@@ -509,7 +524,14 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
+		if startupGuardReader != nil {
+			_ = startupGuardReader.Close()
+			_ = startupGuardWriter.Close()
+		}
 		return ReplicaEndpoint{}, fmt.Errorf("start process: %w", err)
+	}
+	if startupGuardReader != nil {
+		_ = startupGuardReader.Close()
 	}
 	pid := cmd.Process.Pid
 	r.mu.Lock()
@@ -520,12 +542,19 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	// warm-wake nor a limit applies, or when cgroup v2 delegation is unavailable;
 	// failures degrade gracefully (stop-hibernate / uncapped).
 	r.placeInAppCgroup(p, pid)
-	return ReplicaEndpoint{
+	ep := ReplicaEndpoint{
 		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
 		Provider: "native",
 		WorkerID: strconv.Itoa(pid),
 		Handle:   RunHandle{PID: pid},
-	}, nil
+	}
+	// Assign only a concrete non-nil file. Converting a nil *os.File directly
+	// into io.WriteCloser would create a non-nil interface and make ordinary,
+	// unguarded starts attempt to write through a nil receiver.
+	if startupGuardWriter != nil {
+		ep.StartupGuard = startupGuardWriter
+	}
+	return ep, nil
 }
 
 func (r *NativeRuntime) Signal(handle RunHandle, sig syscall.Signal) error {

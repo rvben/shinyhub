@@ -418,10 +418,12 @@ func (c *dockerClient) containerStats(ctx context.Context, id string) (*float64,
 	return cpuPercent, rss, nil
 }
 
-// listContainers returns containers matching the given filters JSON string.
+// listContainers returns containers in every state matching the given filters
+// JSON string. all=1 is required for startup orphan cleanup: Docker otherwise
+// returns only running containers and exited managed replicas accumulate.
 // Example filtersJSON: `{"label":["shinyhub.slug"]}`
 func (c *dockerClient) listContainers(filtersJSON string) ([]containerSummary, error) {
-	reqURL := fmt.Sprintf("%s/containers/json?filters=%s", c.base, url.QueryEscape(filtersJSON))
+	reqURL := fmt.Sprintf("%s/containers/json?all=1&filters=%s", c.base, url.QueryEscape(filtersJSON))
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("list containers: %w", err)

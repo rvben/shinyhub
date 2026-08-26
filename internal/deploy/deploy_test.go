@@ -527,6 +527,125 @@ func TestRunReplica_SingleBoot(t *testing.T) {
 	}
 }
 
+type wedgedReplacementRuntime struct {
+	wait chan struct{}
+}
+
+func (r *wedgedReplacementRuntime) Start(context.Context, process.StartParams, io.Writer) (process.ReplicaEndpoint, error) {
+	return process.ReplicaEndpoint{
+		URL: "http://127.0.0.1:19001", Provider: "native", WorkerID: "44001",
+		Handle: process.RunHandle{PID: 44001},
+	}, nil
+}
+func (r *wedgedReplacementRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
+func (r *wedgedReplacementRuntime) Wait(context.Context, process.RunHandle) error {
+	<-r.wait
+	return nil
+}
+func (r *wedgedReplacementRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
+}
+func (r *wedgedReplacementRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+func (r *wedgedReplacementRuntime) HostPreparesDeps() bool    { return false }
+func (r *wedgedReplacementRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (r *wedgedReplacementRuntime) HostProvidesAppData() bool { return true }
+
+func TestRunReplica_GuardedHealthFailurePreservesUnconfirmedProcess(t *testing.T) {
+	rt := &wedgedReplacementRuntime{wait: make(chan struct{})}
+	mgr := process.NewManager(t.TempDir(), rt)
+	mgr.SetStopGrace(5 * time.Millisecond)
+	prx := proxy.New()
+	prx.SetPoolSize("guarded-failure", 1)
+
+	_, err := deploy.RunReplica(deploy.Params{
+		Slug: "guarded-failure", BundleDir: t.TempDir(), Replicas: 1,
+		Manager: mgr, Proxy: prx, Command: []string{"serve"},
+		GuardUntilAcknowledged: true,
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error {
+			return errors.New("not ready")
+		},
+	}, 0)
+	if !errors.Is(err, process.ErrStopUnconfirmed) {
+		t.Fatalf("RunReplica error=%v, want ErrStopUnconfirmed", err)
+	}
+	if _, ok := mgr.GetReplica("guarded-failure", 0); !ok {
+		t.Fatal("unconfirmed replacement was removed from manager tracking")
+	}
+	close(rt.wait)
+}
+
+type confirmedStopRuntime struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func (r *confirmedStopRuntime) Start(context.Context, process.StartParams, io.Writer) (process.ReplicaEndpoint, error) {
+	return process.ReplicaEndpoint{
+		URL: "http://127.0.0.1:19002", Provider: "native", WorkerID: "44002",
+		Handle: process.RunHandle{PID: 44002},
+	}, nil
+}
+func (r *confirmedStopRuntime) Signal(process.RunHandle, syscall.Signal) error {
+	r.once.Do(func() { close(r.done) })
+	return nil
+}
+func (r *confirmedStopRuntime) Wait(context.Context, process.RunHandle) error {
+	<-r.done
+	return nil
+}
+func (r *confirmedStopRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
+}
+func (r *confirmedStopRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+func (r *confirmedStopRuntime) HostPreparesDeps() bool    { return false }
+func (r *confirmedStopRuntime) AppBindHost() string       { return "127.0.0.1" }
+func (r *confirmedStopRuntime) HostProvidesAppData() bool { return true }
+
+func TestRunReplica_GuardedPostStartFailuresReportConfirmedCleanup(t *testing.T) {
+	tests := []struct {
+		name        string
+		prepare     func(*proxy.Proxy)
+		healthCheck func(string, time.Duration, http.RoundTripper) error
+	}{
+		{
+			name:    "health failure",
+			prepare: func(p *proxy.Proxy) { p.SetPoolSize("confirmed-cleanup", 1) },
+			healthCheck: func(string, time.Duration, http.RoundTripper) error {
+				return errors.New("not ready")
+			},
+		},
+		{
+			name:        "proxy registration failure",
+			prepare:     func(*proxy.Proxy) {},
+			healthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &confirmedStopRuntime{done: make(chan struct{})}
+			mgr := process.NewManager(t.TempDir(), rt)
+			prx := proxy.New()
+			tc.prepare(prx)
+			_, err := deploy.RunReplica(deploy.Params{
+				Slug: "confirmed-cleanup", BundleDir: t.TempDir(), Replicas: 1,
+				Manager: mgr, Proxy: prx, Command: []string{"serve"},
+				GuardUntilAcknowledged: true, HealthCheck: tc.healthCheck,
+			}, 0)
+			var startErr *deploy.ReplicaStartError
+			if !errors.As(err, &startErr) || !startErr.CleanupConfirmed {
+				t.Fatalf("RunReplica error=%v, want confirmed ReplicaStartError", err)
+			}
+			if _, ok := mgr.GetReplica("confirmed-cleanup", 0); ok {
+				t.Fatal("confirmed cleanup left replica in manager")
+			}
+		})
+	}
+}
+
 // TestRun_RunsPostDeployHooksBeforeReplicaBoot verifies the hook fires
 // between dependency installation and replica start: the order matters
 // because hooks typically need the venv that `uv sync` just populated, and

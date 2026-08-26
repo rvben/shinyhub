@@ -28,4 +28,9 @@ const (
 	// the container so re-adoption after an agent restart restores the same limit.
 	// Value is the decimal integer cap; absent or unparseable means no cap.
 	LabelMaxSessions = "shinyhub.max_sessions"
+
+	// ManagedContainerFilterJSON is the Docker Engine filters document used to
+	// inventory every container owned by this control plane. Keep callers on this
+	// shared value: Docker expects JSON here, not a bare label expression.
+	ManagedContainerFilterJSON = `{"label":["` + LabelManaged + `=true"]}`
 )

@@ -52,37 +52,11 @@ func ReconcileInflightDeployments(store *db.Store) {
 // On Linux (the production target) the process working directory is read
 // from /proc/<pid>/cwd and must equal the app's active bundle dir — an
 // unrelated reused PID will not be running there. If the working directory
-// cannot be read on this platform the check degrades to the port-liveness
-// probe alone, which still rejects stale port rows.
+// cannot be read, validation fails closed: a live port is not enough evidence
+// to signal or route a PID that may have been reused by another process.
 func validateNativeProcess(pid, port int, bundleDir string) error {
-	p, err := gops.NewProcess(int32(pid))
-	if err != nil {
-		return fmt.Errorf("pid %d not found: %w", pid, err)
-	}
-	if bundleDir != "" {
-		switch cwd, cwdErr := p.Cwd(); {
-		case cwdErr != nil:
-			slog.Warn("recovery: cannot read process cwd; skipping identity check",
-				"pid", pid, "err", cwdErr)
-		default:
-			// Normalize both sides with EvalSymlinks before comparing. On macOS
-			// /tmp is a symlink to /private/tmp: p.Cwd() returns the OS-resolved
-			// path while the stored bundle_dir may use the unresolved symlinked
-			// prefix. A bare filepath.Abs comparison would reject the healthy
-			// process as a PID reuse. Fall back to the raw Abs values when
-			// EvalSymlinks errors (e.g. the dir was deleted mid-check).
-			want, _ := filepath.Abs(bundleDir)
-			got, _ := filepath.Abs(cwd)
-			if rw, err := filepath.EvalSymlinks(want); err == nil {
-				want = rw
-			}
-			if rg, err := filepath.EvalSymlinks(got); err == nil {
-				got = rg
-			}
-			if want != got {
-				return fmt.Errorf("pid %d cwd %q does not match bundle %q (pid reuse?)", pid, got, want)
-			}
-		}
+	if err := validateNativeProcessIdentity(pid, bundleDir); err != nil {
+		return err
 	}
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	conn, err := net.DialTimeout("tcp", addr, 750*time.Millisecond)
@@ -90,6 +64,45 @@ func validateNativeProcess(pid, port int, bundleDir string) error {
 		return fmt.Errorf("port %d not accepting connections: %w", port, err)
 	}
 	_ = conn.Close()
+	return nil
+}
+
+// validateNativeProcessIdentity proves that pid belongs to the active bundle
+// without requiring its HTTP port to be ready. Activation recovery uses this
+// for a process persisted during the pre-health window. Ordinary legacy
+// recovery permits a PID-only fallback when no deployment bundle is available;
+// destructive activation cleanup checks for a concrete bundle before calling
+// this helper and otherwise quarantines a live PID.
+func validateNativeProcessIdentity(pid int, bundleDir string) error {
+	p, err := gops.NewProcess(int32(pid))
+	if err != nil {
+		return fmt.Errorf("pid %d not found: %w", pid, err)
+	}
+	if bundleDir != "" {
+		return validateNativeProcessCWD(pid, bundleDir, p.Cwd)
+	}
+	return nil
+}
+
+func validateNativeProcessCWD(pid int, bundleDir string, readCWD func() (string, error)) error {
+	cwd, err := readCWD()
+	if err != nil {
+		return fmt.Errorf("read pid %d cwd: %w", pid, err)
+	}
+	// Normalize both sides with EvalSymlinks before comparing. On macOS /tmp is
+	// a symlink to /private/tmp; fall back to absolute paths when a target was
+	// deleted during recovery.
+	want, _ := filepath.Abs(bundleDir)
+	got, _ := filepath.Abs(cwd)
+	if rw, err := filepath.EvalSymlinks(want); err == nil {
+		want = rw
+	}
+	if rg, err := filepath.EvalSymlinks(got); err == nil {
+		got = rg
+	}
+	if want != got {
+		return fmt.Errorf("pid %d cwd %q does not match bundle %q (pid reuse?)", pid, got, want)
+	}
 	return nil
 }
 
@@ -243,7 +256,27 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 				logRunByReplica[run.ReplicaIndex] = run.RunID
 			}
 		}
-		prx.SetPoolSize(app.Slug, app.Replicas)
+		poolSize := app.Replicas
+		recoverableSurges := make(map[int]bool)
+		for _, r := range reps {
+			if r.Index >= app.Replicas && r.ActivationID != nil {
+				a, aerr := store.GetScheduleActivation(*r.ActivationID)
+				if aerr != nil {
+					// Unknown is not terminal. Preserve both the runtime and its
+					// durable handle so the activation coordinator can retry once the
+					// store is readable again.
+					slog.Warn("recovery: activation state unknown; preserving surge",
+						"slug", app.Slug, "idx", r.Index, "activation_id", *r.ActivationID, "err", aerr)
+					recoverableSurges[r.Index] = true
+				} else if isNonterminalActivationStatus(a.Status) {
+					recoverableSurges[r.Index] = true
+				}
+			}
+			if r.Index >= poolSize && recoverableSurges[r.Index] {
+				poolSize = r.Index + 1
+			}
+		}
+		prx.SetPoolSize(app.Slug, poolSize)
 		prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, defaultMaxSessions))
 		prx.SetPoolAppID(app.Slug, app.ID)
 		prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, identityGlobal))
@@ -254,6 +287,42 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		healable := false
 		for _, r := range reps {
 			logRunID := logRunByReplica[r.Index]
+			if r.Index >= app.Replicas && r.ActivationID != nil && !recoverableSurges[r.Index] {
+				// A terminal action never owns a serving surge after restart. Leave
+				// containers unadopted for the orphan sweep; stop recorded native
+				// processes directly, then remove the stale row.
+				canDelete := true
+				if _, containerBacked := mgr.RuntimeForTier(r.Tier).(ContainerLister); !containerBacked {
+					canDelete = stopNativeActivationReplica(mgr, app, r, bundleDir, logRunID)
+				}
+				if !canDelete {
+					indeterminate = true
+					continue
+				}
+				if err := store.DeleteReplica(app.ID, r.Index); err != nil && !errors.Is(err, db.ErrNotFound) {
+					slog.Warn("recovery: delete terminal activation surge", "slug", app.Slug, "idx", r.Index, "err", err)
+				}
+				continue
+			}
+			if r.Status == "starting" && r.ActivationID != nil {
+				// The server died after runtime start but before health completed.
+				// Never adopt an unproven endpoint into routing. Docker is left
+				// unowned for the post-recovery container sweep; native is adopted
+				// only long enough to perform a confirmed stop.
+				rt := mgr.RuntimeForTier(r.Tier)
+				if _, containerBacked := rt.(ContainerLister); !containerBacked {
+					if stopNativeActivationReplica(mgr, app, r, bundleDir, logRunID) {
+						markReplicaCrashed(store, app, r.Index, "activation start interrupted before health check")
+					} else {
+						// Retain the PID and starting row. Losing either would let the
+						// watcher launch a duplicate while this process may still exist.
+						indeterminate = true
+					}
+				} else {
+					markReplicaCrashed(store, app, r.Index, "activation start interrupted before health check")
+				}
+				continue
+			}
 			if r.Status == db.ReplicaStatusLost {
 				// A lost replica is never re-adopted; the next deploy re-places it.
 				continue
@@ -327,6 +396,43 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		if !anyAlive && !indeterminate && !healable {
 			markRecoveryDown(store, app.Slug)
 		}
+	}
+}
+
+func stopNativeActivationReplica(mgr *process.Manager, app *db.App, r *db.Replica, bundleDir, logRunID string) bool {
+	if r.PID == nil {
+		return true
+	}
+	if err := syscall.Kill(*r.PID, 0); err != nil {
+		return errors.Is(err, syscall.ESRCH)
+	}
+	if bundleDir == "" || validateNativeProcessIdentity(*r.PID, bundleDir) != nil {
+		slog.Warn("recovery: activation replica PID failed cwd identity check; preserving row",
+			"slug", app.Slug, "idx", r.Index, "pid", *r.PID)
+		return false
+	}
+	port := 0
+	if r.Port != nil {
+		port = *r.Port
+	}
+	mgr.Adopt(app.Slug, process.ProcessInfo{
+		Slug: app.Slug, AppID: app.ID, Index: r.Index, PID: *r.PID, Port: port,
+		Status: process.StatusRunning, Tier: r.Tier, Provider: r.Provider,
+		EndpointURL: r.EndpointURL, WorkerID: r.WorkerID, LogRunID: logRunID,
+	}, process.RunHandle{PID: *r.PID})
+	if err := mgr.StopReplicaConfirmed(app.Slug, r.Index); err != nil {
+		slog.Warn("recovery: stop interrupted activation replica", "slug", app.Slug, "idx", r.Index, "err", err)
+		return false
+	}
+	return true
+}
+
+func isNonterminalActivationStatus(status string) bool {
+	switch status {
+	case "pending", "deferred_interval", "deferred_capacity", "repairing", "running":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -572,7 +678,14 @@ func frozenReplicaIdentityOK(pid int, bundleDir string) bool {
 // un-restarted and the app permanently under-replicated. reason names why the
 // replica is being marked, for operator triage.
 func markReplicaCrashed(store *db.Store, app *db.App, index int, reason string) {
-	if err := store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: index, Status: "crashed"}); err != nil {
+	// RecordReplicaCrash updates status and diagnostics in place. In particular,
+	// it preserves a pre-health activation's tier, PID/container ID, endpoint,
+	// generation, and activation owner until exact runtime absence is proved.
+	// A sparse UpsertReplica here would erase that recovery identity and could
+	// allow a replacement to launch alongside the surviving process.
+	if err := store.RecordReplicaCrash(db.UpsertReplicaParams{
+		AppID: app.ID, Index: index, Status: "crashed", Reason: reason,
+	}); err != nil {
 		slog.Warn("recovery: persist crashed replica failed",
 			"slug", app.Slug, "idx", index, "reason", reason, "err", err)
 	}
@@ -625,23 +738,55 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 		}
 		return false
 	}
-	if r.Index >= app.Replicas {
+	if r.Index >= app.Replicas && r.ActivationID == nil {
 		slog.Warn("recovery: replica index beyond current pool; skipping", "slug", app.Slug, "idx", r.Index, "pool", app.Replicas)
 		return false
 	}
-	var cID string
-	for _, c := range containers {
-		if c.Labels[process.LabelSlug] == app.Slug && c.Labels[process.LabelReplicaIndex] == strconv.Itoa(r.Index) {
-			cID = c.ID
-			break
-		}
+	var matches []process.ContainerInfo
+	wantDeployment := ""
+	if r.DeploymentID != nil {
+		wantDeployment = strconv.FormatInt(*r.DeploymentID, 10)
 	}
-	if cID == "" {
+	for _, c := range containers {
+		if c.State != "" && c.State != "running" {
+			// All-state inventory is intentional so the later orphan sweep can
+			// remove exited containers. Only a running container is adoptable.
+			continue
+		}
+		labels := c.Labels
+		if labels[process.LabelSlug] != app.Slug || labels[process.LabelReplicaIndex] != strconv.Itoa(r.Index) {
+			continue
+		}
+		if r.WorkerID != "" && c.ID != r.WorkerID {
+			continue
+		}
+		if wantDeployment != "" && labels[process.LabelDeploymentID] != wantDeployment {
+			continue
+		}
+		if r.AppVersion != "" && labels[process.LabelAppVersion] != "" && labels[process.LabelAppVersion] != r.AppVersion {
+			continue
+		}
+		if r.Tier != "" && labels[process.LabelTier] != "" && labels[process.LabelTier] != r.Tier {
+			continue
+		}
+		matches = append(matches, c)
+	}
+	if len(matches) == 0 {
 		return false // no live container for this replica
 	}
+	if len(matches) != 1 {
+		slog.Warn("recovery: ambiguous docker identity; refusing adoption",
+			"slug", app.Slug, "idx", r.Index, "matches", len(matches))
+		return false
+	}
+	cID := matches[0].ID
 	pid, err := lister.InspectPID(cID)
 	if err != nil {
 		slog.Error("recovery: inspect docker container", "slug", app.Slug, "idx", r.Index, "err", err)
+		return false
+	}
+	if pid <= 0 {
+		slog.Warn("recovery: docker container is not running; refusing adoption", "slug", app.Slug, "idx", r.Index, "container", cID, "pid", pid)
 		return false
 	}
 	if r.Port == nil || *r.Port == 0 {
@@ -654,17 +799,19 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 		targetURL = fmt.Sprintf("http://127.0.0.1:%d", port)
 	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
-		Slug:        app.Slug,
-		AppID:       app.ID,
-		Index:       r.Index,
-		PID:         pid,
-		Port:        port,
-		Status:      process.StatusRunning,
-		Tier:        r.Tier,
-		Provider:    r.Provider,
-		EndpointURL: r.EndpointURL,
-		WorkerID:    r.WorkerID,
-		LogRunID:    logRunID,
+		Slug:         app.Slug,
+		AppID:        app.ID,
+		Index:        r.Index,
+		PID:          pid,
+		Port:         port,
+		Status:       process.StatusRunning,
+		Tier:         r.Tier,
+		Provider:     r.Provider,
+		EndpointURL:  targetURL,
+		WorkerID:     cID,
+		AppVersion:   r.AppVersion,
+		DeploymentID: derefInt64(r.DeploymentID),
+		LogRunID:     logRunID,
 	}, process.RunHandle{ContainerID: cID})
 	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID)); err != nil {
 		slog.Error("recovery: register docker proxy", "slug", app.Slug, "idx", r.Index, "err", err)
@@ -730,6 +877,37 @@ type ContainerSweeper interface {
 	RemoveHandle(process.RunHandle) error
 }
 
+// containerSweepScoper lets runtimes that share one backing container daemon
+// expose a stable deduplication key. DockerRuntime uses its daemon endpoint, so
+// multiple configured tiers do not enumerate and sweep the same daemon twice.
+type containerSweepScoper interface {
+	ContainerSweepScope() string
+}
+
+// SweepOrphanContainersForTiers sweeps every registered container-backed tier.
+// It complements durable per-replica recovery; it is not ownership proof.
+func SweepOrphanContainersForTiers(mgr *process.Manager, tierNames []string) {
+	if len(tierNames) == 0 {
+		tierNames = []string{""}
+	}
+	seenScopes := make(map[string]struct{})
+	for _, tierName := range tierNames {
+		sweeper, ok := mgr.RuntimeForTier(tierName).(ContainerSweeper)
+		if !ok {
+			continue
+		}
+		if scoped, ok := sweeper.(containerSweepScoper); ok {
+			if scope := scoped.ContainerSweepScope(); scope != "" {
+				if _, seen := seenScopes[scope]; seen {
+					continue
+				}
+				seenScopes[scope] = struct{}{}
+			}
+		}
+		SweepOrphanContainers(mgr, sweeper)
+	}
+}
+
 // SweepOrphanContainers removes ShinyHub-managed containers that no live
 // replica owns. It must run AFTER RecoverProcesses, so containers the Manager
 // re-adopted are protected; everything else labeled shinyhub.managed (a
@@ -740,7 +918,7 @@ func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) {
 	if sweeper == nil {
 		return
 	}
-	containers, err := sweeper.ListByLabel(`{"label":["` + process.LabelManaged + `=true"]}`)
+	containers, err := sweeper.ListByLabel(process.ManagedContainerFilterJSON)
 	if err != nil {
 		slog.Error("container sweep: list", "err", err)
 		return

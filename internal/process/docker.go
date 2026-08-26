@@ -311,6 +311,15 @@ func (r *DockerRuntime) RemoveContainer(id string) error {
 	return r.client.removeContainer(id)
 }
 
+// ContainerSweepScope identifies the backing daemon for startup-sweep
+// deduplication when multiple runtime tiers use the same Docker endpoint.
+func (r *DockerRuntime) ContainerSweepScope() string {
+	if r == nil || r.client == nil {
+		return ""
+	}
+	return r.client.base
+}
+
 // SetSnapshot enables warm-wake (freeze + cgroup reclaim) and sets the
 // reclaim-success threshold. Called once at startup from buildRuntime.
 func (r *DockerRuntime) SetSnapshot(enabled bool, reclaimMinFraction float64) {
@@ -416,7 +425,7 @@ func (r *DockerRuntime) ListByLabel(labelFilter string) ([]ContainerInfo, error)
 	}
 	out := make([]ContainerInfo, len(containers))
 	for i, c := range containers {
-		out[i] = ContainerInfo{ID: c.ID, Labels: c.Labels}
+		out[i] = ContainerInfo{ID: c.ID, Labels: c.Labels, State: c.State}
 	}
 	return out, nil
 }
