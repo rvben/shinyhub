@@ -8,7 +8,9 @@ PORT="${SHINYHUB_TEST_PG_PORT:-55432}"
 PASS="shinyhub"
 IMAGE="postgres:16"
 
-cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+# PostgreSQL declares PGDATA as a volume. Remove that anonymous, disposable
+# volume with the container so repeated validation runs do not leak disk space.
+cleanup() { docker rm -f -v "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 cleanup
