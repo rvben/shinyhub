@@ -366,8 +366,11 @@ autoscale = { enabled = true, min_replicas = 1, max_replicas = 8, target = 0.8 }
 - `enabled` turns the policy on (still gated on the global flag above).
 - `min_replicas` / `max_replicas` are the bounds the controller stays within.
   When enabled they must be `>= 1` with `min <= max`, and `max_replicas` may not
-  exceed the runtime `max_replicas` ceiling. The effective floor is the larger
-  of `min_replicas` and `min_warm_replicas`.
+  exceed the runtime steady-state `max_replicas` ceiling. The effective floor is
+  the larger of `min_replicas` and `min_warm_replicas`. A
+  [scheduled serving-data roll](schedules.md#activating-refreshed-data-in-serving-replicas)
+  may temporarily admit one memory-checked surge replica above these
+  steady-state bounds.
 - `target` is the target average active sessions per replica as a fraction
   `(0,1]` of the per-replica cap. `0.8` with a cap of `10` aims for ~8 sessions
   per replica before adding one. `0` inherits the runtime-wide default target.
@@ -498,9 +501,14 @@ Server-wide defaults in `shinyhub.yaml`:
 ```yaml
 runtime:
   default_replicas: 1                       # applied to apps created without an override
-  max_replicas: 32                          # admin-enforced upper bound on replicas
+  max_replicas: 32                          # admin-enforced steady-state replica bound
   default_max_sessions_per_replica: 10      # fallback when an app has cap=0
 ```
+
+`runtime.max_replicas` limits configured and autoscaled steady-state replicas.
+A [scheduled serving-data roll](schedules.md#activating-refreshed-data-in-serving-replicas)
+may temporarily admit one additional, memory-checked surge replica; it never
+changes the configured replica count.
 
 Corresponding env vars: `SHINYHUB_RUNTIME_DEFAULT_REPLICAS`,
 `SHINYHUB_RUNTIME_MAX_REPLICAS`,

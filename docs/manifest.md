@@ -231,7 +231,7 @@ autoscale = { enabled = true, min_replicas = 1, max_replicas = 8, target = 0.8 }
 |---|---|---|
 | `enabled` | bool | **Required.** Turn the policy on or off. Still gated on the global `runtime.autoscale.enabled` flag. |
 | `min_replicas` | int | Lower bound. Must be `>= 1` when enabled. The effective floor is `max(min_replicas, min_warm_replicas)`. |
-| `max_replicas` | int | Upper bound. Must be `>= min_replicas` when enabled and may not exceed the runtime `max_replicas` ceiling. |
+| `max_replicas` | int | Steady-state upper bound. Must be `>= min_replicas` when enabled and may not exceed the runtime steady-state `max_replicas` ceiling. A [scheduled serving-data roll](schedules.md#activating-refreshed-data-in-serving-replicas) may temporarily admit one memory-checked surge replica above it without changing the configured count. |
 | `target` | float `(0,1]` | Target average active sessions per replica as a fraction of the per-replica cap. `0` inherits the runtime-wide default target. |
 
 The block is atomic: when present it writes the full policy (all four columns);

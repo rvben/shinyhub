@@ -108,7 +108,7 @@ on every `fleet apply` and drift back to the manifest is corrected:
 | Key | Type | Meaning |
 |---|---|---|
 | `enabled` | bool | **Required.** Turn the policy on or off. Also gated on the global `runtime.autoscale.enabled` server flag. |
-| `min_replicas` / `max_replicas` | int | Bounds the controller stays within. When enabled, `min_replicas >= 1`, `max_replicas >= min_replicas`, and `max_replicas` may not exceed the runtime `max_replicas` ceiling. |
+| `min_replicas` / `max_replicas` | int | Steady-state bounds the controller stays within. When enabled, `min_replicas >= 1`, `max_replicas >= min_replicas`, and `max_replicas` may not exceed the runtime steady-state `max_replicas` ceiling. A [scheduled serving-data roll](schedules.md#activating-refreshed-data-in-serving-replicas) may temporarily admit one memory-checked surge replica above it without changing the configured count. |
 | `target` | float `(0,1]` | Target average active sessions per replica as a fraction of the per-replica cap. `0` inherits the runtime default. |
 
 The block reconciles atomically (all four columns) and is one drift unit: `fleet

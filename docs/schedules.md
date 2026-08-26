@@ -49,6 +49,8 @@ Fields:
 | `overlap` | `skip` (default) drops new ticks while one is in flight; `queue` holds at most one extra; `concurrent` allows overlap. |
 | `missed` | `skip` (default) ignores ticks missed during downtime; `run_once` dispatches one catch-up at startup, recorded with `trigger: "missed"` (see "Run provenance" below). |
 | `run_on_register` | When `true`, fire this schedule once on first registration if the app has never had a successful run of it, warming the cache on a fresh deploy. CLI flag: `--run-on-register`. See "Warm on first deploy" below. |
+| `on_success` | `none` (default) leaves serving processes unchanged. `roll` durably and gracefully replaces this app's replicas after a successful run so module-scope data is re-imported. |
+| `min_roll_interval` | Optional damper such as `1h`. Successful runs still advance job history and the target data generation, but queued activation is coalesced and cannot run before this interval after the last completed successful roll. CLI flag: `--min-roll-interval`. |
 
 **Timezone PATCH tri-state:** The `timezone` key in a PATCH request has three distinct meanings:
 
@@ -100,7 +102,63 @@ cmd = "uv run --with-requirements requirements.txt python helpers/fetch.py"
 timeout_seconds = 600
 overlap = "skip"
 missed = "run_once"
+on_success = "roll"
+min_roll_interval = "1h"
 ```
+
+## Activating refreshed data in serving replicas
+
+Writing a new file does not reload a process that read it at import time. Set
+`on_success = "roll"` when a successful schedule run must also make that data
+visible to new sessions without app-side reload code:
+
+```toml
+[[schedule]]
+name = "refresh-pend-data"
+cron = "*/15 * * * *"
+cmd = "uv run python helpers/fetch_data.py --only pend_data"
+on_success = "roll"
+min_roll_interval = "1h"
+```
+
+The schedule run and serving-data activation are deliberately separate
+outcomes. A successful command commits its run and activation request in one
+database transaction. The activation then starts one fresh surge replica,
+waits for its health check, drains and replaces canonical slots one at a time,
+invalidates suspended snapshots, and removes the surge. Existing sessions are
+allowed to drain; once activation succeeds, every routable or resumable replica
+belongs to the run's target generation.
+
+Important behavior:
+
+- Only `succeeded` runs activate. Failed, timed-out, cancelled, interrupted, or
+  overlap-skipped runs leave serving processes unchanged.
+- The configured replica count and `runtime.max_replicas` are steady-state
+  limits. A roll admits exactly one temporary, memory-checked surge
+  (`max_surge = 1`) above that count; if safe headroom cannot be proved it
+  records `deferred_capacity` and retries without dropping the warm floor.
+- Activations are globally serialized in the first release, so schedules that
+  complete together do not start simultaneous cold imports on one host.
+- A newer queued success supersedes older queued work for the same app while
+  preserving the earliest eligible time. Work already repairing after a
+  destructive boundary cannot be superseded.
+- The app's replica topology and lifecycle settings are fenced while an
+  activation is running or repairing. Scale, restart, deploy, rollback, stop,
+  and delete requests return a conflict rather than erasing recovery identity.
+- Disabling `on_success` affects future runs only. The UI continues to show a
+  durable activation already pending, running, or repairing, and the schedule
+  cannot be deleted until that work becomes terminal.
+- The first release supports self-rolls for multiplex apps on the native and
+  local Docker runtimes. Grouped/per-session isolation, remote or managed
+  runtimes, cross-app consumers, and in-process `signal` hooks are rejected or
+  left for a separately specified expansion.
+
+Use the UI's independent **Job** and **Serving-data activation** statuses,
+`shinyhub apps show <app>` for an attributable per-app summary, or
+`shinyhub schedule runs <app> <schedule>` for full history. Fleet APIs also
+expose activation status, phase, age, target generation, attention, and serving
+freshness. Logs and audit events carry the activation id, source run, and target
+generation for incident attribution.
 
 ## Triggering manually
 
@@ -137,9 +195,13 @@ shinyhub schedule ls fetch
 
 `schedule ls` carries the same freshness fields per schedule -
 `last_run_id`, `last_run_at`, `last_run_status`, `last_success_at`,
-`last_success_age_s`, `stale`, and `refreshing`. The latest run's id, status,
-and timestamp come from one database snapshot, so a diagnostic can fetch the
-log for exactly the run whose state it reports.
+`last_success_age_s`, `stale`, `refreshing`, and the latest durable activation.
+The fleet status endpoint additionally reports `activation_status`,
+`activation_phase`, `activation_age_s`, `activation_due_at`,
+`activation_target_generation`, `activation_error`, `activation_attention`,
+and `serving_freshness`. The latest run's id, status, and timestamp come from
+one database snapshot, so a diagnostic can fetch the log for exactly the run
+whose state it reports.
 
 `stale` is cron-aware rather than a fixed threshold. It takes the last
 **success** as the anchor (the schedule's creation time if it has never
@@ -293,6 +355,7 @@ either sees the old file or the new one — never a partial write.
 - **Timezone.** Each schedule fires in its effective timezone (see "Timezone resolution" above). Schedules without an explicit timezone inherit the server default; the fallback is always UTC, never the host `TZ`. Server-default changes take effect on restart — running schedules are not hot-reloaded on config change.
 - **`run_once` catch-up runs at startup only.** It does not re-fire missed runs from arbitrary points in time.
 - **Native runtime read-only enforcement.** RO is a convention for native (filesystem permits writes through the symlink). Use Docker if you need OS-level enforcement.
+- **Activation scope.** `on_success = "roll"` is limited to self-rolls for multiplex apps on the native and local Docker runtimes in the single-node activation engine. Unsupported topology is recorded as `blocked_unsupported`; it never falls back to stop-first replacement.
 
 ## Audit log
 
@@ -301,10 +364,15 @@ Every schedule action is recorded in the audit log under one of:
 ```
 schedule_create  schedule_update  schedule_delete  schedule_run_manual
 schedule_run_succeeded  schedule_run_failed
-schedule_run_timed_out  schedule_run_cancelled
+schedule_run_timed_out  schedule_run_cancelled  schedule_run_interrupted
+schedule_activation_roll  schedule_activation_outcome
 shared_data_grant  shared_data_revoke
 ```
 
-Enable/disable is recorded as `schedule_update`.
+Create and update audit details include `on_success` and
+`min_roll_interval_seconds`; enable/disable is recorded as `schedule_update`.
 
-Admins can view via **Audit Log** in the UI or `GET /api/audit?action=schedule_run_failed`.
+`schedule_activation_outcome` records the activation ID, source run, schedule
+snapshot, target generation, terminal status, last operational phase, and error.
+Admins can expand those details in **Audit Log**, or filter the API with
+`GET /api/audit?action=schedule_activation_outcome`.

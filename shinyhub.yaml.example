@@ -130,7 +130,7 @@ runtime:
   # corresponding limit is not enforced (the app runs uncapped) and a warning is
   # logged.
   default_replicas: 1                 # applied when an app does not set its own replicas  # SHINYHUB_RUNTIME_DEFAULT_REPLICAS
-  max_replicas: 32                    # hard cap enforced by the API  # SHINYHUB_RUNTIME_MAX_REPLICAS
+  max_replicas: 32                    # steady-state API cap; a schedule roll may admit one memory-checked surge  # SHINYHUB_RUNTIME_MAX_REPLICAS
 
   # Optional: explicit runtime tiers. Each app is placed on a tier, and each
   # tier is backed by one runtime. Omit this block for single-backend setups -
@@ -309,7 +309,7 @@ metrics:
 # Optional: periodic database and application-log housekeeping (owner only).
 maintenance:
   audit_retention_days: 0              # delete audit_events older than N days; 0 = keep forever  # SHINYHUB_AUDIT_RETENTION_DAYS
-  schedule_run_retention_count: 0      # keep N newest runs per schedule; 0 = keep all  # SHINYHUB_SCHEDULE_RUN_RETENTION_COUNT
+  schedule_run_retention_count: 0      # keep N newest runs + terminal activations per schedule; nonterminal/attributed rows survive; 0 = keep all  # SHINYHUB_SCHEDULE_RUN_RETENTION_COUNT
   app_log_run_retention_count: 20      # newest runs per app replica; 0 = default (20), -1 = keep all  # SHINYHUB_APP_LOG_RUN_RETENTION_COUNT
   interval: 1h                         # how often the maintenance loop runs
 
