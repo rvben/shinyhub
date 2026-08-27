@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -292,6 +293,11 @@ func TestDeployWatchDeploysInitialAndCoalescedLatestChange(t *testing.T) {
 	previousPoll := watchPollInterval
 	watchPollInterval = 10 * time.Millisecond
 	t.Cleanup(func() { watchPollInterval = previousPoll })
+	// Leave enough quiet time for three saves to remain one burst even when the
+	// race-enabled package suite is CPU-starved by other packages. The behavior
+	// of the debounce timer itself is covered by the focused unit test above;
+	// this test exercises the complete watcher and deployment loop.
+	const watchDelay = 750 * time.Millisecond
 
 	var deploys atomic.Int32
 	var watchHeaders atomic.Int32
@@ -329,9 +335,8 @@ func TestDeployWatchDeploysInitialAndCoalescedLatestChange(t *testing.T) {
 		sub.SetErr(&stderr)
 	}
 	root.SetContext(ctx)
-	root.SetArgs([]string{"deploy", dir, "--slug", "demo", "--watch", "--watch-delay", "100ms", "--host", srv.URL, "-o", "table"})
-	done := make(chan error, 1)
-	go func() { done <- root.ExecuteContext(ctx) }()
+	root.SetArgs([]string{"deploy", dir, "--slug", "demo", "--watch", "--watch-delay", watchDelay.String(), "--host", srv.URL, "-o", "table"})
+	run := startWatchTestCommand(t, root, cancel)
 
 	waitForAtomicCount(t, &deploys, 1)
 	// A metadata-only touch wakes the filesystem watcher, but the canonical
@@ -341,7 +346,7 @@ func TestDeployWatchDeploysInitialAndCoalescedLatestChange(t *testing.T) {
 	if err := os.Chtimes(appPath, touched, touched); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(watchDelay + 100*time.Millisecond)
 	if got := deploys.Load(); got != 1 {
 		t.Fatalf("metadata-only source change caused %d total deploys, want 1", got)
 	}
@@ -352,18 +357,12 @@ func TestDeployWatchDeploysInitialAndCoalescedLatestChange(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	waitForAtomicCount(t, &deploys, 2)
-	time.Sleep(180 * time.Millisecond)
+	time.Sleep(watchDelay + 100*time.Millisecond)
 	if got := deploys.Load(); got != 2 {
 		t.Fatalf("deploys after one save burst = %d, want 2 total", got)
 	}
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("watch returned error: %v\nstderr=%s", err, stderr.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("watch did not stop after context cancellation")
+	if err := run.stop(); err != nil {
+		t.Fatalf("watch returned error: %v\nstderr=%s", err, stderr.String())
 	}
 	if got := watchHeaders.Load(); got != 2 {
 		t.Fatalf("watch-attributed deploys = %d, want 2", got)
@@ -410,21 +409,14 @@ func TestDeployWatchFailureKeepsWatching(t *testing.T) {
 	dir := deployTestBundleDir(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	root, _, stderr := watchTestCommand(t, ctx, dir, srv.URL)
-	done := make(chan error, 1)
-	go func() { done <- root.ExecuteContext(ctx) }()
+	run := startWatchTestCommand(t, root, cancel)
 	waitForAtomicCount(t, &deploys, 1)
 	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("# fixed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	waitForAtomicCount(t, &deploys, 2)
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			t.Fatalf("watch returned error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("watch did not stop")
+	if err := run.stop(); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("watch returned error: %v", err)
 	}
 	if !strings.Contains(stderr.String(), "watch process is still running") {
 		t.Fatalf("failure did not explain recovery path:\n%s", stderr.String())
@@ -446,6 +438,45 @@ func watchTestCommand(t *testing.T, ctx context.Context, dir, host string) (*cob
 	root.SetContext(ctx)
 	root.SetArgs([]string{"deploy", dir, "--slug", "demo", "--watch", "--watch-delay", "100ms", "--host", host, "-o", "table"})
 	return root, stdout, stderr
+}
+
+type watchTestRun struct {
+	cancel context.CancelFunc
+	done   chan error
+	once   sync.Once
+	err    error
+}
+
+func startWatchTestCommand(t *testing.T, root *cobra.Command, cancel context.CancelFunc) *watchTestRun {
+	t.Helper()
+	run := &watchTestRun{cancel: cancel, done: make(chan error, 1)}
+	go func() { run.done <- root.ExecuteContext(root.Context()) }()
+	// A failed assertion must not leave the command's deferred lease shutdown
+	// running while the next test binds a fresh Cobra root to package flags.
+	t.Cleanup(func() {
+		if err := run.stop(); err != nil && !errors.Is(err, context.Canceled) {
+			if errors.Is(err, errWatchTestStopTimeout) {
+				t.Errorf("watch did not stop after context cancellation")
+				return
+			}
+			t.Errorf("watch returned error during cleanup: %v", err)
+		}
+	})
+	return run
+}
+
+var errWatchTestStopTimeout = errors.New("watch test command did not stop")
+
+func (run *watchTestRun) stop() error {
+	run.cancel()
+	run.once.Do(func() {
+		select {
+		case run.err = <-run.done:
+		case <-time.After(5 * time.Second):
+			run.err = errWatchTestStopTimeout
+		}
+	})
+	return run.err
 }
 
 func waitForAtomicCount(t *testing.T, value *atomic.Int32, want int32) {
