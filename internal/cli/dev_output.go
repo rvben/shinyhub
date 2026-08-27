@@ -45,9 +45,13 @@ func (w *appEventWriter) Write(p []byte) (int, error) {
 			w.buf.Write(line)
 			return n, nil
 		}
-		var event map[string]any
+		// RawMessage preserves every existing JSON value exactly—including int64
+		// identifiers beyond JavaScript's safe-integer range—while adding only the
+		// fleet identity needed to demultiplex the stream.
+		var event map[string]json.RawMessage
 		if json.Unmarshal(bytes.TrimSpace(line), &event) == nil {
-			event["app"] = w.app
+			encodedApp, _ := json.Marshal(w.app)
+			event["app"] = encodedApp
 			if encodeErr := json.NewEncoder(w.w).Encode(event); encodeErr != nil {
 				return 0, encodeErr
 			}

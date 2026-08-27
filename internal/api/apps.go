@@ -313,16 +313,31 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	projectCreated, err := s.store.CreateApp(db.CreateAppParams{
+	appParams := db.CreateAppParams{
 		Slug:        req.Slug,
 		Name:        req.Name,
 		ProjectSlug: req.ProjectSlug,
 		OwnerID:     u.ID,
 		Access:      access,
-	})
+	}
+	var projectCreated bool
+	var err error
+	if development != nil {
+		projectCreated, err = s.store.CreateDevelopmentApp(db.CreateDevelopmentAppParams{
+			App:             appParams,
+			Session:         developmentSessionParams(r, 0, *development, req.ExpiresAt),
+			DefaultReplicas: s.cfg.Runtime.DefaultReplicas,
+		})
+	} else {
+		projectCreated, err = s.store.CreateApp(appParams)
+	}
 	if err != nil {
 		if errors.Is(err, db.ErrSlugTaken) {
 			writeError(w, http.StatusConflict, "slug already taken")
+			return
+		}
+		if errors.Is(err, db.ErrDevelopmentSessionConflict) {
+			writeError(w, http.StatusConflict, "development session is no longer available; start a new session")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -335,7 +350,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	// Apply the operator-configured default replica count when it exceeds the
 	// SQL DEFAULT of 1. Zero and one are left alone (zero is invalid; one
 	// matches the default).
-	if s.cfg.Runtime.DefaultReplicas > 1 {
+	if development == nil && s.cfg.Runtime.DefaultReplicas > 1 {
 		created, err := s.store.GetAppBySlug(req.Slug)
 		if err == nil {
 			if err := s.store.UpdateAppReplicas(created.ID, s.cfg.Runtime.DefaultReplicas); err != nil {
@@ -349,21 +364,6 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if development != nil {
-		if err := s.store.UpsertDevelopmentSession(developmentSessionParams(r, app.ID, *development, req.ExpiresAt)); err != nil {
-			_ = s.store.DeleteApp(req.Slug)
-			writeError(w, http.StatusConflict, err.Error())
-			return
-		}
-		if development.Target == db.DevelopmentTargetEphemeral {
-			if err := s.store.MarkEphemeralApp(app.ID, development.ID, *req.ExpiresAt); err != nil {
-				_ = s.store.DeleteApp(req.Slug)
-				writeError(w, http.StatusInternalServerError, "internal server error")
-				return
-			}
-		}
-	}
-
 	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       &u.ID,
 		Action:       "create_app",

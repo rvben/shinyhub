@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,5 +83,92 @@ func TestCreateEphemeralDevelopmentAppRejectsPublicAccess(t *testing.T) {
 	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/apps", body, token))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("public ephemeral create = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDevelopmentSessionHeartbeatStartsRenewsAndCannotReopenLease(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "lease-dev", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("lease-dev")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "lease-app", Name: "Lease app", OwnerID: u.ID, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	id := "33333333333333333333333333333333"
+	forgedID := "66666666666666666666666666666666"
+	forged := authedRequest(t, http.MethodPost, "/api/apps/lease-app/development-sessions/"+forgedID+"/heartbeat", nil, token)
+	forged.Header.Set("X-Shinyhub-Deploy-Channel", "watch")
+	forged.Header.Set("X-Shinyhub-Development-Session", forgedID)
+	forged.Header.Set("X-Shinyhub-Development-Target", db.DevelopmentTargetEphemeral)
+	forgedRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(forgedRec, forged)
+	if forgedRec.Code != http.StatusConflict {
+		t.Fatalf("forged ephemeral heartbeat = %d: %s", forgedRec.Code, forgedRec.Body.String())
+	}
+	heartbeat := func() *httptest.ResponseRecorder {
+		req := authedRequest(t, http.MethodPost, "/api/apps/lease-app/development-sessions/"+id+"/heartbeat", nil, token)
+		req.Header.Set("X-Shinyhub-Deploy-Channel", "watch")
+		req.Header.Set("X-Shinyhub-Development-Session", id)
+		req.Header.Set("X-Shinyhub-Development-Target", db.DevelopmentTargetExisting)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := heartbeat(); rec.Code != http.StatusNoContent {
+		t.Fatalf("start heartbeat = %d: %s", rec.Code, rec.Body.String())
+	}
+	app, _ := store.GetAppBySlug("lease-app")
+	if session, err := store.GetDevelopmentSession(app.ID, id); err != nil || session.Status != db.DevelopmentSessionActive {
+		t.Fatalf("active session = %+v, err=%v", session, err)
+	}
+	end := authedRequest(t, http.MethodPost, "/api/apps/lease-app/development-sessions/"+id+"/end", nil, token)
+	endRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(endRec, end)
+	if endRec.Code != http.StatusNoContent {
+		t.Fatalf("end = %d: %s", endRec.Code, endRec.Body.String())
+	}
+	if rec := heartbeat(); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "start a new session") {
+		t.Fatalf("reopen heartbeat = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDevelopmentAppCreationConflictIsAtomicAndSanitized(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "atomic-dev", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("atomic-dev")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "session-owner", Name: "Session owner", OwnerID: u.ID, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	existing, _ := store.GetAppBySlug("session-owner")
+	id := "55555555555555555555555555555555"
+	if err := store.UpsertDevelopmentSession(db.UpsertDevelopmentSessionParams{
+		ID: id, AppID: existing.ID, TargetKind: db.DevelopmentTargetExisting,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	body, _ := json.Marshal(map[string]any{
+		"slug": "must-roll-back", "name": "Must roll back", "access": "private", "project_slug": "must-not-leak",
+		"development_session_id": id, "development_target": db.DevelopmentTargetCreated,
+	})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/apps", body, token))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "start a new session") {
+		t.Fatalf("conflicting create = %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "constraint") || strings.Contains(strings.ToLower(rec.Body.String()), "database") {
+		t.Fatalf("database detail leaked: %s", rec.Body.String())
+	}
+	if _, err := store.GetAppBySlug("must-roll-back"); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("app survived failed request: %v", err)
+	}
+	if _, err := store.GetProject("must-not-leak"); !errors.Is(err, db.ErrProjectNotFound) {
+		t.Fatalf("project survived failed request: %v", err)
 	}
 }

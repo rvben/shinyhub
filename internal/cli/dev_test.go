@@ -86,7 +86,7 @@ source = "apps/sales"
 			}
 			uploads <- value
 			_, _ = io.WriteString(w, `{"slug":"sales","status":"running","access":"private","deploy_count":2,"current_version":"v2"}`)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/end"):
+		case r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/heartbeat") || strings.HasSuffix(r.URL.Path, "/end")):
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -190,7 +190,7 @@ func TestDevRemoteFleetStartsEveryLocalTarget(t *testing.T) {
 			slug := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/apps/"), "/deploy")
 			deployed <- slug
 			_, _ = fmt.Fprintf(w, `{"slug":%q,"status":"running","access":"private","deploy_count":2}`, slug)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/end"):
+		case r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/heartbeat") || strings.HasSuffix(r.URL.Path, "/end")):
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -338,6 +338,15 @@ func TestAppEventWriterAddsFleetIdentityToEveryNDJSONRecord(t *testing.T) {
 			t.Fatalf("record lacks app identity: %s", line)
 		}
 	}
+
+	out.Reset()
+	const exactID = "9007199254740993"
+	if _, err := w.Write([]byte(`{"type":"result","deployment_id":` + exactID + `}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"deployment_id":`+exactID) {
+		t.Fatalf("large numeric value changed while attributing NDJSON: %s", out.String())
+	}
 }
 
 func uploadedZipEntry(r *http.Request, name string) (string, error) {
@@ -474,7 +483,7 @@ func TestDevRemoteMapsToDurableWatchSession(t *testing.T) {
 				len(r.Header.Get("X-Shinyhub-Development-Session")) == 32 &&
 				r.Header.Get("X-Shinyhub-Development-Target") == "existing")
 			_, _ = io.WriteString(w, `{"slug":"demo","status":"running","access":"private","deploy_count":2,"current_version":"v2"}`)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/end"):
+		case r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/heartbeat") || strings.HasSuffix(r.URL.Path, "/end")):
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotFound)

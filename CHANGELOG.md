@@ -12,7 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `--remote` mode, safe existing-app attachment, persistent or expiring private
   targets, automatic fleet context and shared-input composition, multi-app
   development, staged local reloads, coalesced remote saves, durable session
-  provenance, filtered logs/traces, and grouped history preserving every attempt
+  provenance with abandoned-session lease recovery, atomic temporary-target
+  creation, filtered logs/traces, and grouped history preserving every attempt
 
 ## [0.12.8](https://github.com/rvben/shinyhub/compare/v0.11.13...v0.12.8) - 2026-08-27
 

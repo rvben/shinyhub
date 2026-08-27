@@ -70,3 +70,73 @@ func TestExpiredEphemeralAppsAreIsolatedFromPersistentApps(t *testing.T) {
 		t.Fatalf("expired apps = %+v", apps)
 	}
 }
+
+func TestDevelopmentSessionLeaseRenewsAndClosesStaleSessions(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "lease-owner", "developer")
+	app := mustCreateApp(t, store, "leased-app", owner.ID)
+	id := "11111111111111111111111111111111"
+	if err := store.UpsertDevelopmentSession(db.UpsertDevelopmentSessionParams{
+		ID: id, AppID: app.ID, TargetKind: db.DevelopmentTargetExisting,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.GetDevelopmentSession(app.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond) // SQLite timestamps have one-second precision.
+	if err := store.HeartbeatDevelopmentSession(db.UpsertDevelopmentSessionParams{
+		ID: id, AppID: app.ID, TargetKind: db.DevelopmentTargetExisting,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.GetDevelopmentSession(app.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.UpdatedAt.Equal(before.UpdatedAt) || !after.HeartbeatAt.After(before.HeartbeatAt) {
+		t.Fatalf("heartbeat changed save time or failed to renew lease: before=%+v after=%+v", before, after)
+	}
+	if ended, err := store.EndStaleDevelopmentSessions(time.Hour); err != nil || ended != 0 {
+		t.Fatalf("fresh lease ended=%d, err=%v", ended, err)
+	}
+	if ended, err := store.EndStaleDevelopmentSessions(0); err != nil || ended != 1 {
+		t.Fatalf("stale lease ended=%d, err=%v", ended, err)
+	}
+	session, err := store.GetDevelopmentSession(app.ID, id)
+	if err != nil || session.Status != db.DevelopmentSessionEnded || session.EndedAt == nil {
+		t.Fatalf("ended session = %+v, err=%v", session, err)
+	}
+	if err := store.HeartbeatDevelopmentSession(db.UpsertDevelopmentSessionParams{
+		ID: id, AppID: app.ID, TargetKind: db.DevelopmentTargetExisting,
+	}); !errors.Is(err, db.ErrDevelopmentSessionConflict) {
+		t.Fatalf("renew ended session error = %v", err)
+	}
+}
+
+func TestCreateDevelopmentAppRollsBackEveryWriteOnSessionConflict(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "atomic-owner", "developer")
+	id := "22222222222222222222222222222222"
+	first := db.CreateDevelopmentAppParams{
+		App:     db.CreateAppParams{Slug: "first-dev", Name: "First", OwnerID: owner.ID, Access: "private"},
+		Session: db.UpsertDevelopmentSessionParams{ID: id, TargetKind: db.DevelopmentTargetCreated, UserID: &owner.ID},
+	}
+	if _, err := store.CreateDevelopmentApp(first); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.App.Slug = "rolled-back-dev"
+	second.App.Name = "Rolled back"
+	second.App.ProjectSlug = "must-not-leak"
+	if _, err := store.CreateDevelopmentApp(second); !errors.Is(err, db.ErrDevelopmentSessionConflict) {
+		t.Fatalf("session conflict error = %v", err)
+	}
+	if _, err := store.GetAppBySlug(second.App.Slug); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("app survived rolled-back creation: %v", err)
+	}
+	if _, err := store.GetProject(second.App.ProjectSlug); !errors.Is(err, db.ErrProjectNotFound) {
+		t.Fatalf("project survived rolled-back creation: %v", err)
+	}
+}

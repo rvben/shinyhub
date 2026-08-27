@@ -188,7 +188,11 @@ proxy traces. The Deployments tab shows one compact **Remote development** item
 per watch process—with actor, target type, save/failure counts, current release,
 and start/end state—and expands to the complete attempt history. Its **View
 logs** and **View traces** links filter observability to the deployments in that
-session. Because post-deploy hooks may have non-idempotent side effects, watch
+session. A lightweight heartbeat renews the session independently of saves, so
+“Last save” remains the time of the latest deployment attempt. Clean shutdown
+ends the session immediately; if the CLI is killed or disconnected, the
+server-owned lease marks it ended automatically after the heartbeat grace
+period. Because post-deploy hooks may have non-idempotent side effects, watch
 mode refuses a manifest containing hooks unless you explicitly add
 `--allow-repeated-hooks` after reviewing them.
 

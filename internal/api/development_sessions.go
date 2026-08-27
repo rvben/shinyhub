@@ -95,6 +95,33 @@ func (s *Server) handleEndDevelopmentSession(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleHeartbeatDevelopmentSession(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "sessionID")
+	if !developmentSessionIDRE.MatchString(id) {
+		writeError(w, http.StatusBadRequest, "invalid development session ID")
+		return
+	}
+	dev, err := developmentRequestFromHeaders(r)
+	if err != nil || dev.ID != id {
+		writeError(w, http.StatusBadRequest, "development heartbeat requires matching watch session headers")
+		return
+	}
+	if err := s.store.HeartbeatDevelopmentSession(developmentSessionParams(r, app.ID, dev, nil)); err != nil {
+		if errors.Is(err, db.ErrDevelopmentSessionConflict) {
+			writeError(w, http.StatusConflict, "development session has ended; start a new session")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) developmentDeploymentFilter(r *http.Request, appID int64) (map[int64]bool, bool, error) {
 	id := strings.TrimSpace(r.URL.Query().Get("development_session_id"))
 	if id == "" {

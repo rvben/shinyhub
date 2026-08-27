@@ -126,6 +126,52 @@ func TestWaitForDebouncedWatchChangeCoalescesBurst(t *testing.T) {
 	}
 }
 
+func TestDevelopmentSessionLeaseReportsTerminalRejectionAndChecksEndResponse(t *testing.T) {
+	previousHeartbeat := watchSessionHeartbeatInterval
+	watchSessionHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { watchSessionHeartbeatInterval = previousHeartbeat })
+
+	var heartbeats atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			heartbeats.Add(1)
+			if r.Header.Get("X-Shinyhub-Deploy-Channel") != "watch" ||
+				r.Header.Get("X-Shinyhub-Development-Session") != "44444444444444444444444444444444" ||
+				r.Header.Get("X-Shinyhub-Development-Target") != watchTargetExisting {
+				t.Fatalf("heartbeat headers = %+v", r.Header)
+			}
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"development session has ended; start a new session"}`))
+		case strings.HasSuffix(r.URL.Path, "/end"):
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"database unavailable"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	cfg := &cliConfig{Host: srv.URL, Token: "token"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fatal := make(chan error, 1)
+	go maintainDevelopmentSessionLease(ctx, cfg, "demo", "44444444444444444444444444444444", watchTargetExisting, fatal)
+	select {
+	case err := <-fatal:
+		if err == nil || !strings.Contains(err.Error(), "start a new session") {
+			t.Fatalf("lease error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("terminal heartbeat rejection was not reported")
+	}
+	if heartbeats.Load() == 0 {
+		t.Fatal("heartbeat was not sent")
+	}
+	if err := endDevelopmentSession(cfg, "demo", "44444444444444444444444444444444"); err == nil || !strings.Contains(err.Error(), "database unavailable") {
+		t.Fatalf("end response error = %v", err)
+	}
+}
+
 func TestDeployWatchNDJSONLifecycleIsStructured(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
@@ -253,6 +299,8 @@ func TestDeployWatchDeploysInitialAndCoalescedLatestChange(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo":
 			_, _ = w.Write([]byte(`{"app":{"slug":"demo","status":"running","access":"private","deploy_count":2,"current_version":"v2"}}`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/development-sessions/"):
+			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/deploy":
 			deploys.Add(1)
 			if r.Header.Get("X-Shinyhub-Deploy-Channel") == "watch" &&
@@ -341,6 +389,8 @@ func TestDeployWatchFailureKeepsWatching(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo":
 			_, _ = w.Write([]byte(`{"app":{"slug":"demo","status":"running"}}`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/development-sessions/"):
+			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo/logs":
 			w.Header().Set("Content-Type", "text/event-stream")
 		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/deploy":

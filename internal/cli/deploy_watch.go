@@ -25,8 +25,10 @@ import (
 )
 
 var (
-	errWatchBundleUnchanged = errors.New("watch bundle is unchanged")
-	watchPollInterval       = 500 * time.Millisecond
+	errWatchBundleUnchanged       = errors.New("watch bundle is unchanged")
+	watchPollInterval             = 500 * time.Millisecond
+	watchSessionHeartbeatInterval = 30 * time.Second
+	watchSessionEndTimeout        = 3 * time.Second
 )
 
 const (
@@ -117,13 +119,24 @@ func runDeployWatch(cmd *cobra.Command, args []string, f *deployFlags) error {
 	if err := prepareWatchTarget(cfg, source.Slug, f); err != nil {
 		return err
 	}
-	defer endDevelopmentSession(cfg, source.Slug, sessionID)
+	defer func() {
+		if endErr := endDevelopmentSession(cfg, source.Slug, sessionID); endErr != nil && !quietFlag {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not close the remote development session immediately: %v; the server lease will close it automatically.\n", endErr)
+		}
+	}()
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	previousContext := cmd.Context()
 	cmd.SetContext(ctx)
 	defer cmd.SetContext(previousContext)
+	if err := heartbeatDevelopmentSession(ctx, cfg, source.Slug, sessionID, f.developmentTarget); err != nil {
+		return fmt.Errorf("start remote development session: %w", err)
+	}
+	leaseErrors := make(chan error, 1)
+	leaseCtx, cancelLease := context.WithCancel(ctx)
+	defer cancelLease()
+	go maintainDevelopmentSessionLease(leaseCtx, cfg, source.Slug, sessionID, f.developmentTarget, leaseErrors)
 
 	changes := sourcewatch.Changes(ctx, source.Dir, sourcewatch.Options{
 		Interval:      watchPollInterval,
@@ -178,7 +191,11 @@ func runDeployWatch(cmd *cobra.Command, args []string, f *deployFlags) error {
 		if !quietFlag && format == formatTable {
 			fmt.Fprintln(cmd.ErrOrStderr(), "Watching for changes…")
 		}
-		if !waitForDebouncedWatchChange(ctx, changes, f.watchDelay) {
+		changed, leaseErr := waitForDebouncedWatchChangeWithLease(ctx, changes, f.watchDelay, leaseErrors)
+		if leaseErr != nil {
+			return leaseErr
+		}
+		if !changed {
 			writeWatchStopped(cmd, format)
 			return nil
 		}
@@ -205,12 +222,19 @@ func validateRepeatedWatchHooks(dir string, allowed bool) error {
 }
 
 func waitForDebouncedWatchChange(ctx context.Context, changes <-chan struct{}, delay time.Duration) bool {
+	changed, _ := waitForDebouncedWatchChangeWithLease(ctx, changes, delay, nil)
+	return changed
+}
+
+func waitForDebouncedWatchChangeWithLease(ctx context.Context, changes <-chan struct{}, delay time.Duration, leaseErrors <-chan error) (bool, error) {
 	select {
 	case <-ctx.Done():
-		return false
+		return false, nil
+	case err := <-leaseErrors:
+		return false, err
 	case _, ok := <-changes:
 		if !ok {
-			return false
+			return false, nil
 		}
 	}
 	timer := time.NewTimer(delay)
@@ -218,10 +242,12 @@ func waitForDebouncedWatchChange(ctx context.Context, changes <-chan struct{}, d
 	for {
 		select {
 		case <-ctx.Done():
-			return false
+			return false, nil
+		case err := <-leaseErrors:
+			return false, err
 		case _, ok := <-changes:
 			if !ok {
-				return false
+				return false, nil
 			}
 			if !timer.Stop() {
 				select {
@@ -231,7 +257,7 @@ func waitForDebouncedWatchChange(ctx context.Context, changes <-chan struct{}, d
 			}
 			timer.Reset(delay)
 		case <-timer.C:
-			return true
+			return true, nil
 		}
 	}
 }
@@ -383,19 +409,70 @@ func createWatchTarget(cfg *cliConfig, slug string, f *deployFlags) error {
 	return nil
 }
 
-func endDevelopmentSession(cfg *cliConfig, slug, sessionID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+func developmentSessionLeaseRequest(ctx context.Context, cfg *cliConfig, slug, sessionID, target, action string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		cfg.Host+"/api/apps/"+slug+"/development-sessions/"+sessionID+"/end", nil)
+		cfg.Host+"/api/apps/"+slug+"/development-sessions/"+sessionID+"/"+action, nil)
 	if err != nil {
-		return
+		return err
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
-	if err == nil {
-		resp.Body.Close()
+	if action == "heartbeat" {
+		req.Header.Set("X-Shinyhub-Deploy-Channel", "watch")
+		req.Header.Set("X-Shinyhub-Development-Session", sessionID)
+		req.Header.Set("X-Shinyhub-Development-Target", target)
 	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	// The app and its session disappear together. A 404 while ending therefore
+	// already represents the desired terminal state.
+	if action == "end" && resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return httpError(cfg.Token, action+" development session", resp, body)
+}
+
+func heartbeatDevelopmentSession(ctx context.Context, cfg *cliConfig, slug, sessionID, target string) error {
+	return developmentSessionLeaseRequest(ctx, cfg, slug, sessionID, target, "heartbeat")
+}
+
+func maintainDevelopmentSessionLease(ctx context.Context, cfg *cliConfig, slug, sessionID, target string, fatal chan<- error) {
+	ticker := time.NewTicker(watchSessionHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			err := heartbeatDevelopmentSession(ctx, cfg, slug, sessionID, target)
+			if err == nil {
+				continue
+			}
+			var statusErr *httpStatusError
+			if errors.As(err, &statusErr) && statusErr.Status >= 400 && statusErr.Status < 500 && statusErr.Status != http.StatusTooManyRequests {
+				select {
+				case fatal <- fmt.Errorf("remote development session lease was rejected: %w", err):
+				default:
+				}
+				return
+			}
+			// Transport, rate-limit, and server failures are transient. Keep the
+			// watcher alive; if they outlast the lease, the next successful request
+			// receives a conflict and takes the fatal path above.
+		}
+	}
+}
+
+func endDevelopmentSession(cfg *cliConfig, slug, sessionID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), watchSessionEndTimeout)
+	defer cancel()
+	return developmentSessionLeaseRequest(ctx, cfg, slug, sessionID, "", "end")
 }
 
 func watchTargetDescription(f *deployFlags) string {

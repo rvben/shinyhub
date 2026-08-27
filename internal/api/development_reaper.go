@@ -10,7 +10,10 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 )
 
-const developmentAppReaperInterval = time.Minute
+const (
+	developmentAppReaperInterval   = time.Minute
+	developmentSessionLeaseTimeout = 2 * time.Minute
+)
 
 // RunDevelopmentAppReaper removes expired ephemeral development apps while
 // this server owns the control plane. Normal and --create watch targets are
@@ -33,6 +36,11 @@ func (s *Server) RunDevelopmentAppReaper(ctx context.Context, interval time.Dura
 }
 
 func (s *Server) reapExpiredDevelopmentApps(ctx context.Context, now time.Time) {
+	if ended, err := s.store.EndStaleDevelopmentSessions(developmentSessionLeaseTimeout); err != nil {
+		slog.Error("end stale development sessions", "err", err)
+	} else if ended > 0 {
+		slog.Info("ended stale development sessions", "count", ended)
+	}
 	apps, err := s.store.ListExpiredEphemeralApps(now)
 	if err != nil {
 		slog.Error("list expired development apps", "err", err)
