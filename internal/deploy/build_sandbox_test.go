@@ -25,6 +25,10 @@ func findEnv(env []string, name string) string {
 // caches, so without this a bundle whose requires-python exceeds every system
 // interpreter fails its build with EACCES under the read-only root.
 func TestBuildConfinement_PerAppPythonDir(t *testing.T) {
+	// Keep the default-path case independent of setup-uv and any operator
+	// environment inherited by the test process.
+	t.Setenv("UV_PYTHON_INSTALL_DIR", "")
+
 	appRoot := filepath.Join(t.TempDir(), "myapp")
 	buildDir := filepath.Join(appRoot, "versions", "v1")
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
