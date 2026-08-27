@@ -1,5 +1,5 @@
 ---
-description: "Add selective, user-friendly URL bookmarks to a Python Shiny app with the shinyhub-bookmarks helper."
+description: "Add selective URL bookmarks to Python Shiny apps with the shinyhub-bookmarks helper and ShinyHub's user-friendly app switcher."
 ---
 
 # Bookmark a Shiny view

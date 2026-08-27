@@ -1,5 +1,5 @@
 ---
-description: "Build, run, test, and validate the ShinyHub control plane itself."
+description: "Build, run, test, and validate the ShinyHub control plane, command-line interface, dashboard, and documentation locally."
 ---
 
 # Develop ShinyHub itself
