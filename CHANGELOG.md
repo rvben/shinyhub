@@ -6,14 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [0.12.9](https://github.com/rvben/shinyhub/compare/v0.12.8...v0.12.9) - 2026-08-27
+
 ### Added
 
+- **bookmarks**: let visitors create selective URL bookmarks for Python Shiny
+  apps, with explicit filter receipts and resilient recovery for renamed,
+  removed, unavailable, and unknown saved filters
+  ([bf314ad](https://github.com/rvben/shinyhub/commit/bf314ad544401e03188a7977facca693d982186d),
+  [6bf6dce](https://github.com/rvben/shinyhub/commit/6bf6dce042bc1c63acbbd42e3777f9f105ae2030))
 - **development workflow**: add local-first `shinyhub dev` with an explicit
   `--remote` mode, safe existing-app attachment, persistent or expiring private
   targets, automatic fleet context and shared-input composition, multi-app
   development, staged local reloads, coalesced remote saves, durable session
   provenance with abandoned-session lease recovery, atomic temporary-target
   creation, filtered logs/traces, and grouped history preserving every attempt
+  ([6c28bd0](https://github.com/rvben/shinyhub/commit/6c28bd0c0e5761a8326e7cf542cbb00c839bc421),
+  [1cf9428](https://github.com/rvben/shinyhub/commit/1cf94283a9864bb0f208dfd0e80299eae975301c),
+  [9341eba](https://github.com/rvben/shinyhub/commit/9341eba044c6a924615b0236c3065c75b51fa88e))
+- **app sessions**: preserve completed results through interrupted sessions,
+  provide a deliberate recovery flow, and make cross-app switching safer
+  ([1a9b075](https://github.com/rvben/shinyhub/commit/1a9b075f3e0a80d3d41f9be5cbc2a44f903ad39a),
+  [86d815e](https://github.com/rvben/shinyhub/commit/86d815ef4bfcf2c999e960e8c7997f130189c7d6),
+  [ea8b6eb](https://github.com/rvben/shinyhub/commit/ea8b6eb37cae23eca4671370ad2392a847170590))
+- **schedules**: make serving-data activation rolls durable, cancellable, and
+  explicit about partial or interrupted outcomes
+  ([def9319](https://github.com/rvben/shinyhub/commit/def931984473826d0c2c457093aa25865cb0f315))
+- **ui**: reinforce ShinyHub branding throughout the authenticated shell
+  ([bcaac82](https://github.com/rvben/shinyhub/commit/bcaac82a0683b30fab743a3de83cd34ca6d30cfd))
+
+### Fixed
+
+- **development workflow**: harden remote-session cleanup, expiry, and failure
+  handling
+  ([592455f](https://github.com/rvben/shinyhub/commit/592455f848940c6343c2090fa8b7812e92f74797))
+- **fleet**: accept parked apps as healthy steady states during
+  `--verify-health` and report real polling failures instead of blaming the
+  server after a successful final observation
+  ([4fa65d0](https://github.com/rvben/shinyhub/commit/4fa65d02b03af41ce7f30f45257c6a19f134a79d),
+  [1c4f443](https://github.com/rvben/shinyhub/commit/1c4f443164e4094599307d25fa0d16f6682d3bd5))
 
 ## [0.12.8](https://github.com/rvben/shinyhub/compare/v0.11.13...v0.12.8) - 2026-08-27
 
