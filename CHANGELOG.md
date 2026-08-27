@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.8](https://github.com/rvben/shinyhub/compare/v0.11.13...v0.12.8) - 2026-08-27
+
+### Fixed
+
+- **release**: publish a clean source-history baseline with internal development artifacts excluded
+- **release**: align package version metadata with the replacement release
+
 ## [0.12.7](https://github.com/rvben/shinyhub/compare/v0.12.6...v0.12.7) - 2026-08-26
 
 ### Added
