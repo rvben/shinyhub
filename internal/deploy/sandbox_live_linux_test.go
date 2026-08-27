@@ -81,6 +81,10 @@ func TestRunSandboxedBuildStep_AllowsManagedPythonWrites_Live(t *testing.T) {
 	if !sandbox.Supported() {
 		t.Skip("no isolation backend on this platform")
 	}
+	// Keep the per-app default-path case independent of setup-uv and any
+	// operator environment inherited by the test process.
+	t.Setenv("UV_PYTHON_INSTALL_DIR", "")
+
 	base := t.TempDir()
 	buildDir := filepath.Join(base, "myapp", "versions", "v1")
 	if err := os.MkdirAll(buildDir, 0o770); err != nil {
