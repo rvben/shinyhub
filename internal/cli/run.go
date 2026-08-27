@@ -31,6 +31,9 @@ health-checked before the running app is replaced, so a broken save leaves the
 last healthy version online. App output streams to the terminal and Ctrl-C
 shuts everything down cleanly.
 
+For the everyday development loop, prefer 'shinyhub dev [dir]'. This run
+command remains the lower-level entry point for --check and --no-reload.
+
 Use --check to run a preflight: boot, verify the app becomes healthy, then
 stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 		Args: cobra.MaximumNArgs(1),
@@ -43,25 +46,34 @@ stop and exit 0 (or 1 on failure). Suitable for CI pre-deploy smoke tests.`,
 				dir = args[0]
 			}
 			warnFleetCompositionOmission(cmd.ErrOrStderr(), dir, fleetOmissionRun, false)
-			effectiveSlug := f.slug
-			if effectiveSlug == "" {
-				abs, err := filepath.Abs(dir)
-				if err != nil {
-					abs = dir
-				}
-				effectiveSlug = sanitizeSlug(filepath.Base(abs))
-				if effectiveSlug == "" {
-					effectiveSlug = "app"
-				}
-			} else if !slugpkg.Valid(effectiveSlug) {
-				return &ExitCodeError{Code: 1, Kind: KindValidation,
-					Err: fmt.Errorf("invalid slug %q: must be %s", effectiveSlug, slugpkg.HumanRule)}
+			effectiveSlug, err := resolveLocalRunSlug(dir, f.slug)
+			if err != nil {
+				return err
 			}
 			return executeLocalRun(cmd, dir, effectiveSlug, f, nil)
 		},
 	}
 	configureLocalRunCommand(cmd, f, true)
 	return cmd
+}
+
+func resolveLocalRunSlug(dir, requested string) (string, error) {
+	if requested != "" {
+		if !slugpkg.Valid(requested) {
+			return "", &ExitCodeError{Code: 1, Kind: KindValidation,
+				Err: fmt.Errorf("invalid slug %q: must be %s", requested, slugpkg.HumanRule)}
+		}
+		return requested, nil
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	slug := sanitizeSlug(filepath.Base(abs))
+	if slug == "" {
+		slug = "app"
+	}
+	return slug, nil
 }
 
 type localRunFlags struct {

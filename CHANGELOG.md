@@ -8,10 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- **remote development**: add `deploy --watch` with existing-app attachment,
-  explicit persistent or expiring private targets, coalesced save deployment,
-  durable session provenance, filtered logs/traces, and grouped deployment
-  history that preserves every attempt
+- **development workflow**: add local-first `shinyhub dev` with an explicit
+  `--remote` mode, safe existing-app attachment, persistent or expiring private
+  targets, staged local reloads, coalesced remote saves, durable session
+  provenance, filtered logs/traces, and grouped history preserving every attempt
 
 ## [0.12.8](https://github.com/rvben/shinyhub/compare/v0.11.13...v0.12.8) - 2026-08-27
 

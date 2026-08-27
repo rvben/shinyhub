@@ -62,6 +62,11 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	},
 
 	// ── local dev runner ─────────────────────────────────────────────────────
+	"dev": {Mutating: mut, Streaming: true,
+		ArgTypes: map[string]string{
+			"dir": "path", "--data-dir": "path", "--env-file": "path", "--state-dir": "path",
+		},
+		Notes: "Local development is the default and does not mutate ShinyHub server state. --remote <host> explicitly selects the remote deployment-session workflow; it never falls back to the saved current host or SHINYHUB_HOST. Local reloads are staged and readiness-checked before handoff. Remote saves are debounced, digest-deduplicated, individually durable, and grouped by development session; --output ndjson is supported only in remote mode."},
 	"run": {Mutating: ro, Streaming: true,
 		ArgTypes: map[string]string{"--data-dir": "path", "--env-file": "path", "--state-dir": "path"},
 		OutputFields: []fieldSpec{

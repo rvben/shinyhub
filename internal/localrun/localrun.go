@@ -208,11 +208,30 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		return &ValidationError{Err: err}
 	}
 	defer releaseWorkspace()
+	heading := "Local development"
+	reloadDescription := "staged and readiness-checked"
+	if o.Check {
+		heading = "Local preflight"
+		reloadDescription = "off; exits after the first healthy start"
+	} else if o.NoReload {
+		reloadDescription = "off; the initial process stays in the foreground"
+	}
+	fmt.Fprintln(stdout, heading)
+	fmt.Fprintf(stdout, "  Source: %s\n", sourceDir)
+	fmt.Fprintf(stdout, "  Workspace: %s\n", w.BundleDir)
+	fmt.Fprintf(stdout, "  Data: %s\n", w.DataDir)
+	fmt.Fprintf(stdout, "  Reload: %s\n", reloadDescription)
+	for _, input := range inputSnapshots {
+		fmt.Fprintf(stdout, "  Bundle input: %s -> %s\n", input.From, input.To)
+	}
+	if len(userEnv) > 0 {
+		fmt.Fprintf(stdout, "  Environment: %s\n", strings.Join(environmentKeys(userEnv), ", "))
+	}
 	if o.Fresh {
 		if err := w.resetAllBundles(); err != nil {
 			return err
 		}
-		fmt.Fprintln(stdout, "==> cleared generated workspace (app data preserved)")
+		fmt.Fprintln(stdout, "  Reset: generated workspace cleared; app data preserved")
 	}
 	depsChanged, err := w.syncSourceWithInputs(sourceDir, inputSnapshots)
 	if err != nil {
@@ -225,16 +244,6 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	}
 	defer lp.close()
 	proxyErrCh := make(chan error, 1)
-
-	fmt.Fprintf(stdout, "==> source: %s\n", sourceDir)
-	for _, input := range inputSnapshots {
-		fmt.Fprintf(stdout, "==> bundle input: %s -> %s\n", input.From, input.To)
-	}
-	fmt.Fprintf(stdout, "==> workspace: %s\n", w.BundleDir)
-	fmt.Fprintf(stdout, "==> data: %s\n", w.DataDir)
-	if len(userEnv) > 0 {
-		fmt.Fprintf(stdout, "==> environment: %s\n", strings.Join(environmentKeys(userEnv), ", "))
-	}
 
 	changeCh := make(chan struct{}, 1)
 	if !o.NoReload {
@@ -276,7 +285,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	if err := pollReady(ctx, publicReadyURL, current.plan.Timeout, current.plan.ReadyStatus); err != nil {
 		return fmt.Errorf("local proxy readiness: %w", err)
 	}
-	fmt.Fprintf(stdout, "serving on %s\n", lp.URL())
+	fmt.Fprintf(stdout, "Ready\n  App: %s\n", lp.URL())
 	if o.Check {
 		return nil
 	}
@@ -287,6 +296,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	if o.NoReload {
 		return waitForExit(ctx, current, proxyErrCh)
 	}
+	fmt.Fprintln(stdout, "  Watching: source changes (Ctrl-C to stop)")
 	currentWorkspace := w
 	stagingWorkspace := w.alternate()
 
@@ -308,27 +318,27 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			}
 			return errors.New("app exited unexpectedly")
 		case <-changeCh:
-			fmt.Fprintln(stdout, "==> change detected; staging reload")
+			fmt.Fprintln(stdout, "Change detected; staging a healthy reload…")
 			stagedInputs, resolveErr := resolveInputSnapshots(manifestRoot, sourceDir, o.BundleInputs)
 			if resolveErr != nil {
-				fmt.Fprintf(stderr, "reload failed; keeping the current app: resolve bundle inputs: %v\n", resolveErr)
+				fmt.Fprintf(stderr, "Reload failed; current app is still serving: resolve bundle inputs: %v\n", resolveErr)
 				continue
 			}
 			depsChanged, syncErr := stagingWorkspace.syncSourceWithInputs(sourceDir, stagedInputs)
 			if syncErr != nil {
-				fmt.Fprintf(stderr, "reload failed; keeping the current app: %v\n", syncErr)
+				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", syncErr)
 				continue
 			}
 			candidate, startErr := startCandidate(ctx, stagingWorkspace, slug, userEnv, o.NoSync, depsChanged, stdout, stderr)
 			if startErr != nil {
-				fmt.Fprintf(stderr, "reload failed; keeping the current app: %v\n", startErr)
+				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", startErr)
 				continue
 			}
 
 			readyErr := waitUntilReady(ctx, candidate, changeCh)
 			if errors.Is(readyErr, errReloadSuperseded) {
 				stopChild(candidate.cmd, candidate.exitCh, stderr)
-				fmt.Fprintln(stdout, "==> newer change detected; replacing staged reload")
+				fmt.Fprintln(stdout, "Newer change detected; replacing the staged candidate…")
 				select {
 				case changeCh <- struct{}{}:
 				default:
@@ -337,25 +347,25 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			}
 			if readyErr != nil {
 				stopChild(candidate.cmd, candidate.exitCh, stderr)
-				fmt.Fprintf(stderr, "reload failed; keeping the current app: %v\n", readyErr)
+				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", readyErr)
 				continue
 			}
 			if err := lp.routeTo(candidate.port); err != nil {
 				stopChild(candidate.cmd, candidate.exitCh, stderr)
-				fmt.Fprintf(stderr, "reload failed; keeping the current app: %v\n", err)
+				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", err)
 				continue
 			}
 			if err := pollReady(ctx, joinReadyURL(lp.URL(), candidate.plan.ReadyPath), 5*time.Second, candidate.plan.ReadyStatus); err != nil {
 				_ = lp.routeTo(current.port)
 				stopChild(candidate.cmd, candidate.exitCh, stderr)
-				fmt.Fprintf(stderr, "reload failed through local proxy; keeping the current app: %v\n", err)
+				fmt.Fprintf(stderr, "Reload failed through the local proxy; current app is still serving: %v\n", err)
 				continue
 			}
 			old := current
 			current = candidate
 			currentWorkspace, stagingWorkspace = stagingWorkspace, currentWorkspace
 			stopChild(old.cmd, old.exitCh, stderr)
-			fmt.Fprintln(stdout, "==> reloaded and healthy")
+			fmt.Fprintln(stdout, "Reload ready; traffic switched.")
 		}
 	}
 }

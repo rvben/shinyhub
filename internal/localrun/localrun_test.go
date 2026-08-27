@@ -1,6 +1,7 @@
 package localrun
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -50,6 +51,33 @@ func TestRun_Check_HealthyExitsZero(t *testing.T) {
 	err := Run(ctx, Options{BundleDir: dir, StateDir: t.TempDir(), Slug: "fixture", Check: true, NoReload: true}, os.Stdout, os.Stderr)
 	if err != nil {
 		t.Fatalf("--check on a healthy app should exit 0, got %v", err)
+	}
+}
+
+func TestRun_CheckPresentsDevelopmentSummaryWithoutEnvironmentValues(t *testing.T) {
+	dir := writeHealthyFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var stdout bytes.Buffer
+	err := Run(ctx, Options{
+		BundleDir: dir, StateDir: t.TempDir(), Slug: "fixture",
+		Check: true, NoReload: true, Env: []string{"API_TOKEN=super-secret-value"},
+	}, &stdout, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Local preflight", "  Source:", "  Workspace:", "  Data:",
+		"  Reload: off; exits after the first healthy start", "  Environment: API_TOKEN",
+		"Ready\n  App: http://127.0.0.1:",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("summary omitted %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "super-secret-value") {
+		t.Fatalf("summary exposed an environment value:\n%s", output)
 	}
 }
 

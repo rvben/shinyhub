@@ -129,6 +129,9 @@ deleted after --ttl (8h by default). Post-deploy hooks require
 --output ndjson for a machine-readable stream; one-document JSON is not available
 for a command that keeps running.
 
+For an interactive local-or-remote development loop, prefer 'shinyhub dev'.
+This flag remains available for scripts and lower-level deployment workflows.
+
 Deploying behind an auth proxy: when ShinyHub sits behind an auth proxy
 (Authelia, oauth2-proxy, Cloudflare Access, etc.) the CLI cannot complete the
 browser redirect that the proxy requires, so interactive 'shinyhub login' does
@@ -191,7 +194,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	defer source.cleanup()
 	abs, slug := source.Dir, source.Slug
 	f.visibility = source.Visibility
-	if f.git == "" {
+	if f.git == "" && !f.watchMode {
 		warnFleetCompositionOmission(cmd.ErrOrStderr(), abs, fleetOmissionDeploy, quietFlag)
 	}
 
@@ -661,6 +664,13 @@ func waitForHealthyWithContext(parent context.Context, cfg *cliConfig, slug stri
 			p.done(" ready.", slug+" is healthy")
 			return nil
 		}
+		// Cancellation of the caller is a request to stop, not a readiness
+		// failure. Return it before retry handling so Ctrl-C remains immediate
+		// even when the last poll failed because its request was cancelled.
+		if parent.Err() != nil {
+			p.stop()
+			return parent.Err()
+		}
 		// A deadline-cancelled final poll is the wait budget expiring, not new
 		// evidence that the server became unreachable. Preserve the most recent
 		// successful observation so the timeout still says "starting"/"idle" (or
@@ -697,7 +707,13 @@ func waitForHealthyWithContext(parent context.Context, cfg *cliConfig, slug stri
 		if remaining < delay {
 			delay = remaining
 		}
-		p.step(delay)
+		if !p.stepContext(ctx, delay) {
+			p.stop()
+			if parent.Err() != nil {
+				return parent.Err()
+			}
+			break
+		}
 	}
 	p.stop()
 	printLogTail(cfg, slug, errOut)

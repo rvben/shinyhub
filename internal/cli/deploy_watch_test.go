@@ -283,7 +283,7 @@ func TestDeployWatchDeploysInitialAndCoalescedLatestChange(t *testing.T) {
 	root.SetContext(ctx)
 	root.SetArgs([]string{"deploy", dir, "--slug", "demo", "--watch", "--watch-delay", "100ms", "--host", srv.URL, "-o", "table"})
 	done := make(chan error, 1)
-	go func() { done <- root.Execute() }()
+	go func() { done <- root.ExecuteContext(ctx) }()
 
 	waitForAtomicCount(t, &deploys, 1)
 	// A metadata-only touch wakes the filesystem watcher, but the canonical
@@ -361,7 +361,7 @@ func TestDeployWatchFailureKeepsWatching(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	root, _, stderr := watchTestCommand(t, ctx, dir, srv.URL)
 	done := make(chan error, 1)
-	go func() { done <- root.Execute() }()
+	go func() { done <- root.ExecuteContext(ctx) }()
 	waitForAtomicCount(t, &deploys, 1)
 	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("# fixed\n"), 0o644); err != nil {
 		t.Fatal(err)

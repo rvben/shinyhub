@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"time"
@@ -65,17 +66,37 @@ func (p *progress) draw() {
 // step marks one unit of work done and waits d before the next one, keeping the
 // spinner turning meanwhile.
 func (p *progress) step(d time.Duration) {
+	p.stepContext(context.Background(), d)
+}
+
+// stepContext is step with an interruptible wait. It reports whether the
+// whole delay elapsed; callers with a lifecycle context can stop promptly
+// instead of waiting out a poll interval after cancellation.
+func (p *progress) stepContext(ctx context.Context, d time.Duration) bool {
 	if !p.s.redraw {
 		fmt.Fprint(p.w, ".")
-		time.Sleep(d)
-		return
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		}
 	}
-	for waited := time.Duration(0); waited < d; waited += spinnerRedraw {
-		p.draw()
-		if rest := d - waited; rest < spinnerRedraw {
-			time.Sleep(rest)
-		} else {
-			time.Sleep(spinnerRedraw)
+	p.draw()
+	timer := time.NewTimer(d)
+	ticker := time.NewTicker(spinnerRedraw)
+	defer timer.Stop()
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		case <-ticker.C:
+			p.draw()
 		}
 	}
 }

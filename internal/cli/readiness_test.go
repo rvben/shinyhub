@@ -2,10 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -116,6 +119,51 @@ func TestWaitForHealthy_UnknownStatusIsLoud(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "quantum") {
 		t.Errorf("the unrecognised status must be reported while waiting, got stderr:\n%s", errOut.String())
+	}
+}
+
+type dotSignalWriter struct {
+	once sync.Once
+	dot  chan struct{}
+}
+
+func (w *dotSignalWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(".")) {
+		w.once.Do(func() { close(w.dot) })
+	}
+	return len(p), nil
+}
+
+func TestWaitForHealthy_CancellationInterruptsPollDelay(t *testing.T) {
+	prev := healthPollInterval
+	healthPollInterval = 10 * time.Second
+	t.Cleanup(func() { healthPollInterval = prev })
+
+	srv := statusServer(t, "starting", false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	progress := &dotSignalWriter{dot: make(chan struct{})}
+	go func() {
+		done <- waitForHealthyWithContext(ctx,
+			&cliConfig{Host: srv.URL, Token: "tok"}, "demo", time.Minute, progress)
+	}()
+
+	// The dot is emitted immediately before the long retry delay. Waiting for it
+	// makes this a deterministic regression for cancellation during that delay.
+	select {
+	case <-progress.dot:
+	case <-time.After(time.Second):
+		t.Fatal("readiness wait never entered its retry delay")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waitForHealthyWithContext error = %v, want context.Canceled", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("waitForHealthyWithContext did not stop promptly after cancellation")
 	}
 }
 

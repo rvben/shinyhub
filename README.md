@@ -174,18 +174,13 @@ browser, the successful deployment stays successful and the CLI prints a URL
 to copy. Later, use `shinyhub apps open <slug>` to return to any running or
 sleeping app; add `--no-browser` on SSH or in scripts.
 
-> Tip: run the bundle locally first with `shinyhub run ./my-app`. It keeps your
-> source tree untouched, serves the production-shaped `/app/<slug>/` route, and
-> swaps in edits only after they pass readiness. Add `--check` for a CI-friendly
-> boot smoke test or `--fresh` to rebuild cached dependencies. See
+> Tip: use `shinyhub dev ./my-app` for the safe local loop: it keeps the source
+> untouched and switches edits into the production-shaped route only after
+> readiness. When development needs a remote host's data, identity, network, or
+> compute, make that mutation explicit:
+> `shinyhub dev . --remote dev --slug my-existing-dev-app`. Add `--create` for a
+> persistent target or `--ephemeral --ttl 8h` for an expiring private one. See
 > [Local development](docs/local-development.md).
-
-> When the app needs a remote host's data, identity, network, or compute, use
-> `shinyhub deploy . --watch --host dev --slug my-existing-dev-app`. Watch mode
-> attaches to an existing app by default; use `--create` for a new persistent
-> target or `--ephemeral --ttl 8h` for an expiring private target. It coalesces
-> save bursts, skips unchanged bundles, and keeps watching after a failed
-> candidate. See [Remote development](docs/local-development.md#develop-on-a-remote-host).
 
 > `uvx shinyhub <cmd>` runs any subcommand one-shot, without installing first.
 > `pip install shinyhub` installs the server too, but native Python apps launch

@@ -77,6 +77,23 @@ func TestDeployAnnotation_DocumentsBuildTimeout(t *testing.T) {
 	}
 }
 
+func TestDevAnnotationDocumentsExplicitModeBoundary(t *testing.T) {
+	ann, ok := schemaAnnotations["dev"]
+	if !ok || ann.Mutating == nil || !*ann.Mutating || !ann.Streaming {
+		t.Fatalf("dev annotation must cover its remote mutation and continuous output: %+v", ann)
+	}
+	for _, want := range []string{"Local development is the default", "--remote <host>", "never falls back", "digest-deduplicated"} {
+		if !strings.Contains(ann.Notes, want) {
+			t.Errorf("dev annotation omitted %q: %s", want, ann.Notes)
+		}
+	}
+	for _, flag := range []string{"dir", "--data-dir", "--env-file", "--state-dir"} {
+		if ann.ArgTypes[flag] != "path" {
+			t.Errorf("dev %s schema type = %q, want path", flag, ann.ArgTypes[flag])
+		}
+	}
+}
+
 func TestFleetApplyAnnotation_DocumentsConcurrency(t *testing.T) {
 	ann, ok := schemaAnnotations["fleet apply"]
 	if !ok {

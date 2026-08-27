@@ -4,17 +4,17 @@ description: "Develop ShinyHub itself, run an app locally with safe reloads, or 
 
 # Local development
 
-ShinyHub supports complementary loops for developing the control plane, running
-an app locally exactly as ShinyHub expects, and continuously deploying local
-changes when development depends on a remote host.
+`shinyhub dev` is the front door for app development. It runs locally by
+default and moves the same continuous workflow to a remote host only when you
+name that host explicitly.
 
-## Run an app locally
+## Develop an app locally
 
 From an app bundle containing `app.py`, `app.R`, or a `shinyhub.toml` command:
 
 ```bash
 shinyhub doctor . --local
-shinyhub run .
+shinyhub dev .
 ```
 
 The doctor preflight validates the directory, deployment slug, manifest,
@@ -27,11 +27,12 @@ hands the working app directly to your browser. Return later with
 `shinyhub apps open <slug>`; use `--no-browser` to print the URL on SSH. See
 [Doctor](doctor.md) and [Deployment plan](deployment-plan.md).
 
-The command installs dependencies when needed, prints the source, workspace,
-data, app type, and readiness contract it selected, then serves the app at a
-production-shaped URL such as <http://127.0.0.1:54321/app/my-app/>. The root
-URL redirects there. Requests pass through ShinyHub's real proxy, including
-prefix stripping, forwarding headers, WebSocket support, and cookie handling.
+The command installs dependencies when needed, presents one startup summary
+with the source, generated workspace, data location, reload policy, app type,
+and readiness contract, then serves the app at a production-shaped URL such as
+<http://127.0.0.1:54321/app/my-app/>. The root URL redirects there. Requests
+pass through ShinyHub's real proxy, including prefix stripping, forwarding
+headers, WebSocket support, and cookie handling.
 
 Your source directory is treated as read-only. ShinyHub mirrors it into an
 OS user-cache workspace keyed by its absolute path; generated `pyproject.toml`,
@@ -46,15 +47,17 @@ next save retries automatically.
 Useful options:
 
 ```bash
-shinyhub run . --open                 # open after the app is healthy
+shinyhub dev . --open                 # open after the app is healthy
+shinyhub dev . --fresh                # rebuild generated state; keep app data
+shinyhub dev . --no-sync              # skip explicit uv/renv preparation
+shinyhub dev . --port 8000            # choose the public proxy port
+shinyhub dev . --slug sales           # serve at /app/sales/
+shinyhub dev . --data-dir ../dev-data # choose durable app-data storage
+shinyhub dev . --state-dir /tmp/sales # choose generated workspace state
+
+# Lower-level one-shot controls remain available.
 shinyhub run . --check                # boot smoke test, then exit
-shinyhub run . --fresh                # rebuild generated state; keep app data
-shinyhub run . --no-sync              # skip explicit uv/renv preparation
 shinyhub run . --no-reload            # run one process without watching files
-shinyhub run . --port 8000            # choose the public proxy port
-shinyhub run . --slug sales           # serve at /app/sales/
-shinyhub run . --data-dir ../dev-data # choose durable app-data storage
-shinyhub run . --state-dir /tmp/sales # choose all generated workspace state
 ```
 
 Environment values come from `.env` by default and may be overridden with
@@ -70,7 +73,7 @@ Use a remote development loop when the app depends on the target host's data,
 identity, network, runtime, or compute:
 
 ```bash
-shinyhub deploy . --watch --host dev --slug sales-dev --open
+shinyhub dev . --remote dev --slug sales-dev --open
 ```
 
 That default is intentionally attach-only: `sales-dev` must already exist. A
@@ -79,10 +82,10 @@ explicitly when you need it:
 
 ```bash
 # Create a normal app that remains after the watch process stops.
-shinyhub deploy . --watch --create --host dev --slug sales-dev
+shinyhub dev . --remote dev --create --slug sales-dev
 
 # Create a private scratch app and delete it automatically after eight hours.
-shinyhub deploy . --watch --ephemeral --ttl 8h --host dev
+shinyhub dev . --remote dev --ephemeral --ttl 8h
 ```
 
 `--create` fails if the slug already exists. `--ephemeral` also fails on a
@@ -92,11 +95,11 @@ collision and generates a recognizable `<directory>-dev-<suffix>` slug when
 but it does not delete an ephemeral app early—the printed expiry remains the
 stable deadline, so a URL does not disappear merely because a terminal closed.
 
-Watch mode requires an explicit target through `--host` or `SHINYHUB_HOST`; it
-never relies silently on the saved current host. It implies `--start` and
-`--wait`, opens the app only after the first successful deployment when
-`--open` is present, and keeps the source and target visible in its startup
-banner.
+Remote development requires `--remote <host>`, where the value is a saved host
+name or server URL. The saved current host and `SHINYHUB_HOST` never turn a
+local `dev` invocation into a remote mutation. It starts and waits for the app,
+opens it only after the first successful deployment when `--open` is present,
+and keeps the source and target visible in its startup banner.
 
 After the initial deployment, ShinyHub observes the local source tree. It waits
 for a 750 ms quiet period after a save burst, builds the same canonical bundle
@@ -126,22 +129,28 @@ mode refuses a manifest containing hooks unless you explicitly add
 Useful options and constraints:
 
 ```bash
-shinyhub deploy . --watch --host dev --slug sales-dev
-shinyhub deploy . --watch --create --host dev --slug sales-dev
-shinyhub deploy . --watch --ephemeral --ttl 8h --host dev
-shinyhub deploy . --watch --host dev --watch-delay 2s
-shinyhub deploy . --watch --host dev --allow-repeated-hooks
-shinyhub deploy . --watch --host dev --output ndjson
+shinyhub dev . --remote dev --slug sales-dev
+shinyhub dev . --remote dev --create --slug sales-dev
+shinyhub dev . --remote dev --ephemeral --ttl 8h
+shinyhub dev . --remote dev --watch-delay 2s
+shinyhub dev . --remote dev --allow-repeated-hooks
+shinyhub dev . --remote dev --output ndjson
 ```
 
 `--create` and `--ephemeral` are mutually exclusive. `--watch-delay` accepts
-100 ms through one minute. `--git` is not supported;
-watch a local checkout instead. A continuous command cannot emit one JSON
-document, so use NDJSON for automation. Press Ctrl-C to stop watching; the last
-successful remote deployment remains in place.
+100 ms through one minute. A continuous command cannot emit one JSON document,
+so use NDJSON for automation. Press Ctrl-C to stop watching; the last successful
+remote deployment remains in place.
 
-Plain `shinyhub run` uses only the selected app directory; it does not compose
-`[[bundle_file]]` entries from a fleet manifest. If the app is a consumer in a
+`shinyhub run` and `shinyhub deploy --watch` remain supported as lower-level
+commands for scripts and specialist options. The latter requires an explicit
+`--host` or `SHINYHUB_HOST` and does not support `--git`; watch a local checkout
+instead. New interactive workflows should prefer `shinyhub dev` so local and
+remote development share one mental model.
+
+Plain `shinyhub dev` and `shinyhub run` use only the selected app directory;
+they do not compose `[[bundle_file]]` entries from a fleet manifest. If the app
+is a consumer in a
 valid nearest-parent `fleet.toml`, the command warns on stderr so an incomplete
 local bundle is not mistaken for fleet parity. This discovery is advisory and
 cannot see a manifest passed elsewhere with `-f`.

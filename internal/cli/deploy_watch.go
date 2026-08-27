@@ -86,8 +86,18 @@ func runDeployWatch(cmd *cobra.Command, args []string, f *deployFlags) error {
 		return err
 	}
 	defer source.cleanup()
+	f.visibility = source.Visibility
+	warnFleetCompositionOmission(cmd.ErrOrStderr(), source.Dir, fleetOmissionDeploy, quietFlag)
 	if err := validateRepeatedWatchHooks(source.Dir, f.allowRepeatedHooks); err != nil {
 		return err
+	}
+	// Creation is explicit, but it should still be side-effect free until the
+	// local source can produce a valid canonical deployment bundle. Without this
+	// preflight a typo or malformed manifest could leave behind an empty app.
+	if f.create || f.ephemeral {
+		if _, _, err := prepareDeployment(source.Dir); err != nil {
+			return err
+		}
 	}
 	cfg, err := loadDeployConfig(cmd)
 	if err != nil {
