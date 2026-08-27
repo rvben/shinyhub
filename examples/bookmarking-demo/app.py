@@ -46,7 +46,7 @@ def app_ui(request):
         ui.div(
             ui.h1("Portfolio pulse", class_="demo-title"),
             ui.p(
-                "A synthetic dashboard for testing ShinyHub bookmarks. Change the filters, then use the bookmark icon in the app switcher.",
+                "A synthetic dashboard for testing ShinyHub view links. Change the filters, then use the link icon in the app switcher.",
                 class_="demo-lede",
             ),
             ui.a(

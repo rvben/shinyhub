@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "shinyhub-bookmarks"
 version = "0.2.2"
-description = "Let ShinyHub visitors create selective URL bookmarks for Python Shiny apps."
+description = "Let ShinyHub visitors create selective view links for Python Shiny apps."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

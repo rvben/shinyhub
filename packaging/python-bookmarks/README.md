@@ -1,12 +1,14 @@
 # shinyhub-bookmarks
 
-Selective URL bookmarks for Python Shiny apps running in ShinyHub.
+Selective view links for Python Shiny apps running in ShinyHub, built on
+Shiny's URL-bookmarking API.
 
 The package registers the filters an app author considers meaningful. ShinyHub
-then adds a **Bookmark this view** control to its app switcher. Visitors see a
-plain-language receipt, can copy the exact view immediately, or customise which
-registered filters follow the link. Unselected filters return to the app's
-defaults when the bookmark opens.
+then adds a **Link to this view** control to its app switcher. Visitors can copy
+the exact view immediately or use **Change** to choose which registered values
+follow the link. Unselected values return to the app's defaults when the link
+opens. The visible UI says “link”; package and API names retain “bookmark” to
+match Shiny's native lifecycle.
 
 ```python
 from shiny import App, render, ui
@@ -48,7 +50,7 @@ once from the top-level server session. Module inputs can be included by their
 resolved IDs in that top-level field mapping; module-scoped registration is
 rejected because selective exclusion is owned by the root bookmark session.
 
-## Bookmarks that outlive the app
+## View links that outlive the app
 
 Native Shiny restoration ignores a removed input, but a retired choice can
 otherwise become empty or fall back differently across widgets. Declare current
@@ -96,13 +98,14 @@ representation, pass an idempotent `normalizer=` to `Field`. It is applied to
 both sides before comparison; it does not change the value Shiny serializes or
 restores.
 
-When anything changes, the switcher marks the bookmark action and presents a
-plain-language **View adjusted** receipt. It names migrated, unavailable,
-renamed, and removed filters and offers **Copy updated link**. The app still
-opens; stale state is never promoted into a blocking error.
+When anything changes, the switcher marks the link action and presents a
+plain-language **Opened with changes** receipt. It labels saved and opened
+values for migrated, unavailable, renamed, and removed fields, then offers
+**Copy link to current view**. The app still opens; stale state is never
+promoted into a blocking error.
 
 An input that is neither registered nor declared as renamed or removed is shown
-with its URL-provided ID and saved value, labelled **Unknown**. Both are rendered
+with its URL-provided ID and saved value, labelled **Not recognized**. Both are rendered
 as bounded plain text. At most three unknown inputs are listed before a compact
 overflow summary. Copying the updated link drops every unknown setting, so the
 warning clears on the next visit.
@@ -116,7 +119,7 @@ warning clears on the next visit.
 - Every registered field is selected by default, including values equal to the
   app's current defaults. The receipt makes that scope explicit before copying.
 - App inputs not registered here are always excluded.
-- A custom bookmark with no selected fields cannot be created.
+- A view link with no selected fields cannot be created.
 - URLs over 8 KiB are rejected by default. Raise `max_url_length` only when the
   complete delivery path is known to accept longer URLs.
 - The control stays absent when the bridge is not installed, so unsupported apps

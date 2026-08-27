@@ -1,10 +1,10 @@
 ---
-description: "Add selective URL bookmarks to Python Shiny apps with the shinyhub-bookmarks helper and ShinyHub's user-friendly app switcher."
+description: "Add selective view links to Python Shiny apps with the shinyhub-bookmarks helper and ShinyHub's user-friendly app switcher."
 ---
 
-# Bookmark a Shiny view
+# Link to a Shiny view
 
-ShinyHub can offer **Bookmark this view** inside the app switcher when a Python
+ShinyHub can offer **Link to this view** inside the app switcher when a Python
 Shiny app opts in. The app names the filter inputs that are safe and useful to
 carry. ShinyHub presents the receipt and selection UI; Shiny itself serializes
 and restores the state.
@@ -58,18 +58,20 @@ inside a module is rejected: Shiny owns selective exclusion at the root
 bookmark session, and accepting a module proxy could otherwise include inputs
 outside the declared allow-list.
 
-If the package is not present, the switcher simply has no bookmark action.
+If the package is not present, the switcher simply has no view-link action.
 
 ## What visitors get
 
-The initial view is an explicit receipt: every registered field is selected and
-its current value is shown. **Copy link** therefore means “copy this exact
-view,” including values that happen to equal today's app defaults.
+The panel lists every registered field and its current value. All values are
+included by default, so **Copy link** means “copy this exact view,” including
+values that happen to equal today's app defaults.
 
-**Customize…** turns the same receipt into a checklist. Unchecked fields are
-omitted and use whatever defaults the app has when the link is opened. The copy
-action is disabled when no fields are selected, avoiding a link that looks
-special but carries no useful state.
+**Change** reveals checkboxes in place; **Done** returns to the compact review.
+Unchecked values are omitted and use whatever defaults the app has when the
+link is opened. The copy action is disabled when no values are selected,
+avoiding a link that looks special but carries no useful state. The panel also
+reminds visitors that the app's access rules still apply to anyone opening the
+link.
 
 ## Field labels and values
 
@@ -90,7 +92,8 @@ fields={
 }
 ```
 
-Formatters only affect the receipt. Shiny serializes the original input value.
+Formatters only affect the value shown in the panel. Shiny serializes the
+original input value.
 Do not register secrets or large free-form inputs: selected values become part
 of a shareable URL and may appear in browser history, logs, and referrer data.
 The browser-local ShinyHub switcher receives registered display values and the
@@ -122,9 +125,9 @@ The adapter serializes one request at a time, restores the app's existing
 registration, and returns stable browser error codes. It does not log filter
 values or generated URLs.
 
-## Evolving filters safely
+## Evolving view links safely
 
-Bookmark URLs often outlive the release that created them. Shiny ignores an
+View links often outlive the release that created them. Shiny ignores an
 input that no longer exists, but an unavailable choice or renamed input can
 otherwise fall back silently. Add restore rules to make that behavior explicit:
 
@@ -166,11 +169,13 @@ for migrations and diagnostics; it is not server-side state. Links created by
 the first helper release have no metadata and continue to restore.
 
 The recovery UX is deliberately non-blocking. The app opens the closest current
-view, the bookmark control gains an amber status dot, and its receipt explains
-what was updated, unavailable, renamed, removed, or ignored. Completely unknown
+view, the link control gains an amber status dot, and its **Opened with changes**
+receipt labels the saved and opened values for anything updated, unavailable,
+renamed, removed, or ignored. Completely unknown
 inputs show their URL-provided IDs and saved values as escaped, length-bounded
 plain text. The first three are listed and any remainder is summarized. Copying
-creates a fresh link from the current schema and drops those unknown settings.
+**Copy link to current view** creates a fresh link from the current schema and
+drops those unknown settings.
 
 ## Compatibility
 
