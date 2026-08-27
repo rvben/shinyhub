@@ -20,6 +20,10 @@ if (!source.includes('shiny-disconnected-overlay')) {
 
 const SHINY_ID = 'shiny-disconnected-overlay';
 const OWN_ID = 'shinyhub-status-overlay';
+const OPEN_ID = 'shinyhub-status-open';
+const SNAPSHOT_ID = 'shinyhub-status-snapshot';
+const RELOAD_ID = 'shinyhub-status-reload';
+const RESTART_ID = 'shinyhub-status-restart';
 const READY_URL = '/app/demo/.shinyhub/ready';
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -123,17 +127,20 @@ function mount({ statuses = [], pollMs = 3000, maxPolls = 20, attrs = {}, preMar
     },
     title: () => (overlay() ? overlay().querySelector('h1').textContent : null),
     message: () => (overlay() ? overlay().querySelector('p').textContent : null),
-    button: () => el('button'),
+    button: () => el(`#${RELOAD_ID}`),
+    openLink: () => el(`#${OPEN_ID}`),
+    snapshotButton: () => el(`#${SNAPSHOT_ID}`),
+    restartButton: () => el(`#${RESTART_ID}`),
+    actionVisible: (id) => {
+      const action = el(`#${id}`);
+      return !!action && action.style.display !== 'none';
+    },
     buttonVisible: () => {
-      const b = el('button');
+      const b = el(`#${RELOAD_ID}`);
       return !!b && b.style.display !== 'none';
     },
-    // The spinner is the element immediately before the title. Anchoring on the
-    // title rather than on 'div div' matters: the latter also matches the box
-    // wrapping everything, which is always visible, so the assertion would
-    // pass in both the waiting and the finished state.
     spinnerVisible: () => {
-      const s = overlay() ? overlay().querySelector('h1').previousElementSibling : null;
+      const s = el('#shinyhub-status-spinner');
       return !!s && s.style.display !== 'none';
     },
   };
@@ -152,18 +159,22 @@ test('a disconnect raises the overlay and starts polling the ready probe', async
   await h.disconnect();
 
   assert.ok(h.overlay(), 'the disconnect must be explained');
-  assert.match(h.title(), /Lost connection/);
+  assert.match(h.title(), /Connection interrupted/);
   assert.equal(h.spinnerVisible(), true, 'a wait in progress shows the spinner');
   assert.equal(h.fetches.length, 1, 'it must ask the server what happened');
   assert.equal(h.fetches[0].url, READY_URL, 'it must poll the URL the proxy gave it, not a guessed one');
   assert.equal(h.fetches[0].opts.cache, 'no-store', 'a cached readiness answer is a wrong answer');
   assert.equal(h.overlay().getAttribute('aria-live'), 'polite', 'the state change is announced');
+  assert.equal(h.overlay().getAttribute('role'), 'dialog', 'the blocking state uses dialog semantics');
+  assert.equal(h.overlay().getAttribute('aria-modal'), 'true', 'the obscured page is exposed as modal');
+  assert.equal(h.document.activeElement, h.button(), 'focus starts on the recovery action');
 
-  // Reload is offered immediately: the ready probe never wakes a hibernated
+  // Restart is offered immediately: the ready probe never wakes a hibernated
   // app, so for the commonest cause of a drop, waiting cannot fix it and
   // reloading can. Holding the button back would be a minute of theatre.
   assert.equal(h.buttonVisible(), true, 'the fix must be offered at once, not after the budget');
-  assert.equal(h.button().textContent, 'Reload');
+  assert.equal(h.button().textContent, 'Restart now');
+  assert.equal(h.button().style.minHeight, '44px', 'the primary action must remain a touch target');
 });
 
 test('a deliberate reload is not a fault', async () => {
@@ -199,19 +210,76 @@ test('a reconnect takes the overlay away again', async () => {
   assert.equal(h.timers.length, 0, 'and the poll must stop, not keep hitting the server');
 });
 
-test('a recovered app is offered, never forced', async () => {
+test('a recovered app offers a new session while preserving the old results', async () => {
   // The dead page still shows the visitor's last results. Reloading replaces
   // them with a blank app, so that is their call to make, not ours.
   const h = mount({ statuses: [503, 200] });
   await h.disconnect();
-  assert.match(h.title(), /Lost connection/);
+  assert.match(h.title(), /Connection interrupted/);
 
   await h.fireTimer();
-  assert.match(h.title(), /back online/);
+  assert.match(h.title(), /available again/);
   assert.equal(h.spinnerVisible(), false, 'the wait is over');
-  assert.equal(h.buttonVisible(), true, 'reloading is offered');
-  assert.match(h.message(), /replaces what is on screen/, 'the cost of reloading is stated');
+  assert.equal(h.buttonVisible(), false, 'the ambiguous generic reload action is gone');
+  assert.match(h.message(), /previous session is still disconnected/, 'service and session recovery are distinct');
+  assert.equal(h.actionVisible(OPEN_ID), true, 'a safe new-session path is primary');
+  assert.equal(h.openLink().textContent, 'Open new session');
+  assert.equal(h.openLink().target, '_blank', 'the new session preserves this tab');
+  assert.match(h.openLink().rel, /noopener/, 'the new tab cannot retain an opener');
+  assert.equal(h.actionVisible(SNAPSHOT_ID), true, 'the preserved results can be inspected');
+  assert.equal(h.actionVisible(RESTART_ID), true, 'same-tab restart remains available');
+  assert.equal(h.document.activeElement, h.openLink(), 'focus moves to the safest recovery action');
   assert.equal(h.timers.length, 0, 'recovery is terminal: no further polling');
+});
+
+test('previous results become an explicit non-blocking offline snapshot', async () => {
+  const h = mount({ statuses: [200] });
+  await h.disconnect();
+
+  h.snapshotButton().click();
+  await flush();
+
+  assert.match(h.title(), /Previous results/);
+  assert.match(h.message(), /may be out of date/);
+  assert.equal(h.overlay().getAttribute('role'), 'status', 'the snapshot banner is no longer modal');
+  assert.equal(h.overlay().hasAttribute('aria-modal'), false, 'snapshot mode releases the app beneath it');
+  assert.match(h.overlay().className, /is-snapshot/, 'the full-screen blocker becomes a banner');
+  assert.equal(h.document.getElementById(SHINY_ID).style.display, 'none', 'Shiny’s blocker no longer hides the results');
+  assert.equal(h.document.getElementById(SHINY_ID).getAttribute('aria-hidden'), 'true');
+  assert.equal(h.document.getElementById('app-root').textContent, 'app', 'the prior results remain in place');
+  assert.equal(h.actionVisible(OPEN_ID), true, 'continuation stays available from snapshot mode');
+  assert.equal(h.actionVisible(SNAPSHOT_ID), false, 'the completed snapshot action is removed');
+});
+
+test('the recovered decision traps focus and Escape reveals the snapshot', async () => {
+  const h = mount({ statuses: [200] });
+  await h.disconnect();
+
+  h.openLink().dispatchEvent(new h.window.KeyboardEvent('keydown', {
+    key: 'Tab', shiftKey: true, bubbles: true, cancelable: true,
+  }));
+  assert.equal(h.document.activeElement, h.restartButton(), 'Shift+Tab wraps to the final recovery action');
+
+  h.restartButton().dispatchEvent(new h.window.KeyboardEvent('keydown', {
+    key: 'Tab', bubbles: true, cancelable: true,
+  }));
+  assert.equal(h.document.activeElement, h.openLink(), 'Tab wraps back to the safest action');
+
+  h.openLink().dispatchEvent(new h.window.KeyboardEvent('keydown', {
+    key: 'Escape', bubbles: true, cancelable: true,
+  }));
+  assert.match(h.overlay().className, /is-snapshot/, 'Escape chooses the non-destructive exit');
+  assert.equal(h.document.activeElement, h.overlay(), 'focus follows the newly revealed snapshot status');
+});
+
+test('a genuine reconnect also clears an already-revealed snapshot', async () => {
+  const h = mount({ statuses: [200] });
+  await h.disconnect();
+  h.snapshotButton().click();
+  assert.ok(h.overlay(), 'precondition: snapshot banner is visible');
+
+  await h.reconnect();
+  assert.equal(h.overlay(), null, 'a live reconnection removes the stale-state banner');
 });
 
 test('a deleted app is terminal, not a slow restart', async () => {
@@ -229,10 +297,10 @@ test('a deleted app is terminal, not a slow restart', async () => {
 test('it gives up after the budget and says how long it waited', async () => {
   const h = mount({ statuses: [503, 503, 503], pollMs: 1000, maxPolls: 3 });
   await h.disconnect();
-  assert.match(h.title(), /Lost connection/, 'precondition: waiting');
+  assert.match(h.title(), /Connection interrupted/, 'precondition: waiting');
 
   assert.equal(await h.fireTimer(), 1000, 'it must wait the configured interval');
-  assert.match(h.title(), /Lost connection/, 'still within the budget');
+  assert.match(h.title(), /Connection interrupted/, 'still within the budget');
   await h.fireTimer();
 
   assert.match(h.title(), /did not come back/);
@@ -246,12 +314,12 @@ test('a failed fetch counts as a miss, not as a crash', async () => {
   // is down" are the same observation. Either way the app is not back yet.
   const h = mount({ statuses: ['error', 503, 200], pollMs: 500, maxPolls: 5 });
   await h.disconnect();
-  assert.match(h.title(), /Lost connection/, 'a rejected fetch must not blank the overlay');
+  assert.match(h.title(), /Connection interrupted/, 'a rejected fetch must not blank the overlay');
   assert.equal(h.timers.length, 1, 'and must schedule the next attempt');
 
   await h.fireTimer();
   await h.fireTimer();
-  assert.match(h.title(), /back online/, 'it recovers once the probe answers');
+  assert.match(h.title(), /available again/, 'it recovers once the probe answers');
 });
 
 test('a page that already carries the marker is handled on arrival', async () => {
@@ -298,4 +366,9 @@ test('the script never throws into the host page', async () => {
   await h.reconnect();
   await h.disconnect();
   assert.deepEqual(h.jsdomErrors, [], 'an uncaught throw here would break the app it is trying to explain');
+});
+
+test('motion and keyboard focus have explicit accessible fallbacks', () => {
+  assert.match(source, /prefers-reduced-motion:\s*reduce/, 'the spinner must yield to reduced-motion preferences');
+  assert.match(source, /:focus-visible/, 'actions need a visible keyboard focus treatment');
 });
