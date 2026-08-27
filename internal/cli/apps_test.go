@@ -679,6 +679,52 @@ func TestAppsLogs_Interactive_DefaultsToStream(t *testing.T) {
 	}
 }
 
+func TestAppsLogs_RunsListsImmutableExecutionDiagnostics(t *testing.T) {
+	_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/apps/demo/logs/sources" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"sources":[{"run_id":"run-dead","replica":0,"current":true,"status":"crashed","started_at":"2026-08-27T16:23:33Z","finished_at":"2026-08-27T16:26:27Z","oom_killed":true,"exit_signal":"SIGKILL","exit_reason":"kernel OOM-killed replica"}]}`)
+	})
+	out, err := execCLI(t, "apps", "logs", "demo", "--runs", "-o", "table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"run-dead", "crashed", "OOM-killed"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("run list missing %q: %s", want, out)
+		}
+	}
+	if len(*reqs) != 1 {
+		t.Fatalf("requests = %d, want 1", len(*reqs))
+	}
+}
+
+func TestAppsLogs_SystemWrapsSelectedRunWithLifecycleMarkers(t *testing.T) {
+	_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/apps/demo/logs/sources":
+			fmt.Fprint(w, `{"sources":[{"run_id":"run-dead","replica":0,"current":true,"status":"crashed","started_at":"2026-08-27T16:23:33Z","finished_at":"2026-08-27T16:26:27Z","oom_killed":true,"exit_signal":"SIGKILL","exit_reason":"kernel OOM-killed replica"}]}`)
+		case "/api/apps/demo/logs":
+			fmt.Fprintln(w, "Application startup complete")
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	out, err := execCLI(t, "apps", "logs", "demo", "--system", "--run", "run-dead", "-o", "table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[shinyhub] replica 0 started", "Application startup complete", "[shinyhub] replica 0 exited", "oom_killed=true", "signal=SIGKILL"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("system log missing %q: %s", want, out)
+		}
+	}
+	if len(*reqs) != 2 || !strings.Contains((*reqs)[1].Query, "run=run-dead") || !strings.Contains((*reqs)[1].Query, "follow=false") {
+		t.Fatalf("requests = %+v", *reqs)
+	}
+}
+
 // TestAppsLogs_FollowFlag_ForcesStream verifies that -f / --follow always
 // uses SSE regardless of TTY state.
 func TestAppsLogs_FollowFlag_ForcesStream(t *testing.T) {

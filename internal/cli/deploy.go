@@ -692,16 +692,22 @@ func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration
 }
 
 func waitForHealthyWithContext(parent context.Context, cfg *cliConfig, slug string, timeout time.Duration, errOut io.Writer) error {
-	deadline := time.Now().Add(timeout)
+	startedAt := time.Now().UTC()
+	deadline := startedAt.Add(timeout)
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	p := newProgress(errOut, fmt.Sprintf("Waiting for %s to be healthy", slug))
 	var lastErr error
 	var lastPollOK bool
 	var lastStatus string
+	var lastObservation appHealthObservation
 	unknownReported := false
 	for {
-		ready, status, err := pollAppStatusContext(ctx, cfg, slug)
+		ready, observation, err := pollAppHealthContext(ctx, cfg, slug)
+		status := observation.App.Status
+		if err == nil {
+			lastObservation = observation
+		}
 		if err == nil && ready {
 			p.done(" ready.", slug+" is healthy")
 			return nil
@@ -738,8 +744,8 @@ func waitForHealthyWithContext(parent context.Context, cfg *cliConfig, slug stri
 		}
 		if isTerminalStatus(status) {
 			p.stop()
-			printLogTail(cfg, slug, errOut)
-			return fmt.Errorf("%s %s during startup - check logs above or run: shinyhub apps logs %s", slug, status, slug)
+			printLogTailForObservation(cfg, slug, errOut, lastObservation)
+			return fleetHealthFailure(slug, "deploy", startedAt, lastObservation)
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -758,7 +764,7 @@ func waitForHealthyWithContext(parent context.Context, cfg *cliConfig, slug stri
 		}
 	}
 	p.stop()
-	printLogTail(cfg, slug, errOut)
+	printLogTailForObservation(cfg, slug, errOut, lastObservation)
 	// If the most recent poll could not reach the app, surface that error: we
 	// have no fresh evidence the app is merely still booting, and a persistent
 	// transport/5xx failure is the actionable diagnostic. This also covers the
@@ -780,10 +786,9 @@ func waitForHealthyWithContext(parent context.Context, cfg *cliConfig, slug stri
 		slug, waitingStatusWord(lastStatus), timeout, slug)
 }
 
-// isTerminalStatus reports whether an app status indicates a non-recoverable
-// failure during startup (as opposed to a transient state like "starting" or
-// "stopped", which is a normal intentional stop). Only "crashed" is unambiguously
-// a failed-startup state.
+// isTerminalStatus reports whether an observed app status is non-recoverable
+// for a health wait. It deliberately says nothing about when the failure
+// happened; callers derive timing from timestamped replica diagnostics.
 func isTerminalStatus(status string) bool {
 	return status == "crashed"
 }
@@ -825,7 +830,51 @@ func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
 		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", err)
 		return
 	}
-	if len(lines) == 0 {
+	writeLogTail(slug, w, lines, "")
+}
+
+// printLogTailForObservation labels output that predates the recorded failure.
+// Without this distinction a healthy session from half an hour earlier reads
+// like causal crash context merely because it happens to be the last output.
+func printLogTailForObservation(cfg *cliConfig, slug string, w io.Writer, observation appHealthObservation) {
+	lines, err := fetchLogTail(cfg, slug, logTailLines)
+	if err != nil {
+		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", err)
+		return
+	}
+	label := ""
+	var failureAt *time.Time
+	replica := 0
+	for i := range observation.Replicas {
+		rep := &observation.Replicas[i]
+		if rep.Status != "crashed" {
+			continue
+		}
+		replica = rep.Index
+		if rep.LastExit != nil && rep.LastExit.ObservedAt != nil {
+			failureAt = rep.LastExit.ObservedAt
+		} else if !rep.UpdatedAt.IsZero() {
+			failureAt = &rep.UpdatedAt
+		}
+		break
+	}
+	if failureAt != nil {
+		if sources, sourceErr := fetchAppLogSources(cfg, slug); sourceErr == nil {
+			for i := range sources {
+				src := &sources[i]
+				if src.Replica == replica && src.Current && src.LogUpdatedAt != nil && src.LogUpdatedAt.Before(*failureAt) {
+					label = fmt.Sprintf("stale: newest app output is %s, before the exit observed at %s",
+						src.LogUpdatedAt.UTC().Format(time.RFC3339), failureAt.UTC().Format(time.RFC3339))
+					break
+				}
+			}
+		}
+	}
+	writeLogTail(slug, w, lines, label)
+}
+
+func writeLogTail(slug string, w io.Writer, lines []string, label string) {
+	if len(lines) == 0 && label == "" {
 		return
 	}
 	// Build the whole block and write it once so a syncWriter (parallel fleet
@@ -833,12 +882,16 @@ func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
 	// one app's tail intact instead of interleaving it line-by-line with another
 	// failing app's tail.
 	var b strings.Builder
-	b.WriteString("--- last log lines ---\n")
+	if label == "" {
+		b.WriteString("--- last log lines ---\n")
+	} else {
+		fmt.Fprintf(&b, "--- last log lines (%s) ---\n", label)
+	}
 	for _, l := range lines {
 		b.WriteString(l)
 		b.WriteByte('\n')
 	}
-	fmt.Fprintf(&b, "--- run `shinyhub apps logs %s` for full logs ---\n", slug)
+	fmt.Fprintf(&b, "--- run `shinyhub apps logs %s --system` for lifecycle context ---\n", slug)
 	_, _ = io.WriteString(w, b.String())
 }
 
@@ -893,40 +946,65 @@ func pollAppStatus(cfg *cliConfig, slug string) (bool, string, error) {
 	return pollAppStatusContext(context.Background(), cfg, slug)
 }
 
+type appHealthObservation struct {
+	App struct {
+		Status           string     `json:"status"`
+		LastDeployedAt   *time.Time `json:"last_deployed_at,omitempty"`
+		ContentDigest    string     `json:"content_digest,omitempty"`
+		LastReplicaError string     `json:"last_replica_error"`
+	} `json:"app"`
+	Replicas         []replicaHealthObservation `json:"replicas_status"`
+	RedeployInFlight bool                       `json:"redeploy_in_flight"`
+}
+
+type replicaHealthObservation struct {
+	Index     int                     `json:"index"`
+	Status    string                  `json:"status"`
+	UpdatedAt time.Time               `json:"updated_at"`
+	Reason    string                  `json:"reason,omitempty"`
+	LastExit  *replicaExitObservation `json:"last_exit,omitempty"`
+}
+
+type replicaExitObservation struct {
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	RunID      string     `json:"run_id,omitempty"`
+	ExitCode   *int       `json:"exit_code,omitempty"`
+	Signal     string     `json:"exit_signal,omitempty"`
+	Reason     string     `json:"exit_reason,omitempty"`
+	OOMKilled  bool       `json:"oom_killed"`
+	CrashCount int        `json:"crash_count"`
+}
+
 func pollAppStatusContext(ctx context.Context, cfg *cliConfig, slug string) (bool, string, error) {
+	ready, observation, err := pollAppHealthContext(ctx, cfg, slug)
+	return ready, observation.App.Status, err
+}
+
+func pollAppHealthContext(ctx context.Context, cfg *cliConfig, slug string) (bool, appHealthObservation, error) {
+	var result appHealthObservation
 	req, err := http.NewRequestWithContext(ctx, "GET", cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
-		return false, "", fmt.Errorf("build request: %w", err)
+		return false, result, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return false, "", err
+		return false, result, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return false, "", &deployHTTPError{statusCode: resp.StatusCode, body: string(body)}
-	}
-	var result struct {
-		App struct {
-			Status string `json:"status"`
-		} `json:"app"`
-		// RedeployInFlight is set by the server while an async replica redeploy
-		// is cycling the pool. The app row still reports "running" throughout,
-		// so this flag is the only honest signal that the new pool is not yet
-		// up. Treat the app as not-ready until it clears.
-		RedeployInFlight bool `json:"redeploy_in_flight"`
+		return false, result, &deployHTTPError{statusCode: resp.StatusCode, body: string(body)}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false, "", err
+		return false, result, err
 	}
 	status := result.App.Status
 	// Ready means the app answers requests now. Elastic pools (grouped /
 	// per_session) report idle until their first request boots a worker,
 	// which is a serving state, not a gap; the shared predicate knows every
 	// status the server emits, so a status added there is accepted here.
-	return appstatus.Serving(status) && !result.RedeployInFlight, status, nil
+	return appstatus.Serving(status) && !result.RedeployInFlight, result, nil
 }
 
 // unknownStatusHint explains a status this CLI cannot classify. The server may

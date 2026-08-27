@@ -9,7 +9,7 @@ Apps (4)
 Applied: 0 created, 1 updated, 1 deleted, 0 unchanged, 0 adopted, 0 skipped, 1 failed, 1 conflicts.
 Result: PARTIAL - 1 failed, 1 conflict(s); re-run plan. Exit 5.
   weekly: config patch returned HTTP 500
-    -> shinyhub apps logs weekly --tail 200
+    -> shinyhub apps logs weekly --tail 200 --system
   forecast: resource revision changed
     -> shinyhub fleet plan   (re-review before re-applying)
 

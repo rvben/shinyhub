@@ -3,6 +3,7 @@ package cli
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -567,6 +568,31 @@ func TestPrintLogTail_PlainTextFixture(t *testing.T) {
 	}
 	if !strings.Contains(out, "shinyhub apps logs demo") {
 		t.Errorf("log tail should contain hint, got %q", out)
+	}
+}
+
+func TestPrintLogTailForObservation_LabelsPreFailureOutputAsStale(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/apps/demo/logs":
+			fmt.Fprintln(w, "Application startup complete")
+		case "/api/apps/demo/logs/sources":
+			fmt.Fprint(w, `{"sources":[{"run_id":"run-dead","replica":0,"current":true,"status":"crashed","log_updated_at":"2026-08-27T16:23:35Z"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	var observation appHealthObservation
+	if err := json.Unmarshal([]byte(`{"app":{"status":"crashed"},"replicas_status":[{"index":0,"status":"crashed","last_exit":{"observed_at":"2026-08-27T16:26:27Z"}}]}`), &observation); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	printLogTailForObservation(&cliConfig{Host: srv.URL, Token: "tok"}, "demo", &out, observation)
+	got := out.String()
+	if !strings.Contains(got, "stale: newest app output is 2026-08-27T16:23:35Z") ||
+		!strings.Contains(got, "before the exit observed at 2026-08-27T16:26:27Z") {
+		t.Fatalf("stale label missing: %s", got)
 	}
 }
 

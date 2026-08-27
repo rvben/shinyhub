@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -207,7 +208,20 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			Reason       string `json:"reason"`
 			ExitCode     *int   `json:"exit_code"`
 			Signal       string `json:"signal"`
+			ExitSignal   string `json:"exit_signal"`
+			ExitReason   string `json:"exit_reason"`
+			OOMKilled    bool   `json:"oom_killed"`
 			RestartCount int    `json:"restart_count"`
+			CrashCount   int    `json:"crash_count"`
+			LastExit     *struct {
+				ObservedAt *time.Time `json:"observed_at,omitempty"`
+				RunID      string     `json:"run_id,omitempty"`
+				ExitCode   *int       `json:"exit_code,omitempty"`
+				Signal     string     `json:"exit_signal,omitempty"`
+				Reason     string     `json:"exit_reason,omitempty"`
+				OOMKilled  bool       `json:"oom_killed"`
+				CrashCount int        `json:"crash_count"`
+			} `json:"last_exit,omitempty"`
 		} `json:"replicas_status"`
 		RejectsByReason *struct {
 			WindowSeconds int               `json:"window_seconds"`
@@ -447,14 +461,44 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			if r.Port != nil {
 				port = fmt.Sprintf("%d", *r.Port)
 			}
-			diagnostic := r.Reason
-			if r.Signal != "" {
-				diagnostic = strings.TrimSpace(diagnostic + " · " + r.Signal)
+			diagnostic := r.ExitReason
+			if diagnostic == "" {
+				diagnostic = r.Reason
+			}
+			if r.OOMKilled {
+				diagnostic = strings.TrimSpace(diagnostic + " · OOM-killed")
+			}
+			signal := r.ExitSignal
+			if signal == "" {
+				signal = r.Signal
+			}
+			if signal != "" {
+				diagnostic = strings.TrimSpace(diagnostic + " · " + signal)
 			} else if r.ExitCode != nil {
 				diagnostic = strings.TrimSpace(diagnostic + fmt.Sprintf(" · exit %d", *r.ExitCode))
 			}
-			if r.RestartCount > 0 {
-				diagnostic = strings.TrimSpace(diagnostic + fmt.Sprintf(" · restart %d", r.RestartCount))
+			crashCount := r.CrashCount
+			if crashCount == 0 {
+				crashCount = r.RestartCount
+			}
+			if crashCount > 0 {
+				diagnostic = strings.TrimSpace(diagnostic + fmt.Sprintf(" · crash observations %d", crashCount))
+			}
+			if diagnostic == "" && r.LastExit != nil {
+				diagnostic = "last exit"
+				if r.LastExit.ObservedAt != nil {
+					diagnostic += " " + r.LastExit.ObservedAt.UTC().Format(time.RFC3339)
+				}
+				if r.LastExit.OOMKilled {
+					diagnostic += " · OOM-killed"
+				} else if r.LastExit.Signal != "" {
+					diagnostic += " · " + r.LastExit.Signal
+				} else if r.LastExit.ExitCode != nil {
+					diagnostic += fmt.Sprintf(" · exit %d", *r.LastExit.ExitCode)
+				}
+				if r.LastExit.Reason != "" {
+					diagnostic += " · " + r.LastExit.Reason
+				}
 			}
 			t.row(txt(r.Index), statusTxt(r.Status), dimTxt(pid), dimTxt(port)).note(strings.TrimPrefix(diagnostic, "· "))
 		}
@@ -509,6 +553,23 @@ type appsLogsFlags struct {
 	follow   bool
 	noFollow bool
 	replica  int
+	run      string
+	runs     bool
+	system   bool
+}
+
+type appLogSource struct {
+	RunID        string     `json:"run_id"`
+	Replica      int        `json:"replica"`
+	Current      bool       `json:"current"`
+	Status       string     `json:"status"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	LogUpdatedAt *time.Time `json:"log_updated_at,omitempty"`
+	OOMKilled    bool       `json:"oom_killed"`
+	ExitCode     *int       `json:"exit_code,omitempty"`
+	ExitSignal   string     `json:"exit_signal,omitempty"`
+	ExitReason   string     `json:"exit_reason,omitempty"`
 }
 
 func newAppsLogsCmd() *cobra.Command {
@@ -542,6 +603,12 @@ func newAppsLogsCmd() *cobra.Command {
 		"Print the tail and exit instead of streaming new output")
 	cmd.Flags().IntVar(&f.replica, "replica", 0,
 		"Replica index (default 0)")
+	cmd.Flags().StringVar(&f.run, "run", "",
+		"Read one immutable execution by run ID")
+	cmd.Flags().BoolVar(&f.runs, "runs", false,
+		"List retained execution history instead of reading output")
+	cmd.Flags().BoolVar(&f.system, "system", false,
+		"Include recorded supervisor start and exit markers (one-shot)")
 	return cmd
 }
 
@@ -551,6 +618,12 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 	}
 	if f.follow && f.noFollow {
 		return validationErr("--follow and --no-follow are mutually exclusive", "pass at most one")
+	}
+	if f.runs && (f.follow || f.noFollow || f.run != "" || f.system) {
+		return validationErr("--runs cannot be combined with log-stream selection flags", "use --runs by itself")
+	}
+	if f.system && f.follow {
+		return validationErr("--system is a one-shot lifecycle view and cannot follow", "drop --follow")
 	}
 
 	// Resolve whether to stream (SSE) or fetch one-shot (plain text).
@@ -562,8 +635,11 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 	if f.noFollow {
 		stream = false
 	}
+	if f.run != "" || f.system || f.runs {
+		stream = false
+	}
 
-	format, err := resolveFormat(false, true)
+	format, err := resolveFormat(false, !f.runs)
 	if err != nil {
 		return err
 	}
@@ -572,9 +648,33 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 	if err != nil {
 		return err
 	}
+	if f.runs {
+		return printAppLogRuns(cmd, cfg, args[0], format)
+	}
+
+	var selected *appLogSource
+	if f.system {
+		sources, err := fetchAppLogSources(cfg, args[0])
+		if err != nil {
+			return err
+		}
+		for i := range sources {
+			if (f.run != "" && sources[i].RunID == f.run) ||
+				(f.run == "" && sources[i].Replica == f.replica && sources[i].Current) {
+				selected = &sources[i]
+				break
+			}
+		}
+		if f.run != "" && selected == nil {
+			return fmt.Errorf("log run %q is not retained for %s", f.run, args[0])
+		}
+	}
 
 	url := fmt.Sprintf("%s/api/apps/%s/logs?tail=%d&replica=%d",
 		cfg.Host, args[0], f.tail, f.replica)
+	if f.run != "" {
+		url += "&run=" + neturl.QueryEscape(f.run)
+	}
 	if !stream {
 		url += "&follow=false"
 	}
@@ -608,7 +708,14 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 
 	// `apps logs` always streams a specific replica (default 0), so the stream
 	// is replica-scoped: pass the index by pointer so even replica 0 is tagged.
-	sw := newStreamWriter(cmd.OutOrStdout(), format, &f.replica)
+	streamReplica := f.replica
+	if selected != nil {
+		streamReplica = selected.Replica
+	}
+	sw := newStreamWriter(cmd.OutOrStdout(), format, &streamReplica)
+	if selected != nil {
+		sw.WriteLine(formatLogStartMarker(*selected))
+	}
 	if !stream {
 		// Plain-text response: scan lines and route through the stream writer
 		// so NDJSON mode wraps each line correctly.
@@ -616,7 +723,13 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 		for scanner.Scan() {
 			sw.WriteLine(scanner.Text())
 		}
-		return scanner.Err()
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+		if selected != nil && selected.FinishedAt != nil {
+			sw.WriteLine(formatLogExitMarker(*selected))
+		}
+		return nil
 	}
 	// SSE stream: strip framing before handing each line to the writer.
 	scanner := bufio.NewScanner(resp.Body)
@@ -632,6 +745,93 @@ func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
 		sw.WriteLine(line)
 	}
 	return scanner.Err()
+}
+
+func fetchAppLogSources(cfg *cliConfig, slug string) ([]appLogSource, error) {
+	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/logs/sources", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, httpError(cfg.Token, "list log runs", resp, body)
+	}
+	var payload struct {
+		Sources []appLogSource `json:"sources"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	return payload.Sources, nil
+}
+
+func printAppLogRuns(cmd *cobra.Command, cfg *cliConfig, slug string, format outputFormat) error {
+	sources, err := fetchAppLogSources(cfg, slug)
+	if err != nil {
+		return err
+	}
+	if format == formatJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"sources": sources})
+	}
+	t := newTable("CURRENT", "REPLICA", "RUN", "STATUS", "STARTED", "FINISHED", "EXIT")
+	for _, src := range sources {
+		current := ""
+		if src.Current {
+			current = "*"
+		}
+		var exitParts []string
+		if src.OOMKilled {
+			exitParts = append(exitParts, "OOM-killed")
+		}
+		if src.ExitSignal != "" {
+			exitParts = append(exitParts, src.ExitSignal)
+		}
+		if src.ExitCode != nil {
+			exitParts = append(exitParts, fmt.Sprintf("code %d", *src.ExitCode))
+		}
+		if src.ExitReason != "" {
+			exitParts = append(exitParts, src.ExitReason)
+		}
+		t.row(markTxt(current), txt(src.Replica), dimTxt(src.RunID), statusTxt(src.Status),
+			dimTxt(formatOptionalTime(src.StartedAt)), dimTxt(formatOptionalTime(src.FinishedAt)), txt(strings.Join(exitParts, " · ")))
+	}
+	t.render(cmd.OutOrStdout())
+	return nil
+}
+
+func formatOptionalTime(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func formatLogStartMarker(src appLogSource) string {
+	return fmt.Sprintf("[shinyhub] replica %d started: run=%s at=%s", src.Replica, src.RunID, formatOptionalTime(src.StartedAt))
+}
+
+func formatLogExitMarker(src appLogSource) string {
+	parts := []string{fmt.Sprintf("[shinyhub] replica %d exited:", src.Replica),
+		"run=" + src.RunID, "at=" + formatOptionalTime(src.FinishedAt), "status=" + src.Status}
+	if src.OOMKilled {
+		parts = append(parts, "oom_killed=true")
+	}
+	if src.ExitSignal != "" {
+		parts = append(parts, "signal="+src.ExitSignal)
+	}
+	if src.ExitCode != nil {
+		parts = append(parts, fmt.Sprintf("code=%d", *src.ExitCode))
+	}
+	if src.ExitReason != "" {
+		parts = append(parts, "reason="+strconv.Quote(src.ExitReason))
+	}
+	return strings.Join(parts, " ")
 }
 
 // ── apps rollback ───────────────────────────────────────────────────────────

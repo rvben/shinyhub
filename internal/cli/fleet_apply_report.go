@@ -443,7 +443,7 @@ func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o apply
 				}
 			}
 			if len(r.scheduleLogs) == 0 && len(r.warmGate) == 0 && len(r.freshnessGate) == 0 {
-				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub apps logs %s --tail 200", r.slug)))
+				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub apps logs %s --tail 200 --system", r.slug)))
 			}
 		case statusConflict:
 			fmt.Fprintf(out, "  %s: %v\n    %s\n", s.red(r.slug), r.err,

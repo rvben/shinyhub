@@ -163,15 +163,26 @@ export function unseenLogSuffix(observed, snapshot) {
 function sameSourceState(a, b) {
   return a && b && a.status === b.status && a.has_log === b.has_log &&
     a.provider === b.provider && a.tier === b.tier && a.size_bytes === b.size_bytes &&
-    a.current === b.current;
+    a.current === b.current && a.oom_killed === b.oom_killed &&
+    a.exit_code === b.exit_code && a.exit_signal === b.exit_signal &&
+    a.exit_reason === b.exit_reason;
+}
+
+function sourceExitDiagnostics(source) {
+  const details = [];
+  if (source.oom_killed) details.push('OOM-killed');
+  if (source.exit_signal) details.push(source.exit_signal);
+  else if (source.exit_code !== null && source.exit_code !== undefined) details.push(`exit ${source.exit_code}`);
+  if (source.exit_reason) details.push(source.exit_reason);
+  return details.length ? ` · ${details.join(' · ')}` : '';
 }
 
 function sourceStatusEvent(source, previous) {
   if (!source.current) return '';
-  if (!previous) return `Replica #${source.replica} run discovered (${titleCase(source.status)})`;
+  if (!previous) return `Replica #${source.replica} run discovered (${titleCase(source.status)})${sourceExitDiagnostics(source)}`;
   if (source.status === previous.status) return '';
   if (isLiveLogSource(source)) return `Replica #${source.replica} started (${titleCase(source.status)})`;
-  return `Replica #${source.replica} ${titleCase(source.status).toLocaleLowerCase()}`;
+  return `Replica #${source.replica} ${titleCase(source.status).toLocaleLowerCase()}${sourceExitDiagnostics(source)}`;
 }
 
 async function mapWithConcurrency(items, limit, mapper) {

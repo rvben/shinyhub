@@ -535,7 +535,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			}
 		}
 		if opt.verifyHealth {
-			if err := verifyFleetHealthy(cfg, d.Slug, out, opt.healthTimeout); err != nil {
+			if err := verifyFleetHealthyForAction(cfg, d.Slug, out, opt.healthTimeout, string(d.Action), start.UTC()); err != nil {
 				res.failureKind = failureHealthVerification
 				return fail(err, attempts)
 			}

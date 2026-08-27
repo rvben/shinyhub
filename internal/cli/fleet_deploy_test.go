@@ -109,8 +109,38 @@ func TestFleetHealthLoop_TerminalStatusFailsFast(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "crashed") {
 		t.Fatalf("crashed app must fail with a crashed error, got %v", err)
 	}
+	if strings.Contains(err.Error(), "during startup") {
+		t.Fatalf("the generic gate must not invent a startup crash: %v", err)
+	}
 	if calls != 1 {
 		t.Fatalf("terminal status must fail on the first poll, got %d calls", calls)
+	}
+}
+
+func TestFleetHealthFailure_AttributesPreexistingUnchangedCrash(t *testing.T) {
+	var observation appHealthObservation
+	if err := json.Unmarshal([]byte(`{
+		"app":{"status":"crashed","last_deployed_at":"2026-08-26T23:14:00Z"},
+		"replicas_status":[{"index":0,"status":"crashed","last_exit":{
+			"observed_at":"2026-08-27T16:26:27Z","run_id":"run-dead",
+			"exit_signal":"SIGKILL","exit_reason":"kernel OOM-killed replica",
+			"oom_killed":true,"crash_count":3}}]
+	}`), &observation); err != nil {
+		t.Fatal(err)
+	}
+	err := fleetHealthFailure("demo", "unchanged", time.Date(2026, 8, 27, 17, 0, 51, 0, time.UTC), observation)
+	got := err.Error()
+	for _, want := range []string{
+		"34m24s before this apply", "app unchanged", "this apply did not start it",
+		"OOM-killed", `reason="kernel OOM-killed replica"`, "crash_observations=3",
+		"--run run-dead",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("error missing %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "during startup") {
+		t.Errorf("error invents startup timing: %s", got)
 	}
 }
 

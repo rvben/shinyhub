@@ -257,11 +257,22 @@ func waitForFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout tim
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	poll := func() (bool, string, error) { return pollAppStatusContext(ctx, cfg, slug) }
+	startedAt := time.Now().UTC()
+	var last appHealthObservation
+	poll := func() (bool, string, error) {
+		ready, observation, err := pollAppHealthContext(ctx, cfg, slug)
+		if err == nil {
+			last = observation
+		}
+		return ready, observation.App.Status, err
+	}
 	err := waitForFleetHealthLoop(slug, timeout, 2*time.Second, fleetHealthProgressInterval,
 		poll, time.Now, time.Sleep, out)
 	if err != nil {
-		printLogTail(cfg, slug, out)
+		if isTerminalStatus(last.App.Status) {
+			err = fleetHealthFailure(slug, "deploy", startedAt, last)
+		}
+		printLogTailForObservation(cfg, slug, out, last)
 	}
 	return err
 }
@@ -274,13 +285,22 @@ func waitForFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout tim
 // in this gate would wake it, and waiting for a wake that never comes would
 // burn the whole timeout on an app in its declared steady state.
 func verifyFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout time.Duration) error {
+	return verifyFleetHealthyForAction(cfg, slug, out, timeout, "", time.Now().UTC())
+}
+
+func verifyFleetHealthyForAction(cfg *cliConfig, slug string, out io.Writer, timeout time.Duration, action string, applyStartedAt time.Time) error {
 	if timeout <= 0 {
 		timeout = fleetHealthTimeout
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	var last appHealthObservation
 	poll := func() (bool, string, error) {
-		ready, status, err := pollAppStatusContext(ctx, cfg, slug)
+		ready, observation, err := pollAppHealthContext(ctx, cfg, slug)
+		if err == nil {
+			last = observation
+		}
+		status := observation.App.Status
 		if err == nil && (status == "stopped" || appstatus.Class(status) == appstatus.KindParked) {
 			return true, status, nil
 		}
@@ -289,7 +309,10 @@ func verifyFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout time
 	err := waitForFleetHealthLoop(slug, timeout, 2*time.Second, fleetHealthProgressInterval,
 		poll, time.Now, time.Sleep, out)
 	if err != nil {
-		printLogTail(cfg, slug, out)
+		if isTerminalStatus(last.App.Status) {
+			err = fleetHealthFailure(slug, action, applyStartedAt, last)
+		}
+		printLogTailForObservation(cfg, slug, out, last)
 	}
 	return err
 }
@@ -353,7 +376,7 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 			}
 		}
 		if isTerminalStatus(status) {
-			return fmt.Errorf("%s %s during startup; run: shinyhub apps logs %s", slug, status, slug)
+			return fmt.Errorf("%s is %s; run: shinyhub apps logs %s --system --tail 200", slug, status, slug)
 		}
 		if !t.Before(deadline) {
 			break
@@ -391,4 +414,59 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 		return fmt.Errorf("timed out after %s waiting for %s to be healthy (%s)", timeout, slug, detail)
 	}
 	return fmt.Errorf("timed out after %s waiting for %s to be healthy", timeout, slug)
+}
+
+func fleetHealthFailure(slug, action string, applyStartedAt time.Time, observation appHealthObservation) error {
+	status := observation.App.Status
+	message := fmt.Sprintf("app is %s", status)
+	var crashedReplica *replicaHealthObservation
+	for i := range observation.Replicas {
+		if observation.Replicas[i].Status == "crashed" {
+			crashedReplica = &observation.Replicas[i]
+			break
+		}
+	}
+	if crashedReplica != nil {
+		message = fmt.Sprintf("replica %d is crashed", crashedReplica.Index)
+		if crashedReplica.LastExit != nil {
+			exit := crashedReplica.LastExit
+			if exit.ObservedAt != nil {
+				message += "; exit observed at " + exit.ObservedAt.UTC().Format(time.RFC3339)
+				if !applyStartedAt.IsZero() && exit.ObservedAt.Before(applyStartedAt) {
+					age := applyStartedAt.Sub(*exit.ObservedAt).Round(time.Second)
+					message += fmt.Sprintf(" (%s before this apply)", age)
+				}
+			}
+			if exit.OOMKilled {
+				message += "; OOM-killed"
+			}
+			if exit.Signal != "" {
+				message += "; signal=" + exit.Signal
+			}
+			if exit.ExitCode != nil {
+				message += fmt.Sprintf("; exit_code=%d", *exit.ExitCode)
+			}
+			if exit.Reason != "" {
+				message += fmt.Sprintf("; reason=%q", exit.Reason)
+			}
+			if exit.CrashCount > 0 {
+				message += fmt.Sprintf("; crash_observations=%d", exit.CrashCount)
+			}
+		}
+	}
+	if action == "unchanged" {
+		message += "; app unchanged"
+		if observation.App.ContentDigest != "" {
+			message += " at content " + shortDigest(observation.App.ContentDigest)
+		}
+		message += "—this apply did not start it"
+	}
+	if observation.App.LastDeployedAt != nil {
+		message += "; last deployed " + observation.App.LastDeployedAt.UTC().Format(time.RFC3339)
+	}
+	hint := fmt.Sprintf("shinyhub apps logs %s --system --tail 200", slug)
+	if crashedReplica != nil && crashedReplica.LastExit != nil && crashedReplica.LastExit.RunID != "" {
+		hint += " --run " + shellQuote(crashedReplica.LastExit.RunID)
+	}
+	return fmt.Errorf("%s; run: %s", message, hint)
 }
