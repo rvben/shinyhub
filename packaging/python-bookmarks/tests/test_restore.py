@@ -412,6 +412,6 @@ def test_unknown_inputs_are_capped_with_an_honest_overflow_summary():
         "made-up-0",
         "made-up-1",
         "made-up-2",
-        "3 more unrecognized bookmark settings",
+        "3 more unrecognized saved settings",
     ]
     assert adjustments[-1].kind == "unknown_summary"

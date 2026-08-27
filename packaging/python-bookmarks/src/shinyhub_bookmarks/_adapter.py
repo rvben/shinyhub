@@ -297,7 +297,7 @@ def _restore_adjustments(
             adjustments.append(
                 Adjustment(
                     kind="unknown_summary",
-                    label=f"{hidden_unknowns} more unrecognized bookmark {noun}",
+                    label=f"{hidden_unknowns} more unrecognized saved {noun}",
                     current="Ignored for safety",
                 )
             )
@@ -550,7 +550,7 @@ def register(
                     "version": PROTOCOL_VERSION,
                     "requestId": request_id,
                     "code": "busy",
-                    "message": "Another bookmark is still being created.",
+                    "message": "Another link is still being created.",
                 },
             )
             return
@@ -584,7 +584,7 @@ def register(
                     "version": PROTOCOL_VERSION,
                     "requestId": request_id,
                     "code": "serialization_failed",
-                    "message": "Shiny could not create this bookmark. Try again.",
+                    "message": "Shiny could not create this link. Try again.",
                 },
             )
 

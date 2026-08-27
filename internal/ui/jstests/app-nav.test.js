@@ -211,10 +211,10 @@ test('bookmarking stays absent until an app publishes supported fields', () => {
   }));
 
   assert.ok(m.root().classList.contains('bookmark-ready'));
-  assert.equal(trigger.getAttribute('aria-label'), 'Bookmark this view');
+  assert.equal(trigger.getAttribute('aria-label'), 'Link to this view');
 });
 
-test('the exact-view receipt names every registered filter before copying', () => {
+test('the view-link panel names every registered value before copying', () => {
   const m = mount();
   m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
     detail: {
@@ -230,12 +230,16 @@ test('the exact-view receipt names every registered filter before copying', () =
   m.q('button.bookmark-trigger').click();
 
   assert.ok(m.root().classList.contains('bookmark-open'));
-  assert.equal(m.q('.bookmark-badge').textContent, 'Exact view');
-  assert.equal(m.q('.bookmark-count').textContent, '2 filters');
+  assert.equal(m.q('.bookmark-title').textContent, 'Link to this view');
+  assert.equal(m.q('.bookmark-subtitle').textContent, 'Reopens the app with these values');
+  assert.equal(m.q('.bookmark-scope-title').textContent, 'All 2 values included');
+  assert.equal(m.q('.bookmark-scope-detail').textContent, 'Choose which values should follow the link.');
   assert.deepEqual(m.qa('.bookmark-field-label').map((node) => node.textContent), ['Region', 'Reporting year']);
   assert.deepEqual(m.qa('.bookmark-field-value').map((node) => node.textContent), ['Europe', '2026']);
   assert.equal(m.qa('.bookmark-check').length, 0);
-  assert.match(m.q('.bookmark-intro').textContent, /exactly as shown/);
+  assert.equal(m.q('.bookmark-access-note').textContent, 'App access rules still apply to anyone opening the link.');
+  assert.equal(m.qa('button.bookmark-primary').length, 1);
+  assert.equal(m.qa('button.bookmark-secondary').length, 0);
 });
 
 test('a stale bookmark becomes an explicit adjusted-view receipt with a fresh-link action', () => {
@@ -269,33 +273,43 @@ test('a stale bookmark becomes an explicit adjusted-view receipt with a fresh-li
           previous: 'Enterprise',
           current: 'Ignored',
         },
+        {
+          kind: 'fallback',
+          label: 'Forecast model',
+          previous: 'Legacy v1',
+          current: 'Standard',
+        },
       ],
     },
   }));
 
   const trigger = m.q('button.bookmark-trigger');
   assert.ok(m.root().classList.contains('bookmark-adjusted'));
-  assert.match(trigger.getAttribute('aria-label'), /saved filters adjusted/);
+  assert.equal(trigger.getAttribute('aria-label'), 'Link to this view, opened with 4 changes');
   trigger.click();
 
   assert.equal(m.q('.bookmark-notice').hidden, false);
-  assert.equal(m.q('.bookmark-notice-title').textContent, 'View adjusted');
+  assert.equal(m.q('.bookmark-notice-title').textContent, 'Opened with 4 changes');
+  assert.equal(m.q('.bookmark-notice-copy').textContent, 'The app used the closest values it supports now.');
   assert.deepEqual(
     m.qa('.bookmark-adjustment-label').map((node) => node.textContent),
-    ['Product', 'Territory is now Region', 'Market segment'],
+    ['Product', 'Territory is now Region', 'Market segment', 'Forecast model'],
   );
   assert.deepEqual(
     m.qa('.bookmark-adjustment-kind').map((node) => node.textContent),
-    ['Updated', 'Renamed', 'Removed'],
+    ['Updated', 'Renamed', 'Removed', 'No longer available'],
   );
   assert.deepEqual(
     m.qa('.bookmark-adjustment-value').map((node) => node.textContent),
-    ['Legacy planning → Planning', 'Restored as Americas', 'Enterprise is no longer used'],
+    [
+      'Saved: Legacy planning\nOpened: Planning',
+      'Saved: Americas\nOpened: Americas',
+      'Saved: Enterprise\nOpened: No longer used',
+      'Saved: Legacy v1\nOpened: Standard',
+    ],
   );
   assert.match(m.q('.bookmark-panel').getAttribute('aria-describedby'), /bookmark-notice/);
-  assert.equal(m.q('.bookmark-badge').textContent, 'Updated view');
-  assert.equal(m.q('button.bookmark-primary').textContent, 'Copy updated link');
-  assert.match(m.q('.bookmark-intro').textContent, /copy a fresh link/);
+  assert.equal(m.q('button.bookmark-primary').textContent, 'Copy link to current view');
 });
 
 test('malformed adjustment records are ignored without hiding bookmarking', () => {
@@ -341,12 +355,14 @@ test('an unknown bookmark setting shows its safely-rendered name and saved value
 
   assert.equal(m.q('.bookmark-notice').hidden, false);
   assert.equal(m.q('.bookmark-adjustment-label').textContent, '<img src=x onerror=alert(1)>');
-  assert.equal(m.q('.bookmark-adjustment-value').textContent, 'Saved value: <script>saved value</script>');
-  assert.equal(m.q('.bookmark-adjustment-kind').textContent, 'Unknown');
+  assert.equal(
+    m.q('.bookmark-adjustment-value').textContent,
+    'Saved: <script>saved value</script>\nOpened: Ignored',
+  );
+  assert.equal(m.q('.bookmark-adjustment-kind').textContent, 'Not recognized');
   assert.equal(m.qa('.bookmark-adjustments img').length, 0);
   assert.equal(m.qa('.bookmark-adjustments script').length, 0);
-  assert.equal(m.q('.bookmark-badge').textContent, 'Updated view');
-  assert.equal(m.q('button.bookmark-primary').textContent, 'Copy updated link');
+  assert.equal(m.q('button.bookmark-primary').textContent, 'Copy link to current view');
 });
 
 test('additional unknown settings collapse into an honest overflow row', () => {
@@ -360,7 +376,7 @@ test('additional unknown settings collapse into an honest overflow row', () => {
         { kind: 'unknown', label: 'mystery', previous: 'saved', current: 'Ignored' },
         {
           kind: 'unknown_summary',
-          label: '3 more unrecognized bookmark settings',
+          label: '3 more unrecognized saved settings',
           current: 'Ignored for safety',
         },
       ],
@@ -371,15 +387,15 @@ test('additional unknown settings collapse into an honest overflow row', () => {
 
   assert.deepEqual(
     m.qa('.bookmark-adjustment-value').map((node) => node.textContent),
-    ['Saved value: saved', 'Ignored for safety'],
+    ['Saved: saved\nOpened: Ignored', 'Opened: Ignored for safety'],
   );
   assert.deepEqual(
     m.qa('.bookmark-adjustment-kind').map((node) => node.textContent),
-    ['Unknown', 'Ignored'],
+    ['Not recognized', 'Ignored'],
   );
 });
 
-test('custom bookmarks begin with everything selected and never submit an empty selection', () => {
+test('changing link values begins with everything selected and never submits an empty selection', () => {
   const m = mount();
   const requests = [];
   m.window.addEventListener(BOOKMARK_CREATE_EVENT, (event) => requests.push(event.detail));
@@ -394,12 +410,19 @@ test('custom bookmarks begin with everything selected and never submit an empty 
     },
   }));
   m.q('button.bookmark-trigger').click();
-  m.q('button.bookmark-secondary').click();
+  m.q('button.bookmark-change').click();
 
   const checks = m.qa('.bookmark-check');
   assert.deepEqual(checks.map((node) => node.checked), [true, true]);
+  assert.equal(m.q('button.bookmark-change').textContent, 'Done');
+  assert.equal(m.q('button.bookmark-change').getAttribute('aria-expanded'), 'true');
   checks[1].click();
-  assert.equal(m.q('.bookmark-count').textContent, '1 of 2 filters');
+  assert.equal(m.q('.bookmark-scope-title').textContent, '1 of 2 values included');
+  m.q('button.bookmark-change').click();
+  assert.equal(m.q('button.bookmark-change').textContent, 'Change');
+  assert.equal(m.q('button.bookmark-change').getAttribute('aria-expanded'), 'false');
+  assert.equal(m.qa('.bookmark-check').length, 0);
+  assert.equal(m.q('.bookmark-scope-title').textContent, '1 of 2 values included');
   m.q('button.bookmark-primary').click();
   assert.equal(requests.length, 1);
   assert.deepEqual(Array.from(requests[0].include), ['region']);
@@ -419,10 +442,10 @@ test('deselecting every custom field disables the copy action', () => {
     },
   }));
   m.q('button.bookmark-trigger').click();
-  m.q('button.bookmark-secondary').click();
+  m.q('button.bookmark-change').click();
   m.q('.bookmark-check').click();
 
-  assert.equal(m.q('.bookmark-count').textContent, '0 of 1 filters');
+  assert.equal(m.q('.bookmark-scope-title').textContent, '0 of 1 values included');
   assert.equal(m.q('button.bookmark-primary').disabled, true);
 });
 

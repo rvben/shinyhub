@@ -523,7 +523,7 @@
     ".root.bookmark-open[data-position='top-right'] .bookmark-panel { transform: translateY(0) scale(1); }",
     ".root.bookmark-open[data-position='left-center'] .bookmark-panel," +
       " .root.bookmark-open[data-position='right-center'] .bookmark-panel { transform: translateY(-50%) translateX(0) scale(1); }",
-    ".bookmark-head { min-height: 52px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 10px 10px 8px 16px; border-bottom: 1px solid var(--sh-line); }",
+    ".bookmark-head { min-height: 60px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 10px 10px 8px 16px; border-bottom: 1px solid var(--sh-line); }",
     ".bookmark-mark { width: 28px; height: 28px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--sh-signal); background: var(--sh-raised); border-radius: var(--sh-r-md); }",
     ".bookmark-mark svg { width: 15px; height: 15px; }",
     ".bookmark-heading { flex: 1; min-width: 0; }",
@@ -534,37 +534,43 @@
     ".bookmark-close:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: -1px; }",
     ".bookmark-close svg { width: 14px; height: 14px; }",
     ".bookmark-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px; user-select: text; -webkit-user-select: text; scrollbar-color: var(--sh-line-strong) transparent; scrollbar-width: thin; }",
-    ".bookmark-notice { margin: 0 0 14px; padding: 11px 12px; border: 1px solid rgba(251,191,36,0.3); border-radius: var(--sh-r-md); background: rgba(251,191,36,0.09); }",
-    ".bookmark-notice-title { color: var(--sh-warning-soft); font-size: 13px; font-weight: 700; line-height: 1.3; }",
-    ".bookmark-notice-copy { margin-top: 3px; color: var(--sh-soft); font-size: 12px; line-height: 1.45; }",
-    ".bookmark-adjustments { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; padding-top: 9px; border-top: 1px solid rgba(251,191,36,0.2); }",
-    ".bookmark-adjustment { min-width: 0; display: flex; align-items: flex-start; gap: 8px; }",
+    ".bookmark-notice { margin: 0 0 14px; overflow: hidden; border: 1px solid rgba(251,191,36,0.35); border-radius: var(--sh-r-md); background: var(--sh-surface); }",
+    ".bookmark-notice-head { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; background: rgba(251,191,36,0.09); border-bottom: 1px solid rgba(251,191,36,0.18); }",
+    ".bookmark-notice-head > svg { width: 15px; height: 15px; flex: none; margin-top: 1px; color: var(--sh-warning); }",
+    ".bookmark-notice-heading { min-width: 0; flex: 1; }",
+    ".bookmark-notice-title { color: var(--sh-text); font-size: 13px; font-weight: 700; line-height: 1.3; }",
+    ".bookmark-notice-copy { margin-top: 2px; color: var(--sh-soft); font-size: 12px; line-height: 1.45; }",
+    ".bookmark-adjustments { display: flex; flex-direction: column; padding: 2px 12px 10px; }",
+    ".bookmark-adjustment { min-width: 0; display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--sh-line); }",
+    ".bookmark-adjustment:last-child { border-bottom: 0; }",
     ".bookmark-adjustment-copy { min-width: 0; flex: 1; }",
     ".bookmark-adjustment-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sh-text); font-size: 12px; font-weight: 650; line-height: 1.3; }",
     ".bookmark-adjustment.is-unknown .bookmark-adjustment-label { font-family: Space Mono, ui-monospace, monospace; font-size: 11px; }",
-    ".bookmark-adjustment-value { margin-top: 1px; overflow-wrap: anywhere; color: var(--sh-soft); font-size: 12px; line-height: 1.35; }",
-    ".bookmark-adjustment-kind { flex: none; padding-top: 1px; color: var(--sh-warning-soft); font-size: 12px; font-weight: 700; line-height: 1.3; }",
-    ".bookmark-intro { margin: 0 0 14px; color: var(--sh-soft); font-size: 13px; line-height: 1.5; }",
-    ".bookmark-summary { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }",
-    ".bookmark-badge { padding: 4px 9px; border-radius: var(--sh-r-pill); color: var(--sh-signal); background: rgba(56,189,248,0.11); font-size: 12px; font-weight: 700; letter-spacing: 0.02em; }",
-    ".bookmark-count { margin-left: auto; color: var(--sh-soft); font-size: 12px; font-variant-numeric: tabular-nums; }",
-    ".bookmark-fields { display: flex; flex-direction: column; border-top: 1px solid var(--sh-line); }",
-    ".bookmark-field { min-height: 46px; box-sizing: border-box; display: flex; align-items: center; gap: 12px; padding: 9px 2px; border-bottom: 1px solid var(--sh-line); }",
+    ".bookmark-adjustment-value { margin-top: 2px; overflow-wrap: anywhere; white-space: pre-line; color: var(--sh-soft); font-size: 12px; line-height: 1.45; }",
+    ".bookmark-adjustment-kind { max-width: 112px; flex: none; padding-top: 1px; text-align: right; color: var(--sh-warning-soft); font-size: 12px; font-weight: 700; line-height: 1.3; }",
+    ".bookmark-scope { display: flex; align-items: center; gap: 12px; margin-bottom: 9px; }",
+    ".bookmark-scope-copy { min-width: 0; flex: 1; }",
+    ".bookmark-scope-title { color: var(--sh-text); font-size: 13px; font-weight: 700; line-height: 1.3; }",
+    ".bookmark-scope-detail { margin-top: 2px; color: var(--sh-soft); font-size: 12px; line-height: 1.4; }",
+    ".bookmark-change { min-height: 32px; box-sizing: border-box; margin: 0; padding: 6px 10px; flex: none; border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-md); color: var(--sh-text); background: var(--sh-raised); font: inherit; font-size: 12px; font-weight: 700; line-height: 1.2; cursor: pointer; }",
+    ".bookmark-change:hover { border-color: var(--sh-signal); background: var(--sh-hover); }",
+    ".bookmark-change:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 2px; }",
+    ".bookmark-change:disabled { opacity: 0.5; cursor: not-allowed; }",
+    ".bookmark-fields { display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--sh-line); border-radius: var(--sh-r-md); background: var(--sh-deep); }",
+    ".bookmark-field { min-height: 49px; box-sizing: border-box; display: flex; align-items: center; gap: 11px; padding: 8px 11px; border-bottom: 1px solid var(--sh-line); }",
+    ".bookmark-field:last-child { border-bottom: 0; }",
     ".bookmark-field-copy { min-width: 0; flex: 1; }",
     ".bookmark-field-label { color: var(--sh-soft); font-size: 12px; line-height: 1.25; }",
     ".bookmark-field-value { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sh-text); font-size: 13px; font-weight: 600; line-height: 1.3; }",
     ".bookmark-check { width: 18px; height: 18px; flex: none; margin: 0; accent-color: var(--sh-signal); cursor: pointer; }",
     ".bookmark-check:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 3px; }",
+    ".bookmark-access-note { display: flex; align-items: center; gap: 7px; margin-top: 12px; color: var(--sh-soft); font-size: 12px; line-height: 1.4; }",
+    ".bookmark-access-note svg { width: 14px; height: 14px; flex: none; color: var(--sh-muted); }",
     ".bookmark-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; }",
-    ".bookmark-primary, .bookmark-secondary { min-height: 40px; box-sizing: border-box; margin: 0; padding: 8px 14px; border-radius: var(--sh-r-md); font: inherit; font-size: 13px; font-weight: 700; line-height: 1.2; cursor: pointer; }",
-    ".bookmark-primary { flex: 1; border: 0; color: var(--sh-deep); background: var(--sh-signal); box-shadow: 0 4px 14px rgba(56,189,248,0.25); }",
+    ".bookmark-primary { min-height: 44px; box-sizing: border-box; margin: 0; padding: 8px 14px; flex: 1; border: 0; border-radius: var(--sh-r-md); color: var(--sh-deep); background: var(--sh-signal); font: inherit; font-size: 13px; font-weight: 700; line-height: 1.2; cursor: pointer; }",
     ".bookmark-primary:hover { background: #7DD3FC; }",
-    ".bookmark-secondary { border: 1px solid var(--sh-line-strong); color: var(--sh-soft); background: transparent; }",
-    ".bookmark-secondary:hover { border-color: var(--sh-signal); color: var(--sh-text); background: var(--sh-raised); }",
-    ".bookmark-primary:focus-visible, .bookmark-secondary:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 2px; }",
-    ".bookmark-primary:disabled, .bookmark-secondary:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }",
-    ".bookmark-back { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 12px; padding: 0; border: 0; color: var(--sh-signal); background: transparent; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }",
-    ".bookmark-back:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 3px; }",
+    ".bookmark-primary:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 2px; }",
+    ".bookmark-primary:disabled { opacity: 0.5; cursor: not-allowed; }",
     ".bookmark-error { display: none; margin-top: 12px; padding: 9px 10px; border-radius: var(--sh-r-md); color: var(--sh-coral); background: rgba(248,113,113,0.12); font-size: 12px; line-height: 1.4; }",
     ".bookmark-error.visible { display: block; }",
     ".bookmark-url { display: none; width: 100%; min-height: 64px; box-sizing: border-box; margin-top: 10px; padding: 9px 10px; resize: vertical; border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-md); color: var(--sh-text); background: var(--sh-deep); font-family: Space Mono, ui-monospace, monospace; font-size: 12px; line-height: 1.45; user-select: text; -webkit-user-select: text; }",
@@ -964,12 +970,16 @@
   var bookmarkBtn = document.createElement("button");
   bookmarkBtn.type = "button";
   bookmarkBtn.className = "control bookmark-trigger";
-  bookmarkBtn.setAttribute("aria-label", "Bookmark this view");
+  bookmarkBtn.setAttribute("aria-label", "Link to this view");
   bookmarkBtn.setAttribute("aria-haspopup", "dialog");
   bookmarkBtn.setAttribute("aria-expanded", "false");
   bookmarkBtn.setAttribute("aria-controls", TAG_ID + "-bookmark-panel");
-  bookmarkBtn.title = "Bookmark this view";
-  bookmarkBtn.appendChild(svg(["M6 3h8a1 1 0 011 1v13l-5-3-5 3V4a1 1 0 011-1z"], 20));
+  bookmarkBtn.title = "Link to this view";
+  bookmarkBtn.appendChild(svg([
+    "M8 12l4-4",
+    "M6.5 13.5l-1 1a3 3 0 01-4.25-4.25l3-3A3 3 0 018.5 7",
+    "M13.5 6.5l1-1a3 3 0 014.25 4.25l-3 3A3 3 0 0111.5 13"
+  ], 20));
 
   var closeBtn = document.createElement("button");
   closeBtn.type = "button";
@@ -1126,76 +1136,97 @@
   bookmarkPanel.setAttribute("role", "dialog");
   bookmarkPanel.setAttribute("aria-modal", "true");
   bookmarkPanel.setAttribute("aria-labelledby", TAG_ID + "-bookmark-title");
-  bookmarkPanel.setAttribute("aria-describedby", TAG_ID + "-bookmark-intro");
+  bookmarkPanel.setAttribute("aria-describedby", TAG_ID + "-bookmark-scope-detail");
   bookmarkPanel.setAttribute("aria-hidden", "true");
   var bookmarkHead = div("bookmark-head");
   var bookmarkMark = div("bookmark-mark");
-  bookmarkMark.appendChild(svg(["M6 3h8a1 1 0 011 1v13l-5-3-5 3V4a1 1 0 011-1z"], 20));
+  bookmarkMark.appendChild(svg([
+    "M8 12l4-4",
+    "M6.5 13.5l-1 1a3 3 0 01-4.25-4.25l3-3A3 3 0 018.5 7",
+    "M13.5 6.5l1-1a3 3 0 014.25 4.25l-3 3A3 3 0 0111.5 13"
+  ], 20));
   var bookmarkHeading = div("bookmark-heading");
-  var bookmarkTitle = div("bookmark-title", "Bookmark this view");
+  var bookmarkTitle = div("bookmark-title", "Link to this view");
   bookmarkTitle.id = TAG_ID + "-bookmark-title";
-  var bookmarkSubtitle = div("bookmark-subtitle", "A link back to these filter values");
+  var bookmarkSubtitle = div("bookmark-subtitle", "Reopens the app with these values");
   bookmarkHeading.appendChild(bookmarkTitle);
   bookmarkHeading.appendChild(bookmarkSubtitle);
   var bookmarkClose = document.createElement("button");
   bookmarkClose.type = "button";
   bookmarkClose.className = "bookmark-close";
-  bookmarkClose.setAttribute("aria-label", "Close bookmark options");
+  bookmarkClose.setAttribute("aria-label", "Close link options");
   bookmarkClose.title = "Close";
   bookmarkClose.appendChild(svg(["M4 4l12 12", "M16 4L4 16"], 20));
   bookmarkHead.appendChild(bookmarkMark);
   bookmarkHead.appendChild(bookmarkHeading);
   bookmarkHead.appendChild(bookmarkClose);
   var bookmarkBody = div("bookmark-body");
-  var bookmarkBack = document.createElement("button");
-  bookmarkBack.type = "button";
-  bookmarkBack.className = "bookmark-back";
-  bookmarkBack.textContent = "← Exact view";
-  bookmarkBack.hidden = true;
-  var bookmarkIntro = document.createElement("p");
-  bookmarkIntro.className = "bookmark-intro";
-  bookmarkIntro.id = TAG_ID + "-bookmark-intro";
-  bookmarkIntro.textContent = "This link will reopen the app with every filter listed below set exactly as shown.";
   var bookmarkNotice = div("bookmark-notice");
   bookmarkNotice.id = TAG_ID + "-bookmark-notice";
   bookmarkNotice.hidden = true;
-  bookmarkNotice.appendChild(div("bookmark-notice-title", "View adjusted"));
-  bookmarkNotice.appendChild(
+  var bookmarkNoticeHead = div("bookmark-notice-head");
+  bookmarkNoticeHead.appendChild(svg([
+    "M10 3L2.5 16h15L10 3z",
+    "M10 8v3",
+    "M10 14h.01"
+  ], 20));
+  var bookmarkNoticeHeading = div("bookmark-notice-heading");
+  var bookmarkNoticeTitle = div("bookmark-notice-title", "Opened with changes");
+  bookmarkNoticeHeading.appendChild(bookmarkNoticeTitle);
+  bookmarkNoticeHeading.appendChild(
     div(
       "bookmark-notice-copy",
-      "Some bookmark settings could not be restored exactly. The app opened the closest current view."
+      "The app used the closest values it supports now."
     )
   );
+  bookmarkNoticeHead.appendChild(bookmarkNoticeHeading);
+  bookmarkNotice.appendChild(bookmarkNoticeHead);
   var bookmarkAdjustments = div("bookmark-adjustments");
   bookmarkNotice.appendChild(bookmarkAdjustments);
-  var bookmarkSummary = div("bookmark-summary");
-  var bookmarkBadge = div("bookmark-badge", "Exact view");
-  var bookmarkCount = div("bookmark-count", "");
-  bookmarkSummary.appendChild(bookmarkBadge);
-  bookmarkSummary.appendChild(bookmarkCount);
+  var bookmarkScope = div("bookmark-scope");
+  var bookmarkScopeCopy = div("bookmark-scope-copy");
+  var bookmarkScopeTitle = div("bookmark-scope-title", "");
+  var bookmarkScopeDetail = div(
+    "bookmark-scope-detail",
+    "Choose which values should follow the link."
+  );
+  bookmarkScopeDetail.id = TAG_ID + "-bookmark-scope-detail";
+  bookmarkScopeCopy.appendChild(bookmarkScopeTitle);
+  bookmarkScopeCopy.appendChild(bookmarkScopeDetail);
+  var bookmarkChange = document.createElement("button");
+  bookmarkChange.type = "button";
+  bookmarkChange.className = "bookmark-change";
+  bookmarkChange.setAttribute("aria-expanded", "false");
+  bookmarkChange.setAttribute("aria-controls", TAG_ID + "-bookmark-fields");
+  bookmarkChange.textContent = "Change";
+  bookmarkScope.appendChild(bookmarkScopeCopy);
+  bookmarkScope.appendChild(bookmarkChange);
   var bookmarkFields = div("bookmark-fields");
+  bookmarkFields.id = TAG_ID + "-bookmark-fields";
+  var bookmarkAccessNote = div("bookmark-access-note");
+  bookmarkAccessNote.appendChild(svg([
+    "M4 8h12v9H4z",
+    "M7 8V6a3 3 0 016 0v2"
+  ], 20));
+  bookmarkAccessNote.appendChild(
+    document.createTextNode("App access rules still apply to anyone opening the link.")
+  );
   var bookmarkError = div("bookmark-error");
   bookmarkError.setAttribute("role", "alert");
   var bookmarkURL = document.createElement("textarea");
   bookmarkURL.className = "bookmark-url";
   bookmarkURL.readOnly = true;
-  bookmarkURL.setAttribute("aria-label", "Bookmark link");
+  bookmarkURL.setAttribute("aria-label", "View link");
   var bookmarkActions = div("bookmark-actions");
   var bookmarkPrimary = document.createElement("button");
   bookmarkPrimary.type = "button";
   bookmarkPrimary.className = "bookmark-primary";
   bookmarkPrimary.textContent = "Copy link";
-  var bookmarkSecondary = document.createElement("button");
-  bookmarkSecondary.type = "button";
-  bookmarkSecondary.className = "bookmark-secondary";
-  bookmarkSecondary.textContent = "Customize…";
   bookmarkActions.appendChild(bookmarkPrimary);
-  bookmarkActions.appendChild(bookmarkSecondary);
-  bookmarkBody.appendChild(bookmarkBack);
   bookmarkBody.appendChild(bookmarkNotice);
-  bookmarkBody.appendChild(bookmarkIntro);
-  bookmarkBody.appendChild(bookmarkSummary);
+  bookmarkBody.appendChild(bookmarkScope);
   bookmarkBody.appendChild(bookmarkFields);
+  bookmarkBody.appendChild(bookmarkAccessNote);
   bookmarkBody.appendChild(bookmarkError);
   bookmarkBody.appendChild(bookmarkURL);
   bookmarkBody.appendChild(bookmarkActions);
@@ -1236,7 +1267,7 @@
   var sessionOpen = false;
   var bookmarkOpen = false;
   var bookmarkCapabilities = null;
-  var bookmarkCustom = false;
+  var bookmarkEditing = false;
   var bookmarkSelection = {};
   var bookmarkPending = null;
   var bookmarkTimer = null;
@@ -1357,7 +1388,7 @@
     }
     for (var i = 0; i < bookmarkCapabilities.fields.length; i++) {
       var id = bookmarkCapabilities.fields[i].id;
-      if (!bookmarkCustom || bookmarkSelection[id] !== false) {
+      if (bookmarkSelection[id] !== false) {
         selected.push(id);
       }
     }
@@ -1383,9 +1414,9 @@
     var fields = bookmarkCapabilities.fields;
     for (var i = 0; i < fields.length; i++) {
       var field = fields[i];
-      var row = document.createElement(bookmarkCustom ? "label" : "div");
+      var row = document.createElement(bookmarkEditing ? "label" : "div");
       row.className = "bookmark-field";
-      if (bookmarkCustom) {
+      if (bookmarkEditing) {
         var checkbox = document.createElement("input");
         checkbox.type = "checkbox";
         checkbox.className = "bookmark-check";
@@ -1411,6 +1442,9 @@
     clear(bookmarkAdjustments);
     var adjustments = bookmarkCapabilities ? bookmarkCapabilities.adjustments : [];
     bookmarkNotice.hidden = !adjustments.length;
+    bookmarkNoticeTitle.textContent = adjustments.length === 1
+      ? "Opened with 1 change"
+      : "Opened with " + adjustments.length + " changes";
     for (var i = 0; i < adjustments.length; i++) {
       var adjustment = adjustments[i];
       var row = div("bookmark-adjustment");
@@ -1427,33 +1461,27 @@
       copy.appendChild(adjustmentLabel);
       var value = "";
       if (adjustment.kind === "unknown") {
-        value = "Saved value: " + (adjustment.previous || "Not set");
+        value = "Saved: " + (adjustment.previous || "Not set") +
+          "\nOpened: " + (adjustment.current || "Ignored");
       } else if (adjustment.kind === "unknown_summary") {
-        value = adjustment.current || "Ignored for safety";
+        value = "Opened: " + (adjustment.current || "Ignored for safety");
       } else if (adjustment.kind === "removed") {
-        value = adjustment.previous
-          ? adjustment.previous + " is no longer used"
-          : "This saved filter is no longer used";
-      } else if (
-        adjustment.kind === "renamed" &&
-        adjustment.previous &&
-        adjustment.previous === adjustment.current
-      ) {
-        value = "Restored as " + adjustment.current;
-      } else if (adjustment.previous && adjustment.current) {
-        value = adjustment.previous + " → " + adjustment.current;
+        value = "Saved: " + (adjustment.previous || "Not set") + "\nOpened: No longer used";
+      } else if (adjustment.previous || adjustment.current) {
+        value = "Saved: " + (adjustment.previous || "Not set") +
+          "\nOpened: " + (adjustment.current || "Not set");
       } else {
-        value = adjustment.current || adjustment.previous;
+        value = "No saved or current value";
       }
       var adjustmentValue = div("bookmark-adjustment-value", value);
       adjustmentValue.title = value;
       copy.appendChild(adjustmentValue);
       var kind = {
         migrated: "Updated",
-        fallback: "Unavailable",
+        fallback: "No longer available",
         renamed: "Renamed",
         removed: "Removed",
-        unknown: "Unknown",
+        unknown: "Not recognized",
         unknown_summary: "Ignored"
       }[adjustment.kind];
       row.appendChild(copy);
@@ -1469,27 +1497,25 @@
     var selected = selectedBookmarkIDs().length;
     var total = bookmarkCapabilities.fields.length;
     var adjusted = bookmarkCapabilities.adjustments.length > 0;
-    bookmarkBadge.textContent = bookmarkCustom ? "Custom link" : adjusted ? "Updated view" : "Exact view";
-    bookmarkCount.textContent = bookmarkCustom
-      ? selected + " of " + total + " filters"
-      : total + (total === 1 ? " filter" : " filters");
-    bookmarkIntro.textContent = bookmarkCustom
-      ? "Choose which current values should follow the link. Unchecked filters will use the app's defaults."
-      : adjusted
-        ? "Review the current values below, then copy a fresh link."
-        : "This link will reopen the app with every filter listed below set exactly as shown.";
-    bookmarkBack.hidden = !bookmarkCustom;
-    bookmarkSecondary.hidden = bookmarkCustom;
+    var complete = selected === total;
+    bookmarkScopeTitle.textContent = selected === total
+      ? total === 1
+        ? "1 value included"
+        : "All " + total + " values included"
+      : selected + " of " + total + " values included";
+    bookmarkScopeDetail.textContent = bookmarkEditing
+      ? "Unchecked values will use the app's defaults."
+      : "Choose which values should follow the link.";
+    bookmarkChange.textContent = bookmarkEditing ? "Done" : "Change";
+    bookmarkChange.setAttribute("aria-expanded", bookmarkEditing ? "true" : "false");
     bookmarkPrimary.textContent = bookmarkPending
       ? "Creating link…"
-      : bookmarkCustom
-        ? "Copy custom link"
-        : adjusted
-          ? "Copy updated link"
-          : "Copy link";
+      : adjusted && complete && !bookmarkEditing
+        ? "Copy link to current view"
+        : "Copy link";
     bookmarkPrimary.disabled = !!bookmarkPending || selected === 0;
-    bookmarkSecondary.disabled = !!bookmarkPending;
-    bookmarkCount.setAttribute("aria-live", bookmarkCustom ? "polite" : "off");
+    bookmarkChange.disabled = !!bookmarkPending;
+    bookmarkScopeTitle.setAttribute("aria-live", bookmarkEditing ? "polite" : "off");
   }
 
   function renderBookmark() {
@@ -1982,7 +2008,7 @@
       setOpen(false);
       setSessionOpen(false, false);
       setPlacing(false);
-      bookmarkCustom = false;
+      bookmarkEditing = false;
       bookmarkSelection = {};
       for (var i = 0; i < bookmarkCapabilities.fields.length; i++) {
         bookmarkSelection[bookmarkCapabilities.fields[i].id] = true;
@@ -2044,17 +2070,15 @@
     setBookmarkOpen(false);
   }));
 
-  bookmarkBack.addEventListener("click", guard(function () {
-    bookmarkCustom = false;
+  bookmarkChange.addEventListener("click", guard(function () {
+    bookmarkEditing = !bookmarkEditing;
     renderBookmark();
-    bookmarkPrimary.focus();
-  }));
-
-  bookmarkSecondary.addEventListener("click", guard(function () {
-    bookmarkCustom = true;
-    renderBookmark();
-    var firstCheck = bookmarkFields.querySelector("input");
-    if (firstCheck) firstCheck.focus();
+    if (bookmarkEditing) {
+      var firstCheck = bookmarkFields.querySelector("input");
+      if (firstCheck) firstCheck.focus();
+    } else {
+      bookmarkChange.focus();
+    }
   }));
 
   bookmarkPrimary.addEventListener("click", guard(requestBookmark));
@@ -2272,21 +2296,20 @@
     bookmarkPanel.setAttribute(
       "aria-describedby",
       capabilities.adjustments.length > 0
-        ? TAG_ID + "-bookmark-notice " + TAG_ID + "-bookmark-intro"
-        : TAG_ID + "-bookmark-intro"
+        ? TAG_ID + "-bookmark-notice " + TAG_ID + "-bookmark-scope-detail"
+        : TAG_ID + "-bookmark-scope-detail"
     );
+    var adjustmentCount = capabilities.adjustments.length;
     bookmarkBtn.setAttribute(
       "aria-label",
-      capabilities.adjustments.length > 0
-        ? "Bookmark this view, saved filters adjusted"
-        : "Bookmark this view"
+      adjustmentCount > 0
+        ? "Link to this view, opened with " + adjustmentCount +
+          (adjustmentCount === 1 ? " change" : " changes")
+        : "Link to this view"
     );
-    bookmarkBtn.title = capabilities.adjustments.length > 0
-      ? "Saved filters adjusted"
-      : "Bookmark this view";
-    bookmarkSubtitle.textContent = capabilities.adjustments.length > 0
-      ? "Saved filters were adjusted"
-      : "A link back to these filter values";
+    bookmarkBtn.title = adjustmentCount > 0
+      ? "Opened with " + adjustmentCount + (adjustmentCount === 1 ? " change" : " changes")
+      : "Link to this view";
     if (bookmarkOpen) {
       var retained = {};
       for (var i = 0; i < capabilities.fields.length; i++) {
@@ -2314,10 +2337,12 @@
       guard(function () {
         finishBookmarkRequest();
         var adjusted = bookmarkCapabilities && bookmarkCapabilities.adjustments.length > 0;
-        bookmarkPrimary.textContent = adjusted && !bookmarkCustom ? "Updated link copied" : "Link copied";
-        announcer.textContent = adjusted && !bookmarkCustom
-          ? "Updated bookmark link copied"
-          : "Bookmark link copied";
+        bookmarkPrimary.textContent = "Copied";
+        var complete = bookmarkCapabilities &&
+          selectedBookmarkIDs().length === bookmarkCapabilities.fields.length;
+        announcer.textContent = adjusted && complete && !bookmarkEditing
+          ? "Link to the current view copied"
+          : "View link copied";
         window.setTimeout(guard(function () {
           if (bookmarkOpen && !bookmarkPending) renderBookmarkSummary();
         }), 1800);
@@ -2338,7 +2363,7 @@
     setBookmarkError(
       typeof detail.message === "string" && detail.message
         ? detail.message.slice(0, 300)
-        : "The app could not create this bookmark. Try again.",
+        : "The app could not create this link. Try again.",
       ""
     );
   }));
