@@ -81,7 +81,7 @@ func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked au
 			w.WriteHeader(http.StatusOK)
 			page := []byte(renderNeverDeployedPage(app, user, manager, requestOrigin(r, trustedProxyNets)))
 			page, _ = favicon.Ensure(page, favicon.AppURL(slug))
-			_, _ = w.Write(cfg.withAppNav(page, slug))
+			_, _ = w.Write(cfg.withAppNav(page, slug, app.Name))
 		})
 	}
 }

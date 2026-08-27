@@ -129,6 +129,7 @@ function mount({
   tag.id = TAG_ID;
   tag.setAttribute('data-nav-url', NAV_URL);
   tag.setAttribute('data-current-slug', 'demo');
+  tag.setAttribute('data-current-name', 'Demo');
   tag.setAttribute('data-home-url', HOME_URL);
   for (const [k, v] of Object.entries(attrs)) {
     if (v === null) tag.removeAttribute(k);
@@ -494,15 +495,24 @@ test('a dismissed switcher releases snapshot ownership and reclaims it when rest
   assert.deepEqual(owners, ['switcher', 'overlay']);
 });
 
-test('opening keeps the current label stable when the friendly name differs from the slug', async () => {
-  const m = mount({ payload: { apps: [app('demo', { name: 'Revenue forecast' })] } });
+test('uses the friendly current name and keeps it stable while the app list loads', async () => {
+  const m = mount({
+    attrs: { 'data-current-name': 'Revenue forecast' },
+    payload: { apps: [app('demo', { name: 'Revenue forecast' })] },
+  });
   const initialLabel = m.q('.current-label').textContent;
   const initialAccessibleName = m.openBtn().getAttribute('aria-label');
   await m.open();
 
+  assert.equal(initialLabel, 'Revenue forecast');
   assert.equal(m.q('.current-label').textContent, initialLabel);
   assert.equal(m.openBtn().getAttribute('aria-label'), initialAccessibleName);
-  assert.match(initialAccessibleName, /current app Demo/);
+  assert.match(initialAccessibleName, /current app Revenue forecast/);
+});
+
+test('falls back to a readable slug when no friendly current name is available', () => {
+  const m = mount({ attrs: { 'data-current-name': null } });
+  assert.equal(m.q('.current-label').textContent, 'Demo');
 });
 
 test('the placement menu offers four deliberate anchors and persists one choice across apps', async () => {

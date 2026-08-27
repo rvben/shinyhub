@@ -48,11 +48,11 @@ func TestConvergeApp_UnchangedNeverSucceededFailsWarmGate(t *testing.T) {
 			postHits++
 		}
 		switch r.URL.Path {
-		case "/api/apps/token-finops/schedules":
+		case "/api/apps/reporting-app/schedules":
 			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","last_run_at":"2026-08-24T10:00:00Z","last_run_status":"failed"}]}`)
-		case "/api/apps/token-finops/schedules/7/runs":
+		case "/api/apps/reporting-app/schedules/7/runs":
 			_, _ = io.WriteString(w, `{"items":[{"id":703,"status":"failed","started_at":"2026-08-24T10:00:00Z"}]}`)
-		case "/api/apps/token-finops/schedules/7/runs/703/logs":
+		case "/api/apps/reporting-app/schedules/7/runs/703/logs":
 			_, _ = io.WriteString(w, "Traceback (most recent call last):\nTABLE_NOT_FOUND\n")
 		default:
 			http.NotFound(w, r)
@@ -69,8 +69,8 @@ run_on_register = true
 `)
 	r := convergeApp(
 		&cliConfig{Host: srv.URL, Token: "shk_test"},
-		fleet.AppDiff{Slug: "token-finops", Action: fleet.ActionUnchanged},
-		fleet.AppEntry{Slug: "token-finops"}, fleet.ObservedApp{}, dir,
+		fleet.AppDiff{Slug: "reporting-app", Action: fleet.ActionUnchanged},
+		fleet.AppEntry{Slug: "reporting-app"}, fleet.ObservedApp{}, dir,
 		convergeOpts{waitForWarm: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
 	)
 	if r.status != statusFailed || r.err == nil {

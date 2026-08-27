@@ -1829,6 +1829,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 		return app.MissStatus(srv.DeployInFlight(slug))
 	})
+	prx.SetAppNameLookup(func(slug string) string {
+		app, err := store.GetAppBySlug(slug)
+		if err != nil {
+			return ""
+		}
+		return app.Name
+	})
 
 	// Hold a request for a not-yet-routable app while its wake completes, so a
 	// warm resume serves inline (no loading-page round-trip). 0 disables it.

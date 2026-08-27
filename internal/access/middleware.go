@@ -180,7 +180,9 @@ func writeAccessDenied(w http.ResponseWriter, r *http.Request, status int, headl
 		nextURL := r.URL.RequestURI()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(status)
-		_, _ = w.Write(cfg.withAppNav(renderAccessDeniedPage(status, headline, nextURL), slug))
+		// Keep the display name empty here: this caller was not authorized to
+		// see the app, so the switcher must not disclose its private metadata.
+		_, _ = w.Write(cfg.withAppNav(renderAccessDeniedPage(status, headline, nextURL), slug, ""))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

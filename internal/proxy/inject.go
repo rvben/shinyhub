@@ -77,8 +77,8 @@ func overlayPageScript(slug string) pageScript {
 }
 
 // navPageScript is the app switcher as an injectable script.
-func navPageScript(slug, homeURL string) pageScript {
-	return pageScript{snippet: appnav.Snippet(slug, homeURL), cspHash: appnav.CSPHash}
+func navPageScript(slug, name, homeURL string) pageScript {
+	return pageScript{snippet: appnav.SnippetWithName(slug, name, homeURL), cspHash: appnav.CSPHash}
 }
 
 // extendCSPForScripts returns policy with each hash allowed for scripts, and
@@ -213,7 +213,7 @@ func (p *Proxy) decorateAppPage(page, slug string) string {
 	if nav == nil {
 		return string(out)
 	}
-	out, ok := appnav.SpliceIntoBody(out, appnav.Snippet(slug, nav.homeURL))
+	out, ok := appnav.SpliceIntoBody(out, appnav.SnippetWithName(slug, p.appName(slug), nav.homeURL))
 	if !ok {
 		return string(out)
 	}
@@ -232,7 +232,7 @@ func (p *Proxy) pageScriptsFor(slug string) []pageScript {
 		scripts = append(scripts, overlayPageScript(slug))
 	}
 	if nav := p.appNav.Load(); nav != nil {
-		scripts = append(scripts, navPageScript(slug, nav.homeURL))
+		scripts = append(scripts, navPageScript(slug, p.appName(slug), nav.homeURL))
 	}
 	return scripts
 }

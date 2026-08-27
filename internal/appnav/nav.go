@@ -72,12 +72,20 @@ func DataURL(slug string) string {
 // session cookie they hold, and a visitor on the control origin gets the
 // launch redirect, so "/app/<slug>/" is correct from both.
 func Snippet(slug, homeURL string) string {
+	return SnippetWithName(slug, "", homeURL)
+}
+
+// SnippetWithName renders the switcher with the app's friendly display name.
+// An empty name deliberately falls back to the slug in the client: access-
+// denied pages must not disclose metadata for an app the caller cannot see.
+func SnippetWithName(slug, name, homeURL string) string {
 	if homeURL == "" {
 		homeURL = "/"
 	}
 	return `<script id="` + ScriptID + `"` +
 		` data-nav-url="` + html.EscapeString(DataURL(slug)) + `"` +
 		` data-current-slug="` + html.EscapeString(slug) + `"` +
+		` data-current-name="` + html.EscapeString(name) + `"` +
 		` data-home-url="` + html.EscapeString(homeURL) + `">` +
 		Script +
 		`</script>`

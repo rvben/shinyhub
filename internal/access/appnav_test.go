@@ -194,6 +194,9 @@ func TestNeverDeployed_CarriesTheSwitcher(t *testing.T) {
 		t.Fatalf("this is not the non-manager never-deployed page:\n%s", body)
 	}
 	assertHasSwitcher(t, body)
+	if !strings.Contains(body, `data-current-name="Fresh"`) {
+		t.Fatal("never-deployed switcher does not carry the friendly app name")
+	}
 	if !strings.Contains(body, favicon.Link(favicon.AppURL("fresh"))) {
 		t.Fatal("never-deployed page does not carry its app favicon")
 	}

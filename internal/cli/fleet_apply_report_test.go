@@ -508,7 +508,7 @@ func TestRenderApplyReport_PostDeployFailureNoKindTag(t *testing.T) {
 
 func TestRenderApplyReport_WarmFailureUsesScheduleLogHint(t *testing.T) {
 	res := []applyResult{{
-		slug: "token-finops", action: fleet.ActionUnchanged, status: statusFailed,
+		slug: "reporting-app", action: fleet.ActionUnchanged, status: statusFailed,
 		err: errors.New("warm gate already unsatisfied before this apply"),
 		warmGate: []scheduleGateOutcome{{
 			Schedule: "refresh-data", State: "never_succeeded", LastRunID: 703, LastRunStatus: "failed",
@@ -523,21 +523,21 @@ func TestRenderApplyReport_WarmFailureUsesScheduleLogHint(t *testing.T) {
 	for _, want := range []string{
 		"warm gate unsatisfied before this apply (never succeeded; last run failed #703)",
 		"TABLE_NOT_FOUND",
-		"shinyhub schedule logs token-finops refresh-data --run 703",
+		"shinyhub schedule logs reporting-app refresh-data --run 703",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("report missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "shinyhub apps logs token-finops") {
+	if strings.Contains(out, "shinyhub apps logs reporting-app") {
 		t.Fatalf("warm failure must not point at the replica log:\n%s", out)
 	}
 }
 
 func TestWriteFleetApplyJSON_DistinguishesStandingWarmFailure(t *testing.T) {
-	d := fleet.AppDiff{Slug: "token-finops", Action: fleet.ActionUnchanged}
+	d := fleet.AppDiff{Slug: "reporting-app", Action: fleet.ActionUnchanged}
 	r := applyResult{
-		slug: "token-finops", action: fleet.ActionUnchanged, status: statusFailed,
+		slug: "reporting-app", action: fleet.ActionUnchanged, status: statusFailed,
 		err: errors.New("warm gate already unsatisfied before this apply"),
 		warmGate: []scheduleGateOutcome{{
 			Schedule: "refresh-data", State: "never_succeeded", LastRunID: 703, LastRunStatus: "failed",

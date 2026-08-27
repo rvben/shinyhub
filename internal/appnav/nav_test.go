@@ -142,6 +142,13 @@ func TestSnippet_EscapesAttributes(t *testing.T) {
 	}
 }
 
+func TestSnippetWithName_CarriesFriendlyName(t *testing.T) {
+	got := SnippetWithName("revenue-forecast", "Revenue & Forecast", "/")
+	if !strings.Contains(got, `data-current-name="Revenue &amp; Forecast"`) {
+		t.Fatalf("friendly name was not carried as an escaped attribute: %s", got[:min(300, len(got))])
+	}
+}
+
 func TestSnippet_DefaultsHomeToRoot(t *testing.T) {
 	// A single-origin deployment has no separate dashboard host, so "/" is both
 	// correct and what an empty configured base URL must become. An empty href

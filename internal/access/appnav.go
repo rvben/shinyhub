@@ -45,11 +45,11 @@ func newOptions(opts []Option) options {
 // tag, or page unchanged when the switcher is off or the page has no place to
 // put it. Declining leaves the page byte for byte as it was: the switcher is an
 // addition to these pages, never a precondition for serving them.
-func (o options) withAppNav(page []byte, slug string) []byte {
+func (o options) withAppNav(page []byte, slug, name string) []byte {
 	if o.nav == nil || slug == "" {
 		return page
 	}
-	out, ok := appnav.SpliceIntoBody(page, appnav.Snippet(slug, o.nav.homeURL))
+	out, ok := appnav.SpliceIntoBody(page, appnav.SnippetWithName(slug, name, o.nav.homeURL))
 	if !ok {
 		return page
 	}

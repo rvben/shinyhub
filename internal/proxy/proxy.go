@@ -382,7 +382,10 @@ type Proxy struct {
 	// app serves a clear status page instead of the endlessly-retrying loading
 	// page. nil => always serve the loading page (the prior behaviour).
 	appStatusFn func(slug string) (status, reason string)
-	slugExists  func(slug string) (bool, error)
+	// appNameFn reports the friendly display name used by the injected app
+	// switcher. It is resolved only for top-level HTML pages while app nav is on.
+	appNameFn  func(slug string) string
+	slugExists func(slug string) (bool, error)
 
 	// wakeHoldNanos is the maximum time (ns) a request for a not-yet-routable app
 	// is held while its wake completes, so a warm resume is served inline instead
@@ -1096,6 +1099,25 @@ func (p *Proxy) SetAppStatusLookup(fn func(slug string) (status, reason string))
 	p.mu.Lock()
 	p.appStatusFn = fn
 	p.mu.Unlock()
+}
+
+// SetAppNameLookup registers a callback that reports an app's friendly display
+// name for the injected switcher. Called once at startup; an empty or missing
+// result makes the client fall back to the readable slug.
+func (p *Proxy) SetAppNameLookup(fn func(slug string) string) {
+	p.mu.Lock()
+	p.appNameFn = fn
+	p.mu.Unlock()
+}
+
+func (p *Proxy) appName(slug string) string {
+	p.mu.RLock()
+	fn := p.appNameFn
+	p.mu.RUnlock()
+	if fn == nil {
+		return ""
+	}
+	return fn(slug)
 }
 
 // getAppStatusLookup returns the current status lookup under the read lock.

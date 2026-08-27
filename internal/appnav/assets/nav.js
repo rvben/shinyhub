@@ -83,6 +83,7 @@
     return;
   }
   var currentSlug = tag.getAttribute("data-current-slug") || "";
+  var currentName = (tag.getAttribute("data-current-name") || "").trim();
   var homeURL = tag.getAttribute("data-home-url") || "/";
 
   function guard(fn) {
@@ -932,7 +933,7 @@
   );
   var current = div("current-meta");
   var compactLabel = div("compact-label", "Apps");
-  var currentLabel = div("current-label", readableSlug(currentSlug));
+  var currentLabel = div("current-label", currentName || readableSlug(currentSlug));
   var currentAction = div("current-action", "Switch app");
   current.appendChild(currentLabel);
   current.appendChild(currentAction);
