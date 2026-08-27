@@ -371,7 +371,7 @@ rather than trusting a stale observation.
 | `--wait-for-warm` | Require every enabled `run_on_register` schedule to have a recorded success, including on unchanged apps. If repair is already running, join that run within the per-app warm deadline instead of dispatching a duplicate. |
 | `--warm-timeout DURATION` | Per-app deadline shared by first-fire waits and the final warm-state check. Default 15 minutes. |
 | `--verify-schedules` | Require every enabled schedule to satisfy the server-computed freshness policy; read-only and never dispatches work. |
-| `--verify-health` | Require serving health for unchanged as well as changed apps. Intentionally stopped apps remain excluded. |
+| `--verify-health` | Require every app, unchanged as well as changed, to be in a state it serves from without operator action: `running`, `idle`, or parked (`hibernated` after its idle timeout, `suspended`). A parked app wakes on its first request and passes in one poll; the gate never wakes it, so a broken bundle in a hibernated app surfaces on wake, not here. Intentionally stopped apps remain excluded. The post-deploy wait for changed apps is stricter and still requires a serving replica. |
 | `--restart-after-warm` | After warm-up succeeds, cycle replicas so startup-loaded caches see the new data. Deliberately stopped apps stay stopped. |
 | `--allow-unsafe-degraded-prune` | Permit prune against a server without precondition support, accepting a documented race (see [Degraded mode](#degraded-mode)). |
 | `--json` | Emit the machine-readable result envelope. |
