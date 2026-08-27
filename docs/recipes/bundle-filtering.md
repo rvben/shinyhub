@@ -31,7 +31,7 @@ scratch/
 *.ipynb
 
 # Large local fixtures — push these with: shinyhub data push
-fixtures/
+fixtures/*
 
 # Re-include the seeded fixture needed at startup
 !fixtures/seed.csv
@@ -122,9 +122,9 @@ overwrite a vendored copy.
 The ignore file still comes from the consumer app's bundle root; a shared
 source directory's own ignore files have no effect. The three bundle control
 files (`shinyhub.toml`, `.shinyhubignore`, and `.gitignore`) cannot be composed.
-`shinyhub fleet dev <slug>` applies these same destination checks while
-composing the selected app's generated local workspace; ordinary `shinyhub
-run` does not compose them.
+`shinyhub dev . --app <slug>` applies these same destination checks while
+composing the selected app's generated local workspace; lower-level
+`shinyhub run` does not compose them.
 See [Fleet shared bundle inputs](../fleet.md#shared-bundle-inputs) for the full
 contract.
 
@@ -151,7 +151,7 @@ scratch/
 .ipynb_checkpoints/
 
 # Large local fixtures — move to data dir with shinyhub data push
-fixtures/
+fixtures/*
 
 # The seed fixture is small and required at startup
 !fixtures/seed.csv

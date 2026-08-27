@@ -18,7 +18,7 @@ uv tool install shinyhub
 cd ./my-app
 
 shinyhub doctor . --local
-shinyhub run . --check
+shinyhub dev . --open  # edit safely; Ctrl-C when ready
 
 shinyhub connect https://hub.example.com --name prod
 shinyhub doctor .
@@ -119,10 +119,11 @@ SHINYHUB_TOKEN="$SHINYHUB_TOKEN" \
 shinyhub doctor . --output json
 ```
 
-Follow a successful doctor run with `shinyhub run . --check` for a real local
-boot, `shinyhub plan .` for an exact read-only deployment preview, and
+Follow a successful doctor run with `shinyhub dev .` for the safe continuous
+local loop, `shinyhub plan .` for an exact read-only deployment preview, and
 `shinyhub deploy . --open` for the real remote build, readiness check, route
-verification, and browser handoff.
+verification, and browser handoff. Use the lower-level `shinyhub run . --check`
+when automation needs a one-shot boot smoke test.
 Doctor is deliberately fast and non-mutating; those commands are the
 end-to-end proof. See [Deployment plan](deployment-plan.md).
 

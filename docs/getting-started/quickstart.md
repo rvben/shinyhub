@@ -1,39 +1,43 @@
 ---
-description: "Go from nothing installed to a live Shiny app, then deploy one of your own through the same workflow you would use in production."
+description: "Try the real ShinyHub server, develop an app with safe reloads, and deploy it through the same production workflow."
 ---
 
 # Quick start
 
-Go from nothing installed to a live Shiny application, then deploy one of your
-own through the same production workflow.
+In about five minutes, you will run the real ShinyHub server, develop a Python
+Shiny app with safe reloads, and deploy that app to your local hub.
 
-## Start a real local server
+## Before you begin
+
+Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/). It runs
+ShinyHub without modifying your project and is also the runtime ShinyHub uses
+for Python applications. No ShinyHub account or external service is required.
+
+## Terminal 1: run ShinyHub
 
 ```bash
 uvx shinyhub serve
 ```
 
-That is the whole first run. ShinyHub asks you to create a local administrator,
-then:
+On the first run, ShinyHub asks you to create a local administrator, then:
 
 - writes a private, loopback-only `shinyhub.yaml`;
 - creates a persistent SQLite database under `./data/`;
 - opens `http://127.0.0.1:8080` in your browser; and
-- deploys **ShinyHub Tour**, a reactive Python Shiny app with bundled example
-  data, through the real build and runtime pipeline.
+- deploys **ShinyHub Tour**, a real Python Shiny app, through the normal build
+  and runtime pipeline.
 
-Sign in with the administrator you just created. The example is an ordinary,
-private app—not a special demo screen—so its deployment, logs, settings, and
-files behave exactly like your own applications. Stop the server with
-<kbd>Ctrl</kbd>+<kbd>C</kbd>; run the same command in the same directory to
-continue with the state you already created.
+Sign in with the administrator you created. Leave this terminal running while
+you work through the next steps. The Tour is an ordinary private app, so its
+deployment, logs, settings, and files behave exactly like your own apps.
 
-Use `uvx shinyhub serve --no-browser` when you do not want ShinyHub to launch a
-browser. Existing installations, explicit `--config` launches, unattended
-setups, PostgreSQL servers, and non-loopback servers are never populated with
-example content.
+Existing installations, explicit `--config` launches, unattended setups,
+PostgreSQL servers, and non-loopback servers are never populated with example
+content. Add `--no-browser` when you do not want ShinyHub to open a browser.
 
-## Deploy your own app
+## Terminal 2: develop an app
+
+Create a small app in a second terminal:
 
 ```bash
 mkdir hello-shinyhub
@@ -47,7 +51,7 @@ from shiny import App, ui
 
 app_ui = ui.page_fluid(
     ui.h2("Hello from ShinyHub"),
-    ui.p("A production-shaped deployment in a few commands."),
+    ui.p("A production-shaped app with a safe local loop."),
 )
 
 app = App(app_ui, server=None)
@@ -59,37 +63,53 @@ Create `requirements.txt`:
 shiny>=1.6
 ```
 
-## Validate locally
+Now start the development loop:
 
 ```bash
-shinyhub doctor . --local
-shinyhub run . --check
+uvx shinyhub dev . --open
 ```
 
-`doctor` reports all bundle and runtime problems in one pass. `run --check`
-boots the app through the production-shaped `/app/<slug>/` route and exits after
-readiness succeeds.
+ShinyHub installs the app dependencies, opens its production-shaped
+`/app/hello-shinyhub/` route, and watches the directory. Change the heading in
+`app.py` and save: the candidate starts separately and must become healthy
+before the browser switches to it. A syntax error leaves the last healthy
+version running, and generated environments never enter your source directory.
 
-## Connect and deploy
+This command does not contact the server in terminal 1. Local development is
+the safe default; moving the loop to a host always requires an explicit
+`--remote <host>`.
+
+When you are ready to deploy, stop `dev` with <kbd>Ctrl</kbd>+<kbd>C</kbd>.
+
+## Deploy to your local hub
+
+From the same app directory:
 
 ```bash
-shinyhub connect http://localhost:8080 --name local
-shinyhub doctor .
-shinyhub plan . --slug hello
-shinyhub deploy . --slug hello --open
+uvx shinyhub connect http://localhost:8080 --name local
+uvx shinyhub doctor .
+uvx shinyhub plan .
+uvx shinyhub deploy . --open
 ```
 
-`plan` is read-only. It shows the exact archive, inferred launch command,
-manifest changes, permissions, and start/stop effects before `deploy` changes
-the server.
+`connect` saves a credential for the local hub. `doctor` reports every blocker
+without changing state, and `plan` shows the exact bundle, configuration, and
+lifecycle effects before `deploy` changes the server. The final command waits
+for health and opens the deployed app.
 
-For regular use, install the command once with `uv tool install shinyhub`. The
-one-shot `uvx` command and the installed command run the same server binary.
+For everyday use, install the same CLI once and drop the `uvx` prefix:
 
-## Continue
+```bash
+uv tool install shinyhub
+shinyhub dev .
+```
 
+## Choose your next step
+
+- Learn the complete [application development workflow](../local-development.md).
+- Run every local app in a [fleet checkout](../development/fleet.md).
+- Move the same loop to an explicit [remote development host](../development/remote.md).
 - Add names, limits, scaling, and lifecycle settings in the
   [application manifest](../manifest.md).
-- Configure [environment variables and encrypted secrets](../environment.md).
-- Move persistent files into the [application data directory](../data.md).
-- Use a [fleet manifest](../fleet.md) to reconcile several applications.
+- Follow an [R Shiny](../recipes/r-shiny.md),
+  [Dash](../recipes/dash.md), or [Streamlit](../recipes/streamlit.md) recipe.

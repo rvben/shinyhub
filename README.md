@@ -11,11 +11,11 @@
 [![CI](https://github.com/rvben/shinyhub/actions/workflows/ci.yml/badge.svg)](https://github.com/rvben/shinyhub/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Self-hosted platform for deploying and operating [R and Python Shiny](https://shiny.posit.co/)
-applications. Push an app from the CLI, get a clean URL behind a built-in
-reverse proxy, sign users in with OAuth or OIDC, and let idle apps hibernate
-and wake on demand. ShinyHub runs as a single Go binary backed by SQLite, with
-no external services to operate.
+Self-hosted platform for developing, deploying, and operating R Shiny, Python
+Shiny, Plotly Dash, and Streamlit applications. Push an app from the CLI, get a
+clean URL behind a built-in reverse proxy, sign users in with OAuth or OIDC,
+and let idle apps hibernate and wake on demand. ShinyHub runs as a single Go
+binary backed by SQLite, with no external services to operate.
 
 <p align="center">
   <a href="https://demo.shinyhub.dev"><img src="docs/images/dashboard.jpg" alt="ShinyHub Demo launchpad grouping live identity, Python Shiny, R Shiny, Plotly Dash, and Streamlit applications" width="900"></a>
@@ -34,7 +34,11 @@ no external services to operate.
 
 ## Features
 
-- **Deploy from the CLI.** `shinyhub deploy` uploads a bundle and brings the app up.
+- **Develop with one command.** `shinyhub dev .` runs an app locally with safe,
+  health-checked reloads; in a fleet checkout it discovers the right scope
+  automatically. Add `--remote <host>` only when development needs that host.
+- **Deploy from the CLI.** `shinyhub deploy` uploads the same canonical bundle
+  and brings the app up with durable progress and rollback history.
 - **Several servers at once.** One saved credential per server, switched with `shinyhub use <name>` or targeted per command with `--host`. See [docs/hosts.md](docs/hosts.md).
 - **Reverse proxy.** One URL per app under `/app/<slug>/`, sticky-session aware.
 - **Hibernation.** Idle apps are stopped automatically and restarted on the next request.
@@ -91,17 +95,32 @@ Prefer setup and startup as separate steps? Run `shinyhub init`, inspect the
 summary, and then run `shinyhub serve`. Both paths are safe to rerun: existing
 configuration, secrets, and users are never overwritten.
 
-Then deploy an app (an `app.py` + `requirements.txt`, or an `app.R` +
-`renv.lock` - see [Deploy an R Shiny app](docs/recipes/r-shiny.md)) from
-another terminal:
+From an app directory, start the everyday development loop:
+
+```bash
+cd ./my-app
+shinyhub dev . --open
+```
+
+That one command installs dependencies when needed, serves the
+production-shaped `/app/<slug>/` route, and watches for edits. A candidate must
+start and become healthy before it replaces the version in your browser, so a
+broken save leaves the last healthy app running. Your source tree remains
+untouched. In a fleet checkout, the same command automatically uses manifest
+slugs and shared bundle inputs; run it at the fleet root to develop every local
+app, or add `--app <slug>` to narrow the set.
+
+When the app is ready, stop the development loop with
+<kbd>Ctrl</kbd>+<kbd>C</kbd> and deploy it to the local ShinyHub from that same
+terminal:
 
 ```bash
 shinyhub connect http://localhost:8080 --name local
-shinyhub plan ./my-app --slug demo
-shinyhub deploy ./my-app --slug demo --open   # healthy and open at /app/demo/
+shinyhub plan .
+shinyhub deploy . --open   # healthy and open at /app/my-app/
 ```
 
-### Connect to a remote ShinyHub
+### Connect and deploy to a remote ShinyHub
 
 On your workstation, connect once and deploy from any app directory:
 
@@ -110,7 +129,7 @@ uv tool install shinyhub
 shinyhub completion install             # detect your shell; safe to rerun
 cd ./my-app
 shinyhub doctor . --local
-shinyhub run . --check
+shinyhub dev . --open                   # edit safely; Ctrl-C when ready
 shinyhub connect https://hub.example.com --name prod
 shinyhub doctor .
 shinyhub plan .
@@ -174,17 +193,20 @@ browser, the successful deployment stays successful and the CLI prints a URL
 to copy. Later, use `shinyhub apps open <slug>` to return to any running or
 sleeping app; add `--no-browser` on SSH or in scripts.
 
-> Tip: use `shinyhub dev ./my-app` for the safe local loop: it keeps the source
-> untouched and switches edits into the production-shaped route only after
-> readiness. In a fleet checkout it automatically uses manifest slugs and
-> shared bundle inputs; from the fleet root it runs every local-source app, or
-> accepts `--app <slug>` to narrow the set. When development needs a remote
-> host's data, identity, network, or compute, make that mutation explicit:
-> `shinyhub dev . --remote dev`. For a standalone app, use
-> `shinyhub dev . --standalone --remote dev --slug my-existing-dev-app`. Add
-> `--create` for a persistent target or `--ephemeral --ttl 8h` for an expiring
-> private one. See
-> [Local development](docs/local-development.md).
+When an app needs a remote host's data, identity, network, runtime, or compute,
+move the same loop there explicitly:
+
+```bash
+shinyhub dev . --remote dev --slug my-existing-dev-app
+```
+
+Remote mode attaches to an existing app by default, so a typo cannot create a
+durable target. Add `--create` for a new persistent app or
+`--ephemeral --ttl 8h` for a private scratch app with a fixed expiry. Use
+`--standalone` only when the directory sits inside a fleet checkout but should
+ignore that fleet. Every remote save remains visible as a durable deployment
+attempt, grouped into one development session with direct links to logs and
+traces. See [Develop applications](docs/local-development.md).
 
 > `uvx shinyhub <cmd>` runs any subcommand one-shot, without installing first.
 > `pip install shinyhub` installs the server too, but native Python apps launch
@@ -315,7 +337,7 @@ controlled explicitly:
 | [Fleet reconcile](docs/fleet.md) | Declaring and converging a whole set of apps from one file. |
 | [Deploy manifest](docs/manifest.md) | The `shinyhub.toml` bundle manifest. |
 | [Deployment progress](docs/deploy-progress.md) | Live deploy phases, rollback diagnostics, NDJSON automation, and compatibility with older servers. |
-| [Local development](docs/local-development.md) | Delightful control-plane and app-author workflows. |
+| [Develop applications](docs/local-development.md) | One safe command for local apps, fleets, and explicit remote development. |
 | [Tracing](docs/tracing.md) | OpenTelemetry propagation, app spans, and control-plane spans. |
 | [Metrics and logs](docs/metrics.md) | The `/metrics` endpoint, exposed series, and the structured access log. |
 | [Branding](docs/branding.md) | White-label title, logo, theme, landing page, and footer links. |

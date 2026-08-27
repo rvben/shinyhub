@@ -243,17 +243,17 @@ Develop a composed consumer through the same declaration rather than restoring
 a vendored copy:
 
 ```bash
-shinyhub fleet dev sales -f fleet.toml
+shinyhub dev . --app sales --file fleet.toml
 ```
 
-This offline command filesystem-validates and runs only the selected local app;
+This offline command validates and runs only the selected local app;
 an unrelated app with a missing local source does not block focused development.
 The whole manifest's syntax and cross-references must still be valid. Shared
 file and app-source edits trigger staged reload, while a broken or missing
 shared input leaves the current healthy process online. Manifest-structure
-edits require restarting the command in V1. See
-[Run a fleet app with shared inputs](local-development.md#run-a-fleet-app-with-shared-inputs)
-for flags, `.env`, state identity, data-directory, and concurrency behavior.
+edits require restarting the command. See
+[Fleet development](development/fleet.md) for selection, shared inputs,
+generated state, data directories, and concurrency behavior.
 
 ## Config precedence
 

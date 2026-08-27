@@ -15,13 +15,20 @@ extra_css = [
   "https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap",
   "stylesheets/extra.css",
 ]
+extra_javascript = [
+  "javascripts/accessibility.js",
+]
 
 nav = [
   { "Home" = "index.md" },
   { "Getting started" = [
-    { "Installation" = "getting-started/installation.md" },
     { "Quick start" = "getting-started/quickstart.md" },
-    { "Local development" = "local-development.md" },
+    { "Installation" = "getting-started/installation.md" },
+  ]},
+  { "Develop applications" = [
+    { "Development overview" = "local-development.md" },
+    { "Fleet development" = "development/fleet.md" },
+    { "Remote development" = "development/remote.md" },
     { "Doctor" = "doctor.md" },
   ]},
   { "Deploy applications" = [
@@ -72,6 +79,9 @@ nav = [
     { "Load testing" = "load-testing.md" },
     { "Managed runner contract" = "fargate-runner-contract.md" },
     { "Security" = "security.md" },
+  ]},
+  { "Contribute to ShinyHub" = [
+    { "Development setup" = "contributing/development.md" },
   ]},
   { "Live demo" = "demo.md" },
 ]

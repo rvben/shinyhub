@@ -70,11 +70,15 @@
   padding: clamp(3rem, 7vw, 5rem) 0;
 }
 
+.md-content__inner:has(> .shiny-hero) > .md-content__button {
+  display: none;
+}
+
 .shiny-hero h1 {
   max-width: 18ch;
   margin: 1.1rem 0 1.3rem;
   color: var(--md-default-fg-color);
-  font-size: clamp(3rem, 4vw, 3.5rem);
+  font-size: 2.6rem;
   font-weight: 300;
   line-height: 0.98;
   letter-spacing: -0.04em;
@@ -272,9 +276,66 @@
   max-width: 66ch;
 }
 
+.shiny-dev-model {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 2rem 0;
+}
+
+.shiny-dev-model > div,
+.shiny-safety-contract {
+  padding: 1.15rem 1.25rem;
+  border: 1px solid var(--sh-line-strong);
+  border-radius: 14px;
+  background: var(--sh-surface);
+}
+
+.shiny-dev-model > div > :first-child,
+.shiny-safety-contract > :first-child {
+  margin-top: 0;
+  color: var(--md-default-fg-color);
+}
+
+.shiny-dev-model > div > :last-child,
+.shiny-safety-contract > :last-child {
+  margin-bottom: 0;
+}
+
+.shiny-dev-model pre {
+  margin: 0.75rem 0;
+}
+
+.shiny-dev-model p,
+.shiny-safety-contract li {
+  color: var(--md-default-fg-color--light);
+}
+
+.shiny-safety-contract {
+  margin: 2rem 0;
+}
+
+.shiny-safety-contract > :first-child {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.shiny-safety-contract > :first-child::before {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--sh-green);
+  box-shadow: 0 0 0 0.25rem rgba(74, 222, 128, 0.1);
+  content: "";
+  flex: 0 0 auto;
+}
+
 [data-md-color-scheme="default"] .shiny-hero__visual img,
 [data-md-color-scheme="default"] .shiny-terminal,
-[data-md-color-scheme="default"] .shiny-final {
+[data-md-color-scheme="default"] .shiny-final,
+[data-md-color-scheme="default"] .shiny-dev-model > div,
+[data-md-color-scheme="default"] .shiny-safety-contract {
   border-color: #c6d0e0;
   background: #f3f6fb;
 }
@@ -301,18 +362,72 @@
 }
 
 @media (max-width: 600px) {
+  .shiny-hero {
+    gap: 1.5rem;
+    padding-top: 0;
+  }
+
   .shiny-hero h1 {
-    font-size: clamp(2.8rem, 16vw, 4.5rem);
+    font-size: 2.6rem;
+    margin: 0.35rem 0 0.6rem;
+  }
+
+  .shiny-hero__copy > p {
+    font-size: 0.875rem;
+    line-height: 1.55;
+  }
+
+  .shiny-actions {
+    margin: 0.65rem 0;
+  }
+
+  .md-typeset .shiny-button {
+    padding-right: 0.4rem;
+    padding-left: 0.4rem;
   }
 
   .shiny-proof,
-  .shiny-journey {
+  .shiny-journey,
+  .shiny-dev-model {
     grid-template-columns: 1fr;
   }
 
   .shiny-proof > div + div {
     border-top: 1px solid var(--sh-line);
     border-left: 0;
+  }
+}
+
+/* Keep theme controls operable and clear of reading content on touch layouts. */
+button.md-header__button {
+  cursor: pointer;
+}
+
+@media (max-width: 1219px) {
+  .md-header__button,
+  .md-content__button {
+    min-width: 2.2rem;
+    min-height: 2.2rem;
+  }
+}
+
+@media (max-width: 959px) {
+  .md-main__inner:has(> .md-sidebar--secondary:not([hidden])) .md-content__inner {
+    padding-right: 2.75rem;
+  }
+
+  .md-sidebar--secondary .md-sidebar-button {
+    align-items: center;
+    justify-content: center;
+    min-width: 2.2rem;
+    min-height: 2.2rem;
+    padding: 0.5rem;
+  }
+
+  .md-code__button,
+  .md-clipboard {
+    min-width: 1.2rem;
+    min-height: 1.2rem;
   }
 }
 

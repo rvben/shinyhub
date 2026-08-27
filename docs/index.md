@@ -11,23 +11,25 @@ hide:
 
 <span class="shiny-status"><span aria-hidden="true"></span> Self-hosted · R and Python</span>
 
-# Fast dashboards. Calm operations.
+# Develop locally. Deploy with confidence.
 
-ShinyHub deploys and operates interactive R and Python applications with built-in authentication, scaling, hibernation, and observability—without turning your platform into another cloud console.
+ShinyHub gives authors of R Shiny, Python Shiny, Dash, and Streamlit apps one
+safe development command, then deploys and operates the same applications with
+built-in authentication, scaling, hibernation, and observability.
 
 <div class="shiny-actions" markdown>
 
-[Start locally](getting-started/quickstart.md){ .shiny-button .shiny-button--primary }
-[Try the live demo](demo.md){ .shiny-button .shiny-button--secondary }
+[Develop an app](local-development.md){ .shiny-button .shiny-button--primary }
+[Try ShinyHub locally](getting-started/quickstart.md){ .shiny-button .shiny-button--secondary }
 
 </div>
 
 ```bash
-uvx shinyhub serve
+shinyhub dev .
 ```
 
-One command starts the real server, opens the dashboard, and deploys a live
-Python Shiny example on the first run. No account or throwaway demo mode.
+Your directory chooses the scope. Add `--remote <host>` only when the app needs
+that host. Source stays untouched, and only healthy edits reach the browser.
 
 </div>
 
@@ -39,18 +41,18 @@ Python Shiny example on the first run. No account or throwaway demo mode.
 </section>
 
 <div class="shiny-proof" role="list">
-  <div role="listitem"><strong>One binary</strong><span>Start with SQLite and no external services.</span></div>
-  <div role="listitem"><strong>Several runtimes</strong><span>Run R Shiny, Python Shiny, Dash, and Streamlit.</span></div>
-  <div role="listitem"><strong>Production controls</strong><span>Authentication, isolation, scaling, and audit history.</span></div>
+  <div role="listitem"><strong>One dev command</strong><span>Use the same loop for one app, a fleet, or a remote host.</span></div>
+  <div role="listitem"><strong>Safe reloads</strong><span>Broken edits never replace the last healthy version.</span></div>
+  <div role="listitem"><strong>Production path</strong><span>Develop through the same route and bundle model you deploy.</span></div>
 </div>
 
 ## From source to a dependable URL
 
 <div class="shiny-journey" markdown>
 
-1. **Validate locally**
+1. **Develop safely**
 
-   Run the production-shaped app route on your workstation and let `doctor` find bundle, runtime, and access problems before deployment.
+   `shinyhub dev .` runs the production-shaped route and swaps in an edit only after it becomes healthy.
 
 2. **Preview the change**
 
@@ -67,6 +69,7 @@ Python Shiny example on the first run. No account or throwaway demo mode.
 </div>
 
 ```bash
+shinyhub dev ./my-app  # edit safely; Ctrl-C when ready
 shinyhub connect https://hub.example.com --name prod
 shinyhub doctor ./my-app
 shinyhub plan ./my-app
@@ -101,7 +104,10 @@ render_seconds = 1.3
 
 ## Built for everyone in the delivery chain
 
-Developers get a direct deployment workflow. Operators get explicit state, bounded resources, and recovery paths. Viewers get the part that matters: a dashboard that opens quickly and stays dependable.
+Developers get one continuous path from the first local edit to a traced remote
+deployment. Operators get explicit state, bounded resources, and recovery
+paths. Viewers get the part that matters: a dashboard that opens quickly and
+stays dependable.
 
 <div class="shiny-final" markdown>
 
