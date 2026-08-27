@@ -67,9 +67,13 @@ func runDeployWatch(cmd *cobra.Command, args []string, f *deployFlags) error {
 	if !f.create && !f.ephemeral && f.visibility != "" {
 		return validationErr("--visibility only applies when watch creates an app", "add --create, or change the existing app with `shinyhub apps access set`")
 	}
-	format, err := resolveFormat(false, true)
-	if err != nil {
-		return err
+	format := f.format
+	if format == "" {
+		var err error
+		format, err = resolveFormat(false, true)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Resolve once before starting the long-lived loop. This proves the source
@@ -87,7 +91,9 @@ func runDeployWatch(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 	defer source.cleanup()
 	f.visibility = source.Visibility
-	warnFleetCompositionOmission(cmd.ErrOrStderr(), source.Dir, fleetOmissionDeploy, quietFlag)
+	if f.bundleManifestRoot == "" {
+		warnFleetCompositionOmission(cmd.ErrOrStderr(), source.Dir, fleetOmissionDeploy, quietFlag)
+	}
 	if err := validateRepeatedWatchHooks(source.Dir, f.allowRepeatedHooks); err != nil {
 		return err
 	}
@@ -95,7 +101,7 @@ func runDeployWatch(cmd *cobra.Command, args []string, f *deployFlags) error {
 	// local source can produce a valid canonical deployment bundle. Without this
 	// preflight a typo or malformed manifest could leave behind an empty app.
 	if f.create || f.ephemeral {
-		if _, _, err := prepareDeployment(source.Dir); err != nil {
+		if _, _, err := prepareDeploymentForFlags(source.Dir, f); err != nil {
 			return err
 		}
 	}
@@ -120,8 +126,9 @@ func runDeployWatch(cmd *cobra.Command, args []string, f *deployFlags) error {
 	defer cmd.SetContext(previousContext)
 
 	changes := sourcewatch.Changes(ctx, source.Dir, sourcewatch.Options{
-		Interval:    watchPollInterval,
-		ExcludeDirs: watchedSourceExcludes,
+		Interval:      watchPollInterval,
+		ExcludeDirs:   watchedSourceExcludes,
+		ExternalFiles: f.watchExternalFiles,
 	})
 	f.watchMode = true
 	f.deployChannel = "watch"
@@ -273,6 +280,10 @@ func generatedDevelopmentSlug(args []string) (string, error) {
 		return "", fmt.Errorf("resolve app directory: %w", err)
 	}
 	base := sanitizeSlug(filepath.Base(abs))
+	return generatedDevelopmentSlugForBase(base)
+}
+
+func generatedDevelopmentSlugForBase(base string) (string, error) {
 	if base == "" {
 		base = "app"
 	}

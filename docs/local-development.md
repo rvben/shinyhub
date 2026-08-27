@@ -67,6 +67,50 @@ validation. Values are never printed; startup diagnostics list keys only.
 `PORT`, `SHINYHUB_APP_DATA`, and `SHINYHUB_APP_SLUG` are platform-managed and
 cannot be overridden.
 
+## Develop in a fleet checkout
+
+Fleet context is automatic. From a local-source app declared by the nearest
+`fleet.toml`, the ordinary command uses the manifest slug and composes that
+app's `[[bundle_file]]` inputs:
+
+```bash
+cd apps/sales-dashboard
+shinyhub dev .
+```
+
+From the fleet root, the same command starts every local-source app on its own
+automatic port and prefixes concurrent output with the app slug:
+
+```bash
+shinyhub dev .
+shinyhub dev . --app sales-dashboard
+shinyhub dev . --app sales-dashboard --app operations
+shinyhub dev fleet.toml
+```
+
+Git-backed entries are named and skipped by the fleet-root default because a
+filesystem watcher needs a local checkout. Add `--all` when skipping anything
+would be a mistake; the command then fails before starting unless every
+declared app has a watchable local source. `--app` is repeatable and the
+manifest slug is authoritative, so it cannot be combined with `--slug`.
+
+Use `--standalone` when a directory lives inside a fleet checkout but should be
+developed independently. Use `--file path/to/fleet.toml` when discovery cannot
+express the intended manifest.
+
+Every selected app receives an isolated generated workspace and default data
+directory. For a multi-app run, explicit `--state-dir` and `--data-dir` values
+act as roots with one child directory per slug; an explicit `--port` requires a
+single `--app`. Editing either an app source or one of its shared bundle inputs
+triggers only that app's staged, health-checked reload. Changes to `fleet.toml`
+itself still require restarting the command so changes to consumers and
+destinations cannot alter a running session unexpectedly.
+
+`dev` consumes the fleet's app identity, source topology, visibility for an
+explicit creation, and shared bundle inputs. It does not reconcile projects,
+ownership, `[app.config]`, or pruning. Use `shinyhub fleet plan` and
+`shinyhub fleet apply` for declarative configuration changes.
+
 ## Develop on a remote host
 
 Use a remote development loop when the app depends on the target host's data,
@@ -94,6 +138,28 @@ collision and generates a recognizable `<directory>-dev-<suffix>` slug when
 15 minutes through seven days. Stopping the CLI ends the development session,
 but it does not delete an ephemeral app early—the printed expiry remains the
 stable deadline, so a URL does not disappear merely because a terminal closed.
+
+Fleet selection works identically in remote mode:
+
+```bash
+# Preflight and attach every local-source fleet app that already exists.
+shinyhub dev . --remote dev
+
+# Attach one fleet app, with its shared inputs composed into every deployment.
+shinyhub dev . --app sales-dashboard --remote dev
+
+# Creation stays deliberately single-app.
+shinyhub dev . --app sales-dashboard --remote dev --create
+shinyhub dev . --app sales-dashboard --remote dev --ephemeral --ttl 8h
+```
+
+A multi-app remote session verifies that every selected target exists before
+the first deployment. If any target is missing, nothing is mutated and the CLI
+points to `shinyhub fleet apply`. `--create` and `--ephemeral` therefore require
+one selected app; mass creation belongs to the fleet convergence workflow.
+Each app gets its own durable development-session ID and Deployments group.
+Multi-app NDJSON records include an `app` field, while terminal output is
+prefixed with the manifest slug.
 
 Remote development requires `--remote <host>`, where the value is a saved host
 name or server URL. The saved current host and `SHINYHUB_HOST` never turn a
@@ -148,50 +214,16 @@ commands for scripts and specialist options. The latter requires an explicit
 instead. New interactive workflows should prefer `shinyhub dev` so local and
 remote development share one mental model.
 
-Plain `shinyhub dev` and `shinyhub run` use only the selected app directory;
-they do not compose `[[bundle_file]]` entries from a fleet manifest. If the app
-is a consumer in a
-valid nearest-parent `fleet.toml`, the command warns on stderr so an incomplete
-local bundle is not mistaken for fleet parity. This discovery is advisory and
-cannot see a manifest passed elsewhere with `-f`.
-
-### Run a fleet app with shared inputs
-
-Use the fleet-aware local entry point when an app consumes shared bundle files:
+The older fleet-local entry point also remains available for scripts that need
+the lower-level `--check` or `--no-reload` controls:
 
 ```bash
 shinyhub fleet dev sales-dashboard
 shinyhub fleet dev sales-dashboard -f config/fleet.toml --check
 ```
 
-`fleet dev` selects the app by its manifest slug, mirrors its local source into
-a generated workspace, and composes the selected app's `[[bundle_file]]`
-destinations there. It never writes vendored copies into either the app or the
-shared source tree, and it does not contact a ShinyHub server. Git-backed apps
-are not supported by this V1 local workflow.
-
-The command accepts the local-run flags `--port`, `--no-sync`, `--no-reload`,
-`--fresh`, `--env`, `--env-file`, `--data-dir`, `--state-dir`, `--open`, and
-`--check`. The app slug is authoritative, so there is no `--slug` flag.
-`--no-sync` skips dependency preparation but still mirrors the source and
-composes shared files. The default `.env` is read from the selected app source,
-not from the fleet manifest directory.
-
-Edits to the app source or any declared shared source trigger the same staged,
-health-checked reload as ordinary `run`. A missing shared file, a newly
-colliding destination, or a candidate that fails startup leaves the last
-healthy process serving. `--no-reload` composes once and runs without watching.
-Changes to `fleet.toml` itself—including consumer or destination changes—require
-restarting `fleet dev` in V1.
-
-Default fleet-development state is keyed by the canonical manifest path plus
-app slug. Two slugs may therefore use the same read-only source concurrently,
-and an ordinary `run` may coexist with `fleet dev`; each gets a separate
-workspace, automatic port, and default data directory. This also means their
-default app data is intentionally not shared. Pass the same explicit
-`--data-dir` when both workflows should see one local data set. Passing the same
-explicit `--state-dir` to concurrent commands instead produces an actionable
-workspace-lock error.
+`shinyhub run` remains standalone and intentionally does not discover or
+compose fleet inputs.
 
 Use `[app] readiness_path` when `/` is not a meaningful health endpoint. By
 default, any 2xx or 3xx response is healthy; add `readiness_status` to require

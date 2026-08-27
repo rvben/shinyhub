@@ -10,7 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **development workflow**: add local-first `shinyhub dev` with an explicit
   `--remote` mode, safe existing-app attachment, persistent or expiring private
-  targets, staged local reloads, coalesced remote saves, durable session
+  targets, automatic fleet context and shared-input composition, multi-app
+  development, staged local reloads, coalesced remote saves, durable session
   provenance, filtered logs/traces, and grouped history preserving every attempt
 
 ## [0.12.8](https://github.com/rvben/shinyhub/compare/v0.11.13...v0.12.8) - 2026-08-27

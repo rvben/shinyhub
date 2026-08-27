@@ -17,7 +17,7 @@ func newFleetCmd() *cobra.Command {
 		Long: "fleet manages a set of apps from a single fleet.toml.\n\n" +
 			"  shinyhub fleet init      scaffold a manifest from deployed apps\n" +
 			"  shinyhub fleet validate  check a manifest locally (offline, no server)\n" +
-			"  shinyhub fleet dev       run one app locally with shared inputs\n" +
+			"  shinyhub fleet dev       compatibility command for local app development\n" +
 			"  shinyhub fleet plan      preview the diff (read-only)\n" +
 			"  shinyhub fleet apply     converge: deploy changed, reconcile, prune\n" +
 			"  shinyhub fleet status    read-only fleet overview (no manifest)\n\n" +

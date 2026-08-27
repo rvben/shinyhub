@@ -66,7 +66,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		ArgTypes: map[string]string{
 			"dir": "path", "--data-dir": "path", "--env-file": "path", "--state-dir": "path",
 		},
-		Notes: "Local development is the default and does not mutate ShinyHub server state. --remote <host> explicitly selects the remote deployment-session workflow; it never falls back to the saved current host or SHINYHUB_HOST. Local reloads are staged and readiness-checked before handoff. Remote saves are debounced, digest-deduplicated, individually durable, and grouped by development session; --output ndjson is supported only in remote mode."},
+		Notes: "Local development is the default and does not mutate ShinyHub server state. App directories run directly; the nearest fleet.toml supplies manifest identity and shared bundle inputs, while a fleet root selects every local-source app unless --app narrows it. --standalone explicitly ignores fleet context. --remote <host> selects durable remote sessions and never falls back to the saved current host or SHINYHUB_HOST. Remote saves are debounced and digest-deduplicated. Multi-app remote mode preflights every existing target before mutation and emits app-attributed NDJSON; creation is single-app only."},
 	"run": {Mutating: ro, Streaming: true,
 		ArgTypes: map[string]string{"--data-dir": "path", "--env-file": "path", "--state-dir": "path"},
 		OutputFields: []fieldSpec{

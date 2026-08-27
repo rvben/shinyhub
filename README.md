@@ -176,10 +176,14 @@ sleeping app; add `--no-browser` on SSH or in scripts.
 
 > Tip: use `shinyhub dev ./my-app` for the safe local loop: it keeps the source
 > untouched and switches edits into the production-shaped route only after
-> readiness. When development needs a remote host's data, identity, network, or
-> compute, make that mutation explicit:
-> `shinyhub dev . --remote dev --slug my-existing-dev-app`. Add `--create` for a
-> persistent target or `--ephemeral --ttl 8h` for an expiring private one. See
+> readiness. In a fleet checkout it automatically uses manifest slugs and
+> shared bundle inputs; from the fleet root it runs every local-source app, or
+> accepts `--app <slug>` to narrow the set. When development needs a remote
+> host's data, identity, network, or compute, make that mutation explicit:
+> `shinyhub dev . --remote dev`. For a standalone app, use
+> `shinyhub dev . --standalone --remote dev --slug my-existing-dev-app`. Add
+> `--create` for a persistent target or `--ephemeral --ttl 8h` for an expiring
+> private one. See
 > [Local development](docs/local-development.md).
 
 > `uvx shinyhub <cmd>` runs any subcommand one-shot, without installing first.

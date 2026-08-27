@@ -21,10 +21,13 @@ func newFleetDevCmd() *cobra.Command {
 	f := &fleetDevFlags{}
 	cmd := &cobra.Command{
 		Use:   "dev APP",
-		Short: "Run one fleet app locally with its shared bundle inputs",
+		Short: "Compatibility entry point for local fleet-app development",
 		Long: `Run one local-source fleet app through the same staged local runner as
 'shinyhub run', with its declared [[bundle_file]] inputs composed into the
-workspace. No server, login, or network connection is required.`,
+workspace. No server, login, or network connection is required.
+
+For the unified local-or-remote workflow, prefer:
+  shinyhub dev . --app APP`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := rejectLocalRunGlobalFlags(cmd); err != nil {

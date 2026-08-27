@@ -22,6 +22,7 @@ import (
 	"github.com/rvben/shinyhub/internal/appstatus"
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/db"
+	deploypkg "github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/deployevent"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/spf13/cobra"
@@ -77,6 +78,12 @@ type deployFlags struct {
 	developmentTarget    string
 	developmentExpiresAt *time.Time
 	format               outputFormat
+
+	// Fleet-aware development composes manifest-relative shared inputs into
+	// every candidate bundle without modifying the app source tree.
+	bundleManifestRoot string
+	bundleInputs       []bundle.FileInputSpec
+	watchExternalFiles []string
 }
 
 // newDeployCmd builds a fresh deploy command each time it is called, with its
@@ -227,7 +234,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	if !quietFlag && format != formatNDJSON {
 		fmt.Fprintf(errW, "Bundling %s...\n", abs)
 	}
-	bundlePlan, _, err := prepareDeployment(abs)
+	bundlePlan, _, err := prepareDeploymentForFlags(abs, f)
 	if err != nil {
 		if format == formatNDJSON {
 			e := deployevent.Event{Type: deployevent.TypeError, Phase: "bundle", Message: err.Error(), FailureKind: "unknown"}
@@ -609,6 +616,41 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 	}
 	return nil
+}
+
+func prepareDeploymentForFlags(dir string, f *deployFlags) (*bundlePreview, *deploypkg.LaunchPlan, error) {
+	spec, err := deploymentBundleSpec(dir, f)
+	if err != nil {
+		return nil, nil, fmt.Errorf("bundle inputs: %w", err)
+	}
+	bundlePlan, err := buildBundlePreviewFromSpec(spec)
+	if err != nil {
+		return nil, nil, fmt.Errorf("bundle: %w", err)
+	}
+	launch, err := deploypkg.ResolveLaunch(dir, deploypkg.LaunchOptions{
+		Port: 4000, BindHost: "127.0.0.1", PrepHostDeps: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("launch contract: %w", err)
+	}
+	return bundlePlan, launch, nil
+}
+
+func deploymentBundleSpec(dir string, f *deployFlags) (bundleBuildSpec, error) {
+	spec := bundleBuildSpec{Dir: dir}
+	if f == nil || len(f.bundleInputs) == 0 {
+		return spec, nil
+	}
+	resolved, err := bundle.ResolveFileInputs(f.bundleManifestRoot, dir, f.bundleInputs)
+	if err != nil {
+		return bundleBuildSpec{}, err
+	}
+	snapshots, err := bundle.SnapshotFileInputs(resolved)
+	if err != nil {
+		return bundleBuildSpec{}, err
+	}
+	spec.Inputs = snapshots
+	return spec, nil
 }
 
 func loadDeployConfig(cmd *cobra.Command) (*cliConfig, error) {
