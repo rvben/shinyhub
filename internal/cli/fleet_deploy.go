@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/appstatus"
 	"github.com/rvben/shinyhub/internal/deployfail"
 )
 
@@ -268,7 +269,10 @@ func waitForFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout tim
 // verifyFleetHealthy applies the serving-state gate to every fleet action,
 // including unchanged apps. An explicitly stopped app is an intentional
 // operational state and is therefore reported but excluded from the serving
-// requirement.
+// requirement. A parked app (hibernated after its idle timeout, or suspended)
+// wakes on its next request, so it is settled rather than in transit: nothing
+// in this gate would wake it, and waiting for a wake that never comes would
+// burn the whole timeout on an app in its declared steady state.
 func verifyFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = fleetHealthTimeout
@@ -277,7 +281,7 @@ func verifyFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout time
 	defer cancel()
 	poll := func() (bool, string, error) {
 		ready, status, err := pollAppStatusContext(ctx, cfg, slug)
-		if err == nil && status == "stopped" {
+		if err == nil && (status == "stopped" || appstatus.Class(status) == appstatus.KindParked) {
 			return true, status, nil
 		}
 		return ready, status, err
@@ -304,6 +308,7 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 	lastProgress := start
 	var lastErr error
 	var lastStatus string
+	lastPollOK := false
 	unknownReported := false
 	for {
 		ready, status, err := poll()
@@ -315,10 +320,22 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 				fmt.Fprintf(out, "  %s: %s\n", slug, s.dim("stopped (excluded from --verify-health)"))
 				return nil
 			}
+			if appstatus.Class(status) == appstatus.KindParked {
+				fmt.Fprintf(out, "  %s: %s\n", slug, s.dim(status+" (parked, wakes on first request)"))
+				return nil
+			}
 			fmt.Fprintf(out, "  %s: %s after %s\n",
 				slug, s.status("healthy"), s.dim(t.Sub(start).Round(time.Second).String()))
 			return nil
 		}
+		// A poll that fails on or after the deadline was cut short by this
+		// loop's own budget, not by the server. Once a status has been observed,
+		// that status is the diagnosis; recording the cancellation as an error
+		// would blame a server that answered every earlier poll.
+		if err != nil && !t.Before(deadline) && lastStatus != "" {
+			break
+		}
+		lastPollOK = err == nil
 		if err != nil {
 			lastErr = err
 			var he *deployHTTPError
@@ -355,14 +372,16 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 		}
 	}
 	// The timeout names what the server last said, so a 15-minute wait ends
-	// in a diagnosis rather than a bare "timed out".
+	// in a diagnosis rather than a bare "timed out". A poll failure is named
+	// only when it was the most recent observation: one that later polls
+	// recovered from is not why the wait ran out.
 	detail := ""
 	if hint := unknownStatusHint(lastStatus); hint != "" {
 		detail = hint
 	} else if lastStatus != "" {
 		detail = "last status: " + lastStatus
 	}
-	if lastErr != nil {
+	if !lastPollOK && lastErr != nil {
 		if detail != "" {
 			detail += "; "
 		}

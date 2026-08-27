@@ -294,6 +294,13 @@ process is already listening.
   frozen (no snapshot support) is a running worker.
   The CLI enforces these gates, so upgrade it together with the server: a
   v0.11.14 CLI accepts only `running` and times out on an idle elastic pool.
+- `hibernated` and `suspended` are settled, not transient. `fleet apply
+  --verify-health` accepts a parked app in one poll: without a
+  `min_warm_replicas` floor, `hibernated` is the declared steady state after
+  the idle timeout, and nothing in the gate wakes an app, so waiting for
+  `running` there could only end in the timeout. The post-deploy wait is
+  unchanged: a deploy restarts the app, so it keeps requiring `running` (or
+  `idle` for an elastic pool).
 - `effective_hibernate_timeout_minutes` resolves an inherited per-app timeout
   against the live server default, so runtime checks do not need to parse the
   deployment configuration.
