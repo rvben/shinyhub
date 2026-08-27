@@ -408,11 +408,17 @@
       "  width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line);" +
       "}",
     ".bookmark-trigger {" +
-      "  display: none; width: 38px; flex: none; color: var(--sh-soft);" +
+      "  position: relative; display: none; width: 38px; flex: none; color: var(--sh-soft);" +
       "  border-right: 1px solid var(--sh-line);" +
       "}",
     ".root.bookmark-ready:not(.session-snapshot) .bookmark-trigger { display: flex; }",
     ".bookmark-trigger:hover { color: var(--sh-signal); background: var(--sh-raised); }",
+    ".root.bookmark-adjusted .bookmark-trigger { color: var(--sh-warning); }",
+    ".root.bookmark-adjusted .bookmark-trigger::after {" +
+      "  content: ''; position: absolute; top: 7px; right: 7px; width: 6px; height: 6px;" +
+      "  box-sizing: border-box; border-radius: 50%; background: var(--sh-warning);" +
+      "  box-shadow: 0 0 0 2px var(--sh-surface);" +
+      "}",
     ".root[data-position='left-center'] .bookmark-trigger," +
       " .root[data-position='right-center'] .bookmark-trigger {" +
       "  width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line);" +
@@ -499,7 +505,7 @@
 
     ".bookmark-panel {" +
       "  position: absolute; width: 368px; max-width: calc(100vw - 24px);" +
-      "  max-height: min(620px, calc(100vh - 72px)); box-sizing: border-box;" +
+      "  max-height: min(760px, calc(100vh - 72px)); box-sizing: border-box;" +
       "  display: flex; flex-direction: column; pointer-events: auto; overflow: hidden;" +
       "  color: var(--sh-text); background: var(--sh-surface);" +
       "  border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg);" +
@@ -527,6 +533,16 @@
     ".bookmark-close:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: -1px; }",
     ".bookmark-close svg { width: 14px; height: 14px; }",
     ".bookmark-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px; user-select: text; -webkit-user-select: text; scrollbar-color: var(--sh-line-strong) transparent; scrollbar-width: thin; }",
+    ".bookmark-notice { margin: 0 0 14px; padding: 11px 12px; border: 1px solid rgba(251,191,36,0.3); border-radius: var(--sh-r-md); background: rgba(251,191,36,0.09); }",
+    ".bookmark-notice-title { color: var(--sh-warning-soft); font-size: 13px; font-weight: 700; line-height: 1.3; }",
+    ".bookmark-notice-copy { margin-top: 3px; color: var(--sh-soft); font-size: 12px; line-height: 1.45; }",
+    ".bookmark-adjustments { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; padding-top: 9px; border-top: 1px solid rgba(251,191,36,0.2); }",
+    ".bookmark-adjustment { min-width: 0; display: flex; align-items: flex-start; gap: 8px; }",
+    ".bookmark-adjustment-copy { min-width: 0; flex: 1; }",
+    ".bookmark-adjustment-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sh-text); font-size: 12px; font-weight: 650; line-height: 1.3; }",
+    ".bookmark-adjustment.is-unknown .bookmark-adjustment-label { font-family: Space Mono, ui-monospace, monospace; font-size: 11px; }",
+    ".bookmark-adjustment-value { margin-top: 1px; overflow-wrap: anywhere; color: var(--sh-soft); font-size: 12px; line-height: 1.35; }",
+    ".bookmark-adjustment-kind { flex: none; padding-top: 1px; color: var(--sh-warning-soft); font-size: 12px; font-weight: 700; line-height: 1.3; }",
     ".bookmark-intro { margin: 0 0 14px; color: var(--sh-soft); font-size: 13px; line-height: 1.5; }",
     ".bookmark-summary { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }",
     ".bookmark-badge { padding: 4px 9px; border-radius: var(--sh-r-pill); color: var(--sh-signal); background: rgba(56,189,248,0.11); font-size: 12px; font-weight: 700; letter-spacing: 0.02em; }",
@@ -1139,6 +1155,18 @@
   bookmarkIntro.className = "bookmark-intro";
   bookmarkIntro.id = TAG_ID + "-bookmark-intro";
   bookmarkIntro.textContent = "This link will reopen the app with every filter listed below set exactly as shown.";
+  var bookmarkNotice = div("bookmark-notice");
+  bookmarkNotice.id = TAG_ID + "-bookmark-notice";
+  bookmarkNotice.hidden = true;
+  bookmarkNotice.appendChild(div("bookmark-notice-title", "View adjusted"));
+  bookmarkNotice.appendChild(
+    div(
+      "bookmark-notice-copy",
+      "Some bookmark settings could not be restored exactly. The app opened the closest current view."
+    )
+  );
+  var bookmarkAdjustments = div("bookmark-adjustments");
+  bookmarkNotice.appendChild(bookmarkAdjustments);
   var bookmarkSummary = div("bookmark-summary");
   var bookmarkBadge = div("bookmark-badge", "Exact view");
   var bookmarkCount = div("bookmark-count", "");
@@ -1163,6 +1191,7 @@
   bookmarkActions.appendChild(bookmarkPrimary);
   bookmarkActions.appendChild(bookmarkSecondary);
   bookmarkBody.appendChild(bookmarkBack);
+  bookmarkBody.appendChild(bookmarkNotice);
   bookmarkBody.appendChild(bookmarkIntro);
   bookmarkBody.appendChild(bookmarkSummary);
   bookmarkBody.appendChild(bookmarkFields);
@@ -1284,7 +1313,40 @@
         value: String(raw.value === undefined ? "Not set" : raw.value).slice(0, 240)
       });
     }
-    return { version: BOOKMARK_PROTOCOL_VERSION, fields: fields };
+    var adjustments = [];
+    var rawAdjustments = Array.isArray(detail.adjustments) ? detail.adjustments : [];
+    var kinds = {
+      migrated: true,
+      fallback: true,
+      renamed: true,
+      removed: true,
+      unknown: true,
+      unknown_summary: true
+    };
+    for (var ai = 0; ai < rawAdjustments.length && adjustments.length < 20; ai++) {
+      var rawAdjustment = rawAdjustments[ai];
+      if (
+        !rawAdjustment ||
+        !kinds[rawAdjustment.kind] ||
+        typeof rawAdjustment.label !== "string" ||
+        !rawAdjustment.label
+      ) {
+        continue;
+      }
+      adjustments.push({
+        kind: rawAdjustment.kind,
+        label: rawAdjustment.label.slice(0, 120),
+        previous: String(rawAdjustment.previous || "").slice(0, 240),
+        current: String(rawAdjustment.current || "").slice(0, 240),
+        sourceLabel: String(rawAdjustment.sourceLabel || "").slice(0, 120)
+      });
+    }
+    return {
+      version: BOOKMARK_PROTOCOL_VERSION,
+      schemaVersion: Number.isInteger(detail.schemaVersion) ? detail.schemaVersion : 1,
+      fields: fields,
+      adjustments: adjustments
+    };
   }
 
   function selectedBookmarkIDs() {
@@ -1344,26 +1406,86 @@
     }
   }
 
+  function renderBookmarkAdjustments() {
+    clear(bookmarkAdjustments);
+    var adjustments = bookmarkCapabilities ? bookmarkCapabilities.adjustments : [];
+    bookmarkNotice.hidden = !adjustments.length;
+    for (var i = 0; i < adjustments.length; i++) {
+      var adjustment = adjustments[i];
+      var row = div("bookmark-adjustment");
+      if (adjustment.kind === "unknown") {
+        row.classList.add("is-unknown");
+      }
+      var copy = div("bookmark-adjustment-copy");
+      var label = adjustment.label;
+      if (adjustment.sourceLabel && adjustment.sourceLabel !== adjustment.label) {
+        label = adjustment.sourceLabel + " is now " + adjustment.label;
+      }
+      var adjustmentLabel = div("bookmark-adjustment-label", label);
+      adjustmentLabel.title = label;
+      copy.appendChild(adjustmentLabel);
+      var value = "";
+      if (adjustment.kind === "unknown") {
+        value = "Saved value: " + (adjustment.previous || "Not set");
+      } else if (adjustment.kind === "unknown_summary") {
+        value = adjustment.current || "Ignored for safety";
+      } else if (adjustment.kind === "removed") {
+        value = adjustment.previous
+          ? adjustment.previous + " is no longer used"
+          : "This saved filter is no longer used";
+      } else if (
+        adjustment.kind === "renamed" &&
+        adjustment.previous &&
+        adjustment.previous === adjustment.current
+      ) {
+        value = "Restored as " + adjustment.current;
+      } else if (adjustment.previous && adjustment.current) {
+        value = adjustment.previous + " → " + adjustment.current;
+      } else {
+        value = adjustment.current || adjustment.previous;
+      }
+      var adjustmentValue = div("bookmark-adjustment-value", value);
+      adjustmentValue.title = value;
+      copy.appendChild(adjustmentValue);
+      var kind = {
+        migrated: "Updated",
+        fallback: "Unavailable",
+        renamed: "Renamed",
+        removed: "Removed",
+        unknown: "Unknown",
+        unknown_summary: "Ignored"
+      }[adjustment.kind];
+      row.appendChild(copy);
+      row.appendChild(div("bookmark-adjustment-kind", kind));
+      bookmarkAdjustments.appendChild(row);
+    }
+  }
+
   function renderBookmarkSummary() {
     if (!bookmarkCapabilities) {
       return;
     }
     var selected = selectedBookmarkIDs().length;
     var total = bookmarkCapabilities.fields.length;
-    bookmarkBadge.textContent = bookmarkCustom ? "Custom link" : "Exact view";
+    var adjusted = bookmarkCapabilities.adjustments.length > 0;
+    bookmarkBadge.textContent = bookmarkCustom ? "Custom link" : adjusted ? "Updated view" : "Exact view";
     bookmarkCount.textContent = bookmarkCustom
       ? selected + " of " + total + " filters"
       : total + (total === 1 ? " filter" : " filters");
     bookmarkIntro.textContent = bookmarkCustom
-      ? "Choose which values should follow the link. Unchecked filters will use the app's defaults."
-      : "This link will reopen the app with every filter listed below set exactly as shown.";
+      ? "Choose which current values should follow the link. Unchecked filters will use the app's defaults."
+      : adjusted
+        ? "Review the current values below, then copy a fresh link."
+        : "This link will reopen the app with every filter listed below set exactly as shown.";
     bookmarkBack.hidden = !bookmarkCustom;
     bookmarkSecondary.hidden = bookmarkCustom;
     bookmarkPrimary.textContent = bookmarkPending
       ? "Creating link…"
       : bookmarkCustom
         ? "Copy custom link"
-        : "Copy link";
+        : adjusted
+          ? "Copy updated link"
+          : "Copy link";
     bookmarkPrimary.disabled = !!bookmarkPending || selected === 0;
     bookmarkSecondary.disabled = !!bookmarkPending;
     bookmarkCount.setAttribute("aria-live", bookmarkCustom ? "polite" : "off");
@@ -1371,6 +1493,7 @@
 
   function renderBookmark() {
     setBookmarkError("", "");
+    renderBookmarkAdjustments();
     renderBookmarkFields();
     renderBookmarkSummary();
   }
@@ -2144,6 +2267,25 @@
     }
     bookmarkCapabilities = capabilities;
     root.classList.add("bookmark-ready");
+    root.classList.toggle("bookmark-adjusted", capabilities.adjustments.length > 0);
+    bookmarkPanel.setAttribute(
+      "aria-describedby",
+      capabilities.adjustments.length > 0
+        ? TAG_ID + "-bookmark-notice " + TAG_ID + "-bookmark-intro"
+        : TAG_ID + "-bookmark-intro"
+    );
+    bookmarkBtn.setAttribute(
+      "aria-label",
+      capabilities.adjustments.length > 0
+        ? "Bookmark this view, saved filters adjusted"
+        : "Bookmark this view"
+    );
+    bookmarkBtn.title = capabilities.adjustments.length > 0
+      ? "Saved filters adjusted"
+      : "Bookmark this view";
+    bookmarkSubtitle.textContent = capabilities.adjustments.length > 0
+      ? "Saved filters were adjusted"
+      : "A link back to these filter values";
     if (bookmarkOpen) {
       var retained = {};
       for (var i = 0; i < capabilities.fields.length; i++) {
@@ -2170,8 +2312,11 @@
     copyBookmarkURL(url).then(
       guard(function () {
         finishBookmarkRequest();
-        bookmarkPrimary.textContent = "Link copied";
-        announcer.textContent = "Bookmark link copied";
+        var adjusted = bookmarkCapabilities && bookmarkCapabilities.adjustments.length > 0;
+        bookmarkPrimary.textContent = adjusted && !bookmarkCustom ? "Updated link copied" : "Link copied";
+        announcer.textContent = adjusted && !bookmarkCustom
+          ? "Updated bookmark link copied"
+          : "Bookmark link copied";
         window.setTimeout(guard(function () {
           if (bookmarkOpen && !bookmarkPending) renderBookmarkSummary();
         }), 1800);

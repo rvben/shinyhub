@@ -19,7 +19,7 @@ dependency to the UI and register fields in the server:
 
 ```python
 from shiny import App, ui
-from shinyhub_bookmarks import Field, bookmarking_dependency, register
+from shinyhub_bookmarks import ChoiceRestore, Field, bookmarking_dependency, register
 
 
 def app_ui(request):
@@ -101,6 +101,55 @@ The adapter serializes one request at a time, restores the app's existing
 `bookmark.exclude` list after every attempt, validates selected IDs against the
 registration, and returns stable browser error codes. It does not log filter
 values or generated URLs.
+
+## Evolving filters safely
+
+Bookmark URLs often outlive the release that created them. Shiny ignores an
+input that no longer exists, but an unavailable choice or renamed input can
+otherwise fall back silently. Add restore rules to make that behavior explicit:
+
+```python
+register(
+    session=session,
+    input=input,
+    schema_version=3,
+    legacy_fields={"segment": "Market segment"},
+    fields={
+        "region": Field(
+            "Region",
+            restore=ChoiceRestore(choices=REGIONS, default="Europe"),
+            renamed_from={"territory": "Territory"},
+        ),
+        "product": Field(
+            "Product",
+            restore=ChoiceRestore(
+                choices=lambda: PRODUCTS,
+                default="All products",
+                aliases={"Legacy planning": "Planning"},
+                control="select",
+            ),
+        ),
+    },
+)
+```
+
+The restore callback uses Shiny's public bookmark lifecycle hooks. It validates
+saved choice values, applies aliases, updates `select`, `selectize`, or `radio`
+controls, and reports any adjustment to the browser-local switcher. A multiple
+selection keeps its still-valid members. Removed fields listed in
+`legacy_fields` are ignored and reported; `renamed_from` moves a saved value to
+the current field.
+
+New links include `schema_version` as Shiny bookmark metadata. The metadata is
+for migrations and diagnostics; it is not server-side state. Links created by
+the first helper release have no metadata and continue to restore.
+
+The recovery UX is deliberately non-blocking. The app opens the closest current
+view, the bookmark control gains an amber status dot, and its receipt explains
+what was updated, unavailable, renamed, removed, or ignored. Completely unknown
+inputs show their URL-provided IDs and saved values as escaped, length-bounded
+plain text. The first three are listed and any remainder is summarized. Copying
+creates a fresh link from the current schema and drops those unknown settings.
 
 ## Compatibility
 

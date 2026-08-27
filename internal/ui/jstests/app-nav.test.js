@@ -237,6 +237,147 @@ test('the exact-view receipt names every registered filter before copying', () =
   assert.match(m.q('.bookmark-intro').textContent, /exactly as shown/);
 });
 
+test('a stale bookmark becomes an explicit adjusted-view receipt with a fresh-link action', () => {
+  const m = mount();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      schemaVersion: 2,
+      fields: [
+        { id: 'region', label: 'Region', value: 'Americas' },
+        { id: 'product', label: 'Product', value: 'Planning' },
+      ],
+      adjustments: [
+        {
+          kind: 'migrated',
+          label: 'Product',
+          previous: 'Legacy planning',
+          current: 'Planning',
+        },
+        {
+          kind: 'renamed',
+          label: 'Region',
+          sourceLabel: 'Territory',
+          previous: 'Americas',
+          current: 'Americas',
+        },
+        {
+          kind: 'removed',
+          label: 'Market segment',
+          previous: 'Enterprise',
+          current: 'Ignored',
+        },
+      ],
+    },
+  }));
+
+  const trigger = m.q('button.bookmark-trigger');
+  assert.ok(m.root().classList.contains('bookmark-adjusted'));
+  assert.match(trigger.getAttribute('aria-label'), /saved filters adjusted/);
+  trigger.click();
+
+  assert.equal(m.q('.bookmark-notice').hidden, false);
+  assert.equal(m.q('.bookmark-notice-title').textContent, 'View adjusted');
+  assert.deepEqual(
+    m.qa('.bookmark-adjustment-label').map((node) => node.textContent),
+    ['Product', 'Territory is now Region', 'Market segment'],
+  );
+  assert.deepEqual(
+    m.qa('.bookmark-adjustment-kind').map((node) => node.textContent),
+    ['Updated', 'Renamed', 'Removed'],
+  );
+  assert.deepEqual(
+    m.qa('.bookmark-adjustment-value').map((node) => node.textContent),
+    ['Legacy planning → Planning', 'Restored as Americas', 'Enterprise is no longer used'],
+  );
+  assert.match(m.q('.bookmark-panel').getAttribute('aria-describedby'), /bookmark-notice/);
+  assert.equal(m.q('.bookmark-badge').textContent, 'Updated view');
+  assert.equal(m.q('button.bookmark-primary').textContent, 'Copy updated link');
+  assert.match(m.q('.bookmark-intro').textContent, /copy a fresh link/);
+});
+
+test('malformed adjustment records are ignored without hiding bookmarking', () => {
+  const m = mount();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+      adjustments: [
+        { kind: 'future-kind', label: 'Unsafe', previous: '<b>old</b>' },
+        null,
+      ],
+    },
+  }));
+
+  assert.ok(m.root().classList.contains('bookmark-ready'));
+  assert.equal(m.root().classList.contains('bookmark-adjusted'), false);
+  m.q('button.bookmark-trigger').click();
+  assert.equal(m.q('.bookmark-notice').hidden, true);
+  assert.equal(m.q('button.bookmark-primary').textContent, 'Copy link');
+});
+
+test('an unknown bookmark setting shows its safely-rendered name and saved value', () => {
+  const m = mount();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+      adjustments: [
+        {
+          kind: 'unknown',
+          label: '<img src=x onerror=alert(1)>',
+          previous: '<script>saved value</script>',
+          current: 'Ignored',
+        },
+      ],
+    },
+  }));
+
+  m.q('button.bookmark-trigger').click();
+
+  assert.equal(m.q('.bookmark-notice').hidden, false);
+  assert.equal(m.q('.bookmark-adjustment-label').textContent, '<img src=x onerror=alert(1)>');
+  assert.equal(m.q('.bookmark-adjustment-value').textContent, 'Saved value: <script>saved value</script>');
+  assert.equal(m.q('.bookmark-adjustment-kind').textContent, 'Unknown');
+  assert.equal(m.qa('.bookmark-adjustments img').length, 0);
+  assert.equal(m.qa('.bookmark-adjustments script').length, 0);
+  assert.equal(m.q('.bookmark-badge').textContent, 'Updated view');
+  assert.equal(m.q('button.bookmark-primary').textContent, 'Copy updated link');
+});
+
+test('additional unknown settings collapse into an honest overflow row', () => {
+  const m = mount();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+      adjustments: [
+        { kind: 'unknown', label: 'mystery', previous: 'saved', current: 'Ignored' },
+        {
+          kind: 'unknown_summary',
+          label: '3 more unrecognized bookmark settings',
+          current: 'Ignored for safety',
+        },
+      ],
+    },
+  }));
+
+  m.q('button.bookmark-trigger').click();
+
+  assert.deepEqual(
+    m.qa('.bookmark-adjustment-value').map((node) => node.textContent),
+    ['Saved value: saved', 'Ignored for safety'],
+  );
+  assert.deepEqual(
+    m.qa('.bookmark-adjustment-kind').map((node) => node.textContent),
+    ['Unknown', 'Ignored'],
+  );
+});
+
 test('custom bookmarks begin with everything selected and never submit an empty selection', () => {
   const m = mount();
   const requests = [];

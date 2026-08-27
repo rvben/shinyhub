@@ -10,7 +10,7 @@ defaults when the bookmark opens.
 
 ```python
 from shiny import App, render, ui
-from shinyhub_bookmarks import Field, bookmarking_dependency, register
+from shinyhub_bookmarks import ChoiceRestore, Field, bookmarking_dependency, register
 
 
 def app_ui(request):
@@ -44,6 +44,57 @@ Both pieces are required: `bookmarking_dependency()` installs the tiny browser
 bridge, and `register()` publishes the allow-list and creates links through
 Shiny's native bookmarking API. The UI must be a function accepting `request`
 so Shiny can restore URL state before rendering it.
+
+## Bookmarks that outlive the app
+
+Native Shiny restoration ignores a removed input, but a retired choice can
+otherwise become empty or fall back differently across widgets. Declare current
+choices when a bookmark should remain dependable across app releases:
+
+```python
+register(
+    session=session,
+    input=input,
+    schema_version=3,
+    legacy_fields={"segment": "Market segment"},
+    fields={
+        "region": Field(
+            "Region",
+            restore=ChoiceRestore(choices=REGIONS, default="Europe"),
+            renamed_from={"territory": "Territory"},
+        ),
+        "product": Field(
+            "Product",
+            restore=ChoiceRestore(
+                choices=lambda: PRODUCTS,
+                default="All products",
+                aliases={"Legacy planning": "Planning"},
+                control="select",
+            ),
+        ),
+    },
+)
+```
+
+`ChoiceRestore` validates the saved value, applies aliases, and updates the
+current Shiny choice input. Supported controls are `select`, `selectize`, and
+`radio`. Multiple selections retain every choice that still exists. A missing
+declared default falls back to the valid value Shiny already selected.
+
+`renamed_from` maps an old input ID to its former label. `legacy_fields` names
+removed inputs that should be reported as ignored. Every new link records the
+app's `schema_version`; older links without metadata remain supported.
+
+When anything changes, the switcher marks the bookmark action and presents a
+plain-language **View adjusted** receipt. It names migrated, unavailable,
+renamed, and removed filters and offers **Copy updated link**. The app still
+opens; stale state is never promoted into a blocking error.
+
+An input that is neither registered nor declared as renamed or removed is shown
+with its URL-provided ID and saved value, labelled **Unknown**. Both are rendered
+as bounded plain text. At most three unknown inputs are listed before a compact
+overflow summary. Copying the updated link drops every unknown setting, so the
+warning clears on the next visit.
 
 ## Privacy and behaviour
 

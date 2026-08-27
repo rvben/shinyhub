@@ -18,4 +18,3 @@ def bookmarking_dependency() -> HTMLDependency:
         source={"package": "shinyhub_bookmarks", "subdir": "www"},
         script={"src": "bridge.js", "defer": "defer"},
     )
-
