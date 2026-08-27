@@ -1121,7 +1121,8 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			if run.AppID == 0 {
 				return nil
 			}
-			return store.FinishAppLogRun(run.RunID, string(run.Status), run.FinishedAt, run.OOMKilled)
+			return store.FinishAppLogRunWithExit(run.RunID, string(run.Status), run.FinishedAt,
+				run.OOMKilled, run.ExitCode, run.Signal, run.ExitReason)
 		},
 	})
 	if store.IsPostgres() {

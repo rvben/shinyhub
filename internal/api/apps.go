@@ -163,8 +163,19 @@ func (s *Server) liveReplicaView(slug string, stored []*db.Replica) []*db.Replic
 			if verdict, ok := s.manager.LastExit(slug, index); ok {
 				rep.ExitCode = verdict.ExitCode
 				rep.Signal = verdict.Signal
+				rep.ExitSignal = verdict.Signal
+				rep.ExitReason = verdict.Reason
+				rep.ExitObservedAt = &verdict.At
+				rep.ExitOOMKilled = verdict.OOMKilled
+				rep.ExitRunID = verdict.RunID
 				if verdict.RestartCount > rep.RestartCount {
 					rep.RestartCount = verdict.RestartCount
+				}
+				rep.CrashCount = rep.RestartCount
+				rep.LastExit = &db.ReplicaExit{
+					Replica: index, ObservedAt: &verdict.At, RunID: verdict.RunID, ExitCode: verdict.ExitCode,
+					Signal: verdict.Signal, Reason: verdict.Reason,
+					OOMKilled: verdict.OOMKilled, CrashCount: rep.RestartCount,
 				}
 				if rep.Status == string(process.StatusCrashed) && verdict.Reason != "" {
 					rep.Reason = verdict.Reason
@@ -177,11 +188,32 @@ func (s *Server) liveReplicaView(slug string, stored []*db.Replica) []*db.Replic
 	for _, rep := range byIndex {
 		if rep.Status == db.ReplicaStatusLost {
 			rep.Reason = s.lostReplicaReason(rep.Tier)
+			clearReplicaCurrentExit(rep, false)
+		} else if rep.Status != string(process.StatusCrashed) {
+			// These flat fields describe the current process. Historical exit facts
+			// live under last_exit, so a healthy process cannot simultaneously
+			// advertise the fatal reason of its predecessor.
+			clearReplicaCurrentExit(rep, true)
 		}
 		out = append(out, rep)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Index < out[j].Index })
 	return out
+}
+
+func clearReplicaCurrentExit(rep *db.Replica, clearReason bool) {
+	if clearReason {
+		rep.Reason = ""
+	}
+	rep.ExitCode = nil
+	rep.Signal = ""
+	rep.ExitSignal = ""
+	rep.ExitReason = ""
+	rep.RestartCount = 0
+	rep.CrashCount = 0
+	rep.ExitObservedAt = nil
+	rep.ExitOOMKilled = false
+	rep.ExitRunID = ""
 }
 
 // elasticObservation reads the proxy's live worker view for slug into the
@@ -407,6 +439,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 			replicas[i].Reason = s.lostReplicaReason(rep.Tier)
 		} else if rep.Status == "crashed" && rep.Reason == "" {
 			replicas[i].Reason = "replica process exited unexpectedly"
+			replicas[i].ExitReason = replicas[i].Reason
 		}
 	}
 	s.decorateAppObservation(app, replicas, s.elasticObservation(slug))
@@ -3493,11 +3526,15 @@ type replicaMetrics struct {
 	// "worker unavailable" for a replica lost to a dead worker with no healthy
 	// replacement. Empty for healthy replicas. Mirrors db.Replica.Reason so the
 	// live poll stays consistent with the app envelope.
-	Reason           string `json:"reason,omitempty"`
-	ExitCode         *int   `json:"exit_code,omitempty"`
-	Signal           string `json:"signal,omitempty"`
-	RestartCount     int    `json:"restart_count"`
-	MetricsAvailable bool   `json:"metrics_available"`
+	Reason           string          `json:"reason,omitempty"`
+	ExitCode         *int            `json:"exit_code,omitempty"`
+	Signal           string          `json:"signal,omitempty"`
+	ExitSignal       string          `json:"exit_signal,omitempty"`
+	ExitReason       string          `json:"exit_reason,omitempty"`
+	RestartCount     int             `json:"restart_count"`
+	CrashCount       int             `json:"crash_count"`
+	LastExit         *db.ReplicaExit `json:"last_exit,omitempty"`
+	MetricsAvailable bool            `json:"metrics_available"`
 	// Effective resource limits mirror the placement-aware pair deployment
 	// resolves for the app. A zero limit is genuinely unlimited; it is not the
 	// nullable "inherit" value stored on the app. EnforcementKnown distinguishes
@@ -3637,12 +3674,17 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 
 	if s.manager == nil {
 		for _, rep := range dbReplicas {
-			resp.Replicas = append(resp.Replicas, replicaMetrics{
+			rm := replicaMetrics{
 				Index: rep.Index, Status: rep.Status, DesiredState: rep.DesiredState,
 				Tier: rep.Tier, Provider: rep.Provider, Sessions: -1,
-				Reason: rep.Reason, ExitCode: rep.ExitCode, Signal: rep.Signal,
-				RestartCount: rep.RestartCount, StartupPeakRSSBytes: rep.StartupPeakRSSBytes,
-			})
+				LastExit: rep.LastExit, StartupPeakRSSBytes: rep.StartupPeakRSSBytes,
+			}
+			if rep.Status == "crashed" || rep.Status == db.ReplicaStatusLost {
+				rm.Reason, rm.ExitCode, rm.Signal, rm.RestartCount = rep.Reason, rep.ExitCode, rep.Signal, rep.RestartCount
+				rm.CrashCount = rep.CrashCount
+				rm.ExitSignal, rm.ExitReason = rep.ExitSignal, rep.ExitReason
+			}
+			resp.Replicas = append(resp.Replicas, rm)
 		}
 	}
 
@@ -3678,10 +3720,17 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 		rm.PID = info.PID
 		rm.Tier = info.Tier
 		rm.Provider = info.Provider
-		if info.Status == process.StatusCrashed {
-			if verdict, ok := s.manager.LastExit(slug, i); ok {
+		if verdict, ok := s.manager.LastExit(slug, i); ok {
+			rm.LastExit = &db.ReplicaExit{
+				Replica: i, ObservedAt: &verdict.At, RunID: verdict.RunID, ExitCode: verdict.ExitCode,
+				Signal: verdict.Signal, Reason: verdict.Reason,
+				OOMKilled: verdict.OOMKilled, CrashCount: verdict.RestartCount,
+			}
+			if info.Status == process.StatusCrashed {
 				rm.ExitCode, rm.Signal = verdict.ExitCode, verdict.Signal
 				rm.RestartCount, rm.Reason = verdict.RestartCount, verdict.Reason
+				rm.CrashCount = verdict.RestartCount
+				rm.ExitSignal, rm.ExitReason = verdict.Signal, verdict.Reason
 			}
 		}
 		if info.Status == process.StatusRunning {
@@ -3774,6 +3823,9 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 		dbReplicas = nil
 	}
 	for _, rep := range dbReplicas {
+		if rep.Index < len(resp.Replicas) && resp.Replicas[rep.Index].LastExit == nil {
+			resp.Replicas[rep.Index].LastExit = rep.LastExit
+		}
 		if rep.Status != db.ReplicaStatusLost && rep.Status != "crashed" {
 			continue
 		}
@@ -3789,7 +3841,10 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 			resp.Replicas[rep.Index].Reason = reason
 			resp.Replicas[rep.Index].ExitCode = rep.ExitCode
 			resp.Replicas[rep.Index].Signal = rep.Signal
+			resp.Replicas[rep.Index].ExitSignal = rep.ExitSignal
+			resp.Replicas[rep.Index].ExitReason = rep.ExitReason
 			resp.Replicas[rep.Index].RestartCount = rep.RestartCount
+			resp.Replicas[rep.Index].CrashCount = rep.CrashCount
 			resp.Replicas[rep.Index].Tier = rep.Tier
 			resp.Replicas[rep.Index].Provider = rep.Provider
 			resp.Replicas[rep.Index].StartupPeakRSSBytes = rep.StartupPeakRSSBytes
@@ -3802,7 +3857,10 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 				Reason:              reason,
 				ExitCode:            rep.ExitCode,
 				Signal:              rep.Signal,
+				ExitSignal:          rep.ExitSignal,
+				ExitReason:          rep.ExitReason,
 				RestartCount:        rep.RestartCount,
+				CrashCount:          rep.CrashCount,
 				Tier:                rep.Tier,
 				Provider:            rep.Provider,
 				StartupPeakRSSBytes: rep.StartupPeakRSSBytes,

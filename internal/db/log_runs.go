@@ -23,6 +23,9 @@ type AppLogRun struct {
 	StartedAt    time.Time  `json:"started_at"`
 	FinishedAt   *time.Time `json:"finished_at,omitempty"`
 	OOMKilled    bool       `json:"oom_killed"`
+	ExitCode     *int       `json:"exit_code,omitempty"`
+	Signal       string     `json:"exit_signal,omitempty"`
+	ExitReason   string     `json:"exit_reason,omitempty"`
 }
 
 type CreateAppLogRunParams struct {
@@ -93,11 +96,20 @@ func (s *Store) MarkAppLogRunRunning(runID, provider, externalLogs string) error
 // FinishAppLogRun closes a run with its terminal status. Calls are idempotent
 // so shutdown/recovery reconciliation can safely repeat them.
 func (s *Store) FinishAppLogRun(runID, status string, finishedAt time.Time, oomKilled bool) error {
+	return s.FinishAppLogRunWithExit(runID, status, finishedAt, oomKilled, nil, "", "")
+}
+
+// FinishAppLogRunWithExit closes a run and retains the complete terminal
+// verdict. The older FinishAppLogRun entry point remains for intentional-stop
+// callers that have no unexpected-exit diagnostic.
+func (s *Store) FinishAppLogRunWithExit(runID, status string, finishedAt time.Time, oomKilled bool, exitCode *int, signal, reason string) error {
 	defer s.timed("FinishAppLogRun")()
 	res, err := s.db.Exec(`
 		UPDATE app_log_runs
-		SET status = ?, finished_at = ?, oom_killed = ?
-		WHERE run_id = ?`, status, finishedAt.UnixMilli(), boolToInt(oomKilled), runID)
+		SET status = ?, finished_at = ?, oom_killed = ?, exit_code = ?,
+		    exit_signal = ?, exit_reason = ?
+		WHERE run_id = ?`, status, finishedAt.UnixMilli(), boolToInt(oomKilled),
+		exitCode, signal, reason, runID)
 	if err != nil {
 		return fmt.Errorf("finish app log run: %w", err)
 	}
@@ -115,7 +127,8 @@ func (s *Store) ListAppLogRuns(appID int64, limit int) ([]*AppLogRun, error) {
 	}
 	rows, err := s.db.Query(`
 		SELECT run_id, app_id, replica_index, deployment_id, app_version, tier,
-		       provider, external_logs, status, started_at, finished_at, oom_killed
+		       provider, external_logs, status, started_at, finished_at, oom_killed,
+		       exit_code, exit_signal, exit_reason
 		FROM app_log_runs
 		WHERE app_id = ?
 		ORDER BY started_at DESC, run_id DESC
@@ -142,7 +155,8 @@ func (s *Store) ListUnfinishedAppLogRuns(appID int64) ([]*AppLogRun, error) {
 	defer s.timed("ListUnfinishedAppLogRuns")()
 	rows, err := s.db.Query(`
 		SELECT run_id, app_id, replica_index, deployment_id, app_version, tier,
-		       provider, external_logs, status, started_at, finished_at, oom_killed
+		       provider, external_logs, status, started_at, finished_at, oom_killed,
+		       exit_code, exit_signal, exit_reason
 		FROM app_log_runs
 		WHERE app_id = ? AND finished_at IS NULL
 		ORDER BY started_at DESC, run_id DESC`, appID)
@@ -167,7 +181,8 @@ func (s *Store) GetAppLogRun(appID int64, runID string) (*AppLogRun, error) {
 	defer s.timed("GetAppLogRun")()
 	row := s.db.QueryRow(`
 		SELECT run_id, app_id, replica_index, deployment_id, app_version, tier,
-		       provider, external_logs, status, started_at, finished_at, oom_killed
+		       provider, external_logs, status, started_at, finished_at, oom_killed,
+		       exit_code, exit_signal, exit_reason
 		FROM app_log_runs WHERE app_id = ? AND run_id = ?`, appID, runID)
 	run, err := scanAppLogRun(row)
 	if err != nil {
@@ -236,7 +251,8 @@ func scanAppLogRun(row logRunScanner) (*AppLogRun, error) {
 	var oom int
 	if err := row.Scan(&run.RunID, &run.AppID, &run.ReplicaIndex,
 		&run.DeploymentID, &run.AppVersion, &run.Tier, &run.Provider,
-		&run.ExternalLogs, &run.Status, &started, &finished, &oom); err != nil {
+		&run.ExternalLogs, &run.Status, &started, &finished, &oom,
+		&run.ExitCode, &run.Signal, &run.ExitReason); err != nil {
 		return nil, err
 	}
 	run.StartedAt = time.UnixMilli(started)

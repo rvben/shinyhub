@@ -312,14 +312,14 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 				rt := mgr.RuntimeForTier(r.Tier)
 				if _, containerBacked := rt.(ContainerLister); !containerBacked {
 					if stopNativeActivationReplica(mgr, app, r, bundleDir, logRunID) {
-						markReplicaCrashed(store, app, r.Index, "activation start interrupted before health check")
+						markReplicaCrashed(store, app, r.Index, "activation start interrupted before health check", logRunID)
 					} else {
 						// Retain the PID and starting row. Losing either would let the
 						// watcher launch a duplicate while this process may still exist.
 						indeterminate = true
 					}
 				} else {
-					markReplicaCrashed(store, app, r.Index, "activation start interrupted before health check")
+					markReplicaCrashed(store, app, r.Index, "activation start interrupted before health check", logRunID)
 				}
 				continue
 			}
@@ -521,7 +521,7 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	}
 	if r.PID == nil {
 		// No PID recorded → treat as crashed so the watcher can restart it.
-		markReplicaCrashed(store, app, r.Index, "no PID recorded")
+		markReplicaCrashed(store, app, r.Index, "no PID recorded", logRunID)
 		return false
 	}
 	if r.Port == nil {
@@ -530,13 +530,13 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		return false
 	}
 	if err := syscall.Kill(*r.PID, 0); err != nil {
-		markReplicaCrashed(store, app, r.Index, "process not alive")
+		markReplicaCrashed(store, app, r.Index, "process not alive", logRunID)
 		return false
 	}
 	if err := validateNativeProcess(*r.PID, *r.Port, bundleDir); err != nil {
 		slog.Warn("recovery: rejected stale/mismatched process; will restart",
 			"slug", app.Slug, "idx", r.Index, "pid", *r.PID, "port", *r.Port, "err", err)
-		markReplicaCrashed(store, app, r.Index, "stale/mismatched process")
+		markReplicaCrashed(store, app, r.Index, "stale/mismatched process", logRunID)
 		return false
 	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
@@ -677,17 +677,25 @@ func frozenReplicaIdentityOK(pid int, bundleDir string) bool {
 // failure is logged rather than dropped: a silent miss would leave the replica
 // un-restarted and the app permanently under-replicated. reason names why the
 // replica is being marked, for operator triage.
-func markReplicaCrashed(store *db.Store, app *db.App, index int, reason string) {
+func markReplicaCrashed(store *db.Store, app *db.App, index int, reason, logRunID string) {
 	// RecordReplicaCrash updates status and diagnostics in place. In particular,
 	// it preserves a pre-health activation's tier, PID/container ID, endpoint,
 	// generation, and activation owner until exact runtime absence is proved.
 	// A sparse UpsertReplica here would erase that recovery identity and could
 	// allow a replacement to launch alongside the surviving process.
+	observedAt := time.Now().UTC()
 	if err := store.RecordReplicaCrash(db.UpsertReplicaParams{
 		AppID: app.ID, Index: index, Status: "crashed", Reason: reason,
+		ExitObservedAt: observedAt, ExitRunID: logRunID,
 	}); err != nil {
 		slog.Warn("recovery: persist crashed replica failed",
 			"slug", app.Slug, "idx", index, "reason", reason, "err", err)
+	}
+	if logRunID != "" {
+		if err := store.FinishAppLogRunWithExit(logRunID, "crashed", observedAt, false, nil, "", reason); err != nil && !errors.Is(err, db.ErrNotFound) {
+			slog.Warn("recovery: close crashed log run failed",
+				"slug", app.Slug, "idx", index, "run_id", logRunID, "err", err)
+		}
 	}
 }
 

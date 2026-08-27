@@ -1028,6 +1028,9 @@ type App struct {
 	// status view, including failures that have not exhausted the app's restart
 	// budget and therefore have not promoted LastError yet.
 	LastReplicaError string `json:"last_replica_error"`
+	// LastReplicaExit is historical and timestamped. Unlike LastReplicaError it
+	// remains after recovery without making a healthy app look actively failed.
+	LastReplicaExit *ReplicaExit `json:"last_replica_exit"`
 	// CrashedAt is the Unix-epoch seconds of the transition into "crashed", or
 	// 0 when the app is not crashed. Cleared alongside LastError on (re)start.
 	CrashedAt int64 `json:"crashed_at,omitempty"`
@@ -3389,21 +3392,52 @@ type Replica struct {
 	DesiredState string    `json:"desired_state"`
 	DeploymentID *int64    `json:"deployment_id,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
-	// Reason is the most recent persisted crash reason, or a presentation-only
-	// annotation set by the read layer for states such as a lost worker.
+	// Reason is the active-state diagnostic for a crashed/lost replica. The API
+	// clears it after a successful start; LastExit retains the historical fact.
 	Reason string `json:"reason,omitempty"`
 	// ExitCode, Signal, and RestartCount describe the most recent unexpected
 	// exit of this replica slot. They are populated by the process manager/read
 	// layer even before the watchdog exhausts its restart budget.
-	ExitCode       *int   `json:"exit_code,omitempty"`
-	Signal         string `json:"signal,omitempty"`
-	RestartCount   int    `json:"restart_count"`
-	DataGeneration int64  `json:"data_generation"`
-	ActivationID   *int64 `json:"activation_id,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+	Signal   string `json:"signal,omitempty"`
+	// ExitSignal and ExitReason are canonical aliases. Signal/Reason remain for
+	// compatibility with older clients; new clients need not guess that those
+	// generic names hold process-exit diagnostics on a crashed replica.
+	ExitSignal string `json:"exit_signal,omitempty"`
+	ExitReason string `json:"exit_reason,omitempty"`
+	// RestartCount is the legacy wire name for the number of recorded crashes,
+	// not proof that the supervisor successfully attempted that many restarts.
+	// CrashCount is the canonical, honestly named alias.
+	RestartCount   int        `json:"restart_count"`
+	CrashCount     int        `json:"crash_count"`
+	ExitObservedAt *time.Time `json:"exit_observed_at,omitempty"`
+	ExitOOMKilled  bool       `json:"oom_killed,omitempty"`
+	ExitRunID      string     `json:"exit_run_id,omitempty"`
+	// LastExit is the timestamped, immutable view of the last unexpected exit
+	// for this reusable slot. It remains available when current-state fields are
+	// cleared after a successful start.
+	LastExit       *ReplicaExit `json:"last_exit,omitempty"`
+	DataGeneration int64        `json:"data_generation"`
+	ActivationID   *int64       `json:"activation_id,omitempty"`
 	// StartupPeakRSSBytes is the high-water RSS observed from runtime start
 	// through readiness for this slot's latest successfully persisted cold boot.
 	// It is retained across status-only updates and used for surge admission.
 	StartupPeakRSSBytes int64 `json:"startup_peak_rss_bytes"`
+}
+
+// ReplicaExit describes the last unexpected execution exit recorded for a
+// reusable replica slot. ObservedAt is when ShinyHub learned of the exit; for a
+// recovered orphan this can be later than the actual exit, so the name avoids
+// claiming false timestamp precision.
+type ReplicaExit struct {
+	Replica    int        `json:"replica"`
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	RunID      string     `json:"run_id,omitempty"`
+	ExitCode   *int       `json:"exit_code,omitempty"`
+	Signal     string     `json:"exit_signal,omitempty"`
+	Reason     string     `json:"exit_reason,omitempty"`
+	OOMKilled  bool       `json:"oom_killed"`
+	CrashCount int        `json:"crash_count"`
 }
 
 // UpsertReplicaParams holds the fields for inserting or updating a replica row.
@@ -3423,6 +3457,9 @@ type UpsertReplicaParams struct {
 	ExitCode            *int
 	Signal              string
 	Reason              string
+	ExitObservedAt      time.Time
+	ExitOOMKilled       bool
+	ExitRunID           string
 	StartupPeakRSSBytes int64
 }
 
@@ -3441,12 +3478,20 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 			p.Reason = "replica process exited unexpectedly"
 		}
 	}
+	var exitObservedAt any
+	if p.Status == "crashed" {
+		if p.ExitObservedAt.IsZero() {
+			p.ExitObservedAt = time.Now().UTC()
+		}
+		exitObservedAt = p.ExitObservedAt.Unix()
+	}
 	_, err := s.db.Exec(`
 		INSERT INTO replicas (app_id, idx, pid, port, status, provider, tier,
 		                      endpoint_url, worker_id, app_version, desired_state,
 		                      deployment_id, updated_at, exit_code, exit_signal,
-		                      exit_reason, restart_count, startup_peak_rss_bytes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`, ?, ?, ?, ?, ?)
+		                      exit_reason, restart_count, exit_observed_at,
+		                      exit_oom_killed, exit_run_id, startup_peak_rss_bytes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(app_id, idx) DO UPDATE SET
 			pid           = excluded.pid,
 			port          = excluded.port,
@@ -3462,12 +3507,16 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 			exit_signal   = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_signal ELSE replicas.exit_signal END,
 			exit_reason   = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_reason ELSE replicas.exit_reason END,
 			restart_count = CASE WHEN excluded.status = 'crashed' THEN replicas.restart_count + 1 ELSE replicas.restart_count END,
+			exit_observed_at = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_observed_at ELSE replicas.exit_observed_at END,
+			exit_oom_killed = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_oom_killed ELSE replicas.exit_oom_killed END,
+			exit_run_id = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_run_id ELSE replicas.exit_run_id END,
 			startup_peak_rss_bytes = CASE WHEN excluded.startup_peak_rss_bytes > 0
 				THEN excluded.startup_peak_rss_bytes ELSE replicas.startup_peak_rss_bytes END,
 			updated_at    = excluded.updated_at`,
 		p.AppID, p.Index, p.PID, p.Port, p.Status, p.Provider, p.Tier,
 		p.EndpointURL, p.WorkerID, p.AppVersion, desired, p.DeploymentID,
-		p.ExitCode, p.Signal, p.Reason, restartCount, p.StartupPeakRSSBytes,
+		p.ExitCode, p.Signal, p.Reason, restartCount, exitObservedAt,
+		boolToInt(p.ExitOOMKilled), p.ExitRunID, p.StartupPeakRSSBytes,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert replica: %w", err)
@@ -3482,11 +3531,16 @@ func (s *Store) RecordReplicaCrash(p UpsertReplicaParams) error {
 	if p.Reason == "" {
 		p.Reason = "replica process exited unexpectedly"
 	}
+	if p.ExitObservedAt.IsZero() {
+		p.ExitObservedAt = time.Now().UTC()
+	}
 	res, err := s.db.Exec(`
 		UPDATE replicas
 		   SET status = 'crashed', exit_code = ?, exit_signal = ?, exit_reason = ?,
+		       exit_observed_at = ?, exit_oom_killed = ?, exit_run_id = ?,
 		       restart_count = restart_count + 1, updated_at = `+s.d.nowEpoch()+`
-		 WHERE app_id = ? AND idx = ?`, p.ExitCode, p.Signal, p.Reason, p.AppID, p.Index)
+		 WHERE app_id = ? AND idx = ?`, p.ExitCode, p.Signal, p.Reason,
+		p.ExitObservedAt.Unix(), boolToInt(p.ExitOOMKilled), p.ExitRunID, p.AppID, p.Index)
 	if err != nil {
 		return fmt.Errorf("record replica crash: %w", err)
 	}
@@ -3504,7 +3558,8 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
 		       deployment_id, updated_at, exit_code, exit_signal, exit_reason,
-		       restart_count, data_generation, activation_id, startup_peak_rss_bytes
+		       restart_count, exit_observed_at, exit_oom_killed, exit_run_id,
+		       data_generation, activation_id, startup_peak_rss_bytes
 		FROM replicas WHERE app_id = ? ORDER BY idx`, appID)
 	if err != nil {
 		return nil, err
@@ -3514,14 +3569,18 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 	for rows.Next() {
 		var r Replica
 		var updatedAt int64
+		var exitObservedAt *int64
+		var exitOOMKilled int
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.ExitCode, &r.Signal,
-			&r.Reason, &r.RestartCount, &r.DataGeneration, &r.ActivationID,
+			&r.Reason, &r.RestartCount, &exitObservedAt, &exitOOMKilled, &r.ExitRunID,
+			&r.DataGeneration, &r.ActivationID,
 			&r.StartupPeakRSSBytes); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
+		populateReplicaLastExit(&r, exitObservedAt, exitOOMKilled)
 		out = append(out, &r)
 	}
 	return out, rows.Err()
@@ -3540,7 +3599,8 @@ func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
 		       deployment_id, updated_at, exit_code, exit_signal, exit_reason,
-		       restart_count, data_generation, activation_id, startup_peak_rss_bytes
+		       restart_count, exit_observed_at, exit_oom_killed, exit_run_id,
+		       data_generation, activation_id, startup_peak_rss_bytes
 		FROM replicas WHERE app_id IN (`+ph+`) ORDER BY app_id, idx`, args...)
 	if err != nil {
 		return nil, err
@@ -3550,17 +3610,40 @@ func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error
 	for rows.Next() {
 		var r Replica
 		var updatedAt int64
+		var exitObservedAt *int64
+		var exitOOMKilled int
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.ExitCode, &r.Signal,
-			&r.Reason, &r.RestartCount, &r.DataGeneration, &r.ActivationID,
+			&r.Reason, &r.RestartCount, &exitObservedAt, &exitOOMKilled, &r.ExitRunID,
+			&r.DataGeneration, &r.ActivationID,
 			&r.StartupPeakRSSBytes); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
+		populateReplicaLastExit(&r, exitObservedAt, exitOOMKilled)
 		out[r.AppID] = append(out[r.AppID], &r)
 	}
 	return out, rows.Err()
+}
+
+func populateReplicaLastExit(r *Replica, observedAt *int64, oomKilled int) {
+	if observedAt != nil {
+		t := time.Unix(*observedAt, 0).UTC()
+		r.ExitObservedAt = &t
+	}
+	r.ExitOOMKilled = oomKilled != 0
+	r.ExitSignal = r.Signal
+	r.ExitReason = r.Reason
+	r.CrashCount = r.RestartCount
+	if r.ExitObservedAt == nil && r.ExitCode == nil && r.Signal == "" && r.Reason == "" && r.RestartCount == 0 {
+		return
+	}
+	r.LastExit = &ReplicaExit{
+		Replica: r.Index, ObservedAt: r.ExitObservedAt, RunID: r.ExitRunID, ExitCode: r.ExitCode,
+		Signal: r.Signal, Reason: r.Reason, OOMKilled: r.ExitOOMKilled,
+		CrashCount: r.RestartCount,
+	}
 }
 
 // SuspendedReplica identifies one suspended replica with the app slug needed to

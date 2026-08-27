@@ -106,6 +106,9 @@ type ProcessInfo struct {
 // the entry being replaced on restart so the watcher can still name an OOM-kill
 // after the crash-restart budget is spent.
 type ExitVerdict struct {
+	// RunID binds the verdict to one concrete execution rather than the reusable
+	// replica index.
+	RunID     string
 	OOMKilled bool
 	// MemoryLimitMB is the enforced per-replica limit at the time of the exit
 	// (0 when unknown, e.g. an adopted process). The watcher falls back to the
@@ -248,6 +251,9 @@ type LogRun struct {
 	StartedAt    time.Time
 	FinishedAt   time.Time
 	OOMKilled    bool
+	ExitCode     *int
+	Signal       string
+	ExitReason   string
 }
 
 type LogRunRecorder struct {
@@ -673,6 +679,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 			_ = os.Remove(logPath)
 			run.Status = StatusCrashed
 			run.FinishedAt = time.Now().UTC()
+			run.ExitReason = "open shared log sink: " + err.Error()
 			m.finishLogRun(run)
 			return nil, fmt.Errorf("open shared log sink: %w", err)
 		}
@@ -688,6 +695,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		delete(m.logFiles, key)
 		run.Status = StatusCrashed
 		run.FinishedAt = time.Now().UTC()
+		run.ExitReason = err.Error()
 		m.finishLogRun(run)
 		return nil, fmt.Errorf("start process: %w", err)
 	}
@@ -769,12 +777,17 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 					// The worker-down sweep owns the transition and the re-placement.
 					e.info.Status = StatusLost
 				default:
-					m.lastExit[key] = replicaExitVerdict(waitErr, oom, p.MemoryLimitMB, m.lastExit[key])
+					verdict := replicaExitVerdict(waitErr, oom, p.MemoryLimitMB, m.lastExit[key])
+					verdict.RunID = run.RunID
+					m.lastExit[key] = verdict
 					e.info.Status = StatusCrashed
 				}
 				run.Status = e.info.Status
 				run.FinishedAt = time.Now().UTC()
 				run.OOMKilled = oom
+				if verdict, ok := m.lastExit[key]; ok && run.Status == StatusCrashed {
+					run.ExitCode, run.Signal, run.ExitReason = verdict.ExitCode, verdict.Signal, verdict.Reason
+				}
 				if lf := m.logFiles[key]; lf != nil {
 					lf.Close()
 					delete(m.logFiles, key)
@@ -1437,7 +1450,11 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 				default:
 					// MemoryLimitMB is unknown for an adopted process (no StartParams);
 					// the watcher falls back to the app's stored limit when it is 0.
-					m.lastExit[key] = replicaExitVerdict(waitErr, oom, 0, m.lastExit[key])
+					verdict := replicaExitVerdict(waitErr, oom, 0, m.lastExit[key])
+					if e.logRun != nil {
+						verdict.RunID = e.logRun.RunID
+					}
+					m.lastExit[key] = verdict
 					e.info.Status = StatusCrashed
 				}
 				if e.logRun != nil {
@@ -1445,6 +1462,9 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 					run.Status = e.info.Status
 					run.FinishedAt = time.Now().UTC()
 					run.OOMKilled = oom
+					if verdict, ok := m.lastExit[key]; ok && run.Status == StatusCrashed {
+						run.ExitCode, run.Signal, run.ExitReason = verdict.ExitCode, verdict.Signal, verdict.Reason
+					}
 					m.finishLogRun(run)
 				}
 			}

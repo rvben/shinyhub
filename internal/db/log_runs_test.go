@@ -36,7 +36,8 @@ func TestAppLogRunsRoundTripAndOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	finished := older.Add(30 * time.Second)
-	if err := store.FinishAppLogRun("11111111-1111-4111-8111-111111111111", "crashed", finished, true); err != nil {
+	if err := store.FinishAppLogRunWithExit("11111111-1111-4111-8111-111111111111", "crashed", finished,
+		true, nil, "SIGKILL", "kernel OOM-killed replica"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -55,6 +56,9 @@ func TestAppLogRunsRoundTripAndOrder(t *testing.T) {
 	}
 	if runs[1].Status != "crashed" || runs[1].FinishedAt == nil || !runs[1].OOMKilled {
 		t.Errorf("old run = %+v", runs[1])
+	}
+	if runs[1].Signal != "SIGKILL" || runs[1].ExitReason != "kernel OOM-killed replica" {
+		t.Errorf("old run exit diagnostics = %+v", runs[1])
 	}
 	unfinished, err := store.ListUnfinishedAppLogRuns(app.ID)
 	if err != nil {

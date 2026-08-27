@@ -1099,6 +1099,9 @@ func (w *Watcher) handleCrashedLocked(slug string, index int) {
 	crash := db.UpsertReplicaParams{AppID: app.ID, Index: index, Reason: reason}
 	if hasVerdict {
 		crash.ExitCode, crash.Signal = verdict.ExitCode, verdict.Signal
+		crash.ExitObservedAt = verdict.At
+		crash.ExitOOMKilled = verdict.OOMKilled
+		crash.ExitRunID = verdict.RunID
 	}
 	if newCrash {
 		if err := w.store.RecordReplicaCrash(crash); err != nil {

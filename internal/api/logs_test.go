@@ -174,7 +174,8 @@ func TestHandleLogSourcesAndLogsExposeImmutableRunHistory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.FinishAppLogRun(olderID, "stopped", base.Add(30*time.Second), false); err != nil {
+	if err := store.FinishAppLogRunWithExit(olderID, "crashed", base.Add(30*time.Second),
+		true, nil, "SIGKILL", "kernel OOM-killed replica"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.MarkAppLogRunRunning(newerID, "native", ""); err != nil {
@@ -217,11 +218,14 @@ func TestHandleLogSourcesAndLogsExposeImmutableRunHistory(t *testing.T) {
 	}
 	var body struct {
 		Sources []struct {
-			SourceID string `json:"source_id"`
-			RunID    string `json:"run_id"`
-			Current  bool   `json:"current"`
-			Replica  int    `json:"replica"`
-			Status   string `json:"status"`
+			SourceID   string `json:"source_id"`
+			RunID      string `json:"run_id"`
+			Current    bool   `json:"current"`
+			Replica    int    `json:"replica"`
+			Status     string `json:"status"`
+			OOMKilled  bool   `json:"oom_killed"`
+			ExitSignal string `json:"exit_signal"`
+			ExitReason string `json:"exit_reason"`
 		} `json:"sources"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -230,10 +234,13 @@ func TestHandleLogSourcesAndLogsExposeImmutableRunHistory(t *testing.T) {
 	if len(body.Sources) != 2 {
 		t.Fatalf("sources=%+v", body.Sources)
 	}
+	if got := body.Sources[1]; !got.OOMKilled || got.ExitSignal != "SIGKILL" || got.ExitReason != "kernel OOM-killed replica" {
+		t.Errorf("historical exit diagnostics = %+v", got)
+	}
 	if body.Sources[0].RunID != newerID || !body.Sources[0].Current || body.Sources[0].Status != "running" {
 		t.Errorf("current=%+v", body.Sources[0])
 	}
-	if body.Sources[1].RunID != olderID || body.Sources[1].Current || body.Sources[1].Status != "stopped" {
+	if body.Sources[1].RunID != olderID || body.Sources[1].Current || body.Sources[1].Status != "crashed" {
 		t.Errorf("history=%+v", body.Sources[1])
 	}
 	rec = request("/api/apps/myapp/logs?replica=0&run=" + olderID + "&follow=false")

@@ -186,6 +186,7 @@ func (s *Server) decorateAppObservation(app *db.App, replicas []*db.Replica, poo
 	app.ReplicasRunning = 0
 	app.WorkersRunning = pool.Running
 	app.LastReplicaError = ""
+	app.LastReplicaExit = nil
 
 	if pool.Known {
 		// Elastic pools are demand-driven and have no durable replica rows.
@@ -207,24 +208,38 @@ func (s *Server) decorateAppObservation(app *db.App, replicas []*db.Replica, poo
 
 	crashed, lost, starting, intentionallyParked := 0, 0, 0, 0
 	var lastReplicaErrorAt time.Time
+	var lastReplicaExitAt time.Time
 	for _, rep := range replicas {
 		if rep == nil {
 			continue
 		}
-		// Exit diagnostics deliberately survive a successful restart. Keep the
-		// newest one visible at app level even after this slot is serving again.
-		if rep.Reason != "" && (app.LastReplicaError == "" || rep.UpdatedAt.After(lastReplicaErrorAt)) {
-			app.LastReplicaError = rep.Reason
-			lastReplicaErrorAt = rep.UpdatedAt
+		if rep.LastExit != nil {
+			observed := time.Time{}
+			if rep.LastExit.ObservedAt != nil {
+				observed = *rep.LastExit.ObservedAt
+			}
+			if app.LastReplicaExit == nil || observed.After(lastReplicaExitAt) {
+				copy := *rep.LastExit
+				app.LastReplicaExit = &copy
+				lastReplicaExitAt = observed
+			}
 		}
 		switch rep.Status {
 		case db.ReplicaStatusRunning:
 			app.ReplicasRunning++
 		case "crashed":
+			if rep.Reason != "" && (app.LastReplicaError == "" || rep.UpdatedAt.After(lastReplicaErrorAt)) {
+				app.LastReplicaError = rep.Reason
+				lastReplicaErrorAt = rep.UpdatedAt
+			}
 			if rep.DesiredState == "" || rep.DesiredState == "running" {
 				crashed++
 			}
 		case db.ReplicaStatusLost:
+			if rep.Reason != "" && (app.LastReplicaError == "" || rep.UpdatedAt.After(lastReplicaErrorAt)) {
+				app.LastReplicaError = rep.Reason
+				lastReplicaErrorAt = rep.UpdatedAt
+			}
 			if rep.DesiredState == "" || rep.DesiredState == "running" {
 				lost++
 			}

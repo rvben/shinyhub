@@ -51,6 +51,9 @@ type logSourceResponse struct {
 	StartedAt    *time.Time `json:"started_at,omitempty"`
 	FinishedAt   *time.Time `json:"finished_at,omitempty"`
 	OOMKilled    bool       `json:"oom_killed,omitempty"`
+	ExitCode     *int       `json:"exit_code,omitempty"`
+	ExitSignal   string     `json:"exit_signal,omitempty"`
+	ExitReason   string     `json:"exit_reason,omitempty"`
 	LogUpdatedAt *time.Time `json:"log_updated_at,omitempty"`
 	SizeBytes    int64      `json:"size_bytes"`
 	HasLog       bool       `json:"has_log"`
@@ -139,6 +142,7 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 			Tier: run.Tier, AppVersion: run.AppVersion,
 			DeploymentID: run.DeploymentID, UpdatedAt: run.StartedAt,
 			StartedAt: &started, FinishedAt: run.FinishedAt, OOMKilled: run.OOMKilled,
+			ExitCode: run.ExitCode, ExitSignal: run.Signal, ExitReason: run.ExitReason,
 			ExternalLogs: externalLogs,
 			InlineAvailable: s.providerLogs != nil && externalLogs != nil &&
 				externalLogs.LogGroup != "" && externalLogs.LogStream != "",
