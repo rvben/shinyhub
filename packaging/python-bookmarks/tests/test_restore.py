@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, datetime
+
 import pytest
 from shinyhub_bookmarks import ChoiceRestore, Field
 from shinyhub_bookmarks._adapter import _normalise_fields, _restore_adjustments
@@ -72,6 +74,46 @@ def test_choice_restore_rejects_an_unknown_control():
 
 def test_values_equal_treats_list_and_tuple_transport_as_equivalent():
     assert values_equal(["A", "B"], ("A", "B"))
+
+
+@pytest.mark.parametrize(
+    ("saved", "current"),
+    [
+        ("2026-08-01", date(2026, 8, 1)),
+        ("2026-08-01T12:30:00", datetime(2026, 8, 1, 12, 30)),
+        (
+            ["2026-08-01", "2026-08-27"],
+            (date(2026, 8, 1), date(2026, 8, 27)),
+        ),
+    ],
+)
+def test_values_equal_treats_temporal_values_as_iso_bookmark_transport(
+    saved, current
+):
+    assert values_equal(saved, current)
+
+
+def test_values_equal_detects_different_temporal_values():
+    assert not values_equal(["2026-08-01"], (date(2026, 8, 2),))
+
+
+def test_restore_adjustments_ignore_matching_date_range_transport_values():
+    registered = _normalise_fields(
+        {"daterange": Field("Date Range")},
+        resolve=lambda value: value,
+    )
+
+    adjustments, updates = _restore_adjustments(
+        state_input={"daterange": ["2026-08-01", "2026-08-27"]},
+        registered=registered,
+        current_values={
+            "daterange": (date(2026, 8, 1), date(2026, 8, 27)),
+        },
+        legacy_fields={},
+    )
+
+    assert not adjustments
+    assert updates == {}
 
 
 def test_restore_adjustments_report_migration_rename_and_removed_field():

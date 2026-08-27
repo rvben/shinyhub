@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Literal
 
 
@@ -71,13 +72,23 @@ class ChoiceResolution:
     kind: Literal["migrated", "fallback"] | None
 
 
-def values_equal(left: Any, right: Any) -> bool:
-    """Compare restored values while treating list/tuple transport equally."""
+def _comparable(value: Any) -> Any:
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
 
+
+def values_equal(left: Any, right: Any) -> bool:
+    """Compare values across Shiny's JSON and live-input representations."""
+
+    left = _comparable(left)
+    right = _comparable(right)
     if isinstance(left, Sequence) and not isinstance(left, (str, bytes)):
         if not isinstance(right, Sequence) or isinstance(right, (str, bytes)):
             return False
-        return list(left) == list(right)
+        return [_comparable(value) for value in left] == [
+            _comparable(value) for value in right
+        ]
     try:
         return bool(left == right)
     except Exception:
