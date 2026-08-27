@@ -2,12 +2,13 @@
 // shell by internal/ui/branding.go RenderIndex) to the static markup.
 //
 // Every `.brand` node in the shell is a brand slot: the sidebar, the mobile top
-// bar, the boot splash, and the login card. A slot carries the stock Orbit Hub
-// lockup until an operator overrides it, so a self-hosted install shows its
-// own identity everywhere the product shows ours - the login card included,
-// which is the only chrome an anonymous visitor ever sees.
+// bar, the boot splash, and the login card. The signed-out boot/login slots may
+// carry the operator's logo or title. Signed-in `.brand-home` slots deliberately
+// keep the ShinyHub lockup and place the configured site title beneath it, so an
+// external-auth flow that skips our login still identifies both product and hub.
 //
-// Precedence per slot: logo image > site title text > stock lockup.
+// Signed-out precedence: logo image > site title text > stock lockup.
+// Signed-in precedence: stock lockup > optional site title subtitle.
 //
 // DOM-free by default: applyBranding takes an explicit document so it is
 // unit-testable with jsdom (jstests/branding.test.js). app.js owns the wiring.
@@ -51,6 +52,28 @@ function renderSiteTitle(doc, slot, text) {
   slot.replaceChildren(name);
 }
 
+function renderSignedInBrand(doc, slot, siteTitle) {
+  const art = doc.createElement('span');
+  art.className = 'brand-art';
+  art.setAttribute('aria-hidden', 'true');
+
+  const productName = doc.createElement('span');
+  productName.className = 'sr-only';
+  productName.textContent = 'ShinyHub';
+
+  const children = [art, productName];
+  if (siteTitle) {
+    const subtitle = doc.createElement('span');
+    subtitle.className = 'brand-subtitle';
+    subtitle.textContent = siteTitle;
+    subtitle.setAttribute('aria-hidden', 'true');
+    children.push(subtitle);
+  }
+
+  slot.classList.toggle('brand-home--subtitled', !!siteTitle);
+  slot.replaceChildren(...children);
+}
+
 function renderFooter(doc, links) {
   let footer = doc.querySelector('footer.brand-footer');
   if (!footer) {
@@ -75,7 +98,13 @@ export function applyBranding(doc, branding) {
   const slots = doc.querySelectorAll('.brand');
   for (const slot of slots) {
     if (slot.classList.contains('brand-home')) {
-      slot.setAttribute('aria-label', `${intent.siteTitle || 'ShinyHub'} home`);
+      slot.setAttribute('aria-label', intent.siteTitle
+        ? `ShinyHub — ${intent.siteTitle} home`
+        : 'ShinyHub home');
+      if (intent.logo || intent.siteTitle) {
+        renderSignedInBrand(doc, slot, intent.siteTitle);
+      }
+      continue;
     }
     if (intent.logo) {
       renderLogo(doc, slot, intent.logo, intent.logoAlt);

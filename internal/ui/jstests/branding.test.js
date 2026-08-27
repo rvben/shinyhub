@@ -3,10 +3,9 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { brandingIntent, applyBranding } from '../static/views/branding.js';
 
-// Operator branding replaces the stock ShinyHub identity in every `.brand` slot.
-// The login card is the slot that matters most: it is the only chrome an
-// anonymous visitor sees, so a self-hoster's logo has to land there and not just
-// in the signed-in sidebar.
+// Operator branding owns the signed-out boot/login slots. Signed-in home links
+// remain product-first: ShinyHub is the lockup and the configured site title is
+// its hub subtitle, so external auth cannot bypass the product identity.
 
 // The four brand slots as they appear in index.html: boot splash, mobile top
 // bar, sidebar, and the login card.
@@ -100,17 +99,24 @@ test('a configured logo reaches the LOGIN card, not just the signed-in chrome', 
   assert.equal(loginSlot(doc).querySelector('.brand-name'), null);
 });
 
-test('every brand slot gets the logo, so the identity is consistent across views', () => {
+test('a custom logo stays on signed-out slots while signed-in slots keep ShinyHub', () => {
   const doc = shellDoc();
   applyBranding(doc, { logo: '/branding/logo.svg' });
-  const slots = [...doc.querySelectorAll('.brand')];
-  assert.equal(slots.length, 4);
-  for (const slot of slots) {
+  const signedOut = [...doc.querySelectorAll('.brand:not(.brand-home)')];
+  const signedIn = [...doc.querySelectorAll('.brand-home')];
+  assert.equal(signedOut.length, 2);
+  assert.equal(signedIn.length, 2);
+  for (const slot of signedOut) {
     assert.equal(slot.querySelectorAll('img.brand-logo').length, 1);
+  }
+  for (const slot of signedIn) {
+    assert.ok(slot.querySelector('.brand-art'));
+    assert.equal(slot.querySelector('.sr-only').textContent, 'ShinyHub');
+    assert.equal(slot.querySelector('img'), null);
   }
 });
 
-test('signed-in brand links identify the configured site as home', () => {
+test('signed-in brand links pair ShinyHub with the configured site subtitle', () => {
   const doc = shellDoc();
   applyBranding(doc, { site_title: 'ACME Analytics' });
   const homeLinks = [...doc.querySelectorAll('a.brand-home')];
@@ -118,7 +124,11 @@ test('signed-in brand links identify the configured site as home', () => {
   for (const link of homeLinks) {
     assert.equal(link.getAttribute('href'), '/home');
     assert.ok(link.hasAttribute('data-nav'));
-    assert.equal(link.getAttribute('aria-label'), 'ACME Analytics home');
+    assert.equal(link.getAttribute('aria-label'), 'ShinyHub — ACME Analytics home');
+    assert.ok(link.querySelector('.brand-art'));
+    assert.equal(link.querySelector('.sr-only').textContent, 'ShinyHub');
+    assert.equal(link.querySelector('.brand-subtitle').textContent, 'ACME Analytics');
+    assert.equal(link.querySelector('.brand-subtitle').getAttribute('aria-hidden'), 'true');
   }
 });
 

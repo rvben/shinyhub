@@ -217,6 +217,8 @@ func TestAboutDialog(t *testing.T) {
 		"the dialog must carry the runtimes slot; /api/server-info reports them and no other view does")
 	assertContains(t, "index.html", `<button id="about-button" type="button" class="sidebar-about"`,
 		"the sidebar footer must carry the About trigger, or the dialog is unreachable")
+	assertContains(t, "index.html", `<span class="nav-label">About ShinyHub</span>`,
+		"the visible About trigger must name ShinyHub after external auth bypasses the built-in login")
 	assertContains(t, "app.js", "renderAbout(document",
 		"app.js must render the dialog via views/about.js so the label rules stay covered by jstests/about.test.js")
 	assertContains(t, "app.js", "createServerInfoLoader(",
@@ -2923,8 +2925,10 @@ func TestRootHomeUIContract(t *testing.T) {
 		"the SPA registers /home as the stable authenticated home alias")
 	assertContains(t, "index.html", `href="/home" data-nav class="brand brand-home" aria-label="ShinyHub home"`,
 		"the signed-in desktop and mobile brand marks must be accessible links to the stable home route")
-	assertContains(t, "views/branding.js", "`${intent.siteTitle || 'ShinyHub'} home`",
-		"white-label home links must use the configured site title in their accessible name")
+	assertContains(t, "views/branding.js", "`ShinyHub — ${intent.siteTitle} home`",
+		"signed-in home links must identify ShinyHub and the configured hub title")
+	assertContains(t, "views/branding.js", "renderSignedInBrand(doc, slot, intent.siteTitle)",
+		"signed-in branding must keep the ShinyHub lockup and render the hub title as a subtitle")
 	assertContains(t, "style.css", ".brand-home:hover",
 		"the brand home link must provide restrained pointer feedback")
 	assertContains(t, "app.js", "router.register('/launchpad'",

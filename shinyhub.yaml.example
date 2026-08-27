@@ -321,10 +321,11 @@ maintenance:
 # A remote logo/favicon origin is added to the SPA's CSP img-src automatically, so
 # the browser loads it; no other CSP directive is widened.
 #
-# logo replaces the ShinyHub wordmark in every brand slot: the sidebar, mobile top
-# bar, boot splash, and the login card (the only chrome a signed-out visitor sees).
-# With no logo, site_title replaces the wordmark text. With neither, the stock
-# ShinyHub wordmark shows. A logo around 40px tall reads well on the login card.
+# logo replaces the ShinyHub wordmark on the boot splash and login card (the only
+# chrome a signed-out visitor sees). With no logo, site_title replaces the
+# signed-out wordmark text. Signed-in sidebar/mobile navigation always shows the
+# ShinyHub lockup, with site_title beneath it as the hub subtitle. With neither,
+# the stock ShinyHub wordmark shows. A logo around 40px tall reads well on login.
 # landing_page is a filename inside assets_dir (or an absolute path that resolves
 # inside assets_dir); it replaces the stock app catalog at /.
 # /login always serves the SPA shell regardless of landing_page.

@@ -32,9 +32,9 @@ branding:
 
 | Field | Description |
 |---|---|
-| `site_title` | Replaces the `<title>` tag in the SPA shell, and the ShinyHub wordmark in every brand slot when no `logo` is set. |
+| `site_title` | Replaces the `<title>` tag in the SPA shell. On signed-out brand slots it replaces the ShinyHub wordmark when no `logo` is set; in signed-in navigation it appears as a subtitle beneath ShinyHub. |
 | `assets_dir` | Directory that backs all local asset references. Required when any field references a local file. |
-| `logo` | Brand logo: a filename inside `assets_dir` or an absolute `http(s)://` URL. Replaces the wordmark in every brand slot, including the login card. |
+| `logo` | Brand logo: a filename inside `assets_dir` or an absolute `http(s)://` URL. Replaces the wordmark on the boot splash and login card; signed-in navigation keeps the ShinyHub lockup. |
 | `favicon` | Browser-tab icon: a filename inside `assets_dir` or an absolute `http(s)://` URL. Used by the dashboard, login, custom landing fallback, and ShinyHub-owned app status/access pages. |
 | `theme.primary_color` | CSS hex color (`#rgb` or `#rrggbb`). Injected as the `--brand-primary` CSS variable. |
 | `landing_page` | Filename inside `assets_dir` that replaces the stock app catalog at `/`. `/login` always serves the SPA shell. |
@@ -62,24 +62,30 @@ mark from leaking into an otherwise white-labelled browser tab.
 
 ### Brand slots
 
-A brand slot is anywhere ShinyHub shows its own identity: the sidebar, the
-mobile top bar, the boot splash, and the login card. All four take the same
-value, so one `logo` (or one `site_title`) brands the whole product.
+A brand slot is anywhere ShinyHub shows product or instance identity: the
+sidebar, mobile top bar, boot splash, and login card. The two signed-out slots
+use the operator identity; the two signed-in slots remain ShinyHub-first so an
+external authentication proxy cannot bypass product identification.
 
-Per slot, the first of these that is set wins:
+On the boot splash and login card, the first configured value wins:
 
 1. `logo` - rendered as an image, with `site_title` (or `ShinyHub`) as its alt text.
-2. `site_title` - rendered as text beside the mark.
+2. `site_title` - rendered as the signed-out identity text.
 3. The stock ShinyHub wordmark.
 
 The login card matters most: signed out, it is the only chrome a visitor sees.
 A logo sized around 40px tall reads well there; wider lockups are clamped to the
 card width.
 
+In the signed-in sidebar and mobile top bar, the ShinyHub wordmark remains the
+primary identity. When `site_title` is set, it appears directly beneath the
+wordmark as the hub subtitle. The compact desktop rail uses the standalone
+ShinyHub mark.
+
 ### What branding does not replace
 
-The About dialog, reached from the sidebar footer, names ShinyHub and its
-version, and branding never replaces it. It is the only place a signed-in
+The About dialog, reached through **About ShinyHub** in the sidebar footer,
+names ShinyHub and its version, and branding never replaces it. It is the only place a signed-in
 operator can read which software and which release they are running, so it has
 to survive a full white-label: it is what makes a bug report actionable and what
 tells whoever inherits the server what it is. It also reports which app runtimes
@@ -87,9 +93,9 @@ the host can start, which is the fastest answer to "why did my R app fail to
 deploy".
 
 It sits behind the login and behind a click, where the audience is people who
-run the platform rather than people who visit it. The trigger reads "About", so
-an anonymous visitor sees only your brand and a signed-in one gives nothing away
-until they open it.
+run the platform rather than people who visit it. The explicit trigger also
+keeps the product name discoverable for users who signed in at an external
+authentication proxy and never saw ShinyHub's login page.
 
 ## Environment overrides
 
