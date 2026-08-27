@@ -185,7 +185,7 @@ func TestWireContract_EveryPayloadFieldIsReadByTheScript(t *testing.T) {
 }
 
 // Apps own their layouts, so the switcher must offer more than one intentional
-// placement rather than assuming the default top centre is always clear. These
+// placement rather than assuming the default top right is always clear. These
 // selectors also pin the bar and its panel to the same placement model.
 func TestScript_OffersFourAnchoredPlacements(t *testing.T) {
 	for _, position := range []string{"top-center", "top-right", "left-center", "right-center"} {

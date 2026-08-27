@@ -27,7 +27,8 @@ const HOST_ID = 'shinyhub-app-nav-host';
 const NAV_URL = '/app/demo/.shinyhub/nav.json';
 const HOME_URL = 'https://hub.example.com/';
 const DISMISS_KEY = 'shinyhub-app-nav:dismissed';
-const POSITION_KEY = 'shinyhub-app-nav:position:demo';
+const POSITION_KEY = 'shinyhub-app-nav:position';
+const LEGACY_POSITION_KEY = 'shinyhub-app-nav:position:demo';
 
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -48,6 +49,7 @@ function mount({
   url = 'http://apps.example.com/app/demo/',
   dismissed = false,
   position = null,
+  legacyPosition = null,
   compactImmediately = false,
   deferred = false,
 } = {}) {
@@ -89,6 +91,7 @@ function mount({
 
   if (dismissed) w.sessionStorage.setItem(DISMISS_KEY, '1');
   if (position) w.localStorage.setItem(POSITION_KEY, position);
+  if (legacyPosition) w.localStorage.setItem(LEGACY_POSITION_KEY, legacyPosition);
 
   const fetches = [];
   let releaseFetch = null;
@@ -181,20 +184,23 @@ test('mounts a recognizable app bar into the page without fetching anything', as
   assert.ok(m.openBtn(), 'the bar has no control to open the panel');
   assert.equal(m.q('.current-label').textContent, 'Demo');
   assert.match(m.q('.current-action').textContent, /Switch app/);
-  assert.equal(m.root().getAttribute('data-position'), 'top-center');
+  assert.equal(m.root().getAttribute('data-position'), 'top-right');
   assert.equal(m.fetches.length, 0);
   assert.equal(m.jsdomErrors.length, 0, `script errored: ${m.jsdomErrors.join('; ')}`);
 });
 
-test('opening resolves the current slug to the app display name', async () => {
+test('opening keeps the current label stable when the friendly name differs from the slug', async () => {
   const m = mount({ payload: { apps: [app('demo', { name: 'Revenue forecast' })] } });
+  const initialLabel = m.q('.current-label').textContent;
+  const initialAccessibleName = m.openBtn().getAttribute('aria-label');
   await m.open();
 
-  assert.equal(m.q('.current-label').textContent, 'Revenue forecast');
-  assert.match(m.openBtn().getAttribute('aria-label'), /current app Revenue forecast/);
+  assert.equal(m.q('.current-label').textContent, initialLabel);
+  assert.equal(m.openBtn().getAttribute('aria-label'), initialAccessibleName);
+  assert.match(initialAccessibleName, /current app Demo/);
 });
 
-test('the placement menu offers four deliberate anchors and persists the choice per app', async () => {
+test('the placement menu offers four deliberate anchors and persists one choice across apps', async () => {
   const m = mount();
   m.moveBtn().click();
 
@@ -211,8 +217,18 @@ test('the placement menu offers four deliberate anchors and persists the choice 
   assert.equal(m.window.localStorage.getItem(POSITION_KEY), 'right-center');
   assert.equal(m.root().classList.contains('placing'), false);
 
-  const next = mount({ position: 'right-center' });
+  const next = mount({
+    position: 'right-center',
+    attrs: { 'data-current-slug': 'another-app' },
+  });
   assert.equal(next.root().getAttribute('data-position'), 'right-center');
+});
+
+test('an old per-app placement is migrated to the hub-wide preference', () => {
+  const m = mount({ legacyPosition: 'left-center' });
+
+  assert.equal(m.root().getAttribute('data-position'), 'left-center');
+  assert.equal(m.window.localStorage.getItem(POSITION_KEY), 'left-center');
 });
 
 test('dragging the handle previews anchors and snaps to the nearest one', async () => {
@@ -249,16 +265,16 @@ test('the placement menu uses arrow-key roving focus', async () => {
   const m = mount();
   m.moveBtn().click();
   const choices = m.qa('button.place-option');
-  assert.equal(m.focused(), choices[0]);
-  assert.deepEqual(choices.map((choice) => choice.tabIndex), [0, -1, -1, -1]);
-
-  choices[0].dispatchEvent(
-    new m.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, composed: true })
-  );
   assert.equal(m.focused(), choices[1]);
   assert.deepEqual(choices.map((choice) => choice.tabIndex), [-1, 0, -1, -1]);
 
   choices[1].dispatchEvent(
+    new m.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, composed: true })
+  );
+  assert.equal(m.focused(), choices[2]);
+  assert.deepEqual(choices.map((choice) => choice.tabIndex), [-1, -1, 0, -1]);
+
+  choices[2].dispatchEvent(
     new m.window.KeyboardEvent('keydown', { key: 'End', bubbles: true, composed: true })
   );
   assert.equal(m.focused(), choices[3]);
@@ -311,7 +327,7 @@ test('lists the apps the endpoint returned, linking each to its own page', async
   );
 });
 
-test('groups apps in the same order as the dashboard sidebar', async () => {
+test('uses the dashboard sidebar order when the current app is not in the result', async () => {
   // The visitor came from that sidebar. A switcher that orders the same apps
   // differently is not a second view of one fleet, it is a contradiction they
   // have to resolve themselves. The rule is copied into nav.js because an
@@ -328,6 +344,44 @@ test('groups apps in the same order as the dashboard sidebar', async () => {
   // apps" once real projects exist, and named projects by their display name.
   assert.deepEqual(m.headings(), ['Other apps', 'Aaa', 'Bbb']);
   assert.deepEqual(m.labels(), ['Mike', 'Zulu', 'Alpha']);
+});
+
+test('puts the current group first and the current app first within it', async () => {
+  const m = mount({
+    payload: {
+      apps: [
+        app('loose', { name: 'Loose' }),
+        app('sibling', { name: 'Alpha', project_slug: 'analytics', project_name: 'Analytics' }),
+        app('demo', { name: 'Zulu', project_slug: 'analytics', project_name: 'Analytics' }),
+        app('other', { name: 'Beta', project_slug: 'briefing', project_name: 'Briefing' }),
+      ],
+    },
+  });
+  await m.open();
+
+  assert.deepEqual(m.headings(), ['Analytics', 'Other apps', 'Briefing']);
+  assert.deepEqual(m.labels(), ['Zulu', 'Alpha', 'Loose', 'Beta']);
+  assert.ok(m.items()[0].classList.contains('current'));
+  assert.equal(m.items()[0].getAttribute('aria-current'), 'page');
+});
+
+test('keeps matching siblings from the current group first while filtering', async () => {
+  const apps = [
+    app('loose-match', { name: 'Match loose' }),
+    app('sibling', { name: 'Match sibling', project_slug: 'analytics', project_name: 'Analytics' }),
+    app('demo', { name: 'Current', project_slug: 'analytics', project_name: 'Analytics' }),
+    app('other', { name: 'Match other', project_slug: 'briefing', project_name: 'Briefing' }),
+    ...Array.from({ length: 6 }, (_, i) => app(`extra-${i}`, { name: `Extra ${i}` })),
+  ];
+  const m = mount({ payload: { apps } });
+  await m.open();
+
+  const filter = m.q('input.filter');
+  filter.value = 'match';
+  filter.dispatchEvent(new m.window.Event('input'));
+
+  assert.deepEqual(m.headings(), ['Analytics', 'Other apps', 'Briefing']);
+  assert.deepEqual(m.labels(), ['Match sibling', 'Match loose', 'Match other']);
 });
 
 test('a lone ungrouped bucket gets no heading', async () => {
@@ -348,6 +402,85 @@ test('the app the visitor is already in is marked, not offered as a destination'
   // accessible name so a screen reader announces it with the app.
   assert.match(demo.getAttribute('aria-label'), /current app/);
   assert.equal(other.getAttribute('aria-current'), null);
+});
+
+test('switching apps immediately names the destination and shows a busy row', async () => {
+  const m = mount({
+    payload: {
+      apps: [
+        app('demo', { name: 'Current app' }),
+        app('forecast', { name: 'Revenue forecast' }),
+        app('briefing', { name: 'Morning briefing' }),
+      ],
+    },
+  });
+  await m.open();
+
+  const destination = m.q('.item[data-slug="forecast"]');
+  // Keep jsdom on this document after the switcher's own handler has observed
+  // the click. The production anchor remains native and is not prevented.
+  destination.addEventListener('click', (event) => event.preventDefault(), { once: true });
+  destination.dispatchEvent(new m.window.MouseEvent('click', {
+    bubbles: true, cancelable: true, button: 0,
+  }));
+
+  assert.ok(m.root().classList.contains('navigating'));
+  assert.equal(m.panel().getAttribute('aria-busy'), 'true');
+  assert.equal(m.q('.title').textContent, 'Opening Revenue forecast…');
+  assert.equal(m.q('.announcer').textContent, 'Opening Revenue forecast');
+  assert.equal(m.q('.announcer').parentElement, m.root(), 'the live message sits inside the busy panel');
+  assert.ok(destination.classList.contains('opening-item'));
+  assert.equal(destination.querySelector('.opening-state').textContent, 'Opening');
+  assert.equal(destination.getAttribute('aria-label'), 'Revenue forecast, opening');
+  assert.ok(
+    m.items().every((item) => item.getAttribute('aria-disabled') === 'true' && item.tabIndex === -1),
+    'the old app still offered another switch while navigation was pending',
+  );
+});
+
+test('a pending switch ignores a second destination and resets after back-forward restore', async () => {
+  const m = mount({
+    payload: { apps: [app('demo'), app('alpha'), app('bravo')] },
+  });
+  await m.open();
+
+  const alpha = m.q('.item[data-slug="alpha"]');
+  alpha.addEventListener('click', (event) => event.preventDefault(), { once: true });
+  alpha.dispatchEvent(new m.window.MouseEvent('click', {
+    bubbles: true, cancelable: true, button: 0,
+  }));
+
+  const bravo = m.q('.item[data-slug="bravo"]');
+  const duplicate = new m.window.MouseEvent('click', {
+    bubbles: true, cancelable: true, button: 0,
+  });
+  assert.equal(bravo.dispatchEvent(duplicate), false, 'the duplicate navigation was not cancelled');
+  assert.equal(duplicate.defaultPrevented, true);
+  assert.ok(alpha.classList.contains('opening-item'));
+  assert.equal(bravo.classList.contains('opening-item'), false);
+
+  m.window.dispatchEvent(new m.window.PageTransitionEvent('pageshow', { persisted: true }));
+  assert.equal(m.root().classList.contains('navigating'), false);
+  assert.equal(m.panel().getAttribute('aria-busy'), null);
+  assert.equal(m.q('.title').textContent, 'Switch app');
+  assert.ok(m.items().every((item) => item.getAttribute('aria-disabled') === null));
+  assert.equal(m.q('.opening-state'), null);
+});
+
+test('modified app clicks keep native new-tab behavior without making this tab busy', async () => {
+  const m = mount({ payload: { apps: [app('demo'), app('other', { name: 'Other app' })] } });
+  await m.open();
+
+  const destination = m.q('.item[data-slug="other"]');
+  destination.addEventListener('click', (event) => event.preventDefault(), { once: true });
+  destination.dispatchEvent(new m.window.MouseEvent('click', {
+    bubbles: true, cancelable: true, button: 0, metaKey: true,
+  }));
+
+  assert.equal(m.root().classList.contains('navigating'), false);
+  assert.equal(m.panel().getAttribute('aria-busy'), null);
+  assert.equal(m.q('.title').textContent, 'Switch app');
+  assert.equal(destination.querySelector('.opening-state'), null);
 });
 
 test('an app that cannot be opened says so in words, not only in colour', async () => {

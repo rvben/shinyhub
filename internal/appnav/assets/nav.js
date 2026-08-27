@@ -18,7 +18,7 @@
  *      cannot restyle the switcher and the switcher's CSS cannot reach the app. An
  *      injected stylesheet without that boundary would be a fleet-wide
  *      restyling of applications this server did not write.
- *   4. It starts at the top centre, then lets the visitor snap it to another
+ *   4. It starts at the top right, then lets the visitor snap it to another
  *      viewport edge or reduce it to a restore tab. Apps own their layouts;
  *      collision recovery therefore belongs in the control, not in a host
  *      page heuristic that guesses where an app put its important controls.
@@ -39,7 +39,8 @@
 
   var TAG_ID = "shinyhub-app-nav";
   var DISMISS_KEY = "shinyhub-app-nav:dismissed";
-  var POSITION_KEY = "shinyhub-app-nav:position:";
+  var POSITION_KEY = "shinyhub-app-nav:position";
+  var LEGACY_POSITION_KEY = POSITION_KEY + ":";
   var FILTER_THRESHOLD = 8;
   var POSITIONS = ["top-center", "top-right", "left-center", "right-center"];
 
@@ -114,16 +115,25 @@
 
   function rememberedPosition() {
     try {
-      var saved = window.localStorage.getItem(POSITION_KEY + currentSlug);
-      return POSITIONS.indexOf(saved) === -1 ? "top-center" : saved;
+      var saved = window.localStorage.getItem(POSITION_KEY);
+      // Placements used to be scoped to each app. Adopt the current app's old
+      // choice once, then keep it hub-wide so following a switcher link does
+      // not move the control to a different edge on the destination app.
+      if (POSITIONS.indexOf(saved) === -1 && currentSlug) {
+        saved = window.localStorage.getItem(LEGACY_POSITION_KEY + currentSlug);
+        if (POSITIONS.indexOf(saved) !== -1) {
+          window.localStorage.setItem(POSITION_KEY, saved);
+        }
+      }
+      return POSITIONS.indexOf(saved) === -1 ? "top-right" : saved;
     } catch (e) {
-      return "top-center";
+      return "top-right";
     }
   }
 
   function rememberPosition(next) {
     try {
-      window.localStorage.setItem(POSITION_KEY + currentSlug, next);
+      window.localStorage.setItem(POSITION_KEY, next);
     } catch (e) {
       /* placement persistence is convenience, never a page requirement */
     }
@@ -135,7 +145,9 @@
    * Grouping. This is a deliberate copy of the rule in
    * internal/ui/static/views/project-groups.js: ungrouped apps first, then
    * named projects by display name with the project slug as a tiebreak so the
-   * order is total; apps sorted by display name within each group.
+   * order is total; apps sorted by display name within each group. The
+   * switcher layers one contextual rule on that stable base: the current
+   * project comes first, with the current app first inside it.
    *
    * It is copied rather than imported because an injected inline script cannot
    * import an ES module, and it is copied into JAVASCRIPT rather than
@@ -210,6 +222,62 @@
       });
     }
     return groups.sort(compareGroups);
+  }
+
+  function prioritizeCurrentContext(groups, allApps) {
+    var currentProject = null;
+    var foundCurrent = false;
+    var source = allApps || [];
+    for (var i = 0; i < source.length; i++) {
+      if (source[i] && source[i].slug === currentSlug) {
+        currentProject = projectKeyOf(source[i]);
+        foundCurrent = true;
+        break;
+      }
+    }
+    if (!foundCurrent) {
+      return groups;
+    }
+
+    var prioritized = groups.slice();
+    var groupIndex = -1;
+    for (var g = 0; g < prioritized.length; g++) {
+      if (prioritized[g].project === currentProject) {
+        groupIndex = g;
+        break;
+      }
+    }
+    // A filter can remove every app in the current project. In that case
+    // there is no contextual group left to promote.
+    if (groupIndex === -1) {
+      return prioritized;
+    }
+
+    var currentGroup = prioritized[groupIndex];
+    var members = currentGroup.apps.slice();
+    var appIndex = -1;
+    for (var a = 0; a < members.length; a++) {
+      if (members[a].slug === currentSlug) {
+        appIndex = a;
+        break;
+      }
+    }
+    if (appIndex > 0) {
+      members.unshift(members.splice(appIndex, 1)[0]);
+      currentGroup = {
+        project: currentGroup.project,
+        name: currentGroup.name,
+        iconEmoji: currentGroup.iconEmoji,
+        apps: members
+      };
+    }
+    if (groupIndex > 0) {
+      prioritized.splice(groupIndex, 1);
+      prioritized.unshift(currentGroup);
+    } else {
+      prioritized[0] = currentGroup;
+    }
+    return prioritized;
   }
 
   /* ---------------------------------------------------------------------
@@ -302,7 +370,6 @@
     ".root[data-position='left-center'] .close, .root[data-position='right-center'] .close { width: 38px; height: 32px; }",
     ".close:hover { color: var(--sh-coral); background: var(--sh-raised); }",
     ".close svg { width: 13px; height: 13px; }",
-
     ".scrim {" +
       "  position: absolute; inset: 0; background: var(--sh-deep); opacity: 0;" +
       "  pointer-events: none; transition: opacity 160ms ease;" +
@@ -341,6 +408,7 @@
       "  padding: 14px 16px 10px; border-bottom: 1px solid var(--sh-line);" +
       "}",
     ".title {" +
+      "  min-width: 0; max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" +
       "  font-size: 12px; font-weight: 600; line-height: 1.35; letter-spacing: 0.02em;" +
       "  text-transform: uppercase; color: var(--sh-soft);" +
       "}",
@@ -404,6 +472,29 @@
       "}",
     ".flag { color: var(--sh-soft); }",
     ".here { color: var(--sh-signal); }",
+    ".opening-state {" +
+      "  flex: none; display: flex; align-items: center; gap: 6px; color: var(--sh-signal);" +
+      "  font-size: 12px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase;" +
+      "}",
+    ".opening-spinner {" +
+      "  width: 12px; height: 12px; box-sizing: border-box; border-radius: 50%;" +
+      "  border: 2px solid var(--sh-line-strong); border-top-color: var(--sh-signal);" +
+      "  animation: sh-nav-spin 700ms linear infinite;" +
+      "}",
+    ".root.navigating .panel { cursor: progress; }",
+    ".root.navigating .item, .root.navigating .home, .root.navigating .headclose," +
+      " .root.navigating .filter { pointer-events: none; }",
+    ".root.navigating .item:not(.opening-item), .root.navigating .home," +
+      " .root.navigating .filterwrap, .root.navigating .headclose { opacity: 0.45; }",
+    ".root.navigating .item.opening-item {" +
+      "  background: var(--sh-hover); border-color: var(--sh-signal); color: var(--sh-text);" +
+      "}",
+    ".root.navigating .scrim, .root.navigating .bar { pointer-events: none; }",
+    ".announcer {" +
+      "  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;" +
+      "  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;" +
+      "}",
+    "@keyframes sh-nav-spin { to { transform: rotate(360deg); } }",
 
     ".note { padding: 16px 8px; color: var(--sh-soft); }",
     ".more { padding: 8px 8px 16px; color: var(--sh-soft); font-size: 12px; line-height: 1.35; }",
@@ -513,6 +604,7 @@
 
     "@media (prefers-reduced-motion: reduce) {" +
       "  .panel, .scrim, .bar, .position-menu, .snap-guides, .guide, .chevron { transition: none; }" +
+      "  .opening-spinner { animation: none; border-color: var(--sh-signal); }" +
       "}"
   ];
 
@@ -664,6 +756,10 @@
   openBtn.appendChild(compactLabel);
   openBtn.appendChild(current);
   openBtn.appendChild(chevron);
+  openBtn.setAttribute(
+    "aria-label",
+    "Switch apps, current app " + (currentLabel.textContent || currentSlug || "unknown")
+  );
 
   var closeBtn = document.createElement("button");
   closeBtn.type = "button";
@@ -771,8 +867,17 @@
   panel.appendChild(filterWrap);
   panel.appendChild(list);
   panel.appendChild(foot);
+
+  // This status sits outside the panel's aria-busy subtree, so assistive
+  // technology announces a switch immediately rather than waiting for the
+  // destination page to finish loading.
+  var announcer = div("announcer");
+  announcer.setAttribute("role", "status");
+  announcer.setAttribute("aria-live", "polite");
+  announcer.setAttribute("aria-atomic", "true");
   root.appendChild(scrim);
   root.appendChild(panel);
+  root.appendChild(announcer);
   root.appendChild(positionMenu);
   root.appendChild(snapGuides);
   root.appendChild(bar);
@@ -791,6 +896,7 @@
   var payload = null;
   var lastFocus = null;
   var compactTimer = null;
+  var navigating = false;
 
   function mobileViewport() {
     try {
@@ -898,7 +1004,7 @@
       return;
     }
 
-    var groups = groupApps(visible);
+    var groups = prioritizeCurrentContext(groupApps(visible), payload.apps);
     for (var g = 0; g < groups.length; g++) {
       var group = groups[g];
       // A single ungrouped bucket needs no heading; once projects exist, the
@@ -938,6 +1044,18 @@
       "item" + (here ? " current" : "") + (openable ? "" : " down");
     if (openable) {
       link.href = "/app/" + encodeURIComponent(app.slug) + "/";
+      if (!here) {
+        link.addEventListener("click", guard(function (ev) {
+          if (!sameTabNavigation(ev, link)) {
+            return;
+          }
+          if (navigating) {
+            ev.preventDefault();
+            return;
+          }
+          beginNavigation(link, String(app.name || app.slug));
+        }));
+      }
     }
     link.setAttribute("data-slug", app.slug);
     if (here) {
@@ -965,6 +1083,85 @@
     return link;
   }
 
+  // New-tab and modified clicks deliberately do not put this tab into a busy
+  // state: its page is staying put. For an ordinary activation, the native
+  // anchor navigation remains in charge while the switcher immediately makes
+  // the destination and the in-progress transition visible.
+  function sameTabNavigation(ev, link) {
+    if (
+      (ev.button !== undefined && ev.button !== 0) ||
+      ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey
+    ) {
+      return false;
+    }
+    var explicitTarget = link.getAttribute("target");
+    var base = document.querySelector("base[target]");
+    var target = explicitTarget || (base && base.getAttribute("target")) || "";
+    return !target || target === "_self" || target === "_top" || target === "_parent";
+  }
+
+  function beginNavigation(link, name) {
+    navigating = true;
+    root.classList.add("navigating");
+    panel.setAttribute("aria-busy", "true");
+    title.textContent = "Opening " + name + "\u2026";
+    title.title = "Opening " + name;
+    announcer.textContent = "Opening " + name;
+    countBadge.hidden = true;
+    filter.disabled = true;
+    headClose.disabled = true;
+    homeLink.setAttribute("aria-disabled", "true");
+    homeLink.setAttribute("tabindex", "-1");
+
+    var links = list.querySelectorAll("a.item");
+    for (var i = 0; i < links.length; i++) {
+      links[i].setAttribute("aria-disabled", "true");
+      links[i].setAttribute("tabindex", "-1");
+    }
+
+    link.classList.add("opening-item");
+    link.setAttribute("aria-label", name + ", opening");
+    var state = div("opening-state");
+    var spinner = div("opening-spinner");
+    spinner.setAttribute("aria-hidden", "true");
+    state.appendChild(spinner);
+    state.appendChild(document.createTextNode("Opening"));
+    link.appendChild(state);
+  }
+
+  // A page restored from the back-forward cache keeps this exact DOM. Clear
+  // the departed-page state so returning to it never leaves a frozen switcher.
+  function resetNavigation() {
+    if (!navigating) {
+      return;
+    }
+    navigating = false;
+    root.classList.remove("navigating");
+    panel.removeAttribute("aria-busy");
+    title.textContent = "Switch app";
+    title.removeAttribute("title");
+    announcer.textContent = "";
+    countBadge.hidden = false;
+    filter.disabled = false;
+    headClose.disabled = false;
+    homeLink.removeAttribute("aria-disabled");
+    homeLink.removeAttribute("tabindex");
+
+    var links = list.querySelectorAll("a.item");
+    for (var i = 0; i < links.length; i++) {
+      links[i].removeAttribute("aria-disabled");
+      links[i].removeAttribute("tabindex");
+      if (links[i].classList.contains("opening-item")) {
+        links[i].classList.remove("opening-item");
+        links[i].removeAttribute("aria-label");
+      }
+    }
+    var state = list.querySelector(".opening-state");
+    if (state && state.parentNode) {
+      state.parentNode.removeChild(state);
+    }
+  }
+
   function render() {
     if (!payload) {
       return;
@@ -973,16 +1170,6 @@
     countBadge.textContent = String(total) + (payload.truncated ? "+" : "");
     filterWrap.hidden = total <= FILTER_THRESHOLD;
     who.textContent = payload.username ? "Signed in as " + payload.username : "";
-    for (var ci = 0; ci < (payload.apps || []).length; ci++) {
-      if (payload.apps[ci] && payload.apps[ci].slug === currentSlug) {
-        currentLabel.textContent = String(payload.apps[ci].name || currentSlug || "Current app");
-        break;
-      }
-    }
-    openBtn.setAttribute(
-      "aria-label",
-      "Switch apps, current app " + (currentLabel.textContent || currentSlug || "unknown")
-    );
     renderList();
     // The list has arrived. If focus is still parked on the panel waiting for
     // something worth landing on, hand it over now. The open check is what
@@ -1305,6 +1492,7 @@
   window.addEventListener("resize", guard(function () {
     revealBar(true);
   }));
+  window.addEventListener("pageshow", guard(resetNavigation));
 
   headClose.addEventListener("click", guard(function () {
     setOpen(false);
@@ -1327,6 +1515,9 @@
   // listens for its own shortcuts on document must not see the visitor typing
   // into our filter box, and we must not see theirs.
   root.addEventListener("keydown", guard(function (ev) {
+    if (navigating) {
+      return;
+    }
     if (placing) {
       if (ev.key === "Escape") {
         ev.stopPropagation();
