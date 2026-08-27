@@ -1979,9 +1979,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 
 	// ownerWork runs the owner-only startup and background loops for one span of
-	// ownership. It performs the five destructive boot-time reconciles/sweeps
+	// ownership. It performs the destructive boot-time reconciles/sweeps
 	// exactly once (deferred until ownership so a coexisting new instance never
-	// fails the old owner's in-flight deploy), starts the three background loops
+	// fails the old owner's in-flight deploy), starts the owner-scoped background loops
 	// bound to octx, then blocks until ownership is lost and stops them.
 	// jobsMgr/sched/watcher/monitor/controller are created once above and reused
 	// across spans (the scheduler supports stop/start cycles).
@@ -2090,6 +2090,8 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// is configured.
 		loops.Add(1)
 		go func() { defer loops.Done(); runMaintenance(octx, store, mgr, appLogTelemetry, cfg.Maintenance) }()
+		loops.Add(1)
+		go func() { defer loops.Done(); srv.RunDevelopmentAppReaper(octx, time.Minute) }()
 		// Warm-restore: re-boot and re-freeze the apps that were hibernated before
 		// this restart, so their next access is a warm resume instead of a cold
 		// boot (a frozen process does not survive a service restart, so the warm

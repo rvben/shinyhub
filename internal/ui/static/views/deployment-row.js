@@ -61,6 +61,7 @@ export function deploymentProviderIcon(provider) {
 
 export function provenanceModel(raw) {
   const origin = raw && raw.origin ? raw.origin : {};
+  const developmentSession = raw && raw.development_session ? raw.development_session : null;
   const originKind = origin.kind || (raw && raw.run_id ? 'fleet' : 'legacy');
   if (originKind === 'legacy') {
     return {
@@ -80,9 +81,11 @@ export function provenanceModel(raw) {
   if (originKind === 'direct' || originKind === 'rollback') {
     const channel = origin.channel || 'api';
     const actor = origin.actor ? String(origin.actor) : '';
+    const isDevelopment = Boolean(developmentSession || origin.development_session_id || channel === 'watch');
     const channelLabels = {
       dashboard: 'Dashboard',
       cli: 'ShinyHub CLI',
+      watch: 'Remote development',
       api: 'API',
     };
     const channelLabel = channelLabels[channel] || 'API';
@@ -101,6 +104,10 @@ export function provenanceModel(raw) {
       headerLead = 'Deployed manually';
       mark = '';
       markIcon = 'manual';
+    } else if (isDevelopment) {
+      label = 'Remote development';
+      headerLead = 'Deployed from a live development session';
+      mark = 'DEV';
     } else if (channel === 'cli') {
       label = 'CLI deployment';
       headerLead = 'Deployed via ShinyHub CLI';
@@ -113,7 +120,7 @@ export function provenanceModel(raw) {
     return {
       available: true,
       label,
-      detail: actor ? `${actor} · ${channelLabel}` : channelLabel,
+      detail: actor ? `${actor} · ${isDevelopment ? 'Remote development' : channelLabel}` : (isDevelopment ? 'Remote development' : channelLabel),
       url: '',
       revisionURL: '',
       change: null,
@@ -122,7 +129,8 @@ export function provenanceModel(raw) {
       markIcon,
       providerIcon: '',
       headerText: actor ? `${headerLead} by ${actor}` : headerLead,
-      headerDetail: channelLabel,
+      headerDetail: isDevelopment ? 'Remote development' : channelLabel,
+      developmentSession,
     };
   }
   const metadata = raw.metadata || {};
@@ -163,4 +171,55 @@ export function deploymentListModels(rows, now = Date.now()) {
   return rows.map((d, i) =>
     deploymentRowModel(d, { isCurrent: i === liveIdx, now }),
   );
+}
+
+// deploymentTimelineModels collapses all attempts from one durable development
+// session into one timeline item while retaining the complete row models for
+// expansion. Non-development deployments keep their ordinary one-row shape.
+export function deploymentTimelineModels(rows, now = Date.now()) {
+  const rowModels = deploymentListModels(rows, now);
+  const sessions = new Map();
+  for (let i = 0; i < rows.length; i++) {
+    const rawSession = rows[i].provenance && rows[i].provenance.development_session;
+    if (!rawSession || !rawSession.id) continue;
+    if (!sessions.has(rawSession.id)) sessions.set(rawSession.id, []);
+    sessions.get(rawSession.id).push(rowModels[i]);
+  }
+  const emitted = new Set();
+  const timeline = [];
+  for (let i = 0; i < rows.length; i++) {
+    const rawSession = rows[i].provenance && rows[i].provenance.development_session;
+    if (!rawSession || !rawSession.id) {
+      timeline.push({ kind: 'deployment', deployment: rowModels[i] });
+      continue;
+    }
+    if (emitted.has(rawSession.id)) continue;
+    emitted.add(rawSession.id);
+    const attempts = sessions.get(rawSession.id);
+    const failed = attempts.filter(a => a.status === 'failed').length;
+    const pending = attempts.filter(a => a.status !== 'succeeded' && a.status !== 'failed').length;
+    const latestRelease = attempts.find(a => a.releaseNumber != null);
+    const actor = rows[i].provenance.origin && rows[i].provenance.origin.actor || '';
+    const targetLabels = { existing: 'Existing app', created: 'New persistent app', ephemeral: 'Temporary app' };
+    const started = rawSession.created_at ? new Date(rawSession.created_at) : null;
+    const updated = rawSession.updated_at ? new Date(rawSession.updated_at) : null;
+    timeline.push({
+      kind: 'development-session',
+      id: rawSession.id,
+      target: rawSession.target_kind || 'existing',
+      targetLabel: targetLabels[rawSession.target_kind] || 'Development app',
+      status: rawSession.status || 'ended',
+      actor,
+      attempts,
+      attemptCount: attempts.length,
+      failedCount: failed,
+      pendingCount: pending,
+      isCurrent: attempts.some(a => a.isCurrent),
+      latestReleaseLabel: latestRelease ? latestRelease.releaseLabel : '',
+      relWhen: updated && Number.isFinite(updated.getTime()) ? relativeTime(updated, now) : '',
+      absWhen: started && Number.isFinite(started.getTime()) ? started.toLocaleString() : '',
+      expiresAt: rawSession.expires_at || '',
+    });
+  }
+  return timeline;
 }

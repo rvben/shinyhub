@@ -70,6 +70,11 @@ func TestDeployAnnotation_DocumentsBuildTimeout(t *testing.T) {
 	if !ann.Streaming || !strings.Contains(ann.Notes, "--output ndjson") || !strings.Contains(ann.Notes, "error event") {
 		t.Fatalf("deploy annotation must document its optional event stream, got %+v", ann)
 	}
+	for _, want := range []string{"--watch", "explicit --host", "--allow-repeated-hooks", "several attempt results"} {
+		if !strings.Contains(ann.Notes, want) {
+			t.Fatalf("deploy annotation must document watch contract %q, got %q", want, ann.Notes)
+		}
+	}
 }
 
 func TestFleetApplyAnnotation_DocumentsConcurrency(t *testing.T) {

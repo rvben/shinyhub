@@ -199,8 +199,17 @@ export function createLogsViewer({
 }) {
   const doc = panel.ownerDocument;
   const win = doc.defaultView || globalThis;
+  let developmentSessionID = '';
+  try {
+    const candidate = new URLSearchParams(win.location && win.location.search || '').get('development_session_id') || '';
+    if (/^[a-f0-9]{32}$/.test(candidate)) developmentSessionID = candidate;
+  } catch { /* location is optional in embedded/test contexts */ }
   panel.innerHTML = `
     <div class="logs-workspace">
+      ${developmentSessionID ? `<div class="observability-scope" role="status">
+        <span>Showing logs from one remote development session.</span>
+        <a href="/apps/${encodeURIComponent(app.slug)}/logs" data-nav>Show all logs</a>
+      </div>` : ''}
       <div class="logs-toolbar" aria-label="Log controls">
         <div class="logs-toolbar-fields">
           <label class="logs-field">
@@ -1017,7 +1026,8 @@ export function createLogsViewer({
 
   async function refreshSources(markChanges = true) {
     try {
-      const resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/logs/sources`);
+      const query = developmentSessionID ? `?development_session_id=${encodeURIComponent(developmentSessionID)}` : '';
+      const resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/logs/sources${query}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const payload = await resp.json();
       if (destroyed) return false;

@@ -1,11 +1,12 @@
 ---
-description: "Two local loops: developing the ShinyHub control plane itself, and running an app exactly the way the server will run it."
+description: "Develop ShinyHub itself, run an app locally with safe reloads, or deploy local changes continuously to an explicit remote development host."
 ---
 
 # Local development
 
-ShinyHub supports two complementary local loops: developing the ShinyHub
-control plane itself and running an app exactly as ShinyHub expects it to run.
+ShinyHub supports complementary loops for developing the control plane, running
+an app locally exactly as ShinyHub expects, and continuously deploying local
+changes when development depends on a remote host.
 
 ## Run an app locally
 
@@ -62,6 +63,82 @@ apply`, including `export`, quoting, comments, duplicate handling, and key
 validation. Values are never printed; startup diagnostics list keys only.
 `PORT`, `SHINYHUB_APP_DATA`, and `SHINYHUB_APP_SLUG` are platform-managed and
 cannot be overridden.
+
+## Develop on a remote host
+
+Use a remote development loop when the app depends on the target host's data,
+identity, network, runtime, or compute:
+
+```bash
+shinyhub deploy . --watch --host dev --slug sales-dev --open
+```
+
+That default is intentionally attach-only: `sales-dev` must already exist. A
+typo therefore cannot create a durable app by accident. Choose creation
+explicitly when you need it:
+
+```bash
+# Create a normal app that remains after the watch process stops.
+shinyhub deploy . --watch --create --host dev --slug sales-dev
+
+# Create a private scratch app and delete it automatically after eight hours.
+shinyhub deploy . --watch --ephemeral --ttl 8h --host dev
+```
+
+`--create` fails if the slug already exists. `--ephemeral` also fails on a
+collision and generates a recognizable `<directory>-dev-<suffix>` slug when
+`--slug` is omitted. Ephemeral apps are always private; their TTL must be from
+15 minutes through seven days. Stopping the CLI ends the development session,
+but it does not delete an ephemeral app early—the printed expiry remains the
+stable deadline, so a URL does not disappear merely because a terminal closed.
+
+Watch mode requires an explicit target through `--host` or `SHINYHUB_HOST`; it
+never relies silently on the saved current host. It implies `--start` and
+`--wait`, opens the app only after the first successful deployment when
+`--open` is present, and keeps the source and target visible in its startup
+banner.
+
+After the initial deployment, ShinyHub observes the local source tree. It waits
+for a 750 ms quiet period after a save burst, builds the same canonical bundle
+as ordinary `deploy`, and sends only the latest state. Changes that arrive while
+a deployment is running are coalesced into one follow-up attempt. If generated,
+ignored, or metadata-only changes leave the content digest unchanged, no remote
+mutation occurs.
+
+A build, hook, startup, or readiness failure is printed without ending the
+watch process; fix the source and save again. The server attempts to restore the
+previous successful version after a failed candidate. Remote deployments
+currently cycle the app pool during the handoff, so viewers may see a brief
+interruption on each deployed change. Use a dedicated development slug rather
+than a production app when that interruption is unacceptable.
+
+Every attempted change is an ordinary durable deployment row: successful
+versions remain rollback-capable and failed attempts keep their failure reason.
+A generated development-session ID ties those rows to their replica logs and
+proxy traces. The Deployments tab shows one compact **Remote development** item
+per watch process—with actor, target type, save/failure counts, current release,
+and start/end state—and expands to the complete attempt history. Its **View
+logs** and **View traces** links filter observability to the deployments in that
+session. Because post-deploy hooks may have non-idempotent side effects, watch
+mode refuses a manifest containing hooks unless you explicitly add
+`--allow-repeated-hooks` after reviewing them.
+
+Useful options and constraints:
+
+```bash
+shinyhub deploy . --watch --host dev --slug sales-dev
+shinyhub deploy . --watch --create --host dev --slug sales-dev
+shinyhub deploy . --watch --ephemeral --ttl 8h --host dev
+shinyhub deploy . --watch --host dev --watch-delay 2s
+shinyhub deploy . --watch --host dev --allow-repeated-hooks
+shinyhub deploy . --watch --host dev --output ndjson
+```
+
+`--create` and `--ephemeral` are mutually exclusive. `--watch-delay` accepts
+100 ms through one minute. `--git` is not supported;
+watch a local checkout instead. A continuous command cannot emit one JSON
+document, so use NDJSON for automation. Press Ctrl-C to stop watching; the last
+successful remote deployment remains in place.
 
 Plain `shinyhub run` uses only the selected app directory; it does not compose
 `[[bundle_file]]` entries from a fleet manifest. If the app is a consumer in a

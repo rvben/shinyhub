@@ -26,7 +26,13 @@ type tracesResponse struct {
 // log, both of which use the view-app auth boundary.
 func (s *Server) handleTraces(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, _, ok := s.requireViewApp(w, r, slug); !ok {
+	app, _, ok := s.requireViewApp(w, r, slug)
+	if !ok {
+		return
+	}
+	deploymentIDs, filtered, err := s.developmentDeploymentFilter(r, app.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -39,7 +45,15 @@ func (s *Server) handleTraces(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.traceBuffer != nil {
 		if spans := s.traceBuffer.Snapshot(slug); len(spans) > 0 {
-			resp.Spans = spans
+			if !filtered {
+				resp.Spans = spans
+			} else {
+				for _, span := range spans {
+					if deploymentIDs[span.DeploymentID] {
+						resp.Spans = append(resp.Spans, span)
+					}
+				}
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

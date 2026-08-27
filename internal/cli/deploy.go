@@ -48,19 +48,35 @@ func sanitizeSlug(name string) string {
 // constructed fresh per command instance (no package-level state) so repeated
 // or shuffled test runs cannot leak flag values between each other.
 type deployFlags struct {
-	slug             string
-	wait             bool
-	waitForWarm      bool
-	restartAfterWarm bool
-	waitTimeout      int    // seconds
-	git              string // git repo URL; if set, clone instead of using local dir
-	branch           string // branch/tag to check out (default: default branch)
-	subdir           string // subdirectory within the repo containing the app
-	visibility       string // app access level: private, shared, public (empty = use server default)
-	start            bool   // start the app even if it was stopped before this deploy
-	open             bool   // start, wait for health, verify the route, and open it
+	slug               string
+	wait               bool
+	waitForWarm        bool
+	restartAfterWarm   bool
+	waitTimeout        int    // seconds
+	git                string // git repo URL; if set, clone instead of using local dir
+	branch             string // branch/tag to check out (default: default branch)
+	subdir             string // subdirectory within the repo containing the app
+	visibility         string // app access level: private, shared, public (empty = use server default)
+	start              bool   // start the app even if it was stopped before this deploy
+	open               bool   // start, wait for health, verify the route, and open it
+	watch              bool   // continuously deploy local source changes
+	watchDelay         time.Duration
+	allowRepeatedHooks bool
+	create             bool          // create a persistent watch target; watch-only
+	ephemeral          bool          // create an expiring private watch target; watch-only
+	ttl                time.Duration // lifetime of an ephemeral watch target
 
 	waitForServer time.Duration // poll /api/server-info until the server is ready before deploying
+
+	// Internal watch-loop state. It lives on this per-command value so repeated
+	// tests and command instances cannot leak a previous watch deployment.
+	watchMode            bool
+	watchLastDigest      string
+	deployChannel        string
+	developmentSessionID string
+	developmentTarget    string
+	developmentExpiresAt *time.Time
+	format               outputFormat
 }
 
 // newDeployCmd builds a fresh deploy command each time it is called, with its
@@ -102,6 +118,17 @@ Slug and URL: the app is served at <host>/app/<slug>/. The slug defaults to the
 directory name (sanitized); override it with --slug. Slug rule: lowercase
 letters, digits, and single hyphens; it must not start or end with a hyphen.
 
+Remote development: --watch performs an initial deployment, then deploys the
+latest bundle after local save bursts. It requires an explicit --host (or
+SHINYHUB_HOST), implies --start and --wait, coalesces changes while a deployment
+is running, and skips unchanged bundle digests. A failed attempt is reported but
+the watcher stays alive. By default the slug must already exist; --create makes
+a new persistent app, while --ephemeral makes a private temporary app that is
+deleted after --ttl (8h by default). Post-deploy hooks require
+--allow-repeated-hooks because they run after every deployable change. Use
+--output ndjson for a machine-readable stream; one-document JSON is not available
+for a command that keeps running.
+
 Deploying behind an auth proxy: when ShinyHub sits behind an auth proxy
 (Authelia, oauth2-proxy, Cloudflare Access, etc.) the CLI cannot complete the
 browser redirect that the proxy requires, so interactive 'shinyhub login' does
@@ -116,7 +143,13 @@ event stream suitable for CI logs and automation. New CLIs automatically fall
 back to the legacy response when deploying to an older server.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeploy(cmd, args, f)
+			if !f.watch {
+				if cmd.Flags().Changed("watch-delay") || cmd.Flags().Changed("allow-repeated-hooks") || f.create || f.ephemeral || cmd.Flags().Changed("ttl") {
+					return validationErr("--watch-delay, --allow-repeated-hooks, --create, --ephemeral, and --ttl require --watch", "add --watch or remove the watch-only flag")
+				}
+				return runDeploy(cmd, args, f)
+			}
+			return runDeployWatch(cmd, args, f)
 		},
 	}
 	cmd.Flags().StringVar(&f.slug, "slug", "", "App slug; serves at /app/<slug>/ (lowercase letters, digits, single hyphens; no leading/trailing hyphen). Defaults to the directory name")
@@ -131,6 +164,12 @@ back to the legacy response when deploying to an older server.`,
 	cmd.Flags().DurationVar(&f.waitForServer, "wait-for-server", 0, "Poll /api/server-info until the server is ready (e.g. 2m) before deploying")
 	cmd.Flags().BoolVar(&f.start, "start", false, "Start the app after deploying even if it was stopped; without this a stopped app stays stopped")
 	cmd.Flags().BoolVar(&f.open, "open", false, "Start the app, wait until it is healthy, verify its public route, and open it in the default browser")
+	cmd.Flags().BoolVar(&f.watch, "watch", false, "Continuously deploy local source changes to an explicit remote host; implies --start and --wait")
+	cmd.Flags().DurationVar(&f.watchDelay, "watch-delay", 750*time.Millisecond, "Quiet period after the last filesystem change before a watched deploy")
+	cmd.Flags().BoolVar(&f.allowRepeatedHooks, "allow-repeated-hooks", false, "Allow --watch to run manifest post-deploy hooks after every deployable change")
+	cmd.Flags().BoolVar(&f.create, "create", false, "Create a new persistent app as the watch target; fail if its slug already exists")
+	cmd.Flags().BoolVar(&f.ephemeral, "ephemeral", false, "Create a private temporary watch target that is deleted after --ttl")
+	cmd.Flags().DurationVar(&f.ttl, "ttl", 8*time.Hour, "Lifetime of an --ephemeral watch target (15m to 7d)")
 	return cmd
 }
 
@@ -156,19 +195,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		warnFleetCompositionOmission(cmd.ErrOrStderr(), abs, fleetOmissionDeploy, quietFlag)
 	}
 
-	cfg, err := loadConfig()
+	cfg, err := loadDeployConfig(cmd)
 	if err != nil {
-		connected, connectErr := offerConnectForFirstDeploy(cmd)
-		if connectErr != nil {
-			return connectErr
-		}
-		if !connected {
-			return err
-		}
-		cfg, err = loadConfig()
-		if err != nil {
-			return err
-		}
+		return err
 	}
 
 	// When the target host may still be coming up (e.g. a freshly recycled EC2
@@ -182,9 +211,12 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 	}
 
-	format, err := resolveDeployFormat()
-	if err != nil {
-		return err
+	format := f.format
+	if format == "" {
+		format, err = resolveDeployFormat()
+		if err != nil {
+			return err
+		}
 	}
 	errW := cmd.ErrOrStderr()
 	stdOut := cmd.OutOrStdout()
@@ -220,6 +252,14 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	if summary != "" {
 		fmt.Fprintln(errW, summary)
 	}
+	if f.watchMode {
+		if err := validateRepeatedWatchHooks(abs, f.allowRepeatedHooks); err != nil {
+			return err
+		}
+		if bundlePlan.Digest == f.watchLastDigest {
+			return errWatchBundleUnchanged
+		}
+	}
 
 	// Best-effort pre-flight: an R bundle on a server with no R runtime will
 	// fail server-side. Warn early so the developer knows it is a host setup
@@ -231,8 +271,10 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 	}
 
-	if err := ensureApp(cfg, slug, f.visibility); err != nil {
-		return err
+	if !f.watchMode {
+		if err := ensureApp(cfg, slug, f.visibility); err != nil {
+			return err
+		}
 	}
 
 	// The deploy request is the longest blocking step (a first deploy installs
@@ -261,7 +303,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	if f.start {
 		deployURL += "?start=true"
 	}
-	req, err := http.NewRequest("POST", deployURL, &body)
+	req, err := http.NewRequestWithContext(cmd.Context(), "POST", deployURL, &body)
 	if err != nil {
 		if deploying != nil {
 			deploying.stop()
@@ -271,7 +313,15 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Accept", deployevent.MediaType)
-	req.Header.Set("X-Shinyhub-Deploy-Channel", "cli")
+	channel := f.deployChannel
+	if channel == "" {
+		channel = "cli"
+	}
+	req.Header.Set("X-Shinyhub-Deploy-Channel", channel)
+	if f.developmentSessionID != "" {
+		req.Header.Set("X-Shinyhub-Development-Session", f.developmentSessionID)
+		req.Header.Set("X-Shinyhub-Development-Target", f.developmentTarget)
+	}
 
 	// Deploy can take several minutes on first run (uv downloads packages).
 	// Use the untimed client to match the SSE logs command.
@@ -348,6 +398,13 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 			return &ExitCodeError{Code: code, Err: httpErr, Reported: true}
 		}
 		return httpErr
+	}
+	// A successful response means the server committed this exact bundle. Mark
+	// it before optional warm-up, readiness, route, and browser follow-ups: those
+	// can fail after the deployment is already live, and a metadata-only save
+	// must not repeat the same remote mutation just because a follow-up failed.
+	if f.watchMode {
+		f.watchLastDigest = bundlePlan.Digest
 	}
 	if !streamed && format == formatNDJSON {
 		if err := writeDeployEvent(stdOut, deployevent.Event{Type: deployevent.TypeResult, Result: json.RawMessage(out)}); err != nil {
@@ -433,7 +490,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	}
 	if f.waitForWarm {
 		timeout := time.Duration(f.waitTimeout) * time.Second
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 		defer cancel()
 		var firstFireErr error
 		deadline := time.Now().Add(timeout)
@@ -490,7 +547,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	// waiting could only end in a timeout that failed a deploy which in fact
 	// succeeded. --start is how a caller asks for a running app to wait for.
 	if f.wait && !keptStopped {
-		if err := waitForHealthyWithOutput(cfg, slug, time.Duration(f.waitTimeout)*time.Second, errW); err != nil {
+		if err := waitForHealthyWithContext(cmd.Context(), cfg, slug, time.Duration(f.waitTimeout)*time.Second, errW); err != nil {
 			return err
 		}
 	}
@@ -551,6 +608,21 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	return nil
 }
 
+func loadDeployConfig(cmd *cobra.Command) (*cliConfig, error) {
+	cfg, err := loadConfig()
+	if err == nil {
+		return cfg, nil
+	}
+	connected, connectErr := offerConnectForFirstDeploy(cmd)
+	if connectErr != nil {
+		return nil, connectErr
+	}
+	if !connected {
+		return nil, err
+	}
+	return loadConfig()
+}
+
 // healthPollInterval is the delay between health polls. It is a package var so
 // tests can shorten it; production keeps the 2-second cadence.
 var healthPollInterval = 2 * time.Second
@@ -571,8 +643,12 @@ func waitForHealthy(cfg *cliConfig, slug string, timeout time.Duration) error {
 // to poll would only delay the inevitable failure. 5xx and transport errors
 // are treated as transient and keep the loop going.
 func waitForHealthyWithOutput(cfg *cliConfig, slug string, timeout time.Duration, errOut io.Writer) error {
+	return waitForHealthyWithContext(context.Background(), cfg, slug, timeout, errOut)
+}
+
+func waitForHealthyWithContext(parent context.Context, cfg *cliConfig, slug string, timeout time.Duration, errOut io.Writer) error {
 	deadline := time.Now().Add(timeout)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	p := newProgress(errOut, fmt.Sprintf("Waiting for %s to be healthy", slug))
 	var lastErr error

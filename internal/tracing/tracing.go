@@ -142,18 +142,19 @@ func SampleByTraceID(id [16]byte, ratio float64) bool {
 // endpoint; ShinyHub's role is only to propagate context and surface its own
 // proxy-level view.
 type Span struct {
-	TraceID    string    `json:"trace_id"`
-	SpanID     string    `json:"span_id"`
-	ParentID   string    `json:"parent_id,omitempty"`
-	AppSlug    string    `json:"app_slug"`
-	Replica    int       `json:"replica"`
-	Method     string    `json:"method"`
-	Path       string    `json:"path"`
-	Status     int       `json:"status"`
-	DurationMS int64     `json:"duration_ms"`
-	StartedAt  time.Time `json:"started_at"`
-	Sampled    bool      `json:"sampled"`
-	Error      string    `json:"error,omitempty"`
+	TraceID      string    `json:"trace_id"`
+	SpanID       string    `json:"span_id"`
+	ParentID     string    `json:"parent_id,omitempty"`
+	AppSlug      string    `json:"app_slug"`
+	Replica      int       `json:"replica"`
+	DeploymentID int64     `json:"deployment_id,omitempty"`
+	Method       string    `json:"method"`
+	Path         string    `json:"path"`
+	Status       int       `json:"status"`
+	DurationMS   int64     `json:"duration_ms"`
+	StartedAt    time.Time `json:"started_at"`
+	Sampled      bool      `json:"sampled"`
+	Error        string    `json:"error,omitempty"`
 }
 
 // Buffer is a per-app fixed-size FIFO of slow/error spans. The zero value is

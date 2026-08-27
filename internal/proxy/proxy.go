@@ -2136,6 +2136,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 	replicaIndex := -1
+	deploymentID := int64(0)
 	sticky := false
 
 	// Trace context derivation: if tracing is enabled, parse the incoming
@@ -2182,18 +2183,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				spanErr = rec.proxyErr.Error()
 			}
 			p.traceBuffer.Record(tracing.Span{
-				TraceID:    traceCtx.TraceIDHex(),
-				SpanID:     hex.EncodeToString(traceCtx.SpanID[:]),
-				ParentID:   traceParent,
-				AppSlug:    slug,
-				Replica:    replicaIndex,
-				Method:     r.Method,
-				Path:       path,
-				Status:     rec.status,
-				DurationMS: time.Since(start).Milliseconds(),
-				StartedAt:  start,
-				Sampled:    traceSampled,
-				Error:      spanErr,
+				TraceID:      traceCtx.TraceIDHex(),
+				SpanID:       hex.EncodeToString(traceCtx.SpanID[:]),
+				ParentID:     traceParent,
+				AppSlug:      slug,
+				Replica:      replicaIndex,
+				DeploymentID: deploymentID,
+				Method:       r.Method,
+				Path:         path,
+				Status:       rec.status,
+				DurationMS:   time.Since(start).Milliseconds(),
+				StartedAt:    start,
+				Sampled:      traceSampled,
+				Error:        spanErr,
 			})
 		}
 		logPtr := p.accessLog.Load()
@@ -2365,6 +2367,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				wkr.activeConns.Add(1)
 				replicaIndex = wkr.slotID
 				depID = wkr.deploymentID
+				deploymentID = depID
 				cs.open()
 				p.mu.RUnlock()
 			} else {
@@ -2413,6 +2416,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				wkr.activeConns.Add(1)
 				replicaIndex = wkr.slotID
 				depID = wkr.deploymentID
+				deploymentID = depID
 				cs.open()
 				p.mu.Unlock()
 			}
@@ -2562,6 +2566,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	replicaIndex = picked.index
+	deploymentID = picked.deploymentID
 	sticky = isStickyHit
 	if !isStickyHit {
 		http.SetCookie(rec, &http.Cookie{

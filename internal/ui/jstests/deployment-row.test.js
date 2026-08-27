@@ -4,6 +4,7 @@ import {
   relativeTime,
   deploymentRowModel,
   deploymentListModels,
+  deploymentTimelineModels,
   deploymentProviderIcon,
   provenanceModel,
 } from '../static/views/deployment-row.js';
@@ -69,7 +70,7 @@ test('legacy deployments expose an explicit provenance fallback', () => {
   });
 });
 
-test('direct deployment provenance distinguishes dashboard, CLI, and API channels', () => {
+test('direct deployment provenance distinguishes dashboard, CLI, watch, and API channels', () => {
   const dashboard = provenanceModel({ origin: { kind: 'direct', channel: 'dashboard', actor: 'admin' } });
   assert.equal(dashboard.label, 'Manual deployment');
   assert.equal(dashboard.detail, 'admin · Dashboard');
@@ -82,6 +83,13 @@ test('direct deployment provenance distinguishes dashboard, CLI, and API channel
   assert.equal(cli.label, 'CLI deployment');
   assert.equal(cli.headerText, 'Deployed via ShinyHub CLI by release-bot');
   assert.equal(cli.mark, 'CLI');
+
+  const watch = provenanceModel({ origin: { kind: 'direct', channel: 'watch', actor: 'dev' } });
+  assert.equal(watch.label, 'Remote development');
+  assert.equal(watch.detail, 'dev · Remote development');
+  assert.equal(watch.headerText, 'Deployed from a live development session by dev');
+  assert.equal(watch.headerDetail, 'Remote development');
+  assert.equal(watch.mark, 'DEV');
 
   const api = provenanceModel({ origin: { kind: 'direct', channel: 'api' } });
   assert.equal(api.label, 'Direct API deployment');
@@ -162,4 +170,32 @@ test('deploymentListModels marks newest row live when all succeeded', () => {
   assert.deepEqual(models.map(m => m.releaseLabel), ['v2', 'v1']);
   assert.deepEqual(models.map(m => m.isCurrent), [true, false]);
   assert.deepEqual(models.map(m => m.canRollback), [false, true]);
+});
+
+test('deploymentTimelineModels groups a development session without hiding attempts', () => {
+  const session = { id: 'a'.repeat(32), target_kind: 'existing', status: 'ended', created_at: NOW - 9000, updated_at: NOW - 1000 };
+  const rows = [
+    { id: 4, version: '400', release_number: null, created_at: NOW - 1000, status: 'failed', provenance: { origin: { kind: 'direct', channel: 'cli', actor: 'dev', development_session_id: session.id }, development_session: session } },
+    { id: 3, version: '300', release_number: 3, created_at: NOW - 2000, status: 'succeeded', provenance: { origin: { kind: 'direct', channel: 'cli', actor: 'dev', development_session_id: session.id }, development_session: session } },
+    { id: 2, version: '200', release_number: 2, created_at: NOW - 3000, status: 'succeeded', provenance: { origin: { kind: 'direct', channel: 'cli' } } },
+  ];
+  const timeline = deploymentTimelineModels(rows, NOW);
+  assert.equal(timeline.length, 2);
+  assert.equal(timeline[0].kind, 'development-session');
+  assert.equal(timeline[0].attemptCount, 2);
+  assert.equal(timeline[0].failedCount, 1);
+  assert.equal(timeline[0].latestReleaseLabel, 'v3');
+  assert.equal(timeline[0].isCurrent, true);
+  assert.deepEqual(timeline[0].attempts.map(a => a.id), [4, 3]);
+  assert.equal(timeline[1].kind, 'deployment');
+});
+
+test('session provenance wins over its backward-compatible CLI channel', () => {
+  const p = provenanceModel({
+    origin: { kind: 'direct', channel: 'cli', actor: 'dev', development_session_id: 'b'.repeat(32) },
+    development_session: { id: 'b'.repeat(32), target_kind: 'created', status: 'active' },
+  });
+  assert.equal(p.label, 'Remote development');
+  assert.equal(p.mark, 'DEV');
+  assert.equal(p.detail, 'dev · Remote development');
 });

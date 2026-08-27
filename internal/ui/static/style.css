@@ -5496,11 +5496,148 @@ fieldset.settings-block { min-width: 0; }
 }
 .rollback-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
+.development-session-row {
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--cyan-bright) 4%, transparent);
+}
+.development-session-details { min-width: 0; }
+.development-session-summary {
+  display: grid;
+  grid-template-columns:
+    minmax(9rem, max-content) minmax(14rem, 1fr)
+    minmax(10rem, auto) minmax(6rem, auto);
+  gap: 8px 16px;
+  align-items: center;
+  min-height: 56px;
+  padding: 10px 28px 10px 0;
+  color: var(--text-soft);
+  cursor: pointer;
+  position: relative;
+  list-style: none;
+}
+.development-session-summary::-webkit-details-marker { display: none; }
+.development-session-summary::after {
+  content: '';
+  position: absolute;
+  right: 7px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  color: var(--text-muted);
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform var(--ease), color var(--ease);
+}
+.development-session-details[open] > .development-session-summary::after {
+  transform: rotate(225deg) translate(-2px, -1px);
+}
+.development-session-summary:hover::after { color: var(--cyan-bright); }
+.development-session-summary:focus-visible {
+  outline: 2px solid var(--cyan-bright);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+.development-session-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.development-session-identity strong {
+  color: var(--text);
+  font-size: 0.9rem;
+  letter-spacing: -0.01em;
+}
+.development-session-badge {
+  color: var(--cyan-bright);
+  background: var(--accent-dim);
+  border: 1px solid color-mix(in srgb, var(--cyan-bright) 42%, transparent);
+  border-radius: 999px;
+  padding: 2px 7px;
+  font: 700 0.64rem/1.3 var(--font);
+  letter-spacing: 0.08em;
+}
+.development-session-context,
+.development-session-outcome,
+.development-session-when {
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+.development-session-outcome {
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+.development-session-outcome { text-align: right; }
+.development-session-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: 16px;
+  padding: 2px 28px 10px 0;
+}
+.development-session-tools a {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+}
+.development-session-tools a:hover,
+.development-session-tools a:focus-visible {
+  color: var(--cyan-bright);
+  text-decoration-color: currentColor;
+}
+.observability-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+.observability-scope a {
+  flex: 0 0 auto;
+  color: var(--cyan-bright);
+  font-weight: 600;
+  text-underline-offset: 3px;
+}
+.development-session-attempts {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0 28px 0 24px;
+  border-top: 1px solid var(--line);
+}
+.deployment-row-attempt {
+  grid-template-columns: minmax(7.5rem, max-content) minmax(14rem, 1fr) minmax(6rem, auto) auto;
+  min-height: 54px;
+}
+.deployment-row-attempt:last-child { border-bottom: 0; }
+
 @media (max-width: 700px) {
   #app-detail-view { padding-inline: 0; }
   .app-detail-provenance { grid-template-columns: auto minmax(0, 1fr); }
   .provenance-open { grid-column: 2; min-height: 44px; }
   .deployments-head { display: none; }
+  .development-session-summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "identity when" "context context" "outcome outcome";
+    gap: 4px 12px;
+    padding-block: 14px;
+  }
+  .development-session-identity { grid-area: identity; }
+  .development-session-context { grid-area: context; }
+  .development-session-outcome { grid-area: outcome; text-align: left; }
+  .development-session-when { grid-area: when; padding-right: 6px; }
+  .development-session-tools { justify-content: flex-start; padding: 0 28px 4px 0; }
+  .development-session-tools a { display: inline-flex; align-items: center; min-height: 44px; }
+  .development-session-attempts { padding-inline: 14px 0; }
   .deployment-row {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas: "version action" "source source" "when when";

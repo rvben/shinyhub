@@ -8,7 +8,12 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 )
 
-const deploymentChannelHeader = "X-Shinyhub-Deploy-Channel"
+const (
+	deploymentChannelHeader  = "X-Shinyhub-Deploy-Channel"
+	developmentSessionHeader = "X-Shinyhub-Development-Session"
+	developmentTargetHeader  = "X-Shinyhub-Development-Target"
+	deploymentChannelWatch   = "watch"
+)
 
 // deploymentOriginForRequest converts request context into durable deployment
 // attribution. A linked fleet run is authoritative; otherwise clients may
@@ -28,6 +33,11 @@ func deploymentOriginForRequest(r *http.Request, runID string, rollback bool) db
 		case db.DeploymentChannelDashboard:
 			origin.Channel = db.DeploymentChannelDashboard
 		case db.DeploymentChannelCLI:
+			origin.Channel = db.DeploymentChannelCLI
+		case deploymentChannelWatch:
+			// Persist watch attempts as direct CLI deployments for compatibility
+			// with databases created before remote-development sessions existed.
+			// The session ID is the durable, unambiguous watch marker.
 			origin.Channel = db.DeploymentChannelCLI
 		case db.DeploymentChannelAPI:
 			origin.Channel = db.DeploymentChannelAPI

@@ -826,6 +826,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Patch("/api/apps/{slug}", s.handlePatchApp)
 		r.Delete("/api/apps/{slug}", s.handleDeleteApp)
 		r.With(rateLimitByUser(s.deployLimiter)).Post("/api/apps/{slug}/deploy", s.handleDeployApp)
+		r.Post("/api/apps/{slug}/development-sessions/{sessionID}/end", s.handleEndDevelopmentSession)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/rollback", s.handleRollbackApp)
 		// Keep PUT for backwards compatibility.
 		r.With(rateLimitByUser(s.actionLimiter)).Put("/api/apps/{slug}/rollback", s.handleRollbackApp)

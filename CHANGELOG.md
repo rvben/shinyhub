@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Added
+
+- **remote development**: add `deploy --watch` with existing-app attachment,
+  explicit persistent or expiring private targets, coalesced save deployment,
+  durable session provenance, filtered logs/traces, and grouped deployment
+  history that preserves every attempt
+
 ## [0.12.8](https://github.com/rvben/shinyhub/compare/v0.11.13...v0.12.8) - 2026-08-27
 
 ### Fixed

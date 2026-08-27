@@ -1752,13 +1752,16 @@ const (
 // created. Actor is an immutable username snapshot: UserID keeps relational
 // identity while the snapshot survives a later rename or user deletion.
 type DeploymentOrigin struct {
-	Kind           string `json:"kind"`
-	Channel        string `json:"channel,omitempty"`
-	UserID         *int64 `json:"user_id,omitempty"`
-	Actor          string `json:"actor,omitempty"`
-	CredentialID   *int64 `json:"credential_id,omitempty"`
-	CredentialType string `json:"credential_type,omitempty"`
-	CredentialName string `json:"credential_name,omitempty"`
+	Kind    string `json:"kind"`
+	Channel string `json:"channel,omitempty"`
+	// DevelopmentSessionID groups the individually durable deployment attempts
+	// produced by one remote development watch process.
+	DevelopmentSessionID string `json:"development_session_id,omitempty"`
+	UserID               *int64 `json:"user_id,omitempty"`
+	Actor                string `json:"actor,omitempty"`
+	CredentialID         *int64 `json:"credential_id,omitempty"`
+	CredentialType       string `json:"credential_type,omitempty"`
+	CredentialName       string `json:"credential_name,omitempty"`
 }
 
 func normalizeDeploymentOrigin(runID string, origin DeploymentOrigin) (DeploymentOrigin, error) {
@@ -1785,6 +1788,7 @@ func normalizeDeploymentOrigin(runID string, origin DeploymentOrigin) (Deploymen
 		}
 	case DeploymentOriginLegacy:
 		origin.Channel = ""
+		origin.DevelopmentSessionID = ""
 		origin.UserID = nil
 		origin.Actor = ""
 		origin.CredentialID = nil
@@ -1792,6 +1796,9 @@ func normalizeDeploymentOrigin(runID string, origin DeploymentOrigin) (Deploymen
 		origin.CredentialName = ""
 	default:
 		return DeploymentOrigin{}, fmt.Errorf("invalid deployment origin kind %q", origin.Kind)
+	}
+	if origin.Kind == DeploymentOriginFleet || origin.Kind == DeploymentOriginRollback {
+		origin.DevelopmentSessionID = ""
 	}
 	return origin, nil
 }
@@ -1820,11 +1827,11 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	}
 	var id int64
 	err = s.db.QueryRow(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, origin_user_id, origin_actor,
-		 origin_credential_id, origin_credential_type, origin_credential_name)
-		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, development_session_id, origin_user_id, origin_actor,
+			 origin_credential_id, origin_credential_type, origin_credential_name)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?) RETURNING id`,
 		p.AppID, p.Version, p.BundleDir, status, p.RunID, p.RestoredFromID,
-		origin.Kind, origin.Channel, origin.UserID, origin.Actor,
+		origin.Kind, origin.Channel, origin.DevelopmentSessionID, origin.UserID, origin.Actor,
 		origin.CredentialID, origin.CredentialType, origin.CredentialName,
 	).Scan(&id)
 	if err != nil {
@@ -1870,11 +1877,11 @@ func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID
 	}
 	var id int64
 	err = s.db.QueryRow(
-		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, origin_user_id, origin_actor,
-		 origin_credential_id, origin_credential_type, origin_credential_name)
-		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, development_session_id, origin_user_id, origin_actor,
+			 origin_credential_id, origin_credential_type, origin_credential_name)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?) RETURNING id`,
 		appID, version, bundleDir, DeploymentPending, runID, restoredFromID,
-		origin.Kind, origin.Channel, origin.UserID, origin.Actor,
+		origin.Kind, origin.Channel, origin.DevelopmentSessionID, origin.UserID, origin.Actor,
 		origin.CredentialID, origin.CredentialType, origin.CredentialName,
 	).Scan(&id)
 	if err != nil {
@@ -2004,12 +2011,14 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		           SELECT COUNT(*) FROM deployments d3
 		           WHERE d3.app_id = d.app_id AND d3.status = 'succeeded' AND d3.id <= d.restored_from_id
 		       ) END AS restored_from_release_number,
-		       d.origin_kind, d.origin_channel, d.origin_user_id, d.origin_actor,
+		       d.origin_kind, d.origin_channel, d.development_session_id, d.origin_user_id, d.origin_actor,
 		       d.origin_credential_id, d.origin_credential_type, d.origin_credential_name,
+		       ds.target_kind, ds.status, ds.created_at, ds.updated_at, ds.ended_at, ds.expires_at,
 		       fr.id, fr.fleet_id, fr.kind, fr.provenance, fr.created_at
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
 		LEFT JOIN fleet_runs fr ON fr.id = d.run_id
+		LEFT JOIN development_sessions ds ON ds.id = d.development_session_id
 		WHERE a.slug = ?
 		ORDER BY d.id DESC`, slug)
 	if err != nil {
@@ -2021,14 +2030,17 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		var d DeploymentSummary
 		var release, restoredID, restoredRelease sql.NullInt64
 		var originKind, originChannel, originActor string
+		var developmentSessionID, developmentTarget, developmentStatus sql.NullString
+		var developmentCreated, developmentUpdated, developmentEnded, developmentExpires sql.NullTime
 		var originUserID sql.NullInt64
 		var originCredentialID sql.NullInt64
 		var originCredentialType, originCredentialName string
 		var runID, fleetID, kind, raw sql.NullString
 		var runCreated sql.NullTime
 		if err := rows.Scan(&d.ID, &d.Version, &d.Status, &d.FailureReason, &d.CreatedAt, &release,
-			&restoredID, &restoredRelease, &originKind, &originChannel, &originUserID, &originActor,
+			&restoredID, &restoredRelease, &originKind, &originChannel, &developmentSessionID, &originUserID, &originActor,
 			&originCredentialID, &originCredentialType, &originCredentialName,
+			&developmentTarget, &developmentStatus, &developmentCreated, &developmentUpdated, &developmentEnded, &developmentExpires,
 			&runID, &fleetID, &kind, &raw, &runCreated); err != nil {
 			return nil, err
 		}
@@ -2044,7 +2056,7 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 			n := restoredRelease.Int64
 			d.RestoredFromReleaseNumber = &n
 		}
-		origin := DeploymentOrigin{Kind: originKind, Channel: originChannel, Actor: originActor}
+		origin := DeploymentOrigin{Kind: originKind, Channel: originChannel, Actor: originActor, DevelopmentSessionID: developmentSessionID.String}
 		if originUserID.Valid {
 			id := originUserID.Int64
 			origin.UserID = &id
@@ -2056,6 +2068,20 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		origin.CredentialType = originCredentialType
 		origin.CredentialName = originCredentialName
 		p := &DeploymentProvenance{Origin: origin}
+		if developmentSessionID.Valid {
+			p.DevelopmentSession = &DevelopmentSession{
+				ID: developmentSessionID.String, AppID: 0, TargetKind: developmentTarget.String,
+				Status: developmentStatus.String, CreatedAt: developmentCreated.Time, UpdatedAt: developmentUpdated.Time,
+			}
+			if developmentEnded.Valid {
+				at := developmentEnded.Time
+				p.DevelopmentSession.EndedAt = &at
+			}
+			if developmentExpires.Valid {
+				at := developmentExpires.Time
+				p.DevelopmentSession.ExpiresAt = &at
+			}
+		}
 		if runID.Valid {
 			p.RunID, p.FleetID, p.Kind = runID.String, fleetID.String, kind.String
 			if runCreated.Valid {
@@ -2091,12 +2117,13 @@ type DeploymentSummary struct {
 }
 
 type DeploymentProvenance struct {
-	Origin    DeploymentOrigin    `json:"origin"`
-	RunID     string              `json:"run_id,omitempty"`
-	FleetID   string              `json:"fleet_id,omitempty"`
-	Kind      string              `json:"kind,omitempty"`
-	StartedAt *time.Time          `json:"started_at,omitempty"`
-	Metadata  provenance.Metadata `json:"metadata,omitempty"`
+	Origin             DeploymentOrigin    `json:"origin"`
+	DevelopmentSession *DevelopmentSession `json:"development_session,omitempty"`
+	RunID              string              `json:"run_id,omitempty"`
+	FleetID            string              `json:"fleet_id,omitempty"`
+	Kind               string              `json:"kind,omitempty"`
+	StartedAt          *time.Time          `json:"started_at,omitempty"`
+	Metadata           provenance.Metadata `json:"metadata,omitempty"`
 }
 
 // CurrentDeploymentProvenance returns the attribution of the live succeeded
@@ -2105,18 +2132,24 @@ type DeploymentProvenance struct {
 func (s *Store) CurrentDeploymentProvenance(appID int64) (*DeploymentProvenance, error) {
 	var p DeploymentProvenance
 	var originKind, originChannel, originActor string
+	var developmentSessionID, developmentTarget, developmentStatus sql.NullString
+	var developmentCreated, developmentUpdated, developmentEnded, developmentExpires sql.NullTime
 	var originUserID sql.NullInt64
 	var originCredentialID sql.NullInt64
 	var originCredentialType, originCredentialName string
 	var runID, fleetID, kind, raw sql.NullString
 	var started sql.NullTime
-	err := s.db.QueryRow(`SELECT d.origin_kind, d.origin_channel, d.origin_user_id, d.origin_actor,
+	err := s.db.QueryRow(`SELECT d.origin_kind, d.origin_channel, d.development_session_id, d.origin_user_id, d.origin_actor,
 		       d.origin_credential_id, d.origin_credential_type, d.origin_credential_name,
+		       ds.target_kind, ds.status, ds.created_at, ds.updated_at, ds.ended_at, ds.expires_at,
 		       fr.id, fr.fleet_id, fr.kind, fr.provenance, fr.created_at
-		FROM deployments d LEFT JOIN fleet_runs fr ON fr.id = d.run_id
+		FROM deployments d
+		LEFT JOIN fleet_runs fr ON fr.id = d.run_id
+		LEFT JOIN development_sessions ds ON ds.id = d.development_session_id
 		WHERE d.app_id = ? AND d.status = 'succeeded' ORDER BY d.id DESC LIMIT 1`, appID).
-		Scan(&originKind, &originChannel, &originUserID, &originActor,
+		Scan(&originKind, &originChannel, &developmentSessionID, &originUserID, &originActor,
 			&originCredentialID, &originCredentialType, &originCredentialName,
+			&developmentTarget, &developmentStatus, &developmentCreated, &developmentUpdated, &developmentEnded, &developmentExpires,
 			&runID, &fleetID, &kind, &raw, &started)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -2127,7 +2160,21 @@ func (s *Store) CurrentDeploymentProvenance(appID int64) (*DeploymentProvenance,
 	if originKind == DeploymentOriginLegacy {
 		return nil, nil
 	}
-	p.Origin = DeploymentOrigin{Kind: originKind, Channel: originChannel, Actor: originActor}
+	p.Origin = DeploymentOrigin{Kind: originKind, Channel: originChannel, Actor: originActor, DevelopmentSessionID: developmentSessionID.String}
+	if developmentSessionID.Valid {
+		p.DevelopmentSession = &DevelopmentSession{
+			ID: developmentSessionID.String, TargetKind: developmentTarget.String, Status: developmentStatus.String,
+			CreatedAt: developmentCreated.Time, UpdatedAt: developmentUpdated.Time,
+		}
+		if developmentEnded.Valid {
+			at := developmentEnded.Time
+			p.DevelopmentSession.EndedAt = &at
+		}
+		if developmentExpires.Valid {
+			at := developmentExpires.Time
+			p.DevelopmentSession.ExpiresAt = &at
+		}
+	}
 	if originUserID.Valid {
 		id := originUserID.Int64
 		p.Origin.UserID = &id

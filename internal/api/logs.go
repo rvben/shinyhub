@@ -75,6 +75,11 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no log sources available")
 		return
 	}
+	deploymentIDs, filtered, filterErr := s.developmentDeploymentFilter(r, app.ID)
+	if filterErr != nil {
+		writeError(w, http.StatusBadRequest, filterErr.Error())
+		return
+	}
 
 	replicas, err := s.store.ListReplicas(app.ID)
 	if err != nil {
@@ -121,6 +126,9 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 	out := make([]*logSourceResponse, 0, len(runs)+len(replicas))
 	seenCurrent := make(map[int]bool)
 	for _, run := range runs {
+		if filtered && (run.DeploymentID == nil || !deploymentIDs[*run.DeploymentID]) {
+			continue
+		}
 		current := !seenCurrent[run.ReplicaIndex]
 		seenCurrent[run.ReplicaIndex] = true
 		started := run.StartedAt
@@ -161,6 +169,9 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, log := range legacy {
+		if filtered {
+			continue
+		}
 		modified := log.ModifiedAt
 		current := !seenCurrent[log.Index]
 		src := &logSourceResponse{
@@ -178,6 +189,9 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 	// A provider may expose a live replica before its first local byte or run
 	// record (notably externally-retained Fargate output). Keep it visible.
 	for index, rep := range replicaByIndex {
+		if filtered && (rep.DeploymentID == nil || !deploymentIDs[*rep.DeploymentID]) {
+			continue
+		}
 		if seenCurrent[index] {
 			continue
 		}

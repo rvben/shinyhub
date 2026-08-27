@@ -2,6 +2,7 @@ package api
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -209,6 +210,11 @@ type createAppRequest struct {
 	// defaults.app_visibility from config (which defaults to "private").
 	// Allowed values: "private", "shared", "public".
 	Access string `json:"access"`
+	// Development fields are sent only by `deploy --watch --create` and
+	// `deploy --watch --ephemeral`. Ordinary app creation remains unchanged.
+	DevelopmentSessionID string     `json:"development_session_id"`
+	DevelopmentTarget    string     `json:"development_target"`
+	ExpiresAt            *time.Time `json:"expires_at,omitempty"`
 }
 
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
@@ -252,6 +258,36 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	if !db.IsValidAppVisibility(access) {
 		writeError(w, http.StatusBadRequest, "access must be one of "+strings.Join(db.ValidAppVisibilities, ", "))
 		return
+	}
+	var development *developmentRequest
+	if req.DevelopmentSessionID != "" || req.DevelopmentTarget != "" || req.ExpiresAt != nil {
+		dev := developmentRequest{ID: strings.TrimSpace(req.DevelopmentSessionID), Target: strings.ToLower(strings.TrimSpace(req.DevelopmentTarget))}
+		if !developmentSessionIDRE.MatchString(dev.ID) || (dev.Target != db.DevelopmentTargetCreated && dev.Target != db.DevelopmentTargetEphemeral) {
+			writeError(w, http.StatusBadRequest, "development app creation requires a valid session ID and target created or ephemeral")
+			return
+		}
+		if dev.Target == db.DevelopmentTargetEphemeral {
+			if access != "private" {
+				writeError(w, http.StatusBadRequest, "ephemeral development apps must be private")
+				return
+			}
+			if req.ExpiresAt == nil {
+				writeError(w, http.StatusBadRequest, "ephemeral development apps require expires_at")
+				return
+			}
+			ttl := time.Until(*req.ExpiresAt)
+			// expires_at is calculated on the CLI. A small tolerance makes the
+			// documented boundary values usable despite request latency and modest
+			// clock skew between a workstation and its remote host.
+			if ttl < minEphemeralTTL-ephemeralTTLClockSkew || ttl > maxEphemeralTTL+ephemeralTTLClockSkew {
+				writeError(w, http.StatusBadRequest, "ephemeral expiry must be between 15m and 7d from now")
+				return
+			}
+		} else if req.ExpiresAt != nil {
+			writeError(w, http.StatusBadRequest, "expires_at is only valid for ephemeral development apps")
+			return
+		}
+		development = &dev
 	}
 
 	u := auth.UserFromContext(r.Context())
@@ -312,6 +348,20 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
+	}
+	if development != nil {
+		if err := s.store.UpsertDevelopmentSession(developmentSessionParams(r, app.ID, *development, req.ExpiresAt)); err != nil {
+			_ = s.store.DeleteApp(req.Slug)
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if development.Target == db.DevelopmentTargetEphemeral {
+			if err := s.store.MarkEphemeralApp(app.ID, development.ID, *req.ExpiresAt); err != nil {
+				_ = s.store.DeleteApp(req.Slug)
+				writeError(w, http.StatusInternalServerError, "internal server error")
+				return
+			}
+		}
 	}
 
 	s.logAuditEvent(r, db.AuditEventParams{
@@ -1579,6 +1629,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	runID := s.knownFleetRunID(r)
 	origin := deploymentOriginForRequest(r, runID, false)
+	dev, err := s.registerDevelopmentSession(r, app.ID, nil)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if dev.ID != "" {
+		origin.DevelopmentSessionID = dev.ID
+	}
 
 	if s.manager == nil {
 		writeError(w, http.StatusServiceUnavailable, "process manager not available")
@@ -2628,54 +2686,14 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stop the process if it is running; ignore the error (may not be running).
-	if s.manager != nil {
-		_ = s.manager.Stop(slug)
-	}
-	if s.proxy != nil {
-		s.proxy.Deregister(slug)
-	}
-
-	// Tombstone first: mark the row 'deleting' BEFORE touching disk so a crash
-	// (or a cleanup failure) mid-teardown is recoverable. ListRunningApps
-	// excludes it, so recovery will not re-adopt a half-deleted app; startup
-	// reconciliation (ReconcileDeletingApps) finishes any tombstone left
-	// behind. Only after disk cleanup fully succeeds is the row removed.
-	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "deleting"}); err != nil {
+	detail, err := s.deleteAppLocked(r.Context(), app)
+	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
-	}
-
-	// The app is logically gone now (tombstoned). Drop its rejection history so
-	// the rollup does not carry a deleted slug. Done here, not on the earlier
-	// Deregister, because Deregister also fires on redeploy/restart/stop where
-	// the app still exists.
-	if s.proxy != nil {
-		s.proxy.ForgetRejects(slug)
-	}
-
-	detail := ""
-	if cleanupErr := storage.OnAppDelete(s.cfg, slug); cleanupErr != nil {
-		// Disk cleanup failed: keep the 'deleting' tombstone so startup
-		// reconciliation retries and the row is not lost with bytes still on
-		// disk (which would orphan them with no owning row or quota). The app
-		// is logically gone from the caller's perspective.
-		detail = "deferred cleanup: " + cleanupErr.Error()
-		slog.Error("app delete cleanup failed; tombstone retained for reconcile", "slug", slug, "err", cleanupErr)
-	} else if secErr := s.cleanupAppSecrets(r.Context(), app.ID); secErr != nil {
-		// External managed-resource cleanup failed: keep the tombstone so
-		// reconciliation retries and no provider resources are orphaned.
-		detail = "deferred provider cleanup: " + secErr.Error()
-		slog.Error("app delete provider cleanup failed; tombstone retained for reconcile", "slug", slug, "err", secErr)
-	} else if err := s.store.DeleteApp(slug); err != nil && !errors.Is(err, db.ErrNotFound) {
-		// Bytes are gone; only the tombstone row remains. Reconcile will drop
-		// it on next startup, so this is not a client-visible failure.
-		detail = "row delete deferred: " + err.Error()
-		slog.Error("app delete: row removal failed after cleanup; tombstone retained", "slug", slug, "err", err)
 	}
 
 	if u := auth.UserFromContext(r.Context()); u != nil {
@@ -2690,6 +2708,43 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// deleteAppLocked performs the crash-safe teardown shared by an explicit
+// DELETE and the ephemeral-app reaper. The caller must hold the per-app deploy
+// lock and must have checked activation lifecycle safety.
+func (s *Server) deleteAppLocked(ctx context.Context, app *db.App) (string, error) {
+	slug := app.Slug
+	if s.manager != nil {
+		_ = s.manager.Stop(slug)
+	}
+	if s.proxy != nil {
+		s.proxy.Deregister(slug)
+	}
+	// Tombstone before disk/provider cleanup. Startup reconciliation completes
+	// any deletion interrupted after this point.
+	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "deleting"}); err != nil {
+		return "", err
+	}
+	if s.proxy != nil {
+		s.proxy.ForgetRejects(slug)
+	}
+	if cleanupErr := storage.OnAppDelete(s.cfg, slug); cleanupErr != nil {
+		detail := "deferred cleanup: " + cleanupErr.Error()
+		slog.Error("app delete cleanup failed; tombstone retained for reconcile", "slug", slug, "err", cleanupErr)
+		return detail, nil
+	}
+	if secErr := s.cleanupAppSecrets(ctx, app.ID); secErr != nil {
+		detail := "deferred provider cleanup: " + secErr.Error()
+		slog.Error("app delete provider cleanup failed; tombstone retained for reconcile", "slug", slug, "err", secErr)
+		return detail, nil
+	}
+	if err := s.store.DeleteApp(slug); err != nil && !errors.Is(err, db.ErrNotFound) {
+		detail := "row delete deferred: " + err.Error()
+		slog.Error("app delete: row removal failed after cleanup; tombstone retained", "slug", slug, "err", err)
+		return detail, nil
+	}
+	return "", nil
 }
 
 func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {

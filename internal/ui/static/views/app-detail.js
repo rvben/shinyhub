@@ -11,7 +11,7 @@ import {
   renderAutoscaleSummary,
   renderRejectsByReason,
 } from '/static/views/autoscale.js';
-import { deploymentListModels, provenanceModel, relativeTime } from '/static/views/deployment-row.js';
+import { deploymentTimelineModels, provenanceModel, relativeTime } from '/static/views/deployment-row.js';
 import { statusPillClass } from '/static/views/stat-format.js';
 import { formatStatus } from '/static/views/status-label.js';
 import { appStatusView } from '/static/views/app-card-badge.js';
@@ -408,6 +408,124 @@ function makeStatusBadge(cls, text) {
   return span;
 }
 
+function makeDeploymentRow(m, nested = false) {
+  const li = document.createElement('li');
+  li.className = 'deployment-row' + (m.isCurrent ? ' deployment-row-current' : '') + (nested ? ' deployment-row-attempt' : '');
+  const verCell = document.createElement('span');
+  verCell.className = 'deployment-version';
+  const num = document.createElement('strong');
+  num.className = 'deployment-number';
+  num.textContent = m.releaseLabel;
+  if (m.releaseLabel) num.title = 'bundle ' + m.version;
+  verCell.appendChild(num);
+  if (m.isCurrent) {
+    verCell.appendChild(makeStatusBadge('deployment-current-badge', 'Current'));
+  } else if (m.status === 'failed') {
+    const b = makeStatusBadge('deployment-failed-badge', 'Failed');
+    if (m.failureReason) b.title = m.failureReason;
+    verCell.appendChild(b);
+  } else if (m.status !== 'succeeded') {
+    verCell.appendChild(makeStatusBadge('deployment-pending-badge', 'Deploying'));
+  }
+  const whenCell = document.createElement('span');
+  whenCell.className = 'deployment-when';
+  whenCell.textContent = m.relWhen || '—';
+  if (m.absWhen) whenCell.title = m.absWhen;
+
+  const sourceCell = document.createElement('span');
+  sourceCell.className = 'deployment-source';
+  const sourcePrimary = document.createElement('span');
+  sourcePrimary.className = 'deployment-source-primary';
+  if (nested && m.source.developmentSession) sourcePrimary.textContent = 'Development save';
+  else if (m.source.url) sourcePrimary.appendChild(externalLink(m.source.label, m.source.url));
+  else sourcePrimary.textContent = m.source.label;
+  const sourceDetail = document.createElement('span');
+  sourceDetail.className = 'deployment-source-detail';
+  sourceDetail.append(m.failureReason && m.status === 'failed' ? m.failureReason : m.source.detail);
+  if (m.source.change) {
+    sourceDetail.append(' · ');
+    sourceDetail.append(m.source.change.url ? externalLink(m.source.change.label, m.source.change.url) : m.source.change.label);
+  }
+  if (m.restoredFromReleaseNumber != null) sourceDetail.append(` · restored bundle from v${m.restoredFromReleaseNumber}`);
+  sourceCell.append(sourcePrimary, sourceDetail);
+
+  const actionCell = document.createElement('span');
+  actionCell.className = 'deployment-action';
+  if (m.canRollback) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'rollback-btn';
+    btn.dataset.id = m.id;
+    btn.textContent = 'Roll back';
+    actionCell.appendChild(btn);
+  } else if (m.isCurrent) {
+    const span = document.createElement('span');
+    span.className = 'deployment-live-note';
+    span.textContent = 'Live';
+    actionCell.appendChild(span);
+  }
+  li.append(verCell, sourceCell, whenCell, actionCell);
+  return li;
+}
+
+function makeDevelopmentSessionRow(model, app) {
+  const li = document.createElement('li');
+  li.className = 'development-session-row' + (model.isCurrent ? ' development-session-current' : '');
+  const details = document.createElement('details');
+  details.className = 'development-session-details';
+  if (model.pendingCount > 0) details.open = true;
+  const summary = document.createElement('summary');
+  summary.className = 'development-session-summary';
+
+  const identity = document.createElement('span');
+  identity.className = 'development-session-identity';
+  const badge = makeStatusBadge('development-session-badge', 'DEV');
+  const title = document.createElement('strong');
+  title.textContent = 'Remote development';
+  identity.append(badge, title);
+
+  const context = document.createElement('span');
+  context.className = 'development-session-context';
+  context.textContent = [model.actor, model.targetLabel].filter(Boolean).join(' · ');
+
+  const outcome = document.createElement('span');
+  outcome.className = 'development-session-outcome';
+  const parts = [];
+  if (model.latestReleaseLabel) parts.push(model.latestReleaseLabel + (model.isCurrent ? ' current' : ''));
+  parts.push(pluralize(model.attemptCount, 'save', 'saves'));
+  if (model.failedCount) parts.push(pluralize(model.failedCount, 'failed', 'failed'));
+  outcome.textContent = parts.join(' · ');
+
+  const when = document.createElement('span');
+  when.className = 'development-session-when';
+  when.textContent = model.status === 'active'
+    ? `Last save ${model.relWhen || 'just now'}`
+    : `Ended ${model.relWhen || ''}`.trim();
+  if (model.absWhen) when.title = `Started ${model.absWhen}`;
+  // Match the parent timeline columns: identity, source context, deployed time,
+  // then the compact outcome in the action column.
+  summary.append(identity, context, when, outcome);
+
+  const tools = document.createElement('nav');
+  tools.className = 'development-session-tools';
+  tools.setAttribute('aria-label', 'Development session observability');
+  const query = `development_session_id=${encodeURIComponent(model.id)}`;
+  for (const [label, tab] of [['View logs', 'logs'], ['View traces', 'traces']]) {
+    const link = document.createElement('a');
+    link.href = `/apps/${encodeURIComponent(app.slug)}/${tab}?${query}`;
+    link.dataset.nav = '';
+    link.textContent = label;
+    tools.appendChild(link);
+  }
+  const attempts = document.createElement('ul');
+  attempts.className = 'development-session-attempts';
+  attempts.setAttribute('aria-label', `${model.attemptCount} deployment attempts`);
+  for (const attempt of model.attempts) attempts.appendChild(makeDeploymentRow(attempt, true));
+  details.append(summary, tools, attempts);
+  li.appendChild(details);
+  return li;
+}
+
 async function renderDeployments(panel, app, ctx) {
   panel.innerHTML = `
     <ul id="detail-deployments-list" class="deployments-list" hidden>
@@ -476,7 +594,7 @@ async function renderDeployments(panel, app, ctx) {
   async function load() {
     list.hidden = false;
     // Keep the header row; drop only previously-rendered deployment rows.
-    list.querySelectorAll('.deployment-row').forEach(r => r.remove());
+    list.querySelectorAll('.deployment-row, .development-session-row').forEach(r => r.remove());
     empty.hidden = true;
     errWrap.hidden = true;
 
@@ -518,67 +636,11 @@ async function renderDeployments(panel, app, ctx) {
     const rows = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : []);
     if (rows.length === 0) { empty.hidden = false; list.hidden = true; return; }
 
-    const models = deploymentListModels(rows);
-    for (const m of models) {
-      const li = document.createElement('li');
-      li.className = 'deployment-row' + (m.isCurrent ? ' deployment-row-current' : '');
-      const verCell = document.createElement('span');
-      verCell.className = 'deployment-version';
-      const num = document.createElement('strong');
-      num.className = 'deployment-number';
-      num.textContent = m.releaseLabel; // "v3"; empty for failed/pending (badge carries status)
-      if (m.releaseLabel) num.title = 'bundle ' + m.version; // epoch id on hover (only where there's a label)
-      verCell.appendChild(num);
-      // Status badge: Current (live), Failed, or Deploying. A plain succeeded
-      // (non-live) row gets no badge — it's just a rollback target.
-      if (m.isCurrent) {
-        verCell.appendChild(makeStatusBadge('deployment-current-badge', 'Current'));
-      } else if (m.status === 'failed') {
-        const b = makeStatusBadge('deployment-failed-badge', 'Failed');
-        if (m.failureReason) b.title = m.failureReason;
-        verCell.appendChild(b);
-      } else if (m.status !== 'succeeded') {
-        verCell.appendChild(makeStatusBadge('deployment-pending-badge', 'Deploying'));
-      }
-      const whenCell = document.createElement('span');
-      whenCell.className = 'deployment-when';
-      whenCell.textContent = m.relWhen || '—';
-      if (m.absWhen) whenCell.title = m.absWhen;
-
-      const sourceCell = document.createElement('span');
-      sourceCell.className = 'deployment-source';
-      const sourcePrimary = document.createElement('span');
-      sourcePrimary.className = 'deployment-source-primary';
-      if (m.source.url) sourcePrimary.appendChild(externalLink(m.source.label, m.source.url));
-      else sourcePrimary.textContent = m.source.label;
-      const sourceDetail = document.createElement('span');
-      sourceDetail.className = 'deployment-source-detail';
-      sourceDetail.append(m.source.detail);
-      if (m.source.change) {
-        sourceDetail.append(' · ');
-        sourceDetail.append(m.source.change.url ? externalLink(m.source.change.label, m.source.change.url) : m.source.change.label);
-      }
-      if (m.restoredFromReleaseNumber != null) sourceDetail.append(` · restored bundle from v${m.restoredFromReleaseNumber}`);
-      sourceCell.append(sourcePrimary, sourceDetail);
-
-      const actionCell = document.createElement('span');
-      actionCell.className = 'deployment-action';
-      if (m.canRollback) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'rollback-btn';
-        btn.dataset.id = m.id;
-        btn.textContent = 'Roll back';
-        actionCell.appendChild(btn);
-      } else if (m.isCurrent) {
-        const span = document.createElement('span');
-        span.className = 'deployment-live-note';
-        span.textContent = 'Live';
-        actionCell.appendChild(span);
-      }
-
-      li.append(verCell, sourceCell, whenCell, actionCell);
-      list.appendChild(li);
+    const models = deploymentTimelineModels(rows);
+    for (const item of models) {
+      list.appendChild(item.kind === 'development-session'
+        ? makeDevelopmentSessionRow(item, app)
+        : makeDeploymentRow(item.deployment));
     }
   }
 
@@ -917,7 +979,13 @@ export function refreshFleetSurfaces(doc, app, state) {
 // but the ring buffer is empty (no slow/error requests yet) it explains how
 // admission to the buffer works so the absence of rows is not surprising.
 function renderTraces(panel, app, ctx) {
+  const candidateSession = new URLSearchParams(window.location.search).get('development_session_id') || '';
+  const session = /^[a-f0-9]{32}$/.test(candidateSession) ? candidateSession : '';
   panel.innerHTML = `
+    ${session ? `<div class="observability-scope" role="status">
+      <span>Showing traces from one remote development session.</span>
+      <a href="/apps/${encodeURIComponent(app.slug)}/traces" data-nav>Show all traces</a>
+    </div>` : ''}
     <div class="traces-toolbar">
       <button id="traces-refresh" type="button" class="btn-row">Refresh</button>
       <span id="traces-status" class="hibernate-status"></span>
@@ -950,7 +1018,8 @@ function renderTraces(panel, app, ctx) {
     errEl.hidden = true;
     let r;
     try {
-      r = await ctx.api(`/api/apps/${app.slug}/traces`);
+      const query = session ? `?development_session_id=${encodeURIComponent(session)}` : '';
+      r = await ctx.api(`/api/apps/${app.slug}/traces${query}`);
     } catch {
       errEl.textContent = 'Network error — could not load traces.';
       errEl.hidden = false;

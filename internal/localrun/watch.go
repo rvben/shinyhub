@@ -2,14 +2,9 @@ package localrun
 
 import (
 	"context"
-	"crypto/sha256"
-	"fmt"
-	"io"
-	"io/fs"
-	"os"
-	"path/filepath"
-	"sort"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/sourcewatch"
 )
 
 // watchAndRestart polls dir every ~500 ms for changes in its source snapshot.
@@ -32,92 +27,23 @@ func watchAndRestartSources(ctx context.Context, dir string, exclude, externalFi
 }
 
 func watchAndRestartSourcesReady(ctx context.Context, dir string, exclude, externalFiles []string, ready chan<- struct{}, onChange func()) error {
-	excludeSet := make(map[string]bool, len(exclude))
-	for _, e := range exclude {
-		excludeSet[e] = true
-	}
-
-	// Initial scan: establish the baseline so a pre-existing recent
-	// modification does not immediately trigger onChange.
-	lastSnapshot := scanSourcesSnapshot(dir, excludeSet, externalFiles)
+	changes := sourcewatch.Changes(ctx, dir, sourcewatch.Options{
+		Interval:      500 * time.Millisecond,
+		ExcludeDirs:   exclude,
+		ExternalFiles: externalFiles,
+	})
 	if ready != nil {
 		close(ready)
 	}
-
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-ticker.C:
-			current := scanSourcesSnapshot(dir, excludeSet, externalFiles)
-			if current != lastSnapshot {
-				lastSnapshot = current
-				onChange()
+		case _, ok := <-changes:
+			if !ok {
+				return nil
 			}
+			onChange()
 		}
 	}
-}
-
-func scanSourcesSnapshot(dir string, excludeSet map[string]bool, externalFiles []string) [sha256.Size]byte {
-	h := sha256.New()
-	tree := scanSnapshot(dir, excludeSet)
-	_, _ = fmt.Fprintf(h, "tree:%x\n", tree)
-	paths := append([]string(nil), externalFiles...)
-	sort.Strings(paths)
-	last := ""
-	for _, path := range paths {
-		if path == last {
-			continue
-		}
-		last = path
-		info, err := os.Lstat(path)
-		if err != nil {
-			_, _ = fmt.Fprintf(h, "external:%s:error:%v\n", path, err)
-			continue
-		}
-		_, _ = fmt.Fprintf(h, "external:%s:%d:%d:%d\n", path, info.Mode(), info.Size(), info.ModTime().UnixNano())
-		if !info.Mode().IsRegular() {
-			continue
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			_, _ = fmt.Fprintf(h, "open-error:%v\n", err)
-			continue
-		}
-		_, _ = io.Copy(h, f)
-		_ = f.Close()
-	}
-	var snapshot [sha256.Size]byte
-	copy(snapshot[:], h.Sum(nil))
-	return snapshot
-}
-
-// scanSnapshot fingerprints metadata, not contents, keeping frequent scans
-// cheap even for bundles with large static assets. filepath.WalkDir is lexical,
-// so identical trees produce identical hashes.
-func scanSnapshot(dir string, excludeSet map[string]bool) [sha256.Size]byte {
-	h := sha256.New()
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			_, _ = fmt.Fprintf(h, "error:%s:%v\n", path, err)
-			return nil // skip unreadable entries; don't abort the walk
-		}
-		if d.IsDir() && excludeSet[d.Name()] && path != dir {
-			return filepath.SkipDir
-		}
-		info, err := d.Info()
-		if err != nil {
-			_, _ = fmt.Fprintf(h, "error:%s:%v\n", path, err)
-			return nil
-		}
-		rel, _ := filepath.Rel(dir, path)
-		_, _ = fmt.Fprintf(h, "%s\x00%d\x00%d\x00%d\n", filepath.ToSlash(rel), info.Mode(), info.Size(), info.ModTime().UnixNano())
-		return nil
-	})
-	var snapshot [sha256.Size]byte
-	copy(snapshot[:], h.Sum(nil))
-	return snapshot
 }

@@ -2190,9 +2190,10 @@ func TestDataUploadWorksOnDeepLink(t *testing.T) {
 // TestDeploymentsMarkCurrent guards that the Deployments tab marks the LIVE
 // deployment — the newest *succeeded* one, not the newest row (a failed/pending
 // latest attempt does not change the running bundle) — and suppresses its Roll
-// back button. deploymentListModels is unit-tested separately; this pins wiring.
+// back button. deploymentTimelineModels delegates each attempt to
+// deploymentListModels before grouping development sessions; this pins wiring.
 func TestDeploymentsMarkCurrent(t *testing.T) {
-	assertContains(t, "views/app-detail.js", "deploymentListModels(rows)",
+	assertContains(t, "views/app-detail.js", "deploymentTimelineModels(rows)",
 		"the Deployments tab must derive the live deployment from status, not current_version")
 	assertContains(t, "views/deployment-row.js", "rows.findIndex(d => (d.status || 'succeeded') === 'succeeded')",
 		"the live deployment must be the newest succeeded one, so a failed latest attempt isn't mislabelled Current")

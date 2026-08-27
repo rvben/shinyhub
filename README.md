@@ -180,6 +180,13 @@ sleeping app; add `--no-browser` on SSH or in scripts.
 > boot smoke test or `--fresh` to rebuild cached dependencies. See
 > [Local development](docs/local-development.md).
 
+> When the app needs a remote host's data, identity, network, or compute, use
+> `shinyhub deploy . --watch --host dev --slug my-existing-dev-app`. Watch mode
+> attaches to an existing app by default; use `--create` for a new persistent
+> target or `--ephemeral --ttl 8h` for an expiring private target. It coalesces
+> save bursts, skips unchanged bundles, and keeps watching after a failed
+> candidate. See [Remote development](docs/local-development.md#develop-on-a-remote-host).
+
 > `uvx shinyhub <cmd>` runs any subcommand one-shot, without installing first.
 > `pip install shinyhub` installs the server too, but native Python apps launch
 > via `uv run`, so you still need `uv` on the host to deploy them.

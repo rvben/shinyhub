@@ -25,6 +25,7 @@ func TestDeploymentOriginForRequest(t *testing.T) {
 	}{
 		{"dashboard", "dashboard", "", db.DeploymentOriginDirect, db.DeploymentChannelDashboard, false},
 		{"cli", "cli", "", db.DeploymentOriginDirect, db.DeploymentChannelCLI, false},
+		{"watch uses compatible cli channel", "watch", "", db.DeploymentOriginDirect, db.DeploymentChannelCLI, false},
 		{"unknown client falls back to api", "forged", "", db.DeploymentOriginDirect, db.DeploymentChannelAPI, false},
 		{"rollback keeps channel", "dashboard", "", db.DeploymentOriginRollback, db.DeploymentChannelDashboard, true},
 		{"fleet run is authoritative", "dashboard", "0123456789abcdef0123456789abcdef", db.DeploymentOriginFleet, db.DeploymentChannelFleet, false},
@@ -36,5 +37,29 @@ func TestDeploymentOriginForRequest(t *testing.T) {
 				t.Fatalf("origin = %#v", got)
 			}
 		})
+	}
+}
+
+func TestDevelopmentRequestHeadersRequireCompleteWatchIdentity(t *testing.T) {
+	valid := httptest.NewRequest("POST", "/api/apps/demo/deploy", nil)
+	valid.Header.Set(deploymentChannelHeader, deploymentChannelWatch)
+	valid.Header.Set(developmentSessionHeader, "0123456789abcdef0123456789abcdef")
+	valid.Header.Set(developmentTargetHeader, db.DevelopmentTargetExisting)
+	got, err := developmentRequestFromHeaders(valid)
+	if err != nil || got.ID == "" || got.Target != db.DevelopmentTargetExisting {
+		t.Fatalf("valid headers = %+v, err=%v", got, err)
+	}
+
+	incomplete := httptest.NewRequest("POST", "/api/apps/demo/deploy", nil)
+	incomplete.Header.Set(deploymentChannelHeader, deploymentChannelWatch)
+	if _, err := developmentRequestFromHeaders(incomplete); err == nil {
+		t.Fatal("incomplete watch identity accepted")
+	}
+
+	forged := httptest.NewRequest("POST", "/api/apps/demo/deploy", nil)
+	forged.Header.Set(developmentSessionHeader, "0123456789abcdef0123456789abcdef")
+	forged.Header.Set(developmentTargetHeader, db.DevelopmentTargetExisting)
+	if _, err := developmentRequestFromHeaders(forged); err == nil {
+		t.Fatal("session identity accepted without watch channel")
 	}
 }
