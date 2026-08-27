@@ -1,0 +1,69 @@
+name: publish shinyhub-bookmarks
+
+on:
+  push:
+    tags:
+      - "shinyhub-bookmarks-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#shinyhub-bookmarks-v}"
+          package_version="$(python -c 'import tomllib; print(tomllib.load(open("packaging/python-bookmarks/pyproject.toml", "rb"))["project"]["version"])')"
+          test "$tag_version" = "$package_version"
+
+      - name: Build and validate distributions
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build 'twine>=7'
+          python -m build packaging/python-bookmarks/
+          twine check packaging/python-bookmarks/dist/*
+
+      - name: Verify the wheel in an isolated environment
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/bookmarks-venv
+          /tmp/bookmarks-venv/bin/pip install --upgrade pip pytest pytest-asyncio
+          /tmp/bookmarks-venv/bin/pip install packaging/python-bookmarks/dist/*.whl
+          /tmp/bookmarks-venv/bin/python -c 'import os; from importlib.resources import files; import shinyhub_bookmarks as b; assert b.__version__ == os.environ["GITHUB_REF_NAME"].removeprefix("shinyhub-bookmarks-v"); assert files("shinyhub_bookmarks").joinpath("www/bridge.js").is_file()'
+          /tmp/bookmarks-venv/bin/pytest packaging/python-bookmarks/tests/ -q
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shinyhub-bookmarks-dist
+          path: packaging/python-bookmarks/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/shinyhub-bookmarks/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: shinyhub-bookmarks-dist
+          path: dist
+
+      - name: Publish shinyhub-bookmarks to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
