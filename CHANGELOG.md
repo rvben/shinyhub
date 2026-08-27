@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.11](https://github.com/rvben/shinyhub/compare/v0.12.10...v0.12.11) - 2026-08-27
+
+### Added
+
+- **diagnostics**: surface replica lifecycle history ([994e500](https://github.com/rvben/shinyhub/commit/994e5007c49ffe63486b5ea2af71e634a88eb796))
+
+### Fixed
+
+- **diagnostics**: persist replica exit lifecycle ([3dde8e3](https://github.com/rvben/shinyhub/commit/3dde8e32b2387ffb9282cb791e178d47581088a1))
+
 ## [0.12.10](https://github.com/rvben/shinyhub/compare/v0.12.9...v0.12.10) - 2026-08-27
 
 ### Added
