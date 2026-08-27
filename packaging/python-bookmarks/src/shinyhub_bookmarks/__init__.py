@@ -1,6 +1,6 @@
 """Selective URL bookmarking for Python Shiny apps hosted by ShinyHub."""
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 from ._adapter import Field, Registration, register
 from ._dependency import bookmarking_dependency
