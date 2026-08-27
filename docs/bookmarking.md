@@ -90,6 +90,19 @@ The browser-local ShinyHub switcher receives registered display values and the
 generated URL to render the receipt and copy the link. The ShinyHub server does
 not receive or persist bookmark state.
 
+Transport differences involving dates, datetimes, tuples, mappings, enums,
+UUIDs, and dataclasses are compared recursively. Custom inputs can provide an
+idempotent comparison normalizer without changing serialization:
+
+```python
+fields={
+    "custom": Field(
+        "Custom filter",
+        normalizer=lambda value: value.key if hasattr(value, "key") else value,
+    )
+}
+```
+
 ## Limits and errors
 
 The helper rejects URLs longer than 8 KiB by default because long request
@@ -136,9 +149,10 @@ register(
 The restore callback uses Shiny's public bookmark lifecycle hooks. It validates
 saved choice values, applies aliases, updates `select`, `selectize`, or `radio`
 controls, and reports any adjustment to the browser-local switcher. A multiple
-selection keeps its still-valid members. Removed fields listed in
-`legacy_fields` are ignored and reported; `renamed_from` moves a saved value to
-the current field.
+selection keeps its still-valid members in current display order, including an
+empty selection. Removed fields listed in `legacy_fields` are ignored and
+reported. `renamed_from` requires a `ChoiceRestore` policy so the saved value is
+validated and moved to the current field.
 
 New links include `schema_version` as Shiny bookmark metadata. The metadata is
 for migrations and diagnostics; it is not server-side state. Links created by

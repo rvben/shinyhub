@@ -22,6 +22,7 @@ MAX_UNKNOWN_LABEL_LENGTH = 120
 MAX_UNKNOWN_VALUE_LENGTH = 240
 
 Formatter = Callable[[Any], str]
+Normalizer = Callable[[Any], Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,10 +33,13 @@ class Field:
     formatter: Formatter | None = None
     restore: ChoiceRestore | None = None
     renamed_from: Mapping[str, str] | None = None
+    normalizer: Normalizer | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.label, str) or not self.label.strip():
             raise ValueError("Field labels must be non-empty strings")
+        if self.normalizer is not None and not callable(self.normalizer):
+            raise TypeError("Field normalizer must be callable")
         if self.restore is not None and not isinstance(self.restore, ChoiceRestore):
             raise TypeError("Field restore must be a ChoiceRestore")
         if self.renamed_from is not None:
@@ -54,6 +58,8 @@ class Field:
                     raise ValueError(
                         "Renamed bookmark field labels must be non-empty strings"
                     )
+            if self.renamed_from and self.restore is None:
+                raise ValueError("Field renamed_from requires a ChoiceRestore policy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +68,7 @@ class _RegisteredField:
     resolved_id: str
     label: str
     formatter: Formatter | None
+    normalizer: Normalizer | None
     restore: ChoiceRestore | None
     renamed_from: Mapping[str, str]
 
@@ -117,6 +124,7 @@ def _normalise_fields(
                 resolved_id=resolved_id,
                 label=field.label.strip(),
                 formatter=field.formatter,
+                normalizer=field.normalizer,
                 restore=field.restore,
                 renamed_from=dict(field.renamed_from or {}),
             )
@@ -156,6 +164,16 @@ def _safe_display_value(value: Any, formatter: Formatter | None) -> str:
         return _display_value(value, formatter)
     except Exception:
         return _display_value(value, None)
+
+
+def _field_values_equal(field: _RegisteredField, left: Any, right: Any) -> bool:
+    if field.normalizer is not None:
+        try:
+            left = field.normalizer(left)
+            right = field.normalizer(right)
+        except Exception:
+            return False
+    return values_equal(left, right)
 
 
 def _bounded_untrusted_display(value: Any, limit: int) -> str:
@@ -202,14 +220,24 @@ def _restore_adjustments(
         target = current
         kind: str | None = None
         if field.restore is not None:
-            resolution = resolve_choice(field.restore, saved, current)
+            resolution = resolve_choice(
+                field.restore,
+                saved,
+                current,
+                equal=lambda left, right: _field_values_equal(
+                    field, left, right
+                ),
+            )
             target = resolution.value
             kind = resolution.kind
-        elif not values_equal(saved, current):
+        elif not _field_values_equal(field, saved, current):
             kind = "fallback"
 
         renamed = source_id != field.input_id
-        if not values_equal(target, current) and field.restore is not None:
+        if (
+            not _field_values_equal(field, target, current)
+            and field.restore is not None
+        ):
             updates[field.input_id] = target
         if kind or renamed:
             adjustments.append(
@@ -409,7 +437,7 @@ def register(
             current = input[field.input_id]()
             if field.input_id in restored_overrides:
                 restored = restored_overrides[field.input_id]
-                if values_equal(current, restored):
+                if _field_values_equal(field, current, restored):
                     restored_overrides.pop(field.input_id, None)
                 else:
                     current = restored

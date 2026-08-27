@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import date
+from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import date, time
+from enum import Enum
 from typing import Any, Literal
+from uuid import UUID
 
 
 class _Missing:
@@ -15,6 +17,7 @@ ChoiceControl = Literal["select", "selectize", "radio"]
 ChoiceSource = (
     Mapping[Any, Any] | Iterable[Any] | Callable[[], Mapping[Any, Any] | Iterable[Any]]
 )
+ValueEqual = Callable[[Any, Any], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,8 @@ class ChoiceRestore:
             )
         if not isinstance(self.aliases, Mapping):
             raise TypeError("ChoiceRestore aliases must be a mapping")
+        if isinstance(self.choices, (set, frozenset)):
+            raise TypeError("ChoiceRestore choices must preserve display order")
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,37 +78,81 @@ class ChoiceResolution:
 
 
 def _comparable(value: Any) -> Any:
-    if isinstance(value, date):
+    if isinstance(value, Enum):
+        return _comparable(value.value)
+    if isinstance(value, (date, time)):
         return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {item.name: getattr(value, item.name) for item in fields(value)}
     return value
+
+
+def _values_equal(left: Any, right: Any) -> bool:
+    left = _comparable(left)
+    right = _comparable(right)
+
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+
+    left_mapping = isinstance(left, Mapping)
+    right_mapping = isinstance(right, Mapping)
+    if left_mapping or right_mapping:
+        if not left_mapping or not right_mapping or len(left) != len(right):
+            return False
+        unmatched = list(right.items())
+        for left_key, left_value in left.items():
+            for index, (right_key, right_value) in enumerate(unmatched):
+                if _values_equal(left_key, right_key) and _values_equal(
+                    left_value, right_value
+                ):
+                    unmatched.pop(index)
+                    break
+            else:
+                return False
+        return True
+
+    left_sequence = isinstance(left, Sequence) and not isinstance(left, (str, bytes))
+    right_sequence = isinstance(right, Sequence) and not isinstance(
+        right, (str, bytes)
+    )
+    if left_sequence or right_sequence:
+        return (
+            left_sequence
+            and right_sequence
+            and len(left) == len(right)
+            and all(
+                _values_equal(left_value, right_value)
+                for left_value, right_value in zip(left, right)
+            )
+        )
+
+    return bool(left == right)
 
 
 def values_equal(left: Any, right: Any) -> bool:
     """Compare values across Shiny's JSON and live-input representations."""
 
-    left = _comparable(left)
-    right = _comparable(right)
-    if isinstance(left, Sequence) and not isinstance(left, (str, bytes)):
-        if not isinstance(right, Sequence) or isinstance(right, (str, bytes)):
-            return False
-        return [_comparable(value) for value in left] == [
-            _comparable(value) for value in right
-        ]
     try:
-        return bool(left == right)
+        return _values_equal(left, right)
     except Exception:
         return False
 
 
-def _mapping_value(mapping: Mapping[Any, Any], value: Any) -> tuple[Any, bool]:
+def _mapping_value(
+    mapping: Mapping[Any, Any], value: Any, equal: ValueEqual
+) -> tuple[Any, bool]:
     for old, new in mapping.items():
-        if values_equal(old, value):
+        if equal(old, value):
             return new, True
     return value, False
 
 
 def _choice_values(source: ChoiceSource) -> list[Any]:
     choices = source() if callable(source) else source
+    if isinstance(choices, (set, frozenset)):
+        raise TypeError("ChoiceRestore choices must preserve display order")
     if isinstance(choices, Mapping):
         values: list[Any] = []
         for key, label in choices.items():
@@ -117,22 +166,42 @@ def _choice_values(source: ChoiceSource) -> list[Any]:
     return list(choices)
 
 
-def _contains(choices: Sequence[Any], value: Any) -> bool:
-    return any(values_equal(choice, value) for choice in choices)
+def _contains(choices: Sequence[Any], value: Any, equal: ValueEqual) -> bool:
+    return any(equal(choice, value) for choice in choices)
 
 
-def _valid_multiple(choices: Sequence[Any], value: Any) -> bool:
+def _valid_multiple(
+    choices: Sequence[Any], value: Any, equal: ValueEqual
+) -> bool:
     return (
         isinstance(value, Sequence)
         and not isinstance(value, (str, bytes))
-        and all(_contains(choices, item) for item in value)
+        and all(_contains(choices, item, equal) for item in value)
     )
 
 
-def resolve_choice(policy: ChoiceRestore, saved: Any, current: Any) -> ChoiceResolution:
+def _canonical_multiple(
+    choices: Sequence[Any], selected: Sequence[Any], equal: ValueEqual
+) -> list[Any]:
+    return [
+        choice
+        for choice in choices
+        if any(equal(choice, item) for item in selected)
+    ]
+
+
+def resolve_choice(
+    policy: ChoiceRestore,
+    saved: Any,
+    current: Any,
+    *,
+    equal: ValueEqual = values_equal,
+) -> ChoiceResolution:
     """Resolve a saved choice to a value the current app can represent."""
 
     choices = _choice_values(policy.choices)
+    if saved is None and current is None:
+        return ChoiceResolution(None, None)
     multiple = isinstance(saved, Sequence) and not isinstance(saved, (str, bytes))
 
     if multiple:
@@ -140,30 +209,37 @@ def resolve_choice(policy: ChoiceRestore, saved: Any, current: Any) -> ChoiceRes
         used_alias = False
         lost_value = False
         for item in saved:
-            candidate, changed = _mapping_value(policy.aliases, item)
+            candidate, changed = _mapping_value(policy.aliases, item, equal)
             used_alias = used_alias or changed
-            if _contains(choices, candidate):
+            if _contains(choices, candidate, equal):
                 migrated.append(candidate)
             else:
                 lost_value = True
+        migrated = _canonical_multiple(choices, migrated, equal)
         if not lost_value:
             return ChoiceResolution(migrated, "migrated" if used_alias else None)
         if migrated:
             return ChoiceResolution(migrated, "fallback")
         if not isinstance(policy.default, _Missing) and _valid_multiple(
-            choices, policy.default
+            choices, policy.default, equal
         ):
-            return ChoiceResolution(list(policy.default), "fallback")
-        if _valid_multiple(choices, current):
-            return ChoiceResolution(list(current), "fallback")
+            return ChoiceResolution(
+                _canonical_multiple(choices, policy.default, equal), "fallback"
+            )
+        if _valid_multiple(choices, current, equal):
+            return ChoiceResolution(
+                _canonical_multiple(choices, current, equal), "fallback"
+            )
         return ChoiceResolution([], "fallback")
 
-    candidate, used_alias = _mapping_value(policy.aliases, saved)
-    if _contains(choices, candidate):
+    candidate, used_alias = _mapping_value(policy.aliases, saved, equal)
+    if _contains(choices, candidate, equal):
         return ChoiceResolution(candidate, "migrated" if used_alias else None)
-    if not isinstance(policy.default, _Missing) and _contains(choices, policy.default):
+    if not isinstance(policy.default, _Missing) and _contains(
+        choices, policy.default, equal
+    ):
         return ChoiceResolution(policy.default, "fallback")
-    if _contains(choices, current):
+    if _contains(choices, current, equal):
         return ChoiceResolution(current, "fallback")
     fallback = choices[0] if choices else current
     return ChoiceResolution(fallback, "fallback")

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, time
+from enum import Enum
+from uuid import UUID
 
 import pytest
 from shinyhub_bookmarks import ChoiceRestore, Field
@@ -72,6 +75,34 @@ def test_choice_restore_rejects_an_unknown_control():
         ChoiceRestore(choices=["A"], control="dropdown")  # type: ignore[arg-type]
 
 
+def test_choice_restore_rejects_unordered_choices():
+    with pytest.raises(TypeError, match="display order"):
+        ChoiceRestore(choices={"A", "B"})
+
+
+def test_choice_restore_preserves_an_empty_multiple_selection():
+    result = resolve_choice(
+        ChoiceRestore(choices=["A", "B"]),
+        None,
+        None,
+    )
+
+    assert result.value is None
+    assert result.kind is None
+
+
+def test_choice_restore_canonicalises_multiple_values_to_display_order():
+    result = resolve_choice(
+        ChoiceRestore(choices=["A", "B", "C"]),
+        ["C", "A", "C"],
+        ("A", "C"),
+    )
+
+    assert result.value == ["A", "C"]
+    assert result.kind is None
+    assert values_equal(result.value, ("A", "C"))
+
+
 def test_values_equal_treats_list_and_tuple_transport_as_equivalent():
     assert values_equal(["A", "B"], ("A", "B"))
 
@@ -95,6 +126,66 @@ def test_values_equal_treats_temporal_values_as_iso_bookmark_transport(
 
 def test_values_equal_detects_different_temporal_values():
     assert not values_equal(["2026-08-01"], (date(2026, 8, 2),))
+
+
+class Status(Enum):
+    READY = "ready"
+
+
+@dataclass
+class NestedValue:
+    when: date
+    at: time
+
+
+def test_values_equal_recurses_through_json_transport_shapes():
+    saved = {
+        "items": [["A"], {"when": "2026-08-27", "at": "12:30:00"}],
+        "status": "ready",
+        "identifier": "12345678-1234-5678-1234-567812345678",
+    }
+    current = {
+        "items": (("A",), NestedValue(date(2026, 8, 27), time(12, 30))),
+        "status": Status.READY,
+        "identifier": UUID("12345678-1234-5678-1234-567812345678"),
+    }
+
+    assert values_equal(saved, current)
+
+
+def test_values_equal_does_not_conflate_booleans_and_numbers():
+    assert not values_equal(True, 1)
+    assert not values_equal(False, 0.0)
+
+
+class LiveValue:
+    def __init__(self, value):
+        self.value = value
+
+
+def test_field_normalizer_supports_custom_transport_representations():
+    registered = _normalise_fields(
+        {
+            "custom": Field(
+                "Custom",
+                restore=ChoiceRestore(choices=["saved"]),
+                normalizer=lambda value: (
+                    value.value if isinstance(value, LiveValue) else value
+                ),
+            )
+        },
+        resolve=lambda value: value,
+    )
+
+    adjustments, updates = _restore_adjustments(
+        state_input={"custom": "saved"},
+        registered=registered,
+        current_values={"custom": LiveValue("saved")},
+        legacy_fields={},
+    )
+
+    assert not adjustments
+    assert updates == {}
 
 
 def test_restore_adjustments_ignore_matching_date_range_transport_values():

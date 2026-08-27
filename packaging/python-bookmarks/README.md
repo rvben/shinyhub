@@ -78,12 +78,20 @@ register(
 
 `ChoiceRestore` validates the saved value, applies aliases, and updates the
 current Shiny choice input. Supported controls are `select`, `selectize`, and
-`radio`. Multiple selections retain every choice that still exists. A missing
-declared default falls back to the valid value Shiny already selected.
+`radio`. Multiple selections retain every choice that still exists, use the
+current display order, and preserve an empty selection. A missing declared
+default falls back to the valid value Shiny already selected.
 
-`renamed_from` maps an old input ID to its former label. `legacy_fields` names
-removed inputs that should be reported as ignored. Every new link records the
-app's `schema_version`; older links without metadata remain supported.
+`renamed_from` maps an old input ID to its former label and requires a
+`ChoiceRestore` policy so the saved value can actually be applied to the new
+control. `legacy_fields` names removed inputs that should be reported as
+ignored. Every new link records the app's `schema_version`; older links without
+metadata remain supported.
+
+For a custom input whose live Python value differs from its JSON bookmark
+representation, pass an idempotent `normalizer=` to `Field`. It is applied to
+both sides before comparison; it does not change the value Shiny serializes or
+restores.
 
 When anything changes, the switcher marks the bookmark action and presents a
 plain-language **View adjusted** receipt. It names migrated, unavailable,

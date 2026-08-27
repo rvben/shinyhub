@@ -78,15 +78,38 @@ def test_field_validates_restore_and_renamed_metadata():
     with pytest.raises(TypeError, match="ChoiceRestore"):
         Field("Region", restore="unsafe")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="public input IDs"):
-        Field("Region", renamed_from={".private": "Old region"})
+        Field(
+            "Region",
+            restore=ChoiceRestore(choices=["Europe"]),
+            renamed_from={".private": "Old region"},
+        )
+    with pytest.raises(ValueError, match="requires a ChoiceRestore"):
+        Field("Region", renamed_from={"territory": "Old region"})
+
+
+def test_field_preserves_positional_restore_arguments():
+    policy = ChoiceRestore(choices=["Europe"])
+    field = Field("Region", None, policy, {"territory": "Old region"})
+
+    assert field.restore is policy
+    assert field.renamed_from == {"territory": "Old region"}
+    assert field.normalizer is None
 
 
 def test_normalise_fields_rejects_ambiguous_renamed_ids():
     with pytest.raises(ValueError, match="ambiguous"):
         _normalise_fields(
             {
-                "region": Field("Region", renamed_from={"territory": "Territory"}),
-                "market": Field("Market", renamed_from={"territory": "Territory"}),
+                "region": Field(
+                    "Region",
+                    restore=ChoiceRestore(choices=["Europe"]),
+                    renamed_from={"territory": "Territory"},
+                ),
+                "market": Field(
+                    "Market",
+                    restore=ChoiceRestore(choices=["Europe"]),
+                    renamed_from={"territory": "Territory"},
+                ),
             },
             resolve=lambda value: value,
         )
