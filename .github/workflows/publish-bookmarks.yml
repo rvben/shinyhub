@@ -12,38 +12,44 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.6"
           python-version: "3.12"
+          enable-cache: false
+          working-directory: packaging/python-bookmarks
 
       - name: Verify tag matches package version
+        working-directory: packaging/python-bookmarks
         shell: bash
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#shinyhub-bookmarks-v}"
-          package_version="$(python -c 'import tomllib; print(tomllib.load(open("packaging/python-bookmarks/pyproject.toml", "rb"))["project"]["version"])')"
+          package_version="$(uv run --isolated --no-project python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           test "$tag_version" = "$package_version"
 
       - name: Build and validate distributions
         working-directory: packaging/python-bookmarks
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip build 'twine>=7'
-          python -m build .
-          twine check dist/*
+          uv build --no-sources .
+          uv run --isolated --no-project --with 'twine>=7' twine check dist/*
 
-      - name: Verify the wheel in an isolated environment
+      - name: Verify distributions in isolated environments
+        working-directory: packaging/python-bookmarks
         run: |
           set -euo pipefail
-          python -m venv /tmp/bookmarks-venv
-          /tmp/bookmarks-venv/bin/pip install --upgrade pip pytest pytest-asyncio
-          /tmp/bookmarks-venv/bin/pip install packaging/python-bookmarks/dist/*.whl
-          /tmp/bookmarks-venv/bin/python -c 'import os; from importlib.resources import files; import shinyhub_bookmarks as b; assert b.__version__ == os.environ["GITHUB_REF_NAME"].removeprefix("shinyhub-bookmarks-v"); assert files("shinyhub_bookmarks").joinpath("www/bridge.js").is_file()'
-          /tmp/bookmarks-venv/bin/pytest packaging/python-bookmarks/tests/ -q
+          for archive in dist/*.whl dist/*.tar.gz; do
+            uv run --isolated --no-project --with "$archive" python -c 'import os; from importlib.resources import files; import shinyhub_bookmarks as b; assert b.__version__ == os.environ["GITHUB_REF_NAME"].removeprefix("shinyhub-bookmarks-v"); assert files("shinyhub_bookmarks").joinpath("www/bridge.js").is_file()'
+          done
+          uv run --isolated --no-project --with dist/*.whl --with pytest --with pytest-asyncio pytest tests/ -q
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: shinyhub-bookmarks-dist
           path: packaging/python-bookmarks/dist/*
@@ -59,12 +65,19 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.6"
+          enable-cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: shinyhub-bookmarks-dist
           path: dist
 
+      - name: Generate PEP 740 attestations
+        uses: astral-sh/attest-action@f589a42a7efb6fe400b4f400de60b4bc90390027 # v0.0.6
+
       - name: Publish shinyhub-bookmarks to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
+        run: uv publish --trusted-publishing always dist/*

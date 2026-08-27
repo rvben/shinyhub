@@ -2,7 +2,7 @@
 
 `shinyhub-bookmarks` is versioned independently from the ShinyHub server. A
 release is built from an immutable package-specific tag and published through
-PyPI Trusted Publishing; no long-lived API token is used.
+PyPI Trusted Publishing with `uv publish`; no long-lived API token is used.
 
 ## First release only
 
@@ -23,7 +23,8 @@ does not reserve the name before then.
 1. Update `project.version` in `pyproject.toml` and `__version__` in
    `src/shinyhub_bookmarks/__init__.py` in the same commit.
 2. Run `make test-py-bookmarks` and the repository's JavaScript test suite.
-3. Build both distributions and validate them with a current Twine release.
+3. Build both distributions with `uv build --no-sources` and validate their
+   metadata with a current Twine release.
 4. Merge the release commit to `main`.
 5. Tag that exact commit as `shinyhub-bookmarks-v<version>` and push the tag.
 6. Wait for the **publish shinyhub-bookmarks** workflow to finish.
