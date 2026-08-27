@@ -31,6 +31,9 @@ const POSITION_KEY = 'shinyhub-app-nav:position';
 const LEGACY_POSITION_KEY = 'shinyhub-app-nav:position:demo';
 const SESSION_EVENT = 'shinyhub:session-status';
 const SESSION_OWNER_EVENT = 'shinyhub:session-status-owner';
+const BOOKMARK_CAPABILITIES_EVENT = 'shinyhub:bookmark:capabilities';
+const BOOKMARK_CREATE_EVENT = 'shinyhub:bookmark:create';
+const BOOKMARK_RESULT_EVENT = 'shinyhub:bookmark:result';
 
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -189,6 +192,96 @@ test('mounts a recognizable app bar into the page without fetching anything', as
   assert.equal(m.root().getAttribute('data-position'), 'top-right');
   assert.equal(m.fetches.length, 0);
   assert.equal(m.jsdomErrors.length, 0, `script errored: ${m.jsdomErrors.join('; ')}`);
+});
+
+test('bookmarking stays absent until an app publishes supported fields', () => {
+  const m = mount();
+  const trigger = m.q('button.bookmark-trigger');
+
+  assert.equal(m.root().classList.contains('bookmark-ready'), false);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+    },
+  }));
+
+  assert.ok(m.root().classList.contains('bookmark-ready'));
+  assert.equal(trigger.getAttribute('aria-label'), 'Bookmark this view');
+});
+
+test('the exact-view receipt names every registered filter before copying', () => {
+  const m = mount();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [
+        { id: 'region', label: 'Region', value: 'Europe' },
+        { id: 'year', label: 'Reporting year', value: '2026' },
+      ],
+    },
+  }));
+
+  m.q('button.bookmark-trigger').click();
+
+  assert.ok(m.root().classList.contains('bookmark-open'));
+  assert.equal(m.q('.bookmark-badge').textContent, 'Exact view');
+  assert.equal(m.q('.bookmark-count').textContent, '2 filters');
+  assert.deepEqual(m.qa('.bookmark-field-label').map((node) => node.textContent), ['Region', 'Reporting year']);
+  assert.deepEqual(m.qa('.bookmark-field-value').map((node) => node.textContent), ['Europe', '2026']);
+  assert.equal(m.qa('.bookmark-check').length, 0);
+  assert.match(m.q('.bookmark-intro').textContent, /exactly as shown/);
+});
+
+test('custom bookmarks begin with everything selected and never submit an empty selection', () => {
+  const m = mount();
+  const requests = [];
+  m.window.addEventListener(BOOKMARK_CREATE_EVENT, (event) => requests.push(event.detail));
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [
+        { id: 'region', label: 'Region', value: 'Europe' },
+        { id: 'year', label: 'Year', value: '2026' },
+      ],
+    },
+  }));
+  m.q('button.bookmark-trigger').click();
+  m.q('button.bookmark-secondary').click();
+
+  const checks = m.qa('.bookmark-check');
+  assert.deepEqual(checks.map((node) => node.checked), [true, true]);
+  checks[1].click();
+  assert.equal(m.q('.bookmark-count').textContent, '1 of 2 filters');
+  m.q('button.bookmark-primary').click();
+  assert.equal(requests.length, 1);
+  assert.deepEqual(Array.from(requests[0].include), ['region']);
+
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_RESULT_EVENT, {
+    detail: { version: 1, requestId: requests[0].requestId, url: 'https://hub.test/app/demo/?_inputs_=ok' },
+  }));
+});
+
+test('deselecting every custom field disables the copy action', () => {
+  const m = mount();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+    },
+  }));
+  m.q('button.bookmark-trigger').click();
+  m.q('button.bookmark-secondary').click();
+  m.q('.bookmark-check').click();
+
+  assert.equal(m.q('.bookmark-count').textContent, '0 of 1 filters');
+  assert.equal(m.q('button.bookmark-primary').disabled, true);
 });
 
 test('an offline snapshot becomes a compact switcher status with explicit recovery actions', async () => {

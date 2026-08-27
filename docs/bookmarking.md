@@ -1,0 +1,121 @@
+---
+description: "Add selective, user-friendly URL bookmarks to a Python Shiny app with the shinyhub-bookmarks helper."
+---
+
+# Bookmark a Shiny view
+
+ShinyHub can offer **Bookmark this view** inside the app switcher when a Python
+Shiny app opts in. The app names the filter inputs that are safe and useful to
+carry. ShinyHub presents the receipt and selection UI; Shiny itself serializes
+and restores the state.
+
+There is no ShinyHub bookmark table, API, or retained copy of filter values.
+The state stays in the URL returned by Shiny.
+
+## Add it to an app
+
+Install `shinyhub-bookmarks` alongside Shiny 1.6.4 or newer, then add the browser
+dependency to the UI and register fields in the server:
+
+```python
+from shiny import App, ui
+from shinyhub_bookmarks import Field, bookmarking_dependency, register
+
+
+def app_ui(request):
+    return ui.page_fluid(
+        bookmarking_dependency(),
+        ui.input_select("region", "Region", ["Europe", "Americas", "Asia"]),
+        ui.input_slider("year", "Year", 2020, 2026, 2026),
+    )
+
+
+def server(input, output, session):
+    register(
+        session=session,
+        input=input,
+        fields={
+            "region": Field("Region"),
+            "year": Field("Reporting year"),
+        },
+    )
+
+
+app = App(app_ui, server, bookmark_store="url")
+```
+
+All three integration details matter:
+
+1. The UI is a function accepting `request`, which lets Shiny restore URL state
+   before it creates the controls.
+2. `bookmarking_dependency()` loads the inert app-side browser bridge.
+3. `bookmark_store="url"` enables Shiny's native URL serializer.
+
+If the package is not present, the switcher simply has no bookmark action.
+
+## What visitors get
+
+The initial view is an explicit receipt: every registered field is selected and
+its current value is shown. **Copy link** therefore means “copy this exact
+view,” including values that happen to equal today's app defaults.
+
+**Customize…** turns the same receipt into a checklist. Unchecked fields are
+omitted and use whatever defaults the app has when the link is opened. The copy
+action is disabled when no fields are selected, avoiding a link that looks
+special but carries no useful state.
+
+## Field labels and values
+
+A string is shorthand for a field label:
+
+```python
+fields={"region": "Region"}
+```
+
+Use a formatter when a raw value needs visitor-facing language:
+
+```python
+fields={
+    "forecast": Field(
+        "Forecast",
+        formatter=lambda enabled: "Included" if enabled else "Actuals only",
+    )
+}
+```
+
+Formatters only affect the receipt. Shiny serializes the original input value.
+Do not register secrets or large free-form inputs: selected values become part
+of a shareable URL and may appear in browser history, logs, and referrer data.
+The browser-local ShinyHub switcher receives registered display values and the
+generated URL to render the receipt and copy the link. The ShinyHub server does
+not receive or persist bookmark state.
+
+## Limits and errors
+
+The helper rejects URLs longer than 8 KiB by default because long request
+targets are not consistently accepted across browsers and reverse proxies. An
+app can pass `max_url_length=` to `register()` when its entire delivery path has
+a known higher limit.
+
+The adapter serializes one request at a time, restores the app's existing
+`bookmark.exclude` list after every attempt, validates selected IDs against the
+registration, and returns stable browser error codes. It does not log filter
+values or generated URLs.
+
+## Compatibility
+
+The browser boundary is a versioned set of `CustomEvent`s, so a future R helper
+can implement the same contract without changing the switcher. Version 1 uses:
+
+- `shinyhub:bookmark:discover`
+- `shinyhub:bookmark:capabilities`
+- `shinyhub:bookmark:create`
+- `shinyhub:bookmark:result`
+- `shinyhub:bookmark:error`
+
+Applications should use the helper rather than emitting these events directly;
+the protocol is documented to make the ownership boundary and upgrade path
+clear.
+
+See [`examples/bookmarking-demo`](../examples/bookmarking-demo/) for a runnable
+four-filter app.

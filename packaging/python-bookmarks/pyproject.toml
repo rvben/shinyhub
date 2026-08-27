@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shinyhub-bookmarks"
+version = "0.1.0"
+description = "Let ShinyHub visitors create selective URL bookmarks for Python Shiny apps."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Ruben J. Jongejan", email = "ruben.jongejan@gmail.com" },
+]
+keywords = ["shinyhub", "shiny", "bookmark", "state"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = [
+  "shiny>=1.6.4,<2",
+]
+
+[project.urls]
+Homepage   = "https://github.com/rvben/shinyhub"
+Repository = "https://github.com/rvben/shinyhub"
+Issues     = "https://github.com/rvben/shinyhub/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=9", "pytest-asyncio>=1.2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shinyhub_bookmarks"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

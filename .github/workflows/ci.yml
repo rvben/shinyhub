@@ -23,6 +23,13 @@ jobs:
         with:
           node-version: "20"
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Lint
         run: go vet ./...
 
@@ -42,6 +49,9 @@ jobs:
       # the whole dashboard, so these tests gate every push too.
       - name: Test (JS)
         run: make test-js
+
+      - name: Test (Python bookmarks)
+        run: make test-py-bookmarks
 
       - name: Vulnerability scan
         run: make vuln

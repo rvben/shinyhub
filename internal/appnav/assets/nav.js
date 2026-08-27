@@ -45,6 +45,13 @@
   var POSITIONS = ["top-center", "top-right", "left-center", "right-center"];
   var SESSION_EVENT = "shinyhub:session-status";
   var SESSION_OWNER_EVENT = "shinyhub:session-status-owner";
+  var BOOKMARK_DISCOVER_EVENT = "shinyhub:bookmark:discover";
+  var BOOKMARK_CAPABILITIES_EVENT = "shinyhub:bookmark:capabilities";
+  var BOOKMARK_CREATE_EVENT = "shinyhub:bookmark:create";
+  var BOOKMARK_RESULT_EVENT = "shinyhub:bookmark:result";
+  var BOOKMARK_ERROR_EVENT = "shinyhub:bookmark:error";
+  var BOOKMARK_PROTOCOL_VERSION = 1;
+  var BOOKMARK_TIMEOUT_MS = 10000;
 
   var tag = document.currentScript || document.getElementById(TAG_ID);
   if (!tag) {
@@ -334,8 +341,12 @@
       "}",
     ".root.session-snapshot[data-position='top-center'] .bar," +
       " .root.session-snapshot[data-position='top-right'] .bar { width: min(304px, calc(100vw - 24px)); }",
+    ".root.bookmark-ready:not(.session-snapshot)[data-position='top-center'] .bar," +
+      " .root.bookmark-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: min(302px, calc(100vw - 24px)); }",
     ".root.session-snapshot[data-position='left-center'] .bar," +
       " .root.session-snapshot[data-position='right-center'] .bar { height: 142px; }",
+    ".root.bookmark-ready:not(.session-snapshot)[data-position='left-center'] .bar," +
+      " .root.bookmark-ready:not(.session-snapshot)[data-position='right-center'] .bar { height: 142px; }",
     ".control {" +
       "  appearance: none; -webkit-appearance: none; border: 0; margin: 0; padding: 0;" +
       "  height: 38px; display: flex; align-items: center; justify-content: center;" +
@@ -396,12 +407,22 @@
       " .root[data-position='right-center'] .session-trigger {" +
       "  width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line);" +
       "}",
+    ".bookmark-trigger {" +
+      "  display: none; width: 38px; flex: none; color: var(--sh-soft);" +
+      "  border-right: 1px solid var(--sh-line);" +
+      "}",
+    ".root.bookmark-ready:not(.session-snapshot) .bookmark-trigger { display: flex; }",
+    ".bookmark-trigger:hover { color: var(--sh-signal); background: var(--sh-raised); }",
+    ".root[data-position='left-center'] .bookmark-trigger," +
+      " .root[data-position='right-center'] .bookmark-trigger {" +
+      "  width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line);" +
+      "}",
 
     ".scrim {" +
       "  position: absolute; inset: 0; background: var(--sh-deep); opacity: 0;" +
       "  pointer-events: none; transition: opacity 160ms ease;" +
       "}",
-    ".root.open .scrim { opacity: 0.14; pointer-events: auto; }",
+    ".root.open .scrim, .root.bookmark-open .scrim, .root.session-open .scrim { opacity: 0.14; pointer-events: auto; }",
     ".root.placing .scrim { opacity: 0; pointer-events: auto; }",
 
     ".panel {" +
@@ -475,6 +496,65 @@
     ".session-restart:hover { border-color: var(--sh-soft); background: var(--sh-hover); }",
     ".session-primary:focus-visible, .session-restart:focus-visible { outline: 2px solid var(--sh-warning); outline-offset: 2px; }",
     ".session-panel ::selection { color: var(--sh-deep); background: var(--sh-warning); }",
+
+    ".bookmark-panel {" +
+      "  position: absolute; width: 368px; max-width: calc(100vw - 24px);" +
+      "  max-height: min(620px, calc(100vh - 72px)); box-sizing: border-box;" +
+      "  display: flex; flex-direction: column; pointer-events: auto; overflow: hidden;" +
+      "  color: var(--sh-text); background: var(--sh-surface);" +
+      "  border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg);" +
+      "  box-shadow: 0 32px 80px rgba(0,0,0,0.7);" +
+      "  opacity: 0; visibility: hidden; transform: translateY(-8px) scale(0.98);" +
+      "  transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 180ms;" +
+      "}",
+    ".root[data-position='top-center'] .bookmark-panel { top: 60px; left: 50%; transform: translateX(-50%) translateY(-8px) scale(0.98); }",
+    ".root[data-position='top-right'] .bookmark-panel { top: 60px; right: 12px; transform-origin: top right; }",
+    ".root[data-position='left-center'] .bookmark-panel { top: 50%; left: 60px; transform: translateY(-50%) translateX(-8px) scale(0.98); transform-origin: left center; }",
+    ".root[data-position='right-center'] .bookmark-panel { top: 50%; right: 60px; transform: translateY(-50%) translateX(8px) scale(0.98); transform-origin: right center; }",
+    ".root.bookmark-open .bookmark-panel { opacity: 1; visibility: visible; }",
+    ".root.bookmark-open[data-position='top-center'] .bookmark-panel { transform: translateX(-50%) translateY(0) scale(1); }",
+    ".root.bookmark-open[data-position='top-right'] .bookmark-panel { transform: translateY(0) scale(1); }",
+    ".root.bookmark-open[data-position='left-center'] .bookmark-panel," +
+      " .root.bookmark-open[data-position='right-center'] .bookmark-panel { transform: translateY(-50%) translateX(0) scale(1); }",
+    ".bookmark-head { min-height: 52px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 10px 10px 8px 16px; border-bottom: 1px solid var(--sh-line); }",
+    ".bookmark-mark { width: 28px; height: 28px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--sh-signal); background: var(--sh-raised); border-radius: var(--sh-r-md); }",
+    ".bookmark-mark svg { width: 15px; height: 15px; }",
+    ".bookmark-heading { flex: 1; min-width: 0; }",
+    ".bookmark-title { color: var(--sh-text); font-size: 14px; font-weight: 700; line-height: 1.25; }",
+    ".bookmark-subtitle { margin-top: 1px; color: var(--sh-soft); font-size: 12px; line-height: 1.3; }",
+    ".bookmark-close { width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; appearance: none; -webkit-appearance: none; border: 0; border-radius: var(--sh-r-sm); color: var(--sh-muted); background: transparent; cursor: pointer; }",
+    ".bookmark-close:hover { color: var(--sh-text); background: var(--sh-raised); }",
+    ".bookmark-close:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: -1px; }",
+    ".bookmark-close svg { width: 14px; height: 14px; }",
+    ".bookmark-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px; user-select: text; -webkit-user-select: text; scrollbar-color: var(--sh-line-strong) transparent; scrollbar-width: thin; }",
+    ".bookmark-intro { margin: 0 0 14px; color: var(--sh-soft); font-size: 13px; line-height: 1.5; }",
+    ".bookmark-summary { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }",
+    ".bookmark-badge { padding: 4px 9px; border-radius: var(--sh-r-pill); color: var(--sh-signal); background: rgba(56,189,248,0.11); font-size: 12px; font-weight: 700; letter-spacing: 0.02em; }",
+    ".bookmark-count { margin-left: auto; color: var(--sh-soft); font-size: 12px; font-variant-numeric: tabular-nums; }",
+    ".bookmark-fields { display: flex; flex-direction: column; border-top: 1px solid var(--sh-line); }",
+    ".bookmark-field { min-height: 46px; box-sizing: border-box; display: flex; align-items: center; gap: 12px; padding: 9px 2px; border-bottom: 1px solid var(--sh-line); }",
+    ".bookmark-field-copy { min-width: 0; flex: 1; }",
+    ".bookmark-field-label { color: var(--sh-soft); font-size: 12px; line-height: 1.25; }",
+    ".bookmark-field-value { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sh-text); font-size: 13px; font-weight: 600; line-height: 1.3; }",
+    ".bookmark-check { width: 18px; height: 18px; flex: none; margin: 0; accent-color: var(--sh-signal); cursor: pointer; }",
+    ".bookmark-check:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 3px; }",
+    ".bookmark-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; }",
+    ".bookmark-primary, .bookmark-secondary { min-height: 40px; box-sizing: border-box; margin: 0; padding: 8px 14px; border-radius: var(--sh-r-md); font: inherit; font-size: 13px; font-weight: 700; line-height: 1.2; cursor: pointer; }",
+    ".bookmark-primary { flex: 1; border: 0; color: var(--sh-deep); background: var(--sh-signal); box-shadow: 0 4px 14px rgba(56,189,248,0.25); }",
+    ".bookmark-primary:hover { background: #7DD3FC; }",
+    ".bookmark-secondary { border: 1px solid var(--sh-line-strong); color: var(--sh-soft); background: transparent; }",
+    ".bookmark-secondary:hover { border-color: var(--sh-signal); color: var(--sh-text); background: var(--sh-raised); }",
+    ".bookmark-primary:focus-visible, .bookmark-secondary:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 2px; }",
+    ".bookmark-primary:disabled, .bookmark-secondary:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }",
+    ".bookmark-back { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 12px; padding: 0; border: 0; color: var(--sh-signal); background: transparent; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }",
+    ".bookmark-back:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 3px; }",
+    ".bookmark-error { display: none; margin-top: 12px; padding: 9px 10px; border-radius: var(--sh-r-md); color: var(--sh-coral); background: rgba(248,113,113,0.12); font-size: 12px; line-height: 1.4; }",
+    ".bookmark-error.visible { display: block; }",
+    ".bookmark-url { display: none; width: 100%; min-height: 64px; box-sizing: border-box; margin-top: 10px; padding: 9px 10px; resize: vertical; border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-md); color: var(--sh-text); background: var(--sh-deep); font-family: Space Mono, ui-monospace, monospace; font-size: 12px; line-height: 1.45; user-select: text; -webkit-user-select: text; }",
+    ".bookmark-url.visible { display: block; }",
+    ".bookmark-url:focus { outline: none; border-color: var(--sh-signal); box-shadow: 0 0 0 3px rgba(56,189,248,0.18); }",
+    ".bookmark-panel ::selection { color: var(--sh-deep); background: var(--sh-signal); }",
+    ".bookmark-panel [hidden] { display: none !important; }",
 
     ".head {" +
       "  display: flex; align-items: center; gap: 8px;" +
@@ -658,7 +738,9 @@
     "@media (max-width: 520px) {" +
       " .bar { width: min(240px, calc(100vw - 24px)); }" +
       " .root.session-snapshot[data-position='top-center'] .bar, .root.session-snapshot[data-position='top-right'] .bar { width: min(280px, calc(100vw - 24px)); }" +
-      " .root.compact[data-position='top-center'] .bar, .root.compact[data-position='top-right'] .bar { width: 140px; }" +
+      " .root.bookmark-ready:not(.session-snapshot)[data-position='top-center'] .bar, .root.bookmark-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: min(278px, calc(100vw - 24px)); }" +
+      " .root.compact:not(.bookmark-ready)[data-position='top-center'] .bar, .root.compact:not(.bookmark-ready)[data-position='top-right'] .bar { width: 140px; }" +
+      " .root.compact.bookmark-ready:not(.session-snapshot)[data-position='top-center'] .bar, .root.compact.bookmark-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: 178px; }" +
       " .root.compact[data-position='top-center'] .current-meta, .root.compact[data-position='top-right'] .current-meta," +
       " .root.compact[data-position='top-center'] .chevron, .root.compact[data-position='top-right'] .chevron { display: none; }" +
       " .root.compact[data-position='top-center'] .compact-label, .root.compact[data-position='top-right'] .compact-label { display: block; }" +
@@ -677,6 +759,13 @@
       " .root.session-open[data-position='top-center'] .session-panel, .root.session-open[data-position='top-right'] .session-panel," +
       " .root.session-open[data-position='left-center'] .session-panel, .root.session-open[data-position='right-center'] .session-panel { transform: none; }" +
       " .session-actions { flex-direction: column; }" +
+      " .bookmark-panel, .root[data-position='top-center'] .bookmark-panel, .root[data-position='top-right'] .bookmark-panel," +
+      " .root[data-position='left-center'] .bookmark-panel, .root[data-position='right-center'] .bookmark-panel {" +
+      "   top: 60px; right: auto; left: 12px; width: calc(100vw - 24px); max-width: none; max-height: calc(100vh - 72px); transform: translateY(-8px) scale(0.98); transform-origin: top center;" +
+      " }" +
+      " .root.bookmark-open[data-position='top-center'] .bookmark-panel, .root.bookmark-open[data-position='top-right'] .bookmark-panel," +
+      " .root.bookmark-open[data-position='left-center'] .bookmark-panel, .root.bookmark-open[data-position='right-center'] .bookmark-panel { transform: none; }" +
+      " .bookmark-actions { flex-direction: column; align-items: stretch; }" +
       " .position-menu, .root[data-position='top-center'] .position-menu, .root[data-position='top-right'] .position-menu," +
       " .root[data-position='left-center'] .position-menu, .root[data-position='right-center'] .position-menu {" +
       "   top: 60px; right: 12px; left: auto; margin: 0;" +
@@ -684,7 +773,7 @@
       "}",
 
     "@media (prefers-reduced-motion: reduce) {" +
-      "  .panel, .session-panel, .scrim, .bar, .position-menu, .snap-guides, .guide, .chevron { transition: none; }" +
+      "  .panel, .session-panel, .bookmark-panel, .scrim, .bar, .position-menu, .snap-guides, .guide, .chevron { transition: none; }" +
       "  .opening-spinner { animation: none; border-color: var(--sh-signal); }" +
       "}"
   ];
@@ -855,6 +944,16 @@
   sessionGlyph.appendChild(div("session-led"));
   sessionBtn.appendChild(sessionGlyph);
 
+  var bookmarkBtn = document.createElement("button");
+  bookmarkBtn.type = "button";
+  bookmarkBtn.className = "control bookmark-trigger";
+  bookmarkBtn.setAttribute("aria-label", "Bookmark this view");
+  bookmarkBtn.setAttribute("aria-haspopup", "dialog");
+  bookmarkBtn.setAttribute("aria-expanded", "false");
+  bookmarkBtn.setAttribute("aria-controls", TAG_ID + "-bookmark-panel");
+  bookmarkBtn.title = "Bookmark this view";
+  bookmarkBtn.appendChild(svg(["M6 3h8a1 1 0 011 1v13l-5-3-5 3V4a1 1 0 011-1z"], 20));
+
   var closeBtn = document.createElement("button");
   closeBtn.type = "button";
   closeBtn.className = "control close";
@@ -868,6 +967,7 @@
   bar.appendChild(moveBtn);
   bar.appendChild(openBtn);
   bar.appendChild(sessionBtn);
+  bar.appendChild(bookmarkBtn);
   bar.appendChild(closeBtn);
 
   var positionMenu = div("position-menu");
@@ -1003,6 +1103,74 @@
   sessionBody.appendChild(sessionActions);
   sessionPanel.appendChild(sessionHead);
   sessionPanel.appendChild(sessionBody);
+
+  var bookmarkPanel = div("bookmark-panel");
+  bookmarkPanel.id = TAG_ID + "-bookmark-panel";
+  bookmarkPanel.setAttribute("role", "dialog");
+  bookmarkPanel.setAttribute("aria-modal", "true");
+  bookmarkPanel.setAttribute("aria-labelledby", TAG_ID + "-bookmark-title");
+  bookmarkPanel.setAttribute("aria-describedby", TAG_ID + "-bookmark-intro");
+  bookmarkPanel.setAttribute("aria-hidden", "true");
+  var bookmarkHead = div("bookmark-head");
+  var bookmarkMark = div("bookmark-mark");
+  bookmarkMark.appendChild(svg(["M6 3h8a1 1 0 011 1v13l-5-3-5 3V4a1 1 0 011-1z"], 20));
+  var bookmarkHeading = div("bookmark-heading");
+  var bookmarkTitle = div("bookmark-title", "Bookmark this view");
+  bookmarkTitle.id = TAG_ID + "-bookmark-title";
+  var bookmarkSubtitle = div("bookmark-subtitle", "A link back to these filter values");
+  bookmarkHeading.appendChild(bookmarkTitle);
+  bookmarkHeading.appendChild(bookmarkSubtitle);
+  var bookmarkClose = document.createElement("button");
+  bookmarkClose.type = "button";
+  bookmarkClose.className = "bookmark-close";
+  bookmarkClose.setAttribute("aria-label", "Close bookmark options");
+  bookmarkClose.title = "Close";
+  bookmarkClose.appendChild(svg(["M4 4l12 12", "M16 4L4 16"], 20));
+  bookmarkHead.appendChild(bookmarkMark);
+  bookmarkHead.appendChild(bookmarkHeading);
+  bookmarkHead.appendChild(bookmarkClose);
+  var bookmarkBody = div("bookmark-body");
+  var bookmarkBack = document.createElement("button");
+  bookmarkBack.type = "button";
+  bookmarkBack.className = "bookmark-back";
+  bookmarkBack.textContent = "← Exact view";
+  bookmarkBack.hidden = true;
+  var bookmarkIntro = document.createElement("p");
+  bookmarkIntro.className = "bookmark-intro";
+  bookmarkIntro.id = TAG_ID + "-bookmark-intro";
+  bookmarkIntro.textContent = "This link will reopen the app with every filter listed below set exactly as shown.";
+  var bookmarkSummary = div("bookmark-summary");
+  var bookmarkBadge = div("bookmark-badge", "Exact view");
+  var bookmarkCount = div("bookmark-count", "");
+  bookmarkSummary.appendChild(bookmarkBadge);
+  bookmarkSummary.appendChild(bookmarkCount);
+  var bookmarkFields = div("bookmark-fields");
+  var bookmarkError = div("bookmark-error");
+  bookmarkError.setAttribute("role", "alert");
+  var bookmarkURL = document.createElement("textarea");
+  bookmarkURL.className = "bookmark-url";
+  bookmarkURL.readOnly = true;
+  bookmarkURL.setAttribute("aria-label", "Bookmark link");
+  var bookmarkActions = div("bookmark-actions");
+  var bookmarkPrimary = document.createElement("button");
+  bookmarkPrimary.type = "button";
+  bookmarkPrimary.className = "bookmark-primary";
+  bookmarkPrimary.textContent = "Copy link";
+  var bookmarkSecondary = document.createElement("button");
+  bookmarkSecondary.type = "button";
+  bookmarkSecondary.className = "bookmark-secondary";
+  bookmarkSecondary.textContent = "Customize…";
+  bookmarkActions.appendChild(bookmarkPrimary);
+  bookmarkActions.appendChild(bookmarkSecondary);
+  bookmarkBody.appendChild(bookmarkBack);
+  bookmarkBody.appendChild(bookmarkIntro);
+  bookmarkBody.appendChild(bookmarkSummary);
+  bookmarkBody.appendChild(bookmarkFields);
+  bookmarkBody.appendChild(bookmarkError);
+  bookmarkBody.appendChild(bookmarkURL);
+  bookmarkBody.appendChild(bookmarkActions);
+  bookmarkPanel.appendChild(bookmarkHead);
+  bookmarkPanel.appendChild(bookmarkBody);
   // This status sits outside the panel's aria-busy subtree, so assistive
   // technology announces a switch immediately rather than waiting for the
   // destination page to finish loading.
@@ -1013,6 +1181,7 @@
   root.appendChild(scrim);
   root.appendChild(panel);
   root.appendChild(sessionPanel);
+  root.appendChild(bookmarkPanel);
   root.appendChild(announcer);
   root.appendChild(positionMenu);
   root.appendChild(snapGuides);
@@ -1035,6 +1204,12 @@
   var navigating = false;
   var snapshotActive = false;
   var sessionOpen = false;
+  var bookmarkOpen = false;
+  var bookmarkCapabilities = null;
+  var bookmarkCustom = false;
+  var bookmarkSelection = {};
+  var bookmarkPending = null;
+  var bookmarkTimer = null;
 
   function mobileViewport() {
     try {
@@ -1082,6 +1257,174 @@
     while (node.firstChild) {
       node.removeChild(node.firstChild);
     }
+  }
+
+  function validBookmarkCapabilities(detail) {
+    if (
+      !detail ||
+      detail.version !== BOOKMARK_PROTOCOL_VERSION ||
+      detail.store !== "url" ||
+      !Array.isArray(detail.fields) ||
+      !detail.fields.length ||
+      detail.fields.length > 50
+    ) {
+      return null;
+    }
+    var fields = [];
+    var seen = {};
+    for (var i = 0; i < detail.fields.length; i++) {
+      var raw = detail.fields[i];
+      if (!raw || typeof raw.id !== "string" || !raw.id || raw.id.length > 256 || seen[raw.id]) {
+        return null;
+      }
+      seen[raw.id] = true;
+      fields.push({
+        id: raw.id,
+        label: String(raw.label || raw.id).slice(0, 120),
+        value: String(raw.value === undefined ? "Not set" : raw.value).slice(0, 240)
+      });
+    }
+    return { version: BOOKMARK_PROTOCOL_VERSION, fields: fields };
+  }
+
+  function selectedBookmarkIDs() {
+    var selected = [];
+    if (!bookmarkCapabilities) {
+      return selected;
+    }
+    for (var i = 0; i < bookmarkCapabilities.fields.length; i++) {
+      var id = bookmarkCapabilities.fields[i].id;
+      if (!bookmarkCustom || bookmarkSelection[id] !== false) {
+        selected.push(id);
+      }
+    }
+    return selected;
+  }
+
+  function setBookmarkError(message, url) {
+    bookmarkError.textContent = message || "";
+    bookmarkError.classList.toggle("visible", !!message);
+    bookmarkURL.value = url || "";
+    bookmarkURL.classList.toggle("visible", !!url);
+    if (url) {
+      bookmarkURL.focus();
+      bookmarkURL.select();
+    }
+  }
+
+  function renderBookmarkFields() {
+    clear(bookmarkFields);
+    if (!bookmarkCapabilities) {
+      return;
+    }
+    var fields = bookmarkCapabilities.fields;
+    for (var i = 0; i < fields.length; i++) {
+      var field = fields[i];
+      var row = document.createElement(bookmarkCustom ? "label" : "div");
+      row.className = "bookmark-field";
+      if (bookmarkCustom) {
+        var checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.className = "bookmark-check";
+        checkbox.checked = bookmarkSelection[field.id] !== false;
+        checkbox.setAttribute("data-bookmark-id", field.id);
+        checkbox.addEventListener("change", guard(function (ev) {
+          bookmarkSelection[ev.currentTarget.getAttribute("data-bookmark-id")] = ev.currentTarget.checked;
+          renderBookmarkSummary();
+        }));
+        row.appendChild(checkbox);
+      }
+      var copy = div("bookmark-field-copy");
+      copy.appendChild(div("bookmark-field-label", field.label));
+      var value = div("bookmark-field-value", field.value);
+      value.title = field.value;
+      copy.appendChild(value);
+      row.appendChild(copy);
+      bookmarkFields.appendChild(row);
+    }
+  }
+
+  function renderBookmarkSummary() {
+    if (!bookmarkCapabilities) {
+      return;
+    }
+    var selected = selectedBookmarkIDs().length;
+    var total = bookmarkCapabilities.fields.length;
+    bookmarkBadge.textContent = bookmarkCustom ? "Custom link" : "Exact view";
+    bookmarkCount.textContent = bookmarkCustom
+      ? selected + " of " + total + " filters"
+      : total + (total === 1 ? " filter" : " filters");
+    bookmarkIntro.textContent = bookmarkCustom
+      ? "Choose which values should follow the link. Unchecked filters will use the app's defaults."
+      : "This link will reopen the app with every filter listed below set exactly as shown.";
+    bookmarkBack.hidden = !bookmarkCustom;
+    bookmarkSecondary.hidden = bookmarkCustom;
+    bookmarkPrimary.textContent = bookmarkPending
+      ? "Creating link…"
+      : bookmarkCustom
+        ? "Copy custom link"
+        : "Copy link";
+    bookmarkPrimary.disabled = !!bookmarkPending || selected === 0;
+    bookmarkSecondary.disabled = !!bookmarkPending;
+    bookmarkCount.setAttribute("aria-live", bookmarkCustom ? "polite" : "off");
+  }
+
+  function renderBookmark() {
+    setBookmarkError("", "");
+    renderBookmarkFields();
+    renderBookmarkSummary();
+  }
+
+  function finishBookmarkRequest() {
+    bookmarkPending = null;
+    if (bookmarkTimer !== null) {
+      window.clearTimeout(bookmarkTimer);
+      bookmarkTimer = null;
+    }
+    renderBookmarkSummary();
+  }
+
+  function copyBookmarkURL(url) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      return navigator.clipboard.writeText(url);
+    }
+    return new Promise(function (resolve, reject) {
+      var temporary = document.createElement("textarea");
+      temporary.value = url;
+      temporary.setAttribute("readonly", "readonly");
+      temporary.style.position = "fixed";
+      temporary.style.opacity = "0";
+      document.body.appendChild(temporary);
+      temporary.select();
+      var copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch (error) {
+        copied = false;
+      }
+      document.body.removeChild(temporary);
+      if (copied) resolve();
+      else reject(new Error("copy blocked"));
+    });
+  }
+
+  function requestBookmark() {
+    var include = selectedBookmarkIDs();
+    if (!include.length || bookmarkPending || typeof window.CustomEvent !== "function") {
+      return;
+    }
+    setBookmarkError("", "");
+    var requestId = "bookmark-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10);
+    bookmarkPending = requestId;
+    renderBookmarkSummary();
+    bookmarkTimer = window.setTimeout(guard(function () {
+      if (bookmarkPending !== requestId) return;
+      finishBookmarkRequest();
+      setBookmarkError("The app took too long to create this link. Check the connection and try again.", "");
+    }), BOOKMARK_TIMEOUT_MS);
+    window.dispatchEvent(new window.CustomEvent(BOOKMARK_CREATE_EVENT, {
+      detail: { version: BOOKMARK_PROTOCOL_VERSION, requestId: requestId, include: include }
+    }));
   }
 
   function renderNote(text, withRetry) {
@@ -1419,6 +1762,9 @@
     if (placing && open) {
       setOpen(false);
     }
+    if (placing && bookmarkOpen) {
+      setBookmarkOpen(false, false);
+    }
   }
 
   function placeFocus() {
@@ -1448,6 +1794,10 @@
     revealBar(!open);
     if (open && placing) {
       setPlacing(false);
+    }
+    if (open) {
+      setBookmarkOpen(false, false);
+      setSessionOpen(false, false);
     }
     root.classList.toggle("open", open);
     panel.setAttribute("aria-hidden", open ? "false" : "true");
@@ -1481,6 +1831,7 @@
     sessionOpen = next;
     if (sessionOpen) {
       setOpen(false);
+      setBookmarkOpen(false, false);
       setPlacing(false);
       revealBar(false);
     }
@@ -1497,12 +1848,48 @@
     }
   }
 
+  function setBookmarkOpen(next, returnFocus) {
+    next = !!next && !!bookmarkCapabilities && !snapshotActive && !root.classList.contains("dismissed");
+    if (bookmarkOpen === next) {
+      return;
+    }
+    bookmarkOpen = next;
+    if (bookmarkOpen) {
+      setOpen(false);
+      setSessionOpen(false, false);
+      setPlacing(false);
+      bookmarkCustom = false;
+      bookmarkSelection = {};
+      for (var i = 0; i < bookmarkCapabilities.fields.length; i++) {
+        bookmarkSelection[bookmarkCapabilities.fields[i].id] = true;
+      }
+      renderBookmark();
+      revealBar(false);
+    } else {
+      finishBookmarkRequest();
+      setBookmarkError("", "");
+    }
+    root.classList.toggle("bookmark-open", bookmarkOpen);
+    bookmarkPanel.setAttribute("aria-hidden", bookmarkOpen ? "false" : "true");
+    bookmarkBtn.setAttribute("aria-expanded", bookmarkOpen ? "true" : "false");
+    if (bookmarkOpen) {
+      bookmarkPrimary.focus();
+    } else {
+      revealBar(true);
+      if (returnFocus !== false && bookmarkCapabilities && !snapshotActive) {
+        bookmarkBtn.focus();
+      }
+    }
+  }
+
   function setSnapshotActive(next) {
     snapshotActive = !!next;
     root.classList.toggle("session-snapshot", snapshotActive);
     currentAction.textContent = snapshotActive ? "Offline snapshot" : "Switch app";
     if (!snapshotActive) {
       setSessionOpen(false, false);
+    } else {
+      setBookmarkOpen(false, false);
     }
     revealBar(!snapshotActive);
   }
@@ -1525,6 +1912,29 @@
     setSessionOpen(!sessionOpen);
   }));
 
+  bookmarkBtn.addEventListener("click", guard(function () {
+    setBookmarkOpen(!bookmarkOpen);
+  }));
+
+  bookmarkClose.addEventListener("click", guard(function () {
+    setBookmarkOpen(false);
+  }));
+
+  bookmarkBack.addEventListener("click", guard(function () {
+    bookmarkCustom = false;
+    renderBookmark();
+    bookmarkPrimary.focus();
+  }));
+
+  bookmarkSecondary.addEventListener("click", guard(function () {
+    bookmarkCustom = true;
+    renderBookmark();
+    var firstCheck = bookmarkFields.querySelector("input");
+    if (firstCheck) firstCheck.focus();
+  }));
+
+  bookmarkPrimary.addEventListener("click", guard(requestBookmark));
+
   sessionClose.addEventListener("click", guard(function () {
     setSessionOpen(false);
   }));
@@ -1535,6 +1945,7 @@
 
   closeBtn.addEventListener("click", guard(function () {
     setSessionOpen(false, false);
+    setBookmarkOpen(false, false);
     setOpen(false);
     setPlacing(false);
     rememberDismissal(true);
@@ -1561,6 +1972,7 @@
       return;
     }
     setSessionOpen(false, false);
+    setBookmarkOpen(false, false);
     setPlacing(!placing);
     if (placing && positionButtons.length) {
       for (var i = 0; i < positionButtons.length; i++) {
@@ -1631,6 +2043,7 @@
       moved: false
     };
     setSessionOpen(false, false);
+    setBookmarkOpen(false, false);
     setPlacing(false);
     setOpen(false);
     revealBar(false);
@@ -1724,6 +2137,66 @@
     }
   }));
 
+  window.addEventListener(BOOKMARK_CAPABILITIES_EVENT, guard(function (ev) {
+    var capabilities = validBookmarkCapabilities(ev && ev.detail);
+    if (!capabilities) {
+      return;
+    }
+    bookmarkCapabilities = capabilities;
+    root.classList.add("bookmark-ready");
+    if (bookmarkOpen) {
+      var retained = {};
+      for (var i = 0; i < capabilities.fields.length; i++) {
+        var id = capabilities.fields[i].id;
+        retained[id] = bookmarkSelection[id] !== false;
+      }
+      bookmarkSelection = retained;
+      renderBookmark();
+    }
+    revealBar(true);
+  }));
+
+  window.addEventListener(BOOKMARK_RESULT_EVENT, guard(function (ev) {
+    var detail = ev && ev.detail ? ev.detail : {};
+    if (
+      detail.version !== BOOKMARK_PROTOCOL_VERSION ||
+      detail.requestId !== bookmarkPending ||
+      typeof detail.url !== "string" ||
+      !detail.url
+    ) {
+      return;
+    }
+    var url = detail.url;
+    copyBookmarkURL(url).then(
+      guard(function () {
+        finishBookmarkRequest();
+        bookmarkPrimary.textContent = "Link copied";
+        announcer.textContent = "Bookmark link copied";
+        window.setTimeout(guard(function () {
+          if (bookmarkOpen && !bookmarkPending) renderBookmarkSummary();
+        }), 1800);
+      }),
+      guard(function () {
+        finishBookmarkRequest();
+        setBookmarkError("The link is ready, but this browser blocked automatic copying. Copy it from the field below.", url);
+      })
+    );
+  }));
+
+  window.addEventListener(BOOKMARK_ERROR_EVENT, guard(function (ev) {
+    var detail = ev && ev.detail ? ev.detail : {};
+    if (detail.version !== BOOKMARK_PROTOCOL_VERSION || detail.requestId !== bookmarkPending) {
+      return;
+    }
+    finishBookmarkRequest();
+    setBookmarkError(
+      typeof detail.message === "string" && detail.message
+        ? detail.message.slice(0, 300)
+        : "The app could not create this bookmark. Try again.",
+      ""
+    );
+  }));
+
   headClose.addEventListener("click", guard(function () {
     setOpen(false);
   }));
@@ -1732,6 +2205,14 @@
     if (placing) {
       setPlacing(false);
       moveBtn.focus();
+      return;
+    }
+    if (bookmarkOpen) {
+      setBookmarkOpen(false);
+      return;
+    }
+    if (sessionOpen) {
+      setSessionOpen(false);
       return;
     }
     setOpen(false);
@@ -1746,6 +2227,38 @@
   // into our filter box, and we must not see theirs.
   root.addEventListener("keydown", guard(function (ev) {
     if (navigating) {
+      return;
+    }
+    if (bookmarkOpen) {
+      if (ev.key === "Escape") {
+        ev.stopPropagation();
+        setBookmarkOpen(false);
+        return;
+      }
+      if (ev.key !== "Tab") {
+        return;
+      }
+      var bookmarkCandidates = bookmarkPanel.querySelectorAll(
+        "button:not([disabled]), input:not([disabled]), textarea:not([disabled])"
+      );
+      var bookmarkItems = [];
+      for (var bi = 0; bi < bookmarkCandidates.length; bi++) {
+        if (!bookmarkCandidates[bi].hidden && bookmarkCandidates[bi].offsetParent !== null) {
+          bookmarkItems.push(bookmarkCandidates[bi]);
+        }
+      }
+      if (!bookmarkItems.length) {
+        return;
+      }
+      var firstBookmarkItem = bookmarkItems[0];
+      var lastBookmarkItem = bookmarkItems[bookmarkItems.length - 1];
+      if (ev.shiftKey && shadow.activeElement === firstBookmarkItem) {
+        ev.preventDefault();
+        lastBookmarkItem.focus();
+      } else if (!ev.shiftKey && shadow.activeElement === lastBookmarkItem) {
+        ev.preventDefault();
+        firstBookmarkItem.focus();
+      }
       return;
     }
     if (sessionOpen && ev.key === "Escape") {
@@ -1817,4 +2330,9 @@
   }));
 
   revealBar(true);
+  if (typeof window.CustomEvent === "function") {
+    window.dispatchEvent(new window.CustomEvent(BOOKMARK_DISCOVER_EVENT, {
+      detail: { version: BOOKMARK_PROTOCOL_VERSION, source: "shinyhub" }
+    }));
+  }
 })();

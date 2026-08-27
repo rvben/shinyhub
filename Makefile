@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -84,6 +84,11 @@ test-identity: test-py-identity test-identity-conformance test-r-identity
 test-py-identity:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python identity helper tests)"; exit 1; }
 	cd packaging/python-identity && PYTHONPATH=src uv run --with pytest --with pyjwt --no-project python -m pytest tests/ -q
+
+# test-py-bookmarks validates the independently versioned Python Shiny adapter.
+test-py-bookmarks:
+	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python bookmark helper tests)"; exit 1; }
+	cd packaging/python-bookmarks && PYTHONPATH=src uv run --with pytest --with pytest-asyncio --with 'shiny>=1.6.4,<2' --no-project python -m pytest tests/ -q
 
 # test-r-identity runs the shinyhubidentity R helper's testthat suite. Needs R
 # with jose, sodium and testthat (see bootstrap-r-identity). Skips when Rscript

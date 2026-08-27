@@ -2,11 +2,13 @@ package localrun
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/appnav"
 	shinyproxy "github.com/rvben/shinyhub/internal/proxy"
 )
 
@@ -34,12 +36,24 @@ func newLocalProxy(port int, slug string) (*localProxy, error) {
 	actualPort := ln.Addr().(*net.TCPAddr).Port
 	p := shinyproxy.New()
 	p.SetPoolSize(slug, 1)
+	// Local runs should exercise the same app-owned chrome integration as a
+	// deployed app. The one-app payload keeps the switch action truthful while
+	// still exposing opt-in capabilities such as bookmarking.
+	p.SetAppNav(true, "/")
 	lp := &localProxy{slug: slug, listener: ln, proxy: p, publicPort: actualPort}
 	lp.server = &http.Server{
 		ReadHeaderTimeout: 10 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/" {
 				http.Redirect(w, r, "/app/"+slug+"/", http.StatusTemporaryRedirect)
+				return
+			}
+			if r.URL.Path == appnav.DataURL(slug) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Cache-Control", "private, no-store")
+				_ = json.NewEncoder(w).Encode(appnav.Payload{Apps: []appnav.App{{
+					Slug: slug, Name: slug, Openable: true,
+				}}})
 				return
 			}
 			p.ServeHTTP(w, r)
