@@ -33,6 +33,8 @@ type Schedule struct {
 	MissedPolicy           string
 	OnSuccess              string
 	MinRollIntervalSeconds int
+	RollFallback           string
+	MaxDeferAgeSeconds     int
 	// Timezone is the optional per-schedule IANA timezone. nil means "inherit
 	// the server default". A non-nil pointer to an empty string is normalised
 	// to nil at the API layer before reaching the DB (empty = inherit).
@@ -89,6 +91,8 @@ type CreateScheduleParams struct {
 	Timezone               *string
 	OnSuccess              string
 	MinRollIntervalSeconds int
+	RollFallback           string
+	MaxDeferAgeSeconds     int
 }
 
 type UpdateScheduleParams struct {
@@ -101,6 +105,8 @@ type UpdateScheduleParams struct {
 	MissedPolicy           *string
 	OnSuccess              *string
 	MinRollIntervalSeconds *int
+	RollFallback           *string
+	MaxDeferAgeSeconds     *int
 	// Timezone uses a sentinel to distinguish three states:
 	//   nil       - field not provided; leave as-is.
 	//   non-nil pointer to empty string - clear to NULL (inherit).
@@ -122,11 +128,11 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 	err := s.db.QueryRow(`
 		INSERT INTO app_schedules
 			(app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone,
-			 on_success, min_roll_interval_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id`,
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
-		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
+		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds, normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
 	).Scan(&id)
 	if err != nil {
 		if s.d.isUniqueViolation(err) {
@@ -140,7 +146,8 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 	row := s.db.QueryRow(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds,
+		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE id = ?`, id)
 	return scanSchedule(row)
 }
@@ -150,7 +157,8 @@ func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 func (s *Store) GetScheduleByName(appID int64, name string) (*Schedule, error) {
 	row := s.db.QueryRow(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds,
+		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE app_id = ? AND name = ?`, appID, name)
 	return scanSchedule(row)
 }
@@ -158,7 +166,8 @@ func (s *Store) GetScheduleByName(appID int64, name string) (*Schedule, error) {
 func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds,
+		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE app_id = ? ORDER BY name`, appID)
 	if err != nil {
 		return nil, err
@@ -178,7 +187,8 @@ func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 func (s *Store) ListEnabledSchedules() ([]*Schedule, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds, created_at, updated_at
+		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds,
+		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE enabled = 1`)
 	if err != nil {
 		return nil, err
@@ -233,6 +243,14 @@ func (s *Store) UpdateSchedule(id int64, p UpdateScheduleParams) error {
 	if p.MinRollIntervalSeconds != nil {
 		sets = append(sets, "min_roll_interval_seconds = ?")
 		args = append(args, *p.MinRollIntervalSeconds)
+	}
+	if p.RollFallback != nil {
+		sets = append(sets, "roll_fallback = ?")
+		args = append(args, normalizeRollFallback(*p.RollFallback))
+	}
+	if p.MaxDeferAgeSeconds != nil {
+		sets = append(sets, "max_defer_age_seconds = ?")
+		args = append(args, *p.MaxDeferAgeSeconds)
 	}
 	if p.SetTimezone {
 		sets = append(sets, "timezone = ?")
@@ -319,6 +337,8 @@ type ScheduleRun struct {
 	// attributable on the same history row without conflating their states.
 	OnSuccess              string `json:"on_success"`
 	MinRollIntervalSeconds int    `json:"min_roll_interval_seconds"`
+	RollFallback           string `json:"roll_fallback"`
+	MaxDeferAgeSeconds     int    `json:"max_defer_age_seconds"`
 	TargetGeneration       *int64 `json:"target_generation,omitempty"`
 	ActivationID           *int64 `json:"activation_id,omitempty"`
 	ActivationStatus       string `json:"activation_status,omitempty"`
@@ -335,6 +355,8 @@ type InsertScheduleRunParams struct {
 	LogPath                string
 	OnSuccess              string
 	MinRollIntervalSeconds int
+	RollFallback           string
+	MaxDeferAgeSeconds     int
 }
 
 type FinishScheduleRunParams struct {
@@ -355,11 +377,12 @@ func (s *Store) InsertScheduleRun(p InsertScheduleRunParams) (int64, error) {
 	var id int64
 	err := s.db.QueryRow(`
 		INSERT INTO schedule_runs (schedule_id, status, trigger, triggered_by_user_id, started_at, log_path,
-		                           on_success, min_roll_interval_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		                           on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id`,
 		p.ScheduleID, p.Status, p.Trigger, uid, p.StartedAt, p.LogPath,
 		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
+		normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert schedule run: %w", err)
@@ -459,6 +482,7 @@ func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*Schedu
 	rows, err := s.db.Query(`
 		SELECT r.id, r.schedule_id, r.status, r.trigger, r.triggered_by_user_id, r.started_at,
 		       r.finished_at, r.exit_code, r.log_path, r.on_success, r.min_roll_interval_seconds,
+		       r.roll_fallback, r.max_defer_age_seconds,
 		       r.target_generation, a.id, COALESCE(a.status, ''), COALESCE(a.phase, ''), COALESCE(a.last_error, '')
 		FROM schedule_runs r LEFT JOIN schedule_activations a ON a.schedule_run_id = r.id
 		WHERE r.schedule_id = ?
@@ -475,6 +499,7 @@ func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*Schedu
 		var ex sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
 			&r.StartedAt, &fin, &ex, &r.LogPath, &r.OnSuccess, &r.MinRollIntervalSeconds,
+			&r.RollFallback, &r.MaxDeferAgeSeconds,
 			&targetGeneration, &activationID, &r.ActivationStatus, &r.ActivationPhase, &r.ActivationError); err != nil {
 			return nil, err
 		}
@@ -507,6 +532,7 @@ func (s *Store) GetScheduleRun(runID int64) (*ScheduleRun, error) {
 	row := s.db.QueryRow(`
 		SELECT r.id, r.schedule_id, r.status, r.trigger, r.triggered_by_user_id, r.started_at,
 		       r.finished_at, r.exit_code, r.log_path, r.on_success, r.min_roll_interval_seconds,
+		       r.roll_fallback, r.max_defer_age_seconds,
 		       r.target_generation, a.id, COALESCE(a.status, ''), COALESCE(a.phase, ''), COALESCE(a.last_error, '')
 		FROM schedule_runs r LEFT JOIN schedule_activations a ON a.schedule_run_id = r.id
 		WHERE r.id = ?`, runID)
@@ -516,6 +542,7 @@ func (s *Store) GetScheduleRun(runID int64) (*ScheduleRun, error) {
 	var ex sql.NullInt64
 	err := row.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
 		&r.StartedAt, &fin, &ex, &r.LogPath, &r.OnSuccess, &r.MinRollIntervalSeconds,
+		&r.RollFallback, &r.MaxDeferAgeSeconds,
 		&targetGeneration, &activationID, &r.ActivationStatus, &r.ActivationPhase, &r.ActivationError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -564,6 +591,7 @@ func (s *Store) LastSuccessfulRun(scheduleID int64) (*ScheduleRun, error) {
 	row := s.db.QueryRow(`
 		SELECT r.id, r.schedule_id, r.status, r.trigger, r.triggered_by_user_id, r.started_at,
 		       r.finished_at, r.exit_code, r.log_path, r.on_success, r.min_roll_interval_seconds,
+		       r.roll_fallback, r.max_defer_age_seconds,
 		       r.target_generation, a.id, COALESCE(a.status, ''), COALESCE(a.phase, ''), COALESCE(a.last_error, '')
 		FROM schedule_runs r LEFT JOIN schedule_activations a ON a.schedule_run_id = r.id
 		WHERE r.schedule_id = ? AND r.status = 'succeeded'
@@ -574,6 +602,7 @@ func (s *Store) LastSuccessfulRun(scheduleID int64) (*ScheduleRun, error) {
 	var ex sql.NullInt64
 	err := row.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
 		&r.StartedAt, &fin, &ex, &r.LogPath, &r.OnSuccess, &r.MinRollIntervalSeconds,
+		&r.RollFallback, &r.MaxDeferAgeSeconds,
 		&targetGeneration, &activationID, &r.ActivationStatus, &r.ActivationPhase, &r.ActivationError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -686,6 +715,8 @@ type UpsertScheduleByNameParams struct {
 	Timezone               *string
 	OnSuccess              string
 	MinRollIntervalSeconds int
+	RollFallback           string
+	MaxDeferAgeSeconds     int
 }
 
 // UpsertScheduleByName performs an atomic insert-or-update keyed on
@@ -716,13 +747,14 @@ func (s *Store) UpsertScheduleByName(p UpsertScheduleByNameParams) (int64, bool,
 	scanErr := tx.QueryRow(`
 INSERT INTO app_schedules
   (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone,
-   on_success, min_roll_interval_seconds)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(app_id, name) DO NOTHING
 RETURNING id`,
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON,
 		boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
 		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
+		normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
 	).Scan(&insertedID)
 	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
 		return 0, false, fmt.Errorf("insert schedule: %w", scanErr)
@@ -740,12 +772,13 @@ RETURNING id`,
 UPDATE app_schedules
    SET cron_expr = ?, command_json = ?, enabled = ?, timeout_seconds = ?,
 	   overlap_policy = ?, missed_policy = ?, timezone = ?, on_success = ?,
-	   min_roll_interval_seconds = ?, updated_at = CURRENT_TIMESTAMP
+	   min_roll_interval_seconds = ?, roll_fallback = ?, max_defer_age_seconds = ?, updated_at = CURRENT_TIMESTAMP
  WHERE app_id = ? AND name = ?
 RETURNING id`,
 		p.CronExpr, p.CommandJSON, boolToInt(p.Enabled),
 		p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
 		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
+		normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
 		p.AppID, p.Name,
 	).Scan(&id)
 	if err != nil {
@@ -1061,7 +1094,8 @@ func scanSchedule(s rowScanner) (*Schedule, error) {
 	var tz sql.NullString
 	err := s.Scan(&sched.ID, &sched.AppID, &sched.Name, &sched.CronExpr, &sched.CommandJSON,
 		&enabled, &sched.TimeoutSeconds, &sched.OverlapPolicy, &sched.MissedPolicy,
-		&tz, &sched.OnSuccess, &sched.MinRollIntervalSeconds, &sched.CreatedAt, &sched.UpdatedAt)
+		&tz, &sched.OnSuccess, &sched.MinRollIntervalSeconds, &sched.RollFallback,
+		&sched.MaxDeferAgeSeconds, &sched.CreatedAt, &sched.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -1080,4 +1114,11 @@ func normalizeScheduleAction(action string) string {
 		return "none"
 	}
 	return strings.TrimSpace(action)
+}
+
+func normalizeRollFallback(fallback string) string {
+	if strings.TrimSpace(fallback) == "" {
+		return "defer"
+	}
+	return strings.TrimSpace(fallback)
 }

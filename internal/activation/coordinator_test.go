@@ -3,6 +3,7 @@ package activation
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,9 +12,12 @@ import (
 )
 
 type fakeStore struct {
-	queue    []*db.ScheduleActivation
-	finished []string
-	deferred []string
+	queue                []*db.ScheduleActivation
+	finished             []string
+	finishedErrors       []string
+	finishedCountAttempt []bool
+	deferred             []string
+	deferredDueAt        []time.Time
 }
 
 func (f *fakeStore) ClaimNextScheduleActivation(time.Time) (*db.ScheduleActivation, error) {
@@ -24,12 +28,15 @@ func (f *fakeStore) ClaimNextScheduleActivation(time.Time) (*db.ScheduleActivati
 	f.queue = f.queue[1:]
 	return a, nil
 }
-func (f *fakeStore) FinishScheduleActivation(_ int64, status, _ string, _ time.Time) error {
+func (f *fakeStore) FinishScheduleActivation(_ int64, status, lastError string, _ time.Time, countAttempt bool) error {
 	f.finished = append(f.finished, status)
+	f.finishedErrors = append(f.finishedErrors, lastError)
+	f.finishedCountAttempt = append(f.finishedCountAttempt, countAttempt)
 	return nil
 }
-func (f *fakeStore) DeferScheduleActivation(_ int64, status, _ string, _ time.Time) error {
+func (f *fakeStore) DeferScheduleActivation(_ int64, status, _ string, dueAt, _ time.Time) error {
 	f.deferred = append(f.deferred, status)
+	f.deferredDueAt = append(f.deferredDueAt, dueAt)
 	return nil
 }
 
@@ -47,10 +54,12 @@ func (s *failingClaimStore) ClaimNextScheduleActivation(time.Time) (*db.Schedule
 	s.calls.Add(1)
 	return nil, errors.New("database unavailable")
 }
-func (*failingClaimStore) FinishScheduleActivation(int64, string, string, time.Time) error {
+func (*failingClaimStore) FinishScheduleActivation(int64, string, string, time.Time, bool) error {
 	return nil
 }
-func (*failingClaimStore) DeferScheduleActivation(int64, string, string, time.Time) error { return nil }
+func (*failingClaimStore) DeferScheduleActivation(int64, string, string, time.Time, time.Time) error {
+	return nil
+}
 
 func TestCoordinatorMapsRuntimeOutcomesToDurableActivationStates(t *testing.T) {
 	tests := []struct {
@@ -102,6 +111,71 @@ func TestCoordinatorRepairIgnoresOrdinaryAttemptBudget(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCapacityDeferralUsesDurableExponentialBackoff(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		deferrals int
+		wantDelay time.Duration
+	}{
+		{deferrals: 0, wantDelay: time.Minute},
+		{deferrals: 1, wantDelay: 2 * time.Minute},
+		{deferrals: 2, wantDelay: 4 * time.Minute},
+		{deferrals: 3, wantDelay: 8 * time.Minute},
+		{deferrals: 4, wantDelay: 15 * time.Minute},
+		{deferrals: 20, wantDelay: 15 * time.Minute},
+	}
+	for _, tc := range tests {
+		store := &fakeStore{queue: []*db.ScheduleActivation{{
+			ID: 7, AppSlug: "demo", CreatedAt: now.Add(-time.Hour), CapacityDeferrals: tc.deferrals,
+		}}}
+		coordinator := New(store, fakeRunner{err: &CapacityError{Reason: "host pressure"}}, time.Second)
+		coordinator.now = func() time.Time { return now }
+		worked, err := coordinator.ProcessNext(context.Background())
+		if !worked || err != nil {
+			t.Fatalf("deferrals=%d ProcessNext = %v, %v; want true, nil", tc.deferrals, worked, err)
+		}
+		if len(store.deferredDueAt) != 1 || !store.deferredDueAt[0].Equal(now.Add(tc.wantDelay)) {
+			t.Fatalf("deferrals=%d due_at=%v, want %s", tc.deferrals, store.deferredDueAt, now.Add(tc.wantDelay))
+		}
+	}
+}
+
+func TestCoordinatorCapacityDeferralExpiresWithoutChargingRollAttempt(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	store := &fakeStore{queue: []*db.ScheduleActivation{{
+		ID: 7, AppSlug: "demo", CreatedAt: now.Add(-24 * time.Hour),
+		CapacityDeferredAt: timePtr(now.Add(-2 * time.Hour)), MaxDeferAgeSeconds: 3600,
+	}}}
+	coordinator := New(store, fakeRunner{err: &CapacityError{Reason: "host pressure"}}, time.Second)
+	coordinator.now = func() time.Time { return now }
+	worked, err := coordinator.ProcessNext(context.Background())
+	if !worked || err == nil {
+		t.Fatalf("ProcessNext = %v, %v; want terminal failure", worked, err)
+	}
+	if len(store.finished) != 1 || store.finished[0] != "failed" || store.finishedCountAttempt[0] {
+		t.Fatalf("finished=%v count_attempt=%v, want failed without rollout attempt", store.finished, store.finishedCountAttempt)
+	}
+	if !strings.Contains(store.finishedErrors[0], "capacity deferral expired after 1h0m0s") {
+		t.Fatalf("last_error=%q, want expiry reason", store.finishedErrors[0])
+	}
+}
+
+func TestCoordinatorCapacityDeadlineStartsAtFirstCapacityDeferral(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	store := &fakeStore{queue: []*db.ScheduleActivation{{
+		ID: 7, AppSlug: "demo", CreatedAt: now.Add(-24 * time.Hour), MaxDeferAgeSeconds: 3600,
+	}}}
+	coordinator := New(store, fakeRunner{err: &CapacityError{Reason: "host pressure"}}, time.Second)
+	coordinator.now = func() time.Time { return now }
+	worked, err := coordinator.ProcessNext(context.Background())
+	if !worked || err != nil {
+		t.Fatalf("ProcessNext = %v, %v; want first capacity defer", worked, err)
+	}
+	if len(store.finished) != 0 || len(store.deferredDueAt) != 1 || !store.deferredDueAt[0].Equal(now.Add(time.Minute)) {
+		t.Fatalf("finished=%v due_at=%v, want a fresh one-hour capacity window", store.finished, store.deferredDueAt)
+	}
+}
+
 func TestCoordinatorNoDueWorkIsBenign(t *testing.T) {
 	coordinator := New(&fakeStore{}, fakeRunner{}, time.Second)
 	worked, err := coordinator.ProcessNext(context.Background())
@@ -133,4 +207,5 @@ func TestCoordinatorContainsRunnerPanicAndDefersRepair(t *testing.T) {
 	}
 }
 
-func int64ptr(v int64) *int64 { return &v }
+func int64ptr(v int64) *int64        { return &v }
+func timePtr(v time.Time) *time.Time { return &v }

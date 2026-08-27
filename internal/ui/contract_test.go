@@ -3238,6 +3238,7 @@ func TestScheduleAndSharedDataHandlersHardened(t *testing.T) {
 
 	checkHandler("async function runScheduleNow(slug, id, name, btn)", "runScheduleNow")
 	checkHandler("async function deleteSchedule(slug, id, name, btn)", "deleteSchedule")
+	checkHandler("async function cancelScheduleActivation(slug, schedID, name, btn)", "cancelScheduleActivation")
 	checkHandler("container.querySelectorAll('[data-action=\"revoke\"]')", "the shared-data unmount handler")
 	checkHandler("document.getElementById('shared-data-add-btn')", "the shared-data mount handler")
 
@@ -3262,7 +3263,9 @@ func TestScheduleAndSharedDataHandlersHardened(t *testing.T) {
 	if submitStart < 0 {
 		t.Fatal("app.js: could not find the schedule form submit handler")
 	}
-	submitEnd := submitStart + 2200
+	// Keep enough room for the complete payload assembly as schedule policy
+	// controls grow; the boundary is still well inside openScheduleForm.
+	submitEnd := submitStart + 3000
 	if submitEnd > len(src) {
 		submitEnd = len(src)
 	}

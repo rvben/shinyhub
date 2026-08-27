@@ -318,8 +318,55 @@ func runRemoteDoctor(checks []doctorCheck, slug, appType string) ([]doctorCheck,
 
 	permission := doctorDeployPermission(cfg, identity.CanCreateApps, slug)
 	checks = append(checks, permission)
+	if slug == "" {
+		checks = append(checks, doctorSkip("roll-feasibility", "no target app slug was selected"))
+	} else if permission.Status == "pass" {
+		checks = append(checks, doctorRollFeasibility(cfg, slug))
+	} else {
+		checks = append(checks, doctorSkip("roll-feasibility", "deployment access to the target was not established"))
+	}
 	checks = append(checks, doctorRemoteRuntime(info.Runtimes, appType))
 	return checks, host
+}
+
+func doctorRollFeasibility(cfg *cliConfig, slug string) doctorCheck {
+	req, err := http.NewRequest(http.MethodGet, cfg.Host+"/api/apps/"+url.PathEscape(slug)+"/schedules", nil)
+	if err != nil {
+		return doctorWarn("roll-feasibility", err.Error(), "Check the target slug and retry.")
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return doctorWarn("roll-feasibility", err.Error(), "Retry when the server is reachable.")
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return doctorSkip("roll-feasibility", fmt.Sprintf("app %q is new or has no schedule surface yet", slug))
+	}
+	if resp.StatusCode >= 400 {
+		return doctorWarn("roll-feasibility", fmt.Sprintf("schedule preflight returned %s", resp.Status), "Verify schedule access with `shinyhub schedule ls "+slug+"`.")
+	}
+	var envelope struct {
+		Items []scheduleDTO `json:"items"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		var bare []scheduleDTO
+		if bareErr := json.Unmarshal(body, &bare); bareErr != nil {
+			return doctorWarn("roll-feasibility", "the schedule response could not be decoded", "Upgrade the CLI or server so their API versions agree.")
+		}
+		envelope.Items = bare
+	}
+	var warnings []string
+	for _, schedule := range envelope.Items {
+		if schedule.RollFeasibilityAdvisory != nil && *schedule.RollFeasibilityAdvisory != "" {
+			warnings = append(warnings, fmt.Sprintf("%s: %s", schedule.Name, *schedule.RollFeasibilityAdvisory))
+		}
+	}
+	if len(warnings) == 0 {
+		return doctorPass("roll-feasibility", "configured roll schedules fit current host capacity, or no roll schedules are configured")
+	}
+	return doctorWarn("roll-feasibility", strings.Join(warnings, " "), "Adjust host capacity or each schedule's roll_fallback before relying on fresh serving data.")
 }
 
 type doctorIdentityResult = remoteIdentity
@@ -449,6 +496,7 @@ func appendRemoteSkipped(checks []doctorCheck, reason string) []doctorCheck {
 		doctorSkip("authentication", reason),
 		doctorSkip("credential-lifecycle", reason),
 		doctorSkip("deploy-permission", reason),
+		doctorSkip("roll-feasibility", reason),
 		doctorSkip("remote-runtime", reason))
 }
 
@@ -458,6 +506,7 @@ func appendRemoteAfterServerSkipped(checks []doctorCheck) []doctorCheck {
 		doctorSkip("authentication", "the server is unavailable"),
 		doctorSkip("credential-lifecycle", "the server is unavailable"),
 		doctorSkip("deploy-permission", "the server is unavailable"),
+		doctorSkip("roll-feasibility", "the server is unavailable"),
 		doctorSkip("remote-runtime", "the server is unavailable"))
 }
 
@@ -466,6 +515,7 @@ func appendRemoteAfterCompatibilitySkipped(checks []doctorCheck) []doctorCheck {
 		doctorSkip("authentication", "the server API protocol is incompatible"),
 		doctorSkip("credential-lifecycle", "the server API protocol is incompatible"),
 		doctorSkip("deploy-permission", "the server API protocol is incompatible"),
+		doctorSkip("roll-feasibility", "the server API protocol is incompatible"),
 		doctorSkip("remote-runtime", "the server API protocol is incompatible"))
 }
 

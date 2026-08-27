@@ -705,6 +705,8 @@ cron = "*/15 * * * *"
 cmd = "python fetch.py"
 on_success = "roll"
 min_roll_interval = "1h"
+roll_fallback = "restart"
+max_defer_age = "6h"
 `)
 	m, err := LoadManifest(dir)
 	if err != nil {
@@ -717,6 +719,9 @@ min_roll_interval = "1h"
 	if s.MinRollInterval != time.Hour {
 		t.Fatalf("MinRollInterval = %s, want 1h", s.MinRollInterval)
 	}
+	if s.RollFallback != "restart" || s.MaxDeferAge != 6*time.Hour {
+		t.Fatalf("fallback policy = %q/%s, want restart/6h", s.RollFallback, s.MaxDeferAge)
+	}
 
 	dir = t.TempDir()
 	writeManifest(t, dir, `
@@ -728,6 +733,18 @@ on_success = "signal"
 `)
 	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "none|roll") {
 		t.Fatalf("signal error = %v, want fail-closed v1 action error", err)
+	}
+
+	dir = t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "refresh"
+cron = "*/15 * * * *"
+cmd = "python fetch.py"
+roll_fallback = "restart"
+`)
+	if _, err := LoadManifest(dir); err == nil || !strings.Contains(err.Error(), "requires on_success=roll") {
+		t.Fatalf("fallback without roll error = %v", err)
 	}
 }
 

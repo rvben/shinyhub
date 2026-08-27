@@ -488,6 +488,8 @@ func (m *Manager) insertRunRow(sched *db.Schedule, trigger string, userID *int64
 		LogPath:                "", // updated after log file creation
 		OnSuccess:              sched.OnSuccess,
 		MinRollIntervalSeconds: sched.MinRollIntervalSeconds,
+		RollFallback:           sched.RollFallback,
+		MaxDeferAgeSeconds:     sched.MaxDeferAgeSeconds,
 	})
 }
 
@@ -502,6 +504,8 @@ func (m *Manager) recordSkipped(sched *db.Schedule, trigger string, userID *int6
 		StartedAt:              time.Now().UTC(),
 		OnSuccess:              sched.OnSuccess,
 		MinRollIntervalSeconds: sched.MinRollIntervalSeconds,
+		RollFallback:           sched.RollFallback,
+		MaxDeferAgeSeconds:     sched.MaxDeferAgeSeconds,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("insert skipped run: %w", err)

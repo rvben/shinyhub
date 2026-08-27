@@ -31,6 +31,8 @@ type scheduleDTO struct {
 	MissedPolicy           string   `json:"missed_policy"`
 	OnSuccess              string   `json:"on_success"`
 	MinRollIntervalSeconds int      `json:"min_roll_interval_seconds"`
+	RollFallback           string   `json:"roll_fallback"`
+	MaxDeferAgeSeconds     int      `json:"max_defer_age_seconds"`
 	// Timezone is the raw stored value; null/nil means "inherit server default".
 	Timezone *string `json:"timezone"`
 	// EffectiveTimezone is the resolved IANA zone name that will actually be
@@ -43,6 +45,10 @@ type scheduleDTO struct {
 	// DSTAdvisory warns when a fixed-hour schedule in a DST-observing zone will
 	// fire twice on the fall-back day. Omitted when the schedule is safe.
 	DSTAdvisory *string `json:"dst_advisory,omitempty"`
+	// RollFeasibilityAdvisory is computed from the same live surge estimate and
+	// host floor used by activation admission. It is advisory because available
+	// memory can change between configuration and execution.
+	RollFeasibilityAdvisory *string `json:"roll_feasibility_advisory,omitempty"`
 	// FirstFireRunID is set only on a create response when run_on_register
 	// dispatched a first run. Omitted everywhere else.
 	FirstFireRunID *int64 `json:"first_fire_run_id,omitempty"`
@@ -114,6 +120,7 @@ func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Loca
 		Command: cmd, Enabled: sc.Enabled, TimeoutSeconds: sc.TimeoutSeconds,
 		OverlapPolicy: sc.OverlapPolicy, MissedPolicy: sc.MissedPolicy,
 		OnSuccess: sc.OnSuccess, MinRollIntervalSeconds: sc.MinRollIntervalSeconds,
+		RollFallback: sc.RollFallback, MaxDeferAgeSeconds: sc.MaxDeferAgeSeconds,
 		Timezone:          sc.Timezone,
 		EffectiveTimezone: loc.String(),
 		TimezoneInherited: inherited,
@@ -174,6 +181,7 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		dto := toScheduleDTO(sc, next, def)
+		dto.RollFeasibilityAdvisory = s.rollFeasibilityAdvisory(app, sc.OnSuccess, sc.RollFallback)
 		if fr, ok := byID[sc.ID]; ok {
 			dto.applyFreshness(fr, def, now)
 		}
@@ -202,6 +210,8 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		RunOnRegister          bool     `json:"run_on_register"`
 		OnSuccess              string   `json:"on_success"`
 		MinRollIntervalSeconds int      `json:"min_roll_interval_seconds"`
+		RollFallback           string   `json:"roll_fallback"`
+		MaxDeferAgeSeconds     int      `json:"max_defer_age_seconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
@@ -215,7 +225,8 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	onSuccess, err := schedulespec.ValidateActivationSeconds(req.OnSuccess, int64(req.MinRollIntervalSeconds))
+	onSuccess, rollFallback, err := schedulespec.ValidateActivationPolicySeconds(
+		req.OnSuccess, int64(req.MinRollIntervalSeconds), req.RollFallback, int64(req.MaxDeferAgeSeconds))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -240,6 +251,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds: req.TimeoutSeconds, OverlapPolicy: req.OverlapPolicy,
 		MissedPolicy: req.MissedPolicy, Timezone: storedTZ,
 		OnSuccess: onSuccess, MinRollIntervalSeconds: req.MinRollIntervalSeconds,
+		RollFallback: rollFallback, MaxDeferAgeSeconds: req.MaxDeferAgeSeconds,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrScheduleNameExists) {
@@ -261,9 +273,12 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 				existing.MissedPolicy == req.MissedPolicy &&
 				existing.OnSuccess == onSuccess &&
 				existing.MinRollIntervalSeconds == req.MinRollIntervalSeconds &&
+				existing.RollFallback == rollFallback &&
+				existing.MaxDeferAgeSeconds == req.MaxDeferAgeSeconds &&
 				tzMatch {
 				// Identical config: idempotent no-op.
 				dto := toScheduleDTO(existing, nil, s.cfg.Scheduler.Location)
+				dto.RollFeasibilityAdvisory = s.rollFeasibilityAdvisory(app, existing.OnSuccess, existing.RollFallback)
 				writeJSON(w, http.StatusOK, dto)
 				return
 			}
@@ -278,13 +293,15 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
-		`{"app":%q,"name":%q,"effective_timezone":%q,"on_success":%q,"min_roll_interval_seconds":%d}`,
-		app.Slug, req.Name, effectiveTZLabel(storedTZ, s.cfg.Scheduler.Location), onSuccess, req.MinRollIntervalSeconds,
+		`{"app":%q,"name":%q,"effective_timezone":%q,"on_success":%q,"min_roll_interval_seconds":%d,"roll_fallback":%q,"max_defer_age_seconds":%d}`,
+		app.Slug, req.Name, effectiveTZLabel(storedTZ, s.cfg.Scheduler.Location), onSuccess,
+		req.MinRollIntervalSeconds, rollFallback, req.MaxDeferAgeSeconds,
 	))
 
 	firstFireRunID := s.maybeFirstFire(id, req.RunOnRegister, !enabled, app.Slug, req.Name)
 	sc, _ := s.store.GetSchedule(id)
 	dto := toScheduleDTO(sc, nil, s.cfg.Scheduler.Location)
+	dto.RollFeasibilityAdvisory = s.rollFeasibilityAdvisory(app, sc.OnSuccess, sc.RollFallback)
 	dto.FirstFireRunID = firstFireRunID
 	writeJSON(w, http.StatusCreated, dto)
 }
@@ -337,6 +354,8 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		MissedPolicy           *string   `json:"missed_policy,omitempty"`
 		OnSuccess              *string   `json:"on_success,omitempty"`
 		MinRollIntervalSeconds *int      `json:"min_roll_interval_seconds,omitempty"`
+		RollFallback           *string   `json:"roll_fallback,omitempty"`
+		MaxDeferAgeSeconds     *int      `json:"max_defer_age_seconds,omitempty"`
 	}
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
@@ -406,6 +425,25 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 			req.MinRollIntervalSeconds = &zero
 		}
 	}
+	rollFallback := sc.RollFallback
+	if req.RollFallback != nil {
+		rollFallback = *req.RollFallback
+	}
+	maxDeferAge := sc.MaxDeferAgeSeconds
+	if req.MaxDeferAgeSeconds != nil {
+		maxDeferAge = *req.MaxDeferAgeSeconds
+	}
+	if req.OnSuccess != nil {
+		requested := strings.TrimSpace(*req.OnSuccess)
+		if requested == "" || requested == "none" {
+			rollFallback = "defer"
+			maxDeferAge = 0
+			fallback := "defer"
+			zero := 0
+			req.RollFallback = &fallback
+			req.MaxDeferAgeSeconds = &zero
+		}
+	}
 	// Compose timezone for validation: use the incoming value when the key was
 	// present (empty string = clear = validate as ""); fall back to the existing
 	// stored value when the key was absent (unchanged semantics).
@@ -421,7 +459,8 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	normalizedAction, err := schedulespec.ValidateActivationSeconds(onSuccess, int64(minRollInterval))
+	normalizedAction, normalizedFallback, err := schedulespec.ValidateActivationPolicySeconds(
+		onSuccess, int64(minRollInterval), rollFallback, int64(maxDeferAge))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -432,6 +471,9 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.OnSuccess != nil {
 		*req.OnSuccess = normalizedAction
+	}
+	if req.RollFallback != nil {
+		*req.RollFallback = normalizedFallback
 	}
 
 	var cmdJSONPtr *string
@@ -446,6 +488,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		Enabled: req.Enabled, TimeoutSeconds: req.TimeoutSeconds,
 		OverlapPolicy: req.OverlapPolicy, MissedPolicy: req.MissedPolicy,
 		OnSuccess: req.OnSuccess, MinRollIntervalSeconds: req.MinRollIntervalSeconds,
+		RollFallback: req.RollFallback, MaxDeferAgeSeconds: req.MaxDeferAgeSeconds,
 	}
 	if tzPresent {
 		// Key was in the body: update the column regardless of value.
@@ -468,10 +511,13 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "schedule_update", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
-		`{"app":%q,"name":%q,"activation_policy":{"before":{"on_success":%q,"min_roll_interval_seconds":%d},"after":{"on_success":%q,"min_roll_interval_seconds":%d}}}`,
-		app.Slug, sc.Name, sc.OnSuccess, sc.MinRollIntervalSeconds, fresh.OnSuccess, fresh.MinRollIntervalSeconds,
+		`{"app":%q,"name":%q,"activation_policy":{"before":{"on_success":%q,"min_roll_interval_seconds":%d,"roll_fallback":%q,"max_defer_age_seconds":%d},"after":{"on_success":%q,"min_roll_interval_seconds":%d,"roll_fallback":%q,"max_defer_age_seconds":%d}}}`,
+		app.Slug, sc.Name, sc.OnSuccess, sc.MinRollIntervalSeconds, sc.RollFallback, sc.MaxDeferAgeSeconds,
+		fresh.OnSuccess, fresh.MinRollIntervalSeconds, fresh.RollFallback, fresh.MaxDeferAgeSeconds,
 	))
-	writeJSON(w, http.StatusOK, toScheduleDTO(fresh, nil, s.cfg.Scheduler.Location))
+	dto := toScheduleDTO(fresh, nil, s.cfg.Scheduler.Location)
+	dto.RollFeasibilityAdvisory = s.rollFeasibilityAdvisory(app, fresh.OnSuccess, fresh.RollFallback)
+	writeJSON(w, http.StatusOK, dto)
 }
 
 // validateScheduleActivationForApp fails closed for topologies the first
@@ -551,6 +597,41 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "schedule_delete", "schedule", fmt.Sprintf("%d", id), "")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/apps/{slug}/schedules/{id}/activation/cancel
+func (s *Server) handleCancelScheduleActivation(w http.ResponseWriter, r *http.Request) {
+	app, ok := s.requireManageApp(w, r, chi.URLParam(r, "slug"))
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad schedule id")
+		return
+	}
+	sc, err := s.store.GetSchedule(id)
+	if err != nil || sc.AppID != app.ID {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	a, err := s.store.CancelQueuedScheduleActivation(id, time.Now().UTC())
+	switch {
+	case errors.Is(err, db.ErrScheduleActivationBusy):
+		writeError(w, http.StatusConflict, "activation is already running or repairing and cannot be cancelled safely")
+		return
+	case errors.Is(err, db.ErrNotFound):
+		writeError(w, http.StatusConflict, "no queued activation to cancel")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(r, "schedule_activation_cancel", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
+		`{"app":%q,"name":%q,"activation_id":%d,"target_generation":%d}`,
+		app.Slug, sc.Name, a.ID, a.TargetGeneration,
+	))
+	writeJSON(w, http.StatusOK, a)
 }
 
 // POST /api/apps/{slug}/schedules/{id}/run

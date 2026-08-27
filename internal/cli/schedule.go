@@ -25,6 +25,7 @@ func newScheduleCmd() *cobra.Command {
 		newScheduleRmCmd(),
 		newScheduleEnableCmd(),
 		newScheduleDisableCmd(),
+		newScheduleCancelCmd(),
 		newScheduleRunCmd(),
 		newScheduleRunsCmd(),
 		newScheduleLogsCmd(),
@@ -35,29 +36,41 @@ func newScheduleCmd() *cobra.Command {
 
 // scheduleDTO mirrors the server's JSON representation of a schedule.
 type scheduleDTO struct {
-	ID                     int64    `json:"id"`
-	Name                   string   `json:"name"`
-	CronExpr               string   `json:"cron_expr"`
-	Command                []string `json:"command"`
-	Enabled                bool     `json:"enabled"`
-	TimeoutSeconds         int      `json:"timeout_seconds"`
-	OverlapPolicy          string   `json:"overlap_policy"`
-	MissedPolicy           string   `json:"missed_policy"`
-	OnSuccess              string   `json:"on_success"`
-	MinRollIntervalSeconds int      `json:"min_roll_interval_seconds"`
-	Timezone               *string  `json:"timezone"`
-	EffectiveTimezone      string   `json:"effective_timezone"`
-	TimezoneInherited      bool     `json:"timezone_inherited"`
-	DSTAdvisory            *string  `json:"dst_advisory"`
-	FirstFireRunID         *int64   `json:"first_fire_run_id"`
-	LastRunID              *int64   `json:"last_run_id"`
-	LastRunAt              *string  `json:"last_run_at"`
-	LastRunStatus          *string  `json:"last_run_status"`
-	LastSuccessAt          *string  `json:"last_success_at"`
-	Stale                  *bool    `json:"stale"`
-	Refreshing             *bool    `json:"refreshing"`
-	ActiveRunID            *int64   `json:"active_run_id"`
-	FreshnessError         string   `json:"freshness_error"`
+	ID                      int64    `json:"id"`
+	Name                    string   `json:"name"`
+	CronExpr                string   `json:"cron_expr"`
+	Command                 []string `json:"command"`
+	Enabled                 bool     `json:"enabled"`
+	TimeoutSeconds          int      `json:"timeout_seconds"`
+	OverlapPolicy           string   `json:"overlap_policy"`
+	MissedPolicy            string   `json:"missed_policy"`
+	OnSuccess               string   `json:"on_success"`
+	MinRollIntervalSeconds  int      `json:"min_roll_interval_seconds"`
+	RollFallback            string   `json:"roll_fallback"`
+	MaxDeferAgeSeconds      int      `json:"max_defer_age_seconds"`
+	Timezone                *string  `json:"timezone"`
+	EffectiveTimezone       string   `json:"effective_timezone"`
+	TimezoneInherited       bool     `json:"timezone_inherited"`
+	DSTAdvisory             *string  `json:"dst_advisory"`
+	RollFeasibilityAdvisory *string  `json:"roll_feasibility_advisory"`
+	FirstFireRunID          *int64   `json:"first_fire_run_id"`
+	LastRunID               *int64   `json:"last_run_id"`
+	LastRunAt               *string  `json:"last_run_at"`
+	LastRunStatus           *string  `json:"last_run_status"`
+	LastSuccessAt           *string  `json:"last_success_at"`
+	Stale                   *bool    `json:"stale"`
+	Refreshing              *bool    `json:"refreshing"`
+	ActiveRunID             *int64   `json:"active_run_id"`
+	FreshnessError          string   `json:"freshness_error"`
+}
+
+func printScheduleAdvisories(out io.Writer, schedule scheduleDTO) {
+	if schedule.DSTAdvisory != nil && *schedule.DSTAdvisory != "" {
+		fmt.Fprintln(out, "Warning: "+*schedule.DSTAdvisory)
+	}
+	if schedule.RollFeasibilityAdvisory != nil && *schedule.RollFeasibilityAdvisory != "" {
+		fmt.Fprintln(out, "Warning: "+*schedule.RollFeasibilityAdvisory)
+	}
 }
 
 // lookupScheduleID resolves a schedule name to its numeric ID by listing all
@@ -207,6 +220,8 @@ func newScheduleAddCmd() *cobra.Command {
 		follow          bool
 		onSuccess       string
 		minRollInterval time.Duration
+		rollFallback    string
+		maxDeferAge     time.Duration
 	}
 
 	addCmd := &cobra.Command{
@@ -228,6 +243,8 @@ func newScheduleAddCmd() *cobra.Command {
 	addCmd.Flags().BoolVar(&flags.follow, "follow", false, "With --run-on-register, stream the first-fire run's logs until it finishes")
 	addCmd.Flags().StringVar(&flags.onSuccess, "on-success", "none", "After a successful run: none|roll")
 	addCmd.Flags().DurationVar(&flags.minRollInterval, "min-roll-interval", 0, "Minimum interval between successful replica rolls (for example 1h)")
+	addCmd.Flags().StringVar(&flags.rollFallback, "roll-fallback", "defer", "When a roll surge does not fit: defer|restart")
+	addCmd.Flags().DurationVar(&flags.maxDeferAge, "max-defer-age", 0, "Fail a capacity-deferred activation after this age (0 retries indefinitely)")
 	_ = addCmd.MarkFlagRequired("name")
 	_ = addCmd.MarkFlagRequired("cron")
 
@@ -278,6 +295,8 @@ func newScheduleAddCmd() *cobra.Command {
 			"run_on_register":           flags.runOnRegister,
 			"on_success":                flags.onSuccess,
 			"min_roll_interval_seconds": int(flags.minRollInterval / time.Second),
+			"roll_fallback":             flags.rollFallback,
+			"max_defer_age_seconds":     int(flags.maxDeferAge / time.Second),
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
@@ -320,9 +339,7 @@ func newScheduleAddCmd() *cobra.Command {
 
 		var created scheduleDTO
 		if err := json.Unmarshal(out, &created); err == nil {
-			if created.DSTAdvisory != nil && *created.DSTAdvisory != "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+*created.DSTAdvisory)
-			}
+			printScheduleAdvisories(cmd.ErrOrStderr(), created)
 			fields := map[string]any{"slug": slug, "name": created.Name, "id": created.ID}
 			prose := fmt.Sprintf("created schedule %q (id %d)", created.Name, created.ID)
 			if created.FirstFireRunID != nil {
@@ -373,6 +390,8 @@ func newScheduleUpdateCmd() *cobra.Command {
 		clearTZ         bool
 		onSuccess       string
 		minRollInterval time.Duration
+		rollFallback    string
+		maxDeferAge     time.Duration
 	}
 
 	updateCmd := &cobra.Command{
@@ -401,6 +420,8 @@ Timezone is tri-state:
 	updateCmd.Flags().BoolVar(&flags.clearTZ, "clear-timezone", false, "Clear the per-schedule timezone (inherit server default)")
 	updateCmd.Flags().StringVar(&flags.onSuccess, "on-success", "", "After a successful run: none|roll")
 	updateCmd.Flags().DurationVar(&flags.minRollInterval, "min-roll-interval", 0, "Minimum interval between successful replica rolls")
+	updateCmd.Flags().StringVar(&flags.rollFallback, "roll-fallback", "", "When a roll surge does not fit: defer|restart")
+	updateCmd.Flags().DurationVar(&flags.maxDeferAge, "max-defer-age", 0, "Fail a capacity-deferred activation after this age (0 retries indefinitely)")
 
 	updateCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug, name := args[0], args[1]
@@ -447,10 +468,18 @@ Timezone is tri-state:
 			payload["on_success"] = flags.onSuccess
 			if !changed("min-roll-interval") && strings.TrimSpace(flags.onSuccess) == "none" {
 				payload["min_roll_interval_seconds"] = 0
+				payload["roll_fallback"] = "defer"
+				payload["max_defer_age_seconds"] = 0
 			}
 		}
 		if changed("min-roll-interval") {
 			payload["min_roll_interval_seconds"] = int(flags.minRollInterval / time.Second)
+		}
+		if changed("roll-fallback") {
+			payload["roll_fallback"] = flags.rollFallback
+		}
+		if changed("max-defer-age") {
+			payload["max_defer_age_seconds"] = int(flags.maxDeferAge / time.Second)
 		}
 		switch {
 		case flags.clearTZ:
@@ -494,6 +523,10 @@ Timezone is tri-state:
 		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
 			return httpError(cfg.Token, "update schedule", resp, out)
+		}
+		var updated scheduleDTO
+		if json.Unmarshal(out, &updated) == nil {
+			printScheduleAdvisories(cmd.ErrOrStderr(), updated)
 		}
 
 		return renderAction(cmd, "updated",
@@ -561,6 +594,51 @@ func newScheduleDisableCmd() *cobra.Command {
 		Short: "Disable a scheduled job",
 		Args:  cobra.ExactArgs(2),
 		RunE:  patchScheduleEnabled(false),
+	}
+}
+
+func newScheduleCancelCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "cancel <slug> <name>",
+		Short: "Cancel a queued serving-data activation",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			slug, name := args[0], args[1]
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			id, err := lookupScheduleID(cfg, slug, name)
+			if err != nil {
+				return err
+			}
+			url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/activation/cancel", cfg.Host, slug, id)
+			req, err := http.NewRequest(http.MethodPost, url, nil)
+			if err != nil {
+				return fmt.Errorf("build request: %w", err)
+			}
+			req.Header.Set("Authorization", authHeader(cfg.Token))
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode >= 400 {
+				out, _ := io.ReadAll(resp.Body)
+				return httpError(cfg.Token, "cancel schedule activation", resp, out)
+			}
+			var activation struct {
+				ID               int64 `json:"id"`
+				TargetGeneration int64 `json:"target_generation"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&activation); err != nil {
+				return fmt.Errorf("decode cancelled activation: %w", err)
+			}
+			return renderAction(cmd, "cancelled", map[string]any{
+				"slug": slug, "name": name, "activation_id": activation.ID,
+				"target_generation": activation.TargetGeneration,
+			}, fmt.Sprintf("%s: cancelled queued activation for schedule %q", slug, name))
+		},
 	}
 }
 

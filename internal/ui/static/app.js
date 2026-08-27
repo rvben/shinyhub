@@ -43,6 +43,7 @@ import { segmentApps } from '/static/views/fleet-ui.js';
 import {
   activationState,
 	activationErrorDetail,
+	canCancelActivation,
 	deletedScheduleActivations,
   afterSuccessDetail,
   afterSuccessLabel,
@@ -6280,6 +6281,7 @@ document.addEventListener('DOMContentLoaded', () => {
 		<td data-label="After success">
 		  <div class="schedule-cell-stack">
 			<span class="schedule-cell-primary">${escapeHtml(afterSuccessLabel(s))}</span>
+			${s.roll_feasibility_advisory ? `<span class="schedule-roll-warning" title="${escapeHtml(s.roll_feasibility_advisory)}">Capacity warning</span>` : ''}
 			${s.latest_activation || s.on_success === 'roll' ? scheduleStatusMarkup(activation) : ''}
 			<span class="schedule-cell-secondary">${escapeHtml(s.latest_activation ? `${s.on_success === 'roll' ? '' : 'Earlier policy · '}Generation ${s.latest_activation.target_generation} · run #${s.latest_activation.schedule_run_id || '—'}` : afterSuccessDetail(s))}</span>
           </div>
@@ -6336,6 +6338,7 @@ document.addEventListener('DOMContentLoaded', () => {
           ${surface.options.canManage ? `<div class="schedule-detail-actions"><button type="button" class="env-btn-secondary" data-detail-action="run" data-schedule-focus="schedule-${schedule.id}-detail-run">Run now</button><button type="button" class="env-btn-secondary" data-detail-action="edit" data-schedule-focus="schedule-${schedule.id}-detail-edit">Edit</button><button type="button" class="btn-danger-sm" data-detail-action="delete" data-schedule-focus="schedule-${schedule.id}-detail-delete">Delete</button></div>` : ''}
         </div>
       </div>
+      ${schedule.roll_feasibility_advisory ? `<div class="schedule-roll-advisory"><strong>Roll capacity warning</strong><span>${escapeHtml(schedule.roll_feasibility_advisory)}</span></div>` : ''}
       <dl class="schedule-definition-grid">
         <div><dt>Timing</dt><dd><code>${escapeHtml(schedule.cron_expr)}</code></dd></div>
         <div><dt>Timezone</dt><dd>${escapeHtml(timezone)}${schedule.timezone_inherited ? ' <span>(inherited)</span>' : ''}</dd></div>
@@ -6344,7 +6347,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <div class="schedule-definition-command"><dt>Command</dt><dd><code>${escapeHtml((schedule.command || []).join(' '))}</code></dd></div>
       </dl>
 	  ${latestActivation || schedule.on_success === 'roll' ? `<section class="schedule-activation-panel" aria-labelledby="schedule-activation-title">
-		<div class="schedule-history-heading"><div><h3 id="schedule-activation-title">Serving-data activation</h3><p>${schedule.on_success === 'roll' ? 'Job health and activation health are reported separately.' : 'This durable activation was requested before rollout was disabled for future runs.'}</p></div>${scheduleStatusMarkup(activation)}</div>
+		<div class="schedule-history-heading"><div><h3 id="schedule-activation-title">Serving-data activation</h3><p>${schedule.on_success === 'roll' ? 'Job health and activation health are reported separately.' : 'This durable activation was requested before rollout was disabled for future runs.'}</p></div><div class="schedule-activation-actions">${scheduleStatusMarkup(activation)}${surface.options.canManage && canCancelActivation(schedule) ? `<button type="button" class="env-btn-secondary" data-detail-action="cancel-activation" data-schedule-focus="schedule-${schedule.id}-cancel-activation">Cancel activation</button>` : ''}</div></div>
         ${latestActivation ? `<dl class="schedule-activation-facts">
           <div><dt>Requested by</dt><dd>${latestActivation.schedule_run_id ? `Run #${escapeHtml(latestActivation.schedule_run_id)}` : 'Retained activation record'}</dd></div>
           <div><dt>Target generation</dt><dd>${escapeHtml(latestActivation.target_generation)}</dd></div>
@@ -6364,6 +6367,9 @@ document.addEventListener('DOMContentLoaded', () => {
     detail.querySelector('[data-detail-action="edit"]')?.addEventListener('click', () => openScheduleForm(surface.slug, schedule));
     detail.querySelector('[data-detail-action="delete"]')?.addEventListener('click', e => {
       deleteSchedule(surface.slug, schedule.id, schedule.name, e.currentTarget);
+    });
+    detail.querySelector('[data-detail-action="cancel-activation"]')?.addEventListener('click', e => {
+      cancelScheduleActivation(surface.slug, schedule.id, schedule.name, e.currentTarget);
     });
 
     await loadScheduleRunPage(surface, schedule, 0, true);
@@ -6540,6 +6546,8 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('sched-timezone').value = existing.timezone || '';
       document.getElementById('sched-on-success').value = existing.on_success || 'none';
       document.getElementById('sched-min-roll-interval').value = existing.min_roll_interval_seconds || 0;
+      document.getElementById('sched-roll-fallback').value = existing.roll_fallback || 'defer';
+      document.getElementById('sched-max-defer-age').value = existing.max_defer_age_seconds || 0;
     }
     updateCronPreview(document.getElementById('sched-cron').value, document.getElementById('sched-timezone').value);
 
@@ -6561,6 +6569,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const rolling = newForm.querySelector('#sched-on-success').value === 'roll';
       newForm.querySelector('#sched-roll-options').hidden = !rolling;
       newForm.querySelector('#sched-min-roll-interval').disabled = !rolling;
+      newForm.querySelector('#sched-roll-fallback').disabled = !rolling;
+      newForm.querySelector('#sched-max-defer-age').disabled = !rolling;
     };
     newForm.querySelector('#sched-on-success').addEventListener('change', refreshRollOptions);
     refreshRollOptions();
@@ -6578,12 +6588,18 @@ document.addEventListener('DOMContentLoaded', () => {
       const minRollIntervalSeconds = onSuccess === 'roll'
         ? parseInt(newForm.querySelector('#sched-min-roll-interval').value || '0', 10)
         : 0;
+      const rollFallback = onSuccess === 'roll'
+        ? newForm.querySelector('#sched-roll-fallback').value
+        : 'defer';
+      const maxDeferAgeSeconds = onSuccess === 'roll'
+        ? parseInt(newForm.querySelector('#sched-max-defer-age').value || '0', 10)
+        : 0;
 
       const newErrEl = document.getElementById('schedule-form-error');
       setError(newErrEl, '');
 
       const timezone = newForm.querySelector('#sched-timezone').value.trim();
-      const body = JSON.stringify({name, cron_expr: cronExpr, command, timeout_seconds: timeoutSeconds, overlap_policy: overlapPolicy, missed_policy: missedPolicy, enabled, timezone, on_success: onSuccess, min_roll_interval_seconds: minRollIntervalSeconds});
+      const body = JSON.stringify({name, cron_expr: cronExpr, command, timeout_seconds: timeoutSeconds, overlap_policy: overlapPolicy, missed_policy: missedPolicy, enabled, timezone, on_success: onSuccess, min_roll_interval_seconds: minRollIntervalSeconds, roll_fallback: rollFallback, max_defer_age_seconds: maxDeferAgeSeconds});
       const submitBtn = newForm.querySelector('button[type="submit"]');
       if (submitBtn) submitBtn.disabled = true;
       try {
@@ -6698,6 +6714,29 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       flashToast(`Run #${runID} cancelled.`, 'success');
+      if (mountedScheduleSurface) await refreshScheduleSurface(mountedScheduleSurface, {announce: true});
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function cancelScheduleActivation(slug, schedID, name, btn) {
+    if (!confirm(`Cancel the pending serving-data activation for "${name}"? The current serving replicas will not be stopped.`)) return;
+    if (btn) btn.disabled = true;
+    try {
+      let response;
+      try {
+        response = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${schedID}/activation/cancel`, {method: 'POST'});
+      } catch {
+        flashToast('Activation cancellation failed: network error', 'error');
+        return;
+      }
+      if (response.status === 401) { await handleUnauthorized(); return; }
+      if (!response.ok) {
+        flashToast('Activation cancellation failed: ' + (await errorMessage(response)), 'error');
+        return;
+      }
+      flashToast('Serving-data activation cancelled. The current replicas are unchanged.', 'success');
       if (mountedScheduleSurface) await refreshScheduleSurface(mountedScheduleSurface, {announce: true});
     } finally {
       if (btn) btn.disabled = false;

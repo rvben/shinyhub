@@ -1540,11 +1540,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// (the legacy field): a config that declares tiers:[{runtime:docker}]
 	// without setting runtime.mode must still pick the RuntimeSampler, not the
 	// host sampler.
+	var replicaSampler process.Sampler
 	if defaultTierCfg.Runtime == "docker" {
-		srv.SetSampler(&process.RuntimeSampler{Runtime: rt})
+		replicaSampler = &process.RuntimeSampler{Runtime: rt}
 	} else {
-		srv.SetSampler(&hostSampler{})
+		replicaSampler = &hostSampler{}
 	}
+	srv.SetSampler(replicaSampler)
 
 	// Start the in-memory metrics-history collector unless disabled
 	// (history_window == 0). It runs on every instance (recording the replicas it
@@ -1629,6 +1631,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			CPUQuotaPercent:       deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, deployDefaultCPU),
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
 			IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, cfg.Auth.IdentityHeadersEnabled()),
+			StartupSampler:        replicaSampler,
 			// Pin a shared-mount consumer's restarted replica to the worker set
 			// hosting its source data, matching the full-deploy placement so a
 			// recovered replica lands beside the data it mounts.

@@ -60,6 +60,25 @@ func TestSchedule_Add_ShellwordsCmd(t *testing.T) {
 	}
 }
 
+func TestSchedule_Add_SendsActivationControls(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(201, `{"id":1,"name":"fetch","on_success":"roll","roll_fallback":"restart","max_defer_age_seconds":21600}`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"add", "demo", "--name", "fetch", "--cron", "0 * * * *", "--cmd", "python fetch.py",
+		"--on-success", "roll", "--roll-fallback", "restart", "--max-defer-age", "6h"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["roll_fallback"] != "restart" || body["max_defer_age_seconds"] != float64(21600) {
+		t.Fatalf("activation payload=%v, want restart fallback with six-hour expiry", body)
+	}
+}
+
 // TestSchedule_Add_PrintsDSTAdvisory verifies that when the server returns a
 // dst_advisory on the created schedule, the CLI surfaces it to stderr so the
 // developer learns their fixed-hour job will fire twice on the fall-back day.
@@ -77,6 +96,22 @@ func TestSchedule_Add_PrintsDSTAdvisory(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "fires twice on 2025-10-26") {
 		t.Errorf("expected DST advisory on stderr, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestSchedule_Add_PrintsRollFeasibilityAdvisory(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(201, `{"id":7,"name":"nightly","roll_feasibility_advisory":"Surge roll is currently infeasible: activation will defer until capacity changes."}`)
+
+	cmd := newScheduleCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"add", "demo", "--name", "nightly", "--cron", "0 2 * * *", "--cmd", "echo hi", "--on-success", "roll"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "Surge roll is currently infeasible") {
+		t.Fatalf("expected roll advisory on stderr, got %q", stderr.String())
 	}
 }
 
@@ -592,8 +627,52 @@ func TestSchedule_Update_DisablingRollAlsoClearsStoredDamper(t *testing.T) {
 	if err := json.Unmarshal((*reqs)[1].Body, &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["on_success"] != "none" || body["min_roll_interval_seconds"] != float64(0) {
-		t.Fatalf("disable payload=%v, want on_success=none and zero damper", body)
+	if body["on_success"] != "none" || body["min_roll_interval_seconds"] != float64(0) ||
+		body["roll_fallback"] != "defer" || body["max_defer_age_seconds"] != float64(0) {
+		t.Fatalf("disable payload=%v, want default activation policy", body)
+	}
+}
+
+func TestSchedule_Update_SendsActivationControls(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `[{"id":7,"name":"job","on_success":"roll"}]`)
+
+	cmd := newScheduleCmd()
+	cmd.SetArgs([]string{"update", "demo", "job", "--roll-fallback", "restart", "--max-defer-age", "90m"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[1].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["roll_fallback"] != "restart" || body["max_defer_age_seconds"] != float64(5400) {
+		t.Fatalf("activation patch=%v, want restart fallback with 90-minute expiry", body)
+	}
+}
+
+func TestSchedule_Cancel_ResolvesNameAndCancelsQueuedActivation(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job"}]`)
+		},
+		"POST /api/apps/demo/schedules/7/activation/cancel": func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"id":31,"target_generation":4}`)
+		},
+	})
+	cmd := newScheduleCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"cancel", "demo", "job"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode output %q: %v", out.String(), err)
+	}
+	if result["status"] != "cancelled" || result["activation_id"] != float64(31) || result["target_generation"] != float64(4) {
+		t.Fatalf("output=%v, want cancelled activation 31 generation 4", result)
 	}
 }
 

@@ -51,7 +51,8 @@ func TestFleetScheduleStatus_StaleFlagAndAge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DeferScheduleActivation(claimed.ID, "deferred_capacity", "host memory", time.Now().Add(time.Minute)); err != nil {
+	deferredAt := time.Now()
+	if err := store.DeferScheduleActivation(claimed.ID, "deferred_capacity", "host memory", deferredAt.Add(time.Minute), deferredAt); err != nil {
 		t.Fatal(err)
 	}
 

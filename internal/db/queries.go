@@ -3353,25 +3353,30 @@ type Replica struct {
 	RestartCount   int    `json:"restart_count"`
 	DataGeneration int64  `json:"data_generation"`
 	ActivationID   *int64 `json:"activation_id,omitempty"`
+	// StartupPeakRSSBytes is the high-water RSS observed from runtime start
+	// through readiness for this slot's latest successfully persisted cold boot.
+	// It is retained across status-only updates and used for surge admission.
+	StartupPeakRSSBytes int64 `json:"startup_peak_rss_bytes"`
 }
 
 // UpsertReplicaParams holds the fields for inserting or updating a replica row.
 type UpsertReplicaParams struct {
-	AppID        int64
-	Index        int
-	PID          *int
-	Port         *int
-	Status       string
-	Provider     string
-	Tier         string
-	EndpointURL  string
-	WorkerID     string
-	AppVersion   string
-	DesiredState string
-	DeploymentID *int64
-	ExitCode     *int
-	Signal       string
-	Reason       string
+	AppID               int64
+	Index               int
+	PID                 *int
+	Port                *int
+	Status              string
+	Provider            string
+	Tier                string
+	EndpointURL         string
+	WorkerID            string
+	AppVersion          string
+	DesiredState        string
+	DeploymentID        *int64
+	ExitCode            *int
+	Signal              string
+	Reason              string
+	StartupPeakRSSBytes int64
 }
 
 // UpsertReplica inserts a new replica or updates an existing one identified by
@@ -3393,8 +3398,8 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 		INSERT INTO replicas (app_id, idx, pid, port, status, provider, tier,
 		                      endpoint_url, worker_id, app_version, desired_state,
 		                      deployment_id, updated_at, exit_code, exit_signal,
-		                      exit_reason, restart_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`, ?, ?, ?, ?)
+		                      exit_reason, restart_count, startup_peak_rss_bytes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`, ?, ?, ?, ?, ?)
 		ON CONFLICT(app_id, idx) DO UPDATE SET
 			pid           = excluded.pid,
 			port          = excluded.port,
@@ -3410,10 +3415,12 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 			exit_signal   = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_signal ELSE replicas.exit_signal END,
 			exit_reason   = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_reason ELSE replicas.exit_reason END,
 			restart_count = CASE WHEN excluded.status = 'crashed' THEN replicas.restart_count + 1 ELSE replicas.restart_count END,
+			startup_peak_rss_bytes = CASE WHEN excluded.startup_peak_rss_bytes > 0
+				THEN excluded.startup_peak_rss_bytes ELSE replicas.startup_peak_rss_bytes END,
 			updated_at    = excluded.updated_at`,
 		p.AppID, p.Index, p.PID, p.Port, p.Status, p.Provider, p.Tier,
 		p.EndpointURL, p.WorkerID, p.AppVersion, desired, p.DeploymentID,
-		p.ExitCode, p.Signal, p.Reason, restartCount,
+		p.ExitCode, p.Signal, p.Reason, restartCount, p.StartupPeakRSSBytes,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert replica: %w", err)
@@ -3450,7 +3457,7 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
 		       deployment_id, updated_at, exit_code, exit_signal, exit_reason,
-		       restart_count, data_generation, activation_id
+		       restart_count, data_generation, activation_id, startup_peak_rss_bytes
 		FROM replicas WHERE app_id = ? ORDER BY idx`, appID)
 	if err != nil {
 		return nil, err
@@ -3463,7 +3470,8 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.ExitCode, &r.Signal,
-			&r.Reason, &r.RestartCount, &r.DataGeneration, &r.ActivationID); err != nil {
+			&r.Reason, &r.RestartCount, &r.DataGeneration, &r.ActivationID,
+			&r.StartupPeakRSSBytes); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
@@ -3485,7 +3493,7 @@ func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
 		       deployment_id, updated_at, exit_code, exit_signal, exit_reason,
-		       restart_count, data_generation, activation_id
+		       restart_count, data_generation, activation_id, startup_peak_rss_bytes
 		FROM replicas WHERE app_id IN (`+ph+`) ORDER BY app_id, idx`, args...)
 	if err != nil {
 		return nil, err
@@ -3498,7 +3506,8 @@ func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.ExitCode, &r.Signal,
-			&r.Reason, &r.RestartCount, &r.DataGeneration, &r.ActivationID); err != nil {
+			&r.Reason, &r.RestartCount, &r.DataGeneration, &r.ActivationID,
+			&r.StartupPeakRSSBytes); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
@@ -4610,7 +4619,7 @@ func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
 	rows, err := s.db.Query(`
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
-		       deployment_id, updated_at, data_generation, activation_id
+		       deployment_id, updated_at, data_generation, activation_id, startup_peak_rss_bytes
 		FROM replicas WHERE worker_id = ? ORDER BY app_id, idx`, nodeID)
 	if err != nil {
 		return nil, err
@@ -4622,7 +4631,8 @@ func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
 		var updatedAt int64
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
-			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.DataGeneration, &r.ActivationID); err != nil {
+			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.DataGeneration, &r.ActivationID,
+			&r.StartupPeakRSSBytes); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)

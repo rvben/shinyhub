@@ -8,6 +8,7 @@ import {
   afterSuccessDetail,
   activationState,
   activationErrorDetail,
+  canCancelActivation,
   deletedScheduleActivations,
   formatAge,
   formatDuration,
@@ -116,6 +117,8 @@ test('schedule copy remains honest about post-success behavior', () => {
   assert.equal(afterSuccessLabel({ on_success: 'signal' }), 'Unsupported action');
   assert.match(afterSuccessDetail({ on_success: 'roll', min_roll_interval_seconds: 3600 }), /at most once every 1h/);
   assert.match(afterSuccessDetail({ on_success: 'roll' }), /temporary surge replica/);
+  assert.match(afterSuccessDetail({ on_success: 'roll', roll_fallback: 'restart' }), /restarts the app in place/);
+  assert.match(afterSuccessDetail({ on_success: 'roll', max_defer_age_seconds: 21600 }), /fails after 6h/);
 });
 
 test('activation state remains distinct from scheduled job state', () => {
@@ -129,7 +132,20 @@ test('activation state remains distinct from scheduled job state', () => {
   assert.equal(activationState({ on_success: 'roll', latest_activation: {status: 'deferred_capacity'} }).attention, true);
   assert.equal(activationState({ on_success: 'roll', latest_activation: {status: 'running', phase: 'draining_slot'} }).label, 'Rolling · draining replica');
   assert.equal(activationState({ on_success: 'roll', latest_activation: {status: 'succeeded'} }).label, 'Activated');
+  assert.deepEqual(activationState({ on_success: 'roll', latest_activation: {status: 'cancelled'} }), {
+    key: 'cancelled', label: 'Activation cancelled', tone: 'warning', active: false, attention: true,
+  });
   assert.equal(activationState({ on_success: 'roll', latest_activation: {status: 'failed'} }).attention, true);
+});
+
+test('canCancelActivation permits only queued, nondestructive lifecycle states', () => {
+  for (const status of ['pending', 'deferred_interval', 'deferred_capacity']) {
+    assert.equal(canCancelActivation({latest_activation: {status}}), true, status);
+  }
+  for (const status of ['running', 'repairing', 'succeeded', 'failed', 'cancelled']) {
+    assert.equal(canCancelActivation({latest_activation: {status}}), false, status);
+  }
+  assert.equal(canCancelActivation({}), false);
 });
 
 test('historical activation errors remain available for safe visible rendering', () => {

@@ -256,6 +256,7 @@ func (s *Server) Config() *config.Config { return s.cfg }
 // regardless of which control-plane action triggered the pool launch.
 func (s *Server) withTierPlacement(p deploy.Params, app *db.App) deploy.Params {
 	p.AppID = app.ID
+	p.StartupSampler = s.sampler
 	p.Placement = app.PlacementMap()
 	p.TierOrder = s.cfg.Runtime.TierOrder()
 	p.DefaultTier = s.cfg.Runtime.DefaultTierName()
@@ -869,6 +870,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/apps/{slug}/schedules", s.handleCreateSchedule)
 		r.Patch("/api/apps/{slug}/schedules/{id}", s.handlePatchSchedule)
 		r.Delete("/api/apps/{slug}/schedules/{id}", s.handleDeleteSchedule)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/activation/cancel", s.handleCancelScheduleActivation)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/run", s.handleRunSchedule)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs", s.handleListScheduleRuns)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs/{run_id}", s.handleGetScheduleRun)

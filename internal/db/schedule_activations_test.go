@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -148,7 +149,7 @@ func TestFinishScheduleActivation_RebasesQueuedWorkAfterRunningActivation(t *tes
 	}
 
 	finished := start.Add(10 * time.Minute)
-	if err := store.FinishScheduleActivation(first.ID, "succeeded", "", finished); err != nil {
+	if err := store.FinishScheduleActivation(first.ID, "succeeded", "", finished, true); err != nil {
 		t.Fatal(err)
 	}
 	audit, err := store.ListAuditEvents("schedule_activation_outcome", 10, 0)
@@ -195,7 +196,7 @@ func TestCompleteScheduleRunAndEnqueueActivation_IncreasedDamperCannotBeBypassed
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FinishScheduleActivation(anchor.ID, "succeeded", "", start); err != nil {
+	if err := store.FinishScheduleActivation(anchor.ID, "succeeded", "", start, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -256,7 +257,7 @@ func TestRepairingActivationCannotBeSupersededAndIsClaimedFirst(t *testing.T) {
 	if err := store.UpdateScheduleActivationProgress(first.ID, "starting_slot", 1, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DeferScheduleActivation(first.ID, "repairing", "replacement stop unconfirmed", now); err != nil {
+	if err := store.DeferScheduleActivation(first.ID, "repairing", "replacement stop unconfirmed", now, now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -341,7 +342,8 @@ func TestCapacityDeferral_DoesNotConsumeRollAttemptBudget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.DeferScheduleActivation(a.ID, "deferred_capacity", "host pressure", now.Add(time.Duration(i+1)*time.Minute)); err != nil {
+		deferredAt := now.Add(time.Duration(i) * time.Minute)
+		if err := store.DeferScheduleActivation(a.ID, "deferred_capacity", "host pressure", now.Add(time.Duration(i+1)*time.Minute), deferredAt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -351,6 +353,92 @@ func TestCapacityDeferral_DoesNotConsumeRollAttemptBudget(t *testing.T) {
 	}
 	if a.Attempts != 0 {
 		t.Fatalf("attempts=%d after capacity-only deferrals, want 0", a.Attempts)
+	}
+	if a.CapacityDeferrals != 5 {
+		t.Fatalf("capacity_deferrals=%d, want 5", a.CapacityDeferrals)
+	}
+	if a.CapacityDeferredAt == nil || !a.CapacityDeferredAt.Equal(now) {
+		t.Fatalf("capacity_deferred_at=%v, want first deferral at %s", a.CapacityDeferredAt, now)
+	}
+}
+
+func TestActivationPolicyIsSnapshottedFromRun(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "activation-policy-snapshot")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "refresh", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
+		RollFallback: "restart", MaxDeferAgeSeconds: 21600,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: now,
+		OnSuccess: "roll", RollFallback: "restart", MaxDeferAgeSeconds: 21600,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: intPtr(0), FinishedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.RollFallback != "restart" || a.MaxDeferAgeSeconds != 21600 {
+		t.Fatalf("activation policy=%q/%d, want restart/21600", a.RollFallback, a.MaxDeferAgeSeconds)
+	}
+	run, err := store.GetScheduleRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.RollFallback != "restart" || run.MaxDeferAgeSeconds != 21600 {
+		t.Fatalf("run policy=%q/%d, want restart/21600", run.RollFallback, run.MaxDeferAgeSeconds)
+	}
+}
+
+func TestCancelQueuedScheduleActivation(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "activation-cancel")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "refresh", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	runID := insertActivationRun(t, store, scheduleID, now, "roll", 0)
+	created, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: intPtr(0), FinishedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := store.CancelQueuedScheduleActivation(scheduleID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.ID != created.ID || cancelled.Status != "cancelled" || cancelled.LastError != "" ||
+		cancelled.FinishedAt == nil || cancelled.Attempts != 0 {
+		t.Fatalf("cancelled activation=%+v", cancelled)
+	}
+	if _, err := store.CancelQueuedScheduleActivation(scheduleID, now.Add(2*time.Minute)); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("second cancel error=%v, want not found", err)
+	}
+	secondRun := insertActivationRun(t, store, scheduleID, now.Add(3*time.Minute), "roll", 0)
+	if _, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: secondRun, Status: "succeeded", ExitCode: intPtr(0), FinishedAt: now.Add(3 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimNextScheduleActivation(now.Add(3 * time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CancelQueuedScheduleActivation(scheduleID, now.Add(4*time.Minute)); !errors.Is(err, db.ErrScheduleActivationBusy) {
+		t.Fatalf("cancel running activation error=%v, want busy", err)
 	}
 }
 
@@ -418,7 +506,7 @@ func TestRollAttemptIsChargedOnlyWithDurableOutcome(t *testing.T) {
 	if a.Attempts != 0 {
 		t.Fatalf("claim charged attempts=%d, want 0 until an outcome commits", a.Attempts)
 	}
-	if err := store.DeferScheduleActivation(a.ID, "pending", "retry", now.Add(time.Minute)); err != nil {
+	if err := store.DeferScheduleActivation(a.ID, "pending", "retry", now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
 	a, err = store.GetScheduleActivation(created.ID)
@@ -461,7 +549,7 @@ func TestDeleteScheduleIfIdle_AtomicallyPreservesRunAndNonterminalActivation(t *
 			t.Fatalf("delete with %s activation = %v, %v; want false, nil", status, deleted, err)
 		}
 	}
-	if err := store.FinishScheduleActivation(created.ID, "not_needed", "", now.Add(time.Second)); err != nil {
+	if err := store.FinishScheduleActivation(created.ID, "not_needed", "", now.Add(time.Second), true); err != nil {
 		t.Fatal(err)
 	}
 	deleted, err = store.DeleteScheduleIfIdle(scheduleID)

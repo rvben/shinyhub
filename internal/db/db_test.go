@@ -823,8 +823,10 @@ func TestReplicas_UpsertListDelete(t *testing.T) {
 	app := mustCreateApp(t, store, "demo", user.ID)
 
 	pid, port := 111, 20001
+	const startupPeak = int64(384 * 1024 * 1024)
 	if err := store.UpsertReplica(db.UpsertReplicaParams{
 		AppID: app.ID, Index: 0, PID: &pid, Port: &port, Status: "running",
+		StartupPeakRSSBytes: startupPeak,
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
@@ -855,6 +857,9 @@ func TestReplicas_UpsertListDelete(t *testing.T) {
 	reps, _ = store.ListReplicas(app.ID)
 	if reps[0].Status != "stopped" {
 		t.Fatalf("want stopped, got %s", reps[0].Status)
+	}
+	if reps[0].StartupPeakRSSBytes != startupPeak {
+		t.Fatalf("status-only upsert erased startup peak: got %d, want %d", reps[0].StartupPeakRSSBytes, startupPeak)
 	}
 
 	// Delete one.

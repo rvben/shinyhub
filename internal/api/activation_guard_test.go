@@ -14,7 +14,8 @@ func TestRepairingScheduleActivationExcludesScaleAndWarmMutations(t *testing.T) 
 	cfg.Runtime.Mode = "native"
 	srv, app := newScaleTestServer(t, "activation-lifecycle-fence", 2, cfg)
 	a := seedClaimedActivation(t, srv.store, app)
-	if err := srv.store.DeferScheduleActivation(a.ID, "repairing", "surge retained", time.Now().UTC()); err != nil {
+	now := time.Now().UTC()
+	if err := srv.store.DeferScheduleActivation(a.ID, "repairing", "surge retained", now, now); err != nil {
 		t.Fatal(err)
 	}
 

@@ -40,7 +40,7 @@ func activationServingState(status string) (string, bool) {
 		return "pending", false
 	case "deferred_capacity", "repairing":
 		return "pending", true
-	case "failed", "blocked_unsupported":
+	case "failed", "cancelled", "blocked_unsupported":
 		return "stale", true
 	case "target_deleted":
 		return "unavailable", true

@@ -373,6 +373,10 @@ mirrors the CLI fields.
 | `missed` | no | `skip` (default) or `run_once`. |
 | `disabled` | no | When `true`, the schedule row exists but the runner skips ticks. |
 | `run_on_register` | no | When `true`, fire this schedule once on first registration if the app has never had a *successful* run of it, warming the cache on a fresh deploy. Re-deploys of an already-warmed schedule do not re-fire. See [First-fire on register](#first-fire-on-register-run_on_register). |
+| `on_success` | no | `none` (default) or `roll`. A roll replaces serving replicas after a successful job so process-global data is re-imported. |
+| `min_roll_interval` | no | Minimum duration between completed successful rolls, such as `1h`. |
+| `roll_fallback` | no | `defer` (default) retries when a surge cannot fit; `restart` accepts downtime and replaces the pool stop-first. Requires `on_success = "roll"`. |
+| `max_defer_age` | no | Capacity-deferral deadline such as `6h`; `0` means unlimited. Requires `on_success = "roll"`. |
 
 Exactly one of `cmd` or `cmd_json` is required. Both empty or both set is
 a parse error.
@@ -384,6 +388,9 @@ cron = "*/15 * * * *"
 cmd_json = '["python", "-m", "myapp.refresh", "--quiet"]'
 timeout_seconds = 120
 overlap = "skip"
+on_success = "roll"
+roll_fallback = "restart"
+max_defer_age = "6h"
 ```
 
 ### Upsert semantics

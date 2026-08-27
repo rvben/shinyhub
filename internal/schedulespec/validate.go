@@ -69,20 +69,44 @@ func Validate(name, cronExpr, timezone string, cmd []string, timeoutSec int, ove
 // signal and cross-app activation need separate runtime and authorization
 // contracts and must fail closed instead of being silently ignored.
 func ValidateActivation(action string, minRollInterval time.Duration) (string, error) {
+	action, _, err := ValidateActivationPolicy(action, minRollInterval, "", 0)
+	return action, err
+}
+
+// ValidateActivationPolicy normalizes and validates the complete serving-data
+// activation policy. Deferred activations remain unbounded by default, and a
+// stop-first restart must be explicitly selected as the roll fallback.
+func ValidateActivationPolicy(action string, minRollInterval time.Duration, rollFallback string, maxDeferAge time.Duration) (string, string, error) {
 	action = strings.TrimSpace(action)
 	if action == "" {
 		action = "none"
 	}
 	if action != "none" && action != "roll" {
-		return "", errors.New("on_success: must be none|roll")
+		return "", "", errors.New("on_success: must be none|roll")
 	}
 	if minRollInterval < 0 {
-		return "", errors.New("min_roll_interval: must not be negative")
+		return "", "", errors.New("min_roll_interval: must not be negative")
 	}
 	if action != "roll" && minRollInterval != 0 {
-		return "", errors.New("min_roll_interval: requires on_success=roll")
+		return "", "", errors.New("min_roll_interval: requires on_success=roll")
 	}
-	return action, nil
+	rollFallback = strings.TrimSpace(rollFallback)
+	if rollFallback == "" {
+		rollFallback = "defer"
+	}
+	if rollFallback != "defer" && rollFallback != "restart" {
+		return "", "", errors.New("roll_fallback: must be defer|restart")
+	}
+	if action != "roll" && rollFallback != "defer" {
+		return "", "", errors.New("roll_fallback: requires on_success=roll")
+	}
+	if maxDeferAge < 0 {
+		return "", "", errors.New("max_defer_age: must not be negative")
+	}
+	if action != "roll" && maxDeferAge != 0 {
+		return "", "", errors.New("max_defer_age: requires on_success=roll")
+	}
+	return action, rollFallback, nil
 }
 
 // MaxRollIntervalSeconds is the largest whole-second interval that can be
@@ -94,11 +118,25 @@ const MaxRollIntervalSeconds = int64(time.Duration(1<<63-1) / time.Second)
 // ValidateActivationSeconds safely validates the integer-seconds form used by
 // the HTTP API before converting it to time.Duration.
 func ValidateActivationSeconds(action string, minRollIntervalSeconds int64) (string, error) {
+	action, _, err := ValidateActivationPolicySeconds(action, minRollIntervalSeconds, "", 0)
+	return action, err
+}
+
+// ValidateActivationPolicySeconds validates the integer-seconds API form
+// before converting to time.Duration, preventing positive overflow.
+func ValidateActivationPolicySeconds(action string, minRollIntervalSeconds int64, rollFallback string, maxDeferAgeSeconds int64) (string, string, error) {
 	if minRollIntervalSeconds < 0 {
-		return "", errors.New("min_roll_interval: must not be negative")
+		return "", "", errors.New("min_roll_interval: must not be negative")
 	}
 	if minRollIntervalSeconds > MaxRollIntervalSeconds {
-		return "", fmt.Errorf("min_roll_interval: must be at most %d seconds", MaxRollIntervalSeconds)
+		return "", "", fmt.Errorf("min_roll_interval: must be at most %d seconds", MaxRollIntervalSeconds)
 	}
-	return ValidateActivation(action, time.Duration(minRollIntervalSeconds)*time.Second)
+	if maxDeferAgeSeconds < 0 {
+		return "", "", errors.New("max_defer_age: must not be negative")
+	}
+	if maxDeferAgeSeconds > MaxRollIntervalSeconds {
+		return "", "", fmt.Errorf("max_defer_age: must be at most %d seconds", MaxRollIntervalSeconds)
+	}
+	return ValidateActivationPolicy(action, time.Duration(minRollIntervalSeconds)*time.Second,
+		rollFallback, time.Duration(maxDeferAgeSeconds)*time.Second)
 }

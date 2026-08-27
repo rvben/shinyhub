@@ -232,6 +232,12 @@ type ScheduleSpec struct {
 	// MinRollInterval dampens high-cadence successful runs. It is meaningful
 	// only when OnSuccess is "roll" and is stored as seconds by the API layer.
 	MinRollInterval time.Duration `toml:"min_roll_interval"`
+	// RollFallback controls what happens when a zero-downtime surge cannot be
+	// admitted. "defer" is the safe default; "restart" accepts a stop-first
+	// replacement and its availability gap.
+	RollFallback string `toml:"roll_fallback"`
+	// MaxDeferAge bounds capacity deferral. Zero preserves unlimited retries.
+	MaxDeferAge time.Duration `toml:"max_defer_age"`
 
 	// RunOnRegister, when true, fires this schedule once immediately the first
 	// time it is registered on an app that has never had a successful run of it
@@ -532,7 +538,8 @@ func resolveAndValidateSchedule(s *ScheduleSpec) error {
 	if err := schedulespec.Validate(s.Name, s.Cron, s.Timezone, s.Command, timeout, overlap, missed); err != nil {
 		return err
 	}
-	onSuccess, err := schedulespec.ValidateActivation(s.OnSuccess, s.MinRollInterval)
+	onSuccess, rollFallback, err := schedulespec.ValidateActivationPolicy(
+		s.OnSuccess, s.MinRollInterval, s.RollFallback, s.MaxDeferAge)
 	if err != nil {
 		return err
 	}
@@ -547,6 +554,7 @@ func resolveAndValidateSchedule(s *ScheduleSpec) error {
 		s.Missed = missed
 	}
 	s.OnSuccess = onSuccess
+	s.RollFallback = rollFallback
 	return nil
 }
 

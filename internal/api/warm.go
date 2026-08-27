@@ -242,18 +242,19 @@ func (s *Server) bootWarmVictims(
 		pid, port := r.PID, r.Port
 		depID := current.ID
 		if upsertErr := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:        app.ID,
-			Index:        idx,
-			PID:          &pid,
-			Port:         &port,
-			Status:       "running",
-			Provider:     r.Provider,
-			Tier:         r.Tier,
-			EndpointURL:  r.EndpointURL,
-			WorkerID:     r.WorkerID,
-			AppVersion:   current.Version,
-			DesiredState: "running",
-			DeploymentID: &depID,
+			AppID:               app.ID,
+			Index:               idx,
+			PID:                 &pid,
+			Port:                &port,
+			Status:              "running",
+			Provider:            r.Provider,
+			Tier:                r.Tier,
+			EndpointURL:         r.EndpointURL,
+			WorkerID:            r.WorkerID,
+			AppVersion:          current.Version,
+			DesiredState:        "running",
+			DeploymentID:        &depID,
+			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
 		}); upsertErr != nil {
 			// The process is running but the row is stale - log and continue so
 			// the watchdog can observe and reconcile.

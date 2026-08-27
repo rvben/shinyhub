@@ -1199,18 +1199,19 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int) {
 	pid, port := res.PID, res.Port
 	depID := deployments[0].ID
 	if err := w.store.UpsertReplica(db.UpsertReplicaParams{
-		AppID:        app.ID,
-		Index:        index,
-		PID:          &pid,
-		Port:         &port,
-		Status:       db.ReplicaStatusRunning,
-		Provider:     res.Provider,
-		Tier:         res.Tier,
-		EndpointURL:  res.EndpointURL,
-		WorkerID:     res.WorkerID,
-		AppVersion:   deployments[0].Version,
-		DesiredState: "running",
-		DeploymentID: &depID,
+		AppID:               app.ID,
+		Index:               index,
+		PID:                 &pid,
+		Port:                &port,
+		Status:              db.ReplicaStatusRunning,
+		Provider:            res.Provider,
+		Tier:                res.Tier,
+		EndpointURL:         res.EndpointURL,
+		WorkerID:            res.WorkerID,
+		AppVersion:          deployments[0].Version,
+		DesiredState:        "running",
+		DeploymentID:        &depID,
+		StartupPeakRSSBytes: res.StartupPeakRSSBytes,
 	}); err != nil {
 		slog.Warn("watcher: persist restarted replica failed", "slug", app.Slug, "index", index, "err", err)
 	}
@@ -1907,18 +1908,19 @@ func (w *Watcher) driveWakingApp(slug string) {
 					}
 					pid, port := res.PID, res.Port
 					if err := w.store.UpsertReplica(db.UpsertReplicaParams{
-						AppID:        app.ID,
-						Index:        idx,
-						PID:          &pid,
-						Port:         &port,
-						Status:       "running",
-						Provider:     res.Provider,
-						Tier:         res.Tier,
-						EndpointURL:  res.EndpointURL,
-						WorkerID:     res.WorkerID,
-						AppVersion:   deployments[0].Version,
-						DesiredState: "running",
-						DeploymentID: &deploymentID,
+						AppID:               app.ID,
+						Index:               idx,
+						PID:                 &pid,
+						Port:                &port,
+						Status:              "running",
+						Provider:            res.Provider,
+						Tier:                res.Tier,
+						EndpointURL:         res.EndpointURL,
+						WorkerID:            res.WorkerID,
+						AppVersion:          deployments[0].Version,
+						DesiredState:        "running",
+						DeploymentID:        &deploymentID,
+						StartupPeakRSSBytes: res.StartupPeakRSSBytes,
 					}); err != nil {
 						slog.Warn("watcher: persist woken replica failed", "slug", slug, "index", idx, "err", err)
 					}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -293,6 +294,93 @@ func TestScheduleActivationRoll_SurgesThenReplacesEveryCanonicalSlot(t *testing.
 		if row.Index < 2 && (row.DataGeneration != a.TargetGeneration || row.ActivationID == nil || *row.ActivationID != a.ID) {
 			t.Errorf("slot %d attribution = generation %d activation %v", row.Index, row.DataGeneration, row.ActivationID)
 		}
+	}
+}
+
+func TestScheduleActivationRoll_RestartFallbackWhenSurgeCannotFit(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.Mode = "native"
+	// Make surge admission deterministically impossible on any realistic test
+	// host. The stop-first deployment hook below intentionally ignores the
+	// synthetic resource request; this test exercises fallback orchestration.
+	cfg.Runtime.Docker.DefaultMemoryMB = 1 << 30
+	srv, app := newScaleTestServer(t, "restart-fallback", 1, cfg)
+	info, err := srv.manager.Start(process.StartParams{
+		Slug: app.Slug, Index: 0, Dir: t.TempDir(), Command: []string{"sleep", "30"}, Port: 20250,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.proxy.SetPoolSize(app.Slug, 1)
+	if err := srv.proxy.RegisterReplica(app.Slug, 0, info.EndpointURL, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	oldPID := info.PID
+	deployCalls := 0
+	srv.deployRun = func(p deploy.Params) (*deploy.PoolResult, error) {
+		deployCalls++
+		if deployCalls == 1 {
+			return nil, errors.New("control plane interrupted after stopping the old pool")
+		}
+		started, err := p.Manager.Start(process.StartParams{
+			Slug: p.Slug, AppID: app.ID, Index: 0, Dir: t.TempDir(), Command: []string{"sleep", "30"}, Port: 20251,
+			AppVersion: p.AppVersion, DeploymentID: p.DeploymentID,
+			GuardUntilAcknowledged: p.GuardUntilAcknowledged,
+		})
+		if err != nil {
+			return nil, err
+		}
+		result := deploy.Result{Index: 0, PID: started.PID, Port: started.Port, EndpointURL: started.EndpointURL,
+			Tier: started.Tier, Provider: started.Provider, WorkerID: started.WorkerID}
+		if p.ReplicaStarted != nil {
+			if err := p.ReplicaStarted(result); err != nil {
+				return nil, err
+			}
+		}
+		if err := p.Manager.AcknowledgeReplicaStart(p.Slug, 0); err != nil {
+			return nil, err
+		}
+		p.Proxy.SetPoolSize(p.Slug, 1)
+		if err := p.Proxy.RegisterReplica(p.Slug, 0, started.EndpointURL, nil, 0); err != nil {
+			return nil, err
+		}
+		return &deploy.PoolResult{Replicas: []deploy.Result{result}}, nil
+	}
+
+	a := seedClaimedActivation(t, srv.store, app)
+	a.RollFallback = "restart"
+	var repair *activation.RepairRequiredError
+	if err := srv.Roll(context.Background(), a); !errors.As(err, &repair) {
+		t.Fatalf("first Roll error=%v, want repair-required after stop-first failure", err)
+	}
+	if _, ok := srv.manager.GetReplica(app.Slug, 0); ok {
+		t.Fatal("old process remained after the restart fallback crossed its stop boundary")
+	}
+	// Recovery must tolerate an already-empty pool and finish bringing the
+	// target generation online instead of looping forever on "not running".
+	if err := srv.Roll(context.Background(), a); err != nil {
+		t.Fatalf("Roll: %v", err)
+	}
+	if deployCalls != 2 {
+		t.Fatalf("deploy calls=%d, want failed start plus recovery start", deployCalls)
+	}
+	after, ok := srv.manager.GetReplica(app.Slug, 0)
+	if !ok || after.PID == oldPID || after.Status != process.StatusRunning {
+		t.Fatalf("replacement replica=%+v ok=%v, want a new running process", after, ok)
+	}
+	if _, ok := srv.manager.GetReplica(app.Slug, 1); ok {
+		t.Fatal("restart fallback unexpectedly launched a surge replica")
+	}
+	rows, err := srv.store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 || rows[0].DataGeneration != a.TargetGeneration || rows[0].ActivationID == nil || *rows[0].ActivationID != a.ID {
+		t.Fatalf("restarted replica attribution=%+v", rows)
+	}
+	audit, err := srv.store.ListAuditEvents("schedule_activation_restart", 10, 0)
+	if err != nil || len(audit) != 1 {
+		t.Fatalf("restart audit=%+v err=%v", audit, err)
 	}
 }
 
@@ -935,6 +1023,49 @@ func TestActivationSurgeMemoryFallsBackToAnotherLiveCanonicalReplica(t *testing.
 	}
 }
 
+func TestActivationSurgeMemoryPrefersPersistedStartupPeakOverSteadyRSS(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.Mode = "native"
+	srv, app := newScaleTestServer(t, "capacity-startup-peak", 1, cfg)
+	if _, err := srv.manager.Start(process.StartParams{
+		Slug: app.Slug, Index: 0, Dir: t.TempDir(), Command: []string{"sleep", "30"}, Port: 20902,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.manager.Stop(app.Slug) })
+	const peak = int64(300 * 1024 * 1024)
+	if err := srv.store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: db.ReplicaStatusRunning, StartupPeakRSSBytes: peak,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetSampler(activationTestSampler{stats: process.Stats{RSSBytes: 100 * 1024 * 1024}})
+
+	estimate := srv.activationSurgeMemoryEstimate(app, 0)
+	if got, want := estimate.MemoryMB, 439; got != want {
+		t.Fatalf("surge memory estimate=%d MiB, want %d MiB from persisted startup peak", got, want)
+	}
+	if !strings.Contains(estimate.Provenance, "persisted healthy-start RSS peak of 300 MiB") {
+		t.Fatalf("surge memory provenance=%q, want persisted startup peak", estimate.Provenance)
+	}
+}
+
+func TestFormatRollFeasibilityAdvisory(t *testing.T) {
+	if got := formatRollFeasibilityAdvisory(3700, 5000, 256, "defer"); got != "" {
+		t.Fatalf("feasible roll advisory = %q, want empty", got)
+	}
+	deferWarning := formatRollFeasibilityAdvisory(3700, 2300, 256, "defer")
+	if !strings.Contains(deferWarning, "2300 MiB available; need 3956 MiB") ||
+		!strings.Contains(deferWarning, "set roll_fallback=restart") {
+		t.Fatalf("defer advisory is not actionable: %q", deferWarning)
+	}
+	restartWarning := formatRollFeasibilityAdvisory(3700, 2300, 256, "restart")
+	if !strings.Contains(restartWarning, "configured restart fallback") ||
+		!strings.Contains(restartWarning, "single-replica app will be unavailable") {
+		t.Fatalf("restart advisory does not disclose availability cost: %q", restartWarning)
+	}
+}
+
 func TestScheduleActivationRoll_ReleasesHostLaunchReservationBeforeHealthCompletes(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Runtime.Mode = "native"
@@ -1093,7 +1224,7 @@ func TestScheduleActivationRoll_DockerContractRecoversSurgeSweepsOrphansAndCompl
 	if err := recoveredServer.Roll(context.Background(), retry); err != nil {
 		t.Fatalf("recovered Docker roll: %v", err)
 	}
-	if err := srv.store.FinishScheduleActivation(a.ID, "succeeded", "", time.Now().UTC()); err != nil {
+	if err := srv.store.FinishScheduleActivation(a.ID, "succeeded", "", time.Now().UTC(), true); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := recoveredManager.GetReplica(app.Slug, app.Replicas); ok {

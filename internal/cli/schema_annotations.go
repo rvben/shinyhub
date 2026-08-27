@@ -678,6 +678,13 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "slug", Type: "string"},
 		{Name: "name", Type: "string"},
 	}},
+	"schedule cancel": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "cancelled"},
+		{Name: "slug", Type: "string"},
+		{Name: "name", Type: "string"},
+		{Name: "activation_id", Type: "integer"},
+		{Name: "target_generation", Type: "integer"},
+	}},
 	"schedule run": {
 		Mutating:            mut,
 		ExitCodePassthrough: true,

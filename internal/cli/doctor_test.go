@@ -133,6 +133,9 @@ func TestDoctorRemoteVerifiesExistingAppManagement(t *testing.T) {
 	mux.HandleFunc("/api/apps/existing", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"app":{"slug":"existing"},"can_manage":true}`)
 	})
+	mux.HandleFunc("/api/apps/existing/schedules", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"nightly","roll_feasibility_advisory":"Surge roll is currently infeasible; activation will defer."}]}`)
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	if err := saveConfig(&cliConfig{Host: srv.URL, Token: "shk_doctor"}); err != nil {
@@ -150,6 +153,10 @@ func TestDoctorRemoteVerifiesExistingAppManagement(t *testing.T) {
 	permission := doctorCheckNamed(t, report, "deploy-permission")
 	if permission.Status != "pass" || !strings.Contains(permission.Detail, "updates") {
 		t.Errorf("permission = %+v", permission)
+	}
+	roll := doctorCheckNamed(t, report, "roll-feasibility")
+	if roll.Status != "warn" || !strings.Contains(roll.Detail, "nightly") || !strings.Contains(roll.Detail, "infeasible") {
+		t.Errorf("roll feasibility = %+v", roll)
 	}
 }
 

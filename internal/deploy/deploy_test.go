@@ -527,6 +527,40 @@ func TestRunReplica_SingleBoot(t *testing.T) {
 	}
 }
 
+type startupPeakSampler struct {
+	rss atomic.Int64
+}
+
+func (s *startupPeakSampler) Sample(process.RunHandle) (process.Stats, error) {
+	return process.Stats{RSSBytes: s.rss.Load()}, nil
+}
+
+func TestRunReplica_ReportsRSSPeakThroughHealthyBoundary(t *testing.T) {
+	bundle := t.TempDir()
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	defer mgr.Stop("startup-peak")
+	prx := proxy.New()
+	prx.SetPoolSize("startup-peak", 1)
+	sampler := &startupPeakSampler{}
+	sampler.rss.Store(128 * 1024 * 1024)
+
+	r, err := deploy.RunReplica(deploy.Params{
+		Slug: "startup-peak", BundleDir: bundle, Replicas: 1,
+		Manager: mgr, Proxy: prx, StartupSampler: sampler,
+		Command: []string{"sleep", "30"},
+		HealthCheck: func(string, time.Duration, http.RoundTripper) error {
+			sampler.rss.Store(384 * 1024 * 1024)
+			return nil
+		},
+	}, 0)
+	if err != nil {
+		t.Fatalf("run replica: %v", err)
+	}
+	if got, want := r.StartupPeakRSSBytes, int64(384*1024*1024); got != want {
+		t.Fatalf("startup peak = %d, want %d", got, want)
+	}
+}
+
 type wedgedReplacementRuntime struct {
 	wait chan struct{}
 }

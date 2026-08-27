@@ -92,7 +92,8 @@ func TestFleetHealth_ReportsActivationRepairAttention(t *testing.T) {
 	if err := store.UpdateScheduleActivationProgress(claimed.ID, "draining_slot", 1, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DeferScheduleActivation(claimed.ID, "repairing", "canonical stop unconfirmed", time.Now()); err != nil {
+	now = time.Now()
+	if err := store.DeferScheduleActivation(claimed.ID, "repairing", "canonical stop unconfirmed", now, now); err != nil {
 		t.Fatal(err)
 	}
 

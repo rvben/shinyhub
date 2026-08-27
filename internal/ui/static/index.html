@@ -1354,6 +1354,15 @@
                 <label for="sched-min-roll-interval">Minimum roll interval <span>seconds · optional</span></label>
                 <input id="sched-min-roll-interval" name="min_roll_interval_seconds" type="number" min="0" step="60" value="0" inputmode="numeric" aria-describedby="sched-min-roll-help">
                 <p id="sched-min-roll-help">Coalesces high-cadence successes. For example, 3600 rolls at most once per hour.</p>
+                <label for="sched-roll-fallback">When a surge does not fit</label>
+                <select id="sched-roll-fallback" name="roll_fallback" aria-describedby="sched-roll-fallback-help">
+                  <option value="defer">Wait for capacity</option>
+                  <option value="restart">Restart in place</option>
+                </select>
+                <p id="sched-roll-fallback-help">Restarting in place makes fresh data visible without surge memory, but the app is unavailable while it starts.</p>
+                <label for="sched-max-defer-age">Maximum defer age <span>seconds · optional</span></label>
+                <input id="sched-max-defer-age" name="max_defer_age_seconds" type="number" min="0" step="60" value="0" inputmode="numeric" aria-describedby="sched-max-defer-help">
+                <p id="sched-max-defer-help">Zero retries indefinitely. A non-zero age fails the activation loudly after capacity remains unavailable.</p>
               </div>
             </section>
             <p id="schedule-form-error" class="error" role="alert" aria-live="assertive" hidden></p>

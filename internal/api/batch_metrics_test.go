@@ -109,7 +109,11 @@ func TestBatchMetrics_SurfacesLostReplicaAndAutoscale(t *testing.T) {
 	owner, _ := store.GetUserByUsername("owner")
 	store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID})
 	app, _ := store.GetAppBySlug("demo")
-	store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: 0, Status: db.ReplicaStatusLost, Tier: "remote"})
+	const startupPeak = int64(384 * 1024 * 1024)
+	store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: db.ReplicaStatusLost, Tier: "remote",
+		StartupPeakRSSBytes: startupPeak,
+	})
 	store.LogAuditEvent(db.AuditEventParams{UserID: &owner.ID, Action: "autoscale_scale_up", ResourceType: "app", ResourceID: "demo", Detail: "1->2"})
 
 	token, _ := auth.IssueJWT(owner.ID, "owner", "developer", "test-secret")
@@ -122,9 +126,10 @@ func TestBatchMetrics_SurfacesLostReplicaAndAutoscale(t *testing.T) {
 	var body struct {
 		Metrics map[string]struct {
 			Replicas []struct {
-				Index  int    `json:"index"`
-				Status string `json:"status"`
-				Reason string `json:"reason"`
+				Index               int    `json:"index"`
+				Status              string `json:"status"`
+				Reason              string `json:"reason"`
+				StartupPeakRSSBytes int64  `json:"startup_peak_rss_bytes"`
 			} `json:"replicas"`
 			AutoscaleStatus *struct {
 				LastAction string `json:"last_action"`
@@ -144,6 +149,9 @@ func TestBatchMetrics_SurfacesLostReplicaAndAutoscale(t *testing.T) {
 			foundLost = true
 			if r.Status != "lost" || r.Reason != "worker unavailable" {
 				t.Errorf("batched replica: status=%q reason=%q, want lost/worker unavailable", r.Status, r.Reason)
+			}
+			if r.StartupPeakRSSBytes != startupPeak {
+				t.Errorf("batched replica startup peak=%d, want %d", r.StartupPeakRSSBytes, startupPeak)
 			}
 		}
 	}

@@ -114,7 +114,7 @@ func TestPruneScheduleActivations_PreservesWorkDamperAnchorAndAttribution(t *tes
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.FinishScheduleActivation(claimed.ID, status, "", at.Add(time.Second)); err != nil {
+		if err := store.FinishScheduleActivation(claimed.ID, status, "", at.Add(time.Second), true); err != nil {
 			t.Fatal(err)
 		}
 	}

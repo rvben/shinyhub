@@ -47,8 +47,8 @@ func (e *CapacityError) Error() string {
 
 type Store interface {
 	ClaimNextScheduleActivation(now time.Time) (*db.ScheduleActivation, error)
-	FinishScheduleActivation(id int64, status, lastError string, finishedAt time.Time) error
-	DeferScheduleActivation(id int64, status, reason string, dueAt time.Time) error
+	FinishScheduleActivation(id int64, status, lastError string, finishedAt time.Time, countAttempt bool) error
+	DeferScheduleActivation(id int64, status, reason string, dueAt, deferredAt time.Time) error
 }
 
 type Runner interface {
@@ -119,6 +119,7 @@ func (c *Coordinator) ProcessNext(ctx context.Context) (bool, error) {
 	finishedAt := c.now()
 	status := "succeeded"
 	lastError := ""
+	countAttempt := true
 	switch {
 	case runErr == nil:
 	case errors.Is(runErr, ErrNotNeeded):
@@ -138,11 +139,29 @@ func (c *Coordinator) ProcessNext(ctx context.Context) (bool, error) {
 	case runErr != nil:
 		var capacity *CapacityError
 		if errors.As(runErr, &capacity) {
-			retry := capacity.RetryAfter
-			if retry <= 0 {
-				retry = time.Minute
+			capacityDeferredAt := finishedAt
+			if a.CapacityDeferredAt != nil {
+				capacityDeferredAt = *a.CapacityDeferredAt
 			}
-			if err := c.store.DeferScheduleActivation(a.ID, "deferred_capacity", capacity.Reason, finishedAt.Add(retry)); err != nil {
+			if a.MaxDeferAgeSeconds > 0 {
+				expiresAt := capacityDeferredAt.Add(time.Duration(a.MaxDeferAgeSeconds) * time.Second)
+				if !finishedAt.Before(expiresAt) {
+					status = "failed"
+					countAttempt = false
+					lastError = fmt.Sprintf("capacity deferral expired after %s: %s",
+						time.Duration(a.MaxDeferAgeSeconds)*time.Second, capacity.Reason)
+					break
+				}
+			}
+			retry := capacityRetryDelay(capacity.RetryAfter, a.CapacityDeferrals)
+			dueAt := finishedAt.Add(retry)
+			if a.MaxDeferAgeSeconds > 0 {
+				expiresAt := capacityDeferredAt.Add(time.Duration(a.MaxDeferAgeSeconds) * time.Second)
+				if dueAt.After(expiresAt) {
+					dueAt = expiresAt
+				}
+			}
+			if err := c.store.DeferScheduleActivation(a.ID, "deferred_capacity", capacity.Reason, dueAt, finishedAt); err != nil {
 				return true, fmt.Errorf("defer activation %d: %w", a.ID, err)
 			}
 			slog.Info("schedule activation deferred", "activation_id", a.ID, "schedule_run_id", runID,
@@ -155,7 +174,7 @@ func (c *Coordinator) ProcessNext(ctx context.Context) (bool, error) {
 			if retry <= 0 {
 				retry = 5 * time.Second
 			}
-			if err := c.store.DeferScheduleActivation(a.ID, "pending", retryable.Reason, finishedAt.Add(retry)); err != nil {
+			if err := c.store.DeferScheduleActivation(a.ID, "pending", retryable.Reason, finishedAt.Add(retry), finishedAt); err != nil {
 				return true, fmt.Errorf("retry activation %d: %w", a.ID, err)
 			}
 			slog.Warn("schedule activation will retry", "activation_id", a.ID, "schedule_run_id", runID,
@@ -168,7 +187,7 @@ func (c *Coordinator) ProcessNext(ctx context.Context) (bool, error) {
 			if retry <= 0 {
 				retry = 5 * time.Second
 			}
-			if err := c.store.DeferScheduleActivation(a.ID, "repairing", repair.Reason, finishedAt.Add(retry)); err != nil {
+			if err := c.store.DeferScheduleActivation(a.ID, "repairing", repair.Reason, finishedAt.Add(retry), finishedAt); err != nil {
 				return true, fmt.Errorf("retry activation repair %d: %w", a.ID, err)
 			}
 			slog.Warn("schedule activation repair will retry", "activation_id", a.ID, "schedule_run_id", runID,
@@ -178,7 +197,7 @@ func (c *Coordinator) ProcessNext(ctx context.Context) (bool, error) {
 		status = "failed"
 		lastError = runErr.Error()
 	}
-	if err := c.store.FinishScheduleActivation(a.ID, status, lastError, finishedAt); err != nil {
+	if err := c.store.FinishScheduleActivation(a.ID, status, lastError, finishedAt, countAttempt); err != nil {
 		return true, fmt.Errorf("finish activation %d: %w", a.ID, err)
 	}
 	slog.Info("schedule activation finished", "activation_id", a.ID, "schedule_run_id", runID,
@@ -187,6 +206,27 @@ func (c *Coordinator) ProcessNext(ctx context.Context) (bool, error) {
 		return true, fmt.Errorf("activation %d for %s: %w", a.ID, a.AppSlug, runErr)
 	}
 	return true, nil
+}
+
+// capacityRetryDelay backs an unsatisfied host-capacity check off from one
+// minute to a fifteen-minute cap. The durable deferral count makes the cadence
+// survive server restarts without consuming the rollout attempt budget.
+func capacityRetryDelay(base time.Duration, priorDeferrals int) time.Duration {
+	if base <= 0 {
+		base = time.Minute
+	}
+	const capDelay = 15 * time.Minute
+	if base > capDelay {
+		base = capDelay
+	}
+	delay := base
+	for i := 0; i < priorDeferrals && delay < capDelay; i++ {
+		delay *= 2
+		if delay > capDelay {
+			delay = capDelay
+		}
+	}
+	return delay
 }
 
 // safeRoll contains a runner panic so one faulty runtime edge cannot terminate

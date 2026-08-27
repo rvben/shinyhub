@@ -1531,18 +1531,19 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		pid, port := rep.PID, rep.Port
 		depID := prev.ID
 		if uerr := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:        app.ID,
-			Index:        rep.Index,
-			PID:          &pid,
-			Port:         &port,
-			Status:       "running",
-			Provider:     rep.Provider,
-			Tier:         rep.Tier,
-			EndpointURL:  rep.EndpointURL,
-			WorkerID:     rep.WorkerID,
-			AppVersion:   prev.Version,
-			DesiredState: "running",
-			DeploymentID: &depID,
+			AppID:               app.ID,
+			Index:               rep.Index,
+			PID:                 &pid,
+			Port:                &port,
+			Status:              "running",
+			Provider:            rep.Provider,
+			Tier:                rep.Tier,
+			EndpointURL:         rep.EndpointURL,
+			WorkerID:            rep.WorkerID,
+			AppVersion:          prev.Version,
+			DesiredState:        "running",
+			DeploymentID:        &depID,
+			StartupPeakRSSBytes: rep.StartupPeakRSSBytes,
 		}); uerr != nil {
 			slog.Error("restore: upsert replica", "slug", slug, "idx", rep.Index, "err", uerr)
 		}
@@ -2002,18 +2003,19 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		pid, port := r.PID, r.Port
 		depID := pendingDep.ID
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:        app.ID,
-			Index:        r.Index,
-			PID:          &pid,
-			Port:         &port,
-			Status:       "running",
-			Provider:     r.Provider,
-			Tier:         r.Tier,
-			EndpointURL:  r.EndpointURL,
-			WorkerID:     r.WorkerID,
-			AppVersion:   version,
-			DesiredState: "running",
-			DeploymentID: &depID,
+			AppID:               app.ID,
+			Index:               r.Index,
+			PID:                 &pid,
+			Port:                &port,
+			Status:              "running",
+			Provider:            r.Provider,
+			Tier:                r.Tier,
+			EndpointURL:         r.EndpointURL,
+			WorkerID:            r.WorkerID,
+			AppVersion:          version,
+			DesiredState:        "running",
+			DeploymentID:        &depID,
+			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
 		}); err != nil {
 			slog.Error("deploy_upsert_replica_failed", "slug", slug, "index", r.Index, "err", err)
 		}
@@ -2103,6 +2105,20 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		manifestSummary.Schedules = scheduleResults
+	}
+	// The new pool is healthy and sampleable at this point. Compare every
+	// configured roll schedule with the same live surge estimate and host floor
+	// used by activation admission, so deploy is the earliest reliable place to
+	// reveal a roll that cannot currently fit.
+	if configuredSchedules, listErr := s.store.ListSchedulesByApp(app.ID); listErr == nil {
+		for _, schedule := range configuredSchedules {
+			if advisory := s.rollFeasibilityAdvisory(app, schedule.OnSuccess, schedule.RollFallback); advisory != nil {
+				manifestSummary.Warnings = append(manifestSummary.Warnings,
+					fmt.Sprintf("schedule %q: %s", schedule.Name, *advisory))
+			}
+		}
+	} else {
+		slog.Warn("deploy: roll feasibility preflight failed", "slug", slug, "err", listErr)
 	}
 
 	// Phase C: reconcile manifest-declared per-app group access. Runs whenever a
@@ -2363,18 +2379,19 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		pid, port := r.PID, r.Port
 		depID := pendingDep.ID
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:        app.ID,
-			Index:        r.Index,
-			PID:          &pid,
-			Port:         &port,
-			Status:       "running",
-			Provider:     r.Provider,
-			Tier:         r.Tier,
-			EndpointURL:  r.EndpointURL,
-			WorkerID:     r.WorkerID,
-			AppVersion:   prev.Version,
-			DesiredState: "running",
-			DeploymentID: &depID,
+			AppID:               app.ID,
+			Index:               r.Index,
+			PID:                 &pid,
+			Port:                &port,
+			Status:              "running",
+			Provider:            r.Provider,
+			Tier:                r.Tier,
+			EndpointURL:         r.EndpointURL,
+			WorkerID:            r.WorkerID,
+			AppVersion:          prev.Version,
+			DesiredState:        "running",
+			DeploymentID:        &depID,
+			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
 		}); err != nil {
 			slog.Error("rollback_upsert_replica_failed", "slug", slug, "index", r.Index, "err", err)
 		}
@@ -2538,18 +2555,19 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		pid, port := r.PID, r.Port
 		depID := current.ID
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:        app.ID,
-			Index:        r.Index,
-			PID:          &pid,
-			Port:         &port,
-			Status:       "running",
-			Provider:     r.Provider,
-			Tier:         r.Tier,
-			EndpointURL:  r.EndpointURL,
-			WorkerID:     r.WorkerID,
-			AppVersion:   current.Version,
-			DesiredState: "running",
-			DeploymentID: &depID,
+			AppID:               app.ID,
+			Index:               r.Index,
+			PID:                 &pid,
+			Port:                &port,
+			Status:              "running",
+			Provider:            r.Provider,
+			Tier:                r.Tier,
+			EndpointURL:         r.EndpointURL,
+			WorkerID:            r.WorkerID,
+			AppVersion:          current.Version,
+			DesiredState:        "running",
+			DeploymentID:        &depID,
+			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
 		}); err != nil {
 			slog.Error("restart_upsert_replica_failed", "slug", slug, "index", r.Index, "err", err)
 		}
@@ -3400,6 +3418,10 @@ type replicaMetrics struct {
 	// render both as an absent key.
 	CPUPercent *float64 `json:"cpu_percent"`
 	RSSBytes   int64    `json:"rss_bytes,omitempty"`
+	// StartupPeakRSSBytes is the durable healthy cold-start high-water mark
+	// used by scheduled-roll surge admission. It remains visible when live
+	// metrics are temporarily unavailable.
+	StartupPeakRSSBytes int64 `json:"startup_peak_rss_bytes,omitempty"`
 	// Linux native replicas additionally expose proportional set size (PSS),
 	// unique/private memory (USS), and proportionally attributed swap. These are
 	// pointers so unsupported backends remain distinguishable from a real zero.
@@ -3564,7 +3586,7 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 				Index: rep.Index, Status: rep.Status, DesiredState: rep.DesiredState,
 				Tier: rep.Tier, Provider: rep.Provider, Sessions: -1,
 				Reason: rep.Reason, ExitCode: rep.ExitCode, Signal: rep.Signal,
-				RestartCount: rep.RestartCount,
+				RestartCount: rep.RestartCount, StartupPeakRSSBytes: rep.StartupPeakRSSBytes,
 			})
 		}
 	}
@@ -3715,19 +3737,21 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 			resp.Replicas[rep.Index].RestartCount = rep.RestartCount
 			resp.Replicas[rep.Index].Tier = rep.Tier
 			resp.Replicas[rep.Index].Provider = rep.Provider
+			resp.Replicas[rep.Index].StartupPeakRSSBytes = rep.StartupPeakRSSBytes
 			resp.Replicas[rep.Index].MetricsAvailable = false
 		} else {
 			resp.Replicas = append(resp.Replicas, replicaMetrics{
-				Index:        rep.Index,
-				Status:       rep.Status,
-				DesiredState: rep.DesiredState,
-				Reason:       reason,
-				ExitCode:     rep.ExitCode,
-				Signal:       rep.Signal,
-				RestartCount: rep.RestartCount,
-				Tier:         rep.Tier,
-				Provider:     rep.Provider,
-				Sessions:     -1,
+				Index:               rep.Index,
+				Status:              rep.Status,
+				DesiredState:        rep.DesiredState,
+				Reason:              reason,
+				ExitCode:            rep.ExitCode,
+				Signal:              rep.Signal,
+				RestartCount:        rep.RestartCount,
+				Tier:                rep.Tier,
+				Provider:            rep.Provider,
+				StartupPeakRSSBytes: rep.StartupPeakRSSBytes,
+				Sessions:            -1,
 			})
 		}
 	}

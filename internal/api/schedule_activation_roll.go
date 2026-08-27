@@ -156,6 +156,9 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 			return s.activationRepairError(fmt.Errorf("discard stale surge: %w", err))
 		}
 		if err := s.activationCapacityCheck(app, staleRunning[0]); err != nil {
+			if a.RollFallback == "restart" {
+				return s.restartActivationPool(ctx, app, current, a, err)
+			}
 			return err
 		}
 	}
@@ -174,6 +177,9 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 		params.LaunchReservationHeld = true
 		if err := s.activationCapacityCheck(app, staleRunning[0]); err != nil {
 			releaseLaunch()
+			if a.RollFallback == "restart" {
+				return s.restartActivationPool(ctx, app, current, a, err)
+			}
 			return err
 		}
 	}
@@ -303,6 +309,74 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 	return nil
 }
 
+// restartActivationPool is the explicitly disruptive fallback for a roll
+// whose surge cannot be admitted. It stops the old pool before starting the
+// target generation, trading an availability gap for bounded data freshness.
+// Once stopping begins every failure is repair-required: recovery must keep
+// retrying until a complete current pool is serving again.
+func (s *Server) restartActivationPool(ctx context.Context, app *db.App, current *db.Deployment, a *db.ScheduleActivation, capacityErr error) error {
+	if err := ctx.Err(); err != nil {
+		return &activation.RetryableError{Reason: "restart fallback interrupted before stop: " + err.Error(), RetryAfter: time.Second}
+	}
+	slog.Warn("schedule activation using stop-first fallback",
+		"activation_id", a.ID, "app", app.Slug, "reason", capacityErr.Error())
+	if err := s.store.UpdateScheduleActivationProgress(a.ID, "stopping_pool", -1, 0); err != nil {
+		return s.activationRetryError(a, err)
+	}
+	for index := 0; index < app.Replicas; index++ {
+		if err := s.manager.StopReplicaConfirmed(app.Slug, index); err != nil && !errors.Is(err, process.ErrReplicaNotFound) {
+			return s.activationRepairError(fmt.Errorf("stop replica %d for restart fallback: %w", index, err))
+		}
+	}
+	s.proxy.Deregister(app.Slug)
+	if err := s.store.UpdateScheduleActivationProgress(a.ID, "starting_pool", -1, 0); err != nil {
+		return s.activationRepairError(err)
+	}
+
+	params := s.activationDeployParams(app, current)
+	params.Preparation = activationPreparation(current.Prepared)
+	params.GuardUntilAcknowledged = true
+	params.ReplicaStarted = func(result deploy.Result) error {
+		return s.persistStartingActivationReplica(app, current, &result, a)
+	}
+	result, err := s.deployRun(params)
+	if err != nil {
+		return s.activationRepairError(fmt.Errorf("start pool after restart fallback: %w", err))
+	}
+	if !current.Prepared {
+		if err := s.store.MarkDeploymentPrepared(current.ID); err != nil {
+			slog.Warn("activation restart: record preparation state", "app", app.Slug, "err", err)
+		}
+	}
+	for i := range result.Replicas {
+		if err := s.persistActivationReplica(app, current, &result.Replicas[i], a); err != nil {
+			return s.activationRepairError(err)
+		}
+	}
+	rows, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		return s.activationRepairError(fmt.Errorf("verify restarted pool: %w", err))
+	}
+	byIndex := make(map[int]*db.Replica, len(rows))
+	for _, row := range rows {
+		byIndex[row.Index] = row
+	}
+	for index := 0; index < app.Replicas; index++ {
+		if !s.activationCanonicalCurrent(app, current, a, index, byIndex[index]) {
+			return s.activationRepairError(fmt.Errorf("restarted replica %d is not healthy, routed, and current", index))
+		}
+	}
+	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: "running"}); err != nil {
+		slog.Error("activation restart: persist running status", "app", app.Slug, "err", err)
+	}
+	s.store.LogAuditEvent(db.AuditEventParams{
+		Action: "schedule_activation_restart", ResourceType: "app", ResourceID: app.Slug,
+		Detail: fmt.Sprintf(`{"activation_id":%d,"schedule_run_id":%d,"target_generation":%d,"capacity_reason":%q}`,
+			a.ID, derefActivationRunID(a.ScheduleRunID), a.TargetGeneration, capacityErr.Error()),
+	})
+	return nil
+}
+
 func (s *Server) activationDeployParams(app *db.App, current *db.Deployment) deploy.Params {
 	defaultMem, defaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	p := deploy.Params{
@@ -350,7 +424,8 @@ func tierForActivationIndex(p deploy.Params, index int) string {
 }
 
 func (s *Server) activationCapacityCheck(app *db.App, sampleIndex int) error {
-	neededMB := s.activationSurgeMemoryMB(app, sampleIndex)
+	estimate := s.activationSurgeMemoryEstimate(app, sampleIndex)
+	neededMB := estimate.MemoryMB
 	if neededMB <= 0 {
 		return &activation.CapacityError{Reason: "surge memory is unknown; configure memory_limit_mb or enable runtime metrics", RetryAfter: time.Minute}
 	}
@@ -362,19 +437,82 @@ func (s *Server) activationCapacityCheck(app *db.App, sampleIndex int) error {
 	requiredMB := s.cfg.MinAvailableMemoryMB() + neededMB
 	if availableMB < requiredMB {
 		return &activation.CapacityError{
-			Reason:     fmt.Sprintf("%d MiB available; need %d MiB for one surge replica plus the %d MiB host floor", availableMB, requiredMB, s.cfg.MinAvailableMemoryMB()),
+			Reason:     fmt.Sprintf("%d MiB available; need %d MiB for one surge replica plus the %d MiB host floor (%s)", availableMB, requiredMB, s.cfg.MinAvailableMemoryMB(), estimate.Provenance),
 			RetryAfter: time.Minute,
 		}
 	}
 	return nil
 }
 
+func (s *Server) rollFeasibilityAdvisory(app *db.App, onSuccess, fallback string) *string {
+	if onSuccess != "roll" {
+		return nil
+	}
+	estimate := s.activationSurgeMemoryEstimate(app, 0)
+	neededMB := estimate.MemoryMB
+	if neededMB <= 0 {
+		msg := "Surge-roll feasibility could not be checked because replica memory is unknown; configure memory_limit_mb or keep runtime metrics available."
+		return &msg
+	}
+	vm, err := gopsmem.VirtualMemory()
+	if err != nil || vm == nil {
+		msg := "Surge-roll feasibility could not be checked because host available memory could not be measured."
+		return &msg
+	}
+	availableMB := int(vm.Available / (1024 * 1024))
+	msg := formatRollFeasibilityAdvisory(neededMB, availableMB, s.cfg.MinAvailableMemoryMB(), fallback)
+	if msg == "" {
+		return nil
+	}
+	msg += " Memory estimate: " + estimate.Provenance + "."
+	return &msg
+}
+
+func formatRollFeasibilityAdvisory(neededMB, availableMB, hostFloorMB int, fallback string) string {
+	requiredMB := neededMB + hostFloorMB
+	if neededMB <= 0 || availableMB >= requiredMB {
+		return ""
+	}
+	msg := fmt.Sprintf("Surge roll is currently infeasible: %d MiB available; need %d MiB for one surge replica plus the %d MiB host floor.",
+		availableMB, requiredMB, hostFloorMB)
+	if fallback == "restart" {
+		msg += " The configured restart fallback will replace replicas in place; a single-replica app will be unavailable while it starts."
+	} else {
+		msg += " Activation will defer until capacity changes; set roll_fallback=restart if a bounded availability gap is preferable to stale data."
+	}
+	return msg
+}
+
 func (s *Server) activationSurgeMemoryMB(app *db.App, preferredIndex int) int {
+	return s.activationSurgeMemoryEstimate(app, preferredIndex).MemoryMB
+}
+
+type surgeMemoryEstimate struct {
+	MemoryMB   int
+	Provenance string
+}
+
+func (s *Server) activationSurgeMemoryEstimate(app *db.App, preferredIndex int) surgeMemoryEstimate {
 	neededMB, _ := s.cfg.Runtime.DefaultResourcesForApp(app)
 	neededMB = deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, neededMB)
-	if neededMB > 0 || s.sampler == nil {
-		return neededMB
+	if neededMB > 0 {
+		return surgeMemoryEstimate{MemoryMB: neededMB, Provenance: fmt.Sprintf("configured memory limit of %d MiB", neededMB)}
 	}
+
+	var baselineBytes int64
+	provenance := ""
+	if s.store != nil {
+		replicas, err := s.store.ListReplicas(app.ID)
+		if err == nil {
+			for _, replica := range replicas {
+				if replica.Index >= 0 && replica.Index < app.Replicas && replica.StartupPeakRSSBytes > baselineBytes {
+					baselineBytes = replica.StartupPeakRSSBytes
+					provenance = "persisted healthy-start RSS peak"
+				}
+			}
+		}
+	}
+
 	indices := make([]int, 0, app.Replicas)
 	if preferredIndex >= 0 && preferredIndex < app.Replicas {
 		indices = append(indices, preferredIndex)
@@ -384,17 +522,29 @@ func (s *Server) activationSurgeMemoryMB(app *db.App, preferredIndex int) int {
 			indices = append(indices, index)
 		}
 	}
-	for _, index := range indices {
-		if handle, ok := s.manager.HandleReplica(app.Slug, index); ok {
-			if stats, err := s.sampler.Sample(handle); err == nil {
-				// RSS is a lower bound for the next import peak. Add 25% plus a
-				// fixed 64 MiB floor rather than pretending steady state is a cap.
-				rssMB := int((stats.RSSBytes + (1024*1024 - 1)) / (1024 * 1024))
-				return rssMB + rssMB/4 + 64
+	if s.sampler != nil && s.manager != nil {
+		for _, index := range indices {
+			if handle, ok := s.manager.HandleReplica(app.Slug, index); ok {
+				if stats, err := s.sampler.Sample(handle); err == nil {
+					if stats.RSSBytes > baselineBytes {
+						baselineBytes = stats.RSSBytes
+						provenance = "current live RSS"
+					}
+				}
 			}
 		}
 	}
-	return 0
+	if baselineBytes <= 0 {
+		return surgeMemoryEstimate{}
+	}
+	// Even an observed startup peak is a sample, not a hard cap. Retain the
+	// existing 25% plus 64 MiB uncertainty margin for allocator, workload, and
+	// sampling variance rather than admitting exactly at the historic peak.
+	baselineMB := int((baselineBytes + (1024*1024 - 1)) / (1024 * 1024))
+	return surgeMemoryEstimate{
+		MemoryMB:   baselineMB + baselineMB/4 + 64,
+		Provenance: fmt.Sprintf("%s of %d MiB plus the 25%% + 64 MiB safety margin", provenance, baselineMB),
+	}
 }
 
 func (s *Server) activationCanonicalCurrent(app *db.App, current *db.Deployment, a *db.ScheduleActivation, index int, row *db.Replica) bool {
@@ -542,6 +692,7 @@ func (s *Server) persistActivationReplica(app *db.App, current *db.Deployment, r
 		AppID: app.ID, Index: result.Index, PID: &pid, Port: &port, Status: db.ReplicaStatusRunning,
 		Provider: result.Provider, Tier: result.Tier, EndpointURL: result.EndpointURL, WorkerID: result.WorkerID,
 		AppVersion: current.Version, DesiredState: "running", DeploymentID: &deploymentID,
+		StartupPeakRSSBytes: result.StartupPeakRSSBytes,
 	}, a.TargetGeneration, a.ID); err != nil {
 		return fmt.Errorf("persist replacement replica %d: %w", result.Index, err)
 	}

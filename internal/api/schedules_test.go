@@ -97,6 +97,9 @@ func TestSchedules_CreateAndList_HappyPath(t *testing.T) {
 
 func TestSchedules_ActivationContractPersistsAndFailsClosed(t *testing.T) {
 	srv, store, _ := newManagerTestServer(t)
+	// Make the live admission estimate deterministically larger than any test
+	// host so the response must surface the feasibility advisory.
+	srv.Config().Runtime.Docker.DefaultMemoryMB = 1 << 30
 	hash, _ := testHashPassword("pass")
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner-activation", PasswordHash: hash, Role: "developer"}); err != nil {
 		t.Fatalf("create user: %v", err)
@@ -111,6 +114,7 @@ func TestSchedules_ActivationContractPersistsAndFailsClosed(t *testing.T) {
 		"name": "refresh", "cron_expr": "*/15 * * * *", "command": []string{"python", "fetch.py"},
 		"enabled": true, "timeout_seconds": 300, "overlap_policy": "skip", "missed_policy": "skip",
 		"on_success": "roll", "min_roll_interval_seconds": 3600,
+		"roll_fallback": "restart", "max_defer_age_seconds": 21600,
 	})
 	req := authedRequest(t, "POST", "/api/apps/activation-app/schedules", body, token)
 	rec := httptest.NewRecorder()
@@ -120,8 +124,12 @@ func TestSchedules_ActivationContractPersistsAndFailsClosed(t *testing.T) {
 	}
 	var created map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &created)
-	if created["on_success"] != "roll" || created["min_roll_interval_seconds"] != float64(3600) {
+	if created["on_success"] != "roll" || created["min_roll_interval_seconds"] != float64(3600) ||
+		created["roll_fallback"] != "restart" || created["max_defer_age_seconds"] != float64(21600) {
 		t.Fatalf("activation fields = %#v", created)
+	}
+	if warning, _ := created["roll_feasibility_advisory"].(string); !strings.Contains(warning, "restart fallback") {
+		t.Fatalf("roll feasibility advisory = %q, want restart fallback consequence", warning)
 	}
 
 	// Explicitly disabling rollout clears an inherited/stored damper when the
@@ -137,7 +145,8 @@ func TestSchedules_ActivationContractPersistsAndFailsClosed(t *testing.T) {
 	}
 	var disabled map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &disabled)
-	if disabled["on_success"] != "none" || disabled["min_roll_interval_seconds"] != float64(0) {
+	if disabled["on_success"] != "none" || disabled["min_roll_interval_seconds"] != float64(0) ||
+		disabled["roll_fallback"] != "defer" || disabled["max_defer_age_seconds"] != float64(0) {
 		t.Fatalf("disabled activation fields=%#v", disabled)
 	}
 
@@ -183,6 +192,64 @@ func TestSchedules_ActivationContractPersistsAndFailsClosed(t *testing.T) {
 	clustered.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "single control-plane") {
 		t.Fatalf("clustered roll status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSchedules_CancelQueuedActivation(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "activation-cancel-owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("activation-cancel-owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "activation-cancel", Name: "Activation cancel", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("activation-cancel")
+	token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: now, OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit := 0
+	created, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: &exit, FinishedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := fmt.Sprintf("/api/apps/activation-cancel/schedules/%d/activation/cancel", scheduleID)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, path, nil, token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var cancelled db.ScheduleActivation
+	if err := json.NewDecoder(rec.Body).Decode(&cancelled); err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.ID != created.ID || cancelled.Status != "cancelled" || cancelled.LastError != "" {
+		t.Fatalf("cancelled activation=%+v", cancelled)
+	}
+	audit, err := store.ListAuditEvents("schedule_activation_cancel", 10, 0)
+	if err != nil || len(audit) != 1 {
+		t.Fatalf("cancel audit=%+v err=%v", audit, err)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, path, nil, token))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "no queued activation") {
+		t.Fatalf("second cancel status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -245,7 +312,7 @@ func TestSchedules_DeleteBlocksNonterminalActivationThenAllowsTerminalHistory(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FinishScheduleActivation(claimed.ID, "not_needed", "", now.Add(time.Second)); err != nil {
+	if err := store.FinishScheduleActivation(claimed.ID, "not_needed", "", now.Add(time.Second), true); err != nil {
 		t.Fatal(err)
 	}
 	rec = httptest.NewRecorder()

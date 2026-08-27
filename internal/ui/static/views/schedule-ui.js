@@ -112,6 +112,9 @@ export function scheduleDetailSignature(schedule) {
     freshness_error: schedule.freshness_error,
     on_success: schedule.on_success,
     min_roll_interval_seconds: schedule.min_roll_interval_seconds,
+    roll_fallback: schedule.roll_fallback,
+    max_defer_age_seconds: schedule.max_defer_age_seconds,
+    roll_feasibility_advisory: schedule.roll_feasibility_advisory,
     latest_activation: schedule.latest_activation,
   });
 }
@@ -148,7 +151,12 @@ export function afterSuccessDetail(schedule) {
   }
   const interval = intervalLabel(schedule.min_roll_interval_seconds);
   const damper = interval ? `, at most once every ${interval}` : '';
-  return `Gracefully replaces this app’s replicas after success${damper}. The roll preserves the warm floor and may use one temporary surge replica.`;
+  const fallback = schedule.roll_fallback === 'restart'
+    ? ' If the surge does not fit, it restarts the app in place.'
+    : ' If the surge does not fit, it waits for capacity.';
+  const maxAge = intervalLabel(schedule.max_defer_age_seconds);
+  const expiry = maxAge ? ` Deferred work fails after ${maxAge}.` : '';
+  return `Gracefully replaces this app’s replicas after success${damper}. The roll preserves the warm floor and may use one temporary surge replica.${fallback}${expiry}`;
 }
 
 export function activationErrorDetail(run) {
@@ -164,6 +172,8 @@ function activationPhaseLabel(phase) {
     starting_slot: 'starting replica',
     invalidating_warm: 'refreshing warm pool',
     retiring_surge: 'retiring surge',
+    stopping_pool: 'stopping pool',
+    starting_pool: 'starting pool',
     recovering: 'recovering',
   };
   return phases[phase] || '';
@@ -197,9 +207,15 @@ export function activationState(schedule) {
     case 'not_needed': return { key: 'not_needed', label: 'No live roll needed', tone: 'success', active: false, attention: false };
     case 'target_deleted': return { key: 'target_deleted', label: 'App deleted', tone: 'quiet', active: false, attention: false };
     case 'blocked_unsupported': return { key: 'blocked_unsupported', label: 'Unsupported topology', tone: 'danger', active: false, attention: true };
-    case 'failed': return { key: 'failed', label: 'Roll failed', tone: 'danger', active: false, attention: true };
+    case 'cancelled': return { key: 'cancelled', label: 'Activation cancelled', tone: 'warning', active: false, attention: true };
+    case 'failed': return { key: 'failed', label: 'Activation failed', tone: 'danger', active: false, attention: true };
     default: return { key: 'unknown', label: 'Unknown activation', tone: 'warning', active: false, attention: true };
   }
+}
+
+export function canCancelActivation(schedule) {
+  return ['pending', 'deferred_interval', 'deferred_capacity']
+    .includes(schedule?.latest_activation?.status);
 }
 
 // Returns activation snapshots whose source schedule is no longer configured.

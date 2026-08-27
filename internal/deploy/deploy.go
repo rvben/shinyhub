@@ -470,6 +470,11 @@ type Params struct {
 	// It receives the runtime-returned endpoint URL (e.g. http://127.0.0.1:PORT).
 	// If nil, the default HTTP health poller (waitHealthy) is used.
 	HealthCheck func(endpointURL string, timeout time.Duration, transport http.RoundTripper) error
+	// StartupSampler observes the replica's full process-group RSS from runtime
+	// start until readiness succeeds or fails. The largest successful-start
+	// sample is returned in Result and can be persisted for future surge sizing.
+	// Nil disables startup memory telemetry without affecting deployment.
+	StartupSampler process.Sampler
 	// ContentDigest, DeploymentID, and AppVersion travel with the launch so a
 	// remote runtime can pull-by-digest and stamp recovery labels. Empty/zero is
 	// allowed for local-only deploys but every API launch path now populates them.
@@ -527,13 +532,14 @@ func (p Params) report(event deployevent.Event) {
 
 // Result contains identifiers for a single successfully deployed replica.
 type Result struct {
-	Index       int
-	PID         int
-	Port        int
-	EndpointURL string
-	Tier        string
-	Provider    string
-	WorkerID    string
+	Index               int
+	PID                 int
+	Port                int
+	EndpointURL         string
+	Tier                string
+	Provider            string
+	WorkerID            string
+	StartupPeakRSSBytes int64
 }
 
 // ReplicaStartError reports a failure after the runtime returned a concrete
@@ -1453,6 +1459,13 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		}
 		return Result{}, stoppedReplicaStartError(fmt.Errorf("acknowledge started replica: %w", err), stopErr)
 	}
+	finishStartupRSSObservation := observeStartupRSS(p.StartupSampler, p.Manager, p.Slug, idx)
+	startupRSSObservationFinished := false
+	defer func() {
+		if !startupRSSObservationFinished {
+			_ = finishStartupRSSObservation()
+		}
+	}()
 	replica := idx + 1
 	e := deployevent.Phase("replicas", deployevent.StatusProgress, fmt.Sprintf("Replica %d started; checking readiness", replica))
 	e.Replica = &replica
@@ -1476,6 +1489,8 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 			return ok && i.Status == process.StatusRunning
 		})
 	}
+	startupPeakRSSBytes := finishStartupRSSObservation()
+	startupRSSObservationFinished = true
 	if healthErr != nil {
 		stop := p.Manager.StopReplica
 		if p.GuardUntilAcknowledged {
@@ -1487,6 +1502,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		}
 		return Result{}, stoppedReplicaStartError(fmt.Errorf("health: %w", healthErr), serr)
 	}
+	startedResult.StartupPeakRSSBytes = startupPeakRSSBytes
 
 	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport, p.DeploymentID); err != nil {
 		stop := p.Manager.StopReplica
@@ -1500,6 +1516,52 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		return Result{}, stoppedReplicaStartError(fmt.Errorf("register: %w", err), serr)
 	}
 	return startedResult, nil
+}
+
+const startupRSSSampleInterval = 200 * time.Millisecond
+
+// observeStartupRSS samples one stable runtime handle until the returned
+// function is called. The final call takes one last sample, which captures the
+// ready boundary even when startup finishes between ticks. Sampling errors are
+// telemetry gaps, never deployment failures.
+func observeStartupRSS(sampler process.Sampler, manager *process.Manager, slug string, index int) func() int64 {
+	if sampler == nil || manager == nil {
+		return func() int64 { return 0 }
+	}
+	handle, ok := manager.HandleReplica(slug, index)
+	if !ok {
+		return func() int64 { return 0 }
+	}
+
+	stop := make(chan struct{})
+	result := make(chan int64, 1)
+	go func() {
+		var peak int64
+		sample := func() {
+			stats, err := sampler.Sample(handle)
+			if err == nil && stats.RSSBytes > peak {
+				peak = stats.RSSBytes
+			}
+		}
+		sample()
+		ticker := time.NewTicker(startupRSSSampleInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sample()
+			case <-stop:
+				sample()
+				result <- peak
+				return
+			}
+		}
+	}()
+
+	return func() int64 {
+		close(stop)
+		return <-result
+	}
 }
 
 // RunReplica boots a single replica at the given index. The proxy pool size

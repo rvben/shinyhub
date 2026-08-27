@@ -62,6 +62,52 @@ func TestValidateActivationSeconds_RejectsOverflowBeforeConversion(t *testing.T)
 	}
 }
 
+func TestValidateActivationPolicy(t *testing.T) {
+	tests := []struct {
+		name         string
+		action       string
+		fallback     string
+		maxDeferAge  time.Duration
+		wantAction   string
+		wantFallback string
+		wantErr      string
+	}{
+		{name: "roll defaults to defer", action: "roll", wantAction: "roll", wantFallback: "defer"},
+		{name: "explicit restart fallback", action: "roll", fallback: "restart", wantAction: "roll", wantFallback: "restart"},
+		{name: "bounded defer", action: "roll", maxDeferAge: 6 * time.Hour, wantAction: "roll", wantFallback: "defer"},
+		{name: "unknown fallback", action: "roll", fallback: "force", wantErr: "defer|restart"},
+		{name: "restart requires roll", action: "none", fallback: "restart", wantErr: "requires on_success=roll"},
+		{name: "defer age requires roll", action: "none", maxDeferAge: time.Hour, wantErr: "requires on_success=roll"},
+		{name: "negative defer age", action: "roll", maxDeferAge: -time.Second, wantErr: "must not be negative"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			action, fallback, err := schedulespec.ValidateActivationPolicy(tc.action, 0, tc.fallback, tc.maxDeferAge)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("ValidateActivationPolicy() error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateActivationPolicy() error = %v", err)
+			}
+			if action != tc.wantAction || fallback != tc.wantFallback {
+				t.Fatalf("ValidateActivationPolicy() = %q, %q; want %q, %q", action, fallback, tc.wantAction, tc.wantFallback)
+			}
+		})
+	}
+}
+
+func TestValidateActivationPolicySeconds_RejectsDeferAgeOverflow(t *testing.T) {
+	if _, _, err := schedulespec.ValidateActivationPolicySeconds("roll", 0, "defer", schedulespec.MaxRollIntervalSeconds); err != nil {
+		t.Fatalf("maximum safe defer age rejected: %v", err)
+	}
+	if _, _, err := schedulespec.ValidateActivationPolicySeconds("roll", 0, "defer", schedulespec.MaxRollIntervalSeconds+1); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("overflow defer age error = %v, want explicit upper bound", err)
+	}
+}
+
 func TestValidate_ValidInput(t *testing.T) {
 	name, cron, tz, cmd, timeout, overlap, missed := validArgs()
 	if err := schedulespec.Validate(name, cron, tz, cmd, timeout, overlap, missed); err != nil {

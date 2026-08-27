@@ -51,6 +51,8 @@ Fields:
 | `run_on_register` | When `true`, fire this schedule once on first registration if the app has never had a successful run of it, warming the cache on a fresh deploy. CLI flag: `--run-on-register`. See "Warm on first deploy" below. |
 | `on_success` | `none` (default) leaves serving processes unchanged. `roll` durably and gracefully replaces this app's replicas after a successful run so module-scope data is re-imported. |
 | `min_roll_interval` | Optional damper such as `1h`. Successful runs still advance job history and the target data generation, but queued activation is coalesced and cannot run before this interval after the last completed successful roll. CLI flag: `--min-roll-interval`. |
+| `roll_fallback` | Behavior when the temporary surge cannot be admitted: `defer` (default) keeps serving the old generation and retries, while `restart` stops the old pool first and accepts an availability gap to activate fresh data. CLI flag: `--roll-fallback`. |
+| `max_defer_age` | Optional capacity-deferral deadline such as `6h`. At expiry the activation fails visibly instead of retrying forever. `0` (default) keeps the existing unlimited behavior. CLI flag: `--max-defer-age`. |
 
 **Timezone PATCH tri-state:** The `timezone` key in a PATCH request has three distinct meanings:
 
@@ -104,6 +106,8 @@ overlap = "skip"
 missed = "run_once"
 on_success = "roll"
 min_roll_interval = "1h"
+roll_fallback = "restart"
+max_defer_age = "6h"
 ```
 
 ## Activating refreshed data in serving replicas
@@ -119,6 +123,8 @@ cron = "*/15 * * * *"
 cmd = "uv run python helpers/fetch_data.py --only pend_data"
 on_success = "roll"
 min_roll_interval = "1h"
+roll_fallback = "restart"
+max_defer_age = "6h"
 ```
 
 The schedule run and serving-data activation are deliberately separate
@@ -135,8 +141,23 @@ Important behavior:
   overlap-skipped runs leave serving processes unchanged.
 - The configured replica count and `runtime.max_replicas` are steady-state
   limits. A roll admits exactly one temporary, memory-checked surge
-  (`max_surge = 1`) above that count; if safe headroom cannot be proved it
-  records `deferred_capacity` and retries without dropping the warm floor.
+  (`max_surge = 1`) above that count. If safe headroom cannot be proved,
+  `roll_fallback = "defer"` records `deferred_capacity` and retries without
+  dropping the warm floor; `roll_fallback = "restart"` instead stops the old
+  pool before starting the target generation.
+- During every cold boot ShinyHub samples full process-group RSS from runtime
+  start through the successful readiness boundary and persists that startup
+  high-water mark on the replica. Surge admission uses a configured memory
+  limit when one exists; otherwise it uses the larger of the persisted startup
+  peak and current live RSS, then retains a 25% + 64 MiB safety margin. Failed
+  startups do not replace the stored peak, and status-only lifecycle changes do
+  not erase it. The replica API/metrics field is `startup_peak_rss_bytes`, and
+  capacity errors and feasibility advisories identify the estimate source.
+- Capacity deferrals back off at 1, 2, 4, 8, then 15-minute intervals. The
+  persisted `capacity_deferrals` count is separate from rollout `attempts`.
+  With `max_defer_age` set, the deadline starts at the first capacity defer,
+  the next check is clamped to it, and the activation then fails with an
+  explicit expiry reason.
 - Activations are globally serialized in the first release, so schedules that
   complete together do not start simultaneous cold imports on one host.
 - A newer queued success supersedes older queued work for the same app while
@@ -148,6 +169,17 @@ Important behavior:
 - Disabling `on_success` affects future runs only. The UI continues to show a
   durable activation already pending, running, or repairing, and the schedule
   cannot be deleted until that work becomes terminal.
+- `shinyhub schedule cancel <app> <schedule>` clears the newest queued or
+  capacity/interval-deferred activation without disabling the schedule.
+  Cancellation is refused once an activation is running or repairing because
+  it may already own live runtime state. A successful cancellation is retained
+  as the terminal `cancelled` activation state; it is not reported as a failure.
+- Schedule create/update responses, deploy results, the dashboard, and
+  `shinyhub doctor --remote --slug <app>` surface a roll-feasibility advisory
+  when the current surge estimate plus host floor exceeds available memory.
+  This is a warning rather than a rejection because host capacity can change
+  before the next run; the text names whether the configured outcome is a
+  capacity defer or an in-place restart availability gap.
 - The first release supports self-rolls for multiplex apps on the native and
   local Docker runtimes. Grouped/per-session isolation, remote or managed
   runtimes, cross-app consumers, and in-process `signal` hooks are rejected or
@@ -355,7 +387,7 @@ either sees the old file or the new one — never a partial write.
 - **Timezone.** Each schedule fires in its effective timezone (see "Timezone resolution" above). Schedules without an explicit timezone inherit the server default; the fallback is always UTC, never the host `TZ`. Server-default changes take effect on restart — running schedules are not hot-reloaded on config change.
 - **`run_once` catch-up runs at startup only.** It does not re-fire missed runs from arbitrary points in time.
 - **Native runtime read-only enforcement.** RO is a convention for native (filesystem permits writes through the symlink). Use Docker if you need OS-level enforcement.
-- **Activation scope.** `on_success = "roll"` is limited to self-rolls for multiplex apps on the native and local Docker runtimes in the single-node activation engine. Unsupported topology is recorded as `blocked_unsupported`; it never falls back to stop-first replacement.
+- **Activation scope.** `on_success = "roll"` is limited to self-rolls for multiplex apps on the native and local Docker runtimes in the single-node activation engine. Unsupported topology is recorded as `blocked_unsupported`; `roll_fallback` applies only to a supported roll that fails capacity admission.
 
 ## Audit log
 
@@ -365,12 +397,14 @@ Every schedule action is recorded in the audit log under one of:
 schedule_create  schedule_update  schedule_delete  schedule_run_manual
 schedule_run_succeeded  schedule_run_failed
 schedule_run_timed_out  schedule_run_cancelled  schedule_run_interrupted
-schedule_activation_roll  schedule_activation_outcome
+schedule_activation_roll  schedule_activation_restart
+schedule_activation_cancel  schedule_activation_outcome
 shared_data_grant  shared_data_revoke
 ```
 
 Create and update audit details include `on_success` and
-`min_roll_interval_seconds`; enable/disable is recorded as `schedule_update`.
+`min_roll_interval_seconds`, `roll_fallback`, and `max_defer_age_seconds`;
+enable/disable is recorded as `schedule_update`.
 
 `schedule_activation_outcome` records the activation ID, source run, schedule
 snapshot, target generation, terminal status, last operational phase, and error.

@@ -205,18 +205,19 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 	depID := current.ID
 	pid, port := r.PID, r.Port
 	if err := s.store.UpsertReplica(db.UpsertReplicaParams{
-		AppID:        app.ID,
-		Index:        r.Index,
-		PID:          &pid,
-		Port:         &port,
-		Status:       "running",
-		Provider:     r.Provider,
-		Tier:         r.Tier,
-		EndpointURL:  r.EndpointURL,
-		WorkerID:     r.WorkerID,
-		AppVersion:   current.Version,
-		DesiredState: "running",
-		DeploymentID: &depID,
+		AppID:               app.ID,
+		Index:               r.Index,
+		PID:                 &pid,
+		Port:                &port,
+		Status:              "running",
+		Provider:            r.Provider,
+		Tier:                r.Tier,
+		EndpointURL:         r.EndpointURL,
+		WorkerID:            r.WorkerID,
+		AppVersion:          current.Version,
+		DesiredState:        "running",
+		DeploymentID:        &depID,
+		StartupPeakRSSBytes: r.StartupPeakRSSBytes,
 	}); err != nil {
 		rollbackStarted(false)
 		return false, fmt.Errorf("scale up %s: upsert replica %d: %w", slug, r.Index, err)

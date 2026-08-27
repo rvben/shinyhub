@@ -135,7 +135,7 @@ reading one instance in isolation - the example alert below already does this.
 | `shinyhub_app_state_transitions_total` | counter | `event` | App lifecycle transitions (`hibernate`, `wake`). |
 | `shinyhub_replica_restarts_total` | counter | - | Replica crash-restarts performed by the watchdog. A flapping app shows up as a rising restart rate. |
 | `shinyhub_schedule_last_success_seconds` | gauge | `slug`, `schedule` | Unix timestamp of the most recent successful command run; absent until the first success. |
-| `shinyhub_schedule_activation_status` | gauge | `slug`, `schedule`, `status` | Current durable serving-data activation state; the labeled state has value 1. Alert on `repairing`, `deferred_capacity`, `failed`, or `blocked_unsupported` according to age and policy. |
+| `shinyhub_schedule_activation_status` | gauge | `slug`, `schedule`, `status` | Current durable serving-data activation state; the labeled state has value 1. Alert on `repairing`, `deferred_capacity`, `failed`, `cancelled`, or `blocked_unsupported` according to age and policy. |
 | `shinyhub_schedule_activation_age_seconds` | gauge | `slug`, `schedule` | Age of a nonterminal activation. Use with the status metric so ordinary interval damping is not mistaken for a fault. |
 | `shinyhub_schedule_activation_target_generation` | gauge | `slug`, `schedule` | Target serving-data generation of the latest activation. |
 

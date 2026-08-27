@@ -339,6 +339,8 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 			Timezone:               tzPtr,
 			OnSuccess:              spec.OnSuccess,
 			MinRollIntervalSeconds: int(spec.MinRollInterval / time.Second),
+			RollFallback:           spec.RollFallback,
+			MaxDeferAgeSeconds:     int(spec.MaxDeferAge / time.Second),
 		})
 		if err != nil {
 			return results, fmt.Errorf("schedule %q: %w", spec.Name, err)

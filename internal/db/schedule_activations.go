@@ -14,6 +14,8 @@ import (
 // coalescing on Postgres. SQLite already serializes writers with BEGIN IMMEDIATE.
 const scheduleActivationLockKey int64 = 0x41435456 // "ACTV"
 
+var ErrScheduleActivationBusy = errors.New("schedule activation is already running or repairing")
+
 type ScheduleActivation struct {
 	ID                     int64      `json:"id"`
 	AppID                  *int64     `json:"app_id"`
@@ -23,12 +25,16 @@ type ScheduleActivation struct {
 	ScheduleRunID          *int64     `json:"schedule_run_id"`
 	Action                 string     `json:"action"`
 	MinRollIntervalSeconds int        `json:"min_roll_interval_seconds"`
+	RollFallback           string     `json:"roll_fallback"`
+	MaxDeferAgeSeconds     int        `json:"max_defer_age_seconds"`
 	TargetGeneration       int64      `json:"target_generation"`
 	Status                 string     `json:"status"`
 	Phase                  string     `json:"phase"`
 	DueAt                  time.Time  `json:"due_at"`
 	DeferReason            string     `json:"defer_reason,omitempty"`
 	Attempts               int        `json:"attempts"`
+	CapacityDeferrals      int        `json:"capacity_deferrals"`
+	CapacityDeferredAt     *time.Time `json:"capacity_deferred_at,omitempty"`
 	SurgeIndex             int        `json:"surge_index"`
 	NextSlot               int        `json:"next_slot"`
 	LastError              string     `json:"last_error,omitempty"`
@@ -48,7 +54,8 @@ type CompleteScheduleRunParams struct {
 
 const activationColumns = `
 id, app_id, app_slug, schedule_id, schedule_name, schedule_run_id, action, min_roll_interval_seconds,
-target_generation, status, phase, due_at, defer_reason, attempts, surge_index,
+roll_fallback, max_defer_age_seconds, target_generation, status, phase, due_at, defer_reason, attempts,
+capacity_deferrals, capacity_deferred_at, surge_index,
 next_slot, last_error, superseded_by_id, created_at, updated_at, started_at, finished_at`
 
 // CompleteScheduleRunAndEnqueueActivation is the transactional outbox boundary
@@ -68,17 +75,19 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 		}
 	}()
 
-	var currentStatus, action, appSlug, scheduleName string
+	var currentStatus, action, appSlug, scheduleName, rollFallback string
 	var scheduleID, appID int64
-	var minInterval int
+	var minInterval, maxDeferAge int
 	err = tx.QueryRowContext(ctx, `
 		SELECT r.status, r.on_success, r.min_roll_interval_seconds,
+		       r.roll_fallback, r.max_defer_age_seconds,
 		       r.schedule_id, sc.name, sc.app_id, a.slug
 		FROM schedule_runs r
 		JOIN app_schedules sc ON sc.id = r.schedule_id
 		JOIN apps a ON a.id = sc.app_id
 		WHERE r.id = ?`, p.RunID).Scan(
-		&currentStatus, &action, &minInterval, &scheduleID, &scheduleName, &appID, &appSlug,
+		&currentStatus, &action, &minInterval, &rollFallback, &maxDeferAge,
+		&scheduleID, &scheduleName, &appID, &appSlug,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -176,10 +185,12 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO schedule_activations
 			(app_id, app_slug, schedule_id, schedule_name, schedule_run_id, action,
-			 min_roll_interval_seconds, target_generation, status, phase, due_at)
-		VALUES (?, ?, ?, ?, ?, 'roll', ?, ?, ?, 'pending', ?)
+			 min_roll_interval_seconds, roll_fallback, max_defer_age_seconds,
+			 target_generation, status, phase, due_at)
+		VALUES (?, ?, ?, ?, ?, 'roll', ?, ?, ?, ?, ?, 'pending', ?)
 		RETURNING id`,
-		appID, appSlug, scheduleID, scheduleName, p.RunID, minInterval, generation, activationStatus, dueAt,
+		appID, appSlug, scheduleID, scheduleName, p.RunID, minInterval, rollFallback,
+		maxDeferAge, generation, activationStatus, dueAt,
 	).Scan(&activationID)
 	if err != nil {
 		return nil, fmt.Errorf("complete schedule run: enqueue activation: %w", err)
@@ -207,6 +218,56 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 
 func (s *Store) GetScheduleActivation(id int64) (*ScheduleActivation, error) {
 	return scanScheduleActivation(s.db.QueryRow(`SELECT `+activationColumns+` FROM schedule_activations WHERE id = ?`, id))
+}
+
+// CancelQueuedScheduleActivation terminalizes the newest still-nondestructive
+// activation for a schedule. Running or repairing work may own live runtime
+// identity and must finish recovery instead of being erased by cancellation.
+func (s *Store) CancelQueuedScheduleActivation(scheduleID int64, finishedAt time.Time) (*ScheduleActivation, error) {
+	ctx := context.Background()
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), scheduleActivationLockKey)
+	if err != nil {
+		return nil, fmt.Errorf("cancel schedule activation: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	var id int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM schedule_activations
+		WHERE schedule_id = ? AND status IN ('pending', 'deferred_interval', 'deferred_capacity')
+		ORDER BY id DESC LIMIT 1`, scheduleID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		var busy int
+		if countErr := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM schedule_activations
+			WHERE schedule_id = ? AND status IN ('running', 'repairing')`, scheduleID).Scan(&busy); countErr != nil {
+			return nil, fmt.Errorf("cancel schedule activation: inspect state: %w", countErr)
+		}
+		if busy > 0 {
+			return nil, ErrScheduleActivationBusy
+		}
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cancel schedule activation: select: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schedule_activations
+		SET status = 'cancelled', phase = 'complete', defer_reason = '', last_error = '',
+		    finished_at = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status IN ('pending', 'deferred_interval', 'deferred_capacity')`, finishedAt, id); err != nil {
+		return nil, fmt.Errorf("cancel schedule activation: update: %w", err)
+	}
+	a, err := getActivationTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("cancel schedule activation: commit: %w", err)
+	}
+	committed = true
+	return a, nil
 }
 
 func (s *Store) ListScheduleActivationsByApp(appID int64, limit int) ([]*ScheduleActivation, error) {
@@ -268,7 +329,8 @@ func (s *Store) LatestScheduleActivationsByApp(appID int64) ([]*ScheduleActivati
 func prefixedActivationColumns(alias string) string {
 	columns := []string{
 		"id", "app_id", "app_slug", "schedule_id", "schedule_name", "schedule_run_id", "action", "min_roll_interval_seconds",
-		"target_generation", "status", "phase", "due_at", "defer_reason", "attempts", "surge_index",
+		"roll_fallback", "max_defer_age_seconds", "target_generation", "status", "phase", "due_at", "defer_reason", "attempts",
+		"capacity_deferrals", "capacity_deferred_at", "surge_index",
 		"next_slot", "last_error", "superseded_by_id", "created_at", "updated_at", "started_at", "finished_at",
 	}
 	for i := range columns {
@@ -349,7 +411,7 @@ func (s *Store) UpdateScheduleActivationProgress(id int64, phase string, surgeIn
 	return nil
 }
 
-func (s *Store) DeferScheduleActivation(id int64, status, reason string, dueAt time.Time) error {
+func (s *Store) DeferScheduleActivation(id int64, status, reason string, dueAt, deferredAt time.Time) error {
 	if status != "deferred_interval" && status != "deferred_capacity" && status != "pending" && status != "repairing" {
 		return fmt.Errorf("defer schedule activation: invalid status %q", status)
 	}
@@ -360,12 +422,19 @@ func (s *Store) DeferScheduleActivation(id int64, status, reason string, dueAt t
 	if status == "deferred_capacity" {
 		attemptIncrement = 0
 	}
+	capacityIncrement := 0
+	if status == "deferred_capacity" {
+		capacityIncrement = 1
+	}
 	res, err := s.db.Exec(`UPDATE schedule_activations
 		SET status = ?, phase = CASE WHEN ? = 'repairing' THEN phase ELSE 'pending' END,
 		    due_at = ?, defer_reason = ?,
-		    attempts = attempts + ?,
+		    attempts = attempts + ?, capacity_deferrals = capacity_deferrals + ?,
+		    capacity_deferred_at = CASE WHEN ? = 'deferred_capacity'
+		        THEN COALESCE(capacity_deferred_at, ?) ELSE capacity_deferred_at END,
 		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND status = 'running'`, status, status, dueAt, reason, attemptIncrement, id)
+		WHERE id = ? AND status = 'running'`, status, status, dueAt, reason,
+		attemptIncrement, capacityIncrement, status, deferredAt, id)
 	if err != nil {
 		return fmt.Errorf("defer schedule activation: %w", err)
 	}
@@ -375,7 +444,7 @@ func (s *Store) DeferScheduleActivation(id int64, status, reason string, dueAt t
 	return nil
 }
 
-func (s *Store) FinishScheduleActivation(id int64, status, lastError string, finishedAt time.Time) error {
+func (s *Store) FinishScheduleActivation(id int64, status, lastError string, finishedAt time.Time, countAttempt bool) error {
 	switch status {
 	case "succeeded", "failed", "not_needed", "blocked_unsupported", "target_deleted":
 	default:
@@ -403,11 +472,15 @@ func (s *Store) FinishScheduleActivation(id int64, status, lastError string, fin
 	} else if err != nil {
 		return fmt.Errorf("finish schedule activation: load audit snapshot: %w", err)
 	}
+	attemptIncrement := 0
+	if countAttempt {
+		attemptIncrement = 1
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE schedule_activations
 		SET status = ?, phase = 'complete', last_error = ?, finished_at = ?,
-		    attempts = attempts + 1,
+		    attempts = attempts + ?,
 		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND status = 'running'`, status, lastError, finishedAt, id)
+		WHERE id = ? AND status = 'running'`, status, lastError, finishedAt, attemptIncrement, id)
 	if err != nil {
 		return fmt.Errorf("finish schedule activation: %w", err)
 	}
@@ -532,7 +605,7 @@ func (s *Store) PruneScheduleActivations(keepTerminalPerSchedule int) (int64, er
 				) AS terminal_rank
 				FROM schedule_activations
 				WHERE status IN (
-					'succeeded', 'failed', 'superseded', 'not_needed',
+					'succeeded', 'failed', 'cancelled', 'superseded', 'not_needed',
 					'blocked_unsupported', 'target_deleted'
 				)
 			) ranked
@@ -577,8 +650,9 @@ func (s *Store) UpsertActivationReplica(p UpsertReplicaParams, generation, activ
 	_, err := s.db.Exec(`
 		INSERT INTO replicas (app_id, idx, pid, port, status, provider, tier,
 		                      endpoint_url, worker_id, app_version, desired_state,
-		                      deployment_id, data_generation, activation_id, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`)
+		                      deployment_id, data_generation, activation_id,
+		                      startup_peak_rss_bytes, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`)
 		ON CONFLICT(app_id, idx) DO UPDATE SET
 			pid = excluded.pid, port = excluded.port, status = excluded.status,
 			provider = excluded.provider, tier = excluded.tier,
@@ -586,10 +660,12 @@ func (s *Store) UpsertActivationReplica(p UpsertReplicaParams, generation, activ
 			app_version = excluded.app_version, desired_state = excluded.desired_state,
 			deployment_id = excluded.deployment_id,
 			data_generation = excluded.data_generation, activation_id = excluded.activation_id,
+			startup_peak_rss_bytes = CASE WHEN excluded.startup_peak_rss_bytes > 0
+				THEN excluded.startup_peak_rss_bytes ELSE replicas.startup_peak_rss_bytes END,
 			updated_at = excluded.updated_at`,
 		p.AppID, p.Index, p.PID, p.Port, p.Status, p.Provider, p.Tier,
 		p.EndpointURL, p.WorkerID, p.AppVersion, desired, p.DeploymentID,
-		generation, activationID,
+		generation, activationID, p.StartupPeakRSSBytes,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert activation replica: %w", err)
@@ -644,11 +720,11 @@ func getActivationTx(ctx context.Context, tx writeTx, id int64) (*ScheduleActiva
 func scanScheduleActivation(row rowScanner) (*ScheduleActivation, error) {
 	var a ScheduleActivation
 	var appID, scheduleID, runID, superseded sql.NullInt64
-	var started, finished sql.NullTime
+	var capacityDeferred, started, finished sql.NullTime
 	err := row.Scan(
 		&a.ID, &appID, &a.AppSlug, &scheduleID, &a.ScheduleName, &runID, &a.Action, &a.MinRollIntervalSeconds,
-		&a.TargetGeneration, &a.Status, &a.Phase, &a.DueAt, &a.DeferReason,
-		&a.Attempts, &a.SurgeIndex, &a.NextSlot, &a.LastError, &superseded,
+		&a.RollFallback, &a.MaxDeferAgeSeconds, &a.TargetGeneration, &a.Status, &a.Phase, &a.DueAt, &a.DeferReason,
+		&a.Attempts, &a.CapacityDeferrals, &capacityDeferred, &a.SurgeIndex, &a.NextSlot, &a.LastError, &superseded,
 		&a.CreatedAt, &a.UpdatedAt, &started, &finished,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -672,6 +748,10 @@ func scanScheduleActivation(row rowScanner) (*ScheduleActivation, error) {
 	if superseded.Valid {
 		v := superseded.Int64
 		a.SupersededByID = &v
+	}
+	if capacityDeferred.Valid {
+		v := capacityDeferred.Time
+		a.CapacityDeferredAt = &v
 	}
 	if started.Valid {
 		v := started.Time
