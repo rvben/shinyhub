@@ -103,6 +103,37 @@ def test_choice_restore_canonicalises_multiple_values_to_display_order():
     assert values_equal(result.value, ("A", "C"))
 
 
+@pytest.mark.parametrize(
+    ("saved", "current"),
+    [
+        (None, None),
+        (["C", "A"], ("A", "C")),
+    ],
+)
+def test_restore_adjustments_ignore_equivalent_multiple_choice_values(
+    saved, current
+):
+    registered = _normalise_fields(
+        {
+            "products": Field(
+                "Products",
+                restore=ChoiceRestore(choices=["A", "B", "C"]),
+            )
+        },
+        resolve=lambda value: value,
+    )
+
+    adjustments, updates = _restore_adjustments(
+        state_input={"products": saved},
+        registered=registered,
+        current_values={"products": current},
+        legacy_fields={},
+    )
+
+    assert not adjustments
+    assert updates == {}
+
+
 def test_values_equal_treats_list_and_tuple_transport_as_equivalent():
     assert values_equal(["A", "B"], ("A", "B"))
 
