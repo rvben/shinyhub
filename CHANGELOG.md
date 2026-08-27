@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.10](https://github.com/rvben/shinyhub/compare/v0.12.9...v0.12.10) - 2026-08-27
+
+### Added
+
+- **bookmarks**: present bookmarks as view links ([db2d895](https://github.com/rvben/shinyhub/commit/db2d895c2cce0ebba4b576d0739df4d426feef1b))
+
+### Fixed
+
+- **appnav**: show friendly app name ([a476c1d](https://github.com/rvben/shinyhub/commit/a476c1dce13d9edb0173806a976c882862123174))
+- **bookmarks**: enforce safe registration lifecycle ([3019ba2](https://github.com/rvben/shinyhub/commit/3019ba2a834a403dd6f8343b385271735670572a))
+- **bookmarks**: harden restore comparisons ([ad599c5](https://github.com/rvben/shinyhub/commit/ad599c59361f3fedba425541dc577cd9081e2c53))
+- **bookmarks**: normalize temporal restore values ([0c648af](https://github.com/rvben/shinyhub/commit/0c648af8685830e6e76f99d7244d92223bf516ac))
+
 ## Unreleased
 
 ## [0.12.9](https://github.com/rvben/shinyhub/compare/v0.12.8...v0.12.9) - 2026-08-27
