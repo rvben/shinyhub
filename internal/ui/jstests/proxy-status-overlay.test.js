@@ -21,10 +21,12 @@ if (!source.includes('shiny-disconnected-overlay')) {
 const SHINY_ID = 'shiny-disconnected-overlay';
 const OWN_ID = 'shinyhub-status-overlay';
 const OPEN_ID = 'shinyhub-status-open';
-const SNAPSHOT_ID = 'shinyhub-status-snapshot';
 const RELOAD_ID = 'shinyhub-status-reload';
 const RESTART_ID = 'shinyhub-status-restart';
+const DOT_ID = 'shinyhub-status-dot';
 const READY_URL = '/app/demo/.shinyhub/ready';
+const SESSION_EVENT = 'shinyhub:session-status';
+const SESSION_OWNER_EVENT = 'shinyhub:session-status-owner';
 
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -36,7 +38,10 @@ const flush = () => new Promise((r) => setImmediate(r));
 // fetch and the timers are the only things replaced. They are the script's two
 // windows onto the outside world, and controlling them is what lets a 60-second
 // retry budget be spent in a millisecond.
-function mount({ statuses = [], pollMs = 3000, maxPolls = 20, attrs = {}, preMarker = false } = {}) {
+function mount({
+  statuses = [], pollMs = 3000, maxPolls = 20, attrs = {}, preMarker = false,
+  claimSnapshot = false,
+} = {}) {
   const jsdomErrors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('jsdomError', (e) => jsdomErrors.push(e.message));
@@ -48,6 +53,13 @@ function mount({ statuses = [], pollMs = 3000, maxPolls = 20, attrs = {}, preMar
   });
   const w = dom.window;
   const d = w.document;
+  const sessionEvents = [];
+  w.addEventListener(SESSION_EVENT, (event) => {
+    sessionEvents.push(event.detail);
+    if (claimSnapshot && event.detail && event.detail.state === 'snapshot') {
+      event.preventDefault();
+    }
+  });
 
   const fetches = [];
   const queue = statuses.slice();
@@ -100,6 +112,7 @@ function mount({ statuses = [], pollMs = 3000, maxPolls = 20, attrs = {}, preMar
     fetches,
     timers,
     jsdomErrors,
+    sessionEvents,
     overlay,
     // disconnect reproduces what Shiny's client does on a socket close.
     async disconnect({ reloading = false } = {}) {
@@ -129,7 +142,6 @@ function mount({ statuses = [], pollMs = 3000, maxPolls = 20, attrs = {}, preMar
     message: () => (overlay() ? overlay().querySelector('p').textContent : null),
     button: () => el(`#${RELOAD_ID}`),
     openLink: () => el(`#${OPEN_ID}`),
-    snapshotButton: () => el(`#${SNAPSHOT_ID}`),
     restartButton: () => el(`#${RESTART_ID}`),
     actionVisible: (id) => {
       const action = el(`#${id}`);
@@ -143,6 +155,7 @@ function mount({ statuses = [], pollMs = 3000, maxPolls = 20, attrs = {}, preMar
       const s = el('#shinyhub-status-spinner');
       return !!s && s.style.display !== 'none';
     },
+    statusDot: () => el(`#${DOT_ID}`),
   };
 }
 
@@ -218,16 +231,20 @@ test('a recovered app offers a new session while preserving the old results', as
   assert.match(h.title(), /Connection interrupted/);
 
   await h.fireTimer();
-  assert.match(h.title(), /available again/);
+  assert.equal(h.title(), 'This session was interrupted');
   assert.equal(h.spinnerVisible(), false, 'the wait is over');
+  assert.equal(h.statusDot().style.background, 'rgb(251, 191, 36)', 'interruption uses the amber warning state');
+  assert.match(h.statusDot().style.animation, /shinyhub-ready-pulse/, 'the decision state announces its arrival');
+  assert.doesNotMatch(h.statusDot().style.animation, /infinite/, 'the arrival pulse must settle');
   assert.equal(h.buttonVisible(), false, 'the ambiguous generic reload action is gone');
-  assert.match(h.message(), /previous session is still disconnected/, 'service and session recovery are distinct');
+  assert.match(h.message(), /Use a new tab to keep these results available/, 'the safe action explains its consequence');
   assert.equal(h.actionVisible(OPEN_ID), true, 'a safe new-session path is primary');
-  assert.equal(h.openLink().textContent, 'Open new session');
+  assert.equal(h.openLink().textContent, 'Start in a new tab');
+  assert.equal(h.openLink().getAttribute('aria-label'), 'Start a new app session in a new tab');
   assert.equal(h.openLink().target, '_blank', 'the new session preserves this tab');
   assert.match(h.openLink().rel, /noopener/, 'the new tab cannot retain an opener');
-  assert.equal(h.actionVisible(SNAPSHOT_ID), true, 'the preserved results can be inspected');
   assert.equal(h.actionVisible(RESTART_ID), true, 'same-tab restart remains available');
+  assert.equal(h.restartButton().textContent, 'Start in this tab');
   assert.equal(h.document.activeElement, h.openLink(), 'focus moves to the safest recovery action');
   assert.equal(h.timers.length, 0, 'recovery is terminal: no further polling');
 });
@@ -236,7 +253,9 @@ test('previous results become an explicit non-blocking offline snapshot', async 
   const h = mount({ statuses: [200] });
   await h.disconnect();
 
-  h.snapshotButton().click();
+  h.overlay().dispatchEvent(new h.window.MouseEvent('click', {
+    bubbles: true, cancelable: true,
+  }));
   await flush();
 
   assert.match(h.title(), /Previous results/);
@@ -248,7 +267,35 @@ test('previous results become an explicit non-blocking offline snapshot', async 
   assert.equal(h.document.getElementById(SHINY_ID).getAttribute('aria-hidden'), 'true');
   assert.equal(h.document.getElementById('app-root').textContent, 'app', 'the prior results remain in place');
   assert.equal(h.actionVisible(OPEN_ID), true, 'continuation stays available from snapshot mode');
-  assert.equal(h.actionVisible(SNAPSHOT_ID), false, 'the completed snapshot action is removed');
+});
+
+test('the app switcher can claim the snapshot without duplicating the fallback card', async () => {
+  const h = mount({ statuses: [200], claimSnapshot: true });
+  await h.disconnect();
+
+  h.overlay().dispatchEvent(new h.window.MouseEvent('click', {
+    bubbles: true, cancelable: true,
+  }));
+  await flush();
+
+  assert.equal(h.sessionEvents.length, 1);
+  assert.equal(h.sessionEvents[0].state, 'snapshot');
+  assert.equal(h.sessionEvents[0].url, 'http://host/app/demo/');
+  assert.equal(h.sessionEvents[0].focus, true);
+  assert.equal(h.overlay().style.display, 'none', 'the claimed snapshot still rendered a second status card');
+  assert.equal(h.document.getElementById(SHINY_ID).style.display, 'none', 'the old results stayed obscured');
+
+  h.window.dispatchEvent(new h.window.CustomEvent(SESSION_OWNER_EVENT, {
+    detail: { owner: 'overlay' },
+  }));
+  assert.equal(h.overlay().style.display, 'block', 'dismissing the switcher did not restore the fallback');
+
+  h.window.dispatchEvent(new h.window.CustomEvent(SESSION_OWNER_EVENT, {
+    detail: { owner: 'switcher' },
+  }));
+  assert.equal(h.overlay().style.display, 'none', 'restoring the switcher left the fallback visible');
+  assert.equal(h.sessionEvents.length, 2, 'the switcher was not offered the snapshot again');
+  assert.equal(h.sessionEvents[1].focus, false, 'restoring chrome unexpectedly moved focus');
 });
 
 test('the recovered decision traps focus and Escape reveals the snapshot', async () => {
@@ -272,14 +319,56 @@ test('the recovered decision traps focus and Escape reveals the snapshot', async
   assert.equal(h.document.activeElement, h.overlay(), 'focus follows the newly revealed snapshot status');
 });
 
+test('clicking the recovered backdrop reveals the snapshot without discarding status', async () => {
+  const h = mount({ statuses: [200] });
+  await h.disconnect();
+
+  const card = h.overlay().firstElementChild;
+  card.dispatchEvent(new h.window.MouseEvent('click', {
+    bubbles: true, cancelable: true,
+  }));
+  assert.equal(h.overlay().classList.contains('is-snapshot'), false, 'clicking the decision card must not dismiss it');
+
+  h.overlay().dispatchEvent(new h.window.MouseEvent('click', {
+    bubbles: true, cancelable: true,
+  }));
+  await flush();
+
+  assert.match(h.overlay().className, /is-snapshot/, 'the backdrop chooses the non-destructive exit');
+  assert.match(h.title(), /Previous results/, 'the dismissed decision remains visible as status');
+  assert.equal(h.document.getElementById(SHINY_ID).style.display, 'none', 'the prior results become inspectable');
+  assert.equal(h.statusDot().style.animation, '', 'the arrival pulse settles in snapshot mode');
+});
+
+test('waiting and error overlays ignore backdrop clicks', async () => {
+  const waiting = mount({ statuses: [503] });
+  await waiting.disconnect();
+  waiting.overlay().dispatchEvent(new waiting.window.MouseEvent('click', {
+    bubbles: true, cancelable: true,
+  }));
+  assert.match(waiting.title(), /Connection interrupted/);
+  assert.equal(waiting.overlay().getAttribute('aria-modal'), 'true');
+
+  const error = mount({ statuses: [404] });
+  await error.disconnect();
+  error.overlay().dispatchEvent(new error.window.MouseEvent('click', {
+    bubbles: true, cancelable: true,
+  }));
+  assert.match(error.title(), /no longer available/);
+  assert.equal(error.overlay().getAttribute('aria-modal'), 'true');
+});
+
 test('a genuine reconnect also clears an already-revealed snapshot', async () => {
   const h = mount({ statuses: [200] });
   await h.disconnect();
-  h.snapshotButton().click();
+  h.overlay().dispatchEvent(new h.window.MouseEvent('click', {
+    bubbles: true, cancelable: true,
+  }));
   assert.ok(h.overlay(), 'precondition: snapshot banner is visible');
 
   await h.reconnect();
   assert.equal(h.overlay(), null, 'a live reconnection removes the stale-state banner');
+  assert.equal(h.sessionEvents.at(-1).state, 'connected', 'the switcher was left showing a stale status');
 });
 
 test('a deleted app is terminal, not a slow restart', async () => {
@@ -319,7 +408,7 @@ test('a failed fetch counts as a miss, not as a crash', async () => {
 
   await h.fireTimer();
   await h.fireTimer();
-  assert.match(h.title(), /available again/, 'it recovers once the probe answers');
+  assert.equal(h.title(), 'This session was interrupted', 'it recovers once the probe answers');
 });
 
 test('a page that already carries the marker is handled on arrival', async () => {
@@ -370,5 +459,6 @@ test('the script never throws into the host page', async () => {
 
 test('motion and keyboard focus have explicit accessible fallbacks', () => {
   assert.match(source, /prefers-reduced-motion:\s*reduce/, 'the spinner must yield to reduced-motion preferences');
+  assert.match(source, /shinyhub-status-spinner, #" \+ DOT_ID/, 'the status pulse must also yield to reduced-motion preferences');
   assert.match(source, /:focus-visible/, 'actions need a visible keyboard focus treatment');
 });

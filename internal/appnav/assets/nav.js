@@ -43,6 +43,8 @@
   var LEGACY_POSITION_KEY = POSITION_KEY + ":";
   var FILTER_THRESHOLD = 8;
   var POSITIONS = ["top-center", "top-right", "left-center", "right-center"];
+  var SESSION_EVENT = "shinyhub:session-status";
+  var SESSION_OWNER_EVENT = "shinyhub:session-status-owner";
 
   var tag = document.currentScript || document.getElementById(TAG_ID);
   if (!tag) {
@@ -304,7 +306,8 @@
       "  --sh-deep: #030510; --sh-surface: #0E1426; --sh-raised: #141B32;" +
       "  --sh-hover: #1B2444; --sh-line: #1E2A4A; --sh-line-strong: #2B3A63;" +
       "  --sh-text: #E8EEFF; --sh-soft: #A8B4D4; --sh-muted: #6B7AA3;" +
-      "  --sh-signal: #38BDF8; --sh-coral: #F87171;" +
+      "  --sh-signal: #38BDF8; --sh-coral: #F87171; --sh-warning: #FBBF24;" +
+      "  --sh-warning-soft: #FDE68A; --sh-warning-deep: #2A2110;" +
       "  --sh-r-sm: 4px; --sh-r-md: 8px; --sh-r-lg: 14px; --sh-r-pill: 99px;" +
       "  position: fixed; inset: 0; z-index: 2147483646;" +
       "  font-family: Manrope, -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', sans-serif;" +
@@ -329,6 +332,10 @@
     ".root[data-position='left-center'] .bar, .root[data-position='right-center'] .bar {" +
       "  width: 40px; height: 104px; flex-direction: column;" +
       "}",
+    ".root.session-snapshot[data-position='top-center'] .bar," +
+      " .root.session-snapshot[data-position='top-right'] .bar { width: min(304px, calc(100vw - 24px)); }",
+    ".root.session-snapshot[data-position='left-center'] .bar," +
+      " .root.session-snapshot[data-position='right-center'] .bar { height: 142px; }",
     ".control {" +
       "  appearance: none; -webkit-appearance: none; border: 0; margin: 0; padding: 0;" +
       "  height: 38px; display: flex; align-items: center; justify-content: center;" +
@@ -364,12 +371,32 @@
     ".current-action { display: block; color: var(--sh-soft); font-size: 12px; line-height: 1.2; }",
     ".root[data-position='left-center'] .current-meta, .root[data-position='right-center'] .current-meta," +
       " .root[data-position='left-center'] .chevron, .root[data-position='right-center'] .chevron { display: none; }",
+    ".root.session-snapshot .current-action { color: var(--sh-warning-soft); }",
     ".chevron { flex: none; transition: transform 140ms ease; }",
     ".root.open .chevron { transform: rotate(180deg); }",
     ".close { width: 32px; flex: none; color: var(--sh-muted); }",
     ".root[data-position='left-center'] .close, .root[data-position='right-center'] .close { width: 38px; height: 32px; }",
     ".close:hover { color: var(--sh-coral); background: var(--sh-raised); }",
     ".close svg { width: 13px; height: 13px; }",
+    ".session-trigger {" +
+      "  display: none; width: 38px; flex: none; color: var(--sh-warning);" +
+      "  border-right: 1px solid var(--sh-line);" +
+      "}",
+    ".root.session-snapshot .session-trigger { display: flex; }",
+    ".session-trigger:hover { color: var(--sh-warning-soft); background: var(--sh-warning-deep); }",
+    ".session-trigger:focus-visible { outline-color: var(--sh-warning); }",
+    ".session-glyph { position: relative; width: 18px; height: 18px; display: block; }",
+    ".session-glyph svg { width: 18px; height: 18px; }",
+    ".session-led {" +
+      "  position: absolute; right: -1px; bottom: -1px; width: 6px; height: 6px;" +
+      "  box-sizing: border-box; border-radius: 50%; background: var(--sh-warning);" +
+      "  box-shadow: 0 0 0 2px var(--sh-surface);" +
+      "}",
+    ".root[data-position='left-center'] .session-trigger," +
+      " .root[data-position='right-center'] .session-trigger {" +
+      "  width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line);" +
+      "}",
+
     ".scrim {" +
       "  position: absolute; inset: 0; background: var(--sh-deep); opacity: 0;" +
       "  pointer-events: none; transition: opacity 160ms ease;" +
@@ -402,6 +429,52 @@
     // who arrived by keyboard; a mouse click never draws it.
     ".panel:focus { outline: none; }",
     ".panel:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--sh-signal); }",
+
+    ".session-panel {" +
+      "  position: absolute; width: 340px; max-width: calc(100vw - 24px); box-sizing: border-box;" +
+      "  pointer-events: auto; overflow: hidden; color: var(--sh-text); background: var(--sh-surface);" +
+      "  border: 1px solid var(--sh-warning); border-radius: var(--sh-r-lg);" +
+      "  box-shadow: 0 28px 72px rgba(0,0,0,0.7);" +
+      "  opacity: 0; visibility: hidden; transform: translateY(-8px) scale(0.98);" +
+      "  transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 180ms;" +
+      "}",
+    ".root[data-position='top-center'] .session-panel { top: 60px; left: 50%; transform: translateX(-50%) translateY(-8px) scale(0.98); }",
+    ".root[data-position='top-right'] .session-panel { top: 60px; right: 12px; transform-origin: top right; }",
+    ".root[data-position='left-center'] .session-panel { top: 50%; left: 60px; transform: translateY(-50%) translateX(-8px) scale(0.98); transform-origin: left center; }",
+    ".root[data-position='right-center'] .session-panel { top: 50%; right: 60px; transform: translateY(-50%) translateX(8px) scale(0.98); transform-origin: right center; }",
+    ".root.session-open .session-panel { opacity: 1; visibility: visible; }",
+    ".root.session-open[data-position='top-center'] .session-panel { transform: translateX(-50%) translateY(0) scale(1); }",
+    ".root.session-open[data-position='top-right'] .session-panel { transform: translateY(0) scale(1); }",
+    ".root.session-open[data-position='left-center'] .session-panel," +
+      " .root.session-open[data-position='right-center'] .session-panel { transform: translateY(-50%) translateX(0) scale(1); }",
+    ".session-head {" +
+      "  min-height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 10px;" +
+      "  padding: 10px 10px 8px 14px; border-bottom: 1px solid var(--sh-line);" +
+      "}",
+    ".session-led-large { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--sh-warning); }",
+    ".session-title { flex: 1; font-size: 13px; font-weight: 700; color: var(--sh-warning-soft); }",
+    ".session-close {" +
+      "  width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center;" +
+      "  appearance: none; -webkit-appearance: none; border: 0; border-radius: var(--sh-r-sm);" +
+      "  color: var(--sh-muted); background: transparent; cursor: pointer;" +
+      "}",
+    ".session-close:hover { color: var(--sh-text); background: var(--sh-raised); }",
+    ".session-close:focus-visible { outline: 2px solid var(--sh-warning); outline-offset: -1px; }",
+    ".session-close svg { width: 14px; height: 14px; }",
+    ".session-body { padding: 14px; }",
+    ".session-copy { margin: 0; color: var(--sh-soft); font-size: 13px; line-height: 1.5; user-select: text; -webkit-user-select: text; }",
+    ".session-actions { display: flex; gap: 8px; margin-top: 14px; }",
+    ".session-primary, .session-restart {" +
+      "  min-height: 44px; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center;" +
+      "  margin: 0; padding: 9px 14px; border-radius: var(--sh-r-md); font: inherit;" +
+      "  font-size: 13px; font-weight: 700; line-height: 1.2; cursor: pointer; text-decoration: none;" +
+      "}",
+    ".session-primary { flex: 1; border: 0; color: var(--sh-deep); background: var(--sh-signal); }",
+    ".session-primary:hover { background: #7DD3FC; }",
+    ".session-restart { border: 1px solid var(--sh-line-strong); color: var(--sh-text); background: var(--sh-raised); }",
+    ".session-restart:hover { border-color: var(--sh-soft); background: var(--sh-hover); }",
+    ".session-primary:focus-visible, .session-restart:focus-visible { outline: 2px solid var(--sh-warning); outline-offset: 2px; }",
+    ".session-panel ::selection { color: var(--sh-deep); background: var(--sh-warning); }",
 
     ".head {" +
       "  display: flex; align-items: center; gap: 8px;" +
@@ -584,6 +657,7 @@
 
     "@media (max-width: 520px) {" +
       " .bar { width: min(240px, calc(100vw - 24px)); }" +
+      " .root.session-snapshot[data-position='top-center'] .bar, .root.session-snapshot[data-position='top-right'] .bar { width: min(280px, calc(100vw - 24px)); }" +
       " .root.compact[data-position='top-center'] .bar, .root.compact[data-position='top-right'] .bar { width: 140px; }" +
       " .root.compact[data-position='top-center'] .current-meta, .root.compact[data-position='top-right'] .current-meta," +
       " .root.compact[data-position='top-center'] .chevron, .root.compact[data-position='top-right'] .chevron { display: none; }" +
@@ -596,6 +670,13 @@
       " }" +
       " .root.open[data-position='top-center'] .panel, .root.open[data-position='top-right'] .panel," +
       " .root.open[data-position='left-center'] .panel, .root.open[data-position='right-center'] .panel { transform: none; }" +
+      " .session-panel, .root[data-position='top-center'] .session-panel, .root[data-position='top-right'] .session-panel," +
+      " .root[data-position='left-center'] .session-panel, .root[data-position='right-center'] .session-panel {" +
+      "   top: 60px; right: auto; left: 12px; width: calc(100vw - 24px); max-width: none; transform: translateY(-8px) scale(0.98); transform-origin: top center;" +
+      " }" +
+      " .root.session-open[data-position='top-center'] .session-panel, .root.session-open[data-position='top-right'] .session-panel," +
+      " .root.session-open[data-position='left-center'] .session-panel, .root.session-open[data-position='right-center'] .session-panel { transform: none; }" +
+      " .session-actions { flex-direction: column; }" +
       " .position-menu, .root[data-position='top-center'] .position-menu, .root[data-position='top-right'] .position-menu," +
       " .root[data-position='left-center'] .position-menu, .root[data-position='right-center'] .position-menu {" +
       "   top: 60px; right: 12px; left: auto; margin: 0;" +
@@ -603,7 +684,7 @@
       "}",
 
     "@media (prefers-reduced-motion: reduce) {" +
-      "  .panel, .scrim, .bar, .position-menu, .snap-guides, .guide, .chevron { transition: none; }" +
+      "  .panel, .session-panel, .scrim, .bar, .position-menu, .snap-guides, .guide, .chevron { transition: none; }" +
       "  .opening-spinner { animation: none; border-color: var(--sh-signal); }" +
       "}"
   ];
@@ -761,6 +842,19 @@
     "Switch apps, current app " + (currentLabel.textContent || currentSlug || "unknown")
   );
 
+  var sessionBtn = document.createElement("button");
+  sessionBtn.type = "button";
+  sessionBtn.className = "control session-trigger";
+  sessionBtn.setAttribute("aria-label", "Offline snapshot options");
+  sessionBtn.setAttribute("aria-haspopup", "dialog");
+  sessionBtn.setAttribute("aria-expanded", "false");
+  sessionBtn.setAttribute("aria-controls", TAG_ID + "-session-panel");
+  sessionBtn.title = "Offline snapshot";
+  var sessionGlyph = div("session-glyph");
+  sessionGlyph.appendChild(svg(["M5 2h7l4 4v12H5z", "M12 2v5h4", "M8 11h5", "M8 14h3"], 20));
+  sessionGlyph.appendChild(div("session-led"));
+  sessionBtn.appendChild(sessionGlyph);
+
   var closeBtn = document.createElement("button");
   closeBtn.type = "button";
   closeBtn.className = "control close";
@@ -773,6 +867,7 @@
 
   bar.appendChild(moveBtn);
   bar.appendChild(openBtn);
+  bar.appendChild(sessionBtn);
   bar.appendChild(closeBtn);
 
   var positionMenu = div("position-menu");
@@ -868,6 +963,46 @@
   panel.appendChild(list);
   panel.appendChild(foot);
 
+  var sessionPanel = div("session-panel");
+  sessionPanel.id = TAG_ID + "-session-panel";
+  sessionPanel.setAttribute("role", "dialog");
+  sessionPanel.setAttribute("aria-labelledby", TAG_ID + "-session-title");
+  sessionPanel.setAttribute("aria-describedby", TAG_ID + "-session-copy");
+  sessionPanel.setAttribute("aria-hidden", "true");
+  var sessionHead = div("session-head");
+  sessionHead.appendChild(div("session-led-large"));
+  var sessionTitle = div("session-title", "Offline snapshot");
+  sessionTitle.id = TAG_ID + "-session-title";
+  sessionHead.appendChild(sessionTitle);
+  var sessionClose = document.createElement("button");
+  sessionClose.type = "button";
+  sessionClose.className = "session-close";
+  sessionClose.setAttribute("aria-label", "Close offline snapshot options");
+  sessionClose.title = "Close";
+  sessionClose.appendChild(svg(["M4 4l12 12", "M16 4L4 16"], 20));
+  sessionHead.appendChild(sessionClose);
+  var sessionBody = div("session-body");
+  var sessionCopy = document.createElement("p");
+  sessionCopy.className = "session-copy";
+  sessionCopy.id = TAG_ID + "-session-copy";
+  sessionCopy.textContent = "These results may be out of date. Controls no longer update.";
+  var sessionActions = div("session-actions");
+  var sessionPrimary = document.createElement("a");
+  sessionPrimary.className = "session-primary";
+  sessionPrimary.href = window.location.href;
+  sessionPrimary.target = "_blank";
+  sessionPrimary.rel = "noopener";
+  sessionPrimary.textContent = "Start in a new tab";
+  var sessionRestart = document.createElement("button");
+  sessionRestart.type = "button";
+  sessionRestart.className = "session-restart";
+  sessionRestart.textContent = "Start in this tab";
+  sessionActions.appendChild(sessionPrimary);
+  sessionActions.appendChild(sessionRestart);
+  sessionBody.appendChild(sessionCopy);
+  sessionBody.appendChild(sessionActions);
+  sessionPanel.appendChild(sessionHead);
+  sessionPanel.appendChild(sessionBody);
   // This status sits outside the panel's aria-busy subtree, so assistive
   // technology announces a switch immediately rather than waiting for the
   // destination page to finish loading.
@@ -877,6 +1012,7 @@
   announcer.setAttribute("aria-atomic", "true");
   root.appendChild(scrim);
   root.appendChild(panel);
+  root.appendChild(sessionPanel);
   root.appendChild(announcer);
   root.appendChild(positionMenu);
   root.appendChild(snapGuides);
@@ -897,6 +1033,8 @@
   var lastFocus = null;
   var compactTimer = null;
   var navigating = false;
+  var snapshotActive = false;
+  var sessionOpen = false;
 
   function mobileViewport() {
     try {
@@ -912,7 +1050,12 @@
       compactTimer = null;
     }
     root.classList.remove("compact");
-    if (!schedule || !mobileViewport() || root.classList.contains("dismissed")) {
+    if (
+      !schedule ||
+      !mobileViewport() ||
+      snapshotActive ||
+      root.classList.contains("dismissed")
+    ) {
       return;
     }
     compactTimer = window.setTimeout(
@@ -921,6 +1064,8 @@
         if (
           mobileViewport() &&
           !open &&
+          !sessionOpen &&
+          !snapshotActive &&
           !placing &&
           !drag &&
           !root.classList.contains("dismissed") &&
@@ -1328,16 +1473,76 @@
     }
   });
 
+  function setSessionOpen(next, returnFocus) {
+    next = !!next && snapshotActive && !root.classList.contains("dismissed");
+    if (sessionOpen === next) {
+      return;
+    }
+    sessionOpen = next;
+    if (sessionOpen) {
+      setOpen(false);
+      setPlacing(false);
+      revealBar(false);
+    }
+    root.classList.toggle("session-open", sessionOpen);
+    sessionPanel.setAttribute("aria-hidden", sessionOpen ? "false" : "true");
+    sessionBtn.setAttribute("aria-expanded", sessionOpen ? "true" : "false");
+    if (sessionOpen) {
+      sessionPrimary.focus();
+    } else {
+      revealBar(true);
+      if (returnFocus !== false && snapshotActive) {
+        sessionBtn.focus();
+      }
+    }
+  }
+
+  function setSnapshotActive(next) {
+    snapshotActive = !!next;
+    root.classList.toggle("session-snapshot", snapshotActive);
+    currentAction.textContent = snapshotActive ? "Offline snapshot" : "Switch app";
+    if (!snapshotActive) {
+      setSessionOpen(false, false);
+    }
+    revealBar(!snapshotActive);
+  }
+
+  function offerSessionOwner(owner) {
+    if (typeof window.CustomEvent !== "function") {
+      return;
+    }
+    window.dispatchEvent(
+      new window.CustomEvent(SESSION_OWNER_EVENT, { detail: { owner: owner } })
+    );
+  }
+
   openBtn.addEventListener("click", guard(function () {
+    setSessionOpen(false, false);
     setOpen(!open);
   }));
 
+  sessionBtn.addEventListener("click", guard(function () {
+    setSessionOpen(!sessionOpen);
+  }));
+
+  sessionClose.addEventListener("click", guard(function () {
+    setSessionOpen(false);
+  }));
+
+  sessionRestart.addEventListener("click", guard(function () {
+    window.location.reload();
+  }));
+
   closeBtn.addEventListener("click", guard(function () {
+    setSessionOpen(false, false);
     setOpen(false);
     setPlacing(false);
     rememberDismissal(true);
     root.classList.add("dismissed");
     restoreBtn.focus();
+    if (snapshotActive) {
+      offerSessionOwner("overlay");
+    }
   }));
 
   restoreBtn.addEventListener("click", guard(function () {
@@ -1345,6 +1550,9 @@
     root.classList.remove("dismissed");
     revealBar(true);
     openBtn.focus();
+    if (snapshotActive) {
+      offerSessionOwner("switcher");
+    }
   }));
 
   moveBtn.addEventListener("click", guard(function () {
@@ -1352,6 +1560,7 @@
       suppressMoveClick = false;
       return;
     }
+    setSessionOpen(false, false);
     setPlacing(!placing);
     if (placing && positionButtons.length) {
       for (var i = 0; i < positionButtons.length; i++) {
@@ -1421,6 +1630,7 @@
       y: ev.clientY,
       moved: false
     };
+    setSessionOpen(false, false);
     setPlacing(false);
     setOpen(false);
     revealBar(false);
@@ -1493,6 +1703,26 @@
     revealBar(true);
   }));
   window.addEventListener("pageshow", guard(resetNavigation));
+  window.addEventListener(SESSION_EVENT, guard(function (ev) {
+    var detail = ev && ev.detail ? ev.detail : {};
+    if (detail.state === "connected") {
+      setSnapshotActive(false);
+      return;
+    }
+    if (detail.state !== "snapshot") {
+      return;
+    }
+    setSnapshotActive(true);
+    if (root.classList.contains("dismissed")) {
+      return;
+    }
+    if (ev.cancelable) {
+      ev.preventDefault();
+    }
+    if (detail.focus) {
+      sessionBtn.focus();
+    }
+  }));
 
   headClose.addEventListener("click", guard(function () {
     setOpen(false);
@@ -1516,6 +1746,11 @@
   // into our filter box, and we must not see theirs.
   root.addEventListener("keydown", guard(function (ev) {
     if (navigating) {
+      return;
+    }
+    if (sessionOpen && ev.key === "Escape") {
+      ev.stopPropagation();
+      setSessionOpen(false);
       return;
     }
     if (placing) {

@@ -29,6 +29,8 @@ const HOME_URL = 'https://hub.example.com/';
 const DISMISS_KEY = 'shinyhub-app-nav:dismissed';
 const POSITION_KEY = 'shinyhub-app-nav:position';
 const LEGACY_POSITION_KEY = 'shinyhub-app-nav:position:demo';
+const SESSION_EVENT = 'shinyhub:session-status';
+const SESSION_OWNER_EVENT = 'shinyhub:session-status-owner';
 
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -187,6 +189,75 @@ test('mounts a recognizable app bar into the page without fetching anything', as
   assert.equal(m.root().getAttribute('data-position'), 'top-right');
   assert.equal(m.fetches.length, 0);
   assert.equal(m.jsdomErrors.length, 0, `script errored: ${m.jsdomErrors.join('; ')}`);
+});
+
+test('an offline snapshot becomes a compact switcher status with explicit recovery actions', async () => {
+  const m = mount();
+  const status = new m.window.CustomEvent(SESSION_EVENT, {
+    cancelable: true,
+    detail: { state: 'snapshot', url: m.window.location.href, focus: true },
+  });
+
+  assert.equal(m.window.dispatchEvent(status), false, 'the visible switcher did not claim the snapshot');
+  assert.equal(status.defaultPrevented, true);
+  assert.ok(m.root().classList.contains('session-snapshot'));
+  assert.equal(m.q('.current-action').textContent, 'Offline snapshot');
+  assert.equal(m.q('button.session-trigger').getAttribute('aria-expanded'), 'false');
+  assert.equal(m.focused(), m.q('button.session-trigger'), 'focus did not follow the recovered snapshot');
+
+  m.q('button.session-trigger').click();
+  assert.ok(m.root().classList.contains('session-open'));
+  assert.equal(m.q('.session-panel').getAttribute('aria-hidden'), 'false');
+  assert.equal(m.q('.session-title').textContent, 'Offline snapshot');
+  assert.match(m.q('.session-copy').textContent, /out of date/);
+  assert.equal(m.q('a.session-primary').href, m.window.location.href);
+  assert.equal(m.q('a.session-primary').target, '_blank');
+  assert.match(m.q('a.session-primary').rel, /noopener/);
+  assert.equal(m.q('a.session-primary').textContent, 'Start in a new tab');
+  assert.equal(m.q('button.session-restart').textContent, 'Start in this tab');
+  assert.equal(m.focused(), m.q('a.session-primary'));
+});
+
+test('snapshot status closes with Escape and clears when the session reconnects', async () => {
+  const m = mount();
+  m.window.dispatchEvent(new m.window.CustomEvent(SESSION_EVENT, {
+    cancelable: true,
+    detail: { state: 'snapshot', url: m.window.location.href },
+  }));
+  const trigger = m.q('button.session-trigger');
+  trigger.click();
+
+  m.root().dispatchEvent(
+    new m.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true })
+  );
+  assert.equal(m.root().classList.contains('session-open'), false);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  assert.equal(m.focused(), trigger);
+
+  m.window.dispatchEvent(new m.window.CustomEvent(SESSION_EVENT, {
+    detail: { state: 'connected' },
+  }));
+  assert.equal(m.root().classList.contains('session-snapshot'), false);
+  assert.equal(m.q('.current-action').textContent, 'Switch app');
+});
+
+test('a dismissed switcher releases snapshot ownership and reclaims it when restored', () => {
+  const m = mount({ dismissed: true });
+  const owners = [];
+  m.window.addEventListener(SESSION_OWNER_EVENT, (event) => owners.push(event.detail.owner));
+  const status = new m.window.CustomEvent(SESSION_EVENT, {
+    cancelable: true,
+    detail: { state: 'snapshot', url: m.window.location.href },
+  });
+
+  assert.equal(m.window.dispatchEvent(status), true, 'a hidden switcher incorrectly suppressed the fallback');
+  assert.equal(status.defaultPrevented, false);
+  m.restoreBtn().click();
+  assert.deepEqual(owners, ['switcher']);
+  assert.ok(m.root().classList.contains('session-snapshot'));
+
+  m.closeBtn().click();
+  assert.deepEqual(owners, ['switcher', 'overlay']);
 });
 
 test('opening keeps the current label stable when the friendly name differs from the slug', async () => {

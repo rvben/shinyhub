@@ -35,9 +35,11 @@
   var TITLE_ID = "shinyhub-status-title";
   var MESSAGE_ID = "shinyhub-status-message";
   var OPEN_ID = "shinyhub-status-open";
-  var SNAPSHOT_ID = "shinyhub-status-snapshot";
   var RELOAD_ID = "shinyhub-status-reload";
   var RESTART_ID = "shinyhub-status-restart";
+  var DOT_ID = "shinyhub-status-dot";
+  var SESSION_EVENT = "shinyhub:session-status";
+  var SESSION_OWNER_EVENT = "shinyhub:session-status-owner";
 
   var tag = document.currentScript;
   if (!tag || typeof window.fetch !== "function" || !window.MutationObserver) {
@@ -144,12 +146,13 @@
       document.head.appendChild(style);
       var rules = [
         "@keyframes shinyhub-spin { to { transform: rotate(360deg); } }",
+        "@keyframes shinyhub-ready-pulse { 0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(251,191,36,0.42); } 55% { transform: scale(1.08); box-shadow: 0 0 0 8px rgba(251,191,36,0); } 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(251,191,36,0); } }",
         "#" + OWN_ID + " a, #" + OWN_ID + " button { transition: background-color 160ms ease-out, border-color 160ms ease-out, color 160ms ease-out, box-shadow 160ms ease-out; }",
         "#" + OWN_ID + " a:hover, #" + OWN_ID + " button:hover { filter: brightness(1.08); }",
         "#" + OWN_ID + " a:focus-visible, #" + OWN_ID + " button:focus-visible { outline: 3px solid #38BDF8; outline-offset: 3px; }",
         "#" + OWN_ID + " ::selection { background: #38BDF8; color: #030510; }",
-        "@media (max-width: 520px) { #" + OWN_ID + " { padding: 16px !important; align-items: flex-end !important; } #" + OWN_ID + " > div { padding: 22px 18px !important; } #" + OWN_ID + " [data-shinyhub-actions] { flex-direction: column; } #" + OWN_ID + " [data-shinyhub-actions] > * { width: 100%; } #" + OWN_ID + ".is-snapshot { inset: auto 8px 8px 8px !important; padding: 0 !important; } #" + OWN_ID + ".is-snapshot > div { padding: 16px !important; } }",
-        "@media (prefers-reduced-motion: reduce) { #" + OWN_ID + " * { transition: none !important; } #shinyhub-status-spinner { animation: none !important; } }"
+        "@media (max-width: 520px) { #" + OWN_ID + " { padding: 16px !important; align-items: flex-end !important; } #" + OWN_ID + " > div { padding: 22px 18px !important; } #" + OWN_ID + " [data-shinyhub-actions] { flex-direction: column; } #" + OWN_ID + " [data-shinyhub-actions] > * { width: 100%; } #" + OWN_ID + ".is-snapshot { inset: auto 8px 8px 8px !important; padding: 0 !important; } #" + OWN_ID + ".is-snapshot > div { display: block !important; padding: 16px !important; } #" + OWN_ID + ".is-snapshot [data-shinyhub-actions] { margin-top: 16px !important; } }",
+        "@media (prefers-reduced-motion: reduce) { #" + OWN_ID + " * { transition: none !important; } #shinyhub-status-spinner, #" + DOT_ID + " { animation: none !important; } }"
       ];
       for (var i = 0; i < rules.length; i++) {
         style.sheet.insertRule(rules[i], style.sheet.cssRules.length);
@@ -226,8 +229,9 @@
       height: "10px",
       display: "none",
       borderRadius: "99px",
-      background: "#4ADE80"
+      background: "#FBBF24"
     });
+    stateDot.id = DOT_ID;
     stateDot.setAttribute("aria-hidden", "true");
     var copy = el("div", {
       minWidth: "0",
@@ -260,12 +264,12 @@
     });
     actions.setAttribute("data-shinyhub-actions", "");
 
-    var openLink = el("a", actionStyles("primary"), "Open new session");
+    var openLink = el("a", actionStyles("primary"), "Start in a new tab");
     openLink.id = OPEN_ID;
     openLink.href = window.location.href;
     openLink.target = "_blank";
     openLink.rel = "noopener";
-    openLink.setAttribute("aria-label", "Open a new app session in a new tab");
+    openLink.setAttribute("aria-label", "Start a new app session in a new tab");
 
     var reloadButton = el(
       "button",
@@ -281,19 +285,10 @@
       })
     );
 
-    var snapshotButton = el(
-      "button",
-      actionStyles("secondary"),
-      "View previous results"
-    );
-    snapshotButton.id = SNAPSHOT_ID;
-    snapshotButton.type = "button";
-    snapshotButton.addEventListener("click", guard(enterSnapshot));
-
     var restartButton = el(
       "button",
-      actionStyles("quiet"),
-      "Restart in this tab"
+      actionStyles("secondary"),
+      "Start in this tab"
     );
     restartButton.id = RESTART_ID;
     restartButton.type = "button";
@@ -313,7 +308,6 @@
     header.appendChild(copy);
     actions.appendChild(openLink);
     actions.appendChild(reloadButton);
-    actions.appendChild(snapshotButton);
     actions.appendChild(restartButton);
     box.appendChild(header);
     box.appendChild(actions);
@@ -334,7 +328,7 @@
         if (event.key !== "Tab") {
           return;
         }
-        var controls = [openLink, reloadButton, snapshotButton, restartButton];
+        var controls = [openLink, reloadButton, restartButton];
         var visible = [];
         for (var i = 0; i < controls.length; i++) {
           if (controls[i].style.display !== "none") {
@@ -358,16 +352,26 @@
       })
     );
 
+    root.addEventListener(
+      "click",
+      guard(function (event) {
+        if (event.target === root && currentState === "ready") {
+          enterSnapshot();
+        }
+      })
+    );
+
     return {
       root: root,
       box: box,
+      header: header,
+      actions: actions,
       spinner: spinner,
       stateDot: stateDot,
       title: title,
       msg: msg,
       openLink: openLink,
       reloadButton: reloadButton,
-      snapshotButton: snapshotButton,
       restartButton: restartButton
     };
   }
@@ -396,15 +400,25 @@
     ui.box.style.maxWidth = "520px";
     ui.box.style.margin = "0";
     ui.box.style.padding = "28px";
+    ui.box.style.display = "block";
+    ui.box.style.alignItems = "";
+    ui.box.style.gap = "";
     ui.box.style.pointerEvents = "auto";
+    ui.header.style.flex = "";
+    ui.header.style.alignItems = "flex-start";
+    ui.actions.style.flexWrap = "wrap";
+    ui.actions.style.marginTop = "24px";
     ui.title.textContent = titleText;
     ui.title.style.color = "#E8EEFF";
     ui.msg.textContent = msgText;
     ui.spinner.style.display = state === "waiting" ? "block" : "none";
     ui.stateDot.style.display = state === "waiting" ? "none" : "block";
-    ui.stateDot.style.background = state === "error" ? "#F87171" : "#4ADE80";
+    ui.stateDot.style.background = state === "error" ? "#F87171" : "#FBBF24";
+    ui.stateDot.style.animation =
+      state === "ready"
+        ? "shinyhub-ready-pulse 760ms cubic-bezier(0.16,1,0.3,1) 2"
+        : "";
     show(ui.openLink, state === "ready");
-    show(ui.snapshotButton, state === "ready");
     show(ui.restartButton, state === "ready");
     show(ui.reloadButton, !!reloadText);
     if (reloadText) {
@@ -440,21 +454,56 @@
     ui.root.style.pointerEvents = "none";
     ui.root.removeAttribute("aria-modal");
     ui.root.setAttribute("role", "status");
-    ui.box.style.maxWidth = "720px";
+    ui.box.style.maxWidth = "680px";
     ui.box.style.margin = "0 auto";
-    ui.box.style.padding = "18px";
+    ui.box.style.padding = "14px 16px";
+    ui.box.style.display = "flex";
+    ui.box.style.alignItems = "center";
+    ui.box.style.gap = "16px";
     ui.box.style.pointerEvents = "auto";
+    ui.header.style.flex = "1";
+    ui.header.style.alignItems = "center";
+    ui.actions.style.flexWrap = "nowrap";
+    ui.actions.style.marginTop = "0";
     ui.title.textContent = "Previous results";
     ui.msg.textContent =
       "This snapshot may be out of date. Its controls no longer update; open a new session to continue.";
     ui.spinner.style.display = "none";
     ui.stateDot.style.display = "block";
     ui.stateDot.style.background = "#FBBF24";
+    ui.stateDot.style.animation = "";
     show(ui.openLink, true);
     show(ui.reloadButton, false);
-    show(ui.snapshotButton, false);
     show(ui.restartButton, true);
-    ui.root.focus();
+    if (publishSnapshot(true)) {
+      ui.root.style.display = "none";
+    } else {
+      ui.root.focus();
+    }
+  }
+
+  function publishSnapshot(moveFocus) {
+    if (typeof window.CustomEvent !== "function") {
+      return false;
+    }
+    var event = new window.CustomEvent(SESSION_EVENT, {
+      cancelable: true,
+      detail: {
+        state: "snapshot",
+        url: window.location.href,
+        focus: !!moveFocus
+      }
+    });
+    return window.dispatchEvent(event) === false;
+  }
+
+  function publishConnected() {
+    if (typeof window.CustomEvent !== "function") {
+      return;
+    }
+    window.dispatchEvent(
+      new window.CustomEvent(SESSION_EVENT, { detail: { state: "connected" } })
+    );
   }
 
   function stopPolling() {
@@ -468,6 +517,7 @@
     stopPolling();
     showing = false;
     polls = 0;
+    publishConnected();
     currentState = null;
     if (ui && ui.root.parentNode) {
       ui.root.parentNode.removeChild(ui.root);
@@ -506,8 +556,8 @@
     stopPolling();
     render(
       "ready",
-      "The app is available again",
-      "Your previous session is still disconnected. Open a new session to continue, or keep these results for reference.",
+      "This session was interrupted",
+      "Results and controls no longer update. Use a new tab to keep these results available.",
       null
     );
   }
@@ -596,6 +646,20 @@
       teardown();
     }
   });
+
+  window.addEventListener(SESSION_OWNER_EVENT, guard(function (event) {
+    if (!ui || currentState !== "snapshot") {
+      return;
+    }
+    var owner = event && event.detail ? event.detail.owner : "";
+    if (owner === "overlay") {
+      ui.root.style.display = "block";
+      return;
+    }
+    if (owner === "switcher" && publishSnapshot(false)) {
+      ui.root.style.display = "none";
+    }
+  }));
 
   var observer = new MutationObserver(
     guard(function (records) {
