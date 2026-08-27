@@ -63,6 +63,19 @@ class Session:
         self.messages.append((message_type, message))
 
 
+@pytest.fixture
+def inert_reactivity(monkeypatch):
+    from shiny import reactive
+
+    def inert_effect(fn=None, **_kwargs):
+        return fn if fn is not None else lambda callback: callback
+
+    monkeypatch.setattr(reactive, "effect", inert_effect)
+    monkeypatch.setattr(
+        reactive, "event", lambda *_args, **_kwargs: lambda callback: callback
+    )
+
+
 def test_normalise_fields_accepts_labels_and_resolves_ids():
     fields = _normalise_fields(
         {"region": "Region", "period": Field("Reporting period")},
@@ -207,16 +220,38 @@ async def test_selected_registration_temporarily_wins_over_an_author_exclusion()
 
 
 @pytest.mark.asyncio
-async def test_register_versions_links_and_reports_a_restored_migration(monkeypatch):
-    from shiny import reactive, ui
+async def test_create_url_excludes_unselected_resolved_module_inputs():
+    class ResolvedInputs(Inputs):
+        def __dir__(self):
+            return ["filters-region", "filters-period", "other-input"]
 
-    def inert_effect(fn=None, **_kwargs):
-        return fn if fn is not None else lambda callback: callback
+    bookmark = Bookmark(exclude=[])
 
-    monkeypatch.setattr(reactive, "effect", inert_effect)
-    monkeypatch.setattr(
-        reactive, "event", lambda *_args, **_kwargs: lambda callback: callback
+    async def get_url():
+        assert bookmark.exclude == [
+            ".shinyhub_bookmark_discover",
+            ".shinyhub_bookmark_request",
+            "filters-period",
+            "other-input",
+        ]
+        return bookmark.url
+
+    bookmark.get_bookmark_url = get_url
+
+    await _create_url(
+        bookmark=bookmark,
+        inputs=ResolvedInputs(),
+        selected=["filters-region"],
+        max_url_length=8192,
     )
+
+
+@pytest.mark.asyncio
+async def test_register_versions_links_and_reports_a_restored_migration(
+    monkeypatch, inert_reactivity
+):
+    from shiny import ui
+
     updates = []
     monkeypatch.setattr(
         ui,
@@ -267,3 +302,82 @@ async def test_register_versions_links_and_reports_a_restored_migration(monkeypa
     assert payload["restoredSchemaVersion"] == 2
     assert payload["fields"][0]["value"] == "Planning"
     assert payload["adjustments"][0]["previous"] == "Legacy planning"
+
+
+def test_register_rejects_module_scoped_sessions_before_installing_callbacks():
+    from shiny.module import ResolvedId
+
+    session = Session()
+    session.ns = ResolvedId("filters")  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="top-level server session"):
+        register(
+            session=session,
+            input=Inputs({"region": "Europe"}),
+            fields={"region": "Region"},
+        )
+
+    assert session.bookmark.bookmark_callbacks == []
+    assert session.bookmark.restore_callbacks == []
+
+
+def test_register_rejects_duplicate_protocol_handlers(inert_reactivity):
+    from shiny.module import ResolvedId
+
+    session = Session()
+    session.ns = ResolvedId("")  # type: ignore[method-assign]
+    inputs = Inputs({"region": "Europe"})
+
+    register(session=session, input=inputs, fields={"region": "Region"})
+
+    with pytest.raises(RuntimeError, match="only once"):
+        register(session=session, input=inputs, fields={"region": "Region"})
+
+    assert len(session.bookmark.bookmark_callbacks) == 1
+    assert len(session.bookmark.restore_callbacks) == 1
+
+
+@pytest.mark.asyncio
+async def test_register_supports_resolved_module_ids_from_the_root_session(
+    inert_reactivity,
+):
+    from shiny.module import ResolvedId
+
+    session = Session()
+    session.ns = ResolvedId("")  # type: ignore[method-assign]
+    registration = register(
+        session=session,
+        input=Inputs({"filters-region": "Europe"}),
+        fields={"filters-region": "Region"},
+    )
+    restore_state = type(
+        "RestoreState",
+        (),
+        {"input": {"filters-region": "Europe"}, "values": {}},
+    )()
+
+    await session.bookmark.restore_callbacks[0](restore_state)
+
+    assert registration.fields[0].resolved_id == "filters-region"
+    assert registration.adjustments == ()
+    assert session.messages[-1][1]["fields"][0]["value"] == "Europe"
+
+
+@pytest.mark.asyncio
+async def test_register_contains_formatter_failures(inert_reactivity):
+    def broken_formatter(_value):
+        raise ValueError("formatter bug")
+
+    session = Session()
+    register(
+        session=session,
+        input=Inputs({"region": "Europe"}),
+        fields={"region": Field("Region", formatter=broken_formatter)},
+    )
+    restore_state = type("RestoreState", (), {"input": {}, "values": {}})()
+
+    await session.bookmark.restore_callbacks[0](restore_state)
+
+    message_type, payload = session.messages[-1]
+    assert message_type == "shinyhub-bookmark-capabilities"
+    assert payload["fields"][0]["value"] == "Europe"

@@ -43,7 +43,10 @@ app = App(app_ui, server, bookmark_store="url")
 Both pieces are required: `bookmarking_dependency()` installs the tiny browser
 bridge, and `register()` publishes the allow-list and creates links through
 Shiny's native bookmarking API. The UI must be a function accepting `request`
-so Shiny can restore URL state before rendering it.
+so Shiny can restore URL state before rendering it. Call `register()` exactly
+once from the top-level server session. Module inputs can be included by their
+resolved IDs in that top-level field mapping; module-scoped registration is
+rejected because selective exclusion is owned by the root bookmark session.
 
 ## Bookmarks that outlive the app
 

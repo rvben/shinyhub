@@ -20,6 +20,7 @@ MAX_ADJUSTMENTS = 20
 MAX_UNKNOWN_DETAILS = 3
 MAX_UNKNOWN_LABEL_LENGTH = 120
 MAX_UNKNOWN_VALUE_LENGTH = 240
+REGISTRATION_MARKER = "_shinyhub_bookmarks_registration"
 
 Formatter = Callable[[Any], str]
 Normalizer = Callable[[Any], Any]
@@ -308,13 +309,16 @@ def _apply_choice_update(session: Any, field: _RegisteredField, value: Any) -> N
     if field.restore is None:
         return
     from shiny import ui
+    from shiny.module import ResolvedId
+
+    input_id = ResolvedId(field.resolved_id)
 
     if field.restore.control == "selectize":
-        ui.update_selectize(field.input_id, selected=value, session=session)
+        ui.update_selectize(input_id, selected=value, session=session)
     elif field.restore.control == "radio":
-        ui.update_radio_buttons(field.input_id, selected=value, session=session)
+        ui.update_radio_buttons(input_id, selected=value, session=session)
     else:
-        ui.update_select(field.input_id, selected=value, session=session)
+        ui.update_select(input_id, selected=value, session=session)
 
 
 def _known_input_ids(inputs: Any) -> set[str]:
@@ -402,8 +406,18 @@ def register(
     the ShinyHub server neither receives nor persists bookmark state.
     """
 
-    if getattr(session.bookmark, "store", None) != "url":
+    bookmark = session.bookmark
+    if getattr(bookmark, "store", None) != "url":
         raise ValueError('ShinyHub bookmarks require App(..., bookmark_store="url")')
+    if getattr(bookmark, REGISTRATION_MARKER, None) is not None:
+        raise RuntimeError("Register ShinyHub bookmarks only once per session")
+    resolve = getattr(session, "ns", lambda value: value)
+    namespace_probe = "__shinyhub_namespace_probe"
+    if str(resolve(namespace_probe)) != namespace_probe:
+        raise ValueError(
+            "Register ShinyHub bookmarks from the top-level server session; "
+            "register module inputs there by their resolved IDs"
+        )
     if not isinstance(max_url_length, int) or max_url_length < 1_024:
         raise ValueError("max_url_length must be an integer of at least 1024")
     if (
@@ -422,19 +436,20 @@ def register(
         if not isinstance(old_label, str) or not old_label.strip():
             raise ValueError("Legacy bookmark field labels must be non-empty strings")
 
-    resolve = getattr(session, "ns", lambda value: value)
-    registered = _normalise_fields(fields, resolve=lambda value: str(resolve(value)))
+    registered = _normalise_fields(fields, resolve=lambda value: value)
     registration = Registration(registered, max_url_length, schema_version)
+    setattr(bookmark, REGISTRATION_MARKER, registration)
     resolved_ids = {field.resolved_id for field in registered}
     lock = asyncio.Lock()
     restored_overrides: dict[str, Any] = {}
 
     from shiny import reactive
+    from shiny.module import ResolvedId
 
     async def publish_capabilities() -> None:
         values = []
         for field in registered:
-            current = input[field.input_id]()
+            current = input[ResolvedId(field.resolved_id)]()
             if field.input_id in restored_overrides:
                 restored = restored_overrides[field.input_id]
                 if _field_values_equal(field, current, restored):
@@ -445,7 +460,7 @@ def register(
                 {
                     "id": field.resolved_id,
                     "label": field.label,
-                    "value": _display_value(current, field.formatter),
+                    "value": _safe_display_value(current, field.formatter),
                 }
             )
         await session.send_custom_message(
@@ -460,14 +475,14 @@ def register(
             },
         )
 
-    @session.bookmark.on_bookmark
+    @bookmark.on_bookmark
     async def _write_bookmark_metadata(state: Any) -> None:
         state.values[BOOKMARK_METADATA_KEY] = {
             "version": BOOKMARK_METADATA_VERSION,
             "schema": schema_version,
         }
 
-    @session.bookmark.on_restore
+    @bookmark.on_restore
     async def _inspect_restored_bookmark(state: Any) -> None:
         state_input = state.input if isinstance(state.input, Mapping) else {}
         state_values = state.values if isinstance(state.values, Mapping) else {}
@@ -482,7 +497,8 @@ def register(
         ):
             registration.restored_schema_version = metadata["schema"]
         current_values = {
-            field.input_id: input[field.input_id]() for field in registered
+            field.input_id: input[ResolvedId(field.resolved_id)]()
+            for field in registered
         }
         adjustments, updates = _restore_adjustments(
             state_input=state_input,
@@ -542,7 +558,7 @@ def register(
         try:
             async with lock:
                 url = await _create_url(
-                    bookmark=session.bookmark,
+                    bookmark=bookmark,
                     inputs=input,
                     selected=selected,
                     max_url_length=max_url_length,

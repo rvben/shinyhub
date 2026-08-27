@@ -51,6 +51,13 @@ All three integration details matter:
 2. `bookmarking_dependency()` loads the inert app-side browser bridge.
 3. `bookmark_store="url"` enables Shiny's native URL serializer.
 
+Call `register()` exactly once from the top-level server session. To bookmark
+inputs rendered by modules, include their resolved IDs (for example,
+`"filters-region"`) in this top-level field mapping. Calling `register()` from
+inside a module is rejected: Shiny owns selective exclusion at the root
+bookmark session, and accepting a module proxy could otherwise include inputs
+outside the declared allow-list.
+
 If the package is not present, the switcher simply has no bookmark action.
 
 ## What visitors get
