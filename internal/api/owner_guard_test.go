@@ -11,7 +11,10 @@ func okHandler() http.Handler {
 }
 
 func TestOwnerGuard_NonOwnerBlocksMutations(t *testing.T) {
-	s := &Server{isOwner: func() bool { return false }}
+	s := &Server{
+		isOwner:             func() bool { return false },
+		appOperationLockDir: t.TempDir(),
+	}
 	h := s.ownerGuard(okHandler())
 
 	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
@@ -47,8 +50,13 @@ func TestOwnerGuard_NonOwnerBlocksMutations(t *testing.T) {
 
 func TestOwnerGuard_OwnerAndUnwiredPass(t *testing.T) {
 	cases := map[string]*Server{
-		"owner":   {isOwner: func() bool { return true }},
-		"unwired": {}, // nil predicate behaves as owner
+		"owner": {
+			isOwner:             func() bool { return true },
+			appOperationLockDir: t.TempDir(),
+		},
+		"unwired": {
+			appOperationLockDir: t.TempDir(),
+		}, // nil predicate behaves as owner
 	}
 	for name, s := range cases {
 		t.Run(name, func(t *testing.T) {
