@@ -152,6 +152,13 @@ func TestRollbackUsesPendingIDAndTargetDigest(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("v2 deploy returned %d: %s", rec2.Code, rec2.Body.String())
 	}
+	// deployRun is stubbed, so PID 2 is only synthetic and is not owned by the
+	// test manager. Do not leave that fake identity for the rollback's
+	// publication-safe stop proof: PID 2 commonly exists on Linux, where it
+	// correctly cannot be treated as a confirmed-dead app consumer.
+	if err := store.ClearReplicaRuntimeIdentity(app.ID, 0); err != nil {
+		t.Fatalf("clear synthetic v2 runtime identity: %v", err)
+	}
 
 	// Confirm v2 is live and v1 is the rollback target (index 1).
 	deps, err := store.ListDeployments(app.ID)
