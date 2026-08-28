@@ -19,8 +19,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **schedules**: replace `run_on_register` with the explicit `deploy_trigger`
   policies `never`, `first_deploy`, and `bundle_change`. Use `first_deploy` for
   the former one-time behavior and `bundle_change` when an app must not consume
-  data produced by an older bundle
+  data produced by an older bundle. Existing schedules migrate to
+  `deploy_trigger = "never"` because the old manifest flag was not persisted;
+  reapply each intended producer policy after upgrading
   ([9f24d8f](https://github.com/rvben/shinyhub/commit/9f24d8ff9e01aa8e88b9459f666bdf6082169336)).
+- **producer runtimes**: enabled data-producing schedules now require effective
+  `worker_isolation = "multiplex"` on local native tiers. An existing Docker,
+  remote, Fargate/ECS, or elastic producer blocks startup with an actionable
+  app/schedule/tier diagnosis instead of failing at its next cron boundary.
+- **api**: advance the public API contract to protocol 2. The CLI now requires
+  the `schedule_deploy_convergence` capability before sending an explicit
+  deploy-trigger policy, so older servers cannot silently ignore it.
 - **upgrades**: a server upgrading from 0.12.x now refuses to start when it
   captures a potentially live, unfenced legacy schedule writer. After stopping
   every old server and confirming those process trees are gone, resolve the
@@ -53,6 +62,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   ([9f24d8f](https://github.com/rvben/shinyhub/commit/9f24d8ff9e01aa8e88b9459f666bdf6082169336)).
 - **runtime**: preserve a concurrent replacement when stale replica-stop
   cleanup completes, and stop native one-shot process groups reliably.
+- **upgrades**: validate stored producer topology during startup, reject a
+  newer-than-supported schema before offline legacy-writer recovery can mutate
+  it, and exercise the 068→069 provenance and 069→070 barrier upgrades on both
+  SQLite and PostgreSQL.
 
 ## [0.12.11](https://github.com/rvben/shinyhub/compare/v0.12.10...v0.12.11) - 2026-08-27
 
