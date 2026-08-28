@@ -73,10 +73,12 @@ command -v docker >/dev/null 2>&1 || skip "docker not installed; the remote tier
 docker info >/dev/null 2>&1 || skip "docker daemon not reachable"
 
 # Ports for the three listeners: the user/API server, the control plane's
-# worker-facing mTLS API, and the worker's data-plane tunnel.
-CP_PORT=8099
-WORKER_API_PORT=8443
-DATA_PORT=9443
+# worker-facing mTLS API, and the worker's data-plane tunnel. Overrides let
+# developers run the hermetic test alongside local services without stopping
+# them; CI uses the stable defaults.
+CP_PORT="${SHINYHUB_E2E_CP_PORT:-8099}"
+WORKER_API_PORT="${SHINYHUB_E2E_WORKER_API_PORT:-8443}"
+DATA_PORT="${SHINYHUB_E2E_DATA_PORT:-9443}"
 
 # Advertise the worker on a non-loopback address when one is available so the
 # control-plane -> worker tunnel traverses the host network stack rather than
