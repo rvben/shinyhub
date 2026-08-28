@@ -1,23 +1,28 @@
 #!/usr/bin/env bash
-# Bidirectional release contract: the current CLI against the last shipped
-# server, and the last shipped CLI against the current server. The released
-# binary is downloaded exactly as users received it and verified against a
-# checksum manifest pinned in the repository.
+# Cross-release contract with two deliberately different baselines:
+#
+#   * legacy: the last release before /api/server-info exposed protocol_version;
+#     this lane keeps capability-negotiation fallback alive.
+#   * previous: the immediate predecessor release; this lane proves the normal
+#     bidirectional upgrade path users actually take.
+#
+# Every released binary is downloaded exactly as published and verified against
+# a checksum manifest pinned in the repository.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
-OLD_PID=""
+RELEASED_PID=""
 CURRENT_PID=""
-OLD_PORT="${SHINYHUB_COMPAT_OLD_PORT:-18091}"
+LEGACY_PORT="${SHINYHUB_COMPAT_LEGACY_PORT:-18090}"
+PREVIOUS_PORT="${SHINYHUB_COMPAT_PREVIOUS_PORT:-${SHINYHUB_COMPAT_OLD_PORT:-18091}}"
 CURRENT_PORT="${SHINYHUB_COMPAT_CURRENT_PORT:-18092}"
-OLD_HOST="http://127.0.0.1:${OLD_PORT}"
 CURRENT_HOST="http://127.0.0.1:${CURRENT_PORT}"
 TOKEN="compatibility-e2e-token-0123456789abcdef"
 ADMIN_PASSWORD="compatibility-e2e-password"
 
 cleanup() {
-  for pid in "${CURRENT_PID}" "${OLD_PID}"; do
+  for pid in "${CURRENT_PID}" "${RELEASED_PID}"; do
     if [ -n "${pid}" ]; then
       kill "${pid}" 2>/dev/null || true
       wait "${pid}" 2>/dev/null || true
@@ -33,10 +38,10 @@ trap cleanup EXIT
 
 fail() {
   echo "CLI COMPATIBILITY E2E FAIL: $*" >&2
-  for log in old-server.log current-server.log current-connect.log current-doctor.log current-deploy.log current-recovery.log old-login.log old-whoami.log old-deploy.log; do
-    if [ -s "${WORK}/${log}" ]; then
-      echo "----- ${log} (last 100 lines) -----" >&2
-      tail -100 "${WORK}/${log}" >&2
+  for log_path in "${WORK}"/*.log; do
+    if [ -s "${log_path}" ]; then
+      echo "----- $(basename "${log_path}") (last 100 lines) -----" >&2
+      tail -100 "${log_path}" >&2
     fi
   done
   exit 1
@@ -45,10 +50,14 @@ fail() {
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v uv >/dev/null 2>&1 || fail "uv is required"
 
+LEGACY_VERSION="$(tr -d '[:space:]' < "${ROOT}/testdata/compatibility/legacy-release.txt")"
 PREVIOUS_VERSION="$(tr -d '[:space:]' < "${ROOT}/testdata/compatibility/previous-release.txt")"
+[ -n "${LEGACY_VERSION}" ] || fail "legacy-release.txt is empty"
 [ -n "${PREVIOUS_VERSION}" ] || fail "previous-release.txt is empty"
-CHECKSUMS="${ROOT}/testdata/compatibility/${PREVIOUS_VERSION}-checksums.txt"
-[ -f "${CHECKSUMS}" ] || fail "missing pinned checksum manifest ${CHECKSUMS}"
+[ "${LEGACY_VERSION}" != "${PREVIOUS_VERSION}" ] || fail "legacy and previous release pins must be distinct"
+[ "${LEGACY_PORT}" != "${PREVIOUS_PORT}" ] || fail "legacy and previous ports must be distinct"
+[ "${LEGACY_PORT}" != "${CURRENT_PORT}" ] || fail "legacy and current ports must be distinct"
+[ "${PREVIOUS_PORT}" != "${CURRENT_PORT}" ] || fail "previous and current ports must be distinct"
 
 case "$(uname -s)" in
   Linux) RELEASE_OS="linux" ;;
@@ -62,25 +71,42 @@ case "$(uname -m)" in
 esac
 
 ASSET="shinyhub_${RELEASE_OS}_${RELEASE_ARCH}.tar.gz"
-EXPECTED_SHA="$(awk -v asset="${ASSET}" '$2 == asset {print $1}' "${CHECKSUMS}")"
-[ -n "${EXPECTED_SHA}" ] || fail "${ASSET} is not pinned in ${CHECKSUMS}"
 
-echo "==> downloading exact released binary ${PREVIOUS_VERSION} (${RELEASE_OS}/${RELEASE_ARCH})"
-curl -fLsS "https://github.com/rvben/shinyhub/releases/download/${PREVIOUS_VERSION}/${ASSET}" \
-  -o "${WORK}/${ASSET}" || fail "download ${PREVIOUS_VERSION}"
-if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL_SHA="$(sha256sum "${WORK}/${ASSET}" | awk '{print $1}')"
-elif command -v shasum >/dev/null 2>&1; then
-  ACTUAL_SHA="$(shasum -a 256 "${WORK}/${ASSET}" | awk '{print $1}')"
-else
-  fail "sha256sum or shasum is required to verify the released binary"
-fi
-[ "${ACTUAL_SHA}" = "${EXPECTED_SHA}" ] || fail "checksum mismatch for ${ASSET}"
-mkdir -p "${WORK}/released"
-tar -xzf "${WORK}/${ASSET}" -C "${WORK}/released" || fail "extract ${ASSET}"
-OLD_BIN="${WORK}/released/shinyhub"
-[ -x "${OLD_BIN}" ] || fail "release archive has no executable shinyhub"
-"${OLD_BIN}" --version | grep -Fq "${PREVIOUS_VERSION#v}" || fail "released binary version does not match ${PREVIOUS_VERSION}"
+download_release() {
+  local lane="$1"
+  local release_version="$2"
+  local checksums="${ROOT}/testdata/compatibility/${release_version}-checksums.txt"
+  local archive="${WORK}/${lane}-${ASSET}"
+  local release_dir="${WORK}/released-${lane}"
+  local expected_sha actual_sha
+
+  [ -f "${checksums}" ] || fail "missing pinned checksum manifest ${checksums}"
+  expected_sha="$(awk -v asset="${ASSET}" '$2 == asset {print $1}' "${checksums}")"
+  [ -n "${expected_sha}" ] || fail "${ASSET} is not pinned in ${checksums}"
+
+  echo "==> downloading ${lane} release ${release_version} (${RELEASE_OS}/${RELEASE_ARCH})"
+  curl -fLsS "https://github.com/rvben/shinyhub/releases/download/${release_version}/${ASSET}" \
+    -o "${archive}" || fail "download ${release_version}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual_sha="$(sha256sum "${archive}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual_sha="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+  else
+    fail "sha256sum or shasum is required to verify released binaries"
+  fi
+  [ "${actual_sha}" = "${expected_sha}" ] || fail "checksum mismatch for ${release_version}/${ASSET}"
+
+  mkdir -p "${release_dir}"
+  tar -xzf "${archive}" -C "${release_dir}" || fail "extract ${release_version}/${ASSET}"
+  [ -x "${release_dir}/shinyhub" ] || fail "${release_version} archive has no executable shinyhub"
+  "${release_dir}/shinyhub" --version | grep -Fq "${release_version#v}" \
+    || fail "released binary version does not match ${release_version}"
+}
+
+download_release legacy "${LEGACY_VERSION}"
+download_release previous "${PREVIOUS_VERSION}"
+LEGACY_BIN="${WORK}/released-legacy/shinyhub"
+PREVIOUS_BIN="${WORK}/released-previous/shinyhub"
 
 CURRENT_VERSION="v$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${ROOT}/package.json" | head -1)"
 CURRENT_PROTOCOL="$(sed -n 's/^const CurrentVersion = \([0-9][0-9]*\)$/\1/p' "${ROOT}/internal/protocol/version.go")"
@@ -91,68 +117,120 @@ GOWORK=off go build -ldflags "-X main.version=${CURRENT_VERSION}" \
   -o "${WORK}/current-bin/shinyhub" "${ROOT}/cmd/shinyhub" || fail "build current binary"
 CURRENT_BIN="${WORK}/current-bin/shinyhub"
 
-cp -R "${ROOT}/testdata/e2e-app" "${WORK}/app-current-to-old"
-cp -R "${ROOT}/testdata/e2e-app" "${WORK}/app-old-to-current"
 printf '%s\n' "${TOKEN}" > "${WORK}/deploy-token"
 printf '%s\n' "${ADMIN_PASSWORD}" > "${WORK}/admin-password"
 chmod 600 "${WORK}/deploy-token" "${WORK}/admin-password"
 
-echo "==> current CLI -> released ${PREVIOUS_VERSION} server"
-mkdir -p "${WORK}/old-server"
-(
-  cd "${WORK}/old-server"
-  SHINYHUB_AUTH_SECRET="compatibility-secret-that-is-long-enough-0123456789" \
-  SHINYHUB_ADMIN_USER="compat-admin" \
-  SHINYHUB_ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
-  SHINYHUB_SERVER_HOST=127.0.0.1 \
-  SHINYHUB_SERVER_PORT="${OLD_PORT}" \
-  SHINYHUB_SHUTDOWN_APPS=stop \
-  SHINYHUB_DEPLOY_TOKEN="${TOKEN}" \
-    exec "${OLD_BIN}" serve
-) >"${WORK}/old-server.log" 2>&1 &
-OLD_PID=$!
-"${ROOT}/scripts/wait-http.sh" "${OLD_HOST}/readyz" 30 || fail "released server readiness"
-kill -0 "${OLD_PID}" 2>/dev/null || fail "released server exited during startup"
-curl -fsS "${OLD_HOST}/api/server-info" -o "${WORK}/old-server-info.json" || fail "released server-info"
-if grep -Fq '"protocol_version"' "${WORK}/old-server-info.json"; then
-  fail "pinned legacy server unexpectedly advertises protocol_version; update the matrix pin deliberately"
-fi
+exercise_current_against_released_server() {
+  local lane="$1"
+  local release_version="$2"
+  local released_bin="$3"
+  local port="$4"
+  local protocol_mode="$5"
+  local host="http://127.0.0.1:${port}"
+  local slug="compat-current-${lane}"
+  local server_dir="${WORK}/${lane}-server"
+  local app_dir="${WORK}/app-current-to-${lane}"
+  local config="${WORK}/current-${lane}-client.json"
+  local server_info="${WORK}/${lane}-server-info.json"
 
-"${CURRENT_BIN}" connect "${OLD_HOST}" --name released \
-  --token-file "${WORK}/deploy-token" --config "${WORK}/current-client.json" --output table \
-  >"${WORK}/current-connect.log" 2>&1 || fail "current connect to released server"
-# The exact warning changes when a release crosses a pre-1.0 minor boundary:
-# within a minor it describes legacy negotiation, while across minors it names
-# the older server. Both must preserve the stable safety contract that commands
-# remain capability-gated when the old server has no protocol_version field.
-grep -Fq 'capability-gated' "${WORK}/current-connect.log" \
-  || fail "current connect did not make capability-gated legacy negotiation visible"
-"${CURRENT_BIN}" doctor "${WORK}/app-current-to-old" --slug compat-current-old \
-  --config "${WORK}/current-client.json" --output table \
-  >"${WORK}/current-doctor.log" 2>&1 || fail "current doctor against released server"
-grep -Fq 'READY' "${WORK}/current-doctor.log" || fail "current doctor did not report READY against released server"
-"${CURRENT_BIN}" deploy "${WORK}/app-current-to-old" --slug compat-current-old \
-  --visibility public --wait --config "${WORK}/current-client.json" --output table \
-  >"${WORK}/current-deploy.log" 2>&1 || fail "current deploy to released server"
-curl -fsS "${OLD_HOST}/app/compat-current-old/" | grep -Fq 'shinyhub remote-worker E2E' \
-  || fail "app deployed by current CLI is not serving on released server"
+  echo "==> current CLI -> ${lane} ${release_version} server"
+  cp -R "${ROOT}/testdata/e2e-app" "${app_dir}"
+  mkdir -p "${server_dir}"
+  (
+    cd "${server_dir}"
+    SHINYHUB_AUTH_SECRET="compatibility-secret-that-is-long-enough-0123456789" \
+    SHINYHUB_ADMIN_USER="compat-admin" \
+    SHINYHUB_ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+    SHINYHUB_SERVER_HOST=127.0.0.1 \
+    SHINYHUB_SERVER_PORT="${port}" \
+    SHINYHUB_SHUTDOWN_APPS=stop \
+    SHINYHUB_DEPLOY_TOKEN="${TOKEN}" \
+      exec "${released_bin}" serve
+  ) >"${WORK}/${lane}-server.log" 2>&1 &
+  RELEASED_PID=$!
+  "${ROOT}/scripts/wait-http.sh" "${host}/readyz" 30 || fail "${lane} server readiness"
+  kill -0 "${RELEASED_PID}" 2>/dev/null || fail "${lane} server exited during startup"
+  curl -fsS "${host}/api/server-info" -o "${server_info}" || fail "${lane} server-info"
 
-sed "s/${TOKEN}/shk_0000000000000000000000000000000000000000000000000000000000000000/g" \
-  "${WORK}/current-client.json" > "${WORK}/revoked-client.json"
-if "${CURRENT_BIN}" whoami --config "${WORK}/revoked-client.json" --output table \
-  >"${WORK}/current-recovery.log" 2>&1; then
-  fail "invalid credential unexpectedly authenticated against released server"
-fi
-grep -Fq 'expired or been revoked' "${WORK}/current-recovery.log" \
-  || fail "released-server credential failure did not explain the likely cause"
-grep -Fq 'shinyhub connect' "${WORK}/current-recovery.log" \
-  || fail "released-server credential failure did not explain how to recover"
+  case "${protocol_mode}" in
+    absent)
+      if grep -Fq '"protocol_version"' "${server_info}"; then
+        fail "legacy server unexpectedly advertises protocol_version; update the legacy pin deliberately"
+      fi
+      ;;
+    present)
+      grep -Eq '"protocol_version"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${server_info}" \
+        || fail "immediate previous server did not advertise a non-zero protocol_version"
+      ;;
+    *) fail "unknown protocol mode ${protocol_mode}" ;;
+  esac
 
-kill "${OLD_PID}" 2>/dev/null || true
-wait "${OLD_PID}" 2>/dev/null || true
-OLD_PID=""
+  "${CURRENT_BIN}" connect "${host}" --name "${lane}" \
+    --token-file "${WORK}/deploy-token" --config "${config}" --output table \
+    >"${WORK}/current-${lane}-connect.log" 2>&1 || fail "current connect to ${lane} server"
+  if [ "${protocol_mode}" = "absent" ]; then
+    # Only the legacy lane owns this fallback assertion. The immediate previous
+    # lane proves the ordinary protocol-advertising upgrade path independently.
+    grep -Fq 'capability-gated' "${WORK}/current-${lane}-connect.log" \
+      || fail "current connect did not make legacy capability negotiation visible"
+  fi
 
-echo "==> released ${PREVIOUS_VERSION} CLI -> current server"
+  "${CURRENT_BIN}" doctor "${app_dir}" --slug "${slug}" \
+    --config "${config}" --output table \
+    >"${WORK}/current-${lane}-doctor.log" 2>&1 || fail "current doctor against ${lane} server"
+  grep -Fq 'READY' "${WORK}/current-${lane}-doctor.log" \
+    || fail "current doctor did not report READY against ${lane} server"
+  "${CURRENT_BIN}" deploy "${app_dir}" --slug "${slug}" \
+    --visibility public --wait --config "${config}" --output table \
+    >"${WORK}/current-${lane}-deploy.log" 2>&1 || fail "current deploy to ${lane} server"
+  curl -fsS "${host}/app/${slug}/" | grep -Fq 'shinyhub remote-worker E2E' \
+    || fail "app deployed by current CLI is not serving on ${lane} server"
+
+  if [ "${lane}" = "previous" ]; then
+    # v0.12.11 accepts unknown JSON fields, so sending deploy_trigger without a
+    # capability check would appear successful while silently creating the old
+    # lifetime-gated schedule. Prove the current CLI rejects before POST, then
+    # ask the published predecessor itself to prove no schedule was created.
+    if "${CURRENT_BIN}" schedule add "${slug}" --name unsupported-trigger \
+      --cron '0 5 * * *' --cmd 'python producer.py' --deploy-trigger bundle_change \
+      --config "${config}" --output table \
+      >"${WORK}/current-previous-trigger-add.log" 2>&1; then
+      fail "current CLI silently sent deploy_trigger to the immediate previous server"
+    fi
+    grep -Fq 'does not support --deploy-trigger=bundle_change' \
+      "${WORK}/current-previous-trigger-add.log" \
+      || fail "unsupported deploy_trigger failure did not identify the missing predecessor capability"
+    grep -Fq 'no schedule was changed' "${WORK}/current-previous-trigger-add.log" \
+      || fail "unsupported deploy_trigger failure did not promise pre-mutation rejection"
+    "${CURRENT_BIN}" schedule ls "${slug}" --config "${config}" --output json \
+      >"${WORK}/current-previous-schedules.json" 2>"${WORK}/current-previous-schedules.log" \
+      || fail "list schedules after rejected predecessor mutation"
+    if grep -Fq 'unsupported-trigger' "${WORK}/current-previous-schedules.json"; then
+      fail "rejected deploy_trigger command still created a schedule on the immediate previous server"
+    fi
+  fi
+
+  sed "s/${TOKEN}/shk_0000000000000000000000000000000000000000000000000000000000000000/g" \
+    "${config}" > "${WORK}/current-${lane}-revoked-client.json"
+  if "${CURRENT_BIN}" whoami --config "${WORK}/current-${lane}-revoked-client.json" --output table \
+    >"${WORK}/current-${lane}-recovery.log" 2>&1; then
+    fail "invalid credential unexpectedly authenticated against ${lane} server"
+  fi
+  grep -Fq 'expired or been revoked' "${WORK}/current-${lane}-recovery.log" \
+    || fail "${lane}-server credential failure did not explain the likely cause"
+  grep -Fq 'shinyhub connect' "${WORK}/current-${lane}-recovery.log" \
+    || fail "${lane}-server credential failure did not explain how to recover"
+
+  kill "${RELEASED_PID}" 2>/dev/null || true
+  wait "${RELEASED_PID}" 2>/dev/null || true
+  RELEASED_PID=""
+}
+
+exercise_current_against_released_server legacy "${LEGACY_VERSION}" "${LEGACY_BIN}" "${LEGACY_PORT}" absent
+exercise_current_against_released_server previous "${PREVIOUS_VERSION}" "${PREVIOUS_BIN}" "${PREVIOUS_PORT}" present
+
+echo "==> released CLIs -> current ${CURRENT_VERSION} server"
 mkdir -p "${WORK}/current-server"
 (
   cd "${WORK}/current-server"
@@ -175,16 +253,31 @@ curl -fsS "${CURRENT_HOST}/api/server-info" -o "${WORK}/current-server-info.json
 grep -Fq "\"protocol_version\":${CURRENT_PROTOCOL}" "${WORK}/current-server-info.json" \
   || fail "current server did not advertise protocol version ${CURRENT_PROTOCOL}"
 
-"${OLD_BIN}" login --host "${CURRENT_HOST}" --name current --token "${TOKEN}" \
-  --config "${WORK}/old-client.json" --output table \
-  >"${WORK}/old-login.log" 2>&1 || fail "released CLI login to current server"
-"${OLD_BIN}" whoami --config "${WORK}/old-client.json" --output table \
-  >"${WORK}/old-whoami.log" 2>&1 || fail "released CLI whoami against current server"
-grep -Fq '__deploy__' "${WORK}/old-whoami.log" || fail "released CLI did not preserve its identity against current server"
-"${OLD_BIN}" deploy "${WORK}/app-old-to-current" --slug compat-old-current \
-  --visibility public --wait --config "${WORK}/old-client.json" --output table \
-  >"${WORK}/old-deploy.log" 2>&1 || fail "released CLI deploy to current server"
-curl -fsS "${CURRENT_HOST}/app/compat-old-current/" | grep -Fq 'shinyhub remote-worker E2E' \
-  || fail "app deployed by released CLI is not serving on current server"
+exercise_released_cli_against_current_server() {
+  local lane="$1"
+  local release_version="$2"
+  local released_bin="$3"
+  local slug="compat-${lane}-current"
+  local app_dir="${WORK}/app-${lane}-to-current"
+  local config="${WORK}/${lane}-client.json"
 
-echo "CLI COMPATIBILITY E2E PASS (${PREVIOUS_VERSION} <-> ${CURRENT_VERSION})"
+  echo "==> ${lane} ${release_version} CLI -> current server"
+  cp -R "${ROOT}/testdata/e2e-app" "${app_dir}"
+  "${released_bin}" login --host "${CURRENT_HOST}" --name current --token "${TOKEN}" \
+    --config "${config}" --output table \
+    >"${WORK}/${lane}-login.log" 2>&1 || fail "${lane} CLI login to current server"
+  "${released_bin}" whoami --config "${config}" --output table \
+    >"${WORK}/${lane}-whoami.log" 2>&1 || fail "${lane} CLI whoami against current server"
+  grep -Fq '__deploy__' "${WORK}/${lane}-whoami.log" \
+    || fail "${lane} CLI did not preserve its identity against current server"
+  "${released_bin}" deploy "${app_dir}" --slug "${slug}" \
+    --visibility public --wait --config "${config}" --output table \
+    >"${WORK}/${lane}-deploy.log" 2>&1 || fail "${lane} CLI deploy to current server"
+  curl -fsS "${CURRENT_HOST}/app/${slug}/" | grep -Fq 'shinyhub remote-worker E2E' \
+    || fail "app deployed by ${lane} CLI is not serving on current server"
+}
+
+exercise_released_cli_against_current_server legacy "${LEGACY_VERSION}" "${LEGACY_BIN}"
+exercise_released_cli_against_current_server previous "${PREVIOUS_VERSION}" "${PREVIOUS_BIN}"
+
+echo "CLI COMPATIBILITY E2E PASS (legacy ${LEGACY_VERSION}; previous ${PREVIOUS_VERSION}; current ${CURRENT_VERSION})"

@@ -184,22 +184,25 @@ Before a release, run the complete long-lived CLI gate:
 make test-cli-release-contract
 ```
 
-It combines two independent journeys:
+It combines two independent test groups:
 
-- `make test-cli-compatibility-e2e` downloads the exact checksum-pinned previous
-  release. The current CLI connects to, diagnoses, deploys to, and exercises
-  credential recovery against that server; then the released CLI logs in to,
-  identifies itself against, and deploys to the current server.
+- `make test-cli-compatibility-e2e` downloads two exact, checksum-pinned
+  releases. The `previous` lane is the immediate predecessor and runs the full
+  bidirectional upgrade journey: each released/current CLI connects to and
+  deploys against the other server. The deliberately older `legacy` lane runs
+  the same journeys while also proving that a server without
+  `protocol_version` remains safely capability-gated.
 - `make test-shell-completion-e2e` installs, loads, reinstalls, and uninstalls
   completion in real Bash, zsh, fish, and PowerShell processes. Set
   `SHINYHUB_COMPLETION_SHELLS="bash zsh"` for a smaller local subset.
 
-The compatibility baseline lives in
-`testdata/compatibility/previous-release.txt`, with the release's published
-checksum manifest beside it. Advance both files to the newly published version
-when that version becomes the baseline for the next release. Never regenerate
-the old binary from a tag: the gate intentionally tests the artifact users
-actually installed.
+The immediate compatibility baseline lives in
+`testdata/compatibility/previous-release.txt`; advance it and add the new
+release's published checksum manifest before the next release. The stable
+no-protocol baseline lives separately in `legacy-release.txt` and changes only
+when the legacy contract itself is deliberately retired or replaced. Never
+regenerate either binary from a tag: the gate intentionally tests the artifacts
+users actually installed.
 
 The required `/api/server-info` shape for each protocol is recorded in
 `internal/protocol/testdata/server-info-vN.json`. Additive response fields do
