@@ -3,6 +3,7 @@ package db
 import "testing"
 
 func TestMigration065AddsReplicaStartupPeakWithoutLosingRows(t *testing.T) {
+	t.Parallel()
 	s := migratedThrough(t, 64)
 	mustExec(t, s, `INSERT INTO users (id, username, password_hash, role) VALUES (1, 'owner', 'hash', 'developer')`)
 	mustExec(t, s, `INSERT INTO apps (id, slug, name, owner_id) VALUES (1, 'reports', 'Reports', 1)`)

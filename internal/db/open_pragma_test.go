@@ -13,14 +13,12 @@ import (
 func TestOpen_FileEnablesWALAndForeignKeys(t *testing.T) {
 	dbtest.SkipIfPostgres(t) // probes SQLite-only PRAGMA journal_mode
 	dsn := filepath.Join(t.TempDir(), "shinyhub.db")
+	dbtest.WriteSQLiteFile(t, dsn)
 	store, err := db.Open(dsn)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
 
 	var mode string
 	if err := store.DB().QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
@@ -47,6 +45,7 @@ func TestOpen_FileEnablesWALAndForeignKeys(t *testing.T) {
 // connection so every query sees the same database (a pool would hand out
 // connections to distinct empty in-memory databases).
 func TestOpen_MemoryStaysSingleDatabase(t *testing.T) {
+	t.Parallel()
 	dbtest.SkipIfPostgres(t) // verifies SQLite :memory: single-connection behavior
 	store, err := db.Open(":memory:")
 	if err != nil {

@@ -189,6 +189,7 @@ func mustExec(t *testing.T, s *Store, q string, args ...any) {
 // TestMigration050RetiresDefaultSentinel proves the sentinel rewrite runs and
 // that a pre-existing named project is preserved as a projects row.
 func TestMigration050RetiresDefaultSentinel(t *testing.T) {
+	t.Parallel()
 	// The migration body under test is the SQLite one (Open(":memory:") selects
 	// the sqlite dialect either way); the Postgres predicate's equivalence is
 	// covered by the parity test above, not here.

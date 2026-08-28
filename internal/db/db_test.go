@@ -19,6 +19,7 @@ func TestOpenAndMigrate(t *testing.T) {
 }
 
 func TestMigrate_FreshDBPopulatesLedger(t *testing.T) {
+	t.Parallel()
 	dbtest.SkipIfPostgres(t) // probes sqlite_master, which is SQLite-only
 	store, err := db.Open(":memory:")
 	if err != nil {
@@ -52,14 +53,13 @@ func TestMigrate_FreshDBPopulatesLedger(t *testing.T) {
 // the ledger (the original runner left no schema_migrations table) is adopted
 // without error and without destroying data, rather than re-running 001+.
 func TestMigrate_BaselinesLegacyDB(t *testing.T) {
+	t.Parallel()
 	dbtest.SkipIfPostgres(t) // legacy adoption is SQLite-only (sqlite_master probe)
 	dsn := t.TempDir() + "/legacy.db"
+	dbtest.WriteSQLiteFile(t, dsn)
 	store, err := db.Open(dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("initial migrate: %v", err)
 	}
 	if err := store.CreateUser(db.CreateUserParams{
 		Username: "legacy", PasswordHash: "h", Role: "admin",
@@ -422,12 +422,7 @@ func TestOAuthState_ConsumeOnce(t *testing.T) {
 
 func TestOAuthState_ExpiredStateIsRejected(t *testing.T) {
 	dbtest.SkipIfPostgres(t) // backdates via SQLite datetime() literal
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	store.Migrate()
+	store := dbtest.New(t)
 
 	// Create two states: one fresh, one that will be backdated.
 	if err := store.CreateOAuthState("nonce-fresh"); err != nil {
@@ -438,7 +433,7 @@ func TestOAuthState_ExpiredStateIsRejected(t *testing.T) {
 	}
 
 	// Backdate nonce-stale to 15 minutes ago.
-	_, err = store.DB().Exec(
+	_, err := store.DB().Exec(
 		`UPDATE oauth_states SET created_at = datetime('now', '-15 minutes') WHERE state = 'nonce-stale'`)
 	if err != nil {
 		t.Fatalf("backdate: %v", err)
@@ -935,14 +930,13 @@ func TestPatchAppSettings_ReplicaShrinkPrune(t *testing.T) {
 
 func TestPatchAppSettings_ConcurrentSQLiteWritersDoNotBusySnapshot(t *testing.T) {
 	dbtest.SkipIfPostgres(t)
-	store, err := db.Open(t.TempDir() + "/concurrent-patch.db")
+	path := t.TempDir() + "/concurrent-patch.db"
+	dbtest.WriteSQLiteFile(t, path)
+	store, err := db.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
 	user := mustCreateUser(t, store, "fleet-owner", "developer")
 	const n = 12
 	for i := 0; i < n; i++ {

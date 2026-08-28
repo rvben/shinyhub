@@ -23,14 +23,12 @@ func TestImportFrom_SQLiteToPostgresRoundTrip(t *testing.T) {
 
 	// Source: a fresh on-disk SQLite store.
 	srcPath := t.TempDir() + "/source.db"
+	dbtest.WriteSQLiteFile(t, srcPath)
 	src, err := db.Open(srcPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer src.Close()
-	if err := src.Migrate(); err != nil {
-		t.Fatal(err)
-	}
 
 	// Populate representative data.
 	mustUser := func(name, role string) *db.User {
@@ -173,14 +171,12 @@ func TestImportFrom_SQLiteToPostgresRoundTrip(t *testing.T) {
 func TestImportFrom_RefusesTargetWithNonCoreData(t *testing.T) {
 	target, _ := dbtest.NewPostgres(t)
 	srcPath := t.TempDir() + "/src.db"
+	dbtest.WriteSQLiteFile(t, srcPath)
 	src, err := db.Open(srcPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer src.Close()
-	if err := src.Migrate(); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := target.PutWorkerCAIfAbsent([]byte("CERT"), []byte("ENC")); err != nil {
 		t.Fatal(err)
 	}
@@ -192,14 +188,12 @@ func TestImportFrom_RefusesTargetWithNonCoreData(t *testing.T) {
 func TestImportFrom_RefusesAdvancedFleetRunSequence(t *testing.T) {
 	target, _ := dbtest.NewPostgres(t)
 	srcPath := t.TempDir() + "/src.db"
+	dbtest.WriteSQLiteFile(t, srcPath)
 	src, err := db.Open(srcPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer src.Close()
-	if err := src.Migrate(); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := target.DB().Exec(`UPDATE fleet_run_sequence SET last_sequence = 1 WHERE singleton = 1`); err != nil {
 		t.Fatal(err)
 	}

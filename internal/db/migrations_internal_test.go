@@ -33,6 +33,7 @@ func columnExists(t *testing.T, store *Store, table, column string) bool {
 // embedded migration as "applied" without running them would leave a legacy DB
 // permanently missing the columns those later migrations add.
 func TestMigrate_LegacyBaselineAppliesPostBaselineMigrations(t *testing.T) {
+	t.Parallel()
 	skipIfPostgres(t) // legacy adoption uses sqlite_master and PRAGMA; SQLite-only
 	store, err := Open(":memory:")
 	if err != nil {
@@ -118,6 +119,7 @@ func TestLoadMigrationsOrderedAndUnique(t *testing.T) {
 }
 
 func TestMigration021_IndexesReplicaStatus(t *testing.T) {
+	t.Parallel()
 	skipIfPostgres(t) // probes sqlite_master; SQLite-only
 	store, err := Open(":memory:")
 	if err != nil {
@@ -139,6 +141,7 @@ func TestMigration021_IndexesReplicaStatus(t *testing.T) {
 }
 
 func TestMigrations015And016AddColumns(t *testing.T) {
+	t.Parallel()
 	skipIfPostgres(t) // uses PRAGMA table_info; SQLite-only
 	store, err := Open(":memory:")
 	if err != nil {

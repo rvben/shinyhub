@@ -37,15 +37,14 @@ func newMigratedStore(t *testing.T, dsn string) *db.Store {
 	if dsn == ":memory:" {
 		return dbtest.New(t)
 	}
-	// Non-memory DSN (e.g. file path for concurrency tests): open directly.
+	// A file DSN (the concurrency tests need real WAL writers): write the
+	// migrated template there and open it.
+	dbtest.WriteSQLiteFile(t, dsn)
 	store, err := db.Open(dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 	return store
 }
 

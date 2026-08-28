@@ -6,20 +6,14 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 // TestVerifySchemaCompatibility proves the startup guard rejects a database
 // that was migrated by a newer binary (downgrade), which would otherwise let an
 // older build run against a schema it does not understand.
 func TestVerifySchemaCompatibility(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := dbtest.New(t)
 
 	// A freshly migrated database is exactly at the binary's latest version.
 	if err := store.VerifySchemaCompatibility(); err != nil {
@@ -33,7 +27,7 @@ func TestVerifySchemaCompatibility(t *testing.T) {
 		t.Fatalf("insert future migration: %v", err)
 	}
 
-	err = store.VerifySchemaCompatibility()
+	err := store.VerifySchemaCompatibility()
 	if err == nil {
 		t.Fatal("a database newer than the binary must be rejected, got nil")
 	}
@@ -58,14 +52,7 @@ func TestVerifySchemaCompatibility_IsSentinel(t *testing.T) {
 
 	// Negative control: a compatible database must NOT match the sentinel, or
 	// the classifier would route every startup failure to the same exit code.
-	fresh, ferr := db.Open(":memory:")
-	if ferr != nil {
-		t.Fatalf("open: %v", ferr)
-	}
-	defer fresh.Close()
-	if merr := fresh.Migrate(); merr != nil {
-		t.Fatalf("migrate: %v", merr)
-	}
+	fresh := dbtest.New(t)
 	if cerr := fresh.VerifySchemaCompatibility(); errors.Is(cerr, db.ErrSchemaTooNew) {
 		t.Errorf("compatible DB must not match ErrSchemaTooNew, got: %v", cerr)
 	}
@@ -94,14 +81,7 @@ func TestVerifySchemaCompatibility_MessageIsActionable(t *testing.T) {
 // beyond anything this binary embeds, i.e. a database migrated by a newer build.
 func tooNewStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	store := dbtest.New(t)
 	if _, err := store.DB().Exec(
 		`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
 		99999, "future_migration", "2099-01-01T00:00:00Z"); err != nil {

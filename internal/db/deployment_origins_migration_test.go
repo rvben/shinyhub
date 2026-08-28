@@ -6,6 +6,7 @@ import (
 )
 
 func TestMigration058BackfillsFleetOriginsAndPreservesLegacyRows(t *testing.T) {
+	t.Parallel()
 	skipIfPostgres(t)
 	s := migratedThrough(t, 57)
 	mustExec(t, s, `INSERT INTO users (username, password_hash, role) VALUES ('owner','x','admin')`)
