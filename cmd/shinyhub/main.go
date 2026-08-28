@@ -2385,10 +2385,6 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 
 	scope := leader.NewOwnerScope(ownerWork)
-	// Stop the owner scope on any early error return below. Idempotent (Stop is a
-	// no-op when idle / already stopped), so it only matters on a return between
-	// here and the ordered shutdown path.
-	defer scope.Stop()
 	elector := leader.New(store, leader.Config{
 		InstanceID: cfg.Server.InstanceID,
 		TTL:        cfg.Server.LeaseTTL,
@@ -2414,9 +2410,22 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		workerAPI.SetOwnership(ownerAndReady)
 	}
 	electorCtx, cancelElector := context.WithCancel(context.Background())
-	defer cancelElector()
-	go elector.Run(electorCtx)
+	electorDone := make(chan struct{})
 	var localLogMaintenanceWG sync.WaitGroup
+	go func() {
+		defer close(electorDone)
+		elector.Run(electorCtx)
+	}()
+	// Cancellation alone is not a join: the Elector may be finishing an
+	// in-flight acquire and can synchronously start owner work before it observes
+	// cancellation. Always wait for Run to return before dependencies are closed.
+	stopOwnership := func() {
+		cancelElector()
+		<-electorDone
+		localLogMaintenanceWG.Wait()
+		scope.Stop()
+	}
+	defer stopOwnership()
 	if cfg.Maintenance.AppLogRunRetentionCount > 0 {
 		localLogMaintenanceWG.Add(1)
 		go func() {
@@ -2650,8 +2659,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		if metricsSrv != nil {
 			_ = metricsSrv.Close()
 		}
-		cancelElector()
-		scope.Stop()
+		stopOwnership()
 		return fmt.Errorf("upgrade ready: %w", err)
 	}
 	// Tell systemd (Type=notify) we are the live process and retarget MAINPID to
@@ -2665,8 +2673,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		if metricsSrv != nil {
 			_ = metricsSrv.Close()
 		}
-		cancelElector()
-		scope.Stop()
+		stopOwnership()
 		return fmt.Errorf("sd_notify: %w", err)
 	}
 
@@ -2675,8 +2682,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	select {
 	case err := <-serveErr:
 		if err != nil {
-			cancelElector()
-			scope.Stop()
+			stopOwnership()
 			return fmt.Errorf("http server: %w", err)
 		}
 	case <-upg.Exit():
@@ -2700,12 +2706,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			slog.Warn("tracer shutdown", "err", err)
 		}
 	}
-	// Stop the owner span: the Elector releases the lease, then OwnerScope
-	// cancels the loop context and waits for the watcher/scheduler/monitor/
-	// autoscaler to exit before we drain jobs and close the store.
-	cancelElector()
-	localLogMaintenanceWG.Wait()
-	scope.Stop()
+	// Stop and join the Elector. Its synchronous OnLose callback cancels the
+	// owner span and waits for the watcher/scheduler/monitor/autoscaler to exit
+	// before Run returns, so jobs and the store remain valid through handoff.
+	stopOwnership()
 	// Stop the session reporter (clustered only). Cancel triggers a final
 	// flush so the last known counts are persisted before the store closes.
 	if reporterCancel != nil {

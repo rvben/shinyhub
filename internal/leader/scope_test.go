@@ -56,6 +56,25 @@ func TestOwnerScope_LoseWhenIdleIsNoop(t *testing.T) {
 	scope.Lose() // must neither panic nor block
 }
 
+func TestOwnerScope_StopPreventsLateAcquire(t *testing.T) {
+	started := make(chan struct{}, 1)
+	scope := NewOwnerScope(func(ctx context.Context, epoch int64) {
+		started <- struct{}{}
+		<-ctx.Done()
+	})
+
+	// Model shutdown winning a race with an Elector database acquire. The
+	// callback may arrive after Stop returns, but must not resurrect owner work.
+	scope.Stop()
+	scope.Acquire(1)
+
+	select {
+	case <-started:
+		t.Fatal("work started after terminal Stop")
+	default:
+	}
+}
+
 func TestOwnerScope_ConcurrentStopIsSafe(t *testing.T) {
 	running := make(chan struct{})
 	scope := NewOwnerScope(func(ctx context.Context, epoch int64) {

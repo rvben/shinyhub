@@ -21,9 +21,10 @@ import (
 type OwnerScope struct {
 	work func(ctx context.Context, epoch int64)
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	done    chan struct{}
+	stopped bool
 }
 
 // NewOwnerScope constructs a scope around work.
@@ -38,6 +39,11 @@ func (o *OwnerScope) Acquire(epoch int64) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	o.mu.Lock()
+	if o.stopped {
+		o.mu.Unlock()
+		cancel()
+		return
+	}
 	o.cancel, o.done = cancel, done
 	o.mu.Unlock()
 	go func() {
@@ -58,9 +64,23 @@ func (o *OwnerScope) Acquire(epoch int64) {
 
 // Lose cancels the current span (if any) and blocks until work returns.
 func (o *OwnerScope) Lose() {
+	o.stop(false)
+}
+
+// Stop cancels and waits for the current span, then permanently prevents new
+// spans from starting. Unlike Lose, Stop is terminal: this matters at process
+// shutdown, where the Elector may already be finishing an in-flight database
+// acquire while another goroutine begins teardown.
+func (o *OwnerScope) Stop() {
+	o.stop(true)
+}
+
+func (o *OwnerScope) stop(final bool) {
 	o.mu.Lock()
+	if final {
+		o.stopped = true
+	}
 	cancel, done := o.cancel, o.done
-	o.cancel, o.done = nil, nil
 	o.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -68,8 +88,12 @@ func (o *OwnerScope) Lose() {
 	if done != nil {
 		<-done
 	}
+	o.mu.Lock()
+	// Retain the active span while waiting so concurrent Stop/Lose callers join
+	// the same work instead of returning early. Do not erase a newer span if a
+	// caller violates the documented serial Acquire/Lose callback contract.
+	if o.done == done {
+		o.cancel, o.done = nil, nil
+	}
+	o.mu.Unlock()
 }
-
-// Stop cancels and waits for the current span; used at process shutdown. It is
-// an idempotent alias for Lose for call-site readability.
-func (o *OwnerScope) Stop() { o.Lose() }
