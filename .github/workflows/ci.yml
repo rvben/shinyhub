@@ -98,7 +98,7 @@ jobs:
           - shard: p-r
             pattern: ^Test[P-R]
           - shard: s-z-misc
-            pattern: ^(Example|Test([^A-R]|$))
+            pattern: ^(Example|Test[^A-R])
     steps:
       - uses: actions/checkout@v7
 
