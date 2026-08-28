@@ -27,6 +27,7 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 			FleetState                bool `json:"fleet_state"`
 			FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
 			ServiceAccountCredentials bool `json:"service_account_credentials"`
+			ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
 		} `json:"capabilities"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
@@ -58,6 +59,9 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 	if !got.Capabilities.ServiceAccountCredentials {
 		t.Errorf("service_account_credentials not advertised")
+	}
+	if !got.Capabilities.ScheduleDeployConvergence {
+		t.Errorf("schedule_deploy_convergence not advertised")
 	}
 }
 

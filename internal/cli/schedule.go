@@ -163,6 +163,25 @@ func lookupScheduleID(cfg *cliConfig, slug, name string) (int64, error) {
 	return s.ID, nil
 }
 
+// requireScheduleDeployConvergence prevents a newer CLI from silently sending
+// deploy_trigger to a server that predates the field and would ignore it. Keep
+// this check before every schedule mutation that depends on the field.
+func requireScheduleDeployConvergence(cfg *cliConfig, policy string) error {
+	info, err := probeServer(cfg)
+	if err != nil {
+		return fmt.Errorf("cannot verify server support for --deploy-trigger=%s before changing the schedule (no schedule was changed; upgrade the ShinyHub server if it is older): %w",
+			policy, err)
+	}
+	if info.Capabilities.ScheduleDeployConvergence {
+		return nil
+	}
+	return validationErr(
+		fmt.Sprintf("server %s does not support --deploy-trigger=%s; upgrade the ShinyHub server before retrying (no schedule was changed)",
+			displayVersion(info.Version), policy),
+		"Upgrade the ShinyHub server to a release that advertises schedule_deploy_convergence, then retry the command.",
+	)
+}
+
 // lookupSchedule resolves a schedule by name to its full DTO so callers can read
 // fields beyond the ID (e.g. Enabled, to note a manual trigger of a disabled job).
 func lookupSchedule(cfg *cliConfig, slug, name string) (scheduleDTO, error) {
@@ -369,6 +388,11 @@ func newScheduleAddCmd() *cobra.Command {
 			}
 		default:
 			return fmt.Errorf("one of --cmd or --cmd-json is required")
+		}
+		if strings.TrimSpace(flags.deployTrigger) != "never" {
+			if err := requireScheduleDeployConvergence(cfg, flags.deployTrigger); err != nil {
+				return err
+			}
 		}
 
 		enabled := !flags.disabled
@@ -611,6 +635,11 @@ Timezone is tri-state:
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
+		}
+		if changed("deploy-trigger") {
+			if err := requireScheduleDeployConvergence(cfg, flags.deployTrigger); err != nil {
+				return err
+			}
 		}
 
 		id, err := lookupScheduleID(cfg, slug, name)

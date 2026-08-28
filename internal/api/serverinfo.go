@@ -46,6 +46,7 @@ type serverCapabilities struct {
 	FleetState                bool `json:"fleet_state"`
 	FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
 	ServiceAccountCredentials bool `json:"service_account_credentials"`
+	ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
 }
 
 // handleServerInfo advertises server capability flags so a fleet-aware CLI
@@ -66,6 +67,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			FleetState:                true,
 			FleetRunLifecycle:         true,
 			ServiceAccountCredentials: true,
+			ScheduleDeployConvergence: true,
 		},
 		Runtimes: detectRuntimes(),
 	})

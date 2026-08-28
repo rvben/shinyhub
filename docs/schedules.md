@@ -59,6 +59,10 @@ Fields:
 > `deploy_trigger = "first_deploy"` only for a genuine lifetime bootstrap. The
 > old manifest-only flag was not persisted, so schedules already in an upgraded
 > database default to `never` until their policy is explicitly reapplied.
+> The v0.13 CLI requires the server capability
+> `schedule_deploy_convergence` before adding a non-`never` policy or updating
+> any `deploy_trigger` value; against an older server it fails before changing
+> the schedule instead of sending a field that server would ignore.
 
 > **Producer runtime:** schedules that declare producer semantics
 > (`deploy_trigger != "never"` or `on_success = "roll"`) currently require the
@@ -318,6 +322,7 @@ Every run records **why** it started in its `trigger` field, visible in
 | `missed` | A catch-up dispatched at startup by `missed = "run_once"`, because one or more boundaries passed while the server was down. Corresponds to no cron boundary. |
 | `deploy` | A run admitted by `deploy_trigger`, including restart recovery for an interrupted run that still applies to the current bundle. |
 | `manual` | Started by an operator via the CLI, UI, or `POST /api/schedules/{id}/run`. |
+| `register` | Legacy history from the removed v0.12.x `run_on_register` first-fire. Upgraded rows retain this value; v0.13 does not create new `register` runs. |
 
 `missed` distinguishes a backfill from an on-time fire, so "did the catch-up
 policy cover last night's outage?" is answerable from run history alone.
@@ -326,6 +331,11 @@ policy cover last night's outage?" is answerable from run history alone.
 > indistinguishable from an on-time fire. Tooling that filters run history on
 > `trigger == "schedule"` to mean "any automatic run" must match `missed` too.
 > Runs recorded before the upgrade keep their original `schedule` value.
+
+Run status can also be `superseded`: the server admitted the run for an older
+bundle or schedule declaration, then proved before command execution that it
+was no longer the current producer obligation. A superseded run does not
+publish data.
 
 ## Deploy-triggered data convergence
 

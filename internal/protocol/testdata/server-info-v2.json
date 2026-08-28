@@ -1,0 +1,14 @@
+{
+  "version": "v0.0.0-contract",
+  "protocol_version": 2,
+  "capabilities": {
+    "fleet_preconditions": true,
+    "content_digest": true,
+    "cli_connect": true,
+    "schedule_deploy_convergence": true
+  },
+  "runtimes": {
+    "python": true,
+    "r": true
+  }
+}

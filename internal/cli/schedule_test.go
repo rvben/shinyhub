@@ -897,8 +897,17 @@ func TestSchedule_Update_CmdShellwords(t *testing.T) {
 // TestScheduleAdd_DeployTrigger_ReportsDeployRun verifies that --deploy-trigger
 // sends the selected policy and reports the explicit convergence result.
 func TestScheduleAdd_DeployTrigger_ReportsDeployRun(t *testing.T) {
-	_, reqs, setResp := setupCLITest(t)
-	setResp(201, `{"id":7,"name":"warm","convergence":{"schedule_id":7,"schedule":"warm","obligation_id":9,"status":"running","run_id":42}}`)
+	_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/server-info":
+			fmt.Fprint(w, `{"version":"v0.13.0","protocol_version":2,"capabilities":{"schedule_deploy_convergence":true}}`)
+		case "/api/apps/warmapp/schedules":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":7,"name":"warm","convergence":{"schedule_id":7,"schedule":"warm","obligation_id":9,"status":"running","run_id":42}}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
 
 	cmd := newScheduleAddCmd()
 	var out bytes.Buffer
@@ -909,11 +918,11 @@ func TestScheduleAdd_DeployTrigger_ReportsDeployRun(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 
-	if len(*reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	if len(*reqs) != 2 {
+		t.Fatalf("expected capability probe and create request, got %d requests", len(*reqs))
 	}
 	var gotBody map[string]any
-	if err := json.Unmarshal((*reqs)[0].Body, &gotBody); err != nil {
+	if err := json.Unmarshal((*reqs)[1].Body, &gotBody); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
 	}
 	if gotBody["deploy_trigger"] != "bundle_change" {
@@ -922,6 +931,50 @@ func TestScheduleAdd_DeployTrigger_ReportsDeployRun(t *testing.T) {
 	// In piped mode the output is a JSON envelope; check for the run id value.
 	if !strings.Contains(out.String(), "42") {
 		t.Errorf("output missing deploy run ID; got: %s", out.String())
+	}
+}
+
+func TestScheduleAddDeployTriggerRejectsServerWithoutConvergenceCapability(t *testing.T) {
+	_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/server-info" {
+			t.Fatalf("unsupported server must not receive schedule mutation: %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"version":"v0.12.9","protocol_version":1,"capabilities":{}}`)
+	})
+
+	cmd := newScheduleAddCmd()
+	cmd.SetArgs([]string{"warmapp", "--name", "warm", "--cron", "0 5 * * *", "--cmd", "true", "--deploy-trigger", "bundle_change"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "does not support --deploy-trigger=bundle_change") ||
+		!strings.Contains(err.Error(), "upgrade the ShinyHub server") {
+		t.Fatalf("error = %v, want actionable unsupported-capability error", err)
+	}
+	if len(*reqs) != 1 || (*reqs)[0].Path != "/api/server-info" {
+		t.Fatalf("requests = %+v, want only the read-only capability probe", *reqs)
+	}
+}
+
+func TestScheduleUpdateDeployTriggerRejectsServerWithoutConvergenceCapability(t *testing.T) {
+	for _, policy := range []string{"bundle_change", "never"} {
+		t.Run(policy, func(t *testing.T) {
+			_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api/server-info" {
+					t.Fatalf("unsupported server must not receive schedule lookup or mutation: %s %s", r.Method, r.URL.Path)
+				}
+				fmt.Fprint(w, `{"version":"v0.12.9","protocol_version":1,"capabilities":{}}`)
+			})
+
+			cmd := newScheduleUpdateCmd()
+			cmd.SetArgs([]string{"warmapp", "warm", "--deploy-trigger", policy})
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), "does not support --deploy-trigger="+policy) ||
+				!strings.Contains(err.Error(), "upgrade the ShinyHub server") {
+				t.Fatalf("error = %v, want actionable unsupported-capability error", err)
+			}
+			if len(*reqs) != 1 || (*reqs)[0].Path != "/api/server-info" {
+				t.Fatalf("requests = %+v, want only the read-only capability probe", *reqs)
+			}
+		})
 	}
 }
 
@@ -958,6 +1011,9 @@ func TestScheduleAdd_NoDeployRun_NoTriggerLine(t *testing.T) {
 // is not corrupted by the creation envelope logic.
 func TestScheduleAdd_DeployTrigger_Follow_NdjsonStream(t *testing.T) {
 	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/server-info": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"version":"v0.13.0","protocol_version":2,"capabilities":{"schedule_deploy_convergence":true}}`)
+		},
 		"POST /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprint(w, `{"id":7,"name":"warm","convergence":{"schedule_id":7,"schedule":"warm","obligation_id":9,"status":"running","run_id":42}}`)

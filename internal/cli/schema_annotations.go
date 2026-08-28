@@ -648,8 +648,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"schedule runs": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "id", Type: "integer"},
 		{Name: "schedule_id", Type: "integer"},
-		{Name: "status", Type: "string", Desc: "running | succeeded | failed | timed_out | cancelled | interrupted | skipped_overlap"},
-		{Name: "trigger", Type: "string", Desc: "schedule (cron boundary) | missed (startup catch-up) | deploy (deploy policy) | manual"},
+		{Name: "status", Type: "string", Desc: "running | succeeded | failed | timed_out | cancelled | interrupted | skipped_overlap | superseded"},
+		{Name: "trigger", Type: "string", Desc: "schedule (cron boundary) | missed (startup catch-up) | deploy (deploy policy) | manual | register (legacy v0.12 run_on_register history)"},
 		{Name: "deployment_id", Type: "integer", Desc: "exact deployment executed by this run"},
 		{Name: "app_version", Type: "string", Desc: "exact app version executed by this run"},
 		{Name: "content_digest", Type: "string", Desc: "exact bundle digest executed by this run"},

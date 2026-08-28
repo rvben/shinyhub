@@ -27,7 +27,7 @@ func TestDiagnoseCompatibilityCoversUpgradeDirections(t *testing.T) {
 		{"stable major tolerates minor drift", "v1.4.0", "v1.9.0", 1, compatibilityCompatible, "compatible", ""},
 		{"new server protocol", "v0.11.9", "v0.12.0", protocol.CurrentVersion + 1, compatibilityIncompatible, "newer than this CLI supports", "uv tool upgrade shinyhub"},
 		{"legacy server remains capability gated", "v0.12.0", "v0.11.0", 0, compatibilityWarning, "capability-gated", "Upgrade the ShinyHub server"},
-		{"dev build trusts matching protocol", "dev", "v0.12.0", 1, compatibilityCompatible, "share API protocol", ""},
+		{"dev build trusts matching protocol", "dev", "v0.12.0", protocol.CurrentVersion, compatibilityCompatible, "share API protocol", ""},
 		{"missing server version is visible", "v0.12.0", "", 1, compatibilityWarning, "does not report its version", "Upgrade the server"},
 	}
 	for _, tc := range tests {

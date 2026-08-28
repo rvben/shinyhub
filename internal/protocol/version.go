@@ -4,4 +4,4 @@
 // testdata/server-info-vN.json contract fixture.
 package protocol
 
-const CurrentVersion = 1
+const CurrentVersion = 2

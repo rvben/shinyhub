@@ -193,14 +193,15 @@ func reportAppsFetchError(cfg *cliConfig, errOut io.Writer, err error) error {
 }
 
 type serverCaps struct {
-	FleetPreconditions bool `json:"fleet_preconditions"`
-	ContentDigest      bool `json:"content_digest"`
-	CLIConnect         bool `json:"cli_connect"`
-	DeployEvents       bool `json:"deploy_events"`
-	PlanApply          bool `json:"plan_apply"`
-	FleetProvenance    bool `json:"fleet_provenance"`
-	FleetState         bool `json:"fleet_state"`
-	FleetRunLifecycle  bool `json:"fleet_run_lifecycle"`
+	FleetPreconditions        bool `json:"fleet_preconditions"`
+	ContentDigest             bool `json:"content_digest"`
+	CLIConnect                bool `json:"cli_connect"`
+	DeployEvents              bool `json:"deploy_events"`
+	PlanApply                 bool `json:"plan_apply"`
+	FleetProvenance           bool `json:"fleet_provenance"`
+	FleetState                bool `json:"fleet_state"`
+	FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
+	ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just
