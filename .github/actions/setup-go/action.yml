@@ -1,0 +1,48 @@
+name: Set up Go with a per-job cache
+description: >-
+  Installs the Go toolchain from go.mod and restores/saves the module and build
+  caches under a key that is unique per job and per run. Each job restores the
+  newest cache of its own flavour (race-instrumented objects included) and saves
+  its own when it finishes, so the next run compiles only what changed.
+  setup-go's built-in cache keys on go.sum alone: it saved once, from whichever
+  job finished first, and then reported a hit on every later run without saving
+  again, so the other jobs downloaded modules and recompiled from scratch until
+  go.sum next changed.
+
+inputs:
+  cache-name:
+    description: >-
+      Distinguishes caches of jobs whose builds differ (race vs plain, one
+      matrix shard vs another). Defaults to the job id, which is enough for
+      any job without a matrix.
+    required: false
+    default: ${{ github.job }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+        cache: false
+
+    - id: go-env
+      shell: bash
+      run: |
+        echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+        echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+
+    # The exact key is never expected to hit (run id and attempt make it
+    # unique); it exists so this job saves a fresh cache. restore-keys pick the
+    # newest earlier cache, preferring the same job with the same dependency
+    # set, then the same job with any dependency set, then any Go job.
+    - uses: actions/cache@v6
+      with:
+        path: |
+          ${{ steps.go-env.outputs.gomodcache }}
+          ${{ steps.go-env.outputs.gocache }}
+        key: go-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          go-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('go.mod', 'go.sum') }}-
+          go-${{ runner.os }}-${{ inputs.cache-name }}-
+          go-${{ runner.os }}-
