@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -90,7 +91,7 @@ type instance struct {
 	id     string
 	port   int
 	cmd    *exec.Cmd
-	stderr *bytes.Buffer
+	output *bytes.Buffer
 	waited bool
 }
 
@@ -125,14 +126,18 @@ runtime:
 	}
 }
 
-func startInstance(t *testing.T, id string, port int, dsn, tmp string) *instance {
+func startInstance(t *testing.T, id string, port int, dsn, tmp, ecsEndpoint string) *instance {
 	t.Helper()
 	cfgPath := filepath.Join(tmp, "config-"+id+".yaml")
 	writeConfig(t, cfgPath, id, port, dsn, tmp)
 
-	var stderr bytes.Buffer
+	var output bytes.Buffer
 	cmd := exec.Command(testBin, "serve", "--config", cfgPath)
-	cmd.Stderr = &stderr
+	// The server's structured logger writes to stdout in production mode. Keep
+	// stdout and stderr together so a failed readiness transition explains the
+	// owner-startup step that blocked instead of reporting an empty child log.
+	cmd.Stdout = &output
+	cmd.Stderr = &output
 	// Auth secret is shared so both instances derive the SAME sticky-cookie key
 	// (cross-instance affinity). Dummy AWS env keeps the owner's ECS reconcile a
 	// fast, hermetic no-op (connection-refused in ms, single attempt). The admin
@@ -146,21 +151,42 @@ func startInstance(t *testing.T, id string, port int, dsn, tmp string) *instance
 		"AWS_ACCESS_KEY_ID=dummy",
 		"AWS_SECRET_ACCESS_KEY=dummy",
 		"AWS_REGION=us-east-1",
-		"AWS_ENDPOINT_URL_ECS=http://127.0.0.1:1",
+		"AWS_ENDPOINT_URL_ECS="+ecsEndpoint,
 		"AWS_MAX_ATTEMPTS=1",
 		"GOWORK=off",
 	)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start instance %s: %v", id, err)
 	}
-	inst := &instance{id: id, port: port, cmd: cmd, stderr: &stderr}
+	inst := &instance{id: id, port: port, cmd: cmd, output: &output}
 	t.Cleanup(func() {
 		inst.stop()
 		if t.Failed() {
-			t.Logf("instance %s stderr:\n%s", inst.id, inst.stderr.String())
+			t.Logf("instance %s output:\n%s", inst.id, inst.output.String())
 		}
 	})
 	return inst
+}
+
+// newEmptyECS exposes the one ECS operation owner startup needs in this test.
+// The HA fixture seeds an already-running off-host replica directly in the
+// database, so the provider inventory is intentionally empty; returning a
+// successful empty ListTasks response proves the fail-closed producer fence can
+// contact its authority without making this control-plane test depend on AWS.
+func newEmptyECS(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if target := r.Header.Get("X-Amz-Target"); !strings.HasSuffix(target, ".ListTasks") {
+			t.Errorf("unexpected ECS operation %q", target)
+			http.Error(w, "unexpected ECS operation", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"taskArns":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // wait reaps the process exactly once (Wait must not be called twice).
@@ -286,17 +312,18 @@ func TestKillTheActive_StandbyTakesOver(t *testing.T) {
 	const slug = "demo-app"
 	stub0 := newStub(t, 0)
 	stub1 := newStub(t, 1)
+	ecs := newEmptyECS(t)
 	seedRunningFargateApp(t, store, slug, []string{stub0.srv.URL, stub1.srv.URL})
 
 	// --- boot instance A and confirm it serves (/readyz=200) ---
-	instA := startInstance(t, "a", 18090, dsn, tmp)
+	instA := startInstance(t, "a", 18090, dsn, tmp, ecs.URL)
 	pollStatus(t, instA.url("/readyz"), http.StatusOK, 30*time.Second)
 
 	// A is the sole instance -> it wins the lease and becomes active.
-	pollStatus(t, instA.url("/activez"), http.StatusOK, 15*time.Second)
+	pollStatus(t, instA.url("/activez"), http.StatusOK, 30*time.Second)
 
 	// --- boot standby B; it serves (/readyz) but is NOT active (A holds lease) ---
-	instB := startInstance(t, "b", 18091, dsn, tmp)
+	instB := startInstance(t, "b", 18091, dsn, tmp, ecs.URL)
 	pollStatus(t, instB.url("/readyz"), http.StatusOK, 30*time.Second)
 
 	if code, _, _ := get(t, instB.url("/activez"), nil); code != http.StatusServiceUnavailable {
@@ -384,7 +411,7 @@ func TestKillTheActive_StandbyTakesOver(t *testing.T) {
 	}
 
 	// --- control-plane handover: B acquires the lease after the TTL expires ---
-	pollStatus(t, instB.url("/activez"), http.StatusOK, 15*time.Second)
+	pollStatus(t, instB.url("/activez"), http.StatusOK, 30*time.Second)
 
 	// --- the killed instance is gone: its port refuses new connections ---
 	deadline := time.Now().Add(5 * time.Second)

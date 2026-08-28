@@ -13,14 +13,14 @@ func TestMigration064PreservesActivationHistoryAndAddsCancelledState(t *testing.
 		(id, schedule_id, status, trigger, started_at, on_success, target_generation)
 		VALUES (1, 1, 'succeeded', 'schedule', CURRENT_TIMESTAMP, 'roll', 1)`)
 	mustExec(t, s, `INSERT INTO schedule_activations
-		(id, app_id, app_slug, schedule_id, schedule_name, schedule_run_id, action,
+		(app_id, app_slug, schedule_id, schedule_name, schedule_run_id, action,
 		target_generation, status, phase, due_at, finished_at)
-		VALUES (1, 1, 'reports', 1, 'nightly', 1, 'roll', 1, 'succeeded',
+		VALUES (1, 'reports', 1, 'nightly', 1, 'roll', 1, 'succeeded',
 		'complete', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
 	mustExec(t, s, `INSERT INTO schedule_activations
-		(id, app_id, app_slug, schedule_id, schedule_name, action, target_generation,
+		(app_id, app_slug, schedule_id, schedule_name, action, target_generation,
 		status, phase, due_at, superseded_by_id, finished_at)
-		VALUES (2, 1, 'reports', 1, 'nightly', 'roll', 2, 'superseded',
+		VALUES (1, 'reports', 1, 'nightly', 'roll', 2, 'superseded',
 		'complete', CURRENT_TIMESTAMP, 1, CURRENT_TIMESTAMP)`)
 
 	if err := s.Migrate(); err != nil {
