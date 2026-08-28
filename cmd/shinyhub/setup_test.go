@@ -10,6 +10,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/spf13/cobra"
 )
 
@@ -316,17 +317,10 @@ func TestMaybeRunInteractiveSetupNonTTYExplainsBothPaths(t *testing.T) {
 }
 
 func TestEnsureUsableFirstLogin(t *testing.T) {
-	store, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Migrate(); err != nil {
-		t.Fatal(err)
-	}
+	store := dbtest.New(t)
 	cfg := &config.Config{}
 
-	err = ensureUsableFirstLogin(cfg, store, defaultServerConfigPath)
+	err := ensureUsableFirstLogin(cfg, store, defaultServerConfigPath)
 	if err == nil || !strings.Contains(err.Error(), "shinyhub init") {
 		t.Fatalf("empty local-login database should fail with recovery, got %v", err)
 	}

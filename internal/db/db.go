@@ -2,10 +2,13 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"math/rand/v2"
@@ -90,6 +93,11 @@ func (s *Store) IsPostgres() bool {
 type Store struct {
 	db *boundDB
 	d  dialect
+
+	// memory marks an in-memory SQLite store. Such a store is pinned to a single
+	// connection (see isMemoryDSN), which is what lets DeserializeSQLite treat
+	// that connection's database as the whole store.
+	memory bool
 
 	// appLogFanouts collapses all live readers for a run onto one database
 	// follower. A viewer performs one direct catch-up read before subscribing;
@@ -217,7 +225,7 @@ func openSQLite(dsn string) (*Store, error) {
 		return nil, fmt.Errorf("foreign_keys pragma not enabled (got %d)", fk)
 	}
 	d := sqliteDialect{}
-	return &Store{db: &boundDB{real: raw, d: d}, d: d}, nil
+	return &Store{db: &boundDB{real: raw, d: d}, d: d, memory: memory}, nil
 }
 
 // pgMaxConns bounds the Postgres pool. The control plane issues a modest query
@@ -518,6 +526,26 @@ func latestEmbeddedVersion(subdir string) (int, error) {
 		}
 	}
 	return max, nil
+}
+
+// MigrationsDigest returns a hex SHA-256 over every embedded migration of both
+// dialects, by file name and content. It changes exactly when the migration
+// set changes and is identical across builds of the same tree, so it can name
+// a cache of a migrated schema (a Postgres template database, for instance)
+// that must be rebuilt when the migrations do.
+func MigrationsDigest() (string, error) {
+	h := sha256.New()
+	for _, subdir := range []string{"sqlite", "postgres"} {
+		ms, err := loadMigrations(subdir)
+		if err != nil {
+			return "", err
+		}
+		for _, m := range ms {
+			fmt.Fprintf(h, "%s/%s\x00%d\x00", subdir, m.name, len(m.sql))
+			io.WriteString(h, m.sql)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // HasLegacySchema reports whether the database holds core tables with no
