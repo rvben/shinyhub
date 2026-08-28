@@ -11,8 +11,7 @@ shinyhub run examples/identity-demo --open
 ```
 
 The [`bookmarking-demo`](bookmarking-demo/) shows Python Shiny's selective URL
-bookmark integration and is intended for repository-local development until the
-helper package is published.
+bookmark integration, including automatic refresh-safe URLs and selective links.
 
 The source remains untouched and the app is served through the same
 `/app/<slug>/` proxy shape used after deployment.

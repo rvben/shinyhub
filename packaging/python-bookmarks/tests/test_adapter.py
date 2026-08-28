@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 import pytest
 from shinyhub_bookmarks import ChoiceRestore, register
 from shinyhub_bookmarks._adapter import (
     BOOKMARK_METADATA_KEY,
+    DISCOVER_INPUT_ID,
     Field,
+    REQUEST_INPUT_ID,
+    SYNC_ACK_INPUT_ID,
     _create_url,
     _display_value,
     _normalise_fields,
+    _selection_exclusions,
     _selection_from_request,
 )
 
@@ -41,6 +46,18 @@ class LifecycleBookmark(Bookmark):
         super().__init__(exclude=[])
         self.bookmark_callbacks = []
         self.restore_callbacks = []
+        self.last_save_state = None
+
+    async def get_bookmark_url(self):
+        state = type(
+            "SaveState",
+            (),
+            {"values": {}, "exclude": list(self.exclude)},
+        )()
+        for callback in self.bookmark_callbacks:
+            await callback(state)
+        self.last_save_state = state
+        return self.url
 
     def on_bookmark(self, callback):
         self.bookmark_callbacks.append(callback)
@@ -154,35 +171,17 @@ def test_selection_rejects_unknown_and_empty_fields():
 
 
 @pytest.mark.asyncio
-async def test_create_url_excludes_unselected_inputs_and_restores_author_settings():
+async def test_create_url_validates_the_generated_url_without_mutating_bookmark():
     bookmark = Bookmark(exclude=["author_excluded"])
 
-    # The fake asserts the effective exclusion while serialising. The original
-    # app-authored list is put back even after the await.
-    async def get_url():
-        assert bookmark.exclude == [
-            ".shinyhub_bookmark_discover",
-            ".shinyhub_bookmark_request",
-            "author_excluded",
-            "period",
-        ]
-        return bookmark.url
-
-    bookmark.get_bookmark_url = get_url
-
-    result = await _create_url(
-        bookmark=bookmark,
-        inputs=Inputs(),
-        selected=["region"],
-        max_url_length=8192,
-    )
+    result = await _create_url(bookmark=bookmark, max_url_length=8192)
 
     assert result == bookmark.url
     assert bookmark.exclude == ["author_excluded"]
 
 
 @pytest.mark.asyncio
-async def test_create_url_restores_exclusions_after_failure():
+async def test_create_url_propagates_serialization_failure():
     bookmark = Bookmark(exclude=["keep"])
 
     async def fail():
@@ -191,59 +190,24 @@ async def test_create_url_restores_exclusions_after_failure():
     bookmark.get_bookmark_url = fail
 
     with pytest.raises(RuntimeError, match="boom"):
-        await _create_url(
-            bookmark=bookmark, inputs=Inputs(), selected=["region"], max_url_length=8192
-        )
+        await _create_url(bookmark=bookmark, max_url_length=8192)
 
     assert bookmark.exclude == ["keep"]
 
 
-@pytest.mark.asyncio
-async def test_selected_registration_temporarily_wins_over_an_author_exclusion():
-    bookmark = Bookmark(exclude=["region"])
-
-    async def get_url():
-        assert bookmark.exclude == [
-            ".shinyhub_bookmark_discover",
-            ".shinyhub_bookmark_request",
-            "period",
-        ]
-        return bookmark.url
-
-    bookmark.get_bookmark_url = get_url
-
-    await _create_url(
-        bookmark=bookmark, inputs=Inputs(), selected=["region"], max_url_length=8192
-    )
-
-    assert bookmark.exclude == ["region"]
-
-
-@pytest.mark.asyncio
-async def test_create_url_excludes_unselected_resolved_module_inputs():
-    class ResolvedInputs(Inputs):
-        def __dir__(self):
-            return ["filters-region", "filters-period", "other-input"]
-
-    bookmark = Bookmark(exclude=[])
-
-    async def get_url():
-        assert bookmark.exclude == [
-            ".shinyhub_bookmark_discover",
-            ".shinyhub_bookmark_request",
-            "filters-period",
-            "other-input",
-        ]
-        return bookmark.url
-
-    bookmark.get_bookmark_url = get_url
-
-    await _create_url(
-        bookmark=bookmark,
-        inputs=ResolvedInputs(),
-        selected=["filters-region"],
-        max_url_length=8192,
-    )
+def test_selection_exclusions_are_request_local_and_keep_selected_fields():
+    assert _selection_exclusions(
+        ["author_excluded", "region"],
+        {"region", "period", "other-input"},
+        ["region"],
+    ) == [
+        DISCOVER_INPUT_ID,
+        REQUEST_INPUT_ID,
+        SYNC_ACK_INPUT_ID,
+        "author_excluded",
+        "other-input",
+        "period",
+    ]
 
 
 @pytest.mark.asyncio
@@ -381,3 +345,239 @@ async def test_register_contains_formatter_failures(inert_reactivity):
     message_type, payload = session.messages[-1]
     assert message_type == "shinyhub-bookmark-capabilities"
     assert payload["fields"][0]["value"] == "Europe"
+
+
+@pytest.mark.asyncio
+async def test_registered_input_changes_request_automatic_url_sync(monkeypatch):
+    from shiny import reactive
+
+    effects = []
+
+    def capture_effect(fn=None, **_kwargs):
+        if fn is None:
+            return capture_effect
+        effects.append(fn)
+        return fn
+
+    monkeypatch.setattr(reactive, "effect", capture_effect)
+    monkeypatch.setattr(
+        reactive, "event", lambda *_args, **_kwargs: lambda callback: callback
+    )
+
+    session = Session()
+    inputs = Inputs({"region": "Europe"})
+    register(session=session, input=inputs, fields={"region": "Region"})
+    publish = next(
+        callback
+        for callback in effects
+        if callback.__name__ == "_publish_capabilities"
+    )
+
+    await publish()
+    assert session.messages[-1][1]["autoSync"] is False
+    assert session.messages[-1][1]["syncRevision"] == 0
+
+    inputs.values["region"] = "Americas"
+    await publish()
+    assert session.messages[-1][1]["autoSync"] is True
+    assert session.messages[-1][1]["syncRevision"] == 1
+    assert session.messages[-1][1]["fields"][0]["value"] == "Americas"
+
+    republish = next(
+        callback
+        for callback in effects
+        if callback.__name__ == "_republish_capabilities"
+    )
+    await republish()
+    assert session.messages[-1][1]["autoSync"] is True
+    assert session.messages[-1][1]["syncRevision"] == 1
+
+    acknowledge = next(
+        callback
+        for callback in effects
+        if callback.__name__ == "_acknowledge_url_sync"
+    )
+    inputs.values[SYNC_ACK_INPUT_ID] = {"version": 1, "syncRevision": 1}
+    await acknowledge()
+    await republish()
+    assert session.messages[-1][1]["autoSync"] is False
+
+
+@pytest.mark.asyncio
+async def test_request_scopes_exclusions_to_its_bookmark_state(monkeypatch):
+    from shiny import reactive
+
+    effects = []
+
+    def capture_effect(fn=None, **_kwargs):
+        if fn is None:
+            return capture_effect
+        effects.append(fn)
+        return fn
+
+    monkeypatch.setattr(reactive, "effect", capture_effect)
+    monkeypatch.setattr(
+        reactive, "event", lambda *_args, **_kwargs: lambda callback: callback
+    )
+
+    session = Session()
+    session.bookmark.exclude = ["author_excluded", "region"]
+    inputs = Inputs(
+        {
+            "region": "Europe",
+            REQUEST_INPUT_ID: {
+                "version": 1,
+                "requestId": "url-sync-test",
+                "include": ["region"],
+                "purpose": "sync",
+                "syncRevision": 3,
+            },
+        }
+    )
+    register(session=session, input=inputs, fields={"region": "Region"})
+    handle = next(
+        callback for callback in effects if callback.__name__ == "_handle_request"
+    )
+
+    await handle()
+
+    assert session.bookmark.exclude == ["author_excluded", "region"]
+    assert session.bookmark.last_save_state.exclude == [
+        DISCOVER_INPUT_ID,
+        REQUEST_INPUT_ID,
+        SYNC_ACK_INPUT_ID,
+        "author_excluded",
+        "period",
+    ]
+    message_type, payload = session.messages[-1]
+    assert message_type == "shinyhub-bookmark-result"
+    assert payload["purpose"] == "sync"
+    assert payload["syncRevision"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("purpose", "expected_code"),
+    [(None, "request_timeout"), ("sync", "sync_timeout")],
+)
+async def test_request_timeouts_release_the_lock_and_report_the_right_kind(
+    monkeypatch, purpose, expected_code
+):
+    from shiny import reactive
+    from shinyhub_bookmarks import _adapter
+
+    effects = []
+
+    def capture_effect(fn=None, **_kwargs):
+        if fn is None:
+            return capture_effect
+        effects.append(fn)
+        return fn
+
+    monkeypatch.setattr(reactive, "effect", capture_effect)
+    monkeypatch.setattr(
+        reactive, "event", lambda *_args, **_kwargs: lambda callback: callback
+    )
+    monkeypatch.setattr(_adapter, "AUTO_SYNC_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(_adapter, "MANUAL_REQUEST_TIMEOUT_SECONDS", 0.001)
+
+    session = Session()
+    request = {
+        "version": 1,
+        "requestId": "first",
+        "include": ["region"],
+    }
+    if purpose:
+        request.update({"purpose": purpose, "syncRevision": 1})
+    inputs = Inputs({"region": "Europe", REQUEST_INPUT_ID: request})
+    register(session=session, input=inputs, fields={"region": "Region"})
+    handle = next(
+        callback for callback in effects if callback.__name__ == "_handle_request"
+    )
+
+    async def never_finishes():
+        await asyncio.sleep(60)
+
+    session.bookmark.get_bookmark_url = never_finishes
+    await handle()
+    assert session.messages[-1][0] == "shinyhub-bookmark-error"
+    assert session.messages[-1][1]["code"] == expected_code
+    assert session.messages[-1][1].get("purpose") == purpose
+
+    async def succeeds():
+        return session.bookmark.url
+
+    session.bookmark.get_bookmark_url = succeeds
+    inputs.values[REQUEST_INPUT_ID] = {
+        "version": 1,
+        "requestId": "second",
+        "include": ["region"],
+    }
+    await handle()
+    assert session.messages[-1][0] == "shinyhub-bookmark-result"
+    assert session.messages[-1][1]["requestId"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_overlapping_native_bookmark_does_not_inherit_adapter_selection(
+    monkeypatch
+):
+    from shiny import reactive
+
+    effects = []
+
+    def capture_effect(fn=None, **_kwargs):
+        if fn is None:
+            return capture_effect
+        effects.append(fn)
+        return fn
+
+    monkeypatch.setattr(reactive, "effect", capture_effect)
+    monkeypatch.setattr(
+        reactive, "event", lambda *_args, **_kwargs: lambda callback: callback
+    )
+
+    session = Session()
+    inputs = Inputs(
+        {
+            "region": "Europe",
+            REQUEST_INPUT_ID: {
+                "version": 1,
+                "requestId": "adapter",
+                "include": ["region"],
+            },
+        }
+    )
+    register(session=session, input=inputs, fields={"region": "Region"})
+    handle = next(
+        callback for callback in effects if callback.__name__ == "_handle_request"
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def paused_url():
+        started.set()
+        await release.wait()
+        state = type("SaveState", (), {"values": {}, "exclude": []})()
+        await session.bookmark.bookmark_callbacks[0](state)
+        session.bookmark.last_save_state = state
+        return session.bookmark.url
+
+    session.bookmark.get_bookmark_url = paused_url
+    request_task = asyncio.create_task(handle())
+    await started.wait()
+
+    native_state = type(
+        "NativeState", (), {"values": {}, "exclude": ["app-owned"]}
+    )()
+    await session.bookmark.bookmark_callbacks[0](native_state)
+    assert native_state.exclude == ["app-owned"]
+
+    release.set()
+    await request_task
+    assert session.bookmark.last_save_state.exclude == [
+        DISCOVER_INPUT_ID,
+        REQUEST_INPUT_ID,
+        SYNC_ACK_INPUT_ID,
+        "period",
+    ]

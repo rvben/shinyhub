@@ -50,6 +50,13 @@ once from the top-level server session. Module inputs can be included by their
 resolved IDs in that top-level field mapping; module-scoped registration is
 rejected because selective exclusion is owned by the root bookmark session.
 
+After a registered filter changes, the bridge also updates the current address
+after a short debounce. It replaces the current browser-history entry, so a
+refresh or ordinary browser bookmark reopens the same view without filling the
+Back button with every intermediate slider or text-input value. The explicit
+**Link to this view** action remains the place to exclude selected fields before
+sharing.
+
 ## View links that outlive the app
 
 Native Shiny restoration ignores a removed input, but a retired choice can
@@ -113,9 +120,10 @@ warning clears on the next visit.
 ## Privacy and behaviour
 
 - The browser-local ShinyHub switcher receives the registered display values and
-  generated URL so it can show the receipt and copy the link. The ShinyHub
-  server neither receives nor persists bookmark state; selected values stay in
-  Shiny's URL.
+  generated URL so it can show the receipt and copy the link. After a registered
+  value changes, all registered values also become part of the current browser
+  URL so refresh works. The ShinyHub server neither receives nor persists
+  bookmark state; selected values stay in Shiny's URL.
 - Every registered field is selected by default, including values equal to the
   app's current defaults. The receipt makes that scope explicit before copying.
 - App inputs not registered here are always excluded.

@@ -76,3 +76,16 @@ visibility = "public"
   hibernate_timeout_minutes = 10
   replicas = 1
   max_sessions_per_replica = 6
+
+[[app]]
+slug = "bookmarking-demo"
+source = "./apps/bookmarking-demo"
+visibility = "public"
+
+  [app.config]
+  name = "Bookmarkable views"
+  description = "Change dashboard filters, refresh the page, and share a durable selective view link."
+  project = "featured"
+  hibernate_timeout_minutes = 10
+  replicas = 1
+  max_sessions_per_replica = 6

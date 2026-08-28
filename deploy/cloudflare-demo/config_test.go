@@ -60,8 +60,8 @@ func TestCloudflareDemoFleetIsCurated(t *testing.T) {
 	if len(problems) != 0 {
 		t.Fatalf("fleet manifest problems: %v", problems)
 	}
-	if len(manifest.Apps) != 5 {
-		t.Fatalf("demo fleet has %d apps, want 5", len(manifest.Apps))
+	if len(manifest.Apps) != 6 {
+		t.Fatalf("demo fleet has %d apps, want 6", len(manifest.Apps))
 	}
 	for _, app := range manifest.Apps {
 		if app.Visibility != "public" {
@@ -150,9 +150,27 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	dockerfileSource := string(dockerfile)
-	for _, required := range []string{`COPY package.json ./`, `-X main.version=${VERSION}`} {
+	for _, required := range []string{
+		`COPY package.json ./`,
+		`-X main.version=${VERSION}`,
+		`"shinyhub-bookmarks==0.3.0"`,
+		`COPY examples/bookmarking-demo/app.py /opt/shinyhub-demo/apps/bookmarking-demo/app.py`,
+	} {
 		if !strings.Contains(dockerfileSource, required) {
-			t.Errorf("demo image does not embed the release version: missing %q", required)
+			t.Errorf("demo image is missing contract %q", required)
+		}
+	}
+
+	smoke, err := os.ReadFile("../../scripts/demo-smoke.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`$app_url/app/bookmarking-demo/`,
+		`$websocket_base/app/bookmarking-demo/websocket/`,
+	} {
+		if !strings.Contains(string(smoke), required) {
+			t.Errorf("demo smoke test is missing bookmarking app contract %q", required)
 		}
 	}
 }
@@ -252,6 +270,7 @@ func TestCloudflareDemoAppsUseAccessibleDarkThemeContract(t *testing.T) {
 		"../demo/apps/r-shiny-gallery/app.R",
 		"../../examples/dash-demo/assets/style.css",
 		"../../examples/identity-demo/app.py",
+		"../../examples/bookmarking-demo/app.py",
 	} {
 		assertThemeAdapterContains(t, path, fullPalette)
 	}
@@ -265,6 +284,7 @@ func TestCloudflareDemoAppsUseAccessibleDarkThemeContract(t *testing.T) {
 		"../../examples/dash-demo/app.py":                      `html.Label("Input value", htmlFor="n")`,
 		"../../examples/dash-demo/assets/style.css":            `color-scheme: dark`,
 		"../../examples/identity-demo/app.py":                  `ui.h1("See the identity your app receives.")`,
+		"../../examples/bookmarking-demo/app.py":               `color-scheme: dark`,
 		"../../examples/streamlit-demo/.streamlit/config.toml": `base = "dark"`,
 		"Dockerfile": `COPY examples/streamlit-demo/.streamlit`,
 	} {

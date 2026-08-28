@@ -12,6 +12,12 @@ and restores the state.
 There is no ShinyHub bookmark table, API, or retained copy of filter values.
 The state stays in the URL returned by Shiny.
 
+Registered filters also keep the current address synchronized. Changes are
+debounced and replace the current history entry, so refresh and ordinary browser
+bookmarks reopen the same view without turning every slider step into a Back
+button stop. **Link to this view** remains the selective sharing control: a
+visitor can exclude registered fields before copying a link.
+
 ## Add it to an app
 
 Install `shinyhub-bookmarks` alongside Shiny 1.6.4 or newer, then add the browser
@@ -94,8 +100,9 @@ fields={
 
 Formatters only affect the value shown in the panel. Shiny serializes the
 original input value.
-Do not register secrets or large free-form inputs: selected values become part
-of a shareable URL and may appear in browser history, logs, and referrer data.
+Do not register secrets or large free-form inputs: after a registered value
+changes it becomes part of the current URL, and generated links may appear in
+browser history, logs, and referrer data.
 The browser-local ShinyHub switcher receives registered display values and the
 generated URL to render the receipt and copy the link. The ShinyHub server does
 not receive or persist bookmark state.
@@ -120,10 +127,16 @@ targets are not consistently accepted across browsers and reverse proxies. An
 app can pass `max_url_length=` to `register()` when its entire delivery path has
 a known higher limit.
 
-The adapter serializes one request at a time, restores the app's existing
-`bookmark.exclude` list after every attempt, validates selected IDs against the
-registration, and returns stable browser error codes. It does not log filter
-values or generated URLs.
+The adapter serializes one request at a time, applies its allow-list to the
+individual bookmark state without mutating the app's shared
+`bookmark.exclude` list, validates selected IDs against the registration, and
+returns stable browser error codes. It does not log filter values or generated
+URLs.
+
+Automatic saving is deliberately bounded. A transient failure is retried once;
+if the URL still cannot be updated, the link control gains a coral status dot
+and explains that **Copy link** will preserve the latest filters. A later filter
+change retries normally and clears the warning after the URL is safely updated.
 
 ## Evolving view links safely
 
@@ -187,6 +200,7 @@ can implement the same contract without changing the switcher. Version 1 uses:
 - `shinyhub:bookmark:create`
 - `shinyhub:bookmark:result`
 - `shinyhub:bookmark:error`
+- `shinyhub:bookmark:sync-status`
 
 Applications should use the helper rather than emitting these events directly;
 the protocol is documented to make the ownership boundary and upgrade path

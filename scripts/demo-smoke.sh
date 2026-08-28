@@ -99,8 +99,10 @@ check "$app_url/app/r-shiny-gallery/" 200
 check "$app_url/app/dash-demo/" 200
 check "$app_url/app/streamlit-demo/" 200
 check "$app_url/app/identity-demo/" 200
+check "$app_url/app/bookmarking-demo/" 200
 
 websocket_base=$(printf '%s' "$app_url" | sed 's,^https://,wss://,; s,^http://,ws://,')
 node "$(dirname "$0")/demo-websocket-smoke.mjs" \
   "$websocket_base/app/operations-dashboard/websocket/" \
+  "$websocket_base/app/bookmarking-demo/websocket/" \
   "$websocket_base/app/streamlit-demo/_stcore/stream"

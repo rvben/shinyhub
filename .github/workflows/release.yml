@@ -31,6 +31,10 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Verify release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: test "${GITHUB_REF_NAME#v}" = "$(node -p 'require("./package.json").version')"
+
       # The release is hermetic: it re-runs the full gate against the exact
       # tagged tree rather than trusting a separate workflow's check-run on a
       # racing commit. Same make targets the ci workflow runs, in order.

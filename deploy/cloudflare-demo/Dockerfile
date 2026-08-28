@@ -31,6 +31,7 @@ RUN pip install --no-cache-dir \
     "dash>=4.4,<5" \
     "PyJWT>=2.13,<3" \
     "shiny>=1.6,<2" \
+    "shinyhub-bookmarks==0.3.0" \
     "streamlit>=1.60,<2"
 
 COPY --from=builder /out/shinyhub /usr/local/bin/shinyhub
@@ -53,6 +54,8 @@ COPY examples/streamlit-demo/.streamlit /opt/shinyhub-demo/apps/streamlit-demo/.
 COPY deploy/cloudflare-demo/manifests/streamlit-demo.toml /opt/shinyhub-demo/apps/streamlit-demo/shinyhub.toml
 COPY examples/identity-demo/app.py /opt/shinyhub-demo/apps/identity-demo/app.py
 COPY deploy/cloudflare-demo/manifests/identity-demo.toml /opt/shinyhub-demo/apps/identity-demo/shinyhub.toml
+COPY examples/bookmarking-demo/app.py /opt/shinyhub-demo/apps/bookmarking-demo/app.py
+COPY deploy/cloudflare-demo/manifests/bookmarking-demo.toml /opt/shinyhub-demo/apps/bookmarking-demo/shinyhub.toml
 
 RUN chmod 0755 /usr/local/bin/cloudflare-demo-entrypoint \
     && mkdir -p /data/apps /data/app-data \

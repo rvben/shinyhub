@@ -14,10 +14,10 @@ go run ./cmd/shinyhub run examples/bookmarking-demo \
   --env "PYTHONPATH=$(pwd)/packaging/python-bookmarks/src"
 ```
 
-Open `http://127.0.0.1:8800/app/bookmarking-demo/`, change some filters, and
-choose the link icon in the ShinyHub switcher. Copy the exact view or remove
-one field with **Change**, choose **Done**, then open the copied URL in a new
-private tab.
+Open `http://127.0.0.1:8800/app/bookmarking-demo/` and change some filters. The
+address updates automatically, so refreshing the page or using the browser's
+bookmark action restores the same view. Choose the link icon in the ShinyHub
+switcher to copy the exact view or remove a field with **Change** before sharing.
 
 The **Open a deliberately outdated bookmark** link exercises all recovery
 paths at once: `territory` is renamed to Region, `Legacy planning` migrates to
@@ -27,5 +27,5 @@ the **Opened with changes** receipt afterwards to inspect the adjustments and
 copy a link to the current view.
 
 The `PYTHONPATH` option supplies the worktree's package source after `shinyhub
-run` copies the isolated app bundle. Add a released `shinyhub-bookmarks`
-requirement before deploying this example as a standalone bundle.
+run` copies the isolated app bundle. The pinned package requirement is used by
+standalone and public-demo deployments.

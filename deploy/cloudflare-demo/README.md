@@ -17,7 +17,7 @@ bootstrapped with a display name and representative group memberships so the
 Identity application demonstrates the complete signed-claims contract.
 
 The demo deliberately uses ShinyHub's native runtime inside the outer container.
-Cloudflare Containers do not expose a Docker daemon, and the five bundled apps
+Cloudflare Containers do not expose a Docker daemon, and the six bundled apps
 are repository-reviewed examples rather than visitor-provided code. This is a
 product demo, not a multi-tenant sandbox.
 

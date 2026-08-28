@@ -23,6 +23,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **bookmarks**: keep registered Python Shiny filters in the current URL so
+  refreshes and browser bookmarks reopen the same view, with coalescing,
+  stale-result protection, bounded retry, and an explicit recovery state.
+- **demo**: add a public bookmarkable-view dashboard to `demo.shinyhub.dev`.
 - **schedules**: persist per-deployment producer obligations and the exact app
   version, content digest, producer fingerprint, command, and data-write order
   that published the current data.

@@ -50,6 +50,7 @@
   var BOOKMARK_CREATE_EVENT = "shinyhub:bookmark:create";
   var BOOKMARK_RESULT_EVENT = "shinyhub:bookmark:result";
   var BOOKMARK_ERROR_EVENT = "shinyhub:bookmark:error";
+  var BOOKMARK_SYNC_STATUS_EVENT = "shinyhub:bookmark:sync-status";
   var BOOKMARK_PROTOCOL_VERSION = 1;
   var BOOKMARK_TIMEOUT_MS = 10000;
 
@@ -420,6 +421,12 @@
       "  box-sizing: border-box; border-radius: 50%; background: var(--sh-warning);" +
       "  box-shadow: 0 0 0 2px var(--sh-surface);" +
       "}",
+    ".root.bookmark-sync-error .bookmark-trigger { color: var(--sh-coral); }",
+    ".root.bookmark-sync-error .bookmark-trigger::after {" +
+      "  content: ''; position: absolute; top: 7px; right: 7px; width: 6px; height: 6px;" +
+      "  box-sizing: border-box; border-radius: 50%; background: var(--sh-coral);" +
+      "  box-shadow: 0 0 0 2px var(--sh-surface);" +
+      "}",
     ".root[data-position='left-center'] .bookmark-trigger," +
       " .root[data-position='right-center'] .bookmark-trigger {" +
       "  width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line);" +
@@ -566,13 +573,15 @@
     ".bookmark-check:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 3px; }",
     ".bookmark-access-note { display: flex; align-items: center; gap: 7px; margin-top: 12px; color: var(--sh-soft); font-size: 12px; line-height: 1.4; }",
     ".bookmark-access-note svg { width: 14px; height: 14px; flex: none; color: var(--sh-muted); }",
-    ".bookmark-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; }",
-    ".bookmark-primary { min-height: 44px; box-sizing: border-box; margin: 0; padding: 8px 14px; flex: 1; border: 0; border-radius: var(--sh-r-md); color: var(--sh-deep); background: var(--sh-signal); font: inherit; font-size: 13px; font-weight: 700; line-height: 1.2; cursor: pointer; }",
+    ".bookmark-actions { display: flex; flex: none; align-items: center; gap: 8px; padding: 12px 16px 16px; border-top: 1px solid var(--sh-line); background: var(--sh-surface); }",
+    ".bookmark-primary { min-height: 44px; box-sizing: border-box; margin: 0; padding: 8px 14px; flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: var(--sh-r-md); color: var(--sh-deep); background: var(--sh-signal); font: inherit; font-size: 13px; font-weight: 700; line-height: 1.2; cursor: pointer; }",
+    ".bookmark-primary-icon { width: 16px; height: 16px; flex: none; stroke-width: 1.8; }",
     ".bookmark-primary:hover { background: #7DD3FC; }",
     ".bookmark-primary:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 2px; }",
     ".bookmark-primary:disabled { opacity: 0.5; cursor: not-allowed; }",
     ".bookmark-error { display: none; margin-top: 12px; padding: 9px 10px; border-radius: var(--sh-r-md); color: var(--sh-coral); background: rgba(248,113,113,0.12); font-size: 12px; line-height: 1.4; }",
     ".bookmark-error.visible { display: block; }",
+    ".bookmark-sync-warning { margin: 0 0 14px; padding: 10px 11px; border: 1px solid rgba(248,113,113,0.35); border-radius: var(--sh-r-md); color: var(--sh-coral); background: rgba(248,113,113,0.10); font-size: 12px; line-height: 1.45; }",
     ".bookmark-url { display: none; width: 100%; min-height: 64px; box-sizing: border-box; margin-top: 10px; padding: 9px 10px; resize: vertical; border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-md); color: var(--sh-text); background: var(--sh-deep); font-family: Space Mono, ui-monospace, monospace; font-size: 12px; line-height: 1.45; user-select: text; -webkit-user-select: text; }",
     ".bookmark-url.visible { display: block; }",
     ".bookmark-url:focus { outline: none; border-color: var(--sh-signal); box-shadow: 0 0 0 3px rgba(56,189,248,0.18); }",
@@ -1161,6 +1170,13 @@
   bookmarkHead.appendChild(bookmarkHeading);
   bookmarkHead.appendChild(bookmarkClose);
   var bookmarkBody = div("bookmark-body");
+  var bookmarkSyncWarning = div(
+    "bookmark-sync-warning",
+    "Latest filter changes are not saved in this page's URL. Use Copy link to preserve them."
+  );
+  bookmarkSyncWarning.id = TAG_ID + "-bookmark-sync-warning";
+  bookmarkSyncWarning.setAttribute("role", "status");
+  bookmarkSyncWarning.hidden = true;
   var bookmarkNotice = div("bookmark-notice");
   bookmarkNotice.id = TAG_ID + "-bookmark-notice";
   bookmarkNotice.hidden = true;
@@ -1221,17 +1237,21 @@
   var bookmarkPrimary = document.createElement("button");
   bookmarkPrimary.type = "button";
   bookmarkPrimary.className = "bookmark-primary";
-  bookmarkPrimary.textContent = "Copy link";
+  setBookmarkPrimary("Copy link", "copy");
   bookmarkActions.appendChild(bookmarkPrimary);
+  bookmarkBody.appendChild(bookmarkSyncWarning);
   bookmarkBody.appendChild(bookmarkNotice);
   bookmarkBody.appendChild(bookmarkScope);
   bookmarkBody.appendChild(bookmarkFields);
   bookmarkBody.appendChild(bookmarkAccessNote);
   bookmarkBody.appendChild(bookmarkError);
   bookmarkBody.appendChild(bookmarkURL);
-  bookmarkBody.appendChild(bookmarkActions);
   bookmarkPanel.appendChild(bookmarkHead);
   bookmarkPanel.appendChild(bookmarkBody);
+  // Keep the decisive action outside the scrolling content. Apps may expose
+  // dozens of bookmarkable inputs, but visitors should never have to hunt for
+  // the control that completes the task.
+  bookmarkPanel.appendChild(bookmarkActions);
   // This status sits outside the panel's aria-busy subtree, so assistive
   // technology announces a switch immediately rather than waiting for the
   // destination page to finish loading.
@@ -1271,6 +1291,7 @@
   var bookmarkSelection = {};
   var bookmarkPending = null;
   var bookmarkTimer = null;
+  var bookmarkSyncError = false;
 
   function mobileViewport() {
     try {
@@ -1332,7 +1353,7 @@
       return null;
     }
     var fields = [];
-    var seen = {};
+    var seen = Object.create(null);
     for (var i = 0; i < detail.fields.length; i++) {
       var raw = detail.fields[i];
       if (!raw || typeof raw.id !== "string" || !raw.id || raw.id.length > 256 || seen[raw.id]) {
@@ -1393,6 +1414,49 @@
       }
     }
     return selected;
+  }
+
+  function setBookmarkPrimary(label, state) {
+    clear(bookmarkPrimary);
+    var icon = state === "copied"
+      ? svg(["M3.5 8.5l3 3 6-7"], 16)
+      : svg(["M6 5h7v8H6z", "M3 10V3h7"], 16);
+    icon.setAttribute(
+      "class",
+      "bookmark-primary-icon " +
+        (state === "copied" ? "bookmark-primary-check-icon" : "bookmark-primary-copy-icon")
+    );
+    bookmarkPrimary.appendChild(icon);
+    var labelNode = document.createElement("span");
+    labelNode.textContent = label;
+    bookmarkPrimary.appendChild(labelNode);
+  }
+
+  function renderBookmarkChrome() {
+    var adjustments = bookmarkCapabilities ? bookmarkCapabilities.adjustments.length : 0;
+    var descriptionIDs = [];
+    if (bookmarkSyncError) descriptionIDs.push(TAG_ID + "-bookmark-sync-warning");
+    if (adjustments > 0) descriptionIDs.push(TAG_ID + "-bookmark-notice");
+    descriptionIDs.push(TAG_ID + "-bookmark-scope-detail");
+    bookmarkPanel.setAttribute("aria-describedby", descriptionIDs.join(" "));
+    if (bookmarkSyncError) {
+      bookmarkBtn.setAttribute(
+        "aria-label",
+        "Link to this view, latest filters are not saved in the URL"
+      );
+      bookmarkBtn.title = "Latest filters are not saved in the URL";
+      return;
+    }
+    bookmarkBtn.setAttribute(
+      "aria-label",
+      adjustments > 0
+        ? "Link to this view, opened with " + adjustments +
+          (adjustments === 1 ? " change" : " changes")
+        : "Link to this view"
+    );
+    bookmarkBtn.title = adjustments > 0
+      ? "Opened with " + adjustments + (adjustments === 1 ? " change" : " changes")
+      : "Link to this view";
   }
 
   function setBookmarkError(message, url) {
@@ -1508,11 +1572,12 @@
       : "Choose which values should follow the link.";
     bookmarkChange.textContent = bookmarkEditing ? "Done" : "Change";
     bookmarkChange.setAttribute("aria-expanded", bookmarkEditing ? "true" : "false");
-    bookmarkPrimary.textContent = bookmarkPending
+    var primaryLabel = bookmarkPending
       ? "Creating link…"
       : adjusted && complete && !bookmarkEditing
         ? "Copy link to current view"
         : "Copy link";
+    setBookmarkPrimary(primaryLabel, "copy");
     bookmarkPrimary.disabled = !!bookmarkPending || selected === 0;
     bookmarkChange.disabled = !!bookmarkPending;
     bookmarkScopeTitle.setAttribute("aria-live", bookmarkEditing ? "polite" : "off");
@@ -2293,23 +2358,7 @@
     bookmarkCapabilities = capabilities;
     root.classList.add("bookmark-ready");
     root.classList.toggle("bookmark-adjusted", capabilities.adjustments.length > 0);
-    bookmarkPanel.setAttribute(
-      "aria-describedby",
-      capabilities.adjustments.length > 0
-        ? TAG_ID + "-bookmark-notice " + TAG_ID + "-bookmark-scope-detail"
-        : TAG_ID + "-bookmark-scope-detail"
-    );
-    var adjustmentCount = capabilities.adjustments.length;
-    bookmarkBtn.setAttribute(
-      "aria-label",
-      adjustmentCount > 0
-        ? "Link to this view, opened with " + adjustmentCount +
-          (adjustmentCount === 1 ? " change" : " changes")
-        : "Link to this view"
-    );
-    bookmarkBtn.title = adjustmentCount > 0
-      ? "Opened with " + adjustmentCount + (adjustmentCount === 1 ? " change" : " changes")
-      : "Link to this view";
+    renderBookmarkChrome();
     if (bookmarkOpen) {
       var retained = {};
       for (var i = 0; i < capabilities.fields.length; i++) {
@@ -2320,6 +2369,19 @@
       renderBookmark();
     }
     revealBar(true);
+  }));
+
+  window.addEventListener(BOOKMARK_SYNC_STATUS_EVENT, guard(function (ev) {
+    var detail = ev && ev.detail ? ev.detail : {};
+    if (detail.version !== BOOKMARK_PROTOCOL_VERSION) return;
+    if (detail.state !== "saved" && detail.state !== "error") return;
+    bookmarkSyncError = detail.state === "error";
+    bookmarkSyncWarning.hidden = !bookmarkSyncError;
+    root.classList.toggle("bookmark-sync-error", bookmarkSyncError);
+    renderBookmarkChrome();
+    if (bookmarkSyncError) {
+      announcer.textContent = "Latest filter changes are not saved in the page URL";
+    }
   }));
 
   window.addEventListener(BOOKMARK_RESULT_EVENT, guard(function (ev) {
@@ -2337,7 +2399,7 @@
       guard(function () {
         finishBookmarkRequest();
         var adjusted = bookmarkCapabilities && bookmarkCapabilities.adjustments.length > 0;
-        bookmarkPrimary.textContent = "Copied";
+        setBookmarkPrimary("Copied", "copied");
         var complete = bookmarkCapabilities &&
           selectedBookmarkIDs().length === bookmarkCapabilities.fields.length;
         announcer.textContent = adjusted && complete && !bookmarkEditing

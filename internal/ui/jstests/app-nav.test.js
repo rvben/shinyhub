@@ -34,6 +34,7 @@ const SESSION_OWNER_EVENT = 'shinyhub:session-status-owner';
 const BOOKMARK_CAPABILITIES_EVENT = 'shinyhub:bookmark:capabilities';
 const BOOKMARK_CREATE_EVENT = 'shinyhub:bookmark:create';
 const BOOKMARK_RESULT_EVENT = 'shinyhub:bookmark:result';
+const BOOKMARK_SYNC_STATUS_EVENT = 'shinyhub:bookmark:sync-status';
 
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -239,7 +240,108 @@ test('the view-link panel names every registered value before copying', () => {
   assert.equal(m.qa('.bookmark-check').length, 0);
   assert.equal(m.q('.bookmark-access-note').textContent, 'App access rules still apply to anyone opening the link.');
   assert.equal(m.qa('button.bookmark-primary').length, 1);
+  assert.equal(m.qa('.bookmark-primary-copy-icon').length, 1);
   assert.equal(m.qa('button.bookmark-secondary').length, 0);
+});
+
+test('the copy action confirms success with a check icon', async () => {
+  const m = mount();
+  const requests = [];
+  Object.defineProperty(m.window.navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: () => Promise.resolve() },
+  });
+  m.window.addEventListener(BOOKMARK_CREATE_EVENT, (event) => requests.push(event.detail));
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+    },
+  }));
+
+  m.q('button.bookmark-trigger').click();
+  m.q('button.bookmark-primary').click();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_RESULT_EVENT, {
+    detail: {
+      version: 1,
+      requestId: requests[0].requestId,
+      url: 'https://hub.test/app/demo/?_inputs_=ok',
+    },
+  }));
+  await flush();
+
+  assert.equal(m.q('button.bookmark-primary').textContent, 'Copied');
+  assert.equal(m.qa('.bookmark-primary-copy-icon').length, 0);
+  assert.equal(m.qa('.bookmark-primary-check-icon').length, 1);
+  m.dom.window.close();
+});
+
+test('URL sync failure is visible, actionable, accessible, and clears after recovery', () => {
+  const m = mount();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+    },
+  }));
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_SYNC_STATUS_EVENT, {
+    detail: { version: 1, state: 'error', code: 'serialization_failed' },
+  }));
+
+  const trigger = m.q('button.bookmark-trigger');
+  assert.ok(m.root().classList.contains('bookmark-sync-error'));
+  assert.match(trigger.getAttribute('aria-label'), /latest filters are not saved/i);
+  assert.match(trigger.title, /not saved/i);
+  trigger.click();
+  assert.equal(m.q('.bookmark-sync-warning').hidden, false);
+  assert.match(m.q('.bookmark-sync-warning').textContent, /Use Copy link/);
+  assert.match(m.q('.bookmark-panel').getAttribute('aria-describedby'), /bookmark-sync-warning/);
+
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_SYNC_STATUS_EVENT, {
+    detail: { version: 1, state: 'saved' },
+  }));
+  assert.equal(m.root().classList.contains('bookmark-sync-error'), false);
+  assert.equal(m.q('.bookmark-sync-warning').hidden, true);
+  assert.equal(trigger.getAttribute('aria-label'), 'Link to this view');
+});
+
+test('a legal field ID named constructor remains visible and selectable', () => {
+  const m = mount();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'constructor', label: 'Constructor', value: 'A' }],
+    },
+  }));
+
+  assert.ok(m.root().classList.contains('bookmark-ready'));
+  m.q('button.bookmark-trigger').click();
+  assert.equal(m.q('.bookmark-field-label').textContent, 'Constructor');
+});
+
+test('the view-link copy action stays outside the scrolling value list', () => {
+  const m = mount();
+  const fields = Array.from({ length: 50 }, (_, index) => ({
+    id: `filter-${index}`,
+    label: `Filter ${index + 1}`,
+    value: `Value ${index + 1}`,
+  }));
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: { version: 1, store: 'url', fields },
+  }));
+
+  m.q('button.bookmark-trigger').click();
+
+  const panel = m.q('.bookmark-panel');
+  const body = m.q('.bookmark-body');
+  const actions = m.q('.bookmark-actions');
+  assert.equal(m.qa('.bookmark-field').length, 50);
+  assert.equal(actions.parentElement, panel);
+  assert.equal(actions.previousElementSibling, body);
+  assert.equal(body.contains(m.q('button.bookmark-primary')), false);
 });
 
 test('a stale bookmark becomes an explicit adjusted-view receipt with a fresh-link action', () => {

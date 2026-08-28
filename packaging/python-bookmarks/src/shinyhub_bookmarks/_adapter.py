@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -10,6 +12,7 @@ from ._restore import Adjustment, ChoiceRestore, resolve_choice, values_equal
 PROTOCOL_VERSION = 1
 REQUEST_INPUT_ID = ".shinyhub_bookmark_request"
 DISCOVER_INPUT_ID = ".shinyhub_bookmark_discover"
+SYNC_ACK_INPUT_ID = ".shinyhub_bookmark_sync_ack"
 CAPABILITIES_MESSAGE = "shinyhub-bookmark-capabilities"
 RESULT_MESSAGE = "shinyhub-bookmark-result"
 ERROR_MESSAGE = "shinyhub-bookmark-error"
@@ -21,6 +24,10 @@ MAX_UNKNOWN_DETAILS = 3
 MAX_UNKNOWN_LABEL_LENGTH = 120
 MAX_UNKNOWN_VALUE_LENGTH = 240
 REGISTRATION_MARKER = "_shinyhub_bookmarks_registration"
+AUTO_SYNC_TIMEOUT_SECONDS = 2.0
+MANUAL_REQUEST_TIMEOUT_SECONDS = 6.0
+
+logger = logging.getLogger(__name__)
 
 Formatter = Callable[[Any], str]
 Normalizer = Callable[[Any], Any]
@@ -364,29 +371,28 @@ def _selection_from_request(
 async def _create_url(
     *,
     bookmark: _Bookmark,
-    inputs: Any,
-    selected: Sequence[str],
     max_url_length: int,
 ) -> str:
-    original = list(bookmark.exclude)
-    selected_ids = set(selected)
-    try:
-        bookmark.exclude[:] = sorted(
-            set(original)
-            .difference(selected_ids)
-            .union(
-                _known_input_ids(inputs).difference(selected_ids),
-                {REQUEST_INPUT_ID, DISCOVER_INPUT_ID},
-            )
-        )
-        url = await bookmark.get_bookmark_url()
-    finally:
-        bookmark.exclude[:] = original
+    url = await bookmark.get_bookmark_url()
     if not isinstance(url, str) or not url:
         raise RuntimeError("Shiny did not return a bookmark URL")
     if len(url) > max_url_length:
         raise OverflowError("The bookmark URL exceeds the configured limit")
     return url
+
+
+def _selection_exclusions(
+    original: Sequence[str], known_inputs: set[str], selected: Sequence[str]
+) -> list[str]:
+    selected_ids = set(selected)
+    return sorted(
+        set(original)
+        .difference(selected_ids)
+        .union(
+            known_inputs.difference(selected_ids),
+            {REQUEST_INPUT_ID, DISCOVER_INPUT_ID, SYNC_ACK_INPUT_ID},
+        )
+    )
 
 
 def register(
@@ -398,12 +404,13 @@ def register(
     schema_version: int = 1,
     legacy_fields: Mapping[str, str] | None = None,
 ) -> Registration:
-    """Expose selected Shiny inputs to ShinyHub's bookmarking control.
+    """Expose selected Shiny inputs to ShinyHub's durable view-link controls.
 
     The app must use ``App(..., bookmark_store="url")`` and include
     :func:`bookmarking_dependency` in its UI. The browser-local ShinyHub
-    switcher receives registered display values and the generated URL, while
-    the ShinyHub server neither receives nor persists bookmark state.
+    switcher receives registered display values and generated URLs. Registered
+    input changes keep the current address synchronized, while the ShinyHub
+    server neither receives nor persists bookmark state.
     """
 
     bookmark = session.bookmark
@@ -442,6 +449,12 @@ def register(
     resolved_ids = {field.resolved_id for field in registered}
     lock = asyncio.Lock()
     restored_overrides: dict[str, Any] = {}
+    selected_fields: ContextVar[tuple[str, ...] | None] = ContextVar(
+        "shinyhub_bookmark_selected_fields", default=None
+    )
+    capability_revision = 0
+    acknowledged_revision = 0
+    initial_capabilities_observed = False
 
     from shiny import reactive
     from shiny.module import ResolvedId
@@ -468,6 +481,8 @@ def register(
             {
                 "version": PROTOCOL_VERSION,
                 "store": "url",
+                "autoSync": capability_revision > acknowledged_revision,
+                "syncRevision": capability_revision,
                 "schemaVersion": schema_version,
                 "restoredSchemaVersion": registration.restored_schema_version,
                 "fields": values,
@@ -481,6 +496,11 @@ def register(
             "version": BOOKMARK_METADATA_VERSION,
             "schema": schema_version,
         }
+        selected = selected_fields.get()
+        if selected is not None:
+            state.exclude[:] = _selection_exclusions(
+                state.exclude, _known_input_ids(input), selected
+            )
 
     @bookmark.on_restore
     async def _inspect_restored_bookmark(state: Any) -> None:
@@ -515,6 +535,11 @@ def register(
 
     @reactive.effect
     async def _publish_capabilities() -> None:
+        nonlocal capability_revision, initial_capabilities_observed
+        if initial_capabilities_observed:
+            capability_revision += 1
+        else:
+            initial_capabilities_observed = True
         await publish_capabilities()
 
     @reactive.effect
@@ -523,9 +548,28 @@ def register(
         await publish_capabilities()
 
     @reactive.effect
+    @reactive.event(input[SYNC_ACK_INPUT_ID], ignore_none=True)
+    async def _acknowledge_url_sync() -> None:
+        nonlocal acknowledged_revision
+        raw_ack = input[SYNC_ACK_INPUT_ID]()
+        if not isinstance(raw_ack, Mapping) or raw_ack.get("version") != PROTOCOL_VERSION:
+            return
+        revision = raw_ack.get("syncRevision")
+        if (
+            isinstance(revision, int)
+            and not isinstance(revision, bool)
+            and 0 <= revision <= capability_revision
+        ):
+            acknowledged_revision = max(acknowledged_revision, revision)
+
+    @reactive.effect
     @reactive.event(input[REQUEST_INPUT_ID], ignore_none=True)
     async def _handle_request() -> None:
         raw_request = input[REQUEST_INPUT_ID]()
+        automatic = isinstance(raw_request, Mapping) and raw_request.get("purpose") == "sync"
+        requested_revision = (
+            raw_request.get("syncRevision") if isinstance(raw_request, Mapping) else None
+        )
         request_id = (
             raw_request.get("requestId", "") if isinstance(raw_request, Mapping) else ""
         )
@@ -557,15 +601,48 @@ def register(
 
         try:
             async with lock:
-                url = await _create_url(
-                    bookmark=bookmark,
-                    inputs=input,
-                    selected=selected,
-                    max_url_length=max_url_length,
-                )
+                token = selected_fields.set(tuple(selected))
+                try:
+                    create = _create_url(
+                        bookmark=bookmark,
+                        max_url_length=max_url_length,
+                    )
+                    url = await asyncio.wait_for(
+                        create,
+                        AUTO_SYNC_TIMEOUT_SECONDS
+                        if automatic
+                        else MANUAL_REQUEST_TIMEOUT_SECONDS,
+                    )
+                finally:
+                    selected_fields.reset(token)
+            result = {"version": PROTOCOL_VERSION, "requestId": request_id, "url": url}
+            if automatic:
+                result["purpose"] = "sync"
+            if automatic and isinstance(requested_revision, int):
+                result["syncRevision"] = requested_revision
             await session.send_custom_message(
                 RESULT_MESSAGE,
-                {"version": PROTOCOL_VERSION, "requestId": request_id, "url": url},
+                result,
+            )
+        except asyncio.TimeoutError:
+            await session.send_custom_message(
+                ERROR_MESSAGE,
+                {
+                    "version": PROTOCOL_VERSION,
+                    "requestId": request_id,
+                    "code": "sync_timeout" if automatic else "request_timeout",
+                    "message": (
+                        "The current view took too long to save in the URL."
+                        if automatic
+                        else "The app took too long to create this link. Try again."
+                    ),
+                    **({"purpose": "sync"} if automatic else {}),
+                    **(
+                        {"syncRevision": requested_revision}
+                        if automatic and isinstance(requested_revision, int)
+                        else {}
+                    ),
+                },
             )
         except OverflowError:
             await session.send_custom_message(
@@ -575,9 +652,11 @@ def register(
                     "requestId": request_id,
                     "code": "url_too_long",
                     "message": "This view contains too much state for a reliable URL. Exclude a few fields and try again.",
+                    **({"purpose": "sync"} if automatic else {}),
                 },
             )
         except Exception:
+            logger.exception("ShinyHub bookmark URL serialization failed")
             await session.send_custom_message(
                 ERROR_MESSAGE,
                 {
@@ -585,6 +664,7 @@ def register(
                     "requestId": request_id,
                     "code": "serialization_failed",
                     "message": "Shiny could not create this link. Try again.",
+                    **({"purpose": "sync"} if automatic else {}),
                 },
             )
 

@@ -1,1 +1,2 @@
 shiny>=1.6.4,<2
+shinyhub-bookmarks==0.3.0
