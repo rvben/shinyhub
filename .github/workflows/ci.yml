@@ -286,9 +286,25 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - uses: r-lib/actions/setup-r@v2
+        id: setup-r
         with:
           r-version: release
           use-public-rspm: true
+
+      # The helper packages come from the binary mirror, but a fresh library
+      # still downloads and unpacks about forty of them. Keep the user library
+      # between runs, keyed on the R version and the files that name the
+      # packages. bootstrap-r-identity installs only what is missing and loads
+      # every package afterwards, so a restored library is verified rather than
+      # trusted, and a package added to the list lands on top of the previous
+      # library (restore-keys) and is saved under the new key.
+      - name: Cache R packages
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: r-lib-${{ runner.os }}-${{ steps.setup-r.outputs.installed-r-version }}-${{ hashFiles('packaging/r-identity/DESCRIPTION', 'Makefile') }}
+          restore-keys: |
+            r-lib-${{ runner.os }}-${{ steps.setup-r.outputs.installed-r-version }}-
 
       # sodium binds libsodium; jose binds openssl (already on the runner).
       # libuv is for fs, a testthat dependency: use-public-rspm above serves

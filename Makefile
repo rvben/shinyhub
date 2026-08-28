@@ -120,10 +120,12 @@ test-r-identity:
 # provisions exactly what a developer does. On Linux, sodium also needs the
 # libsodium system headers (libsodium-dev on Debian/Ubuntu).
 #
-# It installs from whatever repository R is already configured with, falling
-# back to CRAN only when there is none. Hardcoding CRAN instead defeats a
-# binary-package mirror: every dependency then compiles from source, so a
-# missing system header anywhere in the tree fails the install.
+# It installs from every repository R is already configured with, in R's own
+# order, falling back to CRAN only when there is none. A binary mirror is
+# configured as an extra repository ahead of CRAN, not as CRAN itself: the
+# setup-r action names the public Posit mirror "RSPM" and keeps "CRAN" for the
+# source archive, so picking the CRAN entry alone compiles every dependency from
+# source and a missing system header anywhere in the tree fails the install.
 #
 # install.packages reports a failed install as a warning, not an error, so the
 # command exits 0 with the package absent and the suite dies later complaining
@@ -133,11 +135,12 @@ bootstrap-r-identity:
 	@command -v Rscript >/dev/null 2>&1 || { echo "Rscript not found"; exit 1; }
 	Rscript \
 	  -e 'p <- c("jose", "sodium", "testthat", "roxygen2")' \
-	  -e 'repo <- getOption("repos")["CRAN"]' \
-	  -e 'if (is.na(repo) || !nzchar(repo) || repo == "@CRAN@") repo <- "https://cloud.r-project.org"' \
-	  -e 'cat("installing from:", repo, "\n")' \
+	  -e 'repos <- getOption("repos")' \
+	  -e 'repos <- repos[!is.na(repos) & nzchar(repos) & repos != "@CRAN@"]' \
+	  -e 'if (!length(repos)) repos <- c(CRAN = "https://cloud.r-project.org")' \
+	  -e 'cat("installing from:", repos, "\n")' \
 	  -e 'm <- p[!p %in% rownames(installed.packages())]' \
-	  -e 'if (length(m)) install.packages(m, repos = repo)' \
+	  -e 'if (length(m)) install.packages(m, repos = repos)' \
 	  -e 'bad <- p[!vapply(p, requireNamespace, logical(1), quietly = TRUE)]' \
 	  -e 'if (length(bad)) stop("R packages missing after install: ", paste(bad, collapse = ", "), call. = FALSE)'
 
