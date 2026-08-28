@@ -378,7 +378,8 @@ async function runBrowserContract(origin, state) {
     assert.equal(await page.locator('#logs-download').isDisabled(), true, 'external runs must not offer a false local download');
     assert.equal(await page.getByText('Open task logs', { exact: true }).getAttribute('rel'), 'noopener noreferrer');
     assert.match(await page.locator('.logs-external-identity').textContent(), /very-long-task-identity.*eu-west-1.*analytics-production/);
-    assert.match(await output.textContent(), /retained by its provider/i);
+    assert.match(await output.textContent(), /retained by its provider/i,
+      'switching sources must replace the previous run output before exposing the new source identity');
 
     assert.equal(await page.locator('.logs-status-dot').evaluate((element) => getComputedStyle(element).animationName), 'none',
       'reduced-motion users must not receive the live pulse animation');

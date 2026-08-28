@@ -978,6 +978,10 @@ export function createLogsViewer({
     for (const source of scopedSources()) loadSource(source, scopeGeneration);
     updateConnectionStatus();
     scheduleRender(true);
+    // Source identity and output must change atomically. Waiting for the next
+    // animation frame leaves the previous run's lines visible under the newly
+    // selected source/status, briefly attributing output to the wrong run.
+    flushScheduledRender();
     scheduleNextProviderPoll();
   }
 
