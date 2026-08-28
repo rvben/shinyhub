@@ -22,8 +22,8 @@ def bootstrap(database_path: str) -> None:
 
         user_id = row[0]
         connection.execute(
-            "UPDATE users SET display_name = ? WHERE id = ?",
-            (DISPLAY_NAME, user_id),
+            "UPDATE users SET display_name = ?, managed_by = ? WHERE id = ?",
+            (DISPLAY_NAME, "public-demo", user_id),
         )
         connection.execute("DELETE FROM user_groups WHERE user_id = ?", (user_id,))
         connection.executemany(

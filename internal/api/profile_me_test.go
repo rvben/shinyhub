@@ -19,6 +19,47 @@ type meUserResp struct {
 	Role           string `json:"role"`
 	DisplayName    string `json:"display_name"`
 	CanSetPassword bool   `json:"can_set_password"`
+	CanManageSelf  bool   `json:"can_manage_self"`
+}
+
+func TestManagedAccountCannotMutateSharedIdentity(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, id := seedUserAndJWT(t, store, "shared-viewer", "viewer")
+	if _, err := store.DB().Exec(`UPDATE users SET managed_by = 'public-demo' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	me := getMe(t, srv, token)
+	if me.User.CanManageSelf || me.User.CanSetPassword {
+		t.Fatalf("managed account capabilities = manage:%t password:%t, want both false", me.User.CanManageSelf, me.User.CanSetPassword)
+	}
+	rec := patchMe(t, srv, token, map[string]any{"display_name": "Defaced"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("managed profile update: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := store.GetUserByID(id)
+	if got.DisplayName == "Defaced" {
+		t.Fatal("managed display name was mutated")
+	}
+
+	for _, request := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPost, "/api/tokens", `{"name":"escape"}`},
+		{http.MethodPost, "/api/tokens/connect", `{"name":"escape","token_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`},
+		{http.MethodDelete, "/api/tokens/1", ""},
+	} {
+		req := httptest.NewRequest(request.method, request.path, strings.NewReader(request.body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s: expected 403, got %d: %s", request.method, request.path, rec.Code, rec.Body.String())
+		}
+	}
 }
 
 type meResp struct {

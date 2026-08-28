@@ -180,6 +180,13 @@ type sessionUserResponse struct {
 	// file) and false for SSO/forward-auth accounts. The profile UI uses it to
 	// show the change-password fields only when they would actually work.
 	CanSetPassword bool `json:"can_set_password"`
+	// CanManageSelf is false for configuration-managed/shared principals. It is
+	// an advertised capability only; every mutation is also denied server-side.
+	CanManageSelf bool `json:"can_manage_self"`
+}
+
+func canManageSelf(u *db.User) bool {
+	return u != nil && u.PrincipalType != "service_account" && strings.TrimSpace(u.ManagedBy) == ""
 }
 
 // newSessionUser builds the public session view from a full DB user record so
@@ -194,7 +201,8 @@ func newSessionUser(u *db.User) *sessionUserResponse {
 		PrincipalType:     u.PrincipalType,
 		ServiceAccountKey: u.ServiceAccountKey,
 		ManagedBy:         u.ManagedBy,
-		CanSetPassword:    db.HasLocalPassword(u.PasswordHash),
+		CanSetPassword:    canManageSelf(u) && db.HasLocalPassword(u.PasswordHash),
+		CanManageSelf:     canManageSelf(u),
 	}
 }
 
@@ -435,7 +443,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// along. Fall back to the JWT claims if the read fails (e.g. the row was
 	// removed mid-session) so /api/auth/me stays available for logout/redirect.
 	su := &sessionUserResponse{ID: u.ID, Username: u.Username, Role: u.Role, PrincipalType: u.PrincipalType,
-		ServiceAccountKey: u.ServiceAccountKey, ManagedBy: u.ManagedBy}
+		ServiceAccountKey: u.ServiceAccountKey, ManagedBy: u.ManagedBy,
+		CanManageSelf: u.PrincipalType != "service_account" && strings.TrimSpace(u.ManagedBy) == ""}
 	if dbUser, err := s.store.GetUserByID(u.ID); err == nil {
 		su = newSessionUser(dbUser)
 	}
@@ -493,6 +502,10 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if !canManageSelf(current) {
+		writeError(w, http.StatusForbidden, "this account is managed and cannot change its profile")
 		return
 	}
 
@@ -676,6 +689,10 @@ func (s *Server) handleConnectCLIToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "system users cannot connect a CLI")
 		return
 	}
+	if strings.TrimSpace(u.ManagedBy) != "" {
+		writeError(w, http.StatusForbidden, "this account is managed and cannot create tokens")
+		return
+	}
 
 	var req connectCLITokenRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -736,6 +753,10 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 
 	if u.IsServiceAccount() {
 		writeError(w, http.StatusForbidden, "system users cannot create persistent tokens")
+		return
+	}
+	if strings.TrimSpace(u.ManagedBy) != "" {
+		writeError(w, http.StatusForbidden, "this account is managed and cannot create tokens")
 		return
 	}
 
@@ -846,6 +867,10 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !u.IsServiceAccount() && strings.TrimSpace(u.ManagedBy) != "" {
+		writeError(w, http.StatusForbidden, "this account is managed and cannot revoke tokens")
 		return
 	}
 
