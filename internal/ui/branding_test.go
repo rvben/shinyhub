@@ -29,11 +29,11 @@ func TestFaviconHandler(t *testing.T) {
 		}
 	})
 
-	t.Run("white-label identity without icon", func(t *testing.T) {
+	t.Run("branded identity without override falls back to stock", func(t *testing.T) {
 		rr := httptest.NewRecorder()
-		ui.FaviconHandler(config.BrandingConfig{Logo: "acme.svg"}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
-		if rr.Code != http.StatusNotFound {
-			t.Fatalf("status = %d, want 404", rr.Code)
+		ui.FaviconHandler(config.BrandingConfig{SiteTitle: "Acme", Logo: "acme.svg"}).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+		if rr.Code != http.StatusOK || !strings.HasPrefix(rr.Header().Get("Content-Type"), "image/") || rr.Body.Len() == 0 {
+			t.Fatalf("stock fallback = %d %q %d bytes", rr.Code, rr.Header().Get("Content-Type"), rr.Body.Len())
 		}
 	})
 }
@@ -142,7 +142,7 @@ func TestRenderIndexInjectsHeadAndEscapesScript(t *testing.T) {
 	}
 }
 
-func TestRenderIndexReplacesStockIconsForWhiteLabel(t *testing.T) {
+func TestRenderIndexReplacesStockIconsOnlyForFaviconOverride(t *testing.T) {
 	raw := []byte(`<html><head><title>ShinyHub</title>
   <link rel="icon" href="/static/brand/favicon.ico" data-stock-icon>
   <link rel="apple-touch-icon" href="/static/brand/apple-touch-icon.png" data-stock-icon>
@@ -167,8 +167,16 @@ func TestRenderIndexReplacesStockIconsForWhiteLabel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(logoOnly), "data-stock-icon") {
-		t.Fatalf("logo-only white-label must remove stock icons rather than leak ShinyHub: %s", logoOnly)
+	if !strings.Contains(string(logoOnly), "data-stock-icon") {
+		t.Fatalf("logo-only branding must keep the stock favicon fallback: %s", logoOnly)
+	}
+
+	titleOnly, err := ui.RenderIndex(raw, ui.Public{SiteTitle: "Acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(titleOnly), "data-stock-icon") {
+		t.Fatalf("title-only branding must keep the stock favicon fallback: %s", titleOnly)
 	}
 
 	colorOnly, err := ui.RenderIndex(raw, ui.Public{PrimaryColor: "#123456"})

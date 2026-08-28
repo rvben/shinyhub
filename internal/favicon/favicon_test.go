@@ -33,6 +33,41 @@ func TestHasIconDoesNotTreatAppleTouchIconAsFavicon(t *testing.T) {
 	}
 }
 
+func TestEnsureTitlePreservesAuthoredTitle(t *testing.T) {
+	page := []byte(`<html><head><TITLE>App-owned title</TITLE></head><body></body></html>`)
+	out, inserted := EnsureTitle(page, "Revenue · ShinyHub")
+	if inserted || string(out) != string(page) {
+		t.Fatal("EnsureTitle replaced an app-authored title")
+	}
+}
+
+func TestEnsureTitlePreservesMalformedAuthoredTitle(t *testing.T) {
+	page := []byte(`<html><head><title>App-owned title</head><body></body></html>`)
+	out, inserted := EnsureTitle(page, "Revenue · ShinyHub")
+	if inserted || string(out) != string(page) {
+		t.Fatal("EnsureTitle duplicated an unclosed app-authored title")
+	}
+}
+
+func TestEnsureTitleAddsEscapedFallback(t *testing.T) {
+	page := []byte(`<html><head><!-- <title>not real</title> --></head><body></body></html>`)
+	out, inserted := EnsureTitle(page, `Revenue & <Forecast> · ShinyHub`)
+	if !inserted {
+		t.Fatal("EnsureTitle did not insert a fallback")
+	}
+	if got := string(out); !strings.Contains(got, `<title>Revenue &amp; &lt;Forecast&gt; · ShinyHub</title>`+"\n</head>") {
+		t.Fatalf("unexpected output: %s", got)
+	}
+}
+
+func TestSetTitleReplacesLifecycleTitle(t *testing.T) {
+	page := []byte(`<html><head><title>Starting app…</title></head><body></body></html>`)
+	out, changed := SetTitle(page, "Revenue Forecast · ShinyHub")
+	if !changed || !strings.Contains(string(out), `<title>Revenue Forecast · ShinyHub</title>`) || strings.Contains(string(out), "Starting app…") {
+		t.Fatalf("SetTitle did not replace the lifecycle title: %s", out)
+	}
+}
+
 func TestEmojiSVGIsEscaped(t *testing.T) {
 	got := string(EmojiSVG(`📊</text><script>alert(1)</script>`))
 	if strings.Contains(got, "<script>") || !strings.Contains(got, "&lt;/text&gt;") {

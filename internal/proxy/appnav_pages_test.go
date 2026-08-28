@@ -91,9 +91,10 @@ func serveSurface(t *testing.T, i int, nav bool) *httptest.ResponseRecorder {
 	s := missPageSurfaces[i]
 	p := New()
 	s.setup(t, p)
+	p.SetAppFavicon(true)
+	p.SetAppNameLookup(func(string) string { return "Revenue Forecast" })
 	if nav {
 		p.SetAppNav(true, navPagesHome)
-		p.SetAppNameLookup(func(string) string { return "Revenue Forecast" })
 	}
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, pageLoadRequest(s.target))
@@ -131,6 +132,9 @@ func TestMissPages_CarryTheSwitcher(t *testing.T) {
 			}
 			if !strings.Contains(body, `data-current-name="Revenue Forecast"`) {
 				t.Error("switcher carries no friendly current app name")
+			}
+			if !strings.Contains(body, `<title>Revenue Forecast · ShinyHub</title>`) {
+				t.Errorf("%s page does not use the app's ShinyHub lifecycle title", s.name)
 			}
 		})
 	}

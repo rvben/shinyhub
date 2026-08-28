@@ -54,11 +54,15 @@ not, browsers fall back to the configured icon through `/favicon.ico`.
 Running apps keep a favicon declared by their own HTML. When an app does not
 declare one, ShinyHub uses the app icon selected in its configuration (emoji or
 uploaded image), which keeps several open app tabs distinguishable. An app with
-no icon falls back to the platform favicon.
+no icon falls back to the platform favicon. Running apps also keep a title
+declared by their own HTML; when no title is present, ShinyHub uses
+`App Name · ShinyHub`. ShinyHub-owned lifecycle pages use that title format
+consistently. Access-denied pages remain generic so private app metadata is not
+exposed.
 
-If `site_title` or `logo` replaces the stock identity but no `favicon` is set,
-ShinyHub deliberately serves no stock fallback. This prevents the Orbit Hub
-mark from leaking into an otherwise white-labelled browser tab.
+If no `favicon` is set, ShinyHub uses its stock favicon. This fallback remains
+active when `site_title` or `logo` is customized; setting `favicon` replaces the
+complete stock icon set.
 
 ### Brand slots
 

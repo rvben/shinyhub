@@ -298,7 +298,7 @@ func TestInjectStatusOverlay_RewritesThePageAndItsHeaders(t *testing.T) {
 func TestInjectAppFavicon_PreservesAuthoredIdentity(t *testing.T) {
 	const authored = `<!doctype html><html><head><link rel="shortcut icon" href="/app-owned.ico"></head><body>App</body></html>`
 	resp := htmlResponse("demo", authored)
-	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") })(resp); err != nil {
+	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") }, nil)(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	if got := readBody(t, resp); got != authored {
@@ -310,7 +310,7 @@ func TestInjectAppFavicon_AddsContextualIdentity(t *testing.T) {
 	resp := htmlResponse("demo", testShell)
 	resp.Header.Set("ETag", `"app-shell"`)
 	resp.Header.Set("Content-Security-Policy", "default-src 'self'")
-	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") })(resp); err != nil {
+	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") }, nil)(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	body := readBody(t, resp)
@@ -325,11 +325,37 @@ func TestInjectAppFavicon_AddsContextualIdentity(t *testing.T) {
 func TestInjectAppFavicon_RespectsImageCSP(t *testing.T) {
 	resp := htmlResponse("demo", testShell)
 	resp.Header.Set("Content-Security-Policy", "default-src 'none'; img-src data:")
-	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") })(resp); err != nil {
+	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") }, nil)(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	if got := readBody(t, resp); got != testShell {
 		t.Fatalf("favicon was injected through a CSP that blocks same-origin images: %s", got)
+	}
+}
+
+func TestInjectAppTitle_PreservesAuthoredTitle(t *testing.T) {
+	resp := htmlResponse("demo", testShell)
+	if err := injectPageHTML(func() []pageScript { return nil }, nil, func() string { return "Revenue Forecast · ShinyHub" })(resp); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	if got := readBody(t, resp); got != testShell {
+		t.Fatalf("app-authored title was altered: %s", got)
+	}
+}
+
+func TestInjectAppTitle_AddsFallbackWhenMissing(t *testing.T) {
+	const untitled = `<!doctype html><html><head></head><body>App</body></html>`
+	resp := htmlResponse("demo", untitled)
+	resp.Header.Set("ETag", `"untitled-shell"`)
+	if err := injectPageHTML(func() []pageScript { return nil }, nil, func() string { return "Revenue & Forecast · ShinyHub" })(resp); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, `<title>Revenue &amp; Forecast · ShinyHub</title>`) {
+		t.Fatalf("fallback title missing: %s", body)
+	}
+	if resp.Header.Get("ETag") != "" {
+		t.Fatal("ETag survived the title body rewrite")
 	}
 }
 

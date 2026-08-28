@@ -189,7 +189,7 @@ func TestStockBrandAssetSet(t *testing.T) {
 		}
 	}
 	assertContains(t, "index.html", `data-stock-icon`,
-		"stock favicon links must be identifiable so white-label rendering can remove the complete set")
+		"stock favicon links must be identifiable so a favicon override can replace the complete set")
 	assertContains(t, "style.css", `--stock-brand-lockup: url('/static/brand/orbit-hub-lockup-dark.svg')`,
 		"dark mode must select the purpose-built dark Orbit Hub lockup")
 	assertContains(t, "style.css", `--stock-brand-lockup: url('/static/brand/orbit-hub-lockup-light.svg')`,

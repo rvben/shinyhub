@@ -198,10 +198,9 @@ func RenderIndex(raw []byte, p Public) ([]byte, error) {
 	if p.SiteTitle != "" {
 		out = titleRe.ReplaceAllLiteral(out, []byte("<title>"+html.EscapeString(p.SiteTitle)+"</title>"))
 	}
-	// A configured identity must never compete with the stock favicon set. A
-	// logo/title-only white-label gets no icon rather than leaking ShinyHub into
-	// the browser tab; a configured favicon replaces the whole stock set below.
-	if p.Favicon != "" || p.Logo != "" || p.SiteTitle != "" {
+	// A configured favicon replaces the complete stock set so two icon families
+	// never compete. Other branding keeps the ShinyHub favicon as its fallback.
+	if p.Favicon != "" {
 		out = stockIconRe.ReplaceAll(out, nil)
 	}
 

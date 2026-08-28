@@ -40,6 +40,11 @@ func Link(href string) string {
 	return `<link rel="icon" href="` + html.EscapeString(href) + `">`
 }
 
+// Title renders a browser title with escaped text.
+func Title(text string) string {
+	return `<title>` + html.EscapeString(text) + `</title>`
+}
+
 // Ensure inserts a favicon link immediately before </head> unless the page
 // already declares a rel=icon link. Existing app-authored identity always wins.
 // The original bytes are returned unchanged when no insertion point exists.
@@ -57,6 +62,98 @@ func Ensure(page []byte, href string) ([]byte, bool) {
 	out = append(out, snippet...)
 	out = append(out, page[idx:]...)
 	return out, true
+}
+
+// EnsureTitle inserts a title immediately before </head> unless the page
+// already declares one. Existing app-authored title text always wins.
+func EnsureTitle(page []byte, text string) ([]byte, bool) {
+	if text == "" {
+		return page, false
+	}
+	if hasTitle(page) {
+		return page, false
+	}
+	idx := lastIndexFold(page, []byte("</head>"))
+	if idx < 0 {
+		return page, false
+	}
+	snippet := []byte(Title(text) + "\n")
+	out := make([]byte, 0, len(page)+len(snippet))
+	out = append(out, page[:idx]...)
+	out = append(out, snippet...)
+	out = append(out, page[idx:]...)
+	return out, true
+}
+
+// SetTitle replaces the first title element, or inserts one when absent. It is
+// for ShinyHub-authored lifecycle pages; proxied app HTML must use EnsureTitle
+// so an app's own title is never altered.
+func SetTitle(page []byte, text string) ([]byte, bool) {
+	if text == "" {
+		return page, false
+	}
+	start, end, ok := titleElementBounds(page)
+	if !ok {
+		if hasTitle(page) {
+			return page, false
+		}
+		return EnsureTitle(page, text)
+	}
+	replacement := []byte(Title(text))
+	out := make([]byte, 0, len(page)-(end-start)+len(replacement))
+	out = append(out, page[:start]...)
+	out = append(out, replacement...)
+	out = append(out, page[end:]...)
+	return out, true
+}
+
+func hasTitle(page []byte) bool {
+	z := xhtml.NewTokenizer(bytes.NewReader(page))
+	for {
+		switch z.Next() {
+		case xhtml.ErrorToken:
+			return false
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			tok := z.Token()
+			if strings.EqualFold(tok.Data, "title") {
+				return true
+			}
+		}
+	}
+}
+
+// titleElementBounds returns the raw byte range of the first title element.
+// The tokenizer keeps detection out of comments and scripts while the raw
+// offsets let callers preserve every unrelated source byte exactly.
+func titleElementBounds(page []byte) (int, int, bool) {
+	z := xhtml.NewTokenizer(bytes.NewReader(page))
+	offset := 0
+	start := -1
+	for {
+		typ := z.Next()
+		raw := z.Raw()
+		tokenStart := offset
+		offset += len(raw)
+		switch typ {
+		case xhtml.ErrorToken:
+			return 0, 0, false
+		case xhtml.StartTagToken:
+			tok := z.Token()
+			if start < 0 && strings.EqualFold(tok.Data, "title") {
+				start = tokenStart
+			}
+		case xhtml.SelfClosingTagToken:
+			tok := z.Token()
+			if strings.EqualFold(tok.Data, "title") {
+				return tokenStart, offset, true
+			}
+		case xhtml.EndTagToken:
+			tok := z.Token()
+			if start >= 0 && strings.EqualFold(tok.Data, "title") {
+				return start, offset, true
+			}
+		}
+	}
 }
 
 // HasIcon reports whether page has an HTML link whose rel token list contains

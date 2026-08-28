@@ -268,7 +268,7 @@ func renderLoginRedirectPage(headline, nextURL string) []byte {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>HEADLINE</title>
+<title>HEADLINE · ShinyHub</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
          display: flex; align-items: center; justify-content: center;
@@ -302,7 +302,7 @@ func renderHandoffPage(headline, nextURL string) []byte {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>HEADLINE</title>
+<title>HEADLINE · ShinyHub</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
          display: flex; align-items: center; justify-content: center;

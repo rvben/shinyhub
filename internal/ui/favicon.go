@@ -14,9 +14,9 @@ import (
 // That URL is used by ShinyHub's standalone pages and as the browser's implicit
 // /favicon.ico fallback for operator landing pages.
 //
-// A white-label identity with no configured favicon deliberately returns 404:
-// falling back to the stock Orbit Hub mark would leak ShinyHub branding into an
-// otherwise replaced identity. Theme/footer-only customization retains stock.
+// When no favicon override is configured, every branding combination falls
+// back to the stock ShinyHub icon. A custom title or logo changes the page
+// identity without leaving browser tabs blank.
 func FaviconHandler(b config.BrandingConfig) http.Handler {
 	resolved := b.ResolvedAssets()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,11 +32,6 @@ func FaviconHandler(b config.BrandingConfig) http.Handler {
 				http.ServeFile(w, r, abs)
 				return
 			}
-			http.NotFound(w, r)
-			return
-		}
-
-		if b.Logo != "" || b.SiteTitle != "" {
 			http.NotFound(w, r)
 			return
 		}

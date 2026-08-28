@@ -208,6 +208,7 @@ func (p *Proxy) decorateAppPage(page, slug string) string {
 	out := []byte(page)
 	if p.appFavicon.Load() {
 		out, _ = favicon.Ensure(out, favicon.AppURL(slug))
+		out, _ = favicon.SetTitle(out, p.appPageTitle(slug))
 	}
 	nav := p.appNav.Load()
 	if nav == nil {
@@ -273,14 +274,15 @@ func injectableResponse(resp *http.Response) bool {
 // are spliced in one pass: a second pass would mean buffering and copying the
 // whole page again for no gain.
 func injectPageScripts(scripts func() []pageScript) func(*http.Response) error {
-	return injectPageHTML(scripts, nil)
+	return injectPageHTML(scripts, nil, nil)
 }
 
-// injectPageHTML adds ShinyHub's optional scripts and contextual favicon in a
-// single bounded buffering pass. Script CSP changes and favicon insertion are
-// independent: an app that refuses ShinyHub's scripts can still receive its
-// favicon when its image policy permits same-origin resources.
-func injectPageHTML(scripts func() []pageScript, faviconHref func() string) func(*http.Response) error {
+// injectPageHTML adds ShinyHub's optional scripts and contextual browser
+// identity in a single bounded buffering pass. An app-authored title or favicon
+// always wins. Script CSP changes and favicon insertion are independent: an app
+// that refuses ShinyHub's scripts can still receive its favicon when its image
+// policy permits same-origin resources.
+func injectPageHTML(scripts func() []pageScript, faviconHref, titleFallback func() string) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		if !injectableResponse(resp) {
 			return nil
@@ -290,7 +292,11 @@ func injectPageHTML(scripts func() []pageScript, faviconHref func() string) func
 		if faviconHref != nil {
 			href = faviconHref()
 		}
-		if len(wanted) == 0 && href == "" {
+		title := ""
+		if titleFallback != nil {
+			title = titleFallback()
+		}
+		if len(wanted) == 0 && href == "" && title == "" {
 			return nil
 		}
 
@@ -317,6 +323,12 @@ func injectPageHTML(scripts func() []pageScript, faviconHref func() string) func
 
 		out := buf
 		changed := false
+		if title != "" {
+			if withTitle, inserted := favicon.EnsureTitle(out, title); inserted {
+				out = withTitle
+				changed = true
+			}
+		}
 		if href != "" && cspAllowsSelfImage(resp.Header.Get("Content-Security-Policy")) {
 			if withIcon, inserted := favicon.Ensure(out, href); inserted {
 				out = withIcon
@@ -425,6 +437,12 @@ func (p *Proxy) modifyResponseFor(slug string) func(*http.Response) error {
 				return ""
 			}
 			return favicon.AppURL(slug)
+		},
+		func() string {
+			if !p.appFavicon.Load() {
+				return ""
+			}
+			return p.appPageTitle(slug)
 		},
 	))
 }

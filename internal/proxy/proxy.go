@@ -1043,8 +1043,9 @@ func (p *Proxy) AppNavEnabled() bool {
 	return p.appNav.Load() != nil
 }
 
-// SetAppFavicon enables or disables contextual favicons on proxied app HTML and
-// ShinyHub-owned lifecycle pages. App-authored rel=icon links always win.
+// SetAppFavicon enables or disables contextual browser identity on proxied app
+// HTML and ShinyHub-owned lifecycle pages. App-authored favicon and title
+// elements always win; a missing title receives the app name as a fallback.
 func (p *Proxy) SetAppFavicon(enabled bool) {
 	p.appFavicon.Store(enabled)
 }
@@ -1102,8 +1103,9 @@ func (p *Proxy) SetAppStatusLookup(fn func(slug string) (status, reason string))
 }
 
 // SetAppNameLookup registers a callback that reports an app's friendly display
-// name for the injected switcher. Called once at startup; an empty or missing
-// result makes the client fall back to the readable slug.
+// name for browser-title fallback and the injected switcher. Called once at
+// startup; an empty or missing result makes the title fall back to the slug and
+// lets the switcher derive a readable slug itself.
 func (p *Proxy) SetAppNameLookup(fn func(slug string) string) {
 	p.mu.Lock()
 	p.appNameFn = fn
@@ -1118,6 +1120,14 @@ func (p *Proxy) appName(slug string) string {
 		return ""
 	}
 	return fn(slug)
+}
+
+func (p *Proxy) appPageTitle(slug string) string {
+	name := strings.TrimSpace(p.appName(slug))
+	if name == "" {
+		name = slug
+	}
+	return name + " · ShinyHub"
 }
 
 // getAppStatusLookup returns the current status lookup under the read lock.

@@ -16,5 +16,5 @@ masters. They are application delivery assets, not the editable source of truth.
 
 The CSS in `../style.css` selects the correct lockup and mark from the resolved
 `data-theme`. The media-qualified favicon links in `../index.html` follow the
-browser chrome theme. Operator branding removes the entire stock icon set when
-a white-label identity is configured.
+browser chrome theme. An operator favicon override replaces the entire stock
+icon set; other branding combinations retain it as the fallback.

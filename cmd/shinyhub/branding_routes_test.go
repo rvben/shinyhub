@@ -121,12 +121,15 @@ func TestBrandingRoutes(t *testing.T) {
 		}
 	})
 
-	t.Run("white_label_without_favicon_does_not_leak_stock_identity", func(t *testing.T) {
+	t.Run("branding_without_favicon_serves_stock_identity", func(t *testing.T) {
 		mux, _ := buildBrandingMux(t, config.BrandingConfig{SiteTitle: "Acme Analytics"})
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
-		if rr.Code != http.StatusNotFound {
-			t.Fatalf("GET /favicon.ico status = %d, want 404", rr.Code)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET /favicon.ico status = %d, want 200", rr.Code)
+		}
+		if !strings.HasPrefix(rr.Header().Get("Content-Type"), "image/") || rr.Body.Len() == 0 {
+			t.Fatalf("GET /favicon.ico did not serve the stock image (%q, %d bytes)", rr.Header().Get("Content-Type"), rr.Body.Len())
 		}
 	})
 

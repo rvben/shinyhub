@@ -90,6 +90,9 @@ func TestAccess_PrivateApp_BrowserNav_GetsStyledHTMLPage(t *testing.T) {
 	if !strings.Contains(body, "Sign in to access this app") {
 		t.Errorf("body missing headline: %s", body)
 	}
+	if !strings.Contains(body, `<title>Sign in to access this app · ShinyHub</title>`) {
+		t.Errorf("access-denied browser title is not generic ShinyHub identity: %s", body)
+	}
 	if strings.Contains(body, privateAppName) {
 		t.Errorf("body LEAKS private app name %q — anyone guessing the slug can enumerate titles. Body: %s", privateAppName, body)
 	}
