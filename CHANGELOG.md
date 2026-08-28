@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [0.13.1](https://github.com/rvben/shinyhub/compare/v0.13.0...v0.13.1) - 2026-08-28
+
+### Added
+
+- **operations**: add `shinyhub fleet verify`, a genuinely read-only health and
+  code/data-convergence check that reports serving health, schedule freshness,
+  current bundle provenance, and producer provenance without triggering runs.
+- **schedules**: make code/data compatibility the primary dashboard signal,
+  expose exact producer and current-bundle provenance, default new producer
+  schedules to bundle-change convergence, and provide direct repair actions.
+- **accessibility**: harden mobile navigation, modal focus containment, live
+  loading and error announcements, and phone-width app-section navigation.
+
+### Fixed
+
+- **auth**: prevent configuration-managed shared accounts from changing their
+  profile, password, or personal tokens, with matching server-side enforcement
+  and advertised UI capabilities.
+- **branding**: preserve app-specific browser titles and favicons across proxied
+  app pages, lifecycle pages, and operator branding overrides.
+- **schedules**: replace the crowded three-button schedule action row with a
+  clear Run now action and an accessible Edit/Delete overflow menu, and style
+  the mobile app-section picker consistently with the ShinyHub control system.
+
 ## [0.13.0](https://github.com/rvben/shinyhub/compare/v0.12.11...v0.13.0) - 2026-08-28
 
 ### Breaking Changes

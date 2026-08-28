@@ -20,11 +20,11 @@ show ShinyHub waking the process.
 
 ## Explore the control plane
 
-Choose **Enter the live demo** for one-click access to the real control plane.
-The resulting session has the global `viewer` role: it can inspect applications
-and viewer-safe operational state but cannot deploy, change configuration,
-manage users, or create credentials. No signup or third-party identity is
-required.
+Choose **Continue as Demo Viewer** for one-click access to the real control
+plane. No account is created. The resulting session has the global `viewer`
+role: it can inspect applications and viewer-safe operational state but cannot
+deploy, change configuration, manage users, or create credentials. No signup or
+third-party identity is required.
 
 The collapsed manual-login fallback uses username `demo-viewer` and password
 `explore-shinyhub-demo`. This credential is intentionally public and carries

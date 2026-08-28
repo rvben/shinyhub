@@ -99,7 +99,8 @@ func TestCloudflareDemoOneClickEntryIsReadOnlyAndCoveredBySmokeTest(t *testing.T
 	}
 	entrySource := string(entry)
 	for _, required := range []string{
-		`Enter the live demo`,
+		`Continue as Demo Viewer`,
+		`No account created`,
 		`Read-only access`,
 		`aria-controls="login-form"`,
 		`rel="stylesheet" href="${DEMO_STYLE_PATH}"`,
