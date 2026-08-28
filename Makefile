@@ -1,10 +1,11 @@
-.PHONY: bootstrap build check clean test test-go test-race vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race test-race-non-api test-race-api vuln scan-image test-js test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
 CLISPEC ?= clispec
 CLISPEC_MIN_VERSION := 0.3.1
-RACE_TIMEOUT ?= 45m
+RACE_TIMEOUT ?= 60m
+RACE_TEST_PATTERN ?= .
 
 # bootstrap installs the exact project dependencies and a repo-local, pinned
 # live-reload binary. Nothing is written to a developer's global Go bin.
@@ -39,6 +40,16 @@ test-go:
 # the default 10m is exceeded by the api package under race instrumentation.
 test-race:
 	go test -race ./... -count=1 -timeout $(RACE_TIMEOUT)
+
+# CI keeps the historical test-race check name for every package except the
+# dominant internal/api package. API is split by top-level test-name prefix in
+# parallel jobs so adding coverage cannot silently push the package past one
+# monolithic timeout. test-race above remains the convenient full local gate.
+test-race-non-api:
+	go test -race $$(go list ./... | grep -v '/internal/api$$') -count=1 -timeout $(RACE_TIMEOUT)
+
+test-race-api:
+	go test -race ./internal/api -count=1 -timeout $(RACE_TIMEOUT) -run '$(RACE_TEST_PATTERN)'
 
 # vuln scans the module (and its dependencies) against the Go vulnerability
 # database. Run via `go run` so no separate install step is needed and it works

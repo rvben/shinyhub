@@ -59,13 +59,12 @@ jobs:
       - name: Build
         run: go build -o /tmp/shinyhub ./cmd/shinyhub
 
-  # Full suite under the race detector. Separate job so the ~3-5x slowdown runs
-  # in parallel with the fast feedback of the `test` job.
+  # Every non-API package under the race detector. Keep this historical job
+  # name stable for branch protection; internal/api is sharded below because
+  # its ~800 top-level tests exceed a single package timeout under -race.
   test-race:
     runs-on: ubuntu-latest
-    # Keep the job ceiling above Makefile's 45m per-package timeout so Go emits
-    # the actionable package/test timeout instead of GitHub killing the runner.
-    timeout-minutes: 55
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -75,7 +74,41 @@ jobs:
           cache: true
 
       - name: Test (race detector)
-        run: make test-race
+        run: make test-race-non-api RACE_TIMEOUT=40m
+
+  # Preserve full API race coverage without one ever-growing test binary
+  # becoming a 45-minute single point of failure. Prefix ranges are exhaustive
+  # for TestXxx, Test_<case>, and Example names and intentionally overlap none.
+  test-race-api:
+    name: test-race-api (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: a-c
+            pattern: ^Test[A-C]
+          - shard: d
+            pattern: ^TestD
+          - shard: e-g
+            pattern: ^Test[E-G]
+          - shard: h-o
+            pattern: ^Test[H-O]
+          - shard: p-r
+            pattern: ^Test[P-R]
+          - shard: s-z-misc
+            pattern: ^(Example|Test([^A-R]|$))
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test API (race detector)
+        run: make test-race-api RACE_TIMEOUT=20m RACE_TEST_PATTERN='${{ matrix.pattern }}'
 
   # Full Go suite against a throwaway Postgres, so a Postgres-only regression
   # (missing column in the baseline, a wrong-dialect query) is caught in CI
