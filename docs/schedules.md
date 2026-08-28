@@ -423,8 +423,9 @@ generation-specific location, and atomically rename or switch the completed
 output into place immediately before exiting successfully. This also makes the
 recorded completion order faithfully represent writer order.
 
-For a read-only fleet audit, pass `shinyhub fleet apply --verify-schedules`.
-It checks every enabled schedule against the server-computed `stale` boolean
+For a read-only fleet audit, run `shinyhub fleet verify`. It performs only two
+GETs and checks serving health plus every enabled schedule against the
+server-computed `stale` boolean
 (one cron interval plus the server's grace policy), rejects any enabled
 deploy-trigger whose authoritative producer does not match current code, and
 rejects unresolved producer-write uncertainty even when that writer is now
@@ -434,6 +435,10 @@ running, the report says `stale · refreshing`; activity does not substitute for
 a successful data refresh. If the stored cron or timezone cannot be evaluated,
 freshness is `unknown` and strict gates fail closed; the fleet-health banner is
 also `unknown`, never healthy, until the observation is complete.
+
+`shinyhub fleet apply --verify-schedules` applies the manifest first and then
+runs the same schedule postcondition. It is appropriate for convergence, not
+for a read-only incident investigation.
 
 Failed fleet gates have stable JSON `failure_kind` values such as
 `warm_wait_timeout`, `warm_bundle_not_ready`, and `schedule_stale`. When the

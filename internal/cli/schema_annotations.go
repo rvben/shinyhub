@@ -874,7 +874,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "warnings", Type: "array", Desc: "operator advisories emitted while applying this resource"},
 	}, EnvelopeFields: []fieldSpec{
 		{Name: "run_recording_error", Type: "string", Desc: "present when convergence finished but the immutable server-side run result could not be persisted; exit code is non-zero"},
-	}, Notes: "Per-app results carry failure_kind and failed-attempt details. --wait-for-warm asks the server to reconcile each persisted deploy-trigger policy after every non-delete action, including unchanged apps, then waits for the exact obligation and fails closed when provenance is unavailable. --restart-after-warm cycles replicas only after this producer-level postcondition passes. --verify-schedules is read-only and checks both cron freshness and deploy-producer convergence. --verify-health extends serving-health checks to unchanged apps; intentionally stopped apps remain excluded. --concurrency bounds parallel deploys, and every changed app is health-waited within --health-timeout."},
+	}, Notes: "Per-app results carry failure_kind and failed-attempt details. --wait-for-warm asks the server to reconcile each persisted deploy-trigger policy after every non-delete action, including unchanged apps, then waits for the exact obligation and fails closed when provenance is unavailable. --restart-after-warm cycles replicas only after this producer-level postcondition passes. --verify-schedules itself dispatches no run but is a postcondition of the mutating fleet apply command; use fleet verify for a wholly read-only audit. --verify-health extends serving-health checks to unchanged apps; intentionally stopped apps remain excluded. --concurrency bounds parallel deploys, and every changed app is health-waited within --health-timeout."},
 	"fleet validate": {Mutating: ro},
 	"fleet plan":     {Mutating: ro},
 	"fleet dev": {Mutating: ro, Streaming: true,
@@ -900,6 +900,12 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "offset", Type: "integer"},
 		{Name: "summary", Type: "object"},
 	}},
+	"fleet verify": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "ok", Type: "boolean"},
+		{Name: "health", Type: "object"},
+		{Name: "schedules", Type: "array"},
+		{Name: "issues", Type: "array"},
+	}, Notes: "Performs exactly two GETs: aggregate fleet health and schedule freshness/producer convergence. Never deploys, reconciles, runs a job, or mutates state."},
 
 	// ── manifest ──────────────────────────────────────────────────────────────
 	"manifest":          {Mutating: ro},

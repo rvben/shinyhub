@@ -21,6 +21,7 @@ func newFleetCmd() *cobra.Command {
 			"  shinyhub fleet plan      preview the diff (read-only)\n" +
 			"  shinyhub fleet apply     converge: deploy changed, reconcile, prune\n" +
 			"  shinyhub fleet status    read-only fleet overview (no manifest)\n\n" +
+			"  shinyhub fleet verify    read-only health and code/data audit\n\n" +
 			"Commands read fleet.toml from the working directory by default; pass -f to\n" +
 			"point at another path.\n\n" +
 			"Example:\n" +
@@ -34,6 +35,7 @@ func newFleetCmd() *cobra.Command {
 	cmd.AddCommand(newFleetPlanCmd())
 	cmd.AddCommand(newFleetApplyCmd())
 	cmd.AddCommand(newFleetStatusCmd())
+	cmd.AddCommand(newFleetVerifyCmd())
 	// Flag-parse errors happen before RunE, so the dedupe wrapper never sees
 	// them. The root always has SilenceErrors=true so cobra never prints them;
 	// print here so the user is still informed. The Report() envelope that

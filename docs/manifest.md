@@ -333,7 +333,9 @@ icon = "🚀"
 
 The icon appears in ShinyHub's launchpad, app details, app switcher, lifecycle
 pages, and the browser tab when the running app does not provide a favicon of
-its own. An app-authored favicon always takes precedence.
+its own. An app-authored favicon always takes precedence. The emoji remains the
+tab icon rather than becoming title text; an app-authored browser title is also
+preserved.
 
 The field states who owns the app's icon rather than encoding three
 mechanical outcomes:
@@ -664,17 +666,17 @@ array (with the run's `status` when `--wait-for-warm` waited).
 With `--restart-after-warm`, fleet JSON also reports `warm_restarted: true`
 when serving replicas were cycled after those runs succeeded.
 
-For a read-only data audit, `fleet apply --verify-schedules` checks the
-server-computed `stale` state of every enabled schedule, rejects an enabled
+For a genuinely read-only data audit, run `shinyhub fleet verify`. It makes
+only GET requests, checks serving health plus the server-computed `stale` state
+of every enabled schedule, rejects an enabled
 deploy-trigger whose authoritative producer does not match current code, and
 rejects unresolved producer-write uncertainty even if the writer was later
 disabled. Disabling a declaration cannot undo a possible partial physical
 write. The check never dispatches a run. `stale` describes proven data age independently
 from `refreshing`, which reports a live run; a schedule can be both. JSON reports
-failures in
-`schedule_verification`, gives failures stable `failure_kind` values, and
-includes the exact atomic `last_run_id` plus relevant run tails under
-`result.schedule_logs` when available.
+issues in a single report with the exact current and producer bundle versions
+and digests. Use `fleet apply --verify-schedules` only when you intend to
+converge the manifest first and verify this postcondition afterwards.
 
 ## Worked example
 
