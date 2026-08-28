@@ -73,6 +73,7 @@ func TestCoordinatorMapsRuntimeOutcomesToDurableActivationStates(t *testing.T) {
 		{name: "already current", runErr: ErrNotNeeded, wantFinish: "not_needed"},
 		{name: "unsupported", runErr: ErrUnsupported, wantFinish: "blocked_unsupported"},
 		{name: "deleted", runErr: ErrTargetDeleted, wantFinish: "target_deleted"},
+		{name: "newer bundle", runErr: ErrSuperseded, wantFinish: "superseded"},
 		{name: "capacity", runErr: &CapacityError{Reason: "memory floor", RetryAfter: time.Minute}, wantDefer: "deferred_capacity"},
 		{name: "transient", runErr: &RetryableError{Reason: "temporary boot failure"}, wantDefer: "pending"},
 		{name: "repair", runErr: &RepairRequiredError{Reason: "surge owns the safety route"}, wantDefer: "repairing"},

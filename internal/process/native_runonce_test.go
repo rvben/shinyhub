@@ -3,9 +3,12 @@ package process
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -32,6 +35,26 @@ func TestNativeRuntime_RunOnce_ExitsAndCapturesCode(t *testing.T) {
 	}
 }
 
+func TestTerminateOneShotProcessGroupKillsChildAfterRootExits(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", `trap 'exit 0' TERM; /bin/sh -c 'trap "" TERM; while :; do sleep 1; done' & while :; do sleep 1; done`)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(waited)
+	}()
+	if err := terminateOneShotProcessGroup(cmd.Process.Pid, 50*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	<-waited
+	if err := syscall.Kill(-cmd.Process.Pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("one-shot process group still exists: %v", err)
+	}
+}
+
 func TestNativeRuntime_RunOnce_TimeoutKills(t *testing.T) {
 	rt := NewNativeRuntime()
 	var buf bytes.Buffer
@@ -54,6 +77,35 @@ func TestNativeRuntime_RunOnce_TimeoutKills(t *testing.T) {
 	}
 	if elapsed > 11*time.Second {
 		t.Fatalf("RunOnce took %v — grace + kill should be under 11s", elapsed)
+	}
+}
+
+func TestNativeRuntime_RunOnce_InheritsLifetimeFiles(t *testing.T) {
+	rt := NewNativeRuntime()
+	lifetimeFile, err := os.OpenFile(filepath.Join(t.TempDir(), "publication.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lifetimeFile.Close()
+	var logs bytes.Buffer
+	info, err := rt.RunOnce(context.Background(), StartParams{
+		Slug:          "writer",
+		Dir:           t.TempDir(),
+		Command:       []string{"sh", "-c", "printf inherited >&3"},
+		LifetimeFiles: []*os.File{lifetimeFile},
+	}, &logs)
+	if err != nil || info.Code != 0 {
+		t.Fatalf("RunOnce info=%+v err=%v logs=%q", info, err, logs.String())
+	}
+	if _, err := lifetimeFile.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(lifetimeFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "inherited" {
+		t.Fatalf("lifetime descriptor contents=%q, want inherited", contents)
 	}
 }
 

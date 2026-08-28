@@ -3,7 +3,6 @@ package scheduler
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +28,10 @@ func (f *fakeJobs) Run(id int64, trigger string, userID *int64) (int64, error) {
 	return int64(len(f.calls)), nil
 }
 
+func (f *fakeJobs) RunDeployObligation(obligation *db.ScheduleDeployObligation) (int64, error) {
+	return f.Run(obligation.ScheduleID, TriggerDeploy, nil)
+}
+
 func (f *fakeJobs) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -43,15 +46,26 @@ func (f *fakeJobs) triggerFor(id int64) string {
 
 // fakeStore implements scheduler.Store.
 type fakeStore struct {
-	enabled        []*db.Schedule
-	interrupted    int64
-	lastSucc       map[int64]*db.ScheduleRun
-	firstFireRetry []int64
+	enabled     []*db.Schedule
+	lastSucc    map[int64]*db.ScheduleRun
+	obligations []*db.ScheduleDeployObligation
+	releases    int
 }
 
 func (s *fakeStore) ListEnabledSchedules() ([]*db.Schedule, error) { return s.enabled, nil }
-func (s *fakeStore) SchedulesNeedingFirstFireRetry() ([]int64, error) {
-	return s.firstFireRetry, nil
+func (s *fakeStore) RecoverDeployObligations() error               { return nil }
+func (s *fakeStore) ReconcileAllDeployObligations() error          { return nil }
+func (s *fakeStore) ClaimNextDeployObligation() (*db.ScheduleDeployObligation, error) {
+	if len(s.obligations) == 0 {
+		return nil, db.ErrNotFound
+	}
+	o := s.obligations[0]
+	s.obligations = s.obligations[1:]
+	return o, nil
+}
+func (s *fakeStore) ReleaseDeployObligation(int64, error) error {
+	s.releases++
+	return nil
 }
 func (s *fakeStore) GetSchedule(id int64) (*db.Schedule, error) {
 	for _, sched := range s.enabled {
@@ -61,10 +75,6 @@ func (s *fakeStore) GetSchedule(id int64) (*db.Schedule, error) {
 	}
 	return nil, db.ErrNotFound
 }
-func (s *fakeStore) MarkRunningSchedulesInterrupted() (int64, error) {
-	atomic.AddInt64(&s.interrupted, 1)
-	return 1, nil
-}
 func (s *fakeStore) LastSuccessfulRun(id int64) (*db.ScheduleRun, error) {
 	if r, ok := s.lastSucc[id]; ok {
 		return r, nil
@@ -72,7 +82,7 @@ func (s *fakeStore) LastSuccessfulRun(id int64) (*db.ScheduleRun, error) {
 	return nil, db.ErrNotFound
 }
 
-func TestScheduler_Start_MarksInterruptedAndLoadsEnabled(t *testing.T) {
+func TestScheduler_Start_LoadsEnabledWithoutTouchingLiveRuns(t *testing.T) {
 	store := &fakeStore{
 		enabled: []*db.Schedule{
 			{ID: 1, CronExpr: "@every 24h", Enabled: true, MissedPolicy: "skip"},
@@ -85,29 +95,22 @@ func TestScheduler_Start_MarksInterruptedAndLoadsEnabled(t *testing.T) {
 	if err := s.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if atomic.LoadInt64(&store.interrupted) != 1 {
-		t.Fatal("expected MarkRunningSchedulesInterrupted call")
-	}
 	if got := s.entryCount(); got != 1 {
 		t.Fatalf("expected 1 cron entry, got %d", got)
 	}
-	// With nothing needing a first-fire retry, Start must not dispatch any run.
+	// With nothing needing a deploy-trigger retry, Start must not dispatch any run.
 	if got := jobs.callCount(); got != 0 {
 		t.Fatalf("expected no dispatched runs, got %d", got)
 	}
 	s.Stop()
 }
 
-// TestScheduler_Start_RefiresInterruptedFirstFire verifies that a
-// run_on_register first-fire interrupted by a prior restart is re-fired on
-// startup, using the "register" trigger so a later restart can recognise the
-// new first-fire.
-func TestScheduler_Start_RefiresInterruptedFirstFire(t *testing.T) {
+func TestScheduler_Start_RefiresInterruptedDeployRun(t *testing.T) {
 	store := &fakeStore{
 		enabled: []*db.Schedule{
 			{ID: 7, CronExpr: "0 5 * * *", Enabled: true, MissedPolicy: "skip"},
 		},
-		firstFireRetry: []int64{7},
+		obligations: []*db.ScheduleDeployObligation{{ID: 1, ScheduleID: 7}},
 	}
 	jobs := &fakeJobs{}
 	s := New(jobs, store, time.UTC)
@@ -117,10 +120,19 @@ func TestScheduler_Start_RefiresInterruptedFirstFire(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	waitForCallCount(t, jobs, 1, time.Second)
-	if got := jobs.triggerFor(7); got != "register" {
-		t.Fatalf("re-fire trigger = %q, want register", got)
+	if got := jobs.triggerFor(7); got != "deploy" {
+		t.Fatalf("re-fire trigger = %q, want deploy", got)
 	}
 	s.Stop()
+}
+
+func TestScheduler_ReconcileWithoutJobsReleasesClaim(t *testing.T) {
+	store := &fakeStore{obligations: []*db.ScheduleDeployObligation{{ID: 1, ScheduleID: 7}}}
+	s := New(nil, store, time.UTC)
+	s.reconcileDeployRuns()
+	if store.releases != 1 {
+		t.Fatalf("released claims = %d, want 1", store.releases)
+	}
 }
 
 func TestScheduler_MissedRun_DispatchesOnceForRunOnceSchedule(t *testing.T) {

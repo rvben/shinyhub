@@ -84,6 +84,7 @@ type proxyBackend interface {
 	LastSeen(slug string) time.Time
 	BeginHibernate(slug string, since time.Time) bool
 	Deregister(slug string)
+	DeregisterReplicaIfTarget(slug string, index int, expectURL string) bool
 	SetPoolSize(slug string, size int)
 	SetPoolCap(slug string, max int)
 	// SetPoolAppID associates the numeric DB app ID with slug's pool so the
@@ -168,6 +169,7 @@ type appStore interface {
 	// serving runtime or routing state for the app. Callers hold the shared app
 	// lifecycle lease before consulting it, closing check-then-act races.
 	ScheduleActivationInFlight(appID int64) (bool, error)
+	AppCompatibilityQuarantined(appID int64) (bool, error)
 }
 
 // Compile-time interface satisfaction checks.
@@ -257,6 +259,9 @@ type Watcher struct {
 	// the warm-wake path: every wake cold-boots (safe default for unconfigured
 	// setups). Set once at startup via SetResume before Start.
 	resume func(slug, bundleDir string, index int) (*deploy.Result, error)
+	// acquireConsumerBootGate serializes fresh consumer startup with serving-data
+	// publishers. nil is safe when no jobs manager is configured.
+	acquireConsumerBootGate func(appID int64) (func(), error)
 }
 
 // wakeDrainTimeout bounds how long Start waits for outstanding wake
@@ -438,6 +443,18 @@ func (w *Watcher) SetResume(fn func(slug, bundleDir string, index int) (*deploy.
 	w.resume = fn
 }
 
+// SetConsumerBootGate wires the jobs manager's app-level publication fence.
+func (w *Watcher) SetConsumerBootGate(fn func(appID int64) (func(), error)) {
+	w.acquireConsumerBootGate = fn
+}
+
+func (w *Watcher) consumerBootGate(appID int64) (func(), error) {
+	if w.acquireConsumerBootGate == nil {
+		return func() {}, nil
+	}
+	return w.acquireConsumerBootGate(appID)
+}
+
 // hibernatePool removes a slug's replicas from host resources on hibernate,
 // preferring a memory-preserving Suspend when the runtime supports it and the
 // warmed RAM was actually freed. On freed=true the replica rows are marked
@@ -612,6 +629,13 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		if !ok {
 			continue
 		}
+		if quarantined, qerr := w.store.AppCompatibilityQuarantined(app.ID); qerr != nil || quarantined {
+			if qerr != nil {
+				slog.Error("warm restore: compatibility quarantine unavailable", "slug", app.Slug, "err", qerr)
+			}
+			release()
+			continue
+		}
 
 		// Claim the app so a concurrent user wake (WakeTrigger -> BeginWake) cannot
 		// double-boot it. CAS hibernated->waking; if it fails another path already
@@ -658,14 +682,35 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 			app.WorkerGroupedSize, app.WorkerMaxWorkers)
 		w.prx.SetPoolWarmSpares(app.Slug, app.WorkerWarmSpares)
 
+		releaseConsumerBoot, gateErr := w.consumerBootGate(app.ID)
+		if gateErr != nil {
+			slog.Error("warm restore: acquire startup-data compatibility fence", "slug", app.Slug, "err", gateErr)
+			w.abortWarmClaim(app.Slug)
+			release()
+			continue
+		}
 		booted := true
 		for i := 0; i < app.Replicas; i++ {
 			if ctx.Err() != nil {
 				booted = false
 				break
 			}
-			if _, derr := w.deploy(app.Slug, bundleDir, i); derr != nil {
+			result, derr := w.deploy(app.Slug, bundleDir, i)
+			if derr != nil {
 				slog.Warn("warm restore: boot failed; leaving app cold", "slug", app.Slug, "idx", i, "err", derr)
+				booted = false
+				break
+			}
+			pid, port := result.PID, result.Port
+			deploymentID := deployments[0].ID
+			if uerr := w.store.UpsertReplica(db.UpsertReplicaParams{
+				AppID: app.ID, Index: i, PID: &pid, Port: &port, Status: "running",
+				Provider: result.Provider, Tier: result.Tier, EndpointURL: result.EndpointURL,
+				WorkerID: result.WorkerID, AppVersion: deployments[0].Version,
+				DesiredState: "running", DeploymentID: &deploymentID,
+				StartupPeakRSSBytes: result.StartupPeakRSSBytes, ConsumerBooted: true,
+			}); uerr != nil {
+				slog.Warn("warm restore: persist booted replica failed", "slug", app.Slug, "idx", i, "err", uerr)
 				booted = false
 				break
 			}
@@ -685,6 +730,7 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 			if serr := w.mgr.Stop(app.Slug); serr != nil {
 				slog.Warn("warm restore: cleanup after partial boot failed", "slug", app.Slug, "err", serr)
 			}
+			releaseConsumerBoot()
 			w.abortWarmClaim(app.Slug)
 			if ctx.Err() != nil {
 				release()
@@ -707,10 +753,12 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 				slog.Warn("warm restore: finish wake failed", "slug", app.Slug, "err", ferr)
 			}
 			slog.Info("warm restore: app served a request during restore; left running", "slug", app.Slug)
+			releaseConsumerBoot()
 			release()
 			continue
 		}
 		w.hibernatePool(app)
+		releaseConsumerBoot()
 		// Restore the hibernated status: AbortWake is the waking->hibernated CAS.
 		w.abortWarmClaim(app.Slug)
 		release()
@@ -810,15 +858,16 @@ func derefIntOr0(p *int) int {
 // tries the warm Resume path first; on any resume error (or when resume is
 // unconfigured / the replica was not suspended) it falls back to the existing
 // cold RunReplica boot. The fallback guarantees wake is never worse than today.
-func (w *Watcher) wakeReplica(slug, bundleDir string, index int, suspended bool) (*deploy.Result, error) {
+func (w *Watcher) wakeReplica(slug, bundleDir string, index int, suspended bool) (*deploy.Result, bool, error) {
 	if suspended && w.resume != nil {
 		res, err := w.resume(slug, bundleDir, index)
 		if err == nil {
-			return res, nil
+			return res, false, nil
 		}
 		slog.Warn("watcher: resume failed; cold-booting", "slug", slug, "idx", index, "err", err)
 	}
-	return w.deploy(slug, bundleDir, index)
+	res, err := w.deploy(slug, bundleDir, index)
+	return res, err == nil, err
 }
 
 // enforceSuspendedCap evicts the oldest suspended replicas when their count
@@ -1180,6 +1229,23 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int) {
 		opErr = err
 		return
 	}
+	if quarantined, qerr := w.store.AppCompatibilityQuarantined(app.ID); qerr != nil || quarantined {
+		opErr = qerr
+		if qerr != nil {
+			slog.Error("watcher: compatibility quarantine unavailable; restart denied", "slug", app.Slug, "err", qerr)
+		}
+		return
+	}
+	releaseConsumerBoot, gateErr := w.consumerBootGate(app.ID)
+	if gateErr != nil {
+		opErr = gateErr
+		return
+	}
+	defer releaseConsumerBoot()
+	if quarantined, qerr := w.store.AppCompatibilityQuarantined(app.ID); qerr != nil || quarantined {
+		opErr = qerr
+		return
+	}
 	res, err := w.deploy(app.Slug, deployments[0].BundleDir, index)
 	if err != nil {
 		if errors.Is(err, process.ErrNoLiveWorker) || errors.Is(err, process.ErrReplicaAlreadyRunning) {
@@ -1215,8 +1281,21 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int) {
 		DesiredState:        "running",
 		DeploymentID:        &depID,
 		StartupPeakRSSBytes: res.StartupPeakRSSBytes,
+		ConsumerBooted:      true,
 	}); err != nil {
 		slog.Warn("watcher: persist restarted replica failed", "slug", app.Slug, "index", index, "err", err)
+		opErr = err
+		if w.prx != nil {
+			w.prx.DeregisterReplicaIfTarget(app.Slug, index, res.EndpointURL)
+		}
+		if stopErr := w.mgr.StopReplica(app.Slug, index); stopErr != nil {
+			slog.Warn("watcher: stop unpersisted restarted replica failed", "slug", app.Slug, "index", index, "err", stopErr)
+		}
+		w.mu.Lock()
+		w.attempts[k]++
+		w.scheduleBackoffLocked(k, w.attempts[k])
+		w.mu.Unlock()
+		return
 	}
 
 	// Successful restart — reset backoff state for this replica.
@@ -1860,6 +1939,20 @@ func (w *Watcher) driveWakingApp(slug string) {
 			finalized = true
 			return
 		}
+		if quarantined, qerr := w.store.AppCompatibilityQuarantined(app.ID); qerr != nil || quarantined {
+			opErr = qerr
+			return
+		}
+		releaseConsumerBoot, gateErr := w.consumerBootGate(app.ID)
+		if gateErr != nil {
+			opErr = gateErr
+			return
+		}
+		defer releaseConsumerBoot()
+		if quarantined, qerr := w.store.AppCompatibilityQuarantined(app.ID); qerr != nil || quarantined {
+			opErr = qerr
+			return
+		}
 		deployments, err := w.store.ListDeployments(app.ID)
 		if err != nil || len(deployments) == 0 {
 			opErr = err
@@ -1900,11 +1993,12 @@ func (w *Watcher) driveWakingApp(slug string) {
 			}
 			var wg sync.WaitGroup
 			var started atomic.Int32
+			var persistenceFailed atomic.Bool
 			for i := 0; i < app.Replicas; i++ {
 				wg.Add(1)
 				go func(idx int) {
 					defer wg.Done()
-					res, err := w.wakeReplica(slug, deployments[0].BundleDir, idx, suspendedByIdx[idx])
+					res, consumerBooted, err := w.wakeReplica(slug, deployments[0].BundleDir, idx, suspendedByIdx[idx])
 					if err != nil {
 						slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
 						return
@@ -1924,13 +2018,24 @@ func (w *Watcher) driveWakingApp(slug string) {
 						DesiredState:        "running",
 						DeploymentID:        &deploymentID,
 						StartupPeakRSSBytes: res.StartupPeakRSSBytes,
+						ConsumerBooted:      consumerBooted,
 					}); err != nil {
 						slog.Warn("watcher: persist woken replica failed", "slug", slug, "index", idx, "err", err)
+						persistenceFailed.Store(true)
+						return
 					}
 					started.Add(1)
 				}(i)
 			}
 			wg.Wait()
+			if persistenceFailed.Load() {
+				opErr = errors.New("persist woken consumer provenance")
+				w.prx.Deregister(slug)
+				if err := w.mgr.Stop(slug); err != nil {
+					slog.Warn("watcher: stop wake after provenance persistence failure", "slug", slug, "err", err)
+				}
+				return
+			}
 			if started.Load() == 0 {
 				// No replica came up; the deferred guard reverts waking -> hibernated
 				// so a later request retries instead of being stuck in waking.

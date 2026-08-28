@@ -227,6 +227,12 @@ type StartParams struct {
 	// RunOnce, not Start). It namespaces the job's own cgroup (job-<slug>-<runID>)
 	// so a capped job never shares replica 0's app-<slug>-0 cgroup.
 	JobRunID int64
+	// LifetimeFiles are host descriptors whose open-file lifetime must cover the
+	// entire native process tree. Native Start and RunOnce pass them through exec
+	// so descendants inherit the same open file descriptions. Other
+	// runtimes intentionally ignore them; callers must not place secrets in
+	// these descriptors.
+	LifetimeFiles []*os.File
 	// LaunchReservationHeld tells Manager.Start that the caller already owns the
 	// host launch reservation. GuardUntilAcknowledged is used by activation:
 	// native app code cannot exec until ReplicaStarted durably records its PID.
@@ -268,6 +274,11 @@ type LogRunRecorder struct {
 // database implementation.
 type LogRunSinkFactory func(LogRun) (io.WriteCloser, error)
 
+// ConsumerLifetimeResolver acquires a shared physical-lifetime fence for one
+// app start. Start closes the parent descriptor after Runtime.Start returns;
+// native children inherit it until their complete process tree exits.
+type ConsumerLifetimeResolver func(appID int64) (release func(), file *os.File, err error)
+
 type entry struct {
 	info         *ProcessInfo
 	handle       RunHandle
@@ -287,24 +298,29 @@ type replicaKey struct {
 // Manager tracks running app processes as a pool of replicas per slug.
 // entries maps slug → slice indexed by replica index; nil means that slot is down.
 type Manager struct {
-	mu             sync.Mutex
-	launchMu       sync.Mutex
-	entries        map[string][]*entry
-	logFiles       map[replicaKey]io.WriteCloser
-	lastExit       map[replicaKey]ExitVerdict
-	appsDir        string
-	runtimesMu     sync.RWMutex
-	runtimes       map[string]Runtime
-	defaultTier    string
-	envResolver    EnvResolver
-	platformEnv    PlatformDefaultEnvResolver
-	mountResolver  SharedMountResolver
-	appDataRoot    string
-	stopGrace      time.Duration
-	logRunRecorder LogRunRecorder
-	logSinkFactory LogRunSinkFactory
+	mu                       sync.Mutex
+	launchMu                 sync.Mutex
+	entries                  map[string][]*entry
+	logFiles                 map[replicaKey]io.WriteCloser
+	lastExit                 map[replicaKey]ExitVerdict
+	appsDir                  string
+	runtimesMu               sync.RWMutex
+	runtimes                 map[string]Runtime
+	defaultTier              string
+	envResolver              EnvResolver
+	platformEnv              PlatformDefaultEnvResolver
+	mountResolver            SharedMountResolver
+	appDataRoot              string
+	stopGrace                time.Duration
+	logRunRecorder           LogRunRecorder
+	logSinkFactory           LogRunSinkFactory
+	consumerLifetimeResolver ConsumerLifetimeResolver
 
 	autoInstrumentApps bool
+}
+
+func (m *Manager) SetConsumerLifetimeResolver(resolver ConsumerLifetimeResolver) {
+	m.consumerLifetimeResolver = resolver
 }
 
 // SetLogRunRecorder installs durable run-lifecycle callbacks. Begin failures
@@ -550,6 +566,14 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	if !p.LaunchReservationHeld {
 		m.launchMu.Lock()
 		defer m.launchMu.Unlock()
+	}
+	if m.consumerLifetimeResolver != nil && p.AppID > 0 {
+		release, lifetimeFile, err := m.consumerLifetimeResolver(p.AppID)
+		if err != nil {
+			return nil, fmt.Errorf("acquire consumer lifetime fence: %w", err)
+		}
+		defer release()
+		p.LifetimeFiles = append(p.LifetimeFiles, lifetimeFile)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -934,20 +958,22 @@ func (m *Manager) stopReplica(slug string, index int, requireConfirmed bool) err
 	}
 
 	m.mu.Lock()
-	// A clean stop is not a crash: drop any exit verdict so a later unrelated
-	// crash never reads a stale OOM flag from this incarnation.
-	delete(m.lastExit, replicaKey{slug, index})
 	pool = m.entries[slug]
-	if index < len(pool) {
+	// Start may replace an exited entry after the monitor marks it stopped but
+	// before this waiter reacquires m.mu. Only clear the incarnation we actually
+	// signalled; stale cleanup must never orphan a live replacement.
+	if index < len(pool) && pool[index] == e {
+		// A clean stop is not a crash: drop only this incarnation's exit verdict.
+		delete(m.lastExit, replicaKey{slug, index})
 		pool[index] = nil
-	}
-	for len(pool) > 0 && pool[len(pool)-1] == nil {
-		pool = pool[:len(pool)-1]
-	}
-	if len(pool) == 0 {
-		delete(m.entries, slug)
-	} else {
-		m.entries[slug] = pool
+		for len(pool) > 0 && pool[len(pool)-1] == nil {
+			pool = pool[:len(pool)-1]
+		}
+		if len(pool) == 0 {
+			delete(m.entries, slug)
+		} else {
+			m.entries[slug] = pool
+		}
 	}
 	m.mu.Unlock()
 
@@ -1019,6 +1045,17 @@ func (m *Manager) EvictReplicaIfWorker(slug string, index int, workerID string) 
 
 // Stop signals all replicas for a slug to stop in parallel and waits for all to exit.
 func (m *Manager) Stop(slug string) error {
+	return m.stop(slug, false)
+}
+
+// StopConfirmed is the publication-safe pool stop. It succeeds only after
+// every tracked replica has been observed physically terminated; an
+// unconfirmed replica remains tracked so recovery can keep fencing it.
+func (m *Manager) StopConfirmed(slug string) error {
+	return m.stop(slug, true)
+}
+
+func (m *Manager) stop(slug string, requireConfirmed bool) error {
 	m.mu.Lock()
 	pool := m.entries[slug]
 	indices := make([]int, 0, len(pool))
@@ -1030,7 +1067,7 @@ func (m *Manager) Stop(slug string) error {
 	m.mu.Unlock()
 
 	if len(indices) == 0 {
-		return fmt.Errorf("app %s not running", slug)
+		return fmt.Errorf("app %s: %w", slug, ErrReplicaNotFound)
 	}
 
 	var wg sync.WaitGroup
@@ -1039,7 +1076,7 @@ func (m *Manager) Stop(slug string) error {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			if err := m.StopReplica(slug, i); err != nil {
+			if err := m.stopReplica(slug, i, requireConfirmed); err != nil {
 				errs <- fmt.Errorf("replica %d: %w", i, err)
 			}
 		}(i)

@@ -83,6 +83,191 @@ func TestCompleteScheduleRunAndEnqueueActivation_IsAtomicIdempotentAndCoalesces(
 	}
 }
 
+func TestCompleteScheduleRun_OrdinaryJobCannotOverwriteServingDataPublication(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "publication-policy")
+	producerID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "producer", CronExpr: "0 5 * * *", CommandJSON: `["produce"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: "bundle_change",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinaryID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "notify", CronExpr: "0 6 * * *", CommandJSON: `["notify"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	producerDep, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: appID, Version: "v1", BundleDir: "/b/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinaryDep, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: appID, Version: "v2", BundleDir: "/b/v2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := func(scheduleID int64, deployment *db.Deployment, digest, fingerprint string, publishes bool) {
+		t.Helper()
+		runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+			ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: time.Now().UTC(),
+			DeploymentID: &deployment.ID, AppVersion: deployment.Version, ContentDigest: digest,
+			ProducerFingerprint: fingerprint, ProducerCommandJSON: `["command"]`, PublishesData: publishes,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+			RunID: runID, Status: "succeeded", ExitCode: intPtr(0), FinishedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	complete(producerID, producerDep, "sha256:v1", "producer", true)
+	complete(ordinaryID, ordinaryDep, "sha256:v2", "notify", false)
+
+	var generation int64
+	var deploymentID int64
+	var digest, fingerprint string
+	if err := store.DB().QueryRow(`SELECT generation, producer_deployment_id,
+		producer_content_digest, producer_fingerprint FROM app_data_publication WHERE app_id = ?`, appID).
+		Scan(&generation, &deploymentID, &digest, &fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 1 || deploymentID != producerDep.ID || digest != "sha256:v1" || fingerprint != "producer" {
+		t.Fatalf("ordinary job overwrote serving publication: generation=%d deployment=%d digest=%q fingerprint=%q",
+			generation, deploymentID, digest, fingerprint)
+	}
+	var ordinaryState int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM schedule_producer_state WHERE schedule_id = ?`, ordinaryID).Scan(&ordinaryState); err != nil {
+		t.Fatal(err)
+	}
+	if ordinaryState != 0 {
+		t.Fatalf("ordinary non-publisher created authoritative producer state")
+	}
+}
+
+func TestCompleteScheduleRun_NewerNoRollPublicationSupersedesQueuedActivation(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "publication-supersedes-roll")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "producer", CronExpr: "0 5 * * *", CommandJSON: `["produce"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "concurrent", MissedPolicy: "skip",
+		DeployTrigger: "bundle_change", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dep, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: appID, Version: "v1", BundleDir: "/b/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(action string, started time.Time) int64 {
+		t.Helper()
+		runID, insertErr := store.InsertScheduleRun(db.InsertScheduleRunParams{
+			ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: started,
+			OnSuccess: action, DeploymentID: &dep.ID, AppVersion: dep.Version,
+			ContentDigest: "sha256:v1", ProducerFingerprint: "producer", ProducerCommandJSON: `["produce"]`,
+			PublishesData: true,
+		})
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		return runID
+	}
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	rollRun := insert("roll", base.Add(-time.Second))
+	queued, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: rollRun, Status: "succeeded", ExitCode: intPtr(0), FinishedAt: base,
+	})
+	if err != nil || queued == nil {
+		t.Fatalf("queued activation=%+v err=%v", queued, err)
+	}
+	noRollRun := insert("none", base)
+	if activation, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: noRollRun, Status: "succeeded", ExitCode: intPtr(0), FinishedAt: base.Add(time.Second),
+	}); err != nil || activation != nil {
+		t.Fatalf("no-roll completion activation=%+v err=%v", activation, err)
+	}
+	stale, err := store.GetScheduleActivation(queued.ID)
+	if err != nil || stale.Status != "superseded" {
+		t.Fatalf("older activation after newer publication=%+v err=%v", stale, err)
+	}
+	publication, err := store.GetAppDataPublication(appID)
+	if err != nil || publication.ScheduleRunID != noRollRun || publication.Generation != 2 {
+		t.Fatalf("authoritative publication=%+v err=%v", publication, err)
+	}
+}
+
+func TestCompleteScheduleRun_LastPhysicalCompletionIsAuthoritativeRegardlessOfCallerClock(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "publication-order")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "producer", CronExpr: "0 5 * * *", CommandJSON: `["produce"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "concurrent", MissedPolicy: "skip",
+		DeployTrigger: "bundle_change", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	olderDep, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: appID, Version: "v1", BundleDir: "/b/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerDep, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: appID, Version: "v2", BundleDir: "/b/v2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(dep *db.Deployment, digest, fingerprint string) int64 {
+		t.Helper()
+		runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+			ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: time.Now().UTC(),
+			OnSuccess: "roll", DeploymentID: &dep.ID, AppVersion: dep.Version, ContentDigest: digest,
+			ProducerFingerprint: fingerprint, ProducerCommandJSON: `["produce"]`, PublishesData: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return runID
+	}
+	olderRun := insert(olderDep, "sha256:v1", "older")
+	newerRun := insert(newerDep, "sha256:v2", "newer")
+	physicalBase := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: newerRun, Status: "succeeded", ExitCode: intPtr(0), FinishedAt: physicalBase.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The older admitted writer crosses the physical publication boundary last.
+	// Its caller-provided timestamp is deliberately earlier: transaction order,
+	// not wall-clock order or run ID, defines the last writer.
+	if activation, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: olderRun, Status: "succeeded", ExitCode: intPtr(0), FinishedAt: physicalBase.Add(time.Second),
+	}); err != nil || activation == nil {
+		t.Fatalf("last physical writer activation=%+v err=%v", activation, err)
+	}
+	var generation, producerRunID int64
+	var digest, fingerprint string
+	if err := store.DB().QueryRow(`SELECT generation, schedule_run_id,
+		producer_content_digest, producer_fingerprint FROM app_data_publication WHERE app_id = ?`, appID).
+		Scan(&generation, &producerRunID, &digest, &fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 2 || producerRunID != olderRun || digest != "sha256:v1" || fingerprint != "older" {
+		t.Fatalf("last physical writer not authoritative: generation=%d run=%d digest=%q fingerprint=%q",
+			generation, producerRunID, digest, fingerprint)
+	}
+	older, err := store.GetScheduleRun(olderRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if older.TargetGeneration == nil || *older.TargetGeneration != 2 || older.ActivationID == nil {
+		t.Fatalf("last physical writer missing serving generation/activation: %+v", older)
+	}
+}
+
 func TestCompleteScheduleRunAndEnqueueActivation_FailedAndNoneDoNotActivate(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "activation-none")

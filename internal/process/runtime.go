@@ -133,6 +133,14 @@ type Runtime interface {
 	HostProvidesAppData() bool
 }
 
+// LifetimeFileInheritor is implemented by local runtimes that can pass host
+// descriptors into a process tree. Jobs use it to keep publication and
+// consumer flocks tied to physical process lifetime across a control-plane
+// crash. Container and remote runtimes use their own recovery fences.
+type LifetimeFileInheritor interface {
+	InheritsLifetimeFiles() bool
+}
+
 // DurableDataReporter is an optional capability for runtimes whose per-app data
 // dir may NOT survive a restart or be shared across replicas. A runtime that
 // does not implement it is treated as durable (native, docker, and remote
@@ -352,5 +360,6 @@ type ContainerInfo struct {
 // fargate and process; placing TaskRef here breaks the fargate->lifecycle
 // direction that would otherwise form a cycle).
 type TaskRef struct {
-	ARN string
+	ARN    string
+	Labels map[string]string
 }

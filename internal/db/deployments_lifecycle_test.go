@@ -56,9 +56,42 @@ func TestDeploymentLifecycle(t *testing.T) {
 		t.Fatalf("after promote, inflight = %+v, want none", in)
 	}
 
-	// Promote is single-shot: a second call must not resurrect the row.
-	if err := store.PromoteDeployment(pending.ID); err == nil {
-		t.Error("second PromoteDeployment succeeded, want error (no longer pending)")
+	// Promote is idempotent so an ambiguous commit acknowledgement is safely
+	// recoverable without creating another deployment row.
+	if err := store.PromoteDeployment(pending.ID); err != nil {
+		t.Errorf("idempotent second PromoteDeployment: %v", err)
+	}
+}
+
+func TestPromoteDeploymentTerminalizesOlderPendingAttempts(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "owner-pending", "developer")
+	app := mustCreateApp(t, store, "pending-cleanup", owner.ID)
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: "v1", BundleDir: "/b/v1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := store.BeginDeployment(app.ID, "v2-stale", "/b/v2-stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	winner, err := store.BeginDeployment(app.ID, "v2", "/b/v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(winner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := store.HasPendingDeployment(app.ID); err != nil || pending {
+		t.Fatalf("pending after successful retry=%v err=%v", pending, err)
+	}
+	var status, reason string
+	if err := store.DB().QueryRow(`SELECT status, failure_reason FROM deployments WHERE id = ?`, stale.ID).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != db.DeploymentFailed || reason == "" {
+		t.Fatalf("stale attempt status=%q reason=%q", status, reason)
 	}
 }
 

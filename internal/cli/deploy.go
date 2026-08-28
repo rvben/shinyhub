@@ -165,8 +165,8 @@ back to the legacy response when deploying to an older server.`,
 	cmd.Flags().StringVar(&f.slug, "slug", "", "App slug; serves at /app/<slug>/ (lowercase letters, digits, single hyphens; no leading/trailing hyphen). Defaults to the directory name")
 	cmd.Flags().BoolVar(&f.wait, "wait", false, "Wait until the app is healthy: running, or idle for an elastic (grouped/per_session) pool that boots workers on demand")
 	cmd.Flags().IntVar(&f.waitTimeout, "wait-timeout", 300, "Seconds to wait for healthy status when --wait is set (first-run dependency installs can take minutes)")
-	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Wait for any run_on_register first-fire to finish (uses --wait-timeout); a genuine failure exits non-zero")
-	cmd.Flags().BoolVar(&f.restartAfterWarm, "restart-after-warm", false, "Wait for run_on_register first-fires, then restart serving replicas so startup-loaded data is refreshed")
+	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Require deploy-triggered schedules to converge for the deployed bundle (uses --wait-timeout)")
+	cmd.Flags().BoolVar(&f.restartAfterWarm, "restart-after-warm", false, "Wait for bundle data convergence, then restart serving replicas")
 	cmd.Flags().StringVar(&f.git, "git", "", "Git repository URL to clone and deploy")
 	cmd.Flags().StringVar(&f.branch, "branch", "", "Branch or tag to deploy (default: repo default)")
 	cmd.Flags().StringVar(&f.subdir, "subdir", "", "Subdirectory within repo containing the app")
@@ -492,47 +492,50 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	if warn := formatHooksSkippedWarning(appResp["hooks_skipped"]); warn != "" && format != formatNDJSON {
 		fmt.Fprintln(errW, warn)
 	}
+	if warning, _ := appResp["warning"].(string); warning != "" && format != formatNDJSON {
+		fmt.Fprintln(errW, "warning: "+warning)
+	}
 
-	refs := firstFireRefsFromDeployResponse(out)
+	refs := deployRunRefsFromDeployResponse(out)
 	warmRestarted := false
 	for _, ref := range refs {
-		fmt.Fprintf(errW, "%s: first-fire triggered (run #%d)\n", ref.Schedule, ref.RunID)
+		fmt.Fprintf(errW, "%s: deploy-triggered run started (run #%d)\n", ref.Schedule, ref.RunID)
 	}
 	if f.waitForWarm {
 		timeout := time.Duration(f.waitTimeout) * time.Second
 		ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 		defer cancel()
-		var firstFireErr error
+		var deployRunErr error
 		deadline := time.Now().Add(timeout)
 		for _, ref := range refs {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return fmt.Errorf("%s first-fire not confirmed within --wait-timeout %s: %w", ref.Schedule, timeout, errFirstFireTimeout)
+				return fmt.Errorf("%s deploy-triggered run not confirmed within --wait-timeout %s: %w", ref.Schedule, timeout, errDeployRunTimeout)
 			}
 			poll := func() (string, error) {
 				return pollScheduleRunStatusContext(ctx, cfg, slug, ref.ScheduleID, ref.RunID)
 			}
-			status, werr := waitForFirstFireLoop(poll, remaining, healthPollInterval, 15*time.Second, time.Now, time.Sleep, errW, ref.Schedule)
+			status, werr := waitForDeployRunLoop(poll, remaining, healthPollInterval, 15*time.Second, time.Now, time.Sleep, errW, ref.Schedule)
 			switch {
 			case werr != nil:
 				// The run may still be active, so a non-following log stream is not a
 				// reliable terminal cause and must not extend the wait indefinitely.
 				fmt.Fprintf(errW, "-> shinyhub schedule logs %s %s --run %d\n", slug, ref.Schedule, ref.RunID)
-				firstFireErr = errors.Join(firstFireErr,
-					fmt.Errorf("%s first-fire not confirmed within --wait-timeout %s: %w", ref.Schedule, timeout, werr))
+				deployRunErr = errors.Join(deployRunErr,
+					fmt.Errorf("%s deploy-triggered run not confirmed within --wait-timeout %s: %w", ref.Schedule, timeout, werr))
 			case status == "skipped_overlap":
-				fmt.Fprintf(errW, "%s: first-fire skipped (another run is active); verifying recorded success\n", ref.Schedule)
-			case firstFireStatusOK(status):
-				fmt.Fprintf(errW, "%s: first-fire %s\n", ref.Schedule, status)
+				fmt.Fprintf(errW, "%s: deploy run skipped (another run is active); verifying bundle convergence\n", ref.Schedule)
+			case deployRunStatusOK(status):
+				fmt.Fprintf(errW, "%s: deploy-triggered run %s\n", ref.Schedule, status)
 			default:
 				// Dump the failed run's own log so the operator sees why the warm-up
 				// failed.
 				_ = streamRunLogs(cfg, slug, ref.ScheduleID, ref.RunID, false, cmd)
-				firstFireErr = errors.Join(firstFireErr, fmt.Errorf("%s first-fire %s", ref.Schedule, status))
+				deployRunErr = errors.Join(deployRunErr, fmt.Errorf("%s deploy-triggered run %s", ref.Schedule, status))
 			}
 		}
-		if firstFireErr != nil {
-			return firstFireErr
+		if deployRunErr != nil {
+			return deployRunErr
 		}
 		gateRes, gateErr := verifyPostDeployWarmGate(cfg, slug, abs, time.Until(deadline), errW)
 		if gateErr != nil {
@@ -544,7 +547,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 			}
 			return gateErr
 		}
-		if f.restartAfterWarm && len(refs) > 0 {
+		if f.restartAfterWarm && (len(refs) > 0 || observedScheduleConvergenceWork(gateRes)) {
 			restarted, err := restartAppAfterWarm(cfg, slug, errW)
 			if err != nil {
 				return err
@@ -605,6 +608,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 			if value, ok := appResp[key]; ok {
 				result[key] = value
 			}
+		}
+		if warning, _ := appResp["warning"].(string); warning != "" {
+			result["warning"] = warning
 		}
 		// Server advisories about declared-but-inert manifest settings; a JSON
 		// consumer must not have to parse the human summary to learn them.

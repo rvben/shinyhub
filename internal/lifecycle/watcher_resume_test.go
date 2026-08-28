@@ -19,9 +19,9 @@ func TestWakeReplica_ResumesSuspended(t *testing.T) {
 		return &deploy.Result{Index: 0, EndpointURL: "http://127.0.0.1:2500"}, nil
 	})
 
-	res, err := w.wakeReplica("app", "/bundle", 0, true)
-	if err != nil || !resumed || res == nil || res.EndpointURL == "" {
-		t.Fatalf("wakeReplica = (%v,%v) resumed=%v", res, err, resumed)
+	res, booted, err := w.wakeReplica("app", "/bundle", 0, true)
+	if err != nil || booted || !resumed || res == nil || res.EndpointURL == "" {
+		t.Fatalf("wakeReplica = (%v,booted=%v,%v) resumed=%v", res, booted, err, resumed)
 	}
 }
 
@@ -36,9 +36,9 @@ func TestWakeReplica_FallsBackToColdBoot_OnResumeError(t *testing.T) {
 		return nil, errors.New("snapshot gone")
 	})
 
-	res, err := w.wakeReplica("app", "/bundle", 0, true)
-	if err != nil || !coldBooted || res == nil || res.EndpointURL != "http://127.0.0.1:3000" {
-		t.Fatalf("wakeReplica = (%v,%v) coldBooted=%v", res, err, coldBooted)
+	res, booted, err := w.wakeReplica("app", "/bundle", 0, true)
+	if err != nil || !booted || !coldBooted || res == nil || res.EndpointURL != "http://127.0.0.1:3000" {
+		t.Fatalf("wakeReplica = (%v,booted=%v,%v) coldBooted=%v", res, booted, err, coldBooted)
 	}
 }
 
@@ -54,7 +54,7 @@ func TestWakeReplica_ColdBoots_WhenNotSuspended(t *testing.T) {
 		return nil, nil
 	})
 
-	if _, err := w.wakeReplica("app", "/bundle", 0, false); err != nil || !coldBooted {
-		t.Fatalf("err=%v coldBooted=%v", err, coldBooted)
+	if _, booted, err := w.wakeReplica("app", "/bundle", 0, false); err != nil || !booted || !coldBooted {
+		t.Fatalf("booted=%v err=%v coldBooted=%v", booted, err, coldBooted)
 	}
 }

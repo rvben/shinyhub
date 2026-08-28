@@ -43,3 +43,30 @@ func TestRepairingScheduleActivationExcludesScaleAndWarmMutations(t *testing.T) 
 		t.Fatalf("replica layout changed during repair: %d", fresh.Replicas)
 	}
 }
+
+func TestCompatibilityQuarantineExcludesEveryAuxiliaryConsumerBoot(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.Mode = "native"
+	srv, app := newScaleTestServer(t, "compatibility-quarantine", 2, cfg)
+	pending, err := srv.store.BeginDeployment(app.ID, "candidate", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.MarkDeploymentProducerBarrierEntered(pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.QuarantineAndFailDeployment(pending.ID, "candidate producer published before consumer failure"); err != nil {
+		t.Fatal(err)
+	}
+
+	if changed, err := srv.ScaleUp(app.Slug); changed || !errors.Is(err, errCompatibilityQuarantined) {
+		t.Fatalf("ScaleUp during quarantine = %v, %v", changed, err)
+	}
+	if changed, err := srv.WarmExpand(app.Slug); changed || !errors.Is(err, errCompatibilityQuarantined) {
+		t.Fatalf("WarmExpand during quarantine = %v, %v", changed, err)
+	}
+	restartReq := httptest.NewRequest("PATCH", "/api/apps/"+app.Slug+"/env?restart=true", nil)
+	if restarted, err := srv.maybeRestartForChange(restartReq, app, app.Slug); restarted || !errors.Is(err, errCompatibilityQuarantined) {
+		t.Fatalf("env restart during quarantine = %v, %v", restarted, err)
+	}
+}

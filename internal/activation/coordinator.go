@@ -13,6 +13,7 @@ import (
 
 var (
 	ErrNotNeeded     = errors.New("activation not needed")
+	ErrSuperseded    = errors.New("activation source bundle is no longer current")
 	ErrUnsupported   = errors.New("activation topology unsupported")
 	ErrTargetDeleted = errors.New("activation target deleted")
 )
@@ -131,6 +132,9 @@ func (c *Coordinator) ProcessNext(ctx context.Context) (bool, error) {
 		} else {
 			status = "not_needed"
 		}
+	case errors.Is(runErr, ErrSuperseded):
+		status = "superseded"
+		countAttempt = false
 	case errors.Is(runErr, ErrUnsupported):
 		status = "blocked_unsupported"
 		lastError = runErr.Error()

@@ -150,6 +150,65 @@ func TestManagerAdoptClosesRecoveredLogRunOnStop(t *testing.T) {
 	}
 }
 
+func TestStopReplicaConfirmedDoesNotClearConcurrentReplacement(t *testing.T) {
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	finishing := make(chan struct{}, 1)
+	releaseFinish := make(chan struct{})
+	m.SetLogRunRecorder(process.LogRunRecorder{Finish: func(process.LogRun) error {
+		finishing <- struct{}{}
+		<-releaseFinish
+		return nil
+	}})
+	params := process.StartParams{
+		Slug: "demo", AppID: 42, Index: 0, Dir: t.TempDir(), Command: []string{"app"}, Port: 19000,
+	}
+	first, err := m.Start(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- m.StopReplicaConfirmed("demo", 0) }()
+	select {
+	case <-finishing:
+	case <-time.After(time.Second):
+		t.Fatal("old replica did not enter exit bookkeeping")
+	}
+
+	startDone := make(chan struct {
+		info *process.ProcessInfo
+		err  error
+	}, 1)
+	go func() {
+		info, err := m.Start(params)
+		startDone <- struct {
+			info *process.ProcessInfo
+			err  error
+		}{info, err}
+	}()
+	// Start is now queued on the manager mutex before the old monitor releases
+	// it and closes done, so it deterministically wins the replacement window.
+	time.Sleep(10 * time.Millisecond)
+	close(releaseFinish)
+	replacement := <-startDone
+	if replacement.err != nil {
+		t.Fatalf("start replacement: %v", replacement.err)
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatalf("stop old replica: %v", err)
+	}
+	if replacement.info.PID == first.PID {
+		t.Fatalf("replacement PID=%d equals old PID", replacement.info.PID)
+	}
+	running, err := m.Status("demo")
+	if err != nil || running.Status != process.StatusRunning || running.PID != replacement.info.PID {
+		t.Fatalf("manager lost replacement: status=%+v err=%v", running, err)
+	}
+	if err := m.StopReplicaConfirmed("demo", 0); err != nil {
+		t.Fatalf("cleanup replacement: %v", err)
+	}
+}
+
 func TestManagerPruneLogRunFilesProtectsActiveRun(t *testing.T) {
 	m := process.NewManager(t.TempDir(), newFakeRuntime())
 	info, err := m.Start(process.StartParams{

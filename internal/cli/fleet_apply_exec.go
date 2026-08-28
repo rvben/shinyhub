@@ -155,43 +155,43 @@ func declaredProject(c fleet.Config) string {
 // callers can tell a pre-commit failure (safe to roll back) from a post-commit
 // one (this fleet's source is already live). Once committed, retries only
 // re-check health and digest readback; they never upload the bundle again.
-func deployWithRetry(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, opt convergeOpts, out io.Writer, expectedDigest, expectedManagedBy string) (promoted string, attempts int, committed bool, firstFires []firstFireRef, failed []attemptOutcome, err error) {
+func deployWithRetry(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, opt convergeOpts, out io.Writer, expectedDigest, expectedManagedBy string) (promoted string, attempts int, committed bool, deployRuns []deployRunRef, failed []attemptOutcome, err error) {
 	total := 1 + opt.retries
 	ifDigest, ifManagedBy := precondPtrs(opt, expectedDigest, expectedManagedBy)
 	for attempts = 1; attempts <= total; attempts++ {
 		var c bool
-		var ff []firstFireRef
+		var ff []deployRunRef
 		var kind deployfail.Kind
 		promoted, c, ff, kind, err = deployAppBundleFromSpec(cfg, slug, spec, visibility, project, out, opt.runID, opt.healthTimeout, ifDigest, ifManagedBy)
 		committed = committed || c
-		// Keep the first-fire refs from whichever attempt actually fired them.
+		// Keep the deploy-triggered run refs from whichever attempt actually fired them.
 		// A later retry of an already-created schedule returns none (the gate is
 		// closed), so it must not clobber an earlier attempt's refs.
 		if len(ff) > 0 {
-			firstFires = ff
+			deployRuns = ff
 		}
 		if err == nil {
-			return promoted, attempts, committed, firstFires, failed, nil
+			return promoted, attempts, committed, deployRuns, failed, nil
 		}
 		failed = append(failed, attemptOutcome{Attempt: attempts, Kind: kind, Err: err.Error()})
 		if attempts == total {
-			return "", attempts, committed, firstFires, failed, err
+			return "", attempts, committed, deployRuns, failed, err
 		}
 		if committed {
 			for attempts++; attempts <= total; attempts++ {
 				promoted, err = completeCommittedDeploy(cfg, slug, out, opt.healthTimeout)
 				if err == nil {
-					return promoted, attempts, true, firstFires, failed, nil
+					return promoted, attempts, true, deployRuns, failed, nil
 				}
 				failed = append(failed, attemptOutcome{Attempt: attempts, Kind: deployfail.ReadinessTimeout, Err: err.Error()})
 			}
-			return "", total, true, firstFires, failed, err
+			return "", total, true, deployRuns, failed, err
 		}
 		if !retryableDeployFailure(kind) {
-			return "", attempts, false, firstFires, failed, err
+			return "", attempts, false, deployRuns, failed, err
 		}
 	}
-	return "", total, committed, firstFires, failed, err
+	return "", total, committed, deployRuns, failed, err
 }
 
 func completeCommittedDeploy(cfg *cliConfig, slug string, out io.Writer, timeout time.Duration) (string, error) {
@@ -214,14 +214,14 @@ func retryableDeployFailure(kind deployfail.Kind) bool {
 	}
 }
 
-// resolveFirstFires records the per-schedule first-fire outcomes on res and,
+// resolveDeployRuns records the per-schedule deploy-triggered run outcomes on res and,
 // when --wait-for-warm or --restart-after-warm is set, polls each run to
 // completion. Without either it only records that the runs were triggered.
-// The warm timeout is one deadline shared by every first-fire for the app. A
+// The warm timeout is one deadline shared by every deploy-triggered run for the app. A
 // timeout is a convergence failure: "still warming" is not equivalent to
 // "successfully warmed." skipped_overlap is recorded but left to the final
 // level check, which may pass only if the overlapping run actually succeeded.
-func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt convergeOpts, res *applyResult, out io.Writer) error {
+func resolveDeployRuns(cfg *cliConfig, slug string, refs []deployRunRef, opt convergeOpts, res *applyResult, out io.Writer) error {
 	timeout := warmTimeoutDuration(opt.warmTimeout)
 	if res.warmDeadline.IsZero() {
 		res.warmDeadline = time.Now().Add(timeout)
@@ -230,46 +230,46 @@ func resolveFirstFires(cfg *cliConfig, slug string, refs []firstFireRef, opt con
 	defer cancel()
 	deadline := res.warmDeadline
 	for _, ref := range refs {
-		oc := firstFireOutcome{Schedule: ref.Schedule, RunID: ref.RunID}
+		oc := deployRunOutcome{Schedule: ref.Schedule, RunID: ref.RunID}
 		if opt.waitForWarm || opt.restartAfterWarm {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				res.failureKind = failureWarmWaitTimeout
 				appendScheduleLog(cfg, slug, ref.ScheduleID, ref.RunID, ref.Schedule, res)
-				return fmt.Errorf("schedule %q first-fire not confirmed within --warm-timeout %s: %w", ref.Schedule, timeout, errFirstFireTimeout)
+				return fmt.Errorf("schedule %q deploy-triggered run not confirmed within --warm-timeout %s: %w", ref.Schedule, timeout, errDeployRunTimeout)
 			}
 			poll := func() (string, error) { return pollScheduleRunStatusContext(ctx, cfg, slug, ref.ScheduleID, ref.RunID) }
 			// Fleet apps converge concurrently, and schedule names are only unique
 			// within an app. Include the slug in live progress so two apps with a
 			// same-named schedule remain distinguishable when their lines interleave.
-			label := fleetFirstFireLabel(slug, ref.Schedule)
-			status, werr := waitForFirstFireLoop(poll, remaining, 2*time.Second, fleetHealthProgressInterval, time.Now, time.Sleep, out, label)
+			label := fleetDeployRunLabel(slug, ref.Schedule)
+			status, werr := waitForDeployRunLoop(poll, remaining, 2*time.Second, fleetHealthProgressInterval, time.Now, time.Sleep, out, label)
 			oc.Status = status
-			res.firstFires = append(res.firstFires, oc)
+			res.deployRuns = append(res.deployRuns, oc)
 			if werr != nil {
 				res.failureKind = failureWarmStateUnavailable
-				if errors.Is(werr, errFirstFireTimeout) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				if errors.Is(werr, errDeployRunTimeout) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 					res.failureKind = failureWarmWaitTimeout
 				}
 				appendScheduleLog(cfg, slug, ref.ScheduleID, ref.RunID, ref.Schedule, res)
-				return fmt.Errorf("schedule %q first-fire not confirmed within --warm-timeout %s: %w", ref.Schedule, timeout, werr)
+				return fmt.Errorf("schedule %q deploy-triggered run not confirmed within --warm-timeout %s: %w", ref.Schedule, timeout, werr)
 			}
 			if status == "skipped_overlap" {
 				continue
 			}
-			if !firstFireStatusOK(status) {
-				res.failureKind = failureWarmFirstFireFailed
+			if !deployRunStatusOK(status) {
+				res.failureKind = failureWarmDeployRunFailed
 				appendScheduleLog(cfg, slug, ref.ScheduleID, ref.RunID, ref.Schedule, res)
-				return fmt.Errorf("schedule %q first-fire %s", ref.Schedule, status)
+				return fmt.Errorf("schedule %q deploy-triggered run %s", ref.Schedule, status)
 			}
 			continue
 		}
-		res.firstFires = append(res.firstFires, oc)
+		res.deployRuns = append(res.deployRuns, oc)
 	}
 	return nil
 }
 
-func fleetFirstFireLabel(slug, schedule string) string {
+func fleetDeployRunLabel(slug, schedule string) string {
 	return slug + "/" + schedule
 }
 
@@ -498,13 +498,13 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 	// likely crashed on startup) and attaches its log tail so the operator sees
 	// the cause inline instead of SSHing to read the process log. It is used
 	// only where the deploy step failed; post-deploy config/ownership patch and
-	// first-fire failures use fail (the app is running, so its tail would be
+	// deploy-triggered run failures use fail (the app is running, so its tail would be
 	// misleading).
 	failDeploy := func(err error, attempts int, mutation applyMutationState) applyResult {
 		fail(err, attempts)
 		res.mutation = mutation
 		// Mark this as a deploy-bearing failure so the top-level failure_kind is
-		// attributed to the deploy. A post-deploy failure (config patch, first-fire)
+		// attributed to the deploy. A post-deploy failure (config patch, deploy-triggered run)
 		// uses fail directly and must NOT inherit a deploy attempt's kind.
 		res.deployFailed = true
 		if res.status == statusFailed {
@@ -523,7 +523,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			remaining := time.Until(res.warmDeadline)
 			if remaining <= 0 {
 				res.failureKind = failureWarmWaitTimeout
-				return fail(fmt.Errorf("warm gate not confirmed within --warm-timeout %s: %w", warmBudget, errFirstFireTimeout), attempts)
+				return fail(fmt.Errorf("warm gate not confirmed within --warm-timeout %s: %w", warmBudget, errDeployRunTimeout), attempts)
 			}
 			if err := verifyExistingWarmGateWithWait(cfg, d.Slug, spec.Dir, &res, remaining, out); err != nil {
 				return fail(err, attempts)
@@ -540,7 +540,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 				return fail(err, attempts)
 			}
 		}
-		if opt.restartAfterWarm && len(res.firstFires) > 0 {
+		if opt.restartAfterWarm && observedScheduleConvergenceWork(res) {
 			restarted, err := restartAppAfterWarm(cfg, d.Slug, out)
 			if err != nil {
 				res.failureKind = failureWarmRestartFailed
@@ -602,7 +602,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// (2xx, or an ambiguous error whose readback shows the promoted digest
 		// advanced past the pre-deploy one), the reservation is KEPT because
 		// this fleet's source is now the app's bundle.
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(
+		promoted, attempts, committed, deployRuns, failed, err := deployWithRetry(
 			cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt,
 			&resultWarningWriter{Writer: out, result: &res}, d.ServerDigest, marker,
 		)
@@ -622,7 +622,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return failDeploy(err, attempts, state)
 		}
 		res.mutation = mutationPartial
-		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
+		if ffErr := resolveDeployRuns(cfg, d.Slug, deployRuns, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
 		res.attempts = attempts
@@ -654,7 +654,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		return done(statusDeleted)
 
 	case fleet.ActionCreate:
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(
+		promoted, attempts, committed, deployRuns, failed, err := deployWithRetry(
 			cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt,
 			&resultWarningWriter{Writer: out, result: &res}, "", "",
 		)
@@ -668,7 +668,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return failDeploy(err, attempts, state)
 		}
 		res.mutation = mutationPartial
-		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
+		if ffErr := resolveDeployRuns(cfg, d.Slug, deployRuns, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
 		// create => app was just made, currently unmanaged. Stamp failure is
@@ -710,7 +710,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		return finish(statusCreated, attempts)
 
 	case fleet.ActionUpdateSource:
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(
+		promoted, attempts, committed, deployRuns, failed, err := deployWithRetry(
 			cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt,
 			&resultWarningWriter{Writer: out, result: &res}, d.ServerDigest, marker,
 		)
@@ -724,7 +724,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return failDeploy(err, attempts, state)
 		}
 		res.mutation = mutationPartial
-		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
+		if ffErr := resolveDeployRuns(cfg, d.Slug, deployRuns, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
 		// A source-only diff means the pre-deploy config matched the manifest, but
@@ -752,7 +752,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// Mandatory ordering: deploy first, then patch fleet config
 		// on top with a precondition built from the FRESHLY promoted digest -
 		// never the stale pre-deploy one.
-		promoted, attempts, committed, firstFires, failed, err := deployWithRetry(
+		promoted, attempts, committed, deployRuns, failed, err := deployWithRetry(
 			cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt,
 			&resultWarningWriter{Writer: out, result: &res}, d.ServerDigest, marker,
 		)
@@ -766,7 +766,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return failDeploy(err, attempts, state)
 		}
 		res.mutation = mutationPartial
-		if ffErr := resolveFirstFires(cfg, d.Slug, firstFires, opt, &res, out); ffErr != nil {
+		if ffErr := resolveDeployRuns(cfg, d.Slug, deployRuns, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
 		ifD, ifM := precondPtrs(opt, promoted, marker)

@@ -123,18 +123,21 @@ func TestRollbackUsesPendingIDAndTargetDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Seed a v1 deployment directly (already promoted / succeeded).
-	v1Dep, err := store.CreateDeployment(db.CreateDeploymentParams{
-		AppID:     app.ID,
-		Version:   "v1",
-		BundleDir: v1Dir,
-	})
+	// Seed v1 through the pending boundary so it carries the same immutable
+	// empty schedule snapshot as a real modern deployment.
+	v1Dep, err := store.BeginDeployment(app.ID, "v1", v1Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Give v1 a known digest so we can verify it propagates through rollback.
 	const v1Digest = "sha256:aabbcc"
 	if err := store.SetDeploymentDigest(v1Dep.ID, v1Digest); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordDeploymentScheduleSnapshot(v1Dep.ID, app.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(v1Dep.ID); err != nil {
 		t.Fatal(err)
 	}
 

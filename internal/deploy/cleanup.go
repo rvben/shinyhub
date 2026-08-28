@@ -8,9 +8,9 @@ import (
 )
 
 // PruneOldVersions removes extracted version directories and bundle ZIPs beyond
-// the newest `keep` entries for the given app. The activeDir is never deleted,
-// even if it falls outside the retention window.
-func PruneOldVersions(appsDir, slug string, keep int, activeDir string) error {
+// the newest `keep` entries for the given app. The activeDir and every
+// pinnedDir are never deleted, even outside the retention window.
+func PruneOldVersions(appsDir, slug string, keep int, activeDir string, pinnedDirs ...string) error {
 	if keep <= 0 {
 		keep = 5
 	}
@@ -18,19 +18,26 @@ func PruneOldVersions(appsDir, slug string, keep int, activeDir string) error {
 	versionsDir := filepath.Join(appsDir, slug, "versions")
 	bundlesDir := filepath.Join(appsDir, slug, "bundles")
 
-	activeBundleName := filepath.Base(activeDir) + ".zip"
-	activeBundlePath := filepath.Join(bundlesDir, activeBundleName)
+	pinnedVersions := map[string]bool{filepath.Clean(activeDir): true}
+	pinnedBundles := map[string]bool{filepath.Join(bundlesDir, filepath.Base(activeDir)+".zip"): true}
+	for _, dir := range pinnedDirs {
+		if dir == "" {
+			continue
+		}
+		pinnedVersions[filepath.Clean(dir)] = true
+		pinnedBundles[filepath.Join(bundlesDir, filepath.Base(dir)+".zip")] = true
+	}
 
-	if err := pruneDir(versionsDir, keep, activeDir, false); err != nil {
+	if err := pruneDir(versionsDir, keep, pinnedVersions, false); err != nil {
 		return err
 	}
-	return pruneDir(bundlesDir, keep, activeBundlePath, true)
+	return pruneDir(bundlesDir, keep, pinnedBundles, true)
 }
 
 // pruneDir removes old entries in dir, keeping the newest `keep` entries.
-// skipPath (if non-empty) is never removed.
+// pinned paths are never removed.
 // isFiles=true treats entries as files (bundles); false treats them as directories (versions).
-func pruneDir(dir string, keep int, skipPath string, isFiles bool) error {
+func pruneDir(dir string, keep int, pinned map[string]bool, isFiles bool) error {
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
 		return nil
@@ -59,7 +66,7 @@ func pruneDir(dir string, keep int, skipPath string, isFiles bool) error {
 	deleted := 0
 	for i := 0; deleted < toDelete && i < len(all); i++ {
 		c := all[i]
-		if c.path == skipPath {
+		if pinned[filepath.Clean(c.path)] {
 			continue
 		}
 		if isFiles {

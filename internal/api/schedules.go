@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
@@ -33,6 +34,7 @@ type scheduleDTO struct {
 	MinRollIntervalSeconds int      `json:"min_roll_interval_seconds"`
 	RollFallback           string   `json:"roll_fallback"`
 	MaxDeferAgeSeconds     int      `json:"max_defer_age_seconds"`
+	DeployTrigger          string   `json:"deploy_trigger"`
 	// Timezone is the raw stored value; null/nil means "inherit server default".
 	Timezone *string `json:"timezone"`
 	// EffectiveTimezone is the resolved IANA zone name that will actually be
@@ -49,9 +51,10 @@ type scheduleDTO struct {
 	// host floor used by activation admission. It is advisory because available
 	// memory can change between configuration and execution.
 	RollFeasibilityAdvisory *string `json:"roll_feasibility_advisory,omitempty"`
-	// FirstFireRunID is set only on a create response when run_on_register
-	// dispatched a first run. Omitted everywhere else.
-	FirstFireRunID *int64 `json:"first_fire_run_id,omitempty"`
+	// Convergence reports the desired-state result of a write without implying
+	// that an idempotent request necessarily admitted a new run.
+	Convergence *ScheduleConvergenceResult `json:"convergence,omitempty"`
+	Warning     string                     `json:"warning,omitempty"`
 
 	// Freshness, populated only on the list endpoint (where it is computed
 	// from run history) and omitted everywhere else. Field names and meanings
@@ -62,16 +65,31 @@ type scheduleDTO struct {
 	// "never run", a claim those responses cannot make about an existing
 	// schedule. Stale is present on every list row, including never-run
 	// schedules, which can themselves be overdue.
-	LastRunID        *int64                 `json:"last_run_id,omitempty"`
-	LastRunAt        *string                `json:"last_run_at,omitempty"`
-	LastRunStatus    *string                `json:"last_run_status,omitempty"`
-	LastSuccessAt    *string                `json:"last_success_at,omitempty"`
-	LastSuccessAgeS  *int64                 `json:"last_success_age_s,omitempty"`
-	Stale            **bool                 `json:"stale,omitempty"`
-	Refreshing       *bool                  `json:"refreshing,omitempty"`
-	ActiveRunID      **int64                `json:"active_run_id,omitempty"`
-	FreshnessError   *string                `json:"freshness_error,omitempty"`
-	LatestActivation *db.ScheduleActivation `json:"latest_activation,omitempty"`
+	LastRunID               *int64                 `json:"last_run_id,omitempty"`
+	LastRunAt               *string                `json:"last_run_at,omitempty"`
+	LastRunStatus           *string                `json:"last_run_status,omitempty"`
+	LastSuccessAt           *string                `json:"last_success_at,omitempty"`
+	LastSuccessAgeS         *int64                 `json:"last_success_age_s,omitempty"`
+	Stale                   **bool                 `json:"stale,omitempty"`
+	Refreshing              *bool                  `json:"refreshing,omitempty"`
+	ActiveRunID             **int64                `json:"active_run_id,omitempty"`
+	ActiveRunContentDigest  *string                `json:"active_run_content_digest,omitempty"`
+	CurrentDeploymentID     **int64                `json:"current_deployment_id,omitempty"`
+	CurrentAppVersion       *string                `json:"current_app_version,omitempty"`
+	CurrentContentDigest    *string                `json:"current_content_digest,omitempty"`
+	ProducerDeploymentID    **int64                `json:"producer_deployment_id,omitempty"`
+	ProducerAppVersion      *string                `json:"producer_app_version,omitempty"`
+	ProducerContentDigest   *string                `json:"producer_content_digest,omitempty"`
+	DeployTriggerSatisfied  *bool                  `json:"deploy_trigger_satisfied,omitempty"`
+	ProducerRepairRequired  *bool                  `json:"producer_repair_required,omitempty"`
+	ProducerFingerprint     *string                `json:"producer_fingerprint,omitempty"`
+	ProducerPublishedAt     **string               `json:"producer_published_at,omitempty"`
+	ConvergenceObligationID **int64                `json:"convergence_obligation_id,omitempty"`
+	ConvergenceStatus       *string                `json:"convergence_status,omitempty"`
+	ConvergenceRunID        **int64                `json:"convergence_run_id,omitempty"`
+	ConvergenceError        *string                `json:"convergence_error,omitempty"`
+	FreshnessError          *string                `json:"freshness_error,omitempty"`
+	LatestActivation        *db.ScheduleActivation `json:"latest_activation,omitempty"`
 }
 
 // applyFreshness fills the freshness half of the DTO from a freshness row.
@@ -89,6 +107,26 @@ func (d *scheduleDTO) applyFreshness(fr db.ScheduleFreshness, def *time.Location
 	}
 	d.Refreshing = &refreshing
 	d.ActiveRunID = &fr.ActiveRunID
+	d.ActiveRunContentDigest = &fr.ActiveRunContentDigest
+	d.CurrentDeploymentID = &fr.CurrentDeploymentID
+	d.CurrentAppVersion = &fr.CurrentAppVersion
+	d.CurrentContentDigest = &fr.CurrentContentDigest
+	d.ProducerDeploymentID = &fr.ProducerDeploymentID
+	d.ProducerAppVersion = &fr.ProducerAppVersion
+	d.ProducerContentDigest = &fr.ProducerContentDigest
+	d.DeployTriggerSatisfied = &fr.DeployTriggerSatisfied
+	d.ProducerRepairRequired = &fr.ProducerRepairRequired
+	d.ProducerFingerprint = &fr.ProducerFingerprint
+	d.ConvergenceObligationID = &fr.ConvergenceObligationID
+	d.ConvergenceStatus = &fr.ConvergenceStatus
+	d.ConvergenceRunID = &fr.ConvergenceRunID
+	d.ConvergenceError = &fr.ConvergenceError
+	var publishedAt *string
+	if fr.ProducerPublishedAt != nil {
+		v := fr.ProducerPublishedAt.UTC().Format(time.RFC3339)
+		publishedAt = &v
+	}
+	d.ProducerPublishedAt = &publishedAt
 	d.FreshnessError = &freshnessError
 	d.LastRunID = fr.LastRunID
 	if fr.LastRunAt != nil {
@@ -119,7 +157,8 @@ func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Loca
 		ID: sc.ID, AppID: sc.AppID, Name: sc.Name, CronExpr: sc.CronExpr,
 		Command: cmd, Enabled: sc.Enabled, TimeoutSeconds: sc.TimeoutSeconds,
 		OverlapPolicy: sc.OverlapPolicy, MissedPolicy: sc.MissedPolicy,
-		OnSuccess: sc.OnSuccess, MinRollIntervalSeconds: sc.MinRollIntervalSeconds,
+		DeployTrigger: sc.DeployTrigger,
+		OnSuccess:     sc.OnSuccess, MinRollIntervalSeconds: sc.MinRollIntervalSeconds,
 		RollFallback: sc.RollFallback, MaxDeferAgeSeconds: sc.MaxDeferAgeSeconds,
 		Timezone:          sc.Timezone,
 		EffectiveTimezone: loc.String(),
@@ -198,6 +237,8 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	release := s.acquireDeployLock(app.Slug)
+	defer release()
 	var req struct {
 		Name                   string   `json:"name"`
 		CronExpr               string   `json:"cron_expr"`
@@ -207,13 +248,19 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		OverlapPolicy          string   `json:"overlap_policy"`
 		MissedPolicy           string   `json:"missed_policy"`
 		Timezone               *string  `json:"timezone"`
-		RunOnRegister          bool     `json:"run_on_register"`
+		DeployTrigger          string   `json:"deploy_trigger"`
 		OnSuccess              string   `json:"on_success"`
 		MinRollIntervalSeconds int      `json:"min_roll_interval_seconds"`
 		RollFallback           string   `json:"roll_fallback"`
 		MaxDeferAgeSeconds     int      `json:"max_defer_age_seconds"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -225,6 +272,11 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	deployTrigger, err := schedulespec.NormalizeDeployTrigger(req.DeployTrigger)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	onSuccess, rollFallback, err := schedulespec.ValidateActivationPolicySeconds(
 		req.OnSuccess, int64(req.MinRollIntervalSeconds), req.RollFallback, int64(req.MaxDeferAgeSeconds))
 	if err != nil {
@@ -232,6 +284,10 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.validateScheduleActivationForApp(app, onSuccess); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if err := s.validateScheduleProducerTopology(app, deployTrigger, onSuccess); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -249,7 +305,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		AppID: app.ID, Name: req.Name, CronExpr: req.CronExpr,
 		CommandJSON: string(cmdJSON), Enabled: enabled,
 		TimeoutSeconds: req.TimeoutSeconds, OverlapPolicy: req.OverlapPolicy,
-		MissedPolicy: req.MissedPolicy, Timezone: storedTZ,
+		MissedPolicy: req.MissedPolicy, DeployTrigger: deployTrigger, Timezone: storedTZ,
 		OnSuccess: onSuccess, MinRollIntervalSeconds: req.MinRollIntervalSeconds,
 		RollFallback: rollFallback, MaxDeferAgeSeconds: req.MaxDeferAgeSeconds,
 	})
@@ -271,6 +327,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 				existing.TimeoutSeconds == req.TimeoutSeconds &&
 				existing.OverlapPolicy == req.OverlapPolicy &&
 				existing.MissedPolicy == req.MissedPolicy &&
+				existing.DeployTrigger == deployTrigger &&
 				existing.OnSuccess == onSuccess &&
 				existing.MinRollIntervalSeconds == req.MinRollIntervalSeconds &&
 				existing.RollFallback == rollFallback &&
@@ -279,6 +336,10 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 				// Identical config: idempotent no-op.
 				dto := toScheduleDTO(existing, nil, s.cfg.Scheduler.Location)
 				dto.RollFeasibilityAdvisory = s.rollFeasibilityAdvisory(app, existing.OnSuccess, existing.RollFallback)
+				dto.Convergence, err = s.reconcileCurrentSchedule(app.ID, existing.ID)
+				if err != nil {
+					dto.Warning = "schedule is unchanged, but convergence reconciliation is pending asynchronous repair: " + err.Error()
+				}
 				writeJSON(w, http.StatusOK, dto)
 				return
 			}
@@ -288,9 +349,9 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	postcommitWarning := ""
 	if err := s.reloadScheduler(id, app.Slug, req.Name); err != nil {
-		writeError(w, http.StatusInternalServerError, "scheduler reload: "+err.Error())
-		return
+		postcommitWarning = "schedule was created, but scheduler reload requires asynchronous repair: " + err.Error()
 	}
 	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
 		`{"app":%q,"name":%q,"effective_timezone":%q,"on_success":%q,"min_roll_interval_seconds":%d,"roll_fallback":%q,"max_defer_age_seconds":%d}`,
@@ -298,11 +359,17 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		req.MinRollIntervalSeconds, rollFallback, req.MaxDeferAgeSeconds,
 	))
 
-	firstFireRunID := s.maybeFirstFire(id, req.RunOnRegister, !enabled, app.Slug, req.Name)
 	sc, _ := s.store.GetSchedule(id)
 	dto := toScheduleDTO(sc, nil, s.cfg.Scheduler.Location)
+	dto.Warning = postcommitWarning
 	dto.RollFeasibilityAdvisory = s.rollFeasibilityAdvisory(app, sc.OnSuccess, sc.RollFallback)
-	dto.FirstFireRunID = firstFireRunID
+	dto.Convergence, err = s.reconcileCurrentSchedule(app.ID, id)
+	if err != nil {
+		if dto.Warning != "" {
+			dto.Warning += "; "
+		}
+		dto.Warning += "schedule was created, but convergence reconciliation requires asynchronous repair: " + err.Error()
+	}
 	writeJSON(w, http.StatusCreated, dto)
 }
 
@@ -312,6 +379,8 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	release := s.acquireDeployLock(app.Slug)
+	defer release()
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad schedule id")
@@ -343,6 +412,19 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	allowed := map[string]bool{
+		"name": true, "cron_expr": true, "command": true, "enabled": true,
+		"timeout_seconds": true, "overlap_policy": true, "missed_policy": true,
+		"timezone": true, "deploy_trigger": true, "on_success": true,
+		"min_roll_interval_seconds": true, "roll_fallback": true,
+		"max_defer_age_seconds": true,
+	}
+	for field := range rawFields {
+		if !allowed[field] {
+			writeError(w, http.StatusBadRequest, "unknown schedule field: "+field)
+			return
+		}
+	}
 
 	var req struct {
 		Name                   *string   `json:"name,omitempty"`
@@ -352,6 +434,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds         *int      `json:"timeout_seconds,omitempty"`
 		OverlapPolicy          *string   `json:"overlap_policy,omitempty"`
 		MissedPolicy           *string   `json:"missed_policy,omitempty"`
+		DeployTrigger          *string   `json:"deploy_trigger,omitempty"`
 		OnSuccess              *string   `json:"on_success,omitempty"`
 		MinRollIntervalSeconds *int      `json:"min_roll_interval_seconds,omitempty"`
 		RollFallback           *string   `json:"roll_fallback,omitempty"`
@@ -406,6 +489,15 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	missed := sc.MissedPolicy
 	if req.MissedPolicy != nil {
 		missed = *req.MissedPolicy
+	}
+	deployTrigger := sc.DeployTrigger
+	if req.DeployTrigger != nil {
+		deployTrigger, err = schedulespec.NormalizeDeployTrigger(*req.DeployTrigger)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		*req.DeployTrigger = deployTrigger
 	}
 	onSuccess := sc.OnSuccess
 	if req.OnSuccess != nil {
@@ -469,6 +561,10 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	if err := s.validateScheduleProducerTopology(app, deployTrigger, normalizedAction); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	if req.OnSuccess != nil {
 		*req.OnSuccess = normalizedAction
 	}
@@ -487,7 +583,8 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		Name: req.Name, CronExpr: req.CronExpr, CommandJSON: cmdJSONPtr,
 		Enabled: req.Enabled, TimeoutSeconds: req.TimeoutSeconds,
 		OverlapPolicy: req.OverlapPolicy, MissedPolicy: req.MissedPolicy,
-		OnSuccess: req.OnSuccess, MinRollIntervalSeconds: req.MinRollIntervalSeconds,
+		DeployTrigger: req.DeployTrigger,
+		OnSuccess:     req.OnSuccess, MinRollIntervalSeconds: req.MinRollIntervalSeconds,
 		RollFallback: req.RollFallback, MaxDeferAgeSeconds: req.MaxDeferAgeSeconds,
 	}
 	if tzPresent {
@@ -501,9 +598,9 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	postcommitWarning := ""
 	if err := s.reloadScheduler(id, app.Slug, sc.Name); err != nil {
-		writeError(w, http.StatusInternalServerError, "scheduler reload: "+err.Error())
-		return
+		postcommitWarning = "schedule was updated, but scheduler reload requires asynchronous repair: " + err.Error()
 	}
 	fresh, err := s.store.GetSchedule(id)
 	if err != nil {
@@ -516,7 +613,15 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		fresh.OnSuccess, fresh.MinRollIntervalSeconds, fresh.RollFallback, fresh.MaxDeferAgeSeconds,
 	))
 	dto := toScheduleDTO(fresh, nil, s.cfg.Scheduler.Location)
+	dto.Warning = postcommitWarning
 	dto.RollFeasibilityAdvisory = s.rollFeasibilityAdvisory(app, fresh.OnSuccess, fresh.RollFallback)
+	dto.Convergence, err = s.reconcileCurrentSchedule(app.ID, id)
+	if err != nil {
+		if dto.Warning != "" {
+			dto.Warning += "; "
+		}
+		dto.Warning += "schedule was updated, but convergence reconciliation requires asynchronous repair: " + err.Error()
+	}
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -567,12 +672,63 @@ func (s *Server) validateScheduleActivationForApp(app *db.App, action string) er
 	return nil
 }
 
+// validateScheduleProducerTopology rejects publication semantics on remote
+// container, worker, and ECS runtimes until their launch protocol durably records intent
+// before execution and can fence that intent across owner failover. Native and
+// its child share an inherited physical lifetime fence. Docker create/start and
+// ECS RunTask both have acceptance-before-handle-persistence windows that an
+// inventory scan cannot prove empty.
+func (s *Server) validateScheduleProducerTopology(app *db.App, deployTrigger, onSuccess string) error {
+	return s.validateScheduleProducerTopologyWithOrphanFence(app, deployTrigger, onSuccess, false)
+}
+
+// validateScheduleProducerTopologyWithOrphanFence permits the one carefully
+// fenced topology transition that clears elastic orphan risk. The caller must
+// hold both the app-operation exclusion and the app's exclusive physical
+// consumer-lifetime lock through the multiplex settings commit.
+func (s *Server) validateScheduleProducerTopologyWithOrphanFence(app *db.App, deployTrigger, onSuccess string, orphanFenceHeld bool) error {
+	if deployTrigger == schedulespec.DeployTriggerNever && onSuccess != "roll" {
+		return nil
+	}
+	if isolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation); isolation != "multiplex" {
+		return fmt.Errorf("data-producing schedules require worker_isolation=multiplex; %s workers do not yet have durable process identity across control-plane failover", isolation)
+	}
+	if orphanRisk, err := s.store.AppElasticOrphanRisk(app.ID); err != nil {
+		return fmt.Errorf("verify elastic orphan fence: %w", err)
+	} else if orphanRisk && !orphanFenceHeld {
+		return errors.New("data-producing schedules require a cleared elastic orphan fence; stop the app and explicitly set worker_isolation=multiplex before enabling a producer")
+	}
+	placement := app.PlacementMap()
+	if len(placement) == 0 {
+		placement = map[string]int{s.cfg.Runtime.DefaultTierName(): app.Replicas}
+	}
+	for tier := range placement {
+		if s.nodeForTier != nil && s.nodeForTier(tier) != "" {
+			return fmt.Errorf("data-producing schedules do not yet support remote worker tier %q because orphan one-shot fencing is unavailable", tier)
+		}
+		runtimeName, ok := s.cfg.Runtime.RuntimeForTier(tier)
+		if !ok && tier == s.cfg.Runtime.DefaultTierName() && len(s.cfg.Runtime.Tiers) == 0 {
+			runtimeName = s.cfg.Runtime.Mode
+			if runtimeName == "" {
+				runtimeName = "native"
+			}
+			ok = true
+		}
+		if !ok || runtimeName != "native" {
+			return fmt.Errorf("data-producing schedule cannot establish an orphan-process fence on tier %q", tier)
+		}
+	}
+	return nil
+}
+
 // DELETE /api/apps/{slug}/schedules/{id}
 func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	app, ok := s.requireManageApp(w, r, chi.URLParam(r, "slug"))
 	if !ok {
 		return
 	}
+	release := s.acquireDeployLock(app.Slug)
+	defer release()
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad schedule id")
@@ -581,6 +737,13 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	sc, err := s.store.GetSchedule(id)
 	if err != nil || sc.AppID != app.ID {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if repairRequired, err := s.store.ScheduleProducerRepairRequired(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "check producer repair state: "+err.Error())
+		return
+	} else if repairRequired {
+		writeError(w, http.StatusConflict, "cannot delete a producer with an unrepaired failed data write; run it successfully before deleting it")
 		return
 	}
 	deleted, err := s.store.DeleteScheduleIfIdle(id)
@@ -640,6 +803,8 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	release := s.acquireDeployLock(app.Slug)
+	defer release()
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad schedule id")

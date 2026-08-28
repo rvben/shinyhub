@@ -530,9 +530,9 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 			{Source: filepath.Clean(p.Dir), Target: "/app", Mode: "rw"}, // writable: in-container dep prep (uv project sync, renv::restore) writes into the bundle dir
 		},
 		Labels: map[string]string{
-			"shinyhub.managed": "true",
-			"shinyhub.slug":    p.Slug,
-			"shinyhub.kind":    "schedule-run",
+			LabelManaged: "true",
+			LabelSlug:    p.Slug,
+			LabelKind:    KindScheduleRun,
 		},
 		NetworkMode: network,
 		AutoRemove:  true,

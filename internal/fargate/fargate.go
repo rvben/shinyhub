@@ -549,9 +549,15 @@ func (r *Runtime) tags(p process.StartParams) []ecstypes.Tag {
 	tags := []ecstypes.Tag{
 		{Key: aws.String(process.LabelManaged), Value: aws.String("true")},
 		{Key: aws.String(process.LabelSlug), Value: aws.String(p.Slug)},
-		{Key: aws.String(process.LabelReplicaIndex), Value: aws.String(strconv.Itoa(p.Index))},
 		{Key: aws.String(process.LabelTier), Value: aws.String(p.Tier)},
-		{Key: aws.String(process.LabelPort), Value: aws.String(strconv.Itoa(p.Port))},
+	}
+	if p.JobRunID > 0 {
+		tags = append(tags, ecstypes.Tag{Key: aws.String(process.LabelKind), Value: aws.String(process.KindScheduleRun)})
+	} else {
+		tags = append(tags,
+			ecstypes.Tag{Key: aws.String(process.LabelReplicaIndex), Value: aws.String(strconv.Itoa(p.Index))},
+			ecstypes.Tag{Key: aws.String(process.LabelPort), Value: aws.String(strconv.Itoa(p.Port))},
+		)
 	}
 	if p.DeploymentID > 0 {
 		tags = append(tags, ecstypes.Tag{Key: aws.String(process.LabelDeploymentID), Value: aws.String(strconv.FormatInt(p.DeploymentID, 10))})
@@ -566,7 +572,7 @@ func (r *Runtime) runTaskInput(p process.StartParams, taskDef string) *ecs.RunTa
 	if p.Slug == "" {
 		r.log.Warn("fargate: runTaskInput called with empty slug; ClientToken will not be slug-scoped")
 	}
-	ct := clientToken(r.cfg.Cluster, p.Slug, p.Index, p.DeploymentID, time.Now().Unix(), r.workerID)
+	ct := clientToken(r.cfg.Cluster, p.Slug, p.Index, p.DeploymentID, p.JobRunID, time.Now().Unix(), r.workerID)
 	in := &ecs.RunTaskInput{
 		Cluster:        aws.String(r.cfg.Cluster),
 		TaskDefinition: aws.String(taskDef),
@@ -1333,12 +1339,10 @@ func (r *Runtime) ListManagedTasks(ctx context.Context) ([]process.TaskRef, erro
 		if end > len(arns) {
 			end = len(arns)
 		}
-		// Tags are intentionally not requested (no Include: TaskFieldTags):
-		// this call only needs task.LaunchType and task.TaskArn, both base
-		// response fields, so omitting the tags include keeps the call cheap.
 		desc, err := r.client.DescribeTasks(ctx, &ecs.DescribeTasksInput{
 			Cluster: aws.String(r.cfg.Cluster),
 			Tasks:   arns[start:end],
+			Include: []ecstypes.TaskField{ecstypes.TaskFieldTags},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("fargate: list managed tasks describe: %w", err)
@@ -1352,11 +1356,21 @@ func (r *Runtime) ListManagedTasks(ctx context.Context) ([]process.TaskRef, erro
 				continue
 			}
 			if t.TaskArn != nil {
-				out = append(out, process.TaskRef{ARN: aws.ToString(t.TaskArn)})
+				labels := make(map[string]string, len(t.Tags))
+				for _, tag := range t.Tags {
+					labels[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+				}
+				out = append(out, process.TaskRef{ARN: aws.ToString(t.TaskArn), Labels: labels})
 			}
 		}
 	}
 	return out, nil
+}
+
+// TaskSweepScope deduplicates startup fencing for tiers backed by the same ECS
+// cluster and launch type.
+func (r *Runtime) TaskSweepScope() string {
+	return r.cfg.Cluster + "|" + string(r.cfg.LaunchType)
 }
 
 // StopTask stops the Fargate task with the given ARN. It satisfies
@@ -1365,6 +1379,21 @@ func (r *Runtime) ListManagedTasks(ctx context.Context) ([]process.TaskRef, erro
 func (r *Runtime) StopTask(ctx context.Context, arn string) error {
 	return r.stop(ctx, arn, "shinyhub: orphan sweep")
 }
+
+// TaskStopped observes actual ECS lastStatus, not ListTasks desired status.
+// StopTask can disappear from the default RUNNING inventory while its
+// container is still handling SIGTERM and writing data.
+func (r *Runtime) TaskStopped(ctx context.Context, arn string) (bool, error) {
+	task, err := r.describeTask(ctx, arn)
+	if err != nil {
+		return false, err
+	}
+	return task != nil && aws.ToString(task.LastStatus) == "STOPPED", nil
+}
+
+// TaskInventoryStabilizationWindow covers ECS's eventually-consistent task
+// inventory after a control-plane crash immediately following RunTask.
+func (r *Runtime) TaskInventoryStabilizationWindow() time.Duration { return 10 * time.Second }
 
 func (r *Runtime) listManagedTaskARNs(ctx context.Context) ([]string, error) {
 	var arns []string
@@ -1510,7 +1539,7 @@ func optString(s string) *string {
 // deliberate re-launch after a STOPPED task in the prior window still issues a
 // fresh RunTask.
 //
-// Formula: SHA-256(cluster | slug | index | deploymentID | workerID | bucket)
+// Formula: SHA-256(cluster | slug | index | deploymentID | jobRunID | workerID | bucket)
 // as a lowercase hex string. SHA-256 hex is always exactly 64 characters, which
 // fits the ECS ClientToken maximum length of 64 exactly.
 // The workerID segment differentiates a Fargate and an EC2 RunTask for the same
@@ -1518,7 +1547,7 @@ func optString(s string) *string {
 // launch into a running Fargate task (silent cross-contamination).
 // When deploymentID is 0 (legacy/pre-deploy rows) the field is omitted so the
 // token still differentiates across time buckets.
-func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix int64, workerID string) string {
+func clientToken(cluster, slug string, index int, deploymentID, jobRunID int64, nowUnix int64, workerID string) string {
 	bucket := strconv.FormatInt(nowUnix/600, 10)
 	var b strings.Builder
 	b.WriteString(cluster)
@@ -1529,6 +1558,10 @@ func clientToken(cluster, slug string, index int, deploymentID int64, nowUnix in
 	b.WriteByte('|')
 	if deploymentID > 0 {
 		b.WriteString(strconv.FormatInt(deploymentID, 10))
+	}
+	b.WriteByte('|')
+	if jobRunID > 0 {
+		b.WriteString(strconv.FormatInt(jobRunID, 10))
 	}
 	b.WriteByte('|')
 	b.WriteString(workerID)

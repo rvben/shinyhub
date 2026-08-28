@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -1338,6 +1339,147 @@ func TestReconcileInflightDeployments(t *testing.T) {
 	}
 	if len(live) != 1 || live[0].Version != "v1" {
 		t.Fatalf("after reconcile, live = %+v, want only v1", live)
+	}
+}
+
+func TestReconcileInflightDeploymentsRestoresPriorScheduleDeclarations(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "declaration-crash")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "job", CronExpr: "0 5 * * *", CommandJSON: `["old"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: "never", OnSuccess: "none", RollFallback: "defer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.BeginDeployment(app.ID, "v2", "/b/v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := `["candidate"]`
+	if err := store.UpdateSchedule(scheduleID, db.UpdateScheduleParams{CommandJSON: &changed}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := lifecycle.ReconcileInflightDeployments(store); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetSchedule(scheduleID)
+	if err != nil || got.CommandJSON != `["old"]` {
+		t.Fatalf("schedule after interrupted deployment=%+v err=%v", got, err)
+	}
+	var status string
+	err = store.DB().QueryRow(`SELECT status FROM deployments WHERE id = ?`, pending.ID).Scan(&status)
+	if err != nil || status != db.DeploymentFailed {
+		t.Fatalf("pending deployment status after reconcile=%q err=%v", status, err)
+	}
+}
+
+func TestReconcileInflightLegacyDeploymentDoesNotInventEmptyPriorDeclarations(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "legacy-declaration-crash")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "job", CronExpr: "0 5 * * *", CommandJSON: `["old"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: "never", OnSuccess: "none", RollFallback: "defer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.BeginDeployment(app.ID, "v2", "/b/v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a pending deployment created before migration 070. Zero snapshot
+	// rows are ambiguous in that state and must never be interpreted as an
+	// authoritative empty declaration set.
+	if _, err := store.DB().Exec(`UPDATE deployments SET prior_schedule_snapshot_recorded = 0 WHERE id = ?`, pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	changed := `["candidate"]`
+	if err := store.UpdateSchedule(scheduleID, db.UpdateScheduleParams{CommandJSON: &changed}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := lifecycle.ReconcileInflightDeployments(store); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetSchedule(scheduleID)
+	if err != nil || got.CommandJSON != changed || !got.Enabled {
+		t.Fatalf("legacy declaration was destructively guessed: schedule=%+v err=%v", got, err)
+	}
+	gotApp, err := store.GetAppBySlug(app.Slug)
+	if err != nil || gotApp.Status != "failed" {
+		t.Fatalf("legacy interrupted app=%+v err=%v, want failed", gotApp, err)
+	}
+	var status, reason string
+	if err := store.DB().QueryRow(`SELECT status, failure_reason FROM deployments WHERE id = ?`, pending.ID).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != db.DeploymentFailed || !strings.Contains(reason, "prior schedule snapshots") {
+		t.Fatalf("legacy deployment status=%q reason=%q", status, reason)
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || !quarantined {
+		t.Fatalf("legacy unknown-declaration deployment quarantine=%v err=%v, want durable", quarantined, err)
+	}
+	// Soft app status is repairable state. Prove startup enforcement cannot be
+	// bypassed by a stale writer or recovery path setting it back to running.
+	if _, err := store.DB().Exec(`UPDATE apps SET status = 'running' WHERE id = ?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnforceCompatibilityQuarantines(); err != nil {
+		t.Fatal(err)
+	}
+	gotApp, err = store.GetAppBySlug(app.Slug)
+	if err != nil || gotApp.Status != "failed" {
+		t.Fatalf("legacy quarantine enforcement app=%+v err=%v, want failed", gotApp, err)
+	}
+}
+
+func TestReconcileInflightProducerDeploymentQuarantinesApp(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "producer-crash")
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: app.ID, Version: "v1", BundleDir: "/b/v1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.BeginDeployment(app.ID, "v2", "/b/v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDeploymentProducerBarrierEntered(pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || !quarantined {
+		t.Fatalf("pending compatibility barrier quarantine=%v err=%v, want true", quarantined, err)
+	}
+	if err := lifecycle.ReconcileInflightDeployments(store); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetAppBySlug(app.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "failed" {
+		t.Fatalf("app status=%q, want failed after interrupted producer publication", got.Status)
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || !quarantined {
+		t.Fatalf("durable compatibility quarantine=%v err=%v, want true", quarantined, err)
+	}
+	if inflight, err := store.ListInflightDeployments(); err != nil || len(inflight) != 0 {
+		t.Fatalf("inflight=%+v err=%v", inflight, err)
+	}
+	corrective, err := store.BeginDeployment(app.ID, "v3", "/b/v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(corrective.ID); err != nil {
+		t.Fatal(err)
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || quarantined {
+		t.Fatalf("quarantine after corrective promotion=%v err=%v, want false", quarantined, err)
 	}
 }
 

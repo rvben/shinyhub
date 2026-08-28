@@ -368,11 +368,11 @@ rather than trusting a stale observation.
 | `--prune` | Delete fleet-owned apps that are absent from the manifest. **This also removes their persistent data directory and all bundles.** |
 | `-y/--yes` | Skip the interactive destructive-action confirmation. `--prune` in a non-interactive shell requires `--yes`. |
 | `--retries N` | Retry attempts *after* the first for deploys and transient config PATCH failures. Default 1 (so two attempts total). |
-| `--wait-for-warm` | Require every enabled `run_on_register` schedule to have a recorded success, including on unchanged apps. If repair is already running, join that run within the per-app warm deadline instead of dispatching a duplicate. |
-| `--warm-timeout DURATION` | Per-app deadline shared by first-fire waits and the final warm-state check. Default 15 minutes. |
-| `--verify-schedules` | Require every enabled schedule to satisfy the server-computed freshness policy; read-only and never dispatches work. |
+| `--wait-for-warm` | Ask the server to reconcile every persisted enabled deploy-triggered schedule, including on unchanged apps; wait for each exact durable obligation and require the authoritative producer state to match the current digest and command. |
+| `--warm-timeout DURATION` | Per-app deadline shared by deploy-run waits and the final bundle-convergence check. Default 15 minutes. |
+| `--verify-schedules` | Read-only: require cron freshness and authoritative producer convergence for every enabled schedule, and reject unresolved producer-write uncertainty even if its schedule was later disabled; never dispatches work. |
 | `--verify-health` | Require every app, unchanged as well as changed, to be in a state it serves from without operator action: `running`, `idle`, or parked (`hibernated` after its idle timeout, `suspended`). A parked app wakes on its first request and passes in one poll; the gate never wakes it, so a broken bundle in a hibernated app surfaces on wake, not here. Intentionally stopped apps remain excluded. The post-deploy wait for changed apps is stricter and still requires a serving replica. |
-| `--restart-after-warm` | After warm-up succeeds, cycle replicas so startup-loaded caches see the new data. Deliberately stopped apps stay stopped. |
+| `--restart-after-warm` | After convergence repairs an already-running or unchanged app, cycle replicas so startup-loaded caches see the new data. Pre-start deploy/rollback producers already run before replica boot and do not cause a redundant cycle. Deliberately stopped apps stay stopped. |
 | `--allow-unsafe-degraded-prune` | Permit prune against a server without precondition support, accepting a documented race (see [Degraded mode](#degraded-mode)). |
 | `--json` | Emit the machine-readable result envelope. |
 | `-q/--quiet` | Collapse to the summary plus result line. |

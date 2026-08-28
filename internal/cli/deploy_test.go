@@ -1252,18 +1252,24 @@ func TestZipDir_StatErrorOnIgnoreFile(t *testing.T) {
 	}
 }
 
-// TestDeploy_FirstFire_ReportedAndWaited verifies that --wait-for-warm polls
-// the first-fire run endpoint after deploy and exits 0 on "succeeded".
-func TestDeploy_FirstFire_ReportedAndWaited(t *testing.T) {
+// TestDeploy_DeployRun_ReportedAndWaited verifies that --wait-for-warm polls
+// the deploy-triggered run run endpoint after deploy and exits 0 on "succeeded".
+func TestDeploy_DeployRun_ReportedAndWaited(t *testing.T) {
 	var runPolls int
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+		_, _ = w.Write([]byte(`{"app":{"status":"running"},"compatibility_quarantined":false,"producer_repair_required":false}`))
 	})
 	mux.HandleFunc("/api/apps/warmapp/deploy", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"first_fire":{"run_id":42}}]}}`))
+		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"deploy_run":{"run_id":42}}]}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/schedules/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/schedules", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"items":[{"id":5,"name":"warm","enabled":true,"deploy_trigger":"bundle_change","deploy_trigger_satisfied":true}]}`))
 	})
 	mux.HandleFunc("/api/apps/warmapp/schedules/5/runs/42", func(w http.ResponseWriter, r *http.Request) {
 		runPolls++
@@ -1299,10 +1305,16 @@ func TestDeploy_RestartAfterWarm_WaitsThenRestarts(t *testing.T) {
 	var runPolls, restartHits int
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+		_, _ = w.Write([]byte(`{"app":{"status":"running"},"compatibility_quarantined":false,"producer_repair_required":false}`))
 	})
 	mux.HandleFunc("/api/apps/warmapp/deploy", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"first_fire":{"run_id":42}}]}}`))
+		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"deploy_run":{"run_id":42}}]}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/schedules/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/schedules", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"items":[{"id":5,"name":"warm","enabled":true,"deploy_trigger":"bundle_change","deploy_trigger_satisfied":true}]}`))
 	})
 	mux.HandleFunc("/api/apps/warmapp/schedules/5/runs/42", func(w http.ResponseWriter, r *http.Request) {
 		runPolls++
@@ -1334,9 +1346,9 @@ func TestDeploy_RestartAfterWarm_WaitsThenRestarts(t *testing.T) {
 	}
 }
 
-// TestDeploy_FirstFire_FailureIsFatal verifies that a genuine first-fire failure
+// TestDeploy_DeployRun_FailureIsFatal verifies that a genuine deploy-triggered run failure
 // causes --wait-for-warm to return a non-nil error (non-zero exit).
-func TestDeploy_FirstFire_FailureIsFatal(t *testing.T) {
+func TestDeploy_DeployRun_FailureIsFatal(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1344,7 +1356,7 @@ func TestDeploy_FirstFire_FailureIsFatal(t *testing.T) {
 	})
 	mux.HandleFunc("/api/apps/warmapp/deploy", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"first_fire":{"run_id":42}}]}}`))
+		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"deploy_run":{"run_id":42}}]}}`))
 	})
 	mux.HandleFunc("/api/apps/warmapp/schedules/5/runs/42", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1370,7 +1382,7 @@ func TestDeploy_FirstFire_FailureIsFatal(t *testing.T) {
 	cmd.SetErr(&out)
 	cmd.SetArgs([]string{dir, "--slug", "warmapp", "--wait-for-warm"})
 	if err := cmd.Execute(); err == nil {
-		t.Fatalf("expected non-nil error when first-fire fails under --wait-for-warm")
+		t.Fatalf("expected non-nil error when deploy-triggered run fails under --wait-for-warm")
 	}
 }
 
@@ -1380,12 +1392,15 @@ func TestDeploy_WaitForWarmFailsClosedWhenDispatchRefIsMissing(t *testing.T) {
 		_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
 	})
 	mux.HandleFunc("/api/apps/warmapp/deploy", func(w http.ResponseWriter, r *http.Request) {
-		// The server accepted the manifest but omitted first_fire. The final
+		// The deploy response omitted deploy_run. The final
 		// schedule state is authoritative and must keep the deploy red.
 		_, _ = io.WriteString(w, `{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5}]}}`)
 	})
+	mux.HandleFunc("/api/apps/warmapp/schedules/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `[]`)
+	})
 	mux.HandleFunc("/api/apps/warmapp/schedules", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"items":[{"id":5,"name":"warm","enabled":true,"stale":true}]}`)
+		_, _ = io.WriteString(w, `{"items":[{"id":5,"name":"warm","enabled":true,"stale":true,"current_app_version":"v2","current_content_digest":"sha256:new","deploy_trigger_satisfied":false}]}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -1396,7 +1411,7 @@ func TestDeploy_WaitForWarmFailsClosedWhenDispatchRefIsMissing(t *testing.T) {
 name = "warm"
 cron = "0 6 * * *"
 cmd = "python refresh.py"
-run_on_register = true
+deploy_trigger = "bundle_change"
 `)
 	writeTestCLIConfig(t, srv.URL)
 
@@ -1405,8 +1420,8 @@ run_on_register = true
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{dir, "--slug", "warmapp", "--wait-for-warm"})
 	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "never succeeded") {
-		t.Fatalf("error = %v, want fail-closed never-succeeded postcondition", err)
+	if err == nil || !strings.Contains(err.Error(), "producer convergence is not satisfied for app version") {
+		t.Fatalf("error = %v, want fail-closed bundle convergence postcondition", err)
 	}
 }
 

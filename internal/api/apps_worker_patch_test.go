@@ -113,6 +113,41 @@ func TestPatchApp_RejectsTopologyThatInvalidatesRollSchedule(t *testing.T) {
 	}
 }
 
+func TestPatchApp_ClearsElasticOrphanRiskOnlyForStoppedFencedTransition(t *testing.T) {
+	srv, store, token, jm := buildScheduleE2EServer(t)
+	srv.SetJobs(jm, nil)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "wapp", Name: "Worker App", OwnerID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("wapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkElasticOrphanRisk(app.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status = 'running' WHERE id = ?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+	rec := patchWorkerApp(t, srv, token, []byte(`{"worker_isolation":"multiplex"}`))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("running app cleared orphan risk: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if risk, err := store.AppElasticOrphanRisk(app.ID); err != nil || !risk {
+		t.Fatalf("risk after rejected running transition=%v err=%v", risk, err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status = 'stopped' WHERE id = ?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+	rec = patchWorkerApp(t, srv, token, []byte(`{"worker_isolation":"multiplex"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stopped fenced transition status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if risk, err := store.AppElasticOrphanRisk(app.ID); err != nil || risk {
+		t.Fatalf("risk after stopped fenced transition=%v err=%v", risk, err)
+	}
+}
+
 func TestPatchApp_WorkerWarmSparesCannotExceedMaxWorkers(t *testing.T) {
 	srv, store := newWorkerPatchServer(t)
 	_, token := seedWorkerApp(t, store)

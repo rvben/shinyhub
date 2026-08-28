@@ -12,48 +12,54 @@ import (
 
 // scheduleActivationLockKey serializes generation allocation and per-app queue
 // coalescing on Postgres. SQLite already serializes writers with BEGIN IMMEDIATE.
-const scheduleActivationLockKey int64 = 0x41435456 // "ACTV"
+const scheduleActivationLockKey int64 = scheduleConvergenceLockKey
 
 var ErrScheduleActivationBusy = errors.New("schedule activation is already running or repairing")
 
 type ScheduleActivation struct {
-	ID                     int64      `json:"id"`
-	AppID                  *int64     `json:"app_id"`
-	AppSlug                string     `json:"app_slug"`
-	ScheduleID             *int64     `json:"schedule_id"`
-	ScheduleName           string     `json:"schedule_name"`
-	ScheduleRunID          *int64     `json:"schedule_run_id"`
-	Action                 string     `json:"action"`
-	MinRollIntervalSeconds int        `json:"min_roll_interval_seconds"`
-	RollFallback           string     `json:"roll_fallback"`
-	MaxDeferAgeSeconds     int        `json:"max_defer_age_seconds"`
-	TargetGeneration       int64      `json:"target_generation"`
-	Status                 string     `json:"status"`
-	Phase                  string     `json:"phase"`
-	DueAt                  time.Time  `json:"due_at"`
-	DeferReason            string     `json:"defer_reason,omitempty"`
-	Attempts               int        `json:"attempts"`
-	CapacityDeferrals      int        `json:"capacity_deferrals"`
-	CapacityDeferredAt     *time.Time `json:"capacity_deferred_at,omitempty"`
-	SurgeIndex             int        `json:"surge_index"`
-	NextSlot               int        `json:"next_slot"`
-	LastError              string     `json:"last_error,omitempty"`
-	SupersededByID         *int64     `json:"superseded_by_id,omitempty"`
-	CreatedAt              time.Time  `json:"created_at"`
-	UpdatedAt              time.Time  `json:"updated_at"`
-	StartedAt              *time.Time `json:"started_at,omitempty"`
-	FinishedAt             *time.Time `json:"finished_at,omitempty"`
+	ID                        int64      `json:"id"`
+	AppID                     *int64     `json:"app_id"`
+	AppSlug                   string     `json:"app_slug"`
+	ScheduleID                *int64     `json:"schedule_id"`
+	ScheduleName              string     `json:"schedule_name"`
+	ScheduleRunID             *int64     `json:"schedule_run_id"`
+	SourceDeploymentID        *int64     `json:"source_deployment_id,omitempty"`
+	SourceAppVersion          string     `json:"source_app_version,omitempty"`
+	SourceContentDigest       string     `json:"source_content_digest,omitempty"`
+	SourceProducerFingerprint string     `json:"source_producer_fingerprint,omitempty"`
+	Action                    string     `json:"action"`
+	MinRollIntervalSeconds    int        `json:"min_roll_interval_seconds"`
+	RollFallback              string     `json:"roll_fallback"`
+	MaxDeferAgeSeconds        int        `json:"max_defer_age_seconds"`
+	TargetGeneration          int64      `json:"target_generation"`
+	Status                    string     `json:"status"`
+	Phase                     string     `json:"phase"`
+	DueAt                     time.Time  `json:"due_at"`
+	DeferReason               string     `json:"defer_reason,omitempty"`
+	Attempts                  int        `json:"attempts"`
+	CapacityDeferrals         int        `json:"capacity_deferrals"`
+	CapacityDeferredAt        *time.Time `json:"capacity_deferred_at,omitempty"`
+	SurgeIndex                int        `json:"surge_index"`
+	NextSlot                  int        `json:"next_slot"`
+	LastError                 string     `json:"last_error,omitempty"`
+	SupersededByID            *int64     `json:"superseded_by_id,omitempty"`
+	CreatedAt                 time.Time  `json:"created_at"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
+	StartedAt                 *time.Time `json:"started_at,omitempty"`
+	FinishedAt                *time.Time `json:"finished_at,omitempty"`
 }
 
 type CompleteScheduleRunParams struct {
-	RunID      int64
-	Status     string
-	ExitCode   *int
-	FinishedAt time.Time
+	RunID              int64
+	Status             string
+	ExitCode           *int
+	FinishedAt         time.Time
+	DataWriteAttempted bool
 }
 
 const activationColumns = `
-id, app_id, app_slug, schedule_id, schedule_name, schedule_run_id, action, min_roll_interval_seconds,
+id, app_id, app_slug, schedule_id, schedule_name, schedule_run_id, source_deployment_id, source_app_version, source_content_digest, source_producer_fingerprint,
+action, min_roll_interval_seconds,
 roll_fallback, max_defer_age_seconds, target_generation, status, phase, due_at, defer_reason, attempts,
 capacity_deferrals, capacity_deferred_at, surge_index,
 next_slot, last_error, superseded_by_id, created_at, updated_at, started_at, finished_at`
@@ -75,19 +81,26 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 		}
 	}()
 
-	var currentStatus, action, appSlug, scheduleName, rollFallback string
+	var currentStatus, action, appSlug, scheduleName, rollFallback, sourceDigest string
+	var sourceVersion, producerFingerprint, producerCommandJSON string
 	var scheduleID, appID int64
-	var minInterval, maxDeferAge int
+	var sourceDeploymentID, deployObligationID sql.NullInt64
+	var minInterval, maxDeferAge, publishesData int
 	err = tx.QueryRowContext(ctx, `
 		SELECT r.status, r.on_success, r.min_roll_interval_seconds,
 		       r.roll_fallback, r.max_defer_age_seconds,
-		       r.schedule_id, sc.name, sc.app_id, a.slug
+		       r.schedule_id, sc.name, sc.app_id, a.slug,
+		       r.deployment_id, r.app_version, r.content_digest,
+		       r.producer_fingerprint, r.producer_command_json, r.deploy_obligation_id,
+		       r.publishes_data
 		FROM schedule_runs r
 		JOIN app_schedules sc ON sc.id = r.schedule_id
 		JOIN apps a ON a.id = sc.app_id
 		WHERE r.id = ?`, p.RunID).Scan(
 		&currentStatus, &action, &minInterval, &rollFallback, &maxDeferAge,
 		&scheduleID, &scheduleName, &appID, &appSlug,
+		&sourceDeploymentID, &sourceVersion, &sourceDigest,
+		&producerFingerprint, &producerCommandJSON, &deployObligationID, &publishesData,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -112,29 +125,185 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 	if p.ExitCode != nil {
 		ec = sql.NullInt64{Int64: int64(*p.ExitCode), Valid: true}
 	}
+	dataWriteSequence := int64(0)
+	if publishesData != 0 && (p.Status == "succeeded" || p.DataWriteAttempted) {
+		if err := tx.QueryRowContext(ctx, `
+			UPDATE apps SET data_write_sequence = data_write_sequence + 1,
+			                updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? RETURNING data_write_sequence`, appID).Scan(&dataWriteSequence); err != nil {
+			return nil, fmt.Errorf("complete schedule run: allocate physical write sequence: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE schedule_runs SET status = ?, exit_code = ?, finished_at = ?
-		WHERE id = ? AND status = 'running'`, p.Status, ec, p.FinishedAt, p.RunID); err != nil {
+		UPDATE schedule_runs SET status = ?, exit_code = ?, finished_at = ?, data_write_sequence = ?
+		WHERE id = ? AND status = 'running'`, p.Status, ec, p.FinishedAt, dataWriteSequence, p.RunID); err != nil {
 		return nil, fmt.Errorf("complete schedule run: update terminal state: %w", err)
 	}
-	if p.Status != "succeeded" || action != "roll" {
+	if dataWriteSequence > 0 {
+		if p.Status == "succeeded" {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM schedule_data_uncertainty WHERE schedule_id = ?`, scheduleID); err != nil {
+				return nil, fmt.Errorf("complete schedule run: clear data uncertainty: %w", err)
+			}
+		} else if _, err := tx.ExecContext(ctx, `
+			INSERT INTO schedule_data_uncertainty
+				(schedule_id, data_write_sequence, schedule_run_id, status, recorded_at)
+			VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(schedule_id) DO UPDATE SET
+				data_write_sequence = excluded.data_write_sequence,
+				schedule_run_id = excluded.schedule_run_id,
+				status = excluded.status,
+				recorded_at = excluded.recorded_at`, scheduleID, dataWriteSequence, p.RunID, p.Status); err != nil {
+			return nil, fmt.Errorf("complete schedule run: record data uncertainty: %w", err)
+		}
+	}
+	if p.Status == "succeeded" && publishesData != 0 && sourceDigest != "" && producerFingerprint != "" {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO schedule_producer_state
+				(schedule_id, content_digest, producer_fingerprint, producer_command_json,
+				 deployment_id, app_version, schedule_run_id, publication_generation,
+				 data_write_sequence, published_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+			ON CONFLICT(schedule_id) DO UPDATE SET
+				content_digest = excluded.content_digest,
+				producer_fingerprint = excluded.producer_fingerprint,
+				producer_command_json = excluded.producer_command_json,
+				deployment_id = excluded.deployment_id,
+				app_version = excluded.app_version,
+				schedule_run_id = excluded.schedule_run_id,
+				publication_generation = schedule_producer_state.publication_generation + 1,
+				data_write_sequence = excluded.data_write_sequence,
+				published_at = excluded.published_at`,
+			scheduleID, sourceDigest, producerFingerprint, producerCommandJSON,
+			sourceDeploymentID, sourceVersion, p.RunID, dataWriteSequence, p.FinishedAt,
+		); err != nil {
+			return nil, fmt.Errorf("complete schedule run: record deploy provenance: %w", err)
+		}
+	}
+	if deployObligationID.Valid {
+		obligationStatus := "failed"
+		switch p.Status {
+		case "succeeded":
+			obligationStatus = "satisfied"
+		case "interrupted":
+			obligationStatus = "pending"
+		}
+		finished := any(p.FinishedAt)
+		if obligationStatus == "pending" {
+			finished = nil
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE schedule_deploy_obligations
+			SET status = CASE WHEN status = 'superseded' THEN 'superseded' ELSE ? END,
+			    last_error = CASE WHEN ? = 'failed' THEN ? ELSE '' END,
+			    finished_at = CASE WHEN status = 'superseded' THEN finished_at ELSE ? END,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?`, obligationStatus, obligationStatus, p.Status, finished, deployObligationID); err != nil {
+			return nil, fmt.Errorf("complete schedule run: terminalize deploy obligation: %w", err)
+		}
+	}
+
+	// Re-evaluate the current desired producer after every writer completion.
+	// If an obsolete run finishes last, its identity becomes authoritative and
+	// the newer obligation is put back to pending instead of remaining green.
+	sourceIsPending := false
+	if sourceDeploymentID.Valid {
+		var sourceStatus string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM deployments WHERE id = ?`, sourceDeploymentID).Scan(&sourceStatus); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("complete schedule run: load source deployment: %w", err)
+		} else if err == nil {
+			sourceIsPending = sourceStatus == "pending"
+		}
+	}
+	if producerFingerprint != "" && !sourceIsPending {
+		schedule, err := scanSchedule(tx.QueryRowContext(ctx, `
+			SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
+			       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
+			       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds,
+			       created_at, updated_at
+			FROM app_schedules WHERE id = ?`, scheduleID))
+		if err != nil {
+			return nil, fmt.Errorf("complete schedule run: reload schedule: %w", err)
+		}
+		var currentDeploymentID int64
+		var currentVersion, currentDigest string
+		err = tx.QueryRowContext(ctx, `
+			SELECT id, version, COALESCE(content_digest, '') FROM deployments
+			WHERE app_id = ? AND status = 'succeeded'
+			ORDER BY id DESC LIMIT 1`, appID).Scan(&currentDeploymentID, &currentVersion, &currentDigest)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("complete schedule run: load current deployment: %w", err)
+		}
+		if err == nil && currentDigest != "" {
+			if _, err := reconcileScheduleObligationTx(ctx, tx, schedule,
+				currentDeploymentID, currentVersion, currentDigest); err != nil {
+				return nil, fmt.Errorf("complete schedule run: reconcile current producer: %w", err)
+			}
+		}
+	}
+	// Publication and serving rollout are separate. Every successful immutable
+	// producer advances durable app-level data provenance, even when on_success
+	// is none or the source deployment is still pending. Any consumer that boots
+	// later can therefore stamp exactly what it loaded. A pending candidate never
+	// enqueues a redundant roll; its consumers have not started yet.
+	var generation int64
+	provenancePublication := p.Status == "succeeded" && publishesData != 0 && sourceDigest != "" && producerFingerprint != ""
+	// Legacy/manual roll runs may predate immutable producer provenance, but a
+	// rollout still needs a positive generation for its durable activation row.
+	// Provenance-bearing producers additionally publish the app-level source used
+	// to stamp every later consumer boot.
+	if p.Status == "succeeded" && (provenancePublication || (action == "roll" && !provenancePublication)) {
+		if err := tx.QueryRowContext(ctx, `
+			UPDATE apps SET data_generation = data_generation + 1, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? RETURNING data_generation`, appID).Scan(&generation); err != nil {
+			return nil, fmt.Errorf("complete schedule run: allocate generation: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE schedule_runs SET target_generation = ? WHERE id = ?`, generation, p.RunID,
+		); err != nil {
+			return nil, fmt.Errorf("complete schedule run: snapshot generation: %w", err)
+		}
+	}
+	if provenancePublication {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO app_data_publication
+				(app_id, generation, schedule_run_id, producer_deployment_id,
+				 producer_app_version, producer_content_digest, producer_fingerprint,
+				 data_write_sequence, published_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(app_id) DO UPDATE SET
+				generation = excluded.generation,
+				schedule_run_id = excluded.schedule_run_id,
+				producer_deployment_id = excluded.producer_deployment_id,
+				producer_app_version = excluded.producer_app_version,
+				producer_content_digest = excluded.producer_content_digest,
+				producer_fingerprint = excluded.producer_fingerprint,
+				data_write_sequence = excluded.data_write_sequence,
+				published_at = excluded.published_at`,
+			appID, generation, p.RunID, sourceDeploymentID, sourceVersion,
+			sourceDigest, producerFingerprint, dataWriteSequence, p.FinishedAt); err != nil {
+			return nil, fmt.Errorf("complete schedule run: record app data publication: %w", err)
+		}
+	}
+	// Any newer physical publication invalidates older queued roll requests,
+	// even when the newer writer's current policy is on_success=none. Letting an
+	// old deferred activation run would stamp its obsolete generation onto
+	// consumers that actually load the newer writer's data.
+	if provenancePublication {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE schedule_activations
+			SET status = 'superseded', finished_at = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE app_id = ? AND target_generation <> ?
+			  AND status IN ('pending', 'deferred_interval', 'deferred_capacity')`,
+			p.FinishedAt, appID, generation); err != nil {
+			return nil, fmt.Errorf("complete schedule run: supersede stale activations: %w", err)
+		}
+	}
+	if p.Status != "succeeded" || action != "roll" || sourceIsPending {
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("complete schedule run: commit: %w", err)
 		}
 		committed = true
 		return nil, nil
-	}
-
-	var generation int64
-	if err := tx.QueryRowContext(ctx, `
-		UPDATE apps SET data_generation = data_generation + 1, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ? RETURNING data_generation`, appID).Scan(&generation); err != nil {
-		return nil, fmt.Errorf("complete schedule run: allocate generation: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE schedule_runs SET target_generation = ? WHERE id = ?`, generation, p.RunID,
-	); err != nil {
-		return nil, fmt.Errorf("complete schedule run: snapshot generation: %w", err)
 	}
 
 	// Damping begins after the most recent completed activation. Queued work is
@@ -184,12 +353,14 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 	var activationID int64
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO schedule_activations
-			(app_id, app_slug, schedule_id, schedule_name, schedule_run_id, action,
+			(app_id, app_slug, schedule_id, schedule_name, schedule_run_id,
+			 source_deployment_id, source_app_version, source_content_digest, source_producer_fingerprint, action,
 			 min_roll_interval_seconds, roll_fallback, max_defer_age_seconds,
 			 target_generation, status, phase, due_at)
-		VALUES (?, ?, ?, ?, ?, 'roll', ?, ?, ?, ?, ?, 'pending', ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'roll', ?, ?, ?, ?, ?, 'pending', ?)
 		RETURNING id`,
-		appID, appSlug, scheduleID, scheduleName, p.RunID, minInterval, rollFallback,
+		appID, appSlug, scheduleID, scheduleName, p.RunID, sourceDeploymentID, sourceVersion, sourceDigest, producerFingerprint,
+		minInterval, rollFallback,
 		maxDeferAge, generation, activationStatus, dueAt,
 	).Scan(&activationID)
 	if err != nil {
@@ -328,7 +499,8 @@ func (s *Store) LatestScheduleActivationsByApp(appID int64) ([]*ScheduleActivati
 
 func prefixedActivationColumns(alias string) string {
 	columns := []string{
-		"id", "app_id", "app_slug", "schedule_id", "schedule_name", "schedule_run_id", "action", "min_roll_interval_seconds",
+		"id", "app_id", "app_slug", "schedule_id", "schedule_name", "schedule_run_id",
+		"source_deployment_id", "source_app_version", "source_content_digest", "source_producer_fingerprint", "action", "min_roll_interval_seconds",
 		"roll_fallback", "max_defer_age_seconds", "target_generation", "status", "phase", "due_at", "defer_reason", "attempts",
 		"capacity_deferrals", "capacity_deferred_at", "surge_index",
 		"next_slot", "last_error", "superseded_by_id", "created_at", "updated_at", "started_at", "finished_at",
@@ -446,7 +618,7 @@ func (s *Store) DeferScheduleActivation(id int64, status, reason string, dueAt, 
 
 func (s *Store) FinishScheduleActivation(id int64, status, lastError string, finishedAt time.Time, countAttempt bool) error {
 	switch status {
-	case "succeeded", "failed", "not_needed", "blocked_unsupported", "target_deleted":
+	case "succeeded", "failed", "superseded", "not_needed", "blocked_unsupported", "target_deleted":
 	default:
 		return fmt.Errorf("finish schedule activation: invalid status %q", status)
 	}
@@ -719,10 +891,11 @@ func getActivationTx(ctx context.Context, tx writeTx, id int64) (*ScheduleActiva
 
 func scanScheduleActivation(row rowScanner) (*ScheduleActivation, error) {
 	var a ScheduleActivation
-	var appID, scheduleID, runID, superseded sql.NullInt64
+	var appID, scheduleID, runID, sourceDeploymentID, superseded sql.NullInt64
 	var capacityDeferred, started, finished sql.NullTime
 	err := row.Scan(
-		&a.ID, &appID, &a.AppSlug, &scheduleID, &a.ScheduleName, &runID, &a.Action, &a.MinRollIntervalSeconds,
+		&a.ID, &appID, &a.AppSlug, &scheduleID, &a.ScheduleName, &runID,
+		&sourceDeploymentID, &a.SourceAppVersion, &a.SourceContentDigest, &a.SourceProducerFingerprint, &a.Action, &a.MinRollIntervalSeconds,
 		&a.RollFallback, &a.MaxDeferAgeSeconds, &a.TargetGeneration, &a.Status, &a.Phase, &a.DueAt, &a.DeferReason,
 		&a.Attempts, &a.CapacityDeferrals, &capacityDeferred, &a.SurgeIndex, &a.NextSlot, &a.LastError, &superseded,
 		&a.CreatedAt, &a.UpdatedAt, &started, &finished,
@@ -744,6 +917,10 @@ func scanScheduleActivation(row rowScanner) (*ScheduleActivation, error) {
 	if runID.Valid {
 		v := runID.Int64
 		a.ScheduleRunID = &v
+	}
+	if sourceDeploymentID.Valid {
+		v := sourceDeploymentID.Int64
+		a.SourceDeploymentID = &v
 	}
 	if superseded.Valid {
 		v := superseded.Int64

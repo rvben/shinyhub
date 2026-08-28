@@ -58,6 +58,10 @@ func TestSchema_AppOutputFieldsBackedByStruct(t *testing.T) {
 		"render_pacing":                      true,
 		"rejects_by_reason":                  true,
 		"latest_schedule_activations":        true,
+		"schedule_convergence_satisfied":     true,
+		"compatibility_quarantined":          true,
+		"producer_repair_required":           true,
+		"deploy_trigger_schedules":           true,
 	}
 
 	for _, cmd := range []string{"apps list", "apps show"} {

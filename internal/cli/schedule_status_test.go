@@ -9,7 +9,7 @@ import (
 // The server returns the standard {items,total,limit,offset} list envelope.
 const scheduleStatusBody = `{"items":[
   {"slug":"alpha-dash","schedule":"refresh-data","enabled":true,"last_run_at":"2026-06-30T06:00:00Z","last_run_status":"succeeded","last_success_at":"2026-06-30T06:00:00Z","last_success_age_s":7200,"stale":false},
-  {"slug":"beta-kpi","schedule":"refresh-data","enabled":true,"last_run_at":"2026-06-30T06:00:00Z","last_run_status":"failed","last_success_at":null,"last_success_age_s":null,"stale":true}
+  {"slug":"beta-kpi","schedule":"refresh-data","enabled":false,"last_run_at":"2026-06-30T06:00:00Z","last_run_status":"failed","last_success_at":null,"last_success_age_s":null,"stale":true,"deploy_trigger":"never","producer_repair_required":true}
 ],"total":2,"limit":0,"offset":0}`
 
 func TestScheduleStatus_Table(t *testing.T) {
@@ -28,7 +28,7 @@ func TestScheduleStatus_Table(t *testing.T) {
 		t.Fatalf("expected 1 request, got %d", len(*reqs))
 	}
 	// never (never-succeeded) is distinct from a stale-but-once-succeeded row.
-	for _, want := range []string{"APP", "SCHEDULE", "STALE", "never", "yes"} {
+	for _, want := range []string{"APP", "SCHEDULE", "DATA", "STALE", "never", "yes", "repair"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table output missing %q:\n%s", want, out)
 		}

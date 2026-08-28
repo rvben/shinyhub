@@ -515,6 +515,7 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		cmd = exec.Command(guardArgv[0], guardArgv[1:]...)
 		cmd.ExtraFiles = []*os.File{startupGuardReader}
 	}
+	cmd.ExtraFiles = append(cmd.ExtraFiles, p.LifetimeFiles...)
 	cmd.Dir = p.Dir
 	cmd.Env = append(nativeChildEnv(p), extraEnv...)
 	cmd.Stdout = logWriter
@@ -576,16 +577,24 @@ func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 
 	if !ok {
 		// Adopted process: this runtime instance never started it, so we have
-		// no *exec.Cmd to wait on. Poll the kernel for liveness; signal 0 is a
-		// permission/existence probe that returns ESRCH once the PID is gone.
+		// no *exec.Cmd to wait on. Once the recorded leader exits, actively reap
+		// the remaining launch group; otherwise an orphan child can keep a dead
+		// slot looking live forever.
 		err := waitForPIDExit(ctx, handle.PID)
+		if err == nil {
+			err = killOrphanedProcessGroup(handle.PID, 10*time.Second)
+		}
 		// Read the OOM counter before teardown removes the cgroup dir.
 		r.recordOOMVerdict(handle.PID)
 		r.teardownAppCgroupFor(handle.PID)
 		return err
 	}
 
-	err := cmd.Wait()
+	rootErr := cmd.Wait()
+	// cmd.Wait observes only the process-group leader. Anything left in its PGID
+	// is now orphaned from the serving runtime and must be killed before the
+	// manager reports the slot exited or permits replacement/publication.
+	groupErr := killOrphanedProcessGroup(handle.PID, 10*time.Second)
 
 	r.mu.Lock()
 	delete(r.procs, handle.PID)
@@ -594,7 +603,10 @@ func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 	// Read the OOM counter first: teardown rmdirs the cgroup.
 	r.recordOOMVerdict(handle.PID)
 	r.teardownAppCgroupFor(handle.PID)
-	return err
+	if groupErr != nil {
+		return groupErr
+	}
+	return rootErr
 }
 
 // teardownAppCgroupFor removes a replica's per-app cgroup once its process has
@@ -635,6 +647,37 @@ func waitForPIDExit(ctx context.Context, pid int) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+const processGroupPollInterval = 25 * time.Millisecond
+
+func waitForProcessGroupExit(ctx context.Context, pgid int) error {
+	ticker := time.NewTicker(processGroupPollInterval)
+	defer ticker.Stop()
+	for {
+		err := syscall.Kill(-pgid, 0)
+		if err == syscall.ESRCH {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func killOrphanedProcessGroup(pgid int, timeout time.Duration) error {
+	if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := waitForProcessGroupExit(ctx, pgid); err != nil {
+		return fmt.Errorf("orphaned process group %d survived SIGKILL: %w", pgid, err)
+	}
+	return nil
 }
 
 // Stats reports the handle's CPU rate and RSS. The cached *gops.Process per PID
@@ -759,7 +802,8 @@ func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	cmd.Env = append(nativeChildEnv(p), extraEnv...)
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = oneShotSysProcAttr()
+	cmd.ExtraFiles = append(cmd.ExtraFiles, p.LifetimeFiles...)
 
 	if err := cmd.Start(); err != nil {
 		return ExitInfo{}, fmt.Errorf("start one-shot: %w", err)
@@ -772,30 +816,62 @@ func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
 
+	var waitErr error
 	select {
 	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		select {
-		case <-waitDone:
-		case <-time.After(10 * time.Second):
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			<-waitDone
+		if err := terminateOneShotProcessGroup(cmd.Process.Pid, 10*time.Second); err != nil {
+			return ExitInfo{}, err
 		}
+		<-waitDone // reap the group leader after physical group confirmation
 		return ExitInfo{Code: -1, Signaled: true}, nil
-	case err := <-waitDone:
-		if err == nil {
+	case waitErr = <-waitDone:
+		// A root process can report success while a background descendant keeps
+		// mutating data and holding the inherited publication flock. The one-shot
+		// is not physically complete until its entire launch PGID is absent.
+		if err := waitForProcessGroupExit(ctx, cmd.Process.Pid); err != nil {
+			if ctx.Err() != nil {
+				if stopErr := terminateOneShotProcessGroup(cmd.Process.Pid, 10*time.Second); stopErr != nil {
+					return ExitInfo{}, stopErr
+				}
+				return ExitInfo{Code: -1, Signaled: true}, nil
+			}
+			return ExitInfo{}, fmt.Errorf("wait one-shot process group: %w", err)
+		}
+		if waitErr == nil {
 			return ExitInfo{Code: 0}, nil
 		}
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			ws, _ := exitErr.Sys().(syscall.WaitStatus)
 			if ws.Signaled() {
 				return ExitInfo{Code: -1, Signaled: true}, nil
 			}
 			return ExitInfo{Code: exitErr.ExitCode()}, nil
 		}
-		return ExitInfo{}, fmt.Errorf("wait one-shot: %w", err)
+		return ExitInfo{}, fmt.Errorf("wait one-shot: %w", waitErr)
 	}
 }
+
+func terminateOneShotProcessGroup(pgid int, grace time.Duration) error {
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	waitCtx, cancel := context.WithTimeout(context.Background(), grace)
+	err := waitForProcessGroupExit(waitCtx, pgid)
+	cancel()
+	if err == nil {
+		return nil
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	waitCtx, cancel = context.WithTimeout(context.Background(), grace)
+	err = waitForProcessGroupExit(waitCtx, pgid)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("one-shot process group %d did not terminate after SIGKILL: %w", pgid, err)
+	}
+	return nil
+}
+
+// InheritsLifetimeFiles reports that Start and RunOnce pass
+// StartParams.LifetimeFiles through exec to the native command tree.
+func (r *NativeRuntime) InheritsLifetimeFiles() bool { return true }
 
 // Suspend freezes a replica's process group (SIGSTOP) and reclaims its resident
 // memory to swap via its per-app cgroup's memory.reclaim, returning freed=true

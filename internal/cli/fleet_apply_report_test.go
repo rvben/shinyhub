@@ -437,7 +437,7 @@ func TestWriteFleetApplyJSON_RetriedSuccessHasDetailsButNoTopLevelKind(t *testin
 	}
 }
 
-// A failure AFTER the deploy succeeded (config patch, or a first-fire after a
+// A failure AFTER the deploy succeeded (config patch, or a deploy-triggered run after a
 // retried-then-succeeded deploy) must NOT inherit a deploy attempt's kind at the
 // top level, even though attempt_details may still record the earlier flake.
 func TestWriteFleetApplyJSON_UnclassifiedPostDeployFailureOmitsFailureKind(t *testing.T) {
@@ -473,7 +473,7 @@ func TestWriteFleetApplyJSON_ScheduleGateFailureHasStableKind(t *testing.T) {
 	d := fleet.AppDiff{Slug: "projects", Action: fleet.ActionUnchanged}
 	r := applyResult{
 		slug: "projects", action: fleet.ActionUnchanged, status: statusFailed,
-		err: errors.New("schedule freshness gate unsatisfied"), failureKind: failureScheduleStale,
+		err: errors.New("schedule verification gate unsatisfied"), failureKind: failureScheduleStale,
 	}
 	var buf bytes.Buffer
 	if err := writeFleetApplyJSON(&buf, &fleet.Manifest{FleetID: "eu"}, "http://h", []fleet.AppDiff{d}, nil, applyOutcome{apps: []applyResult{r}}, 4, "PARTIAL"); err != nil {
@@ -567,7 +567,7 @@ func TestWriteFleetApplyJSON_DistinguishesStandingWarmFailure(t *testing.T) {
 func TestRenderApplyReport_StaleScheduleIsDistinct(t *testing.T) {
 	res := []applyResult{{
 		slug: "projects", action: fleet.ActionUnchanged, status: statusFailed,
-		err: errors.New("schedule freshness gate unsatisfied"), failureKind: failureScheduleStale,
+		err: errors.New("schedule verification gate unsatisfied"), failureKind: failureScheduleStale,
 		freshnessGate: []scheduleGateOutcome{{
 			Schedule: "refresh-pend-data", State: "stale", LastRunID: 804, LastRunStatus: "failed",
 		}},
@@ -578,7 +578,7 @@ func TestRenderApplyReport_StaleScheduleIsDistinct(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"failed [schedule_stale]",
-		"schedule freshness gate unsatisfied (stale; last run failed #804)",
+		"schedule verification gate unsatisfied (stale; last run failed #804)",
 		"shinyhub schedule logs projects refresh-pend-data --run 804",
 	} {
 		if !strings.Contains(out, want) {

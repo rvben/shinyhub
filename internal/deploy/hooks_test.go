@@ -824,14 +824,14 @@ cmd = "python fetch.py"
 	}
 }
 
-func TestLoadManifest_RunOnRegister(t *testing.T) {
+func TestLoadManifest_DeployTrigger(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir, `
 [[schedule]]
 name = "warm"
 cron = "0 5 * * *"
 cmd = "python fetch.py"
-run_on_register = true
+deploy_trigger = "bundle_change"
 `)
 	m, err := LoadManifest(dir)
 	if err != nil {
@@ -840,12 +840,12 @@ run_on_register = true
 	if len(m.Schedules) != 1 {
 		t.Fatalf("want 1 schedule, got %d", len(m.Schedules))
 	}
-	if !m.Schedules[0].RunOnRegister {
-		t.Errorf("RunOnRegister = false, want true")
+	if m.Schedules[0].DeployTrigger != "bundle_change" {
+		t.Errorf("DeployTrigger = %q, want bundle_change", m.Schedules[0].DeployTrigger)
 	}
 }
 
-func TestLoadManifest_RunOnRegister_DefaultsFalse(t *testing.T) {
+func TestLoadManifest_DeployTriggerDefaultsNever(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir, `
 [[schedule]]
@@ -857,8 +857,23 @@ cmd = "python fetch.py"
 	if err != nil {
 		t.Fatalf("LoadManifest: %v", err)
 	}
-	if m.Schedules[0].RunOnRegister {
-		t.Errorf("RunOnRegister = true, want false (default)")
+	if m.Schedules[0].DeployTrigger != "never" {
+		t.Errorf("DeployTrigger = %q, want never", m.Schedules[0].DeployTrigger)
+	}
+}
+
+func TestLoadManifest_DeployTriggerRejectsUnknownValue(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, `
+[[schedule]]
+name = "warm"
+cron = "0 5 * * *"
+cmd = "python fetch.py"
+deploy_trigger = "sometimes"
+`)
+	_, err := LoadManifest(dir)
+	if err == nil || !strings.Contains(err.Error(), "deploy_trigger") {
+		t.Fatalf("LoadManifest error = %v, want deploy_trigger validation error", err)
 	}
 }
 

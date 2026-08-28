@@ -198,10 +198,16 @@ func (s *Server) bootWarmVictims(
 	victims []warmVictim,
 ) (restored int, firstErr error) {
 	slug := app.Slug
+	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
+	if gateErr != nil {
+		return 0, fmt.Errorf("%s: acquire startup-data compatibility fence: %w", callerName, gateErr)
+	}
+	defer releaseConsumerBoot()
 	for _, v := range victims {
 		idx := v.index
 		var r *deploy.Result
 		var bootErr error
+		consumerBooted := true
 		if v.rep.Status == "suspended" {
 			// Thaw the frozen replica (SIGCONT + abbreviated probe + re-register),
 			// ~ms vs a multi-second cold boot. On any resume failure fall back to a
@@ -210,6 +216,8 @@ func (s *Server) bootWarmVictims(
 			if bootErr != nil {
 				slog.Warn(callerName+": thaw failed; cold-booting", "slug", slug, "index", idx, "err", bootErr)
 				r, bootErr = s.deployReplica(p, idx)
+			} else {
+				consumerBooted = false
 			}
 		} else {
 			r, bootErr = s.deployReplica(p, idx)
@@ -255,10 +263,17 @@ func (s *Server) bootWarmVictims(
 			DesiredState:        "running",
 			DeploymentID:        &depID,
 			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
+			ConsumerBooted:      consumerBooted,
 		}); upsertErr != nil {
-			// The process is running but the row is stale - log and continue so
-			// the watchdog can observe and reconcile.
 			slog.Warn(callerName+": persist running replica", "slug", slug, "index", idx, "err", upsertErr)
+			_ = s.manager.StopReplica(slug, idx)
+			if s.proxy != nil {
+				s.proxy.DeregisterReplicaIfTarget(slug, idx, r.EndpointURL)
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s %s: persist consumer provenance for replica %d: %w", callerName, slug, idx, upsertErr)
+			}
+			continue
 		}
 		restored++
 	}
@@ -281,6 +296,9 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 		return false, fmt.Errorf("warm expand %s: get app: %w", slug, err)
 	}
 	if err := s.guardActivationLifecycle(app.ID, "warm expand "+slug); err != nil {
+		return false, err
+	}
+	if err := s.guardCompatibilityQuarantine(app.ID, "warm expand "+slug); err != nil {
 		return false, err
 	}
 	// Honour a concurrent stop/delete that won the lock first: do not resurrect
@@ -350,6 +368,7 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,
 	}, app)
+	p = s.guardDeploymentConsumerStart(app, current, p)
 
 	// Boot warm victims in ascending index order, mirroring the order a full
 	// deploy would use. Continue past individual failures so every victim gets

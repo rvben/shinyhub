@@ -127,20 +127,20 @@ func TestFleetProgressLinesArePlainOffATerminal(t *testing.T) {
 	}
 }
 
-// TestFirstFireProgressLineIsPlainOffATerminal is the same guarantee for the
-// first-fire wait.
-func TestFirstFireProgressLineIsPlainOffATerminal(t *testing.T) {
+// TestDeployRunProgressLineIsPlainOffATerminal is the same guarantee for the
+// deploy-triggered run wait.
+func TestDeployRunProgressLineIsPlainOffATerminal(t *testing.T) {
 	var out bytes.Buffer
 	cur := time.Unix(0, 0)
 	now := func() time.Time { return cur }
 	sleep := func(d time.Duration) { cur = cur.Add(d) }
 	poll := func() (string, error) { return "running", nil }
 
-	_, _ = waitForFirstFireLoop(poll, 5*time.Second, time.Second, time.Second,
+	_, _ = waitForDeployRunLoop(poll, 5*time.Second, time.Second, time.Second,
 		now, sleep, &out, "warm")
 
-	if !strings.Contains(out.String(), "  warm: first-fire still running (1s/5s)\n") {
-		t.Errorf("first-fire progress line drifted:\n%q", out.String())
+	if !strings.Contains(out.String(), "  warm: deploy-triggered run still running (1s/5s)\n") {
+		t.Errorf("deploy-triggered run progress line drifted:\n%q", out.String())
 	}
 	if i := strings.IndexByte(out.String(), 0x1b); i >= 0 {
 		t.Errorf("piped progress carries an escape at %d: %q", i, out.String())

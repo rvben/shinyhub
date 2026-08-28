@@ -12,6 +12,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 	gopsmem "github.com/shirou/gopsutil/v4/mem"
 )
 
@@ -35,6 +36,33 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 	}
 	if app.Slug != a.AppSlug {
 		return fmt.Errorf("%w: app identity changed", activation.ErrTargetDeleted)
+	}
+	if err := s.guardCompatibilityQuarantine(app.ID, "scheduled data activation"); err != nil {
+		return fmt.Errorf("%w: %v", activation.ErrUnsupported, err)
+	}
+	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
+	if gateErr != nil {
+		return fmt.Errorf("acquire activation publication fence: %w", gateErr)
+	}
+	defer releaseConsumerBoot()
+	if a.SourceContentDigest != "" && a.SourceProducerFingerprint != "" {
+		publication, publicationErr := s.store.GetAppDataPublication(app.ID)
+		if errors.Is(publicationErr, db.ErrNotFound) {
+			return activation.ErrSuperseded
+		}
+		if publicationErr != nil {
+			return fmt.Errorf("load activation data publication: %w", publicationErr)
+		}
+		if a.ScheduleRunID == nil || publication.Generation != a.TargetGeneration ||
+			publication.ScheduleRunID != *a.ScheduleRunID ||
+			publication.ProducerContentDigest != a.SourceContentDigest ||
+			publication.ProducerFingerprint != a.SourceProducerFingerprint {
+			return activation.ErrSuperseded
+		}
+		if (publication.ProducerDeploymentID == nil) != (a.SourceDeploymentID == nil) ||
+			(publication.ProducerDeploymentID != nil && *publication.ProducerDeploymentID != *a.SourceDeploymentID) {
+			return activation.ErrSuperseded
+		}
 	}
 	if err := s.validateScheduleActivationForApp(app, "roll"); err != nil {
 		return fmt.Errorf("%w: %v", activation.ErrUnsupported, err)
@@ -64,6 +92,25 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 		return fmt.Errorf("%w: app has no deployment", activation.ErrUnsupported)
 	}
 	current := deployments[0]
+	if a.SourceContentDigest != "" && current.ContentDigest != a.SourceContentDigest {
+		return activation.ErrSuperseded
+	}
+	if a.SourceProducerFingerprint != "" && a.ScheduleID != nil {
+		schedule, err := s.store.GetSchedule(*a.ScheduleID)
+		if errors.Is(err, db.ErrNotFound) {
+			return activation.ErrTargetDeleted
+		}
+		if err != nil {
+			return fmt.Errorf("load activation producer: %w", err)
+		}
+		_, currentFingerprint, err := schedulespec.ProducerIdentity(schedule.CommandJSON)
+		if err != nil {
+			return fmt.Errorf("resolve activation producer: %w", err)
+		}
+		if currentFingerprint != a.SourceProducerFingerprint {
+			return activation.ErrSuperseded
+		}
+	}
 
 	replicaRows, err := s.store.ListReplicas(app.ID)
 	if err != nil {
@@ -641,7 +688,9 @@ func (s *Server) confirmActivationReplicaStopped(app *db.App, index int) error {
 		}
 	}
 	if errors.Is(stopErr, process.ErrReplicaNotFound) && durable != nil && durable.PID != nil && *durable.PID > 0 {
-		if err := syscall.Kill(*durable.PID, 0); errors.Is(err, syscall.ESRCH) {
+		groupProbeErr := syscall.Kill(-*durable.PID, 0)
+		pidProbeErr := syscall.Kill(*durable.PID, 0)
+		if errors.Is(groupProbeErr, syscall.ESRCH) && errors.Is(pidProbeErr, syscall.ESRCH) {
 			// A confirmed-absent PID is safe to tombstone even if a previous DB
 			// checkpoint failed after the manager had already stopped it.
 			stopErr = nil
@@ -659,6 +708,29 @@ func (s *Server) confirmActivationReplicaStopped(app *db.App, index int) error {
 	if durable != nil {
 		if err := s.store.ClearReplicaRuntimeIdentity(app.ID, index); err != nil && !errors.Is(err, db.ErrNotFound) {
 			return err
+		}
+	}
+	return nil
+}
+
+// confirmAppConsumersStopped combines the in-memory manager view with durable
+// replica identities. Guarded native launches persist a starting row before app
+// code can exec, so an empty Manager after owner loss is never accepted as
+// proof while a durable PID or container identity remains.
+func (s *Server) confirmAppConsumersStopped(app *db.App) error {
+	if s.manager == nil {
+		return errors.New("process manager unavailable")
+	}
+	if err := s.manager.StopConfirmed(app.Slug); err != nil && !errors.Is(err, process.ErrReplicaNotFound) {
+		return err
+	}
+	rows, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		return fmt.Errorf("list durable replica identities: %w", err)
+	}
+	for _, row := range rows {
+		if err := s.confirmActivationReplicaStopped(app, row.Index); err != nil {
+			return fmt.Errorf("confirm replica %d stopped: %w", row.Index, err)
 		}
 	}
 	return nil

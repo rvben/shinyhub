@@ -1738,10 +1738,22 @@ func TestReplicaEnvAlwaysEmitsSHINYHUBSLUG(t *testing.T) {
 func TestClientTokenIsSameWithinTimeBucket(t *testing.T) {
 	// unix/600 == 2 for these two values (1200 and 1199 are in different buckets;
 	// use 1201 and 1250 which are both in bucket 2).
-	tok1 := clientToken("my-cluster", "demo", 1, 42, 1201, "fargate")
-	tok2 := clientToken("my-cluster", "demo", 1, 42, 1250, "fargate")
+	tok1 := clientToken("my-cluster", "demo", 1, 42, 0, 1201, "fargate")
+	tok2 := clientToken("my-cluster", "demo", 1, 42, 0, 1250, "fargate")
 	if tok1 != tok2 {
 		t.Errorf("tokens differ within the same 10-min bucket: %q != %q", tok1, tok2)
+	}
+}
+
+func TestClientTokenUsesStableDistinctScheduleRunIdentity(t *testing.T) {
+	first := clientToken("my-cluster", "demo", 0, 42, 101, 1201, "fargate")
+	retry := clientToken("my-cluster", "demo", 0, 42, 101, 1201, "fargate")
+	second := clientToken("my-cluster", "demo", 0, 42, 102, 1201, "fargate")
+	if first != retry {
+		t.Fatalf("same JobRunID must retain a stable ECS idempotency token: %q != %q", first, retry)
+	}
+	if first == second {
+		t.Fatal("distinct JobRunIDs must not be deduplicated into the same ECS task")
 	}
 }
 
@@ -1750,8 +1762,8 @@ func TestClientTokenIsSameWithinTimeBucket(t *testing.T) {
 // in the prior window still issues a fresh RunTask instead of being deduplicated.
 func TestClientTokenDiffersAcrossTimeBucket(t *testing.T) {
 	// bucket 2 (unix 1200-1799) vs bucket 3 (unix 1800-2399)
-	tok1 := clientToken("my-cluster", "demo", 1, 42, 1201, "fargate")
-	tok2 := clientToken("my-cluster", "demo", 1, 42, 1801, "fargate")
+	tok1 := clientToken("my-cluster", "demo", 1, 42, 0, 1201, "fargate")
+	tok2 := clientToken("my-cluster", "demo", 1, 42, 0, 1801, "fargate")
 	if tok1 == tok2 {
 		t.Errorf("tokens should differ across time buckets, but both = %q", tok1)
 	}
@@ -1761,8 +1773,8 @@ func TestClientTokenDiffersAcrossTimeBucket(t *testing.T) {
 // produce different tokens even in the same time bucket, so concurrent replica
 // launches produce independent idempotency keys.
 func TestClientTokenDiffersAcrossReplicas(t *testing.T) {
-	tok0 := clientToken("my-cluster", "demo", 0, 42, 1201, "fargate")
-	tok1 := clientToken("my-cluster", "demo", 1, 42, 1201, "fargate")
+	tok0 := clientToken("my-cluster", "demo", 0, 42, 0, 1201, "fargate")
+	tok1 := clientToken("my-cluster", "demo", 1, 42, 0, 1201, "fargate")
 	if tok0 == tok1 {
 		t.Errorf("replica 0 and replica 1 have same token: %q", tok0)
 	}
@@ -1771,7 +1783,7 @@ func TestClientTokenDiffersAcrossReplicas(t *testing.T) {
 // TestClientTokenLengthIs64Chars asserts the token fits the ECS ClientToken
 // maximum length of 64 characters.
 func TestClientTokenLengthIs64Chars(t *testing.T) {
-	tok := clientToken("cluster", "slug", 0, 1, 1000, "fargate")
+	tok := clientToken("cluster", "slug", 0, 1, 0, 1000, "fargate")
 	if len(tok) != 64 {
 		t.Errorf("clientToken length = %d, want 64", len(tok))
 	}
@@ -1781,8 +1793,8 @@ func TestClientTokenLengthIs64Chars(t *testing.T) {
 // deploy edge) still produces a valid 64-char token that differs across time
 // buckets, so distinct starts are not conflated.
 func TestClientTokenZeroDeploymentID(t *testing.T) {
-	tok1 := clientToken("cluster", "slug", 0, 0, 1201, "fargate")
-	tok2 := clientToken("cluster", "slug", 0, 0, 1801, "fargate")
+	tok1 := clientToken("cluster", "slug", 0, 0, 0, 1201, "fargate")
+	tok2 := clientToken("cluster", "slug", 0, 0, 0, 1801, "fargate")
 	if len(tok1) != 64 {
 		t.Errorf("zero-deploymentID token length = %d, want 64", len(tok1))
 	}
@@ -2782,8 +2794,8 @@ func TestDecodeHandleAcceptsBareARN_EC2(t *testing.T) {
 // a Fargate RunTask in the same 10-min window share a ClientToken and ECS
 // silently deduplicates the EC2 launch into the already-running Fargate task.
 func TestClientTokenDiffersBetweenLaunchTypes(t *testing.T) {
-	fargateToken := clientToken("my-cluster", "demo", 1, 42, 1201, "fargate")
-	ec2Token := clientToken("my-cluster", "demo", 1, 42, 1201, "ecs-ec2")
+	fargateToken := clientToken("my-cluster", "demo", 1, 42, 0, 1201, "fargate")
+	ec2Token := clientToken("my-cluster", "demo", 1, 42, 0, 1201, "ecs-ec2")
 	if fargateToken == ec2Token {
 		t.Errorf("clientToken must differ by workerID: fargate=%q ec2=%q", fargateToken, ec2Token)
 	}

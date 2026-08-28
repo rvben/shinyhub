@@ -50,6 +50,32 @@ func TestValidateActivation_DefaultAndRollContract(t *testing.T) {
 	}
 }
 
+func TestNormalizeDeployTrigger(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "", want: "never"},
+		{in: "never", want: "never"},
+		{in: "first_deploy", want: "first_deploy"},
+		{in: "bundle_change", want: "bundle_change"},
+		{in: "sometimes", wantErr: true},
+	}
+	for _, tc := range tests {
+		got, err := schedulespec.NormalizeDeployTrigger(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("NormalizeDeployTrigger(%q) error = nil", tc.in)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("NormalizeDeployTrigger(%q) = %q, %v; want %q, nil", tc.in, got, err, tc.want)
+		}
+	}
+}
+
 func TestValidateActivationSeconds_RejectsOverflowBeforeConversion(t *testing.T) {
 	if _, err := schedulespec.ValidateActivationSeconds("roll", schedulespec.MaxRollIntervalSeconds); err != nil {
 		t.Fatalf("maximum safe interval rejected: %v", err)

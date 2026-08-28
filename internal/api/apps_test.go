@@ -1657,6 +1657,76 @@ func TestAppsAPI_GetIncludesReplicasStatus(t *testing.T) {
 	}
 }
 
+func TestAppsAPI_GetAttributesReplicaDataToExactProducer(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "producer-data", Name: "Producer data", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("producer-data")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 5 * * *", CommandJSON: `["producer"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		OnSuccess: "roll", RollFallback: "defer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deploymentID := int64(49)
+	producerFingerprint := "sha256:producer-command"
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: scheduleID, Status: "running", Trigger: "deploy", StartedAt: time.Now().UTC(),
+		OnSuccess: "roll", RollFallback: "defer", DeploymentID: &deploymentID,
+		AppVersion: "v49", ContentDigest: "sha256:1234567890abcdef",
+		ProducerFingerprint: producerFingerprint, ProducerCommandJSON: `["producer"]`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitCode := 0
+	activation, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: runID, Status: "succeeded", ExitCode: &exitCode, FinishedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activation.SourceAppVersion != "v49" || activation.SourceContentDigest != "sha256:1234567890abcdef" ||
+		activation.SourceProducerFingerprint != producerFingerprint {
+		t.Fatalf("activation source = %+v", activation)
+	}
+	if err := store.UpsertActivationReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: "running", AppVersion: "v49",
+	}, activation.TargetGeneration, activation.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodGet, "/api/apps/producer-data", nil, token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get app: %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		ReplicasStatus []*db.Replica `json:"replicas_status"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.ReplicasStatus) != 1 {
+		t.Fatalf("replicas = %d, want 1", len(body.ReplicasStatus))
+	}
+	got := body.ReplicasStatus[0]
+	if got.DataGeneration != activation.TargetGeneration || got.DataProducerDeploymentID == nil ||
+		*got.DataProducerDeploymentID != deploymentID || got.DataProducerAppVersion != "v49" ||
+		got.DataProducerContentDigest != "sha256:1234567890abcdef" || got.DataProducerFingerprint != producerFingerprint {
+		t.Fatalf("replica data provenance = %+v", got)
+	}
+}
+
 // newManagerTestServerWithMaxReplicas creates a test server with a specific MaxReplicas cap.
 func newManagerTestServerWithMaxReplicas(t *testing.T, maxReplicas int) (*api.Server, *db.Store) {
 	t.Helper()

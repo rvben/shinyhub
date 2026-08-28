@@ -165,6 +165,53 @@ func TestElector_ReleasesOnContextCancel(t *testing.T) {
 	waitFor(t, func() bool { return lost.Load() == 1 })
 }
 
+func TestElector_DrainsOnLoseBeforeReleasingLease(t *testing.T) {
+	fs := &fakeStore{}
+	drainEntered := make(chan struct{})
+	releaseDrain := make(chan struct{})
+	e := New(fs, Config{
+		InstanceID: "a", TTL: time.Second, RenewEvery: time.Millisecond,
+		OnLose: func() {
+			close(drainEntered)
+			<-releaseDrain
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		e.Run(ctx)
+		close(done)
+	}()
+	waitFor(t, func() bool { return e.IsOwner() })
+	cancel()
+	select {
+	case <-drainEntered:
+	case <-time.After(time.Second):
+		t.Fatal("OnLose drain did not start")
+	}
+	if e.IsOwner() {
+		t.Fatal("local ownership gate remained open during drain")
+	}
+	fs.mu.Lock()
+	holderDuringDrain := fs.holder
+	fs.mu.Unlock()
+	if holderDuringDrain != "a" {
+		t.Fatalf("lease holder during OnLose drain=%q, want retiring owner", holderDuringDrain)
+	}
+	close(releaseDrain)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("elector did not finish after OnLose drain")
+	}
+	fs.mu.Lock()
+	holderAfterDrain := fs.holder
+	fs.mu.Unlock()
+	if holderAfterDrain != "" {
+		t.Fatalf("lease holder after OnLose drain=%q, want released", holderAfterDrain)
+	}
+}
+
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -42,7 +43,7 @@ const (
 
 // applyResult is one app's outcome. note carries a short human reason for
 // skipped / self-healed states; err carries the failure/conflict cause.
-// firstFires holds the per-schedule run_on_register outcomes for this deploy.
+// deployRuns holds the per-schedule deploy_trigger outcomes for this deploy.
 type applyResult struct {
 	slug     string
 	action   fleet.Action
@@ -56,20 +57,21 @@ type applyResult struct {
 	// deploy attempt's deployfail.Kind.
 	failureKind string
 	note        string
-	firstFires  []firstFireOutcome
+	deployRuns  []deployRunOutcome
 	// warmGate records level checks on apps whose bundle was not registered by
-	// this apply. These are not first-fires: they describe pre-existing state.
+	// this apply. These are not deploy-triggered runs: they describe pre-existing state.
 	warmGate []scheduleGateOutcome
-	// freshnessGate records failures of the opt-in all-enabled-schedules stale
-	// check. Like warmGate, it describes state and never dispatches work.
+	// freshnessGate records failures of the opt-in all-enabled-schedules
+	// freshness/provenance check. Like warmGate, it describes state and never
+	// dispatches work.
 	freshnessGate []scheduleGateOutcome
 	// scheduleLogs identifies the schedule-run logs relevant to warm failures.
 	// The identity remains even when fetching the tail fails, so the report can
 	// still print the exact diagnostic command.
 	scheduleLogs []scheduleFailureLog
-	// warmRestarted records the opt-in post-first-fire replica cycle.
+	// warmRestarted records the opt-in post-deploy-triggered run replica cycle.
 	warmRestarted bool
-	// warmDeadline is the one per-app budget shared by fresh first-fire waits and
+	// warmDeadline is the one per-app budget shared by fresh deploy-triggered run waits and
 	// the final level check (including joining an overlapping active run).
 	warmDeadline time.Time
 	// logTail holds the failing app's last process-log lines, populated only
@@ -85,7 +87,7 @@ type applyResult struct {
 	// deploy so the operator can see why an earlier attempt failed.
 	attemptsDetail []attemptOutcome
 	// deployFailed is true only when the deploy step itself failed (not a
-	// post-deploy config patch / ownership stamp / first-fire failure). The
+	// post-deploy config patch / ownership stamp / deploy-triggered run failure). The
 	// top-level failure_kind is emitted only when this is set, so a post-deploy
 	// failure never inherits a deploy attempt's kind.
 	deployFailed bool
@@ -204,7 +206,7 @@ func slugColumnWidth(res []applyResult) int {
 	return w
 }
 
-// renderResultRows prints one line per result plus its attempt/first-fire
+// renderResultRows prints one line per result plus its attempt/deploy-triggered run
 // detail lines. Shared by the projects and apps sections of renderApplyReport
 // so both use the same glyph and status-word rules; each section sizes its own
 // slug column since projects and apps are never aligned against each other.
@@ -241,13 +243,13 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 		for _, a := range r.attemptsDetail {
 			fmt.Fprintf(out, "     %s\n", s.dim(fmt.Sprintf("attempt %d: %s", a.Attempt, a.Kind)))
 		}
-		for _, ff := range r.firstFires {
+		for _, ff := range r.deployRuns {
 			if ff.Status == "" {
-				fmt.Fprintf(out, "     %s: first-fire triggered (run #%d)\n", ff.Schedule, ff.RunID)
+				fmt.Fprintf(out, "     %s: deploy-triggered run started (run #%d)\n", ff.Schedule, ff.RunID)
 			} else if ff.Status == "skipped_overlap" {
-				fmt.Fprintf(out, "     %s: first-fire skipped (already warming)\n", ff.Schedule)
+				fmt.Fprintf(out, "     %s: deploy run skipped (already running)\n", ff.Schedule)
 			} else {
-				fmt.Fprintf(out, "     %s: first-fire %s\n", ff.Schedule, ff.Status)
+				fmt.Fprintf(out, "     %s: deploy-triggered run %s\n", ff.Schedule, ff.Status)
 			}
 		}
 		for _, gate := range r.warmGate {
@@ -274,7 +276,21 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 				fmt.Fprintf(out, "     %s: schedule freshness unavailable from server\n", gate.Schedule)
 				continue
 			}
-			fmt.Fprintf(out, "     %s: schedule freshness gate unsatisfied (stale", gate.Schedule)
+			if gate.State == "producer_repair_required" {
+				fmt.Fprintf(out, "     %s: producer repair required after an uncertain data write\n", gate.Schedule)
+				continue
+			}
+			if gate.State == "producer_mismatch" {
+				fmt.Fprintf(out, "     %s: schedule producer predates or differs from current code\n", gate.Schedule)
+				continue
+			}
+			label := "stale"
+			if strings.Contains(gate.State, "producer_repair_required") {
+				label = "stale; producer repair required"
+			} else if strings.Contains(gate.State, "producer_mismatch") {
+				label = "stale; producer mismatch"
+			}
+			fmt.Fprintf(out, "     %s: schedule verification gate unsatisfied (%s", gate.Schedule, label)
 			if gate.Refreshing {
 				fmt.Fprint(out, "; refreshing")
 			}
@@ -287,7 +303,7 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 			fmt.Fprintln(out, ")")
 		}
 		if r.warmRestarted {
-			fmt.Fprintln(out, "     replicas restarted after first-fire warm-up")
+			fmt.Fprintln(out, "     replicas restarted after bundle data convergence")
 		}
 	}
 }
@@ -524,7 +540,7 @@ type applyJSONApp struct {
 	AdoptFrom            string                `json:"adopt_from,omitempty"`
 	PruneEligible        bool                  `json:"prune_eligible"`
 	Result               *jsonResult           `json:"result,omitempty"`
-	FirstFires           []firstFireOutcome    `json:"first_fires,omitempty"`
+	DeployRuns           []deployRunOutcome    `json:"deploy_runs,omitempty"`
 	WarmGate             []scheduleGateOutcome `json:"warm_gate,omitempty"`
 	ScheduleVerification []scheduleGateOutcome `json:"schedule_verification,omitempty"`
 	WarmRestarted        bool                  `json:"warm_restarted,omitempty"`
@@ -613,7 +629,7 @@ func writeFleetApplyJSONWithContext(out io.Writer, ctx applyReportContext, m *fl
 		}
 		if r, ok := bySlug[d.Slug]; ok {
 			aj.Result = resultToJSON(r)
-			aj.FirstFires = r.firstFires
+			aj.DeployRuns = r.deployRuns
 			aj.WarmGate = r.warmGate
 			aj.ScheduleVerification = r.freshnessGate
 			aj.WarmRestarted = r.warmRestarted

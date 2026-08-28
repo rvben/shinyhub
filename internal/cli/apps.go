@@ -200,20 +200,41 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			LastError        string `json:"last_error"`
 			DeferReason      string `json:"defer_reason"`
 		} `json:"latest_schedule_activations"`
+		ScheduleConvergenceSatisfied bool `json:"schedule_convergence_satisfied"`
+		CompatibilityQuarantined     bool `json:"compatibility_quarantined"`
+		ProducerRepairRequired       bool `json:"producer_repair_required"`
+		DeployTriggerSchedules       []struct {
+			Name                   string `json:"name"`
+			DeployTrigger          string `json:"deploy_trigger"`
+			Satisfied              bool   `json:"satisfied"`
+			CurrentAppVersion      string `json:"current_app_version"`
+			CurrentContentDigest   string `json:"current_content_digest"`
+			ProducerAppVersion     string `json:"producer_app_version"`
+			ProducerContentDigest  string `json:"producer_content_digest"`
+			ProducerFingerprint    string `json:"producer_fingerprint"`
+			ConvergenceStatus      string `json:"convergence_status"`
+			ConvergenceRunID       *int64 `json:"convergence_run_id"`
+			ConvergenceError       string `json:"convergence_error"`
+			ProducerRepairRequired bool   `json:"producer_repair_required"`
+		} `json:"deploy_trigger_schedules"`
 		ReplicasStatus []struct {
-			Index        int    `json:"index"`
-			Status       string `json:"status"`
-			PID          *int   `json:"pid"`
-			Port         *int   `json:"port"`
-			Reason       string `json:"reason"`
-			ExitCode     *int   `json:"exit_code"`
-			Signal       string `json:"signal"`
-			ExitSignal   string `json:"exit_signal"`
-			ExitReason   string `json:"exit_reason"`
-			OOMKilled    bool   `json:"oom_killed"`
-			RestartCount int    `json:"restart_count"`
-			CrashCount   int    `json:"crash_count"`
-			LastExit     *struct {
+			Index                     int    `json:"index"`
+			Status                    string `json:"status"`
+			PID                       *int   `json:"pid"`
+			Port                      *int   `json:"port"`
+			Reason                    string `json:"reason"`
+			ExitCode                  *int   `json:"exit_code"`
+			Signal                    string `json:"signal"`
+			ExitSignal                string `json:"exit_signal"`
+			ExitReason                string `json:"exit_reason"`
+			OOMKilled                 bool   `json:"oom_killed"`
+			RestartCount              int    `json:"restart_count"`
+			DataGeneration            int    `json:"data_generation"`
+			DataProducerAppVersion    string `json:"data_producer_app_version"`
+			DataProducerContentDigest string `json:"data_producer_content_digest"`
+			DataProducerFingerprint   string `json:"data_producer_fingerprint"`
+			CrashCount                int    `json:"crash_count"`
+			LastExit                  *struct {
 				ObservedAt *time.Time `json:"observed_at,omitempty"`
 				RunID      string     `json:"run_id,omitempty"`
 				ExitCode   *int       `json:"exit_code,omitempty"`
@@ -261,6 +282,12 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	fmt.Fprintf(w, "Slug:        %s\n", a.Slug)
 	fmt.Fprintf(w, "Name:        %s\n", a.Name)
 	fmt.Fprintf(w, "Status:      %s\n", stylerFor(w).status(a.Status))
+	if resp2.CompatibilityQuarantined {
+		fmt.Fprintln(w, "Compatibility: QUARANTINED — consumer starts are blocked")
+	}
+	if resp2.ProducerRepairRequired {
+		fmt.Fprintln(w, "Producer data: repair required after an uncertain write")
+	}
 	if a.DesiredStatus != "" && a.DesiredStatus != a.Status {
 		fmt.Fprintf(w, "Desired:     %s\n", stylerFor(w).status(a.DesiredStatus))
 	}
@@ -284,6 +311,50 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 			}
 			if reason != "" {
 				fmt.Fprintf(w, "    %s\n", reason)
+			}
+		}
+	}
+	if len(resp2.DeployTriggerSchedules) > 0 {
+		state := "ready"
+		if !resp2.ScheduleConvergenceSatisfied {
+			state = "not ready"
+		}
+		fmt.Fprintf(w, "Schedule convergence: %s\n", state)
+		for _, schedule := range resp2.DeployTriggerSchedules {
+			mark := "ready"
+			if schedule.ProducerRepairRequired {
+				mark = "repair required"
+			} else if !schedule.Satisfied {
+				mark = "needs run"
+			}
+			current := schedule.CurrentAppVersion
+			if schedule.CurrentContentDigest != "" {
+				current += " / " + shortDigest(schedule.CurrentContentDigest)
+			}
+			if current == "" {
+				current = "unknown"
+			}
+			fmt.Fprintf(w, "  %s: %s (%s, current %s", schedule.Name, mark, schedule.DeployTrigger, current)
+			if schedule.ConvergenceStatus != "" {
+				fmt.Fprintf(w, "; obligation %s", schedule.ConvergenceStatus)
+			}
+			if schedule.ConvergenceRunID != nil {
+				fmt.Fprintf(w, " run #%d", *schedule.ConvergenceRunID)
+			}
+			if schedule.ProducerAppVersion != "" || schedule.ProducerContentDigest != "" {
+				last := schedule.ProducerAppVersion
+				if schedule.ProducerContentDigest != "" {
+					if last == "" {
+						last = shortDigest(schedule.ProducerContentDigest)
+					} else {
+						last += " / " + shortDigest(schedule.ProducerContentDigest)
+					}
+				}
+				fmt.Fprintf(w, "; producer state %s", last)
+			}
+			fmt.Fprintln(w, ")")
+			if schedule.ConvergenceError != "" {
+				fmt.Fprintf(w, "    %s\n", schedule.ConvergenceError)
 			}
 		}
 	}
@@ -452,7 +523,7 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 	if len(resp2.ReplicasStatus) > 0 && resp2.WorkerPool == nil {
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "Replicas:")
-		t := newTable("INDEX", "STATUS", "PID", "PORT").alignRight(0, 2, 3).indent(2)
+		t := newTable("INDEX", "STATUS", "PID", "PORT", "DATA GEN", "PRODUCER").alignRight(0, 2, 3, 4).indent(2)
 		for _, r := range resp2.ReplicasStatus {
 			pid, port := "-", "-"
 			if r.PID != nil {
@@ -500,7 +571,18 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 					diagnostic += " · " + r.LastExit.Reason
 				}
 			}
-			t.row(txt(r.Index), statusTxt(r.Status), dimTxt(pid), dimTxt(port)).note(strings.TrimPrefix(diagnostic, "· "))
+			producer := "-"
+			if r.DataProducerAppVersion != "" || r.DataProducerContentDigest != "" {
+				producer = r.DataProducerAppVersion
+				if r.DataProducerContentDigest != "" {
+					if producer == "" {
+						producer = shortDigest(r.DataProducerContentDigest)
+					} else {
+						producer += " / " + shortDigest(r.DataProducerContentDigest)
+					}
+				}
+			}
+			t.row(txt(r.Index), statusTxt(r.Status), dimTxt(pid), dimTxt(port), txt(r.DataGeneration), txt(producer)).note(strings.TrimPrefix(diagnostic, "· "))
 		}
 		t.render(w)
 	}
@@ -895,6 +977,13 @@ func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error 
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "rollback", resp, out)
 	}
+	var rollbackResponse struct {
+		ScheduleConvergence []scheduleConvergenceDTO `json:"schedule_convergence"`
+		Warning             string                   `json:"warning"`
+	}
+	if err := json.Unmarshal(out, &rollbackResponse); err != nil {
+		return fmt.Errorf("decode rollback response: %w", err)
+	}
 	fields := map[string]any{"slug": slug}
 	var prose string
 	if cmd.Flags().Changed("to") {
@@ -902,6 +991,20 @@ func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error 
 		prose = fmt.Sprintf("%s: rolled back to deployment %d", slug, f.deploymentID)
 	} else {
 		prose = fmt.Sprintf("%s: rolled back to previous deployment", slug)
+	}
+	if len(rollbackResponse.ScheduleConvergence) > 0 {
+		fields["schedule_convergence"] = rollbackResponse.ScheduleConvergence
+		satisfied := 0
+		for _, item := range rollbackResponse.ScheduleConvergence {
+			if item.Status == "satisfied" {
+				satisfied++
+			}
+		}
+		prose += fmt.Sprintf("; schedule data convergence %d/%d satisfied", satisfied, len(rollbackResponse.ScheduleConvergence))
+	}
+	if rollbackResponse.Warning != "" {
+		fields["warning"] = rollbackResponse.Warning
+		prose += "; warning: " + rollbackResponse.Warning
 	}
 	if err := renderAction(cmd, "rolled_back", fields, prose); err != nil {
 		return err

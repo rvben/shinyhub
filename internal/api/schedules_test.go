@@ -23,6 +23,7 @@ import (
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
 // validScheduleBody returns a JSON body for a schedule that passes validation.
@@ -92,6 +93,97 @@ func TestSchedules_CreateAndList_HappyPath(t *testing.T) {
 	}
 	if list[0].(map[string]any)["name"] != "daily-job" {
 		t.Errorf("expected name=daily-job in list, got %v", list[0])
+	}
+}
+
+func TestSchedules_RejectsRemovedRunOnRegisterField(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	token, _ := auth.IssueJWT(1, "owner", "developer", "test-secret")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "strict-app", Name: "Strict", OwnerID: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody := `{"name":"legacy","cron_expr":"0 2 * * *","command":["true"],"timeout_seconds":60,"overlap_policy":"skip","missed_policy":"skip","run_on_register":true}`
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/apps/strict-app/schedules", []byte(createBody), token))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("legacy create status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	app, _ := store.GetAppBySlug("strict-app")
+	rows, err := store.ListSchedulesByApp(app.ID)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("legacy create mutated schedules: rows=%d err=%v", len(rows), err)
+	}
+
+	valid := validScheduleBody(t)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/apps/strict-app/schedules", valid, token))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("valid create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	id := scheduleIDBySlugAndName(t, store, app.ID, "daily-job")
+	rec = httptest.NewRecorder()
+	path := fmt.Sprintf("/api/apps/strict-app/schedules/%d", id)
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPatch, path, []byte(`{"run_on_register":false}`), token))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("legacy patch status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	fresh, err := store.GetSchedule(id)
+	if err != nil || fresh.DeployTrigger != schedulespec.DeployTriggerNever {
+		t.Fatalf("legacy patch mutated schedule: %+v err=%v", fresh, err)
+	}
+}
+
+func TestSchedules_DataProducersRequireNativeRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		mode             string
+		workerIsolation  string
+		defaultIsolation string
+		wantStatus       int
+	}{
+		{name: "native-multiplex", mode: "native", workerIsolation: "multiplex", wantStatus: http.StatusCreated},
+		{name: "native-grouped", mode: "native", workerIsolation: "grouped", wantStatus: http.StatusUnprocessableEntity},
+		{name: "native-inherited-grouped", mode: "native", workerIsolation: "", defaultIsolation: "grouped", wantStatus: http.StatusUnprocessableEntity},
+		{name: "docker", mode: "docker", workerIsolation: "multiplex", wantStatus: http.StatusUnprocessableEntity},
+		{name: "fargate", mode: "fargate", workerIsolation: "multiplex", wantStatus: http.StatusUnprocessableEntity},
+		{name: "ecs-ec2", mode: "ecs-ec2", workerIsolation: "multiplex", wantStatus: http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			appsDir := t.TempDir()
+			store := dbtest.New(t)
+			cfg := &config.Config{
+				Auth:    config.AuthConfig{Secret: "test-secret"},
+				Storage: config.StorageConfig{AppsDir: appsDir},
+				Runtime: config.RuntimeConfig{Mode: tc.mode, DefaultWorkerIsolation: tc.defaultIsolation},
+			}
+			srv := api.New(cfg, store, process.NewManager(appsDir, process.NewNativeRuntime()), proxy.New())
+			hash, _ := testHashPassword("pass")
+			if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
+				t.Fatal(err)
+			}
+			owner, _ := store.GetUserByUsername("owner")
+			if _, err := store.CreateApp(db.CreateAppParams{Slug: "producer-app", Name: "Producer", OwnerID: owner.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.DB().Exec(`UPDATE apps SET worker_isolation = ? WHERE slug = 'producer-app'`, tc.workerIsolation); err != nil {
+				t.Fatal(err)
+			}
+			token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+			body := []byte(`{"name":"producer","cron_expr":"0 2 * * *","command":["true"],"timeout_seconds":60,"overlap_policy":"skip","missed_policy":"skip","deploy_trigger":"bundle_change"}`)
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/apps/producer-app/schedules", body, token))
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), tc.wantStatus)
+			}
+			if tc.wantStatus != http.StatusCreated &&
+				!strings.Contains(rec.Body.String(), "orphan-process fence") &&
+				!strings.Contains(rec.Body.String(), "worker_isolation=multiplex") {
+				t.Fatalf("rejection does not explain physical fencing: %s", rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -319,6 +411,65 @@ func TestSchedules_DeleteBlocksNonterminalActivationThenAllowsTerminalHistory(t 
 	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodDelete, path, nil, token))
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("delete after terminal activation status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAppsShow_ReportsScheduleConvergenceAndProvenance(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "bundle-owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.GetUserByUsername("bundle-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "bundle-state", Name: "Bundle state", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("bundle-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dep, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "v2", BundleDir: "/bundle/v2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:new"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 5 * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: schedulespec.DeployTriggerBundleChange,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodGet, "/api/apps/bundle-state", nil, token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("show app status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var envelope struct {
+		ScheduleConvergenceSatisfied bool `json:"schedule_convergence_satisfied"`
+		Schedules                    []struct {
+			Name                 string `json:"name"`
+			Satisfied            bool   `json:"satisfied"`
+			CurrentAppVersion    string `json:"current_app_version"`
+			CurrentContentDigest string `json:"current_content_digest"`
+		} `json:"deploy_trigger_schedules"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.ScheduleConvergenceSatisfied || len(envelope.Schedules) != 1 {
+		t.Fatalf("bundle readiness = %+v, want one unsatisfied schedule", envelope)
+	}
+	got := envelope.Schedules[0]
+	if got.Name != "refresh" || got.Satisfied || got.CurrentAppVersion != "v2" || got.CurrentContentDigest != "sha256:new" {
+		t.Fatalf("schedule provenance = %+v", got)
 	}
 }
 
@@ -1360,7 +1511,7 @@ func buildScheduleE2EServer(t *testing.T) (srv *api.Server, store *db.Store, tok
 		t.Fatalf("jobs.NewManager: %v", err)
 	}
 	// Drain the jobs manager before t.TempDir() cleanup runs. A run triggered by
-	// the test (run_on_register first-fire, manual run) launches an async execute
+	// the test (deploy-triggered run, manual run) launches an async execute
 	// goroutine that writes a run log under appsDir (a t.TempDir). If that
 	// goroutine is still writing when Go's RemoveAll cleanup deletes the dir, the
 	// unlink races ("directory not empty") and the test flakes under load. Stop
@@ -1379,9 +1530,91 @@ func newScheduleE2EServerWithJobs(t *testing.T) (*api.Server, *db.Store, string)
 	t.Helper()
 	srv, store, token, jm := buildScheduleE2EServer(t)
 	// Pass nil scheduler so s.scheduler is nil and Reload is skipped; s.jobs is
-	// non-nil so run_on_register dispatch is enabled.
+	// non-nil so deploy-trigger dispatch is enabled.
 	srv.SetJobs(jm, nil)
 	return srv, store, token
+}
+
+func TestScheduleConvergenceRetry_RunsOnlyFailedCurrentObligation(t *testing.T) {
+	srv, store, token := newScheduleE2EServerWithJobs(t)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "retry-app", Name: "retry-app", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("retry-app")
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "producer", CronExpr: "0 5 * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: schedulespec.DeployTriggerBundleChange, OnSuccess: "none", RollFallback: "defer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligations, err := store.ReconcileDeployObligationsForDeployment(app.ID, dep.ID)
+	if err != nil || len(obligations) != 1 {
+		t.Fatalf("reconcile = %+v, %v", obligations, err)
+	}
+	claimed, err := store.ClaimNextDeployObligation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := store.InsertDeployScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: scheduleID, Status: "running", Trigger: "deploy", StartedAt: time.Now().UTC(),
+		OnSuccess: claimed.OnSuccess, RollFallback: claimed.RollFallback, DeploymentID: &claimed.DeploymentID,
+		AppVersion: claimed.AppVersion, ContentDigest: claimed.ContentDigest,
+		ProducerFingerprint: claimed.ProducerFingerprint, ProducerCommandJSON: claimed.ProducerCommandJSON,
+		DeployObligationID: &claimed.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitCode := 1
+	if _, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: runID, Status: "failed", ExitCode: &exitCode, FinishedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	path := fmt.Sprintf("/api/apps/retry-app/schedules/%d/convergence/retry", scheduleID)
+	if _, err := store.DB().Exec(`UPDATE app_schedules SET enabled = 0 WHERE id = ?`, scheduleID); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, path, nil, token))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "schedule is disabled") {
+		t.Fatalf("disabled retry status=%d body=%s, want actionable 409", rec.Code, rec.Body.String())
+	}
+	unchanged, err := store.GetDeployObligation(obligations[0].ID)
+	if err != nil || unchanged.Status != "failed" {
+		t.Fatalf("disabled retry mutated obligation=%+v err=%v", unchanged, err)
+	}
+	if _, err := store.DB().Exec(`UPDATE app_schedules SET enabled = 1 WHERE id = ?`, scheduleID); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, path, nil, token))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("retry status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		current, err := store.GetDeployObligation(obligations[0].ID)
+		if err == nil && current.Status == "satisfied" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	current, _ := store.GetDeployObligation(obligations[0].ID)
+	t.Fatalf("retried obligation did not succeed: %+v", current)
 }
 
 // TestCreateSchedule_SchedulerNotStarted_Returns201 verifies that creating a
@@ -1412,6 +1645,70 @@ func TestCreateSchedule_SchedulerNotStarted_Returns201(t *testing.T) {
 	}
 }
 
+func TestScheduleCRUD_PostCommitConvergenceFailureReturnsSuccessWithWarning(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t) // no jobs manager: convergence dispatch cannot run
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner-warning", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner-warning")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "warning-app", Name: "Warning", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("warning-app")
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+
+	create := []byte(`{"name":"producer","cron_expr":"0 5 * * *","command":["true"],"timeout_seconds":60,"overlap_policy":"skip","missed_policy":"skip","deploy_trigger":"bundle_change"}`)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/apps/warning-app/schedules", create, token))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID      int64  `json:"id"`
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == 0 || !strings.Contains(created.Warning, "created") || !strings.Contains(created.Warning, "asynchronous repair") {
+		t.Fatalf("create response=%+v", created)
+	}
+	if _, err := store.GetSchedule(created.ID); err != nil {
+		t.Fatalf("created row missing after warning response: %v", err)
+	}
+
+	rec = httptest.NewRecorder()
+	path := fmt.Sprintf("/api/apps/warning-app/schedules/%d", created.ID)
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPatch, path, []byte(`{"command":["true","--changed"]}`), token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var updated struct {
+		Warning string   `json:"warning"`
+		Command []string `json:"command"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(updated.Warning, "updated") || !strings.Contains(updated.Warning, "asynchronous repair") {
+		t.Fatalf("patch warning=%q", updated.Warning)
+	}
+	if len(updated.Command) != 2 || updated.Command[1] != "--changed" {
+		t.Fatalf("patch did not persist command: %+v", updated.Command)
+	}
+}
+
 // scheduleIDBySlugAndName resolves a schedule ID by listing all schedules for
 // the given app and matching by name.
 func scheduleIDBySlugAndName(t *testing.T, store *db.Store, appID int64, name string) int64 {
@@ -1429,17 +1726,24 @@ func scheduleIDBySlugAndName(t *testing.T, store *db.Store, appID int64, name st
 	return 0
 }
 
-// TestCreateSchedule_RunOnRegister_FiresOnce verifies that creating a schedule
-// with run_on_register=true dispatches a first run immediately and returns the
-// run id in the response as first_fire_run_id.
-func TestCreateSchedule_RunOnRegister_FiresOnce(t *testing.T) {
+func TestCreateSchedule_BundleChangeDispatchesCurrentDeployment(t *testing.T) {
 	srv, store, token := newScheduleE2EServerWithJobs(t)
 	if _, err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
 	app, _ := store.GetAppBySlug("warmapp")
+	dep, err := store.BeginDeployment(app.ID, "v1", "/tmp/bundle-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, "sha256:v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
 
-	reqBody := `{"name":"warm","cron_expr":"0 5 * * *","command":["true"],"timeout_seconds":60,"overlap_policy":"skip","missed_policy":"skip","run_on_register":true}`
+	reqBody := `{"name":"warm","cron_expr":"0 5 * * *","command":["true"],"timeout_seconds":60,"overlap_policy":"skip","missed_policy":"skip","deploy_trigger":"bundle_change"}`
 	req := httptest.NewRequest("POST", "/api/apps/warmapp/schedules", strings.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -1449,42 +1753,39 @@ func TestCreateSchedule_RunOnRegister_FiresOnce(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
 	}
 	var dto struct {
-		ID             int64  `json:"id"`
-		FirstFireRunID *int64 `json:"first_fire_run_id"`
+		ID          int64 `json:"id"`
+		Convergence *struct {
+			Status string `json:"status"`
+			RunID  *int64 `json:"run_id"`
+		} `json:"convergence"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &dto); err != nil {
 		t.Fatal(err)
 	}
-	if dto.FirstFireRunID == nil {
-		// run_on_register first-fire is best-effort: maybeFirstFire returns nil
-		// (and logs) when its gate sees a prior successful run or when dispatch
-		// errors. Probe the DB so a recurrence pinpoints which: zero runs means
-		// the dispatch never inserted; a non-ErrNotFound gate error means the
-		// gate check itself failed.
+	if dto.Convergence == nil || dto.Convergence.RunID == nil {
 		schedID := scheduleIDBySlugAndName(t, store, app.ID, "warm")
 		runs, runsErr := store.ListScheduleRuns(schedID, 50, 0)
-		_, gateErr := store.LastSuccessfulRun(schedID)
-		t.Fatalf("first_fire_run_id is nil; status=%d body=%s; runs=%d (err=%v); gate(LastSuccessfulRun) err=%v",
-			rr.Code, rr.Body.String(), len(runs), runsErr, gateErr)
+		t.Fatalf("convergence run_id is nil; status=%d body=%s; runs=%d (err=%v)",
+			rr.Code, rr.Body.String(), len(runs), runsErr)
 	}
 
 	schedID := scheduleIDBySlugAndName(t, store, app.ID, "warm")
 	// Wait for the async run to be recorded.
 	deadline := time.Now().Add(5 * time.Second)
-	var hasRegister bool
+	var hasDeploy bool
 	for time.Now().Before(deadline) {
 		runs, _ := store.ListScheduleRuns(schedID, 50, 0)
 		for _, r := range runs {
-			if r.Trigger == "register" {
-				hasRegister = true
+			if r.Trigger == "deploy" && r.ContentDigest == "sha256:v1" {
+				hasDeploy = true
 			}
 		}
-		if hasRegister {
+		if hasDeploy {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !hasRegister {
-		t.Errorf("no 'register' run recorded")
+	if !hasDeploy {
+		t.Errorf("no current-bundle deploy run recorded")
 	}
 }

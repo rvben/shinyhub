@@ -115,6 +115,39 @@ func TestSchedule_Add_PrintsRollFeasibilityAdvisory(t *testing.T) {
 	}
 }
 
+func TestSchedule_Add_IdempotentResponsePrintsPostCommitWarning(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(http.StatusOK, `{"id":7,"name":"nightly","warning":"saved, but convergence dispatch is pending"}`)
+	cmd := newScheduleCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"add", "demo", "--name", "nightly", "--cron", "0 2 * * *", "--cmd", "echo hi"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "convergence dispatch is pending") {
+		t.Fatalf("post-commit warning not surfaced: %q", stderr.String())
+	}
+}
+
+func TestSchedule_EnablePrintsPostCommitWarning(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"job","enabled":false}]`)
+		},
+		"PATCH /api/apps/demo/schedules/7": func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"id":7,"name":"job","enabled":true,"warning":"enabled, but convergence dispatch is pending"}`)
+		},
+	})
+	stdout, stderr, err := execCLISplit(t, "schedule", "enable", "demo", "job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "enabled") || !strings.Contains(stderr, "convergence dispatch is pending") {
+		t.Fatalf("warning missing from enable result: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
 // TestSchedule_Add_NoDSTAdvisoryWhenAbsent verifies the CLI prints no advisory
 // when the server omits dst_advisory.
 func TestSchedule_Add_NoDSTAdvisoryWhenAbsent(t *testing.T) {
@@ -189,23 +222,21 @@ func TestSchedule_Ls_FormatsRows(t *testing.T) {
 	// The server returns the standard {items,total,...} list envelope.
 	setResp(200, `{"items":[
 		{"id":1,"name":"daily","cron_expr":"0 0 * * *","command":["Rscript","run.R"],"enabled":true,"timeout_seconds":3600,"overlap_policy":"skip","missed_policy":"skip"},
-		{"id":2,"name":"hourly","cron_expr":"0 * * * *","command":["python","go.py"],"enabled":false,"timeout_seconds":600,"overlap_policy":"queue","missed_policy":"run_once"}
+		{"id":2,"name":"hourly","cron_expr":"0 * * * *","command":["python","go.py"],"enabled":false,"timeout_seconds":600,"overlap_policy":"queue","missed_policy":"run_once","deploy_trigger":"never","producer_repair_required":true}
 	],"total":2,"limit":0,"offset":0}`)
 
-	cmd := newScheduleCmd()
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetArgs([]string{"ls", "demo"})
-	if err := cmd.Execute(); err != nil {
+	out, err := execCLI(t, "schedule", "ls", "demo", "-o", "table")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	out := buf.String()
 	if !strings.Contains(out, "daily") {
 		t.Errorf("expected output to contain 'daily', got:\n%s", out)
 	}
 	if !strings.Contains(out, "hourly") {
 		t.Errorf("expected output to contain 'hourly', got:\n%s", out)
+	}
+	if !strings.Contains(out, "DATA") || !strings.Contains(out, "repair") {
+		t.Errorf("expected producer repair state to be visible, got:\n%s", out)
 	}
 }
 
@@ -676,6 +707,62 @@ func TestSchedule_Cancel_ResolvesNameAndCancelsQueuedActivation(t *testing.T) {
 	}
 }
 
+func TestSchedule_RetryConvergence_ResolvesNameAndRetriesFailedObligation(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"producer"}]`)
+		},
+		"POST /api/apps/demo/schedules/7/convergence/retry": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusAccepted)
+			fmt.Fprint(w, `{"schedule_id":7,"schedule":"producer","obligation_id":31,"status":"running","run_id":42}`)
+		},
+	})
+	cmd := newScheduleCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"retry-convergence", "demo", "producer"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode output %q: %v", out.String(), err)
+	}
+	if result["status"] != "running" || result["run_id"] != float64(42) {
+		t.Fatalf("output=%v, want running convergence run 42", result)
+	}
+}
+
+func TestSchedule_RetryConvergence_SurfacesDurableAcceptanceWarning(t *testing.T) {
+	scheduleTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/apps/demo/schedules": func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{"id":7,"name":"producer"}]`)
+		},
+		"POST /api/apps/demo/schedules/7/convergence/retry": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusAccepted)
+			fmt.Fprint(w, `{"schedule_id":7,"schedule":"producer","obligation_id":31,"status":"pending","warning":"retry was durably accepted; dispatch will resume asynchronously"}`)
+		},
+	})
+	cmd := newScheduleCmd()
+	var out, stderr bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"retry-convergence", "demo", "producer"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode output %q: %v", out.String(), err)
+	}
+	if result["status"] != "pending" || !strings.Contains(fmt.Sprint(result["warning"]), "durably accepted") {
+		t.Fatalf("structured retry output=%v", result)
+	}
+	if !strings.Contains(stderr.String(), "Warning: retry was durably accepted") {
+		t.Fatalf("stderr missing durable acceptance warning: %q", stderr.String())
+	}
+}
+
 // SCH-1 timezone tri-state: --clear-timezone must send an explicit JSON null so
 // the server clears the per-schedule zone back to inherit-server-default.
 func TestSchedule_Update_ClearTimezoneSendsNull(t *testing.T) {
@@ -807,18 +894,17 @@ func TestSchedule_Update_CmdShellwords(t *testing.T) {
 	}
 }
 
-// TestScheduleAdd_RunOnRegister_ReportsFirstFire verifies that --run-on-register
-// sends run_on_register:true in the body and prints the first-fire run id when
-// the server returns one.
-func TestScheduleAdd_RunOnRegister_ReportsFirstFire(t *testing.T) {
+// TestScheduleAdd_DeployTrigger_ReportsDeployRun verifies that --deploy-trigger
+// sends the selected policy and reports the explicit convergence result.
+func TestScheduleAdd_DeployTrigger_ReportsDeployRun(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
-	setResp(201, `{"id":7,"name":"warm","first_fire_run_id":42}`)
+	setResp(201, `{"id":7,"name":"warm","convergence":{"schedule_id":7,"schedule":"warm","obligation_id":9,"status":"running","run_id":42}}`)
 
 	cmd := newScheduleAddCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"warmapp", "--name", "warm", "--cron", "0 5 * * *", "--cmd", "true", "--run-on-register"})
+	cmd.SetArgs([]string{"warmapp", "--name", "warm", "--cron", "0 5 * * *", "--cmd", "true", "--deploy-trigger", "bundle_change"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -830,21 +916,21 @@ func TestScheduleAdd_RunOnRegister_ReportsFirstFire(t *testing.T) {
 	if err := json.Unmarshal((*reqs)[0].Body, &gotBody); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
 	}
-	if gotBody["run_on_register"] != true {
-		t.Errorf("run_on_register in body = %v, want true", gotBody["run_on_register"])
+	if gotBody["deploy_trigger"] != "bundle_change" {
+		t.Errorf("deploy_trigger in body = %v, want bundle_change", gotBody["deploy_trigger"])
 	}
 	// In piped mode the output is a JSON envelope; check for the run id value.
 	if !strings.Contains(out.String(), "42") {
-		t.Errorf("output missing first-fire run id; got: %s", out.String())
+		t.Errorf("output missing deploy run ID; got: %s", out.String())
 	}
 }
 
-// TestScheduleAdd_NoFirstFire_NoTriggerLine verifies that when the server's
-// create response omits first_fire_run_id (schedule already succeeded, or
-// --run-on-register was not passed), the CLI prints the normal "created
-// schedule" line, does not print any "first-fire" line, and exits 0. Also
-// confirms --follow alone (without a first-fire run id) is silently ignored.
-func TestScheduleAdd_NoFirstFire_NoTriggerLine(t *testing.T) {
+// TestScheduleAdd_NoDeployRun_NoTriggerLine verifies that when the server's
+// create response omits convergence (deploy triggering is disabled),
+// or deploy triggering is disabled), the CLI prints the normal "created
+// schedule" line, does not print any "deploy-triggered run" line, and exits 0. Also
+// confirms --follow alone (without a deploy run ID) is silently ignored.
+func TestScheduleAdd_NoDeployRun_NoTriggerLine(t *testing.T) {
 	_, _, setResp := setupCLITest(t)
 	setResp(201, `{"id":7,"name":"warm"}`)
 
@@ -852,13 +938,13 @@ func TestScheduleAdd_NoFirstFire_NoTriggerLine(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	// --follow passed without --run-on-register must be a no-op.
+	// --follow passed without --deploy-trigger must be a no-op.
 	cmd.SetArgs([]string{"warmapp", "--name", "warm", "--cron", "0 5 * * *", "--cmd", "true", "--follow"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if strings.Contains(out.String(), "first-fire") {
-		t.Errorf("unexpected first-fire line when server returned no run id; got: %s", out.String())
+	if strings.Contains(out.String(), "deploy-triggered run") {
+		t.Errorf("unexpected deploy-triggered run line when server returned no run id; got: %s", out.String())
 	}
 	// In piped mode the output is a JSON envelope with status "created".
 	if !strings.Contains(out.String(), `"created"`) {
@@ -866,15 +952,15 @@ func TestScheduleAdd_NoFirstFire_NoTriggerLine(t *testing.T) {
 	}
 }
 
-// FORMAT-5: schedule add --run-on-register --follow must stream NDJSON log
+// FORMAT-5: schedule add --deploy-trigger --follow must stream NDJSON log
 // objects on stdout when piped, and route the creation notice to stderr.
 // This verifies that the streaming format (resolved once for the follow path)
 // is not corrupted by the creation envelope logic.
-func TestScheduleAdd_RunOnRegister_Follow_NdjsonStream(t *testing.T) {
+func TestScheduleAdd_DeployTrigger_Follow_NdjsonStream(t *testing.T) {
 	scheduleTestServer(t, map[string]http.HandlerFunc{
 		"POST /api/apps/demo/schedules": func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprint(w, `{"id":7,"name":"warm","first_fire_run_id":42}`)
+			fmt.Fprint(w, `{"id":7,"name":"warm","convergence":{"schedule_id":7,"schedule":"warm","obligation_id":9,"status":"running","run_id":42}}`)
 		},
 		"GET /api/apps/demo/schedules/7/runs/42/logs": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -887,7 +973,7 @@ func TestScheduleAdd_RunOnRegister_Follow_NdjsonStream(t *testing.T) {
 
 	stdout, stderr, err := execCLISplit(t, "schedule", "add", "demo",
 		"--name", "warm", "--cron", "0 5 * * *", "--cmd", "true",
-		"--run-on-register", "--follow")
+		"--deploy-trigger", "bundle_change", "--follow")
 	if err != nil {
 		t.Fatalf("unexpected error: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
 	}

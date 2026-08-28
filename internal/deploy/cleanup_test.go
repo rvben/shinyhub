@@ -118,3 +118,39 @@ func TestPruneOldVersions_NothingToDelete(t *testing.T) {
 		t.Errorf("expected 1 entry, got %d", len(entries))
 	}
 }
+
+func TestPruneOldVersions_PreservesSchedulePinnedBundle(t *testing.T) {
+	appsDir := t.TempDir()
+	slug := "producer-app"
+	versionsDir := filepath.Join(appsDir, slug, "versions")
+	bundlesDir := filepath.Join(appsDir, slug, "bundles")
+	if err := os.MkdirAll(versionsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(bundlesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"001", "002", "003", "004"} {
+		if err := os.MkdirAll(filepath.Join(versionsDir, name), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bundlesDir, name+".zip"), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	active := filepath.Join(versionsDir, "004")
+	pinnedProducer := filepath.Join(versionsDir, "001")
+	if err := deploy.PruneOldVersions(appsDir, slug, 2, active, pinnedProducer); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{pinnedProducer, filepath.Join(bundlesDir, "001.zip"), active, filepath.Join(bundlesDir, "004.zip")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("pinned path %s was removed: %v", path, err)
+		}
+	}
+	for _, name := range []string{"002", "003"} {
+		if _, err := os.Stat(filepath.Join(versionsDir, name)); !os.IsNotExist(err) {
+			t.Errorf("version %s should have been pruned", name)
+		}
+	}
+}

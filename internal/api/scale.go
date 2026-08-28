@@ -36,6 +36,9 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 	if err := s.guardActivationLifecycle(app.ID, "scale up "+slug); err != nil {
 		return false, err
 	}
+	if err := s.guardCompatibilityQuarantine(app.ID, "scale up "+slug); err != nil {
+		return false, err
+	}
 	// Only grow a pool the operator still wants running; a concurrent stop or
 	// delete that won the lock first must not be resurrected by a queued scale.
 	if app.Status != "running" && app.Status != "degraded" {
@@ -166,7 +169,13 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,
 	}, app)
+	p = s.guardDeploymentConsumerStart(app, current, p)
 
+	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
+	if gateErr != nil {
+		return false, fmt.Errorf("scale up %s: acquire startup-data compatibility fence: %w", slug, gateErr)
+	}
+	defer releaseConsumerBoot()
 	r, err := s.deployReplica(p, newIndex)
 	if err != nil {
 		// Roll back the optimistic pool growth so a failed boot does not leave a
@@ -188,7 +197,7 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 	// original persistence error returned to the caller.
 	rollbackStarted := func(deleteRow bool) {
 		if s.manager != nil {
-			if err := s.manager.StopReplica(slug, newIndex); err != nil && !errors.Is(err, process.ErrReplicaNotFound) {
+			if err := s.manager.StopReplicaConfirmed(slug, newIndex); err != nil && !errors.Is(err, process.ErrReplicaNotFound) {
 				slog.Error("scale up: rollback stop replica", "slug", slug, "index", newIndex, "err", err)
 			}
 		}
@@ -218,6 +227,7 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		DesiredState:        "running",
 		DeploymentID:        &depID,
 		StartupPeakRSSBytes: r.StartupPeakRSSBytes,
+		ConsumerBooted:      true,
 	}); err != nil {
 		rollbackStarted(false)
 		return false, fmt.Errorf("scale up %s: upsert replica %d: %w", slug, r.Index, err)

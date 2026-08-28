@@ -48,11 +48,63 @@ Fields:
 | `timeout` | Seconds before SIGTERM; SIGKILL after a 10-second grace. |
 | `overlap` | `skip` (default) drops new ticks while one is in flight; `queue` holds at most one extra; `concurrent` allows overlap. |
 | `missed` | `skip` (default) ignores ticks missed during downtime; `run_once` dispatches one catch-up at startup, recorded with `trigger: "missed"` (see "Run provenance" below). |
-| `run_on_register` | When `true`, fire this schedule once on first registration if the app has never had a successful run of it, warming the cache on a fresh deploy. CLI flag: `--run-on-register`. See "Warm on first deploy" below. |
+| `deploy_trigger` | `never` (default), `first_deploy`, or `bundle_change`. The last mode requires the authoritative last writer to match the current bundle digest and canonical command. CLI flag: `--deploy-trigger`. |
 | `on_success` | `none` (default) leaves serving processes unchanged. `roll` durably and gracefully replaces this app's replicas after a successful run so module-scope data is re-imported. |
 | `min_roll_interval` | Optional damper such as `1h`. Successful runs still advance job history and the target data generation, but queued activation is coalesced and cannot run before this interval after the last completed successful roll. CLI flag: `--min-roll-interval`. |
 | `roll_fallback` | Behavior when the temporary surge cannot be admitted: `defer` (default) keeps serving the old generation and retries, while `restart` stops the old pool first and accepts an availability gap to activate fresh data. CLI flag: `--roll-fallback`. |
 | `max_defer_age` | Optional capacity-deferral deadline such as `6h`. At expiry the activation fails visibly instead of retrying forever. `0` (default) keeps the existing unlimited behavior. CLI flag: `--max-defer-age`. |
+
+> **Breaking upgrade:** `run_on_register` has been removed. Replace it with
+> `deploy_trigger = "bundle_change"` for a cache producer, or
+> `deploy_trigger = "first_deploy"` only for a genuine lifetime bootstrap. The
+> old manifest-only flag was not persisted, so schedules already in an upgraded
+> database default to `never` until their policy is explicitly reapplied.
+
+> **Producer runtime:** schedules that declare producer semantics
+> (`deploy_trigger != "never"` or `on_success = "roll"`) currently require the
+> native runtime **and effective `worker_isolation = "multiplex"`**. Native
+> multiplex children have durable replica identities and inherit the server's physical publication
+> fence. Docker, remote-worker, Fargate, and ECS launches have a
+> request-accepted-before-handle-persisted window that cannot be fenced safely
+> after control-plane failure; elastic `grouped`/`per_session` workers likewise
+> lack durable failover identity. These topologies are rejected at write time
+> and revalidated when the server starts and when a producer runs, including
+> apps that inherit a changed fleet isolation default.
+
+> Once an elastic worker launch has been attempted, the app carries a durable
+> orphan-risk marker. Moving it into producer-capable multiplex mode requires
+> stopping the app and explicitly setting `worker_isolation = "multiplex"`;
+> the server holds the app operation lock and proves the entire native consumer
+> process tree absent before it clears that marker.
+
+> **Unclean 0.12.x upgrade:** upgrade only after scheduled runs have drained.
+> If migration finds a run that was still `running`, startup fails closed because
+> the old process has no durable PID and did not inherit the new publication
+> flock. Stop every old server, reboot the host (or otherwise verify every
+> listed legacy job descendant is gone), then run
+> `shinyhub resolve-legacy-schedule-writers
+> --acknowledge-processes-stopped`. The offline command lists the exact affected
+> apps, schedules, and runs, then atomically records conservative producer
+> uncertainty before clearing the startup fence. Do not edit the marker table
+> directly. The migration also installs a database admission guard so a live
+> old server cannot launch another unfenced job during a rolling handoff.
+
+If any designated writer fails or is interrupted after it may have touched app
+data, the app is compatibility-quarantined and fresh consumer starts fail
+closed. `schedule ls` and fleet schedule status expose
+`producer_repair_required`; `apps show` exposes both
+`compatibility_quarantined` and `producer_repair_required`. Repair requires a
+successful rerun of every flagged producer (including an `on_success = "roll"`
+writer whose `deploy_trigger` is `never`) or a deployment that supplies and
+successfully runs a replacement producer policy. Merely deploying unrelated
+code or rolling back does not erase an uncertain physical write.
+
+For legacy-upgrade uncertainty, the original schedule may have
+`deploy_trigger = "never"` and `on_success = "none"`. Run it explicitly with
+`shinyhub schedule run APP SCHEDULE --follow`: while
+`producer_repair_required` is set, that exact manual execution is promoted to a
+fenced publisher regardless of its declaration, and only a successful exit
+clears the uncertainty. This also works while the schedule is disabled.
 
 **Timezone PATCH tri-state:** The `timezone` key in a PATCH request has three distinct meanings:
 
@@ -180,8 +232,8 @@ Important behavior:
   This is a warning rather than a rejection because host capacity can change
   before the next run; the text names whether the configured outcome is a
   capacity defer or an in-place restart availability gap.
-- The first release supports self-rolls for multiplex apps on the native and
-  local Docker runtimes. Grouped/per-session isolation, remote or managed
+- The first release supports self-rolls for multiplex apps on the native
+  runtime. Grouped/per-session isolation, container, remote, or managed
   runtimes, cross-app consumers, and in-process `signal` hooks are rejected or
   left for a separately specified expansion.
 
@@ -264,7 +316,7 @@ Every run records **why** it started in its `trigger` field, visible in
 |---|---|
 | `schedule` | A cron boundary arrived while the server was running. The normal case. |
 | `missed` | A catch-up dispatched at startup by `missed = "run_once"`, because one or more boundaries passed while the server was down. Corresponds to no cron boundary. |
-| `register` | A first-fire from `run_on_register`, including the startup reconcile that retries a first-fire interrupted by a restart. |
+| `deploy` | A run admitted by `deploy_trigger`, including restart recovery for an interrupted run that still applies to the current bundle. |
 | `manual` | Started by an operator via the CLI, UI, or `POST /api/schedules/{id}/run`. |
 
 `missed` distinguishes a backfill from an on-time fire, so "did the catch-up
@@ -275,18 +327,16 @@ policy cover last night's outage?" is answerable from run history alone.
 > `trigger == "schedule"` to mean "any automatic run" must match `missed` too.
 > Runs recorded before the upgrade keep their original `schedule` value.
 
-## Warm on first deploy (`run_on_register`)
+## Deploy-triggered data convergence
 
-A fresh deploy leaves an app's cache empty until the schedule first fires, which
-may be hours away (`0 5 * * *`). `run_on_register` closes that gap: when a
-schedule is registered for the first time on an app that has never had a
-successful run of it, the platform fires it once so the cache is warm by the
-time the first user arrives.
+A schedule command is a pointer into the deployed bundle. `deploy_trigger =
+"bundle_change"` relates its output to that bundle, so changing only the
+producer script still requires a new successful run.
 
 ```bash
 shinyhub schedule add fetch --name daily-fetch \
     --cron "0 6 * * *" --cmd "uv run --with-requirements requirements.txt python helpers/fetch.py" \
-    --run-on-register
+    --deploy-trigger bundle_change
 ```
 
 Or in a `shinyhub.toml` manifest:
@@ -296,52 +346,87 @@ Or in a `shinyhub.toml` manifest:
 name = "daily-fetch"
 cron = "0 6 * * *"
 cmd = "uv run --with-requirements requirements.txt python helpers/fetch.py"
-run_on_register = true
+deploy_trigger = "bundle_change"
 ```
 
 Semantics:
 
-- **Gate: never succeeded.** A brand-new schedule fires once; a schedule that
-  has already succeeded is never re-fired by a re-deploy. A failed first-fire is
-  non-fatal and is re-attempted on the next deploy until a run succeeds. A
-  `disabled` schedule is never first-fired.
-- **Async by default.** The deploy returns immediately and the run warms the
-  cache in the background (a `register`-triggered run, visible in the run
-  history).
-- **Opt-in wait.** Pass `--wait-for-warm` to `shinyhub deploy` or
-  `shinyhub fleet apply` to require proven success. Standalone deploy uses
-  `--wait-timeout`; fleet apply uses one `--warm-timeout` deadline per app
-  (default 15 minutes) across all first-fires. A failure, timeout, missing
-  dispatch reference, or unreadable final state exits non-zero. A
-  `skipped_overlap` proves only that another run existed, so it passes only if
-  the final schedule state already records a success. On `fleet apply`, this is
-  a convergence level checked after every non-delete action: an unchanged app
-  whose enabled `run_on_register` schedule has never succeeded also exits
-  non-zero. The check is read-only and never re-fires an unchanged schedule; a
-  prior success keeps the common path free of extra run-history or log work. If
-  the unsatisfied schedule already has a live run, fleet apply joins that exact
-  run for the remaining warm deadline. A newer `skipped_overlap` history row
-  cannot hide the active process, and activity becomes convergence only after
-  the joined run records success.
-- **Startup-loaded caches.** Waiting alone does not reload a process that read
-  the empty cache before the schedule ran. Pass `--restart-after-warm` to wait
-  for every first-fire to succeed and then cycle serving replicas. The flag
-  does not start an app that was deliberately stopped.
+- **Policy.** `never` disables deploy dispatch. `first_deploy` is a durable
+  one-time bootstrap. `bundle_change` is satisfied only when the authoritative
+  last writer matches both the current content digest and the canonical
+  producer command. Historical successes are not a cache: after another
+  producer writes, a rollback must produce again.
+- **Pre-start convergence.** A deploy or rollback prepares the candidate
+  environment, confirms every previous consumer has physically stopped, runs every unsatisfied producer
+  synchronously against the exact candidate bundle, and only then starts the
+  candidate consumers. With `bundle_change`, new code is therefore never
+  started against data whose authoritative producer belongs to another bundle;
+  `first_deploy` intentionally accepts its lifetime bootstrap publication. If a producer begins and
+  the deploy later fails, ShinyHub leaves the app stopped instead of reviving an
+  older consumer against data that may already have changed format.
+- **Durable desired state.** Each promoted deployment records one convergence
+  obligation for every persisted enabled policy, including API-created
+  schedules and schedules retained when absent from a later manifest. Pending
+  admission and interrupted server work repair automatically. A producer
+  command that runs and fails is left failed for inspection; retry an enabled
+  producer with `shinyhub schedule retry-convergence APP SCHEDULE`. A disabled
+  producer must be enabled first or repaired deliberately with a manual run.
+- **Exact execution provenance.** Admission snapshots `deployment_id`,
+  `app_version`, and `content_digest`. Queued work executes that immutable
+  bundle instead of whichever deployment happens to be newest later.
+- **Fail-closed dispatch.** A required deploy run that cannot be admitted makes
+  the deploy request fail visibly and remains durably pending for repair. A
+  disabled schedule is never dispatched. Active obligation bundles are pinned
+  against deployment cleanup until their work is terminal.
+- **Opt-in wait.** `--wait-for-warm` asks the server to reconcile persisted
+  policy after every fleet action, including unchanged apps, then joins the
+  exact obligation run and rechecks authoritative state. Required convergence
+  serializes behind ordinary work instead of accepting `overlap = "skip"` as
+  proof. An older run that finishes last becomes the authoritative writer and
+  automatically reopens the current obligation.
+- **Startup-loaded caches.** Deploy and rollback convergence happens before
+  replica boot, so startup-loaded caches see the candidate producer's output on
+  their first read. `--restart-after-warm` remains useful when an unchanged-app
+  reconciliation or a direct schedule-policy edit repairs convergence after
+  replicas were already running; it is not needed for a producer marked
+  `prestart` in the deploy response.
+- **Rollback declarations.** Every promoted deployment retains an immutable
+  snapshot of its complete effective schedule declaration set. Rollback
+  restores that snapshot atomically, runs its producer commands against the
+  matching historical bundle, and only then starts consumers. A deployment
+  created before snapshot support cannot be a rollback target until that
+  version is redeployed, so the server never guesses across code generations.
+- **Activation fence.** If a newer bundle becomes current after a successful
+  producer run but before its `on_success = "roll"` activation, that activation
+  finishes as `superseded` rather than rolling newer code onto older output.
+- **Visible data provenance.** `apps show` places each activated replica's
+  `data_generation` beside the exact producer deployment, app version, and
+  content digest; the JSON surface also carries the producer-command
+  fingerprint. Schedule status exposes the same authoritative last writer, so
+  code/data compatibility is directly observable rather than inferred from
+  timestamps.
 
-For fleet-wide freshness beyond first-fire warm-up, pass
-`shinyhub fleet apply --verify-schedules`. This checks every enabled schedule,
-including schedules without `run_on_register`, against the server-computed
-`stale` boolean (one cron interval plus the server's grace policy). It is a
-read-only gate: stale schedules fail convergence, but the apply does not trigger
-them. Combine it with `--wait-for-warm` when both first-deploy warm-up and
-ongoing schedule freshness are required. If a stale schedule is actively
+The server treats a successful process exit as an atomic publication signal;
+it cannot make arbitrary filesystem writes transactional. A producer used for
+deployment convergence must therefore be idempotent, build into a temporary or
+generation-specific location, and atomically rename or switch the completed
+output into place immediately before exiting successfully. This also makes the
+recorded completion order faithfully represent writer order.
+
+For a read-only fleet audit, pass `shinyhub fleet apply --verify-schedules`.
+It checks every enabled schedule against the server-computed `stale` boolean
+(one cron interval plus the server's grace policy), rejects any enabled
+deploy-trigger whose authoritative producer does not match current code, and
+rejects unresolved producer-write uncertainty even when that writer is now
+disabled. It never dispatches work; use `--wait-for-warm` when the apply should reconcile and
+wait. If a stale schedule is actively
 running, the report says `stale · refreshing`; activity does not substitute for
 a successful data refresh. If the stored cron or timezone cannot be evaluated,
 freshness is `unknown` and strict gates fail closed; the fleet-health banner is
 also `unknown`, never healthy, until the observation is complete.
 
 Failed fleet gates have stable JSON `failure_kind` values such as
-`warm_wait_timeout`, `warm_never_succeeded`, and `schedule_stale`. When the
+`warm_wait_timeout`, `warm_bundle_not_ready`, and `schedule_stale`. When the
 latest atomic state identifies a failed run, `fleet apply` includes the last 25
 non-empty schedule-log lines and prints the exact follow-up command:
 
@@ -386,8 +471,8 @@ either sees the old file or the new one — never a partial write.
 - **No per-schedule env or resource overrides.** Schedules inherit from the app.
 - **Timezone.** Each schedule fires in its effective timezone (see "Timezone resolution" above). Schedules without an explicit timezone inherit the server default; the fallback is always UTC, never the host `TZ`. Server-default changes take effect on restart — running schedules are not hot-reloaded on config change.
 - **`run_once` catch-up runs at startup only.** It does not re-fire missed runs from arbitrary points in time.
-- **Native runtime read-only enforcement.** RO is a convention for native (filesystem permits writes through the symlink). Use Docker if you need OS-level enforcement.
-- **Activation scope.** `on_success = "roll"` is limited to self-rolls for multiplex apps on the native and local Docker runtimes in the single-node activation engine. Unsupported topology is recorded as `blocked_unsupported`; `roll_fallback` applies only to a supported roll that fails capacity admission.
+- **Native runtime read-only enforcement.** RO is a convention for native (filesystem permits writes through the symlink). Producer semantics require native execution; use atomic replacement and appropriate filesystem permissions for the data contract.
+- **Activation scope.** `on_success = "roll"` is limited to self-rolls for multiplex apps on the native runtime. Unsupported topology is rejected when the schedule or app placement is written; `roll_fallback` applies only to a supported roll that fails capacity admission.
 
 ## Audit log
 

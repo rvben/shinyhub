@@ -172,7 +172,7 @@ func TestFleetApplyCmd_HasHealthTimeoutFlag(t *testing.T) {
 }
 
 // FLT-SCH: fleet apply exposes a --wait-for-warm flag so an operator can block
-// until run_on_register first-fires complete within the separate warm timeout.
+// until deploy-triggered runs complete within the separate warm timeout.
 func TestFleetApplyCmd_HasWaitForWarmFlag(t *testing.T) {
 	cmd := newFleetApplyCmd()
 	f := cmd.Flags().Lookup("wait-for-warm")
@@ -618,9 +618,9 @@ func TestDeployAppBundle_ServerErrorIsNotCommitted(t *testing.T) {
 	}
 }
 
-// FLT-SCH: deployAppBundle parses first-fire refs from the deploy response so
-// fleet apply can report and optionally wait for run_on_register schedule runs.
-func TestDeployAppBundle_ReturnsFirstFireRefs(t *testing.T) {
+// FLT-SCH: deployAppBundle parses deploy-triggered run refs from the deploy response so
+// fleet apply can report and optionally wait for deploy-triggered schedule runs.
+func TestDeployAppBundle_ReturnsDeployRunRefs(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -628,7 +628,7 @@ func TestDeployAppBundle_ReturnsFirstFireRefs(t *testing.T) {
 	})
 	mux.HandleFunc("/api/apps/warmapp/deploy", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"first_fire":{"run_id":42}}]}}`))
+		_, _ = w.Write([]byte(`{"deploy_count":1,"manifest":{"schedules":[{"name":"warm","action":"created","schedule_id":5,"deploy_run":{"run_id":42}}]}}`))
 	})
 	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{

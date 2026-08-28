@@ -39,8 +39,8 @@ func TestConvergeApp_UnchangedIsNoNetwork(t *testing.T) {
 	}
 }
 
-// A retry of an identical fleet apply must evaluate run_on_register as a
-// level, not silently turn the previous first-fire failure into "unchanged".
+// A retry of an identical fleet apply must evaluate the deploy trigger as a
+// level, not silently turn the previous deploy-triggered run failure into "unchanged".
 func TestConvergeApp_UnchangedNeverSucceededFailsWarmGate(t *testing.T) {
 	var postHits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,8 +48,10 @@ func TestConvergeApp_UnchangedNeverSucceededFailsWarmGate(t *testing.T) {
 			postHits++
 		}
 		switch r.URL.Path {
+		case "/api/apps/reporting-app/schedules/reconcile":
+			_, _ = io.WriteString(w, `[]`)
 		case "/api/apps/reporting-app/schedules":
-			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","last_run_at":"2026-08-24T10:00:00Z","last_run_status":"failed"}]}`)
+			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","enabled":true,"deploy_trigger":"bundle_change","last_run_id":703,"last_run_at":"2026-08-24T10:00:00Z","last_run_status":"failed","current_app_version":"v2","current_content_digest":"sha256:new","producer_app_version":"v1","producer_content_digest":"sha256:old","deploy_trigger_satisfied":false,"convergence_status":"failed"}]}`)
 		case "/api/apps/reporting-app/schedules/7/runs":
 			_, _ = io.WriteString(w, `{"items":[{"id":703,"status":"failed","started_at":"2026-08-24T10:00:00Z"}]}`)
 		case "/api/apps/reporting-app/schedules/7/runs/703/logs":
@@ -65,7 +67,7 @@ func TestConvergeApp_UnchangedNeverSucceededFailsWarmGate(t *testing.T) {
 name = "refresh-data"
 cron = "0 5 * * *"
 cmd = "python helpers/fetch_data.py"
-run_on_register = true
+deploy_trigger = "bundle_change"
 `)
 	r := convergeApp(
 		&cliConfig{Host: srv.URL, Token: "shk_test"},
@@ -77,7 +79,7 @@ run_on_register = true
 		t.Fatalf("result = %#v, want failed warm gate", r)
 	}
 	if !strings.Contains(r.err.Error(), "already unsatisfied before this apply") ||
-		!strings.Contains(r.err.Error(), "never succeeded") {
+		!strings.Contains(r.err.Error(), "producer convergence is not satisfied for app version") {
 		t.Fatalf("error must identify the standing failure, got %v", r.err)
 	}
 	if len(r.warmGate) != 1 || r.warmGate[0].LastRunID != 703 {
@@ -89,8 +91,8 @@ run_on_register = true
 	if code, _ := applyExitCode([]applyResult{r}); code != 4 {
 		t.Fatalf("unchanged never-succeeded app exit = %d, want 4", code)
 	}
-	if postHits != 0 {
-		t.Fatalf("verification must not re-fire the schedule, got %d POST requests", postHits)
+	if postHits != 1 {
+		t.Fatalf("verification must reconcile once without retrying failed producer work, got %d POST requests", postHits)
 	}
 }
 
@@ -98,10 +100,18 @@ func TestConvergeApp_UnchangedSucceededWarmGateStaysFree(t *testing.T) {
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/api/apps/warm/schedules/reconcile" && r.Method == http.MethodPost {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		if r.URL.Path == "/api/apps/warm" && r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"compatibility_quarantined":false,"producer_repair_required":false}`)
+			return
+		}
 		if r.URL.Path != "/api/apps/warm/schedules" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
 		}
-		_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","last_success_at":"2026-08-24T10:00:00Z"}]}`)
+		_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","enabled":true,"deploy_trigger":"bundle_change","last_success_at":"2026-08-24T10:00:00Z","deploy_trigger_satisfied":true}]}`)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -110,7 +120,7 @@ func TestConvergeApp_UnchangedSucceededWarmGateStaysFree(t *testing.T) {
 name = "refresh-data"
 cron = "0 5 * * *"
 cmd = "true"
-run_on_register = true
+deploy_trigger = "bundle_change"
 `)
 	r := convergeApp(
 		&cliConfig{Host: srv.URL, Token: "shk_test"},
@@ -121,23 +131,33 @@ run_on_register = true
 	if r.status != statusUnchanged || r.err != nil {
 		t.Fatalf("result = %#v, want unchanged", r)
 	}
-	if len(paths) != 1 {
-		t.Fatalf("successful common path made %d requests, want one metadata read: %v", len(paths), paths)
+	if len(paths) != 4 {
+		t.Fatalf("successful common path made %d requests, want reconcile + initial/final schedule snapshots + app compatibility snapshot: %v", len(paths), paths)
 	}
 }
 
 func TestConvergeApp_UnchangedJoinsActiveWarmRun(t *testing.T) {
 	var pollHits, postHits int
+	var listHits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			postHits++
 		}
 		switch r.URL.Path {
+		case "/api/apps/warm/schedules/reconcile":
+			_, _ = io.WriteString(w, `[]`)
 		case "/api/apps/warm/schedules":
-			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","enabled":true,"stale":true,"refreshing":true,"active_run_id":17,"last_run_id":18,"last_run_status":"skipped_overlap"}]}`)
+			listHits++
+			if listHits == 1 {
+				_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","enabled":true,"deploy_trigger":"bundle_change","current_content_digest":"sha256:new","deploy_trigger_satisfied":false,"convergence_status":"running","convergence_run_id":17,"last_run_id":17,"last_run_status":"running"}]}`)
+			} else {
+				_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","enabled":true,"deploy_trigger":"bundle_change","current_content_digest":"sha256:new","deploy_trigger_satisfied":true,"convergence_status":"satisfied","convergence_run_id":17,"last_run_id":17,"last_run_status":"succeeded"}]}`)
+			}
 		case "/api/apps/warm/schedules/7/runs/17":
 			pollHits++
 			_, _ = io.WriteString(w, `{"status":"succeeded"}`)
+		case "/api/apps/warm":
+			_, _ = io.WriteString(w, `{"compatibility_quarantined":false,"producer_repair_required":false}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -148,7 +168,7 @@ func TestConvergeApp_UnchangedJoinsActiveWarmRun(t *testing.T) {
 name = "refresh-data"
 cron = "0 5 * * *"
 cmd = "true"
-run_on_register = true
+deploy_trigger = "bundle_change"
 `)
 	r := convergeApp(
 		&cliConfig{Host: srv.URL, Token: "test"},
@@ -159,49 +179,12 @@ run_on_register = true
 	if r.status != statusUnchanged || r.err != nil {
 		t.Fatalf("result = %#v, want unchanged after active run succeeds", r)
 	}
-	if pollHits != 1 || postHits != 0 {
-		t.Fatalf("polls=%d posts=%d, want one join poll and no re-fire", pollHits, postHits)
+	if pollHits != 1 || postHits != 1 {
+		t.Fatalf("polls=%d posts=%d, want one join poll and one idempotent reconcile", pollHits, postHits)
 	}
 }
 
-func TestConvergeApp_LegacyWarmGateFindsOlderSuccessBehindLatestFailure(t *testing.T) {
-	var logHits int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/apps/warm/schedules":
-			// No stale/last_success_at: this is the legacy compatibility path.
-			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"refresh-data","enabled":true}]}`)
-		case "/api/apps/warm/schedules/7/runs":
-			_, _ = io.WriteString(w, `{"items":[{"id":12,"status":"failed"},{"id":11,"status":"succeeded"}],"total":2}`)
-		case "/api/apps/warm/schedules/7/runs/12/logs":
-			logHits++
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "shinyhub.toml"), `[[schedule]]
-name = "refresh-data"
-cron = "0 5 * * *"
-cmd = "true"
-run_on_register = true
-`)
-	r := convergeApp(
-		&cliConfig{Host: srv.URL, Token: "test"},
-		fleet.AppDiff{Slug: "warm", Action: fleet.ActionUnchanged},
-		fleet.AppEntry{Slug: "warm"}, fleet.ObservedApp{}, dir,
-		convergeOpts{waitForWarm: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
-	)
-	if r.status != statusUnchanged || r.err != nil {
-		t.Fatalf("result = %#v, want unchanged after older success", r)
-	}
-	if logHits != 0 || len(r.scheduleLogs) != 0 {
-		t.Fatalf("successful legacy history must not fetch a failure log: hits=%d logs=%+v", logHits, r.scheduleLogs)
-	}
-}
-
-func TestConvergeApp_VerifySchedulesRejectsStaleNonFirstFire(t *testing.T) {
+func TestConvergeApp_VerifySchedulesRejectsStaleNonDeployRun(t *testing.T) {
 	var postHits, historyHits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
@@ -227,7 +210,7 @@ func TestConvergeApp_VerifySchedulesRejectsStaleNonFirstFire(t *testing.T) {
 		fleet.AppEntry{Slug: "projects"}, fleet.ObservedApp{}, t.TempDir(),
 		convergeOpts{verifySchedules: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
 	)
-	if r.status != statusFailed || r.err == nil || !strings.Contains(r.err.Error(), "schedule freshness gate unsatisfied") {
+	if r.status != statusFailed || r.err == nil || !strings.Contains(r.err.Error(), "schedule verification gate unsatisfied") {
 		t.Fatalf("result = %#v, want stale schedule failure", r)
 	}
 	if len(r.freshnessGate) != 1 || r.freshnessGate[0].Schedule != "refresh-pend-data" {
@@ -268,6 +251,68 @@ func TestConvergeApp_VerifySchedulesIgnoresFreshAndDisabled(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Fatalf("freshness common path made %d requests, want one metadata read", hits)
+	}
+}
+
+func TestConvergeApp_VerifySchedulesDetectsProducerMismatchReadOnly(t *testing.T) {
+	var postHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postHits++
+		}
+		switch r.URL.Path {
+		case "/api/apps/projects/schedules":
+			_, _ = io.WriteString(w, `{"items":[{"id":8,"name":"refresh","enabled":true,"stale":false,"deploy_trigger":"bundle_change","deploy_trigger_satisfied":false,"current_app_version":"v2","current_content_digest":"sha256:new","producer_app_version":"v1","producer_content_digest":"sha256:old","convergence_status":"pending"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	r := convergeApp(
+		&cliConfig{Host: srv.URL, Token: "test"},
+		fleet.AppDiff{Slug: "projects", Action: fleet.ActionUnchanged},
+		fleet.AppEntry{Slug: "projects"}, fleet.ObservedApp{}, t.TempDir(),
+		convergeOpts{verifySchedules: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
+	)
+	if r.status != statusFailed || r.failureKind != failureScheduleProducer {
+		t.Fatalf("result = %#v, want producer mismatch", r)
+	}
+	if len(r.freshnessGate) != 1 || r.freshnessGate[0].State != "producer_mismatch" {
+		t.Fatalf("schedule verification = %+v", r.freshnessGate)
+	}
+	if postHits != 0 {
+		t.Fatalf("--verify-schedules must remain read-only, got %d POST requests", postHits)
+	}
+}
+
+func TestConvergeApp_VerifySchedulesRejectsDisabledNeverWriterRequiringRepair(t *testing.T) {
+	var postHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postHits++
+		}
+		if r.URL.Path != "/api/apps/projects/schedules" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"items":[{"id":8,"name":"refresh","enabled":false,"stale":false,"deploy_trigger":"never","deploy_trigger_satisfied":false,"producer_repair_required":true,"last_run_id":804,"last_run_status":"interrupted"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	r := convergeApp(
+		&cliConfig{Host: srv.URL, Token: "test"},
+		fleet.AppDiff{Slug: "projects", Action: fleet.ActionUnchanged},
+		fleet.AppEntry{Slug: "projects"}, fleet.ObservedApp{}, t.TempDir(),
+		convergeOpts{verifySchedules: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard,
+	)
+	if r.status != statusFailed || r.failureKind != failureScheduleProducer || r.err == nil ||
+		!strings.Contains(r.err.Error(), "requires producer repair") {
+		t.Fatalf("result = %#v, want disabled producer repair failure", r)
+	}
+	if len(r.freshnessGate) != 1 || r.freshnessGate[0].State != "producer_repair_required" {
+		t.Fatalf("schedule verification = %+v", r.freshnessGate)
+	}
+	if postHits != 0 {
+		t.Fatalf("--verify-schedules must remain read-only, got %d POST requests", postHits)
 	}
 }
 
@@ -1072,21 +1117,23 @@ func TestConvergeApp_CreateDeploysThenStampsMarker(t *testing.T) {
 	}
 }
 
-func TestConvergeApp_CreateWithoutFirstFireRefFailsWarmPostcondition(t *testing.T) {
+func TestConvergeApp_CreateWithoutDeployRunRefFailsWarmPostcondition(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/deploy"):
-			// The server may absorb a dispatch error and omit first_fire. Waiting
-			// must still evaluate the declared schedule's level postcondition.
+			// Even when the response omits deploy_run, waiting must evaluate the
+			// declared schedule's bundle-specific postcondition.
 			_, _ = io.WriteString(w, `{"status":"ok","manifest":{"schedules":[{"name":"warm","schedule_id":7}]}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/new":
-			_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
+			_, _ = io.WriteString(w, `{"app":{"status":"running"},"compatibility_quarantined":false,"producer_repair_required":false}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps":
 			_, _ = io.WriteString(w, `[{"slug":"new","content_digest":"sha256:NEW"}]`)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/apps/new":
 			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/new/schedules/reconcile":
+			_, _ = io.WriteString(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/new/schedules":
-			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"warm","enabled":true,"stale":false,"refreshing":false}]}`)
+			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"warm","enabled":true,"deploy_trigger":"bundle_change","stale":false,"refreshing":false,"current_app_version":"v2","current_content_digest":"sha256:NEW","deploy_trigger_satisfied":false,"convergence_status":"failed"}]}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1098,7 +1145,7 @@ func TestConvergeApp_CreateWithoutFirstFireRefFailsWarmPostcondition(t *testing.
 name = "warm"
 cron = "0 5 * * *"
 cmd = "true"
-run_on_register = true
+deploy_trigger = "bundle_change"
 `)
 	r := convergeApp(
 		&cliConfig{Host: srv.URL, Token: "test"},
@@ -1121,17 +1168,19 @@ func TestConvergeApp_RestartsOnlyAfterWarmLevelPostconditionPasses(t *testing.T)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/deploy"):
-			_, _ = io.WriteString(w, `{"status":"ok","manifest":{"schedules":[{"name":"warm","schedule_id":7,"first_fire":{"run_id":9}}]}}`)
+			_, _ = io.WriteString(w, `{"status":"ok","manifest":{"schedules":[{"name":"warm","schedule_id":7,"deploy_run":{"run_id":9}}]}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/new/schedules/7/runs/9":
 			_, _ = io.WriteString(w, `{"status":"succeeded"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/new/schedules":
-			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"warm","enabled":true,"last_run_id":9,"last_run_status":"succeeded","last_success_at":"2026-08-24T12:00:00Z","stale":false,"refreshing":false}]}`)
+			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"warm","enabled":true,"last_run_id":9,"last_run_status":"succeeded","last_success_at":"2026-08-24T12:00:00Z","producer_content_digest":"sha256:NEW","current_content_digest":"sha256:NEW","deploy_trigger_satisfied":true,"stale":false,"refreshing":false}]}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/new":
-			_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
+			_, _ = io.WriteString(w, `{"app":{"status":"running"},"compatibility_quarantined":false,"producer_repair_required":false}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps":
 			_, _ = io.WriteString(w, `[{"slug":"new","content_digest":"sha256:NEW"}]`)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/apps/new":
 			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/new/schedules/reconcile":
+			_, _ = io.WriteString(w, `[]`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/new/restart":
 			restartHits++
 			_, _ = io.WriteString(w, `{"status":"running"}`)
@@ -1146,7 +1195,7 @@ func TestConvergeApp_RestartsOnlyAfterWarmLevelPostconditionPasses(t *testing.T)
 name = "warm"
 cron = "0 5 * * *"
 cmd = "true"
-run_on_register = true
+deploy_trigger = "bundle_change"
 `)
 	r := convergeApp(
 		&cliConfig{Host: srv.URL, Token: "test"},
@@ -1552,7 +1601,7 @@ func TestDeclaredStringProject(t *testing.T) {
 	}
 }
 
-func TestResolveFirstFires_DefersRestartUntilLevelPostcondition(t *testing.T) {
+func TestResolveDeployRuns_DefersRestartUntilLevelPostcondition(t *testing.T) {
 	var restartHits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1570,21 +1619,21 @@ func TestResolveFirstFires_DefersRestartUntilLevelPostcondition(t *testing.T) {
 	defer srv.Close()
 
 	res := applyResult{}
-	err := resolveFirstFires(
+	err := resolveDeployRuns(
 		&cliConfig{Host: srv.URL, Token: "test"}, "demo",
-		[]firstFireRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
+		[]deployRunRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
 		convergeOpts{waitForWarm: true, restartAfterWarm: true, healthTimeout: time.Second},
 		&res, io.Discard,
 	)
 	if err != nil {
-		t.Fatalf("resolveFirstFires: %v", err)
+		t.Fatalf("resolveDeployRuns: %v", err)
 	}
 	if restartHits != 0 || res.warmRestarted {
 		t.Fatalf("restartHits=%d warmRestarted=%v, want deferred 0/false", restartHits, res.warmRestarted)
 	}
 }
 
-func TestResolveFirstFires_FailureAttachesScheduleLog(t *testing.T) {
+func TestResolveDeployRuns_FailureAttachesScheduleLog(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/apps/demo/schedules/7/runs/9":
@@ -1598,14 +1647,14 @@ func TestResolveFirstFires_FailureAttachesScheduleLog(t *testing.T) {
 	defer srv.Close()
 
 	res := applyResult{}
-	err := resolveFirstFires(
+	err := resolveDeployRuns(
 		&cliConfig{Host: srv.URL, Token: "test"}, "demo",
-		[]firstFireRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
+		[]deployRunRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
 		convergeOpts{waitForWarm: true, healthTimeout: time.Second},
 		&res, io.Discard,
 	)
-	if err == nil || !strings.Contains(err.Error(), "first-fire failed") {
-		t.Fatalf("error = %v, want first-fire failure", err)
+	if err == nil || !strings.Contains(err.Error(), "deploy-triggered run failed") {
+		t.Fatalf("error = %v, want deploy-triggered run failure", err)
 	}
 	if len(res.scheduleLogs) != 1 || res.scheduleLogs[0].RunID != 9 {
 		t.Fatalf("schedule logs = %+v, want run 9", res.scheduleLogs)
@@ -1615,7 +1664,7 @@ func TestResolveFirstFires_FailureAttachesScheduleLog(t *testing.T) {
 	}
 }
 
-func TestResolveFirstFires_TimeoutIsFatalAndClassified(t *testing.T) {
+func TestResolveDeployRuns_TimeoutIsFatalAndClassified(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/apps/demo/schedules/7/runs/9":
@@ -1630,9 +1679,9 @@ func TestResolveFirstFires_TimeoutIsFatalAndClassified(t *testing.T) {
 
 	res := applyResult{}
 	started := time.Now()
-	err := resolveFirstFires(
+	err := resolveDeployRuns(
 		&cliConfig{Host: srv.URL, Token: "test"}, "demo",
-		[]firstFireRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
+		[]deployRunRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
 		convergeOpts{waitForWarm: true, warmTimeout: 20 * time.Millisecond},
 		&res, io.Discard,
 	)
@@ -1650,14 +1699,14 @@ func TestResolveFirstFires_TimeoutIsFatalAndClassified(t *testing.T) {
 	}
 }
 
-func TestFleetFirstFireLabelQualifiesScheduleWithApp(t *testing.T) {
-	got := fleetFirstFireLabel("reporting", "refresh-database")
+func TestFleetDeployRunLabelQualifiesScheduleWithApp(t *testing.T) {
+	got := fleetDeployRunLabel("reporting", "refresh-database")
 	if got != "reporting/refresh-database" {
-		t.Fatalf("fleetFirstFireLabel = %q, want %q", got, "reporting/refresh-database")
+		t.Fatalf("fleetDeployRunLabel = %q, want %q", got, "reporting/refresh-database")
 	}
 }
 
-func TestResolveFirstFires_OverlapRequiresLaterLevelPostcondition(t *testing.T) {
+func TestResolveDeployRuns_OverlapRequiresLaterLevelPostcondition(t *testing.T) {
 	var restartHits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo/schedules/7/runs/9" {
@@ -1672,9 +1721,9 @@ func TestResolveFirstFires_OverlapRequiresLaterLevelPostcondition(t *testing.T) 
 	defer srv.Close()
 
 	res := applyResult{}
-	err := resolveFirstFires(
+	err := resolveDeployRuns(
 		&cliConfig{Host: srv.URL, Token: "test"}, "demo",
-		[]firstFireRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
+		[]deployRunRef{{Schedule: "warm", ScheduleID: 7, RunID: 9}},
 		convergeOpts{waitForWarm: true, restartAfterWarm: true, healthTimeout: time.Second},
 		&res, io.Discard,
 	)
@@ -1684,7 +1733,7 @@ func TestResolveFirstFires_OverlapRequiresLaterLevelPostcondition(t *testing.T) 
 	if restartHits != 0 || res.warmRestarted {
 		t.Fatalf("restartHits=%d warmRestarted=%v, want 0/false", restartHits, res.warmRestarted)
 	}
-	if len(res.firstFires) != 1 || res.firstFires[0].Status != "skipped_overlap" {
-		t.Fatalf("first fires = %+v, want recorded overlap", res.firstFires)
+	if len(res.deployRuns) != 1 || res.deployRuns[0].Status != "skipped_overlap" {
+		t.Fatalf("first fires = %+v, want recorded overlap", res.deployRuns)
 	}
 }

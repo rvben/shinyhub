@@ -31,6 +31,7 @@ type Schedule struct {
 	TimeoutSeconds         int
 	OverlapPolicy          string
 	MissedPolicy           string
+	DeployTrigger          string
 	OnSuccess              string
 	MinRollIntervalSeconds int
 	RollFallback           string
@@ -88,6 +89,7 @@ type CreateScheduleParams struct {
 	TimeoutSeconds         int
 	OverlapPolicy          string
 	MissedPolicy           string
+	DeployTrigger          string
 	Timezone               *string
 	OnSuccess              string
 	MinRollIntervalSeconds int
@@ -103,6 +105,7 @@ type UpdateScheduleParams struct {
 	TimeoutSeconds         *int
 	OverlapPolicy          *string
 	MissedPolicy           *string
+	DeployTrigger          *string
 	OnSuccess              *string
 	MinRollIntervalSeconds *int
 	RollFallback           *string
@@ -127,11 +130,12 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 	var id int64
 	err := s.db.QueryRow(`
 		INSERT INTO app_schedules
-			(app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone,
+			(app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, deploy_trigger, timezone,
 			 on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id`,
-		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
+		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
+		normalizeDeployTrigger(p.DeployTrigger), tz,
 		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds, normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
 	).Scan(&id)
 	if err != nil {
@@ -146,7 +150,7 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 	row := s.db.QueryRow(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds,
+		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success, min_roll_interval_seconds,
 		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE id = ?`, id)
 	return scanSchedule(row)
@@ -157,7 +161,7 @@ func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 func (s *Store) GetScheduleByName(appID int64, name string) (*Schedule, error) {
 	row := s.db.QueryRow(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds,
+		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success, min_roll_interval_seconds,
 		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE app_id = ? AND name = ?`, appID, name)
 	return scanSchedule(row)
@@ -166,7 +170,7 @@ func (s *Store) GetScheduleByName(appID int64, name string) (*Schedule, error) {
 func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds,
+		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success, min_roll_interval_seconds,
 		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE app_id = ? ORDER BY name`, appID)
 	if err != nil {
@@ -187,7 +191,7 @@ func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 func (s *Store) ListEnabledSchedules() ([]*Schedule, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
-		       overlap_policy, missed_policy, timezone, on_success, min_roll_interval_seconds,
+		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success, min_roll_interval_seconds,
 		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE enabled = 1`)
 	if err != nil {
@@ -236,6 +240,10 @@ func (s *Store) UpdateSchedule(id int64, p UpdateScheduleParams) error {
 		sets = append(sets, "missed_policy = ?")
 		args = append(args, *p.MissedPolicy)
 	}
+	if p.DeployTrigger != nil {
+		sets = append(sets, "deploy_trigger = ?")
+		args = append(args, normalizeDeployTrigger(*p.DeployTrigger))
+	}
 	if p.OnSuccess != nil {
 		sets = append(sets, "on_success = ?")
 		args = append(args, normalizeScheduleAction(*p.OnSuccess))
@@ -278,7 +286,8 @@ func (s *Store) UpdateSchedule(id int64, p UpdateScheduleParams) error {
 }
 
 func (s *Store) DeleteSchedule(id int64) error {
-	res, err := s.db.Exec(`DELETE FROM app_schedules WHERE id = ?`, id)
+	res, err := s.db.Exec(`DELETE FROM app_schedules WHERE id = ?
+		AND NOT EXISTS (SELECT 1 FROM schedule_data_uncertainty WHERE schedule_id = ?)`, id, id)
 	if err != nil {
 		return fmt.Errorf("delete schedule: %w", err)
 	}
@@ -305,9 +314,26 @@ func (s *Store) DeleteScheduleIfIdle(id int64) (bool, error) {
 			WHERE schedule_id = ? AND status IN (
 				'pending', 'deferred_interval', 'deferred_capacity', 'repairing', 'running'
 			)
-		)`, id, id, id)
+		) AND NOT EXISTS (
+			SELECT 1 FROM schedule_data_uncertainty WHERE schedule_id = ?
+		)`, id, id, id, id)
 	if err != nil {
 		return false, fmt.Errorf("delete idle schedule: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// DeleteSchedulePlaceholderIfUnused removes only a disabled planning row that
+// never admitted a run. A terminal failed candidate run is intentionally a
+// blocker: deleting its placeholder would cascade away the only diagnostic
+// run/provenance record for a failed first deploy.
+func (s *Store) DeleteSchedulePlaceholderIfUnused(id int64) (bool, error) {
+	res, err := s.db.Exec(`DELETE FROM app_schedules
+		WHERE id = ? AND enabled = 0 AND deploy_trigger = 'never'
+		  AND NOT EXISTS (SELECT 1 FROM schedule_runs WHERE schedule_id = ?)`, id, id)
+	if err != nil {
+		return false, fmt.Errorf("delete unused schedule placeholder: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
@@ -339,6 +365,13 @@ type ScheduleRun struct {
 	MinRollIntervalSeconds int    `json:"min_roll_interval_seconds"`
 	RollFallback           string `json:"roll_fallback"`
 	MaxDeferAgeSeconds     int    `json:"max_defer_age_seconds"`
+	DeploymentID           *int64 `json:"deployment_id"`
+	AppVersion             string `json:"app_version"`
+	ContentDigest          string `json:"content_digest"`
+	ProducerFingerprint    string `json:"producer_fingerprint"`
+	ProducerCommandJSON    string `json:"-"`
+	PublishesData          bool   `json:"publishes_data"`
+	DeployObligationID     *int64 `json:"deploy_obligation_id,omitempty"`
 	TargetGeneration       *int64 `json:"target_generation,omitempty"`
 	ActivationID           *int64 `json:"activation_id,omitempty"`
 	ActivationStatus       string `json:"activation_status,omitempty"`
@@ -357,6 +390,13 @@ type InsertScheduleRunParams struct {
 	MinRollIntervalSeconds int
 	RollFallback           string
 	MaxDeferAgeSeconds     int
+	DeploymentID           *int64
+	AppVersion             string
+	ContentDigest          string
+	ProducerFingerprint    string
+	ProducerCommandJSON    string
+	PublishesData          bool
+	DeployObligationID     *int64
 }
 
 type FinishScheduleRunParams struct {
@@ -377,12 +417,17 @@ func (s *Store) InsertScheduleRun(p InsertScheduleRunParams) (int64, error) {
 	var id int64
 	err := s.db.QueryRow(`
 		INSERT INTO schedule_runs (schedule_id, status, trigger, triggered_by_user_id, started_at, log_path,
-		                           on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                           on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds,
+		                           deployment_id, app_version, content_digest,
+		                           producer_fingerprint, producer_command_json, publishes_data, deploy_obligation_id,
+		                           provenance_admission)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 		RETURNING id`,
 		p.ScheduleID, p.Status, p.Trigger, uid, p.StartedAt, p.LogPath,
 		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
 		normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
+		p.DeploymentID, p.AppVersion, p.ContentDigest,
+		p.ProducerFingerprint, p.ProducerCommandJSON, boolToInt(p.PublishesData), p.DeployObligationID,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert schedule run: %w", err)
@@ -458,6 +503,10 @@ func (s *Store) PruneScheduleRuns(scheduleID int64, keep int) (int64, error) {
 		    WHERE schedule_run_id IS NOT NULL
 		  )
 		  AND id NOT IN (
+		    SELECT schedule_run_id FROM schedule_data_uncertainty
+		    WHERE schedule_run_id IS NOT NULL
+		  )
+		  AND id NOT IN (
 		    SELECT id FROM schedule_runs
 		    WHERE schedule_id = ?
 		    ORDER BY started_at DESC, id DESC
@@ -478,12 +527,15 @@ func (s *Store) CountScheduleRuns(scheduleID int64) (int, error) {
 	return n, err
 }
 
+const scheduleRunSelectColumns = `
+	r.id, r.schedule_id, r.status, r.trigger, r.triggered_by_user_id, r.started_at,
+	r.finished_at, r.exit_code, r.log_path, r.on_success, r.min_roll_interval_seconds,
+	r.roll_fallback, r.max_defer_age_seconds, r.deployment_id, r.app_version, r.content_digest,
+	r.producer_fingerprint, r.producer_command_json, r.publishes_data, r.deploy_obligation_id,
+	r.target_generation, a.id, COALESCE(a.status, ''), COALESCE(a.phase, ''), COALESCE(a.last_error, '')`
+
 func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*ScheduleRun, error) {
-	rows, err := s.db.Query(`
-		SELECT r.id, r.schedule_id, r.status, r.trigger, r.triggered_by_user_id, r.started_at,
-		       r.finished_at, r.exit_code, r.log_path, r.on_success, r.min_roll_interval_seconds,
-		       r.roll_fallback, r.max_defer_age_seconds,
-		       r.target_generation, a.id, COALESCE(a.status, ''), COALESCE(a.phase, ''), COALESCE(a.last_error, '')
+	rows, err := s.db.Query(`SELECT `+scheduleRunSelectColumns+`
 		FROM schedule_runs r LEFT JOIN schedule_activations a ON a.schedule_run_id = r.id
 		WHERE r.schedule_id = ?
 		ORDER BY r.started_at DESC LIMIT ? OFFSET ?`, scheduleID, limit, offset)
@@ -493,214 +545,243 @@ func (s *Store) ListScheduleRuns(scheduleID int64, limit, offset int) ([]*Schedu
 	defer rows.Close()
 	out := []*ScheduleRun{}
 	for rows.Next() {
-		var r ScheduleRun
-		var uid, targetGeneration, activationID sql.NullInt64
-		var fin sql.NullTime
-		var ex sql.NullInt64
-		if err := rows.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
-			&r.StartedAt, &fin, &ex, &r.LogPath, &r.OnSuccess, &r.MinRollIntervalSeconds,
-			&r.RollFallback, &r.MaxDeferAgeSeconds,
-			&targetGeneration, &activationID, &r.ActivationStatus, &r.ActivationPhase, &r.ActivationError); err != nil {
+		r, err := scanScheduleRun(rows)
+		if err != nil {
 			return nil, err
 		}
-		if uid.Valid {
-			v := uid.Int64
-			r.TriggeredByUserID = &v
-		}
-		if fin.Valid {
-			v := fin.Time
-			r.FinishedAt = &v
-		}
-		if ex.Valid {
-			v := int(ex.Int64)
-			r.ExitCode = &v
-		}
-		if targetGeneration.Valid {
-			v := targetGeneration.Int64
-			r.TargetGeneration = &v
-		}
-		if activationID.Valid {
-			v := activationID.Int64
-			r.ActivationID = &v
-		}
-		out = append(out, &r)
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }
 
 func (s *Store) GetScheduleRun(runID int64) (*ScheduleRun, error) {
-	row := s.db.QueryRow(`
-		SELECT r.id, r.schedule_id, r.status, r.trigger, r.triggered_by_user_id, r.started_at,
-		       r.finished_at, r.exit_code, r.log_path, r.on_success, r.min_roll_interval_seconds,
-		       r.roll_fallback, r.max_defer_age_seconds,
-		       r.target_generation, a.id, COALESCE(a.status, ''), COALESCE(a.phase, ''), COALESCE(a.last_error, '')
+	row := s.db.QueryRow(`SELECT `+scheduleRunSelectColumns+`
 		FROM schedule_runs r LEFT JOIN schedule_activations a ON a.schedule_run_id = r.id
 		WHERE r.id = ?`, runID)
-	var r ScheduleRun
-	var uid, targetGeneration, activationID sql.NullInt64
-	var fin sql.NullTime
-	var ex sql.NullInt64
-	err := row.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
-		&r.StartedAt, &fin, &ex, &r.LogPath, &r.OnSuccess, &r.MinRollIntervalSeconds,
-		&r.RollFallback, &r.MaxDeferAgeSeconds,
-		&targetGeneration, &activationID, &r.ActivationStatus, &r.ActivationPhase, &r.ActivationError)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	if uid.Valid {
-		v := uid.Int64
-		r.TriggeredByUserID = &v
-	}
-	if fin.Valid {
-		v := fin.Time
-		r.FinishedAt = &v
-	}
-	if ex.Valid {
-		v := int(ex.Int64)
-		r.ExitCode = &v
-	}
-	if targetGeneration.Valid {
-		v := targetGeneration.Int64
-		r.TargetGeneration = &v
-	}
-	if activationID.Valid {
-		v := activationID.Int64
-		r.ActivationID = &v
-	}
-	return &r, nil
+	return scanScheduleRun(row)
 }
 
-// MarkRunningSchedulesInterrupted flips any rows still in 'running' state into
-// 'interrupted'. Called at startup since we never resume in-flight runs.
+// MarkRunningSchedulesInterrupted terminalizes inherited rows after runtime
+// orphan fencing. Every potential data writer is conservatively assigned a
+// physical write sequence, because a crashed owner cannot prove whether that
+// process reached its mutable-data command before disappearing.
 func (s *Store) MarkRunningSchedulesInterrupted() (int64, error) {
-	res, err := s.db.Exec(`
+	ctx := context.Background()
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), scheduleConvergenceLockKey)
+	if err != nil {
+		return 0, fmt.Errorf("mark interrupted: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	type inheritedWriter struct{ runID, appID int64 }
+	rows, err := tx.QueryContext(ctx, `
+		SELECT r.id, sc.app_id
+		FROM schedule_runs r JOIN app_schedules sc ON sc.id = r.schedule_id
+		WHERE r.status = 'running' AND r.publishes_data = 1
+		ORDER BY sc.app_id, r.id`)
+	if err != nil {
+		return 0, fmt.Errorf("mark interrupted: list writers: %w", err)
+	}
+	var writers []inheritedWriter
+	for rows.Next() {
+		var writer inheritedWriter
+		if err := rows.Scan(&writer.runID, &writer.appID); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("mark interrupted: scan writer: %w", err)
+		}
+		writers = append(writers, writer)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("mark interrupted: close writers: %w", err)
+	}
+	for _, writer := range writers {
+		var sequence int64
+		if err := tx.QueryRowContext(ctx, `
+			UPDATE apps SET data_write_sequence = data_write_sequence + 1,
+			                updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? RETURNING data_write_sequence`, writer.appID).Scan(&sequence); err != nil {
+			return 0, fmt.Errorf("mark interrupted: allocate app %d write sequence: %w", writer.appID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE schedule_runs
+			SET status = 'interrupted', finished_at = CURRENT_TIMESTAMP,
+			    data_write_sequence = ?
+			WHERE id = ? AND status = 'running'`, sequence, writer.runID); err != nil {
+			return 0, fmt.Errorf("mark interrupted: terminalize writer %d: %w", writer.runID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO schedule_data_uncertainty
+				(schedule_id, data_write_sequence, schedule_run_id, status, recorded_at)
+			SELECT schedule_id, ?, id, 'interrupted', CURRENT_TIMESTAMP
+			FROM schedule_runs WHERE id = ?
+			ON CONFLICT(schedule_id) DO UPDATE SET
+				data_write_sequence = excluded.data_write_sequence,
+				schedule_run_id = excluded.schedule_run_id,
+				status = excluded.status,
+				recorded_at = excluded.recorded_at`, sequence, writer.runID); err != nil {
+			return 0, fmt.Errorf("mark interrupted: record writer %d uncertainty: %w", writer.runID, err)
+		}
+	}
+	res, err := tx.ExecContext(ctx, `
 		UPDATE schedule_runs SET status = 'interrupted', finished_at = CURRENT_TIMESTAMP
 		WHERE status = 'running'`)
 	if err != nil {
-		return 0, fmt.Errorf("mark interrupted: %w", err)
+		return 0, fmt.Errorf("mark interrupted: terminalize remaining rows: %w", err)
 	}
-	return res.RowsAffected()
+	nonWriters, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("mark interrupted: rows affected: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("mark interrupted: commit: %w", err)
+	}
+	return int64(len(writers)) + nonWriters, nil
+}
+
+func (s *Store) CountLegacyUnfencedScheduleRuns() (int64, error) {
+	var count int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM legacy_unfenced_schedule_runs`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count legacy unfenced schedule runs: %w", err)
+	}
+	return count, nil
+}
+
+// LegacyUnfencedScheduleRun identifies a process admitted by a pre-provenance
+// server and captured during migration. Its process tree cannot be recovered
+// safely from the database alone.
+type LegacyUnfencedScheduleRun struct {
+	RunID        int64
+	RunStatus    string
+	ScheduleID   int64
+	ScheduleName string
+	AppID        int64
+	AppSlug      string
+}
+
+// ListLegacyUnfencedScheduleRuns returns the exact operator-facing identities
+// behind the startup fence. It is used by the offline recovery command while
+// the server is stopped.
+func (s *Store) ListLegacyUnfencedScheduleRuns() ([]LegacyUnfencedScheduleRun, error) {
+	rows, err := s.db.Query(`
+		SELECT r.id, r.status, sc.id, sc.name, a.id, a.slug
+		FROM legacy_unfenced_schedule_runs legacy
+		JOIN schedule_runs r ON r.id = legacy.run_id
+		JOIN app_schedules sc ON sc.id = r.schedule_id
+		JOIN apps a ON a.id = sc.app_id
+		ORDER BY a.slug, sc.name, r.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list legacy unfenced schedule runs: %w", err)
+	}
+	defer rows.Close()
+	var out []LegacyUnfencedScheduleRun
+	for rows.Next() {
+		var run LegacyUnfencedScheduleRun
+		if err := rows.Scan(&run.RunID, &run.RunStatus, &run.ScheduleID, &run.ScheduleName, &run.AppID, &run.AppSlug); err != nil {
+			return nil, fmt.Errorf("scan legacy unfenced schedule run: %w", err)
+		}
+		out = append(out, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list legacy unfenced schedule runs: %w", err)
+	}
+	return out, nil
+}
+
+// ResolveLegacyUnfencedScheduleRuns is the only supported way to clear the
+// legacy process fence. The caller must first establish that every old process
+// tree is gone. Clearing evidence and materializing conservative data-write
+// uncertainty are one transaction, so a crash can never make consumers
+// runnable between those operations.
+func (s *Store) ResolveLegacyUnfencedScheduleRuns() (int64, error) {
+	ctx := context.Background()
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), scheduleConvergenceLockKey)
+	if err != nil {
+		return 0, fmt.Errorf("resolve legacy schedule writers: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	type legacyWriter struct {
+		runID, scheduleID, appID int64
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT r.id, r.schedule_id, sc.app_id
+		FROM legacy_unfenced_schedule_runs legacy
+		JOIN schedule_runs r ON r.id = legacy.run_id
+		JOIN app_schedules sc ON sc.id = r.schedule_id
+		ORDER BY sc.app_id, r.id`)
+	if err != nil {
+		return 0, fmt.Errorf("resolve legacy schedule writers: list: %w", err)
+	}
+	var writers []legacyWriter
+	for rows.Next() {
+		var writer legacyWriter
+		if err := rows.Scan(&writer.runID, &writer.scheduleID, &writer.appID); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("resolve legacy schedule writers: scan: %w", err)
+		}
+		writers = append(writers, writer)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("resolve legacy schedule writers: close: %w", err)
+	}
+
+	for _, writer := range writers {
+		var sequence int64
+		if err := tx.QueryRowContext(ctx, `
+			UPDATE apps SET data_write_sequence = data_write_sequence + 1,
+			                updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? RETURNING data_write_sequence`, writer.appID).Scan(&sequence); err != nil {
+			return 0, fmt.Errorf("resolve legacy schedule writer %d: allocate write sequence: %w", writer.runID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE schedule_runs
+			SET status = CASE WHEN status = 'running' THEN 'interrupted' ELSE status END,
+			    finished_at = CASE WHEN status = 'running' THEN CURRENT_TIMESTAMP ELSE finished_at END,
+			    data_write_sequence = ?
+			WHERE id = ?`, sequence, writer.runID); err != nil {
+			return 0, fmt.Errorf("resolve legacy schedule writer %d: terminalize: %w", writer.runID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO schedule_data_uncertainty
+				(schedule_id, data_write_sequence, schedule_run_id, status, recorded_at)
+			VALUES (?, ?, ?, 'legacy_unfenced', CURRENT_TIMESTAMP)
+			ON CONFLICT(schedule_id) DO UPDATE SET
+				data_write_sequence = excluded.data_write_sequence,
+				schedule_run_id = excluded.schedule_run_id,
+				status = excluded.status,
+				recorded_at = excluded.recorded_at`, writer.scheduleID, sequence, writer.runID); err != nil {
+			return 0, fmt.Errorf("resolve legacy schedule writer %d: record uncertainty: %w", writer.runID, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM legacy_unfenced_schedule_runs`); err != nil {
+		return 0, fmt.Errorf("resolve legacy schedule writers: clear fence: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("resolve legacy schedule writers: commit: %w", err)
+	}
+	return int64(len(writers)), nil
 }
 
 // LastSuccessfulRun returns the most recent succeeded run for a schedule, used
 // by missed-run catch-up. Returns ErrNotFound if there's never been one.
 func (s *Store) LastSuccessfulRun(scheduleID int64) (*ScheduleRun, error) {
-	row := s.db.QueryRow(`
-		SELECT r.id, r.schedule_id, r.status, r.trigger, r.triggered_by_user_id, r.started_at,
-		       r.finished_at, r.exit_code, r.log_path, r.on_success, r.min_roll_interval_seconds,
-		       r.roll_fallback, r.max_defer_age_seconds,
-		       r.target_generation, a.id, COALESCE(a.status, ''), COALESCE(a.phase, ''), COALESCE(a.last_error, '')
+	row := s.db.QueryRow(`SELECT `+scheduleRunSelectColumns+`
 		FROM schedule_runs r LEFT JOIN schedule_activations a ON a.schedule_run_id = r.id
 		WHERE r.schedule_id = ? AND r.status = 'succeeded'
 		ORDER BY r.started_at DESC LIMIT 1`, scheduleID)
-	var r ScheduleRun
-	var uid, targetGeneration, activationID sql.NullInt64
-	var fin sql.NullTime
-	var ex sql.NullInt64
-	err := row.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
-		&r.StartedAt, &fin, &ex, &r.LogPath, &r.OnSuccess, &r.MinRollIntervalSeconds,
-		&r.RollFallback, &r.MaxDeferAgeSeconds,
-		&targetGeneration, &activationID, &r.ActivationStatus, &r.ActivationPhase, &r.ActivationError)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	if uid.Valid {
-		v := uid.Int64
-		r.TriggeredByUserID = &v
-	}
-	if fin.Valid {
-		v := fin.Time
-		r.FinishedAt = &v
-	}
-	if ex.Valid {
-		v := int(ex.Int64)
-		r.ExitCode = &v
-	}
-	if targetGeneration.Valid {
-		v := targetGeneration.Int64
-		r.TargetGeneration = &v
-	}
-	if activationID.Valid {
-		v := activationID.Int64
-		r.ActivationID = &v
-	}
-	return &r, nil
+	return scanScheduleRun(row)
 }
 
-// LatestRegisterRunID returns the highest run id among the schedule's runs
-// with the 'register' trigger, regardless of status; 0 when there is none.
-// The first-fire retry snapshots it before dispatching and re-checks after a
-// failed dispatch, so it can verify the failure did not admit a run before
-// re-dispatching. A max id is used rather than a count because it moves ONLY
-// on admission: retention pruning deletes older rows, which would offset a
-// count but cannot move the max.
-func (s *Store) LatestRegisterRunID(scheduleID int64) (int64, error) {
+// LatestDeployRunID returns the highest deploy-triggered run for one exact
+// bundle digest, regardless of status; 0 when there is none.
+func (s *Store) LatestDeployRunID(scheduleID int64, contentDigest string) (int64, error) {
 	var id int64
 	err := s.db.QueryRow(`
 		SELECT COALESCE(MAX(id), 0) FROM schedule_runs
-		WHERE schedule_id = ? AND trigger = 'register'`, scheduleID).Scan(&id)
+		WHERE schedule_id = ? AND trigger = 'deploy' AND content_digest = ?`, scheduleID, contentDigest).Scan(&id)
 	if err != nil {
-		return 0, fmt.Errorf("latest register run for schedule %d: %w", scheduleID, err)
+		return 0, fmt.Errorf("latest deploy run for schedule %d digest %q: %w", scheduleID, contentDigest, err)
 	}
 	return id, nil
-}
-
-// SchedulesNeedingFirstFireRetry returns the ids of enabled schedules whose
-// run_on_register first-fire was interrupted by a service restart and has never
-// succeeded, so the startup reconcile can re-fire it.
-//
-// A schedule qualifies when:
-//   - it is enabled, and
-//   - it has no successful run on record, and
-//   - its most recent run with trigger='register' (the first-fire trigger) is
-//     'interrupted'.
-//
-// This scopes recovery to first-fires only: a missed cron run re-fires on its
-// next tick, but a first-fire's next tick can be hours away. Restricting to a
-// LATEST register run that is 'interrupted' preserves the other policies - an
-// operator 'cancelled' first-fire stays terminal, a 'failed' first-fire heals
-// on the next deploy, and a schedule that ever succeeded is never re-fired.
-//
-// The gate is the run history, not the current manifest's run_on_register flag
-// (which is a deploy-time instruction, never persisted). So if an operator
-// removes run_on_register while a first-fire is interrupted and never
-// succeeded, a restart still completes that one warm. This is intentional:
-// finishing an in-progress warm an operator already requested is harmless and
-// idempotent, and it avoids persisting deploy-time intent into the schedule row.
-func (s *Store) SchedulesNeedingFirstFireRetry() ([]int64, error) {
-	rows, err := s.db.Query(`
-		SELECT sc.id
-		FROM app_schedules sc
-		WHERE sc.enabled = 1
-		  AND NOT EXISTS (
-		      SELECT 1 FROM schedule_runs r
-		      WHERE r.schedule_id = sc.id AND r.status = 'succeeded'
-		  )
-		  AND (
-		      SELECT r.status FROM schedule_runs r
-		      WHERE r.schedule_id = sc.id AND r.trigger = 'register'
-		      ORDER BY r.started_at DESC, r.id DESC
-		      LIMIT 1
-		  ) = 'interrupted'`)
-	if err != nil {
-		return nil, fmt.Errorf("schedules needing first-fire retry: %w", err)
-	}
-	defer rows.Close()
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
 }
 
 type UpsertScheduleByNameParams struct {
@@ -712,11 +793,262 @@ type UpsertScheduleByNameParams struct {
 	TimeoutSeconds         int
 	OverlapPolicy          string
 	MissedPolicy           string
+	DeployTrigger          string
 	Timezone               *string
 	OnSuccess              string
 	MinRollIntervalSeconds int
 	RollFallback           string
 	MaxDeferAgeSeconds     int
+}
+
+type UpsertScheduleByNameResult struct {
+	ID      int64
+	Created bool
+}
+
+// UpsertSchedulesByName atomically applies a complete manifest schedule batch.
+// No caller can observe a partially new declaration set if a later row fails.
+func (s *Store) UpsertSchedulesByName(params []UpsertScheduleByNameParams) ([]UpsertScheduleByNameResult, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin schedule batch: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	results := make([]UpsertScheduleByNameResult, 0, len(params))
+	for _, p := range params {
+		var tz sql.NullString
+		if p.Timezone != nil && *p.Timezone != "" {
+			tz = sql.NullString{String: *p.Timezone, Valid: true}
+		}
+		var id int64
+		scanErr := tx.QueryRow(`
+INSERT INTO app_schedules
+  (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, deploy_trigger, timezone,
+   on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(app_id, name) DO NOTHING
+RETURNING id`,
+			p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled),
+			p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, normalizeDeployTrigger(p.DeployTrigger), tz,
+			normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
+			normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds).Scan(&id)
+		created := scanErr == nil
+		if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+			return nil, fmt.Errorf("insert schedule %q: %w", p.Name, scanErr)
+		}
+		if !created {
+			if err := tx.QueryRow(`
+UPDATE app_schedules
+   SET cron_expr = ?, command_json = ?, enabled = ?, timeout_seconds = ?,
+	   overlap_policy = ?, missed_policy = ?, deploy_trigger = ?, timezone = ?, on_success = ?,
+	   min_roll_interval_seconds = ?, roll_fallback = ?, max_defer_age_seconds = ?, updated_at = CURRENT_TIMESTAMP
+ WHERE app_id = ? AND name = ?
+RETURNING id`,
+				p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds,
+				p.OverlapPolicy, p.MissedPolicy, normalizeDeployTrigger(p.DeployTrigger), tz,
+				normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
+				normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
+				p.AppID, p.Name).Scan(&id); err != nil {
+				return nil, fmt.Errorf("update schedule (app=%d, name=%q): %w", p.AppID, p.Name, err)
+			}
+		}
+		results = append(results, UpsertScheduleByNameResult{ID: id, Created: created})
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit schedule batch: %w", err)
+	}
+	return results, nil
+}
+
+// RecordDeploymentScheduleSnapshot stores the complete effective declaration
+// set for one candidate deployment. The recorded bit distinguishes a genuine
+// empty set from a deployment created before snapshot support.
+func (s *Store) RecordDeploymentScheduleSnapshot(deploymentID, appID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("record deployment schedule snapshot: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`DELETE FROM deployment_schedule_snapshots WHERE deployment_id = ?`, deploymentID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO deployment_schedule_snapshots
+			(deployment_id, name, cron_expr, command_json, enabled, timeout_seconds,
+			 overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
+			 min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
+		SELECT ?, name, cron_expr, command_json, enabled, timeout_seconds,
+		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
+		       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds
+		FROM app_schedules WHERE app_id = ?`, deploymentID, appID); err != nil {
+		return fmt.Errorf("record deployment schedule snapshot rows: %w", err)
+	}
+	res, err := tx.Exec(`UPDATE deployments SET schedule_snapshot_recorded = 1
+		WHERE id = ? AND app_id = ? AND status = ?`, deploymentID, appID, DeploymentPending)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("record deployment schedule snapshot: deployment %d is not pending", deploymentID)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeploymentScheduleSnapshot returns immutable declarations captured for a
+// deployment. ErrNotFound means the deployment predates snapshot support; an
+// empty slice with nil error is an explicitly recorded empty declaration set.
+func (s *Store) DeploymentScheduleSnapshot(deploymentID int64) ([]*Schedule, error) {
+	var recorded int
+	if err := s.db.QueryRow(`SELECT schedule_snapshot_recorded FROM deployments WHERE id = ?`, deploymentID).Scan(&recorded); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if recorded == 0 {
+		return nil, ErrNotFound
+	}
+	rows, err := s.db.Query(`
+		SELECT name, cron_expr, command_json, enabled, timeout_seconds,
+		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
+		       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds
+		FROM deployment_schedule_snapshots WHERE deployment_id = ? ORDER BY name`, deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Schedule
+	for rows.Next() {
+		var schedule Schedule
+		var enabled int
+		var timezone sql.NullString
+		if err := rows.Scan(&schedule.Name, &schedule.CronExpr, &schedule.CommandJSON, &enabled,
+			&schedule.TimeoutSeconds, &schedule.OverlapPolicy, &schedule.MissedPolicy,
+			&schedule.DeployTrigger, &timezone, &schedule.OnSuccess,
+			&schedule.MinRollIntervalSeconds, &schedule.RollFallback,
+			&schedule.MaxDeferAgeSeconds); err != nil {
+			return nil, err
+		}
+		schedule.Enabled = enabled != 0
+		if timezone.Valid {
+			v := timezone.String
+			schedule.Timezone = &v
+		}
+		out = append(out, &schedule)
+	}
+	return out, rows.Err()
+}
+
+// RestoreDeploymentPriorScheduleSnapshot rolls declarations back to the exact
+// set captured atomically when a deployment intent was created. Startup uses
+// this before failing an interrupted pending deployment, closing the crash
+// window between declaration publication and deployment promotion.
+func (s *Store) RestoreDeploymentPriorScheduleSnapshot(deploymentID, appID int64) ([]*Schedule, error) {
+	var recorded int
+	if err := s.db.QueryRow(`SELECT prior_schedule_snapshot_recorded FROM deployments WHERE id = ?`, deploymentID).Scan(&recorded); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if recorded == 0 {
+		return nil, ErrNotFound
+	}
+	rows, err := s.db.Query(`
+		SELECT name, cron_expr, command_json, enabled, timeout_seconds,
+		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
+		       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds
+		FROM deployment_prior_schedule_snapshots WHERE deployment_id = ? ORDER BY name`, deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var snapshots []*Schedule
+	for rows.Next() {
+		var schedule Schedule
+		var enabled int
+		var timezone sql.NullString
+		if err := rows.Scan(&schedule.Name, &schedule.CronExpr, &schedule.CommandJSON, &enabled,
+			&schedule.TimeoutSeconds, &schedule.OverlapPolicy, &schedule.MissedPolicy,
+			&schedule.DeployTrigger, &timezone, &schedule.OnSuccess,
+			&schedule.MinRollIntervalSeconds, &schedule.RollFallback,
+			&schedule.MaxDeferAgeSeconds); err != nil {
+			return nil, err
+		}
+		schedule.Enabled = enabled != 0
+		if timezone.Valid {
+			v := timezone.String
+			schedule.Timezone = &v
+		}
+		snapshots = append(snapshots, &schedule)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return s.RestoreScheduleDeclarations(appID, snapshots)
+}
+
+// RestoreDeploymentScheduleSnapshot atomically replaces the app's effective
+// declaration set with a rollback target's snapshot. Extra current schedules
+// are retained for history but disabled; matching names preserve stable IDs.
+func (s *Store) RestoreDeploymentScheduleSnapshot(deploymentID, appID int64) ([]*Schedule, error) {
+	snapshots, err := s.DeploymentScheduleSnapshot(deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	return s.RestoreScheduleDeclarations(appID, snapshots)
+}
+
+// RestoreScheduleDeclarations atomically replaces an app's effective schedule
+// set from a caller-held pre-mutation snapshot. Deploy failure recovery uses it
+// while producer gates are held, including for an app with no prior deployment.
+func (s *Store) RestoreScheduleDeclarations(appID int64, snapshots []*Schedule) ([]*Schedule, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`
+		UPDATE app_schedules SET enabled = 0, deploy_trigger = 'never', updated_at = CURRENT_TIMESTAMP
+		WHERE app_id = ?`, appID); err != nil {
+		return nil, err
+	}
+	for _, schedule := range snapshots {
+		var timezone sql.NullString
+		if schedule.Timezone != nil && *schedule.Timezone != "" {
+			timezone = sql.NullString{String: *schedule.Timezone, Valid: true}
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO app_schedules
+				(app_id, name, cron_expr, command_json, enabled, timeout_seconds,
+				 overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
+				 min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(app_id, name) DO UPDATE SET
+				cron_expr = excluded.cron_expr, command_json = excluded.command_json,
+				enabled = excluded.enabled, timeout_seconds = excluded.timeout_seconds,
+				overlap_policy = excluded.overlap_policy, missed_policy = excluded.missed_policy,
+				deploy_trigger = excluded.deploy_trigger, timezone = excluded.timezone,
+				on_success = excluded.on_success,
+				min_roll_interval_seconds = excluded.min_roll_interval_seconds,
+				roll_fallback = excluded.roll_fallback,
+				max_defer_age_seconds = excluded.max_defer_age_seconds,
+				updated_at = CURRENT_TIMESTAMP`,
+			appID, schedule.Name, schedule.CronExpr, schedule.CommandJSON, boolToInt(schedule.Enabled),
+			schedule.TimeoutSeconds, schedule.OverlapPolicy, schedule.MissedPolicy,
+			schedule.DeployTrigger, timezone, schedule.OnSuccess,
+			schedule.MinRollIntervalSeconds, schedule.RollFallback,
+			schedule.MaxDeferAgeSeconds); err != nil {
+			return nil, fmt.Errorf("restore schedule %q: %w", schedule.Name, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.ListSchedulesByApp(appID)
 }
 
 // UpsertScheduleByName performs an atomic insert-or-update keyed on
@@ -746,13 +1078,14 @@ func (s *Store) UpsertScheduleByName(p UpsertScheduleByNameParams) (int64, bool,
 	var insertedID int64
 	scanErr := tx.QueryRow(`
 INSERT INTO app_schedules
-  (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, timezone,
+  (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, deploy_trigger, timezone,
    on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(app_id, name) DO NOTHING
 RETURNING id`,
 		p.AppID, p.Name, p.CronExpr, p.CommandJSON,
-		boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
+		boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
+		normalizeDeployTrigger(p.DeployTrigger), tz,
 		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
 		normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
 	).Scan(&insertedID)
@@ -771,12 +1104,12 @@ RETURNING id`,
 	err = tx.QueryRow(`
 UPDATE app_schedules
    SET cron_expr = ?, command_json = ?, enabled = ?, timeout_seconds = ?,
-	   overlap_policy = ?, missed_policy = ?, timezone = ?, on_success = ?,
+	   overlap_policy = ?, missed_policy = ?, deploy_trigger = ?, timezone = ?, on_success = ?,
 	   min_roll_interval_seconds = ?, roll_fallback = ?, max_defer_age_seconds = ?, updated_at = CURRENT_TIMESTAMP
  WHERE app_id = ? AND name = ?
 RETURNING id`,
 		p.CronExpr, p.CommandJSON, boolToInt(p.Enabled),
-		p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, tz,
+		p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, normalizeDeployTrigger(p.DeployTrigger), tz,
 		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
 		normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
 		p.AppID, p.Name,
@@ -931,27 +1264,43 @@ func (s *Store) ListSharedDataSources(consumerAppID int64) ([]*SharedDataMount, 
 // joined to its app, plus the last run and last successful run. It feeds the
 // Prometheus collector, the `schedule status` CLI, and the admin banner.
 type ScheduleFreshness struct {
-	ScheduleID           int64
-	Slug                 string
-	Name                 string
-	Enabled              bool
-	CronExpr             string
-	Timezone             *string
-	CreatedAt            time.Time
-	TimeoutSeconds       int
-	LastRunID            *int64     // id of the most recent run, nil if never run
-	LastRunAt            *time.Time // started_at of the most recent run, nil if never run
-	LastRunStatus        string     // status of that run, "" if never run
-	LastSuccessAt        *time.Time // finished_at of the most recent succeeded run, nil if never
-	ActiveRunID          *int64     // newest status=running row, nil when none is active
-	ActiveRunAt          *time.Time // started_at for ActiveRunID
-	ActivationStatus     string
-	ActivationPhase      string
-	ActivationCreatedAt  *time.Time
-	ActivationUpdatedAt  *time.Time
-	ActivationDueAt      *time.Time
-	ActivationGeneration *int64
-	ActivationError      string
+	ScheduleID              int64
+	Slug                    string
+	Name                    string
+	Enabled                 bool
+	CronExpr                string
+	Timezone                *string
+	CreatedAt               time.Time
+	TimeoutSeconds          int
+	DeployTrigger           string
+	CurrentDeploymentID     *int64
+	CurrentAppVersion       string
+	CurrentContentDigest    string
+	LastRunID               *int64     // id of the most recent run, nil if never run
+	LastRunAt               *time.Time // started_at of the most recent run, nil if never run
+	LastRunStatus           string     // status of that run, "" if never run
+	LastSuccessAt           *time.Time // finished_at of the most recent succeeded run, nil if never
+	ProducerDeploymentID    *int64
+	ProducerAppVersion      string
+	ProducerContentDigest   string
+	ActiveRunID             *int64     // newest status=running row, nil when none is active
+	ActiveRunAt             *time.Time // started_at for ActiveRunID
+	ActiveRunContentDigest  string
+	DeployTriggerSatisfied  bool
+	ProducerRepairRequired  bool
+	ProducerFingerprint     string
+	ProducerPublishedAt     *time.Time
+	ConvergenceObligationID *int64
+	ConvergenceStatus       string
+	ConvergenceRunID        *int64
+	ConvergenceError        string
+	ActivationStatus        string
+	ActivationPhase         string
+	ActivationCreatedAt     *time.Time
+	ActivationUpdatedAt     *time.Time
+	ActivationDueAt         *time.Time
+	ActivationGeneration    *int64
+	ActivationError         string
 }
 
 // EffectiveLocation resolves this schedule's timezone against the server
@@ -968,9 +1317,10 @@ func (f *ScheduleFreshness) EffectiveLocationChecked(def *time.Location) (*time.
 }
 
 // ScheduleFreshness returns one row per schedule across all apps, with the last
-// run and last success resolved via correlated subqueries (SQLite has no
-// LATERAL; same shape as SchedulesNeedingFirstFireRetry). last success uses
-// finished_at so a slow-but-recently-finished job reads as fresh.
+// run, last success, authoritative producer, and current convergence
+// obligation resolved via correlated subqueries (SQLite has no LATERAL).
+// Last success uses finished_at so a slow-but-recently-finished job reads as
+// fresh; producer provenance is deliberately independent of bounded history.
 func (s *Store) ScheduleFreshness() ([]ScheduleFreshness, error) {
 	return s.scheduleFreshness("")
 }
@@ -988,13 +1338,62 @@ func (s *Store) ScheduleFreshnessByApp(appID int64) ([]ScheduleFreshness, error)
 func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshness, error) {
 	rows, err := s.db.Query(`
 		SELECT sc.id, a.slug, sc.name, CASE WHEN sc.enabled = 1 THEN 1 ELSE 0 END,
-		  sc.cron_expr, sc.timezone, sc.created_at, sc.timeout_seconds,
+		  sc.cron_expr, sc.timezone, sc.created_at, sc.timeout_seconds, sc.deploy_trigger,
+		  (SELECT id FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1),
+		  (SELECT version FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1),
+		  (SELECT content_digest FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1),
 		  (SELECT id          FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT started_at  FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT status      FROM schedule_runs WHERE schedule_id=sc.id ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT finished_at FROM schedule_runs WHERE schedule_id=sc.id AND status='succeeded' ORDER BY started_at DESC, id DESC LIMIT 1),
+		  (SELECT deployment_id FROM schedule_producer_state WHERE schedule_id=sc.id),
+		  (SELECT app_version FROM schedule_producer_state WHERE schedule_id=sc.id),
+		  (SELECT content_digest FROM schedule_producer_state WHERE schedule_id=sc.id),
 		  (SELECT id         FROM schedule_runs WHERE schedule_id=sc.id AND status='running' ORDER BY started_at DESC, id DESC LIMIT 1),
 		  (SELECT started_at FROM schedule_runs WHERE schedule_id=sc.id AND status='running' ORDER BY started_at DESC, id DESC LIMIT 1),
+		  (SELECT content_digest FROM schedule_runs WHERE schedule_id=sc.id AND status='running' ORDER BY started_at DESC, id DESC LIMIT 1),
+		  CASE
+		    WHEN sc.deploy_trigger = 'never' AND NOT EXISTS (
+		      SELECT 1 FROM schedule_data_uncertainty uncertainty WHERE uncertainty.schedule_id=sc.id
+		    ) THEN 1
+		    WHEN sc.deploy_trigger = 'first_deploy' AND EXISTS (
+		      SELECT 1 FROM schedule_producer_state ps WHERE ps.schedule_id=sc.id
+		    ) AND NOT EXISTS (
+		      SELECT 1 FROM schedule_data_uncertainty uncertainty
+		      WHERE uncertainty.schedule_id=sc.id
+		    ) THEN 1
+		    WHEN sc.deploy_trigger = 'bundle_change' AND EXISTS (
+		      SELECT 1 FROM schedule_producer_state ps
+		      WHERE ps.schedule_id=sc.id AND ps.content_digest=(
+		        SELECT content_digest FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1
+		      ) AND ps.producer_command_json=sc.command_json
+		    ) AND NOT EXISTS (
+		      SELECT 1 FROM schedule_data_uncertainty uncertainty
+		      WHERE uncertainty.schedule_id=sc.id
+		    ) THEN 1
+		    ELSE 0
+		  END,
+		  CASE WHEN EXISTS (
+		    SELECT 1 FROM schedule_data_uncertainty uncertainty WHERE uncertainty.schedule_id=sc.id
+		  ) THEN 1 ELSE 0 END,
+		  (SELECT producer_fingerprint FROM schedule_producer_state WHERE schedule_id=sc.id),
+		  (SELECT published_at FROM schedule_producer_state WHERE schedule_id=sc.id),
+		  (SELECT id FROM schedule_deploy_obligations o
+		   WHERE o.schedule_id=sc.id
+		     AND o.deployment_id=(SELECT id FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1)
+		     AND o.producer_command_json=sc.command_json ORDER BY o.id DESC LIMIT 1),
+		  (SELECT status FROM schedule_deploy_obligations o
+		   WHERE o.schedule_id=sc.id
+		     AND o.deployment_id=(SELECT id FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1)
+		     AND o.producer_command_json=sc.command_json ORDER BY o.id DESC LIMIT 1),
+		  (SELECT schedule_run_id FROM schedule_deploy_obligations o
+		   WHERE o.schedule_id=sc.id
+		     AND o.deployment_id=(SELECT id FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1)
+		     AND o.producer_command_json=sc.command_json ORDER BY o.id DESC LIMIT 1),
+		  (SELECT last_error FROM schedule_deploy_obligations o
+		   WHERE o.schedule_id=sc.id
+		     AND o.deployment_id=(SELECT id FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1)
+		     AND o.producer_command_json=sc.command_json ORDER BY o.id DESC LIMIT 1),
 		  sa.status, sa.phase, sa.created_at, sa.updated_at, sa.due_at, sa.target_generation,
 		  CASE WHEN sa.last_error <> '' THEN sa.last_error ELSE sa.defer_reason END
 		FROM app_schedules sc JOIN apps a ON a.id = sc.app_id
@@ -1015,22 +1414,59 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 		var fr ScheduleFreshness
 		var enabled int // SQLite stores BOOLEAN as INTEGER; database/sql has no int->bool scan
 		var tz sql.NullString
+		var currentDeploymentID sql.NullInt64
+		var currentVersion, currentDigest sql.NullString
 		var lastRunID sql.NullInt64
 		var lastRunAt sql.NullTime
 		var lastStatus sql.NullString
 		var lastSuccess sql.NullTime
+		var producerDeploymentID sql.NullInt64
+		var producerVersion, producerDigest sql.NullString
 		var activeRunID sql.NullInt64
 		var activeRunAt sql.NullTime
+		var activeRunDigest sql.NullString
+		var deploySatisfied int
+		var producerRepairRequired int
+		var producerFingerprint sql.NullString
+		var producerPublishedAt sql.NullTime
+		var obligationID, obligationRunID sql.NullInt64
+		var convergenceStatus, convergenceError sql.NullString
 		var activationStatus, activationPhase, activationError sql.NullString
 		var activationCreated, activationUpdated, activationDue sql.NullTime
 		var activationGeneration sql.NullInt64
 		if err := rows.Scan(&fr.ScheduleID, &fr.Slug, &fr.Name, &enabled, &fr.CronExpr, &tz,
-			&fr.CreatedAt, &fr.TimeoutSeconds, &lastRunID, &lastRunAt, &lastStatus, &lastSuccess,
-			&activeRunID, &activeRunAt, &activationStatus, &activationPhase, &activationCreated,
+			&fr.CreatedAt, &fr.TimeoutSeconds, &fr.DeployTrigger, &currentDeploymentID, &currentVersion, &currentDigest,
+			&lastRunID, &lastRunAt, &lastStatus, &lastSuccess, &producerDeploymentID, &producerVersion, &producerDigest,
+			&activeRunID, &activeRunAt, &activeRunDigest, &deploySatisfied, &producerRepairRequired,
+			&producerFingerprint, &producerPublishedAt, &obligationID, &convergenceStatus, &obligationRunID, &convergenceError,
+			&activationStatus, &activationPhase, &activationCreated,
 			&activationUpdated, &activationDue, &activationGeneration, &activationError); err != nil {
 			return nil, err
 		}
 		fr.Enabled = enabled != 0
+		fr.DeployTriggerSatisfied = deploySatisfied != 0
+		fr.ProducerRepairRequired = producerRepairRequired != 0
+		fr.ProducerFingerprint = producerFingerprint.String
+		if producerPublishedAt.Valid {
+			v := producerPublishedAt.Time
+			fr.ProducerPublishedAt = &v
+		}
+		if obligationID.Valid {
+			v := obligationID.Int64
+			fr.ConvergenceObligationID = &v
+		}
+		fr.ConvergenceStatus = convergenceStatus.String
+		if obligationRunID.Valid {
+			v := obligationRunID.Int64
+			fr.ConvergenceRunID = &v
+		}
+		fr.ConvergenceError = convergenceError.String
+		if currentDeploymentID.Valid {
+			v := currentDeploymentID.Int64
+			fr.CurrentDeploymentID = &v
+		}
+		fr.CurrentAppVersion = currentVersion.String
+		fr.CurrentContentDigest = currentDigest.String
 		if tz.Valid && tz.String != "" {
 			v := tz.String
 			fr.Timezone = &v
@@ -1050,6 +1486,12 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 			v := lastSuccess.Time
 			fr.LastSuccessAt = &v
 		}
+		if producerDeploymentID.Valid {
+			v := producerDeploymentID.Int64
+			fr.ProducerDeploymentID = &v
+		}
+		fr.ProducerAppVersion = producerVersion.String
+		fr.ProducerContentDigest = producerDigest.String
 		if activeRunID.Valid {
 			v := activeRunID.Int64
 			fr.ActiveRunID = &v
@@ -1058,6 +1500,7 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 			v := activeRunAt.Time
 			fr.ActiveRunAt = &v
 		}
+		fr.ActiveRunContentDigest = activeRunDigest.String
 		fr.ActivationStatus = activationStatus.String
 		fr.ActivationPhase = activationPhase.String
 		fr.ActivationError = activationError.String
@@ -1094,7 +1537,7 @@ func scanSchedule(s rowScanner) (*Schedule, error) {
 	var tz sql.NullString
 	err := s.Scan(&sched.ID, &sched.AppID, &sched.Name, &sched.CronExpr, &sched.CommandJSON,
 		&enabled, &sched.TimeoutSeconds, &sched.OverlapPolicy, &sched.MissedPolicy,
-		&tz, &sched.OnSuccess, &sched.MinRollIntervalSeconds, &sched.RollFallback,
+		&sched.DeployTrigger, &tz, &sched.OnSuccess, &sched.MinRollIntervalSeconds, &sched.RollFallback,
 		&sched.MaxDeferAgeSeconds, &sched.CreatedAt, &sched.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -1109,6 +1552,55 @@ func scanSchedule(s rowScanner) (*Schedule, error) {
 	return &sched, nil
 }
 
+func scanScheduleRun(s rowScanner) (*ScheduleRun, error) {
+	var r ScheduleRun
+	var uid, deploymentID, deployObligationID, targetGeneration, activationID sql.NullInt64
+	var publishesData int
+	var fin sql.NullTime
+	var ex sql.NullInt64
+	err := s.Scan(&r.ID, &r.ScheduleID, &r.Status, &r.Trigger, &uid,
+		&r.StartedAt, &fin, &ex, &r.LogPath, &r.OnSuccess, &r.MinRollIntervalSeconds,
+		&r.RollFallback, &r.MaxDeferAgeSeconds, &deploymentID, &r.AppVersion, &r.ContentDigest,
+		&r.ProducerFingerprint, &r.ProducerCommandJSON, &publishesData, &deployObligationID,
+		&targetGeneration, &activationID, &r.ActivationStatus, &r.ActivationPhase, &r.ActivationError)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if uid.Valid {
+		v := uid.Int64
+		r.TriggeredByUserID = &v
+	}
+	r.PublishesData = publishesData != 0
+	if deploymentID.Valid {
+		v := deploymentID.Int64
+		r.DeploymentID = &v
+	}
+	if deployObligationID.Valid {
+		v := deployObligationID.Int64
+		r.DeployObligationID = &v
+	}
+	if fin.Valid {
+		v := fin.Time
+		r.FinishedAt = &v
+	}
+	if ex.Valid {
+		v := int(ex.Int64)
+		r.ExitCode = &v
+	}
+	if targetGeneration.Valid {
+		v := targetGeneration.Int64
+		r.TargetGeneration = &v
+	}
+	if activationID.Valid {
+		v := activationID.Int64
+		r.ActivationID = &v
+	}
+	return &r, nil
+}
+
 func normalizeScheduleAction(action string) string {
 	if strings.TrimSpace(action) == "" {
 		return "none"
@@ -1121,4 +1613,12 @@ func normalizeRollFallback(fallback string) string {
 		return "defer"
 	}
 	return strings.TrimSpace(fallback)
+}
+
+func normalizeDeployTrigger(trigger string) string {
+	trigger = strings.TrimSpace(trigger)
+	if trigger == "" {
+		return "never"
+	}
+	return trigger
 }

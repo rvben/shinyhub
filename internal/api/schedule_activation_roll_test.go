@@ -1274,4 +1274,81 @@ func seedClaimedActivation(t *testing.T, store *db.Store, app *db.App) *db.Sched
 	return a
 }
 
+func TestScheduleActivationRoll_SupersedesOutputFromOldBundle(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.Mode = "native"
+	srv, app := newScaleTestServer(t, "old-producer-output", 1, cfg)
+	a := seedClaimedActivation(t, srv.store, app)
+	a.SourceContentDigest = "sha256:obsolete"
+	if err := srv.Roll(context.Background(), a); !errors.Is(err, activation.ErrSuperseded) {
+		t.Fatalf("Roll error = %v, want ErrSuperseded", err)
+	}
+}
+
+func TestScheduleActivationRoll_SupersedesOutputFromOldCommand(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.Mode = "native"
+	srv, app := newScaleTestServer(t, "old-producer-command", 1, cfg)
+	a := seedClaimedActivation(t, srv.store, app)
+	a.SourceProducerFingerprint = "sha256:obsolete"
+	if err := srv.Roll(context.Background(), a); !errors.Is(err, activation.ErrSuperseded) {
+		t.Fatalf("Roll error = %v, want ErrSuperseded", err)
+	}
+}
+
+func TestScheduleActivationRoll_ClaimedActivationCannotPublishOlderDataAfterNewerNoRollWriter(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.Mode = "native"
+	srv, app := newScaleTestServer(t, "claimed-old-publication", 1, cfg)
+	deployments, err := srv.store.ListDeployments(app.ID)
+	if err != nil || len(deployments) == 0 {
+		t.Fatalf("deployments=%v err=%v", deployments, err)
+	}
+	dep := deployments[0]
+	scheduleID, err := srv.store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "publisher", CronExpr: "*/15 * * * *", CommandJSON: `["produce"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "concurrent", MissedPolicy: "skip",
+		DeployTrigger: "bundle_change", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertPublisher := func(action, digest, fingerprint string, started time.Time) int64 {
+		t.Helper()
+		deploymentID := dep.ID
+		runID, insertErr := srv.store.InsertScheduleRun(db.InsertScheduleRunParams{
+			ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: started,
+			OnSuccess: action, DeploymentID: &deploymentID, AppVersion: dep.Version,
+			ContentDigest: digest, ProducerFingerprint: fingerprint,
+			ProducerCommandJSON: `["produce"]`, PublishesData: true,
+		})
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		return runID
+	}
+	base := time.Now().UTC().Add(-time.Second).Truncate(time.Microsecond)
+	oldRun := insertPublisher("roll", "sha256:old", "fingerprint-old", base)
+	queued, err := srv.store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: oldRun, Status: "succeeded", FinishedAt: base.Add(100 * time.Millisecond), ExitCode: activationExitCode(0),
+	})
+	if err != nil || queued == nil {
+		t.Fatalf("old activation=%+v err=%v", queued, err)
+	}
+	claimed, err := srv.store.ClaimNextScheduleActivation(base.Add(200 * time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRun := insertPublisher("none", "sha256:new", "fingerprint-new", base.Add(300*time.Millisecond))
+	if activationRow, err := srv.store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: newRun, Status: "succeeded", FinishedAt: base.Add(400 * time.Millisecond), ExitCode: activationExitCode(0),
+	}); err != nil || activationRow != nil {
+		t.Fatalf("new no-roll activation=%+v err=%v", activationRow, err)
+	}
+
+	if err := srv.Roll(context.Background(), claimed); !errors.Is(err, activation.ErrSuperseded) {
+		t.Fatalf("Roll error = %v, want ErrSuperseded", err)
+	}
+}
+
 func activationExitCode(v int) *int { return &v }

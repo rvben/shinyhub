@@ -11,6 +11,10 @@ import (
 	"github.com/rvben/shinyhub/internal/proxy"
 )
 
+func manifestTestDeployment(app *db.App) *db.Deployment {
+	return &db.Deployment{ID: 101, AppID: app.ID, Version: "v-test", BundleDir: "/bundle/test", ContentDigest: "sha256:test", Status: db.DeploymentSucceeded}
+}
+
 func TestApplyManifestAppSettings_UpdatesAllThreeFieldsAtomically(t *testing.T) {
 	srv, store, ownerID := newServerWithOwnedApp(t, "alpha")
 	app, _ := store.GetAppBySlug("alpha")
@@ -200,7 +204,7 @@ func TestApplyManifestSchedules_UpsertsAndReusesID(t *testing.T) {
 		Overlap:        "skip",
 		Missed:         "skip",
 	}}
-	results, err := srv.applyManifestSchedules(r, app, specs)
+	results, err := srv.applyManifestSchedules(r, app, manifestTestDeployment(app), specs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +221,7 @@ func TestApplyManifestSchedules_UpsertsAndReusesID(t *testing.T) {
 	}
 
 	specs[0].Cron = "0 1 * * *"
-	results, err = srv.applyManifestSchedules(r, app, specs)
+	results, err = srv.applyManifestSchedules(r, app, manifestTestDeployment(app), specs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +264,7 @@ func TestApplyManifestSchedules_AuditDetailIncludesEffectiveTimezone(t *testing.
 		Missed:         "skip",
 		Timezone:       tz,
 	}}
-	if _, err := srv.applyManifestSchedules(r, app, specs); err != nil {
+	if _, err := srv.applyManifestSchedules(r, app, manifestTestDeployment(app), specs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -300,7 +304,7 @@ func TestApplyManifestSchedules_AuditDetailEffectiveTimezoneInherited(t *testing
 		Overlap:        "skip",
 		Missed:         "skip",
 	}}
-	if _, err := srv.applyManifestSchedules(r, app, specs); err != nil {
+	if _, err := srv.applyManifestSchedules(r, app, manifestTestDeployment(app), specs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -349,7 +353,7 @@ func TestApplyManifestSchedules_LeavesOrphansAlone(t *testing.T) {
 		Overlap:        "skip",
 		Missed:         "skip",
 	}}
-	if _, err := srv.applyManifestSchedules(r, app, specs); err != nil {
+	if _, err := srv.applyManifestSchedules(r, app, manifestTestDeployment(app), specs); err != nil {
 		t.Fatal(err)
 	}
 	all, _ := store.ListSchedulesByApp(app.ID)
@@ -428,7 +432,7 @@ func TestApplyManifestSchedules_SchedulerNotStartedIsWarn(t *testing.T) {
 		Overlap:        "skip",
 		Missed:         "skip",
 	}}
-	if _, err := srv.applyManifestSchedules(r, app, specs); err != nil {
+	if _, err := srv.applyManifestSchedules(r, app, manifestTestDeployment(app), specs); err != nil {
 		t.Errorf("scheduler-not-started must not fail apply: %v", err)
 	}
 
@@ -529,6 +533,29 @@ func TestValidateManifestForServer_WorkerGroupedValidPasses(t *testing.T) {
 	}
 	if verr := srv.validateManifestForServer(app, m); verr != nil {
 		t.Errorf("expected valid grouped worker block to pass, got: %v", verr)
+	}
+}
+
+func TestValidateManifestActivationTopology_UsesSameNameManifestOverride(t *testing.T) {
+	srv, store, _ := newServerWithOwnedApp(t, "alpha")
+	app, _ := store.GetAppBySlug("alpha")
+	if _, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "0 * * * *", CommandJSON: `["producer"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: "bundle_change", OnSuccess: "none", RollFallback: "defer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	grouped := "grouped"
+	manifest := &deploy.Manifest{
+		App: deploy.AppSettings{Worker: &deploy.WorkerManifest{Isolation: &grouped}},
+		Schedules: []deploy.ScheduleSpec{{
+			Name: "refresh", Cron: "0 * * * *", Command: []string{"producer"},
+			DeployTrigger: "never", OnSuccess: "none", Overlap: "skip", Missed: "skip",
+		}},
+	}
+	if verr := srv.validateManifestActivationTopology(app, manifest); verr != nil {
+		t.Fatalf("atomic removal of producer semantics plus grouped transition rejected: %v", verr)
 	}
 }
 

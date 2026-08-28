@@ -239,11 +239,10 @@ type ScheduleSpec struct {
 	// MaxDeferAge bounds capacity deferral. Zero preserves unlimited retries.
 	MaxDeferAge time.Duration `toml:"max_defer_age"`
 
-	// RunOnRegister, when true, fires this schedule once immediately the first
-	// time it is registered on an app that has never had a successful run of it
-	// - warming the app's cache on a fresh deploy. It is a deploy-time
-	// instruction, never persisted; the gate lives in the server.
-	RunOnRegister bool `toml:"run_on_register"`
+	// DeployTrigger declares whether deploy convergence runs this schedule.
+	// "never" is cron/manual only, "first_deploy" bootstraps once, and
+	// "bundle_change" requires a success from the exact promoted content digest.
+	DeployTrigger string `toml:"deploy_trigger"`
 
 	Command []string `toml:"-"`
 }
@@ -555,6 +554,10 @@ func resolveAndValidateSchedule(s *ScheduleSpec) error {
 	}
 	s.OnSuccess = onSuccess
 	s.RollFallback = rollFallback
+	s.DeployTrigger, err = schedulespec.NormalizeDeployTrigger(s.DeployTrigger)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 

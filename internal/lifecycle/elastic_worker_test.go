@@ -96,7 +96,7 @@ func mustCreateElasticApp(t *testing.T, store *db.Store, slug string) *db.App {
 	t.Helper()
 	app := mustCreateApp(t, store, slug)
 	_, err := store.DB().Exec(
-		`UPDATE apps SET worker_isolation='per_session', worker_max_workers=5 WHERE slug=?`, slug)
+		`UPDATE apps SET status='running', worker_isolation='per_session', worker_max_workers=5 WHERE slug=?`, slug)
 	if err != nil {
 		t.Fatalf("set elastic mode: %v", err)
 	}
@@ -179,6 +179,101 @@ func TestSpawnElasticWorker_BootsWithCorrectSlotID(t *testing.T) {
 	}
 }
 
+func TestSpawnElasticWorker_HoldsAppOperationThroughRegistration(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateElasticApp(t, store, "leased-spawn")
+	bundleDir := mustMinimalBundle(t)
+	_ = mustCreateDeploymentInDir(t, store, app.ID, bundleDir)
+
+	rt := &recordingRuntime{}
+	mgr := process.NewManager(t.TempDir(), rt)
+	prx := proxy.New()
+	prx.SetPoolMode("leased-spawn", config.IsolationPerSession, 1, 5)
+	var appOperation sync.Mutex
+	healthEntered := make(chan struct{})
+	releaseHealth := make(chan struct{})
+	spawner := &lifecycle.ElasticSpawner{
+		Store: store, Manager: mgr, Proxy: prx, RuntimeCfg: config.RuntimeConfig{},
+		AcquireAppOperation: func(slug string) (func(), error) {
+			if slug != "leased-spawn" {
+				t.Errorf("operation slug=%q", slug)
+			}
+			appOperation.Lock()
+			return appOperation.Unlock, nil
+		},
+		HealthCheck: func(_ string, _ time.Duration, _ http.RoundTripper) error {
+			close(healthEntered)
+			<-releaseHealth
+			return nil
+		},
+	}
+	done := make(chan struct{})
+	go func() {
+		spawner.Spawn("leased-spawn", 3)
+		close(done)
+	}()
+	select {
+	case <-healthEntered:
+	case <-time.After(time.Second):
+		t.Fatal("spawn did not reach health check")
+	}
+
+	competingOperation := make(chan struct{})
+	go func() {
+		appOperation.Lock()
+		close(competingOperation)
+		appOperation.Unlock()
+	}()
+	select {
+	case <-competingOperation:
+		t.Fatal("deploy operation acquired while elastic spawn was not yet registered")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseHealth)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("spawn did not complete")
+	}
+	select {
+	case <-competingOperation:
+	case <-time.After(time.Second):
+		t.Fatal("app operation lease was not released after registration")
+	}
+	if prx.ElasticWorkerCount("leased-spawn") != 1 {
+		t.Fatal("worker was not registered before app operation lease released")
+	}
+}
+
+func TestSpawnElasticWorker_RefusesPendingCompatibilityBarrier(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateElasticApp(t, store, "quarantined-spawn")
+	bundleDir := mustMinimalBundle(t)
+	_ = mustCreateDeploymentInDir(t, store, app.ID, bundleDir)
+	pending, err := store.BeginDeployment(app.ID, "v0.0.2", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDeploymentProducerBarrierEntered(pending.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &recordingRuntime{}
+	prx := proxy.New()
+	prx.SetPoolMode("quarantined-spawn", config.IsolationPerSession, 1, 5)
+	spawner := &lifecycle.ElasticSpawner{
+		Store: store, Manager: process.NewManager(t.TempDir(), rt), Proxy: prx,
+		RuntimeCfg: config.RuntimeConfig{}, HealthCheck: noopHealthCheck,
+	}
+	spawner.Spawn("quarantined-spawn", 2)
+	rt.mu.Lock()
+	starts := len(rt.started)
+	rt.mu.Unlock()
+	if starts != 0 {
+		t.Fatalf("elastic spawn started %d consumers behind pending compatibility barrier", starts)
+	}
+}
+
 func TestElasticWarmSpare_FreezesThenResumesOnDemand(t *testing.T) {
 	store := mustOpenStore(t)
 	app := mustCreateElasticApp(t, store, "warmapp")
@@ -194,9 +289,14 @@ func TestElasticWarmSpare_FreezesThenResumesOnDemand(t *testing.T) {
 	prx.SetSpawnFunc(func(string, int) {})
 	prx.ReconcileElasticWarmSpares("warmapp")
 
+	var appOperation sync.Mutex
 	spawner := &lifecycle.ElasticSpawner{
 		Store: store, Manager: mgr, Proxy: prx,
 		RuntimeCfg: config.RuntimeConfig{Mode: "native"}, HealthCheck: noopHealthCheck,
+		AcquireAppOperation: func(string) (func(), error) {
+			appOperation.Lock()
+			return appOperation.Unlock, nil
+		},
 	}
 	spawner.Spawn("warmapp", 0)
 	snap, _ := prx.ElasticWorkersSnapshot("warmapp")
@@ -207,17 +307,41 @@ func TestElasticWarmSpare_FreezesThenResumesOnDemand(t *testing.T) {
 		t.Fatalf("manager worker = %+v ok=%v, want suspended", info, ok)
 	}
 
+	resumeStarted := make(chan struct{})
 	resumeDone := make(chan struct{})
 	prx.SetResumeFunc(func(slug string, slotID int) {
+		close(resumeStarted)
 		spawner.Resume(slug, slotID)
 		close(resumeDone)
 	})
 	rec := httptest.NewRecorder()
-	prx.ServeHTTP(rec, httptest.NewRequest("GET", "/app/warmapp/", nil))
+	requestDone := make(chan struct{})
+	appOperation.Lock() // model a deploy/rollback owning the app lifecycle
+	go func() {
+		prx.ServeHTTP(rec, httptest.NewRequest("GET", "/app/warmapp/", nil))
+		close(requestDone)
+	}()
+	select {
+	case <-resumeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("warm spare resume callback was not dispatched")
+	}
+	rt.mu.Lock()
+	resumeCallsWhileDeploying := rt.resumeCalls
+	rt.mu.Unlock()
+	if resumeCallsWhileDeploying != 0 {
+		t.Fatal("warm spare resumed while deploy owned the app operation")
+	}
+	appOperation.Unlock()
 	select {
 	case <-resumeDone:
 	case <-time.After(time.Second):
 		t.Fatal("warm spare did not resume")
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("request did not complete after warm spare resume")
 	}
 	snap, _ = prx.ElasticWorkersSnapshot("warmapp")
 	var consumed *proxy.ElasticWorkerStatus

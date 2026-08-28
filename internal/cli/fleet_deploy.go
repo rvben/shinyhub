@@ -38,7 +38,7 @@ const fleetHealthTimeout = 120 * time.Second
 
 // fleetWarmTimeout is deliberately separate from readiness: data refreshes
 // commonly take much longer than starting the serving process. The deadline is
-// shared by every first-fire for one app rather than renewed per schedule.
+// shared by every deploy-triggered run for one app rather than renewed per schedule.
 const fleetWarmTimeout = 15 * time.Minute
 
 // fleetHealthProgressInterval is how often the health wait emits a progress
@@ -78,11 +78,11 @@ func warmTimeoutDuration(timeout time.Duration) time.Duration {
 // apply), so the status alone cannot tell whether the new bundle went live -
 // callers that care (adopt) resolve that authoritatively with a digest
 // readback.
-func deployAppBundle(cfg *cliConfig, slug, dir, visibility, project string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, firstFires []firstFireRef, kind deployfail.Kind, err error) {
+func deployAppBundle(cfg *cliConfig, slug, dir, visibility, project string, out io.Writer, runID string, timeout time.Duration) (promoted string, committed bool, deployRuns []deployRunRef, kind deployfail.Kind, err error) {
 	return deployAppBundleFromSpec(cfg, slug, bundleBuildSpec{Dir: dir}, visibility, project, out, runID, timeout)
 }
 
-func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, out io.Writer, runID string, timeout time.Duration, preconditions ...*string) (promoted string, committed bool, firstFires []firstFireRef, kind deployfail.Kind, err error) {
+func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, out io.Writer, runID string, timeout time.Duration, preconditions ...*string) (promoted string, committed bool, deployRuns []deployRunRef, kind deployfail.Kind, err error) {
 	if err := ensureFleetAppWithRun(cfg, slug, visibility, project, out, runID); err != nil {
 		return "", false, nil, deployfail.Unknown, err
 	}
@@ -136,7 +136,7 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 		}
 	}
 
-	firstFires = firstFireRefsFromDeployResponse(rb)
+	deployRuns = deployRunRefsFromDeployResponse(rb)
 
 	// Surface the same post-deploy-hooks-skipped warning the single-app deploy
 	// prints, so a fleet operator is not left unaware that setup hooks did not
@@ -150,6 +150,9 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 		}
 		if warn := formatHooksSkippedWarning(deployResp["hooks_skipped"]); warn != "" {
 			emitFleetWarning(out, slug, warn)
+		}
+		if warning, _ := deployResp["warning"].(string); warning != "" {
+			emitFleetWarning(out, slug, "warning: "+warning)
 		}
 		// Same reasoning as the hooks-skipped warning above: a fleet operator
 		// gets the same shadowed-upload notice the single-app `deploy` prints,
@@ -178,13 +181,13 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 	if keptStopped {
 		emitFleetWarning(out, slug, fmt.Sprintf("stopped, so the new version is not serving yet; start it with `shinyhub apps start %s`", slug))
 	} else if err := waitForFleetHealthy(cfg, slug, out, timeout); err != nil {
-		return "", true, firstFires, deployfail.Unknown, err
+		return "", true, deployRuns, deployfail.Unknown, err
 	}
 	promoted, derr := readPromotedDigest(cfg, slug)
 	if derr != nil {
-		return promoted, true, firstFires, deployfail.Unknown, derr
+		return promoted, true, deployRuns, deployfail.Unknown, derr
 	}
-	return promoted, true, firstFires, "", nil
+	return promoted, true, deployRuns, "", nil
 }
 
 // failureKindFromBody extracts the failure_kind a deploy failure advertises. A

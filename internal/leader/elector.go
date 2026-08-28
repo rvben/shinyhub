@@ -142,12 +142,16 @@ func (e *Elector) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			if owner, epoch := e.snapshot(); owner {
-				if err := e.store.ReleaseOwner(e.cfg.InstanceID, epoch); err != nil {
-					e.cfg.Logger.Warn("release owner on shutdown", "err", err)
-				}
+				// Close local mutation admission and synchronously drain owner-scoped
+				// work before making the durable lease acquirable. Releasing first lets
+				// a successor begin recovery while the retiring owner's watcher,
+				// scheduler, or long-running handler can still mutate shared state.
 				e.set(false, 0)
 				if e.cfg.OnLose != nil {
 					e.cfg.OnLose()
+				}
+				if err := e.store.ReleaseOwner(e.cfg.InstanceID, epoch); err != nil {
+					e.cfg.Logger.Warn("release owner on shutdown", "err", err)
 				}
 			}
 			return

@@ -27,6 +27,7 @@ func newScheduleCmd() *cobra.Command {
 		newScheduleDisableCmd(),
 		newScheduleCancelCmd(),
 		newScheduleRunCmd(),
+		newScheduleRetryConvergenceCmd(),
 		newScheduleRunsCmd(),
 		newScheduleLogsCmd(),
 		newScheduleStatusCmd(),
@@ -34,37 +35,116 @@ func newScheduleCmd() *cobra.Command {
 	return cmd
 }
 
+func newScheduleRetryConvergenceCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "retry-convergence <slug> <name>",
+		Short: "Retry a failed deploy-triggered producer run",
+		Args:  cobra.ExactArgs(2),
+	}
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		slug, name := args[0], args[1]
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		id, err := lookupScheduleID(cfg, slug, name)
+		if err != nil {
+			return err
+		}
+		url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/convergence/retry", cfg.Host, slug, id)
+		req, err := http.NewRequest(http.MethodPost, url, nil)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			return httpError(cfg.Token, "retry schedule convergence", resp, body)
+		}
+		var result struct {
+			Status  string `json:"status"`
+			RunID   *int64 `json:"run_id"`
+			Warning string `json:"warning"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return fmt.Errorf("decode retry response: %w", err)
+		}
+		data := map[string]any{"slug": slug, "name": name, "status": result.Status, "run_id": result.RunID}
+		if result.Warning != "" {
+			data["warning"] = result.Warning
+			fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+result.Warning)
+		}
+		return renderAction(cmd, result.Status, data,
+			fmt.Sprintf("%s: schedule %q convergence retry %s", slug, name, result.Status))
+	}
+	return cmd
+}
+
 // scheduleDTO mirrors the server's JSON representation of a schedule.
 type scheduleDTO struct {
-	ID                      int64    `json:"id"`
-	Name                    string   `json:"name"`
-	CronExpr                string   `json:"cron_expr"`
-	Command                 []string `json:"command"`
-	Enabled                 bool     `json:"enabled"`
-	TimeoutSeconds          int      `json:"timeout_seconds"`
-	OverlapPolicy           string   `json:"overlap_policy"`
-	MissedPolicy            string   `json:"missed_policy"`
-	OnSuccess               string   `json:"on_success"`
-	MinRollIntervalSeconds  int      `json:"min_roll_interval_seconds"`
-	RollFallback            string   `json:"roll_fallback"`
-	MaxDeferAgeSeconds      int      `json:"max_defer_age_seconds"`
-	Timezone                *string  `json:"timezone"`
-	EffectiveTimezone       string   `json:"effective_timezone"`
-	TimezoneInherited       bool     `json:"timezone_inherited"`
-	DSTAdvisory             *string  `json:"dst_advisory"`
-	RollFeasibilityAdvisory *string  `json:"roll_feasibility_advisory"`
-	FirstFireRunID          *int64   `json:"first_fire_run_id"`
-	LastRunID               *int64   `json:"last_run_id"`
-	LastRunAt               *string  `json:"last_run_at"`
-	LastRunStatus           *string  `json:"last_run_status"`
-	LastSuccessAt           *string  `json:"last_success_at"`
-	Stale                   *bool    `json:"stale"`
-	Refreshing              *bool    `json:"refreshing"`
-	ActiveRunID             *int64   `json:"active_run_id"`
-	FreshnessError          string   `json:"freshness_error"`
+	ID                      int64                   `json:"id"`
+	Name                    string                  `json:"name"`
+	CronExpr                string                  `json:"cron_expr"`
+	Command                 []string                `json:"command"`
+	Enabled                 bool                    `json:"enabled"`
+	TimeoutSeconds          int                     `json:"timeout_seconds"`
+	OverlapPolicy           string                  `json:"overlap_policy"`
+	MissedPolicy            string                  `json:"missed_policy"`
+	DeployTrigger           string                  `json:"deploy_trigger"`
+	OnSuccess               string                  `json:"on_success"`
+	MinRollIntervalSeconds  int                     `json:"min_roll_interval_seconds"`
+	RollFallback            string                  `json:"roll_fallback"`
+	MaxDeferAgeSeconds      int                     `json:"max_defer_age_seconds"`
+	Timezone                *string                 `json:"timezone"`
+	EffectiveTimezone       string                  `json:"effective_timezone"`
+	TimezoneInherited       bool                    `json:"timezone_inherited"`
+	DSTAdvisory             *string                 `json:"dst_advisory"`
+	RollFeasibilityAdvisory *string                 `json:"roll_feasibility_advisory"`
+	Convergence             *scheduleConvergenceDTO `json:"convergence"`
+	LastRunID               *int64                  `json:"last_run_id"`
+	LastRunAt               *string                 `json:"last_run_at"`
+	LastRunStatus           *string                 `json:"last_run_status"`
+	LastSuccessAt           *string                 `json:"last_success_at"`
+	Stale                   *bool                   `json:"stale"`
+	Refreshing              *bool                   `json:"refreshing"`
+	ActiveRunID             *int64                  `json:"active_run_id"`
+	ActiveRunContentDigest  string                  `json:"active_run_content_digest"`
+	CurrentDeploymentID     *int64                  `json:"current_deployment_id"`
+	CurrentAppVersion       string                  `json:"current_app_version"`
+	CurrentContentDigest    string                  `json:"current_content_digest"`
+	ProducerDeploymentID    *int64                  `json:"producer_deployment_id"`
+	ProducerAppVersion      string                  `json:"producer_app_version"`
+	ProducerContentDigest   string                  `json:"producer_content_digest"`
+	DeployTriggerSatisfied  *bool                   `json:"deploy_trigger_satisfied"`
+	ProducerRepairRequired  *bool                   `json:"producer_repair_required"`
+	ProducerFingerprint     string                  `json:"producer_fingerprint"`
+	ProducerPublishedAt     *string                 `json:"producer_published_at"`
+	ConvergenceObligationID *int64                  `json:"convergence_obligation_id"`
+	ConvergenceStatus       string                  `json:"convergence_status"`
+	ConvergenceRunID        *int64                  `json:"convergence_run_id"`
+	ConvergenceError        string                  `json:"convergence_error"`
+	FreshnessError          string                  `json:"freshness_error"`
+	Warning                 string                  `json:"warning,omitempty"`
+}
+
+type scheduleConvergenceDTO struct {
+	ScheduleID   int64  `json:"schedule_id"`
+	Schedule     string `json:"schedule"`
+	ObligationID int64  `json:"obligation_id"`
+	Status       string `json:"status"`
+	RunID        *int64 `json:"run_id"`
+	Prestart     bool   `json:"prestart,omitempty"`
 }
 
 func printScheduleAdvisories(out io.Writer, schedule scheduleDTO) {
+	if schedule.Warning != "" {
+		fmt.Fprintln(out, "Warning: "+schedule.Warning)
+	}
 	if schedule.DSTAdvisory != nil && *schedule.DSTAdvisory != "" {
 		fmt.Fprintln(out, "Warning: "+*schedule.DSTAdvisory)
 	}
@@ -161,7 +241,7 @@ func newScheduleLsCmd() *cobra.Command {
 				fmt.Fprintln(w, "No schedules.")
 				return
 			}
-			t := newTable("ID", "NAME", "CRON", "ENABLED", "AFTER SUCCESS", "ACTIVATION", "LAST RUN", "AGE", "STALE", "COMMAND").alignRight(0)
+			t := newTable("ID", "NAME", "CRON", "ENABLED", "AFTER SUCCESS", "ACTIVATION", "DATA", "LAST RUN", "AGE", "STALE", "COMMAND").alignRight(0)
 			for _, item := range rendered {
 				// A disabled schedule is dimmed: it is still listed, but it is not
 				// going to run, and that is the thing worth seeing at a glance.
@@ -193,9 +273,18 @@ func newScheduleLsCmd() *cobra.Command {
 				if latest, ok := item["latest_activation"].(map[string]any); ok {
 					activation = strOrDash(latest["status"])
 				}
+				dataState := dimTxt("-")
+				if repair, ok := item["producer_repair_required"].(bool); ok && repair {
+					dataState = alertTxt("repair")
+				} else if trigger, _ := item["deploy_trigger"].(string); trigger != "" && trigger != "never" {
+					dataState = txt("ready")
+					if satisfied, ok := item["deploy_trigger_satisfied"].(bool); !ok || !satisfied {
+						dataState = alertTxt("needs run")
+					}
+				}
 				cmdParts, _ := item["command"].([]string)
 				t.row(dimTxt(item["id"]), txt(item["name"]), txt(item["cron_expr"]),
-					enabled, txt(action), statusTxt(activation), statusTxt(strOrDash(item["last_run_status"])),
+					enabled, txt(action), statusTxt(activation), dataState, statusTxt(strOrDash(item["last_run_status"])),
 					age, stale, txt(strings.Join(cmdParts, " ")))
 			}
 			t.render(w)
@@ -213,10 +302,10 @@ func newScheduleAddCmd() *cobra.Command {
 		timeout         int
 		overlap         string
 		missed          string
+		deployTrigger   string
 		disabled        bool
 		ifNotExists     bool
 		timezone        string
-		runOnRegister   bool
 		follow          bool
 		onSuccess       string
 		minRollInterval time.Duration
@@ -239,8 +328,8 @@ func newScheduleAddCmd() *cobra.Command {
 	addCmd.Flags().BoolVar(&flags.disabled, "disabled", false, "Create the schedule in disabled state")
 	addCmd.Flags().BoolVar(&flags.ifNotExists, "if-not-exists", false, "Exit silently if a same-named schedule already exists")
 	addCmd.Flags().StringVar(&flags.timezone, "timezone", "", "IANA timezone for this schedule (e.g. Europe/Amsterdam); empty inherits server default")
-	addCmd.Flags().BoolVar(&flags.runOnRegister, "run-on-register", false, "Fire this schedule once now if it has never succeeded (warms the cache on first deploy)")
-	addCmd.Flags().BoolVar(&flags.follow, "follow", false, "With --run-on-register, stream the first-fire run's logs until it finishes")
+	addCmd.Flags().StringVar(&flags.deployTrigger, "deploy-trigger", "never", "Run on deploy: never|first_deploy|bundle_change")
+	addCmd.Flags().BoolVar(&flags.follow, "follow", false, "Stream a deploy-triggered run's logs until it finishes")
 	addCmd.Flags().StringVar(&flags.onSuccess, "on-success", "none", "After a successful run: none|roll")
 	addCmd.Flags().DurationVar(&flags.minRollInterval, "min-roll-interval", 0, "Minimum interval between successful replica rolls (for example 1h)")
 	addCmd.Flags().StringVar(&flags.rollFallback, "roll-fallback", "defer", "When a roll surge does not fit: defer|restart")
@@ -292,7 +381,7 @@ func newScheduleAddCmd() *cobra.Command {
 			"overlap_policy":            flags.overlap,
 			"missed_policy":             flags.missed,
 			"timezone":                  flags.timezone,
-			"run_on_register":           flags.runOnRegister,
+			"deploy_trigger":            flags.deployTrigger,
 			"on_success":                flags.onSuccess,
 			"min_roll_interval_seconds": int(flags.minRollInterval / time.Second),
 			"roll_fallback":             flags.rollFallback,
@@ -328,9 +417,22 @@ func newScheduleAddCmd() *cobra.Command {
 		if resp.StatusCode == http.StatusOK {
 			var existing scheduleDTO
 			if json.Unmarshal(out, &existing) == nil {
+				printScheduleAdvisories(cmd.ErrOrStderr(), existing)
+				fields := map[string]any{"slug": slug, "name": existing.Name, "id": existing.ID}
+				if existing.Warning != "" {
+					fields["warning"] = existing.Warning
+				}
+				prose := fmt.Sprintf("schedule %q already exists with identical config (id %d)", existing.Name, existing.ID)
+				if existing.Convergence != nil {
+					fields["convergence_status"] = existing.Convergence.Status
+					fields["convergence_obligation_id"] = existing.Convergence.ObligationID
+					if existing.Convergence.RunID != nil {
+						fields["convergence_run_id"] = *existing.Convergence.RunID
+					}
+					prose += fmt.Sprintf("; deploy convergence %s", existing.Convergence.Status)
+				}
 				return renderAction(cmd, "unchanged",
-					map[string]any{"slug": slug, "name": existing.Name, "id": existing.ID},
-					fmt.Sprintf("schedule %q already exists with identical config (id %d)", existing.Name, existing.ID))
+					fields, prose)
 			}
 			return renderAction(cmd, "unchanged",
 				map[string]any{"slug": slug, "name": flags.name},
@@ -341,22 +443,31 @@ func newScheduleAddCmd() *cobra.Command {
 		if err := json.Unmarshal(out, &created); err == nil {
 			printScheduleAdvisories(cmd.ErrOrStderr(), created)
 			fields := map[string]any{"slug": slug, "name": created.Name, "id": created.ID}
-			prose := fmt.Sprintf("created schedule %q (id %d)", created.Name, created.ID)
-			if created.FirstFireRunID != nil {
-				fields["first_fire_run_id"] = *created.FirstFireRunID
-				prose += fmt.Sprintf("\nfirst-fire triggered (run #%d)", *created.FirstFireRunID)
+			if created.Warning != "" {
+				fields["warning"] = created.Warning
 			}
-			if flags.follow && created.FirstFireRunID != nil {
+			prose := fmt.Sprintf("created schedule %q (id %d)", created.Name, created.ID)
+			if created.Convergence != nil {
+				fields["convergence_status"] = created.Convergence.Status
+				fields["convergence_obligation_id"] = created.Convergence.ObligationID
+				if created.Convergence.RunID != nil {
+					fields["convergence_run_id"] = *created.Convergence.RunID
+					prose += fmt.Sprintf("\ndeploy convergence %s (run #%d)", created.Convergence.Status, *created.Convergence.RunID)
+				} else {
+					prose += fmt.Sprintf("\ndeploy convergence %s", created.Convergence.Status)
+				}
+			}
+			if flags.follow && created.Convergence != nil && created.Convergence.Status == "running" && created.Convergence.RunID != nil {
 				// In follow mode the run's log stream is the primary data on
 				// stdout; its format was resolved as streaming at command start.
 				// Route the creation acknowledgment to stderr so it does not
 				// interleave with the NDJSON log objects.
 				fmt.Fprintf(cmd.ErrOrStderr(), "created schedule %q (id %d), following run #%d\n",
-					created.Name, created.ID, *created.FirstFireRunID)
-				if err := streamRunLogs(cfg, slug, created.ID, *created.FirstFireRunID, true, cmd); err != nil {
+					created.Name, created.ID, *created.Convergence.RunID)
+				if err := streamRunLogs(cfg, slug, created.ID, *created.Convergence.RunID, true, cmd); err != nil {
 					return err
 				}
-				return runFinalExitError(cfg, slug, created.ID, *created.FirstFireRunID)
+				return runFinalExitError(cfg, slug, created.ID, *created.Convergence.RunID)
 			}
 			// Non-follow path: the creation envelope is a single document.
 			// Re-resolve as non-streaming so -o json is honoured and NDJSON
@@ -385,6 +496,7 @@ func newScheduleUpdateCmd() *cobra.Command {
 		timeout         int
 		overlap         string
 		missed          string
+		deployTrigger   string
 		enabled         bool
 		timezone        string
 		clearTZ         bool
@@ -415,6 +527,7 @@ Timezone is tri-state:
 	updateCmd.Flags().IntVar(&flags.timeout, "timeout", 0, "Timeout in seconds (1..86400)")
 	updateCmd.Flags().StringVar(&flags.overlap, "overlap", "", "Overlap policy: skip|queue|concurrent")
 	updateCmd.Flags().StringVar(&flags.missed, "missed", "", "Missed-run policy: skip|run_once")
+	updateCmd.Flags().StringVar(&flags.deployTrigger, "deploy-trigger", "", "Run on deploy: never|first_deploy|bundle_change")
 	updateCmd.Flags().BoolVar(&flags.enabled, "enabled", true, "Enabled state (use --enabled=false to disable)")
 	updateCmd.Flags().StringVar(&flags.timezone, "timezone", "", "Set the per-schedule IANA timezone")
 	updateCmd.Flags().BoolVar(&flags.clearTZ, "clear-timezone", false, "Clear the per-schedule timezone (inherit server default)")
@@ -460,6 +573,9 @@ Timezone is tri-state:
 		}
 		if changed("missed") {
 			payload["missed_policy"] = flags.missed
+		}
+		if changed("deploy-trigger") {
+			payload["deploy_trigger"] = flags.deployTrigger
 		}
 		if changed("enabled") {
 			payload["enabled"] = flags.enabled
@@ -528,10 +644,21 @@ Timezone is tri-state:
 		if json.Unmarshal(out, &updated) == nil {
 			printScheduleAdvisories(cmd.ErrOrStderr(), updated)
 		}
-
+		fields := map[string]any{"slug": slug, "name": name}
+		if updated.Warning != "" {
+			fields["warning"] = updated.Warning
+		}
+		prose := fmt.Sprintf("%s: updated schedule %q", slug, name)
+		if updated.Convergence != nil {
+			fields["convergence_status"] = updated.Convergence.Status
+			fields["convergence_obligation_id"] = updated.Convergence.ObligationID
+			if updated.Convergence.RunID != nil {
+				fields["convergence_run_id"] = *updated.Convergence.RunID
+			}
+			prose += fmt.Sprintf("; deploy convergence %s", updated.Convergence.Status)
+		}
 		return renderAction(cmd, "updated",
-			map[string]any{"slug": slug, "name": name},
-			fmt.Sprintf("%s: updated schedule %q", slug, name))
+			fields, prose)
 	}
 	return updateCmd
 }
@@ -670,19 +797,34 @@ func patchScheduleEnabled(enabled bool) func(*cobra.Command, []string) error {
 			return err
 		}
 		defer resp.Body.Close()
-
+		out, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode >= 400 {
-			out, _ := io.ReadAll(resp.Body)
 			return httpError(cfg.Token, "update schedule state", resp, out)
 		}
+		var updated scheduleDTO
+		if err := json.Unmarshal(out, &updated); err != nil {
+			return fmt.Errorf("decode schedule state response: %w", err)
+		}
+		printScheduleAdvisories(cmd.ErrOrStderr(), updated)
 
 		state := "enabled"
 		if !enabled {
 			state = "disabled"
 		}
-		return renderAction(cmd, state,
-			map[string]any{"slug": slug, "name": name},
-			fmt.Sprintf("%s: schedule %q %s", slug, name, state))
+		fields := map[string]any{"slug": slug, "name": name}
+		if updated.Warning != "" {
+			fields["warning"] = updated.Warning
+		}
+		prose := fmt.Sprintf("%s: schedule %q %s", slug, name, state)
+		if updated.Convergence != nil {
+			fields["convergence_status"] = updated.Convergence.Status
+			fields["convergence_obligation_id"] = updated.Convergence.ObligationID
+			if updated.Convergence.RunID != nil {
+				fields["convergence_run_id"] = *updated.Convergence.RunID
+			}
+			prose += fmt.Sprintf("; deploy convergence %s", updated.Convergence.Status)
+		}
+		return renderAction(cmd, state, fields, prose)
 	}
 }
 
@@ -926,7 +1068,7 @@ func newScheduleStatusCmd() *cobra.Command {
 				fmt.Fprintln(w, "No schedules.")
 				return
 			}
-			t := newTable("APP", "SCHEDULE", "LAST RUN", "LAST SUCCESS", "AGE", "STALE", "REFRESHING")
+			t := newTable("APP", "SCHEDULE", "DATA", "LAST RUN", "LAST SUCCESS", "AGE", "STALE", "REFRESHING")
 			for _, r := range rows {
 				lastSuccess := dimTxt("never")
 				age := dimTxt("-")
@@ -948,8 +1090,17 @@ func newScheduleStatusCmd() *cobra.Command {
 				if b, ok := r["refreshing"].(bool); ok && b {
 					refreshing = txt("yes")
 				}
+				dataState := dimTxt("-")
+				if repair, ok := r["producer_repair_required"].(bool); ok && repair {
+					dataState = alertTxt("repair")
+				} else if trigger, _ := r["deploy_trigger"].(string); trigger != "" && trigger != "never" {
+					dataState = txt("ready")
+					if satisfied, ok := r["deploy_trigger_satisfied"].(bool); !ok || !satisfied {
+						dataState = alertTxt("needs run")
+					}
+				}
 				t.row(txt(r["slug"]), txt(r["schedule"]),
-					statusTxt(strOrDash(r["last_run_status"])), lastSuccess, age, stale, refreshing)
+					dataState, statusTxt(strOrDash(r["last_run_status"])), lastSuccess, age, stale, refreshing)
 			}
 			t.render(w)
 		})

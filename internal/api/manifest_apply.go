@@ -12,6 +12,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
 // validationError signals "user-provided manifest is invalid"; the handler
@@ -120,20 +121,53 @@ func (s *Server) validateManifestActivationTopology(app *db.App, manifest *deplo
 	if manifest.App.Worker != nil && manifest.App.Worker.Isolation != nil {
 		projected.WorkerIsolation = *manifest.App.Worker.Isolation
 	}
-	for _, spec := range manifest.Schedules {
-		if err := s.validateScheduleActivationForApp(&projected, spec.OnSuccess); err != nil {
-			return newValidationError("schedule %q: %v", spec.Name, err)
-		}
+	type projectedPolicy struct {
+		name          string
+		deployTrigger string
+		onSuccess     string
+		existing      bool
 	}
+	policies := make(map[string]projectedPolicy, len(manifest.Schedules))
+	policyOrder := make([]string, 0, len(manifest.Schedules))
 	if manifest.App.Worker != nil && manifest.App.Worker.Isolation != nil {
 		existing, err := s.store.ListSchedulesByApp(app.ID)
 		if err != nil {
 			return newValidationError("validate existing schedules: %v", err)
 		}
 		for _, schedule := range existing {
-			if err := s.validateScheduleActivationForApp(&projected, schedule.OnSuccess); err != nil {
-				return newValidationError("existing schedule %q: %v", schedule.Name, err)
+			policyOrder = append(policyOrder, schedule.Name)
+			policies[schedule.Name] = projectedPolicy{
+				name: schedule.Name, deployTrigger: schedule.DeployTrigger,
+				onSuccess: schedule.OnSuccess, existing: true,
 			}
+		}
+	}
+	for _, spec := range manifest.Schedules {
+		deployTrigger, err := schedulespec.NormalizeDeployTrigger(spec.DeployTrigger)
+		if err != nil {
+			return newValidationError("schedule %q: %v", spec.Name, err)
+		}
+		// Manifest declarations override same-name stored declarations. Validate
+		// the projected final set once so an atomic policy+topology transition is
+		// judged by what will actually be committed, not by stale live policy.
+		if _, exists := policies[spec.Name]; !exists {
+			policyOrder = append(policyOrder, spec.Name)
+		}
+		policies[spec.Name] = projectedPolicy{
+			name: spec.Name, deployTrigger: deployTrigger, onSuccess: spec.OnSuccess,
+		}
+	}
+	for _, name := range policyOrder {
+		policy := policies[name]
+		label := "schedule"
+		if policy.existing {
+			label = "existing schedule"
+		}
+		if err := s.validateScheduleActivationForApp(&projected, policy.onSuccess); err != nil {
+			return newValidationError("%s %q: %v", label, policy.name, err)
+		}
+		if err := s.validateScheduleProducerTopology(&projected, policy.deployTrigger, policy.onSuccess); err != nil {
+			return newValidationError("%s %q: %v", label, policy.name, err)
 		}
 	}
 	return nil
@@ -289,12 +323,12 @@ type ManifestScheduleResult struct {
 	Name       string        `json:"name"`
 	Action     string        `json:"action"` // "created" or "updated"
 	ScheduleID int64         `json:"schedule_id,omitempty"`
-	FirstFire  *FirstFireRef `json:"first_fire,omitempty"`
+	DeployRun  *DeployRunRef `json:"deploy_run,omitempty"`
 }
 
-// FirstFireRef points the CLI at the run dispatched by run_on_register so it
-// can report it and (under --wait-for-warm) poll it to completion.
-type FirstFireRef struct {
+// DeployRunRef points the CLI at the run dispatched by a schedule's
+// deploy_trigger so it can report it and wait for bundle convergence.
+type DeployRunRef struct {
 	RunID int64 `json:"run_id"`
 }
 
@@ -308,15 +342,26 @@ type FirstFireRef struct {
 //
 // Returns one result entry per spec in input order. On error the slice
 // contains the results processed so far.
-func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []deploy.ScheduleSpec) ([]ManifestScheduleResult, error) {
-	results := make([]ManifestScheduleResult, 0, len(specs))
+func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, deployment *db.Deployment, specs []deploy.ScheduleSpec, plannedCreates ...map[string]int64) ([]ManifestScheduleResult, error) {
+	if deployment == nil || deployment.AppID != app.ID || deployment.ContentDigest == "" {
+		return nil, errors.New("manifest schedule apply requires the target deployment")
+	}
+	params := make([]db.UpsertScheduleByNameParams, 0, len(specs))
+	timezones := make([]*string, 0, len(specs))
 	for _, spec := range specs {
+		deployTrigger, err := schedulespec.NormalizeDeployTrigger(spec.DeployTrigger)
+		if err != nil {
+			return nil, fmt.Errorf("schedule %q: %w", spec.Name, err)
+		}
 		if err := s.validateScheduleActivationForApp(app, spec.OnSuccess); err != nil {
-			return results, fmt.Errorf("schedule %q: %w", spec.Name, err)
+			return nil, fmt.Errorf("schedule %q: %w", spec.Name, err)
+		}
+		if err := s.validateScheduleProducerTopology(app, deployTrigger, spec.OnSuccess); err != nil {
+			return nil, fmt.Errorf("schedule %q: %w", spec.Name, err)
 		}
 		cmdJSON, err := json.Marshal(spec.Command)
 		if err != nil {
-			return results, fmt.Errorf("schedule %q: marshal command: %w", spec.Name, err)
+			return nil, fmt.Errorf("schedule %q: marshal command: %w", spec.Name, err)
 		}
 		timeout := 3600
 		if spec.TimeoutSeconds != nil {
@@ -327,7 +372,7 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 		if spec.Timezone != "" {
 			tzPtr = &spec.Timezone
 		}
-		id, created, err := s.store.UpsertScheduleByName(db.UpsertScheduleByNameParams{
+		params = append(params, db.UpsertScheduleByNameParams{
 			AppID:                  app.ID,
 			Name:                   spec.Name,
 			CronExpr:               spec.Cron,
@@ -336,17 +381,24 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 			TimeoutSeconds:         timeout,
 			OverlapPolicy:          spec.Overlap,
 			MissedPolicy:           spec.Missed,
+			DeployTrigger:          deployTrigger,
 			Timezone:               tzPtr,
 			OnSuccess:              spec.OnSuccess,
 			MinRollIntervalSeconds: int(spec.MinRollInterval / time.Second),
 			RollFallback:           spec.RollFallback,
 			MaxDeferAgeSeconds:     int(spec.MaxDeferAge / time.Second),
 		})
-		if err != nil {
-			return results, fmt.Errorf("schedule %q: %w", spec.Name, err)
-		}
-		if err := s.reloadScheduler(id, app.Slug, spec.Name); err != nil {
-			return results, fmt.Errorf("scheduler reload (%s): %w", spec.Name, err)
+		timezones = append(timezones, tzPtr)
+	}
+	upserts, err := s.store.UpsertSchedulesByName(params)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]ManifestScheduleResult, 0, len(specs))
+	for i, spec := range specs {
+		id, created := upserts[i].ID, upserts[i].Created
+		if len(plannedCreates) > 0 && plannedCreates[0][spec.Name] == id {
+			created = true
 		}
 		auditAction := "schedule_update"
 		resultAction := "updated"
@@ -354,127 +406,21 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, specs []de
 			auditAction = "schedule_create"
 			resultAction = "created"
 		}
-		effectiveTZ := effectiveTZLabel(tzPtr, s.cfg.Scheduler.Location)
+		effectiveTZ := effectiveTZLabel(timezones[i], s.cfg.Scheduler.Location)
 		s.audit(r, auditAction, "schedule", fmt.Sprintf("%d", id),
 			fmt.Sprintf(`{"app":%q,"name":%q,"effective_timezone":%q}`, app.Slug, spec.Name, effectiveTZ))
 
-		result := ManifestScheduleResult{Name: spec.Name, Action: resultAction, ScheduleID: id}
-		if rid := s.maybeFirstFire(id, spec.RunOnRegister, spec.Disabled, app.Slug, spec.Name); rid != nil {
-			result.FirstFire = &FirstFireRef{RunID: *rid}
+		results = append(results, ManifestScheduleResult{Name: spec.Name, Action: resultAction, ScheduleID: id})
+	}
+	// Persistence is already atomic. Reload every committed row; if one reload
+	// fails the caller keeps the app stopped rather than exposing this new
+	// declaration set against the previous bundle.
+	for i, spec := range specs {
+		if err := s.reloadScheduler(upserts[i].ID, app.Slug, spec.Name); err != nil {
+			return results, fmt.Errorf("scheduler reload (%s): %w", spec.Name, err)
 		}
-		results = append(results, result)
 	}
 	return results, nil
-}
-
-// firstFireStore and firstFireRunner are the narrow store and jobs-manager
-// views the first-fire decision needs, so it is testable with fakes.
-// *db.Store and *jobs.Manager satisfy them.
-type firstFireStore interface {
-	LastSuccessfulRun(scheduleID int64) (*db.ScheduleRun, error)
-	LatestRegisterRunID(scheduleID int64) (int64, error)
-}
-
-type firstFireRunner interface {
-	Run(scheduleID int64, trigger string, userID *int64) (int64, error)
-}
-
-// errFirstFireAlreadySucceeded reports that the never-succeeded gate found a
-// prior successful run: the first-fire is skipped, which is not an error.
-var errFirstFireAlreadySucceeded = errors.New("schedule already has a successful run")
-
-// firstFireOnce runs one gate-then-dispatch attempt. It fires only when the
-// schedule has never had a successful run. A gate error that is NOT
-// ErrNotFound is returned wrapped rather than fired through: dispatching on
-// uncertain gate state could double-fire.
-func firstFireOnce(store firstFireStore, runner firstFireRunner, scheduleID int64) (int64, error) {
-	if _, lerr := store.LastSuccessfulRun(scheduleID); lerr == nil {
-		return 0, errFirstFireAlreadySucceeded
-	} else if !errors.Is(lerr, db.ErrNotFound) {
-		return 0, fmt.Errorf("gate check: %w", lerr)
-	}
-	return runner.Run(scheduleID, "register", nil)
-}
-
-// firstFire dispatches the run_on_register first run, retrying once after
-// delay when the gate query or the dispatch fails. A single transient store
-// error must not silently lose the first-fire: a failure swallowed before the
-// run row is inserted leaves no 'interrupted' row for the scheduler's startup
-// reconcile to pick up, so without a retry the run would never happen until
-// the schedule's next registration or cron tick.
-//
-// The retry is double-fire safe. A gate failure precedes any dispatch, so its
-// retry needs no further checks. A dispatch error is ambiguous - the run row
-// may have been admitted before the driver returned the error - so the latest
-// register-run id is snapshotted before dispatching and the retry runs only
-// when that marker is provably unmoved after the failure (a moved or
-// unverifiable marker is left to the restart reconcile). The marker is a max
-// run id, not a count: retention pruning deletes only older rows, so a prune
-// racing the retry window cannot mask an admission the way it could offset a
-// count. The retry attempt re-runs the never-succeeded gate, so a run that
-// succeeded in between is skipped. One retry keeps the create/deploy request
-// path bounded; a persistent failure stays best-effort (logged, nil id) as
-// designed.
-func firstFire(store firstFireStore, runner firstFireRunner, scheduleID int64, delay time.Duration) (int64, error) {
-	if _, lerr := store.LastSuccessfulRun(scheduleID); lerr == nil {
-		return 0, errFirstFireAlreadySucceeded
-	} else if !errors.Is(lerr, db.ErrNotFound) {
-		slog.Warn("run_on_register: first-fire gate check failed; retrying once",
-			"schedule_id", scheduleID, "err", lerr)
-		time.Sleep(delay)
-		return firstFireOnce(store, runner, scheduleID)
-	}
-	before, berr := store.LatestRegisterRunID(scheduleID)
-	runID, derr := runner.Run(scheduleID, "register", nil)
-	if derr == nil {
-		return runID, nil
-	}
-	slog.Warn("run_on_register: first-fire dispatch failed; verifying before retry",
-		"schedule_id", scheduleID, "err", derr)
-	time.Sleep(delay)
-	if berr != nil {
-		return 0, fmt.Errorf("%w (admission baseline unavailable: %v)", derr, berr)
-	}
-	after, aerr := store.LatestRegisterRunID(scheduleID)
-	if aerr != nil {
-		return 0, fmt.Errorf("%w (admission check failed: %v)", derr, aerr)
-	}
-	if after != before {
-		return 0, fmt.Errorf("%w (a register run was admitted by the failed dispatch; not retrying)", derr)
-	}
-	return firstFireOnce(store, runner, scheduleID)
-}
-
-// firstFireRetryDelay spaces the retry inside firstFire: long enough for the
-// transient store errors seen under load (connection resets, pool exhaustion)
-// to clear, short enough not to stall the create/deploy request noticeably.
-const firstFireRetryDelay = 250 * time.Millisecond
-
-// maybeFirstFire fires the schedule once for run_on_register and returns the
-// dispatched run id, or nil. It NEVER fails the caller: a disabled schedule, an
-// unavailable job manager, a closed gate (the schedule has already succeeded),
-// or a persistent gate/dispatch error all yield nil, with problems logged.
-// Transient errors are absorbed by firstFire's single retry; the gate is "has
-// this schedule ever succeeded?" so even a persistently failed first-fire
-// self-heals on the next registration.
-//
-// Inline dispatch is safe because ownerGuard gates both the deploy POST and the
-// schedule-create endpoint, so only the owner instance reaches here - the same
-// invariant the scheduler relies on when it calls jobs.Run.
-func (s *Server) maybeFirstFire(scheduleID int64, runOnRegister, disabled bool, slug, name string) *int64 {
-	if !runOnRegister || disabled || s.jobs == nil {
-		return nil
-	}
-	runID, err := firstFire(s.store, s.jobs, scheduleID, firstFireRetryDelay)
-	if errors.Is(err, errFirstFireAlreadySucceeded) {
-		return nil
-	}
-	if err != nil {
-		slog.Warn("run_on_register: first-fire failed; skipping",
-			"slug", slug, "schedule", name, "err", err)
-		return nil
-	}
-	return &runID
 }
 
 // reloadScheduler re-registers a schedule with the cron engine after a create or

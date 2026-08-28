@@ -5,6 +5,9 @@
 package schedulespec
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -14,9 +17,50 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+// ProducerIdentity canonicalizes the command argv and returns both the exact
+// JSON snapshot a deploy obligation must execute and its stable fingerprint.
+// Bundle digest alone is insufficient: an API PATCH can point the same bundle
+// at a different producer command.
+func ProducerIdentity(commandJSON string) (canonical, fingerprint string, err error) {
+	var command []string
+	if err := json.Unmarshal([]byte(commandJSON), &command); err != nil {
+		return "", "", fmt.Errorf("decode producer command: %w", err)
+	}
+	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
+		return "", "", errors.New("producer command must not be empty")
+	}
+	b, err := json.Marshal(command)
+	if err != nil {
+		return "", "", fmt.Errorf("canonicalize producer command: %w", err)
+	}
+	sum := sha256.Sum256(b)
+	return string(b), "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
 // nameRE is the canonical schedule-name regex: alphanumerics, dashes,
 // underscores; 1..64 chars.
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+const (
+	DeployTriggerNever        = "never"
+	DeployTriggerFirstDeploy  = "first_deploy"
+	DeployTriggerBundleChange = "bundle_change"
+)
+
+// NormalizeDeployTrigger validates when deployment convergence should execute
+// a schedule. Empty is the safe default: cron/manual execution only.
+func NormalizeDeployTrigger(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = DeployTriggerNever
+	}
+	switch value {
+	case DeployTriggerNever, DeployTriggerFirstDeploy, DeployTriggerBundleChange:
+		return value, nil
+	default:
+		return "", errors.New("deploy_trigger: must be never|first_deploy|bundle_change")
+	}
+}
 
 // Validate checks every field of a schedule. Mirrors the rules enforced by
 // the HTTP API (POST /api/apps/{slug}/schedules) so a manifest-driven deploy

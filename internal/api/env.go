@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -269,6 +270,9 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	if err := s.guardActivationLifecycle(app.ID, "restart after environment change "+slug); err != nil {
 		return false, err
 	}
+	if err := s.guardCompatibilityQuarantine(app.ID, "restart after environment change "+slug); err != nil {
+		return false, err
+	}
 
 	deployments, err := s.store.ListDeployments(app.ID)
 	if err != nil || len(deployments) == 0 {
@@ -289,7 +293,12 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		s.proxy.Deregister(slug)
 	}
 	envDefaultMem, envDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
-	result, runErr := s.deployRun(s.withTierPlacement(deploy.Params{
+	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
+	if gateErr != nil {
+		return false, fmt.Errorf("acquire startup-data compatibility fence: %w", gateErr)
+	}
+	defer releaseConsumerBoot()
+	restartParams := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
@@ -302,7 +311,9 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		ContentDigest:         current.ContentDigest,
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,
-	}, app))
+	}, app)
+	restartParams = s.guardDeploymentConsumerStart(app, current, restartParams)
+	result, runErr := s.deployRun(restartParams)
 	if runErr != nil {
 		// The old process is gone; reflect that in the DB so callers don't
 		// see a stale "running" status with a dead PID.
@@ -312,10 +323,11 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		})
 		return false, runErr
 	}
+	var replicaPersistenceErr error
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
 		depID := current.ID
-		_ = s.store.UpsertReplica(db.UpsertReplicaParams{
+		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
 			AppID:               app.ID,
 			Index:               r.Index,
 			PID:                 &pid,
@@ -329,14 +341,27 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 			DesiredState:        "running",
 			DeploymentID:        &depID,
 			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
-		})
+			ConsumerBooted:      true,
+		}); err != nil {
+			replicaPersistenceErr = errors.Join(replicaPersistenceErr, fmt.Errorf("replica %d: %w", r.Index, err))
+		}
 	}
 	for _, idx := range result.Failed {
-		_ = s.store.UpsertReplica(db.UpsertReplicaParams{
+		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
 			AppID:  app.ID,
 			Index:  idx,
 			Status: "crashed",
-		})
+		}); err != nil {
+			replicaPersistenceErr = errors.Join(replicaPersistenceErr, fmt.Errorf("failed replica %d: %w", idx, err))
+		}
+	}
+	if replicaPersistenceErr != nil {
+		_ = s.manager.Stop(slug)
+		if s.proxy != nil {
+			s.proxy.Deregister(slug)
+		}
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
+		return false, fmt.Errorf("persist restarted consumer provenance: %w", replicaPersistenceErr)
 	}
 	_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 		Slug:   slug,

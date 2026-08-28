@@ -1,13 +1,21 @@
 package api
 
 import (
+	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/appstatus"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"golang.org/x/sys/unix"
 )
 
 // deployLockFor returns the per-slug mutex used to serialize all
@@ -36,9 +44,95 @@ func (s *Server) deployLockFor(slug string) *sync.Mutex {
 // While held, the slug is tracked in deployInFlight so DeployInFlight can
 // report whether this instance is actively executing a lock-holding operation.
 func (s *Server) acquireDeployLock(slug string) (release func()) {
+	release, err := s.acquireAppOperation(slug, false)
+	if err != nil {
+		// Every caller treats successful return as authority to mutate runtime and
+		// durable state. Panicking is fail-closed and is recovered by HTTP/background
+		// operation boundaries; proceeding without the cross-process fence is not.
+		panic(fmt.Sprintf("acquire app operation fence for %s: %v", slug, err))
+	}
+	return release
+}
+
+func (s *Server) acquireAppOperation(slug string, nonblocking bool) (release func(), err error) {
+	return s.acquireAppOperationWithFleetFence(slug, nonblocking, true)
+}
+
+func (s *Server) acquireAppOperationWithFleetFence(slug string, nonblocking, joinFleetFence bool) (release func(), err error) {
+	releaseFleet := func() {}
+	if joinFleetFence {
+		mode := unix.LOCK_SH
+		if nonblocking {
+			mode |= unix.LOCK_NB
+		}
+		var fleetErr error
+		releaseFleet, fleetErr = s.acquireFleetMutationFence(mode)
+		if fleetErr != nil {
+			if nonblocking && (errors.Is(fleetErr, unix.EWOULDBLOCK) || errors.Is(fleetErr, unix.EAGAIN)) {
+				return nil, nil
+			}
+			return nil, fleetErr
+		}
+	}
 	m := s.deployLockFor(slug)
-	m.Lock()
-	return s.markAppOperationHeld(slug, m)
+	if nonblocking {
+		if !m.TryLock() {
+			releaseFleet()
+			return nil, nil
+		}
+	} else {
+		m.Lock()
+	}
+	lockName := fmt.Sprintf("%x.lifecycle.lock", sha256.Sum256([]byte(slug)))
+	path := filepath.Join(s.appOperationLockDir, lockName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o640)
+	if err != nil {
+		m.Unlock()
+		releaseFleet()
+		return nil, fmt.Errorf("open lifecycle lock: %w", err)
+	}
+	mode := unix.LOCK_EX
+	if nonblocking {
+		mode |= unix.LOCK_NB
+	}
+	if err := unix.Flock(int(f.Fd()), mode); err != nil {
+		_ = f.Close()
+		m.Unlock()
+		releaseFleet()
+		if nonblocking && (err == unix.EWOULDBLOCK || err == unix.EAGAIN) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("flock lifecycle lock: %w", err)
+	}
+	releaseLocal := s.markAppOperationHeld(slug, m)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+			_ = f.Close()
+			releaseLocal()
+			releaseFleet()
+		})
+	}, nil
+}
+
+func (s *Server) acquireFleetMutationFence(mode int) (func(), error) {
+	path := filepath.Join(s.appOperationLockDir, "fleet.lifecycle.lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o640)
+	if err != nil {
+		return nil, fmt.Errorf("open fleet lifecycle lock: %w", err)
+	}
+	if err := unix.Flock(int(f.Fd()), mode); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+			_ = f.Close()
+		})
+	}, nil
 }
 
 // TryAcquireAppOperation atomically acquires the same per-app exclusion used by
@@ -46,11 +140,91 @@ func (s *Server) acquireDeployLock(slug string) (release func()) {
 // lifecycle work uses the non-blocking form so one slow app never stalls the
 // fleet watcher; a busy app is reconsidered on its next tick.
 func (s *Server) TryAcquireAppOperation(slug string) (release func(), ok bool) {
-	m := s.deployLockFor(slug)
-	if !m.TryLock() {
+	release, err := s.acquireAppOperation(slug, true)
+	if err != nil {
+		slog.Error("acquire background app operation fence", "slug", slug, "err", err)
 		return nil, false
 	}
-	return s.markAppOperationHeld(slug, m), true
+	return release, release != nil
+}
+
+// AcquireAppOperation serializes a foreground demand operation with every
+// deploy, rollback, scale, stop, and activation for the same app. Unlike the
+// watcher-oriented Try form, demand paths may wait because they already run in
+// dedicated goroutines and must not abandon an admitted client reservation.
+func (s *Server) AcquireAppOperation(slug string) (func(), error) {
+	return s.acquireAppOperation(slug, false)
+}
+
+// WaitForAppOperations blocks until every lifecycle mutation admitted by this
+// server has released its per-app fence. Ownership shutdown uses it before the
+// durable lease is released, so a long deploy handler cannot outlive graceful
+// handoff and race successor recovery.
+func (s *Server) WaitForAppOperations(ctx context.Context) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.deployLocksMu.Lock()
+		idle := len(s.deployInFlight) == 0
+		s.deployLocksMu.Unlock()
+		if idle {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// AcquireFleetAppOperations forms a startup barrier across every catalogued
+// app. A successor holds it while reconciling pending deployments and adopting
+// processes, preventing those destructive scans from racing a handler still
+// alive on a retiring process. The catalog is re-read after acquisition so an
+// app committed while the first snapshot was waiting is fenced too.
+func (s *Server) AcquireFleetAppOperations() (func(), error) {
+	releaseFleet, err := s.acquireFleetMutationFence(unix.LOCK_EX)
+	if err != nil {
+		return nil, fmt.Errorf("acquire fleet lifecycle startup fence: %w", err)
+	}
+	held := make(map[string]func())
+	releaseAll := func() {
+		slugs := make([]string, 0, len(held))
+		for slug := range held {
+			slugs = append(slugs, slug)
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(slugs)))
+		for _, slug := range slugs {
+			held[slug]()
+		}
+		releaseFleet()
+	}
+	for {
+		apps, err := s.store.ListApps(0, 0)
+		if err != nil {
+			releaseAll()
+			return nil, fmt.Errorf("list apps for lifecycle startup fence: %w", err)
+		}
+		missing := make([]string, 0)
+		for _, app := range apps {
+			if _, ok := held[app.Slug]; !ok {
+				missing = append(missing, app.Slug)
+			}
+		}
+		if len(missing) == 0 {
+			return releaseAll, nil
+		}
+		sort.Strings(missing)
+		for _, slug := range missing {
+			release, err := s.acquireAppOperationWithFleetFence(slug, false, false)
+			if err != nil {
+				releaseAll()
+				return nil, err
+			}
+			held[slug] = release
+		}
+	}
 }
 
 func (s *Server) markAppOperationHeld(slug string, m *sync.Mutex) func() {
@@ -331,6 +505,10 @@ func (s *Server) redeployApp(slug string) {
 		slog.Info("redeployApp: deferred for scheduled data activation", "slug", slug, "err", err)
 		return
 	}
+	if err := s.guardCompatibilityQuarantine(app.ID, "redeploy "+slug); err != nil {
+		slog.Warn("redeployApp: compatibility quarantine prevents consumer boot", "slug", slug, "err", err)
+		return
+	}
 
 	// A concurrent stop, hibernate, or delete may have changed the app's intent
 	// while this goroutine waited for the lock. Only cycle the pool for an app
@@ -362,7 +540,14 @@ func (s *Server) redeployApp(slug string) {
 	}
 
 	redeployDefaultMem, redeployDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
-	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
+	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
+	if gateErr != nil {
+		slog.Error("redeploy: acquire startup-data compatibility fence", "slug", slug, "err", gateErr)
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+		return
+	}
+	defer releaseConsumerBoot()
+	redeployParams := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
@@ -385,7 +570,9 @@ func (s *Server) redeployApp(slug string) {
 		// dependency builds, via private-index credentials), so its inputs really
 		// are different and re-preparing is the correct behaviour.
 		Preparation: activationPreparation(current.Prepared),
-	}, app))
+	}, app)
+	redeployParams = s.guardDeploymentConsumerStart(app, current, redeployParams)
+	result, err := s.deployRun(redeployParams)
 	if err != nil {
 		slog.Error("redeployApp: deploy failed", "slug", slug, "err", err)
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); err != nil {
@@ -394,6 +581,7 @@ func (s *Server) redeployApp(slug string) {
 		return
 	}
 
+	var replicaPersistenceErr error
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
 		depID := current.ID
@@ -411,9 +599,20 @@ func (s *Server) redeployApp(slug string) {
 			DesiredState:        "running",
 			DeploymentID:        &depID,
 			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
+			ConsumerBooted:      true,
 		}); err != nil {
 			slog.Error("redeployApp: upsert replica", "slug", slug, "index", r.Index, "err", err)
+			replicaPersistenceErr = errors.Join(replicaPersistenceErr, err)
 		}
+	}
+	if replicaPersistenceErr != nil {
+		_ = s.manager.Stop(slug)
+		if s.proxy != nil {
+			s.proxy.Deregister(slug)
+		}
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+		slog.Error("redeployApp: consumer provenance persistence failed; pool stopped", "slug", slug, "err", replicaPersistenceErr)
+		return
 	}
 	for _, idx := range result.Failed {
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{

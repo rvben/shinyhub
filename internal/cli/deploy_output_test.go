@@ -133,6 +133,39 @@ func TestDeploy_LiveDeployHasNoStoppedNote(t *testing.T) {
 	}
 }
 
+func TestDeploy_PostCommitWarningReachesHumanAndJSONOutput(t *testing.T) {
+	const warning = "deployment committed; schedule convergence will repair asynchronously"
+	for _, tc := range []struct {
+		name   string
+		format string
+	}{
+		{name: "human", format: "table"},
+		{name: "json", format: "json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := deployStubServer(t,
+				`{"slug":"demo","status":"running","deploy_count":4,"current_version":"v4","warning":"`+warning+`"}`, nil)
+			writeTestCLIConfig(t, srv.URL)
+			stdout, stderr, err := execCLISplit(t, "deploy", deployTestBundleDir(t), "--slug", "demo", "-o", tc.format)
+			if err != nil {
+				t.Fatalf("deploy: %v stdout=%q stderr=%q", err, stdout, stderr)
+			}
+			if !strings.Contains(stderr, warning) {
+				t.Fatalf("stderr=%q, want warning", stderr)
+			}
+			if tc.format == "json" {
+				var result map[string]any
+				if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+					t.Fatal(err)
+				}
+				if result["warning"] != warning {
+					t.Fatalf("json warning=%v", result["warning"])
+				}
+			}
+		})
+	}
+}
+
 // --wait on a kept-stopped deploy must not poll for a health it was told will
 // never arrive: the app is down on purpose, so the poll could only time out and
 // fail a deploy that succeeded. The stub serves status "stopped", so a poll

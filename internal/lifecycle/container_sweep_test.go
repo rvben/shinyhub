@@ -73,10 +73,9 @@ type tierSweepRuntime struct {
 
 func (r *tierSweepRuntime) ContainerSweepScope() string { return r.scope }
 
-// TestSweepOrphanContainers verifies the startup sweep removes app-replica
-// containers that no live replica re-adopted, while protecting (1) containers
-// the Manager re-adopted and (2) one-shot schedule-run containers, which carry
-// shinyhub.managed but no replica_index and run with AutoRemove.
+// TestSweepOrphanContainers verifies the startup sweep protects re-adopted app
+// replicas but removes every other managed container, including an orphaned
+// one-shot producer that could otherwise keep writing after owner failover.
 func TestSweepOrphanContainers(t *testing.T) {
 	rt := &blockingRuntime{done: make(chan struct{})}
 	t.Cleanup(func() { close(rt.done) })
@@ -98,7 +97,7 @@ func TestSweepOrphanContainers(t *testing.T) {
 
 	lifecycle.SweepOrphanContainers(mgr, sw)
 
-	want := map[string]bool{"c-orphan": true, "c-shrunk": true}
+	want := map[string]bool{"c-orphan": true, "c-shrunk": true, "c-sched": true}
 	if len(sw.removed) != len(want) {
 		t.Fatalf("removed = %v, want exactly %v", sw.removed, want)
 	}
@@ -114,6 +113,29 @@ func TestSweepOrphanContainers(t *testing.T) {
 func TestSweepOrphanContainers_NilSweeperNoop(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	lifecycle.SweepOrphanContainers(mgr, nil) // must not panic
+}
+
+func TestFenceOrphanScheduleContainersForTiers_FailsClosed(t *testing.T) {
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	sweeper := &fakeSweeper{containers: []process.ContainerInfo{
+		{ID: "replica", Labels: map[string]string{process.LabelManaged: "true", process.LabelReplicaIndex: "0"}},
+		{ID: "producer", Labels: map[string]string{process.LabelManaged: "true", process.LabelKind: process.KindScheduleRun}},
+	}}
+	runtime := &tierSweepRuntime{blockingRuntime: &blockingRuntime{done: make(chan struct{})}, fakeSweeper: sweeper, scope: "daemon"}
+	t.Cleanup(func() { close(runtime.done) })
+	mgr.RegisterRuntime("docker", runtime)
+
+	if err := lifecycle.FenceOrphanScheduleContainersForTiers(mgr, []string{"docker"}); err != nil {
+		t.Fatalf("fence orphan producers: %v", err)
+	}
+	if len(sweeper.removed) != 1 || sweeper.removed[0] != "producer" {
+		t.Fatalf("removed = %v, want only producer", sweeper.removed)
+	}
+
+	sweeper.removeErr = fmt.Errorf("daemon unavailable")
+	if err := lifecycle.FenceOrphanScheduleContainersForTiers(mgr, []string{"docker"}); err == nil {
+		t.Fatal("removal uncertainty must fail the startup fence")
+	}
 }
 
 func TestSweepOrphanContainersForTiers_IncludesNonDefaultAndDeduplicatesDaemon(t *testing.T) {

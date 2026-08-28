@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
@@ -28,6 +30,7 @@ import (
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/worker"
+	"golang.org/x/sys/unix"
 )
 
 // Server holds the dependencies shared by all API handlers.
@@ -135,8 +138,9 @@ type Server struct {
 	// restart on the same slug. Different slugs are independent. The async
 	// redeployApp goroutine waits for this lock so a replica change is always
 	// applied even when an HTTP-driven deploy is already running.
-	deployLocksMu sync.Mutex
-	deployLocks   map[string]*sync.Mutex
+	deployLocksMu       sync.Mutex
+	deployLocks         map[string]*sync.Mutex
+	appOperationLockDir string
 	// deployInFlight tracks slugs whose deploy lock is currently held, so
 	// DeployInFlight can answer without a try-lock. Guarded by deployLocksMu.
 	deployInFlight map[string]struct{}
@@ -199,24 +203,35 @@ func (s *Server) isRedeployInFlight(slug string) bool {
 // New constructs a Server and wires up all routes. manager and prx may be nil
 // when running in test contexts that exercise only auth/data handlers.
 func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *proxy.Proxy) *Server {
+	appsDir := cfg.Storage.AppsDir
+	if appsDir == "" {
+		// Production always configures AppsDir. Keep lightweight test servers out
+		// of the source tree while retaining a shared fence namespace.
+		appsDir = filepath.Join(os.TempDir(), "shinyhub-api")
+	}
+	appOperationLockDir := filepath.Join(appsDir, ".shinyhub-locks")
+	if err := os.MkdirAll(appOperationLockDir, 0o750); err != nil {
+		slog.Error("create app operation lock directory", "path", appOperationLockDir, "err", err)
+	}
 	s := &Server{
-		cfg:             cfg,
-		store:           store,
-		manager:         manager,
-		proxy:           prx,
-		sampler:         &process.GopsutilSampler{},
-		loginLimiter:    newLoginLimiter(store, loginRateLimit, loginRateWindow),
-		deployLimiter:   newKeyedRateLimiter(10, time.Minute),
-		userLimiter:     newKeyedRateLimiter(5, time.Minute),
-		tokenLimiter:    newKeyedRateLimiter(20, time.Minute),
-		dataLimiter:     newKeyedRateLimiter(120, time.Minute),
-		actionLimiter:   newKeyedRateLimiter(30, time.Minute),
-		oauthLimiter:    newKeyedRateLimiter(20, time.Minute),
-		connectLimiter:  newKeyedRateLimiter(60, time.Minute),
-		authFailLimiter: newKeyedRateLimiter(30, time.Minute),
-		deployRun:       deploy.Run,
-		deployReplica:   deploy.RunReplica,
-		resumeReplica:   deploy.ResumeReplica,
+		cfg:                 cfg,
+		store:               store,
+		manager:             manager,
+		proxy:               prx,
+		sampler:             &process.GopsutilSampler{},
+		loginLimiter:        newLoginLimiter(store, loginRateLimit, loginRateWindow),
+		deployLimiter:       newKeyedRateLimiter(10, time.Minute),
+		userLimiter:         newKeyedRateLimiter(5, time.Minute),
+		tokenLimiter:        newKeyedRateLimiter(20, time.Minute),
+		dataLimiter:         newKeyedRateLimiter(120, time.Minute),
+		actionLimiter:       newKeyedRateLimiter(30, time.Minute),
+		oauthLimiter:        newKeyedRateLimiter(20, time.Minute),
+		connectLimiter:      newKeyedRateLimiter(60, time.Minute),
+		authFailLimiter:     newKeyedRateLimiter(30, time.Minute),
+		deployRun:           deploy.Run,
+		deployReplica:       deploy.RunReplica,
+		resumeReplica:       deploy.ResumeReplica,
+		appOperationLockDir: appOperationLockDir,
 	}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(
@@ -552,6 +567,22 @@ func (s *Server) cleanupAppSecrets(ctx context.Context, appID int64) error {
 func (s *Server) SetJobs(j *jobs.Manager, sc *scheduler.Scheduler) {
 	s.jobs = j
 	s.scheduler = sc
+	if j != nil {
+		j.SetUnsafePublicationHandler(func(appID int64, slug, status string) {
+			if s.manager != nil {
+				_ = s.manager.Stop(slug)
+			}
+			if s.proxy != nil {
+				s.proxy.Deregister(slug)
+			}
+			if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
+				Slug: slug, Status: "failed",
+			}); err != nil {
+				slog.Error("persist compatibility quarantine after producer failure",
+					"app_id", appID, "slug", slug, "run_status", status, "err", err)
+			}
+		})
+	}
 }
 
 // SetSleepOp wires the operator-requested hibernation executor
@@ -601,6 +632,17 @@ func (s *Server) ownerGuard(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Hold the shared fleet mutation fence for the entire request, including
+		// upload/extraction and any wait before the per-app lock. Successor startup
+		// takes the exclusive side, so a request admitted by a retiring owner cannot
+		// resume mutation after recovery has already passed that app.
+		releaseMutation, err := s.acquireFleetMutationFence(unix.LOCK_SH)
+		if err != nil {
+			w.Header().Set("Retry-After", "2")
+			writeError(w, http.StatusServiceUnavailable, "control-plane mutation fence unavailable, retry")
+			return
+		}
+		defer releaseMutation()
 		if s.isOwner == nil || s.isOwner() {
 			next.ServeHTTP(w, r)
 			return
@@ -870,8 +912,10 @@ func (s *Server) buildRouter() chi.Router {
 
 		r.Get("/api/apps/{slug}/schedules", s.handleListSchedules)
 		r.Post("/api/apps/{slug}/schedules", s.handleCreateSchedule)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/reconcile", s.handleReconcileScheduleConvergence)
 		r.Patch("/api/apps/{slug}/schedules/{id}", s.handlePatchSchedule)
 		r.Delete("/api/apps/{slug}/schedules/{id}", s.handleDeleteSchedule)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/convergence/retry", s.handleRetryScheduleConvergence)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/activation/cancel", s.handleCancelScheduleActivation)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/run", s.handleRunSchedule)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs", s.handleListScheduleRuns)

@@ -44,6 +44,7 @@ func (p *modeRecordingProxy) Deregister(slug string) {
 	p.deregistered = append(p.deregistered, slug)
 	p.mu.Unlock()
 }
+func (p *modeRecordingProxy) DeregisterReplicaIfTarget(string, int, string) bool { return true }
 func (p *modeRecordingProxy) SetPoolSize(slug string, size int) {
 	p.mu.Lock()
 	p.poolSizes[slug] = size

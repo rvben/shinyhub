@@ -2,6 +2,7 @@ package jobs_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +35,9 @@ type fakeRuntime struct {
 	// block, when non-nil, is received by RunOnce before returning.
 	// Set to a non-nil channel to simulate a long-running process.
 	block chan struct{}
+	// entered, when non-nil, is notified immediately after RunOnce acquires
+	// execution. It makes publication-fence tests deterministic without polling.
+	entered chan struct{}
 
 	exitInfo process.ExitInfo
 	err      error
@@ -43,9 +47,14 @@ type fakeRuntime struct {
 	remote bool
 }
 
+type unfencedRuntime struct{ *fakeRuntime }
+
+func (u *unfencedRuntime) InheritsLifetimeFiles() bool { return false }
+
 // HostProvidesAppData reports whether the host provides app data. Remote
 // fakes return false; local fakes return true (default).
-func (f *fakeRuntime) HostProvidesAppData() bool { return !f.remote }
+func (f *fakeRuntime) HostProvidesAppData() bool   { return !f.remote }
+func (f *fakeRuntime) InheritsLifetimeFiles() bool { return true }
 
 func (f *fakeRuntime) RunOnce(ctx context.Context, p process.StartParams, _ io.Writer) (process.ExitInfo, error) {
 	f.mu.Lock()
@@ -55,6 +64,12 @@ func (f *fakeRuntime) RunOnce(ctx context.Context, p process.StartParams, _ io.W
 		f.deadlinesAtEntry = append(f.deadlinesAtEntry, -1)
 	}
 	f.mu.Unlock()
+	if f.entered != nil {
+		select {
+		case f.entered <- struct{}{}:
+		default:
+		}
+	}
 	if f.block != nil {
 		select {
 		case <-f.block:
@@ -96,17 +111,22 @@ func waitForCalls(t *testing.T, rt *fakeRuntime, want int, timeout time.Duration
 type fakeStore struct {
 	mu sync.Mutex
 
-	schedule    *db.Schedule
-	app         *db.App
-	envVars     []db.AppEnvVar
-	mounts      []*db.SharedDataMount
-	deployments []*db.Deployment
+	schedule       *db.Schedule
+	app            *db.App
+	envVars        []db.AppEnvVar
+	mounts         []*db.SharedDataMount
+	deployments    []*db.Deployment
+	pending        bool
+	quarantined    bool
+	repairRequired bool
 
 	runs             map[int64]*db.ScheduleRun
 	nextRunID        int64
 	finishCalls      []db.FinishScheduleRunParams
 	terminalFailures int
 	terminalAttempts int
+	inserted         chan struct{}
+	releaseInsert    <-chan struct{}
 	logPaths         []struct {
 		RunID int64
 		Path  string
@@ -126,8 +146,11 @@ func newFakeStore(sched *db.Schedule, app *db.App) *fakeStore {
 }
 
 func (f *fakeStore) GetSchedule(id int64) (*db.Schedule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.schedule != nil && f.schedule.ID == id {
-		return f.schedule, nil
+		copy := *f.schedule
+		return &copy, nil
 	}
 	return nil, db.ErrNotFound
 }
@@ -140,7 +163,28 @@ func (f *fakeStore) GetAppByID(id int64) (*db.App, error) {
 }
 
 func (f *fakeStore) ListDeployments(appID int64) ([]*db.Deployment, error) {
-	return f.deployments, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*db.Deployment, len(f.deployments))
+	for i, deployment := range f.deployments {
+		copy := *deployment
+		out[i] = &copy
+	}
+	return out, nil
+}
+
+func (f *fakeStore) HasPendingDeployment(appID int64) (bool, error) {
+	return f.pending, nil
+}
+
+func (f *fakeStore) AppCompatibilityQuarantined(appID int64) (bool, error) {
+	return f.quarantined, nil
+}
+func (f *fakeStore) AppCompatibilityQuarantinedExceptRun(appID, runID int64) (bool, error) {
+	return f.quarantined, nil
+}
+func (f *fakeStore) ScheduleProducerRepairRequired(scheduleID int64) (bool, error) {
+	return f.repairRequired, nil
 }
 
 func (f *fakeStore) ListAppEnvVars(appID int64) ([]db.AppEnvVar, error) {
@@ -153,7 +197,6 @@ func (f *fakeStore) ListSharedDataSources(consumerAppID int64) ([]*db.SharedData
 
 func (f *fakeStore) InsertScheduleRun(p db.InsertScheduleRunParams) (int64, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	id := f.nextRunID
 	f.nextRunID++
 	run := &db.ScheduleRun{
@@ -162,11 +205,42 @@ func (f *fakeStore) InsertScheduleRun(p db.InsertScheduleRunParams) (int64, erro
 		Status:            p.Status,
 		Trigger:           p.Trigger,
 		TriggeredByUserID: p.TriggeredByUserID,
+		DeploymentID:      p.DeploymentID,
+		AppVersion:        p.AppVersion,
+		ContentDigest:     p.ContentDigest,
+		PublishesData:     p.PublishesData,
 		StartedAt:         p.StartedAt,
 		LogPath:           p.LogPath,
 	}
 	f.runs[id] = run
+	inserted := f.inserted
+	release := f.releaseInsert
+	f.mu.Unlock()
+	if inserted != nil {
+		select {
+		case inserted <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		<-release
+	}
 	return id, nil
+}
+
+func (f *fakeStore) InsertDeployScheduleRun(p db.InsertScheduleRunParams) (int64, error) {
+	return f.InsertScheduleRun(p)
+}
+
+func (f *fakeStore) GetScheduleRun(id int64) (*db.ScheduleRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	run, ok := f.runs[id]
+	if !ok {
+		return nil, db.ErrNotFound
+	}
+	copy := *run
+	return &copy, nil
 }
 
 func (f *fakeStore) SetScheduleRunLogPath(runID int64, logPath string) error {
@@ -241,6 +315,360 @@ func TestManager_RetriesTerminalPersistenceUntilStoreRecovers(t *testing.T) {
 	t.Fatal("terminal outcome was not persisted after the store recovered")
 }
 
+func TestManager_AppDeleteBetweenRunInsertAndAdmissionDoesNotHang(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	st.inserted = make(chan struct{}, 1)
+	release := make(chan struct{})
+	st.releaseInsert = release
+	m := newTestManager(t, rt, st)
+
+	runResult := make(chan error, 1)
+	go func() {
+		_, err := m.Run(1, "schedule", nil)
+		runResult <- err
+	}()
+	select {
+	case <-st.inserted:
+	case <-time.After(time.Second):
+		t.Fatal("run row was not inserted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := m.BlockAndDrainApp(ctx, st.app.ID); err != nil {
+		t.Fatalf("BlockAndDrainApp: %v", err)
+	}
+	// Model the app/schedule/run FK cascade before InsertScheduleRun returns to
+	// the caller and attempts its now-rejected active admission.
+	st.mu.Lock()
+	delete(st.runs, 1)
+	st.schedule = nil
+	st.app = nil
+	st.mu.Unlock()
+	close(release)
+
+	select {
+	case err := <-runResult:
+		if !errors.Is(err, jobs.ErrManagerStopped) {
+			t.Fatalf("Run error = %v, want ErrManagerStopped", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run hung retrying terminal persistence after cascade deletion")
+	}
+}
+
+func TestManager_OrdinaryAdmissionRejectedDuringDeployment(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	st.pending = true
+	m := newTestManager(t, rt, st)
+
+	if _, err := m.Run(1, "manual", nil); !errors.Is(err, jobs.ErrAppDeploying) {
+		t.Fatalf("Run error=%v, want ErrAppDeploying", err)
+	}
+	st.mu.Lock()
+	runCount := len(st.runs)
+	st.mu.Unlock()
+	if runCount != 0 {
+		t.Fatalf("ordinary admission created %d runs during deployment", runCount)
+	}
+}
+
+func TestManager_CandidateProducerRunsSynchronouslyAgainstPendingBundle(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	schedule := makeSchedule("concurrent", 30)
+	app := makeApp()
+	st := newFakeStore(schedule, app)
+	pending := &db.Deployment{ID: 9, AppID: app.ID, Version: "v2", BundleDir: t.TempDir(), ContentDigest: "sha256:v2", Status: db.DeploymentPending}
+	m := newTestManager(t, rt, st)
+	release := m.AcquireProducerGates([]int64{schedule.ID})
+	runID, err := m.RunCandidateProducerLocked(schedule, app, pending)
+	release()
+	if err != nil {
+		t.Fatalf("RunCandidateProducerLocked: %v", err)
+	}
+	run, err := st.GetScheduleRun(runID)
+	if err != nil || run.Status != "succeeded" || run.DeploymentID == nil || *run.DeploymentID != pending.ID || run.ContentDigest != pending.ContentDigest {
+		t.Fatalf("candidate run=%+v err=%v", run, err)
+	}
+	rt.mu.Lock()
+	calls := rt.calls
+	rt.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("RunOnce calls=%d, want synchronous producer execution", calls)
+	}
+}
+
+func TestManager_ProducerBarrierCannotOvertakeAdmittedOrdinaryRun(t *testing.T) {
+	block := make(chan struct{})
+	rt := &fakeRuntime{block: block, exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	barrierAcquired := make(chan func(), 1)
+	go func() { barrierAcquired <- m.AcquireProducerGates([]int64{1}) }()
+	select {
+	case release := <-barrierAcquired:
+		release()
+		t.Fatal("exclusive producer barrier overtook an admitted ordinary writer")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(block)
+	select {
+	case release := <-barrierAcquired:
+		release()
+	case <-time.After(2 * time.Second):
+		t.Fatal("producer barrier did not acquire after ordinary run completed")
+	}
+}
+
+func TestManager_PublicationGateSerializesProducerAndConsumerBoot(t *testing.T) {
+	t.Run("pre-admitted old writer is superseded after waiting behind new consumer", func(t *testing.T) {
+		rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+		schedule := makeSchedule("concurrent", 30)
+		schedule.OnSuccess = "roll"
+		st := newFakeStore(schedule, makeApp())
+		sharedData := t.TempDir()
+		oldManager, err := jobs.NewManager(
+			process.NewManager(t.TempDir(), rt), nil, process.DefaultTier, st, nil, sharedData, sharedData,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		newManager, err := jobs.NewManager(
+			process.NewManager(t.TempDir(), &fakeRuntime{}), nil, process.DefaultTier, st, nil, sharedData, sharedData,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releaseConsumer, err := newManager.AcquireConsumerBootGate(st.app.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runID, err := oldManager.Run(schedule.ID, "manual", nil)
+		if err != nil {
+			releaseConsumer()
+			t.Fatal(err)
+		}
+		// The run is admitted against deployment 1 but cannot reach RunOnce while
+		// the successor holds the shared consumer fence. Promote deployment 2 in
+		// that window, then let the stale writer reach the definitive EX fence.
+		time.Sleep(50 * time.Millisecond)
+		st.mu.Lock()
+		st.deployments = []*db.Deployment{{
+			ID: 2, AppID: st.app.ID, Version: "v2", BundleDir: "/tmp/fake-bundle-v2", ContentDigest: "sha256:v2",
+		}, st.deployments[0]}
+		st.mu.Unlock()
+		releaseConsumer()
+
+		deadline := time.Now().Add(time.Second)
+		for {
+			run, getErr := st.GetScheduleRun(runID)
+			if getErr == nil && run.Status != "running" {
+				if run.Status != "superseded" {
+					t.Fatalf("stale writer status=%q, want superseded", run.Status)
+				}
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("stale writer did not terminalize")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		rt.mu.Lock()
+		calls := rt.calls
+		rt.mu.Unlock()
+		if calls != 0 {
+			t.Fatalf("stale old-bundle writer executed %d times after new consumer", calls)
+		}
+	})
+
+	t.Run("file fence serializes producer and consumer across managers", func(t *testing.T) {
+		block := make(chan struct{})
+		entered := make(chan struct{}, 1)
+		rt := &fakeRuntime{block: block, entered: entered, exitInfo: process.ExitInfo{Code: 0}}
+		schedule := makeSchedule("concurrent", 30)
+		schedule.OnSuccess = "roll"
+		st := newFakeStore(schedule, makeApp())
+		sharedData := t.TempDir()
+		producerManager, err := jobs.NewManager(
+			process.NewManager(t.TempDir(), rt), nil, process.DefaultTier, st, nil, sharedData, sharedData,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumerManager, err := jobs.NewManager(
+			process.NewManager(t.TempDir(), &fakeRuntime{}), nil, process.DefaultTier, st, nil, sharedData, sharedData,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := producerManager.Run(schedule.ID, "manual", nil); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("cross-manager producer never entered RunOnce")
+		}
+
+		acquired := make(chan func(), 1)
+		gateErr := make(chan error, 1)
+		go func() {
+			release, err := consumerManager.AcquireConsumerBootGate(st.app.ID)
+			if err != nil {
+				gateErr <- err
+				return
+			}
+			acquired <- release
+		}()
+		select {
+		case release := <-acquired:
+			release()
+			t.Fatal("consumer on a second manager crossed the producer publication fence")
+		case err := <-gateErr:
+			t.Fatalf("consumer gate failed: %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+		close(block)
+		select {
+		case release := <-acquired:
+			release()
+		case err := <-gateErr:
+			t.Fatalf("consumer gate failed after producer completion: %v", err)
+		case <-time.After(time.Second):
+			t.Fatal("consumer on a second manager did not acquire after producer completion")
+		}
+	})
+
+	t.Run("producer excludes consumer until terminal state is durable", func(t *testing.T) {
+		block := make(chan struct{})
+		entered := make(chan struct{}, 1)
+		rt := &fakeRuntime{block: block, entered: entered, exitInfo: process.ExitInfo{Code: 0}}
+		schedule := makeSchedule("concurrent", 30)
+		schedule.OnSuccess = "roll" // designated serving-data publisher
+		st := newFakeStore(schedule, makeApp())
+		m := newTestManager(t, rt, st)
+
+		runID, err := m.Run(schedule.ID, "manual", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("producer never entered RunOnce")
+		}
+
+		consumerAcquired := make(chan struct{})
+		consumerRelease := make(chan func(), 1)
+		go func() {
+			release, err := m.AcquireConsumerBootGate(st.app.ID)
+			if err != nil {
+				t.Errorf("acquire consumer gate: %v", err)
+				return
+			}
+			close(consumerAcquired)
+			consumerRelease <- release
+		}()
+		select {
+		case <-consumerAcquired:
+			t.Fatal("consumer boot gate acquired while producer was still running")
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		close(block)
+		select {
+		case <-consumerAcquired:
+		case <-time.After(time.Second):
+			t.Fatal("consumer boot gate did not acquire after producer completion")
+		}
+		run, err := st.GetScheduleRun(runID)
+		if err != nil || run.Status != "succeeded" || run.FinishedAt == nil {
+			t.Fatalf("consumer gate opened before durable terminal state: run=%+v err=%v", run, err)
+		}
+		(<-consumerRelease)()
+	})
+
+	t.Run("consumer excludes producer execution until boot persistence window closes", func(t *testing.T) {
+		block := make(chan struct{})
+		entered := make(chan struct{}, 1)
+		rt := &fakeRuntime{block: block, entered: entered, exitInfo: process.ExitInfo{Code: 0}}
+		schedule := makeSchedule("concurrent", 30)
+		schedule.OnSuccess = "roll"
+		st := newFakeStore(schedule, makeApp())
+		m := newTestManager(t, rt, st)
+
+		releaseConsumer, err := m.AcquireConsumerBootGate(st.app.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runID, err := m.Run(schedule.ID, "manual", nil)
+		if err != nil {
+			releaseConsumer()
+			t.Fatal(err)
+		}
+		select {
+		case <-entered:
+			releaseConsumer()
+			t.Fatal("producer entered RunOnce while consumer boot gate was held")
+		case <-time.After(50 * time.Millisecond):
+		}
+		releaseConsumer()
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("producer did not enter RunOnce after consumer boot gate released")
+		}
+		close(block)
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			run, getErr := st.GetScheduleRun(runID)
+			if getErr == nil && run.Status == "succeeded" {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("producer did not finish after consumer boot gate released")
+	})
+}
+
+func TestManager_OrdinaryRunSnapshotsScheduleInsideProducerFence(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+	release := m.AcquireProducerGates([]int64{1})
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Run(1, "manual", nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("run crossed held producer fence early: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	updated := *st.schedule
+	updated.CommandJSON = `["echo","new-producer"]`
+	st.schedule = &updated
+	st.deployments = []*db.Deployment{{ID: 2, AppID: st.app.ID, Version: "v2", BundleDir: "/tmp/v2", ContentDigest: "sha256:v2"}}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	waitForCalls(t, rt, 1, time.Second)
+	rt.mu.Lock()
+	command := append([]string(nil), rt.lastParams.Command...)
+	rt.mu.Unlock()
+	if len(command) != 2 || command[1] != "new-producer" {
+		t.Fatalf("runtime command=%v, want declaration loaded after deploy fence", command)
+	}
+}
+
 func (f *fakeStore) LogAuditEvent(p db.AuditEventParams) {}
 
 // helpers
@@ -267,7 +695,7 @@ func makeApp() *db.App {
 	}
 }
 
-func newTestManager(t *testing.T, rt *fakeRuntime, st *fakeStore) *jobs.Manager {
+func newTestManager(t *testing.T, rt process.Runtime, st *fakeStore) *jobs.Manager {
 	t.Helper()
 	dir := t.TempDir()
 	pm := process.NewManager(dir, rt)
@@ -276,6 +704,120 @@ func newTestManager(t *testing.T, rt *fakeRuntime, st *fakeStore) *jobs.Manager 
 		t.Fatalf("NewManager: %v", err)
 	}
 	return m
+}
+
+func TestManager_PhysicalBoundaryRejectsUnfencedProducerRuntime(t *testing.T) {
+	base := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	rt := &unfencedRuntime{fakeRuntime: base}
+	schedule := makeSchedule("concurrent", 30)
+	schedule.DeployTrigger = "bundle_change"
+	app := makeApp()
+	st := newFakeStore(schedule, app)
+	pending := &db.Deployment{ID: 9, AppID: app.ID, Version: "v2", BundleDir: t.TempDir(), ContentDigest: "sha256:v2", Status: db.DeploymentPending}
+	m := newTestManager(t, rt, st)
+	release := m.AcquireProducerGates([]int64{schedule.ID})
+	runID, err := m.RunCandidateProducerLocked(schedule, app, pending)
+	release()
+	if err == nil {
+		t.Fatal("unfenced producer runtime was accepted")
+	}
+	run, getErr := st.GetScheduleRun(runID)
+	if getErr != nil || run.Status != "failed" {
+		t.Fatalf("rejected producer run=%+v err=%v", run, getErr)
+	}
+	base.mu.Lock()
+	calls := base.calls
+	base.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("unfenced runtime executed producer %d times", calls)
+	}
+}
+
+func TestManager_ConsumerLifetimeFenceBlocksCandidateExclusion(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+	releaseConsumer, inheritedFile, err := m.AcquireConsumerLifetime(st.app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inheritedFile == nil {
+		t.Fatal("shared consumer lifetime lock did not return an inheritable file")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if releaseExclusive, err := m.AcquireExclusiveConsumerLifetime(ctx, st.app.ID); err == nil {
+		releaseExclusive()
+		t.Fatal("exclusive candidate fence entered while a consumer lifetime was active")
+	}
+	releaseConsumer()
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	releaseExclusive, err := m.AcquireExclusiveConsumerLifetime(ctx2, st.app.ID)
+	if err != nil {
+		t.Fatalf("exclusive candidate fence remained blocked after consumer exit: %v", err)
+	}
+	releaseExclusive()
+}
+
+func TestManager_PhysicalBoundaryRejectsInheritedElasticProducer(t *testing.T) {
+	runtime := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	schedule := makeSchedule("concurrent", 30)
+	schedule.DeployTrigger = "bundle_change"
+	app := makeApp()
+	app.WorkerIsolation = ""
+	store := newFakeStore(schedule, app)
+	pending := &db.Deployment{ID: 9, AppID: app.ID, Version: "v2", BundleDir: t.TempDir(), ContentDigest: "sha256:v2", Status: db.DeploymentPending}
+	manager := newTestManager(t, runtime, store)
+	manager.SetDefaultWorkerIsolation("per_session")
+	release := manager.AcquireProducerGates([]int64{schedule.ID})
+	runID, err := manager.RunCandidateProducerLocked(schedule, app, pending)
+	release()
+	if err == nil {
+		t.Fatal("producer was accepted after inherited isolation became elastic")
+	}
+	run, getErr := store.GetScheduleRun(runID)
+	if getErr != nil || run.Status != "failed" {
+		t.Fatalf("rejected producer run=%+v err=%v", run, getErr)
+	}
+	runtime.mu.Lock()
+	calls := runtime.calls
+	runtime.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("elastic producer executed %d times", calls)
+	}
+}
+
+func TestManager_InterruptAndDrainKeepsRetiringOwnerClosed(t *testing.T) {
+	block := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	rt := &fakeRuntime{block: block, entered: entered, exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("run did not enter runtime")
+	}
+	if err := m.InterruptAndDrain(context.Background()); err != nil {
+		t.Fatalf("interrupt and drain: %v", err)
+	}
+	if _, err := m.Run(1, "manual", nil); !errors.Is(err, jobs.ErrManagerStopped) {
+		t.Fatalf("retiring manager admitted run after drain: %v", err)
+	}
+
+	// Only the next completed owner-startup recovery may reopen admissions.
+	m.ResumeAdmissions()
+	close(block)
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("run after explicit resume: %v", err)
+	}
+	if err := m.InterruptAndDrain(context.Background()); err != nil {
+		t.Fatalf("drain resumed manager: %v", err)
+	}
 }
 
 // TestManager_NormalizesRelativeAppDataDir guards the contract that
@@ -291,7 +833,9 @@ func TestManager_NormalizesRelativeAppDataDir(t *testing.T) {
 	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
 	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
 
-	// Use a relative path that is guaranteed to round-trip through filepath.Abs.
+	// Use a relative path under an isolated working directory so constructor
+	// side effects (the publication lock directory) never touch the source tree.
+	t.Chdir(t.TempDir())
 	relative := "./relative-data-dir"
 	pm := process.NewManager(t.TempDir(), rt)
 	m, err := jobs.NewManager(pm, nil, process.DefaultTier, st, nil, t.TempDir(), relative)
@@ -410,6 +954,133 @@ func TestManager_Run_HappyPath(t *testing.T) {
 	}
 }
 
+func TestManager_ManualRunOfDisabledProducerExecutesForQuarantineRepair(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	schedule := makeSchedule("concurrent", 30)
+	schedule.Enabled = false
+	schedule.OnSuccess = "roll" // a successful manual run repairs shared data
+	st := newFakeStore(schedule, makeApp())
+	st.quarantined = true
+	m := newTestManager(t, rt, st)
+
+	runID, err := m.Run(schedule.ID, "manual", nil)
+	if err != nil {
+		t.Fatalf("Run disabled producer repair: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, getErr := st.GetScheduleRun(runID)
+		if getErr == nil && run.Status == "succeeded" {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	run, _ := st.GetScheduleRun(runID)
+	t.Fatalf("disabled manual producer run=%+v, want succeeded", run)
+}
+
+func TestManager_ManualRunRepairsLegacyWriterWithoutProducerPolicy(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	schedule := makeSchedule("concurrent", 30)
+	schedule.Enabled = false
+	schedule.DeployTrigger = "never"
+	schedule.OnSuccess = "none"
+	st := newFakeStore(schedule, makeApp())
+	st.quarantined = true
+	st.repairRequired = true
+	m := newTestManager(t, rt, st)
+
+	runID, err := m.Run(schedule.ID, "manual", nil)
+	if err != nil {
+		t.Fatalf("Run legacy producer repair: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, getErr := st.GetScheduleRun(runID)
+		if getErr == nil && run.Status == "succeeded" {
+			if !run.PublishesData {
+				t.Fatal("legacy repair run was not admitted as a fenced publisher")
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	run, _ := st.GetScheduleRun(runID)
+	t.Fatalf("legacy manual repair run=%+v, want succeeded publisher", run)
+}
+
+func TestManager_Run_RejectsCompatibilityQuarantineBeforeRecordingRun(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	schedule := makeSchedule("concurrent", 30)
+	schedule.DeployTrigger = "never"
+	st := newFakeStore(schedule, makeApp())
+	st.quarantined = true
+	m := newTestManager(t, rt, st)
+
+	if runID, err := m.Run(1, "manual", nil); !errors.Is(err, jobs.ErrAppCompatibilityQuarantined) || runID != 0 {
+		t.Fatalf("Run() = %d, %v; want zero and compatibility quarantine", runID, err)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.runs) != 0 {
+		t.Fatalf("quarantined schedule recorded runs: %+v", st.runs)
+	}
+}
+
+func TestManager_RequiredConvergenceSerializesWithConcurrentPolicy(t *testing.T) {
+	block := make(chan struct{})
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}, block: block}
+	schedule := makeSchedule("concurrent", 30)
+	store := newFakeStore(schedule, makeApp())
+	store.deployments[0].ContentDigest = "sha256:v1"
+	m := newTestManager(t, rt, store)
+
+	if _, err := m.Run(schedule.ID, "manual", nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rt.mu.Lock()
+		entries := len(rt.deadlinesAtEntry)
+		rt.mu.Unlock()
+		if entries == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	obligation := &db.ScheduleDeployObligation{
+		ID: 9, ScheduleID: schedule.ID, DeploymentID: store.deployments[0].ID,
+		AppVersion: "v1", ContentDigest: "sha256:v1",
+		ProducerFingerprint: "fingerprint", ProducerCommandJSON: schedule.CommandJSON,
+		TimeoutSeconds: 30, OnSuccess: "none", RollFallback: "defer", Status: "dispatching",
+	}
+	if _, err := m.RunDeployObligation(obligation); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	rt.mu.Lock()
+	entriesWhileOrdinaryBlocked := len(rt.deadlinesAtEntry)
+	rt.mu.Unlock()
+	if entriesWhileOrdinaryBlocked != 1 {
+		t.Fatalf("RunOnce entries=%d, want 1: required producer overlapped ordinary concurrent run", entriesWhileOrdinaryBlocked)
+	}
+
+	close(block)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rt.mu.Lock()
+		entries := len(rt.deadlinesAtEntry)
+		rt.mu.Unlock()
+		if entries == 2 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("required convergence run did not execute after ordinary writer completed")
+}
+
 // TestManager_Run_SpawnError_CapturesErrorInLog guards that when the runtime
 // returns an error (e.g. the command binary is not on PATH, so the process
 // never starts), the error text is written to the run log. Otherwise
@@ -490,7 +1161,7 @@ func TestManager_Run_NonZeroExit_StatusFailed(t *testing.T) {
 // TestManager_Stop_InFlightRunMarkedInterrupted verifies that a run cancelled
 // by service shutdown (Stop) is finalised as "interrupted" with a null exit
 // code - distinct from an operator Cancel, which stays "cancelled". The startup
-// reconcile re-fires an interrupted run_on_register first-fire, so a run killed
+// reconcile re-fires an interrupted deploy-triggered run, so a run killed
 // by a restart must be told apart from one an operator deliberately cancelled.
 func TestManager_Stop_InFlightRunMarkedInterrupted(t *testing.T) {
 	rt := &fakeRuntime{block: make(chan struct{})}
@@ -1111,37 +1782,50 @@ func TestManager_Run_UsesLatestDeploymentBundleDir(t *testing.T) {
 	}
 }
 
-// TestManager_Run_FailsWhenNoDeployments verifies Manager records a failed run
-// (rather than panicking or running with an empty Dir) when the app has no
-// deployment rows.
+func TestManager_RunForDeploymentSnapshotsBundleProvenance(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+	target := &db.Deployment{
+		ID: 22, AppID: 10, Version: "v22", BundleDir: "/tmp/bundles/v22", ContentDigest: "sha256:22",
+	}
+	st.deployments = []*db.Deployment{target}
+	runID, err := m.RunForDeployment(1, "deploy", nil, target)
+	if err != nil {
+		t.Fatalf("RunForDeployment: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+	st.mu.Lock()
+	run := st.runs[runID]
+	st.mu.Unlock()
+	if run == nil || run.DeploymentID == nil || *run.DeploymentID != target.ID ||
+		run.AppVersion != target.Version || run.ContentDigest != target.ContentDigest {
+		t.Fatalf("run provenance = %+v, want deployment %+v", run, target)
+	}
+	rt.mu.Lock()
+	dir := rt.lastParams.Dir
+	rt.mu.Unlock()
+	if dir != target.BundleDir {
+		t.Fatalf("runtime dir = %q, want %q", dir, target.BundleDir)
+	}
+}
+
+// TestManager_Run_FailsWhenNoDeployments verifies admission fails before a run
+// row exists when no immutable bundle can be snapshotted.
 func TestManager_Run_FailsWhenNoDeployments(t *testing.T) {
 	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
 	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
 	st.deployments = nil
 	m := newTestManager(t, rt, st)
 
-	if _, err := m.Run(1, "manual", nil); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	// Wait for the run goroutine to call FinishScheduleRun.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		st.mu.Lock()
-		n := len(st.finishCalls)
-		st.mu.Unlock()
-		if n > 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	if _, err := m.Run(1, "manual", nil); err == nil {
+		t.Fatal("Run error = nil, want missing deployment error")
 	}
 
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if len(st.finishCalls) == 0 {
-		t.Fatal("expected FinishScheduleRun call")
-	}
-	if got := st.finishCalls[0].Status; got != "failed" {
-		t.Errorf("expected status 'failed', got %q", got)
+	if len(st.finishCalls) != 0 {
+		t.Fatalf("finish calls = %d, want none before admission", len(st.finishCalls))
 	}
 	if rt.calls != 0 {
 		t.Errorf("expected RunOnce not to be called when no deployments, got %d calls", rt.calls)

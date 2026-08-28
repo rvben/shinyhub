@@ -22,23 +22,48 @@ import (
 )
 
 // ReconcileInflightDeployments fails any deployment still in 'pending' at
-// startup. A pending row means a deploy or rollback was interrupted before
-// the new pool was confirmed; failing it ensures process recovery falls back
-// to the last good deployment instead of adopting a half-applied one. Must
-// run before RecoverProcesses.
-func ReconcileInflightDeployments(store *db.Store) {
+// startup. A pending row normally falls back to the last good deployment. If
+// its producer barrier was entered, however, shared data may already belong to
+// the candidate; the app is durably failed before the row is failed so prior
+// consumers can never be recovered against possibly incompatible data.
+//
+// Any persistence error is returned and startup must retry this function before
+// process recovery or background reconcilers are started.
+func ReconcileInflightDeployments(store *db.Store) error {
 	inflight, err := store.ListInflightDeployments()
 	if err != nil {
-		slog.Error("deploy reconcile: list inflight deployments", "err", err)
-		return
+		return fmt.Errorf("deploy reconcile: list inflight deployments: %w", err)
 	}
 	for _, d := range inflight {
-		if err := store.FailDeployment(d.ID); err != nil {
-			slog.Error("deploy reconcile: fail interrupted deployment", "id", d.ID, "app_id", d.AppID, "err", err)
+		if _, err := store.RestoreDeploymentPriorScheduleSnapshot(d.ID, d.AppID); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				reason := "server interrupted a deployment created before prior schedule snapshots were supported; app left stopped because its declaration provenance is unknown"
+				if qerr := store.QuarantineAndFailDeployment(d.ID, reason); qerr != nil {
+					return fmt.Errorf("deploy reconcile: quarantine legacy deployment %d: %w", d.ID, qerr)
+				}
+				slog.Warn("deploy reconcile: quarantined interrupted legacy deployment with unknown declarations",
+					"id", d.ID, "app_id", d.AppID, "version", d.Version)
+				continue
+			}
+			return fmt.Errorf("deploy reconcile: restore prior declarations for deployment %d: %w", d.ID, err)
+		}
+		if d.ProducerBarrierEntered {
+			if err := store.QuarantineAndFailDeployment(d.ID, "server interrupted after candidate compatibility barrier; app left stopped because shared data may be incompatible with the previous deployment"); err != nil {
+				return fmt.Errorf("deploy reconcile: fail producer-published deployment %d: %w", d.ID, err)
+			}
+			slog.Warn("deploy reconcile: quarantined interrupted producer deployment",
+				"id", d.ID, "app_id", d.AppID, "version", d.Version)
 			continue
+		}
+		if err := store.FailDeployment(d.ID); err != nil {
+			return fmt.Errorf("deploy reconcile: fail interrupted deployment %d: %w", d.ID, err)
 		}
 		slog.Warn("deploy reconcile: failed interrupted deployment", "id", d.ID, "app_id", d.AppID, "version", d.Version)
 	}
+	if err := store.EnforceCompatibilityQuarantines(); err != nil {
+		return fmt.Errorf("deploy reconcile: %w", err)
+	}
+	return nil
 }
 
 // validateNativeProcess confirms a recorded PID is still this app's replica
@@ -212,6 +237,18 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 	}
 
 	for _, app := range apps {
+		quarantined, qerr := store.AppCompatibilityQuarantined(app.ID)
+		if qerr != nil {
+			slog.Error("process recovery: compatibility quarantine unavailable; skipping app", "slug", app.Slug, "err", qerr)
+			continue
+		}
+		if quarantined {
+			if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: "failed"}); err != nil {
+				slog.Error("process recovery: persist compatibility quarantine", "slug", app.Slug, "err", err)
+			}
+			slog.Warn("process recovery: skipped compatibility-quarantined app", "slug", app.Slug)
+			continue
+		}
 		// Elastic-mode apps (grouped or per_session) are demand-driven: workers
 		// are ephemeral and are never persisted to the replicas table. Set up
 		// the elastic proxy pool and keep the app status as "running" so the
@@ -533,10 +570,31 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		markReplicaCrashed(store, app, r.Index, "process not alive", logRunID)
 		return false
 	}
+	if err := validateNativeProcessIdentity(*r.PID, bundleDir); err != nil {
+		slog.Warn("recovery: rejected stale/mismatched process identity; retaining durable identity",
+			"slug", app.Slug, "idx", r.Index, "pid", *r.PID, "err", err)
+		markReplicaCrashed(store, app, r.Index, "stale/mismatched process identity", logRunID)
+		return false
+	}
 	if err := validateNativeProcess(*r.PID, *r.Port, bundleDir); err != nil {
-		slog.Warn("recovery: rejected stale/mismatched process; will restart",
+		// The PID was proved to belong to this bundle, but it has not reached
+		// readiness. Adopt it solely so confirmed stop can terminate its complete
+		// process group before making the slot restartable; otherwise a guarded
+		// pre-health survivor could be laundered by overwriting this row.
+		mgr.Adopt(app.Slug, process.ProcessInfo{
+			Slug: app.Slug, AppID: app.ID, Index: r.Index, PID: *r.PID, Port: *r.Port,
+			Status: process.StatusStarting, Tier: r.Tier, Provider: r.Provider,
+			EndpointURL: r.EndpointURL, WorkerID: r.WorkerID, LogRunID: logRunID,
+		}, process.RunHandle{PID: *r.PID})
+		stopErr := mgr.StopReplicaConfirmed(app.Slug, r.Index)
+		if stopErr == nil {
+			if clearErr := store.ClearReplicaRuntimeIdentity(app.ID, r.Index); clearErr != nil && !errors.Is(clearErr, db.ErrNotFound) {
+				slog.Error("recovery: clear stopped pre-health replica identity", "slug", app.Slug, "idx", r.Index, "err", clearErr)
+			}
+		}
+		slog.Warn("recovery: stopped unready process before allowing restart",
 			"slug", app.Slug, "idx", r.Index, "pid", *r.PID, "port", *r.Port, "err", err)
-		markReplicaCrashed(store, app, r.Index, "stale/mismatched process", logRunID)
+		markReplicaCrashed(store, app, r.Index, "process did not recover ready", logRunID)
 		return false
 	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
@@ -840,6 +898,107 @@ type FargateTaskSweeper interface {
 	WorkerID() string
 }
 
+type fargateTaskTerminationObserver interface {
+	TaskStopped(ctx context.Context, arn string) (bool, error)
+}
+
+type taskInventoryStabilizer interface {
+	TaskInventoryStabilizationWindow() time.Duration
+}
+
+type taskInventoryPoller interface {
+	TaskInventoryPollInterval() time.Duration
+}
+
+type taskSweepScoper interface {
+	TaskSweepScope() string
+}
+
+// FenceOrphanScheduleTasksForTiers stops and then observes the disappearance
+// of every ECS one-shot producer left by an earlier owner. A successful StopTask
+// response is not enough: ECS may keep the task alive during its stop grace, so
+// this loops until inventory proves no producer remains or ctx expires.
+func FenceOrphanScheduleTasksForTiers(ctx context.Context, mgr *process.Manager, tierNames []string) error {
+	if len(tierNames) == 0 {
+		tierNames = []string{""}
+	}
+	seenScopes := make(map[string]struct{})
+	for _, tierName := range tierNames {
+		sweeper, ok := mgr.RuntimeForTier(tierName).(FargateTaskSweeper)
+		if !ok {
+			continue
+		}
+		observer, ok := sweeper.(fargateTaskTerminationObserver)
+		if !ok {
+			return fmt.Errorf("schedule task runtime for tier %q cannot observe physical task termination", tierName)
+		}
+		if scoped, ok := sweeper.(taskSweepScoper); ok {
+			if scope := scoped.TaskSweepScope(); scope != "" {
+				if _, seen := seenScopes[scope]; seen {
+					continue
+				}
+				seenScopes[scope] = struct{}{}
+			}
+		}
+		stableFor := 2 * time.Second
+		if configured, ok := sweeper.(taskInventoryStabilizer); ok {
+			stableFor = configured.TaskInventoryStabilizationWindow()
+		}
+		pollEvery := 500 * time.Millisecond
+		if configured, ok := sweeper.(taskInventoryPoller); ok {
+			pollEvery = configured.TaskInventoryPollInterval()
+		}
+		pendingStops := make(map[string]struct{})
+		var emptySince time.Time
+		for {
+			tasks, err := sweeper.ListManagedTasks(ctx)
+			if err != nil {
+				return fmt.Errorf("list orphan schedule tasks for tier %q: %w", tierName, err)
+			}
+			producers := make([]process.TaskRef, 0)
+			for _, task := range tasks {
+				if task.Labels[process.LabelKind] == process.KindScheduleRun {
+					producers = append(producers, task)
+				}
+			}
+			for _, task := range producers {
+				if _, alreadyStopped := pendingStops[task.ARN]; !alreadyStopped {
+					if err := sweeper.StopTask(ctx, task.ARN); err != nil {
+						return fmt.Errorf("stop orphan schedule task %s for tier %q: %w", task.ARN, tierName, err)
+					}
+					pendingStops[task.ARN] = struct{}{}
+					slog.Info("task publication fence: stopping orphan producer", "arn", task.ARN, "tier", tierName)
+				}
+			}
+			for arn := range pendingStops {
+				stopped, err := observer.TaskStopped(ctx, arn)
+				if err != nil {
+					return fmt.Errorf("observe orphan schedule task %s for tier %q: %w", arn, tierName, err)
+				}
+				if stopped {
+					delete(pendingStops, arn)
+				}
+			}
+			if len(producers) == 0 && len(pendingStops) == 0 {
+				if emptySince.IsZero() {
+					emptySince = time.Now()
+				}
+				if time.Since(emptySince) >= stableFor {
+					break
+				}
+			} else {
+				emptySince = time.Time{}
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("wait for orphan schedule tasks on tier %q: %w", tierName, ctx.Err())
+			case <-time.After(pollEvery):
+			}
+		}
+	}
+	return nil
+}
+
 // SweepOrphanFargateTasks stops ECS tasks not currently owned by any live
 // replica in the Manager. It must run AFTER RecoverProcesses so tasks the
 // Manager re-adopted are protected. A nil sweeper is a no-op.
@@ -892,6 +1051,46 @@ type containerSweepScoper interface {
 	ContainerSweepScope() string
 }
 
+// FenceOrphanScheduleContainersForTiers synchronously removes every local
+// container producer left by a previous control-plane owner. Unlike the later
+// best-effort replica sweep, this is a correctness barrier: callers must not
+// admit consumers when enumeration or removal is uncertain.
+func FenceOrphanScheduleContainersForTiers(mgr *process.Manager, tierNames []string) error {
+	if len(tierNames) == 0 {
+		tierNames = []string{""}
+	}
+	seenScopes := make(map[string]struct{})
+	for _, tierName := range tierNames {
+		sweeper, ok := mgr.RuntimeForTier(tierName).(ContainerSweeper)
+		if !ok {
+			continue
+		}
+		if scoped, ok := sweeper.(containerSweepScoper); ok {
+			if scope := scoped.ContainerSweepScope(); scope != "" {
+				if _, seen := seenScopes[scope]; seen {
+					continue
+				}
+				seenScopes[scope] = struct{}{}
+			}
+		}
+		containers, err := sweeper.ListByLabel(process.ManagedContainerFilterJSON)
+		if err != nil {
+			return fmt.Errorf("list orphan schedule containers for tier %q: %w", tierName, err)
+		}
+		for _, c := range containers {
+			if c.Labels[process.LabelKind] != process.KindScheduleRun {
+				continue
+			}
+			if err := sweeper.RemoveHandle(process.RunHandle{ContainerID: c.ID}); err != nil {
+				return fmt.Errorf("remove orphan schedule container %s for tier %q: %w", c.ID, tierName, err)
+			}
+			slog.Info("container publication fence: removed orphan producer",
+				"container", c.ID, "slug", c.Labels[process.LabelSlug], "tier", tierName)
+		}
+	}
+	return nil
+}
+
 // SweepOrphanContainersForTiers sweeps every registered container-backed tier.
 // It complements durable per-replica recovery; it is not ownership proof.
 func SweepOrphanContainersForTiers(mgr *process.Manager, tierNames []string) {
@@ -918,10 +1117,10 @@ func SweepOrphanContainersForTiers(mgr *process.Manager, tierNames []string) {
 
 // SweepOrphanContainers removes ShinyHub-managed containers that no live
 // replica owns. It must run AFTER RecoverProcesses, so containers the Manager
-// re-adopted are protected; everything else labeled shinyhub.managed (a
-// deleted app, a scaled-down replica index, a container left by a hard crash
-// that recovery rejected) is force-removed so stopped containers do not
-// accumulate across restarts. A nil sweeper (native runtime) is a no-op.
+// re-adopted are protected. One-shot schedule containers are deliberately
+// never adopted: a successor force-removes them here before opening consumer
+// admission, so an orphan producer cannot keep mutating startup data after
+// failover. A nil sweeper (native runtime) is a no-op.
 func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) {
 	if sweeper == nil {
 		return
@@ -935,13 +1134,6 @@ func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) {
 	removed := 0
 	for _, c := range containers {
 		if live[c.ID] {
-			continue
-		}
-		// Only long-running app replicas are swept. One-shot schedule-run
-		// containers (RunOnce) carry shinyhub.managed but no replica_index and
-		// run with AutoRemove; an in-flight scheduled run at startup must not
-		// be killed by the sweep.
-		if _, isReplica := c.Labels[process.LabelReplicaIndex]; !isReplica {
 			continue
 		}
 		if err := sweeper.RemoveHandle(process.RunHandle{ContainerID: c.ID}); err != nil {

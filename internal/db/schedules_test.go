@@ -7,6 +7,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
 func newScheduleStore(t *testing.T) *db.Store {
@@ -229,11 +230,7 @@ func TestScheduleRuns_ExitCodeNullableLifecycle(t *testing.T) {
 	}
 }
 
-// TestLatestRegisterRunID covers the first-fire retry's admission marker:
-// only runs with the 'register' trigger move it, regardless of their status,
-// and it moves monotonically on each admission so a failed-but-admitted
-// dispatch is detected even if retention pruning deletes older rows.
-func TestLatestRegisterRunID(t *testing.T) {
+func TestLatestDeployRunIDIsScopedToBundle(t *testing.T) {
 	store := newScheduleStore(t)
 	appID := newScheduleAppFixture(t, store, "fetch")
 	schedID, err := store.CreateSchedule(db.CreateScheduleParams{
@@ -245,40 +242,46 @@ func TestLatestRegisterRunID(t *testing.T) {
 		t.Fatalf("create schedule: %v", err)
 	}
 
-	if got, err := store.LatestRegisterRunID(schedID); err != nil || got != 0 {
-		t.Fatalf("no runs: LatestRegisterRunID = %d, %v; want 0, nil", got, err)
+	if got, err := store.LatestDeployRunID(schedID, "sha256:new"); err != nil || got != 0 {
+		t.Fatalf("no runs: LatestDeployRunID = %d, %v; want 0, nil", got, err)
 	}
-	if got, err := store.LatestRegisterRunID(schedID + 999); err != nil || got != 0 {
-		t.Fatalf("unknown schedule: LatestRegisterRunID = %d, %v; want 0, nil", got, err)
+	if got, err := store.LatestDeployRunID(schedID+999, "sha256:new"); err != nil || got != 0 {
+		t.Fatalf("unknown schedule: LatestDeployRunID = %d, %v; want 0, nil", got, err)
 	}
 
-	// A cron-triggered run does not move the first-fire admission marker.
+	// A cron run and a deploy run for another bundle do not move this marker.
 	if _, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
 		ScheduleID: schedID, Status: "interrupted", Trigger: "schedule",
 		StartedAt: time.Now().UTC(), LogPath: "x",
 	}); err != nil {
 		t.Fatalf("insert cron run: %v", err)
 	}
-	if got, err := store.LatestRegisterRunID(schedID); err != nil || got != 0 {
-		t.Fatalf("cron run only: LatestRegisterRunID = %d, %v; want 0, nil", got, err)
+	if _, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: schedID, Status: "interrupted", Trigger: "deploy",
+		ContentDigest: "sha256:old", StartedAt: time.Now().UTC(), LogPath: "x",
+	}); err != nil {
+		t.Fatalf("insert old-bundle run: %v", err)
+	}
+	if got, err := store.LatestDeployRunID(schedID, "sha256:new"); err != nil || got != 0 {
+		t.Fatalf("unrelated runs: LatestDeployRunID = %d, %v; want 0, nil", got, err)
 	}
 
-	// Each register run moves the marker forward, whatever its status.
+	// Each deploy run for this digest moves the marker, whatever its status.
 	var prev int64
 	for _, status := range []string{"running", "failed"} {
 		rid, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
-			ScheduleID: schedID, Status: status, Trigger: "register",
-			StartedAt: time.Now().UTC(), LogPath: "x",
+			ScheduleID: schedID, Status: status, Trigger: "deploy",
+			ContentDigest: "sha256:new", StartedAt: time.Now().UTC(), LogPath: "x",
 		})
 		if err != nil {
 			t.Fatalf("insert register run: %v", err)
 		}
-		got, err := store.LatestRegisterRunID(schedID)
+		got, err := store.LatestDeployRunID(schedID, "sha256:new")
 		if err != nil {
-			t.Fatalf("LatestRegisterRunID: %v", err)
+			t.Fatalf("LatestDeployRunID: %v", err)
 		}
 		if got != rid {
-			t.Fatalf("LatestRegisterRunID = %d, want the just-inserted run id %d", got, rid)
+			t.Fatalf("LatestDeployRunID = %d, want the just-inserted run id %d", got, rid)
 		}
 		if got <= prev {
 			t.Fatalf("marker did not move forward: %d after %d", got, prev)
@@ -287,84 +290,83 @@ func TestLatestRegisterRunID(t *testing.T) {
 	}
 }
 
-// TestSchedulesNeedingFirstFireRetry covers the startup-reconcile gate: a
-// run_on_register first-fire (trigger='register') that was interrupted by a
-// service restart and has never succeeded must be re-fired, while a schedule
-// that already succeeded, was operator-cancelled, failed, is disabled, or never
-// had a first-fire must not be.
-func TestSchedulesNeedingFirstFireRetry(t *testing.T) {
+func TestScheduleFreshnessReportsBundleProvenanceAndRollbackReuse(t *testing.T) {
 	store := newScheduleStore(t)
-	appID := newScheduleAppFixture(t, store, "fetch")
-
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	mkSched := func(name string, enabled bool) int64 {
-		id, err := store.CreateSchedule(db.CreateScheduleParams{
-			AppID: appID, Name: name, CronExpr: "0 5 * * *",
-			CommandJSON: `["true"]`, Enabled: enabled, TimeoutSeconds: 60,
-			OverlapPolicy: "skip", MissedPolicy: "skip",
+	appID := newScheduleAppFixture(t, store, "provenance")
+	promote := func(version, digest string) *db.Deployment {
+		t.Helper()
+		dep, err := store.BeginDeployment(appID, version, "/b/"+version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetDeploymentDigest(dep.ID, digest); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.PromoteDeployment(dep.ID); err != nil {
+			t.Fatal(err)
+		}
+		dep.ContentDigest = digest
+		return dep
+	}
+	finish := func(scheduleID int64, dep *db.Deployment) int64 {
+		t.Helper()
+		canonical, fingerprint, err := schedulespec.ProducerIdentity(`["true"]`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+			ScheduleID: scheduleID, Status: "running", Trigger: "deploy",
+			DeploymentID: &dep.ID, AppVersion: dep.Version, ContentDigest: dep.ContentDigest,
+			ProducerFingerprint: fingerprint, ProducerCommandJSON: canonical,
+			StartedAt: time.Now().UTC(), LogPath: "x", PublishesData: true,
 		})
 		if err != nil {
-			t.Fatalf("create schedule %s: %v", name, err)
+			t.Fatal(err)
 		}
-		return id
-	}
-	// run inserts a finished run with a controlled started_at so "most recent
-	// register run" ordering is deterministic.
-	run := func(schedID int64, trigger, status string, offset time.Duration) {
-		rid, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
-			ScheduleID: schedID, Status: status, Trigger: trigger,
-			StartedAt: base.Add(offset), LogPath: "x",
-		})
-		if err != nil {
-			t.Fatalf("insert run: %v", err)
+		zero := 0
+		if _, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+			RunID: runID, Status: "succeeded", ExitCode: &zero, FinishedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
 		}
-		_ = rid
+		return runID
 	}
 
-	// A: interrupted first-fire, never succeeded -> re-fire.
-	a := mkSched("a-needs-retry", true)
-	run(a, "register", "interrupted", time.Minute)
-
-	// B: interrupted first-fire but a later success exists -> do not re-fire.
-	b := mkSched("b-succeeded", true)
-	run(b, "register", "interrupted", time.Minute)
-	run(b, "register", "succeeded", 2*time.Minute)
-
-	// C: latest register run was operator-cancelled -> terminal, do not re-fire.
-	c := mkSched("c-cancelled", true)
-	run(c, "register", "interrupted", time.Minute)
-	run(c, "register", "cancelled", 2*time.Minute)
-
-	// D: first-fire failed (app error) -> self-heals on next deploy, not restart.
-	d := mkSched("d-failed", true)
-	run(d, "register", "failed", time.Minute)
-
-	// E: disabled schedule -> not registered, do not re-fire.
-	e := mkSched("e-disabled", false)
-	run(e, "register", "interrupted", time.Minute)
-
-	// F: only a cron-triggered interrupted run, never a first-fire -> ignore.
-	f := mkSched("f-no-register", true)
-	run(f, "schedule", "interrupted", time.Minute)
-
-	ids, err := store.SchedulesNeedingFirstFireRetry()
+	v1 := promote("v1", "sha256:v1")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "cache", CronExpr: "0 5 * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: "bundle_change",
+	})
 	if err != nil {
-		t.Fatalf("SchedulesNeedingFirstFireRetry: %v", err)
+		t.Fatal(err)
 	}
-	got := map[int64]bool{}
-	for _, id := range ids {
-		got[id] = true
+	finish(scheduleID, v1)
+
+	v2 := promote("v2", "sha256:v2")
+	rows, err := store.ScheduleFreshnessByApp(appID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("freshness = %+v, %v", rows, err)
 	}
-	if !got[a] {
-		t.Errorf("schedule A (interrupted, never succeeded) must be selected for re-fire")
+	fr := rows[0]
+	if fr.DeployTriggerSatisfied || fr.CurrentContentDigest != "sha256:v2" ||
+		fr.ProducerContentDigest != "sha256:v1" || fr.ProducerAppVersion != "v1" {
+		t.Fatalf("new bundle provenance = %+v", fr)
 	}
-	for name, id := range map[string]int64{"B-succeeded": b, "C-cancelled": c, "D-failed": d, "E-disabled": e, "F-no-register": f} {
-		if got[id] {
-			t.Errorf("schedule %s must NOT be selected for re-fire", name)
-		}
+	finish(scheduleID, v2)
+
+	// A rollback creates a new deployment row but restores v1's digest. The
+	// v2 producer remains the authoritative last writer, so historical v1
+	// success must not satisfy the rollback.
+	rollback := promote("v1-rollback", "sha256:v1")
+	rows, err = store.ScheduleFreshnessByApp(appID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rollback freshness = %+v, %v", rows, err)
 	}
-	if len(ids) != 1 {
-		t.Errorf("expected exactly schedule A, got %d ids: %v", len(ids), ids)
+	fr = rows[0]
+	if fr.DeployTriggerSatisfied || fr.CurrentDeploymentID == nil || *fr.CurrentDeploymentID != rollback.ID ||
+		fr.CurrentContentDigest != "sha256:v1" {
+		t.Fatalf("rollback incorrectly reused historical digest success: %+v", fr)
 	}
 }
 
@@ -524,6 +526,29 @@ func TestUpsertScheduleByName_InsertsWhenAbsent(t *testing.T) {
 		!sc.Enabled || sc.TimeoutSeconds != 600 ||
 		sc.OverlapPolicy != "skip" || sc.MissedPolicy != "skip" {
 		t.Errorf("inserted row mismatch: %+v", sc)
+	}
+}
+
+func TestUpsertSchedulesByName_RollsBackWholeManifestBatch(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "batch-app")
+	base := db.UpsertScheduleByNameParams{
+		AppID: appID, Name: "first", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 30, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: "never", OnSuccess: "none", RollFallback: "defer",
+	}
+	invalid := base
+	invalid.AppID = appID + 999999
+	invalid.Name = "second"
+	if _, err := store.UpsertSchedulesByName([]db.UpsertScheduleByNameParams{base, invalid}); err == nil {
+		t.Fatal("batch unexpectedly succeeded")
+	}
+	rows, err := store.ListSchedulesByApp(appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("partial manifest schedule batch became visible: %+v", rows)
 	}
 }
 
@@ -803,5 +828,93 @@ func TestSchedules_Timezone_UpdateSchedule_SetTimezoneFalse_LeavesUnchanged(t *t
 	}
 	if got.Timezone == nil || *got.Timezone != "Europe/Amsterdam" {
 		t.Errorf("Timezone should be unchanged: got %v, want Europe/Amsterdam", got.Timezone)
+	}
+}
+
+func TestDeploymentScheduleSnapshot_RestoresExactHistoricalDeclarations(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "schedule-snapshot")
+	tz := "Europe/Amsterdam"
+	oldID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "refresh", CronExpr: "0 5 * * *",
+		CommandJSON: `["python","old.py"]`, Enabled: true, TimeoutSeconds: 91,
+		OverlapPolicy: "queue_one", MissedPolicy: "catch_up_once", Timezone: &tz,
+		DeployTrigger: schedulespec.DeployTriggerBundleChange, OnSuccess: "roll",
+		MinRollIntervalSeconds: 17, RollFallback: "defer", MaxDeferAgeSeconds: 43,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1, err := store.BeginDeployment(appID, "v1", "/b/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordDeploymentScheduleSnapshot(v1.ID, appID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(v1.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	newCommand := `["python","new.py"]`
+	newCron := "30 6 * * *"
+	disabled := false
+	if err := store.UpdateSchedule(oldID, db.UpdateScheduleParams{
+		CommandJSON: &newCommand, CronExpr: &newCron, Enabled: &disabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "v2-only", CronExpr: "0 1 * * *", CommandJSON: `["new"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: schedulespec.DeployTriggerBundleChange,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := store.RestoreDeploymentScheduleSnapshot(v1.ID, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]*db.Schedule, len(restored))
+	for _, schedule := range restored {
+		byName[schedule.Name] = schedule
+	}
+	got := byName["refresh"]
+	if got == nil || got.ID != oldID || got.CommandJSON != `["python","old.py"]` ||
+		got.CronExpr != "0 5 * * *" || !got.Enabled || got.TimeoutSeconds != 91 ||
+		got.OverlapPolicy != "queue_one" || got.MissedPolicy != "catch_up_once" ||
+		got.Timezone == nil || *got.Timezone != tz ||
+		got.DeployTrigger != schedulespec.DeployTriggerBundleChange || got.OnSuccess != "roll" ||
+		got.MinRollIntervalSeconds != 17 || got.RollFallback != "defer" || got.MaxDeferAgeSeconds != 43 {
+		t.Fatalf("restored historical declaration=%+v", got)
+	}
+	extra := byName["v2-only"]
+	if extra == nil || extra.Enabled || extra.DeployTrigger != schedulespec.DeployTriggerNever {
+		t.Fatalf("extra current declaration must be retained inert, got %+v", extra)
+	}
+}
+
+func TestDeploymentScheduleSnapshot_RecordedEmptySetIsDistinctFromLegacyMissingSnapshot(t *testing.T) {
+	store := newScheduleStore(t)
+	appID := newScheduleAppFixture(t, store, "empty-snapshot")
+	v1, err := store.BeginDeployment(appID, "v1", "/b/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordDeploymentScheduleSnapshot(v1.ID, appID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.DeploymentScheduleSnapshot(v1.ID); err != nil || len(got) != 0 {
+		t.Fatalf("recorded empty snapshot=%+v err=%v", got, err)
+	}
+	legacy, err := store.CreateDeployment(db.CreateDeploymentParams{
+		AppID: appID, Version: "legacy", BundleDir: "/b/legacy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DeploymentScheduleSnapshot(legacy.ID); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("legacy snapshot error=%v, want ErrNotFound", err)
 	}
 }

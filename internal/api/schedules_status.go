@@ -10,26 +10,42 @@ import (
 
 // scheduleStatusItem is one row of GET /api/fleet/schedules/status.
 type scheduleStatusItem struct {
-	Slug                 string  `json:"slug"`
-	Schedule             string  `json:"schedule"`
-	Enabled              bool    `json:"enabled"`
-	LastRunID            *int64  `json:"last_run_id"`        // null if never run
-	LastRunAt            *string `json:"last_run_at"`        // RFC3339, null if never run
-	LastRunStatus        string  `json:"last_run_status"`    // "" if never run
-	LastSuccessAt        *string `json:"last_success_at"`    // RFC3339, null if never succeeded
-	LastSuccessAgeS      *int64  `json:"last_success_age_s"` // null if never succeeded
-	Stale                *bool   `json:"stale"`
-	Refreshing           bool    `json:"refreshing"`
-	ActiveRunID          *int64  `json:"active_run_id"`
-	FreshnessError       string  `json:"freshness_error"`
-	ActivationStatus     string  `json:"activation_status"`
-	ActivationPhase      string  `json:"activation_phase,omitempty"`
-	ActivationAgeS       *int64  `json:"activation_age_s,omitempty"`
-	ActivationDueAt      *string `json:"activation_due_at,omitempty"`
-	ActivationGeneration *int64  `json:"activation_target_generation,omitempty"`
-	ActivationError      string  `json:"activation_error,omitempty"`
-	ActivationAttention  bool    `json:"activation_attention"`
-	ServingFreshness     string  `json:"serving_freshness"`
+	Slug                    string  `json:"slug"`
+	Schedule                string  `json:"schedule"`
+	Enabled                 bool    `json:"enabled"`
+	LastRunID               *int64  `json:"last_run_id"`        // null if never run
+	LastRunAt               *string `json:"last_run_at"`        // RFC3339, null if never run
+	LastRunStatus           string  `json:"last_run_status"`    // "" if never run
+	LastSuccessAt           *string `json:"last_success_at"`    // RFC3339, null if never succeeded
+	LastSuccessAgeS         *int64  `json:"last_success_age_s"` // null if never succeeded
+	Stale                   *bool   `json:"stale"`
+	Refreshing              bool    `json:"refreshing"`
+	ActiveRunID             *int64  `json:"active_run_id"`
+	ActiveRunContentDigest  string  `json:"active_run_content_digest"`
+	DeployTrigger           string  `json:"deploy_trigger"`
+	DeployTriggerSatisfied  bool    `json:"deploy_trigger_satisfied"`
+	ProducerRepairRequired  bool    `json:"producer_repair_required"`
+	ProducerFingerprint     string  `json:"producer_fingerprint"`
+	ProducerPublishedAt     *string `json:"producer_published_at"`
+	ConvergenceObligationID *int64  `json:"convergence_obligation_id"`
+	ConvergenceStatus       string  `json:"convergence_status"`
+	ConvergenceRunID        *int64  `json:"convergence_run_id"`
+	ConvergenceError        string  `json:"convergence_error"`
+	CurrentDeploymentID     *int64  `json:"current_deployment_id"`
+	CurrentAppVersion       string  `json:"current_app_version"`
+	CurrentContentDigest    string  `json:"current_content_digest"`
+	ProducerDeploymentID    *int64  `json:"producer_deployment_id"`
+	ProducerAppVersion      string  `json:"producer_app_version"`
+	ProducerContentDigest   string  `json:"producer_content_digest"`
+	FreshnessError          string  `json:"freshness_error"`
+	ActivationStatus        string  `json:"activation_status"`
+	ActivationPhase         string  `json:"activation_phase,omitempty"`
+	ActivationAgeS          *int64  `json:"activation_age_s,omitempty"`
+	ActivationDueAt         *string `json:"activation_due_at,omitempty"`
+	ActivationGeneration    *int64  `json:"activation_target_generation,omitempty"`
+	ActivationError         string  `json:"activation_error,omitempty"`
+	ActivationAttention     bool    `json:"activation_attention"`
+	ServingFreshness        string  `json:"serving_freshness"`
 }
 
 func activationServingState(status string) (string, bool) {
@@ -106,17 +122,36 @@ func (s *Server) handleFleetScheduleStatus(w http.ResponseWriter, r *http.Reques
 		}
 		stale, staleErr := scheduleStale(fr, def, now)
 		item := scheduleStatusItem{
-			Slug:                 fr.Slug,
-			Schedule:             fr.Name,
-			Enabled:              fr.Enabled,
-			LastRunID:            fr.LastRunID,
-			LastRunStatus:        fr.LastRunStatus,
-			Refreshing:           schedulespec.IsRefreshing(scheduleFreshnessPolicy(fr), now),
-			ActiveRunID:          fr.ActiveRunID,
-			ActivationStatus:     fr.ActivationStatus,
-			ActivationPhase:      fr.ActivationPhase,
-			ActivationGeneration: fr.ActivationGeneration,
-			ActivationError:      fr.ActivationError,
+			Slug:                    fr.Slug,
+			Schedule:                fr.Name,
+			Enabled:                 fr.Enabled,
+			LastRunID:               fr.LastRunID,
+			LastRunStatus:           fr.LastRunStatus,
+			Refreshing:              schedulespec.IsRefreshing(scheduleFreshnessPolicy(fr), now),
+			ActiveRunID:             fr.ActiveRunID,
+			ActiveRunContentDigest:  fr.ActiveRunContentDigest,
+			DeployTrigger:           fr.DeployTrigger,
+			DeployTriggerSatisfied:  fr.DeployTriggerSatisfied,
+			ProducerRepairRequired:  fr.ProducerRepairRequired,
+			ProducerFingerprint:     fr.ProducerFingerprint,
+			ConvergenceObligationID: fr.ConvergenceObligationID,
+			ConvergenceStatus:       fr.ConvergenceStatus,
+			ConvergenceRunID:        fr.ConvergenceRunID,
+			ConvergenceError:        fr.ConvergenceError,
+			CurrentDeploymentID:     fr.CurrentDeploymentID,
+			CurrentAppVersion:       fr.CurrentAppVersion,
+			CurrentContentDigest:    fr.CurrentContentDigest,
+			ProducerDeploymentID:    fr.ProducerDeploymentID,
+			ProducerAppVersion:      fr.ProducerAppVersion,
+			ProducerContentDigest:   fr.ProducerContentDigest,
+			ActivationStatus:        fr.ActivationStatus,
+			ActivationPhase:         fr.ActivationPhase,
+			ActivationGeneration:    fr.ActivationGeneration,
+			ActivationError:         fr.ActivationError,
+		}
+		if fr.ProducerPublishedAt != nil {
+			v := fr.ProducerPublishedAt.UTC().Format(time.RFC3339)
+			item.ProducerPublishedAt = &v
 		}
 		item.ServingFreshness, item.ActivationAttention = activationServingState(fr.ActivationStatus)
 		if fr.ActivationCreatedAt != nil {

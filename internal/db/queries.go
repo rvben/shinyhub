@@ -1076,6 +1076,36 @@ func (a App) PlacementMap() map[string]int {
 	return m
 }
 
+func (s *Store) MarkElasticOrphanRisk(appID int64) error {
+	res, err := s.db.Exec(`UPDATE apps SET elastic_orphan_risk = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, appID)
+	if err != nil {
+		return fmt.Errorf("mark elastic orphan risk: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ClearElasticOrphanRisk(appID int64) error {
+	_, err := s.db.Exec(`UPDATE apps SET elastic_orphan_risk = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, appID)
+	if err != nil {
+		return fmt.Errorf("clear elastic orphan risk: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) AppElasticOrphanRisk(appID int64) (bool, error) {
+	var risk int
+	if err := s.db.QueryRow(`SELECT elastic_orphan_risk FROM apps WHERE id = ?`, appID).Scan(&risk); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, ErrNotFound
+		}
+		return false, err
+	}
+	return risk != 0, nil
+}
+
 // MissStatus returns the lifecycle status the proxy should use when a request
 // arrives for this app and no live backend exists, plus the crash reason when
 // applicable. A pending deployment row means a deploy or rollback is in
@@ -1729,6 +1759,10 @@ type Deployment struct {
 	// for them at all, so callers must treat false as "unknown" rather than
 	// "definitely unprepared".
 	Prepared bool
+	// ProducerBarrierEntered is a durable fail-closed recovery fence. Once true,
+	// a candidate producer may have replaced shared data even if this deployment
+	// never reaches promotion; startup must not restore prior consumers.
+	ProducerBarrierEntered bool
 }
 
 // Deployment status lifecycle. A deploy records DeploymentPending before any
@@ -1831,8 +1865,8 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	var id int64
 	err = s.db.QueryRow(
 		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, development_session_id, origin_user_id, origin_actor,
-			 origin_credential_id, origin_credential_type, origin_credential_name)
-		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?) RETURNING id`,
+			 origin_credential_id, origin_credential_type, origin_credential_name, prior_schedule_snapshot_recorded)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, 1) RETURNING id`,
 		p.AppID, p.Version, p.BundleDir, status, p.RunID, p.RestoredFromID,
 		origin.Kind, origin.Channel, origin.DevelopmentSessionID, origin.UserID, origin.Actor,
 		origin.CredentialID, origin.CredentialType, origin.CredentialName,
@@ -1878,11 +1912,16 @@ func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin deployment: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
 	var id int64
-	err = s.db.QueryRow(
+	err = tx.QueryRow(
 		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, development_session_id, origin_user_id, origin_actor,
-			 origin_credential_id, origin_credential_type, origin_credential_name)
-		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?) RETURNING id`,
+			 origin_credential_id, origin_credential_type, origin_credential_name, prior_schedule_snapshot_recorded)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, 1) RETURNING id`,
 		appID, version, bundleDir, DeploymentPending, runID, restoredFromID,
 		origin.Kind, origin.Channel, origin.DevelopmentSessionID, origin.UserID, origin.Actor,
 		origin.CredentialID, origin.CredentialType, origin.CredentialName,
@@ -1890,26 +1929,71 @@ func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
 	}
+	if _, err := tx.Exec(`
+		INSERT INTO deployment_prior_schedule_snapshots
+			(deployment_id, name, cron_expr, command_json, enabled, timeout_seconds,
+			 overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
+			 min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
+		SELECT ?, name, cron_expr, command_json, enabled, timeout_seconds,
+		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
+		       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds
+		FROM app_schedules WHERE app_id = ?`, id, appID); err != nil {
+		return nil, fmt.Errorf("begin deployment: snapshot prior schedule declarations: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("begin deployment: commit: %w", err)
+	}
 	return &Deployment{ID: id, AppID: appID, Version: version, BundleDir: bundleDir, Status: DeploymentPending, Origin: origin}, nil
 }
 
-// PromoteDeployment marks a pending deployment as the live one. It only acts
-// on a row still in 'pending' so a late call cannot resurrect a deployment
-// that startup reconciliation already failed.
+// PromoteDeployment atomically marks a pending deployment live and terminalizes
+// every older pending attempt for the same app. It is idempotent for an already
+// succeeded target so a caller can safely recover an ambiguous commit result.
 func (s *Store) PromoteDeployment(id int64) error {
-	res, err := s.db.Exec(
-		`UPDATE deployments SET status = ? WHERE id = ? AND status = ?`,
-		DeploymentSucceeded, id, DeploymentPending)
+	tx, err := s.db.Begin()
 	if err != nil {
-		return fmt.Errorf("promote deployment %d: %w", id, err)
+		return fmt.Errorf("promote deployment %d: begin: %w", id, err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("promote deployment %d: rows affected: %w", id, err)
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	var appID int64
+	var status string
+	if err := tx.QueryRow(`SELECT app_id, status FROM deployments WHERE id = ?`, id).Scan(&appID, &status); err != nil {
+		return fmt.Errorf("promote deployment %d: load target: %w", id, err)
 	}
-	if n == 0 {
+	if status != DeploymentPending && status != DeploymentSucceeded {
 		return fmt.Errorf("promote deployment %d: not pending", id)
 	}
+	if status == DeploymentPending {
+		res, err := tx.Exec(
+			`UPDATE deployments SET status = ? WHERE id = ? AND status = ?`,
+			DeploymentSucceeded, id, DeploymentPending)
+		if err != nil {
+			return fmt.Errorf("promote deployment %d: %w", id, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("promote deployment %d: rows affected: %w", id, err)
+		}
+		if n == 0 {
+			return fmt.Errorf("promote deployment %d: lost pending transition", id)
+		}
+	}
+	if _, err := tx.Exec(`
+		UPDATE deployments
+		SET status = ?, failure_reason = CASE WHEN failure_reason = '' THEN ? ELSE failure_reason END
+		WHERE app_id = ? AND id < ? AND status = ?`,
+		DeploymentFailed, fmt.Sprintf("superseded by successful deployment %d", id), appID, id, DeploymentPending); err != nil {
+		return fmt.Errorf("promote deployment %d: terminalize older attempts: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("promote deployment %d: commit: %w", id, err)
+	}
+	committed = true
 	return nil
 }
 
@@ -1925,6 +2009,184 @@ func (s *Store) PromoteDeployment(id int64) error {
 func (s *Store) MarkDeploymentPrepared(id int64) error {
 	if _, err := s.db.Exec(`UPDATE deployments SET prepared = 1 WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("mark deployment %d prepared: %w", id, err)
+	}
+	return nil
+}
+
+// MarkDeploymentProducerBarrierEntered durably records the point after which a
+// failed or interrupted deployment cannot safely restore its previous consumer.
+// It must commit before the first candidate producer process is admitted.
+func (s *Store) MarkDeploymentProducerBarrierEntered(id int64) error {
+	res, err := s.db.Exec(`
+		UPDATE deployments SET producer_barrier_entered = 1
+		WHERE id = ? AND status = ?`, id, DeploymentPending)
+	if err != nil {
+		return fmt.Errorf("mark deployment %d producer barrier entered: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark deployment %d producer barrier entered rows affected: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("mark deployment %d producer barrier entered: not pending", id)
+	}
+	return nil
+}
+
+// AppCompatibilityQuarantined reports whether code/data compatibility is no
+// longer provable. Besides deployment barriers, it treats a data-publishing
+// run that is still running or has an unrepaired failed physical write as
+// uncertain. Repair is tracked per schedule, so a success from producer B
+// cannot accidentally clear producer A's partial-write risk.
+func (s *Store) AppCompatibilityQuarantined(appID int64) (bool, error) {
+	return s.appCompatibilityQuarantinedExceptRun(appID, 0)
+}
+
+// AppDeploymentCompatibilityQuarantined isolates a failed/pending producer
+// barrier that no later successful deployment has repaired. A corrective
+// deployment must explicitly republish from its target bundle before it may
+// become the success that clears this predicate.
+func (s *Store) AppDeploymentCompatibilityQuarantined(appID int64) (bool, error) {
+	var quarantined int
+	err := s.db.QueryRow(`
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM deployments failed
+			WHERE failed.app_id = ? AND failed.status IN ('pending', 'failed')
+			  AND (failed.producer_barrier_entered = 1 OR failed.prior_schedule_snapshot_recorded = 0)
+			  AND failed.id > COALESCE((
+				SELECT MAX(ok.id) FROM deployments ok
+				WHERE ok.app_id = failed.app_id AND ok.status = 'succeeded'
+			  ), 0)
+		) THEN 1 ELSE 0 END`, appID).Scan(&quarantined)
+	if err != nil {
+		return false, fmt.Errorf("check app %d deployment compatibility quarantine: %w", appID, err)
+	}
+	return quarantined != 0, nil
+}
+
+// AppCompatibilityQuarantinedExceptRun is the physical-writer admission check.
+// The current run is already represented by a running publishes_data row, so
+// it must be excluded from its own validation while every other uncertain
+// writer remains a blocker.
+func (s *Store) AppCompatibilityQuarantinedExceptRun(appID, runID int64) (bool, error) {
+	return s.appCompatibilityQuarantinedExceptRun(appID, runID)
+}
+
+// AppDataCompatibilityQuarantined isolates schedule-writer uncertainty from a
+// pending deployment's own producer barrier. Deployment convergence uses this
+// under the consumer publication fence: current candidate barriers are
+// expected, but no running or unrepaired schedule writer may remain.
+func (s *Store) AppDataCompatibilityQuarantined(appID int64) (bool, error) {
+	var quarantined int
+	err := s.db.QueryRow(`
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM schedule_runs r
+			JOIN app_schedules sc ON sc.id = r.schedule_id
+			WHERE sc.app_id = ? AND r.publishes_data = 1
+			  AND r.status = 'running'
+		) OR EXISTS (
+			SELECT 1 FROM schedule_data_uncertainty uncertainty
+			JOIN app_schedules sc ON sc.id = uncertainty.schedule_id
+			WHERE sc.app_id = ?
+		) THEN 1 ELSE 0 END`, appID, appID).Scan(&quarantined)
+	if err != nil {
+		return false, fmt.Errorf("check app %d data compatibility quarantine: %w", appID, err)
+	}
+	return quarantined != 0, nil
+}
+
+func (s *Store) appCompatibilityQuarantinedExceptRun(appID, runID int64) (bool, error) {
+	var quarantined int
+	err := s.db.QueryRow(`
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM deployments failed
+			WHERE failed.app_id = ? AND failed.status IN ('pending', 'failed')
+			  AND (failed.producer_barrier_entered = 1 OR failed.prior_schedule_snapshot_recorded = 0)
+			  AND failed.id > COALESCE((
+				SELECT MAX(ok.id) FROM deployments ok
+				WHERE ok.app_id = failed.app_id AND ok.status = 'succeeded'
+			  ), 0)
+		) OR EXISTS (
+			SELECT 1 FROM schedule_runs r
+			JOIN app_schedules sc ON sc.id = r.schedule_id
+			WHERE sc.app_id = ? AND r.publishes_data = 1 AND r.id <> ?
+			  AND r.status = 'running'
+		) OR EXISTS (
+			SELECT 1 FROM schedule_data_uncertainty uncertainty
+			JOIN app_schedules sc ON sc.id = uncertainty.schedule_id
+			WHERE sc.app_id = ?
+		) THEN 1 ELSE 0 END`, appID, appID, runID, appID).Scan(&quarantined)
+	if err != nil {
+		return false, fmt.Errorf("check app %d compatibility quarantine: %w", appID, err)
+	}
+	return quarantined != 0, nil
+}
+
+// AppDataPublication is the authoritative last successful serving-data writer
+// for an app. Generation is allocated atomically with this row and is therefore
+// the exact compatibility token consumers and deferred activations must match.
+type AppDataPublication struct {
+	AppID                 int64
+	Generation            int64
+	ScheduleRunID         int64
+	ProducerDeploymentID  *int64
+	ProducerAppVersion    string
+	ProducerContentDigest string
+	ProducerFingerprint   string
+	DataWriteSequence     int64
+	PublishedAt           time.Time
+}
+
+func (s *Store) GetAppDataPublication(appID int64) (*AppDataPublication, error) {
+	var p AppDataPublication
+	var deploymentID sql.NullInt64
+	err := s.db.QueryRow(`
+		SELECT app_id, generation, schedule_run_id, producer_deployment_id,
+		       producer_app_version, producer_content_digest, producer_fingerprint,
+		       data_write_sequence, published_at
+		FROM app_data_publication WHERE app_id = ?`, appID).Scan(
+		&p.AppID, &p.Generation, &p.ScheduleRunID, &deploymentID,
+		&p.ProducerAppVersion, &p.ProducerContentDigest, &p.ProducerFingerprint,
+		&p.DataWriteSequence, &p.PublishedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get app %d data publication: %w", appID, err)
+	}
+	if deploymentID.Valid {
+		v := deploymentID.Int64
+		p.ProducerDeploymentID = &v
+	}
+	return &p, nil
+}
+
+// EnforceCompatibilityQuarantines repairs app soft status from every durable
+// compatibility fence. Startup runs it before process or scheduler recovery.
+func (s *Store) EnforceCompatibilityQuarantines() error {
+	_, err := s.db.Exec(`
+		UPDATE apps SET status = 'failed', last_error = '', crashed_at = 0, updated_at = CURRENT_TIMESTAMP
+		WHERE apps.status <> 'stopped' AND (EXISTS (
+			SELECT 1 FROM deployments failed
+			WHERE failed.app_id = apps.id AND failed.status IN ('pending', 'failed')
+			  AND (failed.producer_barrier_entered = 1 OR failed.prior_schedule_snapshot_recorded = 0)
+			  AND failed.id > COALESCE((
+				SELECT MAX(ok.id) FROM deployments ok
+				WHERE ok.app_id = apps.id AND ok.status = 'succeeded'
+			  ), 0)
+		) OR EXISTS (
+			SELECT 1 FROM schedule_runs r
+			JOIN app_schedules sc ON sc.id = r.schedule_id
+			WHERE sc.app_id = apps.id AND r.publishes_data = 1
+			  AND r.status = 'running'
+		) OR EXISTS (
+			SELECT 1 FROM schedule_data_uncertainty uncertainty
+			JOIN app_schedules sc ON sc.id = uncertainty.schedule_id
+			WHERE sc.app_id = apps.id
+		))`)
+	if err != nil {
+		return fmt.Errorf("enforce compatibility quarantines: %w", err)
 	}
 	return nil
 }
@@ -1950,6 +2212,51 @@ func (s *Store) FailDeploymentWithReason(id int64, reason string) error {
 	return nil
 }
 
+// QuarantineAndFailDeployment atomically makes an interrupted compatibility
+// boundary non-runnable and terminalizes its pending deployment. The ordering
+// cannot be split: a crash after failing the row but before failing the app
+// would otherwise let startup recover the previous consumer.
+func (s *Store) QuarantineAndFailDeployment(id int64, reason string) error {
+	return s.QuarantineAndFailDeploymentWithAppStatus(id, reason, "failed")
+}
+
+// QuarantineAndFailDeploymentWithAppStatus preserves an operator-stopped app
+// while atomically terminalizing the failed compatibility boundary. The failed
+// deployment/barrier remains the durable quarantine; lifecycle status controls
+// whether the UI says failed or deliberately stopped.
+func (s *Store) QuarantineAndFailDeploymentWithAppStatus(id int64, reason, appStatus string) error {
+	if appStatus != "failed" && appStatus != "stopped" {
+		return fmt.Errorf("quarantine deployment %d: invalid app status %q", id, appStatus)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("quarantine deployment %d: begin: %w", id, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	res, err := tx.Exec(`
+		UPDATE apps SET status = ?, last_error = '', crashed_at = 0, updated_at = CURRENT_TIMESTAMP
+		WHERE id = (SELECT app_id FROM deployments
+		            WHERE id = ? AND status = ? AND
+		                  (producer_barrier_entered = 1 OR prior_schedule_snapshot_recorded = 0))`, appStatus, id, DeploymentPending)
+	if err != nil {
+		return fmt.Errorf("quarantine deployment %d app: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		if err != nil {
+			return fmt.Errorf("quarantine deployment %d app rows affected: %w", id, err)
+		}
+		return fmt.Errorf("quarantine deployment %d: marked pending compatibility boundary not found", id)
+	}
+	if _, err := tx.Exec(`UPDATE deployments SET status = ?, failure_reason = ?
+		WHERE id = ? AND status = ?`, DeploymentFailed, reason, id, DeploymentPending); err != nil {
+		return fmt.Errorf("quarantine deployment %d row: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("quarantine deployment %d: commit: %w", id, err)
+	}
+	return nil
+}
+
 // SetDeploymentDigest records the content digest on a deployment row. Called
 // after BeginDeployment and before PromoteDeployment so the digest travels
 // with the pending row and only becomes authoritative on promotion.
@@ -1971,7 +2278,8 @@ func (s *Store) SetDeploymentDigest(id int64, digest string) error {
 // good deployment.
 func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 	rows, err := s.db.Query(
-		`SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared
+		`SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared,
+		        producer_barrier_entered
 		FROM deployments WHERE status = ? ORDER BY id`, DeploymentPending)
 	if err != nil {
 		return nil, fmt.Errorf("list inflight deployments: %w", err)
@@ -1985,10 +2293,12 @@ func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 		// works on sqlite and postgres alike; database/sql will not scan an
 		// integer column straight into a bool.
 		var preparedInt int
-		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt, &preparedInt); err != nil {
+		var producerBarrierEntered int
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt, &preparedInt, &producerBarrierEntered); err != nil {
 			return nil, err
 		}
 		d.Prepared = preparedInt != 0
+		d.ProducerBarrierEntered = producerBarrierEntered != 0
 		d.ContentDigest = digest.String
 		ds = append(ds, &d)
 	}
@@ -2277,6 +2587,16 @@ func (s *Store) HasAnyDeployment(appID int64) (bool, error) {
 		return false, err
 	}
 	return exists, nil
+}
+
+// HasPendingDeployment reports whether an app mutation has staged a candidate
+// bundle that is not yet safe to expose to ordinary schedule admissions.
+func (s *Store) HasPendingDeployment(appID int64) (bool, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM deployments WHERE app_id = ? AND status = 'pending'`, appID).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // GetDeploymentBySlugAndID fetches a single deployment by its ID, verified
@@ -3419,6 +3739,13 @@ type Replica struct {
 	LastExit       *ReplicaExit `json:"last_exit,omitempty"`
 	DataGeneration int64        `json:"data_generation"`
 	ActivationID   *int64       `json:"activation_id,omitempty"`
+	// DataProducer* is presentation provenance resolved from ActivationID. It
+	// sits beside DataGeneration so clients can identify which immutable
+	// producer created the data a replica loaded without cross-command joins.
+	DataProducerDeploymentID  *int64 `json:"data_producer_deployment_id,omitempty"`
+	DataProducerAppVersion    string `json:"data_producer_app_version,omitempty"`
+	DataProducerContentDigest string `json:"data_producer_content_digest,omitempty"`
+	DataProducerFingerprint   string `json:"data_producer_fingerprint,omitempty"`
 	// StartupPeakRSSBytes is the high-water RSS observed from runtime start
 	// through readiness for this slot's latest successfully persisted cold boot.
 	// It is retained across status-only updates and used for surge admission.
@@ -3461,12 +3788,44 @@ type UpsertReplicaParams struct {
 	ExitOOMKilled       bool
 	ExitRunID           string
 	StartupPeakRSSBytes int64
+	// ConsumerBooted is true only when this write follows a fresh process boot.
+	// Recovery adoption and warm resume must leave it false because those
+	// processes retain the data generation they loaded before this write.
+	ConsumerBooted bool
+	// A positive DataGeneration atomically replaces serving-data provenance for
+	// a replica started behind a prestart producer barrier. Zero preserves the
+	// previous attribution on ordinary status/process upserts.
+	DataGeneration            int64
+	DataProducerDeploymentID  *int64
+	DataProducerAppVersion    string
+	DataProducerContentDigest string
+	DataProducerFingerprint   string
 }
 
 // UpsertReplica inserts a new replica or updates an existing one identified by
 // (app_id, idx). All fields are replaced on conflict. DesiredState defaults to
 // "running" when the caller leaves it empty.
 func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
+	// Every real consumer boot loads whatever publication is currently on disk.
+	// Resolve its durable generation/source here so deploy retries, stopped-app
+	// starts, watchdog healing, and autoscale all stamp the same authoritative
+	// provenance without relying on handler-local state.
+	if p.ConsumerBooted && p.DataGeneration == 0 {
+		var producerDeploymentID sql.NullInt64
+		err := s.db.QueryRow(`
+			SELECT generation, producer_deployment_id, producer_app_version,
+			       producer_content_digest, producer_fingerprint
+			FROM app_data_publication WHERE app_id = ?`, p.AppID).Scan(
+			&p.DataGeneration, &producerDeploymentID, &p.DataProducerAppVersion,
+			&p.DataProducerContentDigest, &p.DataProducerFingerprint)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("load app %d data publication: %w", p.AppID, err)
+		}
+		if producerDeploymentID.Valid {
+			v := producerDeploymentID.Int64
+			p.DataProducerDeploymentID = &v
+		}
+	}
 	desired := p.DesiredState
 	if desired == "" {
 		desired = "running"
@@ -3490,8 +3849,11 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 		                      endpoint_url, worker_id, app_version, desired_state,
 		                      deployment_id, updated_at, exit_code, exit_signal,
 		                      exit_reason, restart_count, exit_observed_at,
-		                      exit_oom_killed, exit_run_id, startup_peak_rss_bytes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      exit_oom_killed, exit_run_id, startup_peak_rss_bytes,
+		                      data_generation, activation_id, data_producer_deployment_id,
+		                      data_producer_app_version, data_producer_content_digest,
+		                      data_producer_fingerprint)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+s.d.nowEpoch()+`, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
 		ON CONFLICT(app_id, idx) DO UPDATE SET
 			pid           = excluded.pid,
 			port          = excluded.port,
@@ -3512,11 +3874,25 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 			exit_run_id = CASE WHEN excluded.status = 'crashed' THEN excluded.exit_run_id ELSE replicas.exit_run_id END,
 			startup_peak_rss_bytes = CASE WHEN excluded.startup_peak_rss_bytes > 0
 				THEN excluded.startup_peak_rss_bytes ELSE replicas.startup_peak_rss_bytes END,
+			data_generation = CASE WHEN excluded.data_generation > 0
+				THEN excluded.data_generation ELSE replicas.data_generation END,
+			activation_id = CASE WHEN excluded.data_generation > 0
+				THEN NULL ELSE replicas.activation_id END,
+			data_producer_deployment_id = CASE WHEN excluded.data_generation > 0
+				THEN excluded.data_producer_deployment_id ELSE replicas.data_producer_deployment_id END,
+			data_producer_app_version = CASE WHEN excluded.data_generation > 0
+				THEN excluded.data_producer_app_version ELSE replicas.data_producer_app_version END,
+			data_producer_content_digest = CASE WHEN excluded.data_generation > 0
+				THEN excluded.data_producer_content_digest ELSE replicas.data_producer_content_digest END,
+			data_producer_fingerprint = CASE WHEN excluded.data_generation > 0
+				THEN excluded.data_producer_fingerprint ELSE replicas.data_producer_fingerprint END,
 			updated_at    = excluded.updated_at`,
 		p.AppID, p.Index, p.PID, p.Port, p.Status, p.Provider, p.Tier,
 		p.EndpointURL, p.WorkerID, p.AppVersion, desired, p.DeploymentID,
 		p.ExitCode, p.Signal, p.Reason, restartCount, exitObservedAt,
 		boolToInt(p.ExitOOMKilled), p.ExitRunID, p.StartupPeakRSSBytes,
+		p.DataGeneration, p.DataProducerDeploymentID, p.DataProducerAppVersion,
+		p.DataProducerContentDigest, p.DataProducerFingerprint,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert replica: %w", err)
@@ -3559,7 +3935,9 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 		       endpoint_url, worker_id, app_version, desired_state,
 		       deployment_id, updated_at, exit_code, exit_signal, exit_reason,
 		       restart_count, exit_observed_at, exit_oom_killed, exit_run_id,
-		       data_generation, activation_id, startup_peak_rss_bytes
+		       data_generation, activation_id, startup_peak_rss_bytes,
+		       data_producer_deployment_id, data_producer_app_version,
+		       data_producer_content_digest, data_producer_fingerprint
 		FROM replicas WHERE app_id = ? ORDER BY idx`, appID)
 	if err != nil {
 		return nil, err
@@ -3575,8 +3953,9 @@ func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.ExitCode, &r.Signal,
 			&r.Reason, &r.RestartCount, &exitObservedAt, &exitOOMKilled, &r.ExitRunID,
-			&r.DataGeneration, &r.ActivationID,
-			&r.StartupPeakRSSBytes); err != nil {
+			&r.DataGeneration, &r.ActivationID, &r.StartupPeakRSSBytes,
+			&r.DataProducerDeploymentID, &r.DataProducerAppVersion,
+			&r.DataProducerContentDigest, &r.DataProducerFingerprint); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
@@ -3600,7 +3979,9 @@ func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error
 		       endpoint_url, worker_id, app_version, desired_state,
 		       deployment_id, updated_at, exit_code, exit_signal, exit_reason,
 		       restart_count, exit_observed_at, exit_oom_killed, exit_run_id,
-		       data_generation, activation_id, startup_peak_rss_bytes
+		       data_generation, activation_id, startup_peak_rss_bytes,
+		       data_producer_deployment_id, data_producer_app_version,
+		       data_producer_content_digest, data_producer_fingerprint
 		FROM replicas WHERE app_id IN (`+ph+`) ORDER BY app_id, idx`, args...)
 	if err != nil {
 		return nil, err
@@ -3616,8 +3997,9 @@ func (s *Store) ListReplicasForApps(appIDs []int64) (map[int64][]*Replica, error
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.ExitCode, &r.Signal,
 			&r.Reason, &r.RestartCount, &exitObservedAt, &exitOOMKilled, &r.ExitRunID,
-			&r.DataGeneration, &r.ActivationID,
-			&r.StartupPeakRSSBytes); err != nil {
+			&r.DataGeneration, &r.ActivationID, &r.StartupPeakRSSBytes,
+			&r.DataProducerDeploymentID, &r.DataProducerAppVersion,
+			&r.DataProducerContentDigest, &r.DataProducerFingerprint); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)
@@ -4749,7 +5131,9 @@ func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
 	rows, err := s.db.Query(`
 		SELECT app_id, idx, pid, port, status, provider, tier,
 		       endpoint_url, worker_id, app_version, desired_state,
-		       deployment_id, updated_at, data_generation, activation_id, startup_peak_rss_bytes
+		       deployment_id, updated_at, data_generation, activation_id, startup_peak_rss_bytes,
+		       data_producer_deployment_id, data_producer_app_version,
+		       data_producer_content_digest, data_producer_fingerprint
 		FROM replicas WHERE worker_id = ? ORDER BY app_id, idx`, nodeID)
 	if err != nil {
 		return nil, err
@@ -4762,7 +5146,8 @@ func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
 		if err := rows.Scan(&r.AppID, &r.Index, &r.PID, &r.Port, &r.Status,
 			&r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.AppVersion,
 			&r.DesiredState, &r.DeploymentID, &updatedAt, &r.DataGeneration, &r.ActivationID,
-			&r.StartupPeakRSSBytes); err != nil {
+			&r.StartupPeakRSSBytes, &r.DataProducerDeploymentID, &r.DataProducerAppVersion,
+			&r.DataProducerContentDigest, &r.DataProducerFingerprint); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(updatedAt, 0)

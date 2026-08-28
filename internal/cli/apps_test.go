@@ -1009,7 +1009,7 @@ func TestAppsStart_ServerError(t *testing.T) {
 // The test pins the field labels so accidental rewordings break loudly.
 func TestAppsShow(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
-	setResp(200, `{"app":{"slug":"demo","name":"Demo App","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":15,"deploy_count":3,"hibernate_timeout_minutes":null,"memory_limit_mb":512,"cpu_quota_percent":100,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"replicas_status":[{"index":0,"status":"running","pid":1234,"port":34567},{"index":1,"status":"running","pid":1235,"port":34568}]}`)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo App","owner_id":7,"access":"private","status":"running","replicas":2,"max_sessions_per_replica":15,"deploy_count":3,"hibernate_timeout_minutes":null,"memory_limit_mb":512,"cpu_quota_percent":100,"created_at":"2026-04-25T10:00:00Z","updated_at":"2026-04-25T11:00:00Z"},"replicas_status":[{"index":0,"status":"running","pid":1234,"port":34567,"data_generation":7,"data_producer_app_version":"v49","data_producer_content_digest":"sha256:1234567890abcdef"},{"index":1,"status":"running","pid":1235,"port":34568}]}`)
 
 	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
 	if err != nil {
@@ -1031,6 +1031,8 @@ func TestAppsShow(t *testing.T) {
 		"Memory:      512 MB",
 		"CPU:         100%",
 		"INDEX  STATUS",
+		"DATA GEN",
+		"v49 / 12345678",
 		"1234",
 		"34567",
 	} {
@@ -1055,6 +1057,54 @@ func TestAppsShow_AttributesLatestScheduleActivation(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("apps show missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestAppsShow_ReportsScheduleConvergence(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":1},"replicas_status":[],"schedule_convergence_satisfied":false,"deploy_trigger_schedules":[{"name":"refresh","deploy_trigger":"bundle_change","satisfied":false,"current_app_version":"v2","current_content_digest":"sha256:new","producer_app_version":"v1","producer_content_digest":"sha256:old","convergence_status":"pending"}]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Schedule convergence: not ready",
+		"refresh: needs run (bundle_change, current v2 / new; obligation pending; producer state v1 / old)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("apps show missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAppsShow_SurfacesCompatibilityQuarantineAndProducerRepair(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"failed","replicas":1},"replicas_status":[],"compatibility_quarantined":true,"producer_repair_required":true,"schedule_convergence_satisfied":false,"deploy_trigger_schedules":[{"name":"refresh","deploy_trigger":"never","satisfied":false,"producer_repair_required":true}]}`)
+
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Compatibility: QUARANTINED", "Producer data: repair required",
+		"refresh: repair required (never",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("apps show missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAppsShow_ReportsProducerProvenanceWhenConverged(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"app":{"slug":"demo","name":"Demo","owner_id":1,"access":"private","status":"running","replicas":1},"replicas_status":[],"schedule_convergence_satisfied":true,"deploy_trigger_schedules":[{"name":"refresh","deploy_trigger":"bundle_change","satisfied":true,"current_app_version":"v2","current_content_digest":"sha256:new","producer_app_version":"v2","producer_content_digest":"sha256:new","convergence_status":"satisfied"}]}`)
+	out, err := execCLI(t, "apps", "show", "demo", "-o", "table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "refresh: ready (bundle_change, current v2 / new; obligation satisfied; producer state v2 / new)"; !strings.Contains(out, want) {
+		t.Fatalf("apps show missing converged producer provenance %q:\n%s", want, out)
 	}
 }
 
@@ -1627,6 +1677,47 @@ func TestAppsRollback_WaitPolls(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&getCount); got < 2 {
 		t.Fatalf("expected --wait to poll until running (>=2 GETs), got %d", got)
+	}
+}
+
+func TestAppsRollback_SurfacesScheduleConvergence(t *testing.T) {
+	setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/rollback" {
+			_, _ = w.Write([]byte(`{"status":"running","slug":"demo","schedule_convergence":[{"schedule_id":7,"schedule":"warm","obligation_id":11,"status":"satisfied","run_id":42,"prestart":true}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	out, err := execCLI(t, "apps", "rollback", "demo", "-o", "json")
+	if err != nil {
+		t.Fatalf("rollback error: %v", err)
+	}
+	for _, want := range []string{`"schedule_convergence"`, `"status":"satisfied"`, `"prestart":true`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rollback output missing %s: %s", want, out)
+		}
+	}
+}
+
+func TestAppsRollback_SurfacesPostCommitWarning(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{"status":"running","slug":"demo","warning":"rollback committed; schedule data convergence will repair asynchronously"}`)
+
+	for _, format := range []string{"table", "json"} {
+		t.Run(format, func(t *testing.T) {
+			out, err := execCLI(t, "apps", "rollback", "demo", "--output", format)
+			if err != nil {
+				t.Fatalf("rollback %s error: %v", format, err)
+			}
+			for _, want := range []string{"rollback committed", "schedule data convergence will repair asynchronously"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("rollback %s output did not surface warning %q:\n%s", format, want, out)
+				}
+			}
+			if format == "json" && !strings.Contains(out, `"warning"`) {
+				t.Fatalf("rollback JSON output omitted warning field:\n%s", out)
+			}
+		})
 	}
 }
 

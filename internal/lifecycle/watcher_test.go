@@ -113,6 +113,7 @@ func (f *fakeProxy) Deregister(slug string) {
 	f.deregistered = append(f.deregistered, slug)
 	f.mu.Unlock()
 }
+func (f *fakeProxy) DeregisterReplicaIfTarget(string, int, string) bool { return true }
 func (f *fakeProxy) BeginHibernate(slug string, since time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -154,8 +155,10 @@ type fakeStore struct {
 	replicas          map[int64][]*db.Replica
 	suspendedReplicas []db.SuspendedReplica // returned by ListSuspendedReplicas
 	upsertErr         error                 // when set, UpsertReplica records the call then returns this
-	updateStatusErr   error                 // when set, UpdateAppStatus records the call then returns this
-	reapCount         int                   // incremented by each ReapStaleReplicaSessions call
+	upsertHook        func(db.UpsertReplicaParams)
+	updateStatusErr   error // when set, UpdateAppStatus records the call then returns this
+	quarantined       bool
+	reapCount         int // incremented by each ReapStaleReplicaSessions call
 
 	// hibernateAppCalls tracks every HibernateApp call (slug).
 	hibernateAppCalls []string
@@ -201,6 +204,12 @@ type fakeStore struct {
 
 	activationInFlight    bool
 	activationInFlightErr error
+}
+
+func (f *fakeStore) AppCompatibilityQuarantined(_ int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.quarantined, nil
 }
 
 func newFakeStore(apps map[string]*db.App, deployments []*db.Deployment) *fakeStore {
@@ -333,6 +342,9 @@ func (f *fakeStore) UpsertReplica(p db.UpsertReplicaParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.upsertedReplicas = append(f.upsertedReplicas, p)
+	if f.upsertHook != nil {
+		f.upsertHook(p)
+	}
 	if f.upsertErr != nil {
 		return f.upsertErr
 	}
@@ -1207,6 +1219,41 @@ func TestWake_TriggeredOnWakeTrigger(t *testing.T) {
 	}
 }
 
+func TestWake_ProvenancePersistenceFailureStopsUntrackedConsumers(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "hibernated", Replicas: 2}},
+		[]*db.Deployment{{ID: 7, Version: "v1", BundleDir: "/bundles/v1"}},
+	)
+	st.upsertErr = errors.New("database unavailable")
+	mgr := &fakeManager{}
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, prx, st,
+		func(_ string, _ string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{Index: idx, PID: 40 + idx, Port: 20040 + idx, EndpointURL: fmt.Sprintf("http://replica-%d", idx)}, nil
+		})
+
+	w.WakeTrigger("app")
+	w.wakeWG.Wait()
+	st.mu.Lock()
+	status := st.apps["app"].Status
+	st.mu.Unlock()
+	if status != "hibernated" {
+		t.Fatalf("app status=%q, want fail-closed hibernated", status)
+	}
+	mgr.mu.Lock()
+	stopped := append([]string(nil), mgr.stopped...)
+	mgr.mu.Unlock()
+	if len(stopped) == 0 || stopped[len(stopped)-1] != "app" {
+		t.Fatalf("unpersisted consumers were not stopped: %v", stopped)
+	}
+	prx.mu.Lock()
+	deregistered := append([]string(nil), prx.deregistered...)
+	prx.mu.Unlock()
+	if len(deregistered) == 0 || deregistered[len(deregistered)-1] != "app" {
+		t.Fatalf("unpersisted consumers remained routed: %v", deregistered)
+	}
+}
+
 func TestWake_NoConcurrentWakes(t *testing.T) {
 	prx := newFakeProxy()
 	st := newFakeStore(
@@ -1386,6 +1433,65 @@ func TestWatcher_OneReplicaCrashesOtherStays(t *testing.T) {
 	}
 	if got := st.appStatus["demo"]; got == "degraded" {
 		t.Fatalf("app should not be degraded while replica 1 runs; got %q", got)
+	}
+}
+
+func TestWatcher_RestartHoldsConsumerGateThroughReplicaProvenanceWrite(t *testing.T) {
+	st := newFakeStore(
+		map[string]*db.App{"demo": {ID: 1, Slug: "demo", Status: "running", Replicas: 1}},
+		[]*db.Deployment{{ID: 9, AppID: 1, Version: "v2", BundleDir: "/tmp/demo"}},
+	)
+	var gateHeld atomic.Int32
+	st.upsertHook = func(p db.UpsertReplicaParams) {
+		if gateHeld.Load() != 1 {
+			t.Error("consumer publication gate was not held through UpsertReplica")
+		}
+		if !p.ConsumerBooted {
+			t.Error("fresh restart did not request durable producer provenance")
+		}
+	}
+	w := newTestWatcher(Config{RestartMaxAttempts: 3}, &fakeManager{}, newFakeProxy(), st,
+		func(_ string, _ string, index int) (*deploy.Result, error) {
+			if gateHeld.Load() != 1 {
+				t.Error("consumer publication gate was not held during process boot")
+			}
+			return &deploy.Result{Index: index, PID: 42, Port: 20002}, nil
+		})
+	w.SetConsumerBootGate(func(appID int64) (func(), error) {
+		if appID != 1 {
+			t.Errorf("gate app id=%d, want 1", appID)
+		}
+		if !gateHeld.CompareAndSwap(0, 1) {
+			t.Fatal("consumer gate acquired twice")
+		}
+		return func() {
+			if !gateHeld.CompareAndSwap(1, 0) {
+				t.Error("consumer gate released outside held interval")
+			}
+		}, nil
+	})
+
+	w.restartSlotLocked(st.apps["demo"], 0)
+	if gateHeld.Load() != 0 {
+		t.Fatal("consumer publication gate leaked after restart")
+	}
+}
+
+func TestWatcher_RestartRefusesCompatibilityQuarantine(t *testing.T) {
+	st := newFakeStore(
+		map[string]*db.App{"demo": {ID: 1, Slug: "demo", Status: "running", Replicas: 1}},
+		[]*db.Deployment{{ID: 9, AppID: 1, Version: "v1", BundleDir: "/tmp/demo"}},
+	)
+	st.quarantined = true
+	var deployCalls atomic.Int32
+	w := newTestWatcher(Config{RestartMaxAttempts: 3}, &fakeManager{}, newFakeProxy(), st,
+		func(_ string, _ string, _ int) (*deploy.Result, error) {
+			deployCalls.Add(1)
+			return &deploy.Result{}, nil
+		})
+	w.restartSlotLocked(st.apps["demo"], 0)
+	if deployCalls.Load() != 0 {
+		t.Fatal("watcher booted a consumer while compatibility quarantine was active")
 	}
 }
 

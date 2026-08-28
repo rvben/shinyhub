@@ -259,6 +259,59 @@ func validateRotationSecret(oldSecret, newSecret string) error {
 
 var migrateTargetDSN string
 
+var resolveLegacyWritersAck bool
+
+var resolveLegacyWritersCmd = &cobra.Command{
+	Use:   "resolve-legacy-schedule-writers",
+	Short: "Resolve the fail-closed fence left by schedule writers from an older server",
+	Long: "Lists schedule processes captured during the provenance upgrade. Run this only\n" +
+		"with every old ShinyHub server stopped and after verifying that every listed\n" +
+		"job process and descendant is gone. With --acknowledge-processes-stopped, the\n" +
+		"command atomically interrupts the legacy rows, records conservative data-write\n" +
+		"uncertainty, and clears the startup fence. A successful fenced producer rerun is\n" +
+		"then required before consumers can start.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.LoadForMaintenance(serverConfigPath())
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		store, err := db.Open(cfg.Database.DSN)
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		defer store.Close()
+
+		if _, err := backup.PreMigrationSnapshot(cfg, store, time.Now()); err != nil {
+			return fmt.Errorf("pre-migration snapshot: %w", err)
+		}
+		if err := store.Migrate(); err != nil {
+			return fmt.Errorf("migrate database: %w", err)
+		}
+		legacy, err := store.ListLegacyUnfencedScheduleRuns()
+		if err != nil {
+			return err
+		}
+		if len(legacy) == 0 {
+			return cli.RenderAction(cmd, "clear", map[string]any{"legacy_schedule_writers": 0},
+				"no legacy schedule writers require resolution")
+		}
+		for _, run := range legacy {
+			fmt.Fprintf(cmd.ErrOrStderr(), "app=%s schedule=%s run_id=%d status=%s\n",
+				run.AppSlug, run.ScheduleName, run.RunID, run.RunStatus)
+		}
+		if !resolveLegacyWritersAck {
+			return fmt.Errorf("%d legacy schedule writer(s) remain fenced; stop every old server, verify all listed process trees are gone, then rerun with --acknowledge-processes-stopped", len(legacy))
+		}
+		resolved, err := store.ResolveLegacyUnfencedScheduleRuns()
+		if err != nil {
+			return err
+		}
+		return cli.RenderAction(cmd, "resolved",
+			map[string]any{"legacy_schedule_writers": resolved, "producer_repair_required": true},
+			fmt.Sprintf("resolved %d legacy schedule writer(s); producer repair is required before consumers can start", resolved))
+	},
+}
+
 var migrateBackendCmd = &cobra.Command{
 	Use:   "migrate-backend",
 	Short: "Copy all data from the current SQLite database to a fresh Postgres database",
@@ -342,9 +395,11 @@ func init() {
 	backupCmd.Flags().StringVar(&backupOut, "out", "", "Destination archive path (.tar.gz)")
 	_ = backupCmd.MarkFlagRequired("out")
 	migrateBackendCmd.Flags().StringVar(&migrateTargetDSN, "to", "", "Target Postgres DSN (overrides SHINYHUB_TARGET_DSN)")
+	resolveLegacyWritersCmd.Flags().BoolVar(&resolveLegacyWritersAck, "acknowledge-processes-stopped", false,
+		"Confirm every old server and listed job process tree is stopped, then record uncertainty and clear the fence")
 	restoreCmd.Flags().Bool("force", false, "Restore even if a running server is detected (only after confirming the server is stopped)")
 	const configUsage = "Path to the server config file (overrides SHINYHUB_CONFIG; default ./shinyhub.yaml)"
-	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd} {
+	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, resolveLegacyWritersCmd} {
 		c.Flags().StringVar(&configPath, "config", "", configUsage)
 	}
 }
@@ -356,7 +411,7 @@ var buildRootOnce sync.Once
 // tests to call; registration happens exactly once per process.
 func buildRoot() *cobra.Command {
 	buildRootOnce.Do(func() {
-		rootCmd.AddCommand(newInitCmd(), serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, newHealthcheckCmd(), newWorkerCmd(), newSandboxCmd())
+		rootCmd.AddCommand(newInitCmd(), serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, resolveLegacyWritersCmd, newHealthcheckCmd(), newWorkerCmd(), newSandboxCmd())
 		cli.AddCommandsTo(rootCmd)
 	})
 	return rootCmd
@@ -949,6 +1004,14 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// risking silent corruption. Fail fast with an actionable message instead.
 	if err := store.VerifySchemaCompatibility(); err != nil {
 		return fmt.Errorf("schema compatibility: %w", err)
+	}
+	if legacyRuns, err := store.CountLegacyUnfencedScheduleRuns(); err != nil {
+		return fmt.Errorf("legacy schedule writer fence: %w", err)
+	} else if legacyRuns > 0 {
+		return fmt.Errorf("legacy schedule writer fence: %d schedule run(s) were running during the 0.12.x upgrade and may have surviving unfenced descendants; stop every old server, verify those process trees are gone, then run `shinyhub resolve-legacy-schedule-writers --acknowledge-processes-stopped` before restarting", legacyRuns)
+	}
+	if err := validateStoredProducerIsolation(store, cfg.Runtime.DefaultWorkerIsolation); err != nil {
+		return fmt.Errorf("producer topology: %w", err)
 	}
 
 	var (
@@ -1638,10 +1701,44 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			// recovered replica lands beside the data it mounts.
 			ColocateWorkers: srv.ColocationPins(app),
 		}
-		if deps, derr := store.ListDeployments(app.ID); derr == nil && len(deps) > 0 {
-			p.ContentDigest = deps[0].ContentDigest
-			p.DeploymentID = deps[0].ID
-			p.AppVersion = deps[0].Version
+		deps, derr := store.ListDeployments(app.ID)
+		if derr != nil {
+			return nil, fmt.Errorf("list deployment for guarded consumer start: %w", derr)
+		}
+		if len(deps) == 0 {
+			return nil, fmt.Errorf("guarded consumer start: app %s has no successful deployment", slug)
+		}
+		current := deps[0]
+		p.ContentDigest = current.ContentDigest
+		p.DeploymentID = current.ID
+		p.AppVersion = current.Version
+		p.GuardUntilAcknowledged = true
+		p.ReplicaStarted = func(result deploy.Result) error {
+			rows, listErr := store.ListReplicas(app.ID)
+			if listErr != nil {
+				return fmt.Errorf("check prior replica identity: %w", listErr)
+			}
+			for _, prior := range rows {
+				if prior.Index != result.Index || prior.PID == nil || *prior.PID <= 0 || *prior.PID == result.PID {
+					continue
+				}
+				groupProbeErr := syscall.Kill(-*prior.PID, 0)
+				pidProbeErr := syscall.Kill(*prior.PID, 0)
+				if !errors.Is(groupProbeErr, syscall.ESRCH) || !errors.Is(pidProbeErr, syscall.ESRCH) {
+					return fmt.Errorf("replica %d still has unconfirmed prior native process group %d", result.Index, *prior.PID)
+				}
+				if clearErr := store.ClearReplicaRuntimeIdentity(app.ID, result.Index); clearErr != nil && !errors.Is(clearErr, db.ErrNotFound) {
+					return fmt.Errorf("clear confirmed-absent prior replica identity: %w", clearErr)
+				}
+				break
+			}
+			pid, port, deploymentID := result.PID, result.Port, current.ID
+			return store.UpsertReplica(db.UpsertReplicaParams{
+				AppID: app.ID, Index: result.Index, PID: &pid, Port: &port, Status: "starting",
+				Provider: result.Provider, Tier: result.Tier, EndpointURL: result.EndpointURL,
+				WorkerID: result.WorkerID, AppVersion: current.Version,
+				DesiredState: "running", DeploymentID: &deploymentID, ConsumerBooted: true,
+			})
 		}
 		return deploy.RunReplica(p, index)
 	}
@@ -1718,10 +1815,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// worker per slot and registers it with the proxy; the terminate callback
 	// is called when all assigned clients disconnect (after the grace window).
 	elasticSpawner := &lifecycle.ElasticSpawner{
-		Store:      store,
-		Manager:    mgr,
-		Proxy:      prx,
-		RuntimeCfg: cfg.Runtime,
+		Store:               store,
+		Manager:             mgr,
+		Proxy:               prx,
+		RuntimeCfg:          cfg.Runtime,
+		AcquireAppOperation: srv.AcquireAppOperation,
 	}
 	prx.SetSpawnFunc(func(slug string, slotID int) {
 		go elasticSpawner.Spawn(slug, slotID)
@@ -1922,6 +2020,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	if err != nil {
 		return fmt.Errorf("init jobs manager: %w", err)
 	}
+	jobsMgr.SetDefaultWorkerIsolation(cfg.Runtime.DefaultWorkerIsolation)
+	mgr.SetConsumerLifetimeResolver(jobsMgr.AcquireConsumerLifetime)
+	watcher.SetConsumerBootGate(jobsMgr.AcquireCompatibleConsumerBootGate)
+	elasticSpawner.AcquireConsumerBootGate = jobsMgr.AcquireCompatibleConsumerBootGate
 	// Cap scheduled jobs by the same per-replica memory/CPU ceiling as the app, so
 	// a heavy refresh-data run cannot exceed the app's resource budget on a shared
 	// native host.
@@ -2003,6 +2105,20 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		ownerReady.Store(false)       // closed at the start of every ownership span
 		defer ownerReady.Store(false) // and on span exit (ownership lost / shutdown)
 		slog.Info("became control-plane owner", "epoch", epoch, "instance", cfg.Server.InstanceID)
+		retryOwnerStep := func(label string, fn func() error) bool {
+			for {
+				if err := fn(); err == nil {
+					return true
+				} else {
+					slog.Error(label, "err", err)
+				}
+				select {
+				case <-octx.Done():
+					return false
+				case <-time.After(registryRefreshBackoff):
+				}
+			}
+		}
 
 		// Reconcile the environment-managed deploy credential before opening the
 		// owner readiness gate. Standbys authenticate against the same database but
@@ -2029,17 +2145,100 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		if workerReg != nil && !refreshUntilReady(octx, workerReg, registryRefreshBackoff, slog.Default()) {
 			return // lost ownership before a fresh index; start no owner work
 		}
-		ownerReady.Store(true) // gate opens: the index is fresh
-
 		// Rewrite any legacy relative bundle_dir rows to their canonical absolute
 		// path under the configured apps_dir. Idempotent; must run before recovery
 		// so process adoption sees absolute paths.
 		if err := lifecycle.NormalizeBundleDirs(store, cfg.Storage.AppsDir); err != nil {
 			slog.Error("bundle_dir backfill", "err", err)
 		}
-		// Fail any deploy interrupted mid-flight before recovery so adoption falls
-		// back to the last good deployment.
-		lifecycle.ReconcileInflightDeployments(store)
+		// Fence startup's destructive reconciliation/adoption across every app.
+		// This waits for lifecycle handlers that may still be unwinding on a
+		// retiring process, including handlers that outlived HTTP shutdown.
+		var releaseStartupFence func()
+		if !retryOwnerStep("acquire startup app-operation fence", func() error {
+			var err error
+			releaseStartupFence, err = srv.AcquireFleetAppOperations()
+			return err
+		}) {
+			return
+		}
+		startupFenceHeld := true
+		defer func() {
+			if startupFenceHeld {
+				releaseStartupFence()
+			}
+		}()
+		// A Docker one-shot producer survives a control-plane crash. Force-remove
+		// every such orphan and retry on any daemon uncertainty before recovery can
+		// adopt or boot a consumer over data that is still being mutated.
+		for {
+			fenceCtx, cancelFence := context.WithTimeout(octx, 60*time.Second)
+			containerErr := lifecycle.FenceOrphanScheduleContainersForTiers(mgr, cfg.Runtime.TierOrder())
+			taskErr := lifecycle.FenceOrphanScheduleTasksForTiers(fenceCtx, mgr, cfg.Runtime.TierOrder())
+			cancelFence()
+			if containerErr == nil && taskErr == nil {
+				break
+			}
+			slog.Error("fence orphan schedule producers", "container_err", containerErr, "task_err", taskErr)
+			select {
+			case <-octx.Done():
+				return
+			case <-time.After(registryRefreshBackoff):
+			}
+		}
+		var appsForPublicationFence []*db.App
+		if !retryOwnerStep("list apps for publication recovery fence", func() error {
+			var err error
+			appsForPublicationFence, err = store.ListApps(0, 0)
+			return err
+		}) {
+			return
+		}
+		appIDsForPublicationFence := make([]int64, 0, len(appsForPublicationFence))
+		for _, app := range appsForPublicationFence {
+			appIDsForPublicationFence = append(appIDsForPublicationFence, app.ID)
+		}
+		var releasePublicationFences func()
+		if !retryOwnerStep("acquire publication recovery fences", func() error {
+			var err error
+			releasePublicationFences, err = jobsMgr.AcquirePublicationRecoveryFences(octx, appIDsForPublicationFence)
+			return err
+		}) {
+			return
+		}
+		publicationFencesHeld := true
+		defer func() {
+			if publicationFencesHeld {
+				releasePublicationFences()
+			}
+		}()
+		// A previous owner may have completed while we waited for its physical
+		// writer lock. Only rows still running now are truly interrupted/uncertain.
+		var interruptedRuns int64
+		if !retryOwnerStep("terminalize inherited schedule runs", func() error {
+			var err error
+			interruptedRuns, err = store.MarkRunningSchedulesInterrupted()
+			return err
+		}) {
+			return
+		} else if interruptedRuns > 0 {
+			slog.Warn("terminalized inherited schedule runs", "count", interruptedRuns)
+		}
+		// Resolve interrupted deployments before recovery. Fail closed and retry:
+		// a candidate producer may already have published incompatible shared data,
+		// in which case prior consumers must never be adopted.
+		for {
+			if err := lifecycle.ReconcileInflightDeployments(store); err == nil {
+				break
+			} else {
+				slog.Error("reconcile interrupted deployments", "err", err)
+			}
+			select {
+			case <-octx.Done():
+				return
+			case <-time.After(registryRefreshBackoff):
+			}
+		}
 		// Finish any app deletion interrupted between the 'deleting' tombstone and
 		// the row removal. Reconcile first so freshly-cleaned slugs are not flagged
 		// as orphans by the next step.
@@ -2079,6 +2278,36 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 				slog.Info("requeued interrupted schedule activations", "count", n)
 			}
 		}
+		// Start the scheduler before opening owner readiness. Admissions are
+		// temporarily reopened while every recovery fence is still held so missed
+		// and obligation dispatch can register durably but cannot cross a physical
+		// writer/consumer boundary. A transient scheduler load failure is retried
+		// within this ownership span rather than leaving a permanently green owner
+		// with dead cron processing.
+		jobsMgr.ResumeAdmissions()
+		if !retryOwnerStep("start scheduler", func() error { return sched.Start(octx) }) {
+			sched.Stop()
+			if err := jobsMgr.InterruptAndDrain(context.Background()); err != nil {
+				slog.Error("drain scheduled jobs after failed owner startup", "err", err)
+			}
+			return
+		}
+		// Ownership may have been cancelled between the successful Start call and
+		// this continuation. Never briefly advertise readiness or release the
+		// recovery fences for an already-retired owner.
+		if octx.Err() != nil {
+			sched.Stop()
+			if err := jobsMgr.InterruptAndDrain(context.Background()); err != nil {
+				slog.Error("drain scheduled jobs after ownership loss during startup", "err", err)
+			}
+			return
+		}
+		slog.Info("scheduler started")
+		releasePublicationFences()
+		publicationFencesHeld = false
+		releaseStartupFence()
+		startupFenceHeld = false
+		ownerReady.Store(true) // recovery complete and worker index is fresh
 
 		var loops sync.WaitGroup
 		if monitor != nil {
@@ -2109,11 +2338,6 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			loops.Add(1)
 			go func() { defer loops.Done(); watcher.RestoreWarm(octx) }()
 		}
-		if err := sched.Start(octx); err != nil {
-			slog.Error("start scheduler", "err", err)
-		} else {
-			slog.Info("scheduler started")
-		}
 		if controller != nil {
 			loops.Add(1)
 			go func() { defer loops.Done(); controller.Run(octx) }()
@@ -2124,9 +2348,32 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 
 		<-octx.Done()
+		ownerReady.Store(false) // close admission before waiting for local handlers
 		slog.Info("releasing control-plane ownership loops", "epoch", epoch)
 		sched.Stop() // restartable on the next acquisition
 		loops.Wait() // watcher/monitor/autoscale fully stopped
+		// Job cancellation must never wait behind the fleet fence: a successor
+		// request can hold fleet-SH while waiting for this owner's publication
+		// lock. Drain first, then use fleet-EX to close the remaining HTTP/lifecycle
+		// handoff. Successor startup independently waits physical writer locks.
+		if err := jobsMgr.InterruptAndDrain(context.Background()); err != nil {
+			slog.Error("drain scheduled jobs before ownership release", "err", err)
+		}
+		// Take the exclusive fleet mutation fence before releasing ownership. It
+		// drains requests admitted before handoff (including uploads not yet at an
+		// app lock), then interrupts scheduled runs while the successor is still
+		// excluded. Their durable terminal state therefore lands before a new
+		// scheduler can reconcile running rows.
+		var releaseHandoffFence func()
+		for releaseHandoffFence == nil {
+			var fenceErr error
+			releaseHandoffFence, fenceErr = srv.AcquireFleetAppOperations()
+			if fenceErr != nil {
+				slog.Error("acquire ownership handoff fence", "err", fenceErr)
+				time.Sleep(registryRefreshBackoff)
+			}
+		}
+		releaseHandoffFence()
 	}
 
 	scope := leader.NewOwnerScope(ownerWork)
@@ -2154,6 +2401,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// deploy/placement, worker register/heartbeat) must wait for the fresh index.
 	ownerAndReady := ownerAndReadyPredicate(elector.IsOwner, &ownerReady)
 	srv.SetOwnership(ownerAndReady)
+	elasticSpawner.CanMutate = ownerAndReady
 	if workerAPI != nil {
 		workerAPI.SetOwnership(ownerAndReady)
 	}
@@ -2503,6 +2751,33 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 
 	slog.Info("shutdown complete")
+	return nil
+}
+
+// validateStoredProducerIsolation catches configuration-only topology drift
+// before the server can admit traffic. In particular, an app whose stored mode
+// is empty inherits a changed fleet default without any PATCH/deploy request
+// passing through API validation.
+func validateStoredProducerIsolation(store *db.Store, defaultIsolation string) error {
+	apps, err := store.ListApps(0, 0)
+	if err != nil {
+		return fmt.Errorf("list apps: %w", err)
+	}
+	for _, app := range apps {
+		isolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, defaultIsolation)
+		if isolation == "multiplex" {
+			continue
+		}
+		schedules, err := store.ListSchedulesByApp(app.ID)
+		if err != nil {
+			return fmt.Errorf("list schedules for %s: %w", app.Slug, err)
+		}
+		for _, schedule := range schedules {
+			if schedule.Enabled && (schedule.DeployTrigger != "never" || schedule.OnSuccess == "roll") {
+				return fmt.Errorf("app %q has producer schedule %q but effective worker_isolation=%q; set this app explicitly to multiplex before changing the fleet default", app.Slug, schedule.Name, isolation)
+			}
+		}
+	}
 	return nil
 }
 

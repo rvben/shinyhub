@@ -58,3 +58,35 @@ func TestTryAcquireAppOperation_UsesTheDeployMutexPerSlug(t *testing.T) {
 	}
 	backgroundRelease()
 }
+
+func TestTryAcquireAppOperation_UsesFilesystemFenceAcrossServers(t *testing.T) {
+	appsDir := t.TempDir()
+	newServer := func() *Server {
+		return New(&config.Config{
+			Auth:    config.AuthConfig{Secret: "test-secret"},
+			Storage: config.StorageConfig{AppsDir: appsDir},
+		}, dbtest.New(t), nil, nil)
+	}
+	first := newServer()
+	second := newServer()
+
+	release := first.acquireDeployLock("demo")
+	if competingRelease, ok := second.TryAcquireAppOperation("demo"); ok {
+		competingRelease()
+		release()
+		t.Fatal("second server acquired lifecycle operation while first server held filesystem fence")
+	}
+	otherRelease, ok := second.TryAcquireAppOperation("other")
+	if !ok {
+		release()
+		t.Fatal("filesystem fence unnecessarily serialized an unrelated app")
+	}
+	otherRelease()
+	release()
+
+	competingRelease, ok := second.TryAcquireAppOperation("demo")
+	if !ok {
+		t.Fatal("second server could not acquire lifecycle operation after filesystem fence release")
+	}
+	competingRelease()
+}

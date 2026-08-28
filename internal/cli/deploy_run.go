@@ -10,30 +10,28 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
 
-// firstFireRef identifies a run_on_register first-fire dispatched by the server
-// during a deploy, parsed from the deploy response's manifest.schedules[].
-type firstFireRef struct {
+// deployRunRef identifies a deploy-triggered run dispatched by the server.
+type deployRunRef struct {
 	Schedule   string
 	ScheduleID int64
 	RunID      int64
 }
 
-// firstFireOutcome is the per-schedule result the fleet report and JSON envelope
+// deployRunOutcome is the per-schedule result the fleet report and JSON envelope
 // surface. Status is empty when the CLI did not wait (default async path).
-type firstFireOutcome struct {
+type deployRunOutcome struct {
 	Schedule string `json:"schedule"`
 	RunID    int64  `json:"run_id"`
 	Status   string `json:"status,omitempty"`
 }
 
 // scheduleGateOutcome records a level check performed for an app. It is
-// deliberately separate from firstFireOutcome: no run was triggered by this
+// deliberately separate from deployRunOutcome: no run was triggered by this
 // apply, and operators need to distinguish a standing never-succeeded state
-// from a first-fire that failed during the current apply.
+// from a deploy-triggered run that failed during the current apply.
 type scheduleGateOutcome struct {
 	Schedule      string `json:"schedule"`
 	State         string `json:"state"`
@@ -59,10 +57,11 @@ type scheduleFailureLog struct {
 const (
 	failureWarmWaitTimeout      = "warm_wait_timeout"
 	failureWarmStateUnavailable = "warm_state_unavailable"
-	failureWarmFirstFireFailed  = "warm_first_fire_failed"
-	failureWarmNeverSucceeded   = "warm_never_succeeded"
+	failureWarmDeployRunFailed  = "warm_deploy_run_failed"
+	failureWarmNeverSucceeded   = "warm_bundle_not_ready"
 	failureWarmRestartFailed    = "warm_restart_failed"
 	failureScheduleStale        = "schedule_stale"
+	failureScheduleProducer     = "schedule_producer_mismatch"
 	failureScheduleStateMissing = "schedule_state_unavailable"
 )
 
@@ -70,51 +69,66 @@ const (
 // the terminal cause while keeping fleet output compact.
 const scheduleLogTailLines = 25
 
-// firstFireRefsFromDeployResponse extracts the first-fire references from a raw
-// deploy response body. It returns an empty slice when no schedule was first-
-// fired (the common case), so callers can range over it unconditionally.
-func firstFireRefsFromDeployResponse(body []byte) []firstFireRef {
+// deployRunRefsFromDeployResponse extracts deploy-triggered run references.
+// The internal name is retained locally because this file also owns the shared
+// polling machinery. The authoritative wire contract is the top-level
+// schedule_convergence array; nested deploy_run is accepted as a fallback.
+func deployRunRefsFromDeployResponse(body []byte) []deployRunRef {
 	var resp struct {
+		ScheduleConvergence []struct {
+			Schedule   string `json:"schedule"`
+			ScheduleID int64  `json:"schedule_id"`
+			RunID      *int64 `json:"run_id"`
+			Prestart   bool   `json:"prestart"`
+		} `json:"schedule_convergence"`
 		Manifest struct {
 			Schedules []struct {
 				Name       string `json:"name"`
 				ScheduleID int64  `json:"schedule_id"`
-				FirstFire  *struct {
+				DeployRun  *struct {
 					RunID int64 `json:"run_id"`
-				} `json:"first_fire"`
+				} `json:"deploy_run"`
 			} `json:"schedules"`
 		} `json:"manifest"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil
 	}
-	var refs []firstFireRef
+	var refs []deployRunRef
+	seen := map[int64]bool{}
+	for _, convergence := range resp.ScheduleConvergence {
+		seen[convergence.ScheduleID] = true
+		if convergence.RunID == nil || convergence.Prestart {
+			continue
+		}
+		refs = append(refs, deployRunRef{Schedule: convergence.Schedule, ScheduleID: convergence.ScheduleID, RunID: *convergence.RunID})
+	}
 	for _, s := range resp.Manifest.Schedules {
-		if s.FirstFire != nil {
-			refs = append(refs, firstFireRef{Schedule: s.Name, ScheduleID: s.ScheduleID, RunID: s.FirstFire.RunID})
+		if s.DeployRun != nil && !seen[s.ScheduleID] {
+			refs = append(refs, deployRunRef{Schedule: s.Name, ScheduleID: s.ScheduleID, RunID: s.DeployRun.RunID})
 		}
 	}
 	return refs
 }
 
-// errFirstFireTimeout is returned by waitForFirstFireLoop when the run does not
+// errDeployRunTimeout is returned by waitForDeployRunLoop when the run does not
 // reach a terminal state within the timeout.
-var errFirstFireTimeout = errors.New("first-fire wait timed out")
+var errDeployRunTimeout = errors.New("deploy-triggered run wait timed out")
 
-// firstFireStatusOK reports whether a terminal run status proves the cache was
+// deployRunStatusOK reports whether a terminal run status proves the cache was
 // warmed. An overlap skip proves only that another process exists, never that
 // data was successfully delivered.
-func firstFireStatusOK(status string) bool {
+func deployRunStatusOK(status string) bool {
 	return status == "succeeded"
 }
 
-// waitForFirstFireLoop polls the run's status until it leaves "running" or the
+// waitForDeployRunLoop polls the run's status until it leaves "running" or the
 // timeout elapses, emitting a progress line every progressEvery. now and sleep
 // are injected so the cadence is deterministic in tests. It returns the last
-// observed status; on timeout it also returns errFirstFireTimeout. Transient
+// observed status; on timeout it also returns errDeployRunTimeout. Transient
 // poll errors (5xx / transport) are retried until the deadline; a fatal 4xx
 // aborts immediately.
-func waitForFirstFireLoop(poll func() (string, error), timeout, pollEvery, progressEvery time.Duration,
+func waitForDeployRunLoop(poll func() (string, error), timeout, pollEvery, progressEvery time.Duration,
 	now func() time.Time, sleep func(time.Duration), out io.Writer, label string) (string, error) {
 	s := stylerFor(out)
 	start := now()
@@ -140,13 +154,13 @@ func waitForFirstFireLoop(poll func() (string, error), timeout, pollEvery, progr
 			// transient (5xx / transport): keep looping until the deadline
 		}
 		if !t.Before(deadline) {
-			return lastStatus, errFirstFireTimeout
+			return lastStatus, errDeployRunTimeout
 		}
 		if t.Sub(lastProgress) >= progressEvery {
 			// Yellow rather than styler.status("running"): here the word means a
 			// job still in flight, not the steady healthy state that status()
 			// paints green. Green would read as "this finished successfully".
-			fmt.Fprintf(out, "  %s: first-fire still %s %s\n", label, s.yellow("running"),
+			fmt.Fprintf(out, "  %s: deploy-triggered run still %s %s\n", label, s.yellow("running"),
 				s.dim(fmt.Sprintf("(%s/%s)", t.Sub(start).Round(time.Second), timeout)))
 			lastProgress = t
 		}
@@ -230,17 +244,9 @@ func fetchScheduleLogTail(cfg *cliConfig, slug string, scheduleID, runID int64, 
 	return parsePlainLines(resp.Body, n), nil
 }
 
-type scheduleRunBrief struct {
-	ID        int64  `json:"id"`
-	Status    string `json:"status"`
-	StartedAt string `json:"started_at"`
-}
-
-// verifyExistingWarmGate evaluates run_on_register as a convergence level after
-// every non-delete action. It therefore catches both standing failures and a
-// current registration whose best-effort dispatch produced no first-fire ref.
-// It performs no remote work when the manifest has no enabled run_on_register
-// schedule and never triggers a run.
+// verifyExistingWarmGate evaluates server-owned deploy-trigger convergence
+// after every non-delete action. The reconcile request repairs missing
+// admission first; waiting controls patience, not whether required work exists.
 func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyResult) error {
 	return verifyExistingWarmGateWithWait(cfg, slug, bundleDir, res, 0, io.Discard)
 }
@@ -250,32 +256,29 @@ func verifyExistingWarmGate(cfg *cliConfig, slug, bundleDir string, res *applyRe
 // with work that is already repairing the condition, without dispatching a
 // duplicate query or accepting "running" as proof of delivered data.
 func verifyExistingWarmGateWithWait(cfg *cliConfig, slug, bundleDir string, res *applyResult, timeout time.Duration, out io.Writer) error {
-	m, err := deploy.LoadManifest(bundleDir)
-	if err != nil {
+	if err := requestScheduleConvergence(cfg, slug); err != nil {
 		res.failureKind = failureWarmStateUnavailable
-		return fmt.Errorf("verify warm gate: %w", err)
+		return fmt.Errorf("reconcile deploy-triggered schedules: %w", err)
 	}
-	if m == nil {
-		return nil
-	}
-	declared := make([]string, 0, len(m.Schedules))
-	for _, spec := range m.Schedules {
-		if spec.RunOnRegister && !spec.Disabled {
-			declared = append(declared, spec.Name)
-		}
-	}
-	if len(declared) == 0 {
-		return nil
-	}
-
 	remote, err := listSchedules(cfg, slug)
 	if err != nil {
 		res.failureKind = failureWarmStateUnavailable
-		return fmt.Errorf("verify run_on_register schedules: %w", err)
+		return fmt.Errorf("verify deploy-triggered schedules: %w", err)
 	}
+	declared := make([]string, 0, len(remote))
 	byName := make(map[string]scheduleDTO, len(remote))
 	for _, schedule := range remote {
 		byName[schedule.Name] = schedule
+		if schedule.Enabled && schedule.DeployTrigger != "never" {
+			declared = append(declared, schedule.Name)
+		}
+	}
+	if len(declared) == 0 {
+		if err := requireAppCompatibilityClear(cfg, slug); err != nil {
+			classifyAppCompatibilityFailure(res, err)
+			return err
+		}
+		return nil
 	}
 
 	var failures []string
@@ -295,11 +298,16 @@ func verifyExistingWarmGateWithWait(cfg *cliConfig, slug, bundleDir string, res 
 			failures = append(failures, fmt.Sprintf("schedule %q is missing", name))
 			continue
 		}
-		if schedule.LastSuccessAt != nil && *schedule.LastSuccessAt != "" {
+		if schedule.DeployTriggerSatisfied == nil {
+			res.failureKind = failureWarmStateUnavailable
+			return fmt.Errorf("verify schedule %q: server did not report deploy-trigger convergence", name)
+		}
+		if *schedule.DeployTriggerSatisfied {
 			continue
 		}
+		repairRequired := schedule.ProducerRepairRequired != nil && *schedule.ProducerRepairRequired
 
-		outcome := scheduleGateOutcome{Schedule: name, State: "never_succeeded", Origin: origin}
+		outcome := scheduleGateOutcome{Schedule: name, State: "bundle_not_ready", Origin: origin}
 		if schedule.LastRunStatus != nil {
 			outcome.LastRunStatus = *schedule.LastRunStatus
 		}
@@ -310,39 +318,15 @@ func verifyExistingWarmGateWithWait(cfg *cliConfig, slug, bundleDir string, res 
 			outcome.LastSuccessAt = *schedule.LastSuccessAt
 		}
 
-		// stale is the capability marker for the atomic freshness fields. On a
-		// current server, consume the run identity from the same snapshot as the
-		// success decision. For older servers, scan run history until a success
-		// is found rather than mistaking "latest run failed" for "never ran
-		// successfully".
-		if schedule.Stale != nil {
-			if schedule.LastRunID != nil {
-				outcome.LastRunID = *schedule.LastRunID
-			}
-			if schedule.Refreshing != nil {
-				outcome.Refreshing = *schedule.Refreshing
-			}
-			if schedule.ActiveRunID != nil {
-				outcome.ActiveRunID = *schedule.ActiveRunID
-			}
-		} else {
-			succeeded, latest, lerr := legacyScheduleSuccessState(cfg, slug, schedule.ID)
-			if lerr != nil {
-				res.failureKind = failureWarmStateUnavailable
-				return fmt.Errorf("verify schedule %q run history: %w", name, lerr)
-			}
-			if succeeded {
-				continue
-			}
-			if latest != nil {
-				outcome.LastRunID = latest.ID
-				if outcome.LastRunStatus == "" {
-					outcome.LastRunStatus = latest.Status
-				}
-				if outcome.LastRunAt == "" {
-					outcome.LastRunAt = latest.StartedAt
-				}
-			}
+		if schedule.LastRunID != nil {
+			outcome.LastRunID = *schedule.LastRunID
+		}
+		if schedule.Refreshing != nil {
+			outcome.Refreshing = *schedule.Refreshing
+		}
+		if schedule.ConvergenceRunID != nil && schedule.ConvergenceStatus == "running" {
+			outcome.ActiveRunID = *schedule.ConvergenceRunID
+			outcome.Refreshing = true
 		}
 		logCount := len(res.scheduleLogs)
 		if outcome.Refreshing && outcome.ActiveRunID > 0 && timeout > 0 {
@@ -351,24 +335,36 @@ func verifyExistingWarmGateWithWait(cfg *cliConfig, slug, bundleDir string, res 
 				res.warmGate = append(res.warmGate, outcome)
 				res.failureKind = failureWarmWaitTimeout
 				appendScheduleLog(cfg, slug, schedule.ID, outcome.ActiveRunID, name, res)
-				return fmt.Errorf("schedule %q active warm-up not confirmed within --warm-timeout %s: %w", name, timeout, errFirstFireTimeout)
+				return fmt.Errorf("schedule %q active warm-up not confirmed within --warm-timeout %s: %w", name, timeout, errDeployRunTimeout)
 			}
 			poll := func() (string, error) {
 				return pollScheduleRunStatusContext(ctx, cfg, slug, schedule.ID, outcome.ActiveRunID)
 			}
-			status, waitErr := waitForFirstFireLoop(poll, remaining, 2*time.Second, fleetHealthProgressInterval,
-				time.Now, time.Sleep, out, fleetFirstFireLabel(slug, name)+" (active)")
+			status, waitErr := waitForDeployRunLoop(poll, remaining, 2*time.Second, fleetHealthProgressInterval,
+				time.Now, time.Sleep, out, fleetDeployRunLabel(slug, name)+" (active)")
 			if waitErr != nil {
 				res.warmGate = append(res.warmGate, outcome)
 				res.failureKind = failureWarmStateUnavailable
-				if errors.Is(waitErr, errFirstFireTimeout) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				if errors.Is(waitErr, errDeployRunTimeout) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 					res.failureKind = failureWarmWaitTimeout
 				}
 				appendScheduleLog(cfg, slug, schedule.ID, outcome.ActiveRunID, name, res)
 				return fmt.Errorf("schedule %q active warm-up not confirmed within --warm-timeout %s: %w", name, timeout, waitErr)
 			}
-			if firstFireStatusOK(status) {
-				continue
+			if deployRunStatusOK(status) {
+				latest, refreshErr := listSchedules(cfg, slug)
+				if refreshErr != nil {
+					res.failureKind = failureWarmStateUnavailable
+					return fmt.Errorf("refresh schedule %q convergence: %w", name, refreshErr)
+				}
+				for _, candidate := range latest {
+					if candidate.ID == schedule.ID && candidate.DeployTriggerSatisfied != nil && *candidate.DeployTriggerSatisfied {
+						outcome.State = "converged"
+						outcome.Refreshing = false
+						res.warmGate = append(res.warmGate, outcome)
+						goto nextSchedule
+					}
+				}
 			}
 			outcome.LastRunID = outcome.ActiveRunID
 			outcome.LastRunStatus = status
@@ -381,10 +377,50 @@ func verifyExistingWarmGateWithWait(cfg *cliConfig, slug, bundleDir string, res 
 			appendScheduleLog(cfg, slug, schedule.ID, outcome.LastRunID, name, res)
 		}
 		res.warmGate = append(res.warmGate, outcome)
-		failures = append(failures, describeNeverSucceeded(outcome, time.Now()))
+		failures = append(failures, describeDeployTriggerUnsatisfied(outcome, schedule, repairRequired, time.Now()))
+	nextSchedule:
 	}
 	if len(failures) == 0 {
-		return nil
+		// The per-schedule waits above are sequential. A concurrent deployment or
+		// schedule edit can invalidate an item already checked, so success requires
+		// one final authoritative whole-set snapshot. If that snapshot moved, loop
+		// within the original remaining budget until the complete current set is a
+		// fixed point; never combine successes from different deployments.
+		latest, refreshErr := listSchedules(cfg, slug)
+		if refreshErr != nil {
+			res.failureKind = failureWarmStateUnavailable
+			return fmt.Errorf("final schedule convergence check: %w", refreshErr)
+		}
+		var moved []string
+		for _, schedule := range latest {
+			if !schedule.Enabled || schedule.DeployTrigger == "never" {
+				continue
+			}
+			if schedule.DeployTriggerSatisfied == nil {
+				res.failureKind = failureWarmStateUnavailable
+				return fmt.Errorf("verify schedule %q: server did not report deploy-trigger convergence", schedule.Name)
+			}
+			if !*schedule.DeployTriggerSatisfied {
+				moved = append(moved, schedule.Name)
+			}
+		}
+		if len(moved) == 0 {
+			if err := requireAppCompatibilityClear(cfg, slug); err != nil {
+				classifyAppCompatibilityFailure(res, err)
+				return err
+			}
+			return nil
+		}
+		if timeout <= 0 {
+			res.failureKind = failureWarmNeverSucceeded
+			return fmt.Errorf("schedule convergence changed during verification: %s", strings.Join(moved, ", "))
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			res.failureKind = failureWarmWaitTimeout
+			return fmt.Errorf("schedule convergence changed during verification and was not restored within --warm-timeout %s: %w", timeout, errDeployRunTimeout)
+		}
+		return verifyExistingWarmGateWithWait(cfg, slug, bundleDir, res, remaining, out)
 	}
 	res.failureKind = failureWarmNeverSucceeded
 	prefix := "warm gate already unsatisfied before this apply"
@@ -392,6 +428,109 @@ func verifyExistingWarmGateWithWait(cfg *cliConfig, slug, bundleDir string, res 
 		prefix = "warm gate unsatisfied after this apply"
 	}
 	return fmt.Errorf("%s: %s", prefix, strings.Join(failures, "; "))
+}
+
+type appCompatibilityQuarantineError struct{ detail string }
+
+func (e *appCompatibilityQuarantineError) Error() string { return e.detail }
+
+func classifyAppCompatibilityFailure(res *applyResult, err error) {
+	var quarantine *appCompatibilityQuarantineError
+	if errors.As(err, &quarantine) {
+		res.failureKind = failureWarmNeverSucceeded
+		return
+	}
+	res.failureKind = failureWarmStateUnavailable
+}
+
+// requireAppCompatibilityClear closes the gap between per-schedule convergence
+// and the app-level consumer-start guard. A disabled uncertain producer or a
+// failed deployment barrier may quarantine the app even when no enabled
+// deploy-trigger schedule appears in the schedule list.
+func requireAppCompatibilityClear(cfg *cliConfig, slug string) error {
+	req, err := http.NewRequest(http.MethodGet, cfg.Host+"/api/apps/"+slug, nil)
+	if err != nil {
+		return fmt.Errorf("verify app compatibility: build request: %w", err)
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("verify app compatibility: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("verify app compatibility: %w", &deployHTTPError{statusCode: resp.StatusCode, body: string(body)})
+	}
+	var state struct {
+		CompatibilityQuarantined *bool `json:"compatibility_quarantined"`
+		ProducerRepairRequired   *bool `json:"producer_repair_required"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		return fmt.Errorf("verify app compatibility: decode response: %w", err)
+	}
+	if state.CompatibilityQuarantined == nil || state.ProducerRepairRequired == nil {
+		return fmt.Errorf("verify app compatibility: server response omitted authoritative compatibility state")
+	}
+	switch {
+	case *state.ProducerRepairRequired:
+		return &appCompatibilityQuarantineError{detail: "app compatibility quarantine requires a successful producer repair before consumers can start"}
+	case *state.CompatibilityQuarantined:
+		return &appCompatibilityQuarantineError{detail: "app compatibility is quarantined by an incomplete producer barrier; consumers cannot start"}
+	default:
+		return nil
+	}
+}
+
+func observedScheduleConvergenceWork(res applyResult) bool {
+	if len(res.deployRuns) > 0 {
+		return true
+	}
+	for _, gate := range res.warmGate {
+		if gate.ActiveRunID > 0 || gate.State == "converged" {
+			return true
+		}
+	}
+	return false
+}
+
+func requestScheduleConvergence(cfg *cliConfig, slug string) error {
+	url := fmt.Sprintf("%s/api/apps/%s/schedules/reconcile", cfg.Host, slug)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", authHeader(cfg.Token))
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &deployHTTPError{statusCode: resp.StatusCode, body: string(body)}
+	}
+	return nil
+}
+
+func describeDeployTriggerUnsatisfied(outcome scheduleGateOutcome, schedule scheduleDTO, repairRequired bool, now time.Time) string {
+	if repairRequired {
+		detail := fmt.Sprintf("schedule %q requires producer repair because a prior data write may be incomplete", outcome.Schedule)
+		if outcome.LastRunStatus != "" {
+			detail += "; " + describeNeverSucceeded(outcome, now)
+		}
+		return detail
+	}
+	detail := fmt.Sprintf("schedule %q producer convergence is not satisfied for app version %q (digest %s)",
+		outcome.Schedule, schedule.CurrentAppVersion, schedule.CurrentContentDigest)
+	if schedule.ProducerContentDigest != "" {
+		detail += fmt.Sprintf("; current producer state is version %q (digest %s)",
+			schedule.ProducerAppVersion, schedule.ProducerContentDigest)
+	}
+	if outcome.LastRunStatus != "" {
+		detail += "; " + describeNeverSucceeded(outcome, now)
+	}
+	return detail
 }
 
 func warmGateOrigin(action fleet.Action) string {
@@ -407,68 +546,6 @@ func verifyPostDeployWarmGate(cfg *cliConfig, slug, bundleDir string, timeout ti
 	res := applyResult{slug: slug, action: fleet.ActionUpdateSource}
 	err := verifyExistingWarmGateWithWait(cfg, slug, bundleDir, &res, timeout, out)
 	return res, err
-}
-
-// legacyScheduleSuccessState provides an honest fallback for servers predating
-// atomic last_success_at/stale fields. It scans bounded pages until it either
-// finds a success or exhausts history; inspecting only the newest run would
-// falsely report "never succeeded" after a later failure.
-func legacyScheduleSuccessState(cfg *cliConfig, slug string, scheduleID int64) (bool, *scheduleRunBrief, error) {
-	const pageSize = 100
-	var latest *scheduleRunBrief
-	for offset := 0; ; offset += pageSize {
-		url := fmt.Sprintf("%s/api/apps/%s/schedules/%d/runs?limit=%d&offset=%d", cfg.Host, slug, scheduleID, pageSize, offset)
-		req, err := http.NewRequest(http.MethodGet, url, nil)
-		if err != nil {
-			return false, latest, err
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return false, latest, err
-		}
-		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			return false, latest, readErr
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return false, latest, httpError(cfg.Token, "list schedule runs", resp, body)
-		}
-		var env struct {
-			Items []scheduleRunBrief `json:"items"`
-			Total int                `json:"total"`
-		}
-		if err := json.Unmarshal(body, &env); err == nil && env.Items != nil {
-			if latest == nil && len(env.Items) > 0 {
-				v := env.Items[0]
-				latest = &v
-			}
-			for _, run := range env.Items {
-				if run.Status == "succeeded" {
-					return true, latest, nil
-				}
-			}
-			if len(env.Items) < pageSize || (env.Total > 0 && offset+len(env.Items) >= env.Total) {
-				return false, latest, nil
-			}
-			continue
-		}
-		var bare []scheduleRunBrief
-		if err := json.Unmarshal(body, &bare); err != nil {
-			return false, latest, fmt.Errorf("decode schedule runs: %w", err)
-		}
-		if latest == nil && len(bare) > 0 {
-			v := bare[0]
-			latest = &v
-		}
-		for _, run := range bare {
-			if run.Status == "succeeded" {
-				return true, latest, nil
-			}
-		}
-		return false, latest, nil
-	}
 }
 
 func describeNeverSucceeded(outcome scheduleGateOutcome, now time.Time) string {
@@ -495,10 +572,10 @@ func describeNeverSucceeded(outcome scheduleGateOutcome, now time.Time) string {
 	return detail + ")"
 }
 
-// verifyEnabledScheduleFreshness implements the opt-in broader schedule gate:
-// every enabled schedule must satisfy the server-computed stale predicate. It
-// deliberately consumes the API's answer instead of duplicating cron,
-// timezone, timeout, and grace arithmetic in the CLI.
+// verifyEnabledScheduleFreshness implements the opt-in read-only schedule
+// gate. Every enabled schedule must satisfy cron freshness and every enabled
+// deploy-trigger policy must match the authoritative producer state. It
+// consumes the API's answers instead of duplicating server policy in the CLI.
 func verifyEnabledScheduleFreshness(cfg *cliConfig, slug string, res *applyResult) error {
 	schedules, err := listSchedules(cfg, slug)
 	if err != nil {
@@ -506,22 +583,57 @@ func verifyEnabledScheduleFreshness(cfg *cliConfig, slug string, res *applyResul
 		return fmt.Errorf("verify schedule freshness: %w", err)
 	}
 	var failures []string
+	producerMismatch := false
 	for _, schedule := range schedules {
-		if !schedule.Enabled {
+		repairRequired := schedule.ProducerRepairRequired != nil && *schedule.ProducerRepairRequired
+		// Disabling a producer cannot undo a partial physical write. Durable
+		// uncertainty is app-level compatibility state and remains part of this
+		// safety gate until a producer repair succeeds.
+		if !schedule.Enabled && !repairRequired {
 			continue
 		}
-		if schedule.Stale == nil {
+		stale := false
+		if schedule.Enabled && schedule.Stale == nil {
 			res.freshnessGate = append(res.freshnessGate, scheduleGateOutcome{Schedule: schedule.Name, State: "unavailable"})
 			res.failureKind = failureScheduleStateMissing
 			return fmt.Errorf("verify schedule freshness: server did not report stale state for schedule %q; upgrade the server or omit --verify-schedules", schedule.Name)
 		}
-		if !*schedule.Stale {
+		if schedule.Enabled {
+			stale = *schedule.Stale
+		}
+		deployMismatch := repairRequired
+		if schedule.Enabled && schedule.DeployTrigger != "" && schedule.DeployTrigger != "never" {
+			if schedule.DeployTriggerSatisfied == nil {
+				res.freshnessGate = append(res.freshnessGate, scheduleGateOutcome{Schedule: schedule.Name, State: "unavailable"})
+				res.failureKind = failureScheduleStateMissing
+				return fmt.Errorf("verify schedule convergence: server did not report producer state for schedule %q", schedule.Name)
+			}
+			deployMismatch = deployMismatch || !*schedule.DeployTriggerSatisfied
+		}
+		if !stale && !deployMismatch {
 			continue
 		}
 
-		outcome := scheduleGateOutcome{Schedule: schedule.Name, State: "stale"}
-		if schedule.Refreshing != nil && *schedule.Refreshing {
+		outcome := scheduleGateOutcome{Schedule: schedule.Name}
+		switch {
+		case stale && repairRequired:
+			outcome.State = "stale_producer_repair_required"
+		case stale && deployMismatch:
+			outcome.State = "stale_producer_mismatch"
+		case stale:
+			outcome.State = "stale"
+		case repairRequired:
+			outcome.State = "producer_repair_required"
+		default:
+			outcome.State = "producer_mismatch"
+		}
+		if stale && schedule.Refreshing != nil && *schedule.Refreshing {
 			outcome.State = "stale_refreshing"
+			if repairRequired {
+				outcome.State = "stale_refreshing_producer_repair_required"
+			} else if deployMismatch {
+				outcome.State = "stale_refreshing_producer_mismatch"
+			}
 			outcome.Refreshing = true
 		}
 		if schedule.LastRunID != nil {
@@ -543,13 +655,29 @@ func verifyEnabledScheduleFreshness(cfg *cliConfig, slug string, res *applyResul
 			appendScheduleLog(cfg, slug, schedule.ID, outcome.LastRunID, schedule.Name, res)
 		}
 		res.freshnessGate = append(res.freshnessGate, outcome)
-		failures = append(failures, describeStaleSchedule(outcome, time.Now()))
+		detail := ""
+		if stale {
+			detail = describeStaleSchedule(outcome, time.Now())
+		}
+		if deployMismatch {
+			producerMismatch = true
+			producerDetail := describeDeployTriggerUnsatisfied(outcome, schedule, repairRequired, time.Now())
+			if detail != "" {
+				detail += "; " + producerDetail
+			} else {
+				detail = producerDetail
+			}
+		}
+		failures = append(failures, detail)
 	}
 	if len(failures) == 0 {
 		return nil
 	}
 	res.failureKind = failureScheduleStale
-	return fmt.Errorf("schedule freshness gate unsatisfied: %s", strings.Join(failures, "; "))
+	if producerMismatch {
+		res.failureKind = failureScheduleProducer
+	}
+	return fmt.Errorf("schedule verification gate unsatisfied: %s", strings.Join(failures, "; "))
 }
 
 func describeStaleSchedule(outcome scheduleGateOutcome, now time.Time) string {
@@ -576,7 +704,7 @@ func describeStaleSchedule(outcome scheduleGateOutcome, now time.Time) string {
 	return detail + ")"
 }
 
-// restartAppAfterWarm cycles a serving app after every first-fire completed so
+// restartAppAfterWarm cycles a serving app after every deploy-triggered run completed so
 // a process that loaded data at startup gets a post-warm view. An explicitly
 // stopped app stays stopped: its next start will already see the warmed data.
 func restartAppAfterWarm(cfg *cliConfig, slug string, out io.Writer) (bool, error) {
@@ -602,6 +730,6 @@ func restartAppAfterWarm(cfg *cliConfig, slug string, out io.Writer) (bool, erro
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return false, httpError(cfg.Token, "restart after warm", resp, body)
 	}
-	fmt.Fprintf(out, "%s: restarted after first-fire warm-up\n", slug)
+	fmt.Fprintf(out, "%s: restarted after bundle data convergence\n", slug)
 	return true, nil
 }

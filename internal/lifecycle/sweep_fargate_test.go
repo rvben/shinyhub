@@ -2,16 +2,131 @@ package lifecycle_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/fargate"
 	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/process"
 )
+
+type strictTaskSweeper struct {
+	tasks   []process.TaskRef
+	stopErr error
+	stopped []string
+}
+
+func (s *strictTaskSweeper) ListManagedTasks(context.Context) ([]process.TaskRef, error) {
+	return append([]process.TaskRef(nil), s.tasks...), nil
+}
+func (s *strictTaskSweeper) StopTask(_ context.Context, arn string) error {
+	s.stopped = append(s.stopped, arn)
+	if s.stopErr != nil {
+		return s.stopErr
+	}
+	remaining := s.tasks[:0]
+	for _, task := range s.tasks {
+		if task.ARN != arn {
+			remaining = append(remaining, task)
+		}
+	}
+	s.tasks = remaining
+	return nil
+}
+func (s *strictTaskSweeper) WorkerID() string { return fargate.WorkerID }
+func (s *strictTaskSweeper) TaskStopped(_ context.Context, arn string) (bool, error) {
+	for _, stopped := range s.stopped {
+		if stopped == arn && s.stopErr == nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+func (s *strictTaskSweeper) TaskInventoryStabilizationWindow() time.Duration {
+	return 10 * time.Millisecond
+}
+func (s *strictTaskSweeper) TaskInventoryPollInterval() time.Duration { return time.Millisecond }
+
+type strictTaskRuntime struct {
+	noopRuntime
+	*strictTaskSweeper
+}
+
+func TestFenceOrphanScheduleTasksForTiers_ObservesGoneAndFailsClosed(t *testing.T) {
+	mgr := process.NewManager(t.TempDir(), noopRuntime{})
+	sweeper := &strictTaskSweeper{tasks: []process.TaskRef{
+		{ARN: "replica", Labels: map[string]string{process.LabelReplicaIndex: "0"}},
+		{ARN: "producer", Labels: map[string]string{process.LabelKind: process.KindScheduleRun}},
+	}}
+	mgr.RegisterRuntime("fargate", &strictTaskRuntime{strictTaskSweeper: sweeper})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := lifecycle.FenceOrphanScheduleTasksForTiers(ctx, mgr, []string{"fargate"}); err != nil {
+		t.Fatalf("fence task producer: %v", err)
+	}
+	if len(sweeper.stopped) != 1 || sweeper.stopped[0] != "producer" {
+		t.Fatalf("stopped=%v, want producer", sweeper.stopped)
+	}
+
+	sweeper.tasks = []process.TaskRef{{ARN: "producer-2", Labels: map[string]string{process.LabelKind: process.KindScheduleRun}}}
+	sweeper.stopErr = errors.New("ecs unavailable")
+	if err := lifecycle.FenceOrphanScheduleTasksForTiers(ctx, mgr, []string{"fargate"}); err == nil {
+		t.Fatal("task stop uncertainty must fail the startup fence")
+	}
+}
+
+type eventuallyVisibleTaskSweeper struct {
+	lists   int
+	stopped bool
+}
+
+func (s *eventuallyVisibleTaskSweeper) ListManagedTasks(context.Context) ([]process.TaskRef, error) {
+	s.lists++
+	if s.lists == 2 && !s.stopped {
+		return []process.TaskRef{{ARN: "late-producer", Labels: map[string]string{
+			process.LabelKind: process.KindScheduleRun,
+		}}}, nil
+	}
+	return nil, nil
+}
+func (s *eventuallyVisibleTaskSweeper) StopTask(context.Context, string) error {
+	s.stopped = true
+	return nil
+}
+func (s *eventuallyVisibleTaskSweeper) TaskStopped(context.Context, string) (bool, error) {
+	return s.stopped, nil
+}
+func (s *eventuallyVisibleTaskSweeper) WorkerID() string { return fargate.WorkerID }
+func (s *eventuallyVisibleTaskSweeper) TaskInventoryStabilizationWindow() time.Duration {
+	return 8 * time.Millisecond
+}
+func (s *eventuallyVisibleTaskSweeper) TaskInventoryPollInterval() time.Duration {
+	return time.Millisecond
+}
+
+type eventuallyVisibleTaskRuntime struct {
+	noopRuntime
+	*eventuallyVisibleTaskSweeper
+}
+
+func TestFenceOrphanScheduleTasksForTiers_DoesNotTrustFirstEmptyInventory(t *testing.T) {
+	sweeper := &eventuallyVisibleTaskSweeper{}
+	mgr := process.NewManager(t.TempDir(), noopRuntime{})
+	mgr.RegisterRuntime("fargate", &eventuallyVisibleTaskRuntime{eventuallyVisibleTaskSweeper: sweeper})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := lifecycle.FenceOrphanScheduleTasksForTiers(ctx, mgr, []string{"fargate"}); err != nil {
+		t.Fatalf("fence eventually-visible task: %v", err)
+	}
+	if !sweeper.stopped {
+		t.Fatal("first empty ECS inventory was trusted before the producer became visible")
+	}
+}
 
 // noopRuntime is a stub Runtime whose Wait returns immediately, so Adopt's
 // monitoring goroutine does not poll real PIDs or dereference a nil receiver.

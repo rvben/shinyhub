@@ -53,21 +53,31 @@ Deploy proceeds in this order:
    or 500 (DB error); the app row is left untouched.
 3. The new bundle's dependencies are installed (uv / renv).
 4. **`[[hook]]` blocks** run sequentially in the bundle directory.
-5. The new app processes are started and the proxy is re-registered.
-6. **Phase B — `[[schedule]]` blocks** upsert by name into the schedules
-   table. The scheduler is reloaded so the new cron expressions take effect
-   immediately.
-7. **Phase C - `[access]` group rules** reconcile into the per-app group
+5. Deploy-triggered producers that are not satisfied for this exact candidate
+   bundle run to durable success while the app remains stopped. Their bundle
+   digest, command fingerprint, deployment, run, and publication generation
+   are recorded before any consumer can start.
+6. **Phase B — `[[schedule]]` blocks** reconcile atomically by name into the
+   schedules table, and the exact declaration set is snapshotted with the
+   deployment for rollback. The scheduler is reloaded so new cron expressions
+   take effect immediately.
+7. Producer state is revalidated under the publication fence. If a writer from
+   a retiring server completed in the meantime, the candidate producer runs
+   again. Only then are the new app processes started and proxy-registered.
+8. The deployment is promoted and its complete schedule convergence state is
+   materialized.
+9. **Phase C — `[access]` group rules** reconcile into the per-app group
    access table as `source = manifest`, preserving any manually-managed
    rules. Unlike schedules, this is declarative: a group removed from the
    manifest loses its manifest rule on the next deploy.
 
-Phase A failure aborts the deploy (the new bundle never starts) with HTTP
-400 (validation) or 500 (DB error). Phase B failure returns HTTP 500 but
-the new bundle is already durable and serving traffic — the schedule set
-may be incomplete; the next deploy converges because the upsert is
-idempotent. Phase C failure likewise returns HTTP 500 with the bundle
-already live; re-deploying re-runs the reconcile.
+Phase A or Phase B failure aborts the deploy before the new bundle starts.
+Phase B is transactional: the old declaration set remains intact rather than
+leaving a partly-applied schedule set. A failed candidate producer also fails
+closed; if it may have replaced shared data, compatibility quarantine prevents
+the previous consumer from being restarted against uncertain data. Phase C
+failure returns HTTP 500 with the bundle already live; re-deploying re-runs the
+declarative access reconcile.
 
 Reloading the scheduler is a soft step: if the scheduler is not yet
 started (e.g. during early-startup deploys), the reload is skipped and
@@ -372,11 +382,29 @@ mirrors the CLI fields.
 | `overlap` | no | `skip` (default), `queue`, or `concurrent`. |
 | `missed` | no | `skip` (default) or `run_once`. |
 | `disabled` | no | When `true`, the schedule row exists but the runner skips ticks. |
-| `run_on_register` | no | When `true`, fire this schedule once on first registration if the app has never had a *successful* run of it, warming the cache on a fresh deploy. Re-deploys of an already-warmed schedule do not re-fire. See [First-fire on register](#first-fire-on-register-run_on_register). |
+| `deploy_trigger` | no | `never` (default), `first_deploy`, or `bundle_change`. `bundle_change` requires the authoritative last writer to match the current content digest and canonical command; changing code behind an unchanged `cmd` therefore dispatches again. See [Deploy-triggered runs](#deploy-triggered-runs). |
 | `on_success` | no | `none` (default) or `roll`. A roll replaces serving replicas after a successful job so process-global data is re-imported. |
 | `min_roll_interval` | no | Minimum duration between completed successful rolls, such as `1h`. |
 | `roll_fallback` | no | `defer` (default) retries when a surge cannot fit; `restart` accepts downtime and replaces the pool stop-first. Requires `on_success = "roll"`. |
 | `max_defer_age` | no | Capacity-deferral deadline such as `6h`; `0` means unlimited. Requires `on_success = "roll"`. |
+
+`run_on_register` is intentionally no longer accepted. Use `deploy_trigger =
+"bundle_change"` for data that must track producer code, or `first_deploy` for
+a true one-time bootstrap. On upgrade, existing persisted schedules receive
+`never` because the former manifest-only setting cannot be recovered from the
+database; reapply the manifest with an explicit policy.
+
+Schedules that declare producer semantics (`deploy_trigger != "never"` or
+`on_success = "roll"`) currently require native app placement and effective
+`worker_isolation = "multiplex"`. Native multiplex child processes have durable
+replica identities and inherit the physical publication fence across a control-plane crash.
+Docker, remote-worker, Fargate, and ECS launches can be accepted before their
+runtime handle is durably observable, so the server rejects those producer
+topologies rather than claiming a failover guarantee it cannot prove. Elastic
+`grouped` and `per_session` workers are also rejected until their identities
+survive owner failover. The server revalidates inherited isolation at startup
+and at the physical producer boundary, so changing the fleet default cannot
+silently bypass this contract.
 
 Exactly one of `cmd` or `cmd_json` is required. Both empty or both set is
 a parse error.
@@ -406,41 +434,60 @@ Schedules **not** present in the manifest are left alone — removing a
 silently dropping schedules that were created interactively while the
 manifest was being authored.
 
-### First-fire on register (`run_on_register`)
+### Deploy-triggered runs
 
-Setting `run_on_register = true` makes the platform fire the schedule once,
-asynchronously, the first time it is registered on an app that has never had a
-successful run of it. This warms the app's cache on a fresh deploy without
-re-blocking every deploy the way a deploy-time `[[hook]]` would.
+`deploy_trigger` makes the intended convergence policy explicit. In particular,
+`bundle_change` is keyed by producer bundle rather than lifetime success:
 
-The gate is "has this schedule ever succeeded?": a brand-new schedule fires; a
-schedule that has already succeeded is never re-fired by a re-deploy. A failed
-first-fire is non-fatal (the deploy stays live and durable) and is re-attempted
-on the next deploy until a run succeeds. A `disabled` schedule is never
-first-fired. If a re-deploy arrives while a first-fire is still running, the gate
-is still open (no success yet) and a second fire is dispatched, which the
-schedule's `overlap` policy (default `skip`) records as `skipped_overlap` rather
-than running the job twice.
+- `never` does not dispatch on deploy.
+- `first_deploy` dispatches until the schedule has one successful run.
+- `bundle_change` dispatches until the authoritative last writer matches the
+  app's current content digest and canonical producer command. Historical
+  successes are not reused after a different producer publishes; rolling back
+  therefore produces again unless the current data already came from that
+  exact producer identity.
 
-By default the fire is fire-and-forget: the deploy returns immediately and the
-run warms the cache in the background. Pass `--wait-for-warm` to require a
-recorded success. `shinyhub deploy` uses `--wait-timeout`; `shinyhub fleet
-apply` uses one `--warm-timeout` deadline per app (default 15 minutes) across
-all first-fires. A failure, timeout, missing dispatch reference, or unreadable
-final schedule state exits non-zero. A `skipped_overlap` proves only that
-another run existed and passes only when the final state already records a
-success. For `fleet apply`, the level gate runs after every non-delete action,
-including an unchanged bundle: an enabled `run_on_register` schedule with no
-successful run remains unconverged without being re-fired. When an active run
-is already repairing that condition, fleet apply joins its exact run ID within
-the existing per-app deadline; a later overlap-skip row cannot hide it. Waiting
-does not reload a replica that already read the old cache at startup. For that
-application pattern, pass `--restart-after-warm` instead; it implies the wait
-and cycles serving replicas only after the final success check passes. An app
-that was deliberately stopped remains stopped and sees the warmed data on its
-next start. The imperative
-`shinyhub schedule add --run-on-register` fires the same way and reports the
-triggered run id (add `--follow` to stream it).
+Every admitted run snapshots `deployment_id`, `app_version`, `content_digest`,
+the canonical command, and its fingerprint, and executes that immutable bundle
+even if another deploy arrives while it is queued. Active bundle directories
+are pinned against cleanup. Run history and schedule-list responses expose the
+same provenance. A successful writer atomically replaces the schedule's
+authoritative producer state outside bounded run history. If an older run
+finishes last, the server observes that it became the physical last writer and
+reopens the current obligation. An `on_success = "roll"` activation is
+superseded if a newer bundle becomes current before activation starts, so old
+producer output cannot roll newer application code.
+
+Promotion materializes durable obligations for every persisted enabled policy,
+not just the schedules present in that upload's manifest. Admission failures
+and server interruptions repair automatically. A producer process that really
+runs and fails remains failed for diagnosis and requires
+`shinyhub schedule retry-convergence APP SCHEDULE` (or a new desired producer
+identity) before it runs again.
+
+Deploy-triggered runs are a candidate-bundle startup barrier. The server
+prepares the candidate environment, confirms every previous consumer has
+physically stopped, runs every
+unsatisfied producer synchronously against that immutable bundle, atomically
+commits the complete schedule declaration batch, and only then starts candidate
+consumers. Schedule admissions remain fenced through promotion; an interrupted
+publication or declaration commit leaves the app stopped instead of recovering
+older consumers against incompatible data or commands. Each promoted deployment
+also retains an immutable snapshot of its effective schedule declarations;
+rollback restores that exact snapshot and follows the same producer-before-
+consumer ordering. A response marks convergence proven before consumer boot
+with `prestart: true`, whether the authoritative producer ran in that request or
+was already satisfied on entry.
+
+Use `--wait-for-warm` to reconcile and require persisted policy to be satisfied
+for the current producer identity, including on unchanged fleet retries. It
+waits for the exact durable obligation and then rechecks the authoritative last
+writer. `--restart-after-warm` cycles replicas only when convergence was repaired
+after those replicas were already running; a pre-start deploy run does not need
+another cycle.
+
+The imperative equivalent is `shinyhub schedule add --deploy-trigger
+bundle_change`; add `--follow` to stream a dispatched run.
 
 ## `[[hook]]` — deploy lifecycle hooks
 
@@ -582,7 +629,7 @@ The wire shape:
     "app": { "replicas": 2, "max_sessions_per_replica": 10 },
     "icon_shadowed_upload": true,
     "schedules": [
-      { "name": "nightly", "action": "created", "schedule_id": 7, "first_fire": { "run_id": 42 } }
+      { "name": "nightly", "action": "created", "schedule_id": 7, "deploy_run": { "run_id": 42 } }
     ],
     "access_groups": [
       { "group": "finance", "role": "viewer" },
@@ -608,19 +655,23 @@ runtime could not execute declared hooks. This distinguishes "no hooks in the
 deployed manifest" from "all declared hooks completed" without inspecting the
 server log.
 
-Each schedule entry carries its `schedule_id`; a `first_fire` object with the
-dispatched `run_id` is present only when `run_on_register` fired a run on this
-deploy. `shinyhub fleet apply --json` surfaces the same data per app under a
-`first_fires` array (with the run's `status` when `--wait-for-warm` waited).
+Each manifest schedule entry carries its `schedule_id`. The top-level
+`schedule_convergence` array is the authoritative result for every persisted
+deploy-triggered policy, including schedules not mentioned by this manifest;
+each entry carries its obligation state and admitted `run_id` when present.
+`shinyhub fleet apply --json` surfaces waited runs per app under a `deploy_runs`
+array (with the run's `status` when `--wait-for-warm` waited).
 With `--restart-after-warm`, fleet JSON also reports `warm_restarted: true`
 when serving replicas were cycled after those runs succeeded.
 
-For a broader data-freshness policy, `fleet apply --verify-schedules` checks the
-server-computed `stale` state of every enabled schedule, including schedules
-without `run_on_register` and schedules whose last success has aged out. The
-check never dispatches a run. `stale` describes proven data age independently
-from `refreshing`, which reports a live run; a schedule can be both. Human
-output labels these as schedule-freshness failures; JSON reports them in
+For a read-only data audit, `fleet apply --verify-schedules` checks the
+server-computed `stale` state of every enabled schedule, rejects an enabled
+deploy-trigger whose authoritative producer does not match current code, and
+rejects unresolved producer-write uncertainty even if the writer was later
+disabled. Disabling a declaration cannot undo a possible partial physical
+write. The check never dispatches a run. `stale` describes proven data age independently
+from `refreshing`, which reports a live run; a schedule can be both. JSON reports
+failures in
 `schedule_verification`, gives failures stable `failure_kind` values, and
 includes the exact atomic `last_run_id` plus relevant run tails under
 `result.schedule_logs` when available.
@@ -654,9 +705,10 @@ Deploying this bundle:
 
 1. Sets the app to never-hibernate, 2 replicas, cap 20 (Phase A, atomic).
 2. Installs dependencies, runs `python scripts/migrate.py` (post-deploy hook).
-3. Starts the two replicas behind the proxy.
-4. Upserts the `nightly-fetch` schedule (Phase B); the scheduler reloads
-   and the new cron takes effect immediately.
+3. Atomically upserts and snapshots the `nightly-fetch` schedule (Phase B);
+   the scheduler reloads and the new cron takes effect immediately.
+4. Revalidates deploy-triggered producer state under the publication fence,
+   then starts the two replicas behind the proxy.
 
 A second deploy with the same manifest produces no settings change (Phase
 A is a no-op), re-runs the hook (migrations are expected to be

@@ -51,3 +51,20 @@ func TestStopReplicaConfirmed_LeavesWedgedReplicaTracked(t *testing.T) {
 		t.Fatal("unconfirmed replica was removed from the manager")
 	}
 }
+
+func TestStopConfirmed_RejectsPoolWithWedgedReplicaAndKeepsItTracked(t *testing.T) {
+	rt := &captureRuntime{}
+	m := NewManager(t.TempDir(), rt)
+	m.SetStopGrace(20 * time.Millisecond)
+	if _, err := m.Start(StartParams{Slug: "wedged-pool", Dir: t.TempDir(), Command: []string{"true"}, Port: 19952}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	err := m.StopConfirmed("wedged-pool")
+	if !errors.Is(err, ErrStopUnconfirmed) {
+		t.Fatalf("StopConfirmed error = %v, want ErrStopUnconfirmed", err)
+	}
+	if _, ok := m.GetReplica("wedged-pool", 0); !ok {
+		t.Fatal("unconfirmed pool replica was removed from the manager")
+	}
+}

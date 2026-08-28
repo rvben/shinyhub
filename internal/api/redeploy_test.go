@@ -25,7 +25,7 @@ import (
 // guards every deploy/restart/rollback/stop/delete code path against the
 // state-corruption you get when two of them mutate the same app at once.
 func TestDeployLock_SerializesSameSlug(t *testing.T) {
-	s := &Server{cfg: &config.Config{}}
+	s := &Server{cfg: &config.Config{}, appOperationLockDir: t.TempDir()}
 
 	var inFlight, maxObserved int32
 	work := func() {
@@ -57,7 +57,7 @@ func TestDeployLock_SerializesSameSlug(t *testing.T) {
 }
 
 func TestDeployLock_DifferentSlugsIndependent(t *testing.T) {
-	s := &Server{cfg: &config.Config{}}
+	s := &Server{cfg: &config.Config{}, appOperationLockDir: t.TempDir()}
 
 	const slugs = 4
 	start := make(chan struct{})

@@ -26,9 +26,9 @@ const (
 	// catch-up corresponds to no cron boundary, and conflating the two makes
 	// "did the policy backfill the outage?" unanswerable from run history.
 	TriggerMissed = "missed"
-	// TriggerRegister is a first-fire dispatched by run_on_register, including
-	// the startup reconcile that retries an interrupted first-fire.
-	TriggerRegister = "register"
+	// TriggerDeploy is dispatched by a schedule's deploy_trigger, including
+	// restart recovery for an interrupted deploy run.
+	TriggerDeploy = "deploy"
 	// TriggerManual is a run started by an operator through the API or CLI.
 	TriggerManual = "manual"
 )
@@ -37,15 +37,18 @@ const (
 // by *jobs.Manager. Kept here to avoid an import cycle in tests.
 type Jobs interface {
 	Run(scheduleID int64, trigger string, userID *int64) (int64, error)
+	RunDeployObligation(obligation *db.ScheduleDeployObligation) (int64, error)
 }
 
 // Store is the narrow interface scheduler needs from db. Satisfied by *db.Store.
 type Store interface {
 	ListEnabledSchedules() ([]*db.Schedule, error)
 	GetSchedule(id int64) (*db.Schedule, error)
-	MarkRunningSchedulesInterrupted() (int64, error)
 	LastSuccessfulRun(id int64) (*db.ScheduleRun, error)
-	SchedulesNeedingFirstFireRetry() ([]int64, error)
+	RecoverDeployObligations() error
+	ReconcileAllDeployObligations() error
+	ClaimNextDeployObligation() (*db.ScheduleDeployObligation, error)
+	ReleaseDeployObligation(id int64, cause error) error
 }
 
 // ErrNotStarted is returned by Reload when the scheduler's cron has not
@@ -98,14 +101,18 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	// 1. Mark interrupted runs from a previous server life.
-	if _, err := s.store.MarkRunningSchedulesInterrupted(); err != nil {
-		slog.Warn("mark interrupted schedules", "err", err)
+	// Owner startup terminalizes inherited running rows while holding every
+	// publication recovery fence. Doing it here would race API admissions opened
+	// before Scheduler.Start and could interrupt a brand-new live producer.
+	if err := s.store.RecoverDeployObligations(); err != nil {
+		s.Stop()
+		return fmt.Errorf("recover deploy obligations: %w", err)
 	}
 
-	// 2. Load enabled schedules.
+	// Load enabled schedules.
 	enabled, err := s.store.ListEnabledSchedules()
 	if err != nil {
+		s.Stop()
 		return fmt.Errorf("list enabled schedules: %w", err)
 	}
 	for _, sched := range enabled {
@@ -118,17 +125,23 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		}
 	}
 
-	// 2b. Re-fire run_on_register first-fires interrupted by a prior restart.
-	// A first-fire warms an app's cache on its initial deploy; if a restart
-	// killed it before it succeeded, its next cron tick can be hours away, so
-	// recover it here rather than leaving the app with an empty cache.
-	s.reconcileFirstFires()
+	// 2b. Recover deploy-triggered runs interrupted by a prior restart.
+	s.reconcileDeployRuns()
 
 	// 3. Start cron loop and stop it when ctx is cancelled.
 	s.cron.Start()
 	go func() {
-		<-ctx.Done()
-		s.Stop()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				s.Stop()
+				return
+			case <-ticker.C:
+				s.reconcileDeployRuns()
+			}
+		}
 	}()
 	return nil
 }
@@ -252,25 +265,38 @@ func (s *Scheduler) dispatchMissedIfDue(sched *db.Schedule) {
 	}
 }
 
-// reconcileFirstFires re-fires any run_on_register first-fire that a prior
-// service restart interrupted before it could succeed. The store gate scopes
-// this to enabled schedules whose latest register-triggered run is
-// 'interrupted' and that have never succeeded, so an operator-cancelled or
-// already-succeeded first-fire is left alone. Each is dispatched with the
-// "register" trigger (not "schedule") so a subsequent restart sees the new
-// first-fire's status. Dispatch is asynchronous: a first-fire can run for
-// minutes and must not block scheduler startup.
-func (s *Scheduler) reconcileFirstFires() {
-	ids, err := s.store.SchedulesNeedingFirstFireRetry()
-	if err != nil {
-		slog.Warn("reconcile first-fires: query failed", "err", err)
+// reconcileDeployRuns materializes current desired state and drains its durable
+// outbox. It repairs interrupted admission and overlap waits, while failed
+// producer executions remain failed until an explicit retry or new identity.
+func (s *Scheduler) reconcileDeployRuns() {
+	if err := s.store.ReconcileAllDeployObligations(); err != nil {
+		slog.Warn("reconcile deploy obligations: query failed", "err", err)
 		return
 	}
-	for _, id := range ids {
-		go func(id int64) {
-			if _, err := s.jobs.Run(id, TriggerRegister, nil); err != nil {
-				slog.Warn("reconcile first-fire dispatch failed", "schedule", id, "err", err)
+	for attempts := 0; attempts < 256; attempts++ {
+		obligation, err := s.store.ClaimNextDeployObligation()
+		if errors.Is(err, db.ErrNotFound) {
+			return
+		}
+		if err != nil {
+			slog.Warn("claim deploy obligation failed", "err", err)
+			return
+		}
+		if s.jobs == nil {
+			err := errors.New("jobs manager unavailable")
+			if releaseErr := s.store.ReleaseDeployObligation(obligation.ID, err); releaseErr != nil {
+				slog.Error("release deploy obligation without jobs manager", "obligation", obligation.ID, "err", releaseErr)
 			}
-		}(id)
+			slog.Warn("deploy obligation remains pending: jobs manager unavailable", "schedule", obligation.ScheduleID)
+			continue
+		}
+		if _, err := s.jobs.RunDeployObligation(obligation); err != nil {
+			if releaseErr := s.store.ReleaseDeployObligation(obligation.ID, err); releaseErr != nil {
+				slog.Error("release failed deploy obligation claim", "obligation", obligation.ID, "err", releaseErr)
+			}
+			slog.Warn("reconcile deploy obligation dispatch failed", "schedule", obligation.ScheduleID, "err", err)
+			continue
+		}
 	}
+	slog.Warn("deploy obligation reconciliation stopped at bounded drain limit", "limit", 256)
 }

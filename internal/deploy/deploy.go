@@ -518,8 +518,9 @@ type Params struct {
 	// activation uses it to durably record ownership of an in-flight replacement
 	// so startup recovery can reap or retry it after a control-plane crash.
 	ReplicaStarted func(Result) error
-	// LaunchReservationHeld and GuardUntilAcknowledged are activation-only launch
-	// controls. See process.StartParams for their safety contract.
+	// LaunchReservationHeld is activation-specific. GuardUntilAcknowledged is
+	// used by every durable API launch so native app code cannot exec before
+	// ReplicaStarted persists its runtime identity. See process.StartParams.
 	LaunchReservationHeld  bool
 	GuardUntilAcknowledged bool
 }

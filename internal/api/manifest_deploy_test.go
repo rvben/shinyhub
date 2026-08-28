@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -24,15 +26,21 @@ import (
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
 // manifestFakeRuntime is a minimal Runtime for end-to-end deploy tests.
 // It returns synthetic PIDs without spawning real processes, so deploy.Run
 // can complete without uv/Rscript on the host.
 type manifestFakeRuntime struct {
-	mu      sync.Mutex
-	nextPID int
-	stops   map[int]chan struct{}
+	mu               sync.Mutex
+	nextPID          int
+	stops            map[int]chan struct{}
+	events           []string
+	producerCommands [][]string
+	producerEntered  chan struct{}
+	producerBlock    chan struct{}
+	producerErr      error
 }
 
 func newManifestFakeRuntime() *manifestFakeRuntime {
@@ -45,6 +53,7 @@ func newManifestFakeRuntime() *manifestFakeRuntime {
 func (f *manifestFakeRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.events = append(f.events, "start:"+p.ContentDigest)
 	pid := f.nextPID
 	f.nextPID++
 	f.stops[pid] = make(chan struct{})
@@ -84,7 +93,30 @@ func (f *manifestFakeRuntime) Stats(_ context.Context, _ process.RunHandle) (*fl
 	return nil, 0, nil
 }
 
-func (f *manifestFakeRuntime) RunOnce(_ context.Context, _ process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+func (f *manifestFakeRuntime) RunOnce(ctx context.Context, p process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+	f.mu.Lock()
+	f.events = append(f.events, "producer:"+p.ContentDigest)
+	f.producerCommands = append(f.producerCommands, append([]string(nil), p.Command...))
+	f.mu.Unlock()
+	if f.producerEntered != nil {
+		select {
+		case f.producerEntered <- struct{}{}:
+		default:
+		}
+	}
+	if f.producerBlock != nil {
+		select {
+		case <-f.producerBlock:
+		case <-ctx.Done():
+			return process.ExitInfo{Code: -1, Signaled: true}, nil
+		}
+	}
+	f.mu.Lock()
+	err := f.producerErr
+	f.mu.Unlock()
+	if err != nil {
+		return process.ExitInfo{}, err
+	}
 	return process.ExitInfo{}, nil
 }
 
@@ -92,16 +124,17 @@ func (f *manifestFakeRuntime) RunOnce(_ context.Context, _ process.StartParams, 
 // Container-mode semantics: dependency installation is treated as a no-op on
 // the host, which is exactly what we want for a test that never spawns real
 // processes.
-func (f *manifestFakeRuntime) HostPreparesDeps() bool    { return false }
-func (f *manifestFakeRuntime) AppBindHost() string       { return "127.0.0.1" }
-func (f *manifestFakeRuntime) HostProvidesAppData() bool { return true }
+func (f *manifestFakeRuntime) HostPreparesDeps() bool      { return false }
+func (f *manifestFakeRuntime) AppBindHost() string         { return "127.0.0.1" }
+func (f *manifestFakeRuntime) HostProvidesAppData() bool   { return true }
+func (f *manifestFakeRuntime) InheritsLifetimeFiles() bool { return true }
 
 // buildManifestE2EServer constructs the shared scaffolding used by all
 // manifest E2E server variants: temp appsDir, in-memory store, admin user +
 // JWT, config, process manager with the fake runtime, Server, and a no-op
 // health-check deploy runner. SetJobs is intentionally NOT called here so
 // each variant can wire the scheduler it needs (nil vs real jobs.Manager).
-func buildManifestE2EServer(t *testing.T, runtime config.RuntimeConfig) (srv *Server, store *db.Store, token string, mgr *process.Manager, appsDir string) {
+func buildManifestE2EServer(t *testing.T, runtime config.RuntimeConfig) (srv *Server, store *db.Store, token string, mgr *process.Manager, appsDir string, fakeRuntime *manifestFakeRuntime) {
 	t.Helper()
 	appsDir = t.TempDir()
 	store = dbtest.New(t)
@@ -121,7 +154,8 @@ func buildManifestE2EServer(t *testing.T, runtime config.RuntimeConfig) (srv *Se
 		Runtime: runtime,
 	}
 
-	mgr = process.NewManager(appsDir, newManifestFakeRuntime())
+	fakeRuntime = newManifestFakeRuntime()
+	mgr = process.NewManager(appsDir, fakeRuntime)
 	srv = New(cfg, store, mgr, proxy.New())
 
 	// Replace the deploy runner to inject a no-op health check so tests
@@ -132,7 +166,7 @@ func buildManifestE2EServer(t *testing.T, runtime config.RuntimeConfig) (srv *Se
 		p.HealthCheck = func(string, time.Duration, http.RoundTripper) error { return nil }
 		return deploy.Run(p)
 	})
-	return srv, store, token, mgr, appsDir
+	return srv, store, token, mgr, appsDir, fakeRuntime
 }
 
 // newManifestE2EServer wires a Server with a fake runtime, no-op sync hooks,
@@ -145,10 +179,238 @@ func newManifestE2EServer(t *testing.T) (*Server, *db.Store, string) {
 
 func newManifestE2EServerCfg(t *testing.T, runtime config.RuntimeConfig) (*Server, *db.Store, string) {
 	t.Helper()
-	srv, store, token, _, _ := buildManifestE2EServer(t, runtime)
+	srv, store, token, _, _, _ := buildManifestE2EServer(t, runtime)
 	// Wire scheduler (not started — ErrNotStarted is treated as a soft warning).
 	srv.SetJobs(nil, scheduler.New(nil, store, time.UTC))
 	return srv, store, token
+}
+
+func TestPrestartPlanRevalidatesSatisfiedProducerAfterInterveningWriter(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "revalidate-owner", PasswordHash: "unused", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.GetUserByUsername("revalidate-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.CreateApp(db.CreateAppParams{
+		Slug: "revalidate-producer", Name: "revalidate-producer", OwnerID: owner.ID, Access: "private",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("revalidate-producer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appID := app.ID
+	command := `["producer"]`
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: appID, Name: "cache", CronExpr: "0 5 * * *", CommandJSON: command,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: schedulespec.DeployTriggerBundleChange,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, fingerprint, err := schedulespec.ProducerIdentity(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish := func(version, digest string, finishedAt time.Time) {
+		t.Helper()
+		deployment, beginErr := store.BeginDeployment(appID, version, t.TempDir())
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if setErr := store.SetDeploymentDigest(deployment.ID, digest); setErr != nil {
+			t.Fatal(setErr)
+		}
+		deploymentID := deployment.ID
+		runID, insertErr := store.InsertScheduleRun(db.InsertScheduleRunParams{
+			ScheduleID: scheduleID, Status: "running", Trigger: "deploy", StartedAt: finishedAt.Add(-time.Second),
+			DeploymentID: &deploymentID, AppVersion: version, ContentDigest: digest,
+			ProducerFingerprint: fingerprint, ProducerCommandJSON: canonical, PublishesData: true,
+		})
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		zero := 0
+		if _, completeErr := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+			RunID: runID, Status: "succeeded", ExitCode: &zero, FinishedAt: finishedAt,
+		}); completeErr != nil {
+			t.Fatal(completeErr)
+		}
+	}
+
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	publish("target", "sha256:target", base)
+	srv := &Server{store: store}
+	plan, err := srv.planPrestartSchedules(app, nil, "sha256:target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.producers) != 0 {
+		t.Fatalf("initial plan producers=%d, want satisfied-on-entry", len(plan.producers))
+	}
+
+	// Model an ordinary writer admitted before the deploy acquired its producer
+	// gates. It completes while gate acquisition waits and invalidates the state
+	// that made initial planning look satisfied.
+	publish("intervening", "sha256:intervening", base.Add(time.Second))
+	if err := srv.revalidatePrestartPlan(plan, "sha256:target"); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.producers) != 1 || plan.producers[0].ID != scheduleID {
+		t.Fatalf("revalidated producers=%+v, want schedule %d", plan.producers, scheduleID)
+	}
+}
+
+func TestPrestartConsumerFenceRepublishesAfterCrossProcessWriter(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "fence-owner", PasswordHash: "unused", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.GetUserByUsername("fence-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{
+		Slug: "fenced-producer", Name: "fenced-producer", OwnerID: owner.ID, Access: "private",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("fenced-producer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := `["produce"]`
+	canonical, fingerprint, err := schedulespec.ProducerIdentity(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "cache", CronExpr: "0 5 * * *", CommandJSON: command,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "concurrent", MissedPolicy: "skip",
+		DeployTrigger: schedulespec.DeployTriggerBundleChange,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDeployment, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "old", BundleDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDeploymentDigest(oldDeployment.ID, "sha256:old"); err != nil {
+		t.Fatal(err)
+	}
+	oldDeployment.ContentDigest = "sha256:old"
+	sharedData := t.TempDir()
+	oldRuntime := newManifestFakeRuntime()
+	oldRuntime.producerEntered = make(chan struct{}, 1)
+	oldRuntime.producerBlock = make(chan struct{})
+	oldJobs, err := jobs.NewManager(process.NewManager(t.TempDir(), oldRuntime), nil, process.DefaultTier, store, nil, sharedData, sharedData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The old writer passes its definitive current-deployment check and begins
+	// writing before the successor promotes the target deployment. It remains
+	// blocked while the successor establishes target provenance and waits for
+	// the exclusive publication fence to drain.
+	if _, err := oldJobs.RunForDeployment(scheduleID, "manual", nil, oldDeployment); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-oldRuntime.producerEntered:
+	case <-time.After(time.Second):
+		t.Fatal("retiring writer did not acquire publication fence")
+	}
+
+	targetDeployment, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "target", BundleDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDeploymentDigest(targetDeployment.ID, "sha256:target"); err != nil {
+		t.Fatal(err)
+	}
+	targetDeployment.ContentDigest = "sha256:target"
+	targetID := targetDeployment.ID
+	seedRun, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: scheduleID, Status: "running", Trigger: "deploy", StartedAt: time.Now().UTC().Add(-time.Second),
+		DeploymentID: &targetID, AppVersion: targetDeployment.Version, ContentDigest: targetDeployment.ContentDigest,
+		ProducerFingerprint: fingerprint, ProducerCommandJSON: canonical, PublishesData: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := 0
+	if _, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: seedRun, Status: "succeeded", ExitCode: &zero, FinishedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	targetRuntime := newManifestFakeRuntime()
+	targetJobs, err := jobs.NewManager(process.NewManager(t.TempDir(), targetRuntime), nil, process.DefaultTier, store, nil, sharedData, sharedData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{store: store, jobs: targetJobs}
+	plan, err := srv.planPrestartSchedules(app, nil, targetDeployment.ContentDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.producers) != 0 {
+		t.Fatalf("initial target state unexpectedly stale: %+v", plan.producers)
+	}
+	releaseProducerGates := targetJobs.AcquireProducerGates(plan.gateIDs)
+	defer releaseProducerGates()
+
+	type fenceResult struct {
+		release func()
+		err     error
+	}
+	fenced := make(chan fenceResult, 1)
+	barrierEntered := true // model the deploy's already-durable compatibility barrier
+	go func() {
+		release, err := srv.convergePrestartAndFenceConsumer(
+			plan, targetDeployment.ContentDigest, app, targetDeployment, &barrierEntered,
+		)
+		fenced <- fenceResult{release: release, err: err}
+	}()
+	select {
+	case result := <-fenced:
+		if result.release != nil {
+			result.release()
+		}
+		t.Fatalf("consumer fence crossed retiring writer early: %v", result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(oldRuntime.producerBlock)
+	var result fenceResult
+	select {
+	case result = <-fenced:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer convergence did not recover after retiring writer")
+	}
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	defer result.release()
+	state, err := store.GetScheduleProducerState(scheduleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ContentDigest != targetDeployment.ContentDigest || state.ProducerFingerprint != fingerprint {
+		t.Fatalf("consumer fence returned over stale producer state: %+v", state)
+	}
+	targetRuntime.mu.Lock()
+	targetEvents := append([]string(nil), targetRuntime.events...)
+	targetRuntime.mu.Unlock()
+	if len(targetEvents) != 1 || targetEvents[0] != "producer:"+targetDeployment.ContentDigest {
+		t.Fatalf("target republish events=%v, want one candidate producer", targetEvents)
+	}
 }
 
 // buildMultiFileBundleUpload builds a multipart body whose zip contains all
@@ -795,16 +1057,16 @@ func TestDeployRecordsContentDigest(t *testing.T) {
 
 // newManifestE2EServerWithJobs is like newManifestE2EServer but wires a real
 // jobs.Manager (backed by the manifest fake runtime, whose RunOnce returns
-// success) so run_on_register first-fires actually execute and record runs.
-func newManifestE2EServerWithJobs(t *testing.T) (*Server, *db.Store, string) {
+// success) so deploy-triggered runs actually execute and record provenance.
+func newManifestE2EServerWithJobs(t *testing.T) (*Server, *db.Store, string, *manifestFakeRuntime) {
 	t.Helper()
-	srv, store, token, mgr, appsDir := buildManifestE2EServer(t, config.RuntimeConfig{})
+	srv, store, token, mgr, appsDir, fakeRuntime := buildManifestE2EServer(t, config.RuntimeConfig{})
 	jm, err := jobs.NewManager(mgr, nil, process.DefaultTier, store, nil, appsDir, appsDir)
 	if err != nil {
 		t.Fatalf("jobs.NewManager: %v", err)
 	}
 	srv.SetJobs(jm, scheduler.New(jm, store, time.UTC))
-	return srv, store, token
+	return srv, store, token, fakeRuntime
 }
 
 // scheduleIDByName resolves a schedule's id by listing the app's schedules.
@@ -823,9 +1085,7 @@ func scheduleIDByName(t *testing.T, store *db.Store, appID int64, name string) i
 	return 0
 }
 
-// waitForRegisterRunSucceeded blocks until the schedule has a succeeded run
-// triggered by "register", or fails the test after a short deadline.
-func waitForRegisterRunSucceeded(t *testing.T, store *db.Store, scheduleID int64) {
+func waitForDeployRunCount(t *testing.T, store *db.Store, scheduleID int64, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -833,21 +1093,22 @@ func waitForRegisterRunSucceeded(t *testing.T, store *db.Store, scheduleID int64
 		if err != nil {
 			t.Fatal(err)
 		}
+		count := 0
 		for _, r := range runs {
-			if r.Trigger == "register" && r.Status == "succeeded" {
-				return
+			if r.Trigger == "deploy" && r.Status == "succeeded" {
+				count++
 			}
+		}
+		if count >= want {
+			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("no succeeded 'register' run for schedule %d within deadline", scheduleID)
+	t.Fatalf("fewer than %d succeeded deploy runs for schedule %d within deadline", want, scheduleID)
 }
 
-// TestDeploy_RunOnRegister_FiresOnceThenSelfGates verifies that a schedule with
-// run_on_register = true fires exactly once on the first deploy and NOT again
-// on subsequent deploys (once a succeeded run exists, the gate closes).
-func TestDeploy_RunOnRegister_FiresOnceThenSelfGates(t *testing.T) {
-	srv, store, token := newManifestE2EServerWithJobs(t)
+func TestDeploy_BundleChangeTriggerTracksProducerBundle(t *testing.T) {
+	srv, store, token, fakeRuntime := newManifestE2EServerWithJobs(t)
 	if _, err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
@@ -858,11 +1119,12 @@ func TestDeploy_RunOnRegister_FiresOnceThenSelfGates(t *testing.T) {
 name = "warm"
 cron = "0 5 * * *"
 cmd = "true"
-run_on_register = true
+deploy_trigger = "bundle_change"
 `
 	body, ct := buildMultiFileBundleUpload(t, map[string]string{
-		"app.py":        "print('x')",
-		"shinyhub.toml": manifest,
+		"app.py":                "print('x')",
+		"helpers/fetch_data.py": "print('producer-v1')",
+		"shinyhub.toml":         manifest,
 	})
 	req := httptest.NewRequest("POST", "/api/apps/warmapp/deploy", body)
 	req.Header.Set("Content-Type", ct)
@@ -872,23 +1134,60 @@ run_on_register = true
 	if rr.Code != http.StatusOK {
 		t.Fatalf("deploy status = %d, body=%s", rr.Code, rr.Body.String())
 	}
+	var firstResponse struct {
+		ScheduleConvergence []ScheduleConvergenceResult `json:"schedule_convergence"`
+		Manifest            ManifestApplied             `json:"manifest"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &firstResponse); err != nil {
+		t.Fatalf("decode first deploy response: %v", err)
+	}
+	if len(firstResponse.ScheduleConvergence) != 1 || !firstResponse.ScheduleConvergence[0].Prestart ||
+		firstResponse.ScheduleConvergence[0].RunID == nil {
+		t.Fatalf("first deploy convergence = %+v, want prestart with actual run id", firstResponse.ScheduleConvergence)
+	}
+	if len(firstResponse.Manifest.Schedules) != 1 || firstResponse.Manifest.Schedules[0].Action != "created" {
+		t.Fatalf("first manifest schedule action = %+v, want created", firstResponse.Manifest.Schedules)
+	}
+	fakeRuntime.mu.Lock()
+	firstEvents := append([]string(nil), fakeRuntime.events...)
+	fakeRuntime.mu.Unlock()
+	if len(firstEvents) < 2 || !strings.HasPrefix(firstEvents[0], "producer:sha256:") ||
+		!strings.HasPrefix(firstEvents[1], "start:sha256:") ||
+		strings.TrimPrefix(firstEvents[0], "producer:") != strings.TrimPrefix(firstEvents[1], "start:") {
+		t.Fatalf("candidate producer must complete before matching consumer starts; events=%v", firstEvents)
+	}
 	schedID := scheduleIDByName(t, store, app.ID, "warm")
-	waitForRegisterRunSucceeded(t, store, schedID)
+	waitForDeployRunCount(t, store, schedID, 1)
+	replicas, err := store.ListReplicas(app.ID)
+	if err != nil || len(replicas) != 1 {
+		t.Fatalf("first deploy replicas=%+v err=%v", replicas, err)
+	}
+	if replicas[0].DataGeneration == 0 || replicas[0].ActivationID != nil ||
+		replicas[0].DataProducerDeploymentID == nil || replicas[0].DataProducerContentDigest == "" ||
+		replicas[0].DataProducerFingerprint == "" {
+		t.Fatalf("prestart replica provenance = %+v", replicas[0])
+	}
 
 	runsAfterFirst, _ := store.ListScheduleRuns(schedID, 50, 0)
-	registerCount := 0
+	deployCount := 0
 	for _, r := range runsAfterFirst {
-		if r.Trigger == "register" {
-			registerCount++
+		if r.Trigger == "deploy" {
+			deployCount++
+			if r.ContentDigest == "" || r.DeploymentID == nil || r.AppVersion == "" {
+				t.Fatalf("deploy run missing bundle provenance: %+v", r)
+			}
 		}
 	}
-	if registerCount != 1 {
-		t.Fatalf("after first deploy: register runs = %d, want 1", registerCount)
+	if deployCount != 1 {
+		t.Fatalf("after first deploy: deploy runs = %d, want 1", deployCount)
 	}
 
+	// An identical deployment is already satisfied because its producer is
+	// still the authoritative last writer.
 	body2, ct2 := buildMultiFileBundleUpload(t, map[string]string{
-		"app.py":        "print('x')",
-		"shinyhub.toml": manifest,
+		"app.py":                "print('x')",
+		"helpers/fetch_data.py": "print('producer-v1')",
+		"shinyhub.toml":         manifest,
 	})
 	req2 := httptest.NewRequest("POST", "/api/apps/warmapp/deploy", body2)
 	req2.Header.Set("Content-Type", ct2)
@@ -899,21 +1198,420 @@ run_on_register = true
 		t.Fatalf("redeploy status = %d, body=%s", rr2.Code, rr2.Body.String())
 	}
 	runsAfterSecond, _ := store.ListScheduleRuns(schedID, 50, 0)
-	registerCount = 0
+	deployCount = 0
 	for _, r := range runsAfterSecond {
-		if r.Trigger == "register" {
-			registerCount++
+		if r.Trigger == "deploy" {
+			deployCount++
 		}
 	}
-	if registerCount != 1 {
-		t.Errorf("after redeploy: register runs = %d, want 1 (must not re-fire)", registerCount)
+	if deployCount != 1 {
+		t.Errorf("after identical redeploy: deploy runs = %d, want 1", deployCount)
+	}
+	var secondResponse struct {
+		ScheduleConvergence []ScheduleConvergenceResult `json:"schedule_convergence"`
+	}
+	if err := json.Unmarshal(rr2.Body.Bytes(), &secondResponse); err != nil {
+		t.Fatal(err)
+	}
+	if len(secondResponse.ScheduleConvergence) != 1 || !secondResponse.ScheduleConvergence[0].Prestart ||
+		secondResponse.ScheduleConvergence[0].RunID == nil ||
+		*secondResponse.ScheduleConvergence[0].RunID != *firstResponse.ScheduleConvergence[0].RunID {
+		t.Fatalf("identical redeploy convergence=%+v, want satisfied-on-entry prestart provenance", secondResponse.ScheduleConvergence)
+	}
+	secondReplicas, err := store.ListReplicas(app.ID)
+	if err != nil || len(secondReplicas) != 1 {
+		t.Fatalf("identical redeploy replicas=%+v err=%v", secondReplicas, err)
+	}
+	if secondReplicas[0].DataGeneration != replicas[0].DataGeneration ||
+		secondReplicas[0].DataProducerDeploymentID == nil || replicas[0].DataProducerDeploymentID == nil ||
+		*secondReplicas[0].DataProducerDeploymentID != *replicas[0].DataProducerDeploymentID ||
+		secondReplicas[0].DataProducerContentDigest != replicas[0].DataProducerContentDigest ||
+		secondReplicas[0].DataProducerFingerprint != replicas[0].DataProducerFingerprint {
+		t.Fatalf("identical redeploy lost durable publication: first=%+v second=%+v", replicas[0], secondReplicas[0])
+	}
+
+	// Changing only code behind the unchanged command pointer changes the bundle
+	// digest and must dispatch a new producer run.
+	body3, ct3 := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py":                "print('x')",
+		"helpers/fetch_data.py": "print('producer-v2')",
+		"shinyhub.toml":         manifest,
+	})
+	req3 := httptest.NewRequest("POST", "/api/apps/warmapp/deploy", body3)
+	req3.Header.Set("Content-Type", ct3)
+	req3.Header.Set("Authorization", "Bearer "+token)
+	rr3 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr3, req3)
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("changed producer deploy status = %d, body=%s", rr3.Code, rr3.Body.String())
+	}
+	waitForDeployRunCount(t, store, schedID, 2)
+	runsAfterThird, _ := store.ListScheduleRuns(schedID, 50, 0)
+	digests := map[string]bool{}
+	for _, r := range runsAfterThird {
+		if r.Trigger == "deploy" {
+			digests[r.ContentDigest] = true
+		}
+	}
+	if len(digests) != 2 {
+		t.Fatalf("deploy-run digests = %v, want two producer bundles", digests)
 	}
 }
 
-// TestDeploy_RunOnRegister_DisabledNotFired verifies that a schedule with both
-// run_on_register = true and disabled = true is NOT first-fired on deploy.
-func TestDeploy_RunOnRegister_DisabledNotFired(t *testing.T) {
-	srv, store, token := newManifestE2EServerWithJobs(t)
+func TestDeploy_ProducerSuccessConsumerFailureRetryRepublishesBeforeClearingBarrier(t *testing.T) {
+	srv, store, token, fakeRuntime := newManifestE2EServerWithJobs(t)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "durable-retry", Name: "durable-retry", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("durable-retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failActivation := true
+	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.PoolResult, error) {
+		p.HealthCheck = func(string, time.Duration, http.RoundTripper) error { return nil }
+		if !p.PrepareOnly && failActivation {
+			failActivation = false
+			return nil, errors.New("injected consumer startup failure")
+		}
+		return deploy.Run(p)
+	})
+	manifest := `
+[[schedule]]
+name = "warm"
+cron = "0 5 * * *"
+cmd = "python producer.py"
+deploy_trigger = "bundle_change"
+`
+	deployBundle := func() *httptest.ResponseRecorder {
+		t.Helper()
+		body, contentType := buildMultiFileBundleUpload(t, map[string]string{
+			"app.py": "print('consumer')", "producer.py": "print('producer')", "shinyhub.toml": manifest,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/apps/durable-retry/deploy", body)
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+	first := deployBundle()
+	if first.Code != http.StatusInternalServerError {
+		t.Fatalf("first deploy status=%d body=%s", first.Code, first.Body.String())
+	}
+	history, err := store.ListDeploymentsBySlug(app.Slug)
+	if err != nil || len(history) != 1 || history[0].Status != db.DeploymentFailed {
+		t.Fatalf("failed deployment history=%+v err=%v", history, err)
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || !quarantined {
+		t.Fatalf("quarantine after failed consumer=%v err=%v", quarantined, err)
+	}
+	scheduleID := scheduleIDByName(t, store, app.ID, "warm")
+	runs, err := store.ListScheduleRuns(scheduleID, 50, 0)
+	if err != nil || len(runs) != 1 || runs[0].Status != "succeeded" {
+		t.Fatalf("producer runs after failed consumer=%+v err=%v", runs, err)
+	}
+
+	second := deployBundle()
+	if second.Code != http.StatusOK {
+		t.Fatalf("retry status=%d body=%s", second.Code, second.Body.String())
+	}
+	runs, err = store.ListScheduleRuns(scheduleID, 50, 0)
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("corrective retry did not republish exactly once: runs=%+v err=%v", runs, err)
+	}
+	replicas, err := store.ListReplicas(app.ID)
+	if err != nil || len(replicas) != 1 {
+		t.Fatalf("retry replicas=%+v err=%v", replicas, err)
+	}
+	if replicas[0].DataGeneration == 0 || replicas[0].DataProducerDeploymentID == nil ||
+		*replicas[0].DataProducerDeploymentID == history[0].ID ||
+		replicas[0].DataProducerContentDigest == "" || replicas[0].DataProducerFingerprint == "" {
+		t.Fatalf("retry lost failed-attempt publication provenance: %+v", replicas[0])
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || quarantined {
+		t.Fatalf("quarantine after successful corrective retry=%v err=%v", quarantined, err)
+	}
+	fakeRuntime.mu.Lock()
+	producerCalls := len(fakeRuntime.producerCommands)
+	fakeRuntime.mu.Unlock()
+	if producerCalls != 2 {
+		t.Fatalf("producer calls=%d, want corrective retry to republish exactly once", producerCalls)
+	}
+}
+
+func TestDeploy_StoppedCorrectiveTargetWithoutProducerCannotLaunderFailedBarrier(t *testing.T) {
+	srv, store, token, _ := newManifestE2EServerWithJobs(t)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "stopped-repair", Name: "stopped-repair", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("stopped-repair")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployFiles := func(files map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, contentType := buildMultiFileBundleUpload(t, files)
+		req := httptest.NewRequest(http.MethodPost, "/api/apps/stopped-repair/deploy", body)
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+	if baseline := deployFiles(map[string]string{"app.py": "print('old')"}); baseline.Code != http.StatusOK {
+		t.Fatalf("baseline status=%d body=%s", baseline.Code, baseline.Body.String())
+	}
+	failed, err := store.BeginDeployment(app.ID, "failed-producer", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDeploymentProducerBarrierEntered(failed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.QuarantineAndFailDeployment(failed.ID, "injected failed producer barrier"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.manager.Stop(app.Slug); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status = 'stopped' WHERE id = ?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	corrective := deployFiles(map[string]string{"app.py": "print('new but no producer')"})
+	if corrective.Code != http.StatusInternalServerError || !strings.Contains(corrective.Body.String(), "declares no enabled deploy-triggered producer") {
+		t.Fatalf("producer-free corrective deploy status=%d body=%s", corrective.Code, corrective.Body.String())
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || !quarantined {
+		t.Fatalf("producer-free corrective deploy laundered quarantine=%v err=%v", quarantined, err)
+	}
+	got, err := store.GetAppBySlug(app.Slug)
+	if err != nil || got.Status != "stopped" {
+		t.Fatalf("operator-stopped app=%+v err=%v, want stopped", got, err)
+	}
+}
+
+func TestDeploy_FailedFirstProducerPreservesRunHistory(t *testing.T) {
+	srv, store, token, fakeRuntime := newManifestE2EServerWithJobs(t)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "failed-first-producer", Name: "failed-first-producer", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("failed-first-producer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeRuntime.mu.Lock()
+	fakeRuntime.producerErr = errors.New("injected producer launch failure")
+	fakeRuntime.mu.Unlock()
+
+	manifest := `
+[[schedule]]
+name = "cache"
+cron = "0 5 * * *"
+cmd = "python producer.py"
+deploy_trigger = "bundle_change"
+`
+	body, contentType := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py": "print('consumer')", "producer.py": "print('producer')", "shinyhub.toml": manifest,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/failed-first-producer/deploy", body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("deploy status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	schedules, err := store.ListSchedulesByApp(app.ID)
+	if err != nil || len(schedules) != 1 {
+		t.Fatalf("planning schedule history=%+v err=%v", schedules, err)
+	}
+	if schedules[0].Enabled || schedules[0].DeployTrigger != schedulespec.DeployTriggerNever {
+		t.Fatalf("failed placeholder became schedulable: %+v", schedules[0])
+	}
+	runs, err := store.ListScheduleRuns(schedules[0].ID, 10, 0)
+	if err != nil || len(runs) != 1 || runs[0].Status != "failed" || runs[0].Trigger != "deploy" {
+		t.Fatalf("failed producer diagnostic history=%+v err=%v", runs, err)
+	}
+	history, err := store.ListDeploymentsBySlug("failed-first-producer")
+	if err != nil || len(history) != 1 || history[0].Status != db.DeploymentFailed {
+		t.Fatalf("failed deployment history=%+v err=%v", history, err)
+	}
+}
+
+func TestDeploy_FailedCorrectiveRetryInheritsQuarantineAndNeverRestoresOldConsumer(t *testing.T) {
+	srv, store, token, fakeRuntime := newManifestE2EServerWithJobs(t)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "failed-repair", Name: "failed-repair", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("failed-repair")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployFiles := func(files map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, contentType := buildMultiFileBundleUpload(t, files)
+		req := httptest.NewRequest(http.MethodPost, "/api/apps/failed-repair/deploy", body)
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+	baseline := deployFiles(map[string]string{"app.py": "print('old consumer')"})
+	if baseline.Code != http.StatusOK {
+		t.Fatalf("baseline deploy status=%d body=%s", baseline.Code, baseline.Body.String())
+	}
+	if _, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "cache", CronExpr: "0 5 * * *", CommandJSON: `["python","producer.py"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+		DeployTrigger: schedulespec.DeployTriggerBundleChange,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	activationAttempts := 0
+	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.PoolResult, error) {
+		p.HealthCheck = func(string, time.Duration, http.RoundTripper) error { return nil }
+		if !p.PrepareOnly {
+			activationAttempts++
+			if activationAttempts <= 2 {
+				return nil, fmt.Errorf("injected corrective consumer failure %d", activationAttempts)
+			}
+		}
+		return deploy.Run(p)
+	})
+	targetFiles := map[string]string{
+		"app.py": "print('new consumer')", "producer.py": "print('new producer')",
+	}
+	first := deployFiles(targetFiles)
+	if first.Code != http.StatusInternalServerError {
+		t.Fatalf("first corrective deploy status=%d body=%s", first.Code, first.Body.String())
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || !quarantined {
+		t.Fatalf("quarantine after producer/consumer split=%v err=%v", quarantined, err)
+	}
+	fakeRuntime.mu.Lock()
+	producerCallsAfterFirst := len(fakeRuntime.producerCommands)
+	fakeRuntime.mu.Unlock()
+	if producerCallsAfterFirst != 1 {
+		t.Fatalf("first corrective deploy producer calls=%d, want 1", producerCallsAfterFirst)
+	}
+
+	second := deployFiles(targetFiles)
+	if second.Code != http.StatusInternalServerError {
+		t.Fatalf("failed retry status=%d body=%s", second.Code, second.Body.String())
+	}
+	if activationAttempts != 2 {
+		t.Fatalf("non-prepare activations=%d, want exactly two failed target starts and no old-pool restore", activationAttempts)
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || !quarantined {
+		t.Fatalf("failed retry dropped quarantine=%v err=%v", quarantined, err)
+	}
+	if _, running := srv.manager.GetReplica(app.Slug, 0); running {
+		t.Fatal("failed corrective retry restored a serving consumer")
+	}
+	fakeRuntime.mu.Lock()
+	producerCallsAfterSecond := len(fakeRuntime.producerCommands)
+	fakeRuntime.mu.Unlock()
+	if producerCallsAfterSecond != 2 {
+		t.Fatalf("failed corrective retry producer calls=%d, want one new repair publication", producerCallsAfterSecond)
+	}
+
+	third := deployFiles(targetFiles)
+	if third.Code != http.StatusOK {
+		t.Fatalf("successful repair status=%d body=%s", third.Code, third.Body.String())
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || quarantined {
+		t.Fatalf("successful repair left quarantine=%v err=%v", quarantined, err)
+	}
+}
+
+func TestDeploy_ReplicaProvenancePersistenceFailureStopsAndRefusesPromotion(t *testing.T) {
+	srv, store, token, _ := newManifestE2EServerWithJobs(t)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "replica-provenance-fail", Name: "replica-provenance-fail", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("replica-provenance-fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`CREATE TRIGGER reject_booted_replica
+		BEFORE INSERT ON replicas BEGIN SELECT RAISE(FAIL, 'injected replica provenance failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	body, contentType := buildMultiFileBundleUpload(t, map[string]string{"app.py": "print('consumer')"})
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/replica-provenance-fail/deploy", body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("deploy status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	history, err := store.ListDeploymentsBySlug(app.Slug)
+	if err != nil || len(history) != 1 || history[0].Status != db.DeploymentFailed {
+		t.Fatalf("deployment was promoted without replica provenance: history=%+v err=%v", history, err)
+	}
+	if _, running := srv.manager.GetReplica(app.Slug, 0); running {
+		t.Fatal("consumer remained running after provenance persistence failure")
+	}
+	if quarantined, err := store.AppCompatibilityQuarantined(app.ID); err != nil || quarantined {
+		t.Fatalf("non-producing provenance failure quarantine=%v err=%v", quarantined, err)
+	}
+	stopped, err := store.GetAppBySlug(app.Slug)
+	if err != nil || stopped.Status != "stopped" {
+		t.Fatalf("app after provenance failure=%+v err=%v", stopped, err)
+	}
+}
+
+func TestDeploy_PostCommitConvergenceFailureReturnsSuccessWithWarning(t *testing.T) {
+	srv, store, token, _ := newManifestE2EServerWithJobs(t)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "postcommit-warning", Name: "postcommit-warning", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`CREATE TRIGGER reject_postcommit_obligation
+		BEFORE INSERT ON schedule_deploy_obligations
+		BEGIN SELECT RAISE(FAIL, 'injected post-commit convergence failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `
+[[schedule]]
+name = "cache"
+cron = "0 5 * * *"
+cmd = "python producer.py"
+deploy_trigger = "bundle_change"
+`
+	body, contentType := buildMultiFileBundleUpload(t, map[string]string{
+		"app.py": "print('consumer')", "producer.py": "print('producer')", "shinyhub.toml": manifest,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/postcommit-warning/deploy", body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("committed deploy status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.Warning, "deployment committed") || !strings.Contains(response.Warning, "repair asynchronously") {
+		t.Fatalf("post-commit warning=%q", response.Warning)
+	}
+	history, err := store.ListDeploymentsBySlug("postcommit-warning")
+	if err != nil || len(history) != 1 || history[0].Status != db.DeploymentSucceeded {
+		t.Fatalf("committed deployment history=%+v err=%v", history, err)
+	}
+}
+
+func TestDeploy_DeployTriggerDisabledNotFired(t *testing.T) {
+	srv, store, token, _ := newManifestE2EServerWithJobs(t)
 	if _, err := store.CreateApp(db.CreateAppParams{Slug: "warmapp", Name: "warmapp", OwnerID: 1, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
@@ -924,7 +1622,7 @@ name = "warm"
 cron = "0 5 * * *"
 cmd = "true"
 disabled = true
-run_on_register = true
+deploy_trigger = "bundle_change"
 `
 	body, ct := buildMultiFileBundleUpload(t, map[string]string{
 		"app.py":        "print('x')",
@@ -946,7 +1644,76 @@ run_on_register = true
 	time.Sleep(100 * time.Millisecond)
 	runs, _ := store.ListScheduleRuns(schedID, 50, 0)
 	if len(runs) != 0 {
-		t.Errorf("disabled schedule: runs = %d, want 0 (must not first-fire)", len(runs))
+		t.Errorf("disabled schedule: runs = %d, want 0", len(runs))
+	}
+}
+
+func TestRollback_BundleProducerCompletesBeforeConsumerStart(t *testing.T) {
+	srv, store, token, fakeRuntime := newManifestE2EServerWithJobs(t)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "rollback-warm", Name: "rollback-warm", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	manifest := func(command string) string {
+		return fmt.Sprintf(`
+[[schedule]]
+name = "warm"
+cron = "0 5 * * *"
+cmd = "python %s"
+deploy_trigger = "bundle_change"
+`, command)
+	}
+	deployVersion := func(producer, command string) {
+		t.Helper()
+		body, contentType := buildMultiFileBundleUpload(t, map[string]string{
+			"app.py": "print('consumer')", "producer.txt": producer,
+			"shinyhub.toml": manifest(command), command: "print('producer')",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/apps/rollback-warm/deploy", body)
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("deploy %q status=%d body=%s", producer, rec.Code, rec.Body.String())
+		}
+	}
+	deployVersion("v1", "old.py")
+	deployVersion("v2", "new.py")
+
+	rec := httptest.NewRecorder()
+	rollbackReq := httptest.NewRequest(http.MethodPost, "/api/apps/rollback-warm/rollback", nil)
+	rollbackReq.Header.Set("Authorization", "Bearer "+token)
+	srv.Router().ServeHTTP(rec, rollbackReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rollback status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		ScheduleConvergence []ScheduleConvergenceResult `json:"schedule_convergence"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.ScheduleConvergence) != 1 || response.ScheduleConvergence[0].Status != "satisfied" {
+		t.Fatalf("rollback convergence=%+v, want one satisfied producer", response.ScheduleConvergence)
+	}
+	if !response.ScheduleConvergence[0].Prestart || response.ScheduleConvergence[0].RunID == nil {
+		t.Fatalf("rollback convergence=%+v, want actual prestart run provenance", response.ScheduleConvergence)
+	}
+
+	fakeRuntime.mu.Lock()
+	events := append([]string(nil), fakeRuntime.events...)
+	commands := append([][]string(nil), fakeRuntime.producerCommands...)
+	fakeRuntime.mu.Unlock()
+	if len(events) < 2 {
+		t.Fatalf("rollback events=%v", events)
+	}
+	producerEvent, startEvent := events[len(events)-2], events[len(events)-1]
+	if !strings.HasPrefix(producerEvent, "producer:") || !strings.HasPrefix(startEvent, "start:") ||
+		strings.TrimPrefix(producerEvent, "producer:") != strings.TrimPrefix(startEvent, "start:") {
+		t.Fatalf("rollback producer must complete before matching consumer starts; events=%v", events)
+	}
+	if len(commands) < 3 || len(commands[len(commands)-1]) != 2 || commands[len(commands)-1][1] != "old.py" {
+		t.Fatalf("rollback producer commands=%v, want immutable v1 declaration ending in old.py", commands)
 	}
 }
 

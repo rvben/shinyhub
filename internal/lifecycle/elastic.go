@@ -47,6 +47,16 @@ type ElasticSpawner struct {
 	// WarmRetryDelay optionally overrides the warm-spare retry backoff. Nil in
 	// production; tests use a short deterministic delay.
 	WarmRetryDelay func(attempt int) time.Duration
+	// AcquireConsumerBootGate serializes startup-data reads with designated
+	// schedule publishers. Nil is safe only when no jobs manager is configured.
+	AcquireConsumerBootGate func(appID int64) (func(), error)
+	// AcquireAppOperation serializes spawn/resume with deploy teardown and
+	// promotion. Nil is retained for isolated tests; production always wires it.
+	AcquireAppOperation func(slug string) (func(), error)
+	// CanMutate is the control-plane owner/readiness gate. Elastic workers are
+	// process-local and therefore must never be created or resumed by a standby
+	// (including a ZDT successor that is already serving but not yet owner).
+	CanMutate func() bool
 
 	// lifetimeTimers holds the armed max_session_lifetime backstop timers,
 	// keyed by "slug/slotID". Terminate cancels the timer via Stop so that
@@ -71,9 +81,84 @@ type elasticWarmRetry struct {
 // goroutine - the proxy's spawn callback dispatches it with
 // `go spawn(slug, slotID)`.
 func (s *ElasticSpawner) Spawn(slug string, slotID int) {
+	if s.CanMutate != nil && !s.CanMutate() {
+		s.releaseReservation(slug, slotID)
+		return
+	}
+	releaseAppOperation := func() {}
+	if s.AcquireAppOperation != nil {
+		var operationErr error
+		releaseAppOperation, operationErr = s.AcquireAppOperation(slug)
+		if operationErr != nil {
+			slog.Error("elastic spawn: acquire app operation fence", "slug", slug, "slotID", slotID, "err", operationErr)
+			s.releaseReservation(slug, slotID)
+			return
+		}
+	}
+	defer releaseAppOperation()
+	if s.CanMutate != nil && !s.CanMutate() {
+		s.releaseReservation(slug, slotID)
+		return
+	}
+
 	app, err := s.Store.GetAppBySlug(slug)
 	if err != nil {
 		slog.Warn("elastic spawn: get app", "slug", slug, "slotID", slotID, "err", err)
+		s.releaseReservation(slug, slotID)
+		return
+	}
+	if app.Status != "running" && app.Status != "degraded" {
+		s.releaseReservation(slug, slotID)
+		return
+	}
+	// Producer-capable apps are deliberately multiplex-only until elastic
+	// workers have durable identities and a failover orphan fence. Re-evaluate
+	// the inherited fleet default here: configuration can change without an app
+	// or schedule mutation passing through the API validators.
+	if isolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.RuntimeCfg.DefaultWorkerIsolation); isolation != "multiplex" {
+		schedules, schedulesErr := s.Store.ListSchedulesByApp(app.ID)
+		if schedulesErr != nil {
+			slog.Error("elastic spawn: cannot prove app has no producer schedule", "slug", slug, "slotID", slotID, "err", schedulesErr)
+			s.releaseReservation(slug, slotID)
+			return
+		}
+		for _, schedule := range schedules {
+			if schedule.Enabled && (schedule.DeployTrigger != "never" || schedule.OnSuccess == "roll") {
+				slog.Error("elastic spawn refused: data-producing schedules require worker_isolation=multiplex",
+					"slug", slug, "slotID", slotID, "effective_worker_isolation", isolation, "schedule", schedule.Name)
+				s.releaseReservation(slug, slotID)
+				return
+			}
+		}
+	}
+	if quarantined, qerr := s.Store.AppCompatibilityQuarantined(app.ID); qerr != nil || quarantined {
+		if qerr != nil {
+			slog.Error("elastic spawn: compatibility quarantine unavailable", "slug", slug, "slotID", slotID, "err", qerr)
+		}
+		s.releaseReservation(slug, slotID)
+		return
+	}
+	releaseConsumerBoot := func() {}
+	if s.AcquireConsumerBootGate != nil {
+		var gateErr error
+		releaseConsumerBoot, gateErr = s.AcquireConsumerBootGate(app.ID)
+		if gateErr != nil {
+			slog.Error("elastic spawn: acquire startup-data compatibility fence", "slug", slug, "slotID", slotID, "err", gateErr)
+			s.releaseReservation(slug, slotID)
+			return
+		}
+	}
+	defer releaseConsumerBoot()
+	// Recheck after waiting behind an in-flight publisher. A deploy intent may
+	// also have appeared while the elastic reservation was queued.
+	if pending, perr := s.Store.HasPendingDeployment(app.ID); perr != nil || pending {
+		if perr != nil {
+			slog.Error("elastic spawn: pending deployment check failed", "slug", slug, "slotID", slotID, "err", perr)
+		}
+		s.releaseReservation(slug, slotID)
+		return
+	}
+	if quarantined, qerr := s.Store.AppCompatibilityQuarantined(app.ID); qerr != nil || quarantined {
 		s.releaseReservation(slug, slotID)
 		return
 	}
@@ -86,6 +171,14 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		return
 	}
 	dep := deps[0]
+	// Persist the possibility of an untracked elastic survivor before launch.
+	// It is cleared only by an explicit stopped-app transition that acquires the
+	// exclusive physical consumer-lifetime fence.
+	if err := s.Store.MarkElasticOrphanRisk(app.ID); err != nil {
+		slog.Error("elastic spawn: persist orphan-risk fence", "slug", slug, "slotID", slotID, "err", err)
+		s.releaseReservation(slug, slotID)
+		return
+	}
 
 	// Resolve effective resource limits using the same path as the deploy fn.
 	defaultMem, defaultCPU := s.RuntimeCfg.DefaultResourcesForApp(app)
@@ -180,6 +273,16 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		s.releaseReservation(slug, slotID)
 		return
 	}
+	// Ownership may be lost while a slow worker boots. A new owner cannot begin
+	// a deploy until the lease changes hands, so checking immediately before
+	// publication keeps this worker out of the proxy after handoff.
+	if s.CanMutate != nil && !s.CanMutate() {
+		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
+			slog.Warn("elastic spawn: stop after ownership loss", "slug", slug, "slotID", slotID, "err", stopErr)
+		}
+		s.releaseReservation(slug, slotID)
+		return
+	}
 
 	// A pristine warm reservation is frozen after it proves healthy. SuspendReplica
 	// reclaims its cgroup memory to swap when the configured runtime supports it;
@@ -194,6 +297,13 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 			slog.Warn("elastic warm spare: freeze failed; keeping worker running",
 				"slug", slug, "slotID", slotID, "err", suspendErr)
 		}
+	}
+	if s.CanMutate != nil && !s.CanMutate() {
+		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
+			slog.Warn("elastic spawn: stop before registration after ownership loss", "slug", slug, "slotID", slotID, "err", stopErr)
+		}
+		s.releaseReservation(slug, slotID)
+		return
 	}
 
 	// Register the ready worker with the proxy. slotID ties this process to the
@@ -213,6 +323,13 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		// The slot is still in workerBooting state; release it so capacity
 		// returns to the pool.
 		s.releaseReservation(slug, slotID)
+		return
+	}
+	if s.CanMutate != nil && !s.CanMutate() {
+		s.Proxy.DeregisterElasticWorker(slug, slotID)
+		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
+			slog.Warn("elastic spawn: stop after registration ownership loss", "slug", slug, "slotID", slotID, "err", stopErr)
+		}
 		return
 	}
 
@@ -325,26 +442,39 @@ func (s *ElasticSpawner) WarmSpareConsumed(slug string, slotID int) {
 // a cold elastic start, and only then makes it routable. A failed resume removes
 // the client binding and slot so the next request can allocate clean capacity.
 func (s *ElasticSpawner) Resume(slug string, slotID int) {
-	ep, err := s.Manager.Resume(slug, slotID)
-	if err != nil {
-		slog.Warn("elastic warm spare: resume failed", "slug", slug, "slotID", slotID, "err", err)
+	if s.CanMutate != nil && !s.CanMutate() {
 		s.Terminate(slug, slotID)
 		return
 	}
-	info, ok := s.Manager.GetReplica(slug, slotID)
-	if !ok {
+	releaseAppOperation := func() {}
+	if s.AcquireAppOperation != nil {
+		var operationErr error
+		releaseAppOperation, operationErr = s.AcquireAppOperation(slug)
+		if operationErr != nil {
+			slog.Error("elastic warm spare: acquire app operation fence", "slug", slug, "slotID", slotID, "err", operationErr)
+			s.Terminate(slug, slotID)
+			return
+		}
+	}
+	defer releaseAppOperation()
+	if s.CanMutate != nil && !s.CanMutate() {
 		s.Terminate(slug, slotID)
 		return
 	}
-	endpoint := ep.URL
-	if endpoint == "" {
-		endpoint = info.EndpointURL
-	}
-	transport := s.Manager.TransportForWorker(info.Tier, info.WorkerID)
 
 	app, appErr := s.Store.GetAppBySlug(slug)
-	if appErr != nil {
-		slog.Warn("elastic warm spare: load resume metadata failed", "slug", slug, "slotID", slotID)
+	if appErr != nil || (app.Status != "running" && app.Status != "degraded") {
+		slog.Warn("elastic warm spare: app unavailable during resume", "slug", slug, "slotID", slotID, "err", appErr)
+		s.Terminate(slug, slotID)
+		return
+	}
+	if pending, pendingErr := s.Store.HasPendingDeployment(app.ID); pendingErr != nil || pending {
+		slog.Warn("elastic warm spare: deployment in progress during resume", "slug", slug, "slotID", slotID, "err", pendingErr)
+		s.Terminate(slug, slotID)
+		return
+	}
+	if quarantined, quarantineErr := s.Store.AppCompatibilityQuarantined(app.ID); quarantineErr != nil || quarantined {
+		slog.Warn("elastic warm spare: compatibility quarantine during resume", "slug", slug, "slotID", slotID, "err", quarantineErr)
 		s.Terminate(slug, slotID)
 		return
 	}
@@ -354,6 +484,29 @@ func (s *ElasticSpawner) Resume(slug string, slotID int) {
 		s.Terminate(slug, slotID)
 		return
 	}
+	info, ok := s.Manager.GetReplica(slug, slotID)
+	if !ok {
+		s.Terminate(slug, slotID)
+		return
+	}
+	if info.DeploymentID != deps[0].ID {
+		slog.Info("elastic warm spare: discarding superseded deployment", "slug", slug, "slotID", slotID,
+			"worker_deployment", info.DeploymentID, "current_deployment", deps[0].ID)
+		s.Terminate(slug, slotID)
+		return
+	}
+	ep, err := s.Manager.Resume(slug, slotID)
+	if err != nil {
+		slog.Warn("elastic warm spare: resume failed", "slug", slug, "slotID", slotID, "err", err)
+		s.Terminate(slug, slotID)
+		return
+	}
+	endpoint := ep.URL
+	if endpoint == "" {
+		endpoint = info.EndpointURL
+	}
+	transport := s.Manager.TransportForWorker(info.Tier, info.WorkerID)
+
 	plan, planErr := deploy.ResolveLaunch(deps[0].BundleDir, deploy.LaunchOptions{
 		Port: info.Port, BindHost: s.Manager.AppBindHostFor(info.Tier), PrepHostDeps: false,
 		CommandHostDeps: s.Manager.HostPreparesDepsFor(info.Tier),
@@ -377,7 +530,15 @@ func (s *ElasticSpawner) Resume(slug string, slotID int) {
 		s.Terminate(slug, slotID)
 		return
 	}
+	if s.CanMutate != nil && !s.CanMutate() {
+		s.Terminate(slug, slotID)
+		return
+	}
 	if !s.Proxy.MarkElasticWorkerResumed(slug, slotID) {
+		s.Terminate(slug, slotID)
+		return
+	}
+	if s.CanMutate != nil && !s.CanMutate() {
 		s.Terminate(slug, slotID)
 		return
 	}

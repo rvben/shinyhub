@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -469,6 +470,74 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	if latestActivations == nil {
 		latestActivations = []*db.ScheduleActivation{}
 	}
+	activationSources := make(map[int64]*db.ScheduleActivation)
+	for _, activation := range latestActivations {
+		activationSources[activation.ID] = activation
+	}
+	for _, replica := range replicas {
+		if replica.ActivationID == nil {
+			continue
+		}
+		activation := activationSources[*replica.ActivationID]
+		if activation == nil {
+			activation, err = s.store.GetScheduleActivation(*replica.ActivationID)
+			if err != nil && !errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusInternalServerError, "failed to load replica data provenance")
+				return
+			}
+		}
+		if activation == nil {
+			continue
+		}
+		replica.DataProducerDeploymentID = activation.SourceDeploymentID
+		replica.DataProducerAppVersion = activation.SourceAppVersion
+		replica.DataProducerContentDigest = activation.SourceContentDigest
+		replica.DataProducerFingerprint = activation.SourceProducerFingerprint
+	}
+	scheduleFreshness, err := s.store.ScheduleFreshnessByApp(app.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	scheduleConvergenceSatisfied := true
+	producerRepairRequired := false
+	deployScheduleState := make([]map[string]any, 0)
+	for _, fr := range scheduleFreshness {
+		if fr.ProducerRepairRequired {
+			producerRepairRequired = true
+			scheduleConvergenceSatisfied = false
+		}
+		if !fr.Enabled || (fr.DeployTrigger == "never" && !fr.ProducerRepairRequired) {
+			continue
+		}
+		if !fr.DeployTriggerSatisfied {
+			scheduleConvergenceSatisfied = false
+		}
+		deployScheduleState = append(deployScheduleState, map[string]any{
+			"schedule_id":              fr.ScheduleID,
+			"name":                     fr.Name,
+			"deploy_trigger":           fr.DeployTrigger,
+			"satisfied":                fr.DeployTriggerSatisfied,
+			"producer_repair_required": fr.ProducerRepairRequired,
+			"current_deployment_id":    fr.CurrentDeploymentID,
+			"current_app_version":      fr.CurrentAppVersion,
+			"current_content_digest":   fr.CurrentContentDigest,
+			"producer_deployment_id":   fr.ProducerDeploymentID,
+			"producer_app_version":     fr.ProducerAppVersion,
+			"producer_content_digest":  fr.ProducerContentDigest,
+			"producer_fingerprint":     fr.ProducerFingerprint,
+			"producer_published_at":    fr.ProducerPublishedAt,
+			"obligation_id":            fr.ConvergenceObligationID,
+			"convergence_status":       fr.ConvergenceStatus,
+			"convergence_run_id":       fr.ConvergenceRunID,
+			"convergence_error":        fr.ConvergenceError,
+		})
+	}
+	compatibilityQuarantined, compatibilityErr := s.store.AppCompatibilityQuarantined(app.ID)
+	if compatibilityErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load app compatibility state")
+		return
+	}
 
 	envelope := map[string]any{
 		"app":                                 app,
@@ -480,6 +549,10 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		"redeploy_in_flight":                  s.isRedeployInFlight(slug),
 		"can_manage":                          canManage,
 		"latest_schedule_activations":         latestActivations,
+		"schedule_convergence_satisfied":      scheduleConvergenceSatisfied,
+		"compatibility_quarantined":           compatibilityQuarantined,
+		"producer_repair_required":            producerRepairRequired,
+		"deploy_trigger_schedules":            deployScheduleState,
 		// Schedule capabilities are computed server-side because app-manager
 		// membership can come from direct or group grants the browser cannot
 		// reconstruct. Run metadata is safe for readers; command logs can contain
@@ -1102,37 +1175,6 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// An app topology change must not strand an already-valid roll schedule in
-	// an unsupported state. Validate the projected app before any setting is
-	// written, using the same gate as schedule create/update and manifest apply.
-	if setWorkerIsolation || setPlacement || clearPlacement {
-		projected := *app
-		if setWorkerIsolation {
-			projected.WorkerIsolation = newWorkerIsolation
-		}
-		if setPlacement {
-			projected.ReplicaPlacement = placementJSON
-			projected.Replicas = placementTotal
-		} else if clearPlacement {
-			projected.ReplicaPlacement = ""
-		}
-		schedules, err := s.store.ListSchedulesByApp(app.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		for _, schedule := range schedules {
-			if schedule.OnSuccess != "roll" {
-				continue
-			}
-			if err := s.validateScheduleActivationForApp(&projected, schedule.OnSuccess); err != nil {
-				writeError(w, http.StatusUnprocessableEntity,
-					fmt.Sprintf("app topology would invalidate schedule %q: %v", schedule.Name, err))
-				return
-			}
-		}
-	}
-
 	// In native mode, memory_limit_mb and cpu_quota_percent are enforced via a
 	// per-app cgroup v2 (memory.max / cpu.max). Enforcement requires the relevant
 	// controller to be delegated (systemd Delegate=memory / Delegate=cpu); the
@@ -1179,6 +1221,70 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		if err := s.guardActivationLifecycle(app.ID, "update app "+slug); err != nil {
 			writeError(w, http.StatusConflict, err.Error())
 			return
+		}
+	}
+
+	// Validate topology and, when explicitly leaving elastic mode, discharge
+	// the durable orphan-risk marker under the same per-app operation lock used
+	// by elastic spawn. Keep the physical consumer fence through the settings
+	// commit so no surviving worker or concurrent spawn can slip between proof
+	// and persistence.
+	orphanFenceHeld := false
+	clearOrphanRiskAfterPatch := false
+	if setWorkerIsolation || setPlacement || clearPlacement {
+		projected := *app
+		if setWorkerIsolation {
+			projected.WorkerIsolation = newWorkerIsolation
+		}
+		if setWorkerIsolation && deploy.ResolveWorkerIsolation(projected.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "multiplex" {
+			orphanRisk, riskErr := s.store.AppElasticOrphanRisk(app.ID)
+			if riskErr != nil {
+				writeError(w, http.StatusInternalServerError, "check elastic orphan fence")
+				return
+			}
+			if orphanRisk {
+				if app.Status != "stopped" {
+					writeError(w, http.StatusConflict, "stop the app before clearing its elastic orphan fence and switching to multiplex")
+					return
+				}
+				if s.jobs == nil {
+					writeError(w, http.StatusServiceUnavailable, "consumer lifetime fence unavailable")
+					return
+				}
+				fenceCtx, cancelFence := context.WithTimeout(r.Context(), 2*time.Second)
+				releaseFence, fenceErr := s.jobs.AcquireExclusiveConsumerLifetime(fenceCtx, app.ID)
+				cancelFence()
+				if fenceErr != nil {
+					writeError(w, http.StatusConflict, "an elastic worker may still be alive; reboot or terminate it before switching to producer-capable multiplex mode")
+					return
+				}
+				defer releaseFence()
+				orphanFenceHeld = true
+				clearOrphanRiskAfterPatch = true
+			}
+		}
+		if setPlacement {
+			projected.ReplicaPlacement = placementJSON
+			projected.Replicas = placementTotal
+		} else if clearPlacement {
+			projected.ReplicaPlacement = ""
+		}
+		schedules, err := s.store.ListSchedulesByApp(app.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		for _, schedule := range schedules {
+			if err := s.validateScheduleActivationForApp(&projected, schedule.OnSuccess); err != nil {
+				writeError(w, http.StatusUnprocessableEntity,
+					fmt.Sprintf("app topology would invalidate schedule %q: %v", schedule.Name, err))
+				return
+			}
+			if err := s.validateScheduleProducerTopologyWithOrphanFence(&projected, schedule.DeployTrigger, schedule.OnSuccess, orphanFenceHeld); err != nil {
+				writeError(w, http.StatusUnprocessableEntity,
+					fmt.Sprintf("app topology would invalidate schedule %q: %v", schedule.Name, err))
+				return
+			}
 		}
 	}
 
@@ -1237,6 +1343,15 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		reqLog(r).Error("patch app settings failed", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
+	}
+	if clearOrphanRiskAfterPatch {
+		if err := s.store.ClearElasticOrphanRisk(app.ID); err != nil {
+			// The topology is already multiplex, but retaining the marker is safe:
+			// producer enablement remains fail-closed until a later stopped/fenced
+			// transition proves the old elastic process tree absent.
+			writeError(w, http.StatusInternalServerError, "clear elastic orphan fence")
+			return
+		}
 	}
 
 	if setManagedBy {
@@ -1588,7 +1703,14 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 	if prev.Prepared {
 		preparation = deploy.PrepareSkip
 	}
-	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
+	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
+	if gateErr != nil {
+		slog.Error("restore: acquire publication fence", "slug", slug, "err", gateErr)
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+		return
+	}
+	defer releaseConsumerBoot()
+	params := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
 		Replicas:              app.Replicas,
@@ -1602,7 +1724,12 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		DeploymentID:          prev.ID,
 		AppVersion:            prev.Version,
 		Preparation:           preparation,
-	}, app))
+	}, app)
+	params.GuardUntilAcknowledged = true
+	params.ReplicaStarted = func(result deploy.Result) error {
+		return s.persistStartingDeploymentReplica(app, prev, result)
+	}
+	result, err := s.deployRun(params)
 	if err != nil {
 		slog.Error("restore: previous pool failed to start; app is down", "slug", slug, "err", err)
 		if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); uerr != nil {
@@ -1610,6 +1737,7 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		}
 		return
 	}
+	persisted := true
 	for _, rep := range result.Replicas {
 		pid, port := rep.PID, rep.Port
 		depID := prev.ID
@@ -1627,9 +1755,19 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 			DesiredState:        "running",
 			DeploymentID:        &depID,
 			StartupPeakRSSBytes: rep.StartupPeakRSSBytes,
+			ConsumerBooted:      true,
 		}); uerr != nil {
 			slog.Error("restore: upsert replica", "slug", slug, "idx", rep.Index, "err", uerr)
+			persisted = false
 		}
+	}
+	if !persisted {
+		_ = s.manager.Stop(slug)
+		if s.proxy != nil {
+			s.proxy.Deregister(slug)
+		}
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+		return
 	}
 	if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); uerr != nil {
 		slog.Error("restore: persist running status", "slug", slug, "err", uerr)
@@ -1651,6 +1789,51 @@ func (s *Server) restoreAfterFailedDeploy(slug string, app *db.App, prev *db.Dep
 		return
 	}
 	s.restorePreviousPool(slug, app, prev)
+}
+
+func (s *Server) persistStartingDeploymentReplica(app *db.App, deployment *db.Deployment, result deploy.Result) error {
+	rows, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		return fmt.Errorf("check prior replica identity: %w", err)
+	}
+	for _, prior := range rows {
+		if prior.Index != result.Index || prior.PID == nil || *prior.PID <= 0 || *prior.PID == result.PID {
+			continue
+		}
+		// Native PID is also its launch PGID. Never overwrite a durable identity
+		// while any member of that old group may still exist: doing so would make
+		// a later producer barrier unable to find the old consumer.
+		groupProbeErr := syscall.Kill(-*prior.PID, 0)
+		pidProbeErr := syscall.Kill(*prior.PID, 0)
+		if !errors.Is(groupProbeErr, syscall.ESRCH) || !errors.Is(pidProbeErr, syscall.ESRCH) {
+			return fmt.Errorf("replica %d still has unconfirmed prior native process group %d", result.Index, *prior.PID)
+		}
+		if err := s.store.ClearReplicaRuntimeIdentity(app.ID, result.Index); err != nil && !errors.Is(err, db.ErrNotFound) {
+			return fmt.Errorf("clear confirmed-absent prior replica identity: %w", err)
+		}
+		break
+	}
+	pid, port, deploymentID := result.PID, result.Port, deployment.ID
+	return s.store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: result.Index, PID: &pid, Port: &port, Status: "starting",
+		Provider: result.Provider, Tier: result.Tier, EndpointURL: result.EndpointURL,
+		WorkerID: result.WorkerID, AppVersion: deployment.Version,
+		DesiredState: "running", DeploymentID: &deploymentID, ConsumerBooted: true,
+	})
+}
+
+// guardDeploymentConsumerStart closes the native exec-before-checkpoint window
+// for every way the server can cold-start an existing deployment (restart,
+// scale, warm expansion, configuration restart, and background redeploy). The
+// child waits behind an inherited pipe until the exact PID and deployment are
+// durable. If the control plane dies first, EOF terminates the guard instead of
+// releasing untracked app code.
+func (s *Server) guardDeploymentConsumerStart(app *db.App, deployment *db.Deployment, params deploy.Params) deploy.Params {
+	params.GuardUntilAcknowledged = true
+	params.ReplicaStarted = func(result deploy.Result) error {
+		return s.persistStartingDeploymentReplica(app, deployment, result)
+	}
+	return params
 }
 
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
@@ -1874,6 +2057,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if existing, lerr := s.store.ListDeployments(app.ID); lerr == nil && len(existing) > 0 {
 		prevActive = existing[0]
 	}
+	preexistingCompatibilityQuarantine, err := s.store.AppCompatibilityQuarantined(app.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "check compatibility quarantine: "+err.Error())
+		return
+	}
 	// An app that has never deployed successfully is "stopped" by default
 	// rather than by anyone's decision, so a deploy starts it. The test is the
 	// durable deployments row, which ListDeployments already filters to
@@ -1888,6 +2076,19 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// A corrective attempt inherits any durable compatibility quarantine from a
+	// previous failed producer barrier. Carry that fence onto the new pending row
+	// before any path can stop or restore consumers; otherwise a failure before
+	// this attempt runs its own producer could resurrect the old incompatible
+	// bundle merely because the local producerBarrierEntered flag started false.
+	producerBarrierEntered := preexistingCompatibilityQuarantine
+	if producerBarrierEntered {
+		if err := s.store.MarkDeploymentProducerBarrierEntered(pendingDep.ID); err != nil {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "compatibility quarantine could not be inherited")
+			writeError(w, http.StatusInternalServerError, "inherit compatibility quarantine: "+err.Error())
+			return
+		}
+	}
 
 	// Record the content digest on the pending deployment. Computed from the
 	// same accepted entries the extractor validates, so it matches the digest
@@ -1895,30 +2096,70 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// once PromoteDeployment runs; a failed deploy never exposes it.
 	// digest is hoisted so deploy.Params can carry it to the runtime.
 	var digest string
-	if zr, derr := zip.OpenReader(bundleZip); derr == nil {
-		d, derr := bundle.DigestZipReader(&zr.Reader)
-		zr.Close()
-		if derr != nil {
-			slog.Warn("deploy: content digest computation rejected bundle",
-				"slug", slug, "version", version, "err", derr)
-		} else {
-			digest = d
-			if serr := s.store.SetDeploymentDigest(pendingDep.ID, digest); serr != nil {
-				slog.Error("deploy: failed to record content digest (non-fatal; next deploy self-heals)",
-					"slug", slug, "version", version, "err", serr)
-			}
+	zr, digestErr := zip.OpenReader(bundleZip)
+	if digestErr == nil {
+		digest, digestErr = bundle.DigestZipReader(&zr.Reader)
+		closeErr := zr.Close()
+		if digestErr == nil && closeErr != nil {
+			digestErr = closeErr
 		}
-	} else {
-		slog.Warn("deploy: could not re-open bundle for digest (non-fatal)",
-			"slug", slug, "version", version, "err", derr)
 	}
+	if digestErr != nil || digest == "" {
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "bundle content digest could not be established")
+		slog.Error("deploy: content digest is required before runtime mutation",
+			"slug", slug, "version", version, "err", digestErr)
+		writeError(w, http.StatusUnprocessableEntity, "bundle content digest could not be established")
+		return
+	}
+	if err := s.store.SetDeploymentDigest(pendingDep.ID, digest); err != nil {
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "bundle content digest could not be persisted")
+		slog.Error("deploy: content digest persistence is required before runtime mutation",
+			"slug", slug, "version", version, "err", err)
+		writeError(w, http.StatusInternalServerError, "bundle content digest could not be persisted")
+		return
+	}
+	pendingDep.ContentDigest = digest
+	pendingDep.Status = db.DeploymentPending
 
-	// Stop existing instance before re-deploying; ignore the error since the
-	// app may not have been running yet.
-	_ = s.manager.Stop(slug)
+	prestartPlan, err := s.planPrestartSchedules(app, manifest, digest)
+	if err != nil {
+		_ = s.store.FailDeployment(pendingDep.ID)
+		writeError(w, http.StatusInternalServerError, "plan schedule convergence: "+err.Error())
+		return
+	}
+	placeholdersCommitted := false
+	defer func() {
+		if !placeholdersCommitted {
+			s.removePrestartPlaceholders(prestartPlan)
+		}
+	}()
+	var releaseProducerGates func()
+	if s.jobs != nil && len(prestartPlan.gateIDs) > 0 {
+		releaseProducerGates = s.jobs.AcquireProducerGates(prestartPlan.gateIDs)
+		defer releaseProducerGates()
+	}
+	if err := s.revalidatePrestartPlan(prestartPlan, digest); err != nil {
+		_ = s.store.FailDeployment(pendingDep.ID)
+		writeError(w, http.StatusInternalServerError, "revalidate schedule convergence: "+err.Error())
+		return
+	}
+	if len(prestartPlan.producers) > 0 && s.jobs == nil {
+		_ = s.store.FailDeployment(pendingDep.ID)
+		writeError(w, http.StatusServiceUnavailable, "deploy-triggered producer runner unavailable")
+		return
+	}
 
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
+	}
+	// A producer may mutate data that old consumers have mapped or are still
+	// reading. Do not cross that publication boundary until every old process is
+	// observed dead. ErrReplicaNotFound is the expected first-deploy case.
+	if err := s.confirmAppConsumersStopped(app); err != nil {
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "existing consumers could not be confirmed stopped before data publication")
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed"})
+		writeError(w, http.StatusConflict, "existing consumers could not be confirmed stopped; no producer was run")
+		return
 	}
 
 	// Snapshot the pre-manifest [app] settings. If Phase A applies manifest
@@ -1945,7 +2186,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if err := s.applyManifestAppSettings(r, app, manifest.App); err != nil {
 			slog.Error("manifest [app] apply failed", "slug", slug, "err", err)
 			_ = s.store.FailDeployment(pendingDep.ID)
-			s.restoreAfterFailedDeploy(slug, app, prevActive, keepStopped)
+			if producerBarrierEntered {
+				_ = s.manager.Stop(slug)
+			} else {
+				s.restoreAfterFailedDeploy(slug, app, prevActive, keepStopped)
+			}
 			writeError(w, http.StatusInternalServerError, "manifest apply failed")
 			return
 		}
@@ -1977,7 +2222,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 
 	deployDefaultMem, deployDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	deployResponse := newDeployResponder(w, r)
-	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
+	deployParams := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             bundleDir,
 		Replicas:              app.Replicas,
@@ -1994,12 +2239,129 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// bundle is still rejected here rather than at start time.
 		PrepareOnly: keepStopped,
 		Progress:    deployResponse.event,
-	}, app))
+	}, app)
+	deployParams.GuardUntilAcknowledged = true
+	deployParams.ReplicaStarted = func(result deploy.Result) error {
+		return s.persistStartingDeploymentReplica(app, pendingDep, result)
+	}
+	var result *deploy.PoolResult
+	// Any schedule gate requires split prepare/activate. Even a producer that is
+	// satisfied now can be invalidated by a writer admitted on a retiring server;
+	// activation therefore revalidates after acquiring the cross-process
+	// publication fence and may need to republish before consumer startup.
+	needsPreactivationConfig := prestartPlan.deploymentRepairRequired || len(prestartPlan.gateIDs) > 0 || (manifest != nil && len(manifest.Schedules) > 0)
+	if needsPreactivationConfig {
+		prepared := deployParams
+		prepared.PrepareOnly = true
+		result, err = s.deployRun(prepared)
+		if err == nil && len(prestartPlan.producers) > 0 {
+			// Commit the crash-recovery fence before admitting any producer. A hard
+			// process loss from this point must quarantine the app rather than boot
+			// the previous consumer against potentially replaced shared data.
+			if markErr := s.store.MarkDeploymentProducerBarrierEntered(pendingDep.ID); markErr != nil {
+				err = fmt.Errorf("record pre-start producer barrier: %w", markErr)
+			} else {
+				producerBarrierEntered = true
+			}
+		}
+		if err == nil {
+			for _, producer := range prestartPlan.producers {
+				if _, runErr := s.jobs.RunCandidateProducerLocked(producer, app, pendingDep); runErr != nil {
+					err = fmt.Errorf("pre-start producer %q: %w", producer.Name, runErr)
+					break
+				}
+			}
+			if err == nil && len(prestartPlan.producers) > 0 {
+				prestartPlan.deploymentRepairComplete = true
+			}
+		}
+		if err == nil && manifest != nil && len(manifest.Schedules) > 0 {
+			if err == nil {
+				deployResponse.event(deployevent.Phase("configuration", deployevent.StatusStarted, "Applying manifest configuration"))
+				targetDeployment := &db.Deployment{
+					ID: pendingDep.ID, AppID: app.ID, Version: version, BundleDir: bundleDir,
+					Status: db.DeploymentPending, ContentDigest: digest,
+				}
+				manifestSummary.Schedules, err = s.applyManifestSchedules(r, app, targetDeployment, manifest.Schedules, prestartPlan.placeholder)
+				if err != nil {
+					err = fmt.Errorf("manifest schedule apply: %w", err)
+				} else {
+					placeholdersCommitted = true
+				}
+			}
+		}
+		if err == nil {
+			if snapshotErr := s.store.RecordDeploymentScheduleSnapshot(pendingDep.ID, app.ID); snapshotErr != nil {
+				err = fmt.Errorf("record deployment schedule snapshot: %w", snapshotErr)
+			}
+		}
+		if err == nil {
+			releaseConsumerBoot, convergenceErr := s.convergePrestartAndFenceConsumer(
+				prestartPlan, digest, app, pendingDep, &producerBarrierEntered,
+			)
+			if convergenceErr != nil {
+				err = convergenceErr
+			} else if keepStopped {
+				// A stopped deploy still must prove it repaired inherited shared-data
+				// quarantine before promotion. It simply has no consumer boot to keep
+				// under the returned read fence.
+				releaseConsumerBoot()
+			} else {
+				defer releaseConsumerBoot()
+				activate := deployParams
+				activate.Preparation = deploy.PrepareSkip
+				activate.PrepareOnly = false
+				var activated *deploy.PoolResult
+				activated, err = s.deployRun(activate)
+				if err == nil {
+					activated.HooksDeclared = result.HooksDeclared
+					activated.HooksRun = result.HooksRun
+					activated.HooksSkipped = result.HooksSkipped
+					result = activated
+				}
+			}
+		}
+	} else {
+		if err = s.store.RecordDeploymentScheduleSnapshot(pendingDep.ID, app.ID); err == nil {
+			if !keepStopped {
+				releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
+				if gateErr != nil {
+					err = fmt.Errorf("acquire consumer publication fence: %w", gateErr)
+				} else {
+					defer releaseConsumerBoot()
+				}
+			}
+			if err == nil {
+				result, err = s.deployRun(deployParams)
+			}
+		} else {
+			err = fmt.Errorf("record deployment schedule snapshot: %w", err)
+		}
+	}
 	if err != nil {
+		declarationRestoreErr := s.restorePrestartDeclarations(prestartPlan, app)
+		if declarationRestoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("restore previous schedule declarations: %w", declarationRestoreErr))
+		}
 		reason := deployFailureMessage(err)
 		kind := deployfail.Classify(err)
 		slog.Error("deploy_run_failed", "slug", slug, "err", err)
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
+		if producerBarrierEntered {
+			quarantineStatus := "failed"
+			if keepStopped {
+				quarantineStatus = "stopped"
+			}
+			if qerr := s.store.QuarantineAndFailDeploymentWithAppStatus(pendingDep.ID, reason, quarantineStatus); qerr != nil {
+				// Leave the row pending. Pending deployment admission is itself a
+				// durable fail-closed fence, and startup retries atomic quarantine.
+				slog.Error("deploy: persist compatibility quarantine; leaving deployment pending", "slug", slug, "err", qerr)
+			}
+		} else {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
+			if declarationRestoreErr != nil {
+				_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed"})
+			}
+		}
 		// Revert manifest [app] settings so the restored old pool runs under
 		// the settings it was deployed with, not the failed bundle's.
 		if manifestApplied {
@@ -2066,17 +2428,25 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				s.proxy.ApplyRenderPacing(slug, preManifestApp.RenderSeconds)
 			}
 		}
-		deployResponse.event(deployevent.Phase("recovery", deployevent.StatusStarted, "Restoring the previous deployment"))
-		s.restoreAfterFailedDeploy(slug, &preManifestApp, prevActive, keepStopped)
 		recoveryMessage := "Recovery finished"
-		if recovered, rerr := s.store.GetAppBySlug(slug); rerr == nil {
-			switch recovered.Status {
-			case "running":
-				recoveryMessage = "Previous deployment restored and running"
-			case "stopped":
-				recoveryMessage = "App remains safely stopped"
-			case "degraded", "failed", "crashed":
-				recoveryMessage = "Previous deployment could not be fully restored; app is " + recovered.Status
+		if producerBarrierEntered || declarationRestoreErr != nil {
+			// A producer may have replaced shared data. Restoring the previous
+			// consumer would recreate code/data skew.
+			// Fail closed with no serving replicas and require a corrected deploy.
+			_ = s.manager.Stop(slug)
+			recoveryMessage = "App left stopped because data or schedule-declaration compatibility could not be proven"
+		} else {
+			deployResponse.event(deployevent.Phase("recovery", deployevent.StatusStarted, "Restoring the previous deployment"))
+			s.restoreAfterFailedDeploy(slug, &preManifestApp, prevActive, keepStopped)
+			if recovered, rerr := s.store.GetAppBySlug(slug); rerr == nil {
+				switch recovered.Status {
+				case "running":
+					recoveryMessage = "Previous deployment restored and running"
+				case "stopped":
+					recoveryMessage = "App remains safely stopped"
+				case "degraded", "failed", "crashed":
+					recoveryMessage = "Previous deployment could not be fully restored; app is " + recovered.Status
+				}
 			}
 		}
 		deployResponse.event(deployevent.Phase("recovery", deployevent.StatusCompleted, recoveryMessage))
@@ -2090,6 +2460,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	keepFiles = true
 	deployResponse.event(deployevent.Phase("commit", deployevent.StatusStarted, "Recording the new deployment"))
 
+	var replicaPersistenceErr error
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
 		depID := pendingDep.ID
@@ -2107,9 +2478,29 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			DesiredState:        "running",
 			DeploymentID:        &depID,
 			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
+			ConsumerBooted:      true,
 		}); err != nil {
 			slog.Error("deploy_upsert_replica_failed", "slug", slug, "index", r.Index, "err", err)
+			replicaPersistenceErr = errors.Join(replicaPersistenceErr, fmt.Errorf("replica %d: %w", r.Index, err))
 		}
+	}
+	if replicaPersistenceErr != nil {
+		reason := "deployment consumer provenance could not be persisted: " + replicaPersistenceErr.Error()
+		_ = s.manager.Stop(slug)
+		if s.proxy != nil {
+			s.proxy.Deregister(slug)
+		}
+		if producerBarrierEntered {
+			if qerr := s.store.QuarantineAndFailDeployment(pendingDep.ID, reason); qerr != nil {
+				slog.Error("deploy: quarantine after replica provenance failure", "slug", slug, "err", qerr)
+			}
+		} else {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
+			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
+		}
+		s.recordDeploy("failure")
+		deployResponse.fail(http.StatusInternalServerError, reason, "", "commit")
+		return
 	}
 	// Persist indices that failed to boot as crashed (no PID/port) so the
 	// watchdog reconciles the pool back up to the desired replica count
@@ -2123,6 +2514,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			slog.Error("deploy_upsert_failed_replica", "slug", slug, "index", idx, "err", err)
 		}
 	}
+
 	// Bookkeeping after the proxy switch. Two writes here are different
 	// kinds of important and are handled differently:
 	//
@@ -2176,26 +2568,30 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			"slug", slug, "version", version, "err", err)
 	}
 	deployResponse.event(deployevent.Phase("commit", deployevent.StatusCompleted, "Deployment recorded"))
-	if manifest != nil {
-		deployResponse.event(deployevent.Phase("configuration", deployevent.StatusStarted, "Applying manifest configuration"))
+	// Materialize convergence only after every manifest upsert has landed, and
+	// always across the complete persisted schedule set. This same boundary is
+	// used by rollback and direct schedule writes.
+	var deployWarning string
+	scheduleConvergence, err := s.reconcileAndDispatchScheduleConvergence(app.ID, pendingDep.ID)
+	if err != nil {
+		slog.Error("schedule convergence reconciliation failed", "slug", slug, "err", err)
+		deployWarning = "deployment committed; schedule convergence will repair asynchronously: " + err.Error()
+		scheduleConvergence = nil
 	}
-
-	// Phase B: upsert [[schedule]] rows from the manifest. Runs after
-	// CreateDeployment is durable so a scheduler tick between Reload and this
-	// write cannot fire a job against the previous bundle.
-	if manifest != nil && len(manifest.Schedules) > 0 {
-		scheduleResults, err := s.applyManifestSchedules(r, app, manifest.Schedules)
-		if err != nil {
-			// Phase B is post-commit: bundle is live, deployment row is durable.
-			// Failure leaves schedules incomplete; the next deploy converges
-			// (idempotent upserts). The client still sees HTTP 500, so the
-			// deploy metric records failure to match the client-visible result.
-			slog.Error("manifest [[schedule]] apply failed", "slug", slug, "err", err)
-			s.recordDeploy("failure")
-			deployResponse.fail(http.StatusInternalServerError, "manifest schedule apply failed", "", "configuration")
-			return
+	for i := range scheduleConvergence {
+		// Candidate consumers were admitted only after the entire desired producer
+		// set was proven. This remains true when a matching durable publication was
+		// already satisfied and no process needed to run in this request.
+		scheduleConvergence[i].Prestart = scheduleConvergence[i].Status == "satisfied"
+	}
+	bySchedule := make(map[int64]ScheduleConvergenceResult, len(scheduleConvergence))
+	for _, item := range scheduleConvergence {
+		bySchedule[item.ScheduleID] = item
+	}
+	for i := range manifestSummary.Schedules {
+		if item, ok := bySchedule[manifestSummary.Schedules[i].ScheduleID]; ok && item.RunID != nil && !item.Prestart {
+			manifestSummary.Schedules[i].DeployRun = &DeployRunRef{RunID: *item.RunID}
 		}
-		manifestSummary.Schedules = scheduleResults
 	}
 	// The new pool is healthy and sampleable at this point. Compare every
 	// configured roll schedule with the same live surge estimate and host floor
@@ -2253,7 +2649,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// same version/bundle directories at the same time. A detached goroutine would
 	// outlive the handler's lock release and race the next lock holder.
 	deployResponse.event(deployevent.Phase("cleanup", deployevent.StatusStarted, "Cleaning up old deployment files"))
-	if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir); err != nil {
+	pinnedScheduleDirs, pinErr := s.store.ListPinnedScheduleDeploymentDirs(app.ID)
+	if pinErr != nil {
+		slog.Error("list schedule-pinned deployment files", "slug", slug, "err", pinErr)
+	} else if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir, pinnedScheduleDirs...); err != nil {
 		slog.Error("prune_old_versions_failed", "slug", slug, "err", err)
 	}
 	deployResponse.event(deployevent.Phase("cleanup", deployevent.StatusCompleted, "Cleanup complete"))
@@ -2293,13 +2692,17 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// KeptStopped reports that the app was left down because it was stopped
 		// before this deploy. Stated outright so the CLI does not have to infer
 		// it from a status field a concurrent start could have changed.
-		KeptStopped bool `json:"kept_stopped,omitempty"`
+		KeptStopped         bool                        `json:"kept_stopped,omitempty"`
+		ScheduleConvergence []ScheduleConvergenceResult `json:"schedule_convergence,omitempty"`
+		Warning             string                      `json:"warning,omitempty"`
 	}{
-		App:           updatedApp,
-		HooksSkipped:  result.HooksSkipped,
-		HooksDeclared: result.HooksDeclared,
-		HooksRun:      result.HooksRun,
-		KeptStopped:   keepStopped,
+		App:                 updatedApp,
+		HooksSkipped:        result.HooksSkipped,
+		HooksDeclared:       result.HooksDeclared,
+		HooksRun:            result.HooksRun,
+		KeptStopped:         keepStopped,
+		ScheduleConvergence: scheduleConvergence,
+		Warning:             deployWarning,
 	}
 	if !manifestSummary.IsEmpty() {
 		resp.Manifest = &manifestSummary
@@ -2417,21 +2820,83 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	if existing, lerr := s.store.ListDeployments(app.ID); lerr == nil && len(existing) > 0 {
 		prevActive = existing[0]
 	}
+	preexistingCompatibilityQuarantine, err := s.store.AppCompatibilityQuarantined(app.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "check compatibility quarantine: "+err.Error())
+		return
+	}
 	pendingDep, err := s.store.BeginDeploymentWithOrigin(app.ID, prev.Version, prev.BundleDir, runID, &prev.ID, origin)
 	if err != nil {
 		slog.Error("rollback: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	producerBarrierEntered := preexistingCompatibilityQuarantine
+	if producerBarrierEntered {
+		if err := s.store.MarkDeploymentProducerBarrierEntered(pendingDep.ID); err != nil {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "compatibility quarantine could not be inherited")
+			writeError(w, http.StatusInternalServerError, "inherit compatibility quarantine: "+err.Error())
+			return
+		}
+	}
+	pendingDep.ContentDigest = prev.ContentDigest
+	pendingDep.Status = db.DeploymentPending
+	if prev.ContentDigest != "" {
+		if err := s.store.SetDeploymentDigest(pendingDep.ID, prev.ContentDigest); err != nil {
+			_ = s.store.FailDeployment(pendingDep.ID)
+			writeError(w, http.StatusInternalServerError, "record rollback bundle identity")
+			return
+		}
+	}
+	prestartPlan, err := s.planRollbackPrestartSchedules(app, prev.ID, prev.ContentDigest)
+	if err != nil {
+		_ = s.store.FailDeployment(pendingDep.ID)
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusConflict, "rollback target predates immutable schedule snapshots; redeploy that version before rolling back to it")
+		} else {
+			writeError(w, http.StatusInternalServerError, "plan rollback schedule convergence: "+err.Error())
+		}
+		return
+	}
+	rollbackSnapshotCommitted := false
+	defer func() {
+		if !rollbackSnapshotCommitted {
+			s.removePrestartPlaceholders(prestartPlan)
+		}
+	}()
+	var releaseProducerGates func()
+	if s.jobs != nil && len(prestartPlan.gateIDs) > 0 {
+		releaseProducerGates = s.jobs.AcquireProducerGates(prestartPlan.gateIDs)
+		defer releaseProducerGates()
+	}
+	if err := s.revalidatePrestartPlan(prestartPlan, prev.ContentDigest); err != nil {
+		_ = s.store.FailDeployment(pendingDep.ID)
+		writeError(w, http.StatusInternalServerError, "revalidate rollback schedule convergence: "+err.Error())
+		return
+	}
+	if len(prestartPlan.producers) > 0 && prev.ContentDigest == "" {
+		_ = s.store.FailDeployment(pendingDep.ID)
+		writeError(w, http.StatusConflict, "rollback target predates bundle provenance; redeploy that version before rolling back to it")
+		return
+	}
+	if len(prestartPlan.producers) > 0 && s.jobs == nil {
+		_ = s.store.FailDeployment(pendingDep.ID)
+		writeError(w, http.StatusServiceUnavailable, "deploy-triggered producer runner unavailable")
+		return
+	}
 
-	// Stop current instance; ignore the error if it wasn't running.
-	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
 	}
+	if err := s.confirmAppConsumersStopped(app); err != nil {
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "existing consumers could not be confirmed stopped before rollback data publication")
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed"})
+		writeError(w, http.StatusConflict, "existing consumers could not be confirmed stopped; no rollback producer was run")
+		return
+	}
 
 	rollbackDefaultMem, rollbackDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
-	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
+	rollbackParams := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
 		Replicas:              app.Replicas,
@@ -2448,11 +2913,96 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		// created for this rollback: the pending row is new and never prepared,
 		// while prev is the deployment whose environment and hooks already ran.
 		Preparation: activationPreparation(prev.Prepared),
-	}, app))
+	}, app)
+	rollbackParams.GuardUntilAcknowledged = true
+	rollbackParams.ReplicaStarted = func(result deploy.Result) error {
+		return s.persistStartingDeploymentReplica(app, pendingDep, result)
+	}
+	var result *deploy.PoolResult
+	{
+		prepare := rollbackParams
+		prepare.PrepareOnly = true
+		result, err = s.deployRun(prepare)
+		if err == nil {
+			restored, restoreErr := s.store.RestoreDeploymentScheduleSnapshot(prev.ID, app.ID)
+			if restoreErr != nil {
+				err = fmt.Errorf("restore rollback schedule snapshot: %w", restoreErr)
+			} else {
+				rollbackSnapshotCommitted = true
+				for _, schedule := range restored {
+					if reloadErr := s.reloadScheduler(schedule.ID, app.Slug, schedule.Name); reloadErr != nil {
+						err = fmt.Errorf("reload rollback schedule %q: %w", schedule.Name, reloadErr)
+						break
+					}
+				}
+			}
+		}
+		if err == nil && len(prestartPlan.producers) > 0 && !producerBarrierEntered {
+			if markErr := s.store.MarkDeploymentProducerBarrierEntered(pendingDep.ID); markErr != nil {
+				err = fmt.Errorf("record rollback producer barrier: %w", markErr)
+			} else {
+				producerBarrierEntered = true
+			}
+		}
+		if err == nil {
+			for _, producer := range prestartPlan.producers {
+				if _, runErr := s.jobs.RunCandidateProducerLocked(producer, app, pendingDep); runErr != nil {
+					err = fmt.Errorf("pre-start rollback producer %q: %w", producer.Name, runErr)
+					break
+				}
+			}
+			if err == nil && len(prestartPlan.producers) > 0 {
+				prestartPlan.deploymentRepairComplete = true
+			}
+		}
+		if err == nil {
+			if snapshotErr := s.store.RecordDeploymentScheduleSnapshot(pendingDep.ID, app.ID); snapshotErr != nil {
+				err = fmt.Errorf("record rollback deployment schedule snapshot: %w", snapshotErr)
+			}
+		}
+		if err == nil {
+			releaseConsumerBoot, convergenceErr := s.convergePrestartAndFenceConsumer(
+				prestartPlan, prev.ContentDigest, app, pendingDep, &producerBarrierEntered,
+			)
+			if convergenceErr != nil {
+				err = convergenceErr
+			} else {
+				defer releaseConsumerBoot()
+				activate := rollbackParams
+				activate.Preparation = deploy.PrepareSkip
+				activate.PrepareOnly = false
+				var activated *deploy.PoolResult
+				activated, err = s.deployRun(activate)
+				if err == nil {
+					activated.HooksDeclared = result.HooksDeclared
+					activated.HooksRun = result.HooksRun
+					activated.HooksSkipped = result.HooksSkipped
+					result = activated
+				}
+			}
+		}
+	}
 	if err != nil {
+		declarationRestoreErr := s.restorePrestartDeclarations(prestartPlan, app)
+		if declarationRestoreErr != nil {
+			err = errors.Join(err, fmt.Errorf("restore previous schedule declarations: %w", declarationRestoreErr))
+		}
 		slog.Error("rollback_failed", "slug", slug, "err", err)
-		_ = s.store.FailDeployment(pendingDep.ID)
-		s.restorePreviousPool(slug, app, prevActive)
+		if producerBarrierEntered {
+			if qerr := s.store.QuarantineAndFailDeployment(pendingDep.ID, deployFailureMessage(err)); qerr != nil {
+				slog.Error("rollback: persist compatibility quarantine; leaving deployment pending", "slug", slug, "err", qerr)
+			}
+			// The target producer may already have replaced shared data. Starting
+			// the deployment we rolled back from would be an unsafe inverse skew.
+			_ = s.manager.Stop(slug)
+		} else if declarationRestoreErr == nil {
+			_ = s.store.FailDeployment(pendingDep.ID)
+			s.restorePreviousPool(slug, app, prevActive)
+		} else {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, deployFailureMessage(err))
+			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed"})
+			_ = s.manager.Stop(slug)
+		}
 		writeErrorWithKind(w, http.StatusInternalServerError, deployFailureMessage(err), deployfail.Classify(err))
 		return
 	}
@@ -2466,6 +3016,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			"slug", slug, "version", prev.Version, "err", err)
 	}
 
+	var replicaPersistenceErr error
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
 		depID := pendingDep.ID
@@ -2483,9 +3034,28 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			DesiredState:        "running",
 			DeploymentID:        &depID,
 			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
+			ConsumerBooted:      true,
 		}); err != nil {
 			slog.Error("rollback_upsert_replica_failed", "slug", slug, "index", r.Index, "err", err)
+			replicaPersistenceErr = errors.Join(replicaPersistenceErr, fmt.Errorf("replica %d: %w", r.Index, err))
 		}
+	}
+	if replicaPersistenceErr != nil {
+		reason := "rollback consumer provenance could not be persisted: " + replicaPersistenceErr.Error()
+		_ = s.manager.Stop(slug)
+		if s.proxy != nil {
+			s.proxy.Deregister(slug)
+		}
+		if producerBarrierEntered {
+			if qerr := s.store.QuarantineAndFailDeployment(pendingDep.ID, reason); qerr != nil {
+				slog.Error("rollback: quarantine after replica provenance failure", "slug", slug, "err", qerr)
+			}
+		} else {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
+			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
+		}
+		writeError(w, http.StatusInternalServerError, reason)
+		return
 	}
 	// UpdateAppStatus is soft state — the watchdog reconciles. PromoteDeployment
 	// is authoritative: it is the pointer restart/wake/schedule consult to
@@ -2500,25 +3070,31 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		slog.Error("rollback: persist running status failed; pool is live", "slug", slug, "err", err)
 	}
 
-	// Copy the target's digest onto the pending row so the promoted live
-	// deployment row carries the correct bundle identity. Must run before
-	// PromoteDeployment so the update is visible to any concurrent reader.
-	if prev.ContentDigest != "" {
-		if err := s.store.SetDeploymentDigest(pendingDep.ID, prev.ContentDigest); err != nil {
-			slog.Error("rollback: copy target digest to pending", "err", err)
-		}
-	}
-
 	if err := s.store.PromoteDeployment(pendingDep.ID); err != nil {
-		slog.Error("rollback: promote deployment failed; pool is live but next restart/wake/schedule would silently un-roll-back to the previous bundle — failing the request so the caller retries", "slug", slug, "version", prev.Version, "err", err)
-		writeError(w, http.StatusInternalServerError, "rollback succeeded but recording it failed; retry to commit")
+		slog.Error("rollback: promote deployment failed; pool is live but durable state is unresolved", "slug", slug, "version", prev.Version, "err", err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+			"rollback runtime changed but recording it failed; inspect deployment history and, if needed, retry explicitly with --to %d", prev.ID))
 		return
+	}
+	var convergenceWarning string
+	scheduleConvergence, err := s.reconcileAndDispatchScheduleConvergence(app.ID, pendingDep.ID)
+	if err != nil {
+		slog.Error("rollback: schedule convergence reconciliation failed", "slug", slug, "err", err)
+		convergenceWarning = "rollback committed; schedule convergence reconciliation will repair asynchronously: " + err.Error()
+		scheduleConvergence = nil
+	}
+	for i := range scheduleConvergence {
+		scheduleConvergence[i].Prestart = scheduleConvergence[i].Status == "satisfied"
 	}
 
 	updatedApp, err := s.store.GetAppBySlug(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+		slog.Error("rollback: reload committed app failed", "slug", slug, "err", err)
+		updatedApp = app
+		updatedApp.Status = "running"
+		if convergenceWarning == "" {
+			convergenceWarning = "rollback committed; response metadata could not be refreshed"
+		}
 	}
 
 	if u := auth.UserFromContext(r.Context()); u != nil {
@@ -2532,7 +3108,11 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	// Rollbacks are not counted as deploys — deploy_count tracks forward deployments only.
-	writeJSON(w, http.StatusOK, updatedApp)
+	writeJSON(w, http.StatusOK, struct {
+		*db.App
+		ScheduleConvergence []ScheduleConvergenceResult `json:"schedule_convergence,omitempty"`
+		Warning             string                      `json:"warning,omitempty"`
+	}{App: updatedApp, ScheduleConvergence: scheduleConvergence, Warning: convergenceWarning})
 }
 
 func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
@@ -2572,6 +3152,10 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	if err := s.guardCompatibilityQuarantine(app.ID, "restart "+slug); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	deployments, err := s.store.ListDeployments(app.ID)
 	if err != nil {
@@ -2607,7 +3191,13 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	restartDefaultMem, restartDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
-	result, err := s.deployRun(s.withTierPlacement(deploy.Params{
+	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
+	if gateErr != nil {
+		writeError(w, http.StatusInternalServerError, "acquire startup-data compatibility fence")
+		return
+	}
+	defer releaseConsumerBoot()
+	restartParams := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,
 		Replicas:              app.Replicas,
@@ -2623,7 +3213,9 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		// A restart re-activates the deployment that is already live, so its
 		// hooks have run and its environment is built.
 		Preparation: activationPreparation(current.Prepared),
-	}, app))
+	}, app)
+	restartParams = s.guardDeploymentConsumerStart(app, current, restartParams)
+	result, err := s.deployRun(restartParams)
 	if err != nil {
 		slog.Error("restart_failed", "slug", slug, "err", err)
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
@@ -2632,6 +3224,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		writeErrorWithKind(w, http.StatusInternalServerError, deployFailureMessage(err), deployfail.Classify(err))
 		return
 	}
+	var replicaPersistenceErr error
 
 	// A legacy row that has now been prepared for real converges to prepared, so
 	// the next restart skips the work instead of repeating it forever.
@@ -2641,7 +3234,6 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 				"slug", slug, "version", current.Version, "err", err)
 		}
 	}
-
 	for _, r := range result.Replicas {
 		pid, port := r.PID, r.Port
 		depID := current.ID
@@ -2659,9 +3251,20 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			DesiredState:        "running",
 			DeploymentID:        &depID,
 			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
+			ConsumerBooted:      true,
 		}); err != nil {
 			slog.Error("restart_upsert_replica_failed", "slug", slug, "index", r.Index, "err", err)
+			replicaPersistenceErr = errors.Join(replicaPersistenceErr, err)
 		}
+	}
+	if replicaPersistenceErr != nil {
+		_ = s.manager.Stop(slug)
+		if s.proxy != nil {
+			s.proxy.Deregister(slug)
+		}
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
+		writeError(w, http.StatusInternalServerError, "restart consumer provenance could not be persisted")
+		return
 	}
 	// Bookkeeping after the proxy switch: the restarted pool is already
 	// serving traffic, so a transient DB hiccup here must NOT surface as
@@ -2748,8 +3351,24 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 // lock and must have checked activation lifecycle safety.
 func (s *Server) deleteAppLocked(ctx context.Context, app *db.App) (string, error) {
 	slug := app.Slug
+	var releaseJobFences func()
+	if s.jobs != nil {
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancelDrain()
+		if err := s.jobs.BlockAndDrainApp(drainCtx, app.ID); err != nil {
+			return "", fmt.Errorf("drain schedules for app deletion: %w", err)
+		}
+		var err error
+		releaseJobFences, err = s.jobs.AcquirePublicationRecoveryFences(drainCtx, []int64{app.ID})
+		if err != nil {
+			return "", fmt.Errorf("fence schedule processes for app deletion: %w", err)
+		}
+		defer releaseJobFences()
+	}
 	if s.manager != nil {
-		_ = s.manager.Stop(slug)
+		if err := s.confirmAppConsumersStopped(app); err != nil {
+			return "", fmt.Errorf("confirm app processes stopped for deletion: %w", err)
+		}
 	}
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
