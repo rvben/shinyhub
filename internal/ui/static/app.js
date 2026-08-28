@@ -44,7 +44,8 @@ import {
   activationState,
 	activationErrorDetail,
 	canCancelActivation,
-	deletedScheduleActivations,
+  deletedScheduleActivations,
+  deployTriggerLabel,
   afterSuccessDetail,
   afterSuccessLabel,
   dstAdvisoryMarkup,
@@ -55,6 +56,7 @@ import {
   scheduleState,
   scheduleDetailSignature,
   scheduleSummary,
+  producerCompatibilityState,
 } from '/static/views/schedule-ui.js';
 import { auditDetailEntries } from '/static/views/audit-detail.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
@@ -89,10 +91,34 @@ function setError(element, message) {
 // trap confines Tab focus to the dialog while open and restores focus to the
 // element that opened it on release.
 const _modalTraps = new WeakMap();
+let _modalBackgroundDepth = 0;
+function setModalBackgroundInert(inert) {
+  const regions = [document.getElementById('app-shell'), document.getElementById('mobile-topbar')].filter(Boolean);
+  _modalBackgroundDepth = Math.max(0, _modalBackgroundDepth + (inert ? 1 : -1));
+  for (const region of regions) {
+    if (_modalBackgroundDepth > 0) region.setAttribute('inert', '');
+    else region.removeAttribute('inert');
+  }
+}
 function modalTrap(overlayEl) {
   let trap = _modalTraps.get(overlayEl);
   if (!trap) {
-    trap = createFocusTrap(overlayEl.querySelector('.modal-card') || overlayEl);
+    const focusTrap = createFocusTrap(overlayEl.querySelector('.modal-card') || overlayEl);
+    let active = false;
+    trap = {
+      activate() {
+        if (active) return;
+        active = true;
+        setModalBackgroundInert(true);
+        focusTrap.activate();
+      },
+      release() {
+        if (!active) return;
+        active = false;
+        focusTrap.release();
+        setModalBackgroundInert(false);
+      },
+    };
     _modalTraps.set(overlayEl, trap);
   }
   return trap;
@@ -897,6 +923,9 @@ document.addEventListener('DOMContentLoaded', () => {
     tabOverview.hidden = !isOperator;
     tabApps.hidden = false;
     newAppButton.hidden = !state.canCreateApps;
+    const selfService = payload.user.can_manage_self !== false;
+    if (newTokenButton) newTokenButton.hidden = !selfService;
+    if (cliConnectPanel && !selfService) cliConnectPanel.hidden = true;
     // Apply the new session's sidebar policy before any asynchronous list load
     // so switching identities in one tab cannot flash the previous catalog.
     syncSidebar();
@@ -946,10 +975,17 @@ document.addEventListener('DOMContentLoaded', () => {
     // SSO accounts are governed by the identity provider: name + password are
     // read-only here (refreshed from the IdP on each login). Local accounts get
     // the full editor. can_set_password is the local-account signal.
-    const isLocalAccount = !!u.can_set_password;
+    const selfService = u.can_manage_self !== false;
+    const isLocalAccount = selfService && !!u.can_set_password;
     setHidden(profileNameField, !isLocalAccount);
     setHidden(profilePwSection, !isLocalAccount);
     setHidden(profilePwManaged, isLocalAccount);
+    if (profilePwManaged && !selfService) {
+      profilePwManaged.textContent = 'This shared account is read-only. Profile, password, and API-token changes are disabled by the server.';
+    } else if (profilePwManaged) {
+      profilePwManaged.textContent = 'Your name and password are managed by your identity provider.';
+    }
+    setHidden(profileTokensLink, !selfService);
     setHidden(profileSubmit, !isLocalAccount);
     profileDisplayName.value = u.display_name || '';
     profileCurrentPw.value = '';
@@ -1002,7 +1038,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function submitProfile(event) {
     event.preventDefault();
     if (!state.user) return;
-    const canSetPw = !!state.user.can_set_password;
+    const canSetPw = state.user.can_manage_self !== false && !!state.user.can_set_password;
     // SSO accounts have nothing to save (name + password are IdP-managed); the
     // Save button is hidden, but guard against an Enter-key submit anyway.
     if (!canSetPw) { closeProfileModal(); return; }
@@ -2224,19 +2260,21 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── API tokens (self-service, /tokens page) ────────────────────────────────
   async function loadTokens() {
     if (!tokensList) return;
+    const selfService = !state.user || state.user.can_manage_self !== false;
+    if (newTokenButton) newTokenButton.hidden = !selfService;
     setError(tokensError, '');
     let resp;
     try {
       resp = await api('/api/tokens');
     } catch {
       setError(tokensError, 'Network error loading tokens');
-      renderTokenList(tokensList, [], document);
+      renderTokenList(tokensList, [], document, {mutable: selfService});
       return;
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
       setError(tokensError, 'Failed to load tokens');
-      renderTokenList(tokensList, [], document);
+      renderTokenList(tokensList, [], document, {mutable: selfService});
       return;
     }
     let body = [];
@@ -2244,7 +2282,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // The server returns the standard {items,...} list envelope; tolerate a bare
     // array for resilience across versions.
     const tokens = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : []);
-    renderTokenList(tokensList, tokenListModels(tokens), document);
+    renderTokenList(tokensList, tokenListModels(tokens), document, {mutable: selfService});
   }
 
   function persistCLIConnectRequest() {
@@ -2337,6 +2375,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openNewTokenModal() {
+    if (state.user?.can_manage_self === false) {
+      flashToast('This shared account is read-only.', 'error');
+      return;
+    }
     newTokenForm.reset();
     setError(newTokenError, '');
     newTokenForm.hidden = false;
@@ -5387,6 +5429,10 @@ document.addEventListener('DOMContentLoaded', () => {
     doc: document,
   });
   {
+    const drawerMedia = window.matchMedia('(max-width: 860px)');
+    const syncDrawerAccessibility = () => sidebarDrawer.syncAccessibility(drawerMedia.matches);
+    syncDrawerAccessibility();
+    if (typeof drawerMedia.addEventListener === 'function') drawerMedia.addEventListener('change', syncDrawerAccessibility);
     const toggleBtn = document.getElementById('sidebar-toggle');
     const backdrop = document.getElementById('sidebar-backdrop');
     if (toggleBtn) toggleBtn.addEventListener('click', () => sidebarDrawer.toggle());
@@ -6205,11 +6251,9 @@ document.addEventListener('DOMContentLoaded', () => {
       el.textContent = value;
       el.classList.toggle('has-attention', attention);
     };
-    set('schedules-summary-configured', String(summary.total));
-    set('schedules-summary-enabled', String(summary.enabled));
-    set('schedules-summary-running', String(summary.running));
-    set('schedules-summary-activating', String(summary.activating));
     set('schedules-summary-attention', String(summary.attention), summary.attention > 0);
+    set('schedules-summary-compatible', `${summary.compatible} / ${summary.total}`);
+    set('schedules-summary-active', String(summary.running + summary.activating));
     set('schedules-summary-next', summary.nextFire ? scheduleDate(summary.nextFire.toISOString()) : '—');
   }
 
@@ -6242,6 +6286,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const container = document.getElementById('schedules-list');
     const addBtn = document.getElementById('schedules-add-btn');
     if (!container) return;
+    container.querySelectorAll('.schedule-actions-menu').forEach(menu => kebabControls.get(menu)?.close());
     if (addBtn) addBtn.hidden = !surface.options.canManage;
     if (schedules.length === 0) {
 			const retained = deletedActivationHistoryMarkup(surface, schedules);
@@ -6253,15 +6298,25 @@ document.addEventListener('DOMContentLoaded', () => {
     const rows = schedules.map(s => {
       const state = scheduleState(s);
       const activation = activationState(s);
+      const compatibility = producerCompatibilityState(s);
       const tz = s.effective_timezone || 'UTC';
       const lastRun = s.last_run_at ? scheduleDate(s.last_run_at, tz) : 'No completed run recorded';
       const lastSuccess = Number.isFinite(s.last_success_age_s) ? `Last success ${formatAge(s.last_success_age_s)}` : 'No successful run recorded';
       const nextFire = s.enabled === false ? 'Paused' : scheduleDate(s.next_fire, tz);
       const selected = String(s.id) === String(surface.options.selectedScheduleID);
       const actions = surface.options.canManage ? `
-        <button type="button" class="env-btn-secondary" data-action="run" data-id="${s.id}" data-name="${escapeHtml(s.name)}" data-schedule-focus="schedule-${s.id}-run">Run now</button>
-        <button type="button" class="env-btn-secondary" data-action="edit" data-schedule='${escapeHtml(JSON.stringify(s))}' data-schedule-focus="schedule-${s.id}-edit">Edit</button>
-        <button type="button" class="btn-danger-sm" data-action="delete" data-id="${s.id}" data-name="${escapeHtml(s.name)}" data-schedule-focus="schedule-${s.id}-delete">Delete</button>` : '';
+        <button type="button" class="schedule-run-btn" data-action="run" data-id="${s.id}" data-name="${escapeHtml(s.name)}" data-schedule-focus="schedule-${s.id}-run">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.25 3.5 12 8l-6.75 4.5z"/></svg><span>Run now</span>
+        </button>
+        <div class="kebab-menu schedule-actions-menu">
+          <button type="button" aria-haspopup="menu" aria-expanded="false" aria-label="More actions for ${escapeHtml(s.name)}">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="13" cy="8" r="1.25"/></svg>
+          </button>
+          <ul class="kebab-list" role="menu" hidden>
+            <li role="none"><button type="button" role="menuitem" data-action="edit" data-schedule='${escapeHtml(JSON.stringify(s))}' data-schedule-focus="schedule-${s.id}-edit">Edit schedule</button></li>
+            <li role="none" class="schedule-menu-danger"><button type="button" role="menuitem" data-action="delete" data-id="${s.id}" data-name="${escapeHtml(s.name)}" data-schedule-focus="schedule-${s.id}-delete">Delete schedule</button></li>
+          </ul>
+        </div>` : '';
       return `<tr${selected ? ' class="is-selected" aria-current="true"' : ''}>
         <td data-label="Schedule">
           <div class="schedule-cell-stack">
@@ -6278,12 +6333,11 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="schedule-cell-secondary">${escapeHtml(lastSuccess)}</span>
           </div>
         </td>
-		<td data-label="After success">
+		<td data-label="Code/data compatibility">
 		  <div class="schedule-cell-stack">
-			<span class="schedule-cell-primary">${escapeHtml(afterSuccessLabel(s))}</span>
-			${s.roll_feasibility_advisory ? `<span class="schedule-roll-warning" title="${escapeHtml(s.roll_feasibility_advisory)}">Capacity warning</span>` : ''}
-			${s.latest_activation || s.on_success === 'roll' ? scheduleStatusMarkup(activation) : ''}
-			<span class="schedule-cell-secondary">${escapeHtml(s.latest_activation ? `${s.on_success === 'roll' ? '' : 'Earlier policy · '}Generation ${s.latest_activation.target_generation} · run #${s.latest_activation.schedule_run_id || '—'}` : afterSuccessDetail(s))}</span>
+			${scheduleStatusMarkup(compatibility)}
+			<span class="schedule-cell-primary">${escapeHtml(deployTriggerLabel(s.deploy_trigger))}</span>
+			<span class="schedule-cell-secondary">${escapeHtml(compatibility.detail)}</span>
           </div>
         </td>
         <td data-label="Next run">
@@ -6293,9 +6347,13 @@ document.addEventListener('DOMContentLoaded', () => {
       </tr>`;
     }).join('');
     container.innerHTML = `<table>
-      <thead><tr><th scope="col">Schedule</th><th scope="col">Latest run</th><th scope="col">After success</th><th scope="col">Next run</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><th scope="col">Schedule</th><th scope="col">Latest run</th><th scope="col">Code/data compatibility</th><th scope="col">Next run</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>${deletedActivationHistoryMarkup(surface, schedules)}`;
+
+    container.querySelectorAll('.schedule-actions-menu').forEach(menu => {
+      kebabControls.set(menu, wireKebab(menu.querySelector(':scope > button'), menu.querySelector('.kebab-list'), menu.closest('tr')));
+    });
 
     container.querySelectorAll('[data-action]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -6327,27 +6385,53 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const state = scheduleState(schedule);
     const activation = activationState(schedule);
+    const compatibility = producerCompatibilityState(schedule);
     const latestActivation = schedule.latest_activation;
     const timezone = schedule.effective_timezone || 'UTC';
     detail.setAttribute('aria-busy', 'true');
+    detail.querySelectorAll('.schedule-actions-menu').forEach(menu => kebabControls.get(menu)?.close());
     detail.innerHTML = `
       <div class="schedule-detail-head">
         <a class="schedule-detail-back" data-nav href="/apps/${encodeURIComponent(surface.slug)}/schedules">All schedules</a>
         <div class="schedule-detail-title-row">
           <div><h2 id="schedule-detail-title">${escapeHtml(schedule.name)}</h2>${scheduleStatusMarkup(state)}</div>
-          ${surface.options.canManage ? `<div class="schedule-detail-actions"><button type="button" class="env-btn-secondary" data-detail-action="run" data-schedule-focus="schedule-${schedule.id}-detail-run">Run now</button><button type="button" class="env-btn-secondary" data-detail-action="edit" data-schedule-focus="schedule-${schedule.id}-detail-edit">Edit</button><button type="button" class="btn-danger-sm" data-detail-action="delete" data-schedule-focus="schedule-${schedule.id}-detail-delete">Delete</button></div>` : ''}
+          ${surface.options.canManage ? `<div class="schedule-detail-actions">
+            <button type="button" class="schedule-run-btn" data-detail-action="run" data-schedule-focus="schedule-${schedule.id}-detail-run"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.25 3.5 12 8l-6.75 4.5z"/></svg><span>Run now</span></button>
+            <div class="kebab-menu schedule-actions-menu" data-schedule-actions-menu>
+              <button type="button" aria-haspopup="menu" aria-expanded="false" aria-label="More actions for ${escapeHtml(schedule.name)}"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="13" cy="8" r="1.25"/></svg></button>
+              <ul class="kebab-list" role="menu" hidden>
+                <li role="none"><button type="button" role="menuitem" data-detail-action="edit" data-schedule-focus="schedule-${schedule.id}-detail-edit">Edit schedule</button></li>
+                <li role="none" class="schedule-menu-danger"><button type="button" role="menuitem" data-detail-action="delete" data-schedule-focus="schedule-${schedule.id}-detail-delete">Delete schedule</button></li>
+              </ul>
+            </div>
+          </div>` : ''}
         </div>
       </div>
       ${schedule.roll_feasibility_advisory ? `<div class="schedule-roll-advisory"><strong>Roll capacity warning</strong><span>${escapeHtml(schedule.roll_feasibility_advisory)}</span></div>` : ''}
+      <section class="schedule-compatibility-panel schedule-compatibility-${compatibility.tone}" aria-labelledby="schedule-compatibility-title">
+        <div class="schedule-history-heading">
+          <div><h3 id="schedule-compatibility-title">Code and data compatibility</h3><p>${escapeHtml(compatibility.detail)}</p></div>
+          <div class="schedule-activation-actions">${scheduleStatusMarkup(compatibility)}${surface.options.canManage && compatibility.attention ? `<button type="button" class="btn-primary" data-detail-action="retry-convergence">Retry producer</button>` : ''}</div>
+        </div>
+        <dl class="schedule-compatibility-facts">
+          <div><dt>Deployment policy</dt><dd>${escapeHtml(deployTriggerLabel(schedule.deploy_trigger))}</dd></div>
+          <div><dt>Convergence</dt><dd>${escapeHtml(schedule.convergence_status || (schedule.deploy_trigger_satisfied ? 'satisfied' : 'not requested'))}</dd></div>
+          <div><dt>Current code</dt><dd><strong>${escapeHtml(schedule.current_app_version || 'Unknown version')}</strong><code>${escapeHtml(schedule.current_content_digest || 'Digest unavailable')}</code></dd></div>
+          <div><dt>Data producer</dt><dd><strong>${escapeHtml(schedule.producer_app_version || 'No proven producer')}</strong><code>${escapeHtml(schedule.producer_content_digest || 'Digest unavailable')}</code></dd></div>
+          ${schedule.producer_published_at ? `<div class="schedule-activation-wide"><dt>Published</dt><dd>${escapeHtml(scheduleDate(schedule.producer_published_at, timezone))}</dd></div>` : ''}
+          ${schedule.convergence_error ? `<div class="schedule-activation-wide schedule-activation-error"><dt>Last error</dt><dd>${escapeHtml(schedule.convergence_error)}</dd></div>` : ''}
+        </dl>
+      </section>
       <dl class="schedule-definition-grid">
         <div><dt>Timing</dt><dd><code>${escapeHtml(schedule.cron_expr)}</code></dd></div>
         <div><dt>Timezone</dt><dd>${escapeHtml(timezone)}${schedule.timezone_inherited ? ' <span>(inherited)</span>' : ''}</dd></div>
         <div><dt>Next run</dt><dd>${escapeHtml(schedule.enabled === false ? 'Paused' : scheduleDate(schedule.next_fire, timezone))}</dd></div>
         <div><dt>After success</dt><dd>${escapeHtml(afterSuccessLabel(schedule))}<span>${escapeHtml(afterSuccessDetail(schedule))}</span></dd></div>
+        <div><dt>Deploy trigger</dt><dd>${escapeHtml(deployTriggerLabel(schedule.deploy_trigger))}</dd></div>
         <div class="schedule-definition-command"><dt>Command</dt><dd><code>${escapeHtml((schedule.command || []).join(' '))}</code></dd></div>
       </dl>
 	  ${latestActivation || schedule.on_success === 'roll' ? `<section class="schedule-activation-panel" aria-labelledby="schedule-activation-title">
-		<div class="schedule-history-heading"><div><h3 id="schedule-activation-title">Serving-data activation</h3><p>${schedule.on_success === 'roll' ? 'Job health and activation health are reported separately.' : 'This durable activation was requested before rollout was disabled for future runs.'}</p></div><div class="schedule-activation-actions">${scheduleStatusMarkup(activation)}${surface.options.canManage && canCancelActivation(schedule) ? `<button type="button" class="env-btn-secondary" data-detail-action="cancel-activation" data-schedule-focus="schedule-${schedule.id}-cancel-activation">Cancel activation</button>` : ''}</div></div>
+		<div class="schedule-history-heading"><div><h3 id="schedule-activation-title">Serving-data activation</h3><p>${schedule.on_success === 'roll' ? 'Job health and activation health are reported separately.' : 'Earlier policy · this durable activation was requested before rollout was disabled for future runs.'}</p></div><div class="schedule-activation-actions">${scheduleStatusMarkup(activation)}${surface.options.canManage && canCancelActivation(schedule) ? `<button type="button" class="env-btn-secondary" data-detail-action="cancel-activation" data-schedule-focus="schedule-${schedule.id}-cancel-activation">Cancel activation</button>` : ''}</div></div>
         ${latestActivation ? `<dl class="schedule-activation-facts">
           <div><dt>Requested by</dt><dd>${latestActivation.schedule_run_id ? `Run #${escapeHtml(latestActivation.schedule_run_id)}` : 'Retained activation record'}</dd></div>
           <div><dt>Target generation</dt><dd>${escapeHtml(latestActivation.target_generation)}</dd></div>
@@ -6361,6 +6445,11 @@ document.addEventListener('DOMContentLoaded', () => {
       <div class="schedule-history-heading"><div><h3>Run history</h3><p>Newest runs first. Times use ${escapeHtml(timezone)}.</p></div></div>
       <div class="schedule-history" data-schedule-history><p class="schedule-loading">Loading run history…</p></div>`;
 
+    const detailActionsMenu = detail.querySelector('[data-schedule-actions-menu]');
+    if (detailActionsMenu) {
+      kebabControls.set(detailActionsMenu, wireKebab(detailActionsMenu.querySelector(':scope > button'), detailActionsMenu.querySelector('.kebab-list'), detailActionsMenu));
+    }
+
     detail.querySelector('[data-detail-action="run"]')?.addEventListener('click', e => {
       runScheduleNow(surface.slug, schedule.id, schedule.name, e.currentTarget);
     });
@@ -6370,6 +6459,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     detail.querySelector('[data-detail-action="cancel-activation"]')?.addEventListener('click', e => {
       cancelScheduleActivation(surface.slug, schedule.id, schedule.name, e.currentTarget);
+    });
+    detail.querySelector('[data-detail-action="retry-convergence"]')?.addEventListener('click', e => {
+      retryScheduleConvergence(surface.slug, schedule.id, schedule.name, e.currentTarget);
     });
 
     await loadScheduleRunPage(surface, schedule, 0, true);
@@ -6545,6 +6637,7 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('sched-enabled').checked = existing.enabled !== false;
       document.getElementById('sched-timezone').value = existing.timezone || '';
       document.getElementById('sched-on-success').value = existing.on_success || 'none';
+      document.getElementById('sched-deploy-trigger').value = existing.deploy_trigger || 'never';
       document.getElementById('sched-min-roll-interval').value = existing.min_roll_interval_seconds || 0;
       document.getElementById('sched-roll-fallback').value = existing.roll_fallback || 'defer';
       document.getElementById('sched-max-defer-age').value = existing.max_defer_age_seconds || 0;
@@ -6575,6 +6668,21 @@ document.addEventListener('DOMContentLoaded', () => {
     newForm.querySelector('#sched-on-success').addEventListener('change', refreshRollOptions);
     refreshRollOptions();
 
+    const refreshConsequence = () => {
+      const trigger = newForm.querySelector('#sched-deploy-trigger').value;
+      const rolling = newForm.querySelector('#sched-on-success').value === 'roll';
+      const consequence = newForm.querySelector('#schedule-consequence');
+      const triggerCopy = trigger === 'bundle_change'
+        ? 'Every changed bundle builds compatible data before new replicas start.'
+        : trigger === 'first_deploy'
+          ? 'Only the first deployment is guaranteed a producer run; later code changes reuse existing data.'
+          : 'Deployments never run this job; code and data compatibility is not tracked.';
+      consequence.innerHTML = `<strong>What will happen</strong><span>${escapeHtml(triggerCopy)} ${rolling ? 'After each successful job, serving replicas roll onto the new data.' : 'Successful jobs do not reload serving replicas.'}</span>`;
+    };
+    newForm.querySelector('#sched-deploy-trigger').addEventListener('change', refreshConsequence);
+    newForm.querySelector('#sched-on-success').addEventListener('change', refreshConsequence);
+    refreshConsequence();
+
     newForm.addEventListener('submit', async e => {
       e.preventDefault();
       const name = newForm.querySelector('#sched-name').value.trim();
@@ -6585,6 +6693,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const missedPolicy = newForm.querySelector('#sched-missed').value;
       const enabled = newForm.querySelector('#sched-enabled').checked;
       const onSuccess = newForm.querySelector('#sched-on-success').value;
+      const deployTrigger = newForm.querySelector('#sched-deploy-trigger').value;
       const minRollIntervalSeconds = onSuccess === 'roll'
         ? parseInt(newForm.querySelector('#sched-min-roll-interval').value || '0', 10)
         : 0;
@@ -6599,7 +6708,7 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(newErrEl, '');
 
       const timezone = newForm.querySelector('#sched-timezone').value.trim();
-      const body = JSON.stringify({name, cron_expr: cronExpr, command, timeout_seconds: timeoutSeconds, overlap_policy: overlapPolicy, missed_policy: missedPolicy, enabled, timezone, on_success: onSuccess, min_roll_interval_seconds: minRollIntervalSeconds, roll_fallback: rollFallback, max_defer_age_seconds: maxDeferAgeSeconds});
+      const body = JSON.stringify({name, cron_expr: cronExpr, command, timeout_seconds: timeoutSeconds, overlap_policy: overlapPolicy, missed_policy: missedPolicy, enabled, timezone, deploy_trigger: deployTrigger, on_success: onSuccess, min_roll_interval_seconds: minRollIntervalSeconds, roll_fallback: rollFallback, max_defer_age_seconds: maxDeferAgeSeconds});
       const submitBtn = newForm.querySelector('button[type="submit"]');
       if (submitBtn) submitBtn.disabled = true;
       try {
@@ -6668,6 +6777,38 @@ document.addEventListener('DOMContentLoaded', () => {
       await router.navigate(`/apps/${encodeURIComponent(slug)}/schedules/${id}`);
     } finally {
       if (btn) btn.disabled = false;
+    }
+  }
+
+  async function retryScheduleConvergence(slug, id, name, btn) {
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Retrying…';
+    }
+    try {
+      let response;
+      try {
+        response = await api(`/api/apps/${encodeURIComponent(slug)}/schedules/${id}/convergence/retry`, {method: 'POST'});
+      } catch {
+        flashToast('Producer retry failed: network error', 'error');
+        return;
+      }
+      if (response.status === 401) { await handleUnauthorized(); return; }
+      if (!response.ok) {
+        flashToast('Producer retry failed: ' + (await errorMessage(response)), 'error');
+        return;
+      }
+      const result = await response.json().catch(() => ({}));
+      flashToast(result.run_id ? `Producer run #${result.run_id} started.` : `Producer retry started for ${name}.`, 'success');
+      if (mountedScheduleSurface?.slug === slug) {
+        mountedScheduleSurface.renderedDetailSignature = '';
+        await refreshScheduleSurface(mountedScheduleSurface, {announce: true});
+      }
+    } finally {
+      if (btn && btn.isConnected) {
+        btn.disabled = false;
+        btn.textContent = 'Retry producer';
+      }
     }
   }
 

@@ -11,6 +11,8 @@ function fixture() {
       <input id="mid" type="text">
       <button id="disabled" disabled>Disabled</button>
       <section id="hiddenwrap" hidden><button id="buried">Buried</button></section>
+      <section style="display:none"><button id="css-hidden">CSS hidden</button></section>
+      <button id="invisible" style="visibility:hidden">Invisible</button>
       <button id="last">Last</button>
     </div>
   </body>`);

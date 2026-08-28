@@ -52,6 +52,14 @@ export function mountAppDetail(ctx) {
   // edge(s) with clipped tabs when it scrolls (mobile). Wired once; the strip is
   // static markup, so the listeners outlive individual renders.
   const tabsNav = document.querySelector('.settings-tabs');
+  const sectionPicker = document.getElementById('app-section-select');
+  if (sectionPicker && !sectionPicker.dataset.wired) {
+    sectionPicker.dataset.wired = 'true';
+    sectionPicker.addEventListener('change', () => {
+      const target = tabEls[sectionPicker.value];
+      if (target && !target.hidden) ctx.navigate(target.getAttribute('href'));
+    });
+  }
   function updateTabOverflow() {
     if (!tabsNav) return;
     const slack = tabsNav.scrollWidth - tabsNav.clientWidth;
@@ -142,7 +150,10 @@ export function mountAppDetail(ctx) {
       el.setAttribute('tabindex', vm.tabindex);
       if (vm.ariaCurrent) el.setAttribute('aria-current', vm.ariaCurrent);
       else el.removeAttribute('aria-current');
+      const option = sectionPicker?.querySelector(`option[value="${vm.route}"]`);
+      if (option) option.hidden = vm.hidden;
     }
+    if (sectionPicker) sectionPicker.value = tab;
     // On narrow screens the tab bar scrolls horizontally. Keep the active tab
     // for the post-render centering pass below; measuring while the view is
     // still hidden would produce zero-width geometry on a deep link.

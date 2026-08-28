@@ -13,9 +13,22 @@ export function createSidebarDrawer(opts) {
 
   const isOpen = () => body.classList.contains('sidebar-open');
 
+  function syncAccessibility(mobile) {
+    if (!sidebar) return;
+    const closedOnMobile = !!mobile && !isOpen();
+    if (closedOnMobile) {
+      sidebar.setAttribute('inert', '');
+      sidebar.setAttribute('aria-hidden', 'true');
+    } else {
+      sidebar.removeAttribute('inert');
+      sidebar.removeAttribute('aria-hidden');
+    }
+  }
+
   function open() {
     if (isOpen()) return;
     body.classList.add('sidebar-open');
+    syncAccessibility(true);
     if (toggle) toggle.setAttribute('aria-expanded', 'true');
     if (backdrop) backdrop.hidden = false;
     if (content) content.setAttribute('inert', '');
@@ -26,7 +39,7 @@ export function createSidebarDrawer(opts) {
     // Move focus into the drawer so keyboard/screen-reader users land inside it
     // rather than on the hamburger in the (now inert-adjacent) top bar.
     if (sidebar) {
-      const first = sidebar.querySelector('a[href], button:not([disabled])');
+      const first = sidebar.querySelector('#primary-nav a:not([hidden]), #sidebar-apps a:not([hidden]), .identity-card:not([hidden]), .sidebar-about:not([hidden])');
       if (first && typeof first.focus === 'function') first.focus();
     }
   }
@@ -34,6 +47,7 @@ export function createSidebarDrawer(opts) {
   function close() {
     if (!isOpen()) return;
     body.classList.remove('sidebar-open');
+    syncAccessibility(true);
     if (toggle) toggle.setAttribute('aria-expanded', 'false');
     if (backdrop) backdrop.hidden = true;
     if (content) content.removeAttribute('inert');
@@ -46,5 +60,5 @@ export function createSidebarDrawer(opts) {
   // never mounts, so this never fires and the drawer stays open.
   function onNavigated() { if (isOpen()) close(); }
 
-  return { open, close, toggle: toggleDrawer, onNavigated, isOpen };
+  return { open, close, toggle: toggleDrawer, onNavigated, isOpen, syncAccessibility };
 }

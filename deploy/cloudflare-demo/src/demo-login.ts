@@ -46,7 +46,7 @@ export const demoLoginStyles = String.raw`
 .demo-entry h2 {
   margin: 0.15rem 0 0;
   color: var(--text);
-  font-size: 1.42rem;
+  font-size: 1.7rem;
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: -0.025em;
@@ -256,19 +256,19 @@ function entryMarkup(showError: boolean): string {
     <section class="demo-entry" aria-labelledby="demo-entry-title">
       <div class="demo-entry-meta">
         <span class="demo-live-status"><span class="demo-live-dot" aria-hidden="true"></span>Live workspace</span>
-        <span>5 interactive apps</span>
+        <span>6 interactive apps</span>
       </div>
       <h2 id="demo-entry-title">Explore ShinyHub, already running.</h2>
       <p class="demo-entry-copy">Step into a real read-only control plane and launch working Python, R, Dash, and Streamlit applications.</p>
       ${error}
       <form class="demo-entry-form" method="post" action="${DEMO_SESSION_PATH}">
         <button class="demo-entry-button" type="submit">
-          <span class="demo-entry-button-label">Enter the live demo</span>
+          <span class="demo-entry-button-label">Continue as Demo Viewer</span>
           <svg aria-hidden="true" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.75 9h10.5M10 4.75 14.25 9 10 13.25"/></svg>
         </button>
       </form>
       <div class="demo-entry-notes" aria-label="Demo access details">
-        <span><svg aria-hidden="true" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 8 3 3 7-7"/></svg>No signup</span>
+        <span><svg aria-hidden="true" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 8 3 3 7-7"/></svg>No account created</span>
         <span><svg aria-hidden="true" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 8 3 3 7-7"/></svg>Read-only access</span>
         <span><svg aria-hidden="true" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 8 3 3 7-7"/></svg>Resets automatically</span>
       </div>

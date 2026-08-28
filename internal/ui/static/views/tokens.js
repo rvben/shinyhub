@@ -64,7 +64,7 @@ export function tokenListModels(tokens, now = Date.now()) {
 // friendly empty state). Each row carries a Revoke button tagged with
 // data-token-id / data-token-name so the caller can wire deletion by delegation.
 // Names are set via textContent, so a hostile token name cannot inject markup.
-export function renderTokenList(container, models, doc) {
+export function renderTokenList(container, models, doc, options = {}) {
   const d = doc || (typeof document !== 'undefined' ? document : null);
   if (!container || !d) return;
   container.textContent = '';
@@ -73,7 +73,9 @@ export function renderTokenList(container, models, doc) {
     const empty = d.createElement('p');
     empty.className = 'tokens-empty';
     empty.setAttribute('data-tokens-empty', '');
-    empty.textContent = 'No API tokens yet — create one to use the CLI or API.';
+    empty.textContent = options.mutable === false
+      ? 'This shared account cannot create API tokens.'
+      : 'No API tokens yet — create one to use the CLI or API.';
     container.appendChild(empty);
     return;
   }
@@ -107,16 +109,17 @@ export function renderTokenList(container, models, doc) {
     if (m.lastUsedISO) lastUsed.title = m.lastUsedISO;
     meta.appendChild(lastUsed);
 
-    const revoke = d.createElement('button');
-    revoke.type = 'button';
-    revoke.className = 'btn-danger token-revoke';
-    revoke.textContent = 'Revoke';
-    revoke.setAttribute('data-token-id', String(m.id));
-    revoke.setAttribute('data-token-name', m.name);
-    revoke.setAttribute('aria-label', `Revoke token ${m.name}`);
-
     row.appendChild(meta);
-    row.appendChild(revoke);
+    if (options.mutable !== false) {
+      const revoke = d.createElement('button');
+      revoke.type = 'button';
+      revoke.className = 'btn-danger token-revoke';
+      revoke.textContent = 'Revoke';
+      revoke.setAttribute('data-token-id', String(m.id));
+      revoke.setAttribute('data-token-name', m.name);
+      revoke.setAttribute('aria-label', `Revoke token ${m.name}`);
+      row.appendChild(revoke);
+    }
     container.appendChild(row);
   }
 }

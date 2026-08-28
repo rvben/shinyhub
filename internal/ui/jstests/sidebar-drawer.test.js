@@ -26,6 +26,7 @@ function setup() {
     createFocusTrap,
     doc,
   });
+  drawer.syncAccessibility(true);
   return { doc, drawer, traps };
 }
 
@@ -36,6 +37,8 @@ test('open: sets sidebar-open, aria-expanded, shows backdrop, inerts content, tr
   assert.equal(doc.getElementById('toggle').getAttribute('aria-expanded'), 'true');
   assert.equal(doc.getElementById('backdrop').hidden, false);
   assert.equal(doc.getElementById('content').hasAttribute('inert'), true);
+  assert.equal(doc.getElementById('sidebar').hasAttribute('inert'), false);
+  assert.equal(doc.getElementById('sidebar').getAttribute('aria-hidden'), null);
   assert.equal(traps[0].activated, true);
 });
 
@@ -47,7 +50,16 @@ test('close: reverses state and releases the focus trap', () => {
   assert.equal(doc.getElementById('toggle').getAttribute('aria-expanded'), 'false');
   assert.equal(doc.getElementById('backdrop').hidden, true);
   assert.equal(doc.getElementById('content').hasAttribute('inert'), false);
+  assert.equal(doc.getElementById('sidebar').hasAttribute('inert'), true);
+  assert.equal(doc.getElementById('sidebar').getAttribute('aria-hidden'), 'true');
   assert.equal(traps[0].released, true);
+});
+
+test('closed mobile drawer is removed from keyboard and screen-reader navigation', () => {
+  const { doc, drawer } = setup();
+  assert.equal(drawer.isOpen(), false);
+  assert.equal(doc.getElementById('sidebar').hasAttribute('inert'), true);
+  assert.equal(doc.getElementById('sidebar').getAttribute('aria-hidden'), 'true');
 });
 
 test('veto-keeps-open: a vetoed (never-mounted) navigation never calls onNavigated; drawer stays open', () => {

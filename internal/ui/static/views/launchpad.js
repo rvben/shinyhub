@@ -107,6 +107,8 @@ export function mountLaunchpad(ctx) {
   function renderResults(container) {
     const q = query.trim().toLowerCase();
     container.replaceChildren();
+    container.setAttribute('role', 'region');
+    container.setAttribute('aria-label', 'Available apps');
 
     if (q) {
       const matches = model.groups
@@ -206,6 +208,9 @@ export function mountLaunchpad(ctx) {
   function skeleton() {
     const wrap = el('div', 'lp lp-skeleton');
     wrap.setAttribute('aria-busy', 'true');
+    wrap.setAttribute('role', 'status');
+    wrap.setAttribute('aria-live', 'polite');
+    wrap.appendChild(el('span', 'sr-only', 'Loading apps…'));
     const g = el('div', 'lp-grid');
     for (let i = 0; i < 4; i++) g.appendChild(el('div', 'lp-skel'));
     wrap.appendChild(g);
@@ -214,6 +219,7 @@ export function mountLaunchpad(ctx) {
 
   function errorState() {
     const sec = el('section', 'lp-empty');
+    sec.setAttribute('role', 'alert');
     sec.appendChild(el('p', 'lp-empty-body', "Couldn't load your apps."));
     const retry = el('button', 'ov-btn', 'Try again');
     retry.type = 'button';

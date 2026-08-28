@@ -45,7 +45,7 @@
   <!-- Boot splash: shown only while the session check is in flight (data-auth=
        "loading"), so the login form never paints first. Authenticated requests
        are served with data-auth="in" stamped by the server, skipping this. -->
-  <div id="boot-splash" aria-hidden="true">
+  <div id="boot-splash" role="status" aria-live="polite" aria-label="Loading ShinyHub">
     <span class="brand">
       <span class="brand-art" aria-hidden="true"></span>
       <span class="sr-only">ShinyHub</span>
@@ -199,7 +199,7 @@
           <span id="apps-results-status" class="sr-only" role="status" aria-live="polite"></span>
         </div>
       </div>
-      <p id="app-error" class="error" hidden></p>
+      <p id="app-error" class="error" role="alert" hidden></p>
       <div id="fleet-health" class="fleet-health" hidden role="status" aria-label="Fleet health"></div>
       <div id="app-grid" class="app-grid"></div>
       <div id="empty-state" class="emptystate-card dashboard-emptystate" hidden role="region"
@@ -270,7 +270,7 @@
         </div>
       </section>
       <p class="tokens-intro">Personal tokens for the CLI and API. Use with <code>Authorization: token &lt;value&gt;</code> or <code>SHINYHUB_TOKEN</code>. A token is shown once at creation — store it somewhere safe.</p>
-      <p id="tokens-error" class="error" hidden></p>
+      <p id="tokens-error" class="error" role="alert" hidden></p>
       <div id="tokens-list" class="tokens-list"></div>
     </section>
 
@@ -281,7 +281,7 @@
           <button id="workers-refresh" type="button">Refresh</button>
         </div>
       </div>
-      <p id="workers-error" class="error" hidden></p>
+      <p id="workers-error" class="error" role="alert" hidden></p>
       <p id="workers-empty" class="env-empty" hidden>No workers have joined. Workers appear here when worker hosting is enabled and a `shinyhub worker` node joins over mTLS.</p>
       <table id="workers-table" hidden>
         <thead>
@@ -398,6 +398,18 @@
         <a href="" data-nav class="settings-tab" role="tab" data-tab="data"          id="detail-tab-data"          aria-controls="detail-data-panel"          aria-selected="false" >Data</a>
         <a href="" data-nav class="settings-tab" role="tab" data-tab="access"        id="detail-tab-access"        aria-controls="detail-access-panel"        aria-selected="false" >Access</a>
       </nav>
+      <label class="app-section-picker" for="app-section-select">App section
+        <select id="app-section-select" aria-label="App section">
+          <option value="overview">Overview</option>
+          <option value="logs">Logs</option>
+          <option value="traces">Traces</option>
+          <option value="deployments">Deployments</option>
+          <option value="schedules">Schedules</option>
+          <option value="configuration">Configuration</option>
+          <option value="data">Data</option>
+          <option value="access">Access</option>
+        </select>
+      </label>
       <div class="app-detail-panels">
         <section id="detail-overview-panel"      class="settings-tab-panel" role="tabpanel"></section>
         <section id="detail-logs-panel"          class="settings-tab-panel" role="tabpanel" hidden></section>
@@ -417,11 +429,9 @@
             </header>
 
             <dl id="schedules-summary" class="schedules-summary" aria-label="Schedule summary">
-              <div><dt>Configured</dt><dd id="schedules-summary-configured">—</dd></div>
-              <div><dt>Enabled</dt><dd id="schedules-summary-enabled">—</dd></div>
-              <div><dt>Jobs running</dt><dd id="schedules-summary-running">—</dd></div>
-              <div><dt>Activations</dt><dd id="schedules-summary-activating">—</dd></div>
-              <div><dt>Needs attention</dt><dd id="schedules-summary-attention">—</dd></div>
+              <div class="schedules-summary-priority"><dt>Needs attention</dt><dd id="schedules-summary-attention">—</dd></div>
+              <div><dt>Code/data compatible</dt><dd id="schedules-summary-compatible">—</dd></div>
+              <div><dt>Active work</dt><dd id="schedules-summary-active">—</dd></div>
               <div class="schedules-summary-next"><dt>Next run</dt><dd id="schedules-summary-next">—</dd></div>
             </dl>
 
@@ -1079,7 +1089,7 @@
               <a href="/tokens" data-nav id="profile-tokens-link">Manage API tokens &rarr;</a>
             </p>
 
-            <p id="profile-error" class="error" hidden></p>
+            <p id="profile-error" class="error" role="alert" hidden></p>
             <p id="profile-success" class="profile-success" role="status" aria-live="polite" hidden></p>
 
             <div class="modal-actions profile-actions">
@@ -1114,7 +1124,7 @@
           <section class="about-section" aria-labelledby="about-runtimes-heading">
             <h3 id="about-runtimes-heading" class="about-section-title">App runtimes</h3>
             <dl id="about-runtimes" class="about-runtimes"></dl>
-            <p class="about-hint">What this host can start right now.</p>
+            <p class="about-hint">Launch tools detected directly on this host. App bundles may provide additional runtimes.</p>
           </section>
 
           <p class="about-links">
@@ -1325,8 +1335,22 @@
               <label class="schedule-enabled-row"><input type="checkbox" id="sched-enabled" name="enabled" checked> Enabled</label>
             </fieldset>
 
+            <fieldset class="schedule-producer-policy">
+              <legend>Code and data compatibility</legend>
+              <p class="schedule-form-intro">Choose when this producer must rebuild data for newly deployed code.</p>
+              <label for="sched-deploy-trigger">When the app bundle changes</label>
+              <select id="sched-deploy-trigger" name="deploy_trigger" aria-describedby="sched-deploy-trigger-help">
+                <option value="bundle_change">Run for every bundle change — recommended for data producers</option>
+                <option value="first_deploy">Run only for the first deployment</option>
+                <option value="never">Do not run because of deployments</option>
+              </select>
+              <p id="sched-deploy-trigger-help">The deploy waits for a successful producer result from the exact candidate bundle before its replicas start.</p>
+            </fieldset>
+
+            <details class="schedule-advanced">
+              <summary>Advanced execution and rollout</summary>
             <fieldset>
-              <legend>Execution</legend>
+              <legend>Execution limits</legend>
               <label for="sched-timeout">Timeout <span>seconds</span></label>
               <input id="sched-timeout" name="timeout_seconds" type="number" min="1" max="86400" value="3600">
               <label for="sched-overlap">When a previous run is active</label>
@@ -1365,6 +1389,8 @@
                 <p id="sched-max-defer-help">Zero retries indefinitely. A non-zero age fails the activation loudly after capacity remains unavailable.</p>
               </div>
             </section>
+            </details>
+            <aside id="schedule-consequence" class="schedule-consequence" role="status" aria-live="polite"></aside>
             <p id="schedule-form-error" class="error" role="alert" aria-live="assertive" hidden></p>
             <div class="modal-actions">
               <button type="button" id="schedule-form-cancel">Cancel</button>

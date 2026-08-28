@@ -24,6 +24,11 @@ export function focusableElements(container) {
     if (el.getAttribute('aria-hidden') === 'true') return false;
     for (let node = el; node && node !== container.parentElement; node = node.parentElement) {
       if (node.hidden) return false;
+      const view = node.ownerDocument && node.ownerDocument.defaultView;
+      if (view && typeof view.getComputedStyle === 'function') {
+        const style = view.getComputedStyle(node);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+      }
     }
     return true;
   });

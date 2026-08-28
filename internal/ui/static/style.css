@@ -351,6 +351,9 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   background: var(--surface);
   box-shadow: inset 0 0 0 1px var(--line);
 }
+.nav-item.tab-active:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--line), 0 0 0 2px var(--bg), 0 0 0 4px rgba(56, 189, 248, 0.62);
+}
 .nav-ico { width: 16px; height: 16px; flex-shrink: 0; color: var(--text-muted); }
 .nav-item.tab-active .nav-ico { color: var(--cyan-bright); }
 .nav-label { overflow: hidden; text-overflow: ellipsis; }
@@ -696,13 +699,15 @@ main {
     padding-top: 4.25rem;
     z-index: 60;
     transform: translateX(-100%);
+    visibility: hidden;
+    pointer-events: none;
     transition: transform var(--ease);
   }
   /* The sticky top bar remains visible above the drawer and already carries
      the complete lockup. Suppress the duplicate drawer lockup and reserve the
      bar's height so no brand fragment or navigation item sits underneath it. */
   #sidebar .sidebar-brand { display: none; }
-  body.sidebar-open #sidebar { transform: translateX(0); }
+  body.sidebar-open #sidebar { transform: translateX(0); visibility: visible; pointer-events: auto; }
   /* The collapsed icon-rail mode does not apply inside the mobile drawer. */
   body.sidebar-collapsed .nav-label,
   body.sidebar-collapsed .identity-meta,
@@ -2798,17 +2803,63 @@ fieldset.settings-block { min-width: 0; }
      must also wrap so Search + sorts + New app + Refresh don't run off-screen. */
   .toolbar-actions { flex-wrap: wrap; width: 100%; }
 
-  /* The 7-item app-section tab bar scrolls horizontally instead of overflowing
-     the page; each tab keeps its width rather than being squeezed unreadable.
-     scroll-snap gives crisp stops; the edge fade (data-overflow, maintained in
-     app-detail.js) hints that more tabs exist on the side that's clipped. */
+  /* Eight peer tabs are easy to miss in a clipped strip. On phones the native
+     section picker keeps every destination visible, keyboard friendly, and
+     one tap away while desktop retains the faster tab bar. */
+  #app-detail-view .settings-tabs { display: none; }
+  #app-detail-view .app-section-picker {
+    display: grid;
+    gap: 0.4rem;
+    margin: 0 0 1.4rem;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .app-section-picker select {
+    width: 100%;
+    min-height: 48px;
+    padding: 0.7rem 2.8rem 0.7rem 0.9rem;
+    appearance: none;
+    -webkit-appearance: none;
+    border: 1px solid var(--line-2);
+    border-radius: var(--radius);
+    background-color: rgba(var(--surface-rgb), 0.82);
+    background-image:
+      linear-gradient(45deg, transparent 50%, var(--cyan-bright) 50%),
+      linear-gradient(-45deg, transparent 50%, var(--cyan-bright) 50%);
+    background-position: calc(100% - 20px) 50%, calc(100% - 14px) 50%;
+    background-repeat: no-repeat;
+    background-size: 6px 6px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 0.875rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    cursor: pointer;
+    transition: background-color var(--ease), border-color var(--ease), box-shadow var(--ease);
+  }
+  .app-section-picker select:hover {
+    border-color: var(--strong-line, var(--line-2));
+    background-color: var(--surface-2);
+  }
+  .app-section-picker select:focus-visible {
+    outline: none;
+    border-color: var(--cyan-bright);
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+  }
+
+  /* Settings rows stack: the label/help sits above a full-width control instead
+     of being crushed next to a fixed-width input. */
+}
+
+@media (min-width: 641px) and (max-width: 860px) {
   .settings-tabs {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
+    scrollbar-width: thin;
     scroll-snap-type: x proximity;
   }
-  .settings-tabs::-webkit-scrollbar { display: none; }
   .settings-tab { flex: 0 0 auto; scroll-snap-align: center; }
   .settings-tabs[data-overflow="start"] {
     -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 1.75rem), transparent);
@@ -2822,9 +2873,6 @@ fieldset.settings-block { min-width: 0; }
     -webkit-mask-image: linear-gradient(to right, transparent, #000 1.75rem);
             mask-image: linear-gradient(to right, transparent, #000 1.75rem);
   }
-
-  /* Settings rows stack: the label/help sits above a full-width control instead
-     of being crushed next to a fixed-width input. */
 }
 
 /* === New-app modal === */
@@ -3489,6 +3537,7 @@ fieldset.settings-block { min-width: 0; }
      so its content butts against this border without a margin here. */
   margin-bottom: 1.75rem;
 }
+.app-section-picker { display: none; }
 
 .settings-tab {
   position: relative;
@@ -3877,7 +3926,7 @@ fieldset.settings-block { min-width: 0; }
 
 .schedules-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(6rem, 0.7fr)) minmax(13rem, 1.4fr);
+  grid-template-columns: repeat(3, minmax(8rem, 0.8fr)) minmax(13rem, 1.4fr);
   border-block: 1px solid var(--line);
 }
 
@@ -3905,6 +3954,9 @@ fieldset.settings-block { min-width: 0; }
   overflow-wrap: anywhere;
 }
 .schedules-summary dd.has-attention { color: var(--red); }
+.schedules-summary-priority {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--red-bg) 72%, transparent), transparent);
+}
 
 .schedules-surface-status {
   min-height: 1.3rem;
@@ -3948,11 +4000,11 @@ fieldset.settings-block { min-width: 0; }
 .schedules-table tbody tr { transition: background-color var(--ease); }
 .schedules-table tbody tr:hover,
 .schedules-table tbody tr.is-selected { background: rgba(var(--surface-2-rgb), 0.62); }
-.schedules-table th:nth-child(1) { width: 28%; }
-.schedules-table th:nth-child(2) { width: 23%; }
-.schedules-table th:nth-child(3) { width: 18%; }
-.schedules-table th:nth-child(4) { width: 16%; }
-.schedules-table th:nth-child(5) { width: 15%; }
+.schedules-table th:nth-child(1) { width: 25%; }
+.schedules-table th:nth-child(2) { width: 21%; }
+.schedules-table th:nth-child(3) { width: 28%; }
+.schedules-table th:nth-child(4) { width: 14%; }
+.schedules-table th:nth-child(5) { width: 12%; }
 .schedules-workspace.has-detail .schedules-table th:nth-child(1) { width: 40%; }
 .schedules-workspace.has-detail .schedules-table th:nth-child(2) { width: 32%; }
 .schedules-workspace.has-detail .schedules-table th:nth-child(4) { width: 28%; }
@@ -3964,7 +4016,71 @@ fieldset.settings-block { min-width: 0; }
 .schedule-history .table-actions {
   text-align: right;
 }
-.schedule-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
+.schedule-row-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+.schedule-run-btn {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
+  padding: 0.5rem 0.78rem;
+  border: 1px solid color-mix(in srgb, var(--cyan-bright) 42%, var(--line-2));
+  border-radius: var(--radius);
+  background: var(--accent-dim);
+  color: var(--cyan-bright);
+  font-family: var(--font);
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--ease), border-color var(--ease), color var(--ease), transform var(--ease);
+}
+.schedule-run-btn svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  fill: currentColor;
+}
+.schedule-run-btn:hover:not(:disabled) {
+  border-color: var(--cyan-bright);
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+.schedule-run-btn:active:not(:disabled) { transform: translateY(0); }
+.schedule-run-btn:disabled { cursor: wait; opacity: 0.55; }
+.schedule-run-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.22);
+}
+.schedule-actions-menu { flex: none; }
+.schedule-actions-menu:has(> button[aria-expanded="true"]) { z-index: 30; }
+.schedule-actions-menu > button {
+  width: 40px;
+  min-height: 40px;
+  background: transparent;
+}
+.schedule-actions-menu > button svg { width: 16px; height: 16px; fill: currentColor; }
+.schedule-actions-menu .kebab-list { min-width: 168px; }
+.schedule-actions-menu .kebab-list button { font-family: var(--font); font-size: 0.82rem; }
+.schedule-actions-menu .kebab-list button:hover { background: var(--surface-2); color: var(--text); }
+.schedule-actions-menu .schedule-menu-danger {
+  margin-top: 0.2rem;
+  padding-top: 0.2rem;
+  border-top: 1px solid var(--line);
+}
+.schedule-actions-menu .schedule-menu-danger button { color: var(--red); }
+.schedule-actions-menu .schedule-menu-danger button:hover,
+.schedule-actions-menu .schedule-menu-danger button:focus-visible {
+  background: var(--red-bg);
+  color: var(--red);
+}
 .schedule-cell-stack { min-width: 0; }
 
 .schedule-name-link {
@@ -4100,6 +4216,35 @@ fieldset.settings-block { min-width: 0; }
   border-radius: var(--radius-md);
   background: rgba(var(--surface-2-rgb), 0.34);
 }
+.schedule-compatibility-panel {
+  margin-top: 1.25rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--text-muted);
+  border-radius: var(--radius-md);
+  background: rgba(var(--surface-2-rgb), 0.42);
+}
+.schedule-compatibility-panel .schedule-history-heading { align-items: flex-start; margin-top: 0; }
+.schedule-compatibility-success { border-left-color: var(--green); }
+.schedule-compatibility-danger { border-left-color: var(--red); }
+.schedule-compatibility-active { border-left-color: var(--cyan); }
+.schedule-compatibility-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem 1.25rem;
+  margin-top: 1rem;
+}
+.schedule-compatibility-facts dt {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+.schedule-compatibility-facts dd { margin-top: 0.25rem; color: var(--text-soft); overflow-wrap: anywhere; }
+.schedule-compatibility-facts dd strong,
+.schedule-compatibility-facts dd code { display: block; }
+.schedule-compatibility-facts dd code { margin-top: 0.2rem; color: var(--text-muted); font-size: 0.72rem; }
 .schedule-activation-panel .schedule-history-heading { align-items: flex-start; margin-top: 0; }
 .schedule-roll-advisory {
   display: grid;
@@ -4190,6 +4335,7 @@ fieldset.settings-block { min-width: 0; }
   border-bottom: 1px solid var(--line);
 }
 .schedule-form fieldset + fieldset { padding-top: 1.35rem; }
+.schedule-form .schedule-producer-policy { padding-top: 1.35rem; }
 .schedule-form legend,
 .schedule-after-success h3 {
   color: var(--text);
@@ -4221,6 +4367,35 @@ fieldset.settings-block { min-width: 0; }
 }
 #sched-roll-options[hidden] { display: none; }
 #sched-roll-options p { margin-top: 0.35rem; }
+.schedule-advanced {
+  margin-top: 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(var(--inset-rgb), 0.24);
+}
+.schedule-advanced > summary {
+  padding: 0.9rem 1rem;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-weight: 700;
+}
+.schedule-advanced[open] > summary { border-bottom: 1px solid var(--line); }
+.schedule-advanced > fieldset,
+.schedule-advanced > section { margin-inline: 1rem; }
+.schedule-advanced > fieldset { padding-top: 1rem; }
+.schedule-consequence {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 1.15rem;
+  padding: 0.85rem 1rem;
+  border-left: 3px solid var(--cyan);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--accent-dim);
+  color: var(--text-soft);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+.schedule-consequence strong { color: var(--text); }
 
 @media (prefers-reduced-motion: reduce) {
   .schedule-state-active > span { animation: none; }
@@ -4244,6 +4419,7 @@ fieldset.settings-block { min-width: 0; }
   .schedules-workspace.has-detail { display: block; }
   .schedules-workspace.has-detail .schedules-list-pane { display: none; }
   .schedule-detail { padding-left: 0; border-left: 0; }
+  .schedule-compatibility-facts { grid-template-columns: minmax(0, 1fr); }
 
   .schedules-table thead,
   .schedule-history thead { display: none; }
@@ -4285,7 +4461,8 @@ fieldset.settings-block { min-width: 0; }
   .schedule-history .table-actions button { min-height: 44px; }
   .schedule-detail-title-row { display: block; }
   .schedule-detail-actions { margin-top: 1rem; }
-  .schedule-detail-actions > button { min-height: 44px; }
+  .schedule-detail-actions > button,
+  .schedule-detail-actions .schedule-actions-menu > button { min-height: 44px; }
   .schedule-definition-grid { grid-template-columns: minmax(0, 1fr); }
   .schedule-definition-grid > div,
   .schedule-definition-grid > div:nth-child(odd),

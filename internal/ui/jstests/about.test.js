@@ -66,7 +66,7 @@ test('a reported runtime maps to ready or not installed', () => {
   const rows = runtimeRows({ runtimes: { python: true, r: false } });
   assert.deepEqual(rows.map((r) => r.key), ['python', 'r']);
   assert.deepEqual(rows.map((r) => r.state), ['ready', 'missing']);
-  assert.deepEqual(rows.map((r) => r.stateText), ['Ready', 'Not installed']);
+  assert.deepEqual(rows.map((r) => r.stateText), ['Ready', 'Host tool unavailable']);
 });
 
 test('an unreported runtime is unknown, never "not installed"', () => {
@@ -127,7 +127,7 @@ test('runtimes render as name plus launcher plus state', () => {
   renderAbout(doc, { version: '0.11.2', runtimes: { python: true, r: false } });
   const names = [...doc.querySelectorAll('.about-runtime-name')].map((el) => el.textContent);
   assert.deepEqual(names, ['Pythonuv', 'RRscript']);
-  assert.deepEqual(states(doc), ['Ready', 'Not installed']);
+  assert.deepEqual(states(doc), ['Ready', 'Host tool unavailable']);
   assert.deepEqual(
     [...doc.querySelectorAll('.about-runtime-state')].map((el) => el.className),
     ['about-runtime-state is-ready', 'about-runtime-state is-missing'],
@@ -138,7 +138,7 @@ test('a re-render replaces the runtime rows instead of appending', () => {
   const doc = aboutDoc();
   renderAbout(doc, { runtimes: { python: true, r: true } });
   renderAbout(doc, { runtimes: { python: true, r: false } });
-  assert.deepEqual(states(doc), ['Ready', 'Not installed']);
+  assert.deepEqual(states(doc), ['Ready', 'Host tool unavailable']);
 });
 
 test('an unreachable server leaves runtimes unknown, not missing', () => {

@@ -14,6 +14,8 @@ import {
   formatDuration,
   runTriggerLabel,
   runDurationSeconds,
+  deployTriggerLabel,
+  producerCompatibilityState,
   scheduleDetailSignature,
   scheduleState,
   scheduleSummary,
@@ -62,7 +64,7 @@ test('scheduleState prioritises live work, disabled state, and freshness excepti
     key: 'paused', label: 'Paused', tone: 'quiet', attention: false,
   });
   assert.equal(scheduleState({ enabled: true, active_run_id: 14, stale: true }).key, 'running');
-  assert.equal(scheduleState({ enabled: true, stale: true }).key, 'overdue');
+  assert.equal(scheduleState({ enabled: true, stale: true }).key, 'stale');
   assert.equal(scheduleState({ enabled: true, last_run_status: 'failed' }).attention, true);
   assert.equal(scheduleState({ enabled: true, last_run_status: 'skipped_overlap' }).label, 'Skipped');
   assert.equal(scheduleState({ enabled: true }).label, 'Never run');
@@ -96,6 +98,33 @@ test('detail signature ignores age-only polling changes but tracks real outcomes
     scheduleDetailSignature(base),
     scheduleDetailSignature({...base, last_run_id: 42, last_run_status: 'failed'}),
   );
+  assert.notEqual(
+    scheduleDetailSignature(base),
+    scheduleDetailSignature({...base, deploy_trigger: 'bundle_change', deploy_trigger_satisfied: false}),
+  );
+});
+
+test('deploy policy and producer compatibility use plain, fail-closed language', () => {
+  assert.equal(deployTriggerLabel('never'), 'Only on its cron');
+  assert.equal(deployTriggerLabel('first_deploy'), 'On first deployment');
+  assert.equal(deployTriggerLabel('bundle_change'), 'On every bundle change');
+
+  assert.deepEqual(producerCompatibilityState({deploy_trigger: 'never'}), {
+    key: 'not-tracked', label: 'Not tracked', tone: 'quiet', attention: false,
+    detail: 'This schedule does not promise that its data matches the deployed bundle.',
+  });
+  assert.equal(producerCompatibilityState({
+    deploy_trigger: 'bundle_change', deploy_trigger_satisfied: true,
+  }).label, 'Matches current code');
+  assert.equal(producerCompatibilityState({
+    deploy_trigger: 'bundle_change', deploy_trigger_satisfied: false, convergence_status: 'running',
+  }).label, 'Building for current code');
+  assert.equal(producerCompatibilityState({
+    deploy_trigger: 'bundle_change', producer_repair_required: true,
+  }).label, 'Repair required');
+  assert.equal(producerCompatibilityState({
+    deploy_trigger: 'bundle_change', deploy_trigger_satisfied: false,
+  }).attention, true);
 });
 
 test('scheduleSummary counts operational state and selects the earliest enabled fire', () => {
@@ -108,6 +137,7 @@ test('scheduleSummary counts operational state and selects the earliest enabled 
   assert.equal(summary.enabled, 2);
   assert.equal(summary.running, 1);
   assert.equal(summary.attention, 1);
+  assert.equal(summary.compatible, 0);
   assert.equal(summary.nextFire.toISOString(), '2026-08-25T12:00:00.000Z');
 });
 

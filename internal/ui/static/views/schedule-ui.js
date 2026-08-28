@@ -48,7 +48,7 @@ export function scheduleState(schedule) {
     return { key: 'unknown', label: 'Unknown', tone: 'warning', attention: true };
   }
   if (schedule.stale === true) {
-    return { key: 'overdue', label: 'Overdue', tone: 'danger', attention: true };
+    return { key: 'stale', label: 'Stale', tone: 'danger', attention: true };
   }
 
   switch (schedule.last_run_status) {
@@ -82,6 +82,50 @@ export function runTriggerLabel(trigger) {
   }
 }
 
+export function deployTriggerLabel(trigger) {
+  switch (trigger) {
+    case 'first_deploy': return 'On first deployment';
+    case 'bundle_change': return 'On every bundle change';
+    case 'never':
+    case undefined:
+    case null: return 'Only on its cron';
+    default: return 'Unsupported policy';
+  }
+}
+
+// Producer compatibility is deliberately separate from cron/job freshness.
+// A successful run can still have produced data for an older bundle.
+export function producerCompatibilityState(schedule) {
+  if (!schedule || schedule.deploy_trigger === 'never' || !schedule.deploy_trigger) {
+    return {
+      key: 'not-tracked', label: 'Not tracked', tone: 'quiet', attention: false,
+      detail: 'This schedule does not promise that its data matches the deployed bundle.',
+    };
+  }
+  if (schedule.producer_repair_required) {
+    return {
+      key: 'repair', label: 'Repair required', tone: 'danger', attention: true,
+      detail: schedule.convergence_error || 'The last producer write is uncertain and must succeed again before compatibility can be proven.',
+    };
+  }
+  if (schedule.deploy_trigger_satisfied === true) {
+    return {
+      key: 'ready', label: 'Matches current code', tone: 'success', attention: false,
+      detail: 'The current data producer and deployed bundle are proven compatible.',
+    };
+  }
+  if (['pending', 'dispatching', 'running'].includes(schedule.convergence_status)) {
+    return {
+      key: 'building', label: 'Building for current code', tone: 'active', attention: false,
+      detail: 'A deploy-triggered producer run is converging data for the current bundle.',
+    };
+  }
+  return {
+    key: 'needs-run', label: 'Does not match current code', tone: 'danger', attention: true,
+    detail: schedule.convergence_error || 'The deployed bundle has no proven successful producer result yet.',
+  };
+}
+
 // Only fields that can change the selected definition, status, edit payload,
 // or run history belong in this signature. In particular,
 // last_success_age_s advances on every poll and must not discard pagination.
@@ -111,6 +155,21 @@ export function scheduleDetailSignature(schedule) {
     active_run_id: schedule.active_run_id,
     freshness_error: schedule.freshness_error,
     on_success: schedule.on_success,
+    deploy_trigger: schedule.deploy_trigger,
+    deploy_trigger_satisfied: schedule.deploy_trigger_satisfied,
+    producer_repair_required: schedule.producer_repair_required,
+    current_deployment_id: schedule.current_deployment_id,
+    current_app_version: schedule.current_app_version,
+    current_content_digest: schedule.current_content_digest,
+    producer_deployment_id: schedule.producer_deployment_id,
+    producer_app_version: schedule.producer_app_version,
+    producer_content_digest: schedule.producer_content_digest,
+    producer_fingerprint: schedule.producer_fingerprint,
+    producer_published_at: schedule.producer_published_at,
+    convergence_obligation_id: schedule.convergence_obligation_id,
+    convergence_status: schedule.convergence_status,
+    convergence_run_id: schedule.convergence_run_id,
+    convergence_error: schedule.convergence_error,
     min_roll_interval_seconds: schedule.min_roll_interval_seconds,
     roll_fallback: schedule.roll_fallback,
     max_defer_age_seconds: schedule.max_defer_age_seconds,
@@ -236,22 +295,25 @@ export function scheduleSummary(schedules) {
   let enabled = 0;
   let running = 0;
   let attention = 0;
+  let compatible = 0;
   let activating = 0;
   let nextFire = null;
 
   for (const schedule of rows) {
     const state = scheduleState(schedule);
     const activation = activationState(schedule);
+    const compatibility = producerCompatibilityState(schedule);
     if (schedule.enabled !== false) enabled += 1;
     if (state.key === 'running') running += 1;
     if (activation.active) activating += 1;
-    if (state.attention || activation.attention) attention += 1;
+    if (compatibility.key === 'ready') compatible += 1;
+    if (state.attention || activation.attention || compatibility.attention) attention += 1;
     if (schedule.enabled !== false && schedule.next_fire) {
       const value = new Date(schedule.next_fire);
       if (!Number.isNaN(value.getTime()) && (nextFire === null || value < nextFire)) nextFire = value;
     }
   }
-  return { total: rows.length, enabled, running, activating, attention, nextFire };
+  return { total: rows.length, enabled, running, activating, compatible, attention, nextFire };
 }
 
 export function runDurationSeconds(run) {

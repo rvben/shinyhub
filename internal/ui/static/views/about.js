@@ -22,7 +22,7 @@ const RUNTIMES = [
 
 const RUNTIME_STATE_TEXT = {
   ready: 'Ready',
-  missing: 'Not installed',
+  missing: 'Host tool unavailable',
   unknown: 'Unknown',
 };
 
