@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+## [0.13.0](https://github.com/rvben/shinyhub/compare/v0.12.11...v0.13.0) - 2026-08-28
+
+### Breaking Changes
+
+- **schedules**: replace `run_on_register` with the explicit `deploy_trigger`
+  policies `never`, `first_deploy`, and `bundle_change`. Use `first_deploy` for
+  the former one-time behavior and `bundle_change` when an app must not consume
+  data produced by an older bundle
+  ([9f24d8f](https://github.com/rvben/shinyhub/commit/9f24d8ff9e01aa8e88b9459f666bdf6082169336)).
+- **upgrades**: a server upgrading from 0.12.x now refuses to start when it
+  captures a potentially live, unfenced legacy schedule writer. After stopping
+  every old server and confirming those process trees are gone, resolve the
+  quarantine with `shinyhub resolve-legacy-schedule-writers
+  --acknowledge-processes-stopped`.
+
+### Added
+
+- **schedules**: persist per-deployment producer obligations and the exact app
+  version, content digest, producer fingerprint, command, and data-write order
+  that published the current data.
+- **deployments**: converge required producers before consumer replicas start,
+  quarantine consumers when compatibility cannot be proven, and expose the
+  resulting convergence, repair, and provenance state through app and schedule
+  APIs and CLI output.
+- **operations**: add database admission fences for mixed-version upgrades and
+  an explicit repair path for legacy or interrupted writers on both SQLite and
+  PostgreSQL.
+
+### Fixed
+
+- **schedules**: prevent successful deploys from silently running a new app
+  bundle against startup data produced by older code; warm and fleet gates now
+  verify bundle-specific convergence and fail closed when authoritative state
+  is missing or unavailable
+  ([9f24d8f](https://github.com/rvben/shinyhub/commit/9f24d8ff9e01aa8e88b9459f666bdf6082169336)).
+- **runtime**: preserve a concurrent replacement when stale replica-stop
+  cleanup completes, and stop native one-shot process groups reliably.
+
 ## [0.12.11](https://github.com/rvben/shinyhub/compare/v0.12.10...v0.12.11) - 2026-08-27
 
 ### Added
@@ -26,8 +66,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **bookmarks**: enforce safe registration lifecycle ([3019ba2](https://github.com/rvben/shinyhub/commit/3019ba2a834a403dd6f8343b385271735670572a))
 - **bookmarks**: harden restore comparisons ([ad599c5](https://github.com/rvben/shinyhub/commit/ad599c59361f3fedba425541dc577cd9081e2c53))
 - **bookmarks**: normalize temporal restore values ([0c648af](https://github.com/rvben/shinyhub/commit/0c648af8685830e6e76f99d7244d92223bf516ac))
-
-## Unreleased
 
 ## [0.12.9](https://github.com/rvben/shinyhub/compare/v0.12.8...v0.12.9) - 2026-08-27
 
