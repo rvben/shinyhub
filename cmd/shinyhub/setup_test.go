@@ -171,11 +171,9 @@ func TestRunSetupRepairsDatabaseWithoutAdministrator(t *testing.T) {
 	t.Setenv("SHINYHUB_ADMIN_PASSWORD", "repair-password")
 	setSetupTTY(t, false)
 
+	dbtest.WriteSQLiteFile(t, databasePath)
 	store, err := db.Open(databasePath)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CreateUser(db.CreateUserParams{Username: "viewer", PasswordHash: "hash", Role: "viewer"}); err != nil {

@@ -11,6 +11,7 @@ import (
 	"github.com/rvben/shinyhub/internal/backup"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 var snapAt = time.Date(2026, 8, 19, 9, 30, 0, 0, time.UTC)
@@ -24,14 +25,12 @@ func snapCfg(t *testing.T) (*config.Config, *db.Store, string) {
 	cfg := &config.Config{
 		Database: config.DatabaseConfig{Driver: "sqlite", DSN: dbPath, PreMigrationSnapshot: true},
 	}
+	dbtest.WriteSQLiteFile(t, dbPath)
 	store, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 	return cfg, store, dbPath
 }
 

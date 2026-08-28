@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/secrets"
 )
 
@@ -51,12 +52,10 @@ func TestRotateSecretCmd_ReEncryptsEnvSecret(t *testing.T) {
 
 	// Seed an app + a secret env var encrypted under the OLD key, then close so
 	// the command opens its own connection.
+	dbtest.WriteSQLiteFile(t, dbPath)
 	store, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
 	}
 	if err := store.CreateUser(db.CreateUserParams{Username: "o", PasswordHash: "h", Role: "admin"}); err != nil {
 		t.Fatal(err)

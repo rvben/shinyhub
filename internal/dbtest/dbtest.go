@@ -91,6 +91,32 @@ func newSQLite(t testing.TB) *db.Store {
 	return store
 }
 
+// WriteSQLiteFile writes a fully migrated SQLite database to path, which must
+// not exist yet, for tests that need the database as a file: a command that
+// reads a config naming it, a backup that archives it, a restore that moves it.
+// The result is a single file with no WAL or SHM sidecar, so it can be opened
+// with db.Open, handed to a child process, or copied as is. It is SQLite
+// regardless of SHINYHUB_TEST_POSTGRES_DSN; a file path is SQLite by
+// definition, and tests that also run under Postgres skip themselves.
+func WriteSQLiteFile(t testing.TB, path string) {
+	t.Helper()
+	image, err := sqliteTemplateImage()
+	if err != nil {
+		t.Fatalf("build sqlite template: %v", err)
+	}
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer store.Close()
+	if err := store.DeserializeSQLite(context.Background(), image); err != nil {
+		t.Fatalf("load sqlite template: %v", err)
+	}
+	if err := store.BackupTo(path); err != nil {
+		t.Fatalf("write sqlite template to %s: %v", path, err)
+	}
+}
+
 // postgresTemplateLockKey serializes template creation across every test
 // process sharing one Postgres server (go test runs packages in parallel).
 // Distinct from the key Migrate itself takes.

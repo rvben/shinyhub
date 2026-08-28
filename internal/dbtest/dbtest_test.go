@@ -3,6 +3,7 @@ package dbtest
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -129,10 +130,61 @@ func TestNew_PostgresTemplateRenamedIntoPlace(t *testing.T) {
 	}
 }
 
+// TestWriteSQLiteFile_IsMigratedSingleFile pins what file consumers rely on:
+// the file is fully migrated, it is the only file (a WAL or SHM sidecar would
+// be lost by a plain copy and confuse a restore), and writes through db.Open
+// land in it rather than in some in-memory copy.
+func TestWriteSQLiteFile_IsMigratedSingleFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shinyhub.db")
+	WriteSQLiteFile(t, path)
+
+	for _, sidecar := range []string{path + "-wal", path + "-shm", path + "-journal"} {
+		if _, err := os.Stat(sidecar); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s exists after WriteSQLiteFile; the file must stand alone", sidecar)
+		}
+	}
+
+	store, err := db.Open(path)
+	if err != nil {
+		t.Fatalf("open written file: %v", err)
+	}
+	pending, err := store.PendingMigrations()
+	if err != nil {
+		t.Fatalf("pending migrations: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("written file must be fully migrated; pending = %v", pending)
+	}
+	if err := store.CreateUser(db.CreateUserParams{Username: "on-disk", PasswordHash: "x", Role: "admin"}); err != nil {
+		t.Fatalf("write to file store: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := db.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.GetUserByUsername("on-disk"); err != nil {
+		t.Fatalf("row written before close is missing after reopen: %v", err)
+	}
+}
+
 // BenchmarkNew is the fixture cost itself, the number that made the race jobs
 // slow. Run with and without -race; both should sit in the low milliseconds.
 func BenchmarkNew(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		New(b)
+	}
+}
+
+// BenchmarkWriteSQLiteFile is the file-backed fixture cost: a template load
+// plus a VACUUM INTO, so it should sit within a few milliseconds of New.
+func BenchmarkWriteSQLiteFile(b *testing.B) {
+	dir := b.TempDir()
+	for i := 0; i < b.N; i++ {
+		WriteSQLiteFile(b, filepath.Join(dir, strconv.Itoa(i)+".db"))
 	}
 }

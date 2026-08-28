@@ -29,12 +29,10 @@ func mkCfg(t *testing.T) *config.Config {
 
 func seed(t *testing.T, cfg *config.Config) {
 	t.Helper()
+	dbtest.WriteSQLiteFile(t, cfg.Database.DSN)
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate: %v", err)
 	}
 	if _, err := store.DB().Exec(
 		`INSERT INTO users (username, password_hash, role) VALUES ('alice','x','admin')`); err != nil {

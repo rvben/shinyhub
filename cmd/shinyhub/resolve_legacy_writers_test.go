@@ -8,16 +8,14 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 func TestResolveLegacyWritersRejectsNewerSchemaBeforeMutation(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "legacy.sqlite")
+	dbtest.WriteSQLiteFile(t, dbPath)
 	store, err := db.Open(dbPath)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(); err != nil {
-		_ = store.Close()
 		t.Fatal(err)
 	}
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "hash", Role: "developer"}); err != nil {
