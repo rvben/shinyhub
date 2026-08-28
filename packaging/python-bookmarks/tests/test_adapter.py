@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import pytest
 from shinyhub_bookmarks import ChoiceRestore, register
 from shinyhub_bookmarks._adapter import (
-    BOOKMARK_METADATA_KEY,
     DISCOVER_INPUT_ID,
     Field,
     REQUEST_INPUT_ID,
@@ -211,7 +210,7 @@ def test_selection_exclusions_are_request_local_and_keep_selected_fields():
 
 
 @pytest.mark.asyncio
-async def test_register_versions_links_and_reports_a_restored_migration(
+async def test_register_keeps_links_metadata_free_and_reports_a_restored_migration(
     monkeypatch, inert_reactivity
 ):
     from shiny import ui
@@ -230,7 +229,6 @@ async def test_register_versions_links_and_reports_a_restored_migration(
     registration = register(
         session=session,
         input=inputs,
-        schema_version=4,
         fields={
             "product": Field(
                 "Product",
@@ -243,29 +241,40 @@ async def test_register_versions_links_and_reports_a_restored_migration(
         },
     )
 
-    save_state = type("SaveState", (), {"values": {}})()
+    save_state = type("SaveState", (), {"values": {}, "exclude": []})()
     await session.bookmark.bookmark_callbacks[0](save_state)
-    assert save_state.values[BOOKMARK_METADATA_KEY] == {"version": 1, "schema": 4}
+    assert save_state.values == {}
 
     restore_state = type(
         "RestoreState",
         (),
         {
             "input": {"product": "Legacy planning"},
-            "values": {BOOKMARK_METADATA_KEY: {"version": 1, "schema": 2}},
+            "values": {},
         },
     )()
     await session.bookmark.restore_callbacks[0](restore_state)
 
     assert updates == [("product", "Planning", session)]
     assert registration.adjustments[0].kind == "migrated"
-    assert registration.restored_schema_version == 2
     message_type, payload = session.messages[-1]
     assert message_type == "shinyhub-bookmark-capabilities"
-    assert payload["schemaVersion"] == 4
-    assert payload["restoredSchemaVersion"] == 2
+    assert "schemaVersion" not in payload
+    assert "restoredSchemaVersion" not in payload
     assert payload["fields"][0]["value"] == "Planning"
     assert payload["adjustments"][0]["previous"] == "Legacy planning"
+
+
+def test_register_rejects_the_removed_schema_version_argument(inert_reactivity):
+    session = Session()
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'schema_version'"):
+        register(
+            session=session,
+            input=Inputs({"region": "Europe"}),
+            fields={"region": "Region"},
+            schema_version=2,  # type: ignore[call-arg]
+        )
 
 
 def test_register_rejects_module_scoped_sessions_before_installing_callbacks():

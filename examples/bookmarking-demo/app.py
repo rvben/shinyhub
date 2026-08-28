@@ -124,7 +124,6 @@ def server(input, output, session):
                 formatter=lambda value: "Included" if value else "Actuals only",
             ),
         },
-        schema_version=2,
         legacy_fields={"segment": "Market segment"},
     )
 

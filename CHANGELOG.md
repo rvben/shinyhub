@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Breaking Changes
+
+- **bookmarks**: remove the unused `schema_version` registration argument and
+  stop adding package metadata to view-link URLs. The public demo's links now
+  contain only selected Shiny input state.
+
 ## [0.13.0](https://github.com/rvben/shinyhub/compare/v0.12.11...v0.13.0) - 2026-08-28
 
 ### Breaking Changes

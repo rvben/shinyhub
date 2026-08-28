@@ -67,7 +67,6 @@ choices when a bookmark should remain dependable across app releases:
 register(
     session=session,
     input=input,
-    schema_version=3,
     legacy_fields={"segment": "Market segment"},
     fields={
         "region": Field(
@@ -97,8 +96,9 @@ default falls back to the valid value Shiny already selected.
 `renamed_from` maps an old input ID to its former label and requires a
 `ChoiceRestore` policy so the saved value can actually be applied to the new
 control. `legacy_fields` names removed inputs that should be reported as
-ignored. Every new link records the app's `schema_version`; older links without
-metadata remain supported.
+ignored. The helper adds no package-specific schema or version metadata to the
+URL. Shiny may still include application-owned bookmark values when an app
+adds them through its own callbacks.
 
 For a custom input whose live Python value differs from its JSON bookmark
 representation, pass an idempotent `normalizer=` to `Field`. It is applied to

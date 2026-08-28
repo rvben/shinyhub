@@ -1402,7 +1402,6 @@
     }
     return {
       version: BOOKMARK_PROTOCOL_VERSION,
-      schemaVersion: Number.isInteger(detail.schemaVersion) ? detail.schemaVersion : 1,
       fields: fields,
       adjustments: adjustments
     };

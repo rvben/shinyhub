@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir \
     "dash>=4.4,<5" \
     "PyJWT>=2.13,<3" \
     "shiny>=1.6,<2" \
-    "shinyhub-bookmarks==0.3.0" \
+    "shinyhub-bookmarks==0.4.0" \
     "streamlit>=1.60,<2"
 
 COPY --from=builder /out/shinyhub /usr/local/bin/shinyhub

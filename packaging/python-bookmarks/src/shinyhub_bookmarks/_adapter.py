@@ -17,8 +17,6 @@ CAPABILITIES_MESSAGE = "shinyhub-bookmark-capabilities"
 RESULT_MESSAGE = "shinyhub-bookmark-result"
 ERROR_MESSAGE = "shinyhub-bookmark-error"
 DEFAULT_MAX_URL_LENGTH = 8_192
-BOOKMARK_METADATA_KEY = ".shinyhub_bookmarks"
-BOOKMARK_METADATA_VERSION = 1
 MAX_ADJUSTMENTS = 20
 MAX_UNKNOWN_DETAILS = 3
 MAX_UNKNOWN_LABEL_LENGTH = 120
@@ -98,9 +96,7 @@ class Registration:
 
     fields: tuple[_RegisteredField, ...]
     max_url_length: int
-    schema_version: int
     adjustments: tuple[Adjustment, ...] = ()
-    restored_schema_version: int | None = None
 
 
 def _normalise_fields(
@@ -401,7 +397,6 @@ def register(
     input: Any,
     fields: Mapping[str, Field | str] | Iterable[tuple[str, Field | str]],
     max_url_length: int = DEFAULT_MAX_URL_LENGTH,
-    schema_version: int = 1,
     legacy_fields: Mapping[str, str] | None = None,
 ) -> Registration:
     """Expose selected Shiny inputs to ShinyHub's durable view-link controls.
@@ -427,12 +422,6 @@ def register(
         )
     if not isinstance(max_url_length, int) or max_url_length < 1_024:
         raise ValueError("max_url_length must be an integer of at least 1024")
-    if (
-        not isinstance(schema_version, int)
-        or isinstance(schema_version, bool)
-        or schema_version < 1
-    ):
-        raise ValueError("schema_version must be a positive integer")
     if legacy_fields is None:
         legacy_fields = {}
     if not isinstance(legacy_fields, Mapping):
@@ -444,7 +433,7 @@ def register(
             raise ValueError("Legacy bookmark field labels must be non-empty strings")
 
     registered = _normalise_fields(fields, resolve=lambda value: value)
-    registration = Registration(registered, max_url_length, schema_version)
+    registration = Registration(registered, max_url_length)
     setattr(bookmark, REGISTRATION_MARKER, registration)
     resolved_ids = {field.resolved_id for field in registered}
     lock = asyncio.Lock()
@@ -483,19 +472,13 @@ def register(
                 "store": "url",
                 "autoSync": capability_revision > acknowledged_revision,
                 "syncRevision": capability_revision,
-                "schemaVersion": schema_version,
-                "restoredSchemaVersion": registration.restored_schema_version,
                 "fields": values,
                 "adjustments": [item.as_message() for item in registration.adjustments],
             },
         )
 
     @bookmark.on_bookmark
-    async def _write_bookmark_metadata(state: Any) -> None:
-        state.values[BOOKMARK_METADATA_KEY] = {
-            "version": BOOKMARK_METADATA_VERSION,
-            "schema": schema_version,
-        }
+    async def _scope_selected_fields(state: Any) -> None:
         selected = selected_fields.get()
         if selected is not None:
             state.exclude[:] = _selection_exclusions(
@@ -505,17 +488,6 @@ def register(
     @bookmark.on_restore
     async def _inspect_restored_bookmark(state: Any) -> None:
         state_input = state.input if isinstance(state.input, Mapping) else {}
-        state_values = state.values if isinstance(state.values, Mapping) else {}
-        metadata = state_values.get(BOOKMARK_METADATA_KEY)
-        registration.restored_schema_version = None
-        if (
-            isinstance(metadata, Mapping)
-            and metadata.get("version") == BOOKMARK_METADATA_VERSION
-            and isinstance(metadata.get("schema"), int)
-            and not isinstance(metadata.get("schema"), bool)
-            and metadata["schema"] > 0
-        ):
-            registration.restored_schema_version = metadata["schema"]
         current_values = {
             field.input_id: input[ResolvedId(field.resolved_id)]()
             for field in registered

@@ -463,7 +463,6 @@ test('a stale bookmark becomes an explicit adjusted-view receipt with a fresh-li
     detail: {
       version: 1,
       store: 'url',
-      schemaVersion: 2,
       fields: [
         { id: 'region', label: 'Region', value: 'Americas' },
         { id: 'product', label: 'Product', value: 'Planning' },

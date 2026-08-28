@@ -148,7 +148,6 @@ otherwise fall back silently. Add restore rules to make that behavior explicit:
 register(
     session=session,
     input=input,
-    schema_version=3,
     legacy_fields={"segment": "Market segment"},
     fields={
         "region": Field(
@@ -177,9 +176,10 @@ empty selection. Removed fields listed in `legacy_fields` are ignored and
 reported. `renamed_from` requires a `ChoiceRestore` policy so the saved value is
 validated and moved to the current field.
 
-New links include `schema_version` as Shiny bookmark metadata. The metadata is
-for migrations and diagnostics; it is not server-side state. Links created by
-the first helper release have no metadata and continue to restore.
+The helper adds no package-specific schema or version metadata to the URL.
+Shiny may still include application-owned bookmark values when an app adds
+them through its own callbacks. App evolution is declared directly through
+`renamed_from`, `legacy_fields`, and restore rules.
 
 The recovery UX is deliberately non-blocking. The app opens the closest current
 view, the link control gains an amber status dot, and its **Opened with changes**
@@ -187,7 +187,7 @@ receipt labels the saved and opened values for anything updated, unavailable,
 renamed, removed, or ignored. Completely unknown
 inputs show their URL-provided IDs and saved values as escaped, length-bounded
 plain text. The first three are listed and any remainder is summarized. Copying
-**Copy link to current view** creates a fresh link from the current schema and
+**Copy link to current view** creates a fresh link from the current app and
 drops those unknown settings.
 
 ## Compatibility
