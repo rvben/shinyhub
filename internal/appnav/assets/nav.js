@@ -512,8 +512,10 @@
     ".session-panel ::selection { color: var(--sh-deep); background: var(--sh-warning); }",
 
     ".bookmark-panel {" +
+      "  --bookmark-viewport-gap: 72px; --bookmark-head-height: 60px;" +
       "  position: absolute; width: 368px; max-width: calc(100vw - 24px);" +
-      "  max-height: min(760px, calc(100vh - 72px)); box-sizing: border-box;" +
+      "  max-height: min(760px, calc(100vh - var(--bookmark-viewport-gap)));" +
+      "  max-height: min(760px, calc(100dvh - var(--bookmark-viewport-gap))); box-sizing: border-box;" +
       "  display: flex; flex-direction: column; pointer-events: auto; overflow: hidden;" +
       "  color: var(--sh-text); background: var(--sh-surface);" +
       "  border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg);" +
@@ -530,7 +532,7 @@
     ".root.bookmark-open[data-position='top-right'] .bookmark-panel { transform: translateY(0) scale(1); }",
     ".root.bookmark-open[data-position='left-center'] .bookmark-panel," +
       " .root.bookmark-open[data-position='right-center'] .bookmark-panel { transform: translateY(-50%) translateX(0) scale(1); }",
-    ".bookmark-head { min-height: 60px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 10px 10px 8px 16px; border-bottom: 1px solid var(--sh-line); }",
+    ".bookmark-head { min-height: var(--bookmark-head-height); box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 10px 10px 8px 16px; border-bottom: 1px solid var(--sh-line); }",
     ".bookmark-mark { width: 28px; height: 28px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--sh-signal); background: var(--sh-raised); border-radius: var(--sh-r-md); }",
     ".bookmark-mark svg { width: 15px; height: 15px; }",
     ".bookmark-heading { flex: 1; min-width: 0; }",
@@ -573,16 +575,17 @@
     ".bookmark-check:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 3px; }",
     ".bookmark-access-note { display: flex; align-items: center; gap: 7px; margin-top: 12px; color: var(--sh-soft); font-size: 12px; line-height: 1.4; }",
     ".bookmark-access-note svg { width: 14px; height: 14px; flex: none; color: var(--sh-muted); }",
-    ".bookmark-actions { display: flex; flex: none; align-items: center; gap: 8px; padding: 12px 16px 16px; border-top: 1px solid var(--sh-line); background: var(--sh-surface); }",
-    ".bookmark-primary { min-height: 44px; box-sizing: border-box; margin: 0; padding: 8px 14px; flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: var(--sh-r-md); color: var(--sh-deep); background: var(--sh-signal); font: inherit; font-size: 13px; font-weight: 700; line-height: 1.2; cursor: pointer; }",
+    ".bookmark-actions { display: flex; flex: none; flex-direction: column; align-items: stretch; gap: 10px; box-sizing: border-box; max-height: calc(100vh - var(--bookmark-viewport-gap) - var(--bookmark-head-height)); max-height: calc(100dvh - var(--bookmark-viewport-gap) - var(--bookmark-head-height)); padding: 12px 16px 16px; border-top: 1px solid var(--sh-line); background: var(--sh-surface); }",
+    ".bookmark-feedback { max-height: 128px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; scrollbar-color: var(--sh-line-strong) transparent; scrollbar-width: thin; }",
+    ".bookmark-primary { width: 100%; min-height: 44px; box-sizing: border-box; margin: 0; padding: 8px 14px; flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: var(--sh-r-md); color: var(--sh-deep); background: var(--sh-signal); font: inherit; font-size: 13px; font-weight: 700; line-height: 1.2; cursor: pointer; }",
     ".bookmark-primary-icon { width: 16px; height: 16px; flex: none; stroke-width: 1.8; }",
     ".bookmark-primary:hover { background: #7DD3FC; }",
     ".bookmark-primary:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 2px; }",
     ".bookmark-primary:disabled { opacity: 0.5; cursor: not-allowed; }",
-    ".bookmark-error { display: none; margin-top: 12px; padding: 9px 10px; border-radius: var(--sh-r-md); color: var(--sh-coral); background: rgba(248,113,113,0.12); font-size: 12px; line-height: 1.4; }",
+    ".bookmark-error { display: none; margin: 0; padding: 9px 10px; border-radius: var(--sh-r-md); color: var(--sh-coral); background: rgba(248,113,113,0.12); font-size: 12px; line-height: 1.4; }",
     ".bookmark-error.visible { display: block; }",
     ".bookmark-sync-warning { margin: 0 0 14px; padding: 10px 11px; border: 1px solid rgba(248,113,113,0.35); border-radius: var(--sh-r-md); color: var(--sh-coral); background: rgba(248,113,113,0.10); font-size: 12px; line-height: 1.45; }",
-    ".bookmark-url { display: none; width: 100%; min-height: 64px; box-sizing: border-box; margin-top: 10px; padding: 9px 10px; resize: vertical; border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-md); color: var(--sh-text); background: var(--sh-deep); font-family: Space Mono, ui-monospace, monospace; font-size: 12px; line-height: 1.45; user-select: text; -webkit-user-select: text; }",
+    ".bookmark-url { display: none; width: 100%; min-height: 64px; box-sizing: border-box; margin: 0; padding: 9px 10px; resize: vertical; border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-md); color: var(--sh-text); background: var(--sh-deep); font-family: Space Mono, ui-monospace, monospace; font-size: 12px; line-height: 1.45; user-select: text; -webkit-user-select: text; }",
     ".bookmark-url.visible { display: block; }",
     ".bookmark-url:focus { outline: none; border-color: var(--sh-signal); box-shadow: 0 0 0 3px rgba(56,189,248,0.18); }",
     ".bookmark-panel ::selection { color: var(--sh-deep); background: var(--sh-signal); }",
@@ -793,11 +796,11 @@
       " .session-actions { flex-direction: column; }" +
       " .bookmark-panel, .root[data-position='top-center'] .bookmark-panel, .root[data-position='top-right'] .bookmark-panel," +
       " .root[data-position='left-center'] .bookmark-panel, .root[data-position='right-center'] .bookmark-panel {" +
-      "   top: 60px; right: auto; left: 12px; width: calc(100vw - 24px); max-width: none; max-height: calc(100vh - 72px); transform: translateY(-8px) scale(0.98); transform-origin: top center;" +
+      "   top: 60px; right: auto; left: 12px; width: calc(100vw - 24px); max-width: none; max-height: calc(100vh - var(--bookmark-viewport-gap)); max-height: calc(100dvh - var(--bookmark-viewport-gap)); transform: translateY(-8px) scale(0.98); transform-origin: top center;" +
       " }" +
       " .root.bookmark-open[data-position='top-center'] .bookmark-panel, .root.bookmark-open[data-position='top-right'] .bookmark-panel," +
       " .root.bookmark-open[data-position='left-center'] .bookmark-panel, .root.bookmark-open[data-position='right-center'] .bookmark-panel { transform: none; }" +
-      " .bookmark-actions { flex-direction: column; align-items: stretch; }" +
+      " .bookmark-feedback { max-height: min(96px, 26vh); max-height: min(96px, 26dvh); }" +
       " .position-menu, .root[data-position='top-center'] .position-menu, .root[data-position='top-right'] .position-menu," +
       " .root[data-position='left-center'] .position-menu, .root[data-position='right-center'] .position-menu {" +
       "   top: 60px; right: 12px; left: auto; margin: 0;" +
@@ -1233,19 +1236,22 @@
   bookmarkURL.className = "bookmark-url";
   bookmarkURL.readOnly = true;
   bookmarkURL.setAttribute("aria-label", "View link");
+  var bookmarkFeedback = div("bookmark-feedback");
+  bookmarkFeedback.hidden = true;
+  bookmarkFeedback.appendChild(bookmarkError);
+  bookmarkFeedback.appendChild(bookmarkURL);
   var bookmarkActions = div("bookmark-actions");
   var bookmarkPrimary = document.createElement("button");
   bookmarkPrimary.type = "button";
   bookmarkPrimary.className = "bookmark-primary";
   setBookmarkPrimary("Copy link", "copy");
+  bookmarkActions.appendChild(bookmarkFeedback);
   bookmarkActions.appendChild(bookmarkPrimary);
   bookmarkBody.appendChild(bookmarkSyncWarning);
   bookmarkBody.appendChild(bookmarkNotice);
   bookmarkBody.appendChild(bookmarkScope);
   bookmarkBody.appendChild(bookmarkFields);
   bookmarkBody.appendChild(bookmarkAccessNote);
-  bookmarkBody.appendChild(bookmarkError);
-  bookmarkBody.appendChild(bookmarkURL);
   bookmarkPanel.appendChild(bookmarkHead);
   bookmarkPanel.appendChild(bookmarkBody);
   // Keep the decisive action outside the scrolling content. Apps may expose
@@ -1464,6 +1470,7 @@
     bookmarkError.classList.toggle("visible", !!message);
     bookmarkURL.value = url || "";
     bookmarkURL.classList.toggle("visible", !!url);
+    bookmarkFeedback.hidden = !message && !url;
     if (url) {
       bookmarkURL.focus();
       bookmarkURL.select();
@@ -1579,6 +1586,7 @@
         : "Copy link";
     setBookmarkPrimary(primaryLabel, "copy");
     bookmarkPrimary.disabled = !!bookmarkPending || selected === 0;
+    bookmarkPrimary.setAttribute("aria-busy", bookmarkPending ? "true" : "false");
     bookmarkChange.disabled = !!bookmarkPending;
     bookmarkScopeTitle.setAttribute("aria-live", bookmarkEditing ? "polite" : "off");
   }
@@ -1632,6 +1640,7 @@
     var requestId = "bookmark-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10);
     bookmarkPending = requestId;
     renderBookmarkSummary();
+    announcer.textContent = "Creating view link";
     bookmarkTimer = window.setTimeout(guard(function () {
       if (bookmarkPending !== requestId) return;
       finishBookmarkRequest();

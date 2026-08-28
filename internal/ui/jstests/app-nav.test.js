@@ -34,6 +34,7 @@ const SESSION_OWNER_EVENT = 'shinyhub:session-status-owner';
 const BOOKMARK_CAPABILITIES_EVENT = 'shinyhub:bookmark:capabilities';
 const BOOKMARK_CREATE_EVENT = 'shinyhub:bookmark:create';
 const BOOKMARK_RESULT_EVENT = 'shinyhub:bookmark:result';
+const BOOKMARK_ERROR_EVENT = 'shinyhub:bookmark:error';
 const BOOKMARK_SYNC_STATUS_EVENT = 'shinyhub:bookmark:sync-status';
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -342,6 +343,118 @@ test('the view-link copy action stays outside the scrolling value list', () => {
   assert.equal(actions.parentElement, panel);
   assert.equal(actions.previousElementSibling, body);
   assert.equal(body.contains(m.q('button.bookmark-primary')), false);
+  assert.equal(body.contains(m.q('.bookmark-error')), false);
+  assert.equal(body.contains(m.q('.bookmark-url')), false);
+  assert.equal(m.q('.bookmark-feedback').parentElement, actions);
+  assert.equal(m.q('.bookmark-feedback').hidden, true);
+  assert.equal(m.q('.bookmark-error').parentElement, m.q('.bookmark-feedback'));
+  assert.equal(m.q('.bookmark-url').parentElement, m.q('.bookmark-feedback'));
+  const styles = source;
+  assert.match(styles, /--bookmark-viewport-gap: 72px; --bookmark-head-height: 60px/);
+  assert.match(styles, /\.bookmark-actions \{[^}]*max-height: calc\(100dvh - var\(--bookmark-viewport-gap\) - var\(--bookmark-head-height\)\)/);
+  assert.match(styles, /\.bookmark-feedback \{[^}]*overflow-y: auto/);
+  assert.match(styles, /\.bookmark-primary \{[^}]*flex: none/);
+  assert.match(styles, /max-width: none; max-height: calc\(100vh - var\(--bookmark-viewport-gap\)\); max-height: calc\(100dvh - var\(--bookmark-viewport-gap\)\); transform/);
+  assert.match(styles, /\.bookmark-feedback \{ max-height: min\(96px, 26vh\); max-height: min\(96px, 26dvh\); \}/);
+});
+
+test('creating a view link exposes a programmatic pending state', () => {
+  const m = mount();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+    },
+  }));
+
+  m.q('button.bookmark-trigger').click();
+  m.q('button.bookmark-primary').click();
+
+  const primary = m.q('button.bookmark-primary');
+  assert.equal(primary.disabled, true);
+  assert.equal(primary.getAttribute('aria-busy'), 'true');
+  assert.equal(primary.textContent, 'Creating link…');
+  assert.equal(m.q('.announcer').textContent, 'Creating view link');
+  m.dom.window.close();
+});
+
+test('a long-list creation error stays beside the fixed copy action', () => {
+  const m = mount();
+  const requests = [];
+  const fields = Array.from({ length: 50 }, (_, index) => ({
+    id: `filter-${index}`,
+    label: `Filter ${index + 1}`,
+    value: `Value ${index + 1}`,
+  }));
+  m.window.addEventListener(BOOKMARK_CREATE_EVENT, (event) => requests.push(event.detail));
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: { version: 1, store: 'url', fields },
+  }));
+
+  m.q('button.bookmark-trigger').click();
+  m.q('button.bookmark-primary').click();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_ERROR_EVENT, {
+    detail: {
+      version: 1,
+      requestId: requests[0].requestId,
+      message: 'The app could not save these values. Try again.',
+    },
+  }));
+
+  const actions = m.q('.bookmark-actions');
+  const feedback = m.q('.bookmark-feedback');
+  const error = m.q('.bookmark-error');
+  assert.equal(feedback.parentElement, actions);
+  assert.equal(feedback.hidden, false);
+  assert.equal(error.parentElement, feedback);
+  assert.ok(error.classList.contains('visible'));
+  assert.equal(error.getAttribute('role'), 'alert');
+  assert.equal(error.textContent, 'The app could not save these values. Try again.');
+  assert.equal(m.q('button.bookmark-primary').getAttribute('aria-busy'), 'false');
+  assert.equal(m.q('button.bookmark-primary').disabled, false);
+  m.dom.window.close();
+});
+
+test('a blocked clipboard keeps the ready link in the fixed action area', async () => {
+  const m = mount();
+  const requests = [];
+  Object.defineProperty(m.window.navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: () => Promise.reject(new Error('blocked')) },
+  });
+  m.window.addEventListener(BOOKMARK_CREATE_EVENT, (event) => requests.push(event.detail));
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+    },
+  }));
+
+  m.q('button.bookmark-trigger').click();
+  m.q('button.bookmark-primary').click();
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_RESULT_EVENT, {
+    detail: {
+      version: 1,
+      requestId: requests[0].requestId,
+      url: 'https://hub.test/app/demo/?_inputs_=ok',
+    },
+  }));
+  await flush();
+
+  const actions = m.q('.bookmark-actions');
+  const feedback = m.q('.bookmark-feedback');
+  const url = m.q('.bookmark-url');
+  assert.equal(feedback.parentElement, actions);
+  assert.equal(feedback.hidden, false);
+  assert.equal(m.q('.bookmark-error').parentElement, feedback);
+  assert.ok(m.q('.bookmark-error').classList.contains('visible'));
+  assert.equal(url.parentElement, feedback);
+  assert.ok(url.classList.contains('visible'));
+  assert.equal(url.value, 'https://hub.test/app/demo/?_inputs_=ok');
+  assert.equal(m.focused(), url);
+  m.dom.window.close();
 });
 
 test('a stale bookmark becomes an explicit adjusted-view receipt with a fresh-link action', () => {
