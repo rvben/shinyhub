@@ -4,8 +4,7 @@ AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
 CLISPEC ?= clispec
 CLISPEC_MIN_VERSION := 0.3.1
-RACE_TIMEOUT ?= 60m
-RACE_TEST_PATTERN ?= .
+RACE_TIMEOUT ?= 20m
 
 # bootstrap installs the exact project dependencies and a repo-local, pinned
 # live-reload binary. Nothing is written to a developer's global Go bin.
@@ -36,20 +35,20 @@ test-go:
 # test-go, so it is its own target/CI job rather than folded into test-go. The
 # control plane crosses many goroutine boundaries (watcher, proxy poolsync,
 # autoscale, worker agent), so this is the primary guard against data races.
-# A raised, overridable per-package timeout accommodates slower native hosts;
-# the default 10m is exceeded by the api package under race instrumentation.
+# The per-package timeout is overridable; 20m gives internal/api and
+# internal/db, the two longest packages under -race, a margin over go test's
+# default 10m on slow hosts.
 test-race:
 	go test -race ./... -count=1 -timeout $(RACE_TIMEOUT)
 
-# CI keeps the historical test-race check name for every package except the
-# dominant internal/api package. API is split by top-level test-name prefix in
-# parallel jobs so adding coverage cannot silently push the package past one
-# monolithic timeout. test-race above remains the convenient full local gate.
+# CI runs the race suite as two jobs of about equal length: internal/api alone
+# is a third of the suite's race time, every other package fits in the other
+# half. test-race above remains the full local gate.
 test-race-non-api:
 	go test -race $$(go list ./... | grep -v '/internal/api$$') -count=1 -timeout $(RACE_TIMEOUT)
 
 test-race-api:
-	go test -race ./internal/api -count=1 -timeout $(RACE_TIMEOUT) -run '$(RACE_TEST_PATTERN)'
+	go test -race ./internal/api -count=1 -timeout $(RACE_TIMEOUT)
 
 # vuln scans the module (and its dependencies) against the Go vulnerability
 # database. Run via `go run` so no separate install step is needed and it works
