@@ -1538,10 +1538,9 @@ func TestDeploy_ReplicaProvenancePersistenceFailureStopsAndRefusesPromotion(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DB().Exec(`CREATE TRIGGER reject_booted_replica
-		BEFORE INSERT ON replicas BEGIN SELECT RAISE(FAIL, 'injected replica provenance failure'); END`); err != nil {
-		t.Fatal(err)
-	}
+	installDBFailureTrigger(t, store, dbFailureTrigger{
+		name: "reject_booted_replica", table: "replicas", event: "INSERT", condition: "TRUE",
+	})
 	body, contentType := buildMultiFileBundleUpload(t, map[string]string{"app.py": "print('consumer')"})
 	req := httptest.NewRequest(http.MethodPost, "/api/apps/replica-provenance-fail/deploy", body)
 	req.Header.Set("Content-Type", contentType)
@@ -1572,11 +1571,9 @@ func TestDeploy_PostCommitConvergenceFailureReturnsSuccessWithWarning(t *testing
 	if _, err := store.CreateApp(db.CreateAppParams{Slug: "postcommit-warning", Name: "postcommit-warning", OwnerID: 1, Access: "private"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DB().Exec(`CREATE TRIGGER reject_postcommit_obligation
-		BEFORE INSERT ON schedule_deploy_obligations
-		BEGIN SELECT RAISE(FAIL, 'injected post-commit convergence failure'); END`); err != nil {
-		t.Fatal(err)
-	}
+	installDBFailureTrigger(t, store, dbFailureTrigger{
+		name: "reject_postcommit_obligation", table: "schedule_deploy_obligations", event: "INSERT", condition: "TRUE",
+	})
 	manifest := `
 [[schedule]]
 name = "cache"

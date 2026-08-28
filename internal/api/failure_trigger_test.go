@@ -35,7 +35,7 @@ func installDBFailureTrigger(t *testing.T, store *db.Store, spec dbFailureTrigge
 		}
 	}
 	switch spec.event {
-	case "UPDATE", "UPDATE OF phase", "DELETE":
+	case "INSERT", "UPDATE", "UPDATE OF phase", "DELETE":
 	default:
 		t.Fatalf("unsupported test trigger event %q", spec.event)
 	}

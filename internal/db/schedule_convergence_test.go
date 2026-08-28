@@ -547,7 +547,7 @@ func TestScheduleConvergence_ReleasedWorkWaitsForDatabaseDeadline(t *testing.T) 
 		t.Fatalf("released obligation was eligible before DB deadline: %v", err)
 	}
 	if _, err := store.DB().Exec(`UPDATE schedule_deploy_obligations
-		SET next_attempt_at = datetime('now', '-1 second') WHERE id = ?`, claimed.ID); err != nil {
+		SET next_attempt_at = ? WHERE id = ?`, time.Now().UTC().Add(-time.Second), claimed.ID); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := store.ClaimNextDeployObligation(); err != nil || got.ID != claimed.ID {
