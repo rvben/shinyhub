@@ -2,12 +2,19 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
+	"net/url"
+	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+var migrationTestDatabaseCounter atomic.Int64
 
 // backfillCorpus is the shared accept/reject corpus for the migration-050
 // backfill predicate. want is whether the slug is a legal project slug and so
@@ -90,9 +97,11 @@ func mustMigrationSource(t *testing.T, dialect string, version int) string {
 	return ""
 }
 
-// migratedThrough returns an in-memory SQLite store whose schema is migrations
+// migratedThrough returns an isolated store whose schema is migrations
 // 1..version WITH the ledger recorded, so a later Migrate() applies only what
-// comes after. It deliberately does not reuse Store.Migrate for the seed step:
+// comes after. SQLite is always available; when SHINYHUB_TEST_POSTGRES_DSN is
+// set the same upgrade fixture runs against an isolated Postgres database. It
+// deliberately does not reuse Store.Migrate for the seed step:
 // Migrate takes no stop-at-version argument, and seeding without a ledger trips
 // the legacy-adoption branch (db.go:297-307), which runs every embedded
 // migration at once - including the one under test, before the fixture rows
@@ -101,19 +110,29 @@ func mustMigrationSource(t *testing.T, dialect string, version int) string {
 // entry is safe.
 func migratedThrough(t *testing.T, version int) *Store {
 	t.Helper()
-	s, err := Open(":memory:")
+	dialect := "sqlite"
+	dsn := ":memory:"
+	if adminDSN := os.Getenv("SHINYHUB_TEST_POSTGRES_DSN"); adminDSN != "" {
+		dialect = "postgres"
+		dsn = newPostgresMigrationTestDatabase(t, adminDSN)
+	}
+	s, err := Open(dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+	appliedAtType := "TEXT"
+	if dialect == "postgres" {
+		appliedAtType = "TIMESTAMPTZ"
+	}
+	if _, err := s.db.Exec(fmt.Sprintf(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    INTEGER PRIMARY KEY,
 		name       TEXT NOT NULL,
-		applied_at TEXT NOT NULL
-	)`); err != nil {
+		applied_at %s NOT NULL
+	)`, appliedAtType)); err != nil {
 		t.Fatalf("create ledger: %v", err)
 	}
-	ms, err := loadMigrations("sqlite")
+	ms, err := loadMigrations(dialect)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,11 +145,38 @@ func migratedThrough(t *testing.T, version int) *Store {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,
-			m.version, m.name, "seed"); err != nil {
+			m.version, m.name, time.Now().UTC()); err != nil {
 			t.Fatalf("record migration %s: %v", m.name, err)
 		}
 	}
 	return s
+}
+
+// newPostgresMigrationTestDatabase creates a disposable database without
+// migrating it. dbtest.New cannot serve partial-upgrade tests because it always
+// applies the complete schema before returning.
+func newPostgresMigrationTestDatabase(t *testing.T, adminDSN string) string {
+	t.Helper()
+	u, err := url.Parse(adminDSN)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		t.Fatalf("SHINYHUB_TEST_POSTGRES_DSN must be a URL-form DSN: %v", err)
+	}
+	admin, err := sql.Open("pgx", adminDSN)
+	if err != nil {
+		t.Fatalf("open admin postgres: %v", err)
+	}
+	dbName := fmt.Sprintf("shtest_migration_%d_%d", time.Now().UnixNano(), migrationTestDatabaseCounter.Add(1))
+	if _, err := admin.Exec(`CREATE DATABASE ` + dbName); err != nil {
+		_ = admin.Close()
+		t.Fatalf("create migration test database: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1`, dbName)
+		_, _ = admin.Exec(`DROP DATABASE IF EXISTS ` + dbName)
+		_ = admin.Close()
+	})
+	u.Path = "/" + dbName
+	return u.String()
 }
 
 func mustExec(t *testing.T, s *Store, q string, args ...any) {

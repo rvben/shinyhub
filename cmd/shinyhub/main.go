@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,6 +63,7 @@ import (
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/sandbox"
 	scalewayruntime "github.com/rvben/shinyhub/internal/scaleway"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 	"github.com/rvben/shinyhub/internal/secrets"
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
@@ -286,6 +288,12 @@ var resolveLegacyWritersCmd = &cobra.Command{
 		}
 		if err := store.Migrate(); err != nil {
 			return fmt.Errorf("migrate database: %w", err)
+		}
+		// This acknowledgement mutates durable safety evidence. Apply the same
+		// downgrade guard as serve before even listing/resolving markers: an older
+		// recovery binary must never reinterpret a schema it does not understand.
+		if err := store.VerifySchemaCompatibility(); err != nil {
+			return fmt.Errorf("schema compatibility: %w", err)
 		}
 		legacy, err := store.ListLegacyUnfencedScheduleRuns()
 		if err != nil {
@@ -1010,7 +1018,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	} else if legacyRuns > 0 {
 		return fmt.Errorf("legacy schedule writer fence: %d schedule run(s) were running during the 0.12.x upgrade and may have surviving unfenced descendants; stop every old server, verify those process trees are gone, then run `shinyhub resolve-legacy-schedule-writers --acknowledge-processes-stopped` before restarting", legacyRuns)
 	}
-	if err := validateStoredProducerIsolation(store, cfg.Runtime.DefaultWorkerIsolation); err != nil {
+	if err := validateStoredProducerTopology(store, cfg.Runtime); err != nil {
 		return fmt.Errorf("producer topology: %w", err)
 	}
 
@@ -2754,31 +2762,75 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	return nil
 }
 
-// validateStoredProducerIsolation catches configuration-only topology drift
-// before the server can admit traffic. In particular, an app whose stored mode
-// is empty inherits a changed fleet default without any PATCH/deploy request
-// passing through API validation.
-func validateStoredProducerIsolation(store *db.Store, defaultIsolation string) error {
+// validateStoredProducerTopology catches legacy declarations and
+// configuration-only topology drift before the server can admit traffic. In
+// particular, an app whose stored isolation or placement inherits a changed
+// fleet default has not passed through any PATCH/deploy validation. Execution
+// repeats these checks at the physical process boundary, but startup must fail
+// first: otherwise an upgraded server can look healthy until the next cron tick
+// silently rejects a previously supported producer.
+func validateStoredProducerTopology(store *db.Store, runtimeCfg config.RuntimeConfig) error {
 	apps, err := store.ListApps(0, 0)
 	if err != nil {
 		return fmt.Errorf("list apps: %w", err)
 	}
+	var topologyErrs []error
 	for _, app := range apps {
-		isolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, defaultIsolation)
-		if isolation == "multiplex" {
-			continue
-		}
 		schedules, err := store.ListSchedulesByApp(app.ID)
 		if err != nil {
 			return fmt.Errorf("list schedules for %s: %w", app.Slug, err)
 		}
 		for _, schedule := range schedules {
-			if schedule.Enabled && (schedule.DeployTrigger != "never" || schedule.OnSuccess == "roll") {
-				return fmt.Errorf("app %q has producer schedule %q but effective worker_isolation=%q; set this app explicitly to multiplex before changing the fleet default", app.Slug, schedule.Name, isolation)
+			if !schedule.Enabled || (schedule.DeployTrigger == schedulespec.DeployTriggerNever && schedule.OnSuccess != "roll") {
+				continue
+			}
+
+			isolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, runtimeCfg.DefaultWorkerIsolation)
+			if isolation != "multiplex" {
+				topologyErrs = append(topologyErrs, fmt.Errorf("app %q has enabled producer schedule %q but effective worker_isolation=%q; set the app explicitly to multiplex or disable its producer policy before starting this version", app.Slug, schedule.Name, isolation))
+				continue
+			}
+			orphanRisk, err := store.AppElasticOrphanRisk(app.ID)
+			if err != nil {
+				return fmt.Errorf("app %q producer schedule %q: read elastic orphan-risk marker: %w", app.Slug, schedule.Name, err)
+			}
+			if orphanRisk {
+				topologyErrs = append(topologyErrs, fmt.Errorf("app %q has enabled producer schedule %q but its elastic orphan-risk marker is uncleared; keep the app stopped and complete the explicit worker_isolation=multiplex safety transition, or disable its producer policy before restarting", app.Slug, schedule.Name))
+				continue
+			}
+
+			placement := app.PlacementMap()
+			if len(placement) == 0 {
+				placement = map[string]int{runtimeCfg.DefaultTierName(): app.Replicas}
+			}
+			tiers := make([]string, 0, len(placement))
+			for tier := range placement {
+				tiers = append(tiers, tier)
+			}
+			sort.Strings(tiers)
+			for _, tier := range tiers {
+				runtimeName, ok := runtimeCfg.RuntimeForTier(tier)
+				// Config loading synthesizes the local tier, but preserve the zero-value
+				// fallback for maintenance callers and focused tests that construct a
+				// RuntimeConfig directly.
+				if !ok && len(runtimeCfg.Tiers) == 0 && tier == runtimeCfg.DefaultTierName() {
+					runtimeName = runtimeCfg.Mode
+					if runtimeName == "" {
+						runtimeName = "native"
+					}
+					ok = true
+				}
+				if !ok {
+					topologyErrs = append(topologyErrs, fmt.Errorf("app %q producer schedule %q is placed on unresolved tier %q; restore that tier in runtime.tiers or move/disable the producer before restarting", app.Slug, schedule.Name, tier))
+					continue
+				}
+				if runtimeName != "native" {
+					topologyErrs = append(topologyErrs, fmt.Errorf("app %q producer schedule %q is placed on tier %q using runtime %q; data-producing schedules require a local native tier, so move the app or disable its producer policy before restarting", app.Slug, schedule.Name, tier, runtimeName))
+				}
 			}
 		}
 	}
-	return nil
+	return errors.Join(topologyErrs...)
 }
 
 // appNavHomeURL is the dashboard the app switcher links back to.

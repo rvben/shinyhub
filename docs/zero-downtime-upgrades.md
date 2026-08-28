@@ -24,6 +24,61 @@ running throughout (`server.shutdown_apps: adopt`, the default).
 
 ## Upgrading
 
+### Special procedure: 0.12.x to 0.13.0
+
+The schedule-provenance upgrade is an intentional exception to the normal
+zero-downtime procedure. Use a maintenance window and stop the 0.12.x control
+plane; do **not** use `systemctl reload` for this version boundary. Version
+0.13.0 installs a database admission fence that prevents a still-running 0.12.x
+server from launching another unattributed schedule process.
+
+1. While 0.12.x is still running, inventory every enabled schedule with
+   `on_success = "roll"`. Version 0.12.x allowed these schedules on local
+   Docker; 0.13.0 requires every data-producing schedule to use effective
+   `worker_isolation = "multiplex"` and a local native runtime. Move each app to
+   that topology, or disable/remove the producer policy before upgrading.
+2. Replace every manifest `run_on_register` declaration with an explicit
+   `deploy_trigger`: normally `bundle_change` for a cache that must match its
+   bundle, or `first_deploy` for a genuine one-time bootstrap.
+3. Let all in-flight schedule runs finish, verify their terminal state with
+   `shinyhub schedule runs`, then stop the old control plane with
+   `systemctl stop shinyhub`. Confirm no scheduled-job process or descendant is
+   left on the host; reboot if that is the only reliable way to establish the
+   process fence.
+4. Install 0.13.0 and start the service. Startup validates every enabled stored
+   producer before serving. An error names the app, schedule, isolation, tier,
+   or runtime that still needs correction. Stop the service again before
+   correcting a startup error so `Restart=on-failure` cannot retry around your
+   maintenance work.
+5. If startup reports `legacy schedule writer fence`, keep all old servers and
+   the new service stopped, verify the listed process trees are gone, and run
+   the new binary's offline resolver:
+
+   ```bash
+   systemctl stop shinyhub
+   shinyhub resolve-legacy-schedule-writers
+   shinyhub resolve-legacy-schedule-writers --acknowledge-processes-stopped
+   systemctl start shinyhub
+   ```
+
+   The first invocation is read-only and lists the affected app, schedule, and
+   run IDs. The acknowledged invocation records conservative data uncertainty;
+   it does not declare the cache safe.
+6. Reapply the updated manifests after startup. Migrated schedules default to
+   `deploy_trigger = "never"` because 0.12.x did not persist
+   `run_on_register`. If the resolver marked a producer as requiring repair,
+   rerun that exact schedule under the new fence and wait for success:
+
+   ```bash
+   shinyhub schedule run APP SCHEDULE --follow
+   ```
+
+   Check `shinyhub apps show APP` and `shinyhub schedule ls APP`; do not return
+   the app to service while `compatibility_quarantined` or
+   `producer_repair_required` remains true.
+
+For later compatible releases, use the normal handoff:
+
 ```bash
 # 1. Replace the binary in place with the new version.
 install -m 0755 ./shinyhub /usr/local/bin/shinyhub

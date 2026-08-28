@@ -7,7 +7,6 @@ import "testing"
 // the new convergence/provenance fields receive deliberately unsatisfied safe
 // defaults; an upgrade must never infer bundle readiness from lifetime success.
 func TestMigration069PreservesExistingScheduleHistory(t *testing.T) {
-	skipIfPostgres(t)
 	s := migratedThrough(t, 68)
 	mustExec(t, s, `INSERT INTO users (username, password_hash, role) VALUES ('owner','x','admin')`)
 	mustExec(t, s, `INSERT INTO apps (slug, name, owner_id, access) VALUES ('legacy-app','Legacy app',1,'private')`)
@@ -81,7 +80,6 @@ func TestMigration069PreservesExistingScheduleHistory(t *testing.T) {
 }
 
 func TestResolveLegacyUnfencedScheduleRunsCreatesRepairQuarantineAtomically(t *testing.T) {
-	skipIfPostgres(t)
 	s := migratedThrough(t, 68)
 	mustExec(t, s, `INSERT INTO users (username, password_hash, role) VALUES ('owner','x','admin')`)
 	mustExec(t, s, `INSERT INTO apps (slug, name, owner_id, access, status) VALUES ('legacy-app','Legacy app',1,'private','running')`)
@@ -130,7 +128,6 @@ func TestResolveLegacyUnfencedScheduleRunsCreatesRepairQuarantineAtomically(t *t
 }
 
 func TestMigration070PreservesDeploymentsAndReplicaAttribution(t *testing.T) {
-	skipIfPostgres(t)
 	s := migratedThrough(t, 69)
 	mustExec(t, s, `INSERT INTO users (username, password_hash, role) VALUES ('owner','x','admin')`)
 	mustExec(t, s, `INSERT INTO apps (slug, name, owner_id, access) VALUES ('legacy-app','Legacy app',1,'private')`)
