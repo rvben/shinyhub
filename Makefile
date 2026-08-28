@@ -499,7 +499,8 @@ iac-validate:
 
 # Release workflow:
 #   make release-patch   (or release-minor / release-major)
-#   vership bumps the version, commits changelog, creates a tag, and pushes.
+#   vership.toml pins the repository's own lint/test gates, updates package.json,
+#   and regenerates package-lock.json before vership commits, tags, and pushes.
 #   GitHub Actions picks up the v* tag and runs GoReleaser.
 #   Binaries are attached to the GitHub release automatically.
 #   The install script at scripts/install.sh always pulls the latest release.

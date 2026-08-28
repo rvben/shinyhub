@@ -1,0 +1,20 @@
+[project]
+type = "go"
+branch = "main"
+
+[changelog]
+unconventional = "exclude"
+
+[checks]
+lint = true
+tests = true
+lint_command = "make lint"
+test_command = "make test"
+
+[[version_files]]
+glob = "package.json"
+field = "version"
+
+[[artifacts]]
+command = "node scripts/sync-package-lock-version.mjs"
+files = ["package-lock.json"]
