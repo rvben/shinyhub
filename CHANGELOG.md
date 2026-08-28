@@ -6,16 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [0.13.0](https://github.com/rvben/shinyhub/compare/v0.12.11...v0.13.0) - 2026-08-28
+
 ### Breaking Changes
 
 - **bookmarks**: remove the unused `schema_version` registration argument and
   stop adding package metadata to view-link URLs. The public demo's links now
   contain only selected Shiny input state.
-
-## [0.13.0](https://github.com/rvben/shinyhub/compare/v0.12.11...v0.13.0) - 2026-08-28
-
-### Breaking Changes
-
 - **schedules**: replace `run_on_register` with the explicit `deploy_trigger`
   policies `never`, `first_deploy`, and `bundle_change`. Use `first_deploy` for
   the former one-time behavior and `bundle_change` when an app must not consume
