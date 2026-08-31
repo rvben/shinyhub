@@ -7,6 +7,7 @@ import {
   demoLoginScript,
   demoLoginStyles,
 } from "./demo-login";
+import { DEMO_READY_PATH, demoWakeResponse } from "./demo-wake";
 
 interface Env {
   SHINYHUB_DEMO: DurableObjectNamespace<ShinyHubDemo>;
@@ -40,7 +41,7 @@ export class ShinyHubDemo extends Container {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (!allowedHosts.has(url.hostname)) {
       return new Response("Not found", { status: 404 });
@@ -59,6 +60,44 @@ export default {
     headers.set("x-forwarded-proto", "https");
 
     const container = getContainer(env.SHINYHUB_DEMO, "public-demo");
+
+    if (url.hostname === DEMO_HOST && url.pathname === DEMO_READY_PATH) {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", {
+          status: 405,
+          headers: { allow: "GET", "cache-control": "no-store" },
+        });
+      }
+
+      const healthURL = new URL("/healthz", url);
+      const healthResponse = await container.fetch(new Request(healthURL, {
+        method: "GET",
+        headers,
+      }));
+      await healthResponse.body?.cancel();
+      return new Response(null, {
+        status: healthResponse.ok ? 204 : 503,
+        headers: {
+          "cache-control": "no-store",
+          "retry-after": "2",
+          "x-shinyhub-demo-state": healthResponse.ok ? "ready" : "starting",
+        },
+      });
+    }
+
+    if (
+      url.hostname === DEMO_HOST
+      && request.method === "GET"
+      && url.pathname === "/"
+    ) {
+      const state = await container.getState();
+      if (state.status !== "healthy") {
+        ctx.waitUntil(container.start().catch((error: unknown) => {
+          console.error("Unable to start the ShinyHub demo container", error);
+        }));
+        return demoWakeResponse();
+      }
+    }
 
     if (url.hostname === DEMO_HOST && url.pathname === DEMO_SESSION_PATH) {
       if (request.method !== "POST") {

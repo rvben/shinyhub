@@ -32,6 +32,7 @@ check() {
 }
 
 check "$base_url/healthz" 200
+check "$base_url/__demo/ready" 204
 check "$base_url/" 200 302
 check "$base_url/login" 200
 

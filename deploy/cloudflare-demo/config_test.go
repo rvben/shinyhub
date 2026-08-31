@@ -121,6 +121,52 @@ func TestCloudflareDemoOneClickEntryIsReadOnlyAndCoveredBySmokeTest(t *testing.T
 	}
 }
 
+func TestCloudflareDemoColdStartStaysOffTheRootRequestPath(t *testing.T) {
+	worker, err := os.ReadFile("src/index.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerSource := string(worker)
+	for _, required := range []string{
+		`container.getState()`,
+		`state.status !== "healthy"`,
+		`ctx.waitUntil(container.start()`,
+		`return demoWakeResponse()`,
+		`url.pathname === DEMO_READY_PATH`,
+		`new URL("/healthz", url)`,
+	} {
+		if !strings.Contains(workerSource, required) {
+			t.Errorf("demo Worker cold-start path is missing %q", required)
+		}
+	}
+
+	wake, err := os.ReadFile("src/demo-wake.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wakeSource := string(wake)
+	for _, required := range []string{
+		`Waking the live demo`,
+		`fetch('${DEMO_READY_PATH}'`,
+		`window.location.replace('/')`,
+		`@media (prefers-reduced-motion: reduce)`,
+		`content-security-policy`,
+		`x-shinyhub-demo-state`,
+	} {
+		if !strings.Contains(wakeSource, required) {
+			t.Errorf("demo edge boot page is missing %q", required)
+		}
+	}
+
+	smoke, err := os.ReadFile("../../scripts/demo-smoke.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(smoke), `/__demo/ready`) {
+		t.Fatal("production smoke test does not exercise edge readiness")
+	}
+}
+
 func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/demo.yml")
 	if err != nil {

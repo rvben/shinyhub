@@ -5,6 +5,13 @@ one Cloudflare Worker and one stable Cloudflare Container instance. The
 container sleeps after ten idle minutes and reconstructs its curated fleet from
 the image whenever Cloudflare replaces its ephemeral filesystem.
 
+The Worker keeps the container cold start out of the first-page critical path.
+When the container is asleep, `/` returns a small self-contained boot page from
+the edge immediately and starts the named container in the background. The page
+waits on `/__demo/ready`, which gates on ShinyHub's real `/healthz`, then reloads
+into the normal UI. Warm requests continue to proxy directly without showing the
+boot page.
+
 Cloudflare Containers require the Workers Paid plan ($5 USD/month minimum).
 The plan's included container allowance covers an idle or lightly used demo;
 usage beyond that allowance is metered.
