@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- **usage analytics**: record successful app WebSocket sessions and expose
+  authorized per-app totals, audience composition, connection duration, recent
+  activity, and exact peak concurrency without depending on Prometheus.
+- **usage privacy**: default new collection to unattributed totals, with
+  installation-wide and stricter per-app controls for disabled, pseudonymous,
+  or identified reporting. IP addresses, user agents, device identifiers, and
+  browser fingerprints are never stored; raw sessions default to 30-day
+  retention and non-identifying daily rollups to 365 days.
+- **usage operations**: keep connection recording asynchronous and bounded,
+  preserve historical peaks before raw-data expiry, expose persistence-health
+  metrics, and document configuration, authorization, retention, and failure
+  behavior.
+
 ## [0.13.1](https://github.com/rvben/shinyhub/compare/v0.13.0...v0.13.1) - 2026-08-28
 
 ### Added
