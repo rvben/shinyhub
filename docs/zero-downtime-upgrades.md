@@ -102,6 +102,12 @@ straggler is force-closed.
 
 - **Failure is safe.** If the successor fails to start within `upgrade_timeout`,
   the old process keeps serving - the upgrade simply does not happen.
+- **Startup preflight.** The handoff re-execs the process's own `argv[0]`, so at
+  boot the server checks that `argv[0]` resolves to an executable (the same
+  `PATH` lookup the handoff uses) and logs a warning when it does not. With the
+  warning present every `SIGHUP` fails safe with the current process still
+  serving; fix how the service launches the binary (an absolute `ExecStart`
+  path, or a name resolvable on the unit's `PATH`) before relying on reloads.
 - **Database migrations must be backward-compatible and non-blocking.** During
   the handoff window both versions briefly run against the same SQLite database.
   The successor applies any new migrations at startup while the previous version

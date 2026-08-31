@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -45,6 +46,17 @@ func New(timeout time.Duration, pidFile string) (Upgrader, error) {
 		UpgradeTimeout: timeout,
 		PIDFile:        pidFile,
 	})
+}
+
+// ResolveReexecTarget resolves argv0 (normally os.Args[0]) with the same lookup
+// the SIGHUP handoff uses to spawn the successor: tableflip re-execs os.Args[0]
+// via exec.LookPath. An error means a zero-downtime upgrade cannot work in this
+// process - SIGHUP would fail and the current process would keep serving - which
+// is worth a warning at startup rather than a surprise at upgrade time. A bare
+// name (no path separator) resolves only through PATH, so how the process was
+// launched decides the outcome.
+func ResolveReexecTarget(argv0 string) (string, error) {
+	return exec.LookPath(argv0)
 }
 
 // WireSignals connects process signals to the upgrader lifecycle and returns

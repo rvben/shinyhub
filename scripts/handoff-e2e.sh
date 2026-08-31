@@ -9,10 +9,12 @@ WORK="$(mktemp -d)"
 SERVER_PID=""
 LOOP_PID=""
 TCP_PID=""
+BARE_PID=""
 cleanup() {
   [ -n "$LOOP_PID" ] && kill "$LOOP_PID" 2>/dev/null || true
   [ -n "$TCP_PID" ] && kill "$TCP_PID" 2>/dev/null || true
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
+  [ -n "$BARE_PID" ] && kill "$BARE_PID" 2>/dev/null || true
   if [ -f "$WORK/shinyhub.pid" ]; then kill "$(cat "$WORK/shinyhub.pid")" 2>/dev/null || true; fi
   rm -rf "$WORK"
 }
@@ -44,6 +46,39 @@ EOF
 export SHINYHUB_AUTH_SECRET="handoff-e2e-secret-handoff-e2e-secret"
 export SHINYHUB_ADMIN_USER="admin"
 export SHINYHUB_ADMIN_PASSWORD="admin"
+
+# A bare argv[0] cannot be re-exec'd: tableflip spawns the successor from
+# os.Args[0] via PATH lookup, so the server must warn at startup and a SIGHUP
+# must fail safe (old process keeps serving). PATH is pinned to directories
+# that carry no shinyhub so the bare name cannot resolve; the main scenario
+# below is the matching negative control (absolute argv[0]: no warning,
+# handoff succeeds).
+echo "==> bare argv[0]: startup warns, SIGHUP fails safe"
+BARELOG="$WORK/bare.log"
+PATH="/usr/bin:/bin" bash -c "exec -a shinyhub '$BIN' serve --config '$WORK/shinyhub.yaml'" >"$BARELOG" 2>&1 &
+BARE_PID=$!
+ready=0
+for _ in $(seq 1 100); do
+  if curl -fsS "http://127.0.0.1:${PORT}/readyz" >/dev/null 2>&1; then ready=1; break; fi
+  sleep 0.2
+done
+[ "$ready" = "1" ] || { echo "FAIL: bare-argv0 server never became ready"; tail -20 "$BARELOG"; exit 1; }
+grep -q "cannot resolve re-exec target" "$BARELOG" \
+  || { echo "FAIL: no re-exec preflight warning in bare-argv0 startup log"; tail -20 "$BARELOG"; exit 1; }
+kill -HUP "$BARE_PID"
+hupfail=0
+for _ in $(seq 1 50); do
+  if grep -q "zero-downtime upgrade failed" "$BARELOG"; then hupfail=1; break; fi
+  sleep 0.1
+done
+[ "$hupfail" = "1" ] \
+  || { echo "FAIL: SIGHUP with bare argv[0] did not fail (or failure not logged)"; tail -20 "$BARELOG"; exit 1; }
+curl -fsS "http://127.0.0.1:${PORT}/healthz" >/dev/null \
+  || { echo "FAIL: bare-argv0 server stopped serving after the failed upgrade"; exit 1; }
+kill "$BARE_PID"
+wait "$BARE_PID" 2>/dev/null || true
+BARE_PID=""
+rm -f "$PIDFILE" "$WORK/shinyhub.db"*
 
 echo "==> starting server"
 "$BIN" serve --config "$WORK/shinyhub.yaml" &

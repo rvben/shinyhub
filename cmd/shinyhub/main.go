@@ -994,6 +994,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		return fmt.Errorf("init upgrader: %w", err)
 	}
 	defer upg.Stop()
+	// Preflight the handoff's re-exec target now: a SIGHUP re-execs argv[0], and
+	// an unresolvable argv[0] fails every upgrade attempt (the process keeps
+	// serving, so the failure is safe but silent until upgrade time).
+	if _, rerr := upgrade.ResolveReexecTarget(os.Args[0]); rerr != nil {
+		logger.Warn("zero-downtime upgrade preflight: cannot resolve re-exec target; SIGHUP upgrades will fail and this process will keep serving",
+			"argv0", os.Args[0], "err", rerr)
+	}
 
 	// SIGHUP -> upgrade; ctx cancel (SIGINT/SIGTERM) -> Stop (closes Exit).
 	sighup := make(chan os.Signal, 1)
