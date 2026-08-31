@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [0.14.0](https://github.com/rvben/shinyhub/compare/v0.13.1...v0.14.0) - 2026-08-31
+
 ### Added
 
 - **usage analytics**: record successful app WebSocket sessions and expose
@@ -20,6 +22,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   preserve historical peaks before raw-data expiry, expose persistence-health
   metrics, and document configuration, authorization, retention, and failure
   behavior.
+
+### Fixed
+
+- **demo**: use the official logo on the wake page
+  ([69b24cc](https://github.com/rvben/shinyhub/commit/69b24cc44ec876ce074f1288775caea49f8585b8)).
+
+### Performance
+
+- **demo**: move cold start off the initial page load
+  ([a498c21](https://github.com/rvben/shinyhub/commit/a498c219e6d4a1c62bcd3df0100f23bd8ccb8e5a)).
 
 ## [0.13.1](https://github.com/rvben/shinyhub/compare/v0.13.0...v0.13.1) - 2026-08-28
 
