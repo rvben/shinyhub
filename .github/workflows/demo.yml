@@ -30,9 +30,37 @@ jobs:
       name: public-demo
       url: https://demo.shinyhub.dev
     steps:
+      - name: Resolve deployment ref
+        id: deployment-ref
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const requestedRef = context.eventName === "workflow_run"
+              ? context.payload.workflow_run?.head_sha
+              : context.payload.inputs?.ref;
+            if (!requestedRef) {
+              core.setFailed("No deployment ref was provided.");
+              return;
+            }
+
+            try {
+              const { data: commit } = await github.rest.repos.getCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: requestedRef,
+              });
+              if (!/^[0-9a-f]{40}$/.test(commit.sha)) {
+                throw new Error("GitHub returned an invalid commit SHA");
+              }
+              core.info(`Resolved deployment ref ${requestedRef} to ${commit.sha}.`);
+              core.setOutput("sha", commit.sha);
+            } catch (error) {
+              core.setFailed(`Unable to resolve deployment ref ${requestedRef}: ${error.message}`);
+            }
+
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.ref }}
+          ref: ${{ steps.deployment-ref.outputs.sha }}
           persist-credentials: false
 
       - uses: actions/setup-go@v7
