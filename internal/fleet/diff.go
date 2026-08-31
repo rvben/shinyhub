@@ -41,6 +41,7 @@ type ObservedApp struct {
 	MaxSessionsPerReplica        *int
 	RenderSeconds                *float64
 	IdentityHeaders              *bool
+	UsageIdentityMode            *string
 	MinWarmReplicas              *int
 	MemoryLimitMB                *int
 	CPUQuotaPercent              *int
@@ -218,6 +219,11 @@ func unmanagedConfig(app AppEntry, o ObservedApp) []UnmanagedConfigItem {
 			Key: "identity_headers", Server: fmt.Sprintf("%t", *o.IdentityHeaders), Default: "(default)",
 		})
 	}
+	if c.UsageIdentityMode == nil && o.UsageIdentityMode != nil {
+		out = append(out, UnmanagedConfigItem{
+			Key: "usage_identity_mode", Server: fmt.Sprintf("%q", *o.UsageIdentityMode), Default: "(default)",
+		})
+	}
 	addInt("min_warm_replicas", c.MinWarmReplicas, o.MinWarmReplicas, 0, "0")
 	if c.MemoryLimitMB == nil && o.MemoryLimitMB != nil {
 		out = append(out, UnmanagedConfigItem{Key: "memory_limit_mb", Server: fmt.Sprintf("%d", *o.MemoryLimitMB), Default: "(default)"})
@@ -264,6 +270,7 @@ func configDrift(app AppEntry, o ObservedApp) []ConfigDriftItem {
 	d = appendIntDrift(d, "max_sessions_per_replica", c.MaxSessionsPerReplica, o.MaxSessionsPerReplica)
 	d = appendFloatDrift(d, "render_seconds", c.RenderSeconds, o.RenderSeconds)
 	d = appendBoolDrift(d, "identity_headers", c.IdentityHeaders, o.IdentityHeaders)
+	d = appendStringDrift(d, "usage_identity_mode", c.UsageIdentityMode, o.UsageIdentityMode)
 	d = appendIntDrift(d, "min_warm_replicas", c.MinWarmReplicas, o.MinWarmReplicas)
 	d = appendIntDrift(d, "memory_limit_mb", c.MemoryLimitMB, o.MemoryLimitMB)
 	d = appendIntDrift(d, "cpu_quota_percent", c.CPUQuotaPercent, o.CPUQuotaPercent)

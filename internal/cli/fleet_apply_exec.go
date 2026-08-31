@@ -330,6 +330,10 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 				return fmt.Errorf("app %s: invalid desired %s=%q: %w", slug, c.Key, c.Desired, perr)
 			}
 			body[c.Key] = v
+		case "usage_identity_mode":
+			if declared.UsageIdentityMode != nil {
+				body[c.Key] = *declared.UsageIdentityMode
+			}
 		case "project":
 			// The drift key is `project` (what the operator wrote in the
 			// manifest); the API field is `project_slug`. Rebuilt from the

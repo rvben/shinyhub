@@ -563,6 +563,12 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 			"can_read_logs": canManage,
 			"can_cancel":    canManage,
 		},
+		"usage_policy": map[string]any{
+			"hub_identity_mode":        s.cfg.Usage.IdentityMode,
+			"collection_enabled":       s.cfg.Usage.Enabled,
+			"raw_retention_days":       s.cfg.Usage.RawRetentionDays,
+			"aggregate_retention_days": s.cfg.Usage.AggregateRetentionDays,
+		},
 	}
 	if fleetState, err := s.appFleetState(app); err == nil && fleetState != nil {
 		envelope["fleet_state"] = fleetState
@@ -678,43 +684,45 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// Parse and validate all fields first so a bad request never causes a
 	// partial write (e.g. hibernate_timeout persisted while name rejected).
 	var (
-		hibernateTimeout    *int
-		setHibernateTimeout bool
-		newName             string
-		setName             bool
-		newDescription      string
-		setDescription      bool
-		newIconEmoji        string
-		setIconEmoji        bool
-		newProjectSlug      string
-		setProjectSlug      bool
-		memoryLimitMB       *int
-		setMemoryLimitMB    bool
-		cpuQuotaPercent     *int
-		setCPUQuotaPercent  bool
-		newReplicas         int
-		setReplicas         bool
-		newMaxSessions      int
-		setMaxSessions      bool
-		newRenderSeconds    float64
-		setRenderSeconds    bool
-		newIdentityHeaders  *bool
-		setIdentityHeaders  bool
-		newMinWarmReplicas  int
-		setMinWarmReplicas  bool
-		newManagedBy        *string
-		setManagedBy        bool
-		placementKeyPresent bool
-		setPlacement        bool // a non-null placement object was provided
-		clearPlacement      bool // an explicit null placement was provided
-		placementJSON       string
-		placementTotal      int
-		newPlacementTiers   []string // tiers (count>0) the new placement would run on
-		setAutoscale        bool
-		autoEnabled         bool
-		autoMin             int
-		autoMax             int
-		autoTarget          float64
+		hibernateTimeout     *int
+		setHibernateTimeout  bool
+		newName              string
+		setName              bool
+		newDescription       string
+		setDescription       bool
+		newIconEmoji         string
+		setIconEmoji         bool
+		newProjectSlug       string
+		setProjectSlug       bool
+		memoryLimitMB        *int
+		setMemoryLimitMB     bool
+		cpuQuotaPercent      *int
+		setCPUQuotaPercent   bool
+		newReplicas          int
+		setReplicas          bool
+		newMaxSessions       int
+		setMaxSessions       bool
+		newRenderSeconds     float64
+		setRenderSeconds     bool
+		newIdentityHeaders   *bool
+		setIdentityHeaders   bool
+		newUsageIdentityMode *string
+		setUsageIdentityMode bool
+		newMinWarmReplicas   int
+		setMinWarmReplicas   bool
+		newManagedBy         *string
+		setManagedBy         bool
+		placementKeyPresent  bool
+		setPlacement         bool // a non-null placement object was provided
+		clearPlacement       bool // an explicit null placement was provided
+		placementJSON        string
+		placementTotal       int
+		newPlacementTiers    []string // tiers (count>0) the new placement would run on
+		setAutoscale         bool
+		autoEnabled          bool
+		autoMin              int
+		autoMax              int
+		autoTarget           float64
 
 		newWorkerIsolation          string
 		setWorkerIsolation          bool
@@ -891,6 +899,25 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newIdentityHeaders, setIdentityHeaders = v, true
+	}
+	if rawVal, present := raw["usage_identity_mode"]; present {
+		var v *string
+		if err := json.Unmarshal(rawVal, &v); err != nil {
+			writeError(w, http.StatusBadRequest, "usage_identity_mode must be a string or null")
+			return
+		}
+		if v != nil {
+			mode := config.UsageIdentityMode(*v)
+			if *v != "disabled" && !mode.Valid() {
+				writeError(w, http.StatusBadRequest, "usage_identity_mode must be disabled, unattributed, pseudonymous, identified, or null")
+				return
+			}
+			if *v != "disabled" && config.UsageIdentityRank(mode) > config.UsageIdentityRank(s.cfg.Usage.IdentityMode) {
+				writeError(w, http.StatusBadRequest, "usage_identity_mode cannot collect more identity than the hub policy")
+				return
+			}
+		}
+		newUsageIdentityMode, setUsageIdentityMode = v, true
 	}
 
 	if rawVal, present := raw["min_warm_replicas"]; present {
@@ -1297,6 +1324,11 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	oldWorkerWarmSpares := app.WorkerWarmSpares
 	oldWorkerMaxSessionLifetime := app.WorkerMaxSessionLifetimeSecs
 	oldProjectSlug := app.ProjectSlug
+	oldUsageIdentityMode := app.UsageIdentityMode
+	if setUsageIdentityMode && s.usagePolicy == nil {
+		writeError(w, http.StatusServiceUnavailable, "usage privacy policy unavailable")
+		return
+	}
 
 	// Apply core settings in a single transaction so a storage failure mid-write
 	// never leaves the row half-updated. The managed_by marker is a separate
@@ -1322,6 +1354,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		RenderSeconds:                newRenderSeconds,
 		SetIdentityHeaders:           setIdentityHeaders,
 		IdentityHeaders:              newIdentityHeaders,
+		SetUsageIdentityMode:         setUsageIdentityMode,
+		UsageIdentityMode:            newUsageIdentityMode,
 		SetMinWarmReplicas:           setMinWarmReplicas,
 		MinWarmReplicas:              newMinWarmReplicas,
 		SetWorkerIsolation:           setWorkerIsolation,
@@ -1343,6 +1377,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		reqLog(r).Error("patch app settings failed", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
+	}
+	if setUsageIdentityMode {
+		newOverride := ""
+		if newUsageIdentityMode != nil {
+			newOverride = *newUsageIdentityMode
+		}
+		if _, err := s.usagePolicy.ApplyCommittedAppPolicy(s.store, app.ID, slug, newOverride); err != nil {
+			reqLog(r).Error("reconcile committed usage privacy policy", "slug", slug, "err", err)
+			writeError(w, http.StatusInternalServerError, "usage privacy policy committed but retained-data reconciliation failed")
+			return
+		}
 	}
 	if clearOrphanRiskAfterPatch {
 		if err := s.store.ClearElasticOrphanRisk(app.ID); err != nil {
@@ -1521,7 +1566,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// Audit any non-resource field touch exactly as before (these log even with
 	// an empty detail). For resource limits, audit only a real change, so a no-op
 	// resource-only PATCH neither redeploys nor logs a phantom update_app event.
-	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug || setIdentityHeaders ||
+	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug || setIdentityHeaders || setUsageIdentityMode ||
 		setReplicas || setMaxSessions || setRenderSeconds || setMinWarmReplicas || setManagedBy ||
 		setPlacement || clearPlacement || setAutoscale ||
 		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerWarmSpares || setWorkerMaxSessionLifetime ||
@@ -1537,7 +1582,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			setWorkerMaxWorkers, oldWorkerMaxWorkers, newWorkerMaxWorkers,
 			setWorkerWarmSpares, oldWorkerWarmSpares, newWorkerWarmSpares,
 			setWorkerMaxSessionLifetime, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime,
-			setProjectSlug, oldProjectSlug, newProjectSlug)
+			setProjectSlug, oldProjectSlug, newProjectSlug,
+			setUsageIdentityMode, oldUsageIdentityMode, newUsageIdentityMode)
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
 			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r), RunID: s.knownFleetRunID(r),
@@ -1614,6 +1660,7 @@ func patchAppAuditDetail(
 	setWorkerWarmSpares bool, oldWorkerWarmSpares, newWorkerWarmSpares int,
 	setWorkerMaxSessionLifetime bool, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime int,
 	setProjectSlug bool, oldProject, newProject string,
+	setUsageIdentityMode bool, oldUsageIdentityMode, newUsageIdentityMode *string,
 ) string {
 	d := map[string]any{}
 	if setMinWarmReplicas {
@@ -1645,6 +1692,9 @@ func patchAppAuditDetail(
 	}
 	if setProjectSlug {
 		d["project_slug"] = map[string]any{"old": oldProject, "new": newProject}
+	}
+	if setUsageIdentityMode {
+		d["usage_identity_mode"] = map[string]any{"old": oldUsageIdentityMode, "new": newUsageIdentityMode}
 	}
 	if len(d) == 0 {
 		return ""
@@ -2403,6 +2453,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			if _, rerr := s.store.ApplyAppManifestSettings(db.ApplyAppManifestSettingsParams{
 				AppID: preManifestApp.ID, Slug: slug,
 				SetIdentityHeaders: true, IdentityHeaders: preManifestApp.IdentityHeaders,
+				SetUsageIdentityMode: true, UsageIdentityMode: preManifestApp.UsageIdentityMode,
 				// Restore the pre-manifest autoscale policy. Unconditional like
 				// identity_headers: a no-op when the failed manifest declared no
 				// autoscale (writes back the same values), correct when it did.
@@ -2418,6 +2469,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				RenderSeconds:    preManifestApp.RenderSeconds,
 			}); rerr != nil {
 				slog.Error("deploy: revert identity_headers after failed deploy", "slug", slug, "err", rerr)
+			} else if s.usagePolicy != nil {
+				override := ""
+				if preManifestApp.UsageIdentityMode != nil {
+					override = *preManifestApp.UsageIdentityMode
+				}
+				if _, perr := s.usagePolicy.ApplyCommittedAppPolicy(s.store, preManifestApp.ID, slug, override); perr != nil {
+					slog.Error("deploy: reconcile restored usage privacy policy", "slug", slug, "err", perr)
+				}
 			}
 			if s.proxy != nil {
 				s.proxy.SetPoolIdentityHeaders(slug,

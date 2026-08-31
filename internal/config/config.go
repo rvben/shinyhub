@@ -115,6 +115,7 @@ type Config struct {
 	Defaults         DefaultsConfig
 	Tracing          TracingConfig
 	Metrics          MetricsConfig
+	Usage            UsageConfig
 	Maintenance      MaintenanceConfig
 	Branding         BrandingConfig
 	Worker           WorkerConfig
@@ -194,6 +195,77 @@ type MetricsConfig struct {
 	// HistoryInterval is the sampling cadence for the history collector.
 	// Default 15s; must be within [1s, 10m].
 	HistoryInterval time.Duration
+}
+
+// UsageConfig controls durable, privacy-conscious app session analytics. A
+// usage session is recorded only after a proxied app completes a WebSocket
+// upgrade; ordinary HTTP requests, assets, health checks, and failed starts do
+// not create usage rows.
+type UsageConfig struct {
+	// Enabled controls collection and the per-app usage API. It defaults to true
+	// for production configurations; operators can disable collection entirely.
+	Enabled bool `yaml:"enabled"`
+	// IdentityMode is the installation-wide privacy ceiling. Apps may choose a
+	// stricter mode, but can never collect more identity than this value allows.
+	IdentityMode UsageIdentityMode `yaml:"identity_mode"`
+	// RawRetentionDays bounds exact session history. Daily non-identifying
+	// aggregates may outlive it. Zero keeps history indefinitely and therefore
+	// requires an explicit operator choice.
+	RawRetentionDays int `yaml:"raw_retention_days"`
+	// AggregateRetentionDays bounds daily rollups. When both values are finite,
+	// aggregate history cannot expire before its raw source.
+	AggregateRetentionDays int `yaml:"aggregate_retention_days"`
+}
+
+// UsageIdentityMode describes what durable user-derived identity, if any, may
+// be written for a usage session. Pseudonymous identifiers remain personal
+// data; the distinction is about minimization, not legal anonymization.
+type UsageIdentityMode string
+
+const (
+	UsageIdentityUnattributed UsageIdentityMode = "unattributed"
+	UsageIdentityPseudonymous UsageIdentityMode = "pseudonymous"
+	UsageIdentityIdentified   UsageIdentityMode = "identified"
+)
+
+func (m UsageIdentityMode) Valid() bool {
+	switch m {
+	case UsageIdentityUnattributed, UsageIdentityPseudonymous, UsageIdentityIdentified:
+		return true
+	default:
+		return false
+	}
+}
+
+// UsageIdentityRank orders modes from least to most identifying. Unknown
+// values are deliberately treated as the most private mode by callers that
+// resolve an optional app override; validation rejects them at write time.
+func UsageIdentityRank(m UsageIdentityMode) int {
+	switch m {
+	case UsageIdentityIdentified:
+		return 2
+	case UsageIdentityPseudonymous:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// EffectiveUsageIdentityMode applies a nullable per-app privacy override to
+// the hub ceiling. "disabled" turns collection off for that app. An app may
+// reduce identity collection but never raise it above the hub policy.
+func EffectiveUsageIdentityMode(hub UsageIdentityMode, appOverride string) (UsageIdentityMode, bool) {
+	if appOverride == "disabled" {
+		return UsageIdentityUnattributed, false
+	}
+	if appOverride == "" || appOverride == "inherit" {
+		return hub, true
+	}
+	app := UsageIdentityMode(appOverride)
+	if !app.Valid() || UsageIdentityRank(app) >= UsageIdentityRank(hub) {
+		return hub, true
+	}
+	return app, true
 }
 
 // DefaultAppLogRunRetentionCount bounds immutable stdout/stderr history per
@@ -1120,6 +1192,7 @@ type rawConfig struct {
 	Defaults    rawDefaultsConfig  `yaml:"defaults"`
 	Tracing     rawTracingConfig   `yaml:"tracing"`
 	Metrics     rawMetricsConfig   `yaml:"metrics"`
+	Usage       rawUsageConfig     `yaml:"usage"`
 	Maintenance MaintenanceConfig  `yaml:"maintenance"`
 	Branding    BrandingConfig     `yaml:"branding"`
 	Worker      WorkerConfig       `yaml:"worker"`
@@ -1134,7 +1207,7 @@ var validTopLevelKeys = map[string]bool{
 	"database": true, "server": true, "auth": true, "storage": true,
 	"lifecycle": true, "oauth": true, "runtime": true, "scheduler": true,
 	"defaults": true, "tracing": true, "metrics": true, "maintenance": true,
-	"branding": true, "worker": true, "build": true,
+	"usage": true, "branding": true, "worker": true, "build": true,
 }
 
 // runtimeSubKeys are the section names nested under `runtime:`. Placing one at
@@ -1186,6 +1259,15 @@ type rawMetricsConfig struct {
 	Addr            string `yaml:"addr"`
 	HistoryWindow   string `yaml:"history_window"`   // parsed as time.Duration; "0s" disables
 	HistoryInterval string `yaml:"history_interval"` // parsed as time.Duration
+}
+
+type rawUsageConfig struct {
+	// Pointers distinguish an omitted section (privacy-safe bounded defaults)
+	// from explicit false / zero values.
+	Enabled                *bool   `yaml:"enabled"`
+	IdentityMode           *string `yaml:"identity_mode"`
+	RawRetentionDays       *int    `yaml:"raw_retention_days"`
+	AggregateRetentionDays *int    `yaml:"aggregate_retention_days"`
 }
 
 type rawTracingConfig struct {
@@ -1446,6 +1528,12 @@ func loadRaw(path string) (*Config, error) {
 			HistoryWindow:   histWindow,
 			HistoryInterval: histInterval,
 		},
+		Usage: UsageConfig{
+			Enabled:                derefOr(raw.Usage.Enabled, true),
+			IdentityMode:           UsageIdentityMode(derefOr(raw.Usage.IdentityMode, string(UsageIdentityUnattributed))),
+			RawRetentionDays:       derefOr(raw.Usage.RawRetentionDays, 30),
+			AggregateRetentionDays: derefOr(raw.Usage.AggregateRetentionDays, 365),
+		},
 		Maintenance: raw.Maintenance,
 		Branding:    raw.Branding,
 		Worker:      raw.Worker,
@@ -1545,6 +1633,19 @@ func loadRaw(path string) (*Config, error) {
 	}
 	if cfg.Maintenance.Interval <= 0 {
 		cfg.Maintenance.Interval = time.Hour
+	}
+	if !cfg.Usage.IdentityMode.Valid() {
+		return nil, fmt.Errorf("usage.identity_mode must be one of unattributed, pseudonymous, or identified")
+	}
+	if cfg.Usage.RawRetentionDays < 0 {
+		return nil, fmt.Errorf("usage.raw_retention_days must be zero or greater")
+	}
+	if cfg.Usage.AggregateRetentionDays < 0 {
+		return nil, fmt.Errorf("usage.aggregate_retention_days must be zero or greater")
+	}
+	if cfg.Usage.RawRetentionDays > 0 && cfg.Usage.AggregateRetentionDays > 0 &&
+		cfg.Usage.AggregateRetentionDays < cfg.Usage.RawRetentionDays {
+		return nil, fmt.Errorf("usage.aggregate_retention_days must be zero or at least usage.raw_retention_days")
 	}
 	if cfg.Maintenance.AuditRetentionDays < 0 {
 		cfg.Maintenance.AuditRetentionDays = 0
@@ -2979,6 +3080,30 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_METRICS_ENABLED: %w", err)
 		}
 		cfg.Metrics.Enabled = b
+	}
+	if v := os.Getenv("SHINYHUB_USAGE_ENABLED"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_USAGE_ENABLED: %w", err)
+		}
+		cfg.Usage.Enabled = b
+	}
+	if v := os.Getenv("SHINYHUB_USAGE_IDENTITY_MODE"); v != "" {
+		cfg.Usage.IdentityMode = UsageIdentityMode(strings.TrimSpace(v))
+	}
+	if v := os.Getenv("SHINYHUB_USAGE_RAW_RETENTION_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_USAGE_RAW_RETENTION_DAYS: %q is not an integer: %w", v, err)
+		}
+		cfg.Usage.RawRetentionDays = n
+	}
+	if v := os.Getenv("SHINYHUB_USAGE_AGGREGATE_RETENTION_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_USAGE_AGGREGATE_RETENTION_DAYS: %q is not an integer: %w", v, err)
+		}
+		cfg.Usage.AggregateRetentionDays = n
 	}
 	if v := os.Getenv("SHINYHUB_METRICS_ADDR"); v != "" {
 		cfg.Metrics.Addr = v

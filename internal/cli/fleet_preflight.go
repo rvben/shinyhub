@@ -200,6 +200,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			MaxSessionsPerReplica:        intPtr(a.MaxSessionsPerReplica),
 			RenderSeconds:                floatPtr(a.RenderSeconds),
 			IdentityHeaders:              a.IdentityHeaders,
+			UsageIdentityMode:            a.UsageIdentityMode,
 			MinWarmReplicas:              intPtr(a.MinWarmReplicas),
 			MemoryLimitMB:                a.MemoryLimitMB,
 			CPUQuotaPercent:              a.CPUQuotaPercent,
@@ -263,7 +264,8 @@ func bundleFleetConfig(a deploy.AppSettings) fleet.Config {
 		HibernateResetToDefault: a.HibernateResetToDefault,
 		Replicas:                a.Replicas, MaxSessionsPerReplica: a.MaxSessionsPerReplica,
 		RenderSeconds: a.RenderSeconds, IdentityHeaders: a.IdentityHeaders,
-		MinWarmReplicas: a.MinWarmReplicas, MemoryLimitMB: a.MemoryLimitMB,
+		UsageIdentityMode: a.UsageIdentityMode,
+		MinWarmReplicas:   a.MinWarmReplicas, MemoryLimitMB: a.MemoryLimitMB,
 		CPUQuotaPercent: a.CPUQuotaPercent,
 	}
 	if a.Autoscale != nil {

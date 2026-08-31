@@ -50,7 +50,7 @@ binary backed by SQLite, with no external services to operate.
 - **Horizontal scaling.** Set `replicas: N` to run multiple load-balanced backends per app, recovered independently on crash. See [docs/scaling.md](docs/scaling.md).
 - **Render pacing.** Set `render_seconds` to admit page loads at a rate the host can actually render, so a burst queues on a self-retrying wait page instead of stalling every session at once. See [docs/scaling.md](docs/scaling.md#render-pacing).
 - **Fleet reconcile.** Declare a whole set of apps in one `fleet.toml` and converge the server to match, kubectl-apply style. See [docs/fleet.md](docs/fleet.md).
-- **Observability.** OpenTelemetry tracing (proxy, app, and control-plane spans), an opt-in Prometheus `/metrics` endpoint, and a structured access log with request-ID and trace correlation. See [docs/tracing.md](docs/tracing.md) and [docs/metrics.md](docs/metrics.md).
+- **Observability.** Durable per-app usage analytics, OpenTelemetry tracing (proxy, app, and control-plane spans), an opt-in Prometheus `/metrics` endpoint, and a structured access log with request-ID and trace correlation. See [docs/usage-analytics.md](docs/usage-analytics.md), [docs/tracing.md](docs/tracing.md), and [docs/metrics.md](docs/metrics.md).
 - **Container isolation (optional).** Run each app inside a Docker container with CPU and memory limits.
 - **Managed cloud tiers.** Place replicas on AWS ECS/Fargate or private Scaleway Serverless Containers; Scaleway retains a stable endpoint and scales idle app compute to zero. See [docs/deployment/scaleway-serverless.md](docs/deployment/scaleway-serverless.md).
 - **Worker isolation.** Per-app session isolation dial: `multiplex` (shared event loop), `grouped` (N clients per worker), or `per_session` (one process per browser client, HOL-free), with optional frozen warm spares for low-latency assignment. See [docs/isolation.md](docs/isolation.md).
@@ -339,6 +339,7 @@ controlled explicitly:
 | [Deployment progress](docs/deploy-progress.md) | Live deploy phases, rollback diagnostics, NDJSON automation, and compatibility with older servers. |
 | [Develop applications](docs/local-development.md) | One safe command for local apps, fleets, and explicit remote development. |
 | [Tracing](docs/tracing.md) | OpenTelemetry propagation, app spans, and control-plane spans. |
+| [Usage analytics](docs/usage-analytics.md) | Durable app opens, audience privacy, access rules, and retention. |
 | [Metrics and logs](docs/metrics.md) | The `/metrics` endpoint, exposed series, and the structured access log. |
 | [Branding](docs/branding.md) | White-label title, logo, theme, landing page, and footer links. |
 | [Native OIDC login (SSO)](docs/native-oidc.md) | Terminate OpenID Connect SSO in ShinyHub itself - config, claim mapping, group-to-role, sessions/logout, behind-a-proxy, and HA - no external auth proxy. |

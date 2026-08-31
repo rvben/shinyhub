@@ -433,7 +433,8 @@ func (s *Store) recordMigration(m migration, appliedAt string) error {
 func isColumnAlreadyPresent(err error) bool {
 	return err != nil && (strings.Contains(err.Error(), "duplicate column name") ||
 		strings.Contains(err.Error(), "table fleet_runs already exists") ||
-		strings.Contains(err.Error(), "table development_sessions already exists"))
+		strings.Contains(err.Error(), "table development_sessions already exists") ||
+		strings.Contains(err.Error(), "table usage_sessions already exists"))
 }
 
 // appliedMigrations returns the set of versions recorded in the ledger.

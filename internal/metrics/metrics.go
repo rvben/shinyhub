@@ -38,6 +38,7 @@ type Registry struct {
 
 	autoscaleScales    *prometheus.CounterVec
 	auditWriteErrors   prometheus.Counter
+	usagePersistence   *prometheus.CounterVec
 	appLogFlushes      *prometheus.CounterVec
 	appLogFlushTime    prometheus.Histogram
 	appLogPersistLag   prometheus.Histogram
@@ -155,6 +156,11 @@ func New(version string) *Registry {
 		Help: "Total audit events that failed to persist (e.g. disk full). A rising value means the compliance trail is dropping entries.",
 	})
 	reg.MustRegister(auditWriteErrors)
+	usagePersistence := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_usage_persistence_events_total",
+		Help: "Usage-session persistence health by bounded result (start_overflow, start_retry, start_failed, start_dropped, end_retry, or policy_refresh_failed).",
+	}, []string{"result"})
+	reg.MustRegister(usagePersistence)
 
 	appLogFlushes := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "shinyhub_app_log_flush_attempts_total",
@@ -245,6 +251,7 @@ func New(version string) *Registry {
 
 		autoscaleScales:    autoscaleScales,
 		auditWriteErrors:   auditWriteErrors,
+		usagePersistence:   usagePersistence,
 		appLogFlushes:      appLogFlushes,
 		appLogFlushTime:    appLogFlushTime,
 		appLogPersistLag:   appLogPersistLag,
@@ -317,6 +324,18 @@ func (r *Registry) RegisterFleetGauges(appsRunning, replicasRunning, appsCrashed
 // disk full) silently dropping the compliance trail can be alerted on.
 func (r *Registry) RecordAuditWriteError() {
 	r.auditWriteErrors.Inc()
+}
+
+// RecordUsagePersistenceEvent records an exceptional usage-pipeline outcome.
+// The recorder passes only this closed vocabulary, but normalize defensively
+// so an implementation mistake cannot create unbounded label cardinality.
+func (r *Registry) RecordUsagePersistenceEvent(result string) {
+	switch result {
+	case "start_overflow", "start_retry", "start_failed", "start_dropped", "end_retry", "policy_refresh_failed":
+	default:
+		result = "unknown"
+	}
+	r.usagePersistence.WithLabelValues(result).Inc()
 }
 
 // RecordAppLogFlush records one bounded-vocabulary shared-log persistence

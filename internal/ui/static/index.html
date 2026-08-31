@@ -390,6 +390,7 @@
       </header>
       <nav class="settings-tabs" role="tablist" aria-label="App sections">
         <a href="" data-nav class="settings-tab" role="tab" data-tab="overview"      id="detail-tab-overview"      aria-controls="detail-overview-panel"      aria-selected="true"  >Overview</a>
+        <a href="" data-nav class="settings-tab" role="tab" data-tab="usage"         id="detail-tab-usage"         aria-controls="detail-usage-panel"         aria-selected="false" >Usage</a>
         <a href="" data-nav class="settings-tab" role="tab" data-tab="logs"          id="detail-tab-logs"          aria-controls="detail-logs-panel"          aria-selected="false" >Logs</a>
         <a href="" data-nav class="settings-tab" role="tab" data-tab="traces"        id="detail-tab-traces"        aria-controls="detail-traces-panel"        aria-selected="false" >Traces</a>
         <a href="" data-nav class="settings-tab" role="tab" data-tab="deployments"   id="detail-tab-deployments"   aria-controls="detail-deployments-panel"   aria-selected="false" >Deployments</a>
@@ -401,6 +402,7 @@
       <label class="app-section-picker" for="app-section-select">App section
         <select id="app-section-select" aria-label="App section">
           <option value="overview">Overview</option>
+          <option value="usage">Usage</option>
           <option value="logs">Logs</option>
           <option value="traces">Traces</option>
           <option value="deployments">Deployments</option>
@@ -412,6 +414,7 @@
       </label>
       <div class="app-detail-panels">
         <section id="detail-overview-panel"      class="settings-tab-panel" role="tabpanel"></section>
+        <section id="detail-usage-panel"         class="settings-tab-panel" role="tabpanel" aria-labelledby="detail-tab-usage" hidden></section>
         <section id="detail-logs-panel"          class="settings-tab-panel" role="tabpanel" hidden></section>
         <section id="detail-traces-panel"        class="settings-tab-panel" role="tabpanel" hidden></section>
         <section id="detail-deployments-panel"   class="settings-tab-panel" role="tabpanel" hidden></section>
@@ -505,6 +508,33 @@
                 <span id="general-status" class="hibernate-status" hidden></span>
               </div>
               <p id="general-error" class="error" hidden></p>
+            </div>
+          </section>
+
+          <section class="settings-block" id="usage-privacy-settings">
+            <h3 class="settings-block-title">Usage privacy</h3>
+            <p class="settings-block-desc">Choose how much viewer identity this app keeps. An app can be stricter than the hub policy, never more identifying.</p>
+            <div class="settings-block-body">
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Identity granularity</span>
+                  <span id="usage-privacy-help" class="scaling-option-help">Loading the effective policy…</span>
+                </span>
+                <select id="usage-privacy-mode" aria-label="Usage identity granularity" aria-describedby="usage-privacy-help usage-privacy-warning">
+                  <option value="inherit">Inherit hub policy</option>
+                  <option value="disabled">Do not collect</option>
+                  <option value="unattributed">Unattributed totals</option>
+                  <option value="pseudonymous">Pseudonymous viewers</option>
+                  <option value="identified">Named viewers</option>
+                </select>
+              </label>
+              <p id="usage-privacy-warning" class="settings-inline-note" role="status" aria-live="polite" hidden></p>
+              <div class="env-form-actions">
+                <button id="usage-privacy-save-btn" type="button" class="env-btn-primary" hidden disabled>Save privacy setting</button>
+                <span id="usage-privacy-dirty" class="settings-dirty" hidden>Unsaved changes</span>
+                <span id="usage-privacy-status" class="hibernate-status" role="status" hidden></span>
+              </div>
+              <p id="usage-privacy-error" class="error" role="alert" hidden></p>
             </div>
           </section>
 

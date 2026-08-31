@@ -81,6 +81,10 @@ type AppSettings struct {
 	// key reverts to NULL (inherit). The global false kill switch always wins.
 	IdentityHeaders *bool `toml:"identity_headers"`
 
+	// UsageIdentityMode controls durable viewer identity for this app. nil
+	// inherits the hub ceiling; the server rejects values above that ceiling.
+	UsageIdentityMode *string `toml:"usage_identity_mode"`
+
 	// MinWarmReplicas sets the pre-warming floor: replicas kept running
 	// through idle hibernation. nil = leave the stored value unchanged.
 	MinWarmReplicas *int `toml:"min_warm_replicas"`
@@ -197,6 +201,7 @@ func (a AppSettings) IsZero() bool {
 		a.MaxSessionsPerReplica == nil &&
 		a.RenderSeconds == nil &&
 		a.IdentityHeaders == nil &&
+		a.UsageIdentityMode == nil &&
 		a.MinWarmReplicas == nil &&
 		a.MemoryLimitMB == nil &&
 		a.CPUQuotaPercent == nil &&
@@ -384,6 +389,15 @@ func normalizeAndValidateApp(a *AppSettings) error {
 		}
 		if v < 0 || v > 600 {
 			return fmt.Errorf("render_seconds must be between 0 and 600, got %v", v)
+		}
+	}
+	if a.UsageIdentityMode != nil {
+		v := strings.TrimSpace(*a.UsageIdentityMode)
+		switch v {
+		case "disabled", "unattributed", "pseudonymous", "identified":
+			a.UsageIdentityMode = &v
+		default:
+			return fmt.Errorf("usage_identity_mode must be disabled, unattributed, pseudonymous, or identified; got %q", v)
 		}
 	}
 	if a.MinWarmReplicas != nil && (*a.MinWarmReplicas < 0 || *a.MinWarmReplicas > 1000) {

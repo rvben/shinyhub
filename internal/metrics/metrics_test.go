@@ -235,3 +235,18 @@ func TestAppLogMetricsExposePipelineHealthAndCleanup(t *testing.T) {
 		}
 	}
 }
+
+func TestUsagePersistenceHealthUsesBoundedResults(t *testing.T) {
+	reg := New("test")
+	reg.RecordUsagePersistenceEvent("start_retry")
+	reg.RecordUsagePersistenceEvent("policy_refresh_failed")
+	reg.RecordUsagePersistenceEvent("not-a-result")
+	for _, check := range []struct {
+		result string
+		want   float64
+	}{{"start_retry", 1}, {"policy_refresh_failed", 1}, {"unknown", 1}} {
+		if got, ok := sampleValue(t, reg, "shinyhub_usage_persistence_events_total", map[string]string{"result": check.result}); !ok || got != check.want {
+			t.Errorf("result %s = %v (ok=%v), want %v", check.result, got, ok, check.want)
+		}
+	}
+}

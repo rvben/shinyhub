@@ -19,6 +19,9 @@ func (b *boundDB) Exec(query string, args ...any) (sql.Result, error) {
 func (b *boundDB) Query(query string, args ...any) (*sql.Rows, error) {
 	return b.real.Query(b.d.rebind(query), args...)
 }
+func (b *boundDB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return b.real.QueryContext(ctx, b.d.rebind(query), args...)
+}
 func (b *boundDB) QueryRow(query string, args ...any) *sql.Row {
 	return b.real.QueryRow(b.d.rebind(query), args...)
 }

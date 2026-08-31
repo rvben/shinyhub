@@ -16,8 +16,9 @@ import {
 
 test('TAB_ROUTES and MANAGER_ONLY_TABS match the app-detail contract', () => {
   assert.deepEqual(TAB_ROUTES, [
-    'overview', 'logs', 'traces', 'deployments', 'schedules', 'configuration', 'data', 'access',
+    'overview', 'usage', 'logs', 'traces', 'deployments', 'schedules', 'configuration', 'data', 'access',
   ]);
+  assert.equal(MANAGER_ONLY_TABS.has('usage'), true);
   assert.equal(MANAGER_ONLY_TABS.has('configuration'), true);
   assert.equal(MANAGER_ONLY_TABS.has('data'), true);
   assert.equal(MANAGER_ONLY_TABS.has('access'), true);
@@ -122,6 +123,7 @@ test('tabViewModels hides manager-only tabs from a non-manager', () => {
   const models = tabViewModels('demo', 'overview', false);
   const hiddenByRoute = Object.fromEntries(models.map(m => [m.route, m.hidden]));
   assert.equal(hiddenByRoute.configuration, true);
+  assert.equal(hiddenByRoute.usage, true);
   assert.equal(hiddenByRoute.data, true);
   assert.equal(hiddenByRoute.access, true);
   assert.equal(hiddenByRoute.overview, false);

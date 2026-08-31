@@ -1002,6 +1002,23 @@ command = ["uv", "run", "streamlit", "run", "app.py", "--server.port", "{port}",
 	}
 }
 
+func TestLoadManifestUsageIdentityMode(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "[app]\nusage_identity_mode = \"pseudonymous\"\n")
+	m, err := LoadManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.App.UsageIdentityMode == nil || *m.App.UsageIdentityMode != "pseudonymous" {
+		t.Fatalf("usage_identity_mode = %v", m.App.UsageIdentityMode)
+	}
+
+	writeManifest(t, dir, "[app]\nusage_identity_mode = \"track-everything\"\n")
+	if _, err := LoadManifest(dir); err == nil {
+		t.Fatal("expected invalid usage_identity_mode to be rejected")
+	}
+}
+
 func TestLoadManifest_CommandRejectsUnknownPlaceholder(t *testing.T) {
 	dir := t.TempDir()
 	writeManifest(t, dir, `

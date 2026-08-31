@@ -21,6 +21,8 @@ func TestRotateSecretsTx_ReEncryptsEnvAndCA(t *testing.T) {
 	newKey := secrets.DeriveKey("new-secret-new-secret-new-secret-32")
 	oldCA := secrets.DeriveKeyWithInfo("old-secret-old-secret-old-secret-32", "ca")
 	newCA := secrets.DeriveKeyWithInfo("new-secret-new-secret-new-secret-32", "ca")
+	oldUsage := secrets.DeriveKeyWithInfo("old-secret-old-secret-old-secret-32", "shinyhub-usage-pseudonym-master-v1")
+	newUsage := secrets.DeriveKeyWithInfo("new-secret-new-secret-new-secret-32", "shinyhub-usage-pseudonym-master-v1")
 
 	// Two secret env vars + one plaintext (non-secret) var.
 	seedSecret := func(key, plain string) {
@@ -47,6 +49,14 @@ func TestRotateSecretsTx_ReEncryptsEnvAndCA(t *testing.T) {
 	if _, err := s.PutWorkerCAIfAbsent([]byte("CERT"), caEnc); err != nil {
 		t.Fatal(err)
 	}
+	usagePlain := []byte("stable-pseudonym-master")
+	usageEnc, err := secrets.Encrypt(oldUsage, usagePlain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureUsagePolicy("pseudonymous", usageEnc); err != nil {
+		t.Fatal(err)
+	}
 
 	reEnv := func(old []byte) ([]byte, error) {
 		p, err := secrets.Decrypt(oldKey, old)
@@ -62,8 +72,15 @@ func TestRotateSecretsTx_ReEncryptsEnvAndCA(t *testing.T) {
 		}
 		return secrets.Encrypt(newCA, p)
 	}
+	reUsage := func(old []byte) ([]byte, error) {
+		p, err := secrets.Decrypt(oldUsage, old)
+		if err != nil {
+			return nil, err
+		}
+		return secrets.Encrypt(newUsage, p)
+	}
 
-	n, caRotated, err := s.RotateSecretsTx(reEnv, reCA)
+	n, caRotated, usageRotated, err := s.RotateSecretsTx(reEnv, reCA, reUsage)
 	if err != nil {
 		t.Fatalf("RotateSecretsTx: %v", err)
 	}
@@ -72,6 +89,9 @@ func TestRotateSecretsTx_ReEncryptsEnvAndCA(t *testing.T) {
 	}
 	if !caRotated {
 		t.Error("worker CA should have been rotated")
+	}
+	if !usageRotated {
+		t.Error("usage pseudonym key should have been rotated")
 	}
 
 	// Secret vars now decrypt with the NEW key, not the old.
@@ -103,6 +123,14 @@ func TestRotateSecretsTx_ReEncryptsEnvAndCA(t *testing.T) {
 	got, err := secrets.Decrypt(newCA, keyEnc)
 	if err != nil || !bytes.Equal(got, caPlain) {
 		t.Errorf("worker CA must decrypt with the new KEK to the original key, err=%v", err)
+	}
+	policy, err := s.UsagePolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = secrets.Decrypt(newUsage, policy.PseudonymKeyEnc)
+	if err != nil || !bytes.Equal(got, usagePlain) {
+		t.Errorf("usage pseudonym master must decrypt with the new KEK, err=%v", err)
 	}
 }
 
@@ -136,7 +164,8 @@ func TestRotateSecretsTx_AtomicOnError(t *testing.T) {
 	}
 	reCA := func(old []byte) ([]byte, error) { return old, nil }
 
-	if _, _, err := s.RotateSecretsTx(reEnv, reCA); err == nil {
+	reUsage := func(old []byte) ([]byte, error) { return old, nil }
+	if _, _, _, err := s.RotateSecretsTx(reEnv, reCA, reUsage); err == nil {
 		t.Fatal("expected rotation to fail")
 	}
 	// Both vars must still decrypt with the OLD key (rollback preserved them).

@@ -52,6 +52,7 @@ func appResourceRevision(app *db.App) string {
 		AutoscaleTarget          float64   `json:"autoscale_target"`
 		LastAutoscaleAt          int64     `json:"last_autoscale_at"`
 		IdentityHeaders          *bool     `json:"identity_headers"`
+		UsageIdentityMode        *string   `json:"usage_identity_mode"`
 		MinWarmReplicas          int       `json:"min_warm_replicas"`
 		WorkerIsolation          string    `json:"worker_isolation"`
 		WorkerGroupedSize        int       `json:"worker_grouped_size"`
@@ -75,8 +76,9 @@ func appResourceRevision(app *db.App) string {
 		ReplicaPlacement: app.ReplicaPlacement, AutoscaleEnabled: app.AutoscaleEnabled,
 		AutoscaleMinReplicas: app.AutoscaleMinReplicas, AutoscaleMaxReplicas: app.AutoscaleMaxReplicas,
 		AutoscaleTarget: app.AutoscaleTarget, IdentityHeaders: app.IdentityHeaders,
-		LastAutoscaleAt: app.LastAutoscaleAt,
-		MinWarmReplicas: app.MinWarmReplicas, WorkerIsolation: app.WorkerIsolation,
+		UsageIdentityMode: app.UsageIdentityMode,
+		LastAutoscaleAt:   app.LastAutoscaleAt,
+		MinWarmReplicas:   app.MinWarmReplicas, WorkerIsolation: app.WorkerIsolation,
 		WorkerGroupedSize: app.WorkerGroupedSize, WorkerMaxWorkers: app.WorkerMaxWorkers,
 		WorkerMaxSessionLifetime: app.WorkerMaxSessionLifetimeSecs,
 		EphemeralDataAck:         app.EphemeralDataAck, RenderSeconds: app.RenderSeconds,

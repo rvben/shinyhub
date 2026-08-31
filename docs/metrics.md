@@ -8,7 +8,14 @@ ShinyHub exposes Prometheus metrics for the server process itself (the control
 plane), emits a structured access log for every request, and - when tracing is
 enabled - records control-plane spans correlated with that access log. This is
 separate from the per-app CPU/RAM sampling shown in the dashboard and from the
-per-app proxy trace buffer documented in [tracing.md](tracing.md).
+per-app proxy trace buffer documented in [tracing.md](tracing.md). Durable,
+human-facing app-open reporting is also separate; see
+[Usage analytics](usage-analytics.md).
+
+Prometheus is an optional, one-way export. ShinyHub never queries Prometheus to
+populate its API, dashboard, autoscaling decisions, or durable usage reports.
+Historical peak concurrency in the Usage tab is calculated and retained by
+ShinyHub itself.
 
 ## Memory measurement
 
@@ -125,6 +132,16 @@ here. On a single-node deployment they are exact. In a clustered deployment,
 scrape every instance and aggregate in PromQL (`sum by (slug) (...)`) rather than
 reading one instance in isolation - the example alert below already does this.
 
+### Usage analytics durability
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `shinyhub_usage_persistence_events_total` | counter | `result` | Exceptional durable-usage outcomes: `start_overflow`, `start_retry`, `start_failed`, `start_dropped`, `end_retry`, or `policy_refresh_failed`. Overflow and retries are recovered automatically; failed or dropped starts mean the Usage report may undercount connections. A policy-refresh failure leaves the cached connection fast path conservative while every insert remains clamped against durable policy. |
+
+This counter is process-local. In HA, sum it across every control-plane
+instance. An increase in `start_failed` or `start_dropped` is the completeness
+alert; the retry and overflow results are useful early warnings.
+
 ### Fleet and lifecycle
 
 | Metric | Type | Labels | Description |
@@ -193,6 +210,11 @@ groups:
         for: 5m
         annotations:
           summary: "{{ $labels.slug }} is above 90% of its admission ceiling"
+
+      - alert: ShinyHubUsageHistoryIncomplete
+        expr: sum(increase(shinyhub_usage_persistence_events_total{result=~"start_failed|start_dropped"}[10m])) > 0
+        annotations:
+          summary: "Durable app-usage history may be incomplete"
 
       - alert: ShinyHubAppLogPersistenceErrors
         expr: sum(increase(shinyhub_app_log_flush_attempts_total{result="error"}[10m])) > 0

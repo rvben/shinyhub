@@ -19,6 +19,7 @@ DPIA / records-of-processing assessment.
 | Action history | `audit_events` | Every mutating action | Accountability / compliance audit trail |
 | API tokens | `api_keys` (hashed) | User-created | Programmatic auth (stored hashed, shown once) |
 | App data | per-app data dir / object store | Uploaded by app authors/users | App runtime data (opaque to ShinyHub) |
+| App usage | `usage_sessions`, `usage_daily` | Successful proxied WebSocket sessions | Operational adoption and capacity reporting; unattributed by default, optionally app-scoped pseudonymous or named |
 
 App-uploaded data (files, databases an app writes to its data dir) is opaque to
 ShinyHub and may contain personal data depending on the app; treat each hosted
@@ -26,7 +27,8 @@ app as its own processing activity.
 
 ## Data at rest and in transit
 
-- **At rest:** app environment secrets and the worker CA private key are
+- **At rest:** app environment secrets, the worker CA private key, and the
+  stable usage-pseudonym master are
   encrypted (AES-256-GCM with HKDF-derived keys). Other data (usernames, emails,
   audit rows) is stored in the SQLite/Postgres database in plaintext; protect the
   database file/host with OS-level controls and disk encryption as your policy
@@ -39,6 +41,12 @@ app as its own processing activity.
 
 - **Audit events:** retained indefinitely by default. Set
   `maintenance.audit_retention_days` to prune older rows.
+- **Usage analytics:** raw sessions default to 30 days, then roll into
+  non-identifying daily totals and peak concurrent-session counts retained for
+  365 days. Peak concurrency is derived inside ShinyHub from overlapping
+  connection intervals, without querying Prometheus or retaining another user
+  identifier. Configure `usage` to
+  shorten, disable, or explicitly extend either period.
 - **User deletion:** deleting a user removes the account but sets
   `audit_events.user_id` to NULL (`ON DELETE SET NULL`), anonymizing the audit
   trail rather than erasing history - a deliberate balance between the right to

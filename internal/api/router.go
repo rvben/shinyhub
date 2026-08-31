@@ -29,6 +29,7 @@ import (
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
+	"github.com/rvben/shinyhub/internal/usage"
 	"github.com/rvben/shinyhub/internal/worker"
 	"golang.org/x/sys/unix"
 )
@@ -60,6 +61,7 @@ type Server struct {
 	history         *history.Store      // nil when metrics-history collection is disabled
 	tracer          *servertrace.Tracer // nil when server tracing is disabled
 	providerLogs    *providerLogCoordinator
+	usagePolicy     *usage.Policy
 	router          chi.Router
 
 	// renderPacingCores/renderPacingSource record the effective host cores (and
@@ -259,6 +261,10 @@ func (s *Server) Router() http.Handler { return s.router }
 func (s *Server) SetExternalLogReader(reader process.ExternalLogReader) {
 	s.providerLogs = newProviderLogCoordinator(reader)
 }
+
+// SetUsagePolicy enables synchronous at-rest scrubbing when an app manager
+// chooses a stricter usage identity override.
+func (s *Server) SetUsagePolicy(policy *usage.Policy) { s.usagePolicy = policy }
 
 // Config returns the server's configuration. Exposed for tests that need to
 // locate temp directories (e.g. AppsDir, AppDataDir) created by the test helper.
@@ -880,6 +886,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/apps/{slug}/logs", s.handleLogs)
 		r.Get("/api/apps/{slug}/metrics", s.handleMetrics)
 		r.Get("/api/apps/{slug}/metrics/history", s.handleMetricsHistory)
+		r.Get("/api/apps/{slug}/usage", s.handleAppUsage)
 		r.Get("/api/apps/{slug}/traces", s.handleTraces)
 		r.Get("/api/apps/{slug}/members", s.handleGetMembers)
 		r.Patch("/api/apps/{slug}/access", s.handleSetAppAccess)

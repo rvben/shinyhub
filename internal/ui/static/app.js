@@ -2818,6 +2818,45 @@ document.addEventListener('DOMContentLoaded', () => {
     el.textContent = raw === '' ? '' : renderPacingAdvice(Number(raw), renderPacingBlock);
   }
 
+  const usageModeRank = (mode) => ({ unattributed: 0, pseudonymous: 1, identified: 2 }[mode] ?? 0);
+
+  function effectiveUsageMode(hubMode, override) {
+    if (override === 'disabled') return { mode: 'unattributed', collecting: false };
+    if (!override || override === 'inherit') return { mode: hubMode, collecting: true };
+    return usageModeRank(override) < usageModeRank(hubMode)
+      ? { mode: override, collecting: true }
+      : { mode: hubMode, collecting: true };
+  }
+
+  function updateUsagePrivacyHelp() {
+    const select = document.getElementById('usage-privacy-mode');
+    const help = document.getElementById('usage-privacy-help');
+    const warning = document.getElementById('usage-privacy-warning');
+    if (!select || !help || !warning) return;
+    const hubMode = select.dataset.hubMode || 'unattributed';
+    const selected = effectiveUsageMode(hubMode, select.value);
+    const descriptions = {
+      unattributed: 'Keeps session totals and audience type, without a stable viewer identifier.',
+      pseudonymous: 'Keeps an app-scoped random-looking viewer key for unique counts; names are not retained.',
+      identified: 'Keeps the signed-in account so administrators can see names and exact recent sessions.',
+    };
+    help.textContent = selected.collecting
+      ? `${descriptions[selected.mode]} Hub ceiling: ${hubMode}.`
+      : 'Stops new collection for this app. Existing non-identifying totals remain until retention expires.';
+
+    const original = effectiveUsageMode(hubMode, select.dataset.originalMode || 'inherit');
+    const lowering = (original.collecting && !selected.collecting) ||
+      (original.collecting === selected.collecting && selected.collecting && usageModeRank(selected.mode) < usageModeRank(original.mode));
+    if (lowering) {
+      warning.textContent = selected.collecting
+        ? 'Saving removes more identifying data from retained raw sessions immediately. This cannot be undone; a later upgrade only affects new sessions.'
+        : 'Saving stops collection and removes names or pseudonyms from retained raw sessions immediately. Existing totals remain. This cannot be undone.';
+    } else {
+      warning.textContent = '';
+    }
+    setHidden(warning, !lowering);
+  }
+
   function populateGeneralTab(app, envelope) {
     const mode = hibernateModeFromValue(app.hibernate_timeout_minutes);
     document.querySelectorAll('input[name="hibernate-mode"]').forEach(r => {
@@ -2904,6 +2943,26 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(document.getElementById('general-error'), '');
     setHidden(document.getElementById('general-status'), true);
 
+    // Usage privacy: per-app settings may only lower the hub-wide identity
+    // ceiling. Options above that ceiling remain visible but unavailable so the
+    // operator understands why a more identifying mode cannot be selected.
+    const usageSelect = document.getElementById('usage-privacy-mode');
+    const usagePolicy = (envelope && envelope.usage_policy) || {};
+    const hubUsageMode = usagePolicy.hub_identity_mode || 'unattributed';
+    const appUsageMode = app.usage_identity_mode || 'inherit';
+    usageSelect.dataset.hubMode = hubUsageMode;
+    usageSelect.dataset.originalMode = appUsageMode;
+    usageSelect.value = appUsageMode;
+    [...usageSelect.options].forEach(option => {
+      option.disabled = ['pseudonymous', 'identified'].includes(option.value) &&
+        usageModeRank(option.value) > usageModeRank(hubUsageMode);
+    });
+    usageSelect.disabled = !canEdit;
+    document.getElementById('usage-privacy-save-btn').hidden = !canEdit;
+    setError(document.getElementById('usage-privacy-error'), '');
+    setHidden(document.getElementById('usage-privacy-status'), true);
+    updateUsagePrivacyHelp();
+
     renderIconPicker(app, canEdit);
 
     // Resources: per-replica memory/CPU caps. null (no limit) renders as empty.
@@ -2949,6 +3008,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Snapshot baselines so the explicit-save dirty tracker starts clean.
     snapshotSettingsSection('general');
+    snapshotSettingsSection('usage-privacy');
     snapshotSettingsSection('resources');
     snapshotSettingsSection('hibernate');
     snapshotSettingsSection('scaling');
@@ -3227,6 +3287,52 @@ document.addEventListener('DOMContentLoaded', () => {
       if (preview) preview.replaceChildren(renderAppAvatar(document, avatarView(detailApp), 'icon-picker-preview'));
     }
     await loadApps();
+    await refreshDetailFleetState(slug);
+  }
+
+  async function saveUsagePrivacy() {
+    if (!settingsSlug) return;
+    const slug = settingsSlug;
+    const select = document.getElementById('usage-privacy-mode');
+    const errEl = document.getElementById('usage-privacy-error');
+    const statusEl = document.getElementById('usage-privacy-status');
+    const warning = document.getElementById('usage-privacy-warning');
+    setError(errEl, '');
+    setHidden(statusEl, true);
+    if (!warning.hidden && !window.confirm(`${warning.textContent}\n\nApply this privacy change?`)) {
+      return;
+    }
+    const override = select.value === 'inherit' ? null : select.value;
+    const btn = document.getElementById('usage-privacy-save-btn');
+    btn.disabled = true;
+    let resp;
+    try {
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ usage_identity_mode: override }),
+      });
+    } catch {
+      setError(errEl, 'Privacy setting could not be saved. Check your connection and try again.');
+      recomputeDirty('usage-privacy');
+      return;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) {
+      let message = 'Privacy setting could not be saved.';
+      try { const body = await resp.json(); if (body && body.error) message = body.error; } catch { /* non-JSON */ }
+      setError(errEl, message);
+      recomputeDirty('usage-privacy');
+      return;
+    }
+    let body = {};
+    try { body = await resp.json(); } catch { /* tolerate */ }
+    const saved = body.app ? body.app.usage_identity_mode : override;
+    if (detailApp) detailApp.usage_identity_mode = saved;
+    select.dataset.originalMode = saved || 'inherit';
+    statusEl.textContent = 'Privacy setting saved.';
+    setHidden(statusEl, false);
+    updateUsagePrivacyHelp();
+    snapshotSettingsSection('usage-privacy');
     await refreshDetailFleetState(slug);
   }
 
@@ -4450,6 +4556,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- Settings tabs: explicit-save wiring + dirty tracking ---
   // General + Resources (display name/project, memory/CPU limits).
   document.getElementById('general-save-btn').addEventListener('click', saveGeneralInfo);
+  document.getElementById('usage-privacy-save-btn').addEventListener('click', saveUsagePrivacy);
+  document.getElementById('usage-privacy-mode').addEventListener('change', updateUsagePrivacyHelp);
   document.getElementById('resources-save-btn').addEventListener('click', saveResources);
 
   // Hibernation: mode radios + save button.
@@ -4509,6 +4617,9 @@ document.addEventListener('DOMContentLoaded', () => {
   registerSettingsSection('general',
     () => [document.getElementById('general-name'), document.getElementById('general-description'), document.getElementById('general-project')],
     'general-save-btn', 'general-dirty');
+  registerSettingsSection('usage-privacy',
+    () => [document.getElementById('usage-privacy-mode')],
+    'usage-privacy-save-btn', 'usage-privacy-dirty');
   registerSettingsSection('resources',
     () => [document.getElementById('resources-memory'), document.getElementById('resources-cpu')],
     'resources-save-btn', 'resources-dirty');

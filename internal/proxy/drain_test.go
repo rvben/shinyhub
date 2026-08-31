@@ -48,6 +48,21 @@ func TestConnTracker_TrackCountForget(t *testing.T) {
 	}
 }
 
+func TestConnTracker_OnCloseRunsExactlyOnce(t *testing.T) {
+	tr := newConnTracker()
+	closed := 0
+	conn := tr.trackWithClose(&stubConn{}, ConnPrincipal{}, func() { closed++ })
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if closed != 1 {
+		t.Fatalf("onClose calls = %d, want 1", closed)
+	}
+}
+
 func TestConnTracker_CloseAllForceClosesUnderlying(t *testing.T) {
 	tr := newConnTracker()
 	s1, s2 := &stubConn{}, &stubConn{}

@@ -57,6 +57,12 @@ func TestRunMaintenancePrunesDatabaseBeforeLocalLogFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := store.BeginUsageSession(db.UsageSessionStart{
+		ID: "expired-while-disabled", Slug: app.Slug, InstanceID: "cp",
+		StartedAt: time.Now().UTC().Add(-48 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // maintenance still runs its prompt first pass, then exits.
@@ -64,7 +70,7 @@ func TestRunMaintenancePrunesDatabaseBeforeLocalLogFiles(t *testing.T) {
 	runMaintenance(ctx, store, process.NewManager(appsDir, process.NewNativeRuntime()), telemetry, config.MaintenanceConfig{
 		AppLogRunRetentionCount: 1,
 		Interval:                time.Hour,
-	})
+	}, config.UsageConfig{Enabled: false, RawRetentionDays: 1, AggregateRetentionDays: 365})
 
 	runs, err := store.ListAppLogRuns(app.ID, 100)
 	if err != nil || len(runs) != 1 || runs[0].RunID != runIDs[2] {
@@ -82,5 +88,12 @@ func TestRunMaintenancePrunesDatabaseBeforeLocalLogFiles(t *testing.T) {
 	}
 	if telemetry.runs != 2 || telemetry.files != 2 {
 		t.Fatalf("maintenance metrics = runs:%d files:%d, want runs:2 files:2", telemetry.runs, telemetry.files)
+	}
+	var usageRows int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM usage_sessions`).Scan(&usageRows); err != nil {
+		t.Fatal(err)
+	}
+	if usageRows != 0 {
+		t.Fatalf("disabled usage retained %d expired rows", usageRows)
 	}
 }

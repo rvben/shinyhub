@@ -27,6 +27,12 @@ import {
 } from '/static/views/app-detail-nav.js';
 import { normalizeAppEnvelope } from '/static/views/app-detail-envelope.js';
 import { createLogsViewer } from '/static/views/logs-ui.js';
+import {
+  createUsageRequestGate,
+  renderUsageDashboard,
+  renderUsageError,
+  renderUsageLoading,
+} from '/static/views/usage-ui.js';
 
 function pluralize(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
@@ -36,6 +42,7 @@ export function mountAppDetail(ctx) {
   const view = document.getElementById('app-detail-view');
   const panels = {
     overview:      document.getElementById('detail-overview-panel'),
+    usage:         document.getElementById('detail-usage-panel'),
     logs:          document.getElementById('detail-logs-panel'),
     traces:        document.getElementById('detail-traces-panel'),
     deployments:   document.getElementById('detail-deployments-panel'),
@@ -237,6 +244,9 @@ export function mountAppDetail(ctx) {
     if (tab === 'overview') {
       renderOverview(panels.overview, app, replicasStatus, body, ctx);
     }
+    if (tab === 'usage') {
+      tabCleanup = renderUsage(panels.usage, app, ctx);
+    }
     if (tab === 'logs') {
       tabCleanup = renderLogs(panels.logs, app, replicasStatus, ctx);
     }
@@ -410,6 +420,67 @@ function renderLogs(panel, app, replicasStatus, ctx) {
     return () => {};
   }
   return createLogsViewer({ panel, app, initialSources: replicasStatus, api: ctx.api });
+}
+
+function renderUsage(panel, app, ctx) {
+  let disposed = false;
+  let days = 30;
+  const requests = createUsageRequestGate();
+
+  async function load(showLoading = true, focusTarget = '') {
+    const request = requests.begin();
+    if (showLoading) renderUsageLoading(document, panel);
+    const trigger = focusTarget === 'refresh' ? panel.querySelector('.usage-controls button') : null;
+    if (trigger) {
+      trigger.disabled = true;
+      trigger.textContent = 'Refreshing…';
+    }
+    const showError = (message) => {
+      renderUsageError(document, panel, message, () => load());
+      if (focusTarget) panel.querySelector('button')?.focus();
+    };
+    let response;
+    try {
+      response = await ctx.api(`/api/apps/${encodeURIComponent(app.slug)}/usage?days=${days}`, {
+        signal: request.signal,
+      });
+    } catch {
+      if (!disposed && requests.isCurrent(request)) {
+        showError('The server could not be reached. Check the connection and try again.');
+      }
+      return;
+    }
+    if (disposed || !requests.isCurrent(request)) return;
+    if (response.status === 401) { ctx.onUnauthorized(); return; }
+    if (!response.ok) {
+      const message = response.status === 403
+        ? 'Your access to this app changed. Reload the page or ask an app manager for access.'
+        : `The server returned HTTP ${response.status}. Try again in a moment.`;
+      showError(message);
+      return;
+    }
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      if (requests.isCurrent(request)) showError('The server returned an invalid response. Try again in a moment.');
+      return;
+    }
+    if (disposed || !requests.isCurrent(request)) return;
+    days = Number(data.window_days) || days;
+    renderUsageDashboard(document, panel, data, {
+      onRangeChange(nextDays) {
+        days = nextDays;
+        load(true, 'range');
+      },
+      onRefresh() { load(false, 'refresh'); },
+    });
+    if (focusTarget === 'range') panel.querySelector('.usage-controls select')?.focus();
+    if (focusTarget === 'refresh') panel.querySelector('.usage-controls button')?.focus();
+  }
+
+  load();
+  return () => { disposed = true; requests.invalidate(); };
 }
 
 function makeStatusBadge(cls, text) {
@@ -902,6 +973,7 @@ const FLEET_FIELD_TARGETS = {
   description: '#general-description',
   icon: '#general-icon-preview',
   project: '#general-project',
+  usage_identity_mode: '#usage-privacy-mode',
   hibernate_timeout_minutes: 'input[name="hibernate-mode"]',
   replicas: '#scaling-replicas',
   max_sessions_per_replica: '#scaling-cap',

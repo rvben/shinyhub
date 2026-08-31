@@ -24,7 +24,7 @@ var fleetStateKeys = map[string]bool{
 	"source": true, "visibility": true, "name": true, "description": true,
 	"icon": true, "project": true, "hibernate_timeout_minutes": true,
 	"replicas": true, "max_sessions_per_replica": true, "render_seconds": true,
-	"identity_headers": true, "min_warm_replicas": true, "memory_limit_mb": true,
+	"identity_headers": true, "usage_identity_mode": true, "min_warm_replicas": true, "memory_limit_mb": true,
 	"cpu_quota_percent": true, "worker_isolation": true, "worker_grouped_size": true,
 	"worker_max_workers": true, "worker_warm_spares": true,
 	"worker_max_session_lifetime_secs": true, "autoscale": true,
@@ -72,6 +72,10 @@ func currentFleetValues(app *db.App) map[string]string {
 	if app.IdentityHeaders != nil {
 		identity = fmt.Sprintf("%t", *app.IdentityHeaders)
 	}
+	usageIdentity := "(unset)"
+	if app.UsageIdentityMode != nil {
+		usageIdentity = quoted(*app.UsageIdentityMode)
+	}
 	memory := "(unset)"
 	if app.MemoryLimitMB != nil {
 		memory = fmt.Sprintf("%d", *app.MemoryLimitMB)
@@ -92,6 +96,7 @@ func currentFleetValues(app *db.App) map[string]string {
 		"max_sessions_per_replica":         fmt.Sprintf("%d", app.MaxSessionsPerReplica),
 		"render_seconds":                   fmt.Sprintf("%g", app.RenderSeconds),
 		"identity_headers":                 identity,
+		"usage_identity_mode":              usageIdentity,
 		"min_warm_replicas":                fmt.Sprintf("%d", app.MinWarmReplicas),
 		"memory_limit_mb":                  memory,
 		"cpu_quota_percent":                cpu,

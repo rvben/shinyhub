@@ -64,6 +64,18 @@ type liveSession struct {
 	reader *bufio.Reader
 }
 
+type lifecycleRecorder struct {
+	starts chan proxy.UsageSessionStart
+	ends   chan string
+}
+
+func (r *lifecycleRecorder) StartSession(start proxy.UsageSessionStart) string {
+	r.starts <- start
+	return "usage-session-1"
+}
+
+func (r *lifecycleRecorder) EndSession(id string) { r.ends <- id }
+
 // echo proves the tunnel still carries traffic end to end.
 func (s *liveSession) echo(what string) {
 	s.t.Helper()
@@ -231,6 +243,37 @@ func (c *reauthChain) sessionCookie(t *testing.T) string {
 		t.Fatalf("IssueSessionToken: %v", err)
 	}
 	return tok
+}
+
+func TestUsageLifecycleMatchesSuccessfulWebSocketConnection(t *testing.T) {
+	c := newReauthChain(t, "private")
+	recorder := &lifecycleRecorder{
+		starts: make(chan proxy.UsageSessionStart, 1),
+		ends:   make(chan string, 1),
+	}
+	c.proxy.SetUsageRecorder(recorder)
+	session := c.openSession(t, c.sessionCookie(t))
+
+	select {
+	case start := <-recorder.starts:
+		if start.Slug != "rep" || start.UserID != c.ana.ID || start.StartedAt.IsZero() {
+			t.Fatalf("usage start = %+v", start)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successful WebSocket upgrade did not start usage session")
+	}
+
+	if err := session.conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case id := <-recorder.ends:
+		if id != "usage-session-1" {
+			t.Fatalf("ended id = %q", id)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("closing WebSocket did not end usage session")
+	}
 }
 
 // This is the reported defect, end to end. An HTTP request passes through the

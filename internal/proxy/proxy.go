@@ -362,6 +362,29 @@ type AccessLogEntry struct {
 	Reject RejectReason
 }
 
+// UsageSessionStart is emitted exactly once for a successful upgraded app
+// connection. It deliberately carries no network or user-agent data.
+type UsageSessionStart struct {
+	Slug          string
+	DeploymentID  int64
+	UserID        int64
+	PrincipalKind string
+	StartedAt     time.Time
+}
+
+// UsageRecorder receives connection lifecycle events. Implementations must be
+// non-blocking: callbacks run at WebSocket hijack/close boundaries and usage
+// analytics must never delay or fail a dashboard session.
+type UsageRecorder interface {
+	StartSession(UsageSessionStart) string
+	EndSession(id string)
+}
+
+type usageRecorderCallbacks struct {
+	start func(UsageSessionStart) string
+	end   func(string)
+}
+
 // accessLogFn and clientIPFn are named function types so atomic.Pointer can
 // hold them. They are set once at startup and read on every request, so
 // atomic.Pointer avoids the lock traffic a sync.RWMutex would incur while
@@ -435,6 +458,7 @@ type Proxy struct {
 	accessLog        atomic.Pointer[accessLogFn]
 	clientIP         atomic.Pointer[clientIPFn]
 	identityProvider atomic.Pointer[identityProviderFn]
+	usageRecorder    atomic.Pointer[usageRecorderCallbacks]
 
 	// tracing holds the active tracing config + ring buffer. When traceBuffer
 	// is nil the proxy is a no-op for trace propagation: no traceparent header
@@ -843,6 +867,19 @@ func (p *Proxy) SetAccessLogger(fn func(AccessLogEntry)) {
 	}
 	f := accessLogFn(fn)
 	p.accessLog.Store(&f)
+}
+
+// SetUsageRecorder wires durable app-session analytics. Passing nil disables
+// collection. Safe to call before serving or atomically between requests.
+func (p *Proxy) SetUsageRecorder(rec UsageRecorder) {
+	if rec == nil {
+		p.usageRecorder.Store(nil)
+		return
+	}
+	p.usageRecorder.Store(&usageRecorderCallbacks{
+		start: rec.StartSession,
+		end:   rec.EndSession,
+	})
 }
 
 // SetClientIPResolver registers a function that returns the trusted-proxy-aware
@@ -2150,6 +2187,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The recorder delegates Flush/Hijack/ReadFrom so streaming responses,
 	// WebSocket upgrades, and the sendfile fast path keep working.
 	rec := newStatusRecorder(w)
+	start := time.Now()
+	replicaIndex := -1
+	deploymentID := int64(0)
+	sticky := false
 	// Mark this slug ready the instant the reverse proxy completes a WS
 	// upgrade. On this Go toolchain httputil.ReverseProxy hijacks the
 	// connection and writes the 101 status line to the hijacked writer
@@ -2164,12 +2205,32 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// exists, and the connection then outlives it by hours with no middleware
 	// ever seeing it again.
 	rec.trackHijack = func(c net.Conn) net.Conn {
-		return p.conns.track(c, connPrincipal(r, slug))
+		principal := connPrincipal(r, slug)
+		var onClose func()
+		if recorder := p.usageRecorder.Load(); recorder != nil {
+			// Service credentials are automation, not people. Keep their live
+			// connection visible while classifying them separately from anonymous
+			// visitors and signed-in people.
+			userID := int64(0)
+			principalKind := "anonymous"
+			if u := auth.UserFromContext(r.Context()); u != nil {
+				if u.IsServiceAccount() {
+					principalKind = "service_account"
+				} else {
+					principalKind = "person"
+					userID = u.ID
+				}
+			}
+			usageID := recorder.start(UsageSessionStart{
+				Slug: slug, DeploymentID: deploymentID, UserID: userID,
+				PrincipalKind: principalKind, StartedAt: time.Now().UTC(),
+			})
+			if usageID != "" {
+				onClose = func() { recorder.end(usageID) }
+			}
+		}
+		return p.conns.trackWithClose(c, principal, onClose)
 	}
-	start := time.Now()
-	replicaIndex := -1
-	deploymentID := int64(0)
-	sticky := false
 
 	// Trace context derivation: if tracing is enabled, parse the incoming
 	// traceparent (or start a new trace), generate a fresh span ID for this

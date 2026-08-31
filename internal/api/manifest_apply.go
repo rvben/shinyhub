@@ -42,6 +42,12 @@ func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *v
 	if m.Replicas != nil && s.cfg.Runtime.MaxReplicas > 0 && *m.Replicas > s.cfg.Runtime.MaxReplicas {
 		return newValidationError("replicas must be between 1 and %d", s.cfg.Runtime.MaxReplicas)
 	}
+	if m.UsageIdentityMode != nil {
+		mode := config.UsageIdentityMode(*m.UsageIdentityMode)
+		if *m.UsageIdentityMode != "disabled" && config.UsageIdentityRank(mode) > config.UsageIdentityRank(s.cfg.Usage.IdentityMode) {
+			return newValidationError("usage_identity_mode cannot collect more identity than the hub policy")
+		}
+	}
 	// The runtime MaxReplicas ceiling needs server config, so it is enforced
 	// here rather than at parse time (matching the replicas check above and the
 	// PATCH /api/apps autoscale handler). Only meaningful when enabled.
@@ -190,6 +196,11 @@ func (s *Server) validateManifestActivationTopology(app *db.App, manifest *deplo
 //
 // Returns wrapped DB errors on storage failure (handler → 500 + degraded).
 func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy.AppSettings) error {
+	usagePolicyChanged := (app.UsageIdentityMode == nil) != (m.UsageIdentityMode == nil) ||
+		(app.UsageIdentityMode != nil && m.UsageIdentityMode != nil && *app.UsageIdentityMode != *m.UsageIdentityMode)
+	if usagePolicyChanged && s.usagePolicy == nil {
+		return errors.New("usage privacy policy unavailable")
+	}
 	// Autoscale reconciles atomically only when the block is declared; the
 	// zero values below are inert because SetAutoscale gates the DB write.
 	// Resolve worker fields: nil pointer means "absent, leave stored value unchanged".
@@ -237,6 +248,8 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		RenderSeconds:                derefFloatOrZero(m.RenderSeconds),
 		SetIdentityHeaders:           true,
 		IdentityHeaders:              m.IdentityHeaders,
+		SetUsageIdentityMode:         usagePolicyChanged,
+		UsageIdentityMode:            m.UsageIdentityMode,
 		SetMinWarmReplicas:           m.MinWarmReplicas != nil,
 		MinWarmReplicas:              derefOrZero(m.MinWarmReplicas),
 		SetMemoryLimitMB:             m.MemoryLimitMB != nil,
@@ -268,6 +281,15 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		ProjectSlug:                  derefStringOrEmpty(m.Project),
 	}); err != nil {
 		return fmt.Errorf("apply app settings: %w", err)
+	}
+	if usagePolicyChanged {
+		newOverride := ""
+		if m.UsageIdentityMode != nil {
+			newOverride = *m.UsageIdentityMode
+		}
+		if _, err := s.usagePolicy.ApplyCommittedAppPolicy(s.store, app.ID, app.Slug, newOverride); err != nil {
+			return fmt.Errorf("usage privacy policy committed but retained-data reconciliation failed: %w", err)
+		}
 	}
 
 	if m.MaxSessionsPerReplica != nil && s.proxy != nil {
@@ -553,6 +575,9 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if m.IdentityHeaders != nil {
 		d["identity_headers"] = *m.IdentityHeaders
 	}
+	if m.UsageIdentityMode != nil {
+		d["usage_identity_mode"] = *m.UsageIdentityMode
+	}
 	if m.MinWarmReplicas != nil {
 		d["min_warm_replicas"] = *m.MinWarmReplicas
 	}
@@ -625,6 +650,9 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if m.IdentityHeaders != nil {
 		d["identity_headers"] = *m.IdentityHeaders
+	}
+	if m.UsageIdentityMode != nil {
+		d["usage_identity_mode"] = *m.UsageIdentityMode
 	}
 	if m.MinWarmReplicas != nil {
 		d["min_warm_replicas"] = *m.MinWarmReplicas

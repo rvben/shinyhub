@@ -1017,6 +1017,9 @@ type App struct {
 	// from the bundle manifest. nil = inherit the global config flag.
 	// Effective = global && (IdentityHeaders == nil || *IdentityHeaders).
 	IdentityHeaders *bool `json:"identity_headers"`
+	// UsageIdentityMode is a stricter per-app usage policy. nil inherits the hub
+	// ceiling; "disabled" stops collection for this app.
+	UsageIdentityMode *string `json:"usage_identity_mode"`
 	// MinWarmReplicas is the pre-warming floor: replicas kept running
 	// through idle hibernation. 0 = hibernate fully (the default).
 	MinWarmReplicas int `json:"min_warm_replicas"`
@@ -1176,7 +1179,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       created_at, updated_at,
 		       managed_by, replica_placement,
 		       autoscale_enabled, autoscale_min_replicas, autoscale_max_replicas, autoscale_target,
-		       last_autoscale_at, identity_headers, min_warm_replicas,
+		       last_autoscale_at, identity_headers, usage_identity_mode, min_warm_replicas,
 		       last_error, crashed_at, description, icon_mime, icon_emoji,
 		       worker_isolation, worker_grouped_size, worker_max_workers, worker_warm_spares,
 		       worker_max_session_lifetime_secs, ephemeral_data_ack, render_seconds,`
@@ -4304,6 +4307,11 @@ type ApplyAppManifestSettingsParams struct {
 	SetIdentityHeaders bool
 	IdentityHeaders    *bool
 
+	// Usage identity reconciles unconditionally for a bundle manifest: removing
+	// the key restores NULL (inherit hub policy).
+	SetUsageIdentityMode bool
+	UsageIdentityMode    *string
+
 	SetMinWarmReplicas bool
 	MinWarmReplicas    int
 
@@ -4466,7 +4474,18 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) (bool
 			return false, fmt.Errorf("update identity_headers: %w", err)
 		}
 	}
-
+	if p.SetUsageIdentityMode {
+		if _, err := tx.Exec(
+			`UPDATE apps SET usage_identity_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.UsageIdentityMode, p.AppID,
+		); err != nil {
+			return false, fmt.Errorf("update usage_identity_mode: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE usage_policy SET generation = generation + 1,
+			updated_at = CURRENT_TIMESTAMP WHERE singleton_id = 1`); err != nil {
+			return false, fmt.Errorf("advance usage policy generation: %w", err)
+		}
+	}
 	if p.SetMinWarmReplicas {
 		if _, err := tx.Exec(
 			`UPDATE apps SET min_warm_replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -4589,6 +4608,9 @@ type PatchAppSettingsParams struct {
 
 	SetIdentityHeaders bool
 	IdentityHeaders    *bool
+
+	SetUsageIdentityMode bool
+	UsageIdentityMode    *string
 
 	SetMinWarmReplicas bool
 	MinWarmReplicas    int
@@ -4717,6 +4739,18 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			return "", 0, nil, nil, false, fmt.Errorf("update identity_headers: %w", err)
 		}
 	}
+	if p.SetUsageIdentityMode {
+		if _, err := tx.Exec(
+			`UPDATE apps SET usage_identity_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.UsageIdentityMode, appID,
+		); err != nil {
+			return "", 0, nil, nil, false, fmt.Errorf("update usage_identity_mode: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE usage_policy SET generation = generation + 1,
+			updated_at = CURRENT_TIMESTAMP WHERE singleton_id = 1`); err != nil {
+			return "", 0, nil, nil, false, fmt.Errorf("advance usage policy generation: %w", err)
+		}
+	}
 
 	if p.SetMinWarmReplicas {
 		if _, err := tx.Exec(
@@ -4827,7 +4861,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.CreatedAt, &a.UpdatedAt,
 		&a.ManagedBy, &a.ReplicaPlacement,
 		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
-		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.MinWarmReplicas,
+		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.UsageIdentityMode, &a.MinWarmReplicas,
 		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime, &a.IconEmoji,
 		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
 		&a.WorkerWarmSpares, &a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
@@ -5272,6 +5306,7 @@ func parseSQLiteTime(s string) (time.Time, bool) {
 	for _, layout := range []string{
 		time.RFC3339Nano,
 		time.RFC3339,
+		"2006-01-02 15:04:05 -0700 MST",
 		"2006-01-02 15:04:05.999999999-07:00",
 		"2006-01-02 15:04:05",
 	} {

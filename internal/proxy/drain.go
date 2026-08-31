@@ -27,7 +27,11 @@ func newConnTracker() *connTracker {
 // optional because a connection nobody can attribute is a connection nobody can
 // revoke.
 func (t *connTracker) track(c net.Conn, principal ConnPrincipal) net.Conn {
-	tc := &trackedConn{Conn: c, tracker: t, principal: principal}
+	return t.trackWithClose(c, principal, nil)
+}
+
+func (t *connTracker) trackWithClose(c net.Conn, principal ConnPrincipal, onClose func()) net.Conn {
+	tc := &trackedConn{Conn: c, tracker: t, principal: principal, onClose: onClose}
 	t.mu.Lock()
 	t.conns[tc] = struct{}{}
 	t.mu.Unlock()
@@ -79,6 +83,7 @@ type trackedConn struct {
 	// principal is fixed at the upgrade and never mutated, so the recheck sweep
 	// reads it without holding the tracker lock.
 	principal ConnPrincipal
+	onClose   func()
 	once      sync.Once
 	closeErr  error
 }
@@ -87,6 +92,9 @@ func (c *trackedConn) Close() error {
 	c.once.Do(func() {
 		c.tracker.forget(c)
 		c.closeErr = c.Conn.Close()
+		if c.onClose != nil {
+			c.onClose()
+		}
 	})
 	return c.closeErr
 }

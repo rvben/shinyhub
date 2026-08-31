@@ -106,6 +106,9 @@ func summarizeManifest(m *deploy.Manifest) []string {
 	if m.App.IdentityHeaders != nil {
 		appParts = append(appParts, fmt.Sprintf("identity_headers=%t", *m.App.IdentityHeaders))
 	}
+	if m.App.UsageIdentityMode != nil {
+		appParts = append(appParts, "usage_identity_mode="+*m.App.UsageIdentityMode)
+	}
 	if m.App.MinWarmReplicas != nil {
 		appParts = append(appParts, fmt.Sprintf("min_warm_replicas=%d", *m.App.MinWarmReplicas))
 	}

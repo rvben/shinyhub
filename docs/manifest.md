@@ -102,6 +102,7 @@ starts.
 | `readiness_path` | absolute HTTP path | Path polled before a process becomes routable; default `/`. Queries and fragments are rejected. See [Readiness](#app-readiness). |
 | `readiness_status` | int 100..599 | Require this exact response status. When omitted, any 2xx or 3xx response is healthy. See [Readiness](#app-readiness). |
 | `identity_headers` | bool | Per-app identity-forwarding toggle. See [`[app] identity_headers`](#app-identity_headers) below. |
+| `usage_identity_mode` | `disabled`, `unattributed`, `pseudonymous`, or `identified` | Usage-analytics identity override. It may be stricter than the hub policy, never more identifying. See [Usage analytics](usage-analytics.md#per-app-override). |
 | `autoscale` | inline table | Per-app session-saturation autoscale policy. See [`[app] autoscale`](#app-autoscale) below. |
 | `worker` | table | Elastic worker-isolation policy, including the warm-spare floor. See [`[app.worker]`](#appworker) below. |
 | `icon` | string | Single emoji app icon. See [`[app] icon`](#app-icon) below. |

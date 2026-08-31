@@ -241,6 +241,19 @@ Components are compact, familiar, and confident. Every interactive primitive mus
 - **Border:** one-pixel Quiet Line, strengthening to Strong Line on hover or emphasis.
 - **Internal Padding:** typically 14px × 16px for dense application cards and 16px × 18px for viewer launch tiles.
 
+### Operational Data Surfaces
+
+- **Metric summary:** lead with three or four decision-driving measures in a semantic description list. Keep the strip flat, using block borders and hairline dividers instead of separate cards; set values in tabular monospaced type and keep labels and explanatory notes quiet. Reflow four columns to two before values become cramped.
+- **Analysis split:** pair the dominant trend or activity view with a narrower context or composition rail inside one 14px tonal container. Collapse to one column and move the divider between rows when either side can no longer read comfortably.
+- **Charts:** use restrained grid lines, monospaced axes, and Signal Cyan only for the principal series. An SVG chart needs a concise accessible name and a complete semantic data table immediately adjacent but visually hidden; the visual is never the sole source of exact values or meaning.
+- **Operational tables:** keep real table semantics, compact rows, muted headers, and tabular monospaced numeric columns. Lead with the identifying field; at narrow widths allocate columns deliberately and truncate only secondary text, preserving horizontal scrolling when exact values would otherwise be lost.
+- **Motion:** a chart may reveal once to establish reading direction, without stagger or replay. Keep the reveal restrained, and remove it entirely under `prefers-reduced-motion` without hiding data or feedback.
+- **Async replacement:** mark loading regions busy, announce loading and successful completion politely, announce failures assertively with an actionable retry, and restore focus to the equivalent initiating control when user-triggered refreshes replace the DOM. Background refreshes must not steal focus.
+
+**The Data Has a Text Twin Rule.** Every visual summary of operational data must retain a semantic text equivalent that exposes the same labels and values.
+
+**The Refresh Does Not Disorient Rule.** Replacing an async region must preserve the operator's place through stable focus restoration and explicit loading, success, and error announcements.
+
 ### Inputs / Fields
 
 - **Style:** Control Surface background, one-pixel Quiet Line border, 8px corners, and 9px × 12px padding. Use Space Mono when the value is technical; use Manrope for natural-language search and authentication.
@@ -276,6 +289,7 @@ Viewer tiles use a 14px corner, a 46px app avatar, a strong app name, restrained
 - **Do** preserve complete dark and light themes, visible keyboard focus, WCAG 2.2 AA contrast, and reduced-motion behavior.
 - **Do** use skeletons for loading and actionable empty states that teach the next step.
 - **Do** keep responsive changes structural: collapse navigation, reflow grids, and protect touch targets.
+- **Do** pair operational charts with semantic text equivalents and preserve focus across user-triggered refreshes.
 
 ### Don't:
 
@@ -285,4 +299,4 @@ Viewer tiles use a 14px corner, a 46px app avatar, a strong app name, restrained
 - **Don't** use cyan, green, amber, coral, or indigo as decoration or as the only carrier of meaning.
 - **Don't** add heavy shadows to resting cards or stack multiple floating planes.
 - **Don't** introduce display fonts, terminal-themed body copy, custom scrollbars, or nonstandard form controls for flavor.
-- **Don't** animate page-load choreography; motion communicates state and completes within roughly 200ms, except for subtle ambient health cues.
+- **Don't** animate page-load choreography; motion communicates state and completes within roughly 200ms, except for subtle ambient health cues and a single reduced-motion-safe chart reveal.

@@ -71,6 +71,7 @@ type Config struct {
 	Icon                         *string  `toml:"-"`
 	RenderSeconds                *float64 `toml:"-"`
 	IdentityHeaders              *bool    `toml:"-"`
+	UsageIdentityMode            *string  `toml:"-"`
 	MinWarmReplicas              *int     `toml:"-"`
 	MemoryLimitMB                *int     `toml:"-"`
 	CPUQuotaPercent              *int     `toml:"-"`

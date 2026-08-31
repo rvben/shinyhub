@@ -69,6 +69,7 @@ import (
 	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/ui"
 	"github.com/rvben/shinyhub/internal/upgrade"
+	"github.com/rvben/shinyhub/internal/usage"
 	"github.com/rvben/shinyhub/internal/worker"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 	gopscpu "github.com/shirou/gopsutil/v4/cpu"
@@ -222,23 +223,39 @@ var rotateSecretCmd = &cobra.Command{
 			}
 			return secrets.Encrypt(newCA, p)
 		}
+		oldUsage := usage.UsagePseudonymEncryptionKey(oldSecret)
+		newUsage := usage.UsagePseudonymEncryptionKey(newSecret)
+		reUsage := func(old []byte) ([]byte, error) {
+			p, derr := secrets.Decrypt(oldUsage, old)
+			if derr != nil {
+				return nil, fmt.Errorf("decrypt usage pseudonym key with the current auth.secret: %w", derr)
+			}
+			return secrets.Encrypt(newUsage, p)
+		}
 
-		n, caRotated, err := store.RotateSecretsTx(reEnv, reCA)
+		n, caRotated, usageRotated, err := store.RotateSecretsTx(reEnv, reCA, reUsage)
 		if err != nil {
 			return fmt.Errorf("rotation failed (no changes committed - safe to retry): %w", err)
 		}
 		fmt.Fprintf(cmd.ErrOrStderr(),
-			"Rotated %d app-env secret(s)%s.\nNext: set SHINYHUB_AUTH_SECRET to the new value and start the server.\n",
-			n, caRotatedSuffix(caRotated))
+			"Rotated %d app-env secret(s)%s%s.\nNext: set SHINYHUB_AUTH_SECRET to the new value and start the server.\n",
+			n, caRotatedSuffix(caRotated), usageRotatedSuffix(usageRotated))
 		return cli.RenderAction(cmd, "rotated",
-			map[string]any{"env_secrets": n, "worker_ca_rotated": caRotated},
-			fmt.Sprintf("rotated %d env secret(s); worker_ca_rotated=%v", n, caRotated))
+			map[string]any{"env_secrets": n, "worker_ca_rotated": caRotated, "usage_pseudonym_key_rotated": usageRotated},
+			fmt.Sprintf("rotated %d env secret(s); worker_ca_rotated=%v; usage_pseudonym_key_rotated=%v", n, caRotated, usageRotated))
 	},
 }
 
 func caRotatedSuffix(rotated bool) string {
 	if rotated {
 		return " and the worker CA key"
+	}
+	return ""
+}
+
+func usageRotatedSuffix(rotated bool) string {
+	if rotated {
+		return " and the usage pseudonym key"
 	}
 	return ""
 }
@@ -521,8 +538,10 @@ type appLogMaintenanceMetrics interface {
 // runMaintenance periodically prunes database history and reconciles immutable
 // local log files. It runs on the owner instance only, promptly and then on the
 // configured interval.
-func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manager, telemetry appLogMaintenanceMetrics, cfg config.MaintenanceConfig) {
+func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manager, telemetry appLogMaintenanceMetrics, cfg config.MaintenanceConfig, usageCfg config.UsageConfig) {
 	auditRetention := time.Duration(cfg.AuditRetentionDays) * 24 * time.Hour
+	usageRawRetention := time.Duration(usageCfg.RawRetentionDays) * 24 * time.Hour
+	usageAggregateRetention := time.Duration(usageCfg.AggregateRetentionDays) * 24 * time.Hour
 	keepRuns := cfg.ScheduleRunRetentionCount
 	keepAppLogs := cfg.AppLogRunRetentionCount
 	// The database-backed login limiter only writes rows on a Postgres backend,
@@ -531,7 +550,7 @@ func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manag
 	// dropped; raise it if a longer-window bucket is ever added.
 	pruneRateLimits := store.IsPostgres()
 	const rateLimitRetention = time.Hour
-	if auditRetention <= 0 && keepRuns <= 0 && keepAppLogs <= 0 && !pruneRateLimits {
+	if auditRetention <= 0 && usageRawRetention <= 0 && usageAggregateRetention <= 0 && keepRuns <= 0 && keepAppLogs <= 0 && !pruneRateLimits {
 		return
 	}
 
@@ -541,6 +560,20 @@ func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manag
 				slog.Warn("prune_audit_events_failed", "err", err)
 			} else if n > 0 {
 				slog.Info("pruned_audit_events", "removed", n, "retention_days", cfg.AuditRetentionDays)
+			}
+		}
+		if usageRawRetention > 0 {
+			if n, err := store.PruneUsageSessions(usageRawRetention); err != nil {
+				slog.Warn("prune_usage_sessions_failed", "err", err)
+			} else if n > 0 {
+				slog.Info("pruned_usage_sessions", "removed", n, "retention_days", usageCfg.RawRetentionDays)
+			}
+		}
+		if usageAggregateRetention > 0 {
+			if n, err := store.PruneUsageDaily(usageAggregateRetention); err != nil {
+				slog.Warn("prune_usage_daily_failed", "err", err)
+			} else if n > 0 {
+				slog.Info("pruned_usage_daily", "removed", n, "retention_days", usageCfg.AggregateRetentionDays)
 			}
 		}
 		if keepRuns > 0 {
@@ -1309,6 +1342,40 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// authored itself. The proxy only injects the fallback into HTML pages that
 	// do not already declare rel=icon.
 	prx.SetAppFavicon(true)
+	// Usage analytics run off the WebSocket lifecycle rather than raw request
+	// counts. The recorder's bounded queue keeps database work off the serving
+	// path and is stopped only after upgraded connections have drained, so normal
+	// shutdown records their end times.
+	usagePolicy, err := usage.LoadOrInitPolicy(store, cfg.Usage.IdentityMode, cfg.Auth.Secret)
+	if err != nil {
+		return fmt.Errorf("initialize usage privacy policy: %w", err)
+	}
+	var stopUsage func()
+	var usageRecorder *usage.Recorder
+	if cfg.Usage.Enabled {
+		usageRecorder = usage.NewRecorderWithPolicy(store, cfg.Server.InstanceID, usagePolicy)
+		usageCtx, cancelUsage := context.WithCancel(context.Background())
+		var usageWG sync.WaitGroup
+		usageWG.Add(1)
+		go func() {
+			defer usageWG.Done()
+			usageRecorder.Run(usageCtx)
+		}()
+		prx.SetUsageRecorder(usageRecorder)
+		var stopOnce sync.Once
+		stopUsage = func() {
+			stopOnce.Do(func() {
+				prx.SetUsageRecorder(nil)
+				cancelUsage()
+				usageWG.Wait()
+			})
+		}
+		defer stopUsage()
+		slog.Info("usage analytics enabled",
+			"identity_mode", cfg.Usage.IdentityMode,
+			"raw_retention_days", cfg.Usage.RawRetentionDays,
+			"aggregate_retention_days", cfg.Usage.AggregateRetentionDays)
+	}
 	// Identity forwarding: the proxy injects the authenticated user's
 	// identity headers + per-app signed token. The provider owns the groups
 	// TTL cache and minting; the proxy holds no secret and no store.
@@ -1388,6 +1455,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 
 	srv := api.New(cfg, store, mgr, prx)
+	srv.SetUsagePolicy(usagePolicy)
 	srv.SetVersion(version)
 	if fc := cfg.Runtime.Fargate; fc.Cluster != "" {
 		var opts []func(*awsconfig.LoadOptions) error
@@ -1443,6 +1511,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	if cfg.Metrics.Enabled {
 		reg := metrics.New(version)
 		metricsReg = reg
+		if usageRecorder != nil {
+			usageRecorder.SetMetrics(reg)
+		}
 		srv.SetMetrics(reg)
 		prx.SetRejectRecorder(reg)
 		// Fleet gauges read live counts from the store at scrape time, so
@@ -2334,7 +2405,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// only, so HA standbys never prune concurrently. A no-op unless retention
 		// is configured.
 		loops.Add(1)
-		go func() { defer loops.Done(); runMaintenance(octx, store, mgr, appLogTelemetry, cfg.Maintenance) }()
+		go func() {
+			defer loops.Done()
+			runMaintenance(octx, store, mgr, appLogTelemetry, cfg.Maintenance, cfg.Usage)
+		}()
 		loops.Add(1)
 		go func() { defer loops.Done(); srv.RunDevelopmentAppReaper(octx, time.Minute) }()
 		// Warm-restore: re-boot and re-freeze the apps that were hibernated before
@@ -2750,6 +2824,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		} else {
 			slog.Info("upgraded connections drained cleanly")
 		}
+	}
+	if stopUsage != nil {
+		stopUsage()
 	}
 
 	switch cfg.Server.ShutdownApps {
