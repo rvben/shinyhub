@@ -1,4 +1,8 @@
+import orbitHubLockupDarkSource from "../../../assets/branding/selected/shinyhub-orbit-hub-dark.svg";
+
 export const DEMO_READY_PATH = "/__demo/ready";
+
+const orbitHubLockupDark = orbitHubLockupDarkSource.replace(/^<\?xml[^>]+>\s*/, "");
 
 const wakeStyles = String.raw`
 :root {
@@ -39,16 +43,11 @@ main {
 }
 
 .brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.7rem;
-  color: var(--text);
-  font-size: 1.05rem;
-  font-weight: 700;
-  letter-spacing: -0.025em;
+  display: block;
+  width: min(11.5rem, 58vw);
 }
 
-.brand svg { width: 1.8rem; height: 1.8rem; }
+.brand svg { display: block; width: 100%; height: auto; }
 
 h1 {
   max-width: 12ch;
@@ -215,15 +214,7 @@ export function demoWakeResponse(): Response {
 </head>
 <body>
   <main>
-    <div class="brand" aria-label="ShinyHub Demo">
-      <svg viewBox="0 0 32 32" role="img" aria-hidden="true">
-        <path d="M16 2.5c0 7.6 1.9 11.2 10.7 13.5C17.9 18.3 16 21.9 16 29.5 16 21.9 14.1 18.3 5.3 16 14.1 13.7 16 10.1 16 2.5Z" fill="#38bdf8"/>
-        <circle cx="5" cy="8" r="2" fill="#a8b4d4"/>
-        <circle cx="27" cy="8" r="2" fill="#a8b4d4"/>
-        <circle cx="16" cy="28" r="2" fill="#bae6fd"/>
-      </svg>
-      <span>ShinyHub Demo</span>
-    </div>
+    <div class="brand">${orbitHubLockupDark}</div>
     <h1>Waking the live demo</h1>
     <p class="intro">The front door is ready. ShinyHub is starting the demo environment now, then it will bring you straight in.</p>
     <div class="progress" aria-hidden="true"></div>

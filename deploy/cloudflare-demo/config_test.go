@@ -147,6 +147,7 @@ func TestCloudflareDemoColdStartStaysOffTheRootRequestPath(t *testing.T) {
 	wakeSource := string(wake)
 	for _, required := range []string{
 		`Waking the live demo`,
+		`shinyhub-orbit-hub-dark.svg`,
 		`fetch('${DEMO_READY_PATH}'`,
 		`window.location.replace('/')`,
 		`@media (prefers-reduced-motion: reduce)`,
@@ -156,6 +157,26 @@ func TestCloudflareDemoColdStartStaysOffTheRootRequestPath(t *testing.T) {
 		if !strings.Contains(wakeSource, required) {
 			t.Errorf("demo edge boot page is missing %q", required)
 		}
+	}
+	if strings.Contains(wakeSource, `viewBox="0 0 32 32"`) {
+		t.Fatal("demo edge boot page must use the approved Orbit Hub lockup, not an approximate inline mark")
+	}
+
+	brand, err := os.ReadFile("../../assets/branding/selected/shinyhub-orbit-hub-dark.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(brand), `ShinyHub Orbit Hub logo`) {
+		t.Fatal("approved dark-surface Orbit Hub lockup is missing its identity metadata")
+	}
+
+	wrangler, err := os.ReadFile("wrangler.jsonc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wranglerSource := string(wrangler)
+	if !strings.Contains(wranglerSource, `"type": "Text"`) || !strings.Contains(wranglerSource, `"**/*.svg"`) {
+		t.Fatal("demo Worker must bundle the approved SVG lockup as an edge text module")
 	}
 
 	smoke, err := os.ReadFile("../../scripts/demo-smoke.sh")
