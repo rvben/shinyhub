@@ -188,26 +188,42 @@ exercise_current_against_released_server() {
     || fail "app deployed by current CLI is not serving on ${lane} server"
 
   if [ "${lane}" = "previous" ]; then
-    # v0.12.11 accepts unknown JSON fields, so sending deploy_trigger without a
-    # capability check would appear successful while silently creating the old
-    # lifetime-gated schedule. Prove the current CLI rejects before POST, then
-    # ask the published predecessor itself to prove no schedule was created.
-    if "${CURRENT_BIN}" schedule add "${slug}" --name unsupported-trigger \
-      --cron '0 5 * * *' --cmd 'python producer.py' --deploy-trigger bundle_change \
-      --config "${config}" --output table \
-      >"${WORK}/current-previous-trigger-add.log" 2>&1; then
-      fail "current CLI silently sent deploy_trigger to the immediate previous server"
-    fi
-    grep -Fq 'does not support --deploy-trigger=bundle_change' \
-      "${WORK}/current-previous-trigger-add.log" \
-      || fail "unsupported deploy_trigger failure did not identify the missing predecessor capability"
-    grep -Fq 'no schedule was changed' "${WORK}/current-previous-trigger-add.log" \
-      || fail "unsupported deploy_trigger failure did not promise pre-mutation rejection"
-    "${CURRENT_BIN}" schedule ls "${slug}" --config "${config}" --output json \
-      >"${WORK}/current-previous-schedules.json" 2>"${WORK}/current-previous-schedules.log" \
-      || fail "list schedules after rejected predecessor mutation"
-    if grep -Fq 'unsupported-trigger' "${WORK}/current-previous-schedules.json"; then
-      fail "rejected deploy_trigger command still created a schedule on the immediate previous server"
+    # Follow the predecessor's advertised capability instead of assuming every
+    # immediate previous release predates deploy-trigger convergence. This keeps
+    # the rolling baseline valid both when a capability is new and after it has
+    # shipped in consecutive releases.
+    if grep -Eq '"schedule_deploy_convergence"[[:space:]]*:[[:space:]]*true' "${server_info}"; then
+      "${CURRENT_BIN}" schedule add "${slug}" --name supported-trigger \
+        --cron '0 5 * * *' --cmd 'python producer.py' --deploy-trigger bundle_change \
+        --config "${config}" --output table \
+        >"${WORK}/current-previous-trigger-add.log" 2>&1 \
+        || fail "current CLI rejected deploy_trigger advertised by the immediate previous server"
+      "${CURRENT_BIN}" schedule ls "${slug}" --config "${config}" --output json \
+        >"${WORK}/current-previous-schedules.json" 2>"${WORK}/current-previous-schedules.log" \
+        || fail "list schedules after supported predecessor mutation"
+      grep -Fq 'supported-trigger' "${WORK}/current-previous-schedules.json" \
+        || fail "supported deploy_trigger command did not create a schedule on the immediate previous server"
+    else
+      # Older servers accept unknown JSON fields, so sending deploy_trigger
+      # without a capability check can appear successful while silently
+      # creating a lifetime-gated schedule. Prove rejection happens before POST.
+      if "${CURRENT_BIN}" schedule add "${slug}" --name unsupported-trigger \
+        --cron '0 5 * * *' --cmd 'python producer.py' --deploy-trigger bundle_change \
+        --config "${config}" --output table \
+        >"${WORK}/current-previous-trigger-add.log" 2>&1; then
+        fail "current CLI silently sent deploy_trigger to an unsupported immediate previous server"
+      fi
+      grep -Fq 'does not support --deploy-trigger=bundle_change' \
+        "${WORK}/current-previous-trigger-add.log" \
+        || fail "unsupported deploy_trigger failure did not identify the missing predecessor capability"
+      grep -Fq 'no schedule was changed' "${WORK}/current-previous-trigger-add.log" \
+        || fail "unsupported deploy_trigger failure did not promise pre-mutation rejection"
+      "${CURRENT_BIN}" schedule ls "${slug}" --config "${config}" --output json \
+        >"${WORK}/current-previous-schedules.json" 2>"${WORK}/current-previous-schedules.log" \
+        || fail "list schedules after rejected predecessor mutation"
+      if grep -Fq 'unsupported-trigger' "${WORK}/current-previous-schedules.json"; then
+        fail "rejected deploy_trigger command still created a schedule on the immediate previous server"
+      fi
     fi
   fi
 
