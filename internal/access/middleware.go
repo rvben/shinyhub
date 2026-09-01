@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -20,6 +21,12 @@ type store interface {
 
 type supportSessionObserver interface {
 	ObserveSupportSession(id string) error
+}
+
+// supportSessionLookup lets the guard page name the session a root guard
+// cookie refers to. Stores without it still block; they just cannot say why.
+type supportSessionLookup interface {
+	GetSupportSession(id string) (*db.SupportSession, error)
 }
 
 // Middleware returns an HTTP middleware that enforces per-app access control.
@@ -64,25 +71,28 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 			// can still personalize for a signed-in user. An anonymous request
 			// resolves to nil and is denied only where decide says so.
 			user, token := resolveSession(r, jwtSecret, revoked, userLookup)
+			if guard, err := r.Cookie(auth.SupportSessionGuardCookieName); err == nil && (user == nil || user.SupportSession == nil) {
+				// The root guard without a valid app-scoped support cookie means
+				// this request is outside the app the session is bound to, or the
+				// bound app's own cookie is gone. resolveSession has already
+				// refused every other identity; serving a public app anonymously
+				// here would hide that boundary from the administrator and hand a
+				// private app's sign-in page to someone who cannot use it. End the
+				// request on a page that says what is going on instead.
+				writeSupportPage(w, supportui.GuardOnlyPage(slug, guardedSession(st, guard.Value)))
+				return
+			}
 			if user != nil && user.SupportSession != nil &&
 				(user.SupportSession.AppSlug != slug || user.SupportSession.AppID != app.ID) {
 				// Do not let a public replacement turn immutable-scope failure into
 				// anonymous access. The app must not see this request at all.
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
-				w.Header().Set("Cache-Control", "no-store")
-				w.WriteHeader(http.StatusConflict)
-				_, _ = w.Write([]byte(supportui.ScopeBlockedPage(slug, user.SupportSession.ActorUsername, user.Username, user.SupportSession.ExpiresAt)))
+				writeSupportPage(w, supportui.ScopeBlockedPage(slug, user.SupportSession.ActorUsername, user.Username, user.SupportSession.ExpiresAt))
 				return
 			}
 			if user != nil && user.SupportSession != nil {
 				if observer, ok := st.(supportSessionObserver); ok {
 					if err := observer.ObserveSupportSession(user.SupportSession.ID); err != nil {
-						w.Header().Set("Content-Type", "text/html; charset=utf-8")
-						w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
-						w.Header().Set("Cache-Control", "no-store")
-						w.WriteHeader(http.StatusConflict)
-						_, _ = w.Write([]byte(supportui.InactivePage(slug, user.SupportSession.ActorUsername, user.Username, user.SupportSession.ExpiresAt)))
+						writeSupportPage(w, supportui.InactivePage(slug, user.SupportSession.ActorUsername, user.Username, user.SupportSession.ExpiresAt))
 						return
 					}
 				}
@@ -121,6 +131,39 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 				next.ServeHTTP(w, r)
 			}
 		})
+	}
+}
+
+// writeSupportPage answers 409 with a self-contained support safety page. The
+// policy admits the page's own inline styles and stop form and nothing else,
+// and no-store keeps a stale copy from masking a later state change.
+func writeSupportPage(w http.ResponseWriter, page string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusConflict)
+	_, _ = w.Write([]byte(page))
+}
+
+// guardedSession describes the support session behind a guard cookie value,
+// or nil when the store cannot look it up or has no such row. A lookup error
+// is treated the same as an unknown ID: the request is blocked either way, and
+// the page must not claim a state it could not read.
+func guardedSession(st store, id string) *supportui.GuardedSession {
+	lookup, ok := st.(supportSessionLookup)
+	if !ok {
+		return nil
+	}
+	session, err := lookup.GetSupportSession(id)
+	if err != nil || session == nil {
+		return nil
+	}
+	return &supportui.GuardedSession{
+		AppSlug:   session.AppSlug,
+		Actor:     session.ActorUsername,
+		Subject:   session.SubjectUsername,
+		ExpiresAt: session.ExpiresAt,
+		Active:    session.StoppedAt == nil && session.ExpiresAt.After(time.Now()),
 	}
 }
 

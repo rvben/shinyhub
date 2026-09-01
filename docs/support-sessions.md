@@ -44,7 +44,12 @@ that app actions can change data, and provides **End support session**. Ending
 the session revokes its JWT and closes its open WebSockets on the normal
 session-recheck sweep. Its app-scoped cookie is cleared immediately; the root
 fallback guard remains until the original deadline so a delayed or cross-app
-stop request cannot restore an administrator identity on the app origin. The
+stop request cannot restore an administrator identity on the app origin.
+While that guard is present, any app on the origin other than the bound one
+answers with a page that names the session, links back to the bound app and
+offers the same end control; after the session has ended, the page says so and
+explains that the origin stays signed out until the original deadline. No app
+is ever rendered anonymously behind the guard. The
 rail is mounted outside the app's body and repairs
 itself after normal single-page-app body rewrites or accidental removal.
 Only one live support session is permitted per administrator; end it before

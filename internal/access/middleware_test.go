@@ -53,21 +53,113 @@ func TestSupportGuardPreventsIdentityFallbackOutsideBoundApp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var got *auth.ContextUser
+	reached := false
 	handler := access.Middleware(store, "test-secret", nil, store.LookupContextUser)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = auth.UserFromContext(r.Context())
+		reached = true
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/app/other/", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
-	req.AddCookie(&http.Cookie{Name: auth.SupportSessionGuardCookieName, Value: "active-support-id"})
+	req.AddCookie(&http.Cookie{Name: auth.SupportSessionGuardCookieName, Value: "unknown-support-id"})
 	// Model a forward-auth deployment too: neither upstream identity nor the
-	// ordinary cookie may punch through the support-session boundary.
+	// ordinary cookie may punch through the support-session boundary, and the
+	// public app must not quietly serve the request anonymously either.
 	req = req.WithContext(auth.WithUser(req.Context(), &auth.ContextUser{ID: owner.ID, Username: owner.Username, Role: owner.Role}))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || got != nil {
-		t.Fatalf("status=%d downstream user=%+v, want anonymous public access", rec.Code, got)
+	if rec.Code != http.StatusConflict || reached {
+		t.Fatalf("status=%d reached=%v, want an explicit guard page and no app access", rec.Code, reached)
+	}
+	if !strings.Contains(rec.Body.String(), "Support session guard active") {
+		t.Fatalf("guard page missing for an unknown session id: %s", rec.Body.String())
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+}
+
+// TestSupportGuardOnlyRequestNamesTheBoundSession covers the browser state
+// after a support launch: the root guard travels to every app on the origin,
+// while the support cookie only travels to the bound app. A request that
+// carries the guard alone must end on a page that names the session and
+// offers a way back or out, never on the anonymous rendering of the app.
+func TestSupportGuardOnlyRequestNamesTheBoundSession(t *testing.T) {
+	store := makeStore(t)
+	for _, user := range []db.CreateUserParams{
+		{Username: "admin", PasswordHash: "h", Role: "admin"},
+		{Username: "alice", PasswordHash: "h", Role: "viewer"},
+	} {
+		if err := store.CreateUser(user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admin, _ := store.GetUserByUsername("admin")
+	alice, _ := store.GetUserByUsername("alice")
+	for _, slug := range []string{"sales", "other"} {
+		if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: admin.ID, Access: "public"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sales, _ := store.GetAppBySlug("sales")
+	expires := time.Now().UTC().Add(15 * time.Minute)
+	if err := store.CreateSupportSession(db.CreateSupportSessionParams{
+		ID: "support-id", ActorUserID: admin.ID, ActorUsername: admin.Username, ActorTokenEpoch: admin.TokenEpoch,
+		SubjectUserID: alice.ID, SubjectUsername: alice.Username, SubjectRole: alice.Role, SubjectTokenEpoch: alice.TokenEpoch,
+		AppID: sales.ID, AppSlug: "sales", Reason: "Investigating SUP-4001", LaunchCodeHash: "launch-hash", ExpiresAt: expires,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reached := false
+	handler := access.Middleware(store, "test-secret", nil, store.LookupContextUser)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		_, _ = w.Write([]byte("app content"))
+	}))
+	serve := func(slug string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/app/"+slug+"/", nil)
+		req.AddCookie(&http.Cookie{Name: auth.SupportSessionGuardCookieName, Value: "support-id"})
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusConflict || reached || strings.Contains(rec.Body.String(), "app content") {
+			t.Fatalf("/app/%s/: status=%d reached=%v body=%s", slug, rec.Code, reached, rec.Body.String())
+		}
+		return rec
+	}
+
+	// Live session, request on a different app: point back to the bound app
+	// and keep the stop control, which posts to the bound app's stop endpoint
+	// where the support cookie does travel.
+	body := serve("other").Body.String()
+	for _, want := range []string{"Support session paused", "alice", "admin", `href="/app/sales/"`,
+		`action="/app/sales/.shinyhub/support-session/stop"`, "End support session"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("guard page on another app missing %q: %s", want, body)
+		}
+	}
+
+	// Live session, request on the bound app itself without its cookie: the
+	// stop endpoint could not act on it, so no stop form is offered.
+	body = serve("sales").Body.String()
+	if !strings.Contains(body, "Support session paused") || !strings.Contains(body, "app-scoped cookie is missing") {
+		t.Fatalf("guard page on the bound app has the wrong copy: %s", body)
+	}
+	if strings.Contains(body, "<form") {
+		t.Fatalf("guard page on the bound app offers a stop form that cannot succeed: %s", body)
+	}
+
+	// Ended session: the guard outlives the stop by design, and the page says
+	// so instead of the app quietly rendering for nobody in particular.
+	if _, err := store.StopSupportSession("support-id", "ended_by_actor", "192.0.2.10"); err != nil {
+		t.Fatal(err)
+	}
+	body = serve("other").Body.String()
+	for _, want := range []string{"Support session ended", "original deadline", "alice", "admin"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("guard page after stop missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "<form") || strings.Contains(body, "Return to the support session") {
+		t.Fatalf("guard page after stop still offers session controls: %s", body)
 	}
 }
 

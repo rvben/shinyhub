@@ -71,6 +71,26 @@ func (s *Store) GetActiveSupportSessionForActor(actorID int64) (*SupportSession,
 	return session, nil
 }
 
+// GetSupportSession returns the support session with this ID in whatever
+// state it is in, or nil when no such row exists. The root guard cookie carries
+// the ID, so a request that reaches an app outside the session's scope can
+// name the session that blocks it instead of being served anonymously.
+func (s *Store) GetSupportSession(id string) (*SupportSession, error) {
+	row := s.db.QueryRow(`SELECT id, actor_user_id, actor_username, subject_user_id, subject_username,
+		       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
+		       created_at, expires_at, stopped_at, stop_reason
+		  FROM support_sessions
+		 WHERE id = ?`, id)
+	session, err := scanSupportSession(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get support session: %w", err)
+	}
+	return session, nil
+}
+
 func (s *Store) CreateSupportSession(p CreateSupportSessionParams) error {
 	if p.ExpiresAt.IsZero() {
 		p.ExpiresAt = time.Now().UTC().Add(SupportSessionDuration)
