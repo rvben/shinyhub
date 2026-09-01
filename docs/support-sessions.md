@@ -87,8 +87,10 @@ offers both a retry and an idempotent precautionary end action.
   role or session-epoch changes (including viewer-to-developer expansion),
   administrator deletion/demotion/session
   revocation, explicit stop, and the hard deadline all fail closed. Upgraded
-  WebSockets have an independent connection deadline, so expiry does not
-  depend on the periodic session-recheck sweep.
+  WebSockets have an independent connection deadline, and every other request
+  made under the session is cancelled at that deadline as well, so a response
+  the app keeps open (long polling, server-sent events) ends with the session.
+  Expiry does not depend on the periodic session-recheck sweep.
 - The start event records actor, subject, app, reason, source IP, and the
   deterministic deadline in the same transaction as session creation.
   Explicit, aborted, and lazily reaped stop transitions record their cause and

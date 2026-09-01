@@ -2803,6 +2803,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !p.chargeRenderAdmission(rec, r, slug) {
 		return // shed: 503 already written, defer unwinds the accounting
 	}
+	if u := auth.UserFromContext(r.Context()); u != nil && u.SupportSession != nil && !u.SupportSession.ExpiresAt.IsZero() {
+		// Bound every support request to the session deadline. The reverse
+		// proxy cancels its outbound request, and closes an upgraded backend
+		// connection, when this context ends. Only hijacked connections carry
+		// a deadline timer of their own; a plain response the app keeps open
+		// (long polling, server-sent events) would otherwise stream under the
+		// support identity for as long as the app cared to keep writing. A
+		// zero deadline means none, exactly as the hijack tracker reads it.
+		ctx, cancel := context.WithDeadline(r.Context(), u.SupportSession.ExpiresAt)
+		defer cancel()
+		r = r.WithContext(ctx)
+	}
 	picked.rp.ServeHTTP(rec, r)
 }
 
