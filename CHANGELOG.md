@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.0](https://github.com/rvben/shinyhub/compare/v0.14.2...v0.15.0) - 2026-09-01
+
+### Added
+
+- **auth**: add support session recovery controls ([c68084c](https://github.com/rvben/shinyhub/commit/c68084c46e940a57a57ee77d6b36f6d4d740b1fd))
+- **auth**: add app-scoped support sessions ([bdbbd38](https://github.com/rvben/shinyhub/commit/bdbbd382ef09c69edecd3a4540baf289091b1593))
+
 ## [0.14.2](https://github.com/rvben/shinyhub/compare/v0.14.1...v0.14.2) - 2026-09-01
 
 ## [0.14.1](https://github.com/rvben/shinyhub/compare/v0.14.0...v0.14.1) - 2026-09-01
