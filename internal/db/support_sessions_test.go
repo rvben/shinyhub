@@ -150,7 +150,7 @@ func TestActivatedButUnobservedSupportSessionIsReapedAndRevoked(t *testing.T) {
 	if err := store.ActivateSupportSession("unobserved", "orphan-jti", params.ExpiresAt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DB().Exec(`UPDATE support_sessions SET created_at = datetime('now', '-2 minutes') WHERE id = ?`, "unobserved"); err != nil {
+	if _, err := store.DB().Exec(`UPDATE support_sessions SET created_at = ? WHERE id = ?`, time.Now().UTC().Add(-2*time.Minute), "unobserved"); err != nil {
 		t.Fatal(err)
 	}
 	params.ID, params.LaunchCodeHash = "replacement-after-orphan", "replacement-after-orphan-hash"
@@ -160,11 +160,16 @@ func TestActivatedButUnobservedSupportSessionIsReapedAndRevoked(t *testing.T) {
 	if revoked, err := store.IsTokenRevoked("orphan-jti"); err != nil || !revoked {
 		t.Fatalf("orphan token revoked=%v err=%v", revoked, err)
 	}
-	var orphanReason string
-	if err := store.DB().QueryRow(`SELECT json_extract(detail, '$.stop_reason') FROM audit_events
-		WHERE action = 'support_session.stop' AND resource_id = ?`, "unobserved").Scan(&orphanReason); err != nil {
+	var auditDetail string
+	if err := store.DB().QueryRow(`SELECT detail FROM audit_events
+		WHERE action = 'support_session.stop' AND resource_id = ?`, "unobserved").Scan(&auditDetail); err != nil {
 		t.Fatal(err)
 	}
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(auditDetail), &detail); err != nil {
+		t.Fatal(err)
+	}
+	orphanReason, _ := detail["stop_reason"].(string)
 	if orphanReason != "activation_abandoned" {
 		t.Fatalf("orphan stop audit reason = %q", orphanReason)
 	}
@@ -175,8 +180,7 @@ func TestSupportStartAuditFailureRollsBackSession(t *testing.T) {
 	if err := store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: "hash", Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DB().Exec(`CREATE TRIGGER fail_support_start_audit BEFORE INSERT ON audit_events
-		WHEN NEW.action = 'support_session.start' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+	if _, err := store.DB().Exec(`DROP TABLE audit_events`); err != nil {
 		t.Fatal(err)
 	}
 	admin, _ := store.GetUserByUsername("admin")
@@ -226,8 +230,7 @@ func TestSupportStopAuditFailureRollsBackStopAndRevocation(t *testing.T) {
 	if err := store.ActivateSupportSession("rollback-stop", "rollback-jti", expires); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DB().Exec(`CREATE TRIGGER fail_support_stop_audit BEFORE INSERT ON audit_events
-		WHEN NEW.action = 'support_session.stop' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+	if _, err := store.DB().Exec(`DROP TABLE audit_events`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.StopSupportSession("rollback-stop", "ended_by_actor", "192.0.2.1"); err == nil {
