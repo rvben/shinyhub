@@ -14,6 +14,7 @@ LOGS_PID=""
 SERVER_CRASHED=0
 PORT="${SHINYHUB_BROWSER_E2E_PORT:-18090}"
 HOST="http://127.0.0.1:${PORT}"
+PIDFILE="${WORK}/shinyhub.pid"
 ADMIN_USER="browser-admin"
 ADMIN_PASSWORD="browser-onboarding-password"
 CLI_VERSION="v0.0.0-browser-e2e"
@@ -134,6 +135,7 @@ start_server() {
     cd "${WORK}"
     SHINYHUB_SERVER_HOST=127.0.0.1 \
     SHINYHUB_SERVER_PORT="${PORT}" \
+    SHINYHUB_PID_FILE="${PIDFILE}" \
     SHINYHUB_SHUTDOWN_APPS=stop \
       exec "${BIN}" serve --config "${WORK}/shinyhub.yaml"
   ) >>"${WORK}/server.log" 2>&1 &
@@ -235,6 +237,43 @@ echo "==> initializing and starting a fresh installed server"
 ) >/dev/null || fail "server init"
 : >"${WORK}/server.log"
 start_server || fail "server readiness (port ${PORT} may be in use)"
+
+# This is the release-real regression for the wheel launcher's argv[0]
+# contract. The console script first runs Python and then execs the embedded Go
+# binary; tableflip must be able to re-exec that embedded path directly. A raw
+# Go-binary handoff cannot prove this packaging boundary.
+echo "==> handing off the uv-tool-installed wheel server"
+[ -s "${PIDFILE}" ] || fail "installed-wheel server did not write its PID file"
+OLD_SERVER_PID="$(cat "${PIDFILE}")"
+[ "${OLD_SERVER_PID}" = "${SERVER_PID}" ] \
+  || fail "installed-wheel PID file ${OLD_SERVER_PID} does not match launched PID ${SERVER_PID}"
+if grep -q 'cannot resolve re-exec target' "${WORK}/server.log"; then
+  fail "installed-wheel launcher supplied an unresolvable argv[0]"
+fi
+kill -HUP "${OLD_SERVER_PID}" 2>/dev/null || fail "signal installed-wheel server for handoff"
+NEW_SERVER_PID=""
+for _ in $(seq 1 300); do
+  if [ -s "${PIDFILE}" ]; then
+    candidate="$(cat "${PIDFILE}")"
+    if [ "${candidate}" != "${OLD_SERVER_PID}" ] && kill -0 "${candidate}" 2>/dev/null; then
+      NEW_SERVER_PID="${candidate}"
+      break
+    fi
+  fi
+  sleep 0.1
+done
+[ -n "${NEW_SERVER_PID}" ] || fail "installed-wheel handoff did not publish a live successor PID"
+wait "${OLD_SERVER_PID}" || fail "installed-wheel handoff parent did not exit cleanly"
+SERVER_PID="${NEW_SERVER_PID}"
+"${ROOT}/scripts/wait-http.sh" "${HOST}/readyz" 30 \
+  || fail "installed-wheel successor readiness"
+"${ROOT}/scripts/wait-http.sh" "${HOST}/activez" 45 \
+  || fail "installed-wheel successor ownership"
+curl -fsS "${HOST}/api/server-info" | grep -Fq '"version":"'"${CLI_VERSION}"'"' \
+  || fail "installed-wheel successor did not report the embedded release version"
+if grep -q 'cannot resolve re-exec target' "${WORK}/server.log"; then
+  fail "installed-wheel successor supplied an unresolvable argv[0]"
+fi
 
 echo "==> launching an isolated headless browser"
 mkdir -p "${WORK}/chrome-profile"
