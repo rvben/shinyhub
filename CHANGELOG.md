@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **analytics**: store privacy-clamped usage sessions correctly on PostgreSQL.
 - **serve**: warn at startup when the SIGHUP re-exec target cannot resolve ([628b3f7](https://github.com/rvben/shinyhub/commit/628b3f70870f6964fd0d7ae4c5476550e801f99b))
 - **packaging**: pass the binary's own path as argv[0] in the wheel launcher ([59941f1](https://github.com/rvben/shinyhub/commit/59941f1f870ed740a86733ff569eabf028756b5f))
 

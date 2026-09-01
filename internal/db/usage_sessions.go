@@ -197,7 +197,7 @@ func (s *Store) BeginUsageSessionWithPolicy(p UsageSessionStart) (bool, error) {
 		(id, app_id, deployment_id, user_id, viewer_key, principal_kind,
 		 identity_mode, policy_generation, instance_id, started_at, heartbeat_at)
 	SELECT ?, app_id, ?,
-		CASE WHEN identity_mode = 'identified' THEN ? ELSE NULL END,
+		CASE WHEN identity_mode = 'identified' THEN CAST(? AS BIGINT) ELSE NULL END,
 		CASE WHEN identity_mode = 'pseudonymous' THEN ? ELSE NULL END,
 		?, identity_mode,
 		CASE WHEN generation > ? THEN generation ELSE ? END,
