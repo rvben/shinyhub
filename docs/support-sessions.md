@@ -59,8 +59,9 @@ user and app, counts down to expiry, and lets the administrator return to an
 activated app in a new tab or end the session directly from the dashboard.
 Dashboard termination remains available if the app tab was closed or the
 app-origin cookie was lost; it performs the same token revocation and audit
-transition as the in-app action. A launch that has not activated yet can be
-ended but cannot be resumed without its one-time launch capability. If the
+transition as the in-app action. A launch whose browser has not reached the app yet can be
+ended but cannot be resumed without its one-time launch capability; the resume
+link appears once the app has been opened under the session. If the
 dashboard cannot verify support-session status, it keeps a warning visible and
 offers both a retry and an idempotent precautionary end action.
 

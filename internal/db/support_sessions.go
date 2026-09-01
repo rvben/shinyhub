@@ -48,7 +48,11 @@ type SupportSession struct {
 	ExpiresAt       time.Time
 	StoppedAt       *time.Time
 	StopReason      string
-	NewlyStopped    bool
+	// FirstUsedAt is set by the first request the access middleware admits
+	// under this session. Until then the browser has not arrived on the app,
+	// and the reaper may still close the session as abandoned.
+	FirstUsedAt  *time.Time
+	NewlyStopped bool
 }
 
 // GetActiveSupportSessionForActor returns the actor's one live, unexpired
@@ -57,7 +61,7 @@ type SupportSession struct {
 func (s *Store) GetActiveSupportSessionForActor(actorID int64) (*SupportSession, error) {
 	row := s.db.QueryRow(`SELECT id, actor_user_id, actor_username, subject_user_id, subject_username,
 		       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
-		       created_at, expires_at, stopped_at, stop_reason
+		       created_at, expires_at, stopped_at, stop_reason, first_used_at
 		  FROM support_sessions
 		 WHERE actor_user_id = ? AND stopped_at IS NULL AND expires_at > ?
 		 ORDER BY created_at DESC LIMIT 1`, actorID, time.Now().UTC())
@@ -78,7 +82,7 @@ func (s *Store) GetActiveSupportSessionForActor(actorID int64) (*SupportSession,
 func (s *Store) GetSupportSession(id string) (*SupportSession, error) {
 	row := s.db.QueryRow(`SELECT id, actor_user_id, actor_username, subject_user_id, subject_username,
 		       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
-		       created_at, expires_at, stopped_at, stop_reason
+		       created_at, expires_at, stopped_at, stop_reason, first_used_at
 		  FROM support_sessions
 		 WHERE id = ?`, id)
 	session, err := scanSupportSession(row)
@@ -321,14 +325,18 @@ type supportSessionScanner interface {
 
 func scanSupportSession(row supportSessionScanner) (*SupportSession, error) {
 	var (
-		session                SupportSession
-		actorID, subjectID     sql.NullInt64
-		tokenExpiry, stoppedAt sql.NullTime
+		session                           SupportSession
+		actorID, subjectID                sql.NullInt64
+		tokenExpiry, stoppedAt, firstUsed sql.NullTime
 	)
 	if err := row.Scan(&session.ID, &actorID, &session.ActorUsername, &subjectID, &session.SubjectUsername,
 		&session.AppSlug, &session.Reason, &session.TokenJTI, &tokenExpiry,
-		&session.CreatedAt, &session.ExpiresAt, &stoppedAt, &session.StopReason); err != nil {
+		&session.CreatedAt, &session.ExpiresAt, &stoppedAt, &session.StopReason, &firstUsed); err != nil {
 		return nil, err
+	}
+	if firstUsed.Valid {
+		v := firstUsed.Time
+		session.FirstUsedAt = &v
 	}
 	if actorID.Valid {
 		v := actorID.Int64
@@ -364,7 +372,7 @@ func (s *Store) stopSupportSession(id string, actorID *int64, reason, ipAddress 
 			 WHERE actor_user_id = ? AND stopped_at IS NULL AND expires_at > ?
 			 RETURNING id, actor_user_id, actor_username, subject_user_id, subject_username,
 			       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
-			       created_at, expires_at, stopped_at, stop_reason`, reason, *actorID, time.Now().UTC())
+			       created_at, expires_at, stopped_at, stop_reason, first_used_at`, reason, *actorID, time.Now().UTC())
 	} else {
 		row = tx.QueryRow(`
 			UPDATE support_sessions
@@ -372,7 +380,7 @@ func (s *Store) stopSupportSession(id string, actorID *int64, reason, ipAddress 
 			 WHERE id = ? AND stopped_at IS NULL
 			 RETURNING id, actor_user_id, actor_username, subject_user_id, subject_username,
 			       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
-			       created_at, expires_at, stopped_at, stop_reason`, reason, id)
+			       created_at, expires_at, stopped_at, stop_reason, first_used_at`, reason, id)
 	}
 	session, scanErr := scanSupportSession(row)
 	won := scanErr == nil
@@ -383,7 +391,7 @@ func (s *Store) stopSupportSession(id string, actorID *int64, reason, ipAddress 
 		won = false
 		row = tx.QueryRow(`SELECT id, actor_user_id, actor_username, subject_user_id, subject_username,
 		       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
-		       created_at, expires_at, stopped_at, stop_reason
+		       created_at, expires_at, stopped_at, stop_reason, first_used_at
 		  FROM support_sessions WHERE id = ?`, id)
 		session, scanErr = scanSupportSession(row)
 		if errors.Is(scanErr, sql.ErrNoRows) {

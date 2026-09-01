@@ -225,7 +225,11 @@ func (s *Server) handleGetCurrentSupportSession(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, map[string]any{"active": nil})
 		return
 	}
-	resumable := session.TokenJTI != ""
+	// A session is worth a resume link only once the browser has actually
+	// reached the app under it. Activation alone records that the launch
+	// redirect was issued; if the response was lost the reaper still closes
+	// the session as abandoned, and a link into it would open nothing.
+	resumable := session.TokenJTI != "" && session.FirstUsedAt != nil
 	remaining := int64((time.Until(session.ExpiresAt) + time.Second - 1) / time.Second)
 	if remaining < 0 {
 		remaining = 0
