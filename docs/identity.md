@@ -81,9 +81,11 @@ HTTP request.
 
 ### Token validity window
 
-Tokens are valid for 5 minutes from issuance (the `exp` claim). A token
-remains cryptographically valid for up to 5 minutes even if the user logs out
-or their role changes between requests. New HTTP requests immediately carry a
+Tokens are valid for 5 minutes from issuance (the `exp` claim). During a
+support session the token expires at the session deadline instead when that
+comes first, so an app never keeps trusting a support identity that ShinyHub
+has already ended. A token otherwise remains cryptographically valid for up to
+5 minutes even if the user logs out or their role changes between requests. New HTTP requests immediately carry a
 freshly minted token reflecting the current state, so the lag only matters for
 long-lived connections that do not issue new requests. Apps that require
 sub-5-minute revocation (for example a payment flow) should issue their own
@@ -168,7 +170,7 @@ The identity token is a standard JWT signed with HS256. Its claims are:
 | `support_session_id` | string | Random support-session ID; present only during a support session |
 | `act` | object | Administrator actor with `sub` (decimal ID) and `preferred_username`; the top-level `sub` remains the represented user |
 | `iat` | NumericDate | Token issue time |
-| `exp` | NumericDate | `iat + 5 minutes` |
+| `exp` | NumericDate | `iat + 5 minutes`, or the support-session deadline when that is earlier |
 
 When verifying, check `iss == "shinyhub"`, `aud == SHINYHUB_APP_SLUG`, the
 signature, and `exp` (allow about 30 seconds of clock leeway).
@@ -211,7 +213,7 @@ a cross-language conformance test:
 | `bad_key` | `SHINYHUB_IDENTITY_KEY` is not valid hex |
 | `no_slug` | `SHINYHUB_APP_SLUG` unset or empty |
 | `bad_signature` | signed with a different key |
-| `expired` | past its `exp` (tokens live 5 minutes) |
+| `expired` | past its `exp` (tokens live 5 minutes, or until the support-session deadline when that is earlier) |
 | `wrong_audience` | minted for a different app slug |
 | `wrong_issuer` | `iss` is not `shinyhub` |
 | `malformed` | unparseable, or missing the required `exp` claim |

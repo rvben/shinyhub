@@ -241,3 +241,46 @@ func TestSanitizeGroups_Empty(t *testing.T) {
 		t.Fatalf("nil groups: header=%q claim=%v trunc=%v", h, c, trunc)
 	}
 }
+
+func TestMintTokenNeverOutlivesSupportSessionDeadline(t *testing.T) {
+	key := DeriveKey("secret", 7)
+	parseExp := func(t *testing.T, tok string) time.Time {
+		t.Helper()
+		claims := &TokenClaims{}
+		if _, err := jwt.ParseWithClaims(tok, claims, func(*jwt.Token) (any, error) { return key, nil },
+			jwt.WithAudience("demo"), jwt.WithIssuer(Issuer)); err != nil {
+			t.Fatal(err)
+		}
+		if claims.ExpiresAt == nil {
+			t.Fatal("token has no exp claim")
+		}
+		return claims.ExpiresAt.Time
+	}
+	support := TokenParams{
+		UserID: 12, Username: "alice", Role: "viewer", Slug: "demo",
+		SupportSessionID: "support-id", ActorID: 4, ActorUsername: "admin",
+	}
+
+	// A deadline inside the default TTL wins over it: an app must not keep
+	// trusting a support identity after ShinyHub has already ended it.
+	soon := time.Now().Add(90 * time.Second)
+	support.ExpiresAt = soon
+	tok, err := MintToken(key, support)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp := parseExp(t, tok); exp.After(soon) || exp.Before(soon.Add(-2*time.Second)) {
+		t.Fatalf("exp = %v, want the support deadline %v", exp, soon)
+	}
+
+	// A deadline beyond the default TTL leaves the replay bound in force.
+	far := time.Now().Add(20 * time.Minute)
+	support.ExpiresAt = far
+	tok, err = MintToken(key, support)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp := parseExp(t, tok); exp.After(time.Now().Add(TokenTTL)) || exp.Before(time.Now().Add(TokenTTL-2*time.Second)) {
+		t.Fatalf("exp = %v, want about now+%v", exp, TokenTTL)
+	}
+}

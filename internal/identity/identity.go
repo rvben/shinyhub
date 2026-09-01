@@ -121,11 +121,19 @@ type TokenParams struct {
 	SupportSessionID string
 	ActorID          int64
 	ActorUsername    string
+	// ExpiresAt caps the token's lifetime below the default TTL. Zero means
+	// the default applies. A support session sets it to the session deadline
+	// so the app never trusts a support identity ShinyHub has already ended.
+	ExpiresAt time.Time
 }
 
 // MintToken signs a short-lived HS256 identity token with the app's key.
 func MintToken(key []byte, p TokenParams) (string, error) {
 	now := time.Now()
+	exp := now.Add(TokenTTL)
+	if !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(exp) {
+		exp = p.ExpiresAt
+	}
 	claims := TokenClaims{
 		Role:              p.Role,
 		AppRole:           p.AppRole,
@@ -140,7 +148,7 @@ func MintToken(key []byte, p TokenParams) (string, error) {
 			Subject:   strconv.FormatInt(p.UserID, 10),
 			Audience:  jwt.ClaimStrings{p.Slug},
 			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(TokenTTL)),
+			ExpiresAt: jwt.NewNumericDate(exp),
 		},
 	}
 	if p.ActorID > 0 {

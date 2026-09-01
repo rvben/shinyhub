@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/rvben/shinyhub/internal/auth"
 )
 
@@ -125,5 +126,25 @@ func TestProvider_CacheBounded(t *testing.T) {
 	p.mu.Unlock()
 	if n > 10 {
 		t.Fatalf("cache size = %d, want <= 10", n)
+	}
+}
+
+func TestProvider_SupportTokenExpiresWithTheSession(t *testing.T) {
+	p := NewProvider("secret", &fakeGroups{})
+	deadline := time.Now().Add(45 * time.Second)
+	user := &auth.ContextUser{ID: 12, Username: "alice", Role: "viewer",
+		SupportSession: &auth.SupportSessionContext{ID: "support-id", ActorID: 4, ActorUsername: "admin",
+			AppID: 42, AppSlug: "demo", ExpiresAt: deadline}}
+	pl := p.PayloadFor(user, "demo", 42)
+	claims := &TokenClaims{}
+	if _, err := jwt.ParseWithClaims(pl.Token, claims, func(*jwt.Token) (any, error) { return DeriveKey("secret", 42), nil },
+		jwt.WithAudience("demo"), jwt.WithIssuer(Issuer)); err != nil {
+		t.Fatal(err)
+	}
+	if claims.ExpiresAt == nil || claims.ExpiresAt.Time.After(deadline) {
+		t.Fatalf("exp = %v outlives the support deadline %v", claims.ExpiresAt, deadline)
+	}
+	if claims.SupportSessionID != "support-id" || claims.Actor == nil || claims.Actor.Subject != "4" {
+		t.Fatalf("support claims = %+v", claims)
 	}
 }
