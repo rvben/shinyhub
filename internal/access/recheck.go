@@ -3,6 +3,7 @@ package access
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
@@ -33,6 +34,14 @@ type Principal struct {
 	// logout that revokes exactly that token also closes this connection. Empty
 	// when the identity did not come from a ShinyHub session JWT.
 	JTI string
+	// Support fields preserve the separate actor/subject security boundary for
+	// long-lived upgraded connections.
+	ActorID           int64
+	ActorRole         string
+	ActorSessionEpoch int64
+	SupportAppID      int64
+	RoutedAppID       int64
+	SupportExpiresAt  time.Time
 }
 
 // Recheck re-decides whether an already-open upgraded connection may stay open,
@@ -52,9 +61,33 @@ type Principal struct {
 // matter: a demoted admin might still be admitted to a shared app while the app
 // is still being told they are an admin.
 func Recheck(st store, lookup auth.UserLookup, revoked auth.RevocationChecker, p Principal) (bool, string, error) {
+	if !p.SupportExpiresAt.IsZero() && !time.Now().Before(p.SupportExpiresAt) {
+		return true, "support session expired", nil
+	}
+	if p.ActorID > 0 {
+		if p.SupportAppID <= 0 || p.RoutedAppID <= 0 || p.RoutedAppID != p.SupportAppID {
+			return true, "support session routed app replaced", nil
+		}
+		actor, aerr := lookup(p.ActorID)
+		if aerr != nil {
+			if errors.Is(aerr, db.ErrNotFound) {
+				return true, "supporting administrator deleted", nil
+			}
+			return false, "", aerr
+		}
+		if actor == nil || actor.IsServiceAccount() || actor.Role != string(auth.RoleAdmin) {
+			return true, "supporting administrator is no longer an admin", nil
+		}
+		if actor.Role != p.ActorRole || actor.TokenEpoch != p.ActorSessionEpoch {
+			return true, "administrator sessions revoked", nil
+		}
+	}
 	app, err := st.GetAppBySlug(p.Slug)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
+			if p.SupportAppID > 0 {
+				return true, "support session app deleted", nil
+			}
 			// The request path passes an unknown slug straight through instead
 			// of denying it, so a vanished app row is not a lapse of THIS
 			// principal's access. Deleting an app stops its processes, which
@@ -62,6 +95,9 @@ func Recheck(st store, lookup auth.UserLookup, revoked auth.RevocationChecker, p
 			return false, "", nil
 		}
 		return false, "", err
+	}
+	if p.SupportAppID > 0 && app.ID != p.SupportAppID {
+		return true, "support session app replaced", nil
 	}
 
 	// An anonymous connection carries no identity to revoke. The only thing

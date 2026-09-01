@@ -45,6 +45,65 @@ func TestAppOriginRequiresDedicatedBareHTTPSOrigin(t *testing.T) {
 	}
 }
 
+func TestSupportSessionsRequireAppOrigin(t *testing.T) {
+	path := writeYAML(t, "auth:\n  secret: 01234567890123456789012345678901\n  support_sessions: true\n")
+	_, err := config.Load(path)
+	if err == nil || !strings.Contains(err.Error(), "auth.support_sessions requires server.app_origin") {
+		t.Fatalf("Load error = %v, want app-origin requirement", err)
+	}
+}
+
+func TestSupportSessionsLoadWhenAppOriginIsIsolated(t *testing.T) {
+	path := writeYAML(t, "auth:\n  secret: 01234567890123456789012345678901\n  support_sessions: true\nserver:\n  base_url: https://hub.example.com\n  app_origin: https://apps.example.com\n")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Auth.SupportSessions {
+		t.Fatal("support sessions should be enabled")
+	}
+}
+
+func TestSupportSessionsRequireBoundedWebSocketRechecks(t *testing.T) {
+	for _, interval := range []string{"0", "31s", "-1s"} {
+		t.Run(interval, func(t *testing.T) {
+			path := writeYAML(t, "auth:\n  secret: 01234567890123456789012345678901\n  support_sessions: true\nserver:\n  base_url: https://hub.example.com\n  app_origin: https://apps.example.com\n  session_recheck_interval: "+interval+"\n")
+			_, err := config.Load(path)
+			if err == nil || !strings.Contains(err.Error(), "session_recheck_interval") {
+				t.Fatalf("Load error = %v, want bounded recheck requirement", err)
+			}
+		})
+	}
+}
+
+func TestAppOriginRejectsSameCookieHostAcrossPortsAndSpelling(t *testing.T) {
+	for _, appOrigin := range []string{
+		"https://hub.example.com:443",
+		"https://hub.example.com:8443",
+		"https://HUB.EXAMPLE.COM.",
+		"https://bücher.example",
+	} {
+		t.Run(appOrigin, func(t *testing.T) {
+			base := "https://hub.example.com"
+			if strings.Contains(appOrigin, "bücher") {
+				base = "https://xn--bcher-kva.example"
+			}
+			path := writeYAML(t, "auth:\n  secret: 01234567890123456789012345678901\nserver:\n  base_url: "+base+"\n  app_origin: "+appOrigin+"\n")
+			_, err := config.Load(path)
+			if err == nil || !strings.Contains(err.Error(), "different host") {
+				t.Fatalf("Load error = %v, want same cookie-host rejection", err)
+			}
+		})
+	}
+}
+
+func TestAppOriginRejectsAmbiguousNumericHost(t *testing.T) {
+	path := writeYAML(t, "auth:\n  secret: 01234567890123456789012345678901\nserver:\n  base_url: https://127.0.0.1\n  app_origin: https://127.1\n")
+	if _, err := config.Load(path); err == nil || !strings.Contains(err.Error(), "canonicalizable") {
+		t.Fatalf("Load error = %v, want ambiguous numeric host rejection", err)
+	}
+}
+
 func TestForwardAuthRejectsInvalidProxySharedSecret(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

@@ -114,6 +114,26 @@ func TestMintToken_RoundTripsWithDerivedKey(t *testing.T) {
 	}
 }
 
+func TestMintTokenCarriesSupportActorWithoutChangingSubject(t *testing.T) {
+	key := DeriveKey("secret", 7)
+	tok, err := MintToken(key, TokenParams{
+		UserID: 12, Username: "alice", Role: "viewer", Slug: "demo",
+		SupportSessionID: "support-id", ActorID: 4, ActorUsername: "admin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := &TokenClaims{}
+	if _, err := jwt.ParseWithClaims(tok, claims, func(*jwt.Token) (any, error) { return key, nil },
+		jwt.WithAudience("demo"), jwt.WithIssuer(Issuer)); err != nil {
+		t.Fatal(err)
+	}
+	if claims.Subject != "12" || claims.PreferredUsername != "alice" || claims.SupportSessionID != "support-id" ||
+		claims.Actor == nil || claims.Actor.Subject != "4" || claims.Actor.PreferredUsername != "admin" {
+		t.Fatalf("support identity claims = %+v", claims)
+	}
+}
+
 func TestMintToken_CarriesEmail(t *testing.T) {
 	key := DeriveKey("secret", 7)
 	tok, err := MintToken(key, TokenParams{

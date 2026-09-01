@@ -31,3 +31,16 @@ export function userRowCaps(user, selfId) {
     deleteHint: reserved ? RESERVED_USER_HINT : (isSelf ? 'You cannot delete yourself' : ''),
   };
 }
+
+export function supportSessionCaps(user, selfId, enabled = false) {
+  const isSelf = user.id === selfId;
+  const reserved = isReservedUser(user);
+  return {
+    canStart: enabled && !isSelf && !reserved && ['viewer', 'developer'].includes(user.role),
+    hint: !enabled
+      ? 'Support sessions are not enabled'
+      : (isSelf ? 'You cannot start a support session as yourself'
+        : (reserved || !['viewer', 'developer'].includes(user.role)
+          ? 'Support sessions can target only human viewers or developers' : '')),
+  };
+}

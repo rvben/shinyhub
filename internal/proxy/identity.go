@@ -62,7 +62,7 @@ func (p *Proxy) PoolIdentityHeaders(slug string) bool {
 // are also removed. Then, when the pool's flag is on and the request carries
 // an authenticated user, it injects the identity headers and the per-app
 // signed token.
-func applyIdentityHeaders(req *http.Request, pool *backendPool, slug string, provider *atomic.Pointer[identityProviderFn]) {
+func applyIdentityHeaders(req *http.Request, pool *backendPool, slug string, ownerAppID int64, provider *atomic.Pointer[identityProviderFn]) {
 	for k := range req.Header {
 		if len(k) >= len(identity.HeaderPrefix) && strings.EqualFold(k[:len(identity.HeaderPrefix)], identity.HeaderPrefix) {
 			delete(req.Header, k)
@@ -79,7 +79,7 @@ func applyIdentityHeaders(req *http.Request, pool *backendPool, slug string, pro
 	if fnp == nil {
 		return
 	}
-	pl := (*fnp)(user, slug, pool.appID.Load())
+	pl := (*fnp)(user, slug, ownerAppID)
 	if pl == nil {
 		return
 	}
@@ -103,5 +103,10 @@ func applyIdentityHeaders(req *http.Request, pool *backendPool, slug string, pro
 	}
 	if pl.Token != "" {
 		req.Header.Set(identity.HeaderToken, pl.Token)
+	}
+	if pl.SupportSession {
+		req.Header.Set(identity.HeaderSupportSession, "true")
+		req.Header.Set(identity.HeaderActorID, pl.ActorID)
+		req.Header.Set(identity.HeaderActor, pl.ActorUsername)
 	}
 }

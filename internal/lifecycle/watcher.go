@@ -670,9 +670,9 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		// do: after a restart the in-memory pool is empty for a hibernated app
 		// (recovery only sizes running apps), so RegisterReplica would otherwise
 		// fail with "pool size not set".
+		w.prx.SetPoolAppID(app.Slug, app.ID)
 		w.prx.SetPoolSize(app.Slug, app.Replicas)
 		w.prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
-		w.prx.SetPoolAppID(app.Slug, app.ID)
 		w.prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
 		// SetPoolMode: warm restore is a multiplex-only path (elastic apps skip
 		// warm pre-boot above), but set mode unconditionally so the pool is
@@ -1959,9 +1959,9 @@ func (w *Watcher) driveWakingApp(slug string) {
 			return
 		}
 
+		w.prx.SetPoolAppID(slug, app.ID)
 		w.prx.SetPoolSize(slug, app.Replicas)
 		w.prx.SetPoolCap(slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
-		w.prx.SetPoolAppID(slug, app.ID)
 		w.prx.SetPoolIdentityHeaders(slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
 		// Resolve once so SetPoolMode and the elastic boot-skip guard both use the
 		// same effective isolation (fleet default applies when per-app field is empty).

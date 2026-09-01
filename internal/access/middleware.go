@@ -6,14 +6,20 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/favicon"
+	"github.com/rvben/shinyhub/internal/supportui"
 )
 
 type store interface {
 	GetAppBySlug(slug string) (*db.App, error)
 	UserCanAccessApp(slug string, userID int64) (bool, error)
+}
+
+type supportSessionObserver interface {
+	ObserveSupportSession(id string) error
 }
 
 // Middleware returns an HTTP middleware that enforces per-app access control.
@@ -58,6 +64,29 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 			// can still personalize for a signed-in user. An anonymous request
 			// resolves to nil and is denied only where decide says so.
 			user, token := resolveSession(r, jwtSecret, revoked, userLookup)
+			if user != nil && user.SupportSession != nil &&
+				(user.SupportSession.AppSlug != slug || user.SupportSession.AppID != app.ID) {
+				// Do not let a public replacement turn immutable-scope failure into
+				// anonymous access. The app must not see this request at all.
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+				w.Header().Set("Cache-Control", "no-store")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(supportui.ScopeBlockedPage(slug, user.SupportSession.ActorUsername, user.Username, user.SupportSession.ExpiresAt)))
+				return
+			}
+			if user != nil && user.SupportSession != nil {
+				if observer, ok := st.(supportSessionObserver); ok {
+					if err := observer.ObserveSupportSession(user.SupportSession.ID); err != nil {
+						w.Header().Set("Content-Type", "text/html; charset=utf-8")
+						w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+						w.Header().Set("Cache-Control", "no-store")
+						w.WriteHeader(http.StatusConflict)
+						_, _ = w.Write([]byte(supportui.InactivePage(slug, user.SupportSession.ActorUsername, user.Username, user.SupportSession.ExpiresAt)))
+						return
+					}
+				}
+			}
 			if user != nil {
 				ctx := auth.WithUser(r.Context(), user)
 				if token != nil {
@@ -67,6 +96,14 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 					// revoked on logout.
 					ctx = auth.WithTokenInfo(ctx, token)
 				}
+				r = r.WithContext(ctx)
+			} else if auth.UserFromContext(r.Context()) != nil {
+				// resolveSession can deliberately reject an upstream forward-auth
+				// identity when a support guard/cookie is present. Mask that value in
+				// the downstream context too; merely returning nil from resolution
+				// would otherwise leave the original administrator visible to the app.
+				ctx := auth.WithUser(r.Context(), nil)
+				ctx = auth.WithTokenInfo(ctx, nil)
 				r = r.WithContext(ctx)
 			}
 
@@ -154,6 +191,22 @@ func ResolveOptionalUser(r *http.Request, secret string, revoked auth.Revocation
 // middleware validated - an upstream forward-auth identity already in the
 // request context has no jti of ours to revoke.
 func resolveSession(r *http.Request, secret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) (*auth.ContextUser, *auth.TokenInfo) {
+	if _, err := r.Cookie(auth.SupportSessionCookieName); err == nil {
+		user, token, authErr := auth.AuthenticateSupportSession(r, secret, userLookup, revoked)
+		if authErr != nil {
+			// Presence of an invalid support cookie fails closed. Falling back to
+			// forward-auth here could silently turn a broken support session into
+			// the admin's unrestricted identity inside the app.
+			return nil, nil
+		}
+		return user, token
+	}
+	if _, err := r.Cookie(auth.SupportSessionGuardCookieName); err == nil {
+		// The root-scoped guard accompanies the path-scoped support cookie. If
+		// the latter is absent, this request is outside the authorized app and
+		// must not fall back to an admin session or forward-auth identity.
+		return nil, nil
+	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		return u, auth.TokenInfoFromContext(r.Context())
 	}
@@ -180,9 +233,23 @@ func writeAccessDenied(w http.ResponseWriter, r *http.Request, status int, headl
 		nextURL := r.URL.RequestURI()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(status)
+		page := renderAccessDeniedPage(status, headline, nextURL)
+		if user := auth.UserFromContext(r.Context()); user != nil && user.SupportSession != nil && user.SupportSession.AppSlug == slug {
+			// Access can be withdrawn while a support session is active. Preserve
+			// the safety rail and its exit control on the resulting 403 instead of
+			// leaving the administrator stranded on an unlabelled identity state.
+			support := user.SupportSession
+			if out, ok := appnav.SpliceIntoBody(page, supportui.Snippet(slug, support.ActorUsername, user.Username, support.ID, support.ExpiresAt)); ok {
+				page = out
+			} else {
+				page = []byte(supportui.BlockedPage(slug, support.ActorUsername, user.Username, support.ExpiresAt))
+			}
+			_, _ = w.Write(page)
+			return
+		}
 		// Keep the display name empty here: this caller was not authorized to
 		// see the app, so the switcher must not disclose its private metadata.
-		_, _ = w.Write(cfg.withAppNav(renderAccessDeniedPage(status, headline, nextURL), slug, ""))
+		_, _ = w.Write(cfg.withAppNav(page, slug, ""))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

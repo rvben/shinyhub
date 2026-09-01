@@ -18,6 +18,13 @@ colors:
   electric-blue: "#60A5FA"
   running-green: "#4ADE80"
   warning-amber: "#FBBF24"
+  safety-amber-action: "#F59E0B"
+  safety-amber-rail: "#21170A"
+  safety-amber-line: "#A86608"
+  safety-amber-ink: "#241604"
+  safety-amber-copy: "#FFF8E7"
+  safety-amber-copy-soft: "#F7DCA3"
+  safety-amber-deadline: "#FFE9B8"
   failure-coral: "#F87171"
   standby-indigo: "#A5B4FC"
   daylight-canvas: "#F4F7FC"
@@ -103,6 +110,17 @@ components:
     typography: "{typography.label}"
     rounded: "{rounded.md}"
     padding: "9px 18px"
+  button-support:
+    backgroundColor: "{colors.safety-amber-action}"
+    textColor: "{colors.safety-amber-ink}"
+    typography: "{typography.label}"
+    rounded: "{rounded.md}"
+    padding: "7px 11px"
+  support-rail:
+    backgroundColor: "{colors.safety-amber-rail}"
+    textColor: "{colors.safety-amber-copy}"
+    typography: "{typography.label}"
+    padding: "8px clamp(12px, 2vw, 24px)"
   card:
     backgroundColor: "{colors.control-surface-raised}"
     textColor: "{colors.starlight-text}"
@@ -124,13 +142,15 @@ components:
 
 # Design System: ShinyHub
 
-## 1. Overview
+## Overview
 
 **Creative North Star: "The Calm Control Room"**
 
 ShinyHub is a precise, quietly energetic control surface for delivering performant dashboards. Its Constellation identity uses deep tonal layers, starlight text, and sparing cyan signals to make operational state legible without turning the interface into a wall of instrumentation. The Orbit Hub lockup—a crystalline signal held by three connected orbital nodes—is the product signature; it appears as a full wordmark where recognition matters and as the standalone mark only where space is genuinely compact.
 
 The system is dark-first but not dark-only. The light theme carries the same semantic hierarchy with contrast-adjusted colors, while white-label branding can replace front-door identity without weakening the operator console. Density is purposeful: familiar controls, compact information, and clear grouping keep experts moving without making occasional users decode an unfamiliar system.
+
+Temporary security states remain native to Constellation inside the admin workflow. When that state crosses into arbitrary app content, one persistent amber safety rail carries the platform boundary with it: the rail names who is acting, who is represented, whether actions can mutate data, when authority ends, and how to exit.
 
 The interface must never resemble a complex hyperscale cloud console, a fragile developer demo tool, or a visually noisy and flashy SaaS dashboard. Every flourish must either identify ShinyHub, communicate state, or improve orientation.
 
@@ -139,12 +159,13 @@ The interface must never resemble a complex hyperscale cloud console, a fragile 
 - Deep tonal surfaces with crisp, low-contrast boundaries.
 - Cyan reserved for identity, focus, selection, and decisive action.
 - Semantic status colors paired with text or shape, never used as the only signal.
+- One unmistakable amber rail for temporary cross-world security states.
 - Compact product typography with monospaced technical values.
 - Responsive structure, visible keyboard focus, and motion that yields to reduced-motion preferences.
 
 **The Performance-to-Pixels Rule.** Visual hierarchy must lead from dashboard health and availability to the action that improves them.
 
-## 2. Colors
+## Colors
 
 The Constellation palette is a restrained deep-space neutral system animated by rare, high-clarity signals; the daylight theme preserves the same roles with WCAG-conscious darker accents.
 
@@ -163,6 +184,7 @@ The Constellation palette is a restrained deep-space neutral system animated by 
 
 - **Running Green** (#4ADE80): healthy and running states.
 - **Warning Amber** (#FBBF24): deploying, waking, constrained, or attention states.
+- **Safety Amber** (#F59E0B) on **Safety Rail** (#21170A): the action and foundation for a temporary security state that must remain legible over arbitrary app content. Safety Line, Safety Copy, Soft Safety Copy, and Safety Deadline provide the rail's border and text hierarchy without borrowing the app's palette.
 - **Failure Coral** (#F87171): failed, crashed, destructive, and error states.
 - **Standby Indigo** (#A5B4FC): hibernated or ready-to-wake states; distinct from both failure and active service.
 
@@ -179,7 +201,9 @@ The Constellation palette is a restrained deep-space neutral system animated by 
 
 **The Semantic Pairing Rule.** Green, amber, coral, and indigo must be paired with a label, icon, position, or state shape. Color alone is never sufficient.
 
-## 3. Typography
+**The Amber Safety-State Rule.** Use the full amber treatment only for an active security or safety boundary with an explicit consequence and exit. Keep the host application visually untouched so the rail remains the single unmistakable platform signal.
+
+## Typography
 
 - **Display Font:** Manrope (with system sans-serif fallbacks)
 - **Body Font:** Manrope (with system sans-serif fallbacks)
@@ -200,7 +224,15 @@ The Constellation palette is a restrained deep-space neutral system animated by 
 
 **The Mono Means Machine Rule.** Space Mono signals data with machine semantics. It is forbidden for ordinary paragraphs, navigation, or primary actions.
 
-## 4. Elevation
+## Layout
+
+The admin workflow remains inside the established responsive Constellation shell. Cross-world safety chrome is independent of both that shell and the hosted app: mount it as a full-width, sticky direct child of the document so it reserves its own height, stays visible while the app scrolls, and does not depend on the app's layout or stacking context.
+
+At 620px and below, wrap the safety rail rather than truncate its meaning. Keep the warning mark beside the actor-and-subject copy, then place the tabular deadline beneath the copy and the exit action at the trailing edge. Actor, subject, mutability, deadline, and exit must all remain visible without horizontal scrolling.
+
+**The Cross-World Boundary Rule.** Platform safety chrome owns its own layout and must remain legible across arbitrary app themes, frameworks, and responsive behavior.
+
+## Elevation & Depth
 
 ShinyHub uses a hybrid system: tonal layering and hairline borders establish depth at rest; diffuse ambient shadows are reserved for authentication, modals, floating menus, and decisive primary actions. Cards should normally become one tonal step brighter on hover instead of lifting dramatically.
 
@@ -211,12 +243,13 @@ ShinyHub uses a hybrid system: tonal layering and hairline borders establish dep
 - **Modal Focus** ("0 32px 80px rgba(0,0,0,0.7)"): focused dialogs above a blurred overlay.
 - **Primary Action** ("0 4px 14px rgba(56,189,248,0.25)"): low cyan lift for decisive actions, strengthened only on hover.
 - **Launchpad Hover** ("0 10px 30px -16px rgba(0,0,0,0.8)"): restrained feedback for a launchable dashboard tile.
+- **Safety Rail Separation** ("0 8px 24px rgba(15,9,2,0.28)"): a restrained downward shadow that separates the persistent amber rail from arbitrary app content without making it feel like a detachable overlay.
 
 **The Tonal-First Rule.** A resting surface earns hierarchy with background and border tokens before it earns a shadow.
 
 **The One Floating Plane Rule.** Only the active overlay, popover, or decisive control may read as floating. If every card casts a shadow, the hierarchy has failed.
 
-## 5. Components
+## Components
 
 Components are compact, familiar, and confident. Every interactive primitive must cover default, hover, focus-visible, active where meaningful, disabled, loading, and error states.
 
@@ -268,6 +301,28 @@ Top-level app pages use separate injected navigation chrome that identifies itse
 
 Visitors can drag the control with a pointer or touch, or use its keyboard-operable position menu, to snap it to top-centre, top-right, left-centre, or right-centre. Side placements become 40px × 104px vertical controls, and the chosen position is stored once per hub in localStorage so it follows the visitor across apps. Closing the control reduces it to a 30px restore tab and scopes that dismissal to the current browser tab in sessionStorage. At 520px and below, the initial 240px teaching bar contracts after eight seconds idle to a 140px **Apps** pill and expands again on use.
 
+### Support-Session Confirmation
+
+The confirmation dialog is an app-scoped safety checkpoint inside the admin shell, not a generic impersonation prompt. Keep the ordinary modal geometry and typography, then replace cyan emphasis with amber only where it communicates risk: the warning mark, mutability note, focus treatment, and affirmative action.
+
+- **Actor / subject language:** say that the administrator will enter one app as the named subject. Never collapse the real actor and represented subject into one ambiguous identity.
+- **Scope and mutability:** state the app scope, hard duration, audit reason, and the sentence **This is not read-only.** Explain both what can change and which privileged surfaces remain inaccessible.
+- **Pending action:** after submission begins, set the dialog busy, disable the submit, cancel, and close controls, and ignore overlay and Escape dismissal. Restore all dismissal paths only when a failed request is ready for correction; successful creation navigates directly into the supported app.
+
+**The Pending Means Committed Rule.** Once a security-sensitive action is in flight, the modal cannot imply cancellation by disappearing while the request may still succeed.
+
+### Persistent Support-Session Rail
+
+The support-session rail is platform-owned safety chrome placed above arbitrary app content. Isolate its CSS from the app, mount it before the app body as a sticky direct document child, and repair that placement if a hosted SPA replaces document children. Maintain a document-level active marker so other platform chrome can detect the state without reaching into the rail.
+
+- **Message order:** lead with **Support session · Viewing as [subject]**; follow with **[actor] is the administrator** and an explicit statement that actions can change the subject's data. The visible deadline and **End support session** action complete the line of accountability.
+- **Countdown:** update the visible tabular timer each second, but keep assistive announcements quiet. Announce only meaningful thresholds—five minutes, one minute, and expiry—through a polite atomic live region; never speak every tick.
+- **Exit:** while ending, disable the action and label it **Ending…**. If ending fails, restore an explicit retry action and explain that automatic expiry remains in force.
+- **Responsive behavior:** at 620px and below, wrap into a compact multi-row rail while preserving every safety fact and an easy-to-reach exit action.
+- **Self-healing:** hosted app DOM churn must not remove, bury, or restyle the rail. Reinsert it at the document boundary when needed, without duplicating it.
+
+**The No Invisible Identity Switch Rule.** A represented session is never communicated by account data alone; the persistent rail must continuously expose actor, subject, mutability, deadline, and exit.
+
 ### Application Status
 
 Application state is information, not decoration. Use a dot-and-label badge or a labeled metric; reserve animated glow for live healthy state, disable it under reduced motion, and keep viewer-facing availability less revealing than operator-facing health.
@@ -278,7 +333,7 @@ Viewer tiles use a 14px corner, a 46px app avatar, a strong app name, restrained
 
 **The Familiar Controls Rule.** Buttons look like buttons, tabs like tabs, and forms like forms. Never invent an affordance to make a standard operation feel novel.
 
-## 6. Do's and Don'ts
+## Do's and Don'ts
 
 ### Do:
 
@@ -290,6 +345,10 @@ Viewer tiles use a 14px corner, a 46px app avatar, a strong app name, restrained
 - **Do** use skeletons for loading and actionable empty states that teach the next step.
 - **Do** keep responsive changes structural: collapse navigation, reflow grids, and protect touch targets.
 - **Do** pair operational charts with semantic text equivalents and preserve focus across user-triggered refreshes.
+- **Do** use actor, subject, and mutability as separate concepts whenever authority is temporarily represented.
+- **Do** keep security-sensitive confirmation dialogs open and visibly busy while their request is pending.
+- **Do** keep countdowns visually precise but announce only meaningful time thresholds to assistive technology.
+- **Do** mount cross-world safety chrome at the document boundary and make it self-heal after hosted-app DOM replacement.
 
 ### Don't:
 
@@ -300,3 +359,6 @@ Viewer tiles use a 14px corner, a 46px app avatar, a strong app name, restrained
 - **Don't** add heavy shadows to resting cards or stack multiple floating planes.
 - **Don't** introduce display fonts, terminal-themed body copy, custom scrollbars, or nonstandard form controls for flavor.
 - **Don't** animate page-load choreography; motion communicates state and completes within roughly 200ms, except for subtle ambient health cues and a single reduced-motion-safe chart reveal.
+- **Don't** let a hosted app inherit, reposition, dismiss, or visually absorb platform safety chrome.
+- **Don't** hide or truncate actor, subject, mutability, deadline, or exit when the safety rail wraps on mobile.
+- **Don't** announce a per-second countdown through a live region or allow a pending support-session request to be dismissed.

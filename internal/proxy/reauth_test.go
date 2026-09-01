@@ -252,8 +252,25 @@ func TestConnPrincipal_CapturesTheAdmittedIdentity(t *testing.T) {
 	ctx = auth.WithTokenInfo(ctx, &auth.TokenInfo{JTI: "session-jti"})
 	r = r.WithContext(ctx)
 
-	got := connPrincipal(r, "rep")
-	want := ConnPrincipal{Slug: "rep", UserID: 7, Role: "developer", SessionEpoch: 3, JTI: "session-jti"}
+	got := connPrincipal(r, "rep", 42)
+	want := ConnPrincipal{Slug: "rep", RoutedAppID: 42, UserID: 7, Role: "developer", SessionEpoch: 3, JTI: "session-jti"}
+	if got != want {
+		t.Errorf("connPrincipal = %+v, want %+v", got, want)
+	}
+}
+
+func TestConnPrincipal_CapturesSupportActorAndDeadline(t *testing.T) {
+	expires := time.Now().Add(10 * time.Minute).Round(time.Second)
+	r := httptest.NewRequest(http.MethodGet, "/app/rep/websocket", nil)
+	user := &auth.ContextUser{ID: 7, Username: "ana", Role: "developer", TokenEpoch: 3,
+		SupportSession: &auth.SupportSessionContext{
+			ID: "support-id", ActorID: 2, ActorUsername: "admin", ActorTokenEpoch: 5,
+			AppID: 42, AppSlug: "rep", ExpiresAt: expires,
+		}}
+	r = r.WithContext(auth.WithUser(r.Context(), user))
+	got := connPrincipal(r, "rep", 42)
+	want := ConnPrincipal{Slug: "rep", UserID: 7, Role: "developer", SessionEpoch: 3,
+		ActorID: 2, ActorRole: "admin", ActorSessionEpoch: 5, SupportAppID: 42, RoutedAppID: 42, SupportExpiresAt: expires}
 	if got != want {
 		t.Errorf("connPrincipal = %+v, want %+v", got, want)
 	}
@@ -263,8 +280,8 @@ func TestConnPrincipal_CapturesTheAdmittedIdentity(t *testing.T) {
 // app's openness to re-check.
 func TestConnPrincipal_AnonymousRequestCarriesOnlyTheSlug(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/app/rep/websocket", nil)
-	got := connPrincipal(r, "rep")
-	if want := (ConnPrincipal{Slug: "rep"}); got != want {
+	got := connPrincipal(r, "rep", 42)
+	if want := (ConnPrincipal{Slug: "rep", RoutedAppID: 42}); got != want {
 		t.Errorf("connPrincipal = %+v, want %+v", got, want)
 	}
 }
@@ -276,8 +293,8 @@ func TestConnPrincipal_ForwardAuthIdentityHasNoJTI(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/app/rep/websocket", nil)
 	r = r.WithContext(auth.WithUser(r.Context(), &auth.ContextUser{ID: 9, Username: "fa", Role: "admin", TokenEpoch: 2}))
 
-	got := connPrincipal(r, "rep")
-	want := ConnPrincipal{Slug: "rep", UserID: 9, Role: "admin", SessionEpoch: 2}
+	got := connPrincipal(r, "rep", 42)
+	want := ConnPrincipal{Slug: "rep", RoutedAppID: 42, UserID: 9, Role: "admin", SessionEpoch: 2}
 	if got != want {
 		t.Errorf("connPrincipal = %+v, want %+v", got, want)
 	}

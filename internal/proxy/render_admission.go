@@ -298,8 +298,8 @@ func (p *Proxy) renderGateBlocks(r *http.Request, slug string) bool {
 //
 // MUST NOT be called while holding p.mu: recordReject takes the reject-counter
 // mutex and may call an injected recorder.
-func (p *Proxy) serveRenderWaitPage(rec http.ResponseWriter, slug string) {
+func (p *Proxy) serveRenderWaitPage(rec http.ResponseWriter, r *http.Request, slug string) {
 	p.recordReject(rec, slug, ReasonRenderDeferred, true)
 	rec.Header().Set("Retry-After", renderRetryAfter())
-	writeWaitPage(rec, http.StatusServiceUnavailable, p.decorateAppPage(waitingPage, slug))
+	writeWaitPage(rec, http.StatusServiceUnavailable, p.decorateAppPage(waitingPage, slug, r))
 }

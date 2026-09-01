@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -35,6 +36,142 @@ func TestAccess_PublicApp_NoAuth(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("public app: expected 200, got %d", rec.Code)
+	}
+}
+
+func TestSupportGuardPreventsIdentityFallbackOutsideBoundApp(t *testing.T) {
+	store := makeStore(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "other", Name: "Other", OwnerID: owner.ID, Access: "public"}); err != nil {
+		t.Fatal(err)
+	}
+	token, err := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got *auth.ContextUser
+	handler := access.Middleware(store, "test-secret", nil, store.LookupContextUser)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = auth.UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/app/other/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: token})
+	req.AddCookie(&http.Cookie{Name: auth.SupportSessionGuardCookieName, Value: "active-support-id"})
+	// Model a forward-auth deployment too: neither upstream identity nor the
+	// ordinary cookie may punch through the support-session boundary.
+	req = req.WithContext(auth.WithUser(req.Context(), &auth.ContextUser{ID: owner.ID, Username: owner.Username, Role: owner.Role}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || got != nil {
+		t.Fatalf("status=%d downstream user=%+v, want anonymous public access", rec.Code, got)
+	}
+}
+
+func TestRevokedAppAccessKeepsSupportSafetyRail(t *testing.T) {
+	store := makeStore(t)
+	for _, user := range []db.CreateUserParams{
+		{Username: "admin", PasswordHash: "h", Role: "admin"},
+		{Username: "owner", PasswordHash: "h", Role: "developer"},
+		{Username: "alice", PasswordHash: "h", Role: "viewer"},
+	} {
+		if err := store.CreateUser(user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admin, _ := store.GetUserByUsername("admin")
+	owner, _ := store.GetUserByUsername("owner")
+	alice, _ := store.GetUserByUsername("alice")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "sales", Name: "Sales", OwnerID: owner.ID, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("sales")
+	if err := store.CreateSupportSession(db.CreateSupportSessionParams{
+		ID: "support-id", ActorUserID: admin.ID, ActorUsername: admin.Username, ActorTokenEpoch: admin.TokenEpoch,
+		SubjectUserID: alice.ID, SubjectUsername: alice.Username, SubjectRole: alice.Role, SubjectTokenEpoch: alice.TokenEpoch,
+		AppID: app.ID, AppSlug: app.Slug, Reason: "Investigating SUP-6001", LaunchCodeHash: "access-hash",
+		ExpiresAt: time.Now().Add(15 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	issued := &auth.ContextUser{ID: alice.ID, Username: alice.Username, Role: alice.Role, TokenEpoch: alice.TokenEpoch,
+		SupportSession: &auth.SupportSessionContext{
+			ID: "support-id", ActorID: admin.ID, ActorUsername: admin.Username, ActorTokenEpoch: admin.TokenEpoch,
+			AppID: app.ID, AppSlug: "sales", ExpiresAt: time.Now().Add(15 * time.Minute),
+		},
+	}
+	token, _, err := auth.IssueSessionTokenWithInfo(issued, "test-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := access.Middleware(store, "test-secret", nil, store.LookupContextUser)(http.HandlerFunc(next))
+	req := httptest.NewRequest(http.MethodGet, "/app/sales/", nil)
+	req.Header.Set("Accept", "text/html")
+	req.AddCookie(&http.Cookie{Name: auth.SupportSessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "shinyhub-support-session-loader") || !strings.Contains(body, "End support session") {
+		t.Fatalf("support safety rail missing from revoked-access page: %s", body)
+	}
+}
+
+func TestSupportSessionRejectsPublicAppRecreatedAtSameSlug(t *testing.T) {
+	store := makeStore(t)
+	for _, user := range []db.CreateUserParams{
+		{Username: "admin", PasswordHash: "h", Role: "admin"},
+		{Username: "alice", PasswordHash: "h", Role: "viewer"},
+	} {
+		if err := store.CreateUser(user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admin, _ := store.GetUserByUsername("admin")
+	alice, _ := store.GetUserByUsername("alice")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "sales", Name: "Original", OwnerID: admin.ID, Access: "public"}); err != nil {
+		t.Fatal(err)
+	}
+	original, _ := store.GetAppBySlug("sales")
+	// Keep a higher row alive so SQLite cannot recycle the deleted rowid.
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "anchor", Name: "Anchor", OwnerID: admin.ID, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	issued := &auth.ContextUser{ID: alice.ID, Username: alice.Username, Role: alice.Role, TokenEpoch: alice.TokenEpoch,
+		SupportSession: &auth.SupportSessionContext{
+			ID: "support-id", ActorID: admin.ID, ActorUsername: admin.Username, ActorTokenEpoch: admin.TokenEpoch,
+			AppID: original.ID, AppSlug: "sales", ExpiresAt: time.Now().Add(15 * time.Minute),
+		},
+	}
+	token, _, err := auth.IssueSessionTokenWithInfo(issued, "test-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteApp("sales"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "sales", Name: "Replacement", OwnerID: admin.ID, Access: "public"}); err != nil {
+		t.Fatal(err)
+	}
+	reached := false
+	handler := access.Middleware(store, "test-secret", nil, store.LookupContextUser)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		_, _ = w.Write([]byte("replacement content"))
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/app/sales/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SupportSessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict || reached || strings.Contains(rec.Body.String(), "replacement content") {
+		t.Fatalf("status=%d reached=%v body=%s", rec.Code, reached, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no longer the app approved") || !strings.Contains(rec.Body.String(), "End support session") {
+		t.Fatalf("scope-blocked safety page missing: %s", rec.Body.String())
 	}
 }
 

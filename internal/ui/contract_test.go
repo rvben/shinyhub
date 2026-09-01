@@ -3370,6 +3370,25 @@ func TestEscapeClosesNewTokenModal(t *testing.T) {
 	}
 }
 
+func TestSupportSessionModalCannotDismissWhileCreationIsPending(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	for _, want := range []string{
+		"createSupportSessionModalLock",
+		"supportModalLock.setPending(true);",
+		"supportModalLock.setPending(false);",
+		"supportModalLock.requestDismiss",
+		"supportModal && !supportModal.hidden",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("app.js: support-session modal safety contract missing %q", want)
+		}
+	}
+}
+
 // TestDoubleSubmitGuardsOnDestructiveActions guards the rest of UX-8: several
 // destructive/mutating actions (delete user, revoke token, create user, card
 // restart) had no disabled-during-request guard, so a slow request or an

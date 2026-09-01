@@ -178,8 +178,8 @@ func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
 
 	// Configure pool metadata. SetPoolSize creates the pool if absent; it
 	// is safe to call when the pool already exists (idempotent grow).
-	s.prx.SetPoolSize(slug, poolSize)
 	s.prx.SetPoolAppID(slug, appID)
+	s.prx.SetPoolSize(slug, poolSize)
 	s.prx.SetPoolCap(slug, maxSess)
 	s.prx.ApplyRenderPacing(slug, renderSeconds)
 	// SetPoolMode not called here: poolsync reconciles replica membership
@@ -250,7 +250,7 @@ func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
 
 		// RegisterReplica clears wsReady for this slug; the app must re-prove
 		// readiness. This is intentional: a new endpoint is a new connection.
-		if err := s.prx.RegisterReplica(slug, idx, d.endpointURL, tr, d.deploymentID); err != nil {
+		if err := s.prx.RegisterReplica(slug, idx, d.endpointURL, tr, d.deploymentID, appID); err != nil {
 			s.log.Warn("pool_sync_register_error",
 				"slug", slug, "index", idx, "err", err)
 			continue

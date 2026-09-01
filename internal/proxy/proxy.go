@@ -24,6 +24,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/proxytrust"
+	"github.com/rvben/shinyhub/internal/supportui"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
 
@@ -277,6 +278,7 @@ const WaitingPageSentinel = "Waiting for capacity"
 // replicaBackend wraps a single reverse proxy with connection tracking.
 type replicaBackend struct {
 	index        int
+	ownerAppID   int64  // immutable app row that owned this backend at registration
 	targetURL    string // the URL passed to RegisterReplica; used for introspection
 	deploymentID int64  // stamped into sticky cookies; mismatch causes re-pick on redeploy
 	rp           *httputil.ReverseProxy
@@ -316,8 +318,8 @@ type backendPool struct {
 	replicas    []*replicaBackend
 	rrCounter   atomic.Int64
 	maxSessions int
-	// appID is atomic because the Director closure reads it outside p.mu
-	// for identity-key derivation; it is written under p.mu by SetPoolAppID.
+	// appID is atomic for lock-free reporting snapshots; request Directors use
+	// the immutable ownerAppID captured by each backend registration.
 	appID atomic.Int64
 	// identityHeaders gates identity injection per pool. Atomic: the
 	// Director runs inside picked.rp.ServeHTTP AFTER p.mu is released,
@@ -422,6 +424,11 @@ type Proxy struct {
 	// SetWakeTrigger: an embedder or test is never implicitly rewriting the
 	// HTML of an app it serves. Atomic for a lock-free read per response.
 	statusOverlay atomic.Bool
+
+	// supportSessions enables the non-optional safety banner for requests that
+	// carry an app-scoped support identity. The request context decides whether
+	// a given page receives it; this flag only enables the machinery.
+	supportSessions atomic.Bool
 
 	// appNav enables injecting the app switcher, so a visitor inside an app can
 	// reach another one without going back to the dashboard first. Off unless
@@ -1047,6 +1054,11 @@ func (p *Proxy) SetStatusOverlay(enabled bool) {
 	p.statusOverlay.Store(enabled)
 }
 
+// SetSupportSessions enables support-session HTML safety treatment. Unlike
+// optional page chrome, a request carrying a support identity always receives
+// the banner when injection is technically possible.
+func (p *Proxy) SetSupportSessions(enabled bool) { p.supportSessions.Store(enabled) }
+
 // StatusOverlayEnabled reports whether app HTML is currently being rewritten.
 func (p *Proxy) StatusOverlayEnabled() bool {
 	return p.statusOverlay.Load()
@@ -1199,18 +1211,18 @@ func writeWaitPage(w http.ResponseWriter, status int, body string) {
 // it is unavailable; an app with a deployment in flight gets the deploying
 // wait page (auto-refresh, no give-up, no wake); anything else fires the wake
 // trigger and gets the auto-retrying loading page (the normal cold-start path).
-func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(string)) {
+func (p *Proxy) serveMissPage(w http.ResponseWriter, r *http.Request, slug string, trigger func(string)) {
 	if fn := p.getAppStatusLookup(); fn != nil {
 		switch status, reason := fn(slug); status {
 		case "crashed":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(p.decorateAppPage(renderAppDownPage("crashed", slug, reason), slug))) //nolint:errcheck
+			w.Write([]byte(p.decorateAppPage(renderAppDownPage("crashed", slug, reason), slug, r))) //nolint:errcheck
 			return
 		case "stopped":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(p.decorateAppPage(renderAppDownPage("stopped", slug, ""), slug))) //nolint:errcheck
+			w.Write([]byte(p.decorateAppPage(renderAppDownPage("stopped", slug, ""), slug, r))) //nolint:errcheck
 			return
 		case "deploying":
 			// A deployment is in flight for this slug (the deploy tears the
@@ -1221,14 +1233,14 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, slug string, trigger func(s
 			// wake trigger itself: on the miss path holdForWake already fired
 			// it, and on the upstream-error path dead-replica recovery belongs
 			// to the watchdog.
-			writeWaitPage(w, http.StatusOK, p.decorateAppPage(deployingPage, slug))
+			writeWaitPage(w, http.StatusOK, p.decorateAppPage(deployingPage, slug, r))
 			return
 		}
 	}
 	if trigger != nil {
 		go trigger(slug)
 	}
-	writeWaitPage(w, http.StatusOK, p.decorateAppPage(loadingPage, slug))
+	writeWaitPage(w, http.StatusOK, p.decorateAppPage(loadingPage, slug, r))
 }
 
 // SetSlugExists registers a synchronous predicate that the proxy uses to
@@ -1491,13 +1503,48 @@ func (p *Proxy) SetPoolAppID(slug string, appID int64) {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	pool, ok := p.pools[slug]
 	if !ok {
 		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
 		p.pools[slug] = pool
 	}
+	var terminate func(string, int)
+	var staleSlots []int
+	replaced := false
+	if previous := pool.appID.Load(); previous != 0 && previous != appID {
+		// A deleted-and-recreated slug is a different security principal. Fence
+		// every old backend before publishing the replacement ID so clustered
+		// reconciliation cannot route new support identity to old code.
+		if p.poolEpoch == nil {
+			p.poolEpoch = make(map[string]uint64)
+		}
+		p.poolEpoch[slug]++
+		for _, cs := range p.clients[slug] {
+			if cs.releaseTimer != nil {
+				cs.releaseTimer.Stop()
+				cs.releaseTimer = nil
+			}
+		}
+		if poolIsElastic(pool) && p.terminate != nil {
+			terminate = p.terminate
+			for slotID := range pool.workers {
+				staleSlots = append(staleSlots, slotID)
+			}
+		}
+		pool.replicas = make([]*replicaBackend, pool.size)
+		pool.workers = make(map[int]*replicaBackend)
+		delete(p.clients, slug)
+		replaced = true
+	}
 	pool.appID.Store(appID)
+	p.mu.Unlock()
+	if replaced {
+		p.clearWSReady(slug)
+	}
+	for _, slotID := range staleSlots {
+		sid := slotID
+		go terminate(slug, sid)
+	}
 }
 
 // EnableImmediateFlush wires the channel that the session reporter reads to
@@ -1548,7 +1595,7 @@ var defaultBackendTransport = newBackendTransport()
 // into the sticky cookie so a stale cookie from a previous deployment causes a
 // re-pick rather than pinning the client to a potentially wrong replica.
 // Returns an error if the pool size has not been set or the index is out of range.
-func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base http.RoundTripper, deploymentID int64) error {
+func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base http.RoundTripper, deploymentID int64, expectedAppID ...int64) error {
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		return fmt.Errorf("register %s#%d: invalid url: %w", slug, index, err)
@@ -1565,6 +1612,19 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 	pool, ok := p.pools[slug]
 	if !ok || index < 0 || index >= pool.size {
 		return fmt.Errorf("register %s#%d: pool size not set or index out of range", slug, index)
+	}
+	ownerAppID := pool.appID.Load()
+	if len(expectedAppID) > 1 {
+		return fmt.Errorf("register %s#%d: multiple expected app IDs", slug, index)
+	}
+	if len(expectedAppID) == 1 {
+		if expectedAppID[0] <= 0 {
+			return fmt.Errorf("register %s#%d: invalid expected app ID", slug, index)
+		}
+		if ownerAppID != expectedAppID[0] {
+			return fmt.Errorf("register %s#%d: app identity changed", slug, index)
+		}
+		ownerAppID = expectedAppID[0]
 	}
 
 	rp := httputil.NewSingleHostReverseProxy(target)
@@ -1588,7 +1648,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		if sr, ok := w.(*statusRecorder); ok {
 			sr.proxyErr = err
 		}
-		p.serveMissPage(w, slugCopy, p.getWakeTrigger())
+		p.serveMissPage(w, req, slugCopy, p.getWakeTrigger())
 	}
 	// ErrorHandler does not fire for failures after the response header was
 	// sent: ReverseProxy reports those only on the body copy. Wrap the
@@ -1632,7 +1692,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		stripInternalCookies(req)
 		// Strip inbound platform identity headers and (when enabled for
 		// this pool and a user is authenticated) inject the real ones.
-		applyIdentityHeaders(req, pool, slugCopy, &p.identityProvider)
+		applyIdentityHeaders(req, pool, slugCopy, ownerAppID, &p.identityProvider)
 		// Ask for a body ModifyResponse can splice ShinyHub's scripts into.
 		p.relaxEncodingForInjection(req)
 
@@ -1653,7 +1713,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		}
 		req.Host = target.Host
 	}
-	pool.replicas[index] = &replicaBackend{index: index, targetURL: targetURL, deploymentID: deploymentID, rp: rp}
+	pool.replicas[index] = &replicaBackend{index: index, ownerAppID: ownerAppID, targetURL: targetURL, deploymentID: deploymentID, rp: rp}
 	// A freshly registered backend has not yet proven it accepts WS upgrades.
 	// Clearing here also covers the hot-redeploy path where a caller swaps
 	// replicas without an intermediate Deregister.
@@ -1671,17 +1731,17 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 // If a booting placeholder already exists for slotID (inserted by reserveWorker),
 // it is updated in-place to preserve assignedClients; a brand-new entry is
 // created only when the slot is absent (e.g. called out of order in tests).
-func (p *Proxy) RegisterElasticWorker(slug string, slotID int, targetURL string, base http.RoundTripper, deploymentID int64) error {
-	return p.registerElasticWorker(slug, slotID, targetURL, base, deploymentID, workerRunning)
+func (p *Proxy) RegisterElasticWorker(slug string, slotID int, targetURL string, base http.RoundTripper, deploymentID int64, expectedAppID ...int64) error {
+	return p.registerElasticWorker(slug, slotID, targetURL, base, deploymentID, workerRunning, expectedAppID...)
 }
 
 // RegisterSuspendedElasticWorker installs the route metadata for a frozen warm
 // spare while leaving it unroutable until the resume callback succeeds.
-func (p *Proxy) RegisterSuspendedElasticWorker(slug string, slotID int, targetURL string, base http.RoundTripper, deploymentID int64) error {
-	return p.registerElasticWorker(slug, slotID, targetURL, base, deploymentID, workerSuspended)
+func (p *Proxy) RegisterSuspendedElasticWorker(slug string, slotID int, targetURL string, base http.RoundTripper, deploymentID int64, expectedAppID ...int64) error {
+	return p.registerElasticWorker(slug, slotID, targetURL, base, deploymentID, workerSuspended, expectedAppID...)
 }
 
-func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string, base http.RoundTripper, deploymentID int64, readyStatus workerStatus) error {
+func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string, base http.RoundTripper, deploymentID int64, readyStatus workerStatus, expectedAppID ...int64) error {
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		return fmt.Errorf("register elastic %s#%d: invalid url: %w", slug, slotID, err)
@@ -1700,6 +1760,19 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 	if !ok || !poolIsElastic(pool) {
 		return fmt.Errorf("register elastic %s#%d: pool not found or not elastic", slug, slotID)
 	}
+	ownerAppID := pool.appID.Load()
+	if len(expectedAppID) > 1 {
+		return fmt.Errorf("register elastic %s#%d: multiple expected app IDs", slug, slotID)
+	}
+	if len(expectedAppID) == 1 {
+		if expectedAppID[0] <= 0 {
+			return fmt.Errorf("register elastic %s#%d: invalid expected app ID", slug, slotID)
+		}
+		if ownerAppID != expectedAppID[0] {
+			return fmt.Errorf("register elastic %s#%d: app identity changed", slug, slotID)
+		}
+		ownerAppID = expectedAppID[0]
+	}
 
 	slugCopy := slug
 	targetPath := strings.TrimRight(target.Path, "/")
@@ -1710,7 +1783,7 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 		if sr, ok := w.(*statusRecorder); ok {
 			sr.proxyErr = err
 		}
-		p.serveMissPage(w, slugCopy, p.getWakeTrigger())
+		p.serveMissPage(w, req, slugCopy, p.getWakeTrigger())
 	}
 	rp.Transport = &errCapturingTransport{base: base}
 	// Strip any backend Set-Cookie that collides with ShinyHub's reserved
@@ -1729,7 +1802,7 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 		}
 		applyForwardingHeaders(req, scheme, clientIP, proxytrust.PeerIsTrusted(req, p.trustedProxyNets()))
 		stripInternalCookies(req)
-		applyIdentityHeaders(req, pool, slugCopy, &p.identityProvider)
+		applyIdentityHeaders(req, pool, slugCopy, ownerAppID, &p.identityProvider)
 		// Ask for a body ModifyResponse can splice ShinyHub's scripts into.
 		p.relaxEncodingForInjection(req)
 
@@ -1757,6 +1830,7 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 	// placeholder via reserveWorker before RegisterElasticWorker is called).
 	if existing := pool.workers[slotID]; existing != nil {
 		existing.rp = rp
+		existing.ownerAppID = ownerAppID
 		existing.targetURL = targetURL
 		existing.deploymentID = deploymentID
 		existing.status = readyStatus
@@ -1766,6 +1840,7 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 		}
 		pool.workers[slotID] = &replicaBackend{
 			slotID:       slotID,
+			ownerAppID:   ownerAppID,
 			status:       readyStatus,
 			targetURL:    targetURL,
 			deploymentID: deploymentID,
@@ -2190,6 +2265,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	replicaIndex := -1
 	deploymentID := int64(0)
+	routedAppID := int64(0)
 	sticky := false
 	// Mark this slug ready the instant the reverse proxy completes a WS
 	// upgrade. On this Go toolchain httputil.ReverseProxy hijacks the
@@ -2205,9 +2281,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// exists, and the connection then outlives it by hours with no middleware
 	// ever seeing it again.
 	rec.trackHijack = func(c net.Conn) net.Conn {
-		principal := connPrincipal(r, slug)
+		principal := connPrincipal(r, slug, routedAppID)
 		var onClose func()
 		if recorder := p.usageRecorder.Load(); recorder != nil {
+			if u := auth.UserFromContext(r.Context()); u != nil && u.SupportSession != nil {
+				// Troubleshooting traffic is administrative activity, not product
+				// usage by either the administrator or the represented user.
+				return p.conns.trackWithClose(c, principal, nil)
+			}
 			// Service credentials are automation, not people. Keep their live
 			// connection visible while classifying them separately from anonymous
 			// visitors and signed-in people.
@@ -2345,7 +2426,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// miss page - status-aware, so a crashed/stopped app gets a clear page
 			// rather than the spinner. The wake is already in flight (holdForWake
 			// fired it), so do not re-trigger.
-			p.serveMissPage(rec, slug, nil)
+			p.serveMissPage(rec, r, slug, nil)
 			return
 		}
 		// A replica registered within the hold window. Re-acquire the read lock for
@@ -2354,7 +2435,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		pool = p.pools[slug]
 		if pool == nil || !poolHasAny(pool) {
 			p.mu.RUnlock()
-			p.serveMissPage(rec, slug, nil)
+			p.serveMissPage(rec, r, slug, nil)
 			return
 		}
 		// Pool is populated; fall through to the routing path below while still
@@ -2374,7 +2455,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the server strictly less than the render it defers.
 	if p.renderGateBlocks(r, slug) {
 		p.mu.RUnlock()
-		p.serveRenderWaitPage(rec, slug)
+		p.serveRenderWaitPage(rec, r, slug)
 		return
 	}
 
@@ -2443,10 +2524,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					}
 					p.mu.RUnlock()
 				}
-				p.serveMissPage(rec, slug, nil)
+				p.serveMissPage(rec, r, slug, nil)
 				return
 			}
 			var depID int64
+			var routedClientSlot *clientSlot
 			if cs := p.lookupClientSlot(slug, cid); cs != nil {
 				// STEADY STATE: an already-bound client routing to a ready worker.
 				// Do the accounting under the SHARED read lock (already held) plus
@@ -2462,6 +2544,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				depID = wkr.deploymentID
 				deploymentID = depID
 				cs.open()
+				routedClientSlot = cs
 				p.mu.RUnlock()
 			} else {
 				// BIND: a client arrived via decisionRoute with no prior p.clients
@@ -2475,13 +2558,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				pool2 := p.pools[slug]
 				if pool2 == nil || !poolIsElastic(pool2) {
 					p.mu.Unlock()
-					p.serveMissPage(rec, slug, nil)
+					p.serveMissPage(rec, r, slug, nil)
 					return
 				}
 				wkr2 := pool2.workers[d.slotID]
 				if wkr2 == nil || wkr2.status != workerRunning {
 					p.mu.Unlock()
-					p.serveMissPage(rec, slug, nil)
+					p.serveMissPage(rec, r, slug, nil)
 					return
 				}
 				wkr = wkr2
@@ -2511,6 +2594,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				depID = wkr.deploymentID
 				deploymentID = depID
 				cs.open()
+				routedClientSlot = cs
 				p.mu.Unlock()
 			}
 			// Refresh the rep sticky cookie with the current slotID and deploymentID,
@@ -2529,7 +2613,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 			defer wkr.activeConns.Add(-1)
-			defer p.clientConnClosed(slug, cid)
+			defer p.clientConnClosed(slug, cid, routedClientSlot)
+			routedAppID = wkr.ownerAppID
+			if rejectSupportBackendMismatch(rec, r, slug, routedAppID) {
+				return
+			}
 			p.RecordActivity(slug)
 			if traceEnabled {
 				r = r.WithContext(context.WithValue(r.Context(), recorderCtxKey{}, rec))
@@ -2582,7 +2670,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					go resumeFn(slug, pl.slotID)
 				}
 				go p.ReconcileElasticWarmSpares(slug)
-				p.serveMissPage(rec, slug, nil)
+				p.serveMissPage(rec, r, slug, nil)
 			case placedMemoryPressure:
 				p.recordReject(rec, slug, ReasonMemoryPressure, true)
 				rec.Header().Set("Retry-After", "5")
@@ -2592,7 +2680,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				rec.Header().Set("Retry-After", "5")
 				http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
 			default: // placedGone: pool vanished or turned non-elastic in the gap
-				p.serveMissPage(rec, slug, nil)
+				p.serveMissPage(rec, r, slug, nil)
 			}
 			return
 
@@ -2660,7 +2748,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	replicaIndex = picked.index
 	deploymentID = picked.deploymentID
+	routedAppID = picked.ownerAppID
 	sticky = isStickyHit
+	if support := auth.UserFromContext(r.Context()); support != nil && support.SupportSession != nil &&
+		(routedAppID == 0 || routedAppID != support.SupportSession.AppID) {
+		p.mu.RUnlock()
+		rejectSupportBackendMismatch(rec, r, slug, routedAppID)
+		return
+	}
 	if !isStickyHit {
 		http.SetCookie(rec, &http.Cookie{
 			Name:     cookiePrefix + slug,
@@ -2709,6 +2804,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return // shed: 503 already written, defer unwinds the accounting
 	}
 	picked.rp.ServeHTTP(rec, r)
+}
+
+func rejectSupportBackendMismatch(w http.ResponseWriter, r *http.Request, slug string, routedAppID int64) bool {
+	user := auth.UserFromContext(r.Context())
+	if user == nil || user.SupportSession == nil || (routedAppID != 0 && routedAppID == user.SupportSession.AppID) {
+		return false
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusConflict)
+	_, _ = w.Write([]byte(supportui.ScopeBlockedPage(slug, user.SupportSession.ActorUsername, user.Username, user.SupportSession.ExpiresAt)))
+	return true
 }
 
 // serveReadyProbe answers GET /app/<slug>/.shinyhub/ready with one of three
@@ -2838,7 +2946,7 @@ func resolveClientIP(resolver func(*http.Request) string, r *http.Request) strin
 // app backend, nor accepted from one via Set-Cookie.
 func isInternalCookie(name string) bool {
 	switch name {
-	case auth.SessionCookieName, auth.CSRFCookieName, auth.OAuthStateCookieName:
+	case auth.SessionCookieName, auth.SupportSessionCookieName, auth.SupportSessionGuardCookieName, auth.CSRFCookieName, auth.OAuthStateCookieName:
 		return true
 	}
 	return strings.HasPrefix(name, cookiePrefix) || strings.HasPrefix(name, clientCookiePrefix)

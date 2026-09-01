@@ -65,7 +65,17 @@ import { parseRenderSeconds, renderPacingAdvice } from '/static/views/render-pac
 import { initTheme, getThemePreference, setThemePreference } from '/static/views/theme.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 import { formatStatus } from '/static/views/status-label.js';
-import { userRowCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
+import {
+  consumeSupportDraft,
+  clearSupportAppOwnedError,
+  createSupportAppRequestGate,
+  createSupportSessionModalLock,
+  isFreshSupportDraft,
+  restoreSupportAppSelection,
+  restoreFailedActionFocus,
+  saveSupportDraft,
+} from '/static/views/support-session-modal.js';
+import { userRowCaps, supportSessionCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
 import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
@@ -251,6 +261,8 @@ document.addEventListener('DOMContentLoaded', () => {
     canManageApps: false,
     resetPwTargetId: null,
     resetPwTargetUsername: '',
+    supportSessions: { enabled: false, duration_seconds: 900 },
+    supportTarget: null,
   };
   const auditRequests = createLatestRequestGate();
 
@@ -414,6 +426,22 @@ document.addEventListener('DOMContentLoaded', () => {
   const resetPwInput    = document.getElementById('reset-password-input');
   const resetPwUsername = document.getElementById('reset-password-username');
   const resetPwError    = document.getElementById('reset-password-error');
+  const supportModal    = document.getElementById('support-session-modal');
+  const supportForm     = document.getElementById('support-session-form');
+  const supportUsername = document.getElementById('support-session-username');
+  const supportApp      = document.getElementById('support-session-app');
+  const supportAppStatus = document.getElementById('support-session-app-status');
+  const supportReason   = document.getElementById('support-session-reason');
+  const supportError    = document.getElementById('support-session-error');
+  const supportSubmit   = document.getElementById('support-session-submit');
+  const supportClose    = document.getElementById('support-session-close');
+  const supportCancel   = document.getElementById('support-session-cancel');
+  const supportAppsRetry = document.getElementById('support-session-apps-retry');
+  const supportReauth   = document.getElementById('support-session-reauth');
+  const supportModalLock = supportModal ? createSupportSessionModalLock({
+    modal: supportModal, closeButton: supportClose, cancelButton: supportCancel,
+  }) : null;
+  const supportAppsGate = createSupportAppRequestGate();
   const newAppButton       = document.getElementById('new-app-button');
   const newAppModal        = document.getElementById('new-app-modal');
   const newAppHeading      = document.getElementById('new-app-heading');
@@ -1509,6 +1537,7 @@ document.addEventListener('DOMContentLoaded', () => {
       'create_app', 'update_app', 'delete_app', 'stop', 'sleep', 'set_access',
       // User management (blue - config)
       'create_user', 'update_user', 'delete_user', 'reset_user_password',
+      'support_session.start', 'support_session.stop',
       // Token management (amber - security)
       'create_token', 'delete_token',
       // Environment (blue - config)
@@ -1671,6 +1700,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const uBody = (await resp.json()) || [];
       // Standard {items,...} list envelope; tolerate a bare array for resilience.
       users = Array.isArray(uBody) ? uBody : (Array.isArray(uBody.items) ? uBody.items : []);
+      if (!Array.isArray(uBody) && uBody.support_sessions) {
+        state.supportSessions = uBody.support_sessions;
+      }
     }
     catch { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Invalid response'); return; }
     clearUsersLoading();
@@ -1684,6 +1716,7 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const u of users) {
       const tr = document.createElement('tr');
       const caps = userRowCaps(u, selfId);
+      const supportCaps = supportSessionCaps(u, selfId, !!state.supportSessions.enabled);
 
       // Username
       const nameCell = document.createElement('td');
@@ -1755,6 +1788,21 @@ document.addEventListener('DOMContentLoaded', () => {
       const actionsCell = document.createElement('td');
       const actions = document.createElement('div');
       actions.className = 'users-row-actions';
+
+      if (state.supportSessions.enabled) {
+        const supportBtn = document.createElement('button');
+        supportBtn.type = 'button';
+        supportBtn.className = 'btn-row btn-row-support';
+        supportBtn.textContent = 'Support session';
+        supportBtn.setAttribute('aria-label', `Start support session as ${u.username}`);
+        if (!supportCaps.canStart) {
+          supportBtn.disabled = true;
+          supportBtn.title = supportCaps.hint;
+        } else {
+          supportBtn.addEventListener('click', () => openSupportSessionModal(u));
+        }
+        actions.appendChild(supportBtn);
+      }
 
       const resetBtn = document.createElement('button');
       resetBtn.type = 'button';
@@ -2159,6 +2207,207 @@ document.addEventListener('DOMContentLoaded', () => {
     resetPwModal.hidden = false;
     modalTrap(resetPwModal).activate();
     resetPwInput.focus();
+  }
+
+  async function openSupportSessionModal(user, draft = null) {
+    state.supportTarget = user;
+    supportUsername.textContent = user.username;
+    supportReason.value = draft?.reason || '';
+    supportApp.textContent = '';
+    supportApp.removeAttribute('aria-invalid');
+    supportApp.removeAttribute('aria-errormessage');
+    const loadingOption = document.createElement('option');
+    loadingOption.textContent = 'Loading eligible apps…';
+    loadingOption.disabled = true;
+    loadingOption.selected = true;
+    supportApp.appendChild(loadingOption);
+    supportApp.disabled = true;
+    supportSubmit.disabled = true;
+    supportAppsRetry.hidden = true;
+    supportReauth.hidden = true;
+    supportAppStatus.textContent = 'Loading eligible apps…';
+    supportModalLock.setPending(false);
+    setError(supportError, '');
+    supportModal.hidden = false;
+    modalTrap(supportModal).activate();
+    supportClose.focus();
+    await loadSupportSessionApps({ advanceFocus: !draft });
+    if (draft && state.supportTarget?.id === user.id && !supportApp.disabled) {
+      const dialogStillOwnsFocus = document.activeElement === supportClose;
+      const restored = restoreSupportAppSelection(supportApp, supportSubmit, draft.app_slug, { focusOnMissing: dialogStillOwnsFocus });
+      if (!restored) {
+        setError(supportError, 'The previously selected app is no longer available. Choose another app to continue.');
+        supportAppStatus.textContent = 'The previous app is unavailable; an explicit app choice is required.';
+      }
+      if (restored && supportReason.value === (draft.reason || '') && dialogStillOwnsFocus) {
+        supportReason.focus();
+      }
+    }
+  }
+
+  async function loadSupportSessionApps({ advanceFocus = true } = {}) {
+    const target = state.supportTarget;
+    if (!target) return;
+    const request = supportAppsGate.begin();
+    const focusOwner = document.activeElement;
+    supportApp.textContent = '';
+    supportApp.removeAttribute('aria-invalid');
+    supportApp.removeAttribute('aria-errormessage');
+    const loadingOption = document.createElement('option');
+    loadingOption.textContent = 'Loading eligible apps…';
+    loadingOption.disabled = true;
+    loadingOption.selected = true;
+    supportApp.appendChild(loadingOption);
+    supportApp.disabled = true;
+    supportSubmit.disabled = true;
+    supportAppsRetry.hidden = true;
+    supportAppStatus.textContent = 'Loading eligible apps…';
+    setError(supportError, '');
+    try {
+      const resp = await api(`/api/users/${encodeURIComponent(target.id)}/support-apps`, { signal: request.signal });
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const body = await resp.json();
+	  if (!supportAppsGate.isCurrent(request.generation) || !state.supportTarget || state.supportTarget.id !== target.id) return;
+      const apps = Array.isArray(body?.items) ? body.items : [];
+      supportApp.textContent = '';
+      for (const app of apps.slice().sort((a, b) => (a.name || a.slug).localeCompare(b.name || b.slug))) {
+      const option = document.createElement('option');
+      option.value = app.slug;
+      option.textContent = app.name && app.name !== app.slug ? `${app.name} (${app.slug})` : app.slug;
+      supportApp.appendChild(option);
+      }
+      if (!supportApp.options.length) {
+        const option = document.createElement('option');
+        option.textContent = 'This user has no accessible apps';
+        option.disabled = true;
+        supportApp.appendChild(option);
+        setError(supportError, 'There are no apps this user can access.');
+        supportAppStatus.textContent = 'No eligible apps found.';
+        return;
+      }
+      supportApp.disabled = false;
+      supportSubmit.disabled = false;
+      supportAppStatus.textContent = `${apps.length} eligible app${apps.length === 1 ? '' : 's'} loaded.`;
+      if (advanceFocus && (document.activeElement === focusOwner || (focusOwner === supportAppsRetry && document.activeElement === document.body))) {
+        supportApp.focus();
+      }
+    } catch (error) {
+	  if (error?.name === 'AbortError' || !supportAppsGate.isCurrent(request.generation) || !state.supportTarget || state.supportTarget.id !== target.id) return;
+      supportApp.textContent = '';
+      const option = document.createElement('option');
+      option.textContent = 'Apps unavailable';
+      option.disabled = true;
+      supportApp.appendChild(option);
+      setError(supportError, 'Eligible apps could not be loaded. Check your connection and retry.');
+      supportAppStatus.textContent = 'Eligible apps could not be loaded.';
+      supportAppsRetry.hidden = false;
+      if (document.activeElement === focusOwner || (focusOwner === supportAppsRetry && document.activeElement === document.body)) {
+        supportAppsRetry.focus();
+      }
+    }
+  }
+
+  function closeSupportSessionModal() {
+    supportModalLock.requestDismiss(() => {
+      supportModal.hidden = true;
+      modalTrap(supportModal).release();
+      state.supportTarget = null;
+      supportAppsGate.invalidate();
+      supportReason.value = '';
+      supportAppsRetry.hidden = true;
+      supportReauth.hidden = true;
+      setError(supportError, '');
+    });
+  }
+
+  async function submitSupportSession(event) {
+    event.preventDefault();
+    const target = state.supportTarget;
+    const reason = supportReason.value.trim();
+    if (!target || !supportApp.value) return;
+    if (reason.length < 8) {
+      setError(supportError, 'Add a specific reason of at least 8 characters.');
+      supportReason.focus();
+      return;
+    }
+    const submitOwnedFocus = document.activeElement === supportSubmit;
+    supportSubmit.disabled = true;
+    supportSubmit.textContent = 'Starting…';
+    supportModalLock.setPending(true);
+    let restoreSubmitFocus = false;
+    let launched = false;
+    try {
+      const resp = await api('/api/support-sessions', {
+        method: 'POST',
+        body: JSON.stringify({ user_id: target.id, app_slug: supportApp.value, reason }),
+      });
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let message = 'The support session could not be started.';
+        try {
+          const body = await resp.json();
+          if (body?.error) message = body.error;
+          supportReauth.hidden = body?.code !== 'recent_authentication_required';
+        } catch {}
+        setError(supportError, message);
+        if (!supportReauth.hidden) supportReauth.focus();
+        else restoreSubmitFocus = submitOwnedFocus;
+        return;
+      }
+      const session = await resp.json();
+      launched = true;
+      window.location.assign(session.launch_url);
+    } catch {
+      setError(supportError, 'Network error. Check your connection and try again.');
+      restoreSubmitFocus = submitOwnedFocus;
+    } finally {
+      if (!launched) {
+        supportSubmit.disabled = false;
+        supportSubmit.textContent = 'Start 15-minute session';
+        supportModalLock.setPending(false);
+        if (restoreSubmitFocus) restoreFailedActionFocus(supportSubmit, true);
+      }
+    }
+  }
+
+  async function reauthenticateForSupportSession() {
+    const reauthOwnedFocus = document.activeElement === supportReauth;
+    supportReauth.disabled = true;
+    supportReauth.textContent = 'Signing out…';
+    try {
+      const draft = state.supportTarget ? {
+        user_id: state.supportTarget.id,
+        username: state.supportTarget.username,
+        app_slug: supportApp.value,
+        reason: supportReason.value,
+        saved_at: Date.now(),
+      } : null;
+      if (draft && !saveSupportDraft(sessionStorage, draft)) {
+        supportReauth.disabled = false;
+        supportReauth.textContent = 'Sign out and sign in again';
+        setError(supportError, 'This browser could not preserve your support-session draft. Copy the reason, then sign out manually.');
+        supportReauth.focus();
+        return;
+      }
+      const resp = await api('/api/auth/logout', { method: 'POST' });
+      if (!resp.ok && resp.status !== 401) throw new Error(`HTTP ${resp.status}`);
+      suppressUnloadGuard = true;
+      window.location.assign('/users');
+    } catch {
+      consumeSupportDraft(sessionStorage);
+      supportReauth.disabled = false;
+      supportReauth.textContent = 'Sign out and sign in again';
+      setError(supportError, 'Could not sign out. Check your connection and try again.');
+      restoreFailedActionFocus(supportReauth, reauthOwnedFocus);
+    }
+  }
+
+  async function restorePendingSupportSession() {
+    const draft = consumeSupportDraft(sessionStorage);
+    if (state.user?.role !== 'admin') return;
+    if (!isFreshSupportDraft(draft) || !draft.user_id || !draft.username) return;
+    await openSupportSessionModal({ id: draft.user_id, username: draft.username }, draft);
   }
 
   function closeResetPasswordModal() {
@@ -4472,6 +4721,19 @@ document.addEventListener('DOMContentLoaded', () => {
   resetPwClose.addEventListener('click', closeResetPasswordModal);
   resetPwCancel.addEventListener('click', closeResetPasswordModal);
   resetPwForm.addEventListener('submit', submitResetPassword);
+  if (supportForm) supportForm.addEventListener('submit', submitSupportSession);
+  supportClose?.addEventListener('click', closeSupportSessionModal);
+  supportCancel?.addEventListener('click', closeSupportSessionModal);
+  supportAppsRetry?.addEventListener('click', () => loadSupportSessionApps());
+  supportApp?.addEventListener('change', () => {
+    if (!supportApp.disabled && supportApp.value) {
+      clearSupportAppOwnedError(supportApp, supportError);
+      supportSubmit.disabled = false;
+      supportAppStatus.textContent = 'App selected. Review the reason, then start the support session.';
+    }
+  });
+  supportReauth?.addEventListener('click', reauthenticateForSupportSession);
+  supportModal?.addEventListener('click', event => { if (event.target === event.currentTarget) closeSupportSessionModal(); });
   auditPrev.addEventListener('click', () => loadAuditEvents(state.auditPage - 1, state.auditSelection));
   auditNext.addEventListener('click', () => loadAuditEvents(state.auditPage + 1, state.auditSelection));
 
@@ -4523,6 +4785,8 @@ document.addEventListener('DOMContentLoaded', () => {
         closeProfileModal();
       } else if (aboutModal && !aboutModal.hidden) {
         closeAboutModal();
+      } else if (supportModal && !supportModal.hidden) {
+        closeSupportSessionModal();
       } else if (!resetPwModal.hidden) {
         closeResetPasswordModal();
       } else if (scheduleModal && !scheduleModal.hidden) {
@@ -5438,6 +5702,7 @@ document.addEventListener('DOMContentLoaded', () => {
       await router.start();
       consumeNextParam();
       await handleDeployHash();
+      await restorePendingSupportSession();
     } finally {
       if (submitBtn) {
         submitBtn.disabled = false;
@@ -6047,6 +6312,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await router.start();
     consumeNextParam();
     await handleDeployHash();
+    await restorePendingSupportSession();
   }
 
   // Honour /#deploy=<slug> from the server-rendered empty-state page.

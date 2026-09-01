@@ -609,12 +609,12 @@ func (p *Proxy) armClientReleaseLocked(slug, clientID string) {
 // Runs under the SHARED read lock plus cs.mu so unrelated clients close
 // connections in parallel; the grace timer's callback takes the WRITE lock, so
 // it cannot fire while this (or an open) holds the read lock.
-func (p *Proxy) clientConnClosed(slug, clientID string) {
+func (p *Proxy) clientConnClosed(slug, clientID string, expected ...*clientSlot) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	cs := p.lookupClientSlot(slug, clientID)
-	if cs == nil {
+	if cs == nil || (len(expected) > 0 && cs != expected[0]) {
 		return
 	}
 	cs.mu.Lock()

@@ -149,6 +149,7 @@ func TestSpawnElasticWorker_BootsWithCorrectSlotID(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), rt)
 
 	prx := proxy.New()
+	prx.SetPoolAppID("app1", app.ID)
 	prx.SetPoolMode("app1", config.IsolationPerSession, 1, 5)
 
 	spawner := &lifecycle.ElasticSpawner{
@@ -188,6 +189,7 @@ func TestSpawnElasticWorker_HoldsAppOperationThroughRegistration(t *testing.T) {
 	rt := &recordingRuntime{}
 	mgr := process.NewManager(t.TempDir(), rt)
 	prx := proxy.New()
+	prx.SetPoolAppID("leased-spawn", app.ID)
 	prx.SetPoolMode("leased-spawn", config.IsolationPerSession, 1, 5)
 	var appOperation sync.Mutex
 	healthEntered := make(chan struct{})
@@ -284,6 +286,7 @@ func TestElasticWarmSpare_FreezesThenResumesOnDemand(t *testing.T) {
 	t.Cleanup(func() { close(rt.waitCh) })
 	mgr := process.NewManager(t.TempDir(), rt)
 	prx := proxy.New()
+	prx.SetPoolAppID("warmapp", app.ID)
 	prx.SetPoolMode("warmapp", config.IsolationPerSession, 1, 3)
 	prx.SetPoolWarmSpares("warmapp", 1)
 	prx.SetSpawnFunc(func(string, int) {})
@@ -444,6 +447,7 @@ func TestSpawnElasticWorker_AppliesResourceLimits(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), rt)
 
 	prx := proxy.New()
+	prx.SetPoolAppID("limapp", app.ID)
 	prx.SetPoolMode("limapp", config.IsolationPerSession, 1, 5)
 
 	spawner := &lifecycle.ElasticSpawner{
@@ -491,6 +495,7 @@ func TestSpawnElasticWorker_MaxSessionLifetimeBackstop(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), rt)
 
 	prx := proxy.New()
+	prx.SetPoolAppID("lifeapp", app.ID)
 	prx.SetPoolMode("lifeapp", config.IsolationPerSession, 1, 5)
 
 	spawner := &lifecycle.ElasticSpawner{
@@ -540,6 +545,7 @@ func TestTerminateElasticWorker_CancelsLifetimeTimer(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), rt)
 
 	prx := proxy.New()
+	prx.SetPoolAppID("cancelapp", app.ID)
 	prx.SetPoolMode("cancelapp", config.IsolationPerSession, 1, 5)
 
 	var terminateCalls int64
@@ -793,6 +799,7 @@ func TestSpawnElasticWorker_RefusesWhenEnvironmentIsMissing(t *testing.T) {
 
 	rt := &hostDepsRuntime{}
 	prx := proxy.New()
+	prx.SetPoolAppID("noenv", app.ID)
 	prx.SetPoolMode("noenv", config.IsolationPerSession, 1, 5)
 
 	spawner := &lifecycle.ElasticSpawner{
@@ -821,6 +828,7 @@ func TestSpawnElasticWorker_StartsWhenEnvironmentIsPresent(t *testing.T) {
 
 	rt := &hostDepsRuntime{}
 	prx := proxy.New()
+	prx.SetPoolAppID("hasenv", app.ID)
 	prx.SetPoolMode("hasenv", config.IsolationPerSession, 1, 5)
 
 	spawner := &lifecycle.ElasticSpawner{

@@ -152,6 +152,10 @@ exposes app proxy traffic and health checks only; it does not expose the
 dashboard, static control-plane assets, or `/api` routes. This prevents
 application JavaScript from sharing an origin with control-plane cookies.
 
+The isolated origin also unlocks optional administrator support sessions. See
+[Support sessions](support-sessions.md) for the opt-in setting and security
+model.
+
 ## Application status overlay
 
 When an application's WebSocket drops mid-session, Shiny shows a grey

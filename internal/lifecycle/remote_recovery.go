@@ -122,7 +122,7 @@ func recoverRemoteReplica(
 		WorkerID:    r.WorkerID,
 		LogRunID:    logRunID,
 	}, process.RunHandle{ContainerID: r.WorkerID + "/" + item.ContainerID})
-	if err := prx.RegisterReplica(app.Slug, r.Index, item.URL, mgr.TransportForWorker(r.Tier, r.WorkerID), derefInt64(r.DeploymentID)); err != nil {
+	if err := prx.RegisterReplica(app.Slug, r.Index, item.URL, mgr.TransportForWorker(r.Tier, r.WorkerID), derefInt64(r.DeploymentID), app.ID); err != nil {
 		slog.Error("recovery: register remote proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}

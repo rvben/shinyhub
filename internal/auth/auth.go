@@ -19,6 +19,11 @@ const jwtExpiry = 1 * time.Hour
 // reports that the token's jti has been revoked.
 var ErrTokenRevoked = errors.New("token revoked")
 
+var (
+	ErrSupportSessionInvalid = errors.New("support session invalid")
+	ErrSupportSessionScope   = errors.New("support session is restricted to its app")
+)
+
 // RevocationChecker reports whether a JWT's jti has been revoked. Returning an
 // error causes validation to fail closed — we'd rather reject a valid token on
 // DB hiccups than accept a revoked one.
@@ -37,6 +42,14 @@ type Claims struct {
 	// password change bumped it). Legacy tokens carry 0, matching the column
 	// default, so an upgrade logs nobody out.
 	SessionEpoch int64 `json:"sess_epoch,omitempty"`
+	// Support-session claims preserve the administrator as actor while the
+	// registered subject remains the user whose app experience is reproduced.
+	SupportSessionID  string `json:"support_session_id,omitempty"`
+	SupportAppID      int64  `json:"support_app_id,omitempty"`
+	SupportAppSlug    string `json:"support_app,omitempty"`
+	ActorID           int64  `json:"actor_id,omitempty"`
+	ActorUsername     string `json:"actor_username,omitempty"`
+	ActorSessionEpoch int64  `json:"actor_sess_epoch,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -106,14 +119,26 @@ func newJTI() (string, error) {
 // SlideSessionToken) rather than IssueJWT: a token issued without the user's
 // live epoch is rejected on the first request after any bump.
 func IssueSessionToken(u *ContextUser, secret string) (string, error) {
-	return issueJWT(u.ID, u.Username, u.Role, u.TokenEpoch, secret, time.Now())
+	token, _, err := IssueSessionTokenWithInfo(u, secret)
+	return token, err
+}
+
+// IssueSessionTokenWithInfo returns the token metadata alongside the signed
+// value. App-origin support-session activation persists the JTI so a stop can
+// revoke already-open WebSockets immediately through the normal recheck path.
+func IssueSessionTokenWithInfo(u *ContextUser, secret string) (string, *TokenInfo, error) {
+	return issueUserJWT(u, secret, time.Now())
 }
 
 // SlideSessionToken re-issues a session token during a sliding renewal,
 // preserving the original auth_time (so renewals cannot extend the absolute
 // session lifetime) while embedding the user's current token epoch.
 func SlideSessionToken(u *ContextUser, secret string, authTime time.Time) (string, error) {
-	return issueJWT(u.ID, u.Username, u.Role, u.TokenEpoch, secret, authTime)
+	if u.SupportSession != nil {
+		return "", ErrSupportSessionScope
+	}
+	token, _, err := issueUserJWTAt(u, secret, authTime, time.Now().Add(jwtExpiry))
+	return token, err
 }
 
 // IssueJWT issues a session token at epoch 0, stamping auth_time to now. Test
@@ -132,26 +157,55 @@ func IssueJWTAt(userID int64, username, role, secret string, authTime time.Time)
 // issueJWT mints the session token. IssuedAt/ExpiresAt/NotBefore always slide
 // to now; auth_time and the session epoch are the caller's responsibility.
 func issueJWT(userID int64, username, role string, epoch int64, secret string, authTime time.Time) (string, error) {
+	u := &ContextUser{ID: userID, Username: username, Role: role, TokenEpoch: epoch}
+	token, _, err := issueUserJWTAt(u, secret, authTime, time.Now().Add(jwtExpiry))
+	return token, err
+}
+
+func issueUserJWT(u *ContextUser, secret string, authTime time.Time) (string, *TokenInfo, error) {
+	expiresAt := time.Now().Add(jwtExpiry)
+	if u.SupportSession != nil && !u.SupportSession.ExpiresAt.IsZero() && u.SupportSession.ExpiresAt.Before(expiresAt) {
+		expiresAt = u.SupportSession.ExpiresAt
+	}
+	return issueUserJWTAt(u, secret, authTime, expiresAt)
+}
+
+func issueUserJWTAt(u *ContextUser, secret string, authTime, expiresAt time.Time) (string, *TokenInfo, error) {
+	if !expiresAt.After(time.Now()) {
+		return "", nil, ErrSupportSessionInvalid
+	}
 	jti, err := newJTI()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	now := time.Now()
 	claims := Claims{
-		UserID:       userID,
-		Role:         role,
+		UserID:       u.ID,
+		Role:         u.Role,
 		AuthTime:     jwt.NewNumericDate(authTime),
-		SessionEpoch: epoch,
+		SessionEpoch: u.TokenEpoch,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        jti,
-			Subject:   username,
-			ExpiresAt: jwt.NewNumericDate(now.Add(jwtExpiry)),
+			Subject:   u.Username,
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
 		},
 	}
+	if support := u.SupportSession; support != nil {
+		claims.SupportSessionID = support.ID
+		claims.SupportAppID = support.AppID
+		claims.SupportAppSlug = support.AppSlug
+		claims.ActorID = support.ActorID
+		claims.ActorUsername = support.ActorUsername
+		claims.ActorSessionEpoch = support.ActorTokenEpoch
+	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(secret))
+	signed, err := token.SignedString([]byte(secret))
+	if err != nil {
+		return "", nil, err
+	}
+	return signed, &TokenInfo{JTI: jti, ExpiresAt: expiresAt, AuthTime: authTime}, nil
 }
 
 // ValidateJWT parses the signed token and, if revoked is non-nil, also checks

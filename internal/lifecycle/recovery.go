@@ -258,12 +258,12 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		// (fleet default applies when the per-app field is empty).
 		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, defaultWorkerIsolation)
 		if isElasticIsolation(resolvedIso) {
+			prx.SetPoolAppID(app.Slug, app.ID)
 			prx.SetPoolMode(app.Slug,
 				config.WorkerIsolationMode(resolvedIso),
 				app.WorkerGroupedSize,
 				app.WorkerMaxWorkers)
 			prx.SetPoolWarmSpares(app.Slug, app.WorkerWarmSpares)
-			prx.SetPoolAppID(app.Slug, app.ID)
 			prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, identityGlobal))
 			prx.ReconcileElasticWarmSpares(app.Slug)
 			// Mark the app running: the empty elastic pool is live and will
@@ -313,9 +313,9 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 				poolSize = r.Index + 1
 			}
 		}
+		prx.SetPoolAppID(app.Slug, app.ID)
 		prx.SetPoolSize(app.Slug, poolSize)
 		prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, defaultMaxSessions))
-		prx.SetPoolAppID(app.Slug, app.ID)
 		prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, identityGlobal))
 		bundleDir := activeBundleDir(store, app.ID)
 
@@ -614,7 +614,7 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("http://127.0.0.1:%d", *r.Port)
 	}
-	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID)); err != nil {
+	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID), app.ID); err != nil {
 		slog.Error("process recovery: register proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}
@@ -879,7 +879,7 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 		DeploymentID: derefInt64(r.DeploymentID),
 		LogRunID:     logRunID,
 	}, process.RunHandle{ContainerID: cID})
-	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID)); err != nil {
+	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID), app.ID); err != nil {
 		slog.Error("recovery: register docker proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}

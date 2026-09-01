@@ -57,6 +57,12 @@ auth:
   # break-glass admin password login. See docs/native-oidc.md#sso-only.
   # local_login: true                   # SHINYHUB_AUTH_LOCAL_LOGIN
 
+  # Optional, app-scoped admin troubleshooting sessions. Each session lasts at
+  # most 15 minutes, requires a reason, is fully audited, and can target only a
+  # viewer or developer. This safety-sensitive feature is off by default and
+  # requires server.app_origin to keep app code on a separate origin.
+  # support_sessions: false             # SHINYHUB_SUPPORT_SESSIONS
+
   # Optional: map IdP groups to global roles. Groups come from the OIDC `groups`
   # claim (see oauth.oidc.groups_claim) or the forward-auth groups header.
   # Highest-rank match wins. Unlike oauth_default_role, a group MAY confer admin.

@@ -36,6 +36,9 @@ type Payload struct {
 	GroupsHeader    string
 	GroupsTruncated bool
 	Token           string
+	SupportSession  bool
+	ActorID         string
+	ActorUsername   string
 }
 
 type cachedGroups struct {
@@ -110,15 +113,21 @@ func (p *Provider) PayloadFor(user *auth.ContextUser, slug string, appID int64) 
 	p.warnCommaGroups(groups)
 	header, claim, truncated := SanitizeGroups(groups)
 	appRole := p.appRoleFor(user, slug, appID)
-	tok, err := MintToken(DeriveKey(p.secret, appID), TokenParams{
+	params := TokenParams{
 		UserID: user.ID, Username: user.Username, Role: user.Role, AppRole: appRole,
 		Email: user.Email, Name: user.DisplayName,
 		Groups: claim, GroupsTruncated: truncated, Slug: slug,
-	})
+	}
+	if support := user.SupportSession; support != nil {
+		params.SupportSessionID = support.ID
+		params.ActorID = support.ActorID
+		params.ActorUsername = support.ActorUsername
+	}
+	tok, err := MintToken(DeriveKey(p.secret, appID), params)
 	if err != nil {
 		slog.Warn("identity: mint token", "slug", slug, "err", err)
 	}
-	return &Payload{
+	payload := &Payload{
 		Username:        user.Username,
 		UserID:          strconv.FormatInt(user.ID, 10),
 		Role:            user.Role,
@@ -129,6 +138,12 @@ func (p *Provider) PayloadFor(user *auth.ContextUser, slug string, appID int64) 
 		GroupsTruncated: truncated,
 		Token:           tok,
 	}
+	if support := user.SupportSession; support != nil {
+		payload.SupportSession = true
+		payload.ActorID = strconv.FormatInt(support.ActorID, 10)
+		payload.ActorUsername = support.ActorUsername
+	}
+	return payload
 }
 
 // appRole maps ownership, global role, and effective member role onto the

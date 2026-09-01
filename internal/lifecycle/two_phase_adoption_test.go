@@ -109,9 +109,10 @@ func TestRecoverRemoteReplica_FargateFullAdoptWhenURLPresent(t *testing.T) {
 	store := openMemStore(t)
 	mgr := process.NewManager(".", stubRuntime{})
 	prx := proxy.New()
-	prx.SetPoolSize("demo", 1)
 
 	app := buildTestApp("demo", 1)
+	prx.SetPoolAppID("demo", app.ID)
+	prx.SetPoolSize("demo", 1)
 	depID := int64(42)
 	r := buildTestReplica(app.ID, 0, fargate.WorkerID, &depID)
 

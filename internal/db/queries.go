@@ -3229,7 +3229,7 @@ func (s *Store) ConsumeAppLaunchCode(codeHash, appSlug string) (*auth.ContextUse
 	var userID int64
 	if err := row.Scan(&userID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
+			return s.consumeSupportLaunch(codeHash, appSlug)
 		}
 		return nil, fmt.Errorf("consume app launch code: %w", err)
 	}

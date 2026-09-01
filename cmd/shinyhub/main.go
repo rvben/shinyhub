@@ -1342,6 +1342,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Explain a mid-session disconnect to the visitor. The app process cannot:
 	// it does not know whether it was hibernated, redeployed, or killed.
 	prx.SetStatusOverlay(cfg.Server.StatusOverlayEnabled())
+	prx.SetSupportSessions(cfg.Auth.SupportSessions)
 	// Give the visitor a way out of the app they opened. Without it an app page
 	// is a dead end: it fills the tab and links nowhere else in the fleet.
 	prx.SetAppNav(cfg.Server.AppNavEnabled(), appNavHomeURL(cfg))
@@ -2546,11 +2547,17 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			defer recheckWG.Done()
 			prx.StartSessionRecheck(recheckCtx, every, func(c proxy.ConnPrincipal) (bool, string, error) {
 				return access.Recheck(store, appUserLookup, store.IsTokenRevoked, access.Principal{
-					Slug:         c.Slug,
-					UserID:       c.UserID,
-					Role:         c.Role,
-					SessionEpoch: c.SessionEpoch,
-					JTI:          c.JTI,
+					Slug:              c.Slug,
+					UserID:            c.UserID,
+					Role:              c.Role,
+					SessionEpoch:      c.SessionEpoch,
+					JTI:               c.JTI,
+					ActorID:           c.ActorID,
+					ActorRole:         c.ActorRole,
+					ActorSessionEpoch: c.ActorSessionEpoch,
+					SupportAppID:      c.SupportAppID,
+					RoutedAppID:       c.RoutedAppID,
+					SupportExpiresAt:  c.SupportExpiresAt,
 				})
 			})
 		}()
@@ -2577,6 +2584,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		appHandler = appOriginDispatch(parsedAppOrigin, cfg.TrustedProxyNets, store, cfg.Auth.Secret, controlAppHandler, appHandler)
 	}
 	mux.Handle("/app/", appHandler)
+	if cfg.Auth.SupportSessions {
+		mux.HandleFunc("POST /app/{slug}/.shinyhub/support-session/stop",
+			supportSessionStopHandler(store, cfg.Auth.Secret, strings.TrimRight(cfg.Server.BaseURL, "/")+"/#users", cfg.TrustedProxyNets))
+	}
 	// The per-app favicon is access-controlled exactly like the app. Register it
 	// as a more-specific pattern than /app/ so it never reaches the app backend.
 	platformFavicon := ui.FaviconHandler(cfg.Branding)

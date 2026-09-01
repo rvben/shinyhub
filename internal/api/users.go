@@ -100,7 +100,12 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	// ListUsers already orders by username, so the page is stably sorted.
 	limit, offset := parsePagination(r)
-	writeList(w, resp, limit, offset, nil)
+	writeList(w, resp, limit, offset, map[string]any{
+		"support_sessions": map[string]any{
+			"enabled":          s.cfg.Auth.SupportSessions,
+			"duration_seconds": int(db.SupportSessionDuration.Seconds()),
+		},
+	})
 }
 
 type createUserRequest struct {

@@ -1108,9 +1108,9 @@ func Run(p Params) (*PoolResult, error) {
 		return res, nil
 	}
 
+	p.Proxy.SetPoolAppID(p.Slug, p.AppID)
 	p.Proxy.SetPoolSize(p.Slug, total)
 	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
-	p.Proxy.SetPoolAppID(p.Slug, p.AppID)
 	p.Proxy.SetPoolIdentityHeaders(p.Slug, p.IdentityHeaders)
 	// SetPoolMode propagates the worker-isolation strategy so the proxy can
 	// apply the correct routing algorithm for this pool's sessions.
@@ -1505,7 +1505,13 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	}
 	startedResult.StartupPeakRSSBytes = startupPeakRSSBytes
 
-	if err := p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport, p.DeploymentID); err != nil {
+	var registerErr error
+	if p.AppID > 0 {
+		registerErr = p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport, p.DeploymentID, p.AppID)
+	} else {
+		registerErr = p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport, p.DeploymentID)
+	}
+	if registerErr != nil {
 		stop := p.Manager.StopReplica
 		if p.GuardUntilAcknowledged {
 			stop = p.Manager.StopReplicaConfirmed
@@ -1514,7 +1520,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		if serr != nil {
 			slog.Warn("deploy: stop replica after failed proxy register", "slug", p.Slug, "index", idx, "err", serr)
 		}
-		return Result{}, stoppedReplicaStartError(fmt.Errorf("register: %w", err), serr)
+		return Result{}, stoppedReplicaStartError(fmt.Errorf("register: %w", registerErr), serr)
 	}
 	return startedResult, nil
 }
@@ -1626,8 +1632,14 @@ func ResumeReplica(p Params, index int) (*Result, error) {
 	if err := hc(ep.URL, resumeProbeTimeout, transport); err != nil {
 		return nil, fmt.Errorf("resume readiness: %w", err)
 	}
-	if err := p.Proxy.RegisterReplica(p.Slug, index, ep.URL, transport, p.DeploymentID); err != nil {
-		return nil, fmt.Errorf("register: %w", err)
+	var registerErr error
+	if p.AppID > 0 {
+		registerErr = p.Proxy.RegisterReplica(p.Slug, index, ep.URL, transport, p.DeploymentID, p.AppID)
+	} else {
+		registerErr = p.Proxy.RegisterReplica(p.Slug, index, ep.URL, transport, p.DeploymentID)
+	}
+	if registerErr != nil {
+		return nil, fmt.Errorf("register: %w", registerErr)
 	}
 	return &Result{
 		Index:       index,

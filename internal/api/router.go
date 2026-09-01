@@ -950,6 +950,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Patch("/api/users/{id}/password", s.handlePatchUserPassword)                // admin: reset password
 		r.Post("/api/users/{id}/revoke-sessions", s.handleRevokeUserSessions)         // admin: force-logout all sessions
 		r.Delete("/api/users/{id}", s.handleDeleteUser)                               // admin: delete user
+		r.Get("/api/users/{id}/support-apps", s.handleListSupportSessionApps)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/support-sessions", s.handleCreateSupportSession)
 
 		r.Get("/api/audit", s.handleListAuditEvents) // admin: audit log
 

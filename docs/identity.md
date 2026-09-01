@@ -125,6 +125,9 @@ key and cannot be reached with the old one.
 | `X-Shinyhub-Groups` | Comma-joined sorted group names | Capped at 100 names; group names that contain a comma are omitted from this header (they appear in the JWT claim instead) |
 | `X-Shinyhub-Groups-Truncated` | `"true"` | Present only when the group list exceeded 100 and was truncated |
 | `X-Shinyhub-Identity-Token` | Signed HS256 JWT | The authoritative identity artifact; verify before acting on it |
+| `X-Shinyhub-Support-Session` | `"true"` | Present only during an app-scoped administrator support session |
+| `X-Shinyhub-Actor-Id` | Decimal administrator user ID | Present with `X-Shinyhub-Support-Session`; the represented user remains `X-Shinyhub-User-Id` |
+| `X-Shinyhub-Actor` | Administrator username | Present with `X-Shinyhub-Support-Session`; intended for display and logs |
 
 `X-Shinyhub-Groups` is absent when the user belongs to no groups. It is also
 absent when every group name contains a comma (in that case only the JWT claim
@@ -162,6 +165,8 @@ The identity token is a standard JWT signed with HS256. Its claims are:
 | `name` | string | The user's display name when the IdP asserts one (forward-auth `name_header`, or persisted from an OAuth/OIDC login); omitted for local-password accounts |
 | `groups` | array of strings | Sorted group names, capped at 100 (all names, including comma-bearing ones) |
 | `groups_truncated` | bool | `true` when the list was truncated to 100; absent otherwise |
+| `support_session_id` | string | Random support-session ID; present only during a support session |
+| `act` | object | Administrator actor with `sub` (decimal ID) and `preferred_username`; the top-level `sub` remains the represented user |
 | `iat` | NumericDate | Token issue time |
 | `exp` | NumericDate | `iat + 5 minutes` |
 

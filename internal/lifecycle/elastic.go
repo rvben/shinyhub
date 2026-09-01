@@ -311,9 +311,9 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	// proxy's sticky-pin DeploymentID check.
 	var regErr error
 	if registerSuspended {
-		regErr = s.Proxy.RegisterSuspendedElasticWorker(slug, slotID, info.EndpointURL, transport, dep.ID)
+		regErr = s.Proxy.RegisterSuspendedElasticWorker(slug, slotID, info.EndpointURL, transport, dep.ID, app.ID)
 	} else {
-		regErr = s.Proxy.RegisterElasticWorker(slug, slotID, info.EndpointURL, transport, dep.ID)
+		regErr = s.Proxy.RegisterElasticWorker(slug, slotID, info.EndpointURL, transport, dep.ID, app.ID)
 	}
 	if regErr != nil {
 		slog.Warn("elastic spawn: proxy register failed", "slug", slug, "slotID", slotID, "err", regErr)

@@ -118,6 +118,7 @@ func TestRecoverRemoteReplica_PersistsLiveEndpoint(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
+	prx.SetPoolAppID("app", app.ID)
 	prx.SetPoolSize("app", 1)
 
 	if !recoverRemoteReplica(store, mgr, prx, app, r, items, "") {

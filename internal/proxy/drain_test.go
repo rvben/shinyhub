@@ -63,6 +63,37 @@ func TestConnTracker_OnCloseRunsExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestConnTracker_SupportDeadlineClosesWithoutRecheckSweep(t *testing.T) {
+	tr := newConnTracker()
+	underlying := &stubConn{}
+	tr.track(underlying, ConnPrincipal{SupportExpiresAt: time.Now().Add(30 * time.Millisecond)})
+	deadline := time.After(time.Second)
+	for !underlying.isClosed() {
+		select {
+		case <-deadline:
+			t.Fatal("support connection survived its hard deadline")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if tr.count() != 0 {
+		t.Fatalf("expired support connection remains tracked: %d", tr.count())
+	}
+}
+
+func TestConnTracker_EarlyCloseCancelsSupportDeadlineTimer(t *testing.T) {
+	tr := newConnTracker()
+	tc := tr.track(&stubConn{}, ConnPrincipal{SupportExpiresAt: time.Now().Add(15 * time.Minute)}).(*trackedConn)
+	if err := tc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tc.timerMu.Lock()
+	defer tc.timerMu.Unlock()
+	if tc.deadlineTimer != nil {
+		t.Fatal("closed support connection retained its deadline timer")
+	}
+}
+
 func TestConnTracker_CloseAllForceClosesUnderlying(t *testing.T) {
 	tr := newConnTracker()
 	s1, s2 := &stubConn{}, &stubConn{}

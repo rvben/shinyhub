@@ -32,9 +32,25 @@ func (t *connTracker) track(c net.Conn, principal ConnPrincipal) net.Conn {
 
 func (t *connTracker) trackWithClose(c net.Conn, principal ConnPrincipal, onClose func()) net.Conn {
 	tc := &trackedConn{Conn: c, tracker: t, principal: principal, onClose: onClose}
+	delay := time.Duration(0)
+	hasDeadline := !principal.SupportExpiresAt.IsZero()
+	if hasDeadline {
+		delay = time.Until(principal.SupportExpiresAt)
+	}
 	t.mu.Lock()
 	t.conns[tc] = struct{}{}
+	if hasDeadline && delay > 0 {
+		// Publish the timer while holding its dedicated lock. A near-zero timer
+		// callback may start immediately, but Close will wait until the pointer is
+		// assigned; an early manual Close can then cancel and release the closure.
+		tc.timerMu.Lock()
+		tc.deadlineTimer = time.AfterFunc(delay, func() { _ = tc.Close() })
+		tc.timerMu.Unlock()
+	}
 	t.mu.Unlock()
+	if hasDeadline && delay <= 0 {
+		_ = tc.Close()
+	}
 	return tc
 }
 
@@ -82,14 +98,22 @@ type trackedConn struct {
 	tracker *connTracker
 	// principal is fixed at the upgrade and never mutated, so the recheck sweep
 	// reads it without holding the tracker lock.
-	principal ConnPrincipal
-	onClose   func()
-	once      sync.Once
-	closeErr  error
+	principal     ConnPrincipal
+	onClose       func()
+	once          sync.Once
+	closeErr      error
+	timerMu       sync.Mutex
+	deadlineTimer *time.Timer
 }
 
 func (c *trackedConn) Close() error {
 	c.once.Do(func() {
+		c.timerMu.Lock()
+		if c.deadlineTimer != nil {
+			c.deadlineTimer.Stop()
+			c.deadlineTimer = nil
+		}
+		c.timerMu.Unlock()
 		c.tracker.forget(c)
 		c.closeErr = c.Conn.Close()
 		if c.onClose != nil {

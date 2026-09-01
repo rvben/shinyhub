@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,10 @@ func startEchoBackend(t *testing.T) (*httptest.Server, func() http.Header) {
 }
 
 type staticGroups struct{ g []string }
+
+type identityRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f identityRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func (s staticGroups) GetUserGroups(int64) ([]string, error) { return s.g, nil }
 
@@ -85,6 +90,19 @@ func TestIdentityHeaders_InjectedForAuthenticatedUser(t *testing.T) {
 	}
 	if h.Get(identity.HeaderAppRole) != "manager" {
 		t.Fatalf("app-role header = %q, want manager (per-app capability forwarded)", h.Get(identity.HeaderAppRole))
+	}
+}
+
+func TestIdentityHeadersExposeSupportActorSeparately(t *testing.T) {
+	srv, got := startEchoBackend(t)
+	p := newIdentityProxy(t, srv.URL, true)
+	user := &auth.ContextUser{ID: 5, Username: "ana", Role: "developer",
+		SupportSession: &auth.SupportSessionContext{ID: "support-id", ActorID: 2, ActorUsername: "admin", AppID: 42, AppSlug: "demo"}}
+	doIdentityReq(t, p, user, nil)
+	h := got()
+	if h.Get(identity.HeaderUser) != "ana" || h.Get(identity.HeaderSupportSession) != "true" ||
+		h.Get(identity.HeaderActorID) != "2" || h.Get(identity.HeaderActor) != "admin" {
+		t.Fatalf("support identity headers = %v", h)
 	}
 }
 
@@ -161,4 +179,51 @@ func TestSetPoolIdentityHeaders_ConcurrentWithTraffic(t *testing.T) {
 		doIdentityReq(t, p, &auth.ContextUser{ID: 1, Username: "u", Role: "viewer"}, nil)
 	}
 	<-done
+}
+
+func TestIdentityDirectorKeepsRegistrationAppIDAcrossReplacement(t *testing.T) {
+	for _, elastic := range []bool{false, true} {
+		name := "fixed"
+		if elastic {
+			name = "elastic"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := New()
+			p.SetPoolSize("demo", 1)
+			if elastic {
+				p.SetPoolMode("demo", "per_session", 1, 2)
+			}
+			p.SetPoolAppID("demo", 10)
+			p.SetPoolIdentityHeaders("demo", true)
+			seenAppID := make(chan int64, 1)
+			p.SetIdentityProvider(func(user *auth.ContextUser, _ string, appID int64) *identity.Payload {
+				seenAppID <- appID
+				return &identity.Payload{Username: user.Username, UserID: "5", Role: user.Role}
+			})
+			transport := identityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok")), Request: req}, nil
+			})
+			if elastic {
+				if err := p.RegisterElasticWorker("demo", 0, "http://backend.invalid", transport, 1, 10); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := p.RegisterReplica("demo", 0, "http://backend.invalid", transport, 1, 10); err != nil {
+				t.Fatal(err)
+			}
+			p.mu.RLock()
+			old := p.pools["demo"].replicas[0]
+			if elastic {
+				old = p.pools["demo"].workers[0]
+			}
+			p.mu.RUnlock()
+			p.SetPoolAppID("demo", 20)
+
+			req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
+			req = req.WithContext(auth.WithUser(req.Context(), &auth.ContextUser{ID: 5, Username: "ana", Role: "viewer"}))
+			old.rp.ServeHTTP(httptest.NewRecorder(), req)
+			if got := <-seenAppID; got != 10 {
+				t.Fatalf("old backend received identity derived for app %d, want 10", got)
+			}
+		})
+	}
 }

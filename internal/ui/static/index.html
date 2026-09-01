@@ -1312,6 +1312,41 @@
         </div>
       </div>
     </div>
+    <!-- App-scoped support session confirmation (admin only) -->
+    <div id="support-session-modal" class="modal-overlay" hidden
+         role="dialog" aria-modal="true" aria-labelledby="support-session-heading">
+      <div class="modal-card support-session-card">
+        <div class="modal-header">
+          <h2 id="support-session-heading" class="modal-title">Start a support session</h2>
+          <button id="support-session-close" type="button" aria-label="Close support session modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+        </div>
+        <div class="modal-body">
+          <div class="support-session-intro">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3 21 19H3L12 3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 8.5v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1" fill="currentColor"/></svg>
+            <p>You’ll enter one app as <strong id="support-session-username"></strong> for up to 15 minutes. A persistent banner identifies you as the administrator.</p>
+          </div>
+          <form id="support-session-form">
+            <label for="support-session-app">App</label>
+            <select id="support-session-app" required aria-describedby="support-session-app-status"></select>
+            <p id="support-session-app-status" class="profile-hint" role="status" aria-live="polite"></p>
+
+            <label for="support-session-reason">Reason or ticket</label>
+            <textarea id="support-session-reason" required minlength="8" maxlength="500" rows="3" placeholder="What are you investigating, and why is access needed?" aria-describedby="support-session-reason-help"></textarea>
+            <p id="support-session-reason-help" class="profile-hint">Stored in the audit log. Be specific enough for another administrator to understand later.</p>
+
+            <p class="support-session-warning" role="note"><strong>This is not read-only.</strong> Actions inside the app can change the user’s data. The session cannot access ShinyHub’s admin dashboard, other apps, API tokens, or privileged users.</p>
+            <p id="support-session-error" class="error" role="alert" hidden></p>
+			<button type="button" id="support-session-apps-retry" hidden>Retry loading apps</button>
+			<button type="button" id="support-session-reauth" hidden>Sign out and sign in again</button>
+
+            <div class="modal-actions">
+              <button type="button" id="support-session-cancel">Cancel</button>
+              <button type="submit" id="support-session-submit" class="btn-support">Start 15-minute session</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
     <!-- Reset password modal -->
     <div id="reset-password-modal" class="modal-overlay" hidden
          role="dialog" aria-modal="true" aria-labelledby="reset-password-heading">

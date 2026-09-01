@@ -16,7 +16,24 @@ const (
 	credentialContextKey contextKey = "credential"
 )
 
-const SessionCookieName = "shiny_session"
+const (
+	SessionCookieName             = "shiny_session"
+	SupportSessionCookieName      = "shiny_support_session"
+	SupportSessionGuardCookieName = "shiny_support_guard"
+)
+
+// SupportSessionContext preserves the administrator (actor) separately from
+// the user whose app experience is being reproduced (the ContextUser subject).
+// Support sessions are deliberately app-scoped and non-renewable.
+type SupportSessionContext struct {
+	ID              string
+	ActorID         int64
+	ActorUsername   string
+	ActorTokenEpoch int64
+	AppID           int64
+	AppSlug         string
+	ExpiresAt       time.Time
+}
 
 type ContextUser struct {
 	ID       int64
@@ -51,6 +68,9 @@ type ContextUser struct {
 	// TokenEpoch is the user's live session-revocation counter (users.token_epoch).
 	// JWT validation rejects tokens whose embedded epoch differs.
 	TokenEpoch int64
+	// SupportSession is non-nil only for a purpose-built, app-scoped support
+	// token. It must never be treated as a normal dashboard or API identity.
+	SupportSession *SupportSessionContext
 }
 
 func (u *ContextUser) IsServiceAccount() bool {
@@ -180,6 +200,32 @@ func resolveJWTUser(claims *Claims, userLookup UserLookup) (*ContextUser, error)
 	if u != nil && u.TokenEpoch != claims.SessionEpoch {
 		return nil, ErrTokenRevoked
 	}
+	if claims.SupportSessionID != "" {
+		if u == nil || u.Role != claims.Role || (u.Role != string(RoleViewer) && u.Role != string(RoleDeveloper)) || u.IsServiceAccount() {
+			return nil, ErrSupportSessionInvalid
+		}
+		if claims.ActorID <= 0 || claims.SupportAppID <= 0 || claims.SupportAppSlug == "" {
+			return nil, ErrSupportSessionInvalid
+		}
+		actor, err := userLookup(claims.ActorID)
+		if err != nil {
+			return nil, err
+		}
+		if actor == nil || actor.Role != string(RoleAdmin) || actor.IsServiceAccount() || actor.TokenEpoch != claims.ActorSessionEpoch {
+			return nil, ErrSupportSessionInvalid
+		}
+		u.SupportSession = &SupportSessionContext{
+			ID:              claims.SupportSessionID,
+			ActorID:         actor.ID,
+			ActorUsername:   actor.Username,
+			ActorTokenEpoch: actor.TokenEpoch,
+			AppID:           claims.SupportAppID,
+			AppSlug:         claims.SupportAppSlug,
+		}
+		if claims.ExpiresAt != nil {
+			u.SupportSession.ExpiresAt = claims.ExpiresAt.Time
+		}
+	}
 	return u, nil
 }
 
@@ -220,8 +266,8 @@ func authenticateHeader(header, secret string, keyLookup APIKeyLookup, userLooku
 	}
 }
 
-func authenticateSessionCookie(r *http.Request, secret string, userLookup UserLookup, revoked RevocationChecker) (*authResult, error) {
-	c, err := r.Cookie(SessionCookieName)
+func authenticateSessionCookieNamed(r *http.Request, cookieName, secret string, userLookup UserLookup, revoked RevocationChecker) (*authResult, error) {
+	c, err := r.Cookie(cookieName)
 	if err != nil {
 		return nil, err
 	}
@@ -235,6 +281,53 @@ func authenticateSessionCookie(r *http.Request, secret string, userLookup UserLo
 	}
 	tokenInfo := tokenFromClaims(claims)
 	return &authResult{User: user, Token: tokenInfo, Credential: credentialFromToken("browser_session", tokenInfo)}, nil
+}
+
+func authenticateSessionCookie(r *http.Request, secret string, userLookup UserLookup, revoked RevocationChecker) (*authResult, error) {
+	return authenticateSessionCookieNamed(r, SessionCookieName, secret, userLookup, revoked)
+}
+
+// AuthenticateSupportSession authenticates only the dedicated app-scoped
+// support cookie. A valid token always carries dual actor/subject metadata.
+func AuthenticateSupportSession(r *http.Request, secret string, userLookup UserLookup, revoked RevocationChecker) (*ContextUser, *TokenInfo, error) {
+	res, err := authenticateSessionCookieNamed(r, SupportSessionCookieName, secret, userLookup, revoked)
+	if err != nil || res == nil {
+		return nil, nil, err
+	}
+	if res.User == nil || res.User.SupportSession == nil {
+		return nil, nil, ErrSupportSessionInvalid
+	}
+	return res.User, res.Token, nil
+}
+
+// AuthenticateSupportSessionForStop verifies the dedicated cookie's signature,
+// expiry, purpose, and immutable scope without consulting live user state or
+// revocation. It is intentionally stop-only: a demotion, deletion, epoch bump,
+// or already-revoked JTI must remove access immediately while still allowing
+// the holder of the signed app-scoped capability to close its durable row.
+func AuthenticateSupportSessionForStop(r *http.Request, secret string) (*ContextUser, *TokenInfo, error) {
+	c, err := r.Cookie(SupportSessionCookieName)
+	if err != nil {
+		return nil, nil, err
+	}
+	claims, err := ValidateJWT(c.Value, secret, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	if claims.SupportSessionID == "" || claims.SupportAppID <= 0 || claims.SupportAppSlug == "" ||
+		claims.ActorID <= 0 || claims.ActorUsername == "" || claims.UserID <= 0 || claims.Subject == "" ||
+		(claims.Role != string(RoleViewer) && claims.Role != string(RoleDeveloper)) {
+		return nil, nil, ErrSupportSessionInvalid
+	}
+	user := userFromClaims(claims)
+	user.SupportSession = &SupportSessionContext{
+		ID: claims.SupportSessionID, ActorID: claims.ActorID, ActorUsername: claims.ActorUsername,
+		ActorTokenEpoch: claims.ActorSessionEpoch, AppID: claims.SupportAppID, AppSlug: claims.SupportAppSlug,
+	}
+	if claims.ExpiresAt != nil {
+		user.SupportSession.ExpiresAt = claims.ExpiresAt.Time
+	}
+	return user, tokenFromClaims(claims), nil
 }
 
 // AuthenticateBrowserSession authenticates a request strictly from the
@@ -260,6 +353,9 @@ func AuthenticateRequest(r *http.Request, secret string, keyLookup APIKeyLookup,
 	res, err := authenticateRequest(r, secret, keyLookup, userLookup, revoked)
 	if err != nil || res == nil {
 		return nil, nil, err
+	}
+	if res.User != nil && res.User.SupportSession != nil {
+		return nil, nil, ErrSupportSessionScope
 	}
 	return res.User, res.Token, nil
 }
@@ -299,7 +395,7 @@ func BearerMiddleware(secret string, keyLookup APIKeyLookup, userLookup UserLook
 			}
 
 			result, err := authenticateRequest(r, secret, keyLookup, userLookup, revoked)
-			if err != nil || result == nil || result.User == nil {
+			if err != nil || result == nil || result.User == nil || result.User.SupportSession != nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}

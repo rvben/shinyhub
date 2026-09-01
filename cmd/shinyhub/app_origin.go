@@ -4,14 +4,19 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/favicon"
+	"github.com/rvben/shinyhub/internal/originhost"
 	"github.com/rvben/shinyhub/internal/proxytrust"
+	"github.com/rvben/shinyhub/internal/supportui"
 )
 
 const appLaunchQueryParam = "__shinyhub_launch"
@@ -19,6 +24,8 @@ const appLaunchQueryParam = "__shinyhub_launch"
 type appLaunchStore interface {
 	CreateAppLaunchCode(codeHash string, userID int64, appSlug string) error
 	ConsumeAppLaunchCode(codeHash, appSlug string) (*auth.ContextUser, error)
+	ActivateSupportSession(id, jti string, expiresAt time.Time) error
+	AbortSupportSession(id, reason string) error
 }
 
 // appOriginBoundary makes the configured app origin a narrow virtual host. It
@@ -119,12 +126,29 @@ func consumeAppLaunch(w http.ResponseWriter, r *http.Request, store appLaunchSto
 		http.Error(w, "app launch expired or already used", http.StatusUnauthorized)
 		return
 	}
-	token, err := auth.IssueSessionToken(user, jwtSecret)
+	token, tokenInfo, err := auth.IssueSessionTokenWithInfo(user, jwtSecret)
 	if err != nil {
+		if user.SupportSession != nil {
+			_ = store.AbortSupportSession(user.SupportSession.ID, "launch_failed")
+		}
 		http.Error(w, "could not create app session", http.StatusInternalServerError)
 		return
 	}
-	auth.SetSessionCookie(w, r, token, trustedNets)
+	if support := user.SupportSession; support != nil {
+		if support.AppSlug != slug || store.ActivateSupportSession(support.ID, tokenInfo.JTI, tokenInfo.ExpiresAt) != nil {
+			_ = store.AbortSupportSession(support.ID, "activation_failed")
+			http.Error(w, "could not create app session", http.StatusInternalServerError)
+			return
+		}
+		// Remove any ordinary app-origin identity and install a root guard so
+		// leaving this slug cannot fall back to the administrator via a stale
+		// cookie or forward-auth context.
+		auth.ClearSessionCookie(w, r, trustedNets)
+		auth.SetSupportSessionGuardCookie(w, r, support.ID, tokenInfo.ExpiresAt, trustedNets)
+		auth.SetSupportSessionCookie(w, r, token, slug, tokenInfo.ExpiresAt, trustedNets)
+	} else {
+		auth.SetSessionCookie(w, r, token, trustedNets)
+	}
 	query := r.URL.Query()
 	query.Del(appLaunchQueryParam)
 	clean := *r.URL
@@ -133,6 +157,48 @@ func consumeAppLaunch(w http.ResponseWriter, r *http.Request, store appLaunchSto
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	http.Redirect(w, r, clean.RequestURI(), http.StatusSeeOther)
+}
+
+func supportSessionStopHandler(store *db.Store, jwtSecret, returnURL string, trustedNets []*net.IPNet) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		slug := r.PathValue("slug")
+		user, _, err := auth.AuthenticateSupportSessionForStop(r, jwtSecret)
+		if err != nil || user == nil || user.SupportSession == nil || user.SupportSession.AppSlug != slug {
+			auth.ClearSupportSessionCookie(w, r, slug, trustedNets)
+			if !strings.Contains(r.Header.Get("Accept"), "application/json") {
+				http.Redirect(w, r, returnURL, http.StatusSeeOther)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "support session is no longer active", "return_url": returnURL})
+			return
+		}
+		support := user.SupportSession
+		_, err = store.StopSupportSession(support.ID, "ended_by_actor", proxytrust.ClientIP(r, trustedNets))
+		if err != nil {
+			if !strings.Contains(r.Header.Get("Accept"), "application/json") {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(supportui.BlockedPageWithError(slug, support.ActorUsername, user.Username,
+					"The support session could not be ended. Try again; automatic expiry remains in force.", support.ExpiresAt)))
+				return
+			}
+			http.Error(w, "could not end support session", http.StatusInternalServerError)
+			return
+		}
+		auth.ClearSupportSessionCookie(w, r, slug, trustedNets)
+		if !strings.Contains(r.Header.Get("Accept"), "application/json") {
+			http.Redirect(w, r, returnURL, http.StatusSeeOther)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(map[string]string{"return_url": returnURL})
+	}
 }
 
 func newAppLaunchCode() (raw, hash string, err error) {
@@ -155,17 +221,7 @@ func appSlugFromPath(path string) string {
 }
 
 func sameHost(a, b string) bool {
-	return strings.EqualFold(normalizeHTTPSHost(a), normalizeHTTPSHost(b))
-}
-
-func normalizeHTTPSHost(host string) string {
-	u, err := url.Parse("//" + strings.TrimSpace(host))
-	if err != nil || u.Hostname() == "" {
-		return strings.TrimSuffix(strings.TrimSpace(host), ".")
-	}
-	name := strings.TrimSuffix(u.Hostname(), ".")
-	if port := u.Port(); port != "" && port != "443" {
-		return net.JoinHostPort(name, port)
-	}
-	return name
+	canonicalA, errA := originhost.Authority(a)
+	canonicalB, errB := originhost.Authority(b)
+	return errA == nil && errB == nil && canonicalA == canonicalB
 }

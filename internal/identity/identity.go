@@ -26,6 +26,9 @@ const (
 	HeaderGroups          = "X-Shinyhub-Groups"
 	HeaderGroupsTruncated = "X-Shinyhub-Groups-Truncated"
 	HeaderToken           = "X-Shinyhub-Identity-Token"
+	HeaderSupportSession  = "X-Shinyhub-Support-Session"
+	HeaderActorID         = "X-Shinyhub-Actor-Id"
+	HeaderActor           = "X-Shinyhub-Actor"
 
 	// HeaderPrefix is the reserved platform prefix: every inbound request
 	// header matching it is deleted unconditionally before forwarding.
@@ -86,26 +89,38 @@ type TokenClaims struct {
 	// AppRole is the caller's capability on THIS app: "owner", "manager"
 	// (global admin/operator or a manager-role member/group), or "viewer".
 	// Empty when the membership lookup was unavailable.
-	AppRole           string   `json:"app_role,omitempty"`
-	Email             string   `json:"email,omitempty"`
-	Name              string   `json:"name,omitempty"`
-	Groups            []string `json:"groups"`
-	GroupsTruncated   bool     `json:"groups_truncated,omitempty"`
-	PreferredUsername string   `json:"preferred_username"`
+	AppRole           string      `json:"app_role,omitempty"`
+	Email             string      `json:"email,omitempty"`
+	Name              string      `json:"name,omitempty"`
+	Groups            []string    `json:"groups"`
+	GroupsTruncated   bool        `json:"groups_truncated,omitempty"`
+	PreferredUsername string      `json:"preferred_username"`
+	SupportSessionID  string      `json:"support_session_id,omitempty"`
+	Actor             *ActorClaim `json:"act,omitempty"`
 	jwt.RegisteredClaims
+}
+
+// ActorClaim follows JWT's conventional act (actor) shape while retaining a
+// human-readable username for app-side audit logs.
+type ActorClaim struct {
+	Subject           string `json:"sub"`
+	PreferredUsername string `json:"preferred_username"`
 }
 
 // TokenParams carries everything MintToken stamps into the claims.
 type TokenParams struct {
-	UserID          int64
-	Username        string
-	Role            string
-	AppRole         string   // per-app capability; empty = unavailable
-	Email           string   // empty when the upstream IdP provided none
-	Name            string   // display name; empty when the IdP provided none
-	Groups          []string // pre-sanitized claim slice from SanitizeGroups
-	GroupsTruncated bool
-	Slug            string // becomes aud
+	UserID           int64
+	Username         string
+	Role             string
+	AppRole          string   // per-app capability; empty = unavailable
+	Email            string   // empty when the upstream IdP provided none
+	Name             string   // display name; empty when the IdP provided none
+	Groups           []string // pre-sanitized claim slice from SanitizeGroups
+	GroupsTruncated  bool
+	Slug             string // becomes aud
+	SupportSessionID string
+	ActorID          int64
+	ActorUsername    string
 }
 
 // MintToken signs a short-lived HS256 identity token with the app's key.
@@ -119,6 +134,7 @@ func MintToken(key []byte, p TokenParams) (string, error) {
 		Groups:            p.Groups,
 		GroupsTruncated:   p.GroupsTruncated,
 		PreferredUsername: p.Username,
+		SupportSessionID:  p.SupportSessionID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    Issuer,
 			Subject:   strconv.FormatInt(p.UserID, 10),
@@ -126,6 +142,11 @@ func MintToken(key []byte, p TokenParams) (string, error) {
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(TokenTTL)),
 		},
+	}
+	if p.ActorID > 0 {
+		claims.Actor = &ActorClaim{
+			Subject: strconv.FormatInt(p.ActorID, 10), PreferredUsername: p.ActorUsername,
+		}
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(key)
 }

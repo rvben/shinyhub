@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/originhost"
 	"github.com/rvben/shinyhub/internal/sandbox"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
@@ -728,6 +729,11 @@ type AuthConfig struct {
 	// stays admin-only unless the operator opts in. Env:
 	// SHINYHUB_OPERATOR_AUDIT_ACCESS.
 	OperatorAuditAccess bool `yaml:"operator_audit_access"`
+
+	// SupportSessions enables short-lived, app-scoped admin troubleshooting
+	// sessions. It is deliberately opt-in and requires server.app_origin so app
+	// code never shares an origin with the control-plane session cookie.
+	SupportSessions bool `yaml:"support_sessions"`
 
 	ForwardAuth ForwardAuthConfig `yaml:"forward_auth"`
 
@@ -1574,6 +1580,15 @@ func loadRaw(path string) (*Config, error) {
 	if err := validateAppOrigin(&cfg.Server); err != nil {
 		return nil, err
 	}
+	if cfg.Auth.SupportSessions && cfg.Server.AppOrigin == "" {
+		return nil, fmt.Errorf("auth.support_sessions requires server.app_origin to be configured")
+	}
+	if cfg.Auth.SupportSessions {
+		recheck := cfg.SessionRecheckInterval()
+		if recheck <= 0 || recheck > defaultSessionRecheckInterval {
+			return nil, fmt.Errorf("auth.support_sessions requires a positive server.session_recheck_interval no greater than %s", defaultSessionRecheckInterval)
+		}
+	}
 
 	// Parse trusted proxy CIDRs. Default to loopback-only when none are configured,
 	// so XFF is trusted only from local reverse proxies by default.
@@ -1981,7 +1996,16 @@ func validateAppOrigin(server *ServerConfig) error {
 	if baseErr != nil || base.Scheme != "https" || base.Host == "" {
 		return fmt.Errorf("server.base_url must be an absolute HTTPS URL when server.app_origin is set")
 	}
-	if strings.EqualFold(base.Host, u.Host) {
+	// Cookies are scoped to host names, not ports. Comparing URL.Host would let
+	// https://hub.example.com and https://hub.example.com:8443 share the control
+	// cookie even though they look like different authorities. Normalize case
+	// and a trailing root dot as browsers do for cookie matching.
+	baseHostname, baseHostErr := originhost.Hostname(base.Host)
+	appHostname, appHostErr := originhost.Hostname(u.Host)
+	if baseHostErr != nil || appHostErr != nil {
+		return fmt.Errorf("server.app_origin and server.base_url must use canonicalizable DNS names or IP addresses")
+	}
+	if baseHostname == appHostname {
 		return fmt.Errorf("server.app_origin must use a different host from server.base_url")
 	}
 	return nil
@@ -2529,6 +2553,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_OPERATOR_AUDIT_ACCESS: %w", err)
 		}
 		cfg.Auth.OperatorAuditAccess = b
+	}
+	if v := os.Getenv("SHINYHUB_SUPPORT_SESSIONS"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SUPPORT_SESSIONS: %w", err)
+		}
+		cfg.Auth.SupportSessions = b
 	}
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_ENABLED"); v != "" {
 		b, err := parseBoolEnv(v)

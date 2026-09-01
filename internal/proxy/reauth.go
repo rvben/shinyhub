@@ -17,11 +17,17 @@ import (
 // The proxy holds no store and no secret, so it cannot interpret these fields;
 // it only carries them back to the injected Reauthorizer.
 type ConnPrincipal struct {
-	Slug         string
-	UserID       int64 // 0 when the connection was admitted anonymously
-	Role         string
-	SessionEpoch int64
-	JTI          string
+	Slug              string
+	UserID            int64 // 0 when the connection was admitted anonymously
+	Role              string
+	SessionEpoch      int64
+	JTI               string
+	ActorID           int64
+	ActorRole         string
+	ActorSessionEpoch int64
+	SupportAppID      int64
+	RoutedAppID       int64
+	SupportExpiresAt  time.Time
 }
 
 // Reauthorizer re-decides whether a live upgraded connection may stay open.
@@ -36,12 +42,19 @@ type Reauthorizer func(ConnPrincipal) (revoked bool, reason string, err error)
 // request. An anonymous request on a public app yields the zero principal,
 // which is exactly right: there is no identity to revoke, only the app's
 // openness to re-check.
-func connPrincipal(r *http.Request, slug string) ConnPrincipal {
-	p := ConnPrincipal{Slug: slug}
+func connPrincipal(r *http.Request, slug string, routedAppID int64) ConnPrincipal {
+	p := ConnPrincipal{Slug: slug, RoutedAppID: routedAppID}
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		p.UserID = u.ID
 		p.Role = u.Role
 		p.SessionEpoch = u.TokenEpoch
+		if support := u.SupportSession; support != nil {
+			p.ActorID = support.ActorID
+			p.ActorRole = string(auth.RoleAdmin)
+			p.ActorSessionEpoch = support.ActorTokenEpoch
+			p.SupportAppID = support.AppID
+			p.SupportExpiresAt = support.ExpiresAt
+		}
 	}
 	if t := auth.TokenInfoFromContext(r.Context()); t != nil {
 		p.JTI = t.JTI

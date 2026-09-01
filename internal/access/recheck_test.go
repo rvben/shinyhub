@@ -96,6 +96,78 @@ func TestRecheck_UnchangedSessionSurvives(t *testing.T) {
 	f.assertKept(t, f.principal(), "nothing changed")
 }
 
+func TestRecheck_SupportSessionExpiresAndTracksActorRevocation(t *testing.T) {
+	f := newRecheckFixture(t)
+	p := f.principal()
+	app, err := f.store.GetAppBySlug("rep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ActorID = f.owner.ID
+	p.ActorRole = "admin"
+	p.ActorSessionEpoch = f.owner.TokenEpoch
+	p.SupportAppID = app.ID
+	p.RoutedAppID = app.ID
+	p.SupportExpiresAt = time.Now().Add(time.Minute)
+	f.assertKept(t, p, "active support session")
+
+	expired := p
+	expired.SupportExpiresAt = time.Now().Add(-time.Second)
+	if reason := f.assertClosed(t, expired, "expired support session"); reason != "support session expired" {
+		t.Fatalf("reason = %q", reason)
+	}
+
+	if err := f.store.BumpTokenEpoch(f.owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if reason := f.assertClosed(t, p, "revoked administrator"); reason != "administrator sessions revoked" {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
+func TestRecheck_SupportSessionRejectsRecreatedSlug(t *testing.T) {
+	f := newRecheckFixture(t)
+	app, err := f.store.GetAppBySlug("rep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := f.principal()
+	p.ActorID = f.owner.ID
+	p.ActorRole = "admin"
+	p.ActorSessionEpoch = f.owner.TokenEpoch
+	p.SupportAppID = app.ID
+	p.RoutedAppID = app.ID
+	p.SupportExpiresAt = time.Now().Add(time.Minute)
+	f.assertKept(t, p, "original app")
+	if err := f.store.DeleteApp("rep"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.CreateApp(db.CreateAppParams{Slug: "rep", Name: "Replacement", OwnerID: f.owner.ID, Access: "public"}); err != nil {
+		t.Fatal(err)
+	}
+	if reason := f.assertClosed(t, p, "replacement app"); reason != "support session app replaced" {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
+func TestRecheck_SupportSessionRejectsMismatchedRoutedBackend(t *testing.T) {
+	f := newRecheckFixture(t)
+	app, err := f.store.GetAppBySlug("rep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := f.principal()
+	p.ActorID = f.owner.ID
+	p.ActorRole = "admin"
+	p.ActorSessionEpoch = f.owner.TokenEpoch
+	p.SupportAppID = app.ID
+	p.RoutedAppID = app.ID + 1
+	p.SupportExpiresAt = time.Now().Add(time.Minute)
+	if reason := f.assertClosed(t, p, "mismatched routed backend"); reason != "support session routed app replaced" {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
 // An admin revoking a user's sessions (or the user changing their password)
 // bumps token_epoch. That is the headline case: before this sweep existed, the
 // revoked user kept every WebSocket they already had open, for hours.

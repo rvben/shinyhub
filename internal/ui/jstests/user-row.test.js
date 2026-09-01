@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isReservedUser, userRowCaps, RESERVED_USER_HINT } from '../static/views/user-row.js';
+import { isReservedUser, userRowCaps, supportSessionCaps, RESERVED_USER_HINT } from '../static/views/user-row.js';
 
 // The Users table must not let an admin "manage" the synthetic deploy-token
 // identity (__deploy__): it has no password and its role comes from the
@@ -41,4 +41,13 @@ test('an ordinary other user is fully manageable', () => {
   assert.equal(caps.canResetPassword, true);
   assert.equal(caps.roleHint, '');
   assert.equal(caps.deleteHint, '');
+});
+
+test('support sessions are opt-in and limited to non-privileged people', () => {
+  assert.equal(supportSessionCaps({ id: 2, username: 'alice', role: 'developer' }, 1).canStart, false);
+  assert.equal(supportSessionCaps({ id: 2, username: 'alice', role: 'viewer' }, 1, true).canStart, true);
+  assert.equal(supportSessionCaps({ id: 2, username: 'alice', role: 'developer' }, 1, true).canStart, true);
+  assert.equal(supportSessionCaps({ id: 2, username: 'ops', role: 'operator' }, 1, true).canStart, false);
+  assert.equal(supportSessionCaps({ id: 2, username: 'root', role: 'admin' }, 1, true).canStart, false);
+  assert.equal(supportSessionCaps({ id: 1, username: 'me', role: 'admin' }, 1, true).canStart, false);
 });

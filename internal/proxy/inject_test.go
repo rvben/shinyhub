@@ -12,16 +12,18 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/favicon"
+	"github.com/rvben/shinyhub/internal/supportui"
 )
 
 // overlayOnly is the injection set for a proxy with just the status overlay
 // enabled, which is what most of these tests exercise.
-func overlayOnly(slug string) func() []pageScript {
-	return func() []pageScript { return []pageScript{overlayPageScript(slug)} }
+func overlayOnly(slug string) func(*http.Request) []pageScript {
+	return func(*http.Request) []pageScript { return []pageScript{overlayPageScript(slug)} }
 }
 
 // appPageLoad is the request shape ServeHTTP forwards for a top-level browser
@@ -150,6 +152,11 @@ func TestExtendCSPForScripts(t *testing.T) {
 		{"script-src 'none' declines", "default-src 'self'; script-src 'none'", "", false},
 		{"default-src 'none' declines", "default-src 'none'", "", false},
 		{"valueless default-src declines", "default-src", "", false},
+		{"duplicate script-src declines", "script-src 'self'; script-src 'none'", "", false},
+		{"duplicate script-src-elem declines", "script-src-elem 'self'; script-src-elem 'none'", "", false},
+		{"duplicate default-src declines", "default-src 'self'; default-src 'none'", "", false},
+		{"tab-separated duplicate declines", "script-src\t'self'; script-src\t'none'", "", false},
+		{"comma-separated policy list declines", "script-src 'self', script-src 'none'", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -295,10 +302,137 @@ func TestInjectStatusOverlay_RewritesThePageAndItsHeaders(t *testing.T) {
 	}
 }
 
+func TestSupportSessionBannerIsInjectedAndCSPBound(t *testing.T) {
+	p := New()
+	p.SetSupportSessions(true)
+	p.SetAppNav(true, "https://hub.example.com/")
+	resp := htmlResponse("sales", testShell)
+	resp.Request = resp.Request.WithContext(auth.WithUser(resp.Request.Context(), &auth.ContextUser{
+		ID: 22, Username: "alice", Role: "viewer",
+		SupportSession: &auth.SupportSessionContext{
+			ID: "support-id", ActorID: 11, ActorUsername: "admin", AppSlug: "sales",
+			ExpiresAt: time.Now().Add(15 * time.Minute),
+		},
+	}))
+	resp.Header.Set("Content-Security-Policy", "default-src 'self'")
+	if err := p.modifyResponseFor("sales")(resp); err != nil {
+		t.Fatal(err)
+	}
+	body := readBody(t, resp)
+	for _, want := range []string{"shinyhub-support-session-loader", `data-actor="admin"`, `data-subject="alice"`, "End support session"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("support banner missing %q", want)
+		}
+	}
+	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), supportui.CSPHash) {
+		t.Fatalf("CSP missing support script hash: %q", resp.Header.Get("Content-Security-Policy"))
+	}
+	if strings.Contains(body, "shinyhub-app-nav") {
+		t.Fatal("app switcher must be suppressed while the single-app support boundary is active")
+	}
+}
+
+func TestSupportSessionFailsClosedWhenBannerCannotRun(t *testing.T) {
+	p := New()
+	p.SetSupportSessions(true)
+	resp := htmlResponse("sales", `<html><body><p id="private-app">sensitive app</p></body></html>`)
+	resp.Request = resp.Request.WithContext(auth.WithUser(resp.Request.Context(), &auth.ContextUser{
+		ID: 22, Username: "alice", Role: "viewer",
+		SupportSession: &auth.SupportSessionContext{
+			ID: "support-id", ActorID: 11, ActorUsername: "admin", AppSlug: "sales", ExpiresAt: time.Now().Add(15 * time.Minute),
+		},
+	}))
+	resp.Header.Set("Content-Security-Policy", "script-src 'none'")
+	if err := p.modifyResponseFor("sales")(resp); err != nil {
+		t.Fatal(err)
+	}
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "Support session paused") ||
+		!strings.Contains(body, "End support session") || strings.Contains(body, "sensitive app") {
+		t.Fatalf("fail-closed response status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestSupportSessionCSPElementDirectiveAndMetaFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy string
+		body   string
+	}{
+		{name: "script element denied", policy: "script-src 'self'; script-src-elem 'none'", body: testShell},
+		{name: "form action denied", policy: "script-src 'self'; form-action 'none'", body: testShell},
+		{name: "comma list form action denied", policy: "script-src 'self', form-action 'none'", body: testShell},
+		{name: "comma list script denied", policy: "script-src 'self', script-src 'none'", body: testShell},
+		{name: "sandbox denies forms", policy: "script-src 'self'; sandbox allow-scripts", body: testShell},
+		{name: "sandbox opaque origin omits cookie", policy: "script-src 'self'; sandbox allow-scripts allow-forms", body: testShell},
+		{name: "meta policy", body: `<html><head><meta http-equiv="Content-Security-Policy" content="script-src 'none'"></head><body>sensitive</body></html>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New()
+			p.SetSupportSessions(true)
+			resp := htmlResponse("sales", tc.body)
+			resp.Request = resp.Request.WithContext(auth.WithUser(resp.Request.Context(), &auth.ContextUser{
+				ID: 22, Username: "alice", Role: "viewer", SupportSession: &auth.SupportSessionContext{
+					ID: "support-id", ActorID: 11, ActorUsername: "admin", AppID: 42, AppSlug: "sales", ExpiresAt: time.Now().Add(15 * time.Minute)},
+			}))
+			if tc.policy != "" {
+				resp.Header.Set("Content-Security-Policy", tc.policy)
+			}
+			if err := p.modifyResponseFor("sales")(resp); err != nil {
+				t.Fatal(err)
+			}
+			if body := readBody(t, resp); resp.StatusCode != http.StatusConflict || !strings.Contains(body, "Support session paused") {
+				t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+			}
+		})
+	}
+}
+
+func TestSupportSessionNativeEndFormIgnoresConnectSrc(t *testing.T) {
+	p := New()
+	p.SetSupportSessions(true)
+	resp := htmlResponse("sales", testShell)
+	resp.Request = resp.Request.WithContext(auth.WithUser(resp.Request.Context(), &auth.ContextUser{
+		ID: 22, Username: "alice", Role: "viewer", SupportSession: &auth.SupportSessionContext{
+			ID: "support-id", ActorID: 11, ActorUsername: "admin", AppID: 42, AppSlug: "sales", ExpiresAt: time.Now().Add(15 * time.Minute)},
+	}))
+	resp.Header.Set("Content-Security-Policy", "script-src 'self'; connect-src 'none'; form-action 'self'")
+	if err := p.modifyResponseFor("sales")(resp); err != nil {
+		t.Fatal(err)
+	}
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `<form method="post"`) {
+		t.Fatalf("status=%d; native stop form missing: %s", resp.StatusCode, body)
+	}
+}
+
+func TestSupportSessionPreservesAndExtendsEveryCSPHeader(t *testing.T) {
+	p := New()
+	p.SetSupportSessions(true)
+	resp := htmlResponse("sales", testShell)
+	resp.Request = resp.Request.WithContext(auth.WithUser(resp.Request.Context(), &auth.ContextUser{
+		ID: 22, Username: "alice", Role: "viewer", SupportSession: &auth.SupportSessionContext{
+			ID: "support-id", ActorID: 11, ActorUsername: "admin", AppID: 42, AppSlug: "sales", ExpiresAt: time.Now().Add(15 * time.Minute)},
+	}))
+	resp.Header["Content-Security-Policy"] = []string{"default-src 'self'", "script-src 'self'"}
+	if err := p.modifyResponseFor("sales")(resp); err != nil {
+		t.Fatal(err)
+	}
+	values := resp.Header.Values("Content-Security-Policy")
+	if len(values) != 2 {
+		t.Fatalf("CSP values collapsed: %#v", values)
+	}
+	for _, value := range values {
+		if !strings.Contains(value, supportui.CSPHash) {
+			t.Fatalf("CSP value was not independently extended: %q", value)
+		}
+	}
+}
+
 func TestInjectAppFavicon_PreservesAuthoredIdentity(t *testing.T) {
 	const authored = `<!doctype html><html><head><link rel="shortcut icon" href="/app-owned.ico"></head><body>App</body></html>`
 	resp := htmlResponse("demo", authored)
-	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") }, nil)(resp); err != nil {
+	if err := injectPageHTML(func(*http.Request) []pageScript { return nil }, func() string { return favicon.AppURL("demo") }, nil)(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	if got := readBody(t, resp); got != authored {
@@ -310,7 +444,7 @@ func TestInjectAppFavicon_AddsContextualIdentity(t *testing.T) {
 	resp := htmlResponse("demo", testShell)
 	resp.Header.Set("ETag", `"app-shell"`)
 	resp.Header.Set("Content-Security-Policy", "default-src 'self'")
-	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") }, nil)(resp); err != nil {
+	if err := injectPageHTML(func(*http.Request) []pageScript { return nil }, func() string { return favicon.AppURL("demo") }, nil)(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	body := readBody(t, resp)
@@ -325,7 +459,7 @@ func TestInjectAppFavicon_AddsContextualIdentity(t *testing.T) {
 func TestInjectAppFavicon_RespectsImageCSP(t *testing.T) {
 	resp := htmlResponse("demo", testShell)
 	resp.Header.Set("Content-Security-Policy", "default-src 'none'; img-src data:")
-	if err := injectPageHTML(func() []pageScript { return nil }, func() string { return favicon.AppURL("demo") }, nil)(resp); err != nil {
+	if err := injectPageHTML(func(*http.Request) []pageScript { return nil }, func() string { return favicon.AppURL("demo") }, nil)(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	if got := readBody(t, resp); got != testShell {
@@ -335,7 +469,7 @@ func TestInjectAppFavicon_RespectsImageCSP(t *testing.T) {
 
 func TestInjectAppTitle_PreservesAuthoredTitle(t *testing.T) {
 	resp := htmlResponse("demo", testShell)
-	if err := injectPageHTML(func() []pageScript { return nil }, nil, func() string { return "Revenue Forecast · ShinyHub" })(resp); err != nil {
+	if err := injectPageHTML(func(*http.Request) []pageScript { return nil }, nil, func() string { return "Revenue Forecast · ShinyHub" })(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	if got := readBody(t, resp); got != testShell {
@@ -347,7 +481,7 @@ func TestInjectAppTitle_AddsFallbackWhenMissing(t *testing.T) {
 	const untitled = `<!doctype html><html><head></head><body>App</body></html>`
 	resp := htmlResponse("demo", untitled)
 	resp.Header.Set("ETag", `"untitled-shell"`)
-	if err := injectPageHTML(func() []pageScript { return nil }, nil, func() string { return "Revenue & Forecast · ShinyHub" })(resp); err != nil {
+	if err := injectPageHTML(func(*http.Request) []pageScript { return nil }, nil, func() string { return "Revenue & Forecast · ShinyHub" })(resp); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	body := readBody(t, resp)
