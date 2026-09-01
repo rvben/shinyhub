@@ -36,6 +36,39 @@ type supportSessionResponse struct {
 	AppSlug         string    `json:"app_slug"`
 }
 
+type currentSupportSession struct {
+	SubjectUsername  string    `json:"subject_username"`
+	AppSlug          string    `json:"app_slug"`
+	AppURL           string    `json:"app_url,omitempty"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	RemainingSeconds int64     `json:"remaining_seconds"`
+	Resumable        bool      `json:"resumable"`
+}
+
+func (s *Server) requireSupportSessionAdmin(w http.ResponseWriter, r *http.Request) (*auth.ContextUser, bool) {
+	admin, ok := requireAdmin(w, r)
+	if !ok {
+		return nil, false
+	}
+	if !s.cfg.Auth.SupportSessions || s.cfg.Server.AppOrigin == "" {
+		writeError(w, http.StatusNotFound, "not found")
+		return nil, false
+	}
+	if admin.IsServiceAccount() {
+		writeError(w, http.StatusForbidden, "support sessions require a human administrator")
+		return nil, false
+	}
+	return admin, true
+}
+
+func (s *Server) supportSessionAppURL(slug string) string {
+	appURL, _ := url.Parse(s.cfg.Server.AppOrigin)
+	appURL.Path = "/" + strings.TrimPrefix(path.Join(appURL.Path, "app", slug), "/") + "/"
+	appURL.RawQuery = ""
+	appURL.Fragment = ""
+	return appURL.String()
+}
+
 func randomSupportCapability() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -45,16 +78,8 @@ func randomSupportCapability() (string, error) {
 }
 
 func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Request) {
-	admin, ok := requireAdmin(w, r)
+	admin, ok := s.requireSupportSessionAdmin(w, r)
 	if !ok {
-		return
-	}
-	if !s.cfg.Auth.SupportSessions || s.cfg.Server.AppOrigin == "" {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
-	if admin.IsServiceAccount() {
-		writeError(w, http.StatusForbidden, "support sessions require a human administrator")
 		return
 	}
 
@@ -170,8 +195,7 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	launch, _ := url.Parse(s.cfg.Server.AppOrigin)
-	launch.Path = "/" + strings.TrimPrefix(path.Join(launch.Path, "app", req.AppSlug), "/") + "/"
+	launch, _ := url.Parse(s.supportSessionAppURL(req.AppSlug))
 	q := launch.Query()
 	q.Set("__shinyhub_launch", launchCode)
 	launch.RawQuery = q.Encode()
@@ -184,6 +208,53 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 		SubjectUsername: subject.Username,
 		AppSlug:         req.AppSlug,
 	})
+}
+
+func (s *Server) handleGetCurrentSupportSession(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.requireSupportSessionAdmin(w, r)
+	if !ok {
+		return
+	}
+	session, err := s.store.GetActiveSupportSessionForActor(admin.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if session == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"active": nil})
+		return
+	}
+	resumable := session.TokenJTI != ""
+	remaining := int64((time.Until(session.ExpiresAt) + time.Second - 1) / time.Second)
+	if remaining < 0 {
+		remaining = 0
+	}
+	active := currentSupportSession{
+		SubjectUsername:  session.SubjectUsername,
+		AppSlug:          session.AppSlug,
+		ExpiresAt:        session.ExpiresAt,
+		RemainingSeconds: remaining,
+		Resumable:        resumable,
+	}
+	if resumable {
+		active.AppURL = s.supportSessionAppURL(session.AppSlug)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"active": active})
+}
+
+func (s *Server) handleDeleteCurrentSupportSession(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.requireSupportSessionAdmin(w, r)
+	if !ok {
+		return
+	}
+	_, err := s.store.StopActiveSupportSessionForActor(admin.ID, "ended_from_dashboard", s.ClientIP(r))
+	if err != nil && !errors.Is(err, db.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type supportSessionApp struct {

@@ -122,6 +122,34 @@
 
     <div class="app-content">
   <main>
+    <section id="support-session-recovery" class="support-session-recovery" hidden
+             role="region" aria-labelledby="support-session-recovery-heading">
+      <svg class="support-session-recovery-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 3 21 19H3L12 3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M12 8.5v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <circle cx="12" cy="16.6" r="1" fill="currentColor"/>
+      </svg>
+      <div class="support-session-recovery-copy">
+        <h2 id="support-session-recovery-heading" data-support-current-heading>Active support session</h2>
+        <p data-support-current-details>You are acting as <strong data-support-current-subject></strong> in <code data-support-current-app></code>.</p>
+        <p class="support-session-recovery-unavailable" data-support-current-unavailable hidden>
+          ShinyHub could not confirm whether your administrator account has an active support session.
+        </p>
+        <p class="support-session-recovery-meta" data-support-current-meta>
+          <span data-support-current-phase>Active</span>
+          <span aria-hidden="true">·</span>
+          <time data-support-current-deadline>Ends in <span data-support-current-countdown>—</span></time>
+        </p>
+        <p class="support-session-recovery-error" data-support-current-error role="alert" hidden></p>
+      </div>
+      <div class="support-session-recovery-actions">
+        <a data-support-current-resume target="_blank" rel="noopener" hidden>Return to app</a>
+        <button type="button" class="support-session-recovery-retry" data-support-current-retry hidden>Retry status</button>
+        <button type="button" data-support-current-end>End session</button>
+      </div>
+    </section>
+    <p id="support-session-recovery-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+
     <section id="route-error-view" hidden aria-labelledby="route-error-heading">
       <div class="login-box">
         <h1 id="route-error-heading">Something went wrong</h1>

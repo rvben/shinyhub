@@ -952,6 +952,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Delete("/api/users/{id}", s.handleDeleteUser)                               // admin: delete user
 		r.Get("/api/users/{id}/support-apps", s.handleListSupportSessionApps)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/support-sessions", s.handleCreateSupportSession)
+		r.Get("/api/support-sessions/current", s.handleGetCurrentSupportSession)
+		r.Delete("/api/support-sessions/current", s.handleDeleteCurrentSupportSession)
 
 		r.Get("/api/audit", s.handleListAuditEvents) // admin: audit log
 

@@ -75,6 +75,7 @@ import {
   restoreFailedActionFocus,
   saveSupportDraft,
 } from '/static/views/support-session-modal.js';
+import { createSupportSessionRecovery } from '/static/views/support-session-recovery.js';
 import { userRowCaps, supportSessionCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
@@ -438,6 +439,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const supportCancel   = document.getElementById('support-session-cancel');
   const supportAppsRetry = document.getElementById('support-session-apps-retry');
   const supportReauth   = document.getElementById('support-session-reauth');
+  const supportRecoveryRoot = document.getElementById('support-session-recovery');
   const supportModalLock = supportModal ? createSupportSessionModalLock({
     modal: supportModal, closeButton: supportClose, cancelButton: supportCancel,
   }) : null;
@@ -570,6 +572,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     return fetch(path, init);
   }
+
+  function focusCurrentRouteHeading() {
+    const heading = document.querySelector('main > section:not([hidden]) h1');
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus({ preventScroll: true });
+    }
+  }
+
+  const supportRecovery = createSupportSessionRecovery({
+    root: supportRecoveryRoot,
+    request: api,
+    onUnauthorized: handleUnauthorized,
+    onEnded: focusCurrentRouteHeading,
+    onStatusCleared: focusCurrentRouteHeading,
+  });
 
   // errorMessage extracts the human-readable message from a failed API
   // response. Every handler writes {"error": "..."} (see internal/api/helpers.go
@@ -902,6 +920,7 @@ document.addEventListener('DOMContentLoaded', () => {
     auditRequests.invalidate();
     state.canCreateApps = false;
     state.canManageApps = false;
+    supportRecovery.clear();
     appRestartFeedback.clear();
     appCardLifecycleControls.clear();
     newAppButton.hidden = true;
@@ -951,6 +970,8 @@ document.addEventListener('DOMContentLoaded', () => {
     tabOverview.hidden = !isOperator;
     tabApps.hidden = false;
     newAppButton.hidden = !state.canCreateApps;
+    if (payload.user.role === 'admin') supportRecovery.load({ announce: true });
+    else supportRecovery.clear();
     const selfService = payload.user.can_manage_self !== false;
     if (newTokenButton) newTokenButton.hidden = !selfService;
     if (cliConnectPanel && !selfService) cliConnectPanel.hidden = true;
@@ -2350,6 +2371,10 @@ document.addEventListener('DOMContentLoaded', () => {
           if (body?.error) message = body.error;
           supportReauth.hidden = body?.code !== 'recent_authentication_required';
         } catch {}
+        if (resp.status === 409) {
+          message += ' Close this dialog to manage the active session from the dashboard.';
+          supportRecovery.load({ announce: true });
+        }
         setError(supportError, message);
         if (!supportReauth.hidden) supportReauth.focus();
         else restoreSubmitFocus = submitOwnedFocus;
@@ -4734,6 +4759,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   supportReauth?.addEventListener('click', reauthenticateForSupportSession);
   supportModal?.addEventListener('click', event => { if (event.target === event.currentTarget) closeSupportSessionModal(); });
+  window.addEventListener('focus', () => {
+    if (state.user?.role === 'admin') supportRecovery.load();
+  });
   auditPrev.addEventListener('click', () => loadAuditEvents(state.auditPage - 1, state.auditSelection));
   auditNext.addEventListener('click', () => loadAuditEvents(state.auditPage + 1, state.auditSelection));
 

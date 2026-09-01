@@ -48,7 +48,16 @@ stop request cannot restore an administrator identity on the app origin. The
 rail is mounted outside the app's body and repairs
 itself after normal single-page-app body rewrites or accidental removal.
 Only one live support session is permitted per administrator; end it before
-starting another.
+starting another. While one is live, the ShinyHub dashboard shows a compact
+**Active support session** strip on every page. It identifies the represented
+user and app, counts down to expiry, and lets the administrator return to an
+activated app in a new tab or end the session directly from the dashboard.
+Dashboard termination remains available if the app tab was closed or the
+app-origin cookie was lost; it performs the same token revocation and audit
+transition as the in-app action. A launch that has not activated yet can be
+ended but cannot be resumed without its one-time launch capability. If the
+dashboard cannot verify support-session status, it keeps a warning visible and
+offers both a retry and an idempotent precautionary end action.
 
 ## Security properties
 

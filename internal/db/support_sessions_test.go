@@ -79,6 +79,42 @@ func TestSupportSessionLifecycleRevokesItsBoundToken(t *testing.T) {
 	}
 }
 
+func TestStopActiveSupportSessionForActorDoesNotRewriteExpiredLifecycle(t *testing.T) {
+	store := dbtest.New(t)
+	for _, user := range []db.CreateUserParams{
+		{Username: "admin", PasswordHash: "hash", Role: "admin"},
+		{Username: "alice", PasswordHash: "hash", Role: "viewer"},
+	} {
+		if err := store.CreateUser(user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admin, _ := store.GetUserByUsername("admin")
+	alice, _ := store.GetUserByUsername("alice")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "sales", Name: "Sales", OwnerID: admin.ID, Access: "public"}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("sales")
+	if err := store.CreateSupportSession(db.CreateSupportSessionParams{
+		ID: "expired-current", ActorUserID: admin.ID, ActorUsername: admin.Username, ActorTokenEpoch: admin.TokenEpoch,
+		SubjectUserID: alice.ID, SubjectUsername: alice.Username, SubjectRole: alice.Role, SubjectTokenEpoch: alice.TokenEpoch,
+		AppID: app.ID, AppSlug: app.Slug, Reason: "Investigating SUP-1043", LaunchCodeHash: "expired-current-hash",
+		ExpiresAt: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StopActiveSupportSessionForActor(admin.ID, "ended_from_dashboard", "192.0.2.1"); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("stop expired session error = %v, want not found", err)
+	}
+	var stoppedAt any
+	if err := store.DB().QueryRow(`SELECT stopped_at FROM support_sessions WHERE id = ?`, "expired-current").Scan(&stoppedAt); err != nil {
+		t.Fatal(err)
+	}
+	if stoppedAt != nil {
+		t.Fatalf("expired lifecycle was rewritten: stopped_at=%v", stoppedAt)
+	}
+}
+
 func TestSupportLaunchRejectsSubjectRoleExpansionAndAbortReleasesActor(t *testing.T) {
 	store := dbtest.New(t)
 	for _, user := range []db.CreateUserParams{

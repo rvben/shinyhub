@@ -51,6 +51,26 @@ type SupportSession struct {
 	NewlyStopped    bool
 }
 
+// GetActiveSupportSessionForActor returns the actor's one live, unexpired
+// support session. Expired rows are deliberately left for the existing lazy
+// expiry path so a read does not create an audit transition.
+func (s *Store) GetActiveSupportSessionForActor(actorID int64) (*SupportSession, error) {
+	row := s.db.QueryRow(`SELECT id, actor_user_id, actor_username, subject_user_id, subject_username,
+		       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
+		       created_at, expires_at, stopped_at, stop_reason
+		  FROM support_sessions
+		 WHERE actor_user_id = ? AND stopped_at IS NULL AND expires_at > ?
+		 ORDER BY created_at DESC LIMIT 1`, actorID, time.Now().UTC())
+	session, err := scanSupportSession(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get active support session: %w", err)
+	}
+	return session, nil
+}
+
 func (s *Store) CreateSupportSession(p CreateSupportSessionParams) error {
 	if p.ExpiresAt.IsZero() {
 		p.ExpiresAt = time.Now().UTC().Add(SupportSessionDuration)
@@ -265,43 +285,30 @@ func (s *Store) ActivateSupportSession(id, jti string, expiresAt time.Time) erro
 // StopSupportSession ends a support session and revokes its token in one
 // transaction. It is idempotent so retries from the injected banner are safe.
 func (s *Store) StopSupportSession(id, reason, ipAddress string) (*SupportSession, error) {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback() //nolint:errcheck
+	return s.stopSupportSession(id, nil, reason, ipAddress)
+}
 
-	row := tx.QueryRow(`
-		UPDATE support_sessions
-		   SET stopped_at = CURRENT_TIMESTAMP, stop_reason = ?
-		 WHERE id = ? AND stopped_at IS NULL
-		 RETURNING id, actor_user_id, actor_username, subject_user_id, subject_username,
-		       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
-		       created_at, expires_at, stopped_at, stop_reason`, reason, id)
+// StopActiveSupportSessionForActor ends only the current support identity
+// owned by actorID. Keeping actor selection inside the update prevents a
+// control-plane caller from turning a support-session identifier into an IDOR.
+func (s *Store) StopActiveSupportSessionForActor(actorID int64, reason, ipAddress string) (*SupportSession, error) {
+	return s.stopSupportSession("", &actorID, reason, ipAddress)
+}
+
+type supportSessionScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSupportSession(row supportSessionScanner) (*SupportSession, error) {
 	var (
 		session                SupportSession
 		actorID, subjectID     sql.NullInt64
 		tokenExpiry, stoppedAt sql.NullTime
 	)
-	scanErr := row.Scan(&session.ID, &actorID, &session.ActorUsername, &subjectID, &session.SubjectUsername,
+	if err := row.Scan(&session.ID, &actorID, &session.ActorUsername, &subjectID, &session.SubjectUsername,
 		&session.AppSlug, &session.Reason, &session.TokenJTI, &tokenExpiry,
-		&session.CreatedAt, &session.ExpiresAt, &stoppedAt, &session.StopReason)
-	won := scanErr == nil
-	if errors.Is(scanErr, sql.ErrNoRows) {
-		won = false
-		row = tx.QueryRow(`SELECT id, actor_user_id, actor_username, subject_user_id, subject_username,
-		       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
-		       created_at, expires_at, stopped_at, stop_reason
-		  FROM support_sessions WHERE id = ?`, id)
-		scanErr = row.Scan(&session.ID, &actorID, &session.ActorUsername, &subjectID, &session.SubjectUsername,
-			&session.AppSlug, &session.Reason, &session.TokenJTI, &tokenExpiry,
-			&session.CreatedAt, &session.ExpiresAt, &stoppedAt, &session.StopReason)
-		if errors.Is(scanErr, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-	}
-	if scanErr != nil {
-		return nil, fmt.Errorf("get support session: %w", scanErr)
+		&session.CreatedAt, &session.ExpiresAt, &stoppedAt, &session.StopReason); err != nil {
+		return nil, err
 	}
 	if actorID.Valid {
 		v := actorID.Int64
@@ -318,6 +325,53 @@ func (s *Store) StopSupportSession(id, reason, ipAddress string) (*SupportSessio
 	if stoppedAt.Valid {
 		v := stoppedAt.Time
 		session.StoppedAt = &v
+	}
+	return &session, nil
+}
+
+func (s *Store) stopSupportSession(id string, actorID *int64, reason, ipAddress string) (*SupportSession, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var row *sql.Row
+	if actorID != nil {
+		row = tx.QueryRow(`
+			UPDATE support_sessions
+			   SET stopped_at = CURRENT_TIMESTAMP, stop_reason = ?
+			 WHERE actor_user_id = ? AND stopped_at IS NULL AND expires_at > ?
+			 RETURNING id, actor_user_id, actor_username, subject_user_id, subject_username,
+			       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
+			       created_at, expires_at, stopped_at, stop_reason`, reason, *actorID, time.Now().UTC())
+	} else {
+		row = tx.QueryRow(`
+			UPDATE support_sessions
+			   SET stopped_at = CURRENT_TIMESTAMP, stop_reason = ?
+			 WHERE id = ? AND stopped_at IS NULL
+			 RETURNING id, actor_user_id, actor_username, subject_user_id, subject_username,
+			       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
+			       created_at, expires_at, stopped_at, stop_reason`, reason, id)
+	}
+	session, scanErr := scanSupportSession(row)
+	won := scanErr == nil
+	if errors.Is(scanErr, sql.ErrNoRows) {
+		if actorID != nil {
+			return nil, ErrNotFound
+		}
+		won = false
+		row = tx.QueryRow(`SELECT id, actor_user_id, actor_username, subject_user_id, subject_username,
+		       app_slug_snapshot, reason, COALESCE(token_jti, ''), token_expires_at,
+		       created_at, expires_at, stopped_at, stop_reason
+		  FROM support_sessions WHERE id = ?`, id)
+		session, scanErr = scanSupportSession(row)
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+	}
+	if scanErr != nil {
+		return nil, fmt.Errorf("get support session: %w", scanErr)
 	}
 	if won && session.TokenJTI != "" && session.TokenExpiresAt != nil && session.SubjectUserID != nil {
 		if _, err := tx.Exec(`INSERT INTO revoked_tokens (jti, user_id, expires_at)
@@ -344,5 +398,5 @@ func (s *Store) StopSupportSession(id, reason, ipAddress string) (*SupportSessio
 		return nil, err
 	}
 	session.NewlyStopped = won
-	return &session, nil
+	return session, nil
 }

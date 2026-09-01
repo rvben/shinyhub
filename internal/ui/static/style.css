@@ -2171,6 +2171,155 @@ body[data-auth="out"] {
   opacity: 0.5;
 }
 
+.support-session-recovery {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.85rem;
+  margin-block-end: 1.25rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid color-mix(in srgb, var(--yellow) 42%, var(--line));
+  border-radius: var(--radius-lg);
+  background: var(--yellow-bg);
+  color: var(--text);
+  overflow: hidden;
+}
+.support-session-recovery[hidden] { display: none; }
+.support-session-recovery-icon {
+  inline-size: 24px;
+  block-size: 24px;
+  color: var(--yellow);
+}
+.support-session-recovery-copy { min-width: 0; }
+.support-session-recovery-copy h2 {
+  margin: 0 0 0.15rem;
+  color: var(--text);
+  font-size: 0.875rem;
+  line-height: 1.3;
+}
+.support-session-recovery-copy p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 0.875rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.support-session-recovery-copy strong { color: var(--text); }
+.support-session-recovery-copy code {
+  color: var(--yellow);
+  font: 600 0.82rem/1.5 var(--mono);
+}
+.support-session-recovery-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.4rem;
+  margin-block-start: 0.2rem !important;
+  font-size: 0.75rem !important;
+}
+.support-session-recovery-meta time {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.support-session-recovery-error {
+  margin-block-start: 0.4rem !important;
+  color: var(--red) !important;
+}
+.support-session-recovery-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  min-width: 0;
+}
+.support-session-recovery-actions a,
+.support-session-recovery-actions button {
+  min-height: 38px;
+  border-radius: var(--radius);
+  padding: 0.5rem 0.8rem;
+  font: 700 0.75rem/1.2 var(--font);
+  white-space: nowrap;
+  min-width: 0;
+}
+.support-session-recovery-actions a {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line-2);
+  color: var(--text);
+  text-decoration: none;
+}
+.support-session-recovery-actions .support-session-recovery-retry {
+  border-color: var(--line-2);
+  background: transparent;
+  color: var(--text);
+}
+.support-session-recovery-actions .support-session-recovery-retry:hover:not(:disabled) {
+  border-color: var(--cyan-bright);
+  color: var(--text);
+}
+.support-session-recovery-actions a:hover {
+  border-color: var(--yellow);
+  color: var(--text);
+}
+.support-session-recovery-actions a[aria-disabled="true"] {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.support-session-recovery-actions button {
+  border: 1px solid var(--yellow);
+  background: var(--yellow);
+  color: #21170a;
+  cursor: pointer;
+}
+.support-session-recovery-actions button:hover:not(:disabled) { filter: brightness(1.08); }
+.support-session-recovery-actions a:focus-visible,
+.support-session-recovery-actions button:focus-visible {
+  outline: 3px solid var(--cyan-bright);
+  outline-offset: 2px;
+}
+.support-session-recovery-actions button:disabled {
+  border-color: var(--line-2);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  cursor: wait;
+}
+
+@media (max-width: 680px) {
+  .support-session-recovery {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+  .support-session-recovery-actions {
+    grid-column: 1 / -1;
+    justify-content: stretch;
+  }
+  .support-session-recovery-actions a,
+  .support-session-recovery-actions button {
+    flex: 1 1 0;
+    justify-content: center;
+    min-height: 44px;
+    text-align: center;
+  }
+}
+
+@media (pointer: coarse) {
+  .support-session-recovery-actions a,
+  .support-session-recovery-actions button { min-height: 44px; }
+}
+
+:root[data-theme="light"] .support-session-recovery-copy code { color: #7C2D12; }
+:root[data-theme="light"] .support-session-recovery-error { color: #991B1B !important; }
+:root[data-theme="light"] .support-session-recovery-actions button:not(.support-session-recovery-retry) {
+  border-color: #92400E;
+  background: #92400E;
+  color: #FFFFFF;
+}
+
+@media (forced-colors: active) {
+  .support-session-recovery { border: 1px solid CanvasText; }
+  .support-session-recovery-actions a,
+  .support-session-recovery-actions button { border: 1px solid ButtonText; }
+}
+
 .support-session-card::before { background: linear-gradient(90deg, transparent, var(--yellow), transparent); }
 .support-session-card { max-width: 600px; }
 .support-session-intro { display: flex; gap: 0.8rem; align-items: flex-start; color: var(--text-soft); }

@@ -311,6 +311,19 @@ The confirmation dialog is an app-scoped safety checkpoint inside the admin shel
 
 **The Pending Means Committed Rule.** Once a security-sensitive action is in flight, the modal cannot imply cancellation by disappearing while the request may still succeed.
 
+### Dashboard Support-Session Recovery
+
+An administrator with a live support session sees one compact amber state strip above every dashboard route. It is a recovery control, not a notification feed: name the represented user and app, show the exact remaining time, and keep **Return to app** and **End session** reachable without competing with the route toolbar.
+
+- **Privacy:** expose only the current administrator's session. The strip never carries the session identifier, launch capability, audit reason, or another administrator's activity.
+- **Resume:** offer **Return to app** only after the one-time launch has activated. Open it separately so the dashboard remains available as a recovery surface.
+- **Exit:** dashboard termination must work after the app tab or app-origin cookie is lost. While it is pending, disable both actions and label the button **Ending…**; on failure, preserve the strip, restore focus to **Try ending again**, and state that automatic expiry still applies.
+- **Countdown:** keep the visible timer precise and tabular, but announce only the five-minute, one-minute, and expiry thresholds. Refresh server state when the dashboard regains focus so an exit completed in another tab clears promptly.
+- **Uncertainty:** if status cannot be verified, keep a generic warning visible with **Retry status** and actor-scoped **End current session** controls. Never let a failed status read masquerade as proof that no temporary authority exists.
+- **Responsive behavior:** keep the state and deadline together, then move the two actions to one full-width row when space becomes constrained. Long or international user and app names wrap rather than displacing the exit.
+
+**The Recovery Outlives the Tab Rule.** Closing or losing the represented app surface must never remove the administrator's ability to see and revoke the temporary authority from the control plane.
+
 ### Persistent Support-Session Rail
 
 The support-session rail is platform-owned safety chrome placed above arbitrary app content. Isolate its CSS from the app, mount it before the app body as a sticky direct document child, and repair that placement if a hosted SPA replaces document children. Maintain a document-level active marker so other platform chrome can detect the state without reaching into the rail.
