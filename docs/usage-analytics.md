@@ -1,5 +1,5 @@
 ---
-description: "How ShinyHub counts app sessions, minimizes viewer identity, and retains raw and aggregate usage history."
+description: "How ShinyHub counts app sessions, minimizes viewer identity, excludes support traffic, and retains raw and aggregate usage history."
 ---
 
 # Usage analytics
