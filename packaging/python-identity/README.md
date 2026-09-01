@@ -89,7 +89,7 @@ vocabulary, and a cross-language conformance test pins them together):
 | `bad_key` | `SHINYHUB_IDENTITY_KEY` is not valid hex |
 | `no_slug` | `SHINYHUB_APP_SLUG` unset or empty |
 | `bad_signature` | signed with a different key |
-| `expired` | past its `exp` (tokens live 5 minutes) |
+| `expired` | past its `exp` (tokens live 5 minutes, or until the support-session deadline when that is earlier) |
 | `wrong_audience` | minted for a different app slug |
 | `wrong_issuer` | `iss` is not `shinyhub` |
 | `malformed` | unparseable, or missing the required `exp` claim |

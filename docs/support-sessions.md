@@ -44,7 +44,12 @@ that app actions can change data, and provides **End support session**. Ending
 the session revokes its JWT and closes its open WebSockets on the normal
 session-recheck sweep. Its app-scoped cookie is cleared immediately; the root
 fallback guard remains until the original deadline so a delayed or cross-app
-stop request cannot restore an administrator identity on the app origin. The
+stop request cannot restore an administrator identity on the app origin.
+While that guard is present, any app on the origin other than the bound one
+answers with a page that names the session, links back to the bound app and
+offers the same end control; after the session has ended, the page says so and
+explains that the origin stays signed out until the original deadline. No app
+is ever rendered anonymously behind the guard. The
 rail is mounted outside the app's body and repairs
 itself after normal single-page-app body rewrites or accidental removal.
 Only one live support session is permitted per administrator; end it before
@@ -54,8 +59,9 @@ user and app, counts down to expiry, and lets the administrator return to an
 activated app in a new tab or end the session directly from the dashboard.
 Dashboard termination remains available if the app tab was closed or the
 app-origin cookie was lost; it performs the same token revocation and audit
-transition as the in-app action. A launch that has not activated yet can be
-ended but cannot be resumed without its one-time launch capability. If the
+transition as the in-app action. A launch whose browser has not reached the app yet can be
+ended but cannot be resumed without its one-time launch capability; the resume
+link appears once the app has been opened under the session. If the
 dashboard cannot verify support-session status, it keeps a warning visible and
 offers both a retry and an idempotent precautionary end action.
 
@@ -81,8 +87,10 @@ offers both a retry and an idempotent precautionary end action.
   role or session-epoch changes (including viewer-to-developer expansion),
   administrator deletion/demotion/session
   revocation, explicit stop, and the hard deadline all fail closed. Upgraded
-  WebSockets have an independent connection deadline, so expiry does not
-  depend on the periodic session-recheck sweep.
+  WebSockets have an independent connection deadline, and every other request
+  made under the session is cancelled at that deadline as well, so a response
+  the app keeps open (long polling, server-sent events) ends with the session.
+  Expiry does not depend on the periodic session-recheck sweep.
 - The start event records actor, subject, app, reason, source IP, and the
   deterministic deadline in the same transaction as session creation.
   Explicit, aborted, and lazily reaped stop transitions record their cause and

@@ -329,7 +329,7 @@ An administrator with a live support session sees one compact amber state strip 
 The support-session rail is platform-owned safety chrome placed above arbitrary app content. Isolate its CSS from the app, mount it before the app body as a sticky direct document child, and repair that placement if a hosted SPA replaces document children. Maintain a document-level active marker so other platform chrome can detect the state without reaching into the rail.
 
 - **Message order:** lead with **Support session · Viewing as [subject]**; follow with **[actor] is the administrator** and an explicit statement that actions can change the subject's data. The visible deadline and **End support session** action complete the line of accountability.
-- **Countdown:** update the visible tabular timer each second, but keep assistive announcements quiet. Announce only meaningful thresholds—five minutes, one minute, and expiry—through a polite atomic live region; never speak every tick.
+- **Countdown:** update the visible tabular timer each second, but keep assistive announcements quiet. Announce only meaningful thresholds (five minutes, one minute, and expiry) through a polite atomic live region; never speak every tick.
 - **Exit:** while ending, disable the action and label it **Ending…**. If ending fails, restore an explicit retry action and explain that automatic expiry remains in force.
 - **Responsive behavior:** at 620px and below, wrap into a compact multi-row rail while preserving every safety fact and an easy-to-reach exit action.
 - **Self-healing:** hosted app DOM churn must not remove, bury, or restyle the rail. Reinsert it at the document boundary when needed, without duplicating it.

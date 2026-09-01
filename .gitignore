@@ -4,6 +4,7 @@ docs/superpowers/
 # documentation. Keep reports and their assets out of Git and deployments.
 /docs/**/*.html
 /docs/reports/
+**report.html
 /scripts/docs-smoke.py
 .claire/
 .codex/

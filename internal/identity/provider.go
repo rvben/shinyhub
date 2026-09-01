@@ -122,6 +122,7 @@ func (p *Provider) PayloadFor(user *auth.ContextUser, slug string, appID int64) 
 		params.SupportSessionID = support.ID
 		params.ActorID = support.ActorID
 		params.ActorUsername = support.ActorUsername
+		params.ExpiresAt = support.ExpiresAt
 	}
 	tok, err := MintToken(DeriveKey(p.secret, appID), params)
 	if err != nil {

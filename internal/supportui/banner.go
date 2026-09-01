@@ -93,18 +93,75 @@ func blockedPage(slug, actor, subject, explanation, message string, expiresAt ti
 		pageState = "paused"
 		actionCopy = "End support session"
 	}
+	return pageShell("Support session "+pageState,
+		`<p>`+html.EscapeString(explanation)+`</p><p>`+identityCopy+`</p>`+
+			`<p>`+deadlineCopy+`</p>`+
+			`<p>`+actorCopy+`</p>`+
+			errorHTML+
+			stopForm(slug, actionCopy))
+}
+
+// GuardedSession describes the support session a root guard cookie refers to,
+// for the page shown when that guard reaches an app without a valid support
+// cookie. Active reports whether the session is still live.
+type GuardedSession struct {
+	AppSlug   string
+	Actor     string
+	Subject   string
+	ExpiresAt time.Time
+	Active    bool
+}
+
+// GuardOnlyPage is the fail-closed surface for a request that carries the
+// root support guard but no valid support cookie for slug. Such a request is
+// outside the app the session is bound to, or its app-scoped cookie is gone;
+// either way the app must not be shown, anonymously or otherwise, until the
+// guard expires. session is nil when the guard's ID is unknown here.
+func GuardOnlyPage(slug string, session *GuardedSession) string {
+	if session == nil {
+		return pageShell("Support session guard active",
+			`<p>This browser carries a ShinyHub support-session guard, but the session it refers to could not be identified here. The app has not been displayed.</p>`+
+				`<p>Apps on this origin stay signed out until the guard expires.</p>`)
+	}
+	deadline := session.ExpiresAt.UTC().Format(time.RFC3339)
+	deadlineTime := `<time datetime="` + html.EscapeString(deadline) + `">` + html.EscapeString(deadline) + `</time>`
+	if !session.Active {
+		return pageShell("Support session ended",
+			`<p>This support session has ended. The app has not been displayed.</p>`+
+				`<p>Apps on this origin stay signed out until the session's original deadline, `+deadlineTime+`, so a delayed request cannot restore an administrator identity here.</p>`+
+				`<p>The support identity was <strong>`+html.EscapeString(session.Subject)+`</strong>. <strong>`+html.EscapeString(session.Actor)+`</strong> was the administrator.</p>`)
+	}
+	bound := html.EscapeString(session.AppSlug)
+	identity := `<p>The active support identity is <strong>` + html.EscapeString(session.Subject) + `</strong>. It expires automatically by ` + deadlineTime + `. <strong>` + html.EscapeString(session.Actor) + `</strong> remains the administrator.</p>`
+	if session.AppSlug == slug {
+		// The stop endpoint needs the app-scoped cookie this request lacks, so a
+		// stop form here would only redirect back to this page.
+		return pageShell("Support session paused",
+			`<p>This support session is bound to this app, but its app-scoped cookie is missing or no longer valid in this browser. The app has not been displayed.</p>`+
+				identity+
+				`<p>End the session from the ShinyHub dashboard, or wait for it to expire.</p>`)
+	}
+	return pageShell("Support session paused",
+		`<p>This support session is bound to the app at <strong>/app/`+bound+`/</strong>. The app at this address is outside its scope and has not been displayed.</p>`+
+			identity+
+			`<p><a href="/app/`+bound+`/">Return to the support session</a></p>`+
+			stopForm(session.AppSlug, "End support session"))
+}
+
+func stopForm(slug, label string) string {
+	return `<form method="post" action="/app/` + html.EscapeString(slug) + `/.shinyhub/support-session/stop"><button type="submit">` + label + `</button></form>`
+}
+
+// pageShell wraps body in the shared safety-page chrome. title is plain text
+// and doubles as the heading.
+func pageShell(title, body string) string {
 	return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-		`<title>Support session ` + pageState + ` · ShinyHub</title><style>` +
+		`<title>` + html.EscapeString(title) + ` · ShinyHub</title><style>` +
 		`:root{color-scheme:dark;font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b111a;color:#f8fafc}` +
 		`body{min-height:100vh;margin:0;display:grid;place-items:center;padding:24px;box-sizing:border-box}` +
 		`main{max-width:620px;background:#121b28;border:1px solid #a86608;border-radius:14px;padding:28px;box-shadow:0 24px 70px rgba(0,0,0,.45);overflow-wrap:anywhere}` +
-		`h1{font-size:24px;letter-spacing:-.02em;margin:0 0 12px;color:#fbbf24}p{line-height:1.6;color:#dce5f2}strong{color:#fff}` +
+		`h1{font-size:24px;letter-spacing:-.02em;margin:0 0 12px;color:#fbbf24}p{line-height:1.6;color:#dce5f2}strong{color:#fff}a{color:#fbbf24}` +
 		`button{min-height:44px;margin-top:12px;border:0;border-radius:8px;background:#f59e0b;color:#241604;padding:10px 14px;font:700 14px inherit;cursor:pointer}` +
-		`button:focus-visible{outline:3px solid #fff8e7;outline-offset:3px}</style><main><h1>Support session ` + pageState + `</h1>` +
-		`<p>` + html.EscapeString(explanation) + `</p><p>` + identityCopy + `</p>` +
-		`<p>` + deadlineCopy + `</p>` +
-		`<p>` + actorCopy + `</p>` +
-		errorHTML +
-		`<form method="post" action="/app/` + html.EscapeString(slug) + `/.shinyhub/support-session/stop"><button type="submit">` + actionCopy + `</button></form>` +
-		`</main></html>`
+		`button:focus-visible,a:focus-visible{outline:3px solid #fff8e7;outline-offset:3px}</style><main><h1>` + html.EscapeString(title) + `</h1>` +
+		body + `</main></html>`
 }

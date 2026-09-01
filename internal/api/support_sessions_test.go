@@ -149,6 +149,18 @@ func TestCurrentSupportSessionCanBeRecoveredAndEndedOnlyByItsActor(t *testing.T)
 	if err := store.ActivateSupportSession(created.ID, "dashboard-recovery-jti", created.ExpiresAt); err != nil {
 		t.Fatal(err)
 	}
+	// Activation alone proves the launch redirect was issued, not that the
+	// browser ever arrived on the app: the reaper still closes such a session
+	// as abandoned. Offering a resume link into it would send the
+	// administrator to a page that cannot open.
+	status, payload, _ = getCurrent(t, adminToken)
+	active, _ = payload["active"].(map[string]any)
+	if _, hasURL := active["app_url"]; status != http.StatusOK || active["resumable"] != false || hasURL {
+		t.Fatalf("activated-but-unobserved session must not be resumable: status=%d payload=%v", status, payload)
+	}
+	if err := store.ObserveSupportSession(created.ID); err != nil {
+		t.Fatal(err)
+	}
 	status, payload, _ = getCurrent(t, adminToken)
 	active, _ = payload["active"].(map[string]any)
 	if status != http.StatusOK || active["resumable"] != true || active["app_url"] != "https://apps.example.com/app/sales/" {
