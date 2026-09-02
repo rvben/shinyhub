@@ -1054,10 +1054,19 @@ func TestBuildBundlePreview_NoInputCompatibilityFixture(t *testing.T) {
 	if got, want := strings.Join(preview.Files, ","), "app.py,requirements.txt"; got != want {
 		t.Fatalf("files = %q, want %q", got, want)
 	}
-	if preview.FileCount != 2 || preview.UncompressedBytes != 30 || preview.CompressedBytes != 328 ||
+	// The digest is the compatibility contract: it is computed over entry names
+	// and uncompressed content, so it must stay byte-stable across releases.
+	// The container size is deliberately NOT pinned exactly - it depends on the
+	// toolchain's flate encoder, which changes between Go releases - only tied
+	// to the buffer it was measured from.
+	if preview.FileCount != 2 || preview.UncompressedBytes != 30 ||
 		preview.Digest != "sha256:8d4257a1c7de06c39c3547f5c14c7f4eb6142ab56e7a4e6311abf12219e94d11" {
-		t.Fatalf("compatibility fixture: digest=%q count=%d uncompressed=%d compressed=%d",
-			preview.Digest, preview.FileCount, preview.UncompressedBytes, preview.CompressedBytes)
+		t.Fatalf("compatibility fixture: digest=%q count=%d uncompressed=%d",
+			preview.Digest, preview.FileCount, preview.UncompressedBytes)
+	}
+	if preview.CompressedBytes <= 0 || preview.CompressedBytes != preview.Buffer.Len() {
+		t.Fatalf("compressed bytes = %d, want the bundle buffer's length %d",
+			preview.CompressedBytes, preview.Buffer.Len())
 	}
 }
 
