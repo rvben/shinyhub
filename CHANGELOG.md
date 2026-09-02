@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.2](https://github.com/rvben/shinyhub/compare/v0.15.1...v0.15.2) - 2026-09-02
+
+### Added
+
+- **appnav**: surface ready app versions ([af9f898](https://github.com/rvben/shinyhub/commit/af9f8982b65a75bcafaa44d903e56f74113fefd6))
+- **deploy**: add generation-based zero-downtime handoffs ([63bf04f](https://github.com/rvben/shinyhub/commit/63bf04f68459d74e2311f1bd27d744e1bf77d791))
+
+### Fixed
+
+- **fleet**: guard slug replacements ([1547e5b](https://github.com/rvben/shinyhub/commit/1547e5bf1e56b5e80d5651924c761d7006f5d08e))
+
 ## [0.15.1](https://github.com/rvben/shinyhub/compare/v0.15.0...v0.15.1) - 2026-09-02
 
 ### Added
