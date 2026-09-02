@@ -491,6 +491,46 @@ func (s *Server) activationCapacityCheck(app *db.App, sampleIndex int) error {
 	return nil
 }
 
+// generationHandoffCapacityCheck admits the complete candidate pool beside
+// the currently active one. Unlike a rolling activation, a version handoff
+// needs every target replica healthy before publication, so budgeting a single
+// surge replica would still leave the host vulnerable to an OOM mid-start.
+func (s *Server) generationHandoffCapacityCheck(app *db.App) error {
+	estimate := s.activationSurgeMemoryEstimate(app, 0)
+	if estimate.MemoryMB <= 0 {
+		return &activation.CapacityError{Reason: "parallel-generation memory is unknown; configure memory_limit_mb or enable runtime metrics", RetryAfter: time.Minute}
+	}
+	replicas := app.Replicas
+	if replicas < 1 {
+		replicas = 1
+	}
+	neededMB := estimate.MemoryMB * replicas
+	availableMB, err := s.availableMemoryMB()
+	if err != nil {
+		return &activation.CapacityError{Reason: "host available memory could not be measured", RetryAfter: time.Minute}
+	}
+	requiredMB := s.cfg.MinAvailableMemoryMB() + neededMB
+	if availableMB < requiredMB {
+		return &activation.CapacityError{
+			Reason: fmt.Sprintf("%d MiB available; need %d MiB for %d parallel-generation replicas plus the %d MiB host floor (%s)",
+				availableMB, requiredMB, replicas, s.cfg.MinAvailableMemoryMB(), estimate.Provenance),
+			RetryAfter: time.Minute,
+		}
+	}
+	return nil
+}
+
+func hostAvailableMemoryMB() (int, error) {
+	vm, err := gopsmem.VirtualMemory()
+	if err != nil {
+		return 0, err
+	}
+	if vm == nil {
+		return 0, errors.New("host memory sample is nil")
+	}
+	return int(vm.Available / (1024 * 1024)), nil
+}
+
 func (s *Server) rollFeasibilityAdvisory(app *db.App, onSuccess, fallback string) *string {
 	if onSuccess != "roll" {
 		return nil
@@ -731,6 +771,22 @@ func (s *Server) confirmAppConsumersStopped(app *db.App) error {
 	for _, row := range rows {
 		if err := s.confirmActivationReplicaStopped(app, row.Index); err != nil {
 			return fmt.Errorf("confirm replica %d stopped: %w", row.Index, err)
+		}
+	}
+	// Generation identities are a crash-recovery ledger, not capacity cache.
+	// Clear them only after Manager.StopConfirmed has physically confirmed every
+	// active, staged, and draining pool for the slug is gone.
+	generationRows, err := s.store.ListDeploymentReplicas(app.ID)
+	if err != nil {
+		return fmt.Errorf("list durable generation identities: %w", err)
+	}
+	seen := make(map[int64]struct{})
+	for _, row := range generationRows {
+		seen[row.DeploymentID] = struct{}{}
+	}
+	for deploymentID := range seen {
+		if err := s.store.DeleteDeploymentReplicas(deploymentID); err != nil {
+			return fmt.Errorf("clear stopped generation %d identities: %w", deploymentID, err)
 		}
 	}
 	return nil

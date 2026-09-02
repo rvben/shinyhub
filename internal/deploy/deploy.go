@@ -481,6 +481,9 @@ type Params struct {
 	ContentDigest string
 	DeploymentID  int64
 	AppVersion    string
+	// GenerationScoped stages a complete fixed-replica generation beside the
+	// active pool. It is never visible until the caller explicitly activates it.
+	GenerationScoped bool
 	// Preparation selects how the deploy-time preparation phase behaves. The
 	// zero value (PrepareRequired) is normal promotion. Callers bringing an
 	// already-promoted bundle back up set an activation mode so recovery neither
@@ -1109,7 +1112,13 @@ func Run(p Params) (*PoolResult, error) {
 	}
 
 	p.Proxy.SetPoolAppID(p.Slug, p.AppID)
-	p.Proxy.SetPoolSize(p.Slug, total)
+	if p.GenerationScoped {
+		if err := p.Proxy.StageGeneration(p.Slug, p.DeploymentID, total); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Proxy.SetPoolSize(p.Slug, total)
+	}
 	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
 	p.Proxy.SetPoolIdentityHeaders(p.Slug, p.IdentityHeaders)
 	// SetPoolMode propagates the worker-isolation strategy so the proxy can
@@ -1201,8 +1210,19 @@ func Run(p Params) (*PoolResult, error) {
 	sort.Ints(failed)
 
 	if len(ok) == 0 {
+		if p.GenerationScoped {
+			p.Proxy.AbortGeneration(p.Slug, p.DeploymentID)
+		}
 		p.report(deployevent.Phase("replicas", deployevent.StatusFailed, "No replicas became ready"))
 		return nil, fmt.Errorf("all replicas failed health check: %w", errors.Join(bootErrs...))
+	}
+	if p.GenerationScoped && len(failed) > 0 {
+		if stopErr := p.Manager.StopGeneration(p.Slug, p.DeploymentID); stopErr != nil {
+			bootErrs = append(bootErrs, fmt.Errorf("stop incomplete candidate: %w", stopErr))
+		}
+		p.Proxy.AbortGeneration(p.Slug, p.DeploymentID)
+		p.report(deployevent.Phase("replicas", deployevent.StatusFailed, "Candidate generation was not completely ready"))
+		return nil, fmt.Errorf("candidate generation incomplete: %w", errors.Join(bootErrs...))
 	}
 	for _, e := range bootErrs {
 		slog.Warn("replica boot failed", "slug", p.Slug, "err", e)
@@ -1431,6 +1451,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		CPUQuotaPercent:        p.CPUQuotaPercent,
 		AppVersion:             p.AppVersion,
 		DeploymentID:           p.DeploymentID,
+		GenerationScoped:       p.GenerationScoped,
 		ContentDigest:          p.ContentDigest,
 		TargetWorker:           targetWorker,
 		MaxSessions:            p.MaxSessionsPerReplica,
@@ -1446,21 +1467,21 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	}
 	if p.ReplicaStarted != nil {
 		if err := p.ReplicaStarted(startedResult); err != nil {
-			stopErr := p.Manager.StopReplicaConfirmed(p.Slug, idx)
+			stopErr := stopDeployReplica(p, idx, true)
 			if stopErr != nil {
 				slog.Warn("deploy: confirmed stop after start-persistence failure", "slug", p.Slug, "index", idx, "err", stopErr)
 			}
 			return Result{}, stoppedReplicaStartError(fmt.Errorf("record started replica: %w", err), stopErr)
 		}
 	}
-	if err := p.Manager.AcknowledgeReplicaStart(p.Slug, idx); err != nil {
-		stopErr := p.Manager.StopReplicaConfirmed(p.Slug, idx)
+	if err := acknowledgeDeployReplica(p, idx); err != nil {
+		stopErr := stopDeployReplica(p, idx, true)
 		if stopErr != nil {
 			slog.Warn("deploy: confirmed stop after start-acknowledgement failure", "slug", p.Slug, "index", idx, "err", stopErr)
 		}
 		return Result{}, stoppedReplicaStartError(fmt.Errorf("acknowledge started replica: %w", err), stopErr)
 	}
-	finishStartupRSSObservation := observeStartupRSS(p.StartupSampler, p.Manager, p.Slug, idx)
+	finishStartupRSSObservation := observeStartupRSSForDeploy(p, idx)
 	startupRSSObservationFinished := false
 	defer func() {
 		if !startupRSSObservationFinished {
@@ -1486,18 +1507,14 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		healthErr = hc(info.EndpointURL, timeout, transport)
 	} else {
 		healthErr = waitHealthyOrExit(info.EndpointURL, timeout, transport, func() bool {
-			i, ok := p.Manager.GetReplica(p.Slug, idx)
+			i, ok := getDeployReplica(p, idx)
 			return ok && i.Status == process.StatusRunning
 		})
 	}
 	startupPeakRSSBytes := finishStartupRSSObservation()
 	startupRSSObservationFinished = true
 	if healthErr != nil {
-		stop := p.Manager.StopReplica
-		if p.GuardUntilAcknowledged {
-			stop = p.Manager.StopReplicaConfirmed
-		}
-		serr := stop(p.Slug, idx)
+		serr := stopDeployReplica(p, idx, p.GuardUntilAcknowledged)
 		if serr != nil {
 			slog.Warn("deploy: stop replica after failed health check", "slug", p.Slug, "index", idx, "err", serr)
 		}
@@ -1506,23 +1523,97 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	startedResult.StartupPeakRSSBytes = startupPeakRSSBytes
 
 	var registerErr error
-	if p.AppID > 0 {
+	if p.GenerationScoped && p.AppID > 0 {
+		registerErr = p.Proxy.RegisterGenerationReplica(p.Slug, p.DeploymentID, idx, info.EndpointURL, transport, p.AppID)
+	} else if p.GenerationScoped {
+		registerErr = p.Proxy.RegisterGenerationReplica(p.Slug, p.DeploymentID, idx, info.EndpointURL, transport)
+	} else if p.AppID > 0 {
 		registerErr = p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport, p.DeploymentID, p.AppID)
 	} else {
 		registerErr = p.Proxy.RegisterReplica(p.Slug, idx, info.EndpointURL, transport, p.DeploymentID)
 	}
 	if registerErr != nil {
-		stop := p.Manager.StopReplica
-		if p.GuardUntilAcknowledged {
-			stop = p.Manager.StopReplicaConfirmed
-		}
-		serr := stop(p.Slug, idx)
+		serr := stopDeployReplica(p, idx, p.GuardUntilAcknowledged)
 		if serr != nil {
 			slog.Warn("deploy: stop replica after failed proxy register", "slug", p.Slug, "index", idx, "err", serr)
 		}
 		return Result{}, stoppedReplicaStartError(fmt.Errorf("register: %w", registerErr), serr)
 	}
 	return startedResult, nil
+}
+
+func acknowledgeDeployReplica(p Params, index int) error {
+	if p.GenerationScoped {
+		return p.Manager.AcknowledgeGenerationReplicaStart(p.Slug, p.DeploymentID, index)
+	}
+	return p.Manager.AcknowledgeReplicaStart(p.Slug, index)
+}
+
+func getDeployReplica(p Params, index int) (*process.ProcessInfo, bool) {
+	if p.GenerationScoped {
+		return p.Manager.GetGenerationReplica(p.Slug, p.DeploymentID, index)
+	}
+	return p.Manager.GetReplica(p.Slug, index)
+}
+
+func stopDeployReplica(p Params, index int, confirmed bool) error {
+	if p.GenerationScoped {
+		return p.Manager.StopGenerationReplica(p.Slug, p.DeploymentID, index, confirmed)
+	}
+	if confirmed {
+		return p.Manager.StopReplicaConfirmed(p.Slug, index)
+	}
+	return p.Manager.StopReplica(p.Slug, index)
+}
+
+func observeStartupRSSForDeploy(p Params, index int) func() int64 {
+	if p.StartupSampler == nil || p.Manager == nil {
+		return func() int64 { return 0 }
+	}
+	var (
+		handle process.RunHandle
+		ok     bool
+	)
+	if p.GenerationScoped {
+		handle, ok = p.Manager.HandleGenerationReplica(p.Slug, p.DeploymentID, index)
+	} else {
+		handle, ok = p.Manager.HandleReplica(p.Slug, index)
+	}
+	if !ok {
+		return func() int64 { return 0 }
+	}
+	return observeStartupRSSHandle(p.StartupSampler, handle)
+}
+
+func observeStartupRSSHandle(sampler process.Sampler, handle process.RunHandle) func() int64 {
+	stop := make(chan struct{})
+	result := make(chan int64, 1)
+	go func() {
+		var peak int64
+		sample := func() {
+			stats, err := sampler.Sample(handle)
+			if err == nil && stats.RSSBytes > peak {
+				peak = stats.RSSBytes
+			}
+		}
+		sample()
+		ticker := time.NewTicker(startupRSSSampleInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sample()
+			case <-stop:
+				sample()
+				result <- peak
+				return
+			}
+		}
+	}()
+	return func() int64 {
+		close(stop)
+		return <-result
+	}
 }
 
 const startupRSSSampleInterval = 200 * time.Millisecond

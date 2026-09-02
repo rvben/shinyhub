@@ -77,6 +77,7 @@ func postStoppedTestBundle(t *testing.T, srv *Server, token, slug, query string)
 	req := httptest.NewRequest("POST", "/api/apps/"+slug+"/deploy"+query, body)
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 	return rec

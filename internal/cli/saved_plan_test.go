@@ -231,3 +231,32 @@ func TestApplyExpectedAbsentConflictNeverDeploys(t *testing.T) {
 		t.Fatalf("create/deploy calls = %d/%d, want 1/0", creates.Load(), deploys.Load())
 	}
 }
+
+func TestApplyHandoffDeferralIsNotMisreportedAsStalePlan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/server-info":
+			_, _ = io.WriteString(w, `{"version":"dev","protocol_version":1,"capabilities":{"plan_apply":true}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/deploy":
+			w.Header().Set("X-ShinyHub-Conflict", "generation-handoff-deferred")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":"working version preserved; retry with --allow-downtime"}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	writeTestCLIConfig(t, srv.URL)
+	envelope, bundleBytes := savedPlanFixture(t, srv.URL, time.Now())
+	path := filepath.Join(t.TempDir(), "handoff.plan")
+	if err := writeSavedPlan(path, envelope, bundleBytes, false); err != nil {
+		t.Fatal(err)
+	}
+	_, _, applyErr := execCLISplit(t, "apply", path, "-o", "table")
+	if applyErr == nil || !strings.Contains(applyErr.Error(), "--allow-downtime") {
+		t.Fatalf("apply error = %v, want handoff retry guidance", applyErr)
+	}
+	if strings.Contains(applyErr.Error(), "remote state changed") {
+		t.Fatalf("handoff deferral was misreported as stale plan: %v", applyErr)
+	}
+}

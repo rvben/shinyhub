@@ -314,10 +314,18 @@ type replicaBackend struct {
 // can key replica_sessions rows without a DB lookup at snapshot time. Zero
 // means not yet set (reporter skips pools without an appID).
 type backendPool struct {
-	size        int
-	replicas    []*replicaBackend
-	rrCounter   atomic.Int64
-	maxSessions int
+	size     int
+	replicas []*replicaBackend
+	// activeDeploymentID identifies the generation selected for browsers that
+	// do not already carry affinity. candidates are complete but unpublished
+	// replica sets; drainingGenerations remain addressable only through their
+	// existing deployment-stamped cookies until retirement.
+	activeDeploymentID  int64
+	candidates          map[int64][]*replicaBackend
+	drainingGenerations map[int64][]*replicaBackend
+	generationTokens    map[int64]string
+	rrCounter           atomic.Int64
+	maxSessions         int
 	// appID is atomic for lock-free reporting snapshots; request Directors use
 	// the immutable ownerAppID captured by each backend registration.
 	appID atomic.Int64
@@ -997,6 +1005,21 @@ func (p *Proxy) stickyCookieValue(slug string, index int, deploymentID int64) st
 	return strconv.Itoa(index) + "." + strconv.FormatInt(deploymentID, 10)
 }
 
+// ClearGenerationAffinity removes this browser's per-app generation pin. The
+// following top-level reload is therefore routed to the active generation and
+// receives a fresh signed affinity cookie.
+func (p *Proxy) ClearGenerationAffinity(w http.ResponseWriter, r *http.Request, slug string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookiePrefix + slug,
+		Value:    "",
+		Path:     "/app/" + slug + "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
+		MaxAge:   -1,
+	})
+}
+
 // SetTrustedProxies configures the upstream-proxy CIDRs whose forwarding
 // headers are trusted (see Proxy.trustedProxies). Wire it from
 // cfg.TrustedProxyNets at startup, before serving. Safe to leave unset (trust
@@ -1627,6 +1650,23 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		ownerAppID = expectedAppID[0]
 	}
 
+	pool.replicas[index] = p.newReplicaBackend(pool, slug, index, target, targetURL, base, deploymentID, ownerAppID)
+	if deploymentID != 0 {
+		pool.activeDeploymentID = deploymentID
+	}
+	// A freshly registered backend has not yet proven it accepts WS upgrades.
+	// Clearing here also covers the hot-redeploy path where a caller swaps
+	// replicas without an intermediate Deregister.
+	p.clearWSReady(slug)
+	return nil
+}
+
+// newReplicaBackend constructs one multiplex backend. The caller holds p.mu
+// and has already validated the target, owning pool, index and app identity.
+// Keeping construction in one place ensures staged generations receive the
+// same forwarding, security and response-injection behavior as legacy active
+// registrations.
+func (p *Proxy) newReplicaBackend(pool *backendPool, slug string, index int, target *url.URL, targetURL string, base http.RoundTripper, deploymentID, ownerAppID int64) *replicaBackend {
 	rp := httputil.NewSingleHostReverseProxy(target)
 	slugCopy := slug
 	targetPath := strings.TrimRight(target.Path, "/")
@@ -1659,7 +1699,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 	// cookie namespaces so a deployer-controlled app cannot set the platform's
 	// session/sticky/elastic-client-id cookies in a visitor's browser, then
 	// (when enabled) add the status overlay to HTML page loads.
-	rp.ModifyResponse = p.modifyResponseFor(slugCopy)
+	rp.ModifyResponse = p.modifyResponseFor(slugCopy, deploymentID)
 	rp.Director = func(req *http.Request) {
 		// Populate standard forwarding headers so backend apps (uvicorn with
 		// --proxy-headers, R Shiny httpuv, Dash, custom FastAPI, etc.) can
@@ -1713,11 +1753,308 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 		}
 		req.Host = target.Host
 	}
-	pool.replicas[index] = &replicaBackend{index: index, ownerAppID: ownerAppID, targetURL: targetURL, deploymentID: deploymentID, rp: rp}
-	// A freshly registered backend has not yet proven it accepts WS upgrades.
-	// Clearing here also covers the hot-redeploy path where a caller swaps
-	// replicas without an intermediate Deregister.
+	return &replicaBackend{index: index, ownerAppID: ownerAppID, targetURL: targetURL, deploymentID: deploymentID, rp: rp}
+}
+
+// SetGenerationActivationToken associates an opaque browser-facing token with
+// an internal deployment identity. It updates response injection dynamically,
+// including backends registered before the token was loaded from the store.
+func (p *Proxy) SetGenerationActivationToken(slug string, deploymentID int64, token string) {
+	if deploymentID <= 0 || token == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool := p.pools[slug]
+	if pool == nil {
+		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		p.pools[slug] = pool
+	}
+	if pool.generationTokens == nil {
+		pool.generationTokens = make(map[int64]string)
+	}
+	pool.generationTokens[deploymentID] = token
+}
+
+func (p *Proxy) generationActivationToken(slug string, deploymentID int64) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if pool := p.pools[slug]; pool != nil {
+		return pool.generationTokens[deploymentID]
+	}
+	return ""
+}
+
+// ActiveGenerationActivationToken returns the token for the generation this
+// proxy can route right now. The version endpoint uses this local publication
+// state rather than the DB pointer so it never advertises a cutover before the
+// route table has switched.
+func (p *Proxy) ActiveGenerationActivationToken(slug string) (string, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool := p.pools[slug]
+	if pool == nil || pool.activeDeploymentID <= 0 || !poolHasAny(pool) {
+		return "", false
+	}
+	token := pool.generationTokens[pool.activeDeploymentID]
+	return token, token != ""
+}
+
+// HasDrainingGeneration reports whether an older generation still owns open
+// tunnels. V1 permits at most one handoff at a time.
+func (p *Proxy) HasDrainingGeneration(slug string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool := p.pools[slug]
+	return pool != nil && len(pool.drainingGenerations) > 0
+}
+
+// StageGeneration allocates an unpublished fixed-replica generation. It is
+// deliberately unsupported for elastic pools: their server-side client
+// bindings need a different migration contract.
+func (p *Proxy) StageGeneration(slug string, deploymentID int64, size int) error {
+	if deploymentID <= 0 {
+		return fmt.Errorf("stage %s: deployment ID must be positive", slug)
+	}
+	if size < 1 {
+		return fmt.Errorf("stage %s: generation size must be positive", slug)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool := p.pools[slug]
+	if pool == nil {
+		return fmt.Errorf("stage %s: pool not found", slug)
+	}
+	if poolIsElastic(pool) {
+		return fmt.Errorf("stage %s: elastic pools do not support generations", slug)
+	}
+	if deploymentID == pool.activeDeploymentID {
+		return fmt.Errorf("stage %s: deployment %d is already active", slug, deploymentID)
+	}
+	if pool.candidates == nil {
+		pool.candidates = make(map[int64][]*replicaBackend)
+	}
+	if _, exists := pool.candidates[deploymentID]; exists {
+		return fmt.Errorf("stage %s: deployment %d is already staged", slug, deploymentID)
+	}
+	if _, exists := pool.drainingGenerations[deploymentID]; exists {
+		return fmt.Errorf("stage %s: deployment %d is draining", slug, deploymentID)
+	}
+	pool.candidates[deploymentID] = make([]*replicaBackend, size)
+	return nil
+}
+
+// RegisterGenerationReplica installs a ready backend into an unpublished
+// generation. No request picker reads candidates before ActivateGeneration.
+func (p *Proxy) RegisterGenerationReplica(slug string, deploymentID int64, index int, targetURL string, base http.RoundTripper, expectedAppID ...int64) error {
+	target, err := url.Parse(targetURL)
+	if err != nil {
+		return fmt.Errorf("register generation %s#%d: invalid url: %w", slug, index, err)
+	}
+	if target.Scheme == "" || target.Host == "" {
+		return fmt.Errorf("register generation %s#%d: url needs scheme and host", slug, index)
+	}
+	if base == nil {
+		base = defaultBackendTransport
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool := p.pools[slug]
+	if pool == nil {
+		return fmt.Errorf("register generation %s#%d: pool not found", slug, index)
+	}
+	slots, ok := pool.candidates[deploymentID]
+	if !ok || index < 0 || index >= len(slots) {
+		return fmt.Errorf("register generation %s#%d: generation not staged or index out of range", slug, index)
+	}
+	ownerAppID := pool.appID.Load()
+	if len(expectedAppID) > 1 {
+		return fmt.Errorf("register generation %s#%d: multiple expected app IDs", slug, index)
+	}
+	if len(expectedAppID) == 1 {
+		if expectedAppID[0] <= 0 {
+			return fmt.Errorf("register generation %s#%d: invalid expected app ID", slug, index)
+		}
+		if ownerAppID != expectedAppID[0] {
+			return fmt.Errorf("register generation %s#%d: app identity changed", slug, index)
+		}
+		ownerAppID = expectedAppID[0]
+	}
+	slots[index] = p.newReplicaBackend(pool, slug, index, target, targetURL, base, deploymentID, ownerAppID)
+	return nil
+}
+
+// ActivateGeneration atomically publishes a complete candidate set for fresh
+// browsers and moves the previous active set into cookie-only draining.
+func (p *Proxy) ActivateGeneration(slug string, deploymentID int64) (int64, error) {
+	p.mu.Lock()
+	pool := p.pools[slug]
+	if pool == nil {
+		p.mu.Unlock()
+		return 0, fmt.Errorf("activate %s: pool not found", slug)
+	}
+	slots, ok := pool.candidates[deploymentID]
+	if !ok {
+		p.mu.Unlock()
+		return 0, fmt.Errorf("activate %s: deployment %d is not staged", slug, deploymentID)
+	}
+	for index, rep := range slots {
+		if rep == nil {
+			p.mu.Unlock()
+			return 0, fmt.Errorf("activate %s: deployment %d replica %d is not ready", slug, deploymentID, index)
+		}
+	}
+	previous := pool.activeDeploymentID
+	if previous == 0 {
+		for _, rep := range pool.replicas {
+			if rep != nil {
+				previous = rep.deploymentID
+				break
+			}
+		}
+	}
+	if previous != 0 && len(pool.replicas) > 0 {
+		if pool.drainingGenerations == nil {
+			pool.drainingGenerations = make(map[int64][]*replicaBackend)
+		}
+		for _, rep := range pool.replicas {
+			if rep != nil {
+				rep.draining.Store(true)
+			}
+		}
+		pool.drainingGenerations[previous] = pool.replicas
+	}
+	pool.replicas = slots
+	pool.size = len(slots)
+	pool.activeDeploymentID = deploymentID
+	delete(pool.candidates, deploymentID)
+	p.mu.Unlock()
 	p.clearWSReady(slug)
+	return previous, nil
+}
+
+// RetireGeneration removes a draining generation from cookie routing. Any
+// subsequent request carrying its old cookie falls through to the active pool
+// and receives refreshed affinity.
+func (p *Proxy) RetireGeneration(slug string, deploymentID int64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool := p.pools[slug]
+	if pool == nil || pool.drainingGenerations == nil {
+		return false
+	}
+	if _, ok := pool.drainingGenerations[deploymentID]; !ok {
+		return false
+	}
+	delete(pool.drainingGenerations, deploymentID)
+	delete(pool.generationTokens, deploymentID)
+	return true
+}
+
+// TryRetireGeneration atomically removes a draining generation only when no
+// request is using any of its backends. ServeHTTP holds the matching read lock
+// through its active-connection increment, so a sticky request cannot slip in
+// between the idle check and route removal.
+func (p *Proxy) TryRetireGeneration(slug string, deploymentID int64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool := p.pools[slug]
+	if pool == nil || pool.activeDeploymentID == deploymentID || pool.drainingGenerations == nil {
+		return false
+	}
+	replicas, ok := pool.drainingGenerations[deploymentID]
+	if !ok {
+		return false
+	}
+	for _, replica := range replicas {
+		if replica != nil && replica.activeConns.Load() > 0 {
+			return false
+		}
+	}
+	delete(pool.drainingGenerations, deploymentID)
+	delete(pool.generationTokens, deploymentID)
+	return true
+}
+
+// IsGenerationDraining reports whether deploymentID is still available only
+// to browsers pinned before a handoff.
+func (p *Proxy) IsGenerationDraining(slug string, deploymentID int64) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool := p.pools[slug]
+	if pool == nil || pool.drainingGenerations == nil {
+		return false
+	}
+	_, ok := pool.drainingGenerations[deploymentID]
+	return ok
+}
+
+// GenerationDrainingSessions returns the open connection count for one old
+// generation and whether its route is still retained.
+func (p *Proxy) GenerationDrainingSessions(slug string, deploymentID int64) (int, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool := p.pools[slug]
+	if pool == nil {
+		return 0, false
+	}
+	replicas, ok := pool.drainingGenerations[deploymentID]
+	if !ok {
+		return 0, false
+	}
+	total := 0
+	for _, replica := range replicas {
+		if replica != nil {
+			total += int(replica.activeConns.Load())
+		}
+	}
+	return total, true
+}
+
+// AbortGeneration removes an unpublished candidate. Active and draining
+// generations are never affected, so failed readiness cannot cause downtime.
+func (p *Proxy) AbortGeneration(slug string, deploymentID int64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool := p.pools[slug]
+	if pool == nil || pool.candidates == nil {
+		return false
+	}
+	if _, ok := pool.candidates[deploymentID]; !ok {
+		return false
+	}
+	delete(pool.candidates, deploymentID)
+	return true
+}
+
+// RevertGeneration restores a previous draining generation after a control-
+// plane commit step fails. It is target-gated so a stale rollback cannot undo
+// a newer activation.
+func (p *Proxy) RevertGeneration(slug string, failedDeploymentID, previousDeploymentID int64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pool := p.pools[slug]
+	if pool == nil || pool.activeDeploymentID != failedDeploymentID {
+		return fmt.Errorf("revert %s: deployment %d is not active", slug, failedDeploymentID)
+	}
+	previous, ok := pool.drainingGenerations[previousDeploymentID]
+	if !ok {
+		return fmt.Errorf("revert %s: previous deployment %d is not draining", slug, previousDeploymentID)
+	}
+	for _, rep := range previous {
+		if rep != nil {
+			rep.draining.Store(false)
+		}
+	}
+	delete(pool.drainingGenerations, previousDeploymentID)
+	if pool.candidates == nil {
+		pool.candidates = make(map[int64][]*replicaBackend)
+	}
+	pool.candidates[failedDeploymentID] = pool.replicas
+	pool.replicas = previous
+	pool.size = len(previous)
+	pool.activeDeploymentID = previousDeploymentID
 	return nil
 }
 
@@ -2117,6 +2454,13 @@ func (p *Proxy) BeginHibernate(slug string, since time.Time) bool {
 				return false
 			}
 		}
+		for _, generation := range pool.drainingGenerations {
+			for _, rep := range generation {
+				if rep != nil && rep.activeConns.Load() > 0 {
+					return false
+				}
+			}
+		}
 		delete(p.pools, slug)
 	}
 	delete(p.lastSeen, slug)
@@ -2181,6 +2525,15 @@ func (p *Proxy) PoolSessionSnapshot() map[string]PoolSessionStat {
 			sessions += int(rep.activeConns.Load())
 			if !rep.draining.Load() {
 				admitting++
+			}
+		}
+		// Draining generations admit no new work, but their already-open HTTP
+		// streams and WebSockets remain real sessions until retirement.
+		for _, generation := range pool.drainingGenerations {
+			for _, rep := range generation {
+				if rep != nil {
+					sessions += int(rep.activeConns.Load())
+				}
 			}
 		}
 		out[slug] = PoolSessionStat{Sessions: sessions, Cap: pool.maxSessions, Replicas: admitting}
@@ -3126,6 +3479,10 @@ func (p *Proxy) pickReplicaLocked(pool *backendPool, slug string, r *http.Reques
 					return rep, true, false
 				}
 			}
+			// A cookie naming a draining generation is deliberately not reused.
+			// Already-upgraded tunnels retain their selected backend pointer, while
+			// every new HTTP or WebSocket request moves to the active generation
+			// and receives refreshed affinity below.
 		}
 	}
 

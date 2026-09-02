@@ -1760,6 +1760,11 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		return
 	}
 	defer releaseConsumerBoot()
+	if s.proxy != nil {
+		if activeGeneration, err := s.store.GetActiveDeploymentGeneration(app.ID); err == nil {
+			s.proxy.SetGenerationActivationToken(slug, activeGeneration.DeploymentID, activeGeneration.ActivationToken)
+		}
+	}
 	params := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             prev.BundleDir,
@@ -1870,6 +1875,230 @@ func (s *Server) persistStartingDeploymentReplica(app *db.App, deployment *db.De
 		WorkerID: result.WorkerID, AppVersion: deployment.Version,
 		DesiredState: "running", DeploymentID: &deploymentID, ConsumerBooted: true,
 	})
+}
+
+func (s *Server) persistStartingGenerationReplica(app *db.App, deployment *db.Deployment, result deploy.Result) error {
+	pid, port := result.PID, result.Port
+	return s.store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+		AppID: app.ID, DeploymentID: deployment.ID, Index: result.Index,
+		PID: &pid, Port: &port, Status: "starting", Provider: result.Provider,
+		Tier: result.Tier, EndpointURL: result.EndpointURL, WorkerID: result.WorkerID,
+	})
+}
+
+// persistDrainingGeneration snapshots the currently serving legacy projection
+// before a parallel candidate is started. These identities remain durable until
+// the old processes are confirmed stopped, closing crash/stop/delete windows.
+func (s *Server) persistDrainingGeneration(app *db.App, deployment *db.Deployment) error {
+	if app == nil || deployment == nil {
+		return errors.New("missing active deployment")
+	}
+	active, err := s.store.GetActiveDeploymentGeneration(app.ID)
+	if err != nil {
+		return fmt.Errorf("load durable active generation: %w", err)
+	}
+	if active.DeploymentID != deployment.ID {
+		return fmt.Errorf("deployment history points to %d while active generation is %d", deployment.ID, active.DeploymentID)
+	}
+	rows, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		return fmt.Errorf("list active replicas: %w", err)
+	}
+	if len(rows) == 0 {
+		return errors.New("active deployment has no durable replica identities")
+	}
+	for _, replica := range rows {
+		if replica.DeploymentID == nil || *replica.DeploymentID != deployment.ID {
+			return fmt.Errorf("replica %d does not belong to active deployment %d", replica.Index, deployment.ID)
+		}
+		if replica.Provider != "" && replica.Provider != "native" {
+			return fmt.Errorf("replica %d uses provider %q; v1 handoff supports native replicas only", replica.Index, replica.Provider)
+		}
+		if err := s.store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+			AppID: app.ID, DeploymentID: deployment.ID, Index: replica.Index,
+			PID: replica.PID, Port: replica.Port, Status: replica.Status,
+			Provider: replica.Provider, Tier: replica.Tier,
+			EndpointURL: replica.EndpointURL, WorkerID: replica.WorkerID,
+		}); err != nil {
+			return fmt.Errorf("record active replica %d: %w", replica.Index, err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) persistDeployedPool(app *db.App, deployment *db.Deployment, result *deploy.PoolResult) error {
+	var combined error
+	for _, replica := range result.Replicas {
+		pid, port, deploymentID := replica.PID, replica.Port, deployment.ID
+		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: app.ID, Index: replica.Index, PID: &pid, Port: &port,
+			Status: "running", Provider: replica.Provider, Tier: replica.Tier,
+			EndpointURL: replica.EndpointURL, WorkerID: replica.WorkerID,
+			AppVersion: deployment.Version, DesiredState: "running",
+			DeploymentID: &deploymentID, StartupPeakRSSBytes: replica.StartupPeakRSSBytes,
+			ConsumerBooted: true,
+		}); err != nil {
+			slog.Error("deploy_upsert_replica_failed", "slug", app.Slug, "index", replica.Index, "err", err)
+			combined = errors.Join(combined, fmt.Errorf("replica %d: %w", replica.Index, err))
+		}
+	}
+	return combined
+}
+
+// stopAndForgetCandidate removes an unpublished route immediately, but erases
+// its durable runtime ledger only after the manager confirms physical stop.
+// A missing manager entry is not proof that a persisted PID/container is gone;
+// startup recovery owns that identity-safe cleanup path.
+func (s *Server) stopAndForgetCandidate(slug string, deploymentID int64) bool {
+	s.proxy.AbortGeneration(slug, deploymentID)
+	if err := s.manager.StopGeneration(slug, deploymentID); err != nil {
+		slog.Warn("deploy: retaining candidate identity for startup cleanup",
+			"slug", slug, "deployment_id", deploymentID, "err", err)
+		return false
+	}
+	if err := s.store.DeleteDeploymentReplicas(deploymentID); err != nil {
+		slog.Warn("deploy: candidate stopped but durable cleanup ledger could not be cleared",
+			"slug", slug, "deployment_id", deploymentID, "err", err)
+		s.startGenerationLedgerCleanup(slug, deploymentID)
+		return false
+	}
+	return true
+}
+
+// retireGenerationWhenIdle retires as soon as all already-open requests and
+// WebSockets drain, with DrainTimeout as the operator's hard upper bound. New
+// requests never enter a draining generation. Runtime stop is retried and its
+// durable identities are retained until physical termination is confirmed.
+func (s *Server) retireGenerationWhenIdle(ctx context.Context, slug string, deploymentID int64) {
+	started := time.Now()
+	lastSessions := 0
+	if s.metrics != nil {
+		s.metrics.BeginGenerationDrain()
+		defer func() { s.metrics.EndGenerationDrain(lastSessions, time.Since(started)) }()
+	}
+	deadlineAfter := s.cfg.Server.DrainTimeout
+	if deadlineAfter <= 0 {
+		deadlineAfter = time.Minute
+	}
+	poll := deadlineAfter / 20
+	if poll > 5*time.Second {
+		poll = 5 * time.Second
+	}
+	if poll < 100*time.Millisecond {
+		poll = 100 * time.Millisecond
+	}
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	deadline := time.NewTimer(deadlineAfter)
+	defer deadline.Stop()
+	routeRetired := false
+	processStopped := false
+	cleanupFailures := 0
+	for {
+		if sessions, ok := s.proxy.GenerationDrainingSessions(slug, deploymentID); ok && sessions != lastSessions {
+			if s.metrics != nil {
+				s.metrics.UpdateGenerationDrainSessions(sessions - lastSessions)
+			}
+			lastSessions = sessions
+		}
+		if !routeRetired && !s.proxy.IsGenerationDraining(slug, deploymentID) {
+			routeRetired = true
+		}
+		if !routeRetired && s.proxy.TryRetireGeneration(slug, deploymentID) {
+			routeRetired = true
+		}
+		if routeRetired {
+			if !processStopped {
+				if err := s.manager.StopGeneration(slug, deploymentID); err != nil {
+					cleanupFailures++
+					slog.Warn("deploy: retrying retired generation process cleanup", "slug", slug, "deployment_id", deploymentID, "err", err)
+					if cleanupFailures >= 8 {
+						if s.metrics != nil {
+							s.metrics.RecordGenerationHandoff("cleanup_deferred")
+						}
+						slog.Error("deploy: generation cleanup deferred to durable startup recovery", "slug", slug, "deployment_id", deploymentID, "attempts", cleanupFailures)
+						return
+					}
+				} else {
+					processStopped = true
+					cleanupFailures = 0
+				}
+			}
+			if processStopped {
+				if err := s.store.DeleteDeploymentReplicas(deploymentID); err != nil {
+					cleanupFailures++
+					slog.Warn("deploy: retrying retired generation ledger cleanup", "slug", slug, "deployment_id", deploymentID, "err", err)
+					if cleanupFailures >= 8 {
+						if s.metrics != nil {
+							s.metrics.RecordGenerationHandoff("cleanup_deferred")
+						}
+						slog.Error("deploy: generation cleanup deferred to durable startup recovery", "slug", slug, "deployment_id", deploymentID, "attempts", cleanupFailures)
+						return
+					}
+				} else {
+					slog.Info("deploy: retired drained generation", "slug", slug, "deployment_id", deploymentID)
+					return
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			slog.Info("deploy: generation cleanup interrupted by server shutdown; durable identity retained", "slug", slug, "deployment_id", deploymentID)
+			return
+		case <-ticker.C:
+		case <-deadline.C:
+			if !routeRetired {
+				s.proxy.RetireGeneration(slug, deploymentID)
+				routeRetired = true
+				if s.metrics != nil {
+					s.metrics.RecordGenerationHandoff("forced_retirement")
+				}
+				slog.Warn("deploy: generation drain deadline reached; forcing retirement", "slug", slug, "deployment_id", deploymentID)
+			}
+		}
+	}
+}
+
+func (s *Server) retryGenerationLedgerCleanup(ctx context.Context, slug string, deploymentID int64) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for attempt := 1; attempt <= 8; attempt++ {
+		if err := s.store.DeleteDeploymentReplicas(deploymentID); err == nil {
+			slog.Info("deploy: cleared projected generation ledger", "slug", slug, "deployment_id", deploymentID)
+			return
+		} else if attempt == 8 {
+			if s.metrics != nil {
+				s.metrics.RecordGenerationHandoff("cleanup_deferred")
+			}
+			slog.Error("deploy: projected generation ledger cleanup deferred to startup recovery",
+				"slug", slug, "deployment_id", deploymentID, "attempts", attempt, "err", err)
+			return
+		} else {
+			slog.Warn("deploy: retrying projected generation ledger cleanup",
+				"slug", slug, "deployment_id", deploymentID, "attempt", attempt, "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Server) startGenerationLedgerCleanup(slug string, deploymentID int64) {
+	s.generationWG.Add(1)
+	go func() {
+		defer s.generationWG.Done()
+		s.retryGenerationLedgerCleanup(s.generationCtx, slug, deploymentID)
+	}()
+}
+
+func (s *Server) startGenerationRetirement(slug string, deploymentID int64) {
+	s.generationWG.Add(1)
+	go func() {
+		defer s.generationWG.Done()
+		s.retireGenerationWhenIdle(s.generationCtx, slug, deploymentID)
+	}()
 }
 
 // guardDeploymentConsumerStart closes the native exec-before-checkpoint window
@@ -2199,17 +2428,136 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.proxy != nil {
+	targetIsolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
+	if manifest != nil && manifest.App.Worker != nil && manifest.App.Worker.Isolation != nil {
+		targetIsolation = *manifest.App.Worker.Isolation
+	}
+	activeRows, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "current replica state could not be inspected")
+		writeError(w, http.StatusInternalServerError, "inspect current replica state: "+err.Error())
+		return
+	}
+	durableGenerationRows, err := s.store.ListDeploymentReplicas(app.ID)
+	if err != nil {
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "generation cleanup state could not be inspected")
+		writeError(w, http.StatusInternalServerError, "inspect generation cleanup state: "+err.Error())
+		return
+	}
+	activeProcessPresent := s.manager != nil && s.manager.HasRunning(slug)
+	activeRoutePresent := s.proxy != nil && s.proxy.PoolHasAny(slug)
+	durableServingState := app.Status == "running" || app.Status == "degraded" || app.Status == "suspended"
+	// Cluster peers may own the serving process and route, so a succeeded
+	// deployment on a non-stopped clustered app is conservatively treated as
+	// live even when this node has no local runtime entry.
+	liveUpgrade := prevActive != nil && !keepStopped &&
+		(activeProcessPresent || activeRoutePresent || durableServingState || s.clustered)
+	generationHandoff := liveUpgrade
+	unsupportedReason := ""
+	if liveUpgrade {
+		switch {
+		case s.clustered:
+			unsupportedReason = "parallel generation handoff is not yet supported in clustered mode"
+		case s.proxy == nil || s.manager == nil:
+			unsupportedReason = "parallel generation handoff is unavailable"
+		case s.proxy.HasDrainingGeneration(slug):
+			unsupportedReason = "the previous generation is still draining; switch or close its remaining sessions before deploying again"
+		case len(durableGenerationRows) > 0:
+			unsupportedReason = "a previous generation still has pending process cleanup"
+		case producerBarrierEntered || prestartPlan.deploymentRepairRequired || len(prestartPlan.producers) > 0:
+			unsupportedReason = "this deployment changes shared producer state and requires an explicit stop-first deploy"
+		case deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "multiplex" || targetIsolation != "multiplex":
+			unsupportedReason = "parallel generation handoff currently supports multiplex isolation only"
+		case manifest != nil:
+			// Manifest reconciliation has deliberate omitted-key reset semantics
+			// (identity/privacy/access included). V1 therefore treats every present
+			// manifest as configuration-bearing rather than trying to infer a
+			// partial syntactic diff.
+			unsupportedReason = "this bundle contains a manifest whose configuration must be reconciled by an explicit stop-first deploy"
+		}
+		if unsupportedReason == "" {
+			if len(activeRows) == 0 {
+				unsupportedReason = "the current generation has no durable replica identities"
+			} else {
+				for _, replica := range activeRows {
+					if replica.Provider != "" && replica.Provider != "native" {
+						unsupportedReason = fmt.Sprintf("the current generation uses provider %q; v1 handoff supports native replicas only", replica.Provider)
+						break
+					}
+				}
+			}
+		}
+	}
+	var releaseGenerationLaunch func()
+	if generationHandoff && unsupportedReason == "" {
+		// Hold the host-wide launch reservation from the final capacity sample
+		// through candidate boot so two apps cannot both admit the same memory.
+		releaseGenerationLaunch = s.manager.AcquireLaunchReservation()
+		defer releaseGenerationLaunch()
+		projected := *app
+		if manifest != nil && manifest.App.Replicas != nil {
+			projected.Replicas = *manifest.App.Replicas
+		}
+		if capacityErr := s.generationHandoffCapacityCheck(&projected); capacityErr != nil {
+			unsupportedReason = capacityErr.Error()
+		}
+	}
+	generationHandoff = generationHandoff && unsupportedReason == ""
+	if !generationHandoff && releaseGenerationLaunch != nil {
+		releaseGenerationLaunch()
+	}
+	allowDowntime := r.Header.Get("X-ShinyHub-Allow-Downtime") == "1"
+	if liveUpgrade && !generationHandoff && !allowDowntime {
+		if s.metrics != nil {
+			s.metrics.RecordGenerationHandoff("deferred")
+		}
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "no-downtime deployment deferred: "+unsupportedReason)
+		w.Header().Set("X-ShinyHub-Conflict", "generation-handoff-deferred")
+		writeError(w, http.StatusConflict, "working version preserved: "+unsupportedReason+"; retry the CLI command with --allow-downtime (or send X-ShinyHub-Allow-Downtime: 1 via the API) to permit a stop-first deployment")
+		return
+	}
+	if liveUpgrade && !generationHandoff {
+		if s.metrics != nil {
+			s.metrics.RecordGenerationHandoff("explicit_downtime")
+		}
+		slog.Warn("deploy: explicit stop-first deployment permitted", "slug", slug, "reason", unsupportedReason)
+	}
+	drainingRowsStaged := false
+	if generationHandoff {
+		if err := s.persistDrainingGeneration(app, prevActive); err != nil {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "record current generation before handoff: "+err.Error())
+			writeError(w, http.StatusConflict, "working version preserved: current generation could not be recorded safely")
+			return
+		}
+		drainingRowsStaged = true
+		defer func() {
+			if drainingRowsStaged {
+				_ = s.store.DeleteDeploymentReplicas(prevActive.ID)
+			}
+		}()
+		if activeGeneration, activeErr := s.store.GetActiveDeploymentGeneration(app.ID); activeErr == nil {
+			s.proxy.SetGenerationActivationToken(slug, activeGeneration.DeploymentID, activeGeneration.ActivationToken)
+		}
+	}
+	if !generationHandoff && s.proxy != nil {
 		s.proxy.Deregister(slug)
+	}
+	// Deregister removes all proxy-local generation metadata. Install the
+	// candidate token afterwards (and for first deploys) so every page served by
+	// the new pool can later distinguish itself from the next active version.
+	if s.proxy != nil {
+		s.proxy.SetGenerationActivationToken(slug, pendingDep.ID, pendingDep.ActivationToken)
 	}
 	// A producer may mutate data that old consumers have mapped or are still
 	// reading. Do not cross that publication boundary until every old process is
 	// observed dead. ErrReplicaNotFound is the expected first-deploy case.
-	if err := s.confirmAppConsumersStopped(app); err != nil {
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "existing consumers could not be confirmed stopped before data publication")
-		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed"})
-		writeError(w, http.StatusConflict, "existing consumers could not be confirmed stopped; no producer was run")
-		return
+	if !generationHandoff {
+		if err := s.confirmAppConsumersStopped(app); err != nil {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "existing consumers could not be confirmed stopped before data publication")
+			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed"})
+			writeError(w, http.StatusConflict, "existing consumers could not be confirmed stopped; no producer was run")
+			return
+		}
 	}
 
 	// Snapshot the pre-manifest [app] settings. If Phase A applies manifest
@@ -2238,7 +2586,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			_ = s.store.FailDeployment(pendingDep.ID)
 			if producerBarrierEntered {
 				_ = s.manager.Stop(slug)
-			} else {
+			} else if !generationHandoff {
 				s.restoreAfterFailedDeploy(slug, app, prevActive, keepStopped)
 			}
 			writeError(w, http.StatusInternalServerError, "manifest apply failed")
@@ -2272,6 +2620,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 
 	deployDefaultMem, deployDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	deployResponse := newDeployResponder(w, r)
+	if generationHandoff {
+		deployResponse.event(deployevent.Phase("handoff", deployevent.StatusStarted, "Preparing the new version while the current version stays available"))
+	}
 	deployParams := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             bundleDir,
@@ -2285,6 +2636,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		ContentDigest:         digest,
 		DeploymentID:          pendingDep.ID,
 		AppVersion:            version,
+		GenerationScoped:      generationHandoff,
+		LaunchReservationHeld: generationHandoff,
 		// A stopped app is built and validated but not booted, so a broken
 		// bundle is still rejected here rather than at start time.
 		PrepareOnly: keepStopped,
@@ -2292,6 +2645,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}, app)
 	deployParams.GuardUntilAcknowledged = true
 	deployParams.ReplicaStarted = func(result deploy.Result) error {
+		if generationHandoff {
+			return s.persistStartingGenerationReplica(app, pendingDep, result)
+		}
 		return s.persistStartingDeploymentReplica(app, pendingDep, result)
 	}
 	var result *deploy.PoolResult
@@ -2389,6 +2745,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
+		if generationHandoff {
+			if s.metrics != nil {
+				s.metrics.RecordGenerationHandoff("candidate_failure")
+			}
+			s.stopAndForgetCandidate(slug, pendingDep.ID)
+		}
 		declarationRestoreErr := s.restorePrestartDeclarations(prestartPlan, app)
 		if declarationRestoreErr != nil {
 			err = errors.Join(err, fmt.Errorf("restore previous schedule declarations: %w", declarationRestoreErr))
@@ -2494,6 +2856,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			// Fail closed with no serving replicas and require a corrected deploy.
 			_ = s.manager.Stop(slug)
 			recoveryMessage = "App left stopped because data or schedule-declaration compatibility could not be proven"
+		} else if generationHandoff {
+			recoveryMessage = "Previous deployment remained available"
 		} else {
 			deployResponse.event(deployevent.Phase("recovery", deployevent.StatusStarted, "Restoring the previous deployment"))
 			s.restoreAfterFailedDeploy(slug, &preManifestApp, prevActive, keepStopped)
@@ -2520,28 +2884,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	deployResponse.event(deployevent.Phase("commit", deployevent.StatusStarted, "Recording the new deployment"))
 
 	var replicaPersistenceErr error
-	for _, r := range result.Replicas {
-		pid, port := r.PID, r.Port
-		depID := pendingDep.ID
-		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
-			AppID:               app.ID,
-			Index:               r.Index,
-			PID:                 &pid,
-			Port:                &port,
-			Status:              "running",
-			Provider:            r.Provider,
-			Tier:                r.Tier,
-			EndpointURL:         r.EndpointURL,
-			WorkerID:            r.WorkerID,
-			AppVersion:          version,
-			DesiredState:        "running",
-			DeploymentID:        &depID,
-			StartupPeakRSSBytes: r.StartupPeakRSSBytes,
-			ConsumerBooted:      true,
-		}); err != nil {
-			slog.Error("deploy_upsert_replica_failed", "slug", slug, "index", r.Index, "err", err)
-			replicaPersistenceErr = errors.Join(replicaPersistenceErr, fmt.Errorf("replica %d: %w", r.Index, err))
-		}
+	if !generationHandoff {
+		replicaPersistenceErr = s.persistDeployedPool(app, pendingDep, result)
 	}
 	if replicaPersistenceErr != nil {
 		reason := "deployment consumer provenance could not be persisted: " + replicaPersistenceErr.Error()
@@ -2611,11 +2955,121 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		slog.Error("deploy: increment deploy_count failed; bundle is deployed", "slug", slug, "err", err)
 	}
 
-	if err := s.store.PromoteDeployment(pendingDep.ID); err != nil {
-		slog.Error("deploy: promote deployment failed; pool is live but next restart/wake/schedule would silently revert to the previous bundle — failing the request so the caller retries", "slug", slug, "version", version, "err", err)
-		s.recordDeploy("failure")
-		deployResponse.fail(http.StatusInternalServerError, "deploy succeeded but recording it failed; retry to commit", "", "commit")
-		return
+	deploymentPromoted := false
+	if generationHandoff {
+		// The manager performs the final all-replicas-running validation before
+		// any durable or proxy publication. A candidate that died after readiness
+		// therefore cannot become the authority on a later restart.
+		managerPrevious, activateErr := s.manager.ActivateGeneration(slug, pendingDep.ID)
+		if activateErr != nil {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "candidate failed final activation validation: "+activateErr.Error())
+			s.stopAndForgetCandidate(slug, pendingDep.ID)
+			if s.metrics != nil {
+				s.metrics.RecordGenerationHandoff("candidate_failure")
+			}
+			s.recordDeploy("failure")
+			deployResponse.fail(http.StatusInternalServerError, "new version became unavailable before cutover; working version preserved", "", "readiness")
+			return
+		}
+
+		promoteErr := s.promoteDeployment(pendingDep.ID)
+		if promoteErr != nil {
+			// A database commit acknowledgement may be lost after the transaction
+			// became durable. Re-read the authority before deciding which runtime
+			// can be stopped; uncertainty always preserves both identity ledgers.
+			active, activeErr := s.store.GetActiveDeploymentGeneration(app.ID)
+			switch {
+			case activeErr == nil && active.DeploymentID == pendingDep.ID:
+				deploymentPromoted = true
+				slog.Warn("deploy: promotion returned an error but durable candidate authority was confirmed",
+					"slug", slug, "deployment_id", pendingDep.ID, "err", promoteErr)
+			case activeErr == nil && active.DeploymentID != pendingDep.ID:
+				if selectErr := s.manager.SelectGeneration(slug, managerPrevious); selectErr != nil {
+					drainingRowsStaged = false
+					_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+					slog.Error("deploy: promotion failed and manager rollback requires startup repair; preserving both generations",
+						"slug", slug, "deployment_id", pendingDep.ID, "err", errors.Join(promoteErr, selectErr))
+					s.recordDeploy("failure")
+					deployResponse.fail(http.StatusInternalServerError, "working route was preserved but runtime selection requires startup repair", "", "commit")
+					return
+				}
+				_ = s.store.FailDeploymentWithReason(pendingDep.ID, "new generation could not be published: "+promoteErr.Error())
+				s.stopAndForgetCandidate(slug, pendingDep.ID)
+				s.recordDeploy("failure")
+				deployResponse.fail(http.StatusInternalServerError, "new version could not be recorded; working version preserved", "", "commit")
+				return
+			default:
+				drainingRowsStaged = false
+				_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+				slog.Error("deploy: promotion outcome is ambiguous; preserving both generations",
+					"slug", slug, "deployment_id", pendingDep.ID, "promote_err", promoteErr, "read_err", activeErr)
+				s.recordDeploy("failure")
+				deployResponse.fail(http.StatusInternalServerError, "deployment commit outcome is uncertain; both versions were preserved for safe recovery", "", "commit")
+				return
+			}
+		} else {
+			deploymentPromoted = true
+		}
+
+		proxyPrevious, activateErr := s.activateProxyGeneration(slug, pendingDep.ID)
+		if activateErr != nil {
+			revertErr := s.store.RevertDeploymentActivation(pendingDep.ID, managerPrevious, "proxy publication failed: "+activateErr.Error())
+			var selectErr error
+			if revertErr == nil {
+				selectErr = s.manager.SelectGeneration(slug, managerPrevious)
+			}
+			if revertErr == nil && selectErr == nil {
+				deploymentPromoted = false
+				s.stopAndForgetCandidate(slug, pendingDep.ID)
+				if s.metrics != nil {
+					s.metrics.RecordGenerationHandoff("candidate_failure")
+				}
+				s.recordDeploy("failure")
+				deployResponse.fail(http.StatusInternalServerError, "new version could not be published; working version preserved", "", "commit")
+				return
+			}
+			// Reversion was not durably confirmed. The proxy still serves the old
+			// route and both runtime ledgers remain for deterministic startup repair.
+			drainingRowsStaged = false
+			if s.metrics != nil {
+				s.metrics.RecordGenerationHandoff("cutover_repair")
+			}
+			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+			slog.Error("deploy: proxy publication failed and compensation requires startup repair; preserving both generations",
+				"slug", slug, "deployment_id", pendingDep.ID, "activate_err", activateErr,
+				"revert_err", revertErr, "manager_select_err", selectErr)
+			s.recordDeploy("failure")
+			deployResponse.fail(http.StatusInternalServerError, "working route was preserved but deployment cutover requires startup repair", "", "commit")
+			return
+		}
+		// The candidate is now the durable and routed authority. Keep the old
+		// generation ledger until its sessions drain and physical stop succeeds.
+		drainingRowsStaged = false
+		if err := s.persistDeployedPool(app, pendingDep, result); err != nil {
+			slog.Error("deploy: active generation projection will require reconciliation", "slug", slug, "err", err)
+		} else {
+			if err := s.store.DeleteDeploymentReplicas(pendingDep.ID); err != nil {
+				slog.Warn("deploy: active generation ledger cleanup will retry",
+					"slug", slug, "deployment_id", pendingDep.ID, "err", err)
+				s.startGenerationLedgerCleanup(slug, pendingDep.ID)
+			}
+		}
+		if proxyPrevious != 0 {
+			s.startGenerationRetirement(slug, proxyPrevious)
+		}
+		if s.metrics != nil {
+			s.metrics.RecordGenerationHandoff("success")
+		}
+		deployResponse.event(deployevent.Phase("handoff", deployevent.StatusCompleted, "New version is ready; existing sessions remain on their current version"))
+	}
+
+	if !deploymentPromoted {
+		if err := s.store.PromoteDeployment(pendingDep.ID); err != nil {
+			slog.Error("deploy: promote deployment failed; pool is live but next restart/wake/schedule would silently revert to the previous bundle — failing the request so the caller retries", "slug", slug, "version", version, "err", err)
+			s.recordDeploy("failure")
+			deployResponse.fail(http.StatusInternalServerError, "deploy succeeded but recording it failed; retry to commit", "", "commit")
+			return
+		}
 	}
 
 	// Record that this bundle's environment is built and its post-deploy hooks
@@ -2711,8 +3165,13 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	pinnedScheduleDirs, pinErr := s.store.ListPinnedScheduleDeploymentDirs(app.ID)
 	if pinErr != nil {
 		slog.Error("list schedule-pinned deployment files", "slug", slug, "err", pinErr)
-	} else if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir, pinnedScheduleDirs...); err != nil {
-		slog.Error("prune_old_versions_failed", "slug", slug, "err", err)
+	} else {
+		if generationHandoff && prevActive != nil {
+			pinnedScheduleDirs = append(pinnedScheduleDirs, prevActive.BundleDir)
+		}
+		if err := deploy.PruneOldVersions(s.cfg.Storage.AppsDir, slug, s.cfg.Storage.VersionRetention, bundleDir, pinnedScheduleDirs...); err != nil {
+			slog.Error("prune_old_versions_failed", "slug", slug, "err", err)
+		}
 	}
 	deployResponse.event(deployevent.Phase("cleanup", deployevent.StatusCompleted, "Cleanup complete"))
 
@@ -2946,6 +3405,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
+		s.proxy.SetGenerationActivationToken(slug, pendingDep.ID, pendingDep.ActivationToken)
 	}
 	if err := s.confirmAppConsumersStopped(app); err != nil {
 		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "existing consumers could not be confirmed stopped before rollback data publication")
@@ -3233,10 +3693,12 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stop current instance; ignore the error if it wasn't running.
-	_ = s.manager.Stop(slug)
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
+	}
+	if err := s.confirmAppConsumersStopped(app); err != nil {
+		writeError(w, http.StatusConflict, "current app processes could not be confirmed stopped: "+err.Error())
+		return
 	}
 
 	// Defense in depth: refuse to restart a data-using app onto a tier that lost
@@ -3476,9 +3938,14 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stop the process if managed; ignore error if already stopped.
+	// Stop every active or draining generation and retain durable identities if
+	// physical termination cannot be confirmed. Dropping proxy metadata first
+	// would otherwise strand an old generation.
 	if s.manager != nil {
-		_ = s.manager.Stop(slug)
+		if err := s.confirmAppConsumersStopped(app); err != nil {
+			writeError(w, http.StatusConflict, "app processes could not be confirmed stopped: "+err.Error())
+			return
+		}
 	}
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)

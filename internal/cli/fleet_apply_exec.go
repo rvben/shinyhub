@@ -26,6 +26,7 @@ type convergeOpts struct {
 	adopt                    bool
 	prune                    bool
 	allowDegradedPrune       bool
+	allowDowntime            bool
 	preconditions            bool // server supports If-Match-style headers
 	retries                  int  // attempts AFTER the first for deploys/transient config PATCHes
 	healthTimeout            time.Duration
@@ -163,7 +164,7 @@ func deployWithRetry(cfg *cliConfig, slug string, spec bundleBuildSpec, visibili
 		var c bool
 		var ff []deployRunRef
 		var kind deployfail.Kind
-		promoted, c, ff, kind, err = deployAppBundleFromSpec(cfg, slug, spec, visibility, project, out, opt.runID, opt.healthTimeout, ifDigest, ifManagedBy)
+		promoted, c, ff, kind, err = deployAppBundleFromSpecWithDowntime(cfg, slug, spec, visibility, project, out, opt.runID, opt.healthTimeout, opt.allowDowntime, ifDigest, ifManagedBy)
 		committed = committed || c
 		// Keep the deploy-triggered run refs from whichever attempt actually fired them.
 		// A later retry of an already-created schedule returns none (the gate is

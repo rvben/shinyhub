@@ -210,7 +210,11 @@ type StartParams struct {
 	SharedMounts    []SharedMount // resolved by caller before Start/RunOnce
 	AppVersion      string        // app version stamped onto labels/metadata
 	DeploymentID    int64         // owning deployment; 0 when unknown
-	ContentDigest   string        // bundle content digest; "" when unknown (remote runtime pulls by this)
+	// GenerationScoped starts this replica beside the currently active pool.
+	// Its deployment ID becomes part of the manager's internal pool identity,
+	// while Slug remains the public app identity passed to the runtime.
+	GenerationScoped bool
+	ContentDigest    string // bundle content digest; "" when unknown (remote runtime pulls by this)
 	// TargetWorker pins this replica to a specific worker node id. Deploy
 	// pre-plans a multi-replica pool's worker assignments up front (so a
 	// concurrent batch spreads instead of every replica self-placing onto the
@@ -303,9 +307,13 @@ type replicaKey struct {
 // Manager tracks running app processes as a pool of replicas per slug.
 // entries maps slug → slice indexed by replica index; nil means that slot is down.
 type Manager struct {
-	mu                       sync.Mutex
-	launchMu                 sync.Mutex
-	entries                  map[string][]*entry
+	mu       sync.Mutex
+	launchMu sync.Mutex
+	entries  map[string][]*entry
+	// activePoolKeys maps a public app slug to the internal pool key selected
+	// by an atomic generation activation. Slugs absent from this map use their
+	// legacy key directly, preserving all existing manager behavior.
+	activePoolKeys           map[string]string
 	logFiles                 map[replicaKey]io.WriteCloser
 	lastExit                 map[replicaKey]ExitVerdict
 	appsDir                  string
@@ -495,14 +503,41 @@ func (m *Manager) PlanPlacement(tier, slug string, count int) []string {
 // default ("local") tier. Additional tiers are added via RegisterRuntime.
 func NewManager(appsDir string, rt Runtime) *Manager {
 	return &Manager{
-		entries:     make(map[string][]*entry),
-		logFiles:    make(map[replicaKey]io.WriteCloser),
-		lastExit:    make(map[replicaKey]ExitVerdict),
-		appsDir:     appsDir,
-		runtimes:    map[string]Runtime{DefaultTier: rt},
-		defaultTier: DefaultTier,
-		stopGrace:   defaultStopGrace,
+		entries:        make(map[string][]*entry),
+		activePoolKeys: make(map[string]string),
+		logFiles:       make(map[replicaKey]io.WriteCloser),
+		lastExit:       make(map[replicaKey]ExitVerdict),
+		appsDir:        appsDir,
+		runtimes:       map[string]Runtime{DefaultTier: rt},
+		defaultTier:    DefaultTier,
+		stopGrace:      defaultStopGrace,
 	}
+}
+
+func generationPoolKey(slug string, deploymentID int64) string {
+	return fmt.Sprintf("%s\x00generation:%d", slug, deploymentID)
+}
+
+func (m *Manager) activePoolKeyLocked(slug string) string {
+	if key := m.activePoolKeys[slug]; key != "" {
+		return key
+	}
+	return slug
+}
+
+func (m *Manager) poolKeyForDeploymentLocked(slug string, deploymentID int64) (string, bool) {
+	preferred := generationPoolKey(slug, deploymentID)
+	if _, ok := m.entries[preferred]; ok {
+		return preferred, true
+	}
+	for key, pool := range m.entries {
+		for _, e := range pool {
+			if e != nil && e.info.Slug == slug && e.info.DeploymentID == deploymentID {
+				return key, true
+			}
+		}
+	}
+	return "", false
 }
 
 // defaultStopGrace is the SIGTERM-to-SIGKILL window for a single replica. It is
@@ -583,7 +618,14 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	pool := m.entries[p.Slug]
+	poolKey := m.activePoolKeyLocked(p.Slug)
+	if p.GenerationScoped {
+		if p.DeploymentID <= 0 {
+			return nil, fmt.Errorf("start generation for %s: deployment ID is required", p.Slug)
+		}
+		poolKey = generationPoolKey(p.Slug, p.DeploymentID)
+	}
+	pool := m.entries[poolKey]
 	for len(pool) <= p.Index {
 		pool = append(pool, nil)
 	}
@@ -591,7 +633,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		return nil, fmt.Errorf("app %s replica %d: %w", p.Slug, p.Index, ErrReplicaAlreadyRunning)
 	}
 
-	key := replicaKey{p.Slug, p.Index}
+	key := replicaKey{poolKey, p.Index}
 	if prev, ok := m.logFiles[key]; ok {
 		prev.Close()
 		delete(m.logFiles, key)
@@ -758,7 +800,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		info: info, handle: handle, tier: tier, logRun: &run, done: done,
 		startupGuard: ep.StartupGuard,
 	}
-	m.entries[p.Slug] = pool
+	m.entries[poolKey] = pool
 
 	go func() {
 		// close(done) is deferred so it always fires - even on a panic below -
@@ -784,9 +826,9 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		// a replacement Start at the same key, a stale Wait sees a nil or different
 		// entry and must touch neither status nor the log file — otherwise it would
 		// close the replacement replica's log out from under it.
-		if pool := m.entries[p.Slug]; p.Index < len(pool) {
+		if pool := m.entries[poolKey]; p.Index < len(pool) {
 			if e := pool[p.Index]; e != nil && e.handle == handle {
-				key := replicaKey{p.Slug, p.Index}
+				key := replicaKey{poolKey, p.Index}
 				if e.startupGuard != nil {
 					_ = e.startupGuard.Close()
 					e.startupGuard = nil
@@ -836,7 +878,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 // execs the real app under the same PID, so normal restart adoption still works.
 func (m *Manager) AcknowledgeReplicaStart(slug string, index int) error {
 	m.mu.Lock()
-	pool := m.entries[slug]
+	pool := m.entries[m.activePoolKeyLocked(slug)]
 	if index >= len(pool) || pool[index] == nil {
 		m.mu.Unlock()
 		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
@@ -844,6 +886,30 @@ func (m *Manager) AcknowledgeReplicaStart(slug string, index int) error {
 	guard := pool[index].startupGuard
 	pool[index].startupGuard = nil
 	m.mu.Unlock()
+	return acknowledgeStartupGuard(guard)
+}
+
+// AcknowledgeGenerationReplicaStart releases a candidate's startup guard
+// without changing or consulting the active pool.
+func (m *Manager) AcknowledgeGenerationReplicaStart(slug string, deploymentID int64, index int) error {
+	m.mu.Lock()
+	key, ok := m.poolKeyForDeploymentLocked(slug, deploymentID)
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("app %s deployment %d: %w", slug, deploymentID, ErrReplicaNotFound)
+	}
+	pool := m.entries[key]
+	if index >= len(pool) || pool[index] == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
+	}
+	guard := pool[index].startupGuard
+	pool[index].startupGuard = nil
+	m.mu.Unlock()
+	return acknowledgeStartupGuard(guard)
+}
+
+func acknowledgeStartupGuard(guard io.WriteCloser) error {
 	if guard == nil {
 		return nil
 	}
@@ -899,7 +965,14 @@ func (m *Manager) StopReplicaConfirmed(slug string, index int) error {
 
 func (m *Manager) stopReplica(slug string, index int, requireConfirmed bool) error {
 	m.mu.Lock()
-	pool := m.entries[slug]
+	poolKey := m.activePoolKeyLocked(slug)
+	m.mu.Unlock()
+	return m.stopReplicaByPoolKey(slug, poolKey, index, requireConfirmed)
+}
+
+func (m *Manager) stopReplicaByPoolKey(slug, poolKey string, index int, requireConfirmed bool) error {
+	m.mu.Lock()
+	pool := m.entries[poolKey]
 	if index >= len(pool) || pool[index] == nil {
 		m.mu.Unlock()
 		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
@@ -971,21 +1044,21 @@ func (m *Manager) stopReplica(slug string, index int, requireConfirmed bool) err
 	}
 
 	m.mu.Lock()
-	pool = m.entries[slug]
+	pool = m.entries[poolKey]
 	// Start may replace an exited entry after the monitor marks it stopped but
 	// before this waiter reacquires m.mu. Only clear the incarnation we actually
 	// signalled; stale cleanup must never orphan a live replacement.
 	if index < len(pool) && pool[index] == e {
 		// A clean stop is not a crash: drop only this incarnation's exit verdict.
-		delete(m.lastExit, replicaKey{slug, index})
+		delete(m.lastExit, replicaKey{poolKey, index})
 		pool[index] = nil
 		for len(pool) > 0 && pool[len(pool)-1] == nil {
 			pool = pool[:len(pool)-1]
 		}
 		if len(pool) == 0 {
-			delete(m.entries, slug)
+			delete(m.entries, poolKey)
 		} else {
-			m.entries[slug] = pool
+			m.entries[poolKey] = pool
 		}
 	}
 	m.mu.Unlock()
@@ -1027,7 +1100,8 @@ type containerRemover interface {
 func (m *Manager) EvictReplicaIfWorker(slug string, index int, workerID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pool := m.entries[slug]
+	poolKey := m.activePoolKeyLocked(slug)
+	pool := m.entries[poolKey]
 	if index >= len(pool) || pool[index] == nil {
 		return
 	}
@@ -1059,11 +1133,11 @@ func (m *Manager) EvictReplicaIfWorker(slug string, index int, workerID string) 
 		pool = pool[:len(pool)-1]
 	}
 	if len(pool) == 0 {
-		delete(m.entries, slug)
+		delete(m.entries, poolKey)
 	} else {
-		m.entries[slug] = pool
+		m.entries[poolKey] = pool
 	}
-	key := replicaKey{slug, index}
+	key := replicaKey{poolKey, index}
 	if lf := m.logFiles[key]; lf != nil {
 		lf.Close()
 		delete(m.logFiles, key)
@@ -1084,29 +1158,34 @@ func (m *Manager) StopConfirmed(slug string) error {
 
 func (m *Manager) stop(slug string, requireConfirmed bool) error {
 	m.mu.Lock()
-	pool := m.entries[slug]
-	indices := make([]int, 0, len(pool))
-	for i, e := range pool {
-		if e != nil {
-			indices = append(indices, i)
+	type stopTarget struct {
+		poolKey string
+		index   int
+	}
+	var targets []stopTarget
+	for poolKey, pool := range m.entries {
+		for i, e := range pool {
+			if e != nil && e.info.Slug == slug {
+				targets = append(targets, stopTarget{poolKey: poolKey, index: i})
+			}
 		}
 	}
 	m.mu.Unlock()
 
-	if len(indices) == 0 {
+	if len(targets) == 0 {
 		return fmt.Errorf("app %s: %w", slug, ErrReplicaNotFound)
 	}
 
 	var wg sync.WaitGroup
-	errs := make(chan error, len(indices))
-	for _, i := range indices {
+	errs := make(chan error, len(targets))
+	for _, target := range targets {
 		wg.Add(1)
-		go func(i int) {
+		go func(target stopTarget) {
 			defer wg.Done()
-			if err := m.stopReplica(slug, i, requireConfirmed); err != nil {
-				errs <- fmt.Errorf("replica %d: %w", i, err)
+			if err := m.stopReplicaByPoolKey(slug, target.poolKey, target.index, requireConfirmed); err != nil {
+				errs <- fmt.Errorf("replica %d: %w", target.index, err)
 			}
-		}(i)
+		}(target)
 	}
 	wg.Wait()
 	close(errs)
@@ -1135,7 +1214,8 @@ func (m *Manager) Suspend(slug string) (bool, error) {
 		tier   string
 	}
 	m.mu.Lock()
-	pool := m.entries[slug]
+	poolKey := m.activePoolKeyLocked(slug)
+	pool := m.entries[poolKey]
 	targets := make([]target, 0, len(pool))
 	for i, e := range pool {
 		if e != nil && e.info.Status == StatusRunning {
@@ -1178,7 +1258,7 @@ func (m *Manager) Suspend(slug string) (bool, error) {
 
 	if allFreed {
 		m.mu.Lock()
-		pool := m.entries[slug]
+		pool := m.entries[poolKey]
 		for _, t := range frozen {
 			// Re-check identity under the lock: a concurrent stop/replace may have
 			// niled or replaced this slot while Suspend ran unlocked. Only flip the
@@ -1218,7 +1298,8 @@ func (m *Manager) Suspend(slug string) (bool, error) {
 // on a driver error.
 func (m *Manager) SuspendReplica(slug string, index int) (bool, error) {
 	m.mu.Lock()
-	pool := m.entries[slug]
+	poolKey := m.activePoolKeyLocked(slug)
+	pool := m.entries[poolKey]
 	if index >= len(pool) || pool[index] == nil {
 		m.mu.Unlock()
 		return false, fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
@@ -1245,7 +1326,7 @@ func (m *Manager) SuspendReplica(slug string, index int) (bool, error) {
 	m.mu.Lock()
 	// Re-check identity under the lock: a concurrent stop/replace may have niled or
 	// replaced this slot while Suspend ran unlocked. Only flip the entry we froze.
-	if pool := m.entries[slug]; index < len(pool) && pool[index] != nil && pool[index].handle == handle {
+	if pool := m.entries[poolKey]; index < len(pool) && pool[index] != nil && pool[index].handle == handle {
 		pool[index].info.Status = StatusSuspended
 	}
 	m.mu.Unlock()
@@ -1260,7 +1341,8 @@ func (m *Manager) SuspendReplica(slug string, index int) (bool, error) {
 // cold-boots it instead.
 func (m *Manager) Resume(slug string, index int) (ReplicaEndpoint, error) {
 	m.mu.Lock()
-	pool := m.entries[slug]
+	poolKey := m.activePoolKeyLocked(slug)
+	pool := m.entries[poolKey]
 	if index >= len(pool) || pool[index] == nil {
 		m.mu.Unlock()
 		return ReplicaEndpoint{}, fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
@@ -1288,7 +1370,7 @@ func (m *Manager) Resume(slug string, index int) (ReplicaEndpoint, error) {
 	// Re-check identity under the lock: only update the entry we resumed, never a
 	// fresh replacement created by a concurrent stop/start while Resume ran
 	// unlocked (matches the Start/StopReplica handle-equality idiom).
-	if pool := m.entries[slug]; index < len(pool) && pool[index] != nil && pool[index].handle == handle {
+	if pool := m.entries[poolKey]; index < len(pool) && pool[index] != nil && pool[index].handle == handle {
 		if ep.URL == "" {
 			// In-place resume (e.g. docker unpause) preserves the route; keep the
 			// known endpoint URL rather than clobbering it with an empty one. A
@@ -1310,16 +1392,20 @@ func (m *Manager) Resume(slug string, index int) (ReplicaEndpoint, error) {
 // aggregated; a failure to stop one app does not block the others.
 func (m *Manager) StopAll() error {
 	m.mu.Lock()
-	slugs := make([]string, 0, len(m.entries))
-	for slug, pool := range m.entries {
+	slugSet := make(map[string]struct{}, len(m.entries))
+	for _, pool := range m.entries {
 		for _, e := range pool {
 			if e != nil {
-				slugs = append(slugs, slug)
+				slugSet[e.info.Slug] = struct{}{}
 				break
 			}
 		}
 	}
 	m.mu.Unlock()
+	slugs := make([]string, 0, len(slugSet))
+	for slug := range slugSet {
+		slugs = append(slugs, slug)
+	}
 
 	var wg sync.WaitGroup
 	errs := make(chan error, len(slugs))
@@ -1346,7 +1432,7 @@ func (m *Manager) StopAll() error {
 func (m *Manager) Status(slug string) (*ProcessInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, e := range m.entries[slug] {
+	for _, e := range m.entries[m.activePoolKeyLocked(slug)] {
 		if e != nil && e.info.Status == StatusRunning {
 			snap := *e.info
 			return &snap, nil
@@ -1394,7 +1480,7 @@ func (m *Manager) All() []*ProcessInfo {
 func (m *Manager) AllForSlug(slug string) []*ProcessInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pool := m.entries[slug]
+	pool := m.entries[m.activePoolKeyLocked(slug)]
 	out := make([]*ProcessInfo, len(pool))
 	for i, e := range pool {
 		if e != nil {
@@ -1409,7 +1495,7 @@ func (m *Manager) AllForSlug(slug string) []*ProcessInfo {
 func (m *Manager) GetReplica(slug string, index int) (*ProcessInfo, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pool := m.entries[slug]
+	pool := m.entries[m.activePoolKeyLocked(slug)]
 	if index >= len(pool) || pool[index] == nil {
 		return nil, false
 	}
@@ -1417,15 +1503,140 @@ func (m *Manager) GetReplica(slug string, index int) (*ProcessInfo, bool) {
 	return &snap, true
 }
 
+// HasRunning reports whether any replica in the slug's selected active pool is
+// still running. Deployment admission must not infer liveness from slot zero:
+// a degraded multi-replica pool may still be serving from another slot.
+func (m *Manager) HasRunning(slug string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, entry := range m.entries[m.activePoolKeyLocked(slug)] {
+		if entry != nil && entry.info.Status == StatusRunning {
+			return true
+		}
+	}
+	return false
+}
+
 // HandleReplica returns the RunHandle for a specific replica, or false if not tracked.
 func (m *Manager) HandleReplica(slug string, index int) (RunHandle, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pool := m.entries[slug]
+	pool := m.entries[m.activePoolKeyLocked(slug)]
 	if index >= len(pool) || pool[index] == nil {
 		return RunHandle{}, false
 	}
 	return pool[index].handle, true
+}
+
+// GetGenerationReplica returns a replica from one exact deployment generation,
+// whether that generation is staged, active, or draining.
+func (m *Manager) GetGenerationReplica(slug string, deploymentID int64, index int) (*ProcessInfo, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key, ok := m.poolKeyForDeploymentLocked(slug, deploymentID)
+	if !ok {
+		return nil, false
+	}
+	pool := m.entries[key]
+	if index < 0 || index >= len(pool) || pool[index] == nil {
+		return nil, false
+	}
+	snap := *pool[index].info
+	return &snap, true
+}
+
+// HandleGenerationReplica returns the runtime handle for one exact generation.
+func (m *Manager) HandleGenerationReplica(slug string, deploymentID int64, index int) (RunHandle, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key, ok := m.poolKeyForDeploymentLocked(slug, deploymentID)
+	if !ok {
+		return RunHandle{}, false
+	}
+	pool := m.entries[key]
+	if index < 0 || index >= len(pool) || pool[index] == nil {
+		return RunHandle{}, false
+	}
+	return pool[index].handle, true
+}
+
+// ActivateGeneration atomically selects a fully staged manager pool for all
+// ordinary slug-based operations. It does not stop the previous generation.
+func (m *Manager) ActivateGeneration(slug string, deploymentID int64) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	candidateKey := generationPoolKey(slug, deploymentID)
+	candidate := m.entries[candidateKey]
+	if len(candidate) == 0 {
+		return 0, fmt.Errorf("activate generation %d for %s: %w", deploymentID, slug, ErrReplicaNotFound)
+	}
+	for i, e := range candidate {
+		if e == nil || e.info.Status != StatusRunning {
+			return 0, fmt.Errorf("activate generation %d for %s: replica %d is not running", deploymentID, slug, i)
+		}
+	}
+	activeKey := m.activePoolKeyLocked(slug)
+	var previous int64
+	for _, e := range m.entries[activeKey] {
+		if e != nil {
+			previous = e.info.DeploymentID
+			break
+		}
+	}
+	m.activePoolKeys[slug] = candidateKey
+	return previous, nil
+}
+
+// SelectGeneration points ordinary slug-based operations at any already
+// tracked generation. It is used to compensate a partially completed
+// activation; unlike ActivateGeneration it does not require a staged key.
+func (m *Manager) SelectGeneration(slug string, deploymentID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key, ok := m.poolKeyForDeploymentLocked(slug, deploymentID)
+	if !ok {
+		return fmt.Errorf("select generation %d for %s: %w", deploymentID, slug, ErrReplicaNotFound)
+	}
+	m.activePoolKeys[slug] = key
+	return nil
+}
+
+// StopGeneration retires one exact generation without disturbing the active
+// generation selected for the app.
+func (m *Manager) StopGeneration(slug string, deploymentID int64) error {
+	m.mu.Lock()
+	poolKey, ok := m.poolKeyForDeploymentLocked(slug, deploymentID)
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("app %s deployment %d: %w", slug, deploymentID, ErrReplicaNotFound)
+	}
+	pool := m.entries[poolKey]
+	indices := make([]int, 0, len(pool))
+	for i, e := range pool {
+		if e != nil {
+			indices = append(indices, i)
+		}
+	}
+	m.mu.Unlock()
+	var errs []error
+	for _, index := range indices {
+		if err := m.stopReplicaByPoolKey(slug, poolKey, index, true); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// StopGenerationReplica stops one exact candidate/draining replica without
+// resolving through the app's active-generation pointer.
+func (m *Manager) StopGenerationReplica(slug string, deploymentID int64, index int, requireConfirmed bool) error {
+	m.mu.Lock()
+	poolKey, ok := m.poolKeyForDeploymentLocked(slug, deploymentID)
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("app %s deployment %d replica %d: %w", slug, deploymentID, index, ErrReplicaNotFound)
+	}
+	return m.stopReplicaByPoolKey(slug, poolKey, index, requireConfirmed)
 }
 
 // Adopt re-registers a process that was not started by this Manager instance
@@ -1470,7 +1681,12 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 	// best-effort: ErrRuntimeNotSnapshotter (warm-wake off) is silent, and any
 	// other error means the warm state is gone, so the replica hibernates via
 	// Stop, exactly as before this re-registration existed.
-	if rd, ok := rt.(WarmReadopter); ok {
+	if rd, ok := rt.(DeploymentWarmReadopter); ok && info.DeploymentID > 0 {
+		if err := rd.ReadoptDeploymentWarm(slug, info.DeploymentID, info.Index, handle.PID); err != nil && !errors.Is(err, ErrRuntimeNotSnapshotter) {
+			slog.Warn("manager: warm re-adopt failed; replica will hibernate via stop",
+				"slug", slug, "idx", info.Index, "err", err)
+		}
+	} else if rd, ok := rt.(WarmReadopter); ok {
 		if err := rd.ReadoptWarm(slug, info.Index, handle.PID); err != nil && !errors.Is(err, ErrRuntimeNotSnapshotter) {
 			slog.Warn("manager: warm re-adopt failed; replica will hibernate via stop",
 				"slug", slug, "idx", info.Index, "err", err)
@@ -1478,7 +1694,12 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 	}
 	// Re-register the resource-limit cgroup independent of warm-wake so an adopted
 	// limited replica can still be torn down and have OOM-kills detected.
-	if cr, ok := rt.(CgroupReadopter); ok {
+	if cr, ok := rt.(DeploymentCgroupReadopter); ok && info.DeploymentID > 0 {
+		if err := cr.ReadoptDeploymentCgroup(slug, info.DeploymentID, info.Index, handle.PID); err != nil {
+			slog.Warn("manager: resource-limit cgroup re-adopt failed",
+				"slug", slug, "idx", info.Index, "err", err)
+		}
+	} else if cr, ok := rt.(CgroupReadopter); ok {
 		if err := cr.ReadoptCgroup(slug, info.Index, handle.PID); err != nil {
 			slog.Warn("manager: resource-limit cgroup re-adopt failed",
 				"slug", slug, "idx", info.Index, "err", err)
@@ -1586,7 +1807,7 @@ func (m *Manager) ResourceEnforcement(tiers ...string) (memory, cpu bool) {
 func (m *Manager) LastExit(slug string, index int) (ExitVerdict, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v, ok := m.lastExit[replicaKey{slug, index}]
+	v, ok := m.lastExit[replicaKey{m.activePoolKeyLocked(slug), index}]
 	return v, ok
 }
 
@@ -1596,12 +1817,13 @@ func (m *Manager) LastExit(slug string, index int) (ExitVerdict, bool) {
 func (m *Manager) ForceEntry(slug string, info ProcessInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pool := m.entries[slug]
+	poolKey := m.activePoolKeyLocked(slug)
+	pool := m.entries[poolKey]
 	for len(pool) <= info.Index {
 		pool = append(pool, nil)
 	}
 	pool[info.Index] = &entry{info: &info, handle: RunHandle{PID: info.PID}, tier: m.defaultTier, done: make(chan struct{})}
-	m.entries[slug] = pool
+	m.entries[poolKey] = pool
 }
 
 // LogTail returns the last n lines of a replica's log file joined by newlines,

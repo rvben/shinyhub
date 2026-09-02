@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,6 +34,37 @@ func liveListener(t *testing.T) int {
 	}
 	t.Cleanup(func() { ln.Close() })
 	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// startNativeProcess launches a real process-group leader in bundleDir. The
+// recovery tests use it to exercise PID/CWD ownership checks and physical
+// termination rather than only database projection logic.
+func startNativeProcess(t *testing.T, bundleDir string) (int, <-chan error) {
+	t.Helper()
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skipf("sleep unavailable: %v", err)
+	}
+	cmd := exec.Command(sleep, "30")
+	cmd.Dir = bundleDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start native test process: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Errorf("native test process %d did not exit", cmd.Process.Pid)
+		}
+	})
+	return cmd.Process.Pid, done
 }
 
 // fakeDockerRuntime is a process.Runtime that also implements
@@ -125,6 +157,344 @@ func mustCreateApp(t *testing.T, store *db.Store, slug string) *db.App {
 func mustOpenStore(t *testing.T) *db.Store {
 	t.Helper()
 	return dbtest.New(t)
+}
+
+func seedRecoveryReplica(t *testing.T, store *db.Store, app *db.App, deployment *db.Deployment) {
+	t.Helper()
+	deploymentID := deployment.ID
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: "running", Provider: "native",
+		AppVersion: deployment.Version, DeploymentID: &deploymentID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE id=?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecoverProcesses_GenerationCrashBeforePromotePreservesActiveProjection(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "generation-before-promote")
+	active, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(active.ID); err != nil {
+		t.Fatal(err)
+	}
+	seedRecoveryReplica(t, store, app, active)
+
+	candidate, err := store.BeginDeployment(app.ID, "v2", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+		AppID: app.ID, DeploymentID: candidate.ID, Index: 0, Status: "running", Provider: "native",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "")
+
+	replicas, err := store.ListReplicas(app.ID)
+	if err != nil || len(replicas) != 1 {
+		t.Fatalf("active projection after recovery = %+v, err=%v", replicas, err)
+	}
+	if replicas[0].DeploymentID == nil || *replicas[0].DeploymentID != active.ID {
+		t.Fatalf("active projection deployment = %v, want %d", replicas[0].DeploymentID, active.ID)
+	}
+	generationRows, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil || len(generationRows) != 1 || generationRows[0].DeploymentID != candidate.ID {
+		t.Fatalf("unrouted-authority cleanup ledger = %+v, err=%v; want candidate retained", generationRows, err)
+	}
+}
+
+func TestRecoverProcesses_GenerationCrashAfterPromotePublishesCandidateProjection(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "generation-after-promote")
+	old, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(old.ID); err != nil {
+		t.Fatal(err)
+	}
+	seedRecoveryReplica(t, store, app, old)
+
+	candidate, err := store.BeginDeployment(app.ID, "v2", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, deployment := range []*db.Deployment{old, candidate} {
+		if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+			AppID: app.ID, DeploymentID: deployment.ID, Index: 0, Status: "running", Provider: "native",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.PromoteDeployment(candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "")
+
+	replicas, err := store.ListReplicas(app.ID)
+	if err != nil || len(replicas) != 1 {
+		t.Fatalf("candidate projection after recovery = %+v, err=%v", replicas, err)
+	}
+	if replicas[0].DeploymentID == nil || *replicas[0].DeploymentID != candidate.ID {
+		t.Fatalf("candidate projection deployment = %v, want %d", replicas[0].DeploymentID, candidate.ID)
+	}
+	if replicas[0].AppVersion != candidate.Version {
+		t.Fatalf("candidate projection version = %q, want %q", replicas[0].AppVersion, candidate.Version)
+	}
+	generationRows, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil || len(generationRows) != 1 || generationRows[0].DeploymentID != old.ID {
+		t.Fatalf("unrouted-authority cleanup ledger = %+v, err=%v; want old generation retained", generationRows, err)
+	}
+}
+
+func TestRecoverProcesses_GenerationCrashAfterPromoteStopsRealOldProcessAndAdoptsCandidate(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "generation-real-processes")
+	oldBundle := t.TempDir()
+	old, err := store.BeginDeployment(app.ID, "v1", oldBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(old.ID); err != nil {
+		t.Fatal(err)
+	}
+	candidateBundle := t.TempDir()
+	candidate, err := store.BeginDeployment(app.ID, "v2", candidateBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldPID, oldDone := startNativeProcess(t, oldBundle)
+	candidatePID, _ := startNativeProcess(t, candidateBundle)
+	oldPort, candidatePort := liveListener(t), liveListener(t)
+	oldID := old.ID
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &oldPID, Port: &oldPort,
+		Status: db.ReplicaStatusRunning, Provider: "native",
+		AppVersion: old.Version, DesiredState: "running", DeploymentID: &oldID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, replica := range []db.UpsertDeploymentReplicaParams{
+		{AppID: app.ID, DeploymentID: old.ID, Index: 0, PID: &oldPID, Port: &oldPort, Status: db.ReplicaStatusRunning, Provider: "native"},
+		{AppID: app.ID, DeploymentID: candidate.ID, Index: 0, PID: &candidatePID, Port: &candidatePort, Status: db.ReplicaStatusRunning, Provider: "native"},
+	} {
+		if err := store.UpsertDeploymentReplica(replica); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE id=?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	prx := proxy.New()
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	t.Cleanup(func() { _ = mgr.Stop(app.Slug) })
+
+	select {
+	case <-oldDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("old generation process %d survived recovery", oldPID)
+	}
+	info, ok := mgr.GetReplica(app.Slug, 0)
+	if !ok || info.PID != candidatePID || info.DeploymentID != candidate.ID || info.AppVersion != candidate.Version {
+		t.Fatalf("adopted replica = %+v, ok=%v; want candidate PID %d deployment %d", info, ok, candidatePID, candidate.ID)
+	}
+	if got := prx.ReplicaTargetURL(app.Slug, 0); got != "http://127.0.0.1:"+strconv.Itoa(candidatePort) {
+		t.Fatalf("proxy target = %q, want candidate port %d", got, candidatePort)
+	}
+	rows, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("reconciled generation identities = %+v, err=%v", rows, err)
+	}
+}
+
+func TestRecoverProcesses_PreCommitCleanupFailureStillRoutesAuthoritativeGeneration(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "generation-precommit-cleanup-fails")
+	oldBundle := t.TempDir()
+	old, err := store.BeginDeployment(app.ID, "v1", oldBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(old.ID); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := store.BeginDeployment(app.ID, "v2", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPID, _ := startNativeProcess(t, oldBundle)
+	oldPort := liveListener(t)
+	oldID := old.ID
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &oldPID, Port: &oldPort,
+		Status: db.ReplicaStatusRunning, Provider: "native", AppVersion: old.Version,
+		DesiredState: "running", DeploymentID: &oldID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+		AppID: app.ID, DeploymentID: old.ID, Index: 0, PID: &oldPID, Port: &oldPort,
+		Status: db.ReplicaStatusRunning, Provider: "native",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wrongPID, wrongPort := os.Getpid(), 29991
+	if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+		AppID: app.ID, DeploymentID: candidate.ID, Index: 0, PID: &wrongPID, Port: &wrongPort,
+		Status: db.ReplicaStatusRunning, Provider: "native",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE id=?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	prx := proxy.New()
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	t.Cleanup(func() { _ = mgr.Stop(app.Slug) })
+	if info, ok := mgr.GetReplica(app.Slug, 0); !ok || info.PID != oldPID || info.DeploymentID != old.ID {
+		t.Fatalf("authoritative old generation not adopted: info=%+v ok=%v", info, ok)
+	}
+	if got := prx.ReplicaTargetURL(app.Slug, 0); got == "" {
+		t.Fatal("authoritative old generation was not routed")
+	}
+	rows, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil || len(rows) != 1 || rows[0].DeploymentID != candidate.ID {
+		t.Fatalf("failed cleanup ledger = %+v, err=%v; want candidate retained", rows, err)
+	}
+}
+
+func TestRecoverProcesses_PostCommitCleanupFailureStillRoutesAuthoritativeGeneration(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "generation-postcommit-cleanup-fails")
+	old, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(old.ID); err != nil {
+		t.Fatal(err)
+	}
+	candidateBundle := t.TempDir()
+	candidate, err := store.BeginDeployment(app.ID, "v2", candidateBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	candidatePID, _ := startNativeProcess(t, candidateBundle)
+	candidatePort := liveListener(t)
+	candidateID := candidate.ID
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &candidatePID, Port: &candidatePort,
+		Status: db.ReplicaStatusRunning, Provider: "native", AppVersion: candidate.Version,
+		DesiredState: "running", DeploymentID: &candidateID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wrongPID, wrongPort := os.Getpid(), 29992
+	if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+		AppID: app.ID, DeploymentID: old.ID, Index: 0, PID: &wrongPID, Port: &wrongPort,
+		Status: db.ReplicaStatusRunning, Provider: "native",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE id=?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	prx := proxy.New()
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	t.Cleanup(func() { _ = mgr.Stop(app.Slug) })
+	if info, ok := mgr.GetReplica(app.Slug, 0); !ok || info.PID != candidatePID || info.DeploymentID != candidate.ID {
+		t.Fatalf("authoritative candidate not adopted: info=%+v ok=%v", info, ok)
+	}
+	if got := prx.ReplicaTargetURL(app.Slug, 0); got == "" {
+		t.Fatal("authoritative candidate was not routed")
+	}
+	rows, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil || len(rows) != 1 || rows[0].DeploymentID != old.ID {
+		t.Fatalf("failed cleanup ledger = %+v, err=%v; want old generation retained", rows, err)
+	}
+}
+
+func TestRecoverProcesses_DeferredRetirementStopsOldAfterRoutingCandidate(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "generation-deferred-retirement")
+	oldBundle := t.TempDir()
+	old, err := store.BeginDeployment(app.ID, "v1", oldBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(old.ID); err != nil {
+		t.Fatal(err)
+	}
+	candidateBundle := t.TempDir()
+	candidate, err := store.BeginDeployment(app.ID, "v2", candidateBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	oldPID, oldDone := startNativeProcess(t, oldBundle)
+	candidatePID, _ := startNativeProcess(t, candidateBundle)
+	oldPort, candidatePort := liveListener(t), liveListener(t)
+	candidateID := candidate.ID
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, PID: &candidatePID, Port: &candidatePort,
+		Status: db.ReplicaStatusRunning, Provider: "native", AppVersion: candidate.Version,
+		DesiredState: "running", DeploymentID: &candidateID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+		AppID: app.ID, DeploymentID: old.ID, Index: 0, PID: &oldPID, Port: &oldPort,
+		Status: db.ReplicaStatusRunning, Provider: "native",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE id=?`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	prx := proxy.New()
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	t.Cleanup(func() { _ = mgr.Stop(app.Slug) })
+	if info, ok := mgr.GetReplica(app.Slug, 0); !ok || info.PID != candidatePID {
+		t.Fatalf("candidate not adopted before cleanup: info=%+v ok=%v", info, ok)
+	}
+	if got := prx.ReplicaTargetURL(app.Slug, 0); got == "" {
+		t.Fatal("candidate was not routed")
+	}
+	select {
+	case <-oldDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("deferred old process %d survived recovery", oldPID)
+	}
+	rows, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("deferred cleanup ledger = %+v, err=%v; want cleared", rows, err)
+	}
 }
 
 func TestRecoverProcesses_DeadPID(t *testing.T) {

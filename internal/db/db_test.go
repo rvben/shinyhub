@@ -1098,6 +1098,179 @@ func TestSetDeploymentDigest(t *testing.T) {
 	}
 }
 
+func TestPromoteDeploymentPublishesOpaqueActiveGeneration(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "generation-owner", "developer")
+	app := mustCreateApp(t, store, "generation-app", owner.ID)
+
+	first, err := store.BeginDeployment(app.ID, "v1", "/tmp/v1")
+	if err != nil {
+		t.Fatalf("begin first deployment: %v", err)
+	}
+	if first.ActivationToken == "" {
+		t.Fatal("first deployment has an empty activation token")
+	}
+	if first.ActivationToken == fmt.Sprint(first.ID) {
+		t.Fatal("activation token must not expose the deployment ID")
+	}
+	if err := store.PromoteDeployment(first.ID); err != nil {
+		t.Fatalf("promote first deployment: %v", err)
+	}
+
+	active, err := store.GetActiveDeploymentGeneration(app.ID)
+	if err != nil {
+		t.Fatalf("get first active generation: %v", err)
+	}
+	if active.DeploymentID != first.ID || active.ActivationToken != first.ActivationToken {
+		t.Fatalf("active generation = %+v, want deployment %d token %q", active, first.ID, first.ActivationToken)
+	}
+
+	second, err := store.BeginDeployment(app.ID, "v2", "/tmp/v2")
+	if err != nil {
+		t.Fatalf("begin second deployment: %v", err)
+	}
+	if second.ActivationToken == "" || second.ActivationToken == first.ActivationToken {
+		t.Fatalf("second activation token = %q, want a new non-empty token", second.ActivationToken)
+	}
+
+	// Staging a candidate must not change the public generation.
+	active, err = store.GetActiveDeploymentGeneration(app.ID)
+	if err != nil {
+		t.Fatalf("get active generation while candidate pending: %v", err)
+	}
+	if active.DeploymentID != first.ID {
+		t.Fatalf("pending candidate became active: got %d, want %d", active.DeploymentID, first.ID)
+	}
+
+	if err := store.PromoteDeployment(second.ID); err != nil {
+		t.Fatalf("promote second deployment: %v", err)
+	}
+	active, err = store.GetActiveDeploymentGeneration(app.ID)
+	if err != nil {
+		t.Fatalf("get second active generation: %v", err)
+	}
+	if active.DeploymentID != second.ID || active.ActivationToken != second.ActivationToken {
+		t.Fatalf("active generation = %+v, want deployment %d token %q", active, second.ID, second.ActivationToken)
+	}
+}
+
+func TestRevertDeploymentActivationRestoresPointerAndFailsCandidate(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "generation-revert-owner", "developer")
+	app := mustCreateApp(t, store, "generation-revert", owner.ID)
+	first, err := store.BeginDeployment(app.ID, "v1", "/tmp/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.BeginDeployment(app.ID, "v2", "/tmp/v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevertDeploymentActivation(second.ID, first.ID, "runtime switch failed"); err != nil {
+		t.Fatalf("revert activation: %v", err)
+	}
+	active, err := store.GetActiveDeploymentGeneration(app.ID)
+	if err != nil || active.DeploymentID != first.ID {
+		t.Fatalf("active after revert = %+v, err=%v; want %d", active, err, first.ID)
+	}
+	reverted, err := store.GetDeploymentByID(second.ID)
+	if err != nil || reverted.Status != db.DeploymentFailed {
+		t.Fatalf("candidate after revert = %+v, err=%v; want failed", reverted, err)
+	}
+}
+
+func TestDeploymentReplicaIdentityAllowsParallelGenerations(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "generation-replica-owner", "developer")
+	app := mustCreateApp(t, store, "generation-replicas", owner.ID)
+	first, err := store.BeginDeployment(app.ID, "v1", "/tmp/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.BeginDeployment(app.ID, "v2", "/tmp/v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, dep := range []*db.Deployment{first, second} {
+		pid, port := 4100+i, 5100+i
+		if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+			AppID: app.ID, DeploymentID: dep.ID, Index: 0, PID: &pid, Port: &port,
+			Status: "starting", Provider: "native", EndpointURL: fmt.Sprintf("http://127.0.0.1:%d", port),
+		}); err != nil {
+			t.Fatalf("upsert deployment %d replica: %v", dep.ID, err)
+		}
+	}
+	replicas, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil {
+		t.Fatalf("list deployment replicas: %v", err)
+	}
+	if len(replicas) != 2 || replicas[0].Index != replicas[1].Index || replicas[0].DeploymentID == replicas[1].DeploymentID {
+		t.Fatalf("parallel deployment replicas = %+v, want two generations at index 0", replicas)
+	}
+}
+
+func TestDeploymentReplicaRejectsCrossAppOwnership(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "generation-owner-boundary", "developer")
+	firstApp := mustCreateApp(t, store, "generation-owner-a", owner.ID)
+	secondApp := mustCreateApp(t, store, "generation-owner-b", owner.ID)
+	deployment, err := store.BeginDeployment(firstApp.ID, "v1", "/tmp/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+		AppID: secondApp.ID, DeploymentID: deployment.ID, Index: 0, Status: "starting",
+	}); err == nil {
+		t.Fatal("cross-app deployment replica ownership was accepted")
+	}
+}
+
+func TestRepairDeploymentGenerationLedgerAdoptsLateLegacySuccess(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "generation-ledger-repair-owner", "developer")
+	app := mustCreateApp(t, store, "generation-ledger-repair", owner.ID)
+	first, err := store.BeginDeployment(app.ID, "v1", "/tmp/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(first.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a predecessor binary whose handler was admitted before the new
+	// owner's migration/fence: it knows neither activation_token nor the app's
+	// active pointer and commits only the legacy succeeded deployment row.
+	var lateID int64
+	if err := store.DB().QueryRow(`
+		INSERT INTO deployments (app_id, version, bundle_dir, status, prior_schedule_snapshot_recorded)
+		VALUES (?, 'v2-legacy', '/tmp/v2', ?, 1) RETURNING id`, app.ID, db.DeploymentSucceeded).Scan(&lateID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.GetActiveDeploymentGeneration(app.ID)
+	if err != nil || before.DeploymentID != first.ID {
+		t.Fatalf("pre-repair active = %+v, err=%v; want %d", before, err, first.ID)
+	}
+	if err := store.RepairDeploymentGenerationLedger(); err != nil {
+		t.Fatalf("repair generation ledger: %v", err)
+	}
+	after, err := store.GetActiveDeploymentGeneration(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.DeploymentID != lateID || after.ActivationToken == "" {
+		t.Fatalf("post-repair active = %+v, want deployment %d with token", after, lateID)
+	}
+	if after.ActivationToken == first.ActivationToken {
+		t.Fatal("repair reused the prior generation token")
+	}
+}
+
 func TestUpsertSystemUser_CreatesExplicitServiceAccount(t *testing.T) {
 	store := dbtest.New(t)
 

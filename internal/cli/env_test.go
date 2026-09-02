@@ -13,11 +13,12 @@ import (
 )
 
 type capturedReq struct {
-	Method string
-	Path   string
-	Query  string
-	Body   []byte
-	Auth   string
+	Method        string
+	Path          string
+	Query         string
+	Body          []byte
+	Auth          string
+	AllowDowntime string
 }
 
 // writeTestCLIConfig points the CLI at host by writing a config.json into a
@@ -67,11 +68,12 @@ func setupCLITestHandler(t *testing.T, handler http.HandlerFunc) (*httptest.Serv
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		reqs = append(reqs, capturedReq{
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Query:  r.URL.RawQuery,
-			Body:   body,
-			Auth:   r.Header.Get("Authorization"),
+			Method:        r.Method,
+			Path:          r.URL.Path,
+			Query:         r.URL.RawQuery,
+			Body:          body,
+			Auth:          r.Header.Get("Authorization"),
+			AllowDowntime: r.Header.Get("X-ShinyHub-Allow-Downtime"),
 		})
 		handler(w, r)
 	}))

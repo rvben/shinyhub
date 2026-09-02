@@ -21,6 +21,7 @@ func deployManifestBundle(t *testing.T, srv *Server, token, slug, manifest strin
 	req := httptest.NewRequest("POST", "/api/apps/"+slug+"/deploy", body)
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

@@ -41,12 +41,22 @@ type manifestFakeRuntime struct {
 	producerEntered  chan struct{}
 	producerBlock    chan struct{}
 	producerErr      error
+	provider         string
+	signalFailures   map[int]error
+	signalCalls      map[int]int
+	serveTraffic     bool
+	servers          map[int]*httptest.Server
+	holdStarted      chan struct{}
+	holdRelease      chan struct{}
 }
 
 func newManifestFakeRuntime() *manifestFakeRuntime {
 	return &manifestFakeRuntime{
-		nextPID: 30000,
-		stops:   make(map[int]chan struct{}),
+		nextPID:        30000,
+		stops:          make(map[int]chan struct{}),
+		signalFailures: make(map[int]error),
+		signalCalls:    make(map[int]int),
+		servers:        make(map[int]*httptest.Server),
 	}
 }
 
@@ -57,9 +67,30 @@ func (f *manifestFakeRuntime) Start(_ context.Context, p process.StartParams, _ 
 	pid := f.nextPID
 	f.nextPID++
 	f.stops[pid] = make(chan struct{})
+	provider := f.provider
+	if provider == "" {
+		provider = "native"
+	}
+	targetURL := fmt.Sprintf("http://127.0.0.1:%d", p.Port)
+	if f.serveTraffic {
+		version := p.AppVersion
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("hold") == "1" && f.holdStarted != nil && f.holdRelease != nil {
+				select {
+				case f.holdStarted <- struct{}{}:
+				default:
+				}
+				<-f.holdRelease
+			}
+			w.Header().Set("X-Test-App-Version", version)
+			_, _ = io.WriteString(w, version)
+		}))
+		f.servers[pid] = server
+		targetURL = server.URL
+	}
 	return process.ReplicaEndpoint{
-		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
-		Provider: "native",
+		URL:      targetURL,
+		Provider: provider,
 		WorkerID: fmt.Sprintf("%d", pid),
 		Handle:   process.RunHandle{PID: pid},
 	}, nil
@@ -67,9 +98,18 @@ func (f *manifestFakeRuntime) Start(_ context.Context, p process.StartParams, _ 
 
 func (f *manifestFakeRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
 	f.mu.Lock()
+	f.signalCalls[h.PID]++
+	if err := f.signalFailures[h.PID]; err != nil {
+		f.mu.Unlock()
+		return err
+	}
 	ch, ok := f.stops[h.PID]
+	server := f.servers[h.PID]
 	f.mu.Unlock()
 	if ok && (sig == syscall.SIGTERM || sig == syscall.SIGKILL) {
+		if server != nil {
+			server.Close()
+		}
 		select {
 		case <-ch:
 		default:
@@ -534,6 +574,7 @@ cmd     = "echo hello"
 	req2 := httptest.NewRequest("POST", "/api/apps/myapp/deploy", body2)
 	req2.Header.Set("Content-Type", ctype2)
 	req2.Header.Set("Authorization", "Bearer "+token)
+	req2.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 
 	rec2 := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec2, req2)
@@ -782,6 +823,7 @@ cmd  = "echo n"
 	req2 := httptest.NewRequest("POST", "/api/apps/summary/deploy", body2)
 	req2.Header.Set("Content-Type", ctype2)
 	req2.Header.Set("Authorization", "Bearer "+token)
+	req2.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	rec2 := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusOK {
@@ -1192,6 +1234,7 @@ deploy_trigger = "bundle_change"
 	req2 := httptest.NewRequest("POST", "/api/apps/warmapp/deploy", body2)
 	req2.Header.Set("Content-Type", ct2)
 	req2.Header.Set("Authorization", "Bearer "+token)
+	req2.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	rr2 := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rr2, req2)
 	if rr2.Code != http.StatusOK {
@@ -1240,6 +1283,7 @@ deploy_trigger = "bundle_change"
 	req3 := httptest.NewRequest("POST", "/api/apps/warmapp/deploy", body3)
 	req3.Header.Set("Content-Type", ct3)
 	req3.Header.Set("Authorization", "Bearer "+token)
+	req3.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	rr3 := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rr3, req3)
 	if rr3.Code != http.StatusOK {
@@ -1291,6 +1335,7 @@ deploy_trigger = "bundle_change"
 		req := httptest.NewRequest(http.MethodPost, "/api/apps/durable-retry/deploy", body)
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 		rec := httptest.NewRecorder()
 		srv.Router().ServeHTTP(rec, req)
 		return rec
@@ -1355,6 +1400,7 @@ func TestDeploy_StoppedCorrectiveTargetWithoutProducerCannotLaunderFailedBarrier
 		req := httptest.NewRequest(http.MethodPost, "/api/apps/stopped-repair/deploy", body)
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 		rec := httptest.NewRecorder()
 		srv.Router().ServeHTTP(rec, req)
 		return rec
@@ -1456,6 +1502,7 @@ func TestDeploy_FailedCorrectiveRetryInheritsQuarantineAndNeverRestoresOldConsum
 		req := httptest.NewRequest(http.MethodPost, "/api/apps/failed-repair/deploy", body)
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 		rec := httptest.NewRecorder()
 		srv.Router().ServeHTTP(rec, req)
 		return rec
@@ -1668,6 +1715,7 @@ deploy_trigger = "bundle_change"
 		req := httptest.NewRequest(http.MethodPost, "/api/apps/rollback-warm/deploy", body)
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 		rec := httptest.NewRecorder()
 		srv.Router().ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {

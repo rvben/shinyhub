@@ -82,8 +82,8 @@ func overlayPageScript(slug string) pageScript {
 }
 
 // navPageScript is the app switcher as an injectable script.
-func navPageScript(slug, name, homeURL string) pageScript {
-	return pageScript{snippet: appnav.SnippetWithName(slug, name, homeURL), cspHash: appnav.CSPHash}
+func navPageScript(slug, name, homeURL, generation string) pageScript {
+	return pageScript{snippet: appnav.SnippetWithGeneration(slug, name, homeURL, generation), cspHash: appnav.CSPHash}
 }
 
 // extendCSPForScripts returns policy with each hash allowed for scripts, and
@@ -379,7 +379,7 @@ func (p *Proxy) decorateAppPage(page, slug string, r *http.Request) string {
 // registered, because backends are registered once and live for the process: a
 // value sampled at registration would make SetStatusOverlay and SetAppNav
 // silently apply only to apps deployed after the call.
-func (p *Proxy) pageScriptsFor(r *http.Request, slug string) []pageScript {
+func (p *Proxy) pageScriptsFor(r *http.Request, slug string, deploymentID int64) []pageScript {
 	var scripts []pageScript
 	support := p.supportPageScript(r, slug)
 	if support != nil {
@@ -389,7 +389,7 @@ func (p *Proxy) pageScriptsFor(r *http.Request, slug string) []pageScript {
 		scripts = append(scripts, overlayPageScript(slug))
 	}
 	if nav := p.appNav.Load(); nav != nil && support == nil {
-		scripts = append(scripts, navPageScript(slug, p.appName(slug), nav.homeURL))
+		scripts = append(scripts, navPageScript(slug, p.appName(slug), nav.homeURL, p.generationActivationToken(slug, deploymentID)))
 	}
 	return scripts
 }
@@ -652,9 +652,13 @@ func chainModifyResponse(hooks ...func(*http.Response) error) func(*http.Respons
 // Set-Cookie filter is unconditional; page enhancements are opt-in, wired by
 // main.go so tests and embedders are not implicitly rewriting app HTML. See
 // pageScriptsFor for why the toggles are read per response.
-func (p *Proxy) modifyResponseFor(slug string) func(*http.Response) error {
+func (p *Proxy) modifyResponseFor(slug string, deploymentIDs ...int64) func(*http.Response) error {
+	var deploymentID int64
+	if len(deploymentIDs) > 0 {
+		deploymentID = deploymentIDs[0]
+	}
 	return chainModifyResponse(filterReservedSetCookies, injectPageHTML(
-		func(r *http.Request) []pageScript { return p.pageScriptsFor(r, slug) },
+		func(r *http.Request) []pageScript { return p.pageScriptsFor(r, slug, deploymentID) },
 		func() string {
 			if !p.appFavicon.Load() {
 				return ""

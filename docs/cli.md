@@ -34,6 +34,35 @@ shinyhub apps open sales
 shinyhub apps open sales --no-browser  # SSH, containers, and scripts
 ```
 
+## Redeploy without interrupting the current version
+
+For a supported running native app, `shinyhub deploy` starts the complete new
+replica pool beside the current pool, checks readiness, and only then sends new
+visits to it. Existing HTTP streams and WebSockets remain attached to the old
+version until they finish or the configured drain deadline expires. Tabs still
+using the old version get a version-update indicator in the app switcher and
+can move deliberately with **Switch now**.
+
+The first implementation is deliberately conservative. A handoff is deferred
+when memory for both pools cannot be proven, prior cleanup is pending, the app
+uses a non-native provider or clustered control plane, worker isolation is not
+`multiplex`, shared producer state changes, or the uploaded bundle contains a
+`shinyhub.toml` manifest. The working version remains available and the CLI
+returns a conflict with the reason.
+
+If interruption is acceptable, opt in explicitly:
+
+```bash
+shinyhub deploy . --allow-downtime
+shinyhub apply release.plan --allow-downtime
+shinyhub fleet apply fleet.yaml --allow-downtime
+```
+
+This stop-first fallback disconnects active sessions. It is never selected
+silently. After an interrupted cleanup, ShinyHub retains the old process
+identity for startup recovery and defers another handoff until cleanup is
+confirmed.
+
 Running, sleeping, waking, deploying, and degraded apps follow the same launch
 behavior as the dashboard. Sleeping apps wake through the route. Stopped,
 crashed, and never-deployed apps are not launched; the CLI gives the exact

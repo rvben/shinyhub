@@ -11,6 +11,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/proxy"
 )
 
 // navRequest asks the nav endpoint for u's list. The slug in the path is one an
@@ -252,5 +253,98 @@ func TestAppNavJSON_IsNotCacheable(t *testing.T) {
 	srv.HandleAppNavJSON(rr, reqWithOptionalUser("GET", appnav.DataURL("any-app"), nil))
 	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+func TestAppVersionJSON_ReturnsOnlyThePublishedOpaqueGeneration(t *testing.T) {
+	srv, store := newBrandingTestServer(t, config.BrandingConfig{})
+	hash, _ := testHashPassword("pw")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "dashboard", Name: "Dashboard", OwnerID: owner.ID, Access: "public"}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, _ := store.GetAppBySlug("dashboard")
+	deployment, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "v1", BundleDir: "/bundle/v1"})
+	if err != nil {
+		t.Fatalf("create deployment: %v", err)
+	}
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(backend.Close)
+	srv.proxy = proxy.New()
+	srv.proxy.SetPoolSize("dashboard", 1)
+	srv.proxy.SetGenerationActivationToken("dashboard", deployment.ID, deployment.ActivationToken)
+	if err := srv.proxy.RegisterReplica("dashboard", 0, backend.URL, nil, deployment.ID); err != nil {
+		t.Fatalf("register local active generation: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	srv.HandleAppVersionJSON(rr, reqWithOptionalUser("GET", appnav.VersionURL("dashboard"), nil), "dashboard")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("version status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var shape map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&shape); err != nil {
+		t.Fatalf("decode version payload: %v", err)
+	}
+	active, _ := shape["active_generation"].(string)
+	if active != deployment.ActivationToken || active == "" {
+		t.Fatalf("active generation = %q, want opaque token %q", active, deployment.ActivationToken)
+	}
+	if len(shape) != 1 || shape["active_generation"] == nil {
+		t.Fatalf("version response disclosed extra metadata: %#v", shape)
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "no-store, private" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+}
+
+func TestAppVersionSwitch_RequiresExplicitHeaderAndClearsOnlyThisAppCookie(t *testing.T) {
+	srv, store := newBrandingTestServer(t, config.BrandingConfig{})
+	srv.proxy = proxy.New()
+	hash, _ := testHashPassword("pw")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "dashboard", Name: "Dashboard", OwnerID: owner.ID, Access: "public"}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	withoutHeader := httptest.NewRecorder()
+	srv.HandleAppVersionSwitch(withoutHeader, reqWithOptionalUser("POST", appnav.SwitchURL("dashboard"), nil), "dashboard")
+	if withoutHeader.Code != http.StatusForbidden {
+		t.Fatalf("switch without confirmation = %d, want 403", withoutHeader.Code)
+	}
+
+	req := reqWithOptionalUser("POST", appnav.SwitchURL("dashboard"), nil)
+	req.Header.Set("X-ShinyHub-Version-Switch", "1")
+	rr := httptest.NewRecorder()
+	srv.HandleAppVersionSwitch(rr, req, "dashboard")
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("switch status = %d: %s", rr.Code, rr.Body.String())
+	}
+	cookies := rr.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("cookies = %d, want one app-scoped affinity deletion", len(cookies))
+	}
+	if cookies[0].Name != "shinyhub_rep_dashboard" || cookies[0].Path != "/app/dashboard/" || cookies[0].MaxAge >= 0 {
+		t.Fatalf("affinity deletion = %#v", cookies[0])
+	}
+}
+
+func TestAppVersionJSON_DoesNotRevealPrivateAppsToAnonymousCallers(t *testing.T) {
+	srv, store := newBrandingTestServer(t, config.BrandingConfig{})
+	hash, _ := testHashPassword("pw")
+	_ = store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	_, _ = store.CreateApp(db.CreateAppParams{Slug: "private-dashboard", Name: "Private", OwnerID: owner.ID, Access: "private"})
+
+	rr := httptest.NewRecorder()
+	srv.HandleAppVersionJSON(rr, reqWithOptionalUser("GET", appnav.VersionURL("private-dashboard"), nil), "private-dashboard")
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous private version status = %d, want 401", rr.Code)
 	}
 }

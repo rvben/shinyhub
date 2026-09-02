@@ -83,6 +83,10 @@ func deployAppBundle(cfg *cliConfig, slug, dir, visibility, project string, out 
 }
 
 func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, out io.Writer, runID string, timeout time.Duration, preconditions ...*string) (promoted string, committed bool, deployRuns []deployRunRef, kind deployfail.Kind, err error) {
+	return deployAppBundleFromSpecWithDowntime(cfg, slug, spec, visibility, project, out, runID, timeout, false, preconditions...)
+}
+
+func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, out io.Writer, runID string, timeout time.Duration, allowDowntime bool, preconditions ...*string) (promoted string, committed bool, deployRuns []deployRunRef, kind deployfail.Kind, err error) {
 	if err := ensureFleetAppWithRun(cfg, slug, visibility, project, out, runID); err != nil {
 		return "", false, nil, deployfail.Unknown, err
 	}
@@ -113,6 +117,9 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if allowDowntime {
+		req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
+	}
 	decorateFleetRequest(req, runID)
 	preconditioned := len(preconditions) >= 2 && (preconditions[0] != nil || preconditions[1] != nil)
 	if preconditioned {

@@ -17,6 +17,7 @@ type fleetApplyFlags struct {
 	dryRun                   bool
 	yes                      bool
 	allowUnsafeDegradedPrune bool
+	allowDowntime            bool
 	jsonOutput               bool
 	retries                  int
 	healthTimeout            int
@@ -71,6 +72,8 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&f.yes, "yes", "y", false, "Skip the destructive-action confirmation prompt")
 	cmd.Flags().BoolVar(&f.allowUnsafeDegradedPrune, "allow-unsafe-degraded-prune", false,
 		"Allow prune against a server without precondition support (accepts a documented race)")
+	cmd.Flags().BoolVar(&f.allowDowntime, "allow-downtime", false,
+		"Permit stop-first deploys when safe version handoff is unavailable (disconnects active sessions for affected apps)")
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
 	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for transient deploy and config failures (deterministic deploy failures are never retried)")
 	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app after deploy for a healthy status: running, or idle for an elastic (grouped/per_session) pool that boots workers on demand")
@@ -221,6 +224,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		adopt:                    f.adopt,
 		prune:                    f.prune,
 		allowDegradedPrune:       f.allowUnsafeDegradedPrune,
+		allowDowntime:            f.allowDowntime,
 		preconditions:            pf.caps.FleetPreconditions,
 		retries:                  f.retries,
 		healthTimeout:            healthTimeoutDuration(f.healthTimeout),

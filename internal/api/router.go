@@ -124,6 +124,11 @@ type Server struct {
 	// production startup persists the environment credential hash in api_keys.
 	deployToken *auth.DeployToken
 	deployRun   func(deploy.Params) (*deploy.PoolResult, error)
+	// Generation cutover is split into independently testable durable and
+	// in-memory publication phases.
+	promoteDeployment       func(int64) error
+	activateProxyGeneration func(string, int64) (int64, error)
+	availableMemoryMB       func() (int, error)
 	// deployReplica boots a single replica at one index, used by the autoscale
 	// scale-up primitive to grow a pool by one without cycling the whole pool.
 	// Defaults to deploy.RunReplica; overridable in tests.
@@ -169,6 +174,13 @@ type Server struct {
 	// new pool is up.
 	redeployMu       sync.Mutex
 	redeployInFlight map[string]int
+
+	// Generation retirement is server-owned work. Cancellation prevents cleanup
+	// retries from outliving shutdown; durable deployment_replicas rows let the
+	// next owner resume safely.
+	generationCtx    context.Context
+	generationCancel context.CancelFunc
+	generationWG     sync.WaitGroup
 }
 
 // markRedeployInFlight adds one reference for slug's pending pool cycle. Each
@@ -215,25 +227,31 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 	if err := os.MkdirAll(appOperationLockDir, 0o750); err != nil {
 		slog.Error("create app operation lock directory", "path", appOperationLockDir, "err", err)
 	}
+	generationCtx, generationCancel := context.WithCancel(context.Background())
 	s := &Server{
-		cfg:                 cfg,
-		store:               store,
-		manager:             manager,
-		proxy:               prx,
-		sampler:             &process.GopsutilSampler{},
-		loginLimiter:        newLoginLimiter(store, loginRateLimit, loginRateWindow),
-		deployLimiter:       newKeyedRateLimiter(10, time.Minute),
-		userLimiter:         newKeyedRateLimiter(5, time.Minute),
-		tokenLimiter:        newKeyedRateLimiter(20, time.Minute),
-		dataLimiter:         newKeyedRateLimiter(120, time.Minute),
-		actionLimiter:       newKeyedRateLimiter(30, time.Minute),
-		oauthLimiter:        newKeyedRateLimiter(20, time.Minute),
-		connectLimiter:      newKeyedRateLimiter(60, time.Minute),
-		authFailLimiter:     newKeyedRateLimiter(30, time.Minute),
-		deployRun:           deploy.Run,
-		deployReplica:       deploy.RunReplica,
-		resumeReplica:       deploy.ResumeReplica,
-		appOperationLockDir: appOperationLockDir,
+		cfg:                     cfg,
+		store:                   store,
+		manager:                 manager,
+		proxy:                   prx,
+		sampler:                 &process.GopsutilSampler{},
+		loginLimiter:            newLoginLimiter(store, loginRateLimit, loginRateWindow),
+		deployLimiter:           newKeyedRateLimiter(10, time.Minute),
+		userLimiter:             newKeyedRateLimiter(5, time.Minute),
+		tokenLimiter:            newKeyedRateLimiter(20, time.Minute),
+		dataLimiter:             newKeyedRateLimiter(120, time.Minute),
+		actionLimiter:           newKeyedRateLimiter(30, time.Minute),
+		oauthLimiter:            newKeyedRateLimiter(20, time.Minute),
+		connectLimiter:          newKeyedRateLimiter(60, time.Minute),
+		authFailLimiter:         newKeyedRateLimiter(30, time.Minute),
+		deployRun:               deploy.Run,
+		deployReplica:           deploy.RunReplica,
+		resumeReplica:           deploy.ResumeReplica,
+		promoteDeployment:       store.PromoteDeployment,
+		activateProxyGeneration: prx.ActivateGeneration,
+		availableMemoryMB:       hostAvailableMemoryMB,
+		appOperationLockDir:     appOperationLockDir,
+		generationCtx:           generationCtx,
+		generationCancel:        generationCancel,
 	}
 	if cfg.OAuth.GitHub.ClientID != "" {
 		s.github = oauth.NewGitHub(
@@ -251,6 +269,16 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 	}
 	s.router = s.buildRouter()
 	return s
+}
+
+// Close stops and joins server-owned generation cleanup workers. Runtime
+// identities remain durable when shutdown interrupts cleanup, so recovery can
+// resume without guessing which process belongs to which deployment.
+func (s *Server) Close() {
+	if s.generationCancel != nil {
+		s.generationCancel()
+	}
+	s.generationWG.Wait()
 }
 
 // Router returns the fully-configured http.Handler.
@@ -680,6 +708,29 @@ func (s *Server) SetLoginLimiterWindowForTest(window time.Duration) {
 // Must be called before the server begins handling requests; intended for tests.
 func (s *Server) SetDeployRunForTest(fn func(deploy.Params) (*deploy.PoolResult, error)) {
 	s.deployRun = fn
+}
+
+// SetGenerationCutoverForTest replaces cutover seams so tests can inject a
+// failure between runtime selection, durable publication, and proxy publish.
+// It must be called before the server handles requests.
+func (s *Server) SetGenerationCutoverForTest(
+	promote func(int64) error,
+	activateProxy func(string, int64) (int64, error),
+) {
+	if promote != nil {
+		s.promoteDeployment = promote
+	}
+	if activateProxy != nil {
+		s.activateProxyGeneration = activateProxy
+	}
+}
+
+// SetAvailableMemoryForTest replaces host memory sampling for deterministic
+// handoff admission tests. It must be called before serving requests.
+func (s *Server) SetAvailableMemoryForTest(fn func() (int, error)) {
+	if fn != nil {
+		s.availableMemoryMB = fn
+	}
 }
 
 // SetDeployToken installs a pre-shared deploy credential. Must be called before

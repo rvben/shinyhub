@@ -57,6 +57,9 @@ func deployThenFail(t *testing.T) (restoreParams deploy.Params, restored bool) {
 		req := httptest.NewRequest("POST", "/api/apps/ra/deploy", body)
 		req.Header.Set("Content-Type", ctype)
 		req.Header.Set("Authorization", "Bearer "+token)
+		// This synthetic deploy runner has no real manager/proxy identities, so
+		// exercise the explicit stop-first restoration path.
+		req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 		rec := httptest.NewRecorder()
 		srv.Router().ServeHTTP(rec, req)
 		return rec

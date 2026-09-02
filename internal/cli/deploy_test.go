@@ -3,6 +3,7 @@ package cli
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -359,6 +360,37 @@ func TestDeploy_RequiresExplicitDirArgument(t *testing.T) {
 	if len(*reqs) != 0 {
 		t.Errorf("expected no HTTP requests when arg validation fails, got %d", len(*reqs))
 	}
+}
+
+func TestDeploy_AllowDowntimeSendsExplicitConsent(t *testing.T) {
+	_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo":
+			_, _ = w.Write([]byte(`{"slug":"demo","status":"running"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/deploy":
+			_, _ = w.Write([]byte(`{"status":"running","deploy_count":2}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print('ok')\n")
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := runDeploy(cmd, []string{dir}, &deployFlags{slug: "demo", allowDowntime: true, format: formatJSON}); err != nil {
+		t.Fatalf("deploy with downtime consent: %v", err)
+	}
+	for _, req := range *reqs {
+		if req.Method == http.MethodPost && req.Path == "/api/apps/demo/deploy" {
+			if req.AllowDowntime != "1" {
+				t.Fatalf("downtime header = %q, want 1", req.AllowDowntime)
+			}
+			return
+		}
+	}
+	t.Fatal("deploy request not observed")
 }
 
 // TestPollAppStatus_RunningAndStarting guards the contract of the helper

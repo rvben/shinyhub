@@ -63,6 +63,7 @@ type deployFlags struct {
 	watch              bool   // continuously deploy local source changes
 	watchDelay         time.Duration
 	allowRepeatedHooks bool
+	allowDowntime      bool          // explicitly permit the server's stop-first fallback
 	create             bool          // create a persistent watch target; watch-only
 	ephemeral          bool          // create an expiring private watch target; watch-only
 	ttl                time.Duration // lifetime of an ephemeral watch target
@@ -107,6 +108,11 @@ to exclude more. Validate the optional manifest first with
 Server: connect once with 'shinyhub connect https://hub.example.com'. The saved
 current server is used by default; the global --host flag targets a different
 saved name or URL for one command. CI can set SHINYHUB_HOST and SHINYHUB_TOKEN.
+
+Availability: redeploys keep a supported live app serving while the candidate
+starts. If the server cannot safely hand off, it returns 409 and preserves the
+working version. Pass --allow-downtime only when an intentional stop-first
+deployment is acceptable; active sessions will be disconnected.
 
 Manifest: if the bundle contains a shinyhub.toml at its root, ShinyHub applies
 it on deploy - [app] scaling/hibernate overrides, [[hook]] post-deploy commands,
@@ -177,6 +183,7 @@ back to the legacy response when deploying to an older server.`,
 	cmd.Flags().BoolVar(&f.watch, "watch", false, "Continuously deploy local source changes to an explicit remote host; implies --start and --wait")
 	cmd.Flags().DurationVar(&f.watchDelay, "watch-delay", 750*time.Millisecond, "Quiet period after the last filesystem change before a watched deploy")
 	cmd.Flags().BoolVar(&f.allowRepeatedHooks, "allow-repeated-hooks", false, "Allow --watch to run manifest post-deploy hooks after every deployable change")
+	cmd.Flags().BoolVar(&f.allowDowntime, "allow-downtime", false, "Permit an explicit stop-first deployment when safe version handoff is unavailable (disconnects active sessions)")
 	cmd.Flags().BoolVar(&f.create, "create", false, "Create a new persistent app as the watch target; fail if its slug already exists")
 	cmd.Flags().BoolVar(&f.ephemeral, "ephemeral", false, "Create a private temporary watch target that is deleted after --ttl")
 	cmd.Flags().DurationVar(&f.ttl, "ttl", 8*time.Hour, "Lifetime of an --ephemeral watch target (15m to 7d)")
@@ -323,6 +330,9 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Accept", deployevent.MediaType)
+	if f.allowDowntime {
+		req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
+	}
 	channel := f.deployChannel
 	if channel == "" {
 		channel = "cli"

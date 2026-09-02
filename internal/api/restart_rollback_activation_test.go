@@ -69,6 +69,7 @@ func newActivationHarness(t *testing.T, slug string) *activationHarness {
 	req := httptest.NewRequest("POST", "/api/apps/"+slug+"/deploy", body)
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Authorization", "Bearer "+h.token)
+	req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -111,6 +112,7 @@ func TestRollback_IsAnActivation(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/apps/rb/deploy", body)
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Authorization", "Bearer "+h.token)
+	req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	rec := httptest.NewRecorder()
 	h.srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -154,6 +156,7 @@ func TestRollbackFailure_ReportsFailureKind(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/apps/rbf/deploy", body)
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Authorization", "Bearer "+h.token)
+	req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	rec := httptest.NewRecorder()
 	h.srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

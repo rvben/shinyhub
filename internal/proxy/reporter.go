@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -161,6 +162,13 @@ func (p *Proxy) snapshotSessions(slugFilter map[string]struct{}) []db.ReplicaSes
 				ps.replicas = append(ps.replicas, rep)
 			}
 		}
+		for _, generation := range pool.drainingGenerations {
+			for _, rep := range generation {
+				if rep != nil {
+					ps.replicas = append(ps.replicas, rep)
+				}
+			}
+		}
 		snaps = append(snaps, ps)
 	}
 	p.mu.RUnlock()
@@ -186,11 +194,20 @@ func (p *Proxy) snapshotSessions(slugFilter map[string]struct{}) []db.ReplicaSes
 				ageSec = d
 			}
 		}
+		counts := make(map[int]int64)
 		for _, rep := range ps.replicas {
+			counts[rep.index] += rep.activeConns.Load()
+		}
+		indices := make([]int, 0, len(counts))
+		for idx := range counts {
+			indices = append(indices, idx)
+		}
+		sort.Ints(indices)
+		for _, idx := range indices {
 			rows = append(rows, db.ReplicaSessionRow{
 				AppID:              ps.appID,
-				Idx:                rep.index,
-				Active:             rep.activeConns.Load(),
+				Idx:                idx,
+				Active:             counts[idx],
 				LastActivityAgeSec: ageSec,
 			})
 		}

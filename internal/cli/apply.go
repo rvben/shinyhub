@@ -16,7 +16,8 @@ import (
 )
 
 func newApplyCmd() *cobra.Command {
-	return &cobra.Command{
+	var allowDowntime bool
+	cmd := &cobra.Command{
 		Use:   "apply PLAN",
 		Short: "Apply an exact saved plan",
 		Long: `Verify and apply a plan produced by 'shinyhub plan --out'.
@@ -25,15 +26,19 @@ Apply validates the artifact's format, integrity, embedded bundle digest,
 expiry, and target before making a request. It uploads the exact bundle stored
 in the plan and asks the server to atomically compare the resource revision
 observed during planning before changing the app. It never reads or rebuilds
-the original working directory.`,
+the original working directory. By default a working app is preserved when the
+server cannot perform a safe handoff; --allow-downtime explicitly permits the
+stop-first fallback and disconnects active sessions.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runApply(cmd, args[0])
+			return runApply(cmd, args[0], allowDowntime)
 		},
 	}
+	cmd.Flags().BoolVar(&allowDowntime, "allow-downtime", false, "Permit an explicit stop-first deployment when safe version handoff is unavailable (disconnects active sessions)")
+	return cmd
 }
 
-func runApply(cmd *cobra.Command, path string) error {
+func runApply(cmd *cobra.Command, path string, allowDowntime bool) error {
 	// The complete local trust boundary comes first. A corrupt, modified, or
 	// expired plan cannot trigger config loading or any network request.
 	loaded, err := readSavedPlan(path, time.Now(), false)
@@ -76,7 +81,7 @@ func runApply(cmd *cobra.Command, path string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Applying %s to %s using exact bundle %s...\n",
 			loaded.Envelope.PlanID, slug, shortDigest(loaded.Envelope.Bundle.Digest))
 	}
-	resp, err := postSavedPlanBundle(cfg, loaded, revision)
+	resp, err := postSavedPlanBundle(cfg, loaded, revision, allowDowntime)
 	if err != nil {
 		return err
 	}
@@ -86,7 +91,8 @@ func runApply(cmd *cobra.Command, path string) error {
 		out, err = consumeDeployEvents(resp, format, cmd.OutOrStdout(), cmd.ErrOrStderr(), quietFlag)
 		if err != nil {
 			var status *httpStatusError
-			if errors.As(err, &status) && status.Status == http.StatusConflict {
+			if errors.As(err, &status) && status.Status == http.StatusConflict &&
+				resp.Header.Get("X-ShinyHub-Conflict") != "generation-handoff-deferred" {
 				return staleSavedPlanError(path, slug, err)
 			}
 			return err
@@ -96,7 +102,8 @@ func runApply(cmd *cobra.Command, path string) error {
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
 		httpErr := httpError(cfg.Token, "apply saved plan", resp, out)
-		if resp.StatusCode == http.StatusConflict {
+		if resp.StatusCode == http.StatusConflict &&
+			resp.Header.Get("X-ShinyHub-Conflict") != "generation-handoff-deferred" {
 			return staleSavedPlanError(path, slug, httpErr)
 		}
 		return httpErr
@@ -165,7 +172,7 @@ func createAppForSavedPlan(cfg *cliConfig, envelope savedPlanEnvelope) (string, 
 	return revision, nil
 }
 
-func postSavedPlanBundle(cfg *cliConfig, loaded *loadedSavedPlan, revision string) (*http.Response, error) {
+func postSavedPlanBundle(cfg *cliConfig, loaded *loadedSavedPlan, revision string, allowDowntime bool) (*http.Response, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("bundle", savedPlanBundlePath)
@@ -191,5 +198,8 @@ func postSavedPlanBundle(cfg *cliConfig, loaded *loadedSavedPlan, revision strin
 	req.Header.Set("Accept", deployevent.MediaType)
 	req.Header.Set("X-Shinyhub-Deploy-Channel", "cli")
 	req.Header.Set("X-Shinyhub-If-Resource-Revision", revision)
+	if allowDowntime {
+		req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
+	}
 	return streamClient.Do(req)
 }

@@ -279,6 +279,12 @@ type WarmReadopter interface {
 	ReadoptWarm(slug string, index, pid int) error
 }
 
+// DeploymentWarmReadopter is the generation-aware extension used when an
+// adopted process may have been launched beside another generation.
+type DeploymentWarmReadopter interface {
+	ReadoptDeploymentWarm(slug string, deploymentID int64, index, pid int) error
+}
+
 // ResourceEnforcer is the optional runtime capability to report whether per-app
 // memory/CPU limits are ACTUALLY enforced on this host. Only the native runtime
 // implements it (enforcement is best-effort, gated on cgroup v2 delegation);
@@ -300,6 +306,12 @@ type CgroupReadopter interface {
 	// baseline. Best-effort: returns nil when there is no such cgroup (no limit
 	// was set, or warm-wake is off and no base exists).
 	ReadoptCgroup(slug string, index, pid int) error
+}
+
+// DeploymentCgroupReadopter re-registers either a generation-scoped or legacy
+// cgroup for an adopted deployment process.
+type DeploymentCgroupReadopter interface {
+	ReadoptDeploymentCgroup(slug string, deploymentID int64, index, pid int) error
 }
 
 // PartialInventoryError reports that a tier's aggregated inventory is

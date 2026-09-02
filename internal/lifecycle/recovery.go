@@ -249,6 +249,20 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			slog.Warn("process recovery: skipped compatibility-quarantined app", "slug", app.Slug)
 			continue
 		}
+		if ok := reconcileDeploymentGenerationProjection(store, app); !ok {
+			if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: "failed"}); err != nil {
+				slog.Error("generation recovery: persist failed state", "slug", app.Slug, "err", err)
+			}
+			continue
+		}
+		// Generation tokens live only in proxy memory. Restore the active token
+		// before any recovered backend can serve injected navigation, otherwise a
+		// tab opened before the next deploy cannot recognize that it is stale.
+		if active, err := store.GetActiveDeploymentGeneration(app.ID); err == nil {
+			prx.SetGenerationActivationToken(app.Slug, active.DeploymentID, active.ActivationToken)
+		} else if !errors.Is(err, db.ErrNotFound) {
+			slog.Warn("process recovery: load active generation token", "slug", app.Slug, "err", err)
+		}
 		// Elastic-mode apps (grouped or per_session) are demand-driven: workers
 		// are ephemeral and are never persisted to the replicas table. Set up
 		// the elastic proxy pool and keep the app status as "running" so the
@@ -433,7 +447,168 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		if !anyAlive && !indeterminate && !healable {
 			markRecoveryDown(store, app.Slug)
 		}
+		if anyAlive {
+			cleanupObsoleteDeploymentGenerations(store, app)
+		}
 	}
+}
+
+// reconcileDeploymentGenerationProjection closes the crash window where the
+// durable active pointer names a healthy candidate while the legacy replicas
+// projection still names the previous pool. It performs only the authoritative
+// projection here; obsolete process cleanup runs after adoption/routing so a
+// stale or unkillable old identity can never veto restoration of healthy
+// service.
+func reconcileDeploymentGenerationProjection(store *db.Store, app *db.App) bool {
+	generationRows, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil {
+		slog.Error("generation recovery: list replicas", "slug", app.Slug, "err", err)
+		return false
+	}
+	if len(generationRows) == 0 {
+		return true
+	}
+	active, activeErr := store.GetActiveDeploymentGeneration(app.ID)
+	activeID := int64(0)
+	if activeErr == nil {
+		activeID = active.DeploymentID
+	} else if !errors.Is(activeErr, db.ErrNotFound) {
+		slog.Error("generation recovery: load active generation", "slug", app.Slug, "err", activeErr)
+		return false
+	}
+	activeRows := make([]*db.DeploymentReplica, 0, len(generationRows))
+	for _, replica := range generationRows {
+		if replica.DeploymentID == activeID {
+			activeRows = append(activeRows, replica)
+		}
+	}
+	// With no active-generation row, the legacy projection already names the
+	// authority. The remaining rows are cleanup-only (an abandoned pre-commit
+	// candidate or a post-cutover old generation) and must not replace it.
+	if len(activeRows) == 0 {
+		return true
+	}
+	activeDeployment, err := store.GetDeploymentByID(activeID)
+	if err != nil {
+		slog.Error("generation recovery: load active deployment", "slug", app.Slug, "deployment_id", activeID, "err", err)
+		return false
+	}
+
+	for _, replica := range activeRows {
+		pid, port, deploymentID := replica.PID, replica.Port, replica.DeploymentID
+		if err := store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: app.ID, Index: replica.Index, PID: pid, Port: port,
+			Status: db.ReplicaStatusRunning, Provider: replica.Provider, Tier: replica.Tier,
+			EndpointURL: replica.EndpointURL, WorkerID: replica.WorkerID,
+			AppVersion: activeDeployment.Version, DesiredState: "running",
+			DeploymentID: &deploymentID, ConsumerBooted: true,
+		}); err != nil {
+			slog.Error("generation recovery: publish active replica projection", "slug", app.Slug, "index", replica.Index, "err", err)
+			return false
+		}
+	}
+	if err := store.DeleteDeploymentReplicas(activeID); err != nil {
+		slog.Error("generation recovery: clear projected active identities", "slug", app.Slug, "deployment_id", activeID, "err", err)
+		return false
+	}
+	return true
+}
+
+// cleanupObsoleteDeploymentGenerations runs only after the authoritative
+// legacy projection has been adopted and routed. Each deployment ledger is
+// deleted as a unit only when every recorded native identity is confirmed gone;
+// failures remain durable and block another handoff until a later recovery.
+func cleanupObsoleteDeploymentGenerations(store *db.Store, app *db.App) {
+	rows, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil {
+		slog.Error("generation recovery: list cleanup identities", "slug", app.Slug, "err", err)
+		return
+	}
+	activeID := int64(0)
+	if active, err := store.GetActiveDeploymentGeneration(app.ID); err == nil {
+		activeID = active.DeploymentID
+	} else if !errors.Is(err, db.ErrNotFound) {
+		slog.Error("generation recovery: load authority before cleanup", "slug", app.Slug, "err", err)
+		return
+	}
+	byDeployment := make(map[int64][]*db.DeploymentReplica)
+	for _, row := range rows {
+		if row.DeploymentID != activeID {
+			byDeployment[row.DeploymentID] = append(byDeployment[row.DeploymentID], row)
+		}
+	}
+	for deploymentID, replicas := range byDeployment {
+		allStopped := true
+		for _, replica := range replicas {
+			id := deploymentID
+			if !stopRecordedNativeReplica(store, app, replica.PID, replica.Provider, &id) {
+				allStopped = false
+			}
+		}
+		if !allStopped {
+			slog.Warn("generation recovery: obsolete generation cleanup deferred",
+				"slug", app.Slug, "deployment_id", deploymentID)
+			continue
+		}
+		if err := store.DeleteDeploymentReplicas(deploymentID); err != nil {
+			slog.Error("generation recovery: clear obsolete identities", "slug", app.Slug, "deployment_id", deploymentID, "err", err)
+		}
+	}
+}
+
+func stopRecordedNativeReplica(store *db.Store, app *db.App, pid *int, provider string, deploymentID *int64) bool {
+	if pid == nil || *pid <= 0 || (provider != "" && provider != "native") {
+		return true
+	}
+	pidGone := errors.Is(syscall.Kill(*pid, 0), syscall.ESRCH)
+	groupGone := errors.Is(syscall.Kill(-*pid, 0), syscall.ESRCH)
+	if pidGone && groupGone {
+		return true
+	}
+	if deploymentID == nil {
+		slog.Error("generation recovery: refusing to signal native process without deployment identity", "slug", app.Slug, "pid", *pid)
+		return false
+	}
+	deployment, err := store.GetDeploymentByID(*deploymentID)
+	if err != nil || deployment.BundleDir == "" || validateNativeProcessIdentity(*pid, deployment.BundleDir) != nil {
+		slog.Error("generation recovery: refusing to signal native process whose bundle identity cannot be proven", "slug", app.Slug, "pid", *pid, "deployment_id", *deploymentID, "err", err)
+		return false
+	}
+	if err := syscall.Kill(-*pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		slog.Error("generation recovery: terminate old native generation", "slug", app.Slug, "pid", *pid, "err", err)
+		return false
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		pidGone = errors.Is(syscall.Kill(*pid, 0), syscall.ESRCH)
+		groupGone = errors.Is(syscall.Kill(-*pid, 0), syscall.ESRCH)
+		if pidGone && groupGone {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// The numeric PID/PGID may have been recycled during the TERM grace. Never
+	// escalate to SIGKILL unless the leader still exists and its bundle identity
+	// is revalidated immediately before the signal.
+	if pidGone || validateNativeProcessIdentity(*pid, deployment.BundleDir) != nil {
+		slog.Error("generation recovery: refusing SIGKILL after native process identity changed", "slug", app.Slug, "pid", *pid)
+		return false
+	}
+	if err := syscall.Kill(-*pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		slog.Error("generation recovery: kill old native generation", "slug", app.Slug, "pid", *pid, "err", err)
+		return false
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		pidGone = errors.Is(syscall.Kill(*pid, 0), syscall.ESRCH)
+		groupGone = errors.Is(syscall.Kill(-*pid, 0), syscall.ESRCH)
+		if pidGone && groupGone {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	slog.Error("generation recovery: native process group survived SIGKILL", "slug", app.Slug, "pid", *pid)
+	return false
 }
 
 func stopNativeActivationReplica(mgr *process.Manager, app *db.App, r *db.Replica, bundleDir, logRunID string) bool {
@@ -584,7 +759,8 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		mgr.Adopt(app.Slug, process.ProcessInfo{
 			Slug: app.Slug, AppID: app.ID, Index: r.Index, PID: *r.PID, Port: *r.Port,
 			Status: process.StatusStarting, Tier: r.Tier, Provider: r.Provider,
-			EndpointURL: r.EndpointURL, WorkerID: r.WorkerID, LogRunID: logRunID,
+			EndpointURL: r.EndpointURL, WorkerID: r.WorkerID, AppVersion: r.AppVersion,
+			DeploymentID: derefInt64(r.DeploymentID), LogRunID: logRunID,
 		}, process.RunHandle{PID: *r.PID})
 		stopErr := mgr.StopReplicaConfirmed(app.Slug, r.Index)
 		if stopErr == nil {
@@ -598,17 +774,19 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		return false
 	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
-		Slug:        app.Slug,
-		AppID:       app.ID,
-		Index:       r.Index,
-		PID:         *r.PID,
-		Port:        *r.Port,
-		Status:      process.StatusRunning,
-		Tier:        r.Tier,
-		Provider:    r.Provider,
-		EndpointURL: r.EndpointURL,
-		WorkerID:    r.WorkerID,
-		LogRunID:    logRunID,
+		Slug:         app.Slug,
+		AppID:        app.ID,
+		Index:        r.Index,
+		PID:          *r.PID,
+		Port:         *r.Port,
+		Status:       process.StatusRunning,
+		Tier:         r.Tier,
+		Provider:     r.Provider,
+		EndpointURL:  r.EndpointURL,
+		WorkerID:     r.WorkerID,
+		AppVersion:   r.AppVersion,
+		DeploymentID: derefInt64(r.DeploymentID),
+		LogRunID:     logRunID,
 	}, process.RunHandle{PID: *r.PID})
 	targetURL := r.EndpointURL
 	if targetURL == "" {
@@ -645,17 +823,19 @@ func reAdoptFrozenWarmReplica(mgr *process.Manager, app *db.App, r *db.Replica, 
 		return false // unverified PID; caller downgrades without killing
 	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
-		Slug:        app.Slug,
-		AppID:       app.ID,
-		Index:       r.Index,
-		PID:         *r.PID,
-		Port:        *r.Port,
-		Status:      process.StatusSuspended,
-		Tier:        r.Tier,
-		Provider:    r.Provider,
-		EndpointURL: r.EndpointURL,
-		WorkerID:    r.WorkerID,
-		LogRunID:    logRunID,
+		Slug:         app.Slug,
+		AppID:        app.ID,
+		Index:        r.Index,
+		PID:          *r.PID,
+		Port:         *r.Port,
+		Status:       process.StatusSuspended,
+		Tier:         r.Tier,
+		Provider:     r.Provider,
+		EndpointURL:  r.EndpointURL,
+		WorkerID:     r.WorkerID,
+		AppVersion:   r.AppVersion,
+		DeploymentID: derefInt64(r.DeploymentID),
+		LogRunID:     logRunID,
 	}, process.RunHandle{PID: *r.PID})
 	slog.Info("recovery: re-adopted frozen warm replica (warm-resumable on next wake)",
 		"slug", app.Slug, "idx", r.Index, "pid", *r.PID)

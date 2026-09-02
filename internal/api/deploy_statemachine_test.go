@@ -57,6 +57,11 @@ func TestDeployApp_FailedDeployRestoresPreviousPool(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/apps/demo/deploy", body)
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Authorization", "Bearer "+token)
+	// This legacy restore-path harness models a running status without a
+	// manager/proxy pool or durable generation identities. Opt in to the
+	// stop-first path explicitly; generation handoff behavior is covered by the
+	// dedicated end-to-end tests.
+	req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)

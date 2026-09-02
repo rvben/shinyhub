@@ -3,6 +3,7 @@ package metrics
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
@@ -23,6 +24,35 @@ func TestRecordDeploy_CountsByResult(t *testing.T) {
 	}
 	if rr := scrape(t, reg); !strings.Contains(rr, `shinyhub_deploys_total{result="failure"}`) {
 		t.Errorf("scrape missing deploys series:\n%s", rr)
+	}
+}
+
+func TestGenerationHandoffMetricsExposeOutcomesAndDrainState(t *testing.T) {
+	reg := New("test")
+	reg.RecordGenerationHandoff("success")
+	reg.RecordGenerationHandoff("forced_retirement")
+	reg.BeginGenerationDrain()
+	reg.UpdateGenerationDrainSessions(3)
+	if got := testutil.ToFloat64(reg.generationDraining); got != 1 {
+		t.Fatalf("generation_draining = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(reg.generationSessions); got != 3 {
+		t.Fatalf("generation_draining_sessions = %v, want 3", got)
+	}
+	reg.EndGenerationDrain(3, 2*time.Second)
+	if got := testutil.ToFloat64(reg.generationDraining); got != 0 {
+		t.Fatalf("generation_draining after end = %v, want 0", got)
+	}
+	scraped := scrape(t, reg)
+	for _, want := range []string{
+		`shinyhub_generation_handoffs_total{outcome="success"} 1`,
+		`shinyhub_generation_handoffs_total{outcome="forced_retirement"} 1`,
+		`shinyhub_generation_draining_sessions 0`,
+		`shinyhub_generation_drain_duration_seconds_count 1`,
+	} {
+		if !strings.Contains(scraped, want) {
+			t.Errorf("scrape missing %q:\n%s", want, scraped)
+		}
 	}
 }
 

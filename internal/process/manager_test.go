@@ -591,6 +591,86 @@ func TestManager_DuplicateIndex(t *testing.T) {
 	}
 }
 
+func TestManagerGenerationActivationKeepsOldPoolRunning(t *testing.T) {
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+
+	old, err := m.Start(process.StartParams{
+		Slug: "demo", Index: 0, Port: 20001, Command: []string{"app"}, DeploymentID: 101,
+	})
+	if err != nil {
+		t.Fatalf("start old generation: %v", err)
+	}
+	candidate, err := m.Start(process.StartParams{
+		Slug: "demo", Index: 0, Port: 20002, Command: []string{"app"}, DeploymentID: 202,
+		GenerationScoped: true,
+	})
+	if err != nil {
+		t.Fatalf("start candidate generation beside active: %v", err)
+	}
+
+	if got, ok := m.GetReplica("demo", 0); !ok || got.PID != old.PID {
+		t.Fatalf("active replica before activation = %+v, %v; want old pid %d", got, ok, old.PID)
+	}
+	if got, ok := m.GetGenerationReplica("demo", 202, 0); !ok || got.PID != candidate.PID {
+		t.Fatalf("candidate replica = %+v, %v; want pid %d", got, ok, candidate.PID)
+	}
+
+	previous, err := m.ActivateGeneration("demo", 202)
+	if err != nil {
+		t.Fatalf("activate generation: %v", err)
+	}
+	if previous != 101 {
+		t.Fatalf("previous deployment = %d, want 101", previous)
+	}
+	if got, ok := m.GetReplica("demo", 0); !ok || got.PID != candidate.PID {
+		t.Fatalf("active replica after activation = %+v, %v; want candidate pid %d", got, ok, candidate.PID)
+	}
+	if _, ok := m.GetGenerationReplica("demo", 101, 0); !ok {
+		t.Fatal("old generation disappeared at activation")
+	}
+
+	if err := m.StopGeneration("demo", 101); err != nil {
+		t.Fatalf("retire old generation: %v", err)
+	}
+	if _, ok := m.GetGenerationReplica("demo", 101, 0); ok {
+		t.Fatal("old generation still tracked after retirement")
+	}
+	if got, ok := m.GetReplica("demo", 0); !ok || got.PID != candidate.PID {
+		t.Fatalf("retiring old generation disturbed active replica: %+v, %v", got, ok)
+	}
+	if err := m.Stop("demo"); err != nil {
+		t.Fatalf("stop active generation: %v", err)
+	}
+}
+
+func TestManagerStopAllStopsActiveAndDrainingGenerations(t *testing.T) {
+	rt := newFakeRuntime()
+	m := process.NewManager(t.TempDir(), rt)
+	if _, err := m.Start(process.StartParams{
+		Slug: "demo", Index: 0, Port: 20001, Command: []string{"app"}, DeploymentID: 101,
+	}); err != nil {
+		t.Fatalf("start old generation: %v", err)
+	}
+	if _, err := m.Start(process.StartParams{
+		Slug: "demo", Index: 0, Port: 20002, Command: []string{"app"}, DeploymentID: 202, GenerationScoped: true,
+	}); err != nil {
+		t.Fatalf("start candidate generation: %v", err)
+	}
+	if _, err := m.ActivateGeneration("demo", 202); err != nil {
+		t.Fatalf("activate candidate: %v", err)
+	}
+	if err := m.StopAll(); err != nil {
+		t.Fatalf("stop all generations: %v", err)
+	}
+	if _, ok := m.GetGenerationReplica("demo", 101, 0); ok {
+		t.Fatal("draining generation remained after StopAll")
+	}
+	if _, ok := m.GetGenerationReplica("demo", 202, 0); ok {
+		t.Fatal("active generation remained after StopAll")
+	}
+}
+
 // TestStart_PlatformDefaultsLoseToUserEnv asserts the ordering contract for
 // the OTEL_* injection path: platform defaults from the resolver are prepended
 // BEFORE user env, so any user-supplied OTEL_* (or other override) wins under

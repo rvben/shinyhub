@@ -21,13 +21,17 @@ import (
 // Registry bundles a private Prometheus registry with the server's HTTP
 // instruments. Construct with New; the zero value is not usable.
 type Registry struct {
-	reg              *prometheus.Registry
-	httpRequests     *prometheus.CounterVec
-	httpDuration     *prometheus.HistogramVec
-	admissionRejects *prometheus.CounterVec
-	deploys          *prometheus.CounterVec
-	stateTransitions *prometheus.CounterVec
-	replicaRestarts  prometheus.Counter
+	reg                     *prometheus.Registry
+	httpRequests            *prometheus.CounterVec
+	httpDuration            *prometheus.HistogramVec
+	admissionRejects        *prometheus.CounterVec
+	deploys                 *prometheus.CounterVec
+	generationHandoffs      *prometheus.CounterVec
+	generationDraining      prometheus.Gauge
+	generationSessions      prometheus.Gauge
+	generationDrainDuration prometheus.Histogram
+	stateTransitions        *prometheus.CounterVec
+	replicaRestarts         prometheus.Counter
 
 	// Fargate AWS operation metrics.
 	fargateRunTaskTotal         *prometheus.CounterVec
@@ -101,6 +105,24 @@ func New(version string) *Registry {
 		Help: "Total app deployments by result (success or failure).",
 	}, []string{"result"})
 	reg.MustRegister(deploys)
+	generationHandoffs := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_generation_handoffs_total",
+		Help: "Version handoff events by bounded outcome (success, deferred, explicit_downtime, candidate_failure, cutover_repair, forced_retirement, or cleanup_deferred).",
+	}, []string{"outcome"})
+	generationDraining := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "shinyhub_generation_draining",
+		Help: "Number of old app generations currently draining on this control-plane process.",
+	})
+	generationSessions := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "shinyhub_generation_draining_sessions",
+		Help: "Open HTTP streams and WebSockets still attached to draining generations on this control-plane process.",
+	})
+	generationDrainDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "shinyhub_generation_drain_duration_seconds",
+		Help:    "Time from version cutover until the old generation route retired or cleanup was deferred.",
+		Buckets: []float64{0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600},
+	})
+	reg.MustRegister(generationHandoffs, generationDraining, generationSessions, generationDrainDuration)
 
 	stateTransitions := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "shinyhub_app_state_transitions_total",
@@ -235,13 +257,17 @@ func New(version string) *Registry {
 	reg.MustRegister(runs)
 
 	return &Registry{
-		reg:              reg,
-		httpRequests:     httpRequests,
-		httpDuration:     httpDuration,
-		admissionRejects: admissionRejects,
-		deploys:          deploys,
-		stateTransitions: stateTransitions,
-		replicaRestarts:  replicaRestarts,
+		reg:                     reg,
+		httpRequests:            httpRequests,
+		httpDuration:            httpDuration,
+		admissionRejects:        admissionRejects,
+		deploys:                 deploys,
+		generationHandoffs:      generationHandoffs,
+		generationDraining:      generationDraining,
+		generationSessions:      generationSessions,
+		generationDrainDuration: generationDrainDuration,
+		stateTransitions:        stateTransitions,
+		replicaRestarts:         replicaRestarts,
 
 		fargateRunTaskTotal:         fargateRunTaskTotal,
 		fargateWaitIPTimeoutTotal:   fargateWaitIPTimeoutTotal,
@@ -272,6 +298,28 @@ func New(version string) *Registry {
 // should be "success" or "failure".
 func (r *Registry) RecordDeploy(result string) {
 	r.deploys.WithLabelValues(result).Inc()
+}
+
+// RecordGenerationHandoff records one bounded operational outcome.
+func (r *Registry) RecordGenerationHandoff(outcome string) {
+	r.generationHandoffs.WithLabelValues(outcome).Inc()
+}
+
+// BeginGenerationDrain and EndGenerationDrain maintain process-global drain
+// gauges; callers update the session gauge by deltas so concurrent app drains
+// compose without high-cardinality slug labels.
+func (r *Registry) BeginGenerationDrain() { r.generationDraining.Inc() }
+
+func (r *Registry) UpdateGenerationDrainSessions(delta int) {
+	r.generationSessions.Add(float64(delta))
+}
+
+func (r *Registry) EndGenerationDrain(remainingSessions int, elapsed time.Duration) {
+	if remainingSessions != 0 {
+		r.generationSessions.Sub(float64(remainingSessions))
+	}
+	r.generationDraining.Dec()
+	r.generationDrainDuration.Observe(elapsed.Seconds())
 }
 
 // RecordScheduleRun increments the per-status counter for a terminal scheduled

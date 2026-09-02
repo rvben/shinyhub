@@ -335,7 +335,11 @@ func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 	if !ready || (!r.snapshotEnabled && p.MemoryLimitMB <= 0 && p.CPUQuotaPercent <= 0) {
 		return
 	}
-	dir, err := setupAppCgroup(base, appCgroupName(p.Slug, p.Index), pid)
+	cgroupName := appCgroupName(p.Slug, p.Index)
+	if p.GenerationScoped {
+		cgroupName = fmt.Sprintf("app-%s-generation-%d-%d", p.Slug, p.DeploymentID, p.Index)
+	}
+	dir, err := setupAppCgroup(base, cgroupName, pid)
 	if err != nil {
 		slog.Warn("native: per-app cgroup setup failed; no warm-wake or resource limits for this replica",
 			"slug", p.Slug, "idx", p.Index, "err", err)
@@ -438,6 +442,34 @@ func (r *NativeRuntime) ReadoptWarm(slug string, index, pid int) error {
 	return nil
 }
 
+func (r *NativeRuntime) ReadoptDeploymentWarm(slug string, deploymentID int64, index, pid int) error {
+	if !r.snapshotEnabled {
+		return ErrRuntimeNotSnapshotter
+	}
+	r.ensureCgroupBase()
+	r.mu.Lock()
+	ready := r.cgroupBaseReady
+	base := r.cgroupBase
+	r.mu.Unlock()
+	if !ready {
+		return ErrRuntimeNotSnapshotter
+	}
+	for _, dir := range []string{
+		filepath.Join(base, fmt.Sprintf("app-%s-generation-%d-%d", slug, deploymentID, index)),
+		appCgroupDir(base, slug, index),
+	} {
+		ok, err := cgroupContainsPID(dir, pid)
+		if err != nil || !ok {
+			continue
+		}
+		r.mu.Lock()
+		r.appCgroups[pid] = dir
+		r.mu.Unlock()
+		return nil
+	}
+	return fmt.Errorf("readopt warm %s/%d: pid %d not found in deployment or legacy cgroup", slug, index, pid)
+}
+
 // ReadoptCgroup re-registers an adopted replica's per-app cgroup independent of
 // warm-wake, so a limited replica adopted after a server restart can still be
 // torn down and have its OOM-kills detected. Best-effort and idempotent: it
@@ -466,6 +498,34 @@ func (r *NativeRuntime) ReadoptCgroup(slug string, index, pid int) error {
 		r.oomBaseline[pid] = readAppCgroupOOMCount(dir)
 	}
 	r.mu.Unlock()
+	return nil
+}
+
+func (r *NativeRuntime) ReadoptDeploymentCgroup(slug string, deploymentID int64, index, pid int) error {
+	r.ensureCgroupBase()
+	r.mu.Lock()
+	ready := r.cgroupBaseReady
+	base := r.cgroupBase
+	r.mu.Unlock()
+	if !ready {
+		return nil
+	}
+	for _, dir := range []string{
+		filepath.Join(base, fmt.Sprintf("app-%s-generation-%d-%d", slug, deploymentID, index)),
+		appCgroupDir(base, slug, index),
+	} {
+		ok, err := cgroupContainsPID(dir, pid)
+		if err != nil || !ok {
+			continue
+		}
+		r.mu.Lock()
+		r.appCgroups[pid] = dir
+		if _, seeded := r.oomBaseline[pid]; !seeded {
+			r.oomBaseline[pid] = readAppCgroupOOMCount(dir)
+		}
+		r.mu.Unlock()
+		return nil
+	}
 	return nil
 }
 

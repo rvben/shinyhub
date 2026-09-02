@@ -1463,6 +1463,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 
 	srv := api.New(cfg, store, mgr, prx)
+	defer srv.Close()
 	srv.SetUsagePolicy(usagePolicy)
 	srv.SetVersion(version)
 	if fc := cfg.Runtime.Fargate; fc.Cluster != "" {
@@ -2326,6 +2327,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			case <-time.After(registryRefreshBackoff):
 			}
 		}
+		// Migrations may have completed while a predecessor owner still had an
+		// admitted legacy deploy handler. The exclusive startup fence above now
+		// proves those writers are gone, so repair tokens and active pointers from
+		// the final succeeded ledger before process recovery consults them.
+		if !retryOwnerStep("repair deployment generation ledger", store.RepairDeploymentGenerationLedger) {
+			return
+		}
 		// Finish any app deletion interrupted between the 'deleting' tombstone and
 		// the row removal. Reconcile first so freshly-cleaned slugs are not flagged
 		// as orphans by the next step.
@@ -2612,6 +2620,18 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 				r = r.WithContext(auth.WithUser(r.Context(), u))
 			}
 			srv.HandleAppNavJSON(w, r)
+		})
+		mux.HandleFunc("GET /app/{slug}/.shinyhub/version.json", func(w http.ResponseWriter, r *http.Request) {
+			if u := access.ResolveOptionalUser(r, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup); u != nil {
+				r = r.WithContext(auth.WithUser(r.Context(), u))
+			}
+			srv.HandleAppVersionJSON(w, r, r.PathValue("slug"))
+		})
+		mux.HandleFunc("POST /app/{slug}/.shinyhub/version/switch", func(w http.ResponseWriter, r *http.Request) {
+			if u := access.ResolveOptionalUser(r, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup); u != nil {
+				r = r.WithContext(auth.WithUser(r.Context(), u))
+			}
+			srv.HandleAppVersionSwitch(w, r, r.PathValue("slug"))
 		})
 	}
 	mux.Handle("/healthz", probeMethods(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

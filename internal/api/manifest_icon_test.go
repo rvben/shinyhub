@@ -57,6 +57,7 @@ func TestManifestIconDeclaredOnly(t *testing.T) {
 	req2 := httptest.NewRequest("POST", "/api/apps/iconapp/deploy", body2)
 	req2.Header.Set("Content-Type", ctype2)
 	req2.Header.Set("Authorization", "Bearer "+token)
+	req2.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	rec2 := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusOK {
@@ -84,6 +85,7 @@ func TestManifestIconDeclaredOnly(t *testing.T) {
 	req3 := httptest.NewRequest("POST", "/api/apps/iconapp/deploy", body3)
 	req3.Header.Set("Content-Type", ctype3)
 	req3.Header.Set("Authorization", "Bearer "+token)
+	req3.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	rec3 := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec3, req3)
 	if rec3.Code != http.StatusOK {

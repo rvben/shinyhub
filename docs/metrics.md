@@ -149,6 +149,10 @@ alert; the retry and overflow results are useful early warnings.
 | `shinyhub_apps_running` | gauge | - | Apps currently in the running state (evaluated at scrape time). |
 | `shinyhub_replicas_running` | gauge | - | App replicas currently running (evaluated at scrape time). |
 | `shinyhub_deploys_total` | counter | `result` | Deployments by outcome (`success` / `failure`). Alert on a rising failure rate. |
+| `shinyhub_generation_handoffs_total` | counter | `outcome` | Generation handoff events from a closed vocabulary: `success`, `deferred`, `explicit_downtime`, `candidate_failure`, `cutover_repair`, `forced_retirement`, or `cleanup_deferred`. |
+| `shinyhub_generation_draining` | gauge | - | Old generations currently draining on this control-plane process. |
+| `shinyhub_generation_draining_sessions` | gauge | - | Open HTTP streams and WebSockets still attached to draining generations on this control-plane process. |
+| `shinyhub_generation_drain_duration_seconds` | histogram | - | Time from cutover until the old route retired or cleanup was deferred. |
 | `shinyhub_app_state_transitions_total` | counter | `event` | App lifecycle transitions (`hibernate`, `wake`). |
 | `shinyhub_replica_restarts_total` | counter | - | Replica crash-restarts performed by the watchdog. A flapping app shows up as a rising restart rate. |
 | `shinyhub_schedule_last_success_seconds` | gauge | `slug`, `schedule` | Unix timestamp of the most recent successful command run; absent until the first success. |
@@ -197,6 +201,27 @@ groups:
         expr: increase(shinyhub_deploys_total{result="failure"}[15m]) > 0
         annotations:
           summary: "A ShinyHub deploy failed in the last 15m"
+
+      - alert: ShinyHubGenerationForcedRetirement
+        expr: sum(increase(shinyhub_generation_handoffs_total{outcome="forced_retirement"}[15m])) > 0
+        annotations:
+          summary: "An old app generation exceeded its drain deadline"
+
+      - alert: ShinyHubGenerationCleanupDeferred
+        expr: sum(increase(shinyhub_generation_handoffs_total{outcome="cleanup_deferred"}[15m])) > 0
+        annotations:
+          summary: "Old generation process cleanup was deferred to startup recovery"
+
+      - alert: ShinyHubGenerationDrainStuck
+        expr: sum(shinyhub_generation_draining) > 0
+        for: 10m
+        annotations:
+          summary: "An app generation has been draining for more than 10m"
+
+      - alert: ShinyHubExplicitDowntimeDeploy
+        expr: sum(increase(shinyhub_generation_handoffs_total{outcome="explicit_downtime"}[15m])) > 0
+        annotations:
+          summary: "A deploy used the explicit stop-first fallback"
 
       - alert: ShinyHubReplicaFlapping
         expr: increase(shinyhub_replica_restarts_total[10m]) > 5

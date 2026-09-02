@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1802,8 +1804,12 @@ type Deployment struct {
 	BundleDir     string
 	Status        string
 	ContentDigest string // "" until SetDeploymentDigest records it
-	CreatedAt     time.Time
-	Origin        DeploymentOrigin
+	// ActivationToken is the opaque browser-facing identity of this deployment
+	// generation. It is deliberately unrelated to the sequential database ID
+	// and is never treated as an authorization capability.
+	ActivationToken string
+	CreatedAt       time.Time
+	Origin          DeploymentOrigin
 	// Prepared reports that this deployment finished its host-side preparation
 	// (dependency build + post-deploy hooks). False on every row written before
 	// the column existed, and on elastic deployments made before preparation ran
@@ -1904,6 +1910,22 @@ type CreateDeploymentParams struct {
 	Status string
 }
 
+// ActiveDeploymentGeneration is the durable generation currently published
+// for an app. The activation token may be exposed to an authorized app page;
+// the deployment ID remains an internal routing identity.
+type ActiveDeploymentGeneration struct {
+	DeploymentID    int64
+	ActivationToken string
+}
+
+func newActivationToken() (string, error) {
+	var raw [24]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate deployment activation token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
+}
+
 func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) {
 	status := p.Status
 	if status == "" {
@@ -1913,19 +1935,36 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	if err != nil {
 		return nil, err
 	}
+	activationToken, err := newActivationToken()
+	if err != nil {
+		return nil, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("create deployment: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
 	var id int64
-	err = s.db.QueryRow(
+	err = tx.QueryRow(
 		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, development_session_id, origin_user_id, origin_actor,
-			 origin_credential_id, origin_credential_type, origin_credential_name, prior_schedule_snapshot_recorded)
-		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, 1) RETURNING id`,
+			 origin_credential_id, origin_credential_type, origin_credential_name, prior_schedule_snapshot_recorded, activation_token)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, 1, ?) RETURNING id`,
 		p.AppID, p.Version, p.BundleDir, status, p.RunID, p.RestoredFromID,
 		origin.Kind, origin.Channel, origin.DevelopmentSessionID, origin.UserID, origin.Actor,
-		origin.CredentialID, origin.CredentialType, origin.CredentialName,
+		origin.CredentialID, origin.CredentialType, origin.CredentialName, activationToken,
 	).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
-	return &Deployment{ID: id, AppID: p.AppID, Version: p.Version, BundleDir: p.BundleDir, Status: status, Origin: origin}, nil
+	if status == DeploymentSucceeded {
+		if _, err := tx.Exec(`UPDATE apps SET active_deployment_id = ? WHERE id = ?`, id, p.AppID); err != nil {
+			return nil, fmt.Errorf("create deployment: publish active generation: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("create deployment: commit: %w", err)
+	}
+	return &Deployment{ID: id, AppID: p.AppID, Version: p.Version, BundleDir: p.BundleDir, Status: status, ActivationToken: activationToken, Origin: origin}, nil
 }
 
 func (s *Store) UpdateDeploymentStatus(id int64, status string) error {
@@ -1963,6 +2002,10 @@ func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
 	}
+	activationToken, err := newActivationToken()
+	if err != nil {
+		return nil, fmt.Errorf("begin deployment: %w", err)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
@@ -1971,11 +2014,11 @@ func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID
 	var id int64
 	err = tx.QueryRow(
 		`INSERT INTO deployments (app_id, version, bundle_dir, status, run_id, restored_from_id, origin_kind, origin_channel, development_session_id, origin_user_id, origin_actor,
-			 origin_credential_id, origin_credential_type, origin_credential_name, prior_schedule_snapshot_recorded)
-		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, 1) RETURNING id`,
+			 origin_credential_id, origin_credential_type, origin_credential_name, prior_schedule_snapshot_recorded, activation_token)
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, 1, ?) RETURNING id`,
 		appID, version, bundleDir, DeploymentPending, runID, restoredFromID,
 		origin.Kind, origin.Channel, origin.DevelopmentSessionID, origin.UserID, origin.Actor,
-		origin.CredentialID, origin.CredentialType, origin.CredentialName,
+		origin.CredentialID, origin.CredentialType, origin.CredentialName, activationToken,
 	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
@@ -1994,7 +2037,7 @@ func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("begin deployment: commit: %w", err)
 	}
-	return &Deployment{ID: id, AppID: appID, Version: version, BundleDir: bundleDir, Status: DeploymentPending, Origin: origin}, nil
+	return &Deployment{ID: id, AppID: appID, Version: version, BundleDir: bundleDir, Status: DeploymentPending, ActivationToken: activationToken, Origin: origin}, nil
 }
 
 // PromoteDeployment atomically marks a pending deployment live and terminalizes
@@ -2041,11 +2084,93 @@ func (s *Store) PromoteDeployment(id int64) error {
 		DeploymentFailed, fmt.Sprintf("superseded by successful deployment %d", id), appID, id, DeploymentPending); err != nil {
 		return fmt.Errorf("promote deployment %d: terminalize older attempts: %w", id, err)
 	}
+	res, err := tx.Exec(`
+		UPDATE apps
+		SET active_deployment_id = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+		  AND EXISTS (
+		      SELECT 1 FROM deployments
+		      WHERE deployments.id = ? AND deployments.app_id = apps.id
+		  )`, id, appID, id)
+	if err != nil {
+		return fmt.Errorf("promote deployment %d: publish active generation: %w", id, err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("promote deployment %d: active generation rows affected: %w", id, err)
+	} else if n != 1 {
+		return fmt.Errorf("promote deployment %d: active generation app not found", id)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("promote deployment %d: commit: %w", id, err)
 	}
 	committed = true
 	return nil
+}
+
+// RevertDeploymentActivation compensates a runtime publication failure after
+// PromoteDeployment committed. It restores the previous durable pointer and
+// records that the candidate did not remain active, in one transaction so a
+// restart can never select the failed generation between those writes.
+func (s *Store) RevertDeploymentActivation(failedID, previousID int64, reason string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("revert deployment activation %d: begin: %w", failedID, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var failedAppID, previousAppID int64
+	if err := tx.QueryRow(`SELECT app_id FROM deployments WHERE id = ?`, failedID).Scan(&failedAppID); err != nil {
+		return fmt.Errorf("revert deployment activation %d: load failed generation: %w", failedID, err)
+	}
+	if err := tx.QueryRow(`SELECT app_id FROM deployments WHERE id = ? AND status = ?`, previousID, DeploymentSucceeded).Scan(&previousAppID); err != nil {
+		return fmt.Errorf("revert deployment activation %d: load previous generation: %w", failedID, err)
+	}
+	if failedAppID != previousAppID {
+		return fmt.Errorf("revert deployment activation %d: previous deployment belongs to another app", failedID)
+	}
+	res, err := tx.Exec(`UPDATE apps SET active_deployment_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND active_deployment_id = ?`,
+		previousID, failedAppID, failedID)
+	if err != nil {
+		return fmt.Errorf("revert deployment activation %d: restore active pointer: %w", failedID, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		if err != nil {
+			return fmt.Errorf("revert deployment activation %d: active pointer rows affected: %w", failedID, err)
+		}
+		return fmt.Errorf("revert deployment activation %d: active pointer changed", failedID)
+	}
+	failedResult, err := tx.Exec(`UPDATE deployments SET status = ?, failure_reason = ? WHERE id = ? AND status = ?`,
+		DeploymentFailed, reason, failedID, DeploymentSucceeded)
+	if err != nil {
+		return fmt.Errorf("revert deployment activation %d: mark candidate failed: %w", failedID, err)
+	}
+	if n, err := failedResult.RowsAffected(); err != nil {
+		return fmt.Errorf("revert deployment activation %d: candidate rows affected: %w", failedID, err)
+	} else if n != 1 {
+		return fmt.Errorf("revert deployment activation %d: candidate status changed", failedID)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("revert deployment activation %d: commit: %w", failedID, err)
+	}
+	return nil
+}
+
+// GetActiveDeploymentGeneration returns the generation atomically published by
+// PromoteDeployment. Pending candidates never appear here.
+func (s *Store) GetActiveDeploymentGeneration(appID int64) (*ActiveDeploymentGeneration, error) {
+	var generation ActiveDeploymentGeneration
+	err := s.db.QueryRow(`
+		SELECT d.id, d.activation_token
+		FROM apps a
+		JOIN deployments d ON d.id = a.active_deployment_id AND d.app_id = a.id
+		WHERE a.id = ? AND d.status = ?`, appID, DeploymentSucceeded).
+		Scan(&generation.DeploymentID, &generation.ActivationToken)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get active deployment generation: %w", err)
+	}
+	return &generation, nil
 }
 
 // MarkDeploymentPrepared records that this deployment completed its host-side
@@ -2659,6 +2784,25 @@ func (s *Store) GetDeploymentBySlugAndID(slug string, id int64) (*Deployment, er
 		FROM deployments d
 		JOIN apps a ON a.id = d.app_id
 		WHERE d.id = ? AND a.slug = ?`, id, slug)
+	var dep Deployment
+	var digest sql.NullString
+	var preparedInt int
+	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &digest, &dep.CreatedAt, &preparedInt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	dep.Prepared = preparedInt != 0
+	dep.ContentDigest = digest.String
+	return &dep, nil
+}
+
+// GetDeploymentByID resolves an internal deployment identity for recovery.
+func (s *Store) GetDeploymentByID(id int64) (*Deployment, error) {
+	row := s.db.QueryRow(`
+		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared
+		FROM deployments WHERE id = ?`, id)
 	var dep Deployment
 	var digest sql.NullString
 	var preparedInt int
