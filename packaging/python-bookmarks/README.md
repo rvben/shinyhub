@@ -10,6 +10,11 @@ follow the link. Unselected values return to the app's defaults when the link
 opens. The visible UI says “link”; package and API names retain “bookmark” to
 match Shiny's native lifecycle.
 
+```console
+uv add shinyhub-bookmarks
+# or: python -m pip install shinyhub-bookmarks
+```
+
 ```python
 from shiny import App, render, ui
 from shinyhub_bookmarks import ChoiceRestore, Field, bookmarking_dependency, register
@@ -29,8 +34,8 @@ def server(input, output, session):
         session=session,
         input=input,
         fields={
-            "region": Field("Region"),
-            "year": Field("Year"),
+            "region": Field("Region", baseline="Europe"),
+            "year": Field("Year", baseline=2026),
         },
     )
 
@@ -51,11 +56,28 @@ resolved IDs in that top-level field mapping; module-scoped registration is
 rejected because selective exclusion is owned by the root bookmark session.
 
 After a registered filter changes, the bridge also updates the current address
-after a short debounce. It replaces the current browser-history entry, so a
-refresh or ordinary browser bookmark reopens the same view without filling the
-Back button with every intermediate slider or text-input value. The explicit
-**Link to this view** action remains the place to exclude selected fields before
-sharing.
+after a short debounce. The live address contains only values that differ from
+their baselines. It replaces the current browser-history entry, so a refresh or
+ordinary browser bookmark reopens the same view without filling the Back button
+with every intermediate slider or text-input value. The explicit **Link to this
+view** action remains the exact, selective sharing control.
+
+Declare stable baselines with `Field(baseline=...)`. This is comparison
+metadata; it does not set the Shiny control's initial value. On a clean page,
+the helper logs a mismatch without logging either value and safely retains the
+current value until it reaches the declaration. Without a declaration, it
+learns the first materialized value—even for a dynamically rendered input.
+Declare `baseline=` when later initialization code changes that first value.
+
+Baseline comparison is semantic. Meaningful falsy values such as `False`, `0`,
+and an empty selection remain in the URL when they differ from the baseline.
+`ChoiceRestore.default` has a separate job: it is only the fallback for an
+unavailable saved choice. A field restored before its baseline is known remains
+in later live URLs for refresh safety.
+
+The live URL is minimal; the explicit **Copy link** action is exact and includes
+every checked field, even one at baseline. An opened exact link stays full until
+a registered value changes, after which live synchronization minimizes it.
 
 ## View links that outlive the app
 
@@ -91,7 +113,8 @@ register(
 current Shiny choice input. Supported controls are `select`, `selectize`, and
 `radio`. Multiple selections retain every choice that still exists, use the
 current display order, and preserve an empty selection. A missing declared
-default falls back to the valid value Shiny already selected.
+default falls back to the valid value Shiny already selected. Dynamically
+rendered choice inputs are validated once they materialize.
 
 `renamed_from` maps an old input ID to its former label and requires a
 `ChoiceRestore` policy so the saved value can actually be applied to the new
@@ -120,13 +143,14 @@ warning clears on the next visit.
 ## Privacy and behaviour
 
 - The browser-local ShinyHub switcher receives the registered display values and
-  generated URL so it can show the receipt and copy the link. After a registered
-  value changes, all registered values also become part of the current browser
-  URL so refresh works. The ShinyHub server neither receives nor persists
-  bookmark state; selected values stay in Shiny's URL.
+  generated URL so it can show the receipt and copy the link. ShinyHub has no
+  dedicated bookmark-state API or store. The URL query still follows the
+  browser, proxy, and Shiny request path and may appear in browser history,
+  deployment logs, analytics, or referrer data.
 - Every registered field is selected by default, including values equal to the
   app's current defaults. The receipt makes that scope explicit before copying.
-- App inputs not registered here are always excluded.
+- Helper-created links exclude unregistered Shiny inputs. App-owned bookmark
+  callbacks may still add `state.values`, which Shiny preserves as `_values_`.
 - A view link with no selected fields cannot be created.
 - URLs over 8 KiB are rejected by default. Raise `max_url_length` only when the
   complete delivery path is known to accept longer URLs.

@@ -9,19 +9,27 @@ Shiny app opts in. The app names the filter inputs that are safe and useful to
 carry. ShinyHub presents the receipt and selection UI; Shiny itself serializes
 and restores the state.
 
-There is no ShinyHub bookmark table, API, or retained copy of filter values.
-The state stays in the URL returned by Shiny.
+There is no dedicated ShinyHub bookmark API or database table. Shiny serializes
+the selected state into the URL, which follows the application's normal request
+path when opened.
 
-Registered filters also keep the current address synchronized. Changes are
-debounced and replace the current history entry, so refresh and ordinary browser
-bookmarks reopen the same view without turning every slider step into a Back
-button stop. **Link to this view** remains the selective sharing control: a
-visitor can exclude registered fields before copying a link.
+Registered filters also keep the current address synchronized. The live address
+contains only values that differ from the app's baseline. Changes are debounced
+and replace the current history entry, so refresh and ordinary browser bookmarks
+reopen the same view without turning every slider step into a Back button stop.
+**Link to this view** remains the exact, selective sharing control: a visitor can
+exclude registered fields before copying a link.
 
 ## Add it to an app
 
-Install `shinyhub-bookmarks` alongside Shiny 1.6.4 or newer, then add the browser
-dependency to the UI and register fields in the server:
+Install `shinyhub-bookmarks` alongside Shiny 1.6.4 or newer:
+
+```console
+uv add shinyhub-bookmarks
+# or: python -m pip install shinyhub-bookmarks
+```
+
+Then add the browser dependency to the UI and register fields in the server:
 
 ```python
 from shiny import App, ui
@@ -41,8 +49,8 @@ def server(input, output, session):
         session=session,
         input=input,
         fields={
-            "region": Field("Region"),
-            "year": Field("Reporting year"),
+            "region": Field("Region", baseline="Europe"),
+            "year": Field("Reporting year", baseline=2026),
         },
     )
 
@@ -72,12 +80,55 @@ The panel lists every registered field and its current value. All values are
 included by default, so **Copy link** means “copy this exact view,” including
 values that happen to equal today's app defaults.
 
+An exact link that is opened stays exact until a registered value changes. At
+that point, live synchronization rewrites it to the minimal representation.
+
 **Change** reveals checkboxes in place; **Done** returns to the compact review.
 Unchecked values are omitted and use whatever defaults the app has when the
 link is opened. The copy action is disabled when no values are selected,
 avoiding a link that looks special but carries no useful state. The panel also
 reminds visitors that the app's access rules still apply to anyone opening the
 link.
+
+## Keep the live URL minimal
+
+Use `baseline=` for a stable initial value that may be omitted from the live
+URL:
+
+```python
+fields={
+    "forecast": Field("Forecast", baseline=False),
+    "segments": Field("Segments", baseline=[]),
+}
+```
+
+`baseline=` is comparison metadata; it does not set the Shiny control's value.
+Keep it aligned with the control's initialized value. On a clean page, a
+mismatch is logged without logging either value, and the current value remains
+in live URLs until the control reaches the declared baseline. This preserves
+refresh fidelity while still allowing later initialization code to settle on
+the declared value.
+
+The live URL contains a field exactly when its current value differs
+semantically from its baseline. `False`, `0`, an empty string, and an empty
+selection are real values—not shorthand for “omit.” Returning a field to its
+baseline removes it again.
+
+When `baseline=` is omitted, the helper learns the first materialized value on
+a clean page. This also works for dynamically rendered inputs: learning waits
+until the input exists. If later initialization code changes that first value,
+declare the final value explicitly with `baseline=`.
+
+Restoration and minimization are intentionally separate. `ChoiceRestore.default`
+is only the fallback for a saved choice that is no longer available; it is not
+a URL baseline. If a field is restored from an existing URL before a baseline
+is known, the helper retains that field in later live URLs rather than risk
+losing part of the current view on refresh.
+
+For example, if `region="Europe"` and `year=2026` are baselines, a clean view
+uses the app path with neither input in its query. Changing only the region adds
+only `region`. The explicit **Copy link** action still includes every checked
+field, including `year=2026`, because it represents the exact selected view.
 
 ## Field labels and values
 
@@ -100,12 +151,16 @@ fields={
 
 Formatters only affect the value shown in the panel. Shiny serializes the
 original input value.
+
 Do not register secrets or large free-form inputs: after a registered value
-changes it becomes part of the current URL, and generated links may appear in
-browser history, logs, and referrer data.
+differs from its baseline it becomes part of the current URL, and generated
+links may appear in browser history, logs, and referrer data.
 The browser-local ShinyHub switcher receives registered display values and the
-generated URL to render the receipt and copy the link. The ShinyHub server does
-not receive or persist bookmark state.
+generated URL to render the receipt and copy the link. ShinyHub does not
+intentionally retain a separate bookmark-state copy. As with any application
+URL, the query travels through the browser, ShinyHub's normal proxy path, and
+Shiny; depending on deployment configuration, it may also appear in access
+logs, analytics, browser history, and referrer data.
 
 Transport differences involving dates, datetimes, tuples, mappings, enums,
 UUIDs, and dataclasses are compared recursively. Custom inputs can provide an
@@ -137,6 +192,10 @@ Automatic saving is deliberately bounded. A transient failure is retried once;
 if the URL still cannot be updated, the link control gains a coral status dot
 and explains that **Copy link** will preserve the latest filters. A later filter
 change retries normally and clears the warning after the URL is safely updated.
+Live synchronization may select no fields when every value is at baseline; in
+that case the bridge removes Shiny's empty input marker while preserving the
+fragment, if any. If the app adds its own `state.values` in a bookmark callback,
+Shiny's `_values_` query remains because it is application-owned state.
 
 ## Evolving view links safely
 
@@ -174,7 +233,8 @@ controls, and reports any adjustment to the browser-local switcher. A multiple
 selection keeps its still-valid members in current display order, including an
 empty selection. Removed fields listed in `legacy_fields` are ignored and
 reported. `renamed_from` requires a `ChoiceRestore` policy so the saved value is
-validated and moved to the current field.
+validated and moved to the current field. For a dynamically rendered choice
+input, validation and any required update run once the input materializes.
 
 The helper adds no package-specific schema or version metadata to the URL.
 Shiny may still include application-owned bookmark values when an app adds

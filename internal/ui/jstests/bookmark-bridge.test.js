@@ -102,6 +102,7 @@ test('registered filter changes replace the current URL after a short debounce',
     store: 'url',
     autoSync: true,
     syncRevision: 1,
+    syncFields: ['region'],
     fields: [
       { id: 'region', label: 'Region', value: 'Americas' },
       { id: 'year', label: 'Year', value: '2026' },
@@ -110,7 +111,7 @@ test('registered filter changes replace the current URL after a short debounce',
 
   await flush(m.window, 350);
   assert.equal(requests(m).length, 1);
-  assert.deepEqual(Array.from(requests(m)[0].value.include), ['region', 'year']);
+  assert.deepEqual(Array.from(requests(m)[0].value.include), ['region']);
   assert.equal(requests(m)[0].value.purpose, 'sync');
   assert.equal(requests(m)[0].value.syncRevision, 1);
 
@@ -127,6 +128,89 @@ test('registered filter changes replace the current URL after a short debounce',
   assert.equal(pushes.length, 0, 'filter changes must not add Back-button entries');
   const ack = m.inputs.find((entry) => entry.id === '.shinyhub_bookmark_sync_ack');
   assert.equal(ack.value.syncRevision, 1);
+});
+
+test('returning every filter to its baseline clears bookmark state from the URL', async () => {
+  const m = mountBridge();
+  m.window.history.replaceState(null, '', '/app/demo/?_inputs_&region=%22Asia%22#results');
+  m.inputs.length = 0;
+
+  m.handlers['shinyhub-bookmark-capabilities']({
+    version: 1,
+    store: 'url',
+    autoSync: true,
+    syncRevision: 2,
+    syncFields: [],
+    fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+  });
+
+  await flush(m.window, 350);
+  assert.equal(requests(m).length, 1);
+  assert.deepEqual(Array.from(requests(m)[0].value.include), []);
+
+  m.handlers['shinyhub-bookmark-result']({
+    version: 1,
+    requestId: requests(m)[0].value.requestId,
+    purpose: 'sync',
+    syncRevision: 2,
+    url: 'https://hub.test/app/demo/?',
+  });
+
+  assert.equal(m.window.location.search, '');
+  assert.equal(m.window.location.hash, '#results');
+});
+
+test('app-owned bookmark values remain when every registered field is at baseline', async () => {
+  const m = mountBridge();
+  m.window.history.replaceState(null, '', '/app/demo/?_inputs_&region=%22Asia%22#results');
+  m.inputs.length = 0;
+
+  m.handlers['shinyhub-bookmark-capabilities']({
+    version: 1,
+    store: 'url',
+    autoSync: true,
+    syncRevision: 3,
+    syncFields: [],
+    fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+  });
+
+  await flush(m.window, 350);
+  m.handlers['shinyhub-bookmark-result']({
+    version: 1,
+    requestId: requests(m)[0].value.requestId,
+    purpose: 'sync',
+    syncRevision: 3,
+    url: 'https://hub.test/app/demo/?_values_&theme=%22dark%22',
+  });
+
+  assert.equal(m.window.location.search, '?_values_&theme=%22dark%22');
+  assert.equal(m.window.location.hash, '#results');
+});
+
+test('a legacy empty Shiny input marker is normalized to the app path', async () => {
+  const m = mountBridge();
+  m.window.history.replaceState(null, '', '/app/demo/?_inputs_&region=%22Asia%22');
+  m.inputs.length = 0;
+
+  m.handlers['shinyhub-bookmark-capabilities']({
+    version: 1,
+    store: 'url',
+    autoSync: true,
+    syncRevision: 4,
+    syncFields: [],
+    fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+  });
+
+  await flush(m.window, 350);
+  m.handlers['shinyhub-bookmark-result']({
+    version: 1,
+    requestId: requests(m)[0].value.requestId,
+    purpose: 'sync',
+    syncRevision: 4,
+    url: 'https://hub.test/app/demo/?_inputs_',
+  });
+
+  assert.equal(m.window.location.search, '');
 });
 
 test('initial capabilities do not rewrite a clean app URL', async () => {

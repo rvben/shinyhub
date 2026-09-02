@@ -87,6 +87,28 @@
     return result;
   }
 
+  function syncFieldIDs() {
+    if (
+      !cachedCapabilities ||
+      !Object.prototype.hasOwnProperty.call(cachedCapabilities, "syncFields") ||
+      !Array.isArray(cachedCapabilities.syncFields)
+    ) {
+      return registeredFieldIDs();
+    }
+    var registered = registeredFieldIDs();
+    var allowed = Object.create(null);
+    for (var i = 0; i < registered.length; i++) allowed[registered[i]] = true;
+    var result = [];
+    var seen = Object.create(null);
+    for (var j = 0; j < cachedCapabilities.syncFields.length; j++) {
+      var id = cachedCapabilities.syncFields[j];
+      if (typeof id !== "string" || !allowed[id] || seen[id]) continue;
+      seen[id] = true;
+      result.push(id);
+    }
+    return result;
+  }
+
   function replaceCurrentViewURL(rawURL) {
     if (typeof rawURL !== "string" || !rawURL) return false;
     try {
@@ -96,6 +118,9 @@
         target.pathname !== window.location.pathname
       ) {
         return false;
+      }
+      if (target.search === "?_inputs_" || target.search === "?_inputs_=") {
+        target.search = "";
       }
       if (!target.hash && window.location.hash) target.hash = window.location.hash;
       var next = target.pathname + target.search + target.hash;
@@ -241,11 +266,7 @@
   function requestURLSync() {
     syncTimer = null;
     if (!syncNeeded || pendingRequest || queuedCreate) return;
-    var include = registeredFieldIDs();
-    if (!include.length) {
-      syncNeeded = false;
-      return;
-    }
+    var include = syncFieldIDs();
     syncNeeded = false;
     syncSequence += 1;
     var revision = desiredSyncRevision;

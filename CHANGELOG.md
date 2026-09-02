@@ -23,8 +23,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- **bookmarks**: add `Field(baseline=...)` and keep live Python Shiny URLs
+  minimal by including only values that differ from their baselines, while
+  preserving exact selective links.
+
 ### Fixed
 
+- **bookmarks**: let URL restoration continue when a registered Python Shiny
+  input has not initialized its client value yet.
 - **fleet**: preserve the last real application timestamp and provenance when
   an identical `fleet apply` only verifies already-converged state.
 

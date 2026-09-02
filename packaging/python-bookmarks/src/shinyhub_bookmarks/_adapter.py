@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from ._restore import Adjustment, ChoiceRestore, resolve_choice, values_equal
+from ._restore import MISSING, Adjustment, ChoiceRestore, resolve_choice, values_equal
 
 PROTOCOL_VERSION = 1
 REQUEST_INPUT_ID = ".shinyhub_bookmark_request"
@@ -33,13 +34,19 @@ Normalizer = Callable[[Any], Any]
 
 @dataclass(frozen=True, slots=True)
 class Field:
-    """A Shiny input that visitors may include in a bookmark."""
+    """A Shiny input that visitors may include in a bookmark.
+
+    ``baseline`` defines the value omitted from the live URL. When it is
+    omitted, the first materialized value on a clean page becomes the baseline.
+    A restore fallback remains independent from this value.
+    """
 
     label: str
     formatter: Formatter | None = None
     restore: ChoiceRestore | None = None
     renamed_from: Mapping[str, str] | None = None
     normalizer: Normalizer | None = None
+    baseline: Any = MISSING
 
     def __post_init__(self) -> None:
         if not isinstance(self.label, str) or not self.label.strip():
@@ -77,6 +84,7 @@ class _RegisteredField:
     normalizer: Normalizer | None
     restore: ChoiceRestore | None
     renamed_from: Mapping[str, str]
+    baseline: Any
 
 
 class _Bookmark(Protocol):
@@ -131,6 +139,7 @@ def _normalise_fields(
                 normalizer=field.normalizer,
                 restore=field.restore,
                 renamed_from=dict(field.renamed_from or {}),
+                baseline=field.baseline,
             )
         )
     if not result:
@@ -180,6 +189,26 @@ def _field_values_equal(field: _RegisteredField, left: Any, right: Any) -> bool:
     return values_equal(left, right)
 
 
+def _baseline_value(field: _RegisteredField, value: Any) -> Any:
+    """Normalize and snapshot a baseline so later mutation cannot move it."""
+
+    if field.normalizer is not None:
+        try:
+            value = field.normalizer(value)
+        except Exception as error:
+            raise ValueError(
+                f"Bookmark field {field.input_id!r} could not normalize its baseline"
+            ) from error
+
+    try:
+        return copy.deepcopy(value)
+    except Exception as error:
+        raise TypeError(
+            f"Bookmark field {field.input_id!r} baseline must be safely copyable; "
+            "provide an idempotent normalizer that returns a copyable value"
+        ) from error
+
+
 def _bounded_untrusted_display(value: Any, limit: int) -> str:
     text = _safe_display_value(value, None)
     printable = "".join(
@@ -216,6 +245,10 @@ def _restore_adjustments(
     }
     for field in registered:
         claimed.update(field.renamed_from)
+        if field.input_id not in current_values:
+            # A registered dynamic input can materialize after the restore hook.
+            # Shiny still owns its native restoration; defer helper validation.
+            continue
         restored = _restored_value(state_input, field)
         if restored is None:
             continue
@@ -228,9 +261,7 @@ def _restore_adjustments(
                 field.restore,
                 saved,
                 current,
-                equal=lambda left, right: _field_values_equal(
-                    field, left, right
-                ),
+                equal=lambda left, right: _field_values_equal(field, left, right),
             )
             target = resolution.value
             kind = resolution.kind
@@ -335,7 +366,7 @@ def _known_input_ids(inputs: Any) -> set[str]:
 
 
 def _selection_from_request(
-    request: object, registered_ids: set[str]
+    request: object, registered_ids: set[str], *, allow_empty: bool = False
 ) -> tuple[str, tuple[str, ...]]:
     if not isinstance(request, Mapping):
         raise ValueError("The bookmark request is not an object")
@@ -359,7 +390,7 @@ def _selection_from_request(
             raise ValueError("The bookmark selection contains an unknown field")
         selected.append(raw_id)
         seen.add(raw_id)
-    if not selected:
+    if not selected and not allow_empty:
         raise ValueError("Select at least one field")
     return request_id, tuple(selected)
 
@@ -404,8 +435,8 @@ def register(
     The app must use ``App(..., bookmark_store="url")`` and include
     :func:`bookmarking_dependency` in its UI. The browser-local ShinyHub
     switcher receives registered display values and generated URLs. Registered
-    input changes keep the current address synchronized, while the ShinyHub
-    server neither receives nor persists bookmark state.
+    input changes keep the current address synchronized. ShinyHub has no
+    dedicated bookmark-state API or store; the state travels in Shiny's URL.
     """
 
     bookmark = session.bookmark
@@ -433,6 +464,14 @@ def register(
             raise ValueError("Legacy bookmark field labels must be non-empty strings")
 
     registered = _normalise_fields(fields, resolve=lambda value: value)
+    explicit_baseline_ids = {
+        field.input_id for field in registered if field.baseline is not MISSING
+    }
+    baseline_values = {
+        field.input_id: _baseline_value(field, field.baseline)
+        for field in registered
+        if field.baseline is not MISSING
+    }
     registration = Registration(registered, max_url_length)
     setattr(bookmark, REGISTRATION_MARKER, registration)
     resolved_ids = {field.resolved_id for field in registered}
@@ -444,20 +483,97 @@ def register(
     capability_revision = 0
     acknowledged_revision = 0
     initial_capabilities_observed = False
+    preserved_restored_fields: set[str] = set()
+    conservative_fields: set[str] = set()
+    restored_field_ids: set[str] = set()
+    pending_restored_inputs: dict[str, dict[str, Any]] = {}
+    validated_baseline_ids: set[str] = set()
+    restore_inspected = False
 
     from shiny import reactive
     from shiny.module import ResolvedId
+    from shiny.types import SilentException
+
+    def read_current_values() -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for field in registered:
+            try:
+                values[field.input_id] = input[ResolvedId(field.resolved_id)]()
+            except SilentException:
+                # Keep the dependency registered, but do not mistake an input
+                # that has not materialized yet for an intentional None value.
+                continue
+        return values
+
+    def capture_observed_baseline(field: _RegisteredField, value: Any) -> None:
+        try:
+            baseline_values[field.input_id] = _baseline_value(field, value)
+        except (TypeError, ValueError):
+            baseline_values.pop(field.input_id, None)
+            conservative_fields.add(field.input_id)
+            logger.warning(
+                "Bookmark field %r has no safely comparable baseline; "
+                "keeping it in live URLs",
+                field.resolved_id,
+            )
+        else:
+            conservative_fields.discard(field.input_id)
+
+    def validate_declared_baseline(field: _RegisteredField, current: Any) -> None:
+        if field.input_id in validated_baseline_ids:
+            return
+        validated_baseline_ids.add(field.input_id)
+        if _field_values_equal(field, current, baseline_values[field.input_id]):
+            return
+        logger.warning(
+            "Bookmark field %r baseline does not match its value after restore; "
+            "keeping the current value in live URLs until it reaches the baseline",
+            field.resolved_id,
+        )
+
+    def inspect_clean_values(current_values: Mapping[str, Any]) -> None:
+        for field in registered:
+            if field.input_id not in current_values:
+                continue
+            if field.input_id in explicit_baseline_ids:
+                validate_declared_baseline(field, current_values[field.input_id])
+            elif field.input_id not in baseline_values:
+                capture_observed_baseline(field, current_values[field.input_id])
+
+    def process_pending_restores(current_values: Mapping[str, Any]) -> None:
+        for field in registered:
+            pending = pending_restored_inputs.get(field.input_id)
+            if pending is None or field.input_id not in current_values:
+                continue
+            adjustments, updates = _restore_adjustments(
+                state_input=pending,
+                registered=(field,),
+                current_values=current_values,
+                legacy_fields={},
+            )
+            pending_restored_inputs.pop(field.input_id, None)
+            registration.adjustments = tuple(
+                (*registration.adjustments, *adjustments)[:MAX_ADJUSTMENTS]
+            )
+            restored_overrides.update(updates)
+            if field.input_id in updates:
+                _apply_choice_update(session, field, updates[field.input_id])
 
     async def publish_capabilities() -> None:
         values = []
+        current_values = read_current_values()
+        process_pending_restores(current_values)
         for field in registered:
-            current = input[ResolvedId(field.resolved_id)]()
+            if field.input_id not in current_values:
+                continue
+            current = current_values[field.input_id]
             if field.input_id in restored_overrides:
                 restored = restored_overrides[field.input_id]
                 if _field_values_equal(field, current, restored):
                     restored_overrides.pop(field.input_id, None)
                 else:
                     current = restored
+            current_values[field.input_id] = current
             values.append(
                 {
                     "id": field.resolved_id,
@@ -465,6 +581,36 @@ def register(
                     "value": _safe_display_value(current, field.formatter),
                 }
             )
+        if restore_inspected:
+            for field in registered:
+                if field.input_id not in current_values:
+                    continue
+                if (
+                    field.input_id in explicit_baseline_ids
+                    and field.input_id not in restored_field_ids
+                ):
+                    validate_declared_baseline(field, current_values[field.input_id])
+        sync_fields = []
+        for field in registered:
+            if field.input_id not in current_values:
+                continue
+            current = current_values[field.input_id]
+            if field.input_id in baseline_values:
+                if not _field_values_equal(
+                    field, current, baseline_values[field.input_id]
+                ):
+                    sync_fields.append(field.resolved_id)
+            elif (
+                field.input_id in preserved_restored_fields
+                or field.input_id in conservative_fields
+            ):
+                # Without a baseline, dropping state restored from an existing
+                # URL would make a later refresh lose part of the current view.
+                sync_fields.append(field.resolved_id)
+            elif restore_inspected:
+                # Do not learn from the first reactive effect: Shiny may already
+                # have applied URL state before the restore hook identifies it.
+                capture_observed_baseline(field, current)
         await session.send_custom_message(
             CAPABILITIES_MESSAGE,
             {
@@ -472,6 +618,7 @@ def register(
                 "store": "url",
                 "autoSync": capability_revision > acknowledged_revision,
                 "syncRevision": capability_revision,
+                "syncFields": sync_fields,
                 "fields": values,
                 "adjustments": [item.as_message() for item in registration.adjustments],
             },
@@ -487,11 +634,27 @@ def register(
 
     @bookmark.on_restore
     async def _inspect_restored_bookmark(state: Any) -> None:
+        nonlocal restore_inspected
         state_input = state.input if isinstance(state.input, Mapping) else {}
-        current_values = {
-            field.input_id: input[ResolvedId(field.resolved_id)]()
-            for field in registered
-        }
+        current_values = read_current_values()
+        for field in registered:
+            restored = _restored_value(state_input, field)
+            if restored is not None:
+                restored_field_ids.add(field.input_id)
+                if field.input_id not in baseline_values:
+                    preserved_restored_fields.add(field.input_id)
+                if field.input_id not in current_values:
+                    source_id, _source_label, saved = restored
+                    pending_restored_inputs[field.input_id] = {source_id: saved}
+                continue
+        inspect_clean_values(
+            {
+                input_id: value
+                for input_id, value in current_values.items()
+                if input_id not in restored_field_ids
+            }
+        )
+        restore_inspected = True
         adjustments, updates = _restore_adjustments(
             state_input=state_input,
             registered=registered,
@@ -504,6 +667,19 @@ def register(
             if field.input_id in updates:
                 _apply_choice_update(session, field, updates[field.input_id])
         await publish_capabilities()
+
+    async def _finalize_baselines_after_first_flush() -> None:
+        nonlocal restore_inspected
+        if restore_inspected:
+            return
+        # A malformed bookmark can make Shiny suppress on_restore entirely.
+        # Once the first flush completes, the inputs reflect the safe app view.
+        restore_inspected = True
+        with reactive.isolate():
+            inspect_clean_values(read_current_values())
+            await publish_capabilities()
+
+    session.on_flushed(_finalize_baselines_after_first_flush, once=True)
 
     @reactive.effect
     async def _publish_capabilities() -> None:
@@ -524,7 +700,10 @@ def register(
     async def _acknowledge_url_sync() -> None:
         nonlocal acknowledged_revision
         raw_ack = input[SYNC_ACK_INPUT_ID]()
-        if not isinstance(raw_ack, Mapping) or raw_ack.get("version") != PROTOCOL_VERSION:
+        if (
+            not isinstance(raw_ack, Mapping)
+            or raw_ack.get("version") != PROTOCOL_VERSION
+        ):
             return
         revision = raw_ack.get("syncRevision")
         if (
@@ -538,15 +717,21 @@ def register(
     @reactive.event(input[REQUEST_INPUT_ID], ignore_none=True)
     async def _handle_request() -> None:
         raw_request = input[REQUEST_INPUT_ID]()
-        automatic = isinstance(raw_request, Mapping) and raw_request.get("purpose") == "sync"
+        automatic = (
+            isinstance(raw_request, Mapping) and raw_request.get("purpose") == "sync"
+        )
         requested_revision = (
-            raw_request.get("syncRevision") if isinstance(raw_request, Mapping) else None
+            raw_request.get("syncRevision")
+            if isinstance(raw_request, Mapping)
+            else None
         )
         request_id = (
             raw_request.get("requestId", "") if isinstance(raw_request, Mapping) else ""
         )
         try:
-            request_id, selected = _selection_from_request(raw_request, resolved_ids)
+            request_id, selected = _selection_from_request(
+                raw_request, resolved_ids, allow_empty=automatic
+            )
         except ValueError as error:
             await session.send_custom_message(
                 ERROR_MESSAGE,
@@ -581,9 +766,11 @@ def register(
                     )
                     url = await asyncio.wait_for(
                         create,
-                        AUTO_SYNC_TIMEOUT_SECONDS
-                        if automatic
-                        else MANUAL_REQUEST_TIMEOUT_SECONDS,
+                        (
+                            AUTO_SYNC_TIMEOUT_SECONDS
+                            if automatic
+                            else MANUAL_REQUEST_TIMEOUT_SECONDS
+                        ),
                     )
                 finally:
                     selected_fields.reset(token)

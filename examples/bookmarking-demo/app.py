@@ -109,6 +109,7 @@ def server(input, output, session):
                 "Region",
                 restore=ChoiceRestore(choices=REGIONS, default="Europe"),
                 renamed_from={"territory": "Territory"},
+                baseline="Europe",
             ),
             "product": Field(
                 "Product",
@@ -117,11 +118,13 @@ def server(input, output, session):
                     default="All products",
                     aliases={"Legacy planning": "Planning"},
                 ),
+                baseline="All products",
             ),
-            "year": Field("Reporting year"),
+            "year": Field("Reporting year", baseline=2026),
             "forecast": Field(
                 "Forecast",
                 formatter=lambda value: "Included" if value else "Actuals only",
+                baseline=True,
             ),
         },
         legacy_fields={"segment": "Market segment"},
