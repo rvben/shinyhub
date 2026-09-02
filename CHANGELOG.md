@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.1](https://github.com/rvben/shinyhub/compare/v0.15.0...v0.15.1) - 2026-09-02
+
+### Added
+
+- **bookmarks**: prepare v0.5.0 ([d58f1df](https://github.com/rvben/shinyhub/commit/d58f1df658753151569502ab7bd93d106ab8fac6))
+
+### Fixed
+
+- **fleet**: preserve provenance on unchanged applies ([48a9096](https://github.com/rvben/shinyhub/commit/48a9096fd5c771901c69afefd8d1a3fcf03e5b91))
+- **process**: preserve terminal log verdicts during eviction ([638f864](https://github.com/rvben/shinyhub/commit/638f864fe7e171118f7652f20db91a4e1f25cfe0))
+- **lifecycle**: recover workloads stranded by dead workers ([e8f6693](https://github.com/rvben/shinyhub/commit/e8f669313af1c4ca016454406882f5c3bcfda050))
+- **support**: merge support-session review fixes ([910bee8](https://github.com/rvben/shinyhub/commit/910bee87103e8a4557b5045dc2257aca57b97d9e))
+- **proxy**: end support-session responses at the session deadline ([a33aa9a](https://github.com/rvben/shinyhub/commit/a33aa9ad418aa263f983d519000e93dac5ef058d))
+- **api**: offer a support-session resume link only once the app was reached ([2e1b1fb](https://github.com/rvben/shinyhub/commit/2e1b1fb76b793c95c57995fb5e83f90a1f906211))
+- **access**: block guard-only requests instead of serving apps anonymously ([c0d35da](https://github.com/rvben/shinyhub/commit/c0d35dacf98a052a38dda2fc04ad58ab2f377f99))
+- **identity**: cap token expiry at the support session deadline ([b8e40c1](https://github.com/rvben/shinyhub/commit/b8e40c148e103e0c8adffa3cecd4158f82ff2de8))
+- **docs**: satisfy usage analytics metadata check ([6803da6](https://github.com/rvben/shinyhub/commit/6803da6c0c6cdaf4aa7a1d0d5540cc702654100b))
+
 ## [0.15.0](https://github.com/rvben/shinyhub/compare/v0.14.2...v0.15.0) - 2026-09-01
 
 ### Added
