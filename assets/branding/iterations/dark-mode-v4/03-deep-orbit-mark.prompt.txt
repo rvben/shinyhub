@@ -1,2 +1,0 @@
-Origin: deterministic emblem-only crop of `03-deep-orbit.png` after its lower-right node/orbit join repair.
-Production request: preserve the complete Orbit Hub emblem exactly--the cyan sparkle, continuous Strong Line orbital structure and node rings, pale cores, repaired join geometry, colors, and alpha--while removing only the wordmark. Trim transparent canvas around the emblem and add 48px transparent clear space on every side. No additional recoloring, redraw, filter, shadow, or background.

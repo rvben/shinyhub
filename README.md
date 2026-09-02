@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/branding/selected/shinyhub-orbit-hub-dark.svg">
-    <img src="assets/branding/selected/shinyhub-orbit-hub.svg" alt="ShinyHub" width="520">
+    <source media="(prefers-color-scheme: dark)" srcset="internal/ui/static/brand/orbit-hub-lockup-dark.svg">
+    <img src="internal/ui/static/brand/orbit-hub-lockup-light.svg" alt="ShinyHub" width="520">
   </picture>
 </p>
 

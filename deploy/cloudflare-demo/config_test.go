@@ -147,7 +147,7 @@ func TestCloudflareDemoColdStartStaysOffTheRootRequestPath(t *testing.T) {
 	wakeSource := string(wake)
 	for _, required := range []string{
 		`Waking the live demo`,
-		`shinyhub-orbit-hub-dark.svg`,
+		`orbit-hub-lockup-dark.svg`,
 		`fetch('${DEMO_READY_PATH}'`,
 		`window.location.replace('/')`,
 		`@media (prefers-reduced-motion: reduce)`,
@@ -162,7 +162,7 @@ func TestCloudflareDemoColdStartStaysOffTheRootRequestPath(t *testing.T) {
 		t.Fatal("demo edge boot page must use the approved Orbit Hub lockup, not an approximate inline mark")
 	}
 
-	brand, err := os.ReadFile("../../assets/branding/selected/shinyhub-orbit-hub-dark.svg")
+	brand, err := os.ReadFile("../../internal/ui/static/brand/orbit-hub-lockup-dark.svg")
 	if err != nil {
 		t.Fatal(err)
 	}

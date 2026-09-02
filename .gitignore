@@ -58,5 +58,9 @@ research/
 # Local prototypes kept beside the repo, never part of a build.
 experiments/
 
+# Local font and branding source material. Production-ready application assets
+# belong with the component that ships them, not in this repository-level tree.
+/assets/
+
 # macOS Finder metadata.
 .DS_Store

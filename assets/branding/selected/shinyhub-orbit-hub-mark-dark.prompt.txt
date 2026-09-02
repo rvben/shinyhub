@@ -1,2 +1,0 @@
-Origin: deterministic emblem-only crop of `shinyhub-orbit-hub-dark.png` after its lower-right node/orbit join repair.
-Production request: preserve the complete reversed Orbit Hub emblem exactly—the cyan four-point sparkle, continuous Starlight orbit, all three nodes, repaired join geometry, alpha, and colors—while removing only the wordmark. Trim the transparent source canvas around the emblem, then add 48 pixels of transparent clear space on every side. No additional recoloring, redraw, filtering, resampling, shadow, background, or element.

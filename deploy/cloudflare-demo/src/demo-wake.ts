@@ -1,4 +1,4 @@
-import orbitHubLockupDarkSource from "../../../assets/branding/selected/shinyhub-orbit-hub-dark.svg";
+import orbitHubLockupDarkSource from "../../../internal/ui/static/brand/orbit-hub-lockup-dark.svg";
 
 export const DEMO_READY_PATH = "/__demo/ready";
 
