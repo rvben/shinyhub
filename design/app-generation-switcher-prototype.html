@@ -1,0 +1,1345 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>ShinyHub — App version switcher design report</title>
+  <style>
+    :root {
+      --deep: #030510;
+      --canvas: #060914;
+      --surface: #0e1426;
+      --raised: #141b32;
+      --hover: #1b2444;
+      --line: #1e2a4a;
+      --line-strong: #2b3a63;
+      --text: #e8eeff;
+      --soft: #a8b4d4;
+      --muted: #7f8db3;
+      --signal: #38bdf8;
+      --signal-soft: #7dd3fc;
+      --warning: #fbbf24;
+      --warning-soft: #fde68a;
+      --warning-deep: #2a2110;
+      --coral: #f87171;
+      --green: #4ade80;
+      --indigo: #a5b4fc;
+      --shadow: 0 28px 70px -28px rgba(0, 0, 0, 0.88);
+      --page-max: 1240px;
+      --radius-sm: 4px;
+      --radius-md: 8px;
+      --radius-lg: 14px;
+      --font: Manrope, Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: "Space Mono", "SFMono-Regular", Consolas, monospace;
+    }
+
+    html[data-theme="light"] {
+      --deep: #e8edf6;
+      --canvas: #f4f7fc;
+      --surface: #ffffff;
+      --raised: #f3f6fb;
+      --hover: #e9eef7;
+      --line: #dbe2ee;
+      --line-strong: #c6d0e0;
+      --text: #16203a;
+      --soft: #45526e;
+      --muted: #5b6784;
+      --signal: #0369a1;
+      --signal-soft: #075985;
+      --warning: #b45309;
+      --warning-soft: #92400e;
+      --warning-deep: #fff7ed;
+      --coral: #dc2626;
+      --green: #15803d;
+      --indigo: #4f46e5;
+      --shadow: 0 28px 70px -32px rgba(22, 32, 58, 0.34);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--text);
+      background: var(--canvas);
+      font-family: var(--font);
+      font-size: 0.875rem;
+      line-height: 1.6;
+      letter-spacing: -0.005em;
+    }
+
+    button, input, select { font: inherit; }
+
+    button { -webkit-tap-highlight-color: transparent; }
+
+    ::selection { color: var(--deep); background: var(--signal); }
+
+    :focus-visible {
+      outline: 3px solid var(--signal);
+      outline-offset: 3px;
+    }
+
+    a { color: var(--signal-soft); text-underline-offset: 3px; }
+
+    .page-shell {
+      width: min(var(--page-max), calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .report-header {
+      position: sticky;
+      z-index: 50;
+      top: 0;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--canvas) 94%, transparent);
+      backdrop-filter: blur(14px);
+    }
+
+    .header-inner {
+      min-height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-width: 0;
+      font-weight: 750;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      flex: none;
+      color: var(--signal);
+      background: var(--raised);
+      border-radius: var(--radius-md);
+    }
+
+    .brand-mark svg { width: 18px; height: 18px; }
+
+    .brand-context {
+      color: var(--soft);
+      font-weight: 500;
+    }
+
+    .header-actions { display: flex; align-items: center; gap: 8px; }
+
+    .icon-button {
+      width: 40px;
+      height: 40px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-md);
+      color: var(--soft);
+      background: var(--surface);
+      cursor: pointer;
+    }
+
+    .icon-button:hover { color: var(--text); background: var(--hover); }
+    .icon-button svg { width: 18px; height: 18px; }
+
+    main { padding: 72px 0 104px; }
+
+    .intro {
+      max-width: 840px;
+      margin-bottom: 44px;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    h1 {
+      max-width: 760px;
+      margin-bottom: 20px;
+      font-size: 2.6rem;
+      line-height: 0.99;
+      letter-spacing: -0.04em;
+      text-wrap: balance;
+    }
+
+    .lede {
+      max-width: 68ch;
+      margin-bottom: 0;
+      color: var(--soft);
+      font-size: 1.05rem;
+      line-height: 1.65;
+    }
+
+    .report-status {
+      width: fit-content;
+      margin-top: 24px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--soft);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 15%, transparent);
+    }
+
+    .prototype-section { margin-top: 24px; }
+
+    .section-heading {
+      max-width: 720px;
+      margin-bottom: 24px;
+    }
+
+    h2 {
+      margin-bottom: 10px;
+      font-size: 1.7rem;
+      line-height: 1.16;
+      letter-spacing: -0.03em;
+      text-wrap: balance;
+    }
+
+    .section-heading p, .section-copy { color: var(--soft); }
+
+    .prototype-frame {
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-lg);
+      background: var(--deep);
+      box-shadow: var(--shadow);
+    }
+
+    .prototype-toolbar {
+      min-height: 66px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 14px 12px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .state-tabs {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow-x: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--line-strong) transparent;
+    }
+
+    .state-tab {
+      min-height: 38px;
+      padding: 7px 12px;
+      border: 0;
+      border-radius: var(--radius-md);
+      color: var(--soft);
+      background: transparent;
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .state-tab:hover { color: var(--text); background: var(--hover); }
+    .state-tab[aria-selected="true"] { color: var(--text); background: var(--raised); }
+
+    .viewport-toggle {
+      display: flex;
+      flex: none;
+      padding: 3px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: var(--deep);
+    }
+
+    .viewport-button {
+      width: 36px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: var(--radius-sm);
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .viewport-button:hover { color: var(--text); }
+    .viewport-button[aria-pressed="true"] { color: var(--signal); background: var(--raised); }
+    .viewport-button svg { width: 16px; height: 16px; }
+
+    .stage-wrap {
+      padding: 30px;
+      background: var(--canvas);
+    }
+
+    .app-stage {
+      position: relative;
+      min-height: 650px;
+      overflow: hidden;
+      margin: 0 auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: #f7f9fc;
+      color: #172033;
+    }
+
+    .app-stage.is-mobile {
+      width: min(390px, 100%);
+      min-height: 720px;
+    }
+
+    .mock-app {
+      min-height: inherit;
+      padding: 38px clamp(22px, 5vw, 64px) 52px;
+      background: #f7f9fc;
+    }
+
+    .app-stage.is-mobile .mock-app { padding: 78px 20px 40px; }
+
+    .mock-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 34px;
+    }
+
+    .mock-brand { display: flex; align-items: center; gap: 12px; }
+
+    .mock-logo {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      flex: none;
+      border-radius: var(--radius-md);
+      color: white;
+      background: #0369a1;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+
+    .mock-title { font-size: 17px; font-weight: 800; letter-spacing: -0.02em; }
+    .mock-subtitle { color: #5b6784; font-size: 0.75rem; }
+
+    .mock-controls { display: flex; gap: 8px; }
+
+    .mock-control {
+      min-height: 36px;
+      padding: 7px 12px;
+      border: 1px solid #d8dfeb;
+      border-radius: 8px;
+      color: #42506a;
+      background: #fff;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .mock-kpi-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    .mock-kpi, .mock-chart, .mock-activity {
+      border: 1px solid #e0e5ee;
+      border-radius: var(--radius-lg);
+      background: #fff;
+    }
+
+    .mock-kpi { padding: 18px; }
+    .mock-kpi-label { color: #5b6784; font-size: 0.75rem; font-weight: 750; text-transform: uppercase; letter-spacing: 0.06em; }
+    .mock-kpi-value { margin-top: 7px; font-size: 1.7rem; font-weight: 780; letter-spacing: -0.03em; }
+    .mock-kpi-trend { margin-top: 2px; color: #15803d; font-size: 0.75rem; font-weight: 700; }
+
+    .mock-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(230px, 0.75fr); gap: 14px; }
+
+    .mock-chart { min-height: 290px; padding: 20px; }
+    .mock-card-title { font-size: 13px; font-weight: 800; }
+    .mock-card-subtitle { color: #5b6784; font-size: 0.75rem; }
+
+    .bars {
+      height: 190px;
+      display: flex;
+      align-items: flex-end;
+      gap: clamp(7px, 1.3vw, 15px);
+      margin-top: 18px;
+      padding: 0 4px 0 2px;
+      border-bottom: 1px solid #e4e9f1;
+    }
+
+    .bar-col { flex: 1; min-width: 5px; border-radius: 4px 4px 0 0; background: #0369a1; opacity: 0.86; }
+    .bar-col:nth-child(2n) { background: #60a5fa; }
+
+    .mock-activity { padding: 20px; }
+    .activity-row { display: flex; gap: 10px; padding: 14px 0; border-bottom: 1px solid #edf0f5; }
+    .activity-row:last-child { border-bottom: 0; }
+    .activity-avatar { width: 28px; height: 28px; display: grid; place-items: center; flex: none; border-radius: 8px; color: #0369a1; background: #e8edf6; font-size: 0.75rem; font-weight: 800; }
+    .activity-copy { color: #45526e; font-size: 0.75rem; line-height: 1.45; }
+    .activity-copy strong { display: block; color: #16203a; font-size: 0.75rem; }
+
+    .app-stage.is-mobile .mock-header { display: block; }
+    .app-stage.is-mobile .mock-controls { margin-top: 18px; }
+    .app-stage.is-mobile .mock-kpi-row { grid-template-columns: 1fr 1fr; }
+    .app-stage.is-mobile .mock-kpi:last-child { grid-column: 1 / -1; }
+    .app-stage.is-mobile .mock-grid { grid-template-columns: 1fr; }
+    .app-stage.is-mobile .mock-activity { display: none; }
+
+    .switcher {
+      --switch-deep: #030510;
+      --switch-surface: #0e1426;
+      --switch-raised: #141b32;
+      --switch-hover: #1b2444;
+      --switch-line: #1e2a4a;
+      --switch-line-strong: #2b3a63;
+      --switch-text: #e8eeff;
+      --switch-soft: #a8b4d4;
+      --switch-muted: #6b7aa3;
+      --switch-signal: #38bdf8;
+      --switch-signal-soft: #7dd3fc;
+      --switch-warning: #fbbf24;
+      --switch-warning-soft: #fde68a;
+      --switch-warning-deep: #2a2110;
+      --switch-coral: #f87171;
+      position: absolute;
+      z-index: 10;
+      top: 12px;
+      right: 12px;
+      width: 348px;
+      color: var(--switch-text);
+      font-family: var(--font);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .app-stage.is-mobile .switcher { right: 8px; width: min(348px, calc(100% - 16px)); }
+
+    .switcher-bar {
+      min-height: 46px;
+      display: flex;
+      align-items: stretch;
+      overflow: hidden;
+      border: 1px solid var(--switch-line-strong);
+      border-radius: var(--radius-md);
+      background: var(--switch-surface);
+      box-shadow: 0 12px 30px -14px color-mix(in srgb, var(--switch-deep) 80%, transparent);
+    }
+
+    .switcher-control {
+      min-width: 42px;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 0;
+      border-right: 1px solid var(--switch-line);
+      color: var(--switch-soft);
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .switcher-control:hover { color: var(--switch-text); background: var(--switch-hover); }
+    .switcher-control svg { width: 18px; height: 18px; }
+
+    .drag-handle { width: 34px; min-width: 34px; color: var(--switch-muted); cursor: grab; }
+
+    .current-app {
+      min-width: 0;
+      flex: 1;
+      justify-content: flex-start;
+      gap: 9px;
+      padding: 6px 10px;
+    }
+
+    .current-app[aria-expanded="true"] { background: var(--switch-raised); }
+
+    .app-grid-mark {
+      width: 24px;
+      height: 24px;
+      display: grid;
+      place-items: center;
+      flex: none;
+      border-radius: var(--radius-sm);
+      color: var(--switch-signal);
+      background: var(--switch-raised);
+    }
+
+    .app-grid-mark svg { width: 14px; height: 14px; }
+
+    .app-meta { min-width: 0; text-align: left; }
+    .app-name { display: block; overflow: hidden; color: var(--switch-text); font-size: 12px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+    .app-action { display: block; color: var(--switch-soft); font-size: 11px; }
+
+    .update-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--switch-warning-soft);
+      font-size: 11px;
+      font-weight: 780;
+      line-height: 1.2;
+    }
+
+    .normal-action { display: none; }
+
+    .update-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--switch-warning);
+    }
+
+    .bookmark-trigger { color: var(--switch-soft); }
+    .bookmark-trigger:hover { color: var(--switch-signal); background: var(--switch-raised); }
+
+    .close-trigger { border-right: 0; }
+
+    .switcher-panel {
+      margin-top: 8px;
+      overflow: hidden;
+      border: 1px solid var(--switch-line-strong);
+      border-radius: var(--radius-lg);
+      color: var(--switch-text);
+      background: var(--switch-surface);
+      box-shadow: 0 30px 78px color-mix(in srgb, var(--switch-deep) 80%, transparent);
+      transform-origin: top right;
+      animation: panel-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+
+    @keyframes panel-in {
+      from { opacity: 0.01; transform: translateY(-6px) scale(0.985); filter: blur(2px); }
+      to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+    }
+
+    .panel-head {
+      min-height: 50px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 10px 9px 16px;
+      border-bottom: 1px solid var(--switch-line);
+    }
+
+    .panel-heading { color: var(--switch-text); font-size: 13px; font-weight: 780; }
+    .app-count { padding: 3px 8px; border-radius: 99px; color: var(--switch-soft); background: var(--switch-raised); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .panel-spacer { flex: 1; }
+
+    .version-status-mark {
+      position: relative;
+      width: 24px;
+      height: 24px;
+      display: grid;
+      place-items: center;
+      flex: none;
+      border-radius: var(--radius-md);
+      color: var(--switch-warning);
+      background: var(--switch-warning-deep);
+    }
+
+    .version-status-mark svg { width: 15px; height: 15px; }
+    .panel-close {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: var(--radius-sm);
+      color: var(--switch-muted);
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .panel-close:hover { color: var(--switch-text); background: var(--switch-raised); }
+    .panel-close svg { width: 14px; height: 14px; }
+
+    .panel-scroll {
+      max-height: 520px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding: 12px;
+      scrollbar-color: var(--switch-line-strong) transparent;
+      scrollbar-width: thin;
+    }
+
+    .version-card {
+      padding: 14px;
+      border: 1px solid color-mix(in srgb, var(--switch-warning) 45%, var(--switch-line));
+      border-radius: var(--radius-md);
+      background: color-mix(in srgb, var(--switch-warning-deep) 72%, var(--switch-surface));
+    }
+
+    .version-card-head { display: flex; align-items: flex-start; gap: 10px; }
+    .version-card-copy { min-width: 0; flex: 1; }
+
+    .version-title {
+      margin-bottom: 5px;
+      color: var(--switch-text);
+      font-size: 1.05rem;
+      font-weight: 780;
+      line-height: 1.25;
+      letter-spacing: -0.02em;
+    }
+
+    .version-copy { margin: 0; color: color-mix(in srgb, var(--switch-warning-soft) 70%, var(--switch-soft)); font-size: 12px; line-height: 1.55; }
+    .version-consequence { margin-top: 10px; color: var(--switch-soft); font-size: 12px; line-height: 1.5; }
+
+    .deadline-note {
+      display: none;
+      align-items: flex-start;
+      gap: 8px;
+      margin-top: 12px;
+      padding: 10px;
+      border: 1px solid color-mix(in srgb, var(--switch-warning) 38%, transparent);
+      border-radius: var(--radius-md);
+      color: var(--switch-warning-soft);
+      background: var(--switch-warning-deep);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .deadline-note svg { width: 14px; height: 14px; margin-top: 1px; flex: none; }
+
+    .version-actions { display: flex; gap: 8px; margin-top: 16px; }
+
+    .filter-wrap { margin-top: 12px; }
+
+    .app-filter {
+      width: 100%;
+      min-height: 40px;
+      padding: 9px 11px;
+      border: 1px solid var(--switch-line);
+      border-radius: var(--radius-md);
+      color: var(--switch-text);
+      background: var(--switch-deep);
+      font-size: 13px;
+    }
+
+    .app-filter::placeholder { color: var(--switch-soft); }
+    .app-filter:focus { outline: none; border-color: var(--switch-signal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--switch-signal) 18%, transparent); }
+
+    .app-list { margin-top: 8px; }
+    .app-group[hidden], .filter-empty[hidden] { display: none; }
+    .group-label { padding: 10px 8px 4px; color: var(--switch-soft); font-size: 11px; font-weight: 780; letter-spacing: 0.06em; text-transform: uppercase; }
+
+    .app-row {
+      width: 100%;
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 7px 8px;
+      border: 1px solid transparent;
+      border-radius: var(--radius-md);
+      color: var(--switch-soft);
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .app-row:hover { color: var(--switch-text); background: var(--switch-hover); }
+    .app-row.current { color: var(--switch-text); border-color: var(--switch-line-strong); background: var(--switch-raised); }
+    .app-avatar { width: 25px; height: 25px; display: grid; place-items: center; flex: none; border-radius: var(--radius-sm); color: var(--switch-soft); background: var(--switch-raised); font-size: 11px; font-weight: 780; }
+    .app-row.current .app-avatar { color: var(--switch-signal); background: var(--switch-hover); }
+    .row-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
+    .row-status { flex: none; color: var(--switch-signal); font-size: 11px; font-weight: 780; letter-spacing: 0.04em; text-transform: uppercase; }
+
+    .filter-empty {
+      padding: 22px 12px 14px;
+      color: var(--switch-soft);
+      text-align: center;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .clear-filter {
+      min-height: 36px;
+      margin-top: 8px;
+      padding: 6px 11px;
+      border: 1px solid var(--switch-line-strong);
+      border-radius: var(--radius-md);
+      color: var(--switch-text);
+      background: var(--switch-raised);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .clear-filter:hover { border-color: var(--switch-signal); background: var(--switch-hover); }
+
+    .switch-now, .later-button {
+      min-height: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border-radius: var(--radius-md);
+      font-size: 12px;
+      font-weight: 780;
+      cursor: pointer;
+    }
+
+    .switch-now {
+      flex: 1;
+      border: 0;
+      color: var(--switch-deep);
+      background: var(--switch-signal);
+    }
+
+    .switch-now:hover { background: var(--switch-signal-soft); }
+    .switch-now:disabled { opacity: 0.72; cursor: wait; }
+
+    .later-button {
+      padding: 0 14px;
+      border: 1px solid var(--switch-line-strong);
+      color: var(--switch-text);
+      background: var(--switch-raised);
+    }
+
+    .later-button:hover { border-color: var(--switch-soft); background: var(--switch-hover); }
+    .later-button:disabled, .panel-close:disabled { opacity: 0.45; cursor: wait; }
+
+    .spinner {
+      width: 14px;
+      height: 14px;
+      display: none;
+      border: 2px solid rgba(3, 5, 16, 0.3);
+      border-top-color: var(--switch-deep);
+      border-radius: 50%;
+      animation: spin 700ms linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .switch-error {
+      display: none;
+      margin-top: 12px;
+      padding: 10px 11px;
+      border-radius: var(--radius-md);
+      color: var(--switch-coral);
+      background: rgba(248, 113, 113, 0.1);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .retry-link {
+      margin-left: 4px;
+      padding: 0;
+      border: 0;
+      color: var(--switch-text);
+      background: transparent;
+      font: inherit;
+      font-weight: 780;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      cursor: pointer;
+    }
+
+    .restore-tab {
+      min-height: 44px;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+      padding: 0 13px;
+      border: 1px solid var(--switch-line-strong);
+      border-top: 0;
+      border-radius: 0 0 var(--radius-md) var(--radius-md);
+      color: var(--switch-text);
+      background: var(--switch-surface);
+      box-shadow: 0 12px 28px -16px color-mix(in srgb, var(--switch-deep) 80%, transparent);
+      font-size: 12px;
+      font-weight: 750;
+      cursor: pointer;
+    }
+
+    .restore-tab:hover { background: var(--switch-hover); }
+    .restore-tab svg { width: 15px; height: 15px; color: var(--switch-signal); }
+    .restore-update { width: 7px; height: 7px; border-radius: 50%; background: var(--switch-warning); }
+
+    .state-current .update-action,
+    .state-current .switcher-panel,
+    .state-closed .switcher-panel,
+    .state-collapsed .switcher-bar,
+    .state-collapsed .switcher-panel { display: none; }
+
+    .state-current .normal-action { display: inline; }
+    .state-collapsed .restore-tab { display: flex; }
+    .state-switching .spinner { display: block; }
+    .state-error .switch-error { display: block; }
+    .state-deadline .deadline-note { display: flex; }
+
+    .stage-caption {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 16px 20px;
+      border-top: 1px solid var(--line);
+      color: var(--soft);
+      background: var(--surface);
+      font-size: 12px;
+    }
+
+    .caption-state { color: var(--text); font-weight: 750; }
+    .caption-note { max-width: 64ch; text-align: right; }
+
+    .decision-band {
+      margin: 84px 0;
+      padding: 30px 0;
+      border-top: 1px solid var(--line-strong);
+      border-bottom: 1px solid var(--line-strong);
+    }
+
+    .decision-grid {
+      display: grid;
+      grid-template-columns: minmax(250px, 0.8fr) minmax(0, 1.6fr);
+      gap: clamp(32px, 7vw, 92px);
+      align-items: start;
+    }
+
+    .decision-statement {
+      margin: 0;
+      font-size: 1.7rem;
+      line-height: 1.3;
+      letter-spacing: -0.025em;
+      text-wrap: balance;
+    }
+
+    .decision-list { margin: 0; padding: 0; list-style: none; }
+    .decision-list li { display: grid; grid-template-columns: 120px 1fr; gap: 16px; padding: 15px 0; border-bottom: 1px solid var(--line); }
+    .decision-list li:first-child { padding-top: 0; }
+    .decision-list li:last-child { border-bottom: 0; padding-bottom: 0; }
+    .decision-key { color: var(--text); font-size: 13px; font-weight: 750; }
+    .decision-value { color: var(--soft); }
+
+    .flow-section, .anatomy-section, .spec-section { margin-top: 88px; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      margin-top: 32px;
+      border-top: 1px solid var(--line-strong);
+    }
+
+    .flow-step {
+      position: relative;
+      padding: 26px 26px 24px 0;
+      border-right: 1px solid var(--line);
+    }
+
+    .flow-step:not(:first-child) { padding-left: 26px; }
+    .flow-step:last-child { border-right: 0; }
+
+    .flow-marker {
+      position: absolute;
+      top: -5px;
+      left: 0;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--line-strong);
+    }
+
+    .flow-step:nth-child(2) .flow-marker { left: 26px; background: var(--warning); }
+    .flow-step:nth-child(3) .flow-marker { left: 26px; background: var(--signal); }
+    .flow-step:nth-child(4) .flow-marker { left: 26px; background: var(--green); }
+
+    .flow-title { margin-bottom: 8px; font-size: 0.875rem; font-weight: 780; }
+    .flow-copy { margin: 0; color: var(--soft); font-size: 13px; line-height: 1.55; }
+
+    .anatomy-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+      gap: clamp(30px, 6vw, 72px);
+      align-items: start;
+      margin-top: 32px;
+    }
+
+    .anatomy-grid > *, .decision-grid > * { min-width: 0; }
+
+    .anatomy-preview {
+      padding: clamp(24px, 5vw, 52px);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: var(--deep);
+    }
+
+    .anatomy-preview .switcher { position: relative; top: auto; right: auto; width: min(348px, 100%); margin-left: auto; }
+
+    .annotation-list { margin: 0; padding: 0; list-style: none; counter-reset: anatomy; }
+
+    .annotation-list li {
+      position: relative;
+      padding: 0 0 20px 44px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 20px;
+      color: var(--soft);
+    }
+
+    .annotation-list li:last-child { margin-bottom: 0; border-bottom: 0; }
+    .annotation-list li::before {
+      counter-increment: anatomy;
+      content: counter(anatomy);
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: var(--deep);
+      background: var(--signal);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 750;
+    }
+
+    .annotation-list strong { display: block; margin-bottom: 3px; overflow-wrap: anywhere; color: var(--text); }
+
+    .spec-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1px;
+      overflow: hidden;
+      margin-top: 30px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: var(--line);
+    }
+
+    .spec-block { min-height: 196px; padding: 24px; background: var(--surface); }
+    .spec-block h3 { margin-bottom: 10px; font-size: 0.875rem; letter-spacing: -0.01em; }
+    .spec-block p, .spec-block ul { color: var(--soft); font-size: 13px; }
+    .spec-block ul { margin: 0; padding-left: 18px; }
+    .spec-block li + li { margin-top: 6px; }
+
+    .report-footer {
+      margin-top: 92px;
+      padding-top: 28px;
+      border-top: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    @media (max-width: 820px) {
+      .page-shell { width: min(100% - 28px, var(--page-max)); }
+      main { padding-top: 52px; }
+      .brand-context { display: none; }
+      .prototype-toolbar { align-items: flex-start; flex-direction: column; }
+      .state-tabs { width: 100%; padding-bottom: 4px; }
+      .viewport-toggle { align-self: flex-end; margin-top: -50px; }
+      .stage-wrap { padding: 14px; }
+      .app-stage { min-height: 610px; }
+      .mock-grid { grid-template-columns: 1fr; }
+      .mock-activity { display: none; }
+      .decision-grid, .anatomy-grid { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr 1fr; }
+      .flow-step:nth-child(2) { border-right: 0; }
+      .flow-step:nth-child(3), .flow-step:nth-child(4) { border-top: 1px solid var(--line); }
+    }
+
+    @media (max-width: 560px) {
+      .page-shell { width: min(100% - 20px, var(--page-max)); }
+      .header-inner { min-height: 58px; }
+      .brand-context { display: none; }
+      .brand { font-size: 14px; }
+      main { padding: 42px 0 72px; }
+      h1 { font-size: 2.6rem; }
+      .prototype-toolbar { padding: 10px; }
+      .viewport-toggle { display: none; }
+      .state-tab { min-height: 44px; }
+      .state-tabs { padding-right: 0; }
+      .stage-wrap { padding: 0; }
+      .app-stage { min-height: 720px; border: 0; border-radius: 0; }
+      .mock-app { padding: 78px 16px 36px; }
+      .mock-header { display: block; }
+      .mock-controls { margin-top: 16px; }
+      .mock-kpi-row { grid-template-columns: 1fr 1fr; }
+      .mock-kpi:last-child { grid-column: 1 / -1; }
+      .bars { gap: 6px; }
+      .stage-caption { display: block; }
+      .caption-note { margin-top: 5px; text-align: left; }
+      .decision-list li { grid-template-columns: 1fr; gap: 4px; }
+      .flow { grid-template-columns: 1fr; border-top: 0; }
+      .flow-step, .flow-step:not(:first-child) { padding: 24px 0 24px 24px; border-top: 1px solid var(--line); border-right: 0; }
+      .flow-step .flow-marker, .flow-step:nth-child(2) .flow-marker, .flow-step:nth-child(3) .flow-marker, .flow-step:nth-child(4) .flow-marker { top: 21px; left: -4px; }
+      .spec-grid { grid-template-columns: 1fr; }
+      .anatomy-preview { padding: 20px 14px; }
+      .panel-close { width: 44px; height: 44px; }
+      .icon-button { width: 44px; height: 44px; }
+      .switcher-control { min-width: 44px; }
+      .drag-handle { width: 44px; min-width: 44px; }
+      .report-footer { display: block; }
+      .report-footer span { display: block; margin-top: 4px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="report-header">
+    <div class="page-shell header-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 12h16M12 4v16"/><circle cx="12" cy="12" r="3"/><circle cx="4" cy="12" r="1.5"/><circle cx="20" cy="12" r="1.5"/><circle cx="12" cy="4" r="1.5"/></svg>
+        </span>
+        <span>ShinyHub <span class="brand-context">/ App version switcher</span></span>
+      </div>
+      <div class="header-actions">
+        <button class="icon-button" id="theme-toggle" type="button" aria-label="Switch to light theme" title="Toggle report theme">
+          <svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page-shell">
+    <section class="intro" aria-labelledby="report-title">
+      <h1 id="report-title">Put version updates where people switch apps.</h1>
+      <p class="lede">The working dashboard stays untouched. When another version is ready, the existing app switcher names the update, keeps bookmarks secondary, and lets the visitor choose when to reload.</p>
+      <div class="report-status"><span class="status-dot" aria-hidden="true"></span>Production-ready interaction prototype</div>
+    </section>
+
+    <section class="prototype-section" aria-labelledby="prototype-title">
+      <div class="section-heading">
+        <h2 id="prototype-title">Try the complete state model</h2>
+        <p>Inspect the ready, deferred, hidden, pending, failed, and bounded-drain treatments. Search is functional; the dashboard behind the switcher remains deliberately unaffected.</p>
+      </div>
+
+      <div class="prototype-frame">
+        <div class="prototype-toolbar">
+          <div class="state-tabs" role="tablist" aria-label="Switcher state">
+            <button class="state-tab" id="state-available" type="button" role="tab" aria-controls="app-stage" aria-selected="true" tabindex="0" data-state="available">Version ready</button>
+            <button class="state-tab" id="state-closed" type="button" role="tab" aria-controls="app-stage" aria-selected="false" tabindex="-1" data-state="closed">Panel closed</button>
+            <button class="state-tab" id="state-collapsed" type="button" role="tab" aria-controls="app-stage" aria-selected="false" tabindex="-1" data-state="collapsed">Switcher hidden</button>
+            <button class="state-tab" id="state-switching" type="button" role="tab" aria-controls="app-stage" aria-selected="false" tabindex="-1" data-state="switching">Switching</button>
+            <button class="state-tab" id="state-error" type="button" role="tab" aria-controls="app-stage" aria-selected="false" tabindex="-1" data-state="error">Error</button>
+            <button class="state-tab" id="state-deadline" type="button" role="tab" aria-controls="app-stage" aria-selected="false" tabindex="-1" data-state="deadline">Bounded drain</button>
+            <button class="state-tab" id="state-current" type="button" role="tab" aria-controls="app-stage" aria-selected="false" tabindex="-1" data-state="current">Up to date</button>
+          </div>
+          <div class="viewport-toggle" aria-label="Preview size">
+            <button class="viewport-button" type="button" aria-label="Desktop preview" aria-pressed="true" data-viewport="desktop">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            </button>
+            <button class="viewport-button" type="button" aria-label="Mobile preview" aria-pressed="false" data-viewport="mobile">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M10 5h4M11 19h2"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="stage-wrap">
+          <div class="app-stage state-available" id="app-stage" role="tabpanel" aria-labelledby="state-available">
+            <div class="mock-app" aria-hidden="true">
+              <div class="mock-header">
+                <div class="mock-brand">
+                  <div class="mock-logo">OD</div>
+                  <div><div class="mock-title">Operations dashboard</div><div class="mock-subtitle">Illustrative fleet overview</div></div>
+                </div>
+                <div class="mock-controls"><span class="mock-control">Last 24 hours</span><span class="mock-control">All regions</span></div>
+              </div>
+              <div class="mock-kpi-row">
+                <div class="mock-kpi"><div class="mock-kpi-label">Requests</div><div class="mock-kpi-value">18,420</div><div class="mock-kpi-trend">Healthy traffic</div></div>
+                <div class="mock-kpi"><div class="mock-kpi-label">Availability</div><div class="mock-kpi-value">99.98%</div><div class="mock-kpi-trend">Within target</div></div>
+                <div class="mock-kpi"><div class="mock-kpi-label">Active sessions</div><div class="mock-kpi-value">286</div><div class="mock-kpi-trend">Normal range</div></div>
+              </div>
+              <div class="mock-grid">
+                <div class="mock-chart">
+                  <div class="mock-card-title">Session traffic</div><div class="mock-card-subtitle">Illustrative values for the prototype</div>
+                  <div class="bars"><span class="bar-col" style="height:42%"></span><span class="bar-col" style="height:54%"></span><span class="bar-col" style="height:48%"></span><span class="bar-col" style="height:69%"></span><span class="bar-col" style="height:58%"></span><span class="bar-col" style="height:76%"></span><span class="bar-col" style="height:64%"></span><span class="bar-col" style="height:86%"></span><span class="bar-col" style="height:73%"></span><span class="bar-col" style="height:91%"></span><span class="bar-col" style="height:79%"></span><span class="bar-col" style="height:88%"></span></div>
+                </div>
+                <div class="mock-activity">
+                  <div class="mock-card-title">Recent activity</div><div class="mock-card-subtitle">Latest operational changes</div>
+                  <div class="activity-row"><span class="activity-avatar">EU</span><div class="activity-copy"><strong>Capacity adjusted</strong>European workers are within target.</div></div>
+                  <div class="activity-row"><span class="activity-avatar">US</span><div class="activity-copy"><strong>Health check passed</strong>All serving replicas responded.</div></div>
+                  <div class="activity-row"><span class="activity-avatar">AP</span><div class="activity-copy"><strong>Traffic normalized</strong>Latency returned to baseline.</div></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="switcher" aria-label="App switcher prototype">
+              <div class="switcher-bar">
+                <button class="switcher-control drag-handle" type="button" aria-label="Move switcher" title="Move switcher">
+                  <svg viewBox="0 0 20 20" fill="currentColor"><circle cx="7" cy="5" r="1"/><circle cx="13" cy="5" r="1"/><circle cx="7" cy="10" r="1"/><circle cx="13" cy="10" r="1"/><circle cx="7" cy="15" r="1"/><circle cx="13" cy="15" r="1"/></svg>
+                </button>
+                <button class="switcher-control current-app" type="button" aria-label="Switch apps, current app Operations dashboard, different version ready" aria-expanded="true">
+                  <span class="app-grid-mark" aria-hidden="true"><svg viewBox="0 0 20 20" fill="currentColor"><path d="M3 3h5v5H3zM12 3h5v5h-5zM3 12h5v5H3zM12 12h5v5h-5z"/></svg></span>
+                  <span class="app-meta"><span class="app-name">Operations dashboard</span><span class="app-action"><span class="normal-action">Switch app</span><span class="update-action"><span class="update-dot" aria-hidden="true"></span>Update ready</span></span></span>
+                </button>
+                <button class="switcher-control bookmark-trigger" type="button" aria-label="Link to this view" title="Link to this view">
+                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12l4-4M6.5 13.5l-1 1a3 3 0 0 1-4.25-4.25l3-3A3 3 0 0 1 8.5 7M13.5 6.5l1-1a3 3 0 0 1 4.25 4.25l-3 3A3 3 0 0 1 11.5 13"/></svg>
+                </button>
+                <button class="switcher-control close-trigger" type="button" aria-label="Hide the app switcher for this tab">
+                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="m5 5 10 10M15 5 5 15"/></svg>
+                </button>
+              </div>
+
+              <div class="switcher-panel" role="dialog" aria-labelledby="switcher-panel-title">
+                <div class="panel-head">
+                  <span class="panel-heading" id="switcher-panel-title">Switch app</span>
+                  <span class="app-count">6</span>
+                  <span class="panel-spacer"></span>
+                  <button class="panel-close" type="button" aria-label="Close app switcher"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
+                </div>
+                <div class="panel-scroll">
+                  <section class="version-card" aria-labelledby="version-title" aria-describedby="version-copy">
+                    <div class="version-card-head">
+                      <span class="version-status-mark" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 7a6 6 0 1 0 .3 6M15 3v4h-4"/></svg></span>
+                      <div class="version-card-copy">
+                        <div class="version-title" id="version-title">A different version is ready</div>
+                        <p class="version-copy" id="version-copy">Keep working here, or move this tab to the ready version.</p>
+                      </div>
+                    </div>
+                    <div class="version-consequence">Switching reloads this tab and updates this app for your browser. Unsaved inputs may be lost.</div>
+                    <div class="deadline-note"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l2.5 1.5"/></svg><span>This version retires today at <strong>17:30</strong>. Switch before then to choose the moment.</span></div>
+                    <div class="switch-error" role="status">Couldn’t switch versions. Your current dashboard is still running.<button class="retry-link" type="button">Try again</button></div>
+                    <div class="version-actions">
+                      <button class="switch-now" type="button"><span class="spinner" aria-hidden="true"></span><span class="switch-label">Switch and reload</span></button>
+                      <button class="later-button" type="button">Later</button>
+                    </div>
+                  </section>
+
+                  <div class="filter-wrap"><input class="app-filter" type="search" placeholder="Find an app" aria-label="Find an app"></div>
+                  <div class="app-list" aria-label="Available apps">
+                    <div class="app-group">
+                      <div class="group-label">Operations</div>
+                      <button class="app-row current" type="button"><span class="app-avatar">OD</span><span class="row-label">Operations dashboard</span><span class="row-status">Here</span></button>
+                      <button class="app-row" type="button"><span class="app-avatar">IC</span><span class="row-label">Incident command</span></button>
+                      <button class="app-row" type="button"><span class="app-avatar">SL</span><span class="row-label">Service levels</span></button>
+                    </div>
+                    <div class="app-group">
+                      <div class="group-label">Analytics</div>
+                      <button class="app-row" type="button"><span class="app-avatar">GR</span><span class="row-label">Growth report</span></button>
+                      <button class="app-row" type="button"><span class="app-avatar">RF</span><span class="row-label">Revenue forecast</span></button>
+                      <button class="app-row" type="button"><span class="app-avatar">CR</span><span class="row-label">Customer retention and lifecycle</span></button>
+                    </div>
+                    <div class="filter-empty" role="status" hidden>No apps match your search.<br><button class="clear-filter" type="button">Clear search</button></div>
+                  </div>
+                </div>
+              </div>
+
+              <button class="restore-tab" type="button" aria-label="Show app switcher, different app version available"><svg viewBox="0 0 20 20" fill="currentColor"><path d="M3 3h5v5H3zM12 3h5v5h-5zM3 12h5v5H3zM12 12h5v5h-5z"/></svg><span>Apps</span><span class="restore-update" aria-hidden="true"></span></button>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-caption">
+          <span class="caption-state" id="caption-state">Update integrated · panel open</span>
+          <span class="caption-note" id="caption-note">The existing dashboard remains fully pinned to its current generation.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="decision-band" aria-labelledby="decision-title">
+      <div class="decision-grid">
+        <h2 class="decision-statement" id="decision-title">A notification, not an interruption.</h2>
+        <ul class="decision-list">
+          <li><span class="decision-key">Signal</span><span class="decision-value">The main Switch app control changes its secondary line to “Update ready.” No extra version button appears beside bookmarks.</span></li>
+          <li><span class="decision-key">Action</span><span class="decision-value">Cyan remains the single decisive action: explicitly reload into the latest switchable generation.</span></li>
+          <li><span class="decision-key">Persistence</span><span class="decision-value">Closing the panel preserves “Update ready” on the switcher; hiding all chrome preserves a dot on the restore tab.</span></li>
+          <li><span class="decision-key">Control</span><span class="decision-value">No automatic reload. The visitor decides when to switch during the configured drain window; an overlong session may be closed at its operator-set limit.</span></li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="flow-section" aria-labelledby="flow-title">
+      <div class="section-heading">
+        <h2 id="flow-title">The interaction follows deployment truth</h2>
+        <p>The interface appears only when the replacement generation is healthy and every currently serving control-plane node can route it.</p>
+      </div>
+      <div class="flow">
+        <div class="flow-step"><span class="flow-marker" aria-hidden="true"></span><div class="flow-title">Current version serves</div><p class="flow-copy">The browser remains pinned to the generation that rendered the page. Nothing visual changes while a candidate builds.</p></div>
+        <div class="flow-step"><span class="flow-marker" aria-hidden="true"></span><div class="flow-title">Replacement becomes ready</div><p class="flow-copy">Only an all-ready, fleet-switchable generation produces the notice. A failed candidate stays invisible.</p></div>
+        <div class="flow-step"><span class="flow-marker" aria-hidden="true"></span><div class="flow-title">Visitor switches</div><p class="flow-copy">A same-origin handshake selects the latest generation, then reloads the exact path, query, and hash.</p></div>
+        <div class="flow-step"><span class="flow-marker" aria-hidden="true"></span><div class="flow-title">Old version retires</div><p class="flow-copy">It stops after its tracked requests and sessions drain, or at the configured hard drain limit.</p></div>
+      </div>
+    </section>
+
+    <section class="anatomy-section" aria-labelledby="anatomy-title">
+      <div class="section-heading">
+        <h2 id="anatomy-title">One hierarchy, even with bookmarks enabled</h2>
+        <p>The update belongs to app switching, so it is expressed on the app switcher—not introduced as another peer action in the toolbar.</p>
+      </div>
+      <div class="anatomy-grid">
+        <div class="anatomy-preview">
+          <div class="switcher">
+            <div class="switcher-bar">
+              <span class="switcher-control drag-handle"><svg viewBox="0 0 20 20" fill="currentColor"><circle cx="7" cy="5" r="1"/><circle cx="13" cy="5" r="1"/><circle cx="7" cy="10" r="1"/><circle cx="13" cy="10" r="1"/><circle cx="7" cy="15" r="1"/><circle cx="13" cy="15" r="1"/></svg></span>
+              <span class="switcher-control current-app"><span class="app-grid-mark"><svg viewBox="0 0 20 20" fill="currentColor"><path d="M3 3h5v5H3zM12 3h5v5h-5zM3 12h5v5H3zM12 12h5v5h-5z"/></svg></span><span class="app-meta"><span class="app-name">Operations dashboard</span><span class="app-action"><span class="update-action"><span class="update-dot"></span>Update ready</span></span></span></span>
+              <span class="switcher-control bookmark-trigger"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 12l4-4M6.5 13.5l-1 1a3 3 0 0 1-4.25-4.25l3-3A3 3 0 0 1 8.5 7M13.5 6.5l1-1a3 3 0 0 1 4.25 4.25l-3 3A3 3 0 0 1 11.5 13"/></svg></span>
+              <span class="switcher-control close-trigger"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m5 5 10 10M15 5 5 15"/></svg></span>
+            </div>
+            <div class="switcher-panel">
+              <div class="panel-head"><span class="panel-heading">Switch app</span><span class="app-count">6</span></div>
+              <div class="panel-scroll"><div class="version-card"><div class="version-card-head"><span class="version-status-mark"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M15 7a6 6 0 1 0 .3 6M15 3v4h-4"/></svg></span><div class="version-card-copy"><div class="version-title">A different version is ready</div><p class="version-copy">Keep working here, or move this tab to the ready version.</p></div></div><div class="version-actions"><span class="switch-now">Switch and reload</span><span class="later-button">Later</span></div></div></div>
+            </div>
+          </div>
+        </div>
+        <ol class="annotation-list">
+          <li><strong>One primary switcher</strong>The ready-version state changes the existing app-switching action, so the relationship is immediate.</li>
+          <li><strong>Bookmarks stay secondary</strong>Link to this view remains its own utility action without competing with deployment state.</li>
+          <li><strong>Truthful, rollback-safe copy</strong>“Different version” avoids implying every activation moves numerically forward.</li>
+          <li><strong>Priority inside the panel</strong>The version card is pinned above search and destinations; Later returns to the compact bar with “Update ready” still visible.</li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="spec-section" aria-labelledby="spec-title">
+      <div class="section-heading">
+        <h2 id="spec-title">Implementation-ready boundaries</h2>
+        <p>These constraints keep the convenience layer honest, accessible, and independent from deployment correctness.</p>
+      </div>
+      <div class="spec-grid">
+        <article class="spec-block"><h3>Availability</h3><ul><li>Poll only while visible, with jitter and backoff.</li><li>Quietly tolerate network, authorization, and old-server errors.</li><li>No app navigation or blocked injection means no notice—not reduced continuity.</li></ul></article>
+        <article class="spec-block"><h3>Switching</h3><ul><li>Never auto-reload.</li><li>Disable duplicate submissions while pending.</li><li>On failure, retain the old generation and offer an inline retry.</li><li>Target the latest switchable generation if another activation arrived.</li></ul></article>
+        <article class="spec-block"><h3>Accessibility</h3><ul><li>Announce the availability transition once with a polite atomic live region.</li><li>Do not move focus when state changes.</li><li>Meet WCAG 2.2 AA, 44px mobile targets, 200% zoom, and reduced motion.</li><li>Announce only meaningful retirement thresholds.</li></ul></article>
+        <article class="spec-block"><h3>Security and trust</h3><ul><li>The opaque generation token authorizes nothing.</li><li>Status and switching enforce normal app access and support scope.</li><li>The endpoint reveals no deployment metadata.</li><li>The injected notice is convenience chrome, never a security indicator.</li></ul></article>
+      </div>
+    </section>
+
+    <footer class="report-footer">
+      <strong>ShinyHub app version switcher</strong>
+      <span>Interactive design report · 2 September 2026</span>
+    </footer>
+  </main>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var stage = document.getElementById("app-stage");
+      var stateTabs = Array.prototype.slice.call(document.querySelectorAll(".state-tab"));
+      var viewportButtons = Array.prototype.slice.call(document.querySelectorAll(".viewport-button"));
+      var captionState = document.getElementById("caption-state");
+      var captionNote = document.getElementById("caption-note");
+      var switchLabel = stage.querySelector(".switch-label");
+      var switchButton = stage.querySelector(".switch-now");
+      var openButton = stage.querySelector(".current-app");
+      var laterButton = stage.querySelector(".later-button");
+      var panelClose = stage.querySelector(".panel-close");
+      var restoreButton = stage.querySelector(".restore-tab");
+      var versionCard = stage.querySelector(".version-card");
+      var appFilter = stage.querySelector(".app-filter");
+      var appCount = stage.querySelector(".app-count");
+      var appGroups = Array.prototype.slice.call(stage.querySelectorAll(".app-group"));
+      var appRows = Array.prototype.slice.call(stage.querySelectorAll(".app-row"));
+      var filterEmpty = stage.querySelector(".filter-empty");
+      var clearFilter = stage.querySelector(".clear-filter");
+      var descriptions = {
+        available: ["Update integrated · panel open", "The ready-version card leads the same panel people already use to switch apps."],
+        closed: ["Panel closed · update still visible", "Later removes the panel while the main Switch app control keeps the update visible."],
+        collapsed: ["Switcher hidden · restore tab badged", "Hiding all platform chrome preserves one quiet update dot on the restore tab."],
+        switching: ["Switching · duplicate action blocked", "The current dashboard remains in place until the generation handshake succeeds."],
+        error: ["Switch failed · old version preserved", "Failure is inline and recoverable; focus remains where the visitor left it."],
+        deadline: ["Bounded drain · deadline disclosed", "A configured retirement time is stated precisely without an alarming countdown."],
+        current: ["Up to date · ordinary switcher", "The update status and card disappear; bookmarks remain the same secondary utility."]
+      };
+
+      function setState(next) {
+        stage.className = stage.className.replace(/\bstate-[a-z]+\b/g, "").trim() + " state-" + next;
+        stateTabs.forEach(function (tab) {
+          var selected = tab.getAttribute("data-state") === next;
+          tab.setAttribute("aria-selected", selected ? "true" : "false");
+          tab.setAttribute("tabindex", selected ? "0" : "-1");
+          if (selected) { stage.setAttribute("aria-labelledby", tab.id); }
+        });
+        var switching = next === "switching";
+        switchButton.disabled = switching;
+        laterButton.disabled = switching;
+        panelClose.disabled = switching;
+        versionCard.setAttribute("aria-busy", switching ? "true" : "false");
+        switchLabel.textContent = switching ? "Switching…" : "Switch and reload";
+        openButton.setAttribute("aria-expanded", ["available", "switching", "error", "deadline"].indexOf(next) !== -1 ? "true" : "false");
+        captionState.textContent = descriptions[next][0];
+        captionNote.textContent = descriptions[next][1];
+      }
+
+      stateTabs.forEach(function (tab) {
+        tab.addEventListener("click", function () { setState(tab.getAttribute("data-state")); });
+        tab.addEventListener("keydown", function (event) {
+          var currentIndex = stateTabs.indexOf(tab);
+          var targetIndex = currentIndex;
+          if (event.key === "ArrowRight") { targetIndex = (currentIndex + 1) % stateTabs.length; }
+          if (event.key === "ArrowLeft") { targetIndex = (currentIndex - 1 + stateTabs.length) % stateTabs.length; }
+          if (event.key === "Home") { targetIndex = 0; }
+          if (event.key === "End") { targetIndex = stateTabs.length - 1; }
+          if (targetIndex !== currentIndex) {
+            event.preventDefault();
+            setState(stateTabs[targetIndex].getAttribute("data-state"));
+            stateTabs[targetIndex].focus();
+          }
+        });
+      });
+
+      viewportButtons.forEach(function (button) {
+        button.addEventListener("click", function () {
+          var mobile = button.getAttribute("data-viewport") === "mobile";
+          stage.classList.toggle("is-mobile", mobile);
+          viewportButtons.forEach(function (item) { item.setAttribute("aria-pressed", item === button ? "true" : "false"); });
+        });
+      });
+
+      function filterApps() {
+        var query = appFilter.value.trim().toLocaleLowerCase();
+        var visibleCount = 0;
+        appGroups.forEach(function (group) {
+          var groupCount = 0;
+          Array.prototype.slice.call(group.querySelectorAll(".app-row")).forEach(function (row) {
+            var matches = !query || row.textContent.toLocaleLowerCase().indexOf(query) !== -1;
+            row.hidden = !matches;
+            if (matches) { groupCount += 1; visibleCount += 1; }
+          });
+          group.hidden = groupCount === 0;
+        });
+        filterEmpty.hidden = visibleCount !== 0;
+        appCount.textContent = query ? visibleCount + " / " + appRows.length : String(appRows.length);
+      }
+
+      appFilter.addEventListener("input", filterApps);
+      clearFilter.addEventListener("click", function () {
+        appFilter.value = "";
+        filterApps();
+        appFilter.focus();
+      });
+
+      laterButton.addEventListener("click", function () { setState("closed"); openButton.focus(); });
+      panelClose.addEventListener("click", function () { setState("closed"); openButton.focus(); });
+      stage.querySelector(".close-trigger").addEventListener("click", function () { setState("collapsed"); restoreButton.focus(); });
+      restoreButton.addEventListener("click", function () { setState("closed"); openButton.focus(); });
+      openButton.addEventListener("click", function () { setState("available"); });
+      stage.querySelector(".retry-link").addEventListener("click", function () { setState("switching"); });
+      switchButton.addEventListener("click", function () { setState("switching"); });
+
+      var themeToggle = document.getElementById("theme-toggle");
+      themeToggle.addEventListener("click", function () {
+        var root = document.documentElement;
+        var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+        root.setAttribute("data-theme", next);
+        themeToggle.setAttribute("aria-label", next === "dark" ? "Switch to light theme" : "Switch to dark theme");
+      });
+    }());
+  </script>
+</body>
+</html>
