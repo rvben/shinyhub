@@ -378,6 +378,13 @@ rather than trusting a stale observation.
 | `-q/--quiet` | Collapse to the summary plus result line. |
 | `--provenance auto\|none` | Detect CI attribution (default) or intentionally omit it. |
 
+An app slug is its durable URL identity and cannot be renamed in place. To
+replace a fleet app with a new slug, edit the slug and run `fleet plan`, then
+apply with `--prune`. The new app is created and the old fleet-owned app is
+permanently deleted, including its persistent data and deployment history. If
+the old and new slugs have the same declared friendly name, `fleet apply`
+refuses to create the duplicate unless `--prune` is present.
+
 ### Deployment provenance
 
 On servers that advertise the `fleet_provenance` capability, `fleet apply`

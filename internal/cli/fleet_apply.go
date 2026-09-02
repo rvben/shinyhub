@@ -141,6 +141,22 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		return renderFleetPlan(cmd, synthetic, "shinyhub fleet apply --dry-run", pf.manifest, pf.host, pf.caps, pf.diff, pf.projectDiff)
 	}
 
+	// A slug is an app's durable identity, not mutable display metadata. The
+	// most common accidental replacement is therefore visible as a manifest app
+	// and an owned-but-absent app with the same declared friendly name. Without
+	// --prune the old behavior created the new slug and reported the old one as a
+	// successful skip, leaving two indistinguishable dashboard cards. Refuse
+	// before registering a run or mutating projects/apps so the operator makes
+	// the replacement semantics explicit.
+	if !f.prune {
+		if oldSlug, newSlug, name, ok := likelyFleetSlugReplacement(pf); ok {
+			return validationErr(
+				fmt.Sprintf("app %q appears to replace fleet-owned app %q (both use display name %q)", newSlug, oldSlug, name),
+				fleetPruneHint(f.file),
+			)
+		}
+	}
+
 	if w := foreignAdoptWarning(pf.diff, f.adopt); w != "" {
 		fmt.Fprintln(errOut, w)
 	}
@@ -251,6 +267,53 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		return applyExitErr(code, reason)
 	}
 	return renderApplyReportWithContext(out, reportCtx, outcome, quietFlag)
+}
+
+// likelyFleetSlugReplacement recognizes the narrow, high-confidence shape of
+// an app slug edit: an app currently owned by this fleet is absent from the
+// manifest, while a declared app uses its exact effective friendly name. Names
+// can legitimately repeat among active manifest entries, so this check only
+// considers owned prune candidates.
+func likelyFleetSlugReplacement(pf *preflightResult) (oldSlug, newSlug, name string, ok bool) {
+	if pf == nil || pf.manifest == nil {
+		return "", "", "", false
+	}
+	desiredByName := make(map[string]string, len(pf.manifest.Apps))
+	for _, app := range pf.manifest.Apps {
+		effective := fleet.EffectiveConfig(app)
+		if effective.Name == nil || *effective.Name == "" {
+			continue
+		}
+		// Ambiguous duplicate names within the desired fleet are not enough to
+		// infer which app, if any, replaced the old slug.
+		if previous, exists := desiredByName[*effective.Name]; exists && previous != app.Slug {
+			desiredByName[*effective.Name] = ""
+			continue
+		}
+		desiredByName[*effective.Name] = app.Slug
+	}
+	for _, d := range pf.diff {
+		if d.Action != fleet.ActionDelete || !d.PruneEligible {
+			continue
+		}
+		observed, exists := pf.observed[d.Slug]
+		if !exists || observed.Name == nil || *observed.Name == "" {
+			continue
+		}
+		if replacement := desiredByName[*observed.Name]; replacement != "" {
+			return d.Slug, replacement, *observed.Name, true
+		}
+	}
+	return "", "", "", false
+}
+
+func fleetPruneHint(file string) string {
+	command := "shinyhub fleet apply --prune"
+	if file != "" && file != defaultFleetManifest {
+		command += " -f " + shellQuote(file)
+	}
+	return "slugs cannot be renamed in place; review the plan, then run `" + command +
+		"` to create the new slug and permanently delete the old app (including its data), or give the apps distinct display names"
 }
 
 func fleetPlanRecoveryCommand(file string) string {

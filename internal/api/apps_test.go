@@ -773,6 +773,56 @@ func TestDeleteApp(t *testing.T) {
 	}
 }
 
+func TestDeleteApp_AllowsRepairingScheduleActivation(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "retired", Name: "Retired", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("retired")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "refresh", CronExpr: "*/15 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(-time.Second)
+	runID, err := store.InsertScheduleRun(db.InsertScheduleRunParams{
+		ScheduleID: scheduleID, Status: "running", Trigger: "schedule", StartedAt: now, OnSuccess: "roll",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitCode := 0
+	if _, err := store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		RunID: runID, Status: "succeeded", FinishedAt: now, ExitCode: &exitCode,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	activation, err := store.ClaimNextScheduleActivation(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeferScheduleActivation(activation.ID, "repairing", "surge retained", now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodDelete, "/api/apps/retired", nil, token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete during repairing activation = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := store.GetAppBySlug("retired"); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("retired app still exists after delete: %v", err)
+	}
+}
+
 func TestStopApp(t *testing.T) {
 	srv, store := newTestServer(t)
 	hash, _ := testHashPassword("pass")

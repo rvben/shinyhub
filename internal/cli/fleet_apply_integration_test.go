@@ -19,6 +19,7 @@ import (
 // fakeApp is the server's view of one app.
 type fakeApp struct {
 	Slug          string  `json:"slug"`
+	Name          string  `json:"name"`
 	Access        string  `json:"access"`
 	ContentDigest string  `json:"content_digest"`
 	ManagedBy     *string `json:"managed_by"`
@@ -96,7 +97,7 @@ func (s *fleetFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		var body struct{ Slug, Name, Access string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if _, ok := s.apps[body.Slug]; !ok {
-			s.apps[body.Slug] = &fakeApp{Slug: body.Slug, Access: body.Access, status: "running"}
+			s.apps[body.Slug] = &fakeApp{Slug: body.Slug, Name: body.Name, Access: body.Access, status: "running"}
 		}
 		w.WriteHeader(201)
 
@@ -179,6 +180,9 @@ func (s *fleetFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if rv, present := b["replicas"]; present {
 			a.Replicas = int(rv.(float64))
+		}
+		if name, present := b["name"].(string); present {
+			a.Name = name
 		}
 		w.WriteHeader(200)
 
@@ -470,6 +474,47 @@ func TestFleetApply_Acceptance_PruneRemovesAfterConfirm(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 deleted") {
 		t.Fatalf("want 1 deleted:\n%s", out)
+	}
+}
+
+func TestFleetApply_Acceptance_LikelySlugReplacementRequiresPruneBeforeMutation(t *testing.T) {
+	fake := newFleetFake(true)
+	_ = fake.httptest(t)
+	fake.apps["old-dashboard"] = &fakeApp{
+		Slug: "old-dashboard", Name: "Operations dashboard", Access: "private",
+		ContentDigest: "sha256:OLD", ManagedBy: strp("fleet:eu"), status: "running",
+	}
+	manifest := `fleet_id="eu"
+[[app]]
+slug="new-dashboard"
+source="./src"
+[app.config]
+name="Operations dashboard"
+`
+
+	out, err := applyManifest(t, fake, manifest)
+	if err == nil || exitCode(err) != 1 {
+		t.Fatalf("slug replacement without prune error = %v, want exit 1\n%s", err, out)
+	}
+	if !strings.Contains(out, "old-dashboard") || !strings.Contains(out, "new-dashboard") || !strings.Contains(hintOf(err), "--prune") {
+		t.Fatalf("replacement refusal must name both slugs and the recovery command:\nout=%s\nhint=%s", out, hintOf(err))
+	}
+	if fake.deploys != 0 {
+		t.Fatalf("replacement refusal deployed %d time(s); want pre-mutation failure", fake.deploys)
+	}
+	if _, exists := fake.apps["new-dashboard"]; exists {
+		t.Fatal("replacement refusal created the new slug")
+	}
+
+	out, err = applyManifest(t, fake, manifest, "--prune", "--yes")
+	if err != nil {
+		t.Fatalf("explicit replacement apply: %v\n%s", err, out)
+	}
+	if _, exists := fake.apps["old-dashboard"]; exists {
+		t.Fatalf("old slug survived explicit prune:\n%s", out)
+	}
+	if created := fake.apps["new-dashboard"]; created == nil || created.Name != "Operations dashboard" {
+		t.Fatalf("new slug was not created with the friendly name: %+v\n%s", created, out)
 	}
 }
 

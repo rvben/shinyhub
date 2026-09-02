@@ -3364,13 +3364,16 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Serialize against any in-flight deploy/restart on this slug so we don't
-	// race the process manager into an inconsistent state mid-teardown.
+	// race the process manager into an inconsistent state mid-teardown. Unlike
+	// stop/restart/config mutations, permanent deletion deliberately does not
+	// reject an in-flight scheduled-data activation. Roll takes this same lock,
+	// while deleteAppLocked blocks new jobs, drains active ones, and acquires the
+	// physical publication fences before stopping consumers. A queued activation
+	// that was claimed before deletion subsequently observes ErrTargetDeleted.
+	// Keeping the generic activation guard here made a repairing activation an
+	// indefinite veto on the one operation that can safely retire the app.
 	release := s.acquireDeployLock(slug)
 	defer release()
-	if err := s.guardActivationLifecycle(app.ID, "delete "+slug); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
 
 	// app was loaded by requireManageApp before acquireDeployLock. Checking the
 	// precondition here (under the deploy lock) serializes it against in-flight
