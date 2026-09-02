@@ -227,7 +227,7 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 	for _, required := range []string{
 		`COPY package.json ./`,
 		`-X main.version=${VERSION}`,
-		`"shinyhub-bookmarks==0.5.0"`,
+		`"shinyhub-bookmarks==0.5.1"`,
 		`COPY examples/bookmarking-demo/app.py /opt/shinyhub-demo/apps/bookmarking-demo/app.py`,
 	} {
 		if !strings.Contains(dockerfileSource, required) {
