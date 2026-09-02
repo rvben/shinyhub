@@ -149,6 +149,19 @@ func TestSnippetWithName_CarriesFriendlyName(t *testing.T) {
 	}
 }
 
+func TestSnippetWithGenerationCarriesVersionHandoffContract(t *testing.T) {
+	got := SnippetWithGeneration("revenue", "Revenue", "/", "opaque-generation-token")
+	for _, want := range []string{
+		`data-served-generation="opaque-generation-token"`,
+		`data-version-url="/app/revenue/.shinyhub/version.json"`,
+		`data-switch-url="/app/revenue/.shinyhub/version/switch"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("generation snippet missing %s", want)
+		}
+	}
+}
+
 func TestSnippet_DefaultsHomeToRoot(t *testing.T) {
 	// A single-origin deployment has no separate dashboard host, so "/" is both
 	// correct and what an empty configured base URL must become. An empty href

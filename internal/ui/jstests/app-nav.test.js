@@ -25,6 +25,8 @@ if (!source.includes('shinyhub-app-nav')) {
 const TAG_ID = 'shinyhub-app-nav';
 const HOST_ID = 'shinyhub-app-nav-host';
 const NAV_URL = '/app/demo/.shinyhub/nav.json';
+const VERSION_URL = '/app/demo/.shinyhub/version.json';
+const SWITCH_URL = '/app/demo/.shinyhub/version/switch';
 const HOME_URL = 'https://hub.example.com/';
 const DISMISS_KEY = 'shinyhub-app-nav:dismissed';
 const POSITION_KEY = 'shinyhub-app-nav:position';
@@ -59,6 +61,11 @@ function mount({
   legacyPosition = null,
   compactImmediately = false,
   deferred = false,
+  deferSwitch = false,
+  versionPayload = null,
+  versionPayloads = null,
+  switchStatus = 200,
+  captureTimers = false,
 } = {}) {
   const jsdomErrors = [];
   const virtualConsole = new VirtualConsole();
@@ -67,6 +74,17 @@ function mount({
   const dom = new JSDOM(html, { runScripts: 'dangerously', url, virtualConsole });
   const w = dom.window;
   const d = w.document;
+  const timerRecords = [];
+  if (captureTimers) {
+    const nativeSetTimeout = w.setTimeout.bind(w);
+    w.setTimeout = (fn, delay, ...args) => {
+      timerRecords.push({ fn, delay });
+      return nativeSetTimeout(fn, delay, ...args);
+    };
+  }
+  // jsdom defaults documents to hidden because it has no visual compositor.
+  // These tests model a visible app tab unless a test explicitly changes it.
+  Object.defineProperty(d, 'hidden', { configurable: true, value: false });
 
   if (compactImmediately) {
     w.matchMedia = (query) => ({ matches: query.includes('max-width: 520px') });
@@ -101,21 +119,28 @@ function mount({
   if (legacyPosition) w.localStorage.setItem(LEGACY_POSITION_KEY, legacyPosition);
 
   const fetches = [];
-  let releaseFetch = null;
+  const deferredFetches = [];
+  let versionFetchIndex = 0;
   w.fetch = (u, opts) => {
     fetches.push({ url: u, opts });
     if (fail) return Promise.reject(new Error('network down'));
+    let responsePayload = u === VERSION_URL && versionPayload ? versionPayload : payload;
+    if (u === VERSION_URL && versionPayloads) {
+      responsePayload = versionPayloads[Math.min(versionFetchIndex, versionPayloads.length - 1)];
+      versionFetchIndex += 1;
+    }
+    const responseStatus = u === SWITCH_URL ? switchStatus : status;
     const answer = {
-      ok: status >= 200 && status < 300,
-      status,
-      json: () => Promise.resolve(payload),
+      ok: responseStatus >= 200 && responseStatus < 300,
+      status: responseStatus,
+      json: () => Promise.resolve(responsePayload),
     };
-    if (!deferred) return Promise.resolve(answer);
+    if (!deferred && !(deferSwitch && u === SWITCH_URL)) return Promise.resolve(answer);
     // A real fetch does not answer within the click that started it. Holding it
     // open is the only way to see the panel in the state a first-time visitor
     // actually meets: open, empty, still loading.
     return new Promise((resolve) => {
-      releaseFetch = () => resolve(answer);
+      deferredFetches.push(() => resolve(answer));
     });
   };
 
@@ -149,6 +174,7 @@ function mount({
     window: w,
     document: d,
     fetches,
+    timerRecords,
     jsdomErrors,
     shadow: () => shadow,
     host: () => d.getElementById(HOST_ID),
@@ -176,8 +202,14 @@ function mount({
       await flush();
     },
     async settle() {
-      if (!releaseFetch) throw new Error('settle() called on a mount that is not deferred');
-      releaseFetch();
+      if (!deferredFetches.length) throw new Error('settle() called on a mount that is not deferred');
+      deferredFetches.shift()();
+      await flush();
+      await flush();
+    },
+    async resolveFetch(index) {
+      if (!deferredFetches[index]) throw new Error(`no deferred fetch at index ${index}`);
+      deferredFetches[index]();
       await flush();
       await flush();
     },
@@ -195,6 +227,383 @@ test('mounts a recognizable app bar into the page without fetching anything', as
   assert.equal(m.root().getAttribute('data-position'), 'top-right');
   assert.equal(m.fetches.length, 0);
   assert.equal(m.jsdomErrors.length, 0, `script errored: ${m.jsdomErrors.join('; ')}`);
+});
+
+test('offers an explicit switch when a different generation is active', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+
+  assert.ok(m.root().classList.contains('version-ready'));
+  assert.equal(m.q('button.version-trigger'), null, 'version readiness must not add another toolbar button');
+  assert.equal(m.q('.current-action').textContent, 'Update ready');
+  assert.match(m.openBtn().getAttribute('aria-label'), /different version ready/);
+  await m.open();
+  assert.equal(m.q('.version-notice').hidden, false);
+  assert.equal(m.q('.version-title').textContent, 'A different app version is ready');
+  assert.match(m.q('.version-copy').textContent, /Keep working here/);
+  assert.match(m.q('.version-consequence').textContent, /Other open tabs are not reloaded/);
+  assert.equal(
+    m.q('button.version-switch').getAttribute('aria-describedby'),
+    m.q('.version-consequence').id,
+  );
+  assert.equal(m.focused(), m.q('button.version-switch'));
+
+  m.q('button.version-switch').click();
+  await flush();
+  const request = m.fetches.find((entry) => entry.url === SWITCH_URL);
+  assert.equal(request.opts.method, 'POST');
+  assert.equal(request.opts.headers['X-ShinyHub-Version-Switch'], '1');
+});
+
+test('the current generation never raises a version notice', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'same-generation',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'same-generation' },
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+
+  assert.equal(m.root().classList.contains('version-ready'), false);
+  assert.equal(m.q('.current-action').textContent, 'Switch app');
+  assert.equal(m.q('.version-notice').hidden, true);
+  assert.doesNotMatch(m.openBtn().getAttribute('aria-label'), /different version ready/);
+});
+
+test('a failed version switch remains retryable and restores focus', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+    switchStatus: 503,
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+  m.openBtn().focus();
+  await m.open();
+  m.q('button.version-switch').click();
+  await flush();
+  await flush();
+
+  assert.ok(m.root().classList.contains('version-error'));
+  assert.equal(m.q('button.version-switch').disabled, false);
+  assert.equal(m.q('button.version-switch').textContent, 'Switch and reload');
+  assert.equal(m.focused(), m.q('button.version-switch'));
+  assert.equal(m.q('.version-notice').hasAttribute('aria-busy'), false);
+  assert.equal(m.panel().hasAttribute('aria-busy'), false);
+  assert.equal(m.jsdomErrors.filter((message) => /navigation/i.test(message)).length, 0);
+});
+
+test('a stalled version switch times out into a retryable, dismissible state', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+    deferSwitch: true,
+    captureTimers: true,
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+  m.openBtn().focus();
+  await m.open();
+  m.q('button.version-switch').click();
+
+  const request = m.fetches.find((entry) => entry.url === SWITCH_URL);
+  const deadline = m.timerRecords.find((timer) => timer.delay === 12000);
+  assert.ok(deadline, 'the switch request has no bounded deadline');
+  deadline.fn();
+  await flush();
+  await flush();
+
+  assert.equal(request.opts.signal.aborted, true);
+  assert.equal(m.root().classList.contains('version-switching'), false);
+  assert.ok(m.root().classList.contains('version-error'));
+  assert.equal(m.q('button.version-switch').disabled, false);
+  assert.equal(m.q('button.version-later').disabled, false);
+  assert.equal(m.panel().hasAttribute('aria-busy'), false);
+  assert.equal(m.focused(), m.q('button.version-switch'));
+  m.q('button.version-later').click();
+  assert.equal(m.root().classList.contains('open'), false);
+});
+
+test('version polling permits only one in-flight request', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+    deferred: true,
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  m.document.dispatchEvent(new m.window.Event('visibilitychange'));
+  m.window.dispatchEvent(new m.window.Event('pageshow'));
+  await flush();
+
+  assert.equal(m.fetches.filter((entry) => entry.url === VERSION_URL).length, 1);
+  await m.settle();
+  assert.ok(m.root().classList.contains('version-ready'));
+});
+
+test('a stalled version poll aborts and retries without erasing known state', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    deferred: true,
+    captureTimers: true,
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+
+  const request = m.fetches.find((entry) => entry.url === VERSION_URL);
+  const deadline = m.timerRecords.find((timer) => timer.delay === 10000);
+  assert.ok(deadline, 'the version poll has no bounded deadline');
+  deadline.fn();
+  await flush();
+
+  assert.equal(request.opts.signal.aborted, true);
+  assert.equal(m.root().classList.contains('version-ready'), false);
+  assert.ok(
+    m.timerRecords.some((timer) => timer.delay >= 30000 && timer.delay < 33000),
+    'a timed-out poll did not enter backoff',
+  );
+});
+
+test('a malformed version response preserves the last trustworthy ready state', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayloads: [
+      { active_generation: 'active-new' },
+      {},
+    ],
+    captureTimers: true,
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+  assert.ok(m.root().classList.contains('version-ready'));
+
+  const nextPoll = m.timerRecords.find((timer) => timer.delay >= 15000 && timer.delay < 18000);
+  nextPoll.fn();
+  await flush();
+  await flush();
+
+  assert.ok(m.root().classList.contains('version-ready'));
+  assert.equal(m.q('.current-action').textContent, 'Update ready');
+  assert.ok(m.timerRecords.some((timer) => timer.delay >= 30000 && timer.delay < 33000));
+});
+
+test('an unchanged version poll does not repeatedly expand the compact mobile bar', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+    compactImmediately: true,
+    captureTimers: true,
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+  await new Promise((resolve) => m.window.setTimeout(resolve, 5));
+  assert.ok(m.root().classList.contains('compact'));
+
+  const nextPoll = m.timerRecords.find((timer) => timer.delay >= 15000 && timer.delay < 18000);
+  nextPoll.fn();
+  await flush();
+  await flush();
+
+  assert.ok(m.root().classList.contains('compact'));
+});
+
+test('a dismissed switcher still exposes the version indicator on its restore tab', async (t) => {
+  const m = mount({
+    dismissed: true,
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+
+  assert.ok(m.root().classList.contains('dismissed'));
+  assert.ok(m.root().classList.contains('version-ready'));
+  assert.match(m.restoreBtn().getAttribute('aria-label'), /different app version is ready/);
+});
+
+test('hidden and restored pages cancel stale version polls before accepting a fresh result', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayloads: [
+      { active_generation: 'served-old' },
+      { active_generation: 'active-new' },
+    ],
+    deferred: true,
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  const first = m.fetches.find((entry) => entry.url === VERSION_URL);
+
+  Object.defineProperty(m.document, 'hidden', { configurable: true, value: true });
+  m.document.dispatchEvent(new m.window.Event('visibilitychange'));
+  assert.equal(first.opts.signal.aborted, true);
+  Object.defineProperty(m.document, 'hidden', { configurable: true, value: false });
+  m.window.dispatchEvent(new m.window.Event('pageshow'));
+  await flush();
+  assert.equal(m.fetches.filter((entry) => entry.url === VERSION_URL).length, 2);
+
+  await m.resolveFetch(1);
+  assert.ok(m.root().classList.contains('version-ready'));
+  await m.resolveFetch(0);
+  assert.ok(m.root().classList.contains('version-ready'), 'stale first response cleared the fresh notice');
+});
+
+test('failed version polls back off exponentially within bounded jitter', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    fail: true,
+    captureTimers: true,
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+  let polls = m.timerRecords.filter((timer) => timer.delay >= 30000);
+  assert.ok(polls[0].delay >= 30000 && polls[0].delay < 33000);
+
+  polls[0].fn();
+  await flush();
+  await flush();
+  polls = m.timerRecords.filter((timer) => timer.delay >= 30000);
+  assert.ok(polls[1].delay >= 60000 && polls[1].delay < 63000);
+});
+
+test('a successful version switch announces the transition and does not enter retry state', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+  await m.open();
+  m.q('button.version-switch').click();
+  await flush();
+  await flush();
+
+  assert.equal(m.root().classList.contains('version-error'), false);
+  assert.match(m.q('.announcer').textContent, /Switching to the ready app version/);
+  assert.equal(
+    m.jsdomErrors.filter((message) => /Not implemented: navigation/i.test(message)).length,
+    1,
+    'a successful switch did not request exactly one page reload',
+  );
+});
+
+test('Later closes the app list, restores focus, and keeps the integrated update status', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+  m.openBtn().focus();
+  await m.open();
+
+  m.q('button.version-later').click();
+
+  assert.equal(m.root().classList.contains('open'), false);
+  assert.equal(m.focused(), m.openBtn());
+  assert.equal(m.q('.current-action').textContent, 'Update ready');
+});
+
+test('bookmarking and a ready version share one bar without adding a version button', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+  });
+  t.after(() => m.dom.window.close());
+  m.window.dispatchEvent(new m.window.CustomEvent(BOOKMARK_CAPABILITIES_EVENT, {
+    detail: {
+      version: 1,
+      store: 'url',
+      fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+    },
+  }));
+  await flush();
+  await flush();
+
+  assert.ok(m.root().classList.contains('bookmark-ready'));
+  assert.ok(m.root().classList.contains('version-ready'));
+  assert.equal(m.q('button.version-trigger'), null);
+  assert.equal(
+    m.qa('.bar > button:not(.session-trigger)').length,
+    4,
+    'move, switch, bookmark, and close are the only active-mode bar controls',
+  );
+  assert.equal(m.q('.current-action').textContent, 'Update ready');
+
+  await m.open();
+  assert.equal(m.q('.version-notice').hidden, false);
+  m.q('button.bookmark-trigger').click();
+  assert.ok(m.root().classList.contains('bookmark-open'));
+  assert.equal(m.root().classList.contains('open'), false);
 });
 
 test('bookmarking stays absent until an app publishes supported fields', () => {
@@ -711,6 +1120,103 @@ test('snapshot status closes with Escape and clears when the session reconnects'
   }));
   assert.equal(m.root().classList.contains('session-snapshot'), false);
   assert.equal(m.q('.current-action').textContent, 'Switch app');
+});
+
+test('an offline snapshot temporarily outranks a ready version without losing it', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+
+  m.window.dispatchEvent(new m.window.CustomEvent(SESSION_EVENT, {
+    cancelable: true,
+    detail: { state: 'snapshot', url: m.window.location.href },
+  }));
+  assert.equal(m.q('.current-action').textContent, 'Offline snapshot');
+  assert.equal(m.q('.version-notice').hidden, true);
+  assert.doesNotMatch(m.restoreBtn().getAttribute('aria-label'), /different app version/);
+
+  m.window.dispatchEvent(new m.window.CustomEvent(SESSION_EVENT, {
+    detail: { state: 'connected' },
+  }));
+  assert.equal(m.q('.current-action').textContent, 'Update ready');
+  assert.equal(m.q('.version-notice').hidden, false);
+  assert.match(m.q('.announcer').textContent, /different app version is ready/);
+});
+
+test('snapshot recovery preempts a pending version switch without hiding focus', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+    deferSwitch: true,
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  await flush();
+  await m.open();
+  m.q('button.version-switch').click();
+  const request = m.fetches.find((entry) => entry.url === SWITCH_URL);
+
+  m.window.dispatchEvent(new m.window.CustomEvent(SESSION_EVENT, {
+    cancelable: true,
+    detail: { state: 'snapshot', url: m.window.location.href, focus: true },
+  }));
+
+  assert.equal(request.opts.signal.aborted, true);
+  assert.equal(m.root().classList.contains('version-switching'), false);
+  assert.equal(m.panel().hasAttribute('aria-busy'), false);
+  assert.equal(m.q('.version-notice').hidden, true);
+  assert.equal(m.focused(), m.q('button.session-trigger'));
+  assert.equal(m.q('button.session-trigger').disabled, false);
+});
+
+test('page lifecycle events cannot restart version polling until a snapshot reconnects', async (t) => {
+  const m = mount({
+    attrs: {
+      'data-served-generation': 'served-old',
+      'data-version-url': VERSION_URL,
+      'data-switch-url': SWITCH_URL,
+    },
+    versionPayload: { active_generation: 'active-new' },
+    deferred: true,
+  });
+  t.after(() => m.dom.window.close());
+  await flush();
+  assert.equal(m.fetches.filter((entry) => entry.url === VERSION_URL).length, 1);
+
+  m.window.dispatchEvent(new m.window.CustomEvent(SESSION_EVENT, {
+    cancelable: true,
+    detail: { state: 'snapshot', url: m.window.location.href },
+  }));
+  m.document.dispatchEvent(new m.window.Event('visibilitychange'));
+  m.window.dispatchEvent(new m.window.Event('pageshow'));
+  await flush();
+  assert.equal(
+    m.fetches.filter((entry) => entry.url === VERSION_URL).length,
+    1,
+    'snapshot lifecycle events started a stale version poll',
+  );
+
+  m.window.dispatchEvent(new m.window.CustomEvent(SESSION_EVENT, {
+    detail: { state: 'connected' },
+  }));
+  await flush();
+  assert.equal(m.fetches.filter((entry) => entry.url === VERSION_URL).length, 2);
+  await m.resolveFetch(1);
+  assert.ok(m.root().classList.contains('version-ready'));
+  await m.resolveFetch(0);
+  assert.ok(m.root().classList.contains('version-ready'));
 });
 
 test('a dismissed switcher releases snapshot ownership and reclaims it when restored', () => {

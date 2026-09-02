@@ -53,13 +53,18 @@ const (
 	// It is per-app only because the app origin admits nothing outside /app/
 	// (see cmd/shinyhub/app_origin.go); the response itself is a function of
 	// the caller's identity and ignores the slug entirely.
-	DataSuffix = "/.shinyhub/nav.json"
+	DataSuffix    = "/.shinyhub/nav.json"
+	VersionSuffix = "/.shinyhub/version.json"
+	SwitchSuffix  = "/.shinyhub/version/switch"
 )
 
 // DataURL is the switcher's data endpoint for slug.
 func DataURL(slug string) string {
 	return "/app/" + slug + DataSuffix
 }
+
+func VersionURL(slug string) string { return "/app/" + slug + VersionSuffix }
+func SwitchURL(slug string) string  { return "/app/" + slug + SwitchSuffix }
 
 // Snippet renders the <script> tag for one surface. Only the attributes vary;
 // the body between the tags is always Script verbatim, which is what keeps one
@@ -79,6 +84,13 @@ func Snippet(slug, homeURL string) string {
 // An empty name deliberately falls back to the slug in the client: access-
 // denied pages must not disclose metadata for an app the caller cannot see.
 func SnippetWithName(slug, name, homeURL string) string {
+	return SnippetWithGeneration(slug, name, homeURL, "")
+}
+
+// SnippetWithGeneration stamps the exact generation that rendered an app
+// page. The client compares this opaque value with the durable active token;
+// it never infers ordering and never treats the token as authorization.
+func SnippetWithGeneration(slug, name, homeURL, generation string) string {
 	if homeURL == "" {
 		homeURL = "/"
 	}
@@ -86,7 +98,10 @@ func SnippetWithName(slug, name, homeURL string) string {
 		` data-nav-url="` + html.EscapeString(DataURL(slug)) + `"` +
 		` data-current-slug="` + html.EscapeString(slug) + `"` +
 		` data-current-name="` + html.EscapeString(name) + `"` +
-		` data-home-url="` + html.EscapeString(homeURL) + `">` +
+		` data-home-url="` + html.EscapeString(homeURL) + `"` +
+		` data-served-generation="` + html.EscapeString(generation) + `"` +
+		` data-version-url="` + html.EscapeString(VersionURL(slug)) + `"` +
+		` data-switch-url="` + html.EscapeString(SwitchURL(slug)) + `">` +
 		Script +
 		`</script>`
 }

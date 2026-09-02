@@ -53,6 +53,8 @@
   var BOOKMARK_SYNC_STATUS_EVENT = "shinyhub:bookmark:sync-status";
   var BOOKMARK_PROTOCOL_VERSION = 1;
   var BOOKMARK_TIMEOUT_MS = 10000;
+  var VERSION_POLL_TIMEOUT_MS = 10000;
+  var VERSION_SWITCH_TIMEOUT_MS = 12000;
 
   var tag = document.currentScript || document.getElementById(TAG_ID);
   if (!tag) {
@@ -86,6 +88,9 @@
   var currentSlug = tag.getAttribute("data-current-slug") || "";
   var currentName = (tag.getAttribute("data-current-name") || "").trim();
   var homeURL = tag.getAttribute("data-home-url") || "/";
+  var servedGeneration = tag.getAttribute("data-served-generation") || "";
+  var versionURL = tag.getAttribute("data-version-url") || "";
+  var switchURL = tag.getAttribute("data-switch-url") || "";
 
   function guard(fn) {
     return function () {
@@ -316,7 +321,7 @@
       "  --sh-hover: #1B2444; --sh-line: #1E2A4A; --sh-line-strong: #2B3A63;" +
       "  --sh-text: #E8EEFF; --sh-soft: #A8B4D4; --sh-muted: #6B7AA3;" +
       "  --sh-signal: #38BDF8; --sh-coral: #F87171; --sh-warning: #FBBF24;" +
-      "  --sh-warning-soft: #FDE68A; --sh-warning-deep: #2A2110;" +
+      "  --sh-warning-soft: #FDE68A; --sh-warning-copy: #F7DCA3; --sh-warning-deep: #2A2110;" +
       "  --sh-r-sm: 4px; --sh-r-md: 8px; --sh-r-lg: 14px; --sh-r-pill: 99px;" +
       "  position: fixed; inset: 0; z-index: 2147483646;" +
       "  font-family: Manrope, -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', sans-serif;" +
@@ -370,10 +375,15 @@
       "  border: 0; border-top: 1px solid var(--sh-line); border-bottom: 1px solid var(--sh-line);" +
       "}",
     ".switchmark {" +
-      "  width: 24px; height: 24px; flex: none; display: flex; align-items: center; justify-content: center;" +
+      "  position: relative; width: 24px; height: 24px; flex: none; display: flex; align-items: center; justify-content: center;" +
       "  color: var(--sh-signal); background: var(--sh-raised); border-radius: var(--sh-r-sm);" +
       "}",
     ".switchmark svg { width: 14px; height: 14px; }",
+    ".root.version-ready:not(.session-snapshot) .switchmark::after {" +
+      "  content: ''; position: absolute; right: -2px; bottom: -2px; width: 6px; height: 6px;" +
+      "  box-sizing: border-box; border-radius: 50%; background: var(--sh-warning);" +
+      "  box-shadow: 0 0 0 2px var(--sh-surface);" +
+      "}",
     ".root[data-position='left-center'] .switchmark, .root[data-position='right-center'] .switchmark { background: transparent; }",
     ".current-meta { min-width: 0; flex: 1; text-align: left; }",
     ".compact-label { display: none; color: var(--sh-text); font-size: 12px; font-weight: 600; }",
@@ -382,6 +392,7 @@
       "  color: var(--sh-text); font-size: 13px; font-weight: 600; line-height: 1.2;" +
       "}",
     ".current-action { display: block; color: var(--sh-soft); font-size: 12px; line-height: 1.2; }",
+    ".root.version-ready:not(.session-snapshot) .current-action { color: var(--sh-warning-soft); font-weight: 600; }",
     ".root[data-position='left-center'] .current-meta, .root[data-position='right-center'] .current-meta," +
       " .root[data-position='left-center'] .chevron, .root[data-position='right-center'] .chevron { display: none; }",
     ".root.session-snapshot .current-action { color: var(--sh-warning-soft); }",
@@ -431,7 +442,6 @@
       " .root[data-position='right-center'] .bookmark-trigger {" +
       "  width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line);" +
       "}",
-
     ".scrim {" +
       "  position: absolute; inset: 0; background: var(--sh-deep); opacity: 0;" +
       "  pointer-events: none; transition: opacity 160ms ease;" +
@@ -464,6 +474,35 @@
     // who arrived by keyboard; a mouse click never draws it.
     ".panel:focus { outline: none; }",
     ".panel:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--sh-signal); }",
+
+    ".version-notice {" +
+      "  display: none; flex: 0 1 auto; min-height: 0; max-height: min(272px, 44vh);" +
+      "  box-sizing: border-box; margin: 12px 12px 4px; padding: 14px; overflow-y: auto;" +
+      "  overscroll-behavior: contain; border: 1px solid rgba(251,191,36,0.42);" +
+      "  border-radius: var(--sh-r-md); background: var(--sh-warning-deep);" +
+      "  scrollbar-color: var(--sh-line-strong) transparent; scrollbar-width: thin;" +
+      "}",
+    ".root.version-ready:not(.session-snapshot) .version-notice:not([hidden]) { display: block; }",
+    ".version-head { display: flex; align-items: flex-start; gap: 10px; }",
+    ".version-mark { width: 26px; height: 26px; display: grid; place-items: center; flex: none; color: var(--sh-warning); background: var(--sh-raised); border-radius: var(--sh-r-md); }",
+    ".version-mark svg { width: 15px; height: 15px; }",
+    ".version-heading { min-width: 0; flex: 1; }",
+    ".version-title { margin-bottom: 4px; color: var(--sh-text); font-size: 14px; font-weight: 750; line-height: 1.3; letter-spacing: -0.01em; }",
+    ".version-copy { margin: 0; color: var(--sh-warning-copy); font-size: 12px; line-height: 1.5; }",
+    ".version-consequence { margin-top: 10px; color: var(--sh-soft); font-size: 12px; line-height: 1.5; }",
+    ".version-error { display: none; margin-top: 12px; padding: 10px 11px; border-radius: var(--sh-r-md); color: var(--sh-coral); background: var(--sh-raised); font-size: 12px; line-height: 1.45; }",
+    ".root.version-error .version-error { display: block; }",
+    ".version-actions { display: flex; gap: 8px; margin-top: 16px; }",
+    ".version-switch, .version-later { min-height: 44px; border-radius: var(--sh-r-md); font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }",
+    ".version-switch { flex: 1; border: 0; color: var(--sh-deep); background: var(--sh-signal); }",
+    ".version-switch:hover { filter: brightness(1.12); }",
+    ".version-switch:disabled { opacity: 0.72; cursor: wait; }",
+    ".version-later { padding: 0 14px; border: 1px solid var(--sh-line-strong); color: var(--sh-text); background: var(--sh-raised); }",
+    ".version-later:hover { border-color: var(--sh-soft); background: var(--sh-hover); }",
+    ".version-later:disabled { opacity: 0.5; cursor: wait; }",
+    ".version-switch:focus-visible, .version-later:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 2px; }",
+    ".root.version-switching .bar, .root.version-switching .item, .root.version-switching .home," +
+      " .root.version-switching .filter, .root.version-switching .headclose { pointer-events: none; }",
 
     ".session-panel {" +
       "  position: absolute; width: 340px; max-width: calc(100vw - 24px); box-sizing: border-box;" +
@@ -762,6 +801,10 @@
       "  box-shadow: 0 10px 30px -16px rgba(0,0,0,0.8);" +
       "}",
     ".root.dismissed .restore { display: flex; }",
+    ".root.dismissed.version-ready:not(.session-snapshot) .restore::after {" +
+      "  content: ''; position: absolute; top: 4px; right: 4px; width: 6px; height: 6px;" +
+      "  border-radius: 50%; background: var(--sh-warning); box-shadow: 0 0 0 2px var(--sh-surface);" +
+      "}",
     ".restore:hover { color: var(--sh-text); background: var(--sh-hover); }",
     ".restore:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: 2px; }",
     ".restore svg { width: 14px; height: 14px; }",
@@ -1102,6 +1145,61 @@
   panel.appendChild(list);
   panel.appendChild(foot);
 
+  // Version readiness belongs to switching apps, so it is a pinned action in
+  // the existing app panel instead of another toolbar button and another
+  // modal. This keeps bookmark, snapshot, and version utilities from becoming
+  // an undifferentiated row of status icons.
+  var versionNotice = div("version-notice");
+  versionNotice.id = TAG_ID + "-version-notice";
+  versionNotice.setAttribute("role", "region");
+  versionNotice.setAttribute("aria-labelledby", TAG_ID + "-version-title");
+  versionNotice.setAttribute(
+    "aria-describedby",
+    TAG_ID + "-version-copy " + TAG_ID + "-version-consequence"
+  );
+  versionNotice.hidden = true;
+  var versionHead = div("version-head");
+  var versionMark = div("version-mark");
+  versionMark.appendChild(svg(["M15 7a6 6 0 10.3 6", "M15 3v4h-4"], 20));
+  versionHead.appendChild(versionMark);
+  var versionHeading = div("version-heading");
+  var versionTitle = div("version-title", "A different app version is ready");
+  versionTitle.id = TAG_ID + "-version-title";
+  var versionCopy = document.createElement("p");
+  versionCopy.className = "version-copy";
+  versionCopy.id = TAG_ID + "-version-copy";
+  versionCopy.textContent = "Keep working here, or move this tab to the ready version.";
+  versionHeading.appendChild(versionTitle);
+  versionHeading.appendChild(versionCopy);
+  versionHead.appendChild(versionHeading);
+  var versionConsequence = div(
+    "version-consequence",
+    "This tab reloads on the ready version. Other open tabs are not reloaded by this action. Unsaved input in this tab may be lost."
+  );
+  versionConsequence.id = TAG_ID + "-version-consequence";
+  var versionError = div(
+    "version-error",
+    "Could not switch versions. Your current dashboard is still running."
+  );
+  versionError.setAttribute("role", "alert");
+  var versionActions = div("version-actions");
+  var versionSwitch = document.createElement("button");
+  versionSwitch.type = "button";
+  versionSwitch.className = "version-switch";
+  versionSwitch.setAttribute("aria-describedby", versionConsequence.id);
+  versionSwitch.textContent = "Switch and reload";
+  var versionLater = document.createElement("button");
+  versionLater.type = "button";
+  versionLater.className = "version-later";
+  versionLater.textContent = "Later";
+  versionActions.appendChild(versionSwitch);
+  versionActions.appendChild(versionLater);
+  versionNotice.appendChild(versionHead);
+  versionNotice.appendChild(versionConsequence);
+  versionNotice.appendChild(versionError);
+  versionNotice.appendChild(versionActions);
+  panel.insertBefore(versionNotice, filterWrap);
+
   var sessionPanel = div("session-panel");
   sessionPanel.id = TAG_ID + "-session-panel";
   sessionPanel.setAttribute("role", "dialog");
@@ -1290,6 +1388,17 @@
   var compactTimer = null;
   var navigating = false;
   var snapshotActive = false;
+  var versionReady = false;
+  var versionSwitching = false;
+  var versionTimer = null;
+  var versionPollFailures = 0;
+  var versionRequestSerial = 0;
+  var versionRequestInFlight = false;
+  var versionAbort = null;
+  var versionRequestDeadline = null;
+  var versionSwitchSerial = 0;
+  var versionSwitchAbort = null;
+  var versionSwitchDeadline = null;
   var sessionOpen = false;
   var bookmarkOpen = false;
   var bookmarkCapabilities = null;
@@ -1943,12 +2052,12 @@
   // soon as one exists. Leaving focus on the bar button instead would strand a
   // keyboard visitor on a control the open panel has just hidden.
   //
-  // The order below is deliberate and is not DOM order. The filter is what a
-  // visitor with a long list opened the panel to use; the first app is what a
-  // visitor with a short one opened it to pick. The close button and the
-  // dashboard link are focusable too and both sit in the panel, but landing on
-  // either turns the visitor's first Enter into "leave" - the opposite of what
-  // opening the panel asked for.
+  // The order below is deliberate and is not DOM order. A ready version is the
+  // panel's time-sensitive action, the filter is what a visitor with a long
+  // list opened it to use, and the first app is what a visitor with a short one
+  // opened it to pick. The close button and dashboard link are focusable too,
+  // but landing on either turns the visitor's first Enter into "leave" - the
+  // opposite of what opening the panel asked for.
   var pendingFocus = false;
 
   function updatePositionControls() {
@@ -1976,6 +2085,273 @@
     }
   }
 
+  function updateSwitcherStatus() {
+    var label = currentLabel.textContent || currentSlug || "unknown";
+    currentAction.textContent = snapshotActive
+      ? "Offline snapshot"
+      : versionReady
+        ? "Update ready"
+        : "Switch app";
+    openBtn.setAttribute(
+      "aria-label",
+      "Switch apps, current app " + label +
+        (versionReady && !snapshotActive ? ", different version ready" : "")
+    );
+  }
+
+  function setVersionReady(next) {
+    var wasReady = versionReady;
+    var noticeHadFocus = versionNotice.contains(shadow.activeElement);
+    versionReady = !!next;
+    root.classList.toggle("version-ready", versionReady);
+    versionNotice.hidden = !versionReady || snapshotActive;
+    restoreBtn.setAttribute(
+      "aria-label",
+      versionReady && !snapshotActive
+        ? "Show the app switcher; a different app version is ready"
+        : "Show the app switcher"
+    );
+    updateSwitcherStatus();
+    if (!versionReady) {
+      root.classList.remove("version-error");
+      if (noticeHadFocus && open) {
+        placeFocus();
+      }
+    } else if (!wasReady && !snapshotActive) {
+      announcer.textContent = "A different app version is ready";
+    }
+    if (wasReady !== versionReady) {
+      revealBar(true);
+    }
+  }
+
+  function scheduleVersionCheck(failed) {
+    if (versionTimer !== null) {
+      window.clearTimeout(versionTimer);
+    }
+    if (document.hidden) {
+      versionTimer = null;
+      return;
+    }
+    versionPollFailures = failed ? Math.min(versionPollFailures + 1, 3) : 0;
+    var base = 15000 * Math.pow(2, versionPollFailures);
+    var jitter = Math.floor(Math.random() * 3000);
+    versionTimer = window.setTimeout(guard(checkVersion), base + jitter);
+  }
+
+  function checkVersion() {
+    if (
+      !servedGeneration ||
+      !versionURL ||
+      document.hidden ||
+      snapshotActive ||
+      versionRequestInFlight
+    ) {
+      return;
+    }
+    versionRequestInFlight = true;
+    var requestSerial = ++versionRequestSerial;
+    versionAbort = typeof window.AbortController === "function" ? new window.AbortController() : null;
+    var requestOptions = {
+      cache: "no-store",
+      credentials: "same-origin"
+    };
+    if (versionAbort) {
+      requestOptions.signal = versionAbort.signal;
+    }
+    versionRequestDeadline = window.setTimeout(guard(function () {
+      if (requestSerial !== versionRequestSerial || !versionRequestInFlight) {
+        return;
+      }
+      if (versionAbort) {
+        versionAbort.abort();
+      }
+      versionRequestInFlight = false;
+      versionAbort = null;
+      versionRequestDeadline = null;
+      // Preserve the last trustworthy answer and retry with backoff. A hung
+      // endpoint must not permanently turn version discovery off for this tab.
+      scheduleVersionCheck(true);
+    }), VERSION_POLL_TIMEOUT_MS);
+    window.fetch(versionURL, requestOptions).then(
+      function (response) {
+        if (!response.ok) {
+          throw new Error("version endpoint returned " + response.status);
+        }
+        return response.json();
+      }
+    ).then(
+      function (next) {
+        if (requestSerial !== versionRequestSerial || !versionRequestInFlight) {
+          return;
+        }
+        var active = next && typeof next.active_generation === "string"
+          ? next.active_generation.trim()
+          : "";
+        if (!active) {
+          throw new Error("version endpoint returned an invalid generation");
+        }
+        if (versionRequestDeadline !== null) {
+          window.clearTimeout(versionRequestDeadline);
+          versionRequestDeadline = null;
+        }
+        versionRequestInFlight = false;
+        versionAbort = null;
+        setVersionReady(active !== servedGeneration);
+        scheduleVersionCheck(false);
+      }
+    ).catch(function () {
+      if (requestSerial !== versionRequestSerial || !versionRequestInFlight) {
+        return;
+      }
+      if (versionRequestDeadline !== null) {
+        window.clearTimeout(versionRequestDeadline);
+        versionRequestDeadline = null;
+      }
+      versionRequestInFlight = false;
+      versionAbort = null;
+      // A missed poll changes nothing: this page stays attached to the healthy
+      // generation it is already using and tries again on the next interval.
+      scheduleVersionCheck(true);
+    });
+  }
+
+  function cancelVersionCheck() {
+    versionRequestSerial += 1;
+    versionRequestInFlight = false;
+    if (versionAbort) {
+      versionAbort.abort();
+      versionAbort = null;
+    }
+    if (versionRequestDeadline !== null) {
+      window.clearTimeout(versionRequestDeadline);
+      versionRequestDeadline = null;
+    }
+    if (versionTimer !== null) {
+      window.clearTimeout(versionTimer);
+      versionTimer = null;
+    }
+  }
+
+  function setVersionSwitchControlsDisabled(disabled) {
+    root.classList.toggle("version-switching", disabled);
+    if (disabled) {
+      panel.setAttribute("aria-busy", "true");
+      versionNotice.setAttribute("aria-busy", "true");
+    } else {
+      panel.removeAttribute("aria-busy");
+      versionNotice.removeAttribute("aria-busy");
+    }
+    versionSwitch.disabled = disabled;
+    versionLater.disabled = disabled;
+    filter.disabled = disabled;
+    headClose.disabled = disabled;
+    if (disabled) {
+      homeLink.setAttribute("aria-disabled", "true");
+      homeLink.setAttribute("tabindex", "-1");
+    } else {
+      homeLink.removeAttribute("aria-disabled");
+      homeLink.removeAttribute("tabindex");
+    }
+    var links = list.querySelectorAll("a.item");
+    for (var i = 0; i < links.length; i++) {
+      if (disabled) {
+        links[i].setAttribute("aria-disabled", "true");
+        links[i].setAttribute("tabindex", "-1");
+      } else {
+        links[i].removeAttribute("aria-disabled");
+        links[i].removeAttribute("tabindex");
+      }
+    }
+    versionSwitch.textContent = disabled ? "Switching…" : "Switch and reload";
+  }
+
+  function clearVersionSwitchRequest() {
+    if (versionSwitchDeadline !== null) {
+      window.clearTimeout(versionSwitchDeadline);
+      versionSwitchDeadline = null;
+    }
+    versionSwitchAbort = null;
+  }
+
+  function failVersionSwitch(requestSerial) {
+    if (requestSerial !== versionSwitchSerial || !versionSwitching) {
+      return;
+    }
+    versionSwitching = false;
+    clearVersionSwitchRequest();
+    setVersionSwitchControlsDisabled(false);
+    root.classList.add("version-error");
+    if (!snapshotActive && !versionNotice.hidden) {
+      versionSwitch.focus();
+    }
+    // The POST may have reached the server before a timeout. Reconcile from
+    // the authoritative active generation instead of guessing what happened.
+    checkVersion();
+  }
+
+  function cancelVersionSwitch() {
+    if (!versionSwitching) {
+      return;
+    }
+    versionSwitchSerial += 1;
+    versionSwitching = false;
+    if (versionSwitchAbort) {
+      versionSwitchAbort.abort();
+    }
+    clearVersionSwitchRequest();
+    setVersionSwitchControlsDisabled(false);
+    root.classList.remove("version-error");
+  }
+
+  function switchVersion() {
+    if (versionSwitching || !switchURL) {
+      return;
+    }
+    versionSwitching = true;
+    var requestSerial = ++versionSwitchSerial;
+    root.classList.remove("version-error");
+    setVersionSwitchControlsDisabled(true);
+    versionSwitchAbort = typeof window.AbortController === "function"
+      ? new window.AbortController()
+      : null;
+    var requestOptions = {
+      method: "POST",
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { "X-ShinyHub-Version-Switch": "1" }
+    };
+    if (versionSwitchAbort) {
+      requestOptions.signal = versionSwitchAbort.signal;
+    }
+    versionSwitchDeadline = window.setTimeout(guard(function () {
+      if (requestSerial !== versionSwitchSerial || !versionSwitching) {
+        return;
+      }
+      if (versionSwitchAbort) {
+        versionSwitchAbort.abort();
+      }
+      failVersionSwitch(requestSerial);
+    }), VERSION_SWITCH_TIMEOUT_MS);
+    window.fetch(switchURL, requestOptions).then(
+      function (response) {
+        if (requestSerial !== versionSwitchSerial || !versionSwitching) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error("version switch returned " + response.status);
+        }
+        clearVersionSwitchRequest();
+        announcer.textContent = "Switching to the ready app version";
+        window.location.reload();
+      }
+    ).catch(
+      function () {
+        failVersionSwitch(requestSerial);
+      }
+    );
+  }
+
   function setPlacing(next) {
     placing = !!next;
     revealBar(!placing);
@@ -1992,6 +2368,9 @@
 
   function placeFocus() {
     var wanted = [];
+    if (versionReady && !snapshotActive && !versionNotice.hidden) {
+      wanted.push(versionSwitch);
+    }
     if (!filterWrap.hidden) {
       wanted.push(filter);
     }
@@ -2106,13 +2485,38 @@
   }
 
   function setSnapshotActive(next) {
+    var noticeHadFocus = versionNotice.contains(shadow.activeElement);
+    var wasSnapshotActive = snapshotActive;
     snapshotActive = !!next;
+    if (snapshotActive) {
+      // Snapshot recovery is the higher-priority decision. Do not leave its
+      // visible controls behind a version request lock or accept a version
+      // response that began while the live session was still authoritative.
+      cancelVersionSwitch();
+      cancelVersionCheck();
+    }
     root.classList.toggle("session-snapshot", snapshotActive);
-    currentAction.textContent = snapshotActive ? "Offline snapshot" : "Switch app";
+    versionNotice.hidden = !versionReady || snapshotActive;
+    updateSwitcherStatus();
+    restoreBtn.setAttribute(
+      "aria-label",
+      versionReady && !snapshotActive
+        ? "Show the app switcher; a different app version is ready"
+        : "Show the app switcher"
+    );
     if (!snapshotActive) {
       setSessionOpen(false, false);
+      if (wasSnapshotActive && versionReady) {
+        announcer.textContent = "A different app version is ready";
+      }
+      if (wasSnapshotActive && servedGeneration && versionURL && !document.hidden) {
+        checkVersion();
+      }
     } else {
       setBookmarkOpen(false, false);
+      if (noticeHadFocus && open) {
+        placeFocus();
+      }
     }
     revealBar(!snapshotActive);
   }
@@ -2130,6 +2534,12 @@
     setSessionOpen(false, false);
     setOpen(!open);
   }));
+
+  versionLater.addEventListener("click", guard(function () {
+    setOpen(false);
+  }));
+
+  versionSwitch.addEventListener("click", guard(switchVersion));
 
   sessionBtn.addEventListener("click", guard(function () {
     setSessionOpen(!sessionOpen);
@@ -2443,6 +2853,9 @@
   }));
 
   scrim.addEventListener("click", guard(function () {
+    if (versionSwitching) {
+      return;
+    }
     if (placing) {
       setPlacing(false);
       moveBtn.focus();
@@ -2467,7 +2880,7 @@
   // listens for its own shortcuts on document must not see the visitor typing
   // into our filter box, and we must not see theirs.
   root.addEventListener("keydown", guard(function (ev) {
-    if (navigating) {
+    if (navigating || versionSwitching) {
       return;
     }
     if (bookmarkOpen) {
@@ -2570,6 +2983,23 @@
     }
   }));
 
+  if (servedGeneration && versionURL) {
+    checkVersion();
+    document.addEventListener("visibilitychange", guard(function () {
+      if (!document.hidden) {
+        checkVersion();
+      } else {
+        cancelVersionCheck();
+      }
+    }));
+    window.addEventListener("pagehide", guard(cancelVersionCheck));
+    window.addEventListener("pageshow", guard(function () {
+      if (!document.hidden) {
+        checkVersion();
+      }
+    }));
+  }
+  updateSwitcherStatus();
   revealBar(true);
   if (typeof window.CustomEvent === "function") {
     window.dispatchEvent(new window.CustomEvent(BOOKMARK_DISCOVER_EVENT, {
