@@ -368,9 +368,10 @@ func TestConvergeApp_VerifySchedulesFailsClosedWithoutServerStaleState(t *testin
 
 func TestConvergeApp_UnchangedRecordsFleetStateWhenAdvertised(t *testing.T) {
 	var body struct {
-		Status      string `json:"status"`
-		Digest      string `json:"desired_content_digest"`
-		Declaration []struct {
+		Status       string `json:"status"`
+		Digest       string `json:"desired_content_digest"`
+		StateChanged *bool  `json:"state_changed"`
+		Declaration  []struct {
 			Key     string `json:"key"`
 			Desired string `json:"desired"`
 		} `json:"declaration"`
@@ -389,7 +390,7 @@ func TestConvergeApp_UnchangedRecordsFleetStateWhenAdvertised(t *testing.T) {
 	d := fleet.AppDiff{Slug: "a", Action: fleet.ActionUnchanged, LocalDigest: "sha256:local"}
 	r := convergeApp(&cliConfig{Host: srv.URL, Token: "shk_test"}, d,
 		fleet.AppEntry{Slug: "a", Visibility: "private", Config: fleet.Config{Replicas: &replicas}},
-		fleet.ObservedApp{}, "", convergeOpts{fleetState: true, fleetID: "eu", runID: "r"},
+		fleet.ObservedApp{}, "", convergeOpts{fleetState: true, fleetStateChangeTracking: true, fleetID: "eu", runID: "r"},
 		"fleet:eu", io.Discard)
 	if r.status != statusUnchanged || r.err != nil {
 		t.Fatalf("result = %#v", r)
@@ -397,8 +398,39 @@ func TestConvergeApp_UnchangedRecordsFleetStateWhenAdvertised(t *testing.T) {
 	if body.Status != fleetConvergenceInSync || body.Digest != "sha256:local" {
 		t.Fatalf("body = %#v", body)
 	}
+	if body.StateChanged == nil || *body.StateChanged {
+		t.Fatalf("state_changed = %v, want false for unchanged app", body.StateChanged)
+	}
 	if len(body.Declaration) != 2 || body.Declaration[0].Key != "visibility" || body.Declaration[1].Desired != "2" {
 		t.Fatalf("declaration = %#v", body.Declaration)
+	}
+}
+
+func TestConvergeApp_UnchangedOmitsChangeSignalForOlderServer(t *testing.T) {
+	var body struct {
+		Status               string `json:"status"`
+		DesiredContentDigest string `json:"desired_content_digest"`
+		Declaration          []struct {
+			Key     string `json:"key"`
+			Desired string `json:"desired"`
+		} `json:"declaration"`
+		Error string `json:"error"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			t.Fatalf("older strict decoder rejected request: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	d := fleet.AppDiff{Slug: "a", Action: fleet.ActionUnchanged, LocalDigest: "sha256:local"}
+	r := convergeApp(&cliConfig{Host: srv.URL, Token: "shk_test"}, d,
+		fleet.AppEntry{Slug: "a", Visibility: "private"}, fleet.ObservedApp{}, "",
+		convergeOpts{fleetState: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+	if r.status != statusUnchanged || r.err != nil {
+		t.Fatalf("result = %#v", r)
 	}
 }
 

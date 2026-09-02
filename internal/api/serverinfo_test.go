@@ -25,6 +25,7 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 			DeployEvents              bool `json:"deploy_events"`
 			FleetProvenance           bool `json:"fleet_provenance"`
 			FleetState                bool `json:"fleet_state"`
+			FleetStateChangeTracking  bool `json:"fleet_state_change_tracking"`
 			FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
 			ServiceAccountCredentials bool `json:"service_account_credentials"`
 			ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
@@ -53,6 +54,9 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 	if !got.Capabilities.FleetState {
 		t.Errorf("fleet_state not advertised")
+	}
+	if !got.Capabilities.FleetStateChangeTracking {
+		t.Errorf("fleet_state_change_tracking not advertised")
 	}
 	if !got.Capabilities.FleetRunLifecycle {
 		t.Errorf("fleet_run_lifecycle not advertised")

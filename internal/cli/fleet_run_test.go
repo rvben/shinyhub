@@ -108,14 +108,18 @@ func TestRecordAppFleetStateSendsNormalizedDeclarationAndRun(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	stateChanged := true
 	err := recordAppFleetState(&cliConfig{Host: srv.URL, Token: "token"}, "demo",
 		fleetConvergenceInSync, "sha256:expected",
-		[]fleet.ConfigDriftItem{{Key: "replicas", Desired: "3"}}, "", "run-42")
+		[]fleet.ConfigDriftItem{{Key: "replicas", Desired: "3"}}, "", "run-42", &stateChanged)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got["status"] != fleetConvergenceInSync || got["desired_content_digest"] != "sha256:expected" {
 		t.Fatalf("body = %#v", got)
+	}
+	if got["state_changed"] != true {
+		t.Fatalf("state_changed = %#v, want true", got["state_changed"])
 	}
 	declared := got["declaration"].([]any)
 	if len(declared) != 1 || declared[0].(map[string]any)["desired"] != "3" {

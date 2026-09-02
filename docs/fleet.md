@@ -393,6 +393,13 @@ result remains observably abandoned rather than looking successful. If the CLI
 cannot persist the terminal result after convergence, the apply itself exits
 partial and reports the run-recording failure instead of printing a false OK.
 
+An identical apply is recorded as a new audit run and refreshes the app's
+`checked_at` convergence timestamp, but it remains `unchanged`: it does not
+advance the last application timestamp or provenance and does not create a new
+release. Changing only which already-matching fields the manifest declares
+does advance the declaration application, because the fleet ownership baseline
+itself changed even though no live app value needed patching.
+
 GitLab CI works without extra credentials. In `auto` mode the CLI reads
 GitLab's predefined `CI_PIPELINE_*`, `CI_JOB_*`, `CI_COMMIT_*`, and
 `CI_MERGE_REQUEST_*` variables. It stores a bounded snapshot containing the

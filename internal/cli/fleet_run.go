@@ -222,17 +222,22 @@ func updateFleetRun(cfg *cliConfig, runID, status string, exitCode *int, reason 
 
 // recordAppFleetState commits the declaration baseline only after an app has
 // converged. On failure, status=incomplete records the attempt without replacing
-// the prior successful baseline. Older servers never receive this request
-// because fleet apply gates it on the advertised fleet_state capability.
-func recordAppFleetState(cfg *cliConfig, slug, status, digest string, declared []fleet.ConfigDriftItem, message, runID string) error {
+// the prior successful baseline. stateChanged is sent only when the server
+// advertises fleet_state_change_tracking, keeping the current CLI compatible
+// with older servers whose strict request decoder rejects unknown fields.
+func recordAppFleetState(cfg *cliConfig, slug, status, digest string, declared []fleet.ConfigDriftItem, message, runID string, stateChanged *bool) error {
 	values := make([]map[string]string, 0, len(declared))
 	for _, item := range declared {
 		values = append(values, map[string]string{"key": item.Key, "desired": item.Desired})
 	}
-	body, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"status": status, "desired_content_digest": digest,
 		"declaration": values, "error": message,
-	})
+	}
+	if stateChanged != nil {
+		payload["state_changed"] = *stateChanged
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode fleet state for %s: %w", slug, err)
 	}

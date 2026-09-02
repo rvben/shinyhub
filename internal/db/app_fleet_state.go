@@ -5,12 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/provenance"
 )
 
 var ErrFleetStateSuperseded = errors.New("fleet state belongs to a newer run")
+
+// fleetDeclarationOrder matches fleet.DeclaredState's durable field order.
+// Keeping the established order avoids rewriting baselines produced by older
+// official CLIs, while sorting incoming values makes semantic equality
+// independent of JSON array order for other clients and future CLI changes.
+var fleetDeclarationOrder = map[string]int{
+	"visibility": 0, "name": 1, "description": 2, "icon": 3, "project": 4,
+	"hibernate_timeout_minutes": 5, "replicas": 6, "max_sessions_per_replica": 7,
+	"render_seconds": 8, "identity_headers": 9, "usage_identity_mode": 10,
+	"min_warm_replicas": 11, "memory_limit_mb": 12, "cpu_quota_percent": 13,
+	"worker_isolation": 14, "worker_grouped_size": 15, "worker_max_workers": 16,
+	"worker_warm_spares": 17, "worker_max_session_lifetime_secs": 18, "autoscale": 19,
+}
 
 // FleetDeclaredValue is one fleet-owned app field in its normalized display
 // form. The CLI records only fields declared by the effective fleet+bundle
@@ -47,7 +61,20 @@ type AppFleetState struct {
 func encodeFleetDeclaration(values []FleetDeclaredValue) (string, error) {
 	if values == nil {
 		values = []FleetDeclaredValue{}
+	} else {
+		values = append([]FleetDeclaredValue(nil), values...)
 	}
+	sort.Slice(values, func(i, j int) bool {
+		iRank, iKnown := fleetDeclarationOrder[values[i].Key]
+		jRank, jKnown := fleetDeclarationOrder[values[j].Key]
+		if iKnown != jKnown {
+			return iKnown
+		}
+		if iKnown && iRank != jRank {
+			return iRank < jRank
+		}
+		return values[i].Key < values[j].Key
+	})
 	b, err := json.Marshal(values)
 	if err != nil {
 		return "", fmt.Errorf("encode fleet declaration: %w", err)
@@ -55,10 +82,29 @@ func encodeFleetDeclaration(values []FleetDeclaredValue) (string, error) {
 	return string(b), nil
 }
 
-// RecordAppFleetSuccess replaces the drift baseline and clears any prior
-// incomplete attempt. The API validates the declaration against live state
-// before calling this method.
+// RecordAppFleetSuccess records a successful application using the legacy
+// semantics where the caller is assumed to have mutated the app. New callers
+// should use RecordAppFleetSuccessWithChange so a verification-only apply
+// does not overwrite the provenance and timestamp of the last real change.
 func (s *Store) RecordAppFleetSuccess(appID int64, runID, digest string, values []FleetDeclaredValue) error {
+	return s.RecordAppFleetSuccessWithChange(appID, runID, digest, values, true)
+}
+
+// RecordAppFleetSuccessWithChange replaces the drift baseline and clears any
+// prior incomplete attempt. Every call advances latest_run_id and
+// convergence_updated_at: those fields mean "last checked". The successful
+// application provenance and applied_at advance only when persisted desired
+// state or the declaration/digest baseline changed, or when the retained
+// successful run belongs to a different fleet than the incoming run. That
+// last condition covers adoption: the app changed hands with an identical
+// declaration and digest, the adopt run's own fleet-state request was lost,
+// and the reader discards a cross-fleet application - so preserving the old
+// fleet's run would leave the owning fleet with no recorded application
+// until a real declaration change. Repeating an identical same-fleet no-op
+// apply therefore remains auditable without looking like an app update.
+// The API validates the declaration against live state before calling this
+// method.
+func (s *Store) RecordAppFleetSuccessWithChange(appID int64, runID, digest string, values []FleetDeclaredValue, stateChanged bool) error {
 	decl, err := encodeFleetDeclaration(values)
 	if err != nil {
 		return err
@@ -70,17 +116,31 @@ func (s *Store) RecordAppFleetSuccess(appID int64, runID, digest string, values 
 			convergence_updated_at
 		) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, 'in_sync', '', CURRENT_TIMESTAMP)
 		ON CONFLICT(app_id) DO UPDATE SET
-			successful_run_id = excluded.successful_run_id,
+			successful_run_id = CASE
+				WHEN ? OR app_fleet_state.declaration <> excluded.declaration
+					OR app_fleet_state.desired_content_digest <> excluded.desired_content_digest
+					OR (SELECT fleet_id FROM fleet_runs WHERE id = app_fleet_state.successful_run_id)
+						IS DISTINCT FROM (SELECT fleet_id FROM fleet_runs WHERE id = excluded.latest_run_id)
+				THEN excluded.successful_run_id
+				ELSE app_fleet_state.successful_run_id
+			END,
 			declaration = excluded.declaration,
 			desired_content_digest = excluded.desired_content_digest,
-			applied_at = CURRENT_TIMESTAMP,
+			applied_at = CASE
+				WHEN ? OR app_fleet_state.declaration <> excluded.declaration
+					OR app_fleet_state.desired_content_digest <> excluded.desired_content_digest
+					OR (SELECT fleet_id FROM fleet_runs WHERE id = app_fleet_state.successful_run_id)
+						IS DISTINCT FROM (SELECT fleet_id FROM fleet_runs WHERE id = excluded.latest_run_id)
+				THEN CURRENT_TIMESTAMP
+				ELSE app_fleet_state.applied_at
+			END,
 			latest_run_id = excluded.latest_run_id,
 			convergence_status = 'in_sync',
 			convergence_error = '',
 			convergence_updated_at = CURRENT_TIMESTAMP
 		WHERE (SELECT run_sequence FROM fleet_runs WHERE id = excluded.latest_run_id) >=
 		      COALESCE((SELECT run_sequence FROM fleet_runs WHERE id = app_fleet_state.latest_run_id), 0)`,
-		appID, runID, decl, digest, runID)
+		appID, runID, decl, digest, runID, stateChanged, stateChanged)
 	if err != nil {
 		return fmt.Errorf("record app fleet success: %w", err)
 	}

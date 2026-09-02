@@ -35,6 +35,9 @@ type recordFleetStateRequest struct {
 	DesiredContentDigest string                  `json:"desired_content_digest"`
 	Declaration          []db.FleetDeclaredValue `json:"declaration"`
 	Error                string                  `json:"error,omitempty"`
+	// StateChanged is optional for compatibility with older CLIs. Omitted retains
+	// the historical assumption that a successful apply changed the app.
+	StateChanged *bool `json:"state_changed,omitempty"`
 }
 
 type fleetStateChange struct {
@@ -56,6 +59,7 @@ type appFleetStateView struct {
 	Attempt     *db.FleetStateRun     `json:"attempt,omitempty"`
 	Error       string                `json:"error,omitempty"`
 	UpdatedAt   *time.Time            `json:"updated_at,omitempty"`
+	CheckedAt   *time.Time            `json:"checked_at,omitempty"`
 }
 
 func quoted(v string) string { return fmt.Sprintf("%q", v) }
@@ -130,6 +134,8 @@ func (s *Server) appFleetState(app *db.App) (*appFleetStateView, error) {
 	if state.LatestRun == nil || state.LatestRun.FleetID != fleetID {
 		return view, nil
 	}
+	checkedAt := state.ConvergenceUpdatedAt
+	view.CheckedAt = &checkedAt
 	if state.ConvergenceStatus == fleetConvergenceIncomplete {
 		view.Status = fleetConvergenceIncomplete
 		view.Attempt = state.LatestRun
@@ -245,7 +251,11 @@ func (s *Server) handleRecordAppFleetState(w http.ResponseWriter, r *http.Reques
 				return
 			}
 		}
-		if err := s.store.RecordAppFleetSuccess(app.ID, runID, req.DesiredContentDigest, req.Declaration); errors.Is(err, db.ErrFleetStateSuperseded) {
+		stateChanged := true
+		if req.StateChanged != nil {
+			stateChanged = *req.StateChanged
+		}
+		if err := s.store.RecordAppFleetSuccessWithChange(app.ID, runID, req.DesiredContentDigest, req.Declaration, stateChanged); errors.Is(err, db.ErrFleetStateSuperseded) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		} else if err != nil {

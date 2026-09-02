@@ -200,6 +200,7 @@ type serverCaps struct {
 	PlanApply                 bool `json:"plan_apply"`
 	FleetProvenance           bool `json:"fleet_provenance"`
 	FleetState                bool `json:"fleet_state"`
+	FleetStateChangeTracking  bool `json:"fleet_state_change_tracking"`
 	FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
 	ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
 }

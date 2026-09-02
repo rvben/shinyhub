@@ -23,6 +23,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+
+- **fleet**: preserve the last real application timestamp and provenance when
+  an identical `fleet apply` only verifies already-converged state.
+
 ## [0.14.0](https://github.com/rvben/shinyhub/compare/v0.13.1...v0.14.0) - 2026-08-31
 
 ### Added

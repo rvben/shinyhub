@@ -23,21 +23,22 @@ type attemptOutcome struct {
 
 // convergeOpts carries the run-wide knobs for one apply invocation.
 type convergeOpts struct {
-	adopt              bool
-	prune              bool
-	allowDegradedPrune bool
-	preconditions      bool // server supports If-Match-style headers
-	retries            int  // attempts AFTER the first for deploys/transient config PATCHes
-	healthTimeout      time.Duration
-	warmTimeout        time.Duration
-	waitForWarm        bool
-	verifySchedules    bool
-	verifyHealth       bool
-	restartAfterWarm   bool
-	concurrency        int // max apps converged in parallel; <=1 means serial
-	fleetID            string
-	runID              string
-	fleetState         bool // server persists per-app declaration/convergence state
+	adopt                    bool
+	prune                    bool
+	allowDegradedPrune       bool
+	preconditions            bool // server supports If-Match-style headers
+	retries                  int  // attempts AFTER the first for deploys/transient config PATCHes
+	healthTimeout            time.Duration
+	warmTimeout              time.Duration
+	waitForWarm              bool
+	verifySchedules          bool
+	verifyHealth             bool
+	restartAfterWarm         bool
+	concurrency              int // max apps converged in parallel; <=1 means serial
+	fleetID                  string
+	runID                    string
+	fleetState               bool // server persists per-app declaration/convergence state
+	fleetStateChangeTracking bool // server distinguishes a no-op check from a desired-state change
 }
 
 const (
@@ -478,7 +479,12 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			res.mutation = mutationCommitted
 		}
 		if opt.fleetState && !stateAlreadyRecorded && s != statusDeleted && s != statusSkipped {
-			if err := recordAppFleetState(cfg, d.Slug, fleetConvergenceInSync, d.LocalDigest, declaredState, "", opt.runID); err != nil {
+			var stateChanged *bool
+			if opt.fleetStateChangeTracking {
+				changed := s != statusUnchanged
+				stateChanged = &changed
+			}
+			if err := recordAppFleetState(cfg, d.Slug, fleetConvergenceInSync, d.LocalDigest, declaredState, "", opt.runID, stateChanged); err != nil {
 				res.status = statusFailed
 				res.err = fmt.Errorf("record fleet convergence: %w", err)
 			}
@@ -493,7 +499,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			res.status = statusFailed
 		}
 		if opt.fleetState && !stateAlreadyRecorded {
-			_ = recordAppFleetState(cfg, d.Slug, fleetConvergenceIncomplete, d.LocalDigest, declaredState, err.Error(), opt.runID)
+			_ = recordAppFleetState(cfg, d.Slug, fleetConvergenceIncomplete, d.LocalDigest, declaredState, err.Error(), opt.runID, nil)
 			stateAlreadyRecorded = true
 		}
 		return res
