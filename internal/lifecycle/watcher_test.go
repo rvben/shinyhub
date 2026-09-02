@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -84,6 +85,17 @@ func (f *fakeManager) StopReplica(slug string, index int) error {
 	return nil
 }
 
+func (f *fakeManager) TransportForWorker(_, _ string) http.RoundTripper { return nil }
+
+// registeredBackend records one RegisterReplica call: which slot's route was
+// installed, pointing where, under which app identity.
+type registeredBackend struct {
+	slug   string
+	index  int
+	target string
+	appID  int64
+}
+
 type fakeProxy struct {
 	mu              sync.Mutex
 	seen            map[string]time.Time
@@ -93,13 +105,16 @@ type fakeProxy struct {
 	hibernateNever  bool // if true, BeginHibernate always returns false (simulates activeConns>0)
 	poolSizes       map[string]int
 	poolCaps        map[string]int
+	poolAppIDs      map[string]int64
+	registered      []registeredBackend
 }
 
 func newFakeProxy() *fakeProxy {
 	return &fakeProxy{
-		seen:      make(map[string]time.Time),
-		poolSizes: make(map[string]int),
-		poolCaps:  make(map[string]int),
+		seen:       make(map[string]time.Time),
+		poolSizes:  make(map[string]int),
+		poolCaps:   make(map[string]int),
+		poolAppIDs: make(map[string]int64),
 	}
 }
 
@@ -139,11 +154,25 @@ func (f *fakeProxy) SetPoolCap(slug string, max int) {
 	f.poolCaps[slug] = max
 	f.mu.Unlock()
 }
-func (f *fakeProxy) SetPoolAppID(_ string, _ int64)                               {}
+func (f *fakeProxy) SetPoolAppID(slug string, appID int64) {
+	f.mu.Lock()
+	f.poolAppIDs[slug] = appID
+	f.mu.Unlock()
+}
 func (f *fakeProxy) SetPoolIdentityHeaders(_ string, _ bool)                      {}
 func (f *fakeProxy) SetPoolMode(_ string, _ config.WorkerIsolationMode, _, _ int) {}
 func (f *fakeProxy) SetPoolWarmSpares(_ string, _ int)                            {}
 func (f *fakeProxy) ReconcileElasticWarmSpares(_ string)                          {}
+func (f *fakeProxy) RegisterReplica(slug string, index int, targetURL string, _ http.RoundTripper, _ int64, expectedAppID ...int64) error {
+	var appID int64
+	if len(expectedAppID) > 0 {
+		appID = expectedAppID[0]
+	}
+	f.mu.Lock()
+	f.registered = append(f.registered, registeredBackend{slug: slug, index: index, target: targetURL, appID: appID})
+	f.mu.Unlock()
+	return nil
+}
 
 type fakeStore struct {
 	mu                sync.Mutex
@@ -156,6 +185,7 @@ type fakeStore struct {
 	suspendedReplicas []db.SuspendedReplica // returned by ListSuspendedReplicas
 	upsertErr         error                 // when set, UpsertReplica records the call then returns this
 	upsertHook        func(db.UpsertReplicaParams)
+	recordCrashErr    error // when set, RecordReplicaCrash returns this without writing
 	updateStatusErr   error // when set, UpdateAppStatus records the call then returns this
 	quarantined       bool
 	reapCount         int // incremented by each ReapStaleReplicaSessions call
@@ -175,6 +205,12 @@ type fakeStore struct {
 	// ListHibernatedApps regardless of per-app status (drives the
 	// snapshot-vs-claim race in warm-restore tests).
 	forceHibernatedList []*db.App
+
+	// listCrashedStale, when non-nil, is returned verbatim by
+	// ListCrashedAppsWithLostReplicas instead of deriving from apps. Models
+	// the listing being a pre-lease snapshot that no longer matches the row
+	// GetAppBySlug returns (a settings change landed in between).
+	listCrashedStale []*db.App
 
 	// listReplicasCalls counts how many times ListReplicas has been called.
 	listReplicasCalls int
@@ -370,9 +406,69 @@ func (f *fakeStore) UpsertReplica(p db.UpsertReplicaParams) error {
 	return nil
 }
 
+// RecordReplicaCrash mirrors the real store's lost guard: a row already ruled
+// lost is left untouched, so a late crash write cannot undo the loss verdict.
 func (f *fakeStore) RecordReplicaCrash(p db.UpsertReplicaParams) error {
+	f.mu.Lock()
+	if f.recordCrashErr != nil {
+		err := f.recordCrashErr
+		f.mu.Unlock()
+		return err
+	}
+	for _, r := range f.replicas[p.AppID] {
+		if r.Index == p.Index && r.Status == db.ReplicaStatusLost {
+			f.mu.Unlock()
+			return nil
+		}
+	}
+	f.mu.Unlock()
 	p.Status = "crashed"
 	return f.UpsertReplica(p)
+}
+
+// RecordReplicaCrashFromLost mirrors the real store's lost-overwriting variant.
+func (f *fakeStore) RecordReplicaCrashFromLost(p db.UpsertReplicaParams) error {
+	p.Status = "crashed"
+	return f.UpsertReplica(p)
+}
+
+func (f *fakeStore) ListCrashedAppsWithLostReplicas() ([]*db.App, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listCrashedStale != nil {
+		return f.listCrashedStale, nil
+	}
+	var out []*db.App
+	for _, app := range f.apps {
+		if app.Status != "crashed" {
+			continue
+		}
+		for _, r := range f.replicas[app.ID] {
+			if r.Status == db.ReplicaStatusLost {
+				out = append(out, app)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// ReviveCrashedApp mirrors the real store's CAS: only an app still crashed at
+// write time transitions to degraded, and the crash diagnostic is cleared.
+func (f *fakeStore) ReviveCrashedApp(slug string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	app, ok := f.apps[slug]
+	if !ok || app.Status != "crashed" {
+		return false, nil
+	}
+	app.Status = "degraded"
+	if f.appStatus == nil {
+		f.appStatus = make(map[string]string)
+	}
+	f.appStatus[slug] = "degraded"
+	delete(f.crashReasons, slug)
+	return true, nil
 }
 func (f *fakeStore) ListReconcilableApps() ([]*db.App, error) {
 	f.mu.Lock()
@@ -537,6 +633,7 @@ func newTestWatcher(cfg Config, mgr *fakeManager, prx *fakeProxy, st *fakeStore,
 		nextRetry:     make(map[replicaKey]time.Time),
 		crashCount:    make(map[replicaKey]int),
 		lastCrash:     make(map[replicaKey]time.Time),
+		lostForgiven:  make(map[replicaKey]bool),
 		driving:       make(map[string]bool),
 		expandingWarm: make(map[string]bool),
 	}
@@ -589,7 +686,7 @@ func TestWatcher_ActivationFenceBlocksRuntimeMutationBetweenRepairAttempts(t *te
 		})
 
 	w.handleCrashed("myapp", 0)
-	w.restartSlot(app, 0)
+	w.restartSlot(app, 0, false)
 	w.handleIdle("myapp", 1)
 	if err := w.SleepNow("myapp"); err == nil {
 		t.Fatal("SleepNow succeeded while activation owned runtime")
@@ -618,7 +715,7 @@ func TestWatcher_ActivationFenceFailsClosedWhenStoreUnavailable(t *testing.T) {
 			return &deploy.Result{}, nil
 		})
 
-	w.restartSlot(app, 0)
+	w.restartSlot(app, 0, false)
 	if deployCalls != 0 {
 		t.Fatal("watcher mutated runtime without a trustworthy activation fence")
 	}
@@ -1471,7 +1568,7 @@ func TestWatcher_RestartHoldsConsumerGateThroughReplicaProvenanceWrite(t *testin
 		}, nil
 	})
 
-	w.restartSlotLocked(st.apps["demo"], 0)
+	w.restartSlotLocked(st.apps["demo"], 0, false)
 	if gateHeld.Load() != 0 {
 		t.Fatal("consumer publication gate leaked after restart")
 	}
@@ -1489,7 +1586,7 @@ func TestWatcher_RestartRefusesCompatibilityQuarantine(t *testing.T) {
 			deployCalls.Add(1)
 			return &deploy.Result{}, nil
 		})
-	w.restartSlotLocked(st.apps["demo"], 0)
+	w.restartSlotLocked(st.apps["demo"], 0, false)
 	if deployCalls.Load() != 0 {
 		t.Fatal("watcher booted a consumer while compatibility quarantine was active")
 	}
@@ -2090,6 +2187,9 @@ func (m *orderCheckingManager) LogTail(slug string, index, n int) string {
 }
 func (m *orderCheckingManager) StopReplica(slug string, index int) error {
 	return m.inner.StopReplica(slug, index)
+}
+func (m *orderCheckingManager) TransportForWorker(tier, nodeID string) http.RoundTripper {
+	return m.inner.TransportForWorker(tier, nodeID)
 }
 
 // --- warm-shrink replaces hibernation tests ---

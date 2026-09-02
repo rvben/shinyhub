@@ -1445,6 +1445,54 @@ func (s *Store) ListReconcilableApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// ListCrashedAppsWithLostReplicas returns crashed apps that still have at
+// least one lost replica. A crashed app has left the reconcilable set, but a
+// lost replica means its worker died: the restart budget that terminalized the
+// app was spent dialing a dead worker, not against the app itself. The watcher
+// revives exactly this set back to degraded so the lost-replica healing path
+// can re-place the slots once a healthy worker exists.
+func (s *Store) ListCrashedAppsWithLostReplicas() ([]*App, error) {
+	rows, err := s.db.Query(`
+		SELECT ` + appColumns + deploymentSummarySQL + `
+		FROM apps
+		WHERE status = 'crashed'
+		AND EXISTS (
+			SELECT 1 FROM replicas r
+			WHERE r.app_id = apps.id AND r.status = '` + ReplicaStatusLost + `'
+		)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// ReviveCrashedApp atomically transitions a crashed app back to "degraded" and
+// reports whether the transition happened. The CAS keeps any concurrent
+// transition (delete, manual restart, redeploy) authoritative: only an app
+// still crashed at write time is revived. The crash diagnostic is cleared like
+// every other transition out of "crashed".
+func (s *Store) ReviveCrashedApp(slug string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE apps SET status = 'degraded', last_error = '', crashed_at = 0, updated_at = CURRENT_TIMESTAMP
+		   WHERE slug = ? AND status = 'crashed'`,
+		slug,
+	)
+	if err != nil {
+		return false, fmt.Errorf("revive crashed app: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // ListAutoscaleApps returns apps that have opted into autoscaling and are in a
 // state the controller may act on (running or degraded). Stopped, hibernated,
 // and deploying apps are excluded so the controller never resurrects or fights
@@ -3624,8 +3672,12 @@ func (s *Store) CountAppEnvVars(appID int64) (int, error) {
 const (
 	// ReplicaStatusRunning marks a replica the control plane considers healthy.
 	ReplicaStatusRunning = "running"
+	// ReplicaStatusCrashed marks a replica whose process exited unexpectedly.
+	// The watcher restarts it in place, subject to the restart budget.
+	ReplicaStatusCrashed = "crashed"
 	// ReplicaStatusLost marks a replica whose worker stopped heartbeating. It is
-	// excluded from routing and is not auto-restarted.
+	// excluded from routing and is re-placed only once a healthy worker exists
+	// for its tier.
 	ReplicaStatusLost = "lost"
 	// ReplicaStatusSuspended marks a replica that is hibernated but resumable: its
 	// warmed memory was snapshotted/frozen and host RAM freed, so wake can Resume
@@ -3906,19 +3958,67 @@ func (s *Store) UpsertReplica(p UpsertReplicaParams) error {
 // RecordReplicaCrash updates only crash diagnostics and status, preserving the
 // replica's placement and identity metadata. It inserts a minimal row when a
 // crash is observed before the normal replica upsert reached the database.
+//
+// A row already ruled lost is left untouched: the worker-down sweep writes the
+// loss verdict without the app lease, so a crash report from a restart attempt
+// that was already in flight can arrive after it. The loss is the later,
+// authoritative fact - the worker is gone - and pulling the row back to
+// crashed would misattribute a placement casualty to the app.
 func (s *Store) RecordReplicaCrash(p UpsertReplicaParams) error {
+	return s.recordReplicaCrash(p, false)
+}
+
+// RecordReplicaCrashFromLost records the failure of a restart that was
+// launched FROM a lost row, overwriting the lost state by design: the
+// re-placement onto a healthy tier failed, which is an app fault with real
+// diagnostics. Safe against the sweep because the caller holds the app lease
+// and MarkReplicaLostIfOwnedBy no-ops on rows already lost. When the row still
+// carries the original lost placement, its identity (worker_id, endpoint, pid,
+// port) is cleared in the same write so the crashed row cannot pin the
+// reaped-worker record; a row the restart already re-pointed at its
+// replacement keeps that identity, because it may name a live runtime whose
+// persisted PID fences off duplicate starts.
+func (s *Store) RecordReplicaCrashFromLost(p UpsertReplicaParams) error {
+	return s.recordReplicaCrash(p, true)
+}
+
+func (s *Store) recordReplicaCrash(p UpsertReplicaParams, overwriteLost bool) error {
 	if p.Reason == "" {
 		p.Reason = "replica process exited unexpectedly"
 	}
 	if p.ExitObservedAt.IsZero() {
 		p.ExitObservedAt = time.Now().UTC()
 	}
+	statusGuard := ` AND status <> '` + ReplicaStatusLost + `'`
+	detach := ``
+	if overwriteLost {
+		statusGuard = ""
+		// A row still in the lost state names the dead worker's placement, and
+		// this crash happened attempting a NEW placement, so the stale identity is
+		// cleared: a crashed row that keeps the dead worker's id pins that
+		// worker's record forever (the stale-worker reap refuses to delete a
+		// worker with running or crashed replicas, and the worker-down sweep
+		// fires only once per death, so nothing would ever re-rule the row lost).
+		// The detach is conditional on the pre-update status because a restart
+		// that persisted its replacement as starting (ReplicaStarted) and then
+		// failed on health or registration may have left that runtime alive under
+		// unconfirmed cleanup; its persisted identity is the fence that stops a
+		// later start from launching a duplicate beside it, so it must survive
+		// the crash write. SET expressions evaluate against the original row, so
+		// every CASE sees the status this UPDATE is about to overwrite.
+		lost := `'` + ReplicaStatusLost + `'`
+		detach = `,
+		       worker_id = CASE WHEN status = ` + lost + ` THEN '' ELSE worker_id END,
+		       endpoint_url = CASE WHEN status = ` + lost + ` THEN '' ELSE endpoint_url END,
+		       pid = CASE WHEN status = ` + lost + ` THEN NULL ELSE pid END,
+		       port = CASE WHEN status = ` + lost + ` THEN NULL ELSE port END`
+	}
 	res, err := s.db.Exec(`
 		UPDATE replicas
 		   SET status = 'crashed', exit_code = ?, exit_signal = ?, exit_reason = ?,
 		       exit_observed_at = ?, exit_oom_killed = ?, exit_run_id = ?,
-		       restart_count = restart_count + 1, updated_at = `+s.d.nowEpoch()+`
-		 WHERE app_id = ? AND idx = ?`, p.ExitCode, p.Signal, p.Reason,
+		       restart_count = restart_count + 1, updated_at = `+s.d.nowEpoch()+detach+`
+		 WHERE app_id = ? AND idx = ?`+statusGuard, p.ExitCode, p.Signal, p.Reason,
 		p.ExitObservedAt.Unix(), boolToInt(p.ExitOOMKilled), p.ExitRunID, p.AppID, p.Index)
 	if err != nil {
 		return fmt.Errorf("record replica crash: %w", err)
@@ -3926,8 +4026,21 @@ func (s *Store) RecordReplicaCrash(p UpsertReplicaParams) error {
 	if n, _ := res.RowsAffected(); n > 0 {
 		return nil
 	}
-	p.Status = "crashed"
-	return s.UpsertReplica(p)
+	// Zero rows means either the row does not exist yet or the guard skipped a
+	// lost row. Only the first case falls through to the insert: upserting over
+	// a lost row would clobber the very state the guard preserved.
+	var existing int
+	err = s.db.QueryRow(`SELECT 1 FROM replicas WHERE app_id = ? AND idx = ?`,
+		p.AppID, p.Index).Scan(&existing)
+	switch {
+	case err == sql.ErrNoRows:
+		p.Status = "crashed"
+		return s.UpsertReplica(p)
+	case err != nil:
+		return fmt.Errorf("record replica crash: check row: %w", err)
+	default:
+		return nil
+	}
 }
 
 // ListReplicas returns all replicas for the given app, ordered by index.
@@ -5280,17 +5393,20 @@ func (s *Store) UpdateReplicaEndpoint(appID int64, index int, endpointURL string
 }
 
 // MarkReplicaLostIfOwnedBy transitions (app_id, idx) to lost only while it is
-// still running and still attributed to workerID, returning whether the row
-// actually changed. The ownership-and-status guard prevents a worker-loss pass
-// (admin revoke or the down-sweep) that read a stale snapshot from clobbering a
-// replica that a concurrent redeploy already re-placed onto a healthy worker:
-// such a row no longer matches workerID, so the update is a no-op and the caller
-// skips deregistering the (now healthy) routing slot.
+// still running or crashed in place and still attributed to workerID, returning
+// whether the row actually changed. Crashed rows qualify because crash detection
+// on a dying worker outruns the heartbeat sweep, so by the time a loss pass runs
+// the worker's replicas typically read crashed; skipping them would strand each
+// one on the dead worker with a live route. The ownership guard prevents a
+// worker-loss pass (admin revoke or the down-sweep) that read a stale snapshot
+// from clobbering a replica that a concurrent redeploy already re-placed onto a
+// healthy worker: such a row no longer matches workerID, so the update is a
+// no-op and the caller skips deregistering the (now healthy) routing slot.
 func (s *Store) MarkReplicaLostIfOwnedBy(appID int64, index int, workerID string) (bool, error) {
 	res, err := s.db.Exec(
 		`UPDATE replicas SET status = ?, updated_at = `+s.d.nowEpoch()+`
-		   WHERE app_id = ? AND idx = ? AND worker_id = ? AND status = ?`,
-		ReplicaStatusLost, appID, index, workerID, ReplicaStatusRunning)
+		   WHERE app_id = ? AND idx = ? AND worker_id = ? AND status IN (?, ?)`,
+		ReplicaStatusLost, appID, index, workerID, ReplicaStatusRunning, ReplicaStatusCrashed)
 	if err != nil {
 		return false, fmt.Errorf("mark replica lost: %w", err)
 	}

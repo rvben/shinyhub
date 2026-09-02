@@ -1564,11 +1564,11 @@ func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T)
 	}
 }
 
-// TestLoseWorkerReplicas asserts the loss pass transitions only the running
-// replicas genuinely owned by the worker and deregisters exactly those, leaving
-// replicas re-placed onto another worker and replicas already in a terminal
-// state untouched. (The atomic ownership guard that protects against a concurrent
-// re-placement landing mid-pass is covered by the DB-layer
+// TestLoseWorkerReplicas asserts the loss pass transitions the running and
+// crashed replicas genuinely owned by the worker and deregisters exactly those,
+// leaving replicas re-placed onto another worker and replicas already in a
+// terminal state untouched. (The atomic ownership guard that protects against a
+// concurrent re-placement landing mid-pass is covered by the DB-layer
 // MarkReplicaLostIfOwnedBy test.)
 func TestLoseWorkerReplicas(t *testing.T) {
 	store := mustOpenStore(t)
@@ -1588,6 +1588,9 @@ func TestLoseWorkerReplicas(t *testing.T) {
 	seed(1, db.ReplicaStatusRunning, "node-dead")
 	// idx2: owned by the dead worker but already terminal -> skipped.
 	seed(2, "stopped", "node-dead")
+	// idx3: crashed in place on the dead worker (crash detection beats the
+	// heartbeat sweep when a worker dies) -> lost + deregistered.
+	seed(3, db.ReplicaStatusCrashed, "node-dead")
 
 	deregistered := map[int]bool{}
 	if err := lifecycle.LoseWorkerReplicas(store, "node-dead", func(_ string, idx int, _ string) {
@@ -1610,6 +1613,9 @@ func TestLoseWorkerReplicas(t *testing.T) {
 	if byIdx[2].Status != "stopped" || deregistered[2] {
 		t.Errorf("terminal replica was touched: status=%q deregistered=%v", byIdx[2].Status, deregistered[2])
 	}
+	if byIdx[3].Status != db.ReplicaStatusLost || !deregistered[3] {
+		t.Errorf("dead worker's crashed replica not lost/deregistered: status=%q deregistered=%v", byIdx[3].Status, deregistered[3])
+	}
 }
 
 // TestLoseWorkerReplicas_EvictsManagerEntry asserts the loss pass invokes the
@@ -1630,6 +1636,7 @@ func TestLoseWorkerReplicas_EvictsManagerEntry(t *testing.T) {
 	}
 	seed(0, db.ReplicaStatusRunning, "node-dead") // changed -> evict
 	seed(1, "stopped", "node-dead")               // terminal -> no evict
+	seed(2, db.ReplicaStatusCrashed, "node-dead") // changed -> evict
 
 	evicted := map[int]bool{}
 	if err := lifecycle.LoseWorkerReplicas(store, "node-dead",
@@ -1652,6 +1659,71 @@ func TestLoseWorkerReplicas_EvictsManagerEntry(t *testing.T) {
 	}
 	if evicted[1] {
 		t.Error("terminal slot 1 must not be evicted")
+	}
+	if !evicted[2] {
+		t.Error("expected evict for the crashed-then-lost replica slot 2")
+	}
+}
+
+// TestWorkerDownMonitor_TransitionsCrashedReplicaToLost models the ordering a
+// worker death actually produces: the manager notices the dropped connection
+// within seconds and records the replica as crashed, while the heartbeat sweep
+// fires only after the (much longer) timeout. The sweep must still transition
+// the crashed row to lost and deregister its route; the sweep runs once per
+// worker (on the up->down edge), so a skipped row would stay stranded on the
+// dead worker forever.
+func TestWorkerDownMonitor_TransitionsCrashedReplicaToLost(t *testing.T) {
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "wd-crashed-app")
+
+	if err := store.UpsertWorker(db.Worker{
+		NodeID: "node-a", AdvertiseAddr: "w:8443", Tier: "remote", Status: "up",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-10 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+	if _, err := store.DB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE node_id = ?`, old, "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: db.ReplicaStatusRunning,
+		Provider: "remote_docker", Tier: "remote", WorkerID: "node-a",
+		EndpointURL: "https://w:8443/v1/data/tok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Crash detection ran first: the production write path preserves the row's
+	// placement (worker_id, endpoint_url) while flipping status to crashed.
+	if err := store.RecordReplicaCrash(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Reason: "connection to worker lost",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prx.SetPoolSize("wd-crashed-app", 1)
+	if err := prx.RegisterReplica("wd-crashed-app", 0, "https://w:8443/v1/data/tok", nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	deregistered := false
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour,
+		func(nodeID string) error { return store.SetWorkerStatus(nodeID, "down") },
+		func(slug string, index int, expectURL string) {
+			deregistered = true
+			prx.DeregisterReplicaIfTarget(slug, index, expectURL)
+		},
+		nil, nil)
+	monitor.Sweep(time.Now())
+
+	reps, _ := store.ListReplicas(app.ID)
+	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
+		t.Errorf("replica status = %+v, want lost", reps)
+	}
+	if !deregistered {
+		t.Error("crashed replica on the downed worker was not deregistered from the proxy")
+	}
+	if got := prx.ReplicaTargetURL("wd-crashed-app", 0); got != "" {
+		t.Errorf("replica still routable after deregister: %q", got)
 	}
 }
 

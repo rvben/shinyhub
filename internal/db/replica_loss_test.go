@@ -7,10 +7,10 @@ import (
 )
 
 // TestMarkReplicaLostIfOwnedBy asserts the conditional loss transition only
-// fires for a replica that is still running and still attributed to the given
-// worker. The ownership guard prevents a stale worker-loss pass (revoke or
-// down-sweep) from clobbering a replica that a concurrent redeploy already
-// re-placed onto a healthy worker.
+// fires for a replica that is still running or crashed in place and still
+// attributed to the given worker. The ownership guard prevents a stale
+// worker-loss pass (revoke or down-sweep) from clobbering a replica that a
+// concurrent redeploy already re-placed onto a healthy worker.
 func TestMarkReplicaLostIfOwnedBy(t *testing.T) {
 	store := mustOpenDB(t)
 	owner := mustCreateUser(t, store, "owner", "admin")
@@ -74,5 +74,47 @@ func TestMarkReplicaLostIfOwnedBy(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("already-lost replica reported as newly changed")
+	}
+
+	// Crashed in place, still owned by node-a: transitions to lost. Crash
+	// detection on a dying worker beats the heartbeat sweep, so by the time the
+	// loss pass runs the row typically reads crashed, not running; skipping it
+	// would strand the replica on the dead worker forever.
+	seed(t, 3, db.ReplicaStatusCrashed, "node-a")
+	changed, err = store.MarkReplicaLostIfOwnedBy(app.ID, 3, "node-a")
+	if err != nil {
+		t.Fatalf("owned crashed: %v", err)
+	}
+	if !changed {
+		t.Fatal("owned crashed replica was not marked lost")
+	}
+	if got := statusOf(t, 3); got != db.ReplicaStatusLost {
+		t.Fatalf("replica 3 status = %q, want lost", got)
+	}
+
+	// Crashed, but re-placed onto node-b: the ownership guard still applies.
+	seed(t, 4, db.ReplicaStatusCrashed, "node-b")
+	changed, err = store.MarkReplicaLostIfOwnedBy(app.ID, 4, "node-a")
+	if err != nil {
+		t.Fatalf("re-placed crashed: %v", err)
+	}
+	if changed {
+		t.Fatal("loss pass for node-a clobbered a crashed replica owned by node-b")
+	}
+	if got := statusOf(t, 4); got != db.ReplicaStatusCrashed {
+		t.Fatalf("re-placed crashed replica status = %q, want crashed (untouched)", got)
+	}
+
+	// Stopped: terminal for the loss pass; no runtime on the worker to lose.
+	seed(t, 5, "stopped", "node-a")
+	changed, err = store.MarkReplicaLostIfOwnedBy(app.ID, 5, "node-a")
+	if err != nil {
+		t.Fatalf("stopped: %v", err)
+	}
+	if changed {
+		t.Fatal("stopped replica reported as newly changed")
+	}
+	if got := statusOf(t, 5); got != "stopped" {
+		t.Fatalf("stopped replica status = %q, want stopped (untouched)", got)
 	}
 }

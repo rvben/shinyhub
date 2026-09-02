@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -64,6 +65,9 @@ func (p *modeRecordingProxy) SetPoolMode(slug string, mode config.WorkerIsolatio
 }
 func (p *modeRecordingProxy) SetPoolWarmSpares(_ string, _ int)   {}
 func (p *modeRecordingProxy) ReconcileElasticWarmSpares(_ string) {}
+func (p *modeRecordingProxy) RegisterReplica(string, int, string, http.RoundTripper, int64, ...int64) error {
+	return nil
+}
 
 func newPoolModeWatcher(cfg Config, prx *modeRecordingProxy, st *fakeStore,
 	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {

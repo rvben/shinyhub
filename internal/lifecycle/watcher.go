@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -77,6 +78,10 @@ type manager interface {
 	// LastExit returns the most recent exit verdict for a replica (whether it
 	// was OOM-killed and the limit in force), or ok=false when none is recorded.
 	LastExit(slug string, index int) (process.ExitVerdict, bool)
+	// TransportForWorker returns the HTTP transport for reaching a replica on
+	// the given tier/worker (nil selects the default local transport). Used
+	// when re-registering a still-live replica's proxy route after a revive.
+	TransportForWorker(tier, nodeID string) http.RoundTripper
 }
 
 // proxyBackend is the subset of *proxy.Proxy used by the Watcher.
@@ -103,6 +108,11 @@ type proxyBackend interface {
 	SetPoolMode(slug string, mode config.WorkerIsolationMode, groupedSize, maxWorkers int)
 	SetPoolWarmSpares(slug string, warmSpares int)
 	ReconcileElasticWarmSpares(slug string)
+	// RegisterReplica installs the backend route for one replica slot. The
+	// watcher uses it to restore routes for replicas that are still live in
+	// the process manager when a crashed app is revived (terminalization
+	// deregistered the whole pool).
+	RegisterReplica(slug string, index int, targetURL string, base http.RoundTripper, deploymentID int64, expectedAppID ...int64) error
 }
 
 // MetricsRecorder records lifecycle business metrics. A nil recorder disables
@@ -131,7 +141,18 @@ type appStore interface {
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
 	RecordReplicaCrash(p db.UpsertReplicaParams) error
+	// RecordReplicaCrashFromLost is the lost-overwriting variant used only for
+	// the failure of a restart launched from a lost row; RecordReplicaCrash
+	// leaves lost rows untouched.
+	RecordReplicaCrashFromLost(p db.UpsertReplicaParams) error
 	ListReconcilableApps() ([]*db.App, error)
+	// ListCrashedAppsWithLostReplicas returns crashed apps that still have at
+	// least one lost replica - apps terminalized by budget spent against a dead
+	// worker rather than an app fault. The watcher revives exactly this set.
+	ListCrashedAppsWithLostReplicas() ([]*db.App, error)
+	// ReviveCrashedApp CAS-transitions a crashed app back to degraded so the
+	// reconciler can heal it; reports false when the app is no longer crashed.
+	ReviveCrashedApp(slug string) (bool, error)
 	ListWakingApps() ([]*db.App, error)
 	ListReplicas(appID int64) ([]*db.Replica, error)
 	// ListReplicasForApps is the batch form of ListReplicas: it returns every
@@ -226,6 +247,15 @@ type Watcher struct {
 	// starts a fresh incident, so an occasional crash never accumulates.
 	crashCount map[replicaKey]int
 	lastCrash  map[replicaKey]time.Time
+	// lostForgiven marks slots whose current loss episode has already had its
+	// restart budget forgiven, so forgiveness happens once per loss event
+	// rather than once per drive. Without it, a lost slot whose failed
+	// re-placement cannot persist its crash (the lost-to-crashed write errors)
+	// stays lost and would be re-forgiven every tick, erasing the backoff and
+	// budget recorded one line below the failure for as long as writes fail.
+	// The flag is cleared whenever the slot is driven as non-lost or heals,
+	// so the next worker death forgives again.
+	lostForgiven map[replicaKey]bool
 	// seenExitSequence prevents a crashed manager entry from being counted again
 	// on every watchdog tick while its restart is still inside backoff.
 	seenExitSequence map[replicaKey]int
@@ -284,6 +314,7 @@ func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 		nextRetry:        make(map[replicaKey]time.Time),
 		crashCount:       make(map[replicaKey]int),
 		lastCrash:        make(map[replicaKey]time.Time),
+		lostForgiven:     make(map[replicaKey]bool),
 		seenExitSequence: make(map[replicaKey]int),
 		driving:          make(map[string]bool),
 		expandingWarm:    make(map[string]bool),
@@ -979,6 +1010,11 @@ func (w *Watcher) runOnce() {
 			}
 		}
 	}
+	// Return apps that were terminalized against a dying worker to the healing
+	// path BEFORE fetching the reconcilable set, so a revived app joins this
+	// same tick's reconciliation instead of waiting one interval.
+	w.reviveWorkerLossCrashedApps()
+
 	// Fetch the reconcilable apps (running+degraded) once for the whole tick:
 	// reconcileReplicas, reconcileStatuses, and handleWarmExpand all iterate the
 	// same set, and none of them changes an app's Status field directly (only
@@ -1068,14 +1104,14 @@ func (w *Watcher) reconcileReplicas(apps []*db.App, repMap map[int64][]*db.Repli
 			}
 			switch r.Status {
 			case "crashed":
-				w.restartSlot(app, r.Index)
+				w.restartSlot(app, r.Index, false)
 			case db.ReplicaStatusLost:
 				// Lost-only gate: a healthy worker must exist for the tier before
 				// spending any effort. This is both the cheap fast-path skip and the
 				// on/off switch; ErrNoLiveWorker classification in restartSlot is the
 				// correctness backstop for the gate-vs-start TOCTOU.
 				if w.tierHealthy != nil && w.tierHealthy(r.Tier) {
-					w.restartSlot(app, r.Index)
+					w.restartSlot(app, r.Index, true)
 				}
 			}
 		}
@@ -1181,7 +1217,7 @@ func (w *Watcher) handleCrashedLocked(slug string, index int) {
 		slog.Warn("watcher: app crash-looped; marked crashed", "slug", slug, "index", index, "crashes", count)
 		return
 	}
-	w.restartSlotLocked(app, index)
+	w.restartSlotLocked(app, index, false)
 }
 
 // restartSlot is the single deploy+persist+backoff core shared by the crash path
@@ -1190,7 +1226,13 @@ func (w *Watcher) handleCrashedLocked(slug string, index int) {
 // a concurrent redeploy is classified as zero-cost (the restart budget is not
 // consumed); any other deploy error consumes one attempt and schedules backoff.
 // Status promotion is left to reconcileStatuses (the single status authority).
-func (w *Watcher) restartSlot(app *db.App, index int) {
+//
+// fromLost says the slot being driven is a lost row. A deploy failure then
+// records its crash over the lost state on purpose (the re-placement onto a
+// healthy tier failed, an app fault worth surfacing); a failure driving a
+// crashed row keeps the lost-preserving default, so a sweep that ruled the
+// row lost mid-flight is not undone by the late crash write.
+func (w *Watcher) restartSlot(app *db.App, index int, fromLost bool) {
 	release, ok := w.tryAppLease(app.Slug)
 	if !ok {
 		return
@@ -1203,13 +1245,40 @@ func (w *Watcher) restartSlot(app *db.App, index int) {
 	if w.activationOwnsRuntime(fresh, "replica restart") {
 		return
 	}
-	w.restartSlotLocked(fresh, index)
+	w.restartSlotLocked(fresh, index, fromLost)
 }
 
-func (w *Watcher) restartSlotLocked(app *db.App, index int) {
+func (w *Watcher) restartSlotLocked(app *db.App, index int, fromLost bool) {
 	k := replicaKey{app.Slug, index}
 
 	w.mu.Lock()
+	if fromLost {
+		// A slot is only ever lost through a worker death, so whatever budget,
+		// backoff, or crash-loop count it accumulated was burned against the
+		// dying worker, not the app; forgive all of it before the checks below.
+		// Without this a slot that spent its budget retrying against the
+		// dead-but-not-yet-swept worker is blocked forever once ruled lost: a
+		// running sibling keeps the app degraded (never crashed), so the
+		// crashed-app reviver's identical forgiveness never fires. Self-limiting
+		// by the same trade the reviver documents: a failed re-placement writes
+		// the row crashed (leaving the lost state), after which retries
+		// accumulate budget normally, so one fresh budget costs one worker
+		// death. Forgiveness is once per loss episode (lostForgiven): when the
+		// crash write itself fails the row stays lost, and re-forgiving on the
+		// next drive would erase the budget and backoff recorded against that
+		// failure, retrying every tick unbounded for as long as writes fail.
+		if !w.lostForgiven[k] {
+			w.lostForgiven[k] = true
+			delete(w.attempts, k)
+			delete(w.nextRetry, k)
+			delete(w.crashCount, k)
+			delete(w.lastCrash, k)
+		}
+	} else {
+		// Driving the slot as non-lost means the loss episode is over (the
+		// lost state was overwritten); the next loss forgives afresh.
+		delete(w.lostForgiven, k)
+	}
 	if retry, ok := w.nextRetry[k]; ok && time.Now().Before(retry) {
 		w.mu.Unlock()
 		return // still within backoff window
@@ -1253,7 +1322,11 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int) {
 		}
 		opErr = err
 		reason := w.crashReason(app.Slug, index, err, derefIntOr0(app.MemoryLimitMB))
-		if rerr := w.store.RecordReplicaCrash(db.UpsertReplicaParams{
+		recordCrash := w.store.RecordReplicaCrash
+		if fromLost {
+			recordCrash = w.store.RecordReplicaCrashFromLost
+		}
+		if rerr := recordCrash(db.UpsertReplicaParams{
 			AppID: app.ID, Index: index, Reason: reason,
 		}); rerr != nil {
 			slog.Warn("watcher: record replica restart failure", "slug", app.Slug, "index", index, "err", rerr)
@@ -1298,10 +1371,12 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int) {
 		return
 	}
 
-	// Successful restart — reset backoff state for this replica.
+	// Successful restart — reset backoff state for this replica. The slot is
+	// healed, so its loss episode (if any) is over too.
 	w.mu.Lock()
 	delete(w.attempts, k)
 	delete(w.nextRetry, k)
+	delete(w.lostForgiven, k)
 	w.mu.Unlock()
 	w.recordRestart()
 }
@@ -1438,7 +1513,259 @@ func (w *Watcher) clearRestartBudget(slug string, replicas int) {
 		k := replicaKey{slug, i}
 		delete(w.attempts, k)
 		delete(w.nextRetry, k)
+		delete(w.lostForgiven, k)
 	}
+}
+
+// reviveWorkerLossCrashedApps returns apps that were terminalized as crashed
+// while holding lost replicas to the degraded (reconcilable) state. That
+// combination means the restart budget was spent against a dying worker
+// (deploy attempts to a dead-but-not-yet-swept worker fail like app faults)
+// rather than against the app itself: a crashed app's own replicas end up
+// crashed, not lost, because loss requires a worker death. Without the revive
+// the app is stranded forever - crashed apps are outside ListReconcilableApps,
+// so the lost slots are never re-placed.
+func (w *Watcher) reviveWorkerLossCrashedApps() {
+	apps, err := w.store.ListCrashedAppsWithLostReplicas()
+	if err != nil {
+		slog.Warn("watcher: list crashed apps with lost replicas failed", "err", err)
+		return
+	}
+	for _, app := range apps {
+		if w.appOperationInFlight(app.Slug) {
+			continue
+		}
+		release, ok := w.tryAppLease(app.Slug)
+		if !ok {
+			continue
+		}
+		// Refetch under the lease: the listing ran before it, so every gate
+		// in the revive (elastic isolation, activation fence, the pool bound
+		// on app.Replicas) must judge the row as it is now, not the listing
+		// snapshot. A settings change landing in that window (say multiplex
+		// to per_session) would otherwise pass the stale elastic gate and
+		// boot a durable replica the app must not have - ReviveCrashedApp's
+		// CAS guards only the status.
+		fresh, err := w.store.GetAppBySlug(app.Slug)
+		if err != nil || fresh.Status != "crashed" {
+			release()
+			continue
+		}
+		w.reviveIfHealable(fresh)
+		release()
+	}
+}
+
+// reviveIfHealable revives one crashed app, but only when at least one of its
+// lost replicas is actually healable right now - in the current replica pool
+// and on a tier with a healthy worker (the same gate reconcileReplicas applies
+// before re-placing a lost row) - and that slot's loss episode has not already
+// been forgiven (once per episode, see the funded gate below). Reviving on an unhealable lost row would
+// trade a stable terminal state for a degraded app that makes no progress,
+// and would keep undoing any terminalization a crash-looping sibling slot
+// earns; instead the crashed state stands until a healthy worker exists, and
+// the tick after that revives and heals together. The forgotten budget and
+// crash-loop counters are the LOST slots' only: a lost slot's spent budget
+// was burned against the dying worker, but a crashed sibling's verdict is its
+// own and survives the revive, so a persistent lost row can never fund extra
+// restarts of a genuinely broken replica.
+//
+// An app terminalized by a runtime crash loop whose worker later dies is
+// revived too, on purpose: a crash loop caused by the failing worker itself
+// (OOM, disk) is indistinguishable here from an app fault, and refusing to
+// revive would strand the worker-caused kind forever. The trade is bounded:
+// the revive is funded by that one worker-death event (the heal consumes the
+// lost rows, and a further revive needs another death), and a genuine app
+// fault re-terminalizes within the restart budget on the new worker. The
+// crash verdict being cleared is logged so the prior diagnosis survives in
+// the operator's history. The caller holds the app lease.
+func (w *Watcher) reviveIfHealable(app *db.App) {
+	// Elastic apps are demand-driven with no durable replica pool, so a lost
+	// row on a crashed elastic app is a stale multiplex-era leftover (an
+	// isolation change on a non-running app neither redeploys nor clears
+	// replica rows). Reviving from it would flip a terminal crashed state to
+	// reconcilable with no healing event behind it and hand reconcileReplicas
+	// a row that boots a durable replica the app must not have.
+	if isElasticIsolation(deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)) {
+		return
+	}
+	// A durable schedule activation survives a crash as repairing and reclaims
+	// the runtime when it resumes, so while one is in flight the app's status
+	// and replica rows are the activation's to mutate, same as every other
+	// watcher runtime path. Reviving here would hand the activation a degraded
+	// app whose pool it believes it owns; the crashed state stands until the
+	// activation resolves, and the tick after that revives.
+	if w.activationOwnsRuntime(app, "crashed-app revival") {
+		return
+	}
+	repMap, err := w.store.ListReplicasForApps([]int64{app.ID})
+	if err != nil {
+		slog.Warn("watcher: list replicas for revive failed", "slug", app.Slug, "err", err)
+		return
+	}
+	var lostSlots []int
+	var healableSlots []int
+	for _, r := range repMap[app.ID] {
+		if r.Index >= app.Replicas || r.Status != db.ReplicaStatusLost {
+			continue
+		}
+		lostSlots = append(lostSlots, r.Index)
+		if w.tierHealthy != nil && w.tierHealthy(r.Tier) {
+			healableSlots = append(healableSlots, r.Index)
+		}
+	}
+	// The revive must be funded by a healable slot whose loss episode has not
+	// had its forgiveness yet. A forgiven slot already received this episode's
+	// one budget grant (a prior revive, or a fromLost drive while the app was
+	// still degraded); re-funding from it would let an app whose failed heal
+	// cannot even persist its crash (the rows stay lost, the app
+	// re-terminalizes) cycle crashed -> degraded -> crashed with a fresh
+	// budget every time - the same unbounded retry restartSlotLocked's
+	// once-per-episode forgiveness exists to prevent. The crashed state then
+	// stands until a new worker death opens a new episode, or an operator
+	// restarts the app.
+	funded := false
+	w.mu.Lock()
+	for _, i := range healableSlots {
+		if !w.lostForgiven[replicaKey{app.Slug, i}] {
+			funded = true
+			break
+		}
+	}
+	w.mu.Unlock()
+	if !funded {
+		return
+	}
+	// Normalize BEFORE the revive, and only revive when every rewrite landed.
+	// Reviving first would make a failed sibling rewrite unretryable: the app
+	// is no longer crashed, so this reviver never selects it again, and the
+	// stale running row becomes exactly the permanent debris the normalization
+	// exists to clear. Rewriting first is safe on its own: the rows are dead
+	// runtimes on a crashed app the reconciler does not drive, so if the
+	// revive then fails or loses its CAS the rows merely state that fact, and
+	// a retried normalization skips them (no longer running).
+	if err := w.normalizeStoppedSiblings(app, repMap[app.ID]); err != nil {
+		slog.Warn("watcher: revive deferred; sibling normalization failed", "slug", app.Slug, "err", err)
+		return
+	}
+	revived, err := w.store.ReviveCrashedApp(app.Slug)
+	if err != nil {
+		slog.Warn("watcher: revive crashed app failed", "slug", app.Slug, "err", err)
+		return
+	}
+	if !revived {
+		return
+	}
+	// Terminalization deregistered the app's entire proxy pool; restore it
+	// before the same-tick reconcile heals the lost slots, since RunReplica
+	// requires the pool size to be set before it can register a booted
+	// replica. This also re-registers any replica the process manager still
+	// runs: a sibling whose Stop failed during terminalization is live with a
+	// running row (normalizeStoppedSiblings skips live runtimes) and lost its
+	// route with the pool.
+	w.restoreProxyPool(app)
+	w.mu.Lock()
+	for _, i := range lostSlots {
+		k := replicaKey{app.Slug, i}
+		if w.lostForgiven[k] {
+			// This slot's loss episode already had its one grant; the budget
+			// it re-spent is the recorded verdict against it and survives a
+			// revive funded by a sibling's fresh episode.
+			continue
+		}
+		delete(w.attempts, k)
+		delete(w.nextRetry, k)
+		delete(w.crashCount, k)
+		delete(w.lastCrash, k)
+		// The revive is this loss episode's forgiveness; the drive that
+		// follows must not forgive again if a failed re-placement cannot
+		// persist its crash and the row stays lost (see lostForgiven).
+		w.lostForgiven[k] = true
+	}
+	w.mu.Unlock()
+	slog.Info("watcher: revived crashed app with lost replicas",
+		"slug", app.Slug, "lostSlots", len(lostSlots), "clearedError", app.LastError)
+}
+
+// restoreProxyPool rebuilds the proxy-side routing state that crash-loop
+// terminalization tore down (handleCrashedLocked deregisters the app's whole
+// pool). The configuration mirrors what wake sets, so the healing deploys
+// that follow can register their replicas; live replicas the process manager
+// still holds are re-registered directly, because in a single-node deployment
+// nothing else re-creates their routes. Clustered deployments also converge
+// pools from the DB replica table (the pool syncer); these writes derive from
+// the same rows and are idempotent, so the two writers agree.
+func (w *Watcher) restoreProxyPool(app *db.App) {
+	w.prx.SetPoolAppID(app.Slug, app.ID)
+	w.prx.SetPoolSize(app.Slug, app.Replicas)
+	w.prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
+	w.prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
+	resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+	w.prx.SetPoolMode(app.Slug, config.WorkerIsolationMode(resolvedIso), app.WorkerGroupedSize, app.WorkerMaxWorkers)
+	w.prx.SetPoolWarmSpares(app.Slug, app.WorkerWarmSpares)
+	for _, info := range w.mgr.All() {
+		if info.Slug != app.Slug || info.Index < 0 || info.Index >= app.Replicas {
+			continue
+		}
+		// Only running replicas are routable: a starting one registers itself
+		// once healthy, and a suspended one on wake.
+		if info.Status != process.StatusRunning {
+			continue
+		}
+		target := info.EndpointURL
+		if target == "" && info.Port > 0 {
+			target = fmt.Sprintf("http://127.0.0.1:%d", info.Port)
+		}
+		if target == "" {
+			continue
+		}
+		transport := w.mgr.TransportForWorker(info.Tier, info.WorkerID)
+		if err := w.prx.RegisterReplica(app.Slug, info.Index, target, transport, info.DeploymentID, app.ID); err != nil {
+			slog.Warn("watcher: revive re-register replica failed",
+				"slug", app.Slug, "index", info.Index, "err", err)
+		}
+	}
+}
+
+// normalizeStoppedSiblings rewrites as crashed every replica row of an app
+// about to be revived that claims to be running but has no live runtime behind
+// it. Crash-loop terminalization (handleCrashedLocked) stops the whole pool via
+// mgr.Stop and deregisters the proxy, but touches no sibling replica rows, so
+// siblings that were healthy at that moment keep status running with dead
+// processes. Left alone past a revive they are unreachable debris: the
+// reconciler only drives crashed and lost rows, reconcileAppStatus counts them
+// as healthy (a false running verdict for an app whose real capacity is lower),
+// and in clustered mode the pool syncer keeps routing to their dead endpoints.
+// Rewriting them as crashed hands them to the ordinary crashed-row heal path in
+// the same tick as the revive, under their own surviving restart budget.
+// RecordReplicaCrash preserves the placement identity, so the duplicate-start
+// fence still sees the old PID if the terminalization stop never actually
+// landed. Returns the first rewrite error so the caller can hold the revive
+// back: this runs only while the app is still crashed, and a revive is only
+// safe once every dead sibling is reachable by the reconciler.
+func (w *Watcher) normalizeStoppedSiblings(app *db.App, reps []*db.Replica) error {
+	live := make(map[replicaKey]bool)
+	for _, info := range w.mgr.All() {
+		switch info.Status {
+		case process.StatusStarting, process.StatusRunning, process.StatusSuspended:
+			live[replicaKey{info.Slug, info.Index}] = true
+		}
+	}
+	for _, r := range reps {
+		if r.Index >= app.Replicas || r.Status != db.ReplicaStatusRunning {
+			continue
+		}
+		if live[replicaKey{app.Slug, r.Index}] {
+			continue
+		}
+		if err := w.store.RecordReplicaCrash(db.UpsertReplicaParams{
+			AppID: app.ID, Index: r.Index,
+			Reason: "runtime stopped when the app was terminalized; re-placing after revive",
+		}); err != nil {
+			return fmt.Errorf("normalize stopped sibling %d: %w", r.Index, err)
+		}
+	}
+	return nil
 }
 
 // allReplicasExhausted reports whether every replica slot of an app has spent its

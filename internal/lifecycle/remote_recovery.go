@@ -140,13 +140,19 @@ func recoverRemoteReplica(
 	return true
 }
 
-// LoseWorkerReplicas transitions every running replica owned by nodeID to lost
-// and removes it from routing via deregister (nil-safe). It is shared by the
-// worker-down monitor (a worker whose heartbeat went stale) and the admin
-// revoke path (a worker pulled administratively) so both evict in-flight user
-// traffic from the worker identically. Replicas already in a terminal state are
-// left untouched. A failure to resolve or update one replica is logged and
-// skipped so the others still drain.
+// LoseWorkerReplicas transitions every running or crashed replica owned by
+// nodeID to lost and removes it from routing via deregister (nil-safe). It is
+// shared by the worker-down monitor (a worker whose heartbeat went stale) and
+// the admin revoke path (a worker pulled administratively) so both evict
+// in-flight user traffic from the worker identically. Crashed rows are included
+// because crash detection outruns the heartbeat sweep when a worker dies: its
+// replicas drop their connections and are recorded crashed within seconds,
+// while the sweep fires only after the heartbeat timeout - and only once per
+// worker, on the up->down edge - so a crashed row skipped here would stay
+// stranded on the dead worker forever, retried into ErrNoLiveWorker by the
+// watcher instead of waiting as lost for a healthy worker. Stopped, suspended,
+// and already-lost replicas are left untouched. A failure to resolve or update
+// one replica is logged and skipped so the others still drain.
 //
 // deregister is passed the replica's expected routing target (its endpoint URL
 // at the time of the snapshot) so it can drop the slot only while the live route
@@ -165,7 +171,7 @@ func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug str
 		return err
 	}
 	for _, r := range reps {
-		if r.Status != db.ReplicaStatusRunning {
+		if r.Status != db.ReplicaStatusRunning && r.Status != db.ReplicaStatusCrashed {
 			continue
 		}
 		app, err := store.GetAppByID(r.AppID)
@@ -173,10 +179,10 @@ func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug str
 			slog.Error("lose replica: resolve app", "app_id", r.AppID, "err", err)
 			continue
 		}
-		// Guard the transition on the row still being running and still owned by
-		// this worker: a concurrent redeploy may have re-placed this index onto a
-		// healthy worker since the snapshot above, and we must not mark that
-		// healthy replica lost nor pull its routing slot.
+		// Guard the transition on the row still being running or crashed and
+		// still owned by this worker: a concurrent redeploy may have re-placed
+		// this index onto a healthy worker since the snapshot above, and we must
+		// not mark that healthy replica lost nor pull its routing slot.
 		changed, err := store.MarkReplicaLostIfOwnedBy(r.AppID, r.Index, nodeID)
 		if err != nil {
 			slog.Error("lose replica: mark lost", "slug", app.Slug, "idx", r.Index, "err", err)
@@ -196,12 +202,12 @@ func LoseWorkerReplicas(store *db.Store, nodeID string, deregister func(slug str
 	return nil
 }
 
-// WorkerDownMonitor periodically marks stale workers down and transitions their
-// running replicas to lost, removing them from proxy routing. It also reaps
-// worker rows that have been down past a longer retention window so the table
-// does not grow without bound. deregister is the proxy removal hook and forget
-// drops a reaped worker from the routing index; both are injected so the monitor
-// is unit-testable.
+// WorkerDownMonitor periodically marks stale workers down and transitions
+// their running and crashed replicas to lost, removing them from proxy
+// routing. It also reaps worker rows that have been down past a longer
+// retention window so the table does not grow without bound. deregister is the
+// proxy removal hook and forget drops a reaped worker from the routing index;
+// both are injected so the monitor is unit-testable.
 type WorkerDownMonitor struct {
 	store      *db.Store
 	timeout    time.Duration
@@ -213,9 +219,9 @@ type WorkerDownMonitor struct {
 }
 
 // NewWorkerDownMonitor builds a monitor that marks a worker down once its
-// heartbeat is older than timeout and transitions that worker's running
-// replicas to lost, calling deregister for each removed replica. markDown
-// performs the down transition; wiring it to the registry keeps the in-memory
+// heartbeat is older than timeout and transitions that worker's running and
+// crashed replicas to lost, calling deregister for each removed replica.
+// markDown performs the down transition; wiring it to the registry keeps the in-memory
 // routing index consistent with the store so a downed worker is excluded from
 // routing without a control-plane restart. retention is the (much longer)
 // window after which a still-dead, non-revoked worker row with no live replicas
@@ -227,9 +233,10 @@ func NewWorkerDownMonitor(store *db.Store, timeout, retention time.Duration, mar
 }
 
 // Sweep performs one monitor pass as of now: every worker whose heartbeat
-// predates now-timeout is marked down and each of its running replicas becomes
-// lost and is deregistered from routing. Finally, worker rows that have been
-// down past the retention window (and host no live replica) are reaped.
+// predates now-timeout is marked down and each of its running or crashed
+// replicas becomes lost and is deregistered from routing. Finally, worker rows
+// that have been down past the retention window (and host no live replica) are
+// reaped.
 func (m *WorkerDownMonitor) Sweep(now time.Time) {
 	stale, err := m.store.ListWorkersStale(now.Add(-m.timeout))
 	if err != nil {
