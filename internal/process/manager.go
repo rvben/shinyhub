@@ -280,10 +280,15 @@ type LogRunSinkFactory func(LogRun) (io.WriteCloser, error)
 type ConsumerLifetimeResolver func(appID int64) (release func(), file *os.File, err error)
 
 type entry struct {
-	info         *ProcessInfo
-	handle       RunHandle
-	tier         string
-	logRun       *LogRun
+	info   *ProcessInfo
+	handle RunHandle
+	tier   string
+	logRun *LogRun
+	// finishFailed marks a run whose exit monitor recorded a terminal verdict
+	// on logRun but could not persist it (transient store error). The in-memory
+	// run is then the only copy of the verdict, so whoever drops this entry
+	// must retry the persist first. Guarded by Manager.mu.
+	finishFailed bool
 	done         chan struct{}
 	stopped      bool
 	startupGuard io.WriteCloser
@@ -816,7 +821,9 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 					lf.Close()
 					delete(m.logFiles, key)
 				}
-				m.finishLogRun(run)
+				if !m.finishLogRun(run) {
+					e.finishFailed = true
+				}
 			}
 		}
 	}()
@@ -860,13 +867,19 @@ func (m *Manager) AcquireLaunchReservation() func() {
 	return func() { once.Do(m.launchMu.Unlock) }
 }
 
-func (m *Manager) finishLogRun(run LogRun) {
+// finishLogRun persists a run's terminal record and reports whether it is
+// durably recorded (trivially true when no recorder is configured). A false
+// return means the in-memory run is the only copy of the verdict; a caller
+// about to drop that copy should retry the persist first.
+func (m *Manager) finishLogRun(run LogRun) bool {
 	if m.logRunRecorder.Finish == nil {
-		return
+		return true
 	}
 	if err := m.logRunRecorder.Finish(run); err != nil {
 		slog.Error("manager: persist finished log run", "slug", run.Slug, "idx", run.ReplicaIndex, "run_id", run.RunID, "err", err)
+		return false
 	}
+	return true
 }
 
 // StopReplica signals a single replica to stop and waits for it to exit.
@@ -1021,11 +1034,25 @@ func (m *Manager) EvictReplicaIfWorker(slug string, index int, workerID string) 
 	if pool[index].info.WorkerID != workerID {
 		return
 	}
-	if pool[index].logRun != nil {
-		run := *pool[index].logRun
-		run.Status = StatusLost
-		run.FinishedAt = time.Now().UTC()
-		m.finishLogRun(run)
+	// Close the run's durable record as lost only while it is still open. A
+	// replica that crashed on the dying worker before the loss pass got here
+	// already has its terminal record (status, exit cause, finish time) written
+	// by the exit monitor; the run-history UPDATE is keyed on run_id and
+	// unguarded, so re-finishing would silently rewrite that verdict as lost.
+	// An in-memory FinishedAt does not prove the record is durable, though: if
+	// the monitor's persist failed, this eviction is the last actor holding the
+	// verdict, so retry the existing terminal payload (best-effort; a second
+	// failure is logged and the verdict is gone with the entry).
+	if lr := pool[index].logRun; lr != nil {
+		switch {
+		case lr.FinishedAt.IsZero():
+			run := *lr
+			run.Status = StatusLost
+			run.FinishedAt = time.Now().UTC()
+			m.finishLogRun(run)
+		case pool[index].finishFailed:
+			m.finishLogRun(*lr)
+		}
 	}
 	pool[index] = nil
 	for len(pool) > 0 && pool[len(pool)-1] == nil {
@@ -1495,14 +1522,19 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 					e.info.Status = StatusCrashed
 				}
 				if e.logRun != nil {
-					run := *e.logRun
-					run.Status = e.info.Status
-					run.FinishedAt = time.Now().UTC()
-					run.OOMKilled = oom
-					if verdict, ok := m.lastExit[key]; ok && run.Status == StatusCrashed {
-						run.ExitCode, run.Signal, run.ExitReason = verdict.ExitCode, verdict.Signal, verdict.Reason
+					// Mutate the shared run (like the Start monitor does), not a
+					// copy: EvictReplicaIfWorker reads FinishedAt off the entry to
+					// tell a finished run from a still-open one, so the terminal
+					// record must be visible there.
+					e.logRun.Status = e.info.Status
+					e.logRun.FinishedAt = time.Now().UTC()
+					e.logRun.OOMKilled = oom
+					if verdict, ok := m.lastExit[key]; ok && e.logRun.Status == StatusCrashed {
+						e.logRun.ExitCode, e.logRun.Signal, e.logRun.ExitReason = verdict.ExitCode, verdict.Signal, verdict.Reason
 					}
-					m.finishLogRun(run)
+					if !m.finishLogRun(*e.logRun) {
+						e.finishFailed = true
+					}
 				}
 			}
 		}
