@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.5](https://github.com/rvben/shinyhub/compare/v0.15.4...v0.15.5) - 2026-09-03
+
+### Fixed
+
+- **cli**: only a 404 proves an app is absent before deploy ([e9664fb](https://github.com/rvben/shinyhub/commit/e9664fba440e4f321de2c7e3356ff54ab2089ac6))
+
 ## [0.15.4](https://github.com/rvben/shinyhub/compare/v0.15.3...v0.15.4) - 2026-09-03
 
 ### Fixed
