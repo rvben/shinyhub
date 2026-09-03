@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.3](https://github.com/rvben/shinyhub/compare/v0.15.2...v0.15.3) - 2026-09-03
+
+### Fixed
+
+- **recovery**: keep dead apps wakeable after restart ([f3e3abd](https://github.com/rvben/shinyhub/commit/f3e3abdad69b73d6661031d37b605081e049b685))
+
 ## [0.15.2](https://github.com/rvben/shinyhub/compare/v0.15.1...v0.15.2) - 2026-09-02
 
 ### Added
