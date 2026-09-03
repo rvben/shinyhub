@@ -994,7 +994,7 @@ func TestRecoverDockerProcesses_MultiReplica(t *testing.T) {
 	}
 }
 
-func TestRecovery_NilPIDMarkedCrashed(t *testing.T) {
+func TestRecovery_NilPIDBecomesWakeable(t *testing.T) {
 	store := mustOpenStore(t)
 	app := mustCreateApp(t, store, "nil-pid")
 
@@ -1010,9 +1010,22 @@ func TestRecovery_NilPIDMarkedCrashed(t *testing.T) {
 	prx := proxy.New()
 	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
 
-	reps, _ := store.ListReplicas(app.ID)
-	if len(reps) != 1 || reps[0].Status != "crashed" {
-		t.Fatalf("expected replica 0 status=crashed after nil-PID recovery, got %+v", reps)
+	reps, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reps) != 1 || reps[0].Status != "stopped" || reps[0].DesiredState != "stopped" {
+		t.Fatalf("replica after nil-PID recovery = %+v, want stopped/stopped", reps)
+	}
+	if reps[0].LastExit == nil || reps[0].LastExit.Reason != "no PID recorded" || reps[0].LastExit.CrashCount != 1 {
+		t.Fatalf("last exit after nil-PID recovery = %+v, want preserved diagnostic", reps[0].LastExit)
+	}
+	recovered, err := store.GetAppBySlug(app.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Status != "hibernated" {
+		t.Fatalf("app after nil-PID recovery = %q, want hibernated", recovered.Status)
 	}
 }
 

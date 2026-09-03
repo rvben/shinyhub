@@ -1672,6 +1672,60 @@ func (s *Store) UpdateAppStatus(p UpdateAppStatusParams) error {
 	return nil
 }
 
+// MarkRecoveryHibernated atomically parks an app whose serving processes were
+// all proved absent during control-plane startup recovery. The app remains
+// wakeable, while its formerly serving replica rows describe current reality
+// instead of the intermediate crash observations used to reach that
+// conclusion. Rows already parked by warm shrinking remain warm.
+//
+// Exit fields are deliberately retained. They feed Replica.LastExit, so an
+// operator can still see when and why the old process disappeared without the
+// historical event masquerading as the replica's current state. Placement and
+// deployment provenance are retained for the same reason; only ephemeral
+// runtime identity is cleared.
+func (s *Store) MarkRecoveryHibernated(slug string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin recovery hibernate: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`
+		UPDATE apps
+		SET status = 'hibernated', last_error = '', crashed_at = 0,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE slug = ? AND status IN ('running', 'degraded')`, slug)
+	if err != nil {
+		return fmt.Errorf("mark recovery hibernated: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark recovery hibernated rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+
+	if _, err := tx.Exec(`
+		UPDATE replicas
+		SET pid = NULL, port = NULL, status = 'stopped',
+		    endpoint_url = '', worker_id = '', desired_state = 'stopped',
+		    updated_at = `+s.d.nowEpoch()+`
+		WHERE app_id = (SELECT id FROM apps WHERE slug = ?)
+		  AND desired_state = 'running'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM schedule_activations sa
+		      WHERE sa.id = replicas.activation_id
+		        AND sa.status IN ('pending', 'deferred_interval', 'deferred_capacity', 'repairing', 'running')
+		  )`, slug); err != nil {
+		return fmt.Errorf("park recovery replicas: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit recovery hibernate: %w", err)
+	}
+	return nil
+}
+
 // MarkAppCrashed transitions an app into the "crashed" status and records why:
 // reason is a short diagnostic (a boot error plus the tail of the app log, e.g.
 // a Python traceback). It is the single entry point into the crashed state,

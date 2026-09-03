@@ -1344,7 +1344,7 @@ func markRecoveryStopped(store *db.Store, slug string) {
 // (no restore pass) the "hibernated" status still lets the next request cold-wake
 // it. A genuinely-broken app fails to boot and is surfaced as "crashed".
 func markRecoveryDown(store *db.Store, slug string) {
-	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "hibernated"}); err != nil {
+	if err := store.MarkRecoveryHibernated(slug); err != nil {
 		slog.Error("process recovery: mark hibernated", "slug", slug, "err", err)
 	}
 }
