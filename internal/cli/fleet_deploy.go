@@ -88,7 +88,7 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 
 func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, out io.Writer, runID string, timeout time.Duration, allowDowntime bool, preconditions ...*string) (promoted string, committed bool, deployRuns []deployRunRef, kind deployfail.Kind, err error) {
 	if err := ensureFleetAppWithRun(cfg, slug, visibility, project, out, runID); err != nil {
-		return "", false, nil, deployfail.Unknown, err
+		return "", false, nil, ensureFailureKind(err), err
 	}
 	buf, summary, err := zipDirFromSpec(spec)
 	if err != nil {
@@ -256,6 +256,23 @@ func ensureFleetApp(cfg *cliConfig, slug, visibility, project string, out io.Wri
 
 func ensureFleetAppWithRun(cfg *cliConfig, slug, visibility, project string, out io.Writer, runID string) error {
 	return ensureAppCore(cfg, slug, visibility, project, out, false, runID)
+}
+
+// ensureFailureKind maps a failure from the pre-deploy existence check or the
+// create that follows it onto the shared failure vocabulary, so the fleet
+// report names the fault instead of labelling every one "unknown" - a 5xx on
+// the check is the operator's signal that the server, not the manifest, is
+// what needs fixing. It routes through classify so this mapping cannot drift
+// from the CLI's own error kinds.
+func ensureFailureKind(err error) deployfail.Kind {
+	switch kind, _ := classify(err); kind {
+	case KindServerError:
+		return deployfail.ServerError
+	case KindNetwork, KindTimeout:
+		return deployfail.TransportError
+	default:
+		return deployfail.Unknown
+	}
 }
 
 // waitForFleetHealthy blocks until the app reports running or a terminal

@@ -743,6 +743,53 @@ func TestDeployAppBundle_BundleRejectionClassifiedBundleInvalid(t *testing.T) {
 	}
 }
 
+// A 5xx on the pre-deploy existence check must stop the deploy and be reported
+// as a server failure. Creating on an unproven absence turns the server fault
+// into a slug conflict, which sends the operator to the manifest for a problem
+// that is entirely on the server; labelling it "unknown" hides it just as well.
+func TestDeployAppBundle_ExistenceCheckServerErrorStopsDeploy(t *testing.T) {
+	var created, deployed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/apps/demo":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+		case r.Method == "POST" && r.URL.Path == "/api/apps":
+			created = true
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"slug already has on-disk state"}`))
+		case r.Method == "POST" && r.URL.Path == "/api/apps/demo/deploy":
+			deployed = true
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	_, committed, _, kind, err := deployAppBundle(cfg, "demo", dir, "", "", io.Discard, "r", 5*time.Second)
+	if err == nil {
+		t.Fatal("expected the deploy to fail on the broken existence check")
+	}
+	if created {
+		t.Error("the app was created after a check that never proved it absent")
+	}
+	if deployed {
+		t.Error("a bundle was uploaded despite the failed existence check")
+	}
+	if committed {
+		t.Error("a failed existence check must report committed=false")
+	}
+	if kind != deployfail.ServerError {
+		t.Errorf("kind = %q, want server_error", kind)
+	}
+	if !strings.Contains(err.Error(), "internal server error") {
+		t.Errorf("error = %q, want the server message, not a slug conflict", err)
+	}
+}
+
 // TestDeployAppBundle_EmitsManifestWarningsBeforeHealthWait covers the
 // reported grouped-app scenario end to end on the CLI side: the server accepts
 // the deploy, attaches a keep-warm advisory to the manifest block, and then

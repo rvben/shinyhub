@@ -1090,12 +1090,20 @@ func ensureAppCore(cfg *cliConfig, slug, visibility, project string, errOut io.W
 	if err != nil {
 		return err
 	}
+	checkBody, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode == 200 {
+	if resp.StatusCode == http.StatusOK {
 		if visibility != "" && warnExisting {
 			fmt.Fprintf(errOut, "warning: --visibility is ignored for existing apps; use `shinyhub apps access set %s %s` instead\n", slug, visibility)
 		}
 		return nil
+	}
+	// Only 404 proves the app is absent. Any other answer - a 5xx, a rejected
+	// credential, a proxy fault - leaves existence unknown, and creating on an
+	// unknown answer reports a conflict against an app that was there all
+	// along, burying the fault that actually needs fixing.
+	if resp.StatusCode != http.StatusNotFound {
+		return httpError(cfg.Token, "check app "+slug, resp, checkBody)
 	}
 
 	createBody := map[string]string{"slug": slug, "name": slug}

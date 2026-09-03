@@ -342,6 +342,80 @@ func TestEnsureApp_SurfacesServerErrorBody(t *testing.T) {
 	}
 }
 
+// Only a 404 proves an app is absent. Every other failed existence check - a
+// 5xx, a rejected credential, a proxy fault - leaves existence unknown, and
+// creating on an unknown answer reports a spurious conflict against an app that
+// was there all along, hiding the fault that actually needs fixing.
+func TestEnsureApp_UnknownExistenceDoesNotCreate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		wantKind Kind
+		wantExit int
+		wantText string
+	}{
+		{"server error", http.StatusInternalServerError, `{"error":"internal server error"}`, KindServerError, 3, "internal server error"},
+		{"bad gateway", http.StatusBadGateway, "upstream timeout", KindServerError, 3, "upstream timeout"},
+		{"forbidden", http.StatusForbidden, `{"error":"not a manager"}`, KindAuth, 3, "not a manager"},
+		{"rate limited", http.StatusTooManyRequests, `{"error":"slow down"}`, KindRateLimit, 3, "slow down"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var posted bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					posted = true
+					w.WriteHeader(http.StatusCreated)
+					return
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			err := ensureApp(&cliConfig{Host: srv.URL, Token: "tok"}, "probe", "")
+			if err == nil {
+				t.Fatal("existence check failed but ensureApp returned nil")
+			}
+			if posted {
+				t.Error("app was created after a check that never proved it absent")
+			}
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Errorf("error = %q, want the server message %q", err, tc.wantText)
+			}
+			if !strings.Contains(err.Error(), "probe") {
+				t.Errorf("error = %q, want it to name the app", err)
+			}
+			if kind, exit := classify(err); kind != tc.wantKind || exit != tc.wantExit {
+				t.Errorf("classify = %s/%d, want %s/%d", kind, exit, tc.wantKind, tc.wantExit)
+			}
+		})
+	}
+}
+
+// Positive control for the guard above: 404 is the one answer that does prove
+// absence, so it must still create. Without this, refusing to create on every
+// status would pass the guard and break the feature.
+func TestEnsureApp_NotFoundStillCreates(t *testing.T) {
+	var posted bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posted = true
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if err := ensureApp(&cliConfig{Host: srv.URL, Token: "tok"}, "probe", ""); err != nil {
+		t.Fatalf("ensureApp on a 404: %v", err)
+	}
+	if !posted {
+		t.Error("a 404 proves the app is absent; it must be created")
+	}
+}
+
 // TestDeploy_RequiresExplicitDirArgument guards against the "stray
 // `shinyhub deploy` from $PWD" footgun. Without an explicit positional arg
 // the command should refuse to run rather than silently bundling the
