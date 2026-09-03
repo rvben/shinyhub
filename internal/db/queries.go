@@ -1672,17 +1672,41 @@ func (s *Store) UpdateAppStatus(p UpdateAppStatusParams) error {
 	return nil
 }
 
+// parkedReplicaAssignments clears the runtime identity that makes a replica row
+// routable, so nothing can dispatch to a process that is gone. Exit fields are
+// deliberately absent: they feed Replica.LastExit, so an operator can still see
+// when and why the old process disappeared without the historical event
+// masquerading as the replica's current state. Placement and deployment
+// provenance are retained for the same reason.
+const parkedReplicaAssignments = `
+		SET pid = NULL, port = NULL, status = 'stopped',
+		    endpoint_url = '', worker_id = '', desired_state = 'stopped',
+		    updated_at = `
+
+// liveActivationOwnsReplica excludes a replica slot a schedule activation is
+// still driving. That activation repairs its own slots, so parking one
+// underneath it would strand the rollout. One definition, used by every path
+// that parks a recovered replica.
+const liveActivationOwnsReplica = `
+		  AND NOT EXISTS (
+		      SELECT 1 FROM schedule_activations sa
+		      WHERE sa.id = replicas.activation_id
+		        AND sa.status IN ('pending', 'deferred_interval', 'deferred_capacity', 'repairing', 'running')
+		  )`
+
 // MarkRecoveryHibernated atomically parks an app whose serving processes were
 // all proved absent during control-plane startup recovery. The app remains
 // wakeable, while its formerly serving replica rows describe current reality
 // instead of the intermediate crash observations used to reach that
 // conclusion. Rows already parked by warm shrinking remain warm.
 //
-// Exit fields are deliberately retained. They feed Replica.LastExit, so an
-// operator can still see when and why the old process disappeared without the
-// historical event masquerading as the replica's current state. Placement and
-// deployment provenance are retained for the same reason; only ephemeral
-// runtime identity is cleared.
+// An app already parked is accepted rather than rejected. The status guard is
+// there to protect a decided state (an intentional stop, a genuinely crashed
+// app), not to require that the app row change value: a pass that finds the
+// app parked and its replica rows still claiming to be running is exactly the
+// half-finished park this repairs. Rejecting it left those rows contradicting
+// the app forever, and the API's replica overlay then reported the wakeable app
+// as crashed.
 func (s *Store) MarkRecoveryHibernated(slug string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1694,7 +1718,7 @@ func (s *Store) MarkRecoveryHibernated(slug string) error {
 		UPDATE apps
 		SET status = 'hibernated', last_error = '', crashed_at = 0,
 		    updated_at = CURRENT_TIMESTAMP
-		WHERE slug = ? AND status IN ('running', 'degraded')`, slug)
+		WHERE slug = ? AND status IN ('running', 'degraded', 'hibernated')`, slug)
 	if err != nil {
 		return fmt.Errorf("mark recovery hibernated: %w", err)
 	}
@@ -1707,23 +1731,133 @@ func (s *Store) MarkRecoveryHibernated(slug string) error {
 	}
 
 	if _, err := tx.Exec(`
-		UPDATE replicas
-		SET pid = NULL, port = NULL, status = 'stopped',
-		    endpoint_url = '', worker_id = '', desired_state = 'stopped',
-		    updated_at = `+s.d.nowEpoch()+`
+		UPDATE replicas`+parkedReplicaAssignments+s.d.nowEpoch()+`
 		WHERE app_id = (SELECT id FROM apps WHERE slug = ?)
-		  AND desired_state = 'running'
-		  AND NOT EXISTS (
-		      SELECT 1 FROM schedule_activations sa
-		      WHERE sa.id = replicas.activation_id
-		        AND sa.status IN ('pending', 'deferred_interval', 'deferred_capacity', 'repairing', 'running')
-		  )`, slug); err != nil {
+		  AND desired_state = 'running'`+liveActivationOwnsReplica, slug); err != nil {
 		return fmt.Errorf("park recovery replicas: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit recovery hibernate: %w", err)
 	}
 	return nil
+}
+
+// ParkedReplica names a replica slot the stranded sweep repaired. A repaired
+// row was written by an earlier control plane, so this process has logged
+// nothing else about it: naming the slot rather than only the app is the whole
+// record that its runtime identity was cleared here.
+//
+// The identity itself is deliberately not carried. RETURNING yields a row as it
+// is after the update, where pid and port are already NULL, and reading them
+// beforehand would turn the repair back into a read-then-write transaction -
+// the shape this file documents as deadlock-prone under SQLite WAL. The native
+// path that can record an unconfirmed stop already logs pid and port at the
+// moment it happens.
+type ParkedReplica struct {
+	Slug  string
+	Index int
+}
+
+// ParkStrandedReplicas repairs replica rows that contradict an app which is not
+// serving: a row still demanding to run, for a process already proved dead,
+// under an app that is parked or stopped. The API projects replica state onto
+// the app, so one such row reports a wakeable app as crashed, which every
+// readiness gate reads as terminal. It returns the slots it repaired.
+//
+// This is the self-healing counterpart to MarkRecoveryHibernated, which can
+// only fix an app that startup recovery examines. Recovery scans running and
+// degraded apps, so a contradiction recorded under an already-parked app - by
+// an older binary, or by a restored backup - is otherwise unreachable and
+// permanent.
+//
+// It is deliberately narrower than the park above, because it runs over apps
+// nothing has just examined. Only 'crashed' rows qualify: a crash is a proved
+// absence, whereas a 'lost' row is indeterminate and may still have a live
+// process behind it, so clearing its identity could let a replacement launch
+// alongside the survivor. Warm rows are an intentional park and are left alone.
+func (s *Store) ParkStrandedReplicas() ([]ParkedReplica, error) {
+	// Every column is table-qualified. The predicate reads a replicas.status
+	// beside a subquery over apps.status, and both tables carry that column
+	// name: unqualified, the two conditions read as the same test.
+	const strandedPredicate = `
+		  replicas.status = 'crashed'
+		  AND replicas.desired_state = 'running'
+		  AND replicas.app_id IN (SELECT apps.id FROM apps WHERE apps.status IN ('hibernated', 'suspended', 'stopped'))` +
+		liveActivationOwnsReplica
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin park stranded replicas: %w", err)
+	}
+	defer tx.Rollback()
+
+	// RETURNING rather than SELECT-then-UPDATE: the returned set is then the set
+	// actually written. A separate SELECT would name apps a concurrent wake moved
+	// out of the predicate before the UPDATE ran, so the caller would log a
+	// repair that never happened.
+	rows, err := tx.Query(`
+		UPDATE replicas` + parkedReplicaAssignments + s.d.nowEpoch() + `
+		WHERE` + strandedPredicate + `
+		RETURNING app_id, idx`)
+	if err != nil {
+		return nil, fmt.Errorf("park stranded replicas: %w", err)
+	}
+	type parkedRow struct {
+		appID int64
+		index int
+	}
+	var parked []parkedRow
+	for rows.Next() {
+		var row parkedRow
+		if err := rows.Scan(&row.appID, &row.index); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan parked replica: %w", err)
+		}
+		parked = append(parked, row)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate parked replicas: %w", err)
+	}
+	if len(parked) == 0 {
+		return nil, nil
+	}
+
+	// The slug is a label for the caller's log, so an id that will not resolve is
+	// skipped rather than failing: a name lookup must never roll back a repair
+	// that has already been proved correct by the predicate. Resolved once per
+	// app, since one app can strand several slots.
+	slugs := make(map[int64]string, len(parked))
+	for _, row := range parked {
+		if _, done := slugs[row.appID]; done {
+			continue
+		}
+		var slug string
+		switch err := tx.QueryRow(`SELECT slug FROM apps WHERE id = ?`, row.appID).Scan(&slug); {
+		case errors.Is(err, sql.ErrNoRows):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("resolve parked app %d: %w", row.appID, err)
+		}
+		slugs[row.appID] = slug
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit park stranded replicas: %w", err)
+	}
+
+	repaired := make([]ParkedReplica, 0, len(parked))
+	for _, row := range parked {
+		if slug, ok := slugs[row.appID]; ok {
+			repaired = append(repaired, ParkedReplica{Slug: slug, Index: row.index})
+		}
+	}
+	slices.SortFunc(repaired, func(a, b ParkedReplica) int {
+		if a.Slug != b.Slug {
+			return strings.Compare(a.Slug, b.Slug)
+		}
+		return a.Index - b.Index
+	})
+	return repaired, nil
 }
 
 // MarkAppCrashed transitions an app into the "crashed" status and records why:

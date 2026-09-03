@@ -451,6 +451,30 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			cleanupObsoleteDeploymentGenerations(store, app)
 		}
 	}
+
+	parkStrandedReplicas(store)
+}
+
+// parkStrandedReplicas repairs replica rows that contradict an app the loop
+// above never visits. Recovery iterates running and degraded apps, so a crashed
+// replica row left under an already-parked app is structurally out of its
+// reach: an older control plane could park the app and fail to park the row,
+// and a restored backup can carry the same pair. The app stays wakeable and
+// real traffic still wakes it, but the API projects the replica onto the app
+// and reports it crashed, which every readiness gate reads as terminal.
+//
+// Runs after the per-app loop so the sweep only ever sees apps this recovery
+// pass has finished deciding about.
+func parkStrandedReplicas(store *db.Store) {
+	repaired, err := store.ParkStrandedReplicas()
+	if err != nil {
+		slog.Error("process recovery: park stranded replicas", "err", err)
+		return
+	}
+	for _, r := range repaired {
+		slog.Info("process recovery: parked a stranded replica row under a non-serving app",
+			"slug", r.Slug, "idx", r.Index)
+	}
 }
 
 // reconcileDeploymentGenerationProjection closes the crash window where the
