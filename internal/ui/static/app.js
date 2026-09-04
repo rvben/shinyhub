@@ -82,6 +82,7 @@ import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
 import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
 import { createGroupDisclosure } from '/static/views/group-disclosure.js';
 import { focusedKey, restoreFocus, siblingKey } from '/static/views/focus-restore.js';
+import { wireKebab } from '/static/views/kebab-menu.js';
 import { buildProjectPatchBody } from '/static/views/project-edit-body.js';
 import {
   CLI_CONNECT_STORAGE_KEY,
@@ -169,83 +170,12 @@ function relativeTime(date) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-// wireKebab wires a kebab "⋯" toggle to its dropdown list: click toggles
-// open/closed, Escape and outside-click close it, clicking any menu item closes
-// it, and aria-expanded stays in sync. The optional container gets the
-// `kebab-open` class while open so CSS can lift it above its neighbours (the
-// dropdown is intentionally allowed to overflow its card). This is the single
-// wiring path for BOTH the dashboard card kebab and the app-detail header kebab
-// (the latter previously had no handler at all, so its menu never opened).
 // kebabControls maps a .kebab-menu element to the handle wireKebab returned for
 // it, so code holding only the element (the metrics poller, re-syncing a card
 // whose app changed state) can close the menu without re-implementing its
-// open/closed bookkeeping.
+// open/closed bookkeeping. wireKebab itself lives in views/kebab-menu.js so its
+// keyboard behaviour can be exercised without booting the shell.
 const kebabControls = new WeakMap();
-
-// Returns a handle so a caller that hides the menu (because the app's state no
-// longer offers any action) can close it through the same setOpen that opened
-// it, instead of writing `hidden`/aria-expanded/kebab-open a second time.
-function wireKebab(button, list, container) {
-  if (!button || !list) return null;
-  const availableItems = () => [...list.querySelectorAll('button:not([disabled])')]
-    .filter(item => !item.closest('[hidden]'));
-  function onDocClick(e) {
-    if (!list.contains(e.target) && !button.contains(e.target)) setOpen(false);
-  }
-  function onKey(e) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      setOpen(false);
-      button.focus();
-      return;
-    }
-    if (e.key === 'Tab') {
-      setOpen(false);
-      return;
-    }
-    const items = availableItems();
-    if (!items.length || !list.contains(document.activeElement)) return;
-    const current = Math.max(0, items.indexOf(document.activeElement));
-    let next = null;
-    if (e.key === 'ArrowDown') next = items[(current + 1) % items.length];
-    if (e.key === 'ArrowUp') next = items[(current - 1 + items.length) % items.length];
-    if (e.key === 'Home') next = items[0];
-    if (e.key === 'End') next = items.at(-1);
-    if (next) {
-      e.preventDefault();
-      next.focus();
-    }
-  }
-  function setOpen(open, focus = '') {
-    list.hidden = !open;
-    button.setAttribute('aria-expanded', String(open));
-    if (container) container.classList.toggle('kebab-open', open);
-    if (open) {
-      document.addEventListener('click', onDocClick, true);
-      document.addEventListener('keydown', onKey, true);
-      const items = availableItems();
-      if (focus === 'first') items[0]?.focus();
-      if (focus === 'last') items.at(-1)?.focus();
-    } else {
-      document.removeEventListener('click', onDocClick, true);
-      document.removeEventListener('keydown', onKey, true);
-    }
-  }
-  button.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const opening = list.hidden;
-    setOpen(opening, opening ? 'first' : '');
-  });
-  button.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    e.preventDefault();
-    setOpen(true, e.key === 'ArrowDown' ? 'first' : 'last');
-  });
-  list.addEventListener('click', (e) => {
-    if (e.target.closest('button')) setOpen(false);
-  });
-  return { close: () => setOpen(false) };
-}
 
 // formatStatus (status → display label) is imported from views/status-label.js
 // so the cards, detail pill, sidebar, and replica badges all speak with one

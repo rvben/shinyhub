@@ -2320,17 +2320,19 @@ func TestMinWarmReplicasUIContract(t *testing.T) {
 // previously had NO handler at all (its menu never opened), so "Restart" was
 // unreachable from the detail page; this pins that it is wired.
 func TestKebabMenusAreWired(t *testing.T) {
-	assertContains(t, "app.js", "function wireKebab",
+	assertContains(t, "views/kebab-menu.js", "export function wireKebab",
 		"a shared wireKebab helper must toggle kebab menus (open/close, outside-click, Escape)")
+	assertContains(t, "app.js", "import { wireKebab } from '/static/views/kebab-menu.js'",
+		"app.js must wire its menus through the shared, unit-tested helper")
 	assertContains(t, "app.js", "wireKebab(kebabBtn, kebabList, card)",
 		"the dashboard card kebab must be wired via wireKebab")
 	assertContains(t, "app.js", "getElementById('app-detail-kebab')",
 		"the app-detail header kebab must be wired (it previously had no handler)")
 	assertContains(t, "app.js", "getElementById('app-detail-restart')",
 		"the app-detail header Restart item must be wired to restart the current app")
-	assertContains(t, "app.js", "setOpen(opening, opening ? 'first' : '')",
+	assertContains(t, "views/kebab-menu.js", "setOpen(opening, opening ? 'first' : '')",
 		"keyboard activation must move focus into an opened role=menu")
-	assertContains(t, "app.js", "if (e.key === 'Tab')",
+	assertContains(t, "views/kebab-menu.js", "if (e.key === 'Tab')",
 		"Tab must close an open role=menu while allowing focus to continue")
 	assertContains(t, "app.js", `role="menuitem" data-kebab`,
 		"card action buttons, not their list wrappers, must own menuitem semantics")
@@ -2344,6 +2346,51 @@ func TestKebabMenusAreWired(t *testing.T) {
 		"the app-detail header kebab's per-app visibility must be decided in one place, from appCardActions")
 	assertNotContains(t, "views/app-detail.js", "headerKebab",
 		"app-detail.js must not also set the header kebab's visibility; ctx.setDetailApp already drives it through syncDetailHeaderActions")
+}
+
+// TestKebabItemActivationReturnsFocus pins the ordering the focus handoff needs.
+// Closing the menu hides the list, and an element cannot hold focus once it is
+// hidden, so the browser drops focus on <body>: whether to reclaim the keyboard
+// has to be decided from the focus that exists BEFORE the close, not after.
+// The behaviour itself is covered by jstests/kebab-menu.test.js; what a string
+// search adds is that these two lines cannot be reordered.
+func TestKebabItemActivationReturnsFocus(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "views/kebab-menu.js")
+	if err != nil {
+		t.Fatalf("read kebab-menu.js: %v", err)
+	}
+	src := string(b)
+
+	// Narrow to the item-activation handler. setOpen(false) appears in four
+	// places (outside-click, Escape, Tab, and the exported close), so an index
+	// taken over the whole file would compare against the wrong one.
+	start := strings.Index(src, "list.addEventListener('click'")
+	if start < 0 {
+		t.Fatal("activating a menu item must close its menu")
+	}
+	handler := src[start:]
+	if end := strings.Index(handler, "\n  });"); end >= 0 {
+		handler = handler[:end]
+	}
+
+	read := strings.Index(handler, "shouldReturnFocus(list, doc.activeElement)")
+	closes := strings.Index(handler, "setOpen(false)")
+	restore := strings.Index(handler, "button.focus()")
+	for name, at := range map[string]int{
+		"a decision about reclaiming focus": read,
+		"a close":                           closes,
+		"a focus handoff to the toggle":     restore,
+	} {
+		if at < 0 {
+			t.Fatalf("activating a menu item must contain %s", name)
+		}
+	}
+	if read > closes {
+		t.Error("focus must be read before the menu closes; hiding the list is what destroys it")
+	}
+	if restore < closes {
+		t.Error("the toggle must be focused after the menu closes, not before")
+	}
 }
 
 // TestCardKebabNotClippedByOverflow guards the card-kebab clip fix: .app-card
