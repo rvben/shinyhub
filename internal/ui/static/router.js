@@ -12,9 +12,22 @@
 // A mount function receives (params, search) and returns an optional view
 // object { unmount, title }. The router calls unmount() on leave and sets
 // document.title to `title` on enter.
+//
+// register() takes per-route options:
+//   key(params)    identifies the mounted view. Navigating between two routes
+//                    that produce the same key is a change WITHIN one view (the
+//                    app-detail tab routes: same app, different tab), so the
+//                    router hands it to the view's update(params, search)
+//                    instead of unmounting and mounting again. A view that
+//                    declares no update() is remounted as usual.
+//   params(params) normalizes the matched params before they reach mount() or
+//                    update(), so a pattern that implies a value (/apps/:slug
+//                    means the overview tab) states it in one place.
 export function createRouter(opts = {}) {
   const routes = [];
   let current = null;
+  // The key of the mounted view, or null when the view cannot take updates.
+  let currentKey = null;
   let generation = 0;
   // onError is invoked when a mount function throws or rejects. It lets the app
   // render a visible error state instead of leaving a blank shell (a single
@@ -40,7 +53,7 @@ export function createRouter(opts = {}) {
   // history entries and mount the target view twice.
   let started = false;
 
-  function register(pattern, mountFn) {
+  function register(pattern, mountFn, routeOpts = {}) {
     const keys = [];
     const rx = new RegExp(
       '^' +
@@ -50,7 +63,14 @@ export function createRouter(opts = {}) {
         }) +
         '$',
     );
-    routes.push({ pattern, rx, keys, mountFn });
+    routes.push({
+      pattern,
+      rx,
+      keys,
+      mountFn,
+      keyFn: routeOpts.key || null,
+      paramsFn: routeOpts.params || null,
+    });
   }
 
   function match(path) {
@@ -64,14 +84,57 @@ export function createRouter(opts = {}) {
     return null;
   }
 
+  function paramsFor(route, params) {
+    return route.paramsFn ? route.paramsFn(params) : params;
+  }
+
+  function applyTitle() {
+    const brandTitle = (window.__SHINYHUB_BRANDING__ && window.__SHINYHUB_BRANDING__.site_title) || 'ShinyHub';
+    document.title = (current && current.title) ? current.title + ' · ' + brandTitle : brandTitle;
+  }
+
+  // The navigation resolves to the view that is already mounted, and that view
+  // knows how to change in place. Nothing is torn down: no unmount, no second
+  // mount, no frame in which the view is hidden while the new region loads, and
+  // no focus grab. A tab switch must leave the visitor's focus and scroll
+  // exactly where they were.
+  async function update(hit, path, search) {
+    const gen = ++generation;
+    try {
+      await current.update(paramsFor(hit.route, hit.params), search);
+    } catch (err) {
+      // onError blanks every page section, so a view that failed to update can
+      // no longer be assumed to be on screen. Drop its key (but keep the view,
+      // so its unmount still runs) and the next navigation rebuilds it through
+      // the full mount path.
+      currentKey = null;
+      if (gen === generation) onError(err, path);
+      return;
+    }
+    if (gen !== generation) return;
+    onMounted();
+    applyTitle();
+  }
+
   async function mount(path, search) {
     currentPath = path + (search || '');
+    const hit = match(path);
+    if (
+      hit &&
+      currentKey !== null &&
+      current &&
+      typeof current.update === 'function' &&
+      hit.route.keyFn &&
+      hit.route.keyFn(hit.params) === currentKey
+    ) {
+      return update(hit, path, search);
+    }
     const gen = ++generation;
     if (current && typeof current.unmount === 'function') {
       try { current.unmount(); } catch (e) { console.error('unmount', e); }
     }
     current = null;
-    const hit = match(path);
+    currentKey = null;
     if (!hit) {
       if (path !== '/') {
         console.warn('router: no match for', path);
@@ -81,7 +144,7 @@ export function createRouter(opts = {}) {
     }
     let view;
     try {
-      view = await hit.route.mountFn(hit.params, search);
+      view = await hit.route.mountFn(paramsFor(hit.route, hit.params), search);
     } catch (err) {
       // A later navigation may have superseded this one; only surface the error
       // if we are still the current mount, so a stale failure can't clobber a
@@ -97,11 +160,11 @@ export function createRouter(opts = {}) {
       return;
     }
     current = view || {};
+    currentKey = hit.route.keyFn ? hit.route.keyFn(hit.params) : null;
     // Clear any prior error state before computing focus, so a recovered
     // navigation neither shows the error panel nor lets its h1 steal focus.
     onMounted();
-    const brandTitle = (window.__SHINYHUB_BRANDING__ && window.__SHINYHUB_BRANDING__.site_title) || 'ShinyHub';
-    document.title = (current && current.title) ? current.title + ' · ' + brandTitle : brandTitle;
+    applyTitle();
     const h1 = document.querySelector('main section:not([hidden]) h1');
     if (h1) {
       if (!h1.hasAttribute('tabindex')) h1.setAttribute('tabindex', '-1');

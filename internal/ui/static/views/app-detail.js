@@ -26,6 +26,7 @@ import {
   tabViewModels,
 } from '/static/views/app-detail-nav.js';
 import { normalizeAppEnvelope } from '/static/views/app-detail-envelope.js';
+import { createFreshness } from '/static/views/freshness.js';
 import { createLogsViewer } from '/static/views/logs-ui.js';
 import {
   createUsageRequestGate,
@@ -36,6 +37,14 @@ import {
 
 function pluralize(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
+}
+
+// Write only when the value actually differs. Assigning textContent replaces
+// the text node even when the string is identical, so an unconditional write in
+// a re-applied render is a real DOM change: it discards a selection inside the
+// element and shows up as churn to anything watching.
+function setText(el, value) {
+  if (el && el.textContent !== value) el.textContent = value;
 }
 
 export function mountAppDetail(ctx) {
@@ -104,9 +113,182 @@ export function mountAppDetail(ctx) {
   }
 
   let tabCleanup = null;
+  // The app currently on screen, with the envelope it was rendered from. A tab
+  // switch reuses it (see update below) instead of refetching and repainting
+  // what the visitor is already looking at.
+  let showing = null;
+  // How long the cached envelope may go unchecked. Matched to the metrics poll
+  // interval: nothing else on this page is fresher than that anyway, so clicking
+  // through several tabs costs one background refresh rather than one per tab.
+  const ENVELOPE_MAX_AGE_MS = 10000;
+  const freshness = createFreshness({ maxAgeMs: ENVELOPE_MAX_AGE_MS });
+  let revalidation = 0;
 
-  return async function mount(params) {
+  // api() in app.js announces every successful mutating request, so a rollback,
+  // a lifecycle action, a config save, or anything added later invalidates this
+  // page's cached copy without the call site having to remember.
+  document.addEventListener('shinyhub:mutated', () => freshness.mutated());
+
+  // Apply the per-tab visibility/href/ARIA/roving-tabindex model. Hrefs are
+  // populated so middle-click / cmd-click open real URLs; only the active tab
+  // carries tabindex 0 (arrow keys move between the rest, see createTablistNav).
+  function applyTabs(slug, tab, canManage) {
+    for (const vm of tabViewModels(slug, tab, canManage)) {
+      const el = tabEls[vm.route];
+      el.hidden = vm.hidden;
+      el.setAttribute('href', vm.href);
+      el.classList.toggle('active', vm.active);
+      el.setAttribute('aria-selected', String(vm.ariaSelected));
+      el.setAttribute('tabindex', vm.tabindex);
+      if (vm.ariaCurrent) el.setAttribute('aria-current', vm.ariaCurrent);
+      else el.removeAttribute('aria-current');
+      const option = sectionPicker?.querySelector(`option[value="${vm.route}"]`);
+      if (option) option.hidden = vm.hidden;
+    }
+    if (sectionPicker) sectionPicker.value = tab;
+  }
+
+  // Show the selected panel, hide the rest, and render the active tab. The
+  // panel that is about to fill is the only region allowed to be empty while
+  // its data loads; the header and the tab strip stay put.
+  async function renderTab(tab, params) {
+    const { app, body, replicasStatus } = showing;
+    for (const t of TAB_ROUTES) {
+      panels[t].hidden = t !== tab;
+    }
+
+    if (tabCleanup) { tabCleanup(); tabCleanup = null; }
+
+    if (tab === 'overview') {
+      renderOverview(panels.overview, app, replicasStatus, body, ctx);
+    }
+    if (tab === 'usage') {
+      tabCleanup = renderUsage(panels.usage, app, ctx);
+    }
+    if (tab === 'logs') {
+      tabCleanup = renderLogs(panels.logs, app, replicasStatus, ctx);
+    }
+    if (tab === 'traces') {
+      tabCleanup = renderTraces(panels.traces, app, ctx);
+    }
+    if (tab === 'deployments') {
+      await renderDeployments(panels.deployments, app, ctx);
+    }
+    if (tab === 'schedules') {
+      tabCleanup = await renderSchedules(panels.schedules, app, ctx, params.scheduleId);
+    }
+    if (tab === 'configuration') {
+      renderConfiguration(panels.configuration, app, ctx, body);
+    }
+    if (tab === 'data') {
+      renderData(panels.data, app, ctx);
+    }
+    if (tab === 'access') {
+      renderAccess(panels.access, app, ctx, body);
+    }
+  }
+
+  // A tab switch inside the app already on screen. The view is never hidden and
+  // nothing outside the panel is rebuilt, so the header, the metric tiles, the
+  // scroll position and the visitor's focus all survive untouched. This exists
+  // because remounting the view made a tab switch read as a page reload.
+  async function update(params) {
+    if (!showing || showing.slug !== params.slug) {
+      // The router only routes an update here when the key (the slug) matches,
+      // so this is unreachable; fail loudly rather than render another app's
+      // data under this app's header.
+      throw new Error(`app detail: update for ${params.slug} while showing ${showing && showing.slug}`);
+    }
+    const { tab, redirect } = resolveDetailAccess({
+      user: ctx.state.user, canManage: showing.canManage, requestedTab: params.tab, slug: params.slug,
+    });
+    if (redirect) { ctx.navigate(redirect.path, { replace: redirect.replace }); return; }
+
+    // The tab strip moves on the click, before any request: the visitor gets
+    // immediate confirmation, and the panel below it swaps when it is ready.
+    applyTabs(params.slug, tab, showing.canManage);
+    if (freshness.isStale()) await refetch(params.slug);
+    // A refetch that found the app gone has already navigated away.
+    if (!showing || showing.slug !== params.slug) return;
+    await renderTab(tab, params);
+    requestAnimationFrame(() => syncTabStrip(tabEls[tab]));
+    ctx.updateActiveNav(location.pathname);
+    ctx.metrics.setTargets([showing.app.slug]);
+    revalidate(params.slug);
+  }
+
+  // Pull the envelope again and adopt it, for the case where the page is known
+  // to be out of date (an action was taken) and the next render must not come
+  // from before it. A failure leaves the cache in place and still stale: showing
+  // the last known-good data beats blanking the page over one lost request, and
+  // the next switch tries again.
+  async function refetch(slug) {
+    const stamp = freshness.begin();
+    let resp;
+    try {
+      resp = await ctx.api(`/api/apps/${slug}`);
+    } catch {
+      return;
+    }
+    if (resp.status === 404) {
+      showing = null;
+      freshness.forget();
+      ctx.navigate('/apps', { replace: true });
+      return;
+    }
+    if (resp.status === 401) { ctx.onUnauthorized(); return; }
+    if (!resp.ok) return;
+    const body = await resp.json();
+    if (!showing || showing.slug !== slug) return;
+    const { app, replicasStatus } = normalizeAppEnvelope(body);
+    revalidation++; // any background revalidation in flight is now the older answer
+    showing = {
+      slug, app, body, replicasStatus,
+      canManage: ctx.canManageApp(ctx.state.user, app),
+    };
+    freshness.adopt(stamp);
+    if (ctx.setDetailApp) ctx.setDetailApp(app);
+    applyHeader(app, body);
+  }
+
+  // Refresh the cached envelope in the background so a detail page left open
+  // across several tab switches does not drift stale. It only ever re-applies
+  // the header, which is idempotent when nothing changed, and it never blanks,
+  // reflows or refetches a panel. A failed revalidation leaves the page exactly
+  // as it is: the visible data is the data we last confirmed, and the next real
+  // navigation surfaces the error.
+  function revalidate(slug) {
+    if (!showing || showing.slug !== slug) return;
+    if (!freshness.isOld()) return;
+    const token = ++revalidation;
+    const stamp = freshness.begin();
+    Promise.resolve()
+      .then(async () => {
+        const resp = await ctx.api(`/api/apps/${slug}`);
+        if (!resp.ok) return;
+        const body = await resp.json();
+        // A newer revalidation, or a move to another app, has superseded us.
+        if (token !== revalidation || !showing || showing.slug !== slug) return;
+        const unchanged = JSON.stringify(body) === JSON.stringify(showing.body);
+        freshness.adopt(stamp);
+        // Nothing changed, so there is nothing to repaint. Writing the same
+        // values back would still replace DOM nodes for no reason.
+        if (unchanged) return;
+        const { app, replicasStatus } = normalizeAppEnvelope(body);
+        showing = {
+          slug, app, body, replicasStatus,
+          canManage: ctx.canManageApp(ctx.state.user, app),
+        };
+        if (ctx.setDetailApp) ctx.setDetailApp(app);
+        applyHeader(app, body);
+      })
+      .catch(() => {});
+  }
+
+  // A fresh arrival on this page: fetch the app, build the whole view, reveal it.
+  async function mount(params) {
     const { slug } = params;
+    const stamp = freshness.begin();
 
     // Preserve the user's URL: /apps/<slug>/overview is a legitimate route
     // (every other tab keeps its segment, so /overview should too). The
@@ -141,41 +323,68 @@ export function mountAppDetail(ctx) {
     });
     if (redirect) { ctx.navigate(redirect.path, { replace: redirect.replace }); return {}; }
 
+    showing = { slug, app, body, replicasStatus, canManage };
+    freshness.adopt(stamp);
+
     // Record the app so the static header kebab (wired once in app.js) acts on
     // the right app.
     if (ctx.setDetailApp) ctx.setDetailApp(app);
 
-    // Apply the per-tab visibility/href/ARIA/roving-tabindex model. Hrefs are
-    // populated so middle-click / cmd-click open real URLs; only the active tab
-    // carries tabindex 0 (arrow keys move between the rest, see createTablistNav).
-    for (const vm of tabViewModels(slug, tab, canManage)) {
-      const el = tabEls[vm.route];
-      el.hidden = vm.hidden;
-      el.setAttribute('href', vm.href);
-      el.classList.toggle('active', vm.active);
-      el.setAttribute('aria-selected', String(vm.ariaSelected));
-      el.setAttribute('tabindex', vm.tabindex);
-      if (vm.ariaCurrent) el.setAttribute('aria-current', vm.ariaCurrent);
-      else el.removeAttribute('aria-current');
-      const option = sectionPicker?.querySelector(`option[value="${vm.route}"]`);
-      if (option) option.hidden = vm.hidden;
-    }
-    if (sectionPicker) sectionPicker.value = tab;
+    applyTabs(slug, tab, canManage);
     // On narrow screens the tab bar scrolls horizontally. Keep the active tab
     // for the post-render centering pass below; measuring while the view is
     // still hidden would produce zero-width geometry on a deep link.
     const activeTabEl = tabEls[tab];
 
-    document.getElementById('app-detail-heading').textContent = app.name;
-    document.getElementById('app-detail-slug').textContent = '/' + app.slug;
+    applyHeader(app, body);
+    // Seed the metric tiles until the first metrics poll arrives. Only on a
+    // fresh mount: on a tab switch the poller is still running and the tiles
+    // already hold real values, and blanking them to "—" is precisely what made
+    // a tab click look like a page load.
+    seedStats(app);
+
+    await renderTab(tab, params);
+
+    view.hidden = false;
+    requestAnimationFrame(() => syncTabStrip(activeTabEl));
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => syncTabStrip(activeTabEl)).catch(() => {});
+    }
+    ctx.updateActiveNav(location.pathname);
+    ctx.metrics.setTargets([app.slug]);
+
+    return {
+      title: app.name,
+      update,
+      unmount() {
+        if (tabCleanup) { tabCleanup(); tabCleanup = null; }
+        // Abandon any in-flight revalidation: its result belongs to a page the
+        // visitor has left.
+        revalidation++;
+        showing = null;
+        freshness.forget();
+        view.hidden = true;
+        ctx.metrics.setTargets([]);
+      },
+    };
+  }
+
+  // Header fields, all derived from the envelope. Safe to re-apply at any time:
+  // it writes only values it has, and touches no metric tile. Text goes through
+  // setText so a background refresh that finds nothing changed also changes
+  // nothing on screen: assigning the same string still replaces the text node,
+  // which would drop a selection the visitor had made inside the header.
+  function applyHeader(app, body) {
+    setText(document.getElementById('app-detail-heading'), app.name);
+    setText(document.getElementById('app-detail-slug'), '/' + app.slug);
     const deployCountEl = document.getElementById('app-detail-deploy-count');
-    deployCountEl.textContent = pluralize(app.deploy_count, 'deploy', 'deploys');
+    setText(deployCountEl, pluralize(app.deploy_count, 'deploy', 'deploys'));
     // Release chip (human-friendly vN) + deployed-ago meta. The epoch version is
     // kept on the chip's title for support.
     const versionEl = document.getElementById('app-detail-version');
     if (versionEl) {
       if (app.release_number != null) {
-        versionEl.textContent = 'v' + app.release_number;
+        setText(versionEl, 'v' + app.release_number);
         if (app.released_version) versionEl.title = 'bundle ' + app.released_version;
         versionEl.hidden = false;
       } else {
@@ -187,10 +396,10 @@ export function mountAppDetail(ctx) {
       const deployedAt = app.released_at || app.last_deployed_at;
       if (deployedAt) {
         const d = new Date(deployedAt);
-        deployedEl.textContent = 'deployed ' + relativeTime(d);
+        setText(deployedEl, 'deployed ' + relativeTime(d));
         deployedEl.title = d.toLocaleString();
       } else {
-        deployedEl.textContent = '';
+        setText(deployedEl, '');
         deployedEl.removeAttribute('title');
       }
     }
@@ -200,24 +409,12 @@ export function mountAppDetail(ctx) {
     // (not "degraded"), and a zero-deploy crash-looped one reads "Failed", not
     // the benign "Awaiting deploy".
     const statusView = appStatusView(app, formatStatus);
-    statusEl.textContent = statusView.text;
-    statusEl.className = statusPillClass(statusView.state);
-    // Seed the metric tiles until the first metrics poll arrives. Replicas shows
-    // the configured count immediately (CPU/Memory/Sessions fill in on poll).
-    const seedStat = (id, val) => {
-      const el = document.getElementById(id);
-      if (el) {
-        el.textContent = val;
-        el.classList.toggle('is-empty', val === '—');
-        el.removeAttribute('title'); // clear any stale tooltip from a prior app
-      }
-    };
-    seedStat('app-detail-cpu', '—');
-    seedStat('app-detail-ram', '—');
-    seedStat('app-detail-sessions', '—');
-    seedStat('app-detail-replicas', '0 / ' + (app.replicas || 1));
+    setText(statusEl, statusView.text);
+    const pillClass = statusPillClass(statusView.state);
+    if (statusEl.className !== pillClass) statusEl.className = pillClass;
     const openLink = document.getElementById('app-detail-open');
-    openLink.href = `/app/${app.slug}/`;
+    const openHref = `/app/${app.slug}/`;
+    if (openLink.getAttribute('href') !== openHref) openLink.href = openHref;
     openLink.hidden = !['running', 'idle'].includes(app.status);
 
     // The header kebab holds only manager actions, so a viewer must not see it
@@ -232,60 +429,29 @@ export function mountAppDetail(ctx) {
       renderFleetBadges(fleetSlot, app, body.fleet_state);
     }
     renderHeaderProvenance(document.getElementById('app-detail-provenance'), app.deployment_provenance);
+  }
 
-    // Show the selected panel, hide the rest.
-    for (const t of TAB_ROUTES) {
-      panels[t].hidden = t !== tab;
-    }
-
-    if (tabCleanup) { tabCleanup(); tabCleanup = null; }
-
-    // Render the active tab.
-    if (tab === 'overview') {
-      renderOverview(panels.overview, app, replicasStatus, body, ctx);
-    }
-    if (tab === 'usage') {
-      tabCleanup = renderUsage(panels.usage, app, ctx);
-    }
-    if (tab === 'logs') {
-      tabCleanup = renderLogs(panels.logs, app, replicasStatus, ctx);
-    }
-    if (tab === 'traces') {
-      tabCleanup = renderTraces(panels.traces, app, ctx);
-    }
-    if (tab === 'deployments') {
-      await renderDeployments(panels.deployments, app, ctx);
-    }
-    if (tab === 'schedules') {
-      tabCleanup = await renderSchedules(panels.schedules, app, ctx, params.scheduleId);
-    }
-    if (tab === 'configuration') {
-      renderConfiguration(panels.configuration, app, ctx, body);
-    }
-    if (tab === 'data') {
-      renderData(panels.data, app, ctx);
-    }
-    if (tab === 'access') {
-      renderAccess(panels.access, app, ctx, body);
-    }
-
-    view.hidden = false;
-    requestAnimationFrame(() => syncTabStrip(activeTabEl));
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(() => syncTabStrip(activeTabEl)).catch(() => {});
-    }
-    ctx.updateActiveNav(location.pathname);
-    ctx.metrics.setTargets([app.slug]);
-
-    return {
-      title: app.name,
-      unmount() {
-        if (tabCleanup) { tabCleanup(); tabCleanup = null; }
-        view.hidden = true;
-        ctx.metrics.setTargets([]);
-      },
+  // Placeholder values for the metric tiles until the first metrics poll
+  // arrives. Replicas shows the configured count immediately (CPU/Memory/
+  // Sessions fill in on poll). Only a fresh mount does this: on a tab switch the
+  // tiles already hold live values and blanking them would be a visible flicker
+  // with nothing gained.
+  function seedStats(app) {
+    const seedStat = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.textContent = val;
+        el.classList.toggle('is-empty', val === '—');
+        el.removeAttribute('title'); // clear any stale tooltip from a prior app
+      }
     };
-  };
+    seedStat('app-detail-cpu', '—');
+    seedStat('app-detail-ram', '—');
+    seedStat('app-detail-sessions', '—');
+    seedStat('app-detail-replicas', '0 / ' + (app.replicas || 1));
+  }
+
+  return mount;
 }
 
 function externalLink(label, href, className = '') {
@@ -663,7 +829,9 @@ async function renderDeployments(panel, app, ctx) {
       return;
     }
     if (r.ok) {
-      // Navigating away unmounts this view; no need to re-enable the button.
+      // The overview tab replaces this panel, and coming back here re-runs
+      // renderDeployments, which rebuilds the list from scratch. This button
+      // never returns, so leaving it disabled costs nothing.
       ctx.navigate(`/apps/${app.slug}`);
       return;
     }

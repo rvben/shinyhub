@@ -566,11 +566,21 @@ document.addEventListener('DOMContentLoaded', () => {
       init.headers['Content-Type'] = 'application/json';
     }
     const method = (init.method || 'GET').toUpperCase();
-    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    const mutating = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
+    if (mutating) {
       const token = readCookie('csrf_token');
       if (token) init.headers['X-CSRF-Token'] = token;
     }
-    return fetch(path, init);
+    const resp = await fetch(path, init);
+    // A successful mutating request means anything a view is holding may no
+    // longer be true. Announce it here, at the one place every request passes
+    // through, rather than asking each call site to remember: a view that caches
+    // server data (the app-detail envelope) refetches before it renders again,
+    // and a mutation added later is covered without touching it.
+    if (mutating && resp.ok) {
+      document.dispatchEvent(new CustomEvent('shinyhub:mutated', { detail: { path, method } }));
+    }
+    return resp;
   }
 
   function focusCurrentRouteHeading() {
@@ -6291,18 +6301,26 @@ document.addEventListener('DOMContentLoaded', () => {
     hideAllPageViews();
     return mountAuditLog({ ...ctx, loadAuditEvents }, search);
   });
-  router.register('/apps/:slug', (p) => {
-    hideAllPageViews();
-    return appDetailMount({ ...p, tab: 'overview' });
-  });
-  router.register('/apps/:slug/schedules/:scheduleId', (p) => {
-    hideAllPageViews();
-    return appDetailMount({ ...p, tab: 'schedules' });
-  });
-  router.register('/apps/:slug/:tab', (p) => {
+  // All three app-detail patterns are the same page for a given app, so they
+  // share a key: moving between them is a tab switch, which the mounted view
+  // handles in place (see mountAppDetail's update) rather than being torn down
+  // and rebuilt. hideAllPageViews() therefore runs only when the visitor is
+  // genuinely arriving from another page. Each pattern names the tab it selects
+  // once, for the mount and the update alike.
+  const appDetailKey = (p) => 'app-detail:' + p.slug;
+  const appDetailRoute = (p) => {
     hideAllPageViews();
     return appDetailMount(p);
+  };
+  router.register('/apps/:slug', appDetailRoute, {
+    key: appDetailKey,
+    params: (p) => ({ ...p, tab: 'overview' }),
   });
+  router.register('/apps/:slug/schedules/:scheduleId', appDetailRoute, {
+    key: appDetailKey,
+    params: (p) => ({ ...p, tab: 'schedules' }),
+  });
+  router.register('/apps/:slug/:tab', appDetailRoute, { key: appDetailKey });
 
   async function initialize() {
     // Persist any /#deploy=<slug> hash before the auth check so the slug

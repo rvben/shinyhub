@@ -311,6 +311,45 @@ func TestTablistKeyboardNavWired(t *testing.T) {
 		"the settings tab strip must keep role=tablist for the keyboard pattern to apply")
 }
 
+// TestAppDetailTabSwitchIsInPlace guards the three-part wiring that makes a tab
+// click a change within the page rather than a page load: the router's same-key
+// update path, app.js registering all three app-detail patterns under one key,
+// and app-detail.js returning an update() for the router to call. Break any one
+// link and every tab click silently returns to hiding the view, blanking the
+// metric tiles, resetting the scroll position and stealing focus - which is what
+// made it feel like a full refresh. The router behaviour itself is unit-tested
+// in internal/ui/jstests/router.test.js; the app-detail closure is not
+// jsdom-importable, so it is pinned by string search.
+func TestAppDetailTabSwitchIsInPlace(t *testing.T) {
+	assertContains(t, "router.js", "typeof current.update === 'function'",
+		"the router must hand a navigation between same-key routes to the mounted view's update() instead of unmount+mount")
+	assertContains(t, "app.js", "const appDetailKey = (p) => 'app-detail:' + p.slug",
+		"app.js must give the app-detail routes a shared per-app key so a tab switch resolves to the mounted view")
+	assertContains(t, "app.js", "key: appDetailKey",
+		"every app-detail route pattern must register with the shared key, or the tab it names remounts the page")
+	assertContains(t, "views/app-detail.js", "      update,",
+		"app-detail.js must return an update() from its mount, or the router falls back to remounting on every tab click")
+	assertContains(t, "views/app-detail.js", "function seedStats(app)",
+		"stat seeding must stay a mount-only step; re-running it on a tab switch blanks the live metric tiles to an em dash")
+}
+
+// TestAppDetailCacheInvalidationWired guards the other half of the in-place tab
+// switch: rendering a tab from a cached envelope is only correct while nothing
+// has changed. api() in app.js announces every successful mutating request and
+// app-detail.js listens, so a tab opened after a rollback, a restart or a config
+// save refetches before it renders instead of drawing the state from before the
+// action. Break the announcement and the page silently shows stale data - the
+// worst failure mode this change could have. The counting rule behind it is
+// unit-tested in internal/ui/jstests/freshness.test.js.
+func TestAppDetailCacheInvalidationWired(t *testing.T) {
+	assertContains(t, "app.js", "new CustomEvent('shinyhub:mutated'",
+		"api() must announce every successful mutating request so cached views know they are out of date")
+	assertContains(t, "views/app-detail.js", "document.addEventListener('shinyhub:mutated'",
+		"app-detail.js must listen for the mutation announcement, or a tab opened after an action renders pre-action data")
+	assertContains(t, "views/app-detail.js", "if (freshness.isStale()) await refetch(",
+		"a stale envelope must be refetched BEFORE the panel renders, not repainted behind it")
+}
+
 // TestRouterErrorBoundaryWired guards the global error boundary. A throw inside
 // a view mount function once blanked the whole dashboard (v0.8.7). The router
 // now catches mount throws and calls an onError callback; app.js must pass one

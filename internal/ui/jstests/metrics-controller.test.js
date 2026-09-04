@@ -63,6 +63,45 @@ test('a successful poll calls onMetrics and never onError', async () => {
   assert.equal(seen[0][0], 'demo');
 });
 
+// The app-detail page re-declares its metrics target on every render, including
+// the in-place render of a tab switch. That must leave the running poller and
+// the values already on screen alone; restarting it is what reset the header
+// tiles to "—" on every tab click. Paired with the negative control below, so a
+// "no extra poll" result cannot be a blind harness.
+test('re-targeting the poller at the set it is already polling does not re-poll', async () => {
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    return { ok: true, status: 200, json: async () => ({ metrics: { demo: { cpu_percent: 1 } } }) };
+  };
+  const metrics = createMetricsController({ intervalMs: 100000, onMetrics: () => {} });
+  metrics.setTargets(['demo']);
+  await flush();
+  assert.equal(calls, 1, 'the first target set polls immediately');
+
+  metrics.setTargets(['demo']);
+  await flush();
+  metrics.stop();
+  assert.equal(calls, 1, 'an unchanged target set must not re-poll');
+});
+
+test('a genuinely changed target set still polls immediately', async () => {
+  const polled = [];
+  global.fetch = async (url) => {
+    polled.push(String(url));
+    return { ok: true, status: 200, json: async () => ({ metrics: {} }) };
+  };
+  const metrics = createMetricsController({ intervalMs: 100000, onMetrics: () => {} });
+  metrics.setTargets(['demo']);
+  await flush();
+  metrics.setTargets([]);
+  metrics.setTargets(['other']);
+  await flush();
+  metrics.stop();
+  assert.equal(polled.length, 2);
+  assert.match(polled[1], /slugs=other/);
+});
+
 test('a failing poll does not throw when onError is omitted', async () => {
   global.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
   const metrics = createMetricsController({ intervalMs: 100000, onMetrics: () => {} });
