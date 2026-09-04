@@ -23,7 +23,7 @@ import {
   mountAuditLog,
 } from '/static/views/audit-log.js';
 import { mountAppDetail, refreshFleetSurfaces } from '/static/views/app-detail.js';
-import { appCardBadge, updateCardStatusBadge, updateStatusPill } from '/static/views/app-card-badge.js';
+import { appCardBadge, applyLiveStatus, paintCardStatusBadge, updateStatusPill } from '/static/views/app-card-badge.js';
 import {
   appsSurfaceForSession,
   homeSurfaceForSession,
@@ -638,6 +638,29 @@ document.addEventListener('DOMContentLoaded', () => {
       if (item.title) el.title = item.title;
       container.appendChild(el);
     }
+  }
+
+  // syncCardFromModel brings one card back in line with the stored app model,
+  // optionally merging a live view first (a /metrics sample, or the row a
+  // lifecycle action just returned). The badge, the lifecycle menu and the facts
+  // line all describe the same app, so they are refreshed together and in this
+  // order: the merge rewrites app.status AND app.deploying, and the menu and the
+  // facts are derived from it. Derive them before the merge and they trail the
+  // badge by one tick, offering Sleep and Stop on a deploy already in flight.
+  //
+  // This is what a one-app change costs: no /api/apps, no grid rebuild, and no
+  // change to what the metrics poller is watching. Returns the app model, or
+  // null when the fleet does not hold that slug.
+  function syncCardFromModel(slug, live = null) {
+    const app = state.apps && state.apps.find((item) => item.slug === slug);
+    if (!app) return null;
+    if (live) applyLiveStatus(app, live);
+    paintCardStatusBadge(appGrid.querySelector(`.app-header .badge[data-slug="${slug}"]`), app, formatStatus);
+    const kebabEl = appGrid.querySelector(`.kebab-menu[data-slug="${slug}"]`);
+    if (kebabEl) syncCardActions(kebabEl, appCardActions(app, canManageApp(state.user, app)));
+    const factsEl = appGrid.querySelector(`.app-card-facts[data-slug="${slug}"]`);
+    if (factsEl) renderCardFacts(factsEl, app, live);
+    return app;
   }
 
   function applyRestartFeedbackToCard(slug, card, control) {
@@ -1291,7 +1314,14 @@ document.addEventListener('DOMContentLoaded', () => {
     clearGridLoading();
     renderApps();
     syncSidebar();
-    metrics.setTargets(state.apps.map(a => a.slug));
+    // The poller follows what is on screen, and the mounted view is what decides
+    // that: the grid watches every app, an app's detail page watches one. A
+    // reload triggered from a detail page (a setting saved, an app deployed)
+    // must not silently widen that back to the whole fleet, which is a tenfold
+    // increase in polling for a page showing one app.
+    if (!document.getElementById('apps-view').hidden) {
+      metrics.setTargets(state.apps.map(a => a.slug));
+    }
     loadFleetHealth();
     populateProjectDatalist();
   }
@@ -2760,29 +2790,63 @@ document.addEventListener('DOMContentLoaded', () => {
     if (result.kind !== 'success') {
       if (cardLocal) {
         setRestartFeedback(slug, 'error', result.message);
-        // Restart failures can leave the app stopped. Refresh the durable state
-        // while preserving the local recovery panel across the grid re-render.
-        if (result.kind === 'error') await loadApps();
+        // A failed restart can leave the app stopped, and the error body says
+        // nothing about where it landed, so this is the one path that has to
+        // ask. Ask about this app only: the rest of the fleet did not move, and
+        // rebuilding the grid would take the recovery panel's focus with it.
+        if (result.kind === 'error') await refreshApp(slug);
       } else {
         setError(appError, result.message);
       }
       return;
     }
 
+    // The restart endpoint answers with the app's new row. Merge it and repaint
+    // the one card it describes rather than reloading the fleet: nothing else
+    // changed, and a rebuild would drop the recovery panel's focus and re-point
+    // the metrics poller at every app.
     if (result.app) {
       const app = state.apps.find((item) => item.slug === slug);
       if (app) Object.assign(app, result.app);
     }
+    // A restart is not a deploy, so whatever "deploying" the model was carrying
+    // is over by the time this responds. A response without a status leaves the
+    // model's own status standing rather than inventing "running" for it.
+    syncCardFromModel(slug, {status: result.app && result.app.status, deploying: false});
+    syncSidebar();
+    loadFleetHealth();
 
     if (cardLocal) {
       // The restart endpoint responds only after deployRun has passed readiness
       // and the proxy has switched, so success here means the app is serving.
       const success = setRestartFeedback(slug, 'success');
-      await loadApps();
       window.setTimeout(() => clearRestartFeedback(slug, success.version), 6000);
-    } else {
-      await loadApps();
     }
+  }
+
+  // refreshApp re-reads one app and folds it back into the model and its card.
+  // It is the narrow counterpart of loadApps for the paths where only one app's
+  // state is in doubt. A missing app (404) or a failed request leaves the model
+  // as it was: a stale card is a smaller lie than a card silently emptied by a
+  // network blip.
+  async function refreshApp(slug) {
+    let response;
+    try {
+      response = await api(`/api/apps/${encodeURIComponent(slug)}`);
+    } catch {
+      return null;
+    }
+    if (response.status === 401) { await handleUnauthorized(); return null; }
+    if (!response.ok) return null;
+    let body = null;
+    try { body = await response.json(); } catch { return null; }
+    const fresh = body && body.app ? body.app : body;
+    if (!fresh || !fresh.slug) return null;
+    const app = state.apps.find((item) => item.slug === slug);
+    if (app) Object.assign(app, fresh);
+    const synced = syncCardFromModel(slug);
+    syncSidebar();
+    return synced;
   }
 
   async function restart(slug, btn) {
@@ -2800,9 +2864,9 @@ document.addEventListener('DOMContentLoaded', () => {
     await performRestart(slug, btn, false);
   }
 
-  // lifecycleAction is the shared POST-then-refresh path behind Sleep, Stop and
-  // Start. It mirrors restart(): clear the error region, disable the control,
-  // post, then refresh so the card badge reflects the new state. The server's
+  // lifecycleAction is the shared POST path behind Sleep, Stop and Start. It
+  // mirrors restart(): clear the error region, disable the control, post, then
+  // repaint the one app that changed from the row that came back. The server's
   // message wins over the generic one, because a refused lifecycle call answers
   // 409 with the actual reason (the app is not running, the app uses elastic
   // worker isolation) and that reason is what tells the operator what to do.
@@ -2834,14 +2898,21 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    // Sleep, Stop and Start all answer with the app's new row, and none of them
+    // runs a deploy, so the new state is known here without asking the server
+    // anything further. One app changed, so one card changes: reloading the
+    // fleet to learn this would cost three more requests, rebuild every card
+    // (dropping focus and any open menu with them), and re-point the metrics
+    // poller at the whole fleet even when the visitor is on a single app's page.
+    const live = body && body.status ? {status: body.status, deploying: false} : null;
+
     // The detail header renders once per navigation, so an action taken there
     // has to fold the new status back in or the menu keeps offering Sleep for an
     // app that is already asleep. Repaint the pill from the same merge the
     // metrics poller uses and derive the menu from the merged model, so the two
     // cannot disagree during the window before the next tick - waiting for that
     // tick left the header reading "Sleeping" above a Stop item.
-    if (detailApp && detailApp.slug === slug && body && body.status) {
-      const live = {status: body.status, deploying: false};
+    if (detailApp && detailApp.slug === slug && live) {
       const pillEl = document.getElementById('app-detail-status');
       if (pillEl) {
         updateStatusPill(pillEl, detailApp, live, formatStatus);
@@ -2850,7 +2921,13 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       syncDetailHeaderActions(detailApp);
     }
-    loadApps();
+    syncCardFromModel(slug, live);
+    // The sidebar carries its own badge for every app and renders from the same
+    // model the merge just updated, so it costs nothing to keep it truthful.
+    syncSidebar();
+    // Fleet health counts running and stopped apps, so it does move on a
+    // lifecycle action even though nothing else in the fleet did.
+    loadFleetHealth();
   }
 
   // Sleep releases the app's resources and leaves it wakeable: the next visitor
@@ -5879,37 +5956,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const metrics = createMetricsController({
     intervalMs: 10000,
     onMetrics: (slug, m) => {
-      // Grid card status badge: keep it live so a card opened while an app was
-      // hibernating or deploying reflects the transition (m.status is the live
-      // app-level status from /metrics; m.deploying flags an executing deploy).
-      // Update the stored model too so a later re-render (search/sort/filter)
-      // carries the fresh state.
-      const liveStatus = {
-        status: m.status,
-        deploying: m.deploying,
-        last_deployment_status: m.last_deployment_status,
-      };
-      const badgeEl = appGrid.querySelector(`.app-header .badge[data-slug="${slug}"]`);
-      const gridApp = state.apps && state.apps.find(a => a.slug === slug);
-      if (badgeEl && gridApp) {
-        updateCardStatusBadge(badgeEl, gridApp, liveStatus, formatStatus);
-      }
-      // The badge merge above rewrites gridApp.status AND gridApp.deploying, so
-      // re-derive the card's lifecycle menu from it, and only after it. Without
-      // this an app that hibernated on the idle watchdog, or woke on a visitor's
-      // request, would show its new badge while the menu still offered the
-      // previous state's actions; run before the merge and the menu trails the
-      // badge by one tick, offering Sleep and Stop on a deploy already in flight.
-      if (gridApp) {
-        const kebabEl = appGrid.querySelector(`.kebab-menu[data-slug="${slug}"]`);
-        if (kebabEl) {
-          syncCardActions(kebabEl, appCardActions(gridApp, canManageApp(state.user, gridApp)));
-        }
-      }
-      // The index stays scan-first: refresh release/readiness facts from live
-      // replica state, while detailed CPU/RAM remains on the app overview.
-      const factsEl = appGrid.querySelector(`.app-card-facts[data-slug="${slug}"]`);
-      if (factsEl && gridApp) renderCardFacts(factsEl, gridApp, m);
+      // Keep the card live so one opened while an app was hibernating or
+      // deploying reflects the transition (m.status is the live app-level status
+      // from /metrics; m.deploying flags an executing deploy; m.replicas gives
+      // the facts line its readiness count). The index stays scan-first:
+      // release/readiness here, detailed CPU/RAM on the app overview.
+      syncCardFromModel(slug, m);
       // Detail header (only when the detail view for this slug is visible).
       const detailView = document.getElementById('app-detail-view');
       if (!detailView.hidden && location.pathname.startsWith(`/apps/${slug}`)) {
@@ -5918,8 +5970,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // back during a deploy instead of freezing at its load-time state.
         const pillEl = document.getElementById('app-detail-status');
         if (pillEl && detailApp && detailApp.slug === slug) {
-          updateStatusPill(pillEl, detailApp, liveStatus, formatStatus);
-          // Same reason as the card menu above: the pill merge refreshes
+          updateStatusPill(pillEl, detailApp, m, formatStatus);
+          // Same ordering as syncCardFromModel: the pill merge refreshes
           // detailApp.status, so the header kebab has to follow it.
           syncDetailHeaderActions(detailApp);
         }

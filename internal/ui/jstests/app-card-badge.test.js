@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
   appCardBadge,
+  applyLiveStatus,
+  paintCardStatusBadge,
   updateCardStatusBadge,
   updateStatusPill,
   appStatusView,
@@ -148,6 +150,34 @@ test('updateCardStatusBadge is a no-op on a missing badge element', () => {
   assert.doesNotThrow(() => updateCardStatusBadge(null, app, { status: 'stopped' }, fmt));
   // The model is left untouched when there is no element to update.
   assert.equal(app.status, 'running');
+});
+
+// applyLiveStatus is exported for the callers that have to merge whether or not
+// a card is on screen: an app filtered out of the grid still has to render its
+// new state when the filter changes, so the merge cannot depend on finding an
+// element to paint.
+test('applyLiveStatus updates the model with no element in sight', () => {
+  const app = { slug: 'demo', deploy_count: 1, status: 'running', deploying: true };
+  applyLiveStatus(app, { status: 'stopped', deploying: false });
+  assert.equal(app.status, 'stopped');
+  assert.equal(app.deploying, false);
+});
+
+test('paintCardStatusBadge renders the model as it stands and merges nothing', () => {
+  const app = { slug: 'demo', deploy_count: 3, status: 'stopped' };
+  const el = badgeSpan(app);
+
+  app.status = 'running';
+  paintCardStatusBadge(el, app, fmt);
+
+  assert.equal(el.textContent, 'S:running');
+  assert.equal(el.className, 'badge badge-running');
+  assert.equal(el.dataset.slug, 'demo');
+});
+
+test('paintCardStatusBadge is a no-op on a missing badge element', () => {
+  const app = { slug: 'demo', deploy_count: 1, status: 'running' };
+  assert.doesNotThrow(() => paintCardStatusBadge(null, app, fmt));
 });
 
 test('updateCardStatusBadge flips the badge to Deploying and back over a redeploy', () => {

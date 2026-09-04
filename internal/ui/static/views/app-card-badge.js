@@ -40,9 +40,15 @@ export function appCardBadge(app, formatStatus) {
 }
 
 // applyLiveStatus merges a freshly polled live view ({status, deploying,
-// last_deployment_status} from /metrics) onto the app model, so a later
-// re-render (search/sort/filter) carries the fresh state.
-function applyLiveStatus(app, live) {
+// last_deployment_status} from /metrics, or the row a lifecycle action just
+// returned) onto the app model, so a later re-render (search/sort/filter)
+// carries the fresh state.
+//
+// It is exported because the model is the thing every surface reads: a card
+// that is filtered out of the grid right now still has to render the new state
+// when the filter changes, so the merge cannot be conditional on finding an
+// element to paint.
+export function applyLiveStatus(app, live) {
   // A deploy this poller watched finish with the app running has, by
   // definition, succeeded: reconcile the stale deploy_count so the badge
   // lands on "Running" instead of falling back to "Awaiting deploy" until
@@ -76,6 +82,15 @@ function applyLiveStatus(app, live) {
 export function updateCardStatusBadge(badgeEl, app, live, formatStatus) {
   if (!badgeEl || !app || !live) return;
   applyLiveStatus(app, live);
+  paintCardStatusBadge(badgeEl, app, formatStatus);
+}
+
+// paintCardStatusBadge renders the badge from the model as it stands, with no
+// merge of its own. It is the half of updateCardStatusBadge a caller wants when
+// the model was already brought up to date (a lifecycle action that merged the
+// row it got back), so the merge is not repeated once per surface.
+export function paintCardStatusBadge(badgeEl, app, formatStatus) {
+  if (!badgeEl || !app) return;
   const info = appCardBadge(app, formatStatus);
   badgeEl.className = info.cls;
   badgeEl.textContent = info.text;

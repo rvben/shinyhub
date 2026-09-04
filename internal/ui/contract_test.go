@@ -76,10 +76,12 @@ func TestConnectivityBannerWired(t *testing.T) {
 func TestDeployingBadgeWired(t *testing.T) {
 	assertContains(t, "views/app-card-badge.js", "app.deploying",
 		"app-card-badge.js must rank the server-computed deploying flag above every other state")
-	assertContains(t, "app.js", "deploying: m.deploying",
-		"app.js must forward m.deploying from the /metrics poll into updateCardStatusBadge (see metricsResponse.Deploying in internal/api/apps.go)")
-	assertContains(t, "app.js", "last_deployment_status: m.last_deployment_status",
-		"app.js must forward m.last_deployment_status so a watched failed first deploy renders Failed, not Awaiting deploy")
+	assertContains(t, "app.js", "syncCardFromModel(slug, m)",
+		"app.js must hand the whole /metrics sample to the card sync so deploying flips the badge live (see metricsResponse.Deploying in internal/api/apps.go)")
+	assertContains(t, "views/app-card-badge.js", "app.deploying = !!live.deploying",
+		"the live merge must carry deploying from the sample onto the model the badge is derived from")
+	assertContains(t, "views/app-card-badge.js", "live.last_deployment_status !== undefined",
+		"the live merge must carry last_deployment_status so a watched failed first deploy renders Failed, not Awaiting deploy")
 	assertContains(t, "app.js", "updateStatusPill(pillEl",
 		"app.js must live-update the detail-header pill from the /metrics poll so an open detail page flips to Deploying and back")
 	assertContains(t, "style.css", ".badge-deploying",
@@ -1311,6 +1313,25 @@ func assertContains(t *testing.T, path, needle, contract string) {
 	}
 }
 
+// funcBody returns the source of the function whose declaration starts with
+// marker, up to the closing brace at that declaration's own indentation. It
+// exists so an assertion about "this function calls X" cannot be satisfied by a
+// call somewhere else in the same 6000-line file.
+func funcBody(t *testing.T, src, marker string) string {
+	t.Helper()
+	start := strings.Index(src, marker)
+	if start < 0 {
+		t.Fatalf("could not find %q in the source", marker)
+	}
+	lineStart := strings.LastIndex(src[:start], "\n") + 1
+	indent := src[lineStart:start]
+	end := strings.Index(src[start:], "\n"+indent+"}")
+	if end < 0 {
+		t.Fatalf("could not find the end of %q", marker)
+	}
+	return src[start : start+end]
+}
+
 func assertNotContains(t *testing.T, path, needle, contract string) {
 	t.Helper()
 	b, err := fs.ReadFile(ui.Static(), path)
@@ -1415,7 +1436,7 @@ func TestLifecycleMenusFollowPolledStatus(t *testing.T) {
 		handler = handler[:i]
 	}
 	for _, call := range []string{
-		"syncCardActions(kebabEl, appCardActions(gridApp, canManageApp(state.user, gridApp)))",
+		"syncCardFromModel(slug, m)",
 		"syncDetailHeaderActions(detailApp)",
 	} {
 		if !strings.Contains(handler, call) {
@@ -1424,29 +1445,35 @@ func TestLifecycleMenusFollowPolledStatus(t *testing.T) {
 		}
 	}
 
-	// Order matters as much as presence. The badge merge is what writes the
-	// polled status and the transient deploying flag onto the stored app model,
-	// and appCardActions reads both. Re-syncing the menu before the merge would
-	// derive it from the previous tick's model, so a deploy that just started
-	// would keep offering Sleep and Stop for another 10 seconds.
-	for _, pair := range []struct{ merge, resync string }{
-		{"updateCardStatusBadge(badgeEl, gridApp, liveStatus, formatStatus)", "syncCardActions(kebabEl,"},
-		{"updateStatusPill(pillEl, detailApp, liveStatus, formatStatus)", "syncDetailHeaderActions(detailApp)"},
+	// Order matters as much as presence. The merge is what writes the polled
+	// status and the transient deploying flag onto the stored app model, and
+	// appCardActions reads both. Re-deriving the menu before the merge would
+	// build it from the previous tick's model, so a deploy that just started
+	// would keep offering Sleep and Stop for another 10 seconds. The card's
+	// order is enforced inside syncCardFromModel; the detail header keeps its
+	// own pair in the handler.
+	sync := funcBody(t, src, "function syncCardFromModel(")
+	for _, pair := range []struct {
+		scope, name, merge, resync string
+	}{
+		{sync, "syncCardFromModel", "applyLiveStatus(app, live)", "syncCardActions(kebabEl,"},
+		{sync, "syncCardFromModel", "applyLiveStatus(app, live)", "renderCardFacts(factsEl,"},
+		{handler, "the metrics poller's onMetrics handler", "updateStatusPill(pillEl, detailApp, m, formatStatus)", "syncDetailHeaderActions(detailApp)"},
 	} {
-		mergeAt := strings.Index(handler, pair.merge)
-		resyncAt := strings.Index(handler, pair.resync)
+		mergeAt := strings.Index(pair.scope, pair.merge)
+		resyncAt := strings.Index(pair.scope, pair.resync)
 		if mergeAt < 0 {
-			t.Errorf("expected the metrics poller's onMetrics handler to call %q", pair.merge)
+			t.Errorf("expected %s to call %q", pair.name, pair.merge)
 			continue
 		}
 		if resyncAt < 0 {
-			t.Errorf("expected the metrics poller's onMetrics handler to call %q", pair.resync)
+			t.Errorf("expected %s to call %q", pair.name, pair.resync)
 			continue
 		}
 		if mergeAt > resyncAt {
-			t.Errorf("expected %q to run before %q: the merge writes the polled status and the\n"+
-				"deploying flag that the menu is derived from, so re-syncing first leaves the menu\n"+
-				"one tick behind the badge", pair.merge, pair.resync)
+			t.Errorf("in %s, expected %q to run before %q: the merge writes the polled status and\n"+
+				"the deploying flag that the menu is derived from, so re-syncing first leaves the\n"+
+				"menu one tick behind the badge", pair.name, pair.merge, pair.resync)
 		}
 	}
 
@@ -1462,6 +1489,52 @@ func TestLifecycleMenusFollowPolledStatus(t *testing.T) {
 		"the card kebab needs its slug so the poller can find the right card's menu")
 	assertNotContains(t, "app.js", "].filter(([, , show]) => show)",
 		"the card menu must render all lifecycle rows and hide them per state; filtering at build time leaves nothing for the poller to re-sync")
+}
+
+// TestOneAppActionUpdatesOneCard pins the cost of Sleep, Stop, Start and
+// Restart. Each changes one app and is answered with that app's new row, so the
+// dashboard already knows what to paint. Reloading the fleet to find out
+// instead costs GET /api/apps, /api/fleet/health and /api/projects, rebuilds
+// every card (dropping keyboard focus and closing any open menu with them), and
+// re-points the metrics poller at every app in the fleet - so an app's detail
+// page, which asked to poll one app, polls all of them from then on.
+func TestOneAppActionUpdatesOneCard(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+
+	for _, fn := range []string{"async function lifecycleAction(", "async function performRestart("} {
+		body := funcBody(t, src, fn)
+		if strings.Contains(body, "loadApps(") {
+			t.Errorf("%s must not reload the whole fleet: one app changed, and the response carries\n"+
+				"its new row", fn)
+		}
+		if !strings.Contains(body, "syncCardFromModel(") {
+			t.Errorf("%s must repaint the app it changed via syncCardFromModel", fn)
+		}
+	}
+
+	// The one path that legitimately has to ask again: a failed restart can
+	// leave the app stopped and the error body says nothing about where it
+	// landed. It asks about that app alone.
+	assertContains(t, "app.js", "await refreshApp(slug)",
+		"a failed restart must re-read the one app whose state is in doubt, not the fleet")
+	if body := funcBody(t, src, "async function refreshApp("); !strings.Contains(body, "api(`/api/apps/${encodeURIComponent(slug)}`)") {
+		t.Error("refreshApp must read a single app, not the apps list")
+	}
+
+	// The mounted view decides what the poller watches: the grid watches every
+	// app, an app's detail page watches one. A reload triggered from the detail
+	// page must not silently widen that back to the fleet.
+	loadApps := funcBody(t, src, "async function loadApps(")
+	guardAt := strings.Index(loadApps, "if (!document.getElementById('apps-view').hidden) {")
+	targetsAt := strings.Index(loadApps, "metrics.setTargets(")
+	if guardAt < 0 || targetsAt < 0 || guardAt > targetsAt {
+		t.Error("loadApps must set the metrics targets only while the apps grid is the mounted view,\n" +
+			"or a reload from an app's detail page re-points the poller at the whole fleet")
+	}
 }
 
 // TestGrantByUsernameUsesServerResolution guards the access-grant security fix:

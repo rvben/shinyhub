@@ -3806,7 +3806,8 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if u := auth.UserFromContext(r.Context()); u != nil {
+	u := auth.UserFromContext(r.Context())
+	if u != nil {
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "restart",
@@ -3815,6 +3816,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			IPAddress:    s.ClientIP(r),
 		})
 	}
+	s.decorateAppForCaller(u, updatedApp)
 	writeJSON(w, http.StatusOK, updatedApp)
 }
 
@@ -3984,7 +3986,8 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if u := auth.UserFromContext(r.Context()); u != nil {
+	u := auth.UserFromContext(r.Context())
+	if u != nil {
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "stop",
@@ -3993,6 +3996,7 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 			IPAddress:    s.ClientIP(r),
 		})
 	}
+	s.decorateAppForCaller(u, app)
 	writeJSON(w, http.StatusOK, app)
 }
 
@@ -4040,7 +4044,8 @@ func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if u := auth.UserFromContext(r.Context()); u != nil {
+	u := auth.UserFromContext(r.Context())
+	if u != nil {
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID:       &u.ID,
 			Action:       "sleep",
@@ -4049,6 +4054,7 @@ func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
 			IPAddress:    s.ClientIP(r),
 		})
 	}
+	s.decorateAppForCaller(u, app)
 	writeJSON(w, http.StatusOK, app)
 }
 
@@ -4086,13 +4092,15 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if u := auth.UserFromContext(r.Context()); u != nil {
+	u := auth.UserFromContext(r.Context())
+	if u != nil {
 		accessDetail, _ := json.Marshal(map[string]string{"from": oldAccess, "to": req.Access})
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &u.ID, Action: "set_access", ResourceType: "app",
 			ResourceID: slug, Detail: string(accessDetail), IPAddress: s.ClientIP(r), RunID: s.knownFleetRunID(r),
 		})
 	}
+	s.decorateAppForCaller(u, app)
 	writeJSON(w, http.StatusOK, app)
 }
 
@@ -4163,6 +4171,10 @@ func (s *Server) handleTransferAppOwnership(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	// Decorated against the row as it now stands, so a former owner who handed
+	// the app to someone else is told can_manage=false rather than keeping the
+	// controls the transfer just took away.
+	s.decorateAppForCaller(u, app)
 	writeJSON(w, http.StatusOK, app)
 }
 

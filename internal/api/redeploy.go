@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/appstatus"
+	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"golang.org/x/sys/unix"
@@ -290,6 +291,40 @@ func (s *Server) decorateApp(app *db.App) {
 	app.EffectiveMemoryLimitMB = deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem)
 	app.EffectiveCPUQuotaPercent = deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defaultCPU)
 	app.SessionsCeiling = configuredSessionsCeiling(app)
+}
+
+// decorateAppForCaller is decorateApp plus the two derived views a plain
+// database read cannot supply: the live process observation, and can_manage.
+// Every handler that answers a mutation with a freshly read app row calls it,
+// so the row a client merges back onto its model says the same thing the list
+// and detail payloads say about the same app.
+//
+// Without it the row is not merely incomplete, it is wrong: GetAppBySlug leaves
+// every computed field at its zero value and none of them is omitempty, so the
+// response states positively that the app has no session ceiling, no effective
+// hibernate timeout, no running replicas, and that the caller may not manage it.
+// A client merging that row hides every management control on an app the caller
+// has just successfully managed.
+//
+// An observation failure is logged and skipped rather than surfaced. The
+// mutation already succeeded; failing its response would push the caller into
+// retrying an action that is done.
+func (s *Server) decorateAppForCaller(u *auth.ContextUser, app *db.App) {
+	s.decorateApp(app)
+	app.CanManage = s.effectiveCanManageApp(u, app)
+	replicas, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		slog.Error("decorate app: list replicas", "slug", app.Slug, "err", err)
+		return
+	}
+	replicas = s.liveReplicaView(app.Slug, replicas)
+	pool := s.elasticObservation(app.Slug)
+	// A server built without a process manager (unit tests and API-only
+	// embeddings) has no live authority. Preserve the stored status when there
+	// are no durable replica facts to contradict it.
+	if s.manager != nil || len(replicas) > 0 || pool.Known {
+		s.decorateAppObservation(app, replicas, pool)
+	}
 }
 
 // configuredSessionsCeiling gives sessions_ceiling one stable meaning on every
