@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.6](https://github.com/rvben/shinyhub/compare/v0.15.5...v0.15.6) - 2026-09-04
+
+### Fixed
+
+- **fleet**: name the next action for refusals apply cannot clear itself ([332617e](https://github.com/rvben/shinyhub/commit/332617e6849ba5102d337a331fc0a8bcb25235f2))
+- **fleet**: classify a refused no-downtime handoff as downtime_required ([f17b4a4](https://github.com/rvben/shinyhub/commit/f17b4a49d4936c57d154fe5bc45773d3a5e78755))
+
 ## [0.15.5](https://github.com/rvben/shinyhub/compare/v0.15.4...v0.15.5) - 2026-09-03
 
 ### Fixed
