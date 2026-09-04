@@ -81,6 +81,7 @@ import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
 import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
 import { createGroupDisclosure } from '/static/views/group-disclosure.js';
+import { focusedKey, restoreFocus, siblingKey } from '/static/views/focus-restore.js';
 import { buildProjectPatchBody } from '/static/views/project-edit-body.js';
 import {
   CLI_CONNECT_STORAGE_KEY,
@@ -126,8 +127,13 @@ function modalTrap(overlayEl) {
       release() {
         if (!active) return;
         active = false;
-        focusTrap.release();
+        // Lift inert BEFORE restoring focus. An inert subtree cannot take
+        // focus, so focusing the opener while the shell is still inert is a
+        // silent no-op and the browser leaves focus on <body>: the operator
+        // who opened the dialog from a card is returned to the top of the
+        // page instead of to the control they opened it with.
         setModalBackgroundInert(false);
+        focusTrap.release();
       },
     };
     _modalTraps.set(overlayEl, trap);
@@ -707,6 +713,13 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderGridVerbatim(groups, gridEl, emptyEl, options = {}) {
+    // The grid is rebuilt from scratch on every search keystroke, sort change,
+    // project save and app reload. Whichever control the keyboard was on is
+    // about to be discarded, so remember what it was and hand focus back to the
+    // control doing the same job in the rebuilt grid. Every focusable control
+    // below carries a data-focus-key naming its job, never its position, so a
+    // rebuild that regroups or reorders the cards still finds it.
+    const keepFocus = focusedKey(gridEl);
     gridEl.textContent = '';
     appCardLifecycleControls.clear();
     const total = groups.reduce((n, g) => n + g.apps.length, 0);
@@ -735,10 +748,12 @@ document.addEventListener('DOMContentLoaded', () => {
           classPrefix: 'app-grid',
           forceExpanded: !!options.forceExpanded,
         });
+        disclosure.toggle.dataset.focusKey = `group:${group.project}:toggle`;
         if (group.project && isOperatorRole(state.user)) {
           const edit = document.createElement('button');
           edit.type = 'button';
           edit.className = 'app-grid-group-edit';
+          edit.dataset.focusKey = `group:${group.project}:edit`;
           edit.setAttribute('aria-label', `Edit project ${group.name}`);
           edit.title = `Edit ${group.name}`;
           const editIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -774,6 +789,7 @@ document.addEventListener('DOMContentLoaded', () => {
       titleLink.href = `/apps/${app.slug}`;
       titleLink.setAttribute('data-nav', '');
       titleLink.className = 'app-card-title';
+      titleLink.dataset.focusKey = `app:${app.slug}:title`;
       titleLink.setAttribute('aria-label', canManageApp(state.user, app)
         ? `Manage ${app.name}`
         : `View ${app.name}`);
@@ -833,6 +849,7 @@ document.addEventListener('DOMContentLoaded', () => {
         openLink.href = `/app/${app.slug}/`;
         openLink.target = '_blank';
         openLink.rel = 'noopener noreferrer';
+        openLink.dataset.focusKey = `app:${app.slug}:open`;
         openLink.append(document.createTextNode('Open app'));
         const externalArrow = document.createElement('span');
         externalArrow.setAttribute('aria-hidden', 'true');
@@ -851,6 +868,7 @@ document.addEventListener('DOMContentLoaded', () => {
           deployButton.type = 'button';
           deployButton.textContent = 'Deploy first release';
           deployButton.className = 'btn-primary';
+          deployButton.dataset.focusKey = `app:${app.slug}:deploy`;
           deployButton.setAttribute('aria-label', `Deploy first bundle to ${app.name}`);
           deployButton.addEventListener('click', () => openDeployModal(app));
           actions.appendChild(deployButton);
@@ -882,6 +900,7 @@ document.addEventListener('DOMContentLoaded', () => {
           </ul>
         `;
         const kebabBtn = kebab.querySelector('button');
+        kebabBtn.dataset.focusKey = `app:${app.slug}:menu`;
         kebabBtn.setAttribute('aria-label', `More actions for ${app.name}`);
         const kebabList = kebab.querySelector('.kebab-list');
         kebabControls.set(kebab, wireKebab(kebabBtn, kebabList, card));
@@ -900,6 +919,14 @@ document.addEventListener('DOMContentLoaded', () => {
       applyRestartFeedbackToCard(app.slug, card, lifecycleControl);
       cardHost.appendChild(card);
     }
+    }
+
+    // A control can legitimately vanish across a rebuild: "Deploy first
+    // release" disappears the moment that deploy succeeds. The card is still
+    // there, so fall back to its title link and leave the keyboard on the app
+    // the operator was working on instead of dropping it to the top of the page.
+    if (keepFocus && !restoreFocus(gridEl, keepFocus)) {
+      restoreFocus(gridEl, siblingKey(keepFocus, 'title'));
     }
   }
 
@@ -6664,7 +6691,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!surface || surface.stopped || surface !== mountedScheduleSurface) return;
     const container = document.getElementById('schedules-list');
     const statusEl = document.getElementById('schedules-surface-status');
-    const focusedKey = document.activeElement?.dataset?.scheduleFocus || null;
+    const focusedScheduleKey = document.activeElement?.dataset?.scheduleFocus || null;
     if (!container) return;
     if (surface.timer) clearTimeout(surface.timer);
     container.setAttribute('aria-busy', 'true');
@@ -6710,9 +6737,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const forceDetail = announce || (selected && scheduleState(selected).key === 'running');
     await renderScheduleDetail(surface, selected, forceDetail);
-    if (focusedKey) {
+    if (focusedScheduleKey) {
       const replacement = Array.from(document.querySelectorAll('[data-schedule-focus]'))
-        .find(el => el.dataset.scheduleFocus === focusedKey);
+        .find(el => el.dataset.scheduleFocus === focusedScheduleKey);
       replacement?.focus({preventScroll: true});
     }
     scheduleNextPoll(surface, schedules);

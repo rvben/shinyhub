@@ -1537,6 +1537,84 @@ func TestOneAppActionUpdatesOneCard(t *testing.T) {
 	}
 }
 
+// TestGridRebuildKeepsKeyboardFocus pins the focus handling of the one function
+// that wipes the apps grid. renderGridVerbatim opens by emptying gridEl, which
+// detaches whatever the keyboard was on, and the browser answers that by
+// focusing <body>: a keyboard or screen-reader user who saves a project edit,
+// changes the sort, or watches a deploy finish is thrown back to the top of the
+// page and has to tab down again. So it must read the focused control's key
+// before the wipe and hand focus back after the rebuild, and every focusable
+// control it builds must carry a key naming its job rather than its position.
+func TestGridRebuildKeepsKeyboardFocus(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	body := funcBody(t, string(b), "function renderGridVerbatim(")
+
+	captureAt := strings.Index(body, "const keepFocus = focusedKey(gridEl)")
+	wipeAt := strings.Index(body, "gridEl.textContent = ''")
+	restoreAt := strings.Index(body, "restoreFocus(gridEl, keepFocus)")
+	if captureAt < 0 || wipeAt < 0 || restoreAt < 0 {
+		t.Fatalf("renderGridVerbatim must capture the focused key, wipe the grid and restore focus (found at %d, %d, %d)",
+			captureAt, wipeAt, restoreAt)
+	}
+	// Two bounds, because a capture after the wipe reads <body> and a restore
+	// before the rebuild targets elements that are about to be discarded: both
+	// leave focus on <body> while looking like the fix is present.
+	if captureAt > wipeAt {
+		t.Error("the focused key must be read BEFORE the grid is wiped; afterwards there is nothing left to read")
+	}
+	if restoreAt < wipeAt {
+		t.Error("focus must be restored AFTER the grid is rebuilt, not onto the elements about to be discarded")
+	}
+	// "Deploy first release" is gone the moment that deploy succeeds, and the
+	// rebuild that removes it is the same one the operator is watching.
+	if !strings.Contains(body, "restoreFocus(gridEl, siblingKey(keepFocus, 'title'))") {
+		t.Error("a control that did not survive the rebuild must fall back to its card's title link,\n" +
+			"or finishing a first deploy drops the keyboard to the top of the page")
+	}
+
+	// Every control a keyboard can land on inside the grid.
+	for _, key := range []string{
+		"disclosure.toggle.dataset.focusKey = `group:${group.project}:toggle`",
+		"edit.dataset.focusKey = `group:${group.project}:edit`",
+		"titleLink.dataset.focusKey = `app:${app.slug}:title`",
+		"openLink.dataset.focusKey = `app:${app.slug}:open`",
+		"deployButton.dataset.focusKey = `app:${app.slug}:deploy`",
+		"kebabBtn.dataset.focusKey = `app:${app.slug}:menu`",
+	} {
+		if !strings.Contains(body, key) {
+			t.Errorf("renderGridVerbatim must tag the control with %s, or focus on it is lost across a rebuild", key)
+		}
+	}
+}
+
+// TestModalReleaseLiftsInertBeforeRestoringFocus pins the ordering inside
+// modalTrap.release. Closing a dialog does two things: it lifts the inert
+// attribute from the dashboard shell, and it returns focus to the control that
+// opened the dialog. An inert subtree cannot take focus, so restoring focus
+// first is a silent no-op - the call succeeds, focus stays on <body>, and the
+// operator who opened the dialog from a card in the grid is returned to the top
+// of the page. Nothing throws and nothing looks wrong, which is why this needs a
+// test rather than an eye.
+func TestModalReleaseLiftsInertBeforeRestoringFocus(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	body := funcBody(t, string(b), "function modalTrap(")
+
+	uninertAt := strings.Index(body, "setModalBackgroundInert(false)")
+	restoreAt := strings.Index(body, "focusTrap.release()")
+	if uninertAt < 0 || restoreAt < 0 {
+		t.Fatalf("modalTrap.release must both lift inert and release the focus trap (found at %d, %d)", uninertAt, restoreAt)
+	}
+	if uninertAt > restoreAt {
+		t.Error("modalTrap.release must lift inert BEFORE restoring focus; focusing an inert element does nothing and leaves focus on <body>")
+	}
+}
+
 // TestGrantByUsernameUsesServerResolution guards the access-grant security fix:
 // the Access tab must grant by POSTing { username } to /members (the server
 // resolves it under manage-app authorization) and must NOT pre-resolve via

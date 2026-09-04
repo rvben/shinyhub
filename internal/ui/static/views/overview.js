@@ -9,6 +9,7 @@ import { formatBytes } from './stat-format.js';
 import { formatStatus } from './status-label.js';
 import { appCardBadge } from './app-card-badge.js';
 import { activityTime, buildActivityBrief } from './overview-activity.js';
+import { focusedKey, restoreFocus } from './focus-restore.js';
 
 const POLL_MS = 10000;
 const REQUEST_TIMEOUT_MS = 8000;
@@ -954,19 +955,6 @@ function relativeAge(iso) {
   if (seconds < 5) return 'just now';
   if (seconds < 60) return `${seconds}s ago`;
   return `${Math.round(seconds / 60)}m ago`;
-}
-
-function focusedKey(root) {
-  const active = document.activeElement;
-  return active && root.contains(active) ? active.dataset.focusKey || null : null;
-}
-
-function restoreFocus(root, key) {
-  if (!key) return false;
-  const match = [...root.querySelectorAll('[data-focus-key]')].find((node) => node.dataset.focusKey === key);
-  if (!match) return false;
-  match.focus({ preventScroll: true });
-  return true;
 }
 
 function expandedDisclosureKeys(root) {
