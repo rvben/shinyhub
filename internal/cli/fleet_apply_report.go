@@ -363,11 +363,88 @@ func applyRecoveryFor(ctx applyReportContext, results []applyResult) applyRecove
 		strategy = "repair_then_resume"
 		summary = "Fix the reported deterministic or post-commit failure, then re-run apply."
 	}
-	commands := []string{}
+	runCommands, notes, fullyGuided := applyRecoveryGuidance(results)
+	if len(notes) > 0 {
+		if fullyGuided == t.failed {
+			// Every failed app is wholly explained by a specific remedy, so the
+			// generic repair instruction would name a defect that does not exist.
+			// An app carrying even one undiagnosed condition keeps it.
+			summary = strings.Join(notes, " ")
+		} else {
+			summary = summary + " " + strings.Join(notes, " ")
+		}
+	}
+	commands := append([]string{}, runCommands...)
 	if ctx.ResumeCommand != "" {
 		commands = append(commands, ctx.ResumeCommand)
 	}
 	return applyRecovery{Strategy: strategy, SafeToRetry: safe, Summary: summary, Commands: commands}
+}
+
+// producerRunClears reports whether dispatching the producer is unambiguously
+// the remedy for a freshness gate. Only a plainly overdue schedule qualifies:
+// a refreshing one already has a run in flight that a second dispatch would
+// either duplicate or lose to overlap-skip, and the repair, mismatch and
+// unavailable states each need their own diagnosis before any run. Suggesting
+// the wrong command costs more than suggesting none.
+func producerRunClears(state string) bool { return state == "stale" }
+
+// isDowntimeDeferral reports whether the server declined the deploy to keep the
+// working version serving. Nothing changed under the caller, so the remedy is
+// the operator's consent to a stop-first deployment, not a repair.
+func isDowntimeDeferral(r applyResult) bool {
+	return resultFailureKind(r) == string(deployfail.DowntimeRequired)
+}
+
+// applyRecoveryGuidance maps the failure kinds apply refuses to clear by itself
+// onto the exact next action each one needs, and reports how many failed apps
+// are wholly explained by that guidance. Both gates are deliberate refusals
+// rather than defects, so without this they collapse into "re-run apply", which
+// changes nothing and fails identically.
+//
+// Producer runs are emitted as commands because running one is the documented
+// remedy and reverses nothing. Downtime consent stays prose: handing over a
+// copy-pasteable command that drops live sessions pre-confirms a decision that
+// is the operator's, the same reason a recovery command never carries --yes.
+func applyRecoveryGuidance(results []applyResult) (commands, notes []string, fullyGuided int) {
+	deferred := []string{}
+	stale := []string{}
+	for _, r := range results {
+		if r.status != statusFailed {
+			continue
+		}
+		// One app can fail several gates at once, in different states. It
+		// counts as fully guided only when nothing on it is left undiagnosed;
+		// a single coverable gate among others must not vouch for the rest.
+		addressed, unresolved := false, false
+		if isDowntimeDeferral(r) {
+			deferred = append(deferred, r.slug)
+			addressed = true
+		}
+		for _, gate := range r.freshnessGate {
+			if !producerRunClears(gate.State) {
+				unresolved = true
+				continue
+			}
+			commands = append(commands, fmt.Sprintf("shinyhub schedule run %s %s", r.slug, gate.Schedule))
+			stale = append(stale, r.slug+"/"+gate.Schedule)
+			addressed = true
+		}
+		if addressed && !unresolved {
+			fullyGuided++
+		}
+	}
+	if len(deferred) > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"The working version was preserved for %s because a no-downtime handoff is unsupported for its current shape; re-run with --allow-downtime to accept a stop-first deployment.",
+			strings.Join(deferred, ", ")))
+	}
+	if len(stale) > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"Apply will not run producers itself; refresh %s with the schedule run commands below, then re-apply.",
+			strings.Join(stale, ", ")))
+	}
+	return commands, notes, fullyGuided
 }
 
 func applyMutationCounts(results []applyResult) (committed, partial, unknown int) {
@@ -458,7 +535,14 @@ func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o apply
 					fmt.Fprintf(out, "      %s\n", s.dim(l))
 				}
 			}
-			if len(r.scheduleLogs) == 0 && len(r.warmGate) == 0 && len(r.freshnessGate) == 0 {
+			// A deferred deploy never started a process, so its app log says
+			// nothing about the refusal. It gets the decision in prose rather
+			// than a command, for the same reason the recovery commands never
+			// pre-fill the flag that drops live sessions.
+			switch {
+			case isDowntimeDeferral(r):
+				fmt.Fprintf(out, "    %s\n", s.dim("working version still serving; re-run with --allow-downtime to accept a stop-first deployment"))
+			case len(r.scheduleLogs) == 0 && len(r.warmGate) == 0 && len(r.freshnessGate) == 0:
 				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub apps logs %s --tail 200 --system", r.slug)))
 			}
 		case statusConflict:
@@ -474,7 +558,11 @@ func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o apply
 			fmt.Fprintf(out, "  Run ID: %s (use this to correlate server audit records)\n", ctx.RunID)
 		}
 		fmt.Fprintf(out, "  Remote mutation: %d committed, %d partial, %d unknown.\n", committed, partial, unknown)
-		fmt.Fprintf(out, "  %s\n", recovery.Summary)
+		// Guidance for several apps runs well past a terminal line. Only the
+		// prose wraps; a wrapped command is no longer copy-pasteable.
+		for _, line := range wrapPlanValue("  ", recovery.Summary, planOutputWidth(out)) {
+			fmt.Fprintln(out, line)
+		}
 		for i, command := range recovery.Commands {
 			fmt.Fprintf(out, "  %d. %s\n", i+1, command)
 		}

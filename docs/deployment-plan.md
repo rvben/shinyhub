@@ -139,6 +139,18 @@ three recovery strategies:
   re-run apply;
 - `replan`: remote state conflicted; review a fresh plan before re-applying.
 
+Two `repair_then_resume` cases are deliberate refusals rather than defects, and
+the recovery output names the specific next action for each instead of a
+generic repair. A `downtime_required` failure means the deploy could not be
+completed without dropping live sessions, because parallel generation handoff
+does not support that app's current shape; rather than drop them unasked the
+server made no change and left the working version serving. Re-run with
+`--allow-downtime` to permit the stop-first deployment. A `schedule_stale`
+failure means a freshness gate is unsatisfied and apply will not dispatch
+producers itself; the recovery lists the `shinyhub schedule run <slug>
+<schedule>` commands to run first, and only for schedules that are plainly
+overdue rather than already refreshing.
+
 Re-running fleet apply recomputes current state. Already completed resources
 become unchanged, so they are not applied twice. Deploy attempts automatically
 retry only readiness timeouts, transport failures, and server errors; config
