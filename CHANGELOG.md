@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.7](https://github.com/rvben/shinyhub/compare/v0.15.6...v0.15.7) - 2026-09-04
+
+### Fixed
+
+- **ui**: pin the sidebar footer to the bottom when the app list is hidden ([ca9f3a9](https://github.com/rvben/shinyhub/commit/ca9f3a917c9d528883c332aae647b71e04650bee))
+- **ui**: return keyboard focus to the kebab toggle after activating an item ([9feecf1](https://github.com/rvben/shinyhub/commit/9feecf10635b64cb9977595e2797d3930041ff89))
+- **ui**: make navigating to the page already on screen a no-op ([9e07999](https://github.com/rvben/shinyhub/commit/9e079993130e80859d33fb7c60227efac52fc193))
+- **ui**: keep keyboard focus when the apps grid rebuilds ([4279c1b](https://github.com/rvben/shinyhub/commit/4279c1b83e2dce0fe1a4f312392f1f9c2ffa9a57))
+- **ui**: update one card on a lifecycle action instead of reloading the fleet ([306d48c](https://github.com/rvben/shinyhub/commit/306d48c54eea66f4e4a18994970e5cc4bf5884b5))
+- **ui**: switch app detail tabs in place instead of remounting the view ([a987ac0](https://github.com/rvben/shinyhub/commit/a987ac008691699baaf1181db6d458fed85a3e79))
+
 ## [0.15.6](https://github.com/rvben/shinyhub/compare/v0.15.5...v0.15.6) - 2026-09-04
 
 ### Fixed
