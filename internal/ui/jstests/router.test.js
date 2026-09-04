@@ -274,6 +274,106 @@ test('an update superseded by a later navigation does not clobber the newer view
   assert.equal(global.location.pathname, '/apps/other');
 });
 
+// ---------------------------------------------------------------------------
+// Navigating to the URL already on screen. A nav item for the current page is
+// the one link a visitor clicks by accident, and it must cost nothing: no
+// teardown, no refetch, no focus grab, and no duplicate history entry.
+// ---------------------------------------------------------------------------
+
+test('navigating to the current URL neither remounts nor updates the view', async () => {
+  withDom('/apps/demo/logs');
+  const rec = newRecord();
+  const router = detailRouter(rec);
+  await router.start();
+
+  await router.navigate('/apps/demo/logs');
+
+  assert.equal(rec.mounts, 1, 'the page is already on screen; nothing to mount');
+  assert.equal(rec.unmounts, 0, 'nothing to tear down either');
+  assert.deepEqual(rec.updates, [], 'and nothing changed for the view to update to');
+});
+
+test('navigating to the current URL pushes no history entry', async () => {
+  withDom('/apps/demo');
+  const rec = newRecord();
+  const router = detailRouter(rec);
+  await router.start();
+  await router.navigate('/apps/demo/logs');
+  const depth = global.history.length;
+
+  await router.navigate('/apps/demo/logs');
+  assert.equal(global.history.length, depth, 'a no-op navigation must not stack a duplicate entry');
+
+  // The proof that it is not stacked: one Back returns to the previous tab
+  // rather than to the same page again.
+  global.history.back();
+  await waitFor(() => rec.updates.length === 2, 'the popstate update to arrive');
+  assert.equal(global.location.pathname, '/apps/demo');
+});
+
+test('a route on the current URL still remounts after its mount failed', async () => {
+  // The mount threw, so onError blanked the sections: the page named by the URL
+  // is not on screen and clicking its nav item again is a retry, not a no-op.
+  withDom('/flaky');
+  let attempts = 0;
+  const router = createRouter({ onError: () => {} });
+  router.register('/flaky', () => {
+    attempts++;
+    if (attempts === 1) throw new Error('first mount fails');
+    return { title: 'flaky' };
+  });
+  await router.start();
+  assert.equal(attempts, 1);
+
+  await router.navigate('/flaky');
+  assert.equal(attempts, 2, 'the retry must reach the mount function');
+});
+
+test('a same-URL navigation does not consult the unsaved-changes guard', async () => {
+  // The guard exists to ask about work in progress before leaving a page.
+  // Nothing is being left, so nothing may be asked.
+  withDom('/apps/demo');
+  const rec = newRecord();
+  const router = detailRouter(rec);
+  await router.start();
+  let asked = 0;
+  router.setNavGuard(() => {
+    asked++;
+    return true;
+  });
+
+  await router.navigate('/apps/demo');
+  assert.equal(asked, 0, 'staying put must not prompt about unsaved changes');
+
+  await router.navigate('/apps/demo/logs');
+  assert.equal(asked, 1, 'an actual navigation still consults the guard');
+});
+
+test('a replace navigation to the current URL is a no-op too', async () => {
+  // Internal redirects land on the URL already showing (a bounced tab that
+  // resolves back to where the visitor is). Remounting would blank the page
+  // they are looking at.
+  withDom('/apps/demo/logs');
+  const rec = newRecord();
+  const router = detailRouter(rec);
+  await router.start();
+
+  await router.navigate('/apps/demo/logs', { replace: true });
+  assert.equal(rec.mounts, 1);
+  assert.deepEqual(rec.updates, []);
+});
+
+test('the search string is part of the comparison', async () => {
+  withDom('/apps/demo');
+  const rec = newRecord();
+  const router = detailRouter(rec);
+  await router.start();
+
+  await router.navigate('/apps/demo', { search: '?from=grid' });
+  assert.equal(global.location.search, '?from=grid', 'a different query is a different URL');
+  assert.equal(rec.updates.length, 1, 'and must reach the view');
+});
+
 test('the document title survives a tab switch', async () => {
   withDom('/apps/demo');
   const rec = newRecord();

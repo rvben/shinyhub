@@ -28,6 +28,11 @@ export function createRouter(opts = {}) {
   let current = null;
   // The key of the mounted view, or null when the view cannot take updates.
   let currentKey = null;
+  // Whether what is on screen is the view for the current URL. False before the
+  // first mount and after any mount or update that failed, because onError
+  // blanks the page sections: navigating to the URL we are already on is only a
+  // no-op while the page it names is actually there to look at.
+  let viewHealthy = false;
   let generation = 0;
   // onError is invoked when a mount function throws or rejects. It lets the app
   // render a visible error state instead of leaving a blank shell (a single
@@ -108,10 +113,12 @@ export function createRouter(opts = {}) {
       // so its unmount still runs) and the next navigation rebuilds it through
       // the full mount path.
       currentKey = null;
+      viewHealthy = false;
       if (gen === generation) onError(err, path);
       return;
     }
     if (gen !== generation) return;
+    viewHealthy = true;
     onMounted();
     applyTitle();
   }
@@ -135,6 +142,7 @@ export function createRouter(opts = {}) {
     }
     current = null;
     currentKey = null;
+    viewHealthy = false;
     if (!hit) {
       if (path !== '/') {
         console.warn('router: no match for', path);
@@ -161,6 +169,7 @@ export function createRouter(opts = {}) {
     }
     current = view || {};
     currentKey = hit.route.keyFn ? hit.route.keyFn(hit.params) : null;
+    viewHealthy = true;
     // Clear any prior error state before computing focus, so a recovered
     // navigation neither shows the error panel nor lets its h1 steal focus.
     onMounted();
@@ -173,11 +182,22 @@ export function createRouter(opts = {}) {
   }
 
   function navigate(path, opts = {}) {
+    const full = path + (opts.search || '');
+    // Clicking the nav item for the page you are already on must do nothing.
+    // Running the navigation would tear that page down and build it again: the
+    // grid rebuilt card by card, its requests re-issued, focus dragged back to
+    // the heading from wherever the visitor put it, and a second identical
+    // history entry pushed so that Back appears not to work. Nothing about the
+    // page would differ afterwards.
+    //
+    // Only while the page it names is actually on screen, though: after a mount
+    // that failed the sections are blank, so the same click is the visitor
+    // asking to try again and has to go through.
+    if (viewHealthy && full === location.pathname + location.search) return Promise.resolve();
     // A guard may veto navigation (unsaved edits). replace:true navigations are
     // internal redirects (e.g. viewer bounced off a manager-only tab) and skip
     // the guard so they always complete.
     if (!opts.replace && navGuard && !navGuard()) return Promise.resolve();
-    const full = path + (opts.search || '');
     if (opts.replace) {
       history.replaceState({}, '', full);
     } else {
