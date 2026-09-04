@@ -263,6 +263,16 @@ func setPrecondition(req *http.Request, ifDigest *string, ifManagedBy *string) {
 	}
 }
 
+const (
+	// conflictHeader carries the server's reason for a 409 so the CLI can tell a
+	// precondition race apart from a refusal it can name a remedy for.
+	conflictHeader = "X-ShinyHub-Conflict"
+	// conflictHandoffDeferred means the deploy was declined to keep the working
+	// version live because parallel generation handoff does not support this
+	// app's shape. Nothing changed under the caller.
+	conflictHandoffDeferred = "generation-handoff-deferred"
+)
+
 // conflictError marks an app action aborted by a server precondition 409.
 // apply records it, continues other apps, and never blind-retries it.
 type conflictError struct {

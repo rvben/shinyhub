@@ -92,7 +92,7 @@ func runApply(cmd *cobra.Command, path string, allowDowntime bool) error {
 		if err != nil {
 			var status *httpStatusError
 			if errors.As(err, &status) && status.Status == http.StatusConflict &&
-				resp.Header.Get("X-ShinyHub-Conflict") != "generation-handoff-deferred" {
+				resp.Header.Get(conflictHeader) != conflictHandoffDeferred {
 				return staleSavedPlanError(path, slug, err)
 			}
 			return err
@@ -103,7 +103,7 @@ func runApply(cmd *cobra.Command, path string, allowDowntime bool) error {
 	if resp.StatusCode >= http.StatusBadRequest {
 		httpErr := httpError(cfg.Token, "apply saved plan", resp, out)
 		if resp.StatusCode == http.StatusConflict &&
-			resp.Header.Get("X-ShinyHub-Conflict") != "generation-handoff-deferred" {
+			resp.Header.Get(conflictHeader) != conflictHandoffDeferred {
 			return staleSavedPlanError(path, slug, httpErr)
 		}
 		return httpErr

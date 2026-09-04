@@ -20,6 +20,14 @@ const (
 	Crashed                Kind = "crashed"                 // process exited before healthy
 	ServerError            Kind = "server_error"            // a 5xx the server could not classify
 
+	// DowntimeRequired is the server's refusal to deploy without downtime when
+	// parallel generation handoff does not support the app's current shape
+	// (non-multiplex isolation, a draining generation, a config-bearing
+	// manifest). The working version is preserved and nothing changed under the
+	// caller, so this is a precondition the operator clears with
+	// --allow-downtime, never a state race to re-plan.
+	DowntimeRequired Kind = "downtime_required"
+
 	// Client-emitted kinds (set by the CLI for its own error shapes).
 	ZipError       Kind = "zip_error"       // CLI failed to package the local dir
 	TransportError Kind = "transport_error" // the request never reached the server
@@ -32,7 +40,7 @@ const (
 func (k Kind) Valid() bool {
 	switch k {
 	case RuntimeMissing, BuildFailed, InterpreterUnavailable, HookFailed, BundleInvalid,
-		ReadinessTimeout, Crashed, ServerError, ZipError, TransportError, Unknown:
+		ReadinessTimeout, Crashed, ServerError, DowntimeRequired, ZipError, TransportError, Unknown:
 		return true
 	}
 	return false

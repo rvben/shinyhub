@@ -5,7 +5,7 @@ import "testing"
 func TestKindValid(t *testing.T) {
 	valid := []Kind{
 		RuntimeMissing, BuildFailed, BundleInvalid, ReadinessTimeout,
-		Crashed, ServerError, ZipError, TransportError, Unknown,
+		Crashed, ServerError, DowntimeRequired, ZipError, TransportError, Unknown,
 	}
 	for _, k := range valid {
 		if !k.Valid() {
@@ -28,6 +28,7 @@ func TestKindStringValues(t *testing.T) {
 		ReadinessTimeout: "readiness_timeout",
 		Crashed:          "crashed",
 		ServerError:      "server_error",
+		DowntimeRequired: "downtime_required",
 		ZipError:         "zip_error",
 		TransportError:   "transport_error",
 		Unknown:          "unknown",

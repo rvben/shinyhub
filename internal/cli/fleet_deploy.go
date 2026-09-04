@@ -134,6 +134,18 @@ func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundl
 	rb, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
+		// A refused no-downtime handoff preserves the working version and races
+		// nothing, so it is a precondition the operator clears with
+		// --allow-downtime, not a state change to re-plan. It is classified
+		// ahead of the precondition check because the server sends the same 409
+		// whether or not this deploy carried an If-Match, and the remedy is
+		// identical either way.
+		if resp.StatusCode == http.StatusConflict && resp.Header.Get(conflictHeader) == conflictHandoffDeferred {
+			return "", false, nil, deployfail.DowntimeRequired, &httpStatusError{
+				Status: resp.StatusCode,
+				msg:    fmt.Sprintf("deploy %s deferred: %s", slug, serverErrorMessage(rb, resp.Status)),
+			}
+		}
 		if resp.StatusCode == http.StatusConflict && preconditioned {
 			return "", false, nil, deployfail.Unknown, &conflictError{slug: slug, msg: strings.TrimSpace(string(rb))}
 		}
