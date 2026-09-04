@@ -358,12 +358,15 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .nav-item.tab-active .nav-ico { color: var(--cyan-bright); }
 .nav-label { overflow: hidden; text-overflow: ellipsis; }
 
-/* App list region: the only inner scroll area. */
+/* App list region: the only inner scroll area. It also carries the gap to the
+   footer below it, because the footer's auto top margin resolves to zero
+   whenever this region grows to fill the column. */
 .sidebar-apps {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   margin-top: 0.7rem;
+  margin-bottom: 0.5rem;
   padding-top: 0.7rem;
   border-top: 1px solid var(--line);
 }
@@ -479,12 +482,15 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .group-disclosure-toggle[aria-expanded="false"] .group-disclosure-chevron { transform: rotate(0); }
 .group-disclosure-body[hidden] { display: none; }
 
-/* Footer: host badge, user, logout, collapse toggle */
+/* Footer: host badge, user, logout, collapse toggle. The auto top margin pins
+   it to the bottom of the rail when the app list is not rendered: viewer
+   sessions hide #sidebar-apps and the collapsed rail sets it display:none, so
+   nothing else fills the column. */
 .sidebar-footer {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
-  margin-top: 0.5rem;
+  margin-top: auto;
   padding-top: 0.5rem;
   border-top: 1px solid var(--line);
 }
@@ -632,7 +638,6 @@ body.sidebar-collapsed:not([data-sidebar-tooltip-hidden]) [data-tooltip]:focus-v
   opacity: 1;
   transform: translate(0, -50%);
 }
-body.sidebar-collapsed .sidebar-footer { margin-top: auto; }
 body.sidebar-collapsed .identity-card { justify-content: center; gap: 0; padding-left: 0; padding-right: 0; }
 body.sidebar-collapsed .sidebar-collapse .nav-ico { transform: rotate(180deg); }
 body.sidebar-collapsed .sidebar-brand { justify-content: center; padding: 0 0 0.5rem; }

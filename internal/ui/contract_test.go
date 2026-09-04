@@ -2683,6 +2683,45 @@ func TestSidebarDrawerWiring(t *testing.T) {
 	assertContains(t, "views/sidebar-drawer.js", "createFocusTrap", "the drawer must reuse createFocusTrap for focus containment")
 }
 
+// TestSidebarFooterPinnedToBottom pins the footer (identity card, About,
+// Collapse) to the bottom of the rail whether or not the Applications list is
+// rendered. #sidebar is a flex column whose only growing child is
+// .sidebar-apps; syncSidebar hides that region for viewer sessions and the
+// collapsed rail sets it display:none. With a fixed footer margin-top nothing
+// then fills the column and the footer sits directly under the section nav
+// with the rest of the rail empty. An auto margin absorbs the free space in
+// both cases. The list-to-footer gap must live on the list region, because the
+// auto margin resolves to zero whenever the list grows to fill the column.
+func TestSidebarFooterPinnedToBottom(t *testing.T) {
+	css := readStatic(t, "style.css")
+	footer := cssRuleBody(t, css, "\n.sidebar-footer {")
+	if !strings.Contains(footer, "margin-top: auto;") {
+		t.Fatalf(".sidebar-footer must set margin-top: auto so the footer reaches the bottom of the rail when #sidebar-apps is hidden (viewer sessions, collapsed rail); got:%s", footer)
+	}
+	apps := cssRuleBody(t, css, "\n.sidebar-apps {")
+	if !strings.Contains(apps, "margin-bottom: 0.5rem;") {
+		t.Fatalf(".sidebar-apps must carry the list-to-footer gap as margin-bottom: 0.5rem, since the footer's auto margin is zero whenever the list fills the column; got:%s", apps)
+	}
+}
+
+// cssRuleBody returns the declarations of the first rule whose selector is
+// exactly prefix. Anchoring on the leading newline keeps a bare ".sidebar-footer {"
+// from matching a descendant or state-scoped rule such as
+// "body.sidebar-collapsed .sidebar-footer {".
+func cssRuleBody(t *testing.T, css, prefix string) string {
+	t.Helper()
+	start := strings.Index(css, prefix)
+	if start < 0 {
+		t.Fatalf("style.css has no rule %q", strings.TrimSpace(prefix))
+	}
+	body := css[start+len(prefix):]
+	end := strings.Index(body, "}")
+	if end < 0 {
+		t.Fatalf("style.css rule %q is unterminated", strings.TrimSpace(prefix))
+	}
+	return body[:end]
+}
+
 // TestSidebarLayoutCSS pins the shell layout primitives.
 func TestSidebarLayoutCSS(t *testing.T) {
 	for _, needle := range []string{"#app-shell", "--sidebar-w", "body.sidebar-collapsed", "body.sidebar-open", "@media (max-width: 860px)"} {
@@ -2692,8 +2731,6 @@ func TestSidebarLayoutCSS(t *testing.T) {
 		"desktop sidebar must use the compact expanded panel and tool rail widths")
 	assertContains(t, "style.css", "body.sidebar-collapsed .nav-item,\nbody.sidebar-collapsed .sidebar-about,\nbody.sidebar-collapsed .sidebar-collapse { justify-content: center; padding-left: 0; padding-right: 0; }",
 		"collapsed sidebar controls must center their icons in the compact rail")
-	assertContains(t, "style.css", "body.sidebar-collapsed .sidebar-footer { margin-top: auto; }",
-		"collapsed sidebar footer controls must stay pinned to the bottom")
 	assertContains(t, "style.css", "body.sidebar-collapsed [data-tooltip]::before {",
 		"collapsed tooltips need a hover bridge between the rail control and popup")
 	assertContains(t, "style.css", "border-radius: var(--radius);",
