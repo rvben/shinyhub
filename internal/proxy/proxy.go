@@ -3177,7 +3177,7 @@ func rejectSupportBackendMismatch(w http.ResponseWriter, r *http.Request, slug s
 		return false
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", supportui.PageCSP)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusConflict)
 	_, _ = w.Write([]byte(supportui.ScopeBlockedPage(slug, user.SupportSession.ActorUsername, user.Username, user.SupportSession.ExpiresAt)))

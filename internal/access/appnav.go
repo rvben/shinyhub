@@ -9,6 +9,7 @@ import "github.com/rvben/shinyhub/internal/appnav"
 type Option func(*options)
 
 type options struct {
+	supportDashboardURL string
 	// nav carries the switcher's home URL and, by being non-nil, the fact that
 	// it is enabled at all. One pointer rather than a bool beside a string, so
 	// there is no state where the switcher is on with a home link nobody set.
@@ -54,4 +55,10 @@ func (o options) withAppNav(page []byte, slug, name string) []byte {
 		return page
 	}
 	return out
+}
+
+// WithSupportDashboard provides a trusted return destination even when the
+// optional application switcher is disabled.
+func WithSupportDashboard(dashboardURL string) Option {
+	return func(o *options) { o.supportDashboardURL = dashboardURL }
 }

@@ -699,7 +699,7 @@ func replaceWithRequiredFallback(resp *http.Response, scripts []pageScript) bool
 	resp.StatusCode = http.StatusConflict
 	resp.Status = strconv.Itoa(http.StatusConflict) + " " + http.StatusText(http.StatusConflict)
 	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
-	resp.Header.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+	resp.Header.Set("Content-Security-Policy", supportui.PageCSP)
 	resp.Header.Del("Content-Security-Policy-Report-Only")
 	resp.Header.Del("Content-Encoding")
 	resp.Header.Del("ETag")

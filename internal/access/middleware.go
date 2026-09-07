@@ -85,7 +85,7 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 				// here would hide that boundary from the administrator and hand a
 				// private app's sign-in page to someone who cannot use it. End the
 				// request on a page that says what is going on instead.
-				writeSupportPage(w, supportui.GuardOnlyPage(slug, guardedSession(st, guard.Value)))
+				writeSupportPage(w, supportui.GuardOnlyPage(slug, guardedSession(st, guard.Value), cfg.supportDashboardURL))
 				return
 			}
 			if user != nil && user.SupportSession != nil &&
@@ -146,7 +146,7 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 // and no-store keeps a stale copy from masking a later state change.
 func writeSupportPage(w http.ResponseWriter, page string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", supportui.PageCSP)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusConflict)
 	_, _ = w.Write([]byte(page))

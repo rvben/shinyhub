@@ -67,3 +67,25 @@ func TestGuardOnlyPageEscapesUntrustedValues(t *testing.T) {
 		t.Fatalf("bound slug not escaped in link: %s", page)
 	}
 }
+
+func TestGuardRecoveryAlwaysOffersTrustedDashboard(t *testing.T) {
+	for _, session := range []*GuardedSession{nil, {AppSlug: "sales", Active: true}, {AppSlug: "sales", Active: false}} {
+		for _, slug := range []string{"sales", "other"} {
+			page := GuardOnlyPage(slug, session, "https://hub.example.com/users")
+			if !strings.Contains(page, `href="https://hub.example.com/users">Return to ShinyHub</a>`) {
+				t.Fatal("missing trusted dashboard recovery link")
+			}
+			if !strings.Contains(page, pageScript) {
+				t.Fatal("missing locale enhancement")
+			}
+		}
+	}
+	for _, bad := range []string{"javascript:alert(1)", "//evil.example", "https://user:password@evil.example"} {
+		if strings.Contains(GuardOnlyPage("sales", nil, bad), ">Return to ShinyHub</a>") {
+			t.Fatalf("unsafe return link %q", bad)
+		}
+	}
+	if !strings.Contains(PageCSP, "script-src 'sha256-") || strings.Contains(PageCSP, "script-src 'unsafe-inline'") {
+		t.Fatal("safety page must allow only its exact script")
+	}
+}

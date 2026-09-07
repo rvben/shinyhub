@@ -2578,8 +2578,8 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// The pages these two middlewares answer with instead of the app - denied,
 	// and awaiting a first deploy - are dead ends for the same reason app pages
 	// are, so they carry the same switcher. Nothing but the switcher varies:
-	// with app_nav off, navOpts is empty and every page is what it was.
-	var navOpts []access.Option
+	// Support recovery stays available independently of the optional app switcher.
+	navOpts := []access.Option{access.WithSupportDashboard(strings.TrimRight(cfg.Server.BaseURL, "/") + "/users")}
 	if cfg.Server.AppNavEnabled() {
 		navOpts = append(navOpts, access.WithAppNav(appNavHomeURL(cfg)))
 	}
@@ -2596,7 +2596,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	mux.Handle("/app/", appHandler)
 	if cfg.Auth.SupportSessions {
 		mux.HandleFunc("POST /app/{slug}/.shinyhub/support-session/stop",
-			supportSessionStopHandler(store, cfg.Auth.Secret, strings.TrimRight(cfg.Server.BaseURL, "/")+"/#users", cfg.TrustedProxyNets))
+			supportSessionStopHandler(store, cfg.Auth.Secret, strings.TrimRight(cfg.Server.BaseURL, "/")+"/users?support=ended", cfg.TrustedProxyNets))
 	}
 	// The per-app favicon is access-controlled exactly like the app. Register it
 	// as a more-specific pattern than /app/ so it never reaches the app backend.

@@ -31,3 +31,17 @@ test('mountUsers shows the view, loads users, updates nav, and unmount hides it'
   handle.unmount();
   assert.equal(view.hidden, true, 'view must be hidden on unmount');
 });
+
+
+test('returning from support announces the restored identity once and preserves other URL state', () => {
+  const dom = fixture();
+  dom.window.history.replaceState(null, '', '/users?support=ended&filter=viewer#people');
+  const messages = [];
+  const ctx = { loadUsers() {}, updateActiveNav() {}, flashToast: message => messages.push(message) };
+  mountUsers(ctx);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /administrator identity is active/);
+  assert.equal(location.pathname + location.search + location.hash, '/users?filter=viewer#people');
+  mountUsers(ctx);
+  assert.equal(messages.length, 1);
+});

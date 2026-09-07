@@ -181,7 +181,7 @@ func supportSessionStopHandler(store *db.Store, jwtSecret, returnURL string, tru
 			if !strings.Contains(r.Header.Get("Accept"), "application/json") {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.Header().Set("Cache-Control", "no-store")
-				w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+				w.Header().Set("Content-Security-Policy", supportui.PageCSP)
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(supportui.BlockedPageWithError(slug, support.ActorUsername, user.Username,
 					"The support session could not be ended. Try again; automatic expiry remains in force.", support.ExpiresAt)))

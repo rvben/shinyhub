@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"html"
+	"net/url"
 	"strconv"
 	"time"
 )
@@ -19,6 +20,17 @@ var bannerScript string
 var CSPHash = func() string {
 	sum := sha256.Sum256([]byte(bannerScript))
 	return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+}()
+
+// PageCSP admits only the locale enhancement shipped with our safety pages.
+// Navigation and the native stop form remain usable without JavaScript.
+//
+//go:embed assets/page.js
+var pageScript string
+
+var PageCSP = func() string {
+	sum := sha256.Sum256([]byte(pageScript))
+	return "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; script-src 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
 }()
 
 // Snippet renders the invariant script body with all request-specific values
@@ -117,19 +129,28 @@ type GuardedSession struct {
 // outside the app the session is bound to, or its app-scoped cookie is gone;
 // either way the app must not be shown, anonymously or otherwise, until the
 // guard expires. session is nil when the guard's ID is unknown here.
-func GuardOnlyPage(slug string, session *GuardedSession) string {
+func GuardOnlyPage(slug string, session *GuardedSession, dashboardURL ...string) string {
+	returnLink := ""
+	if len(dashboardURL) > 0 {
+		// The destination comes from server configuration, never request headers.
+		u, err := url.Parse(dashboardURL[0])
+		if err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" && u.User == nil {
+			returnLink = `<p><a href="` + html.EscapeString(u.String()) + `">Return to ShinyHub</a></p>`
+		}
+	}
+
 	if session == nil {
 		return pageShell("Support session guard active",
 			`<p>This browser carries a ShinyHub support-session guard, but the session it refers to could not be identified here. The app has not been displayed.</p>`+
-				`<p>Apps on this origin stay signed out until the guard expires.</p>`)
+				`<p>Apps remain signed out until this restriction expires. Return to ShinyHub to check or end your current support session.</p>`+returnLink)
 	}
 	deadline := session.ExpiresAt.UTC().Format(time.RFC3339)
 	deadlineTime := `<time datetime="` + html.EscapeString(deadline) + `">` + html.EscapeString(deadline) + `</time>`
 	if !session.Active {
 		return pageShell("Support session ended",
 			`<p>This support session has ended. The app has not been displayed.</p>`+
-				`<p>Apps on this origin stay signed out until the session's original deadline, `+deadlineTime+`, so a delayed request cannot restore an administrator identity here.</p>`+
-				`<p>The support identity was <strong>`+html.EscapeString(session.Subject)+`</strong>. <strong>`+html.EscapeString(session.Actor)+`</strong> was the administrator.</p>`)
+				`<p>You can return to ShinyHub now. Apps in this browser remain signed out until the original deadline, `+deadlineTime+`.</p>`+
+				`<p>The support identity was <strong>`+html.EscapeString(session.Subject)+`</strong>. <strong>`+html.EscapeString(session.Actor)+`</strong> was the administrator.</p>`+returnLink)
 	}
 	bound := html.EscapeString(session.AppSlug)
 	identity := `<p>The active support identity is <strong>` + html.EscapeString(session.Subject) + `</strong>. It expires automatically by ` + deadlineTime + `. <strong>` + html.EscapeString(session.Actor) + `</strong> remains the administrator.</p>`
@@ -139,13 +160,13 @@ func GuardOnlyPage(slug string, session *GuardedSession) string {
 		return pageShell("Support session paused",
 			`<p>This support session is bound to this app, but its app-scoped cookie is missing or no longer valid in this browser. The app has not been displayed.</p>`+
 				identity+
-				`<p>End the session from the ShinyHub dashboard, or wait for it to expire.</p>`)
+				`<p>Return to ShinyHub to end this session, or wait for it to expire.</p>`+returnLink)
 	}
 	return pageShell("Support session paused",
 		`<p>This support session is bound to the app at <strong>/app/`+bound+`/</strong>. The app at this address is outside its scope and has not been displayed.</p>`+
 			identity+
 			`<p><a href="/app/`+bound+`/">Return to the support session</a></p>`+
-			stopForm(session.AppSlug, "End support session"))
+			stopForm(session.AppSlug, "End support session")+returnLink)
 }
 
 func stopForm(slug, label string) string {
@@ -163,5 +184,5 @@ func pageShell(title, body string) string {
 		`h1{font-size:24px;letter-spacing:-.02em;margin:0 0 12px;color:#fbbf24}p{line-height:1.6;color:#dce5f2}strong{color:#fff}a{color:#fbbf24}` +
 		`button{min-height:44px;margin-top:12px;border:0;border-radius:8px;background:#f59e0b;color:#241604;padding:10px 14px;font:700 14px inherit;cursor:pointer}` +
 		`button:focus-visible,a:focus-visible{outline:3px solid #fff8e7;outline-offset:3px}</style><main><h1>` + html.EscapeString(title) + `</h1>` +
-		body + `</main></html>`
+		body + `</main><script>` + pageScript + `</script></html>`
 }
