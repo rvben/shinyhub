@@ -15,6 +15,7 @@ import (
 	"net/http/pprof"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -997,7 +998,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Preflight the handoff's re-exec target now: a SIGHUP re-execs argv[0], and
 	// an unresolvable argv[0] fails every upgrade attempt (the process keeps
 	// serving, so the failure is safe but silent until upgrade time).
-	if _, rerr := upgrade.ResolveReexecTarget(os.Args[0]); rerr != nil {
+	if _, rerr := exec.LookPath(os.Args[0]); rerr != nil {
 		logger.Warn("zero-downtime upgrade preflight: cannot resolve re-exec target; SIGHUP upgrades will fail and this process will keep serving",
 			"argv0", os.Args[0], "err", rerr)
 	}

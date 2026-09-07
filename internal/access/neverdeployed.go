@@ -73,7 +73,7 @@ func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked au
 				next.ServeHTTP(w, r)
 				return
 			}
-			user := extractUser(r, jwtSecret, revoked, userLookup)
+			user := ResolveOptionalUser(r, jwtSecret, revoked, userLookup)
 			manager := canManageApp(st, app, user)
 
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -361,7 +361,7 @@ func (r *LogReader) SnapshotTail(n int) ([]logstream.Record, int64, error) {
 	}
 
 	const chunkSize = 32 * 1024
-	var data []byte
+	var chunks [][]byte
 	pos := end
 	newlines := 0
 	for pos > 0 && newlines <= n {
@@ -374,8 +374,17 @@ func (r *LogReader) SnapshotTail(n int) ([]logstream.Record, int64, error) {
 		if _, err := f.ReadAt(chunk, pos); err != nil && err != io.EOF {
 			return nil, 0, err
 		}
-		data = append(chunk, data...)
-		newlines = bytes.Count(data, []byte{'\n'})
+		chunks = append(chunks, chunk)
+		newlines += bytes.Count(chunk, []byte{'\n'})
+	}
+	// Assemble once in file order; prepending each chunk would repeatedly copy
+	// the whole suffix for long lines or large tail requests.
+	data := chunks[0]
+	if len(chunks) > 1 {
+		data = make([]byte, 0, end-pos)
+		for i := len(chunks) - 1; i >= 0; i-- {
+			data = append(data, chunks[i]...)
+		}
 	}
 	records := logstream.RecordsFromBytes(data, pos)
 	if len(records) > n {

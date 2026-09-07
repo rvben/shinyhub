@@ -318,11 +318,10 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusConflict, db.ErrScheduleNameExists.Error())
 				return
 			}
-			existingCmdJSON, _ := json.Marshal(req.Command) // re-serialize for comparison
 			tzMatch := (storedTZ == nil && existing.Timezone == nil) ||
 				(storedTZ != nil && existing.Timezone != nil && *storedTZ == *existing.Timezone)
 			if existing.CronExpr == req.CronExpr &&
-				existing.CommandJSON == string(existingCmdJSON) &&
+				existing.CommandJSON == string(cmdJSON) &&
 				existing.Enabled == enabled &&
 				existing.TimeoutSeconds == req.TimeoutSeconds &&
 				existing.OverlapPolicy == req.OverlapPolicy &&

@@ -2,6 +2,7 @@ package access
 
 import (
 	"errors"
+	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -198,27 +199,11 @@ func decide(st store, app *db.App, user *auth.ContextUser) (int, error) {
 	return http.StatusOK, nil
 }
 
-// extractUser authenticates the request strictly from the session cookie.
-// Authorization headers are intentionally ignored: /app/* is the path a
-// Shiny app's own frontend uses to talk back to its own backend, and
-// those calls regularly carry an `Authorization: Bearer ...` (or `Basic`)
-// header meant for the embedded app. Routing that header into ShinyHub's
-// JWT validator would reject perfectly valid browser sessions with a
-// spurious 401. CLI/SDK callers use /api/* instead.
-//
-// When userLookup is supplied, the JWT-claimed identity is re-resolved
-// against the live database on every request; this defeats stale-claim
-// attacks where a demoted admin's still-valid JWT would otherwise keep
-// granting bypass access until token expiry. With nil userLookup the
-// claim-derived role is used as-is - that path exists only for tests
-// that pre-date the live-resolve plumbing.
-func extractUser(r *http.Request, secret string, revoked auth.RevocationChecker, userLookup auth.UserLookup) *auth.ContextUser {
-	return ResolveOptionalUser(r, secret, revoked, userLookup)
-}
-
 // ResolveOptionalUser resolves the authenticated identity from the request's
 // session cookie, returning nil when the request is anonymous or the token is
-// invalid/revoked. It never writes an HTTP error response, making it suitable
+// invalid/revoked. Authorization headers belong to the embedded app and are
+// ignored. A supplied user lookup revalidates the identity against the live store.
+// It never writes an HTTP error response, making it suitable
 // for optional-auth routes where anonymous callers must still be served.
 //
 // The resolved user (if any) is NOT placed into the request context by this
@@ -401,8 +386,8 @@ func renderLoginRedirectPage(headline, nextURL string) []byte {
 </body>
 </html>`
 	out := strings.NewReplacer(
-		"HEADLINE", htmlEscape(headline),
-		"LOGIN", htmlEscape(loginHref),
+		"HEADLINE", html.EscapeString(headline),
+		"LOGIN", html.EscapeString(loginHref),
 	).Replace(tpl)
 	return []byte(out)
 }
@@ -439,15 +424,10 @@ func renderHandoffPage(headline, nextURL string) []byte {
 </body>
 </html>`
 	out := strings.NewReplacer(
-		"HEADLINE", htmlEscape(headline),
-		"NEXT", htmlEscape(nextURL),
+		"HEADLINE", html.EscapeString(headline),
+		"NEXT", html.EscapeString(nextURL),
 	).Replace(tpl)
 	return []byte(out)
-}
-
-func htmlEscape(s string) string {
-	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;", "'", "&#39;")
-	return r.Replace(s)
 }
 
 // extractSlug parses the slug from /app/:slug/... paths.

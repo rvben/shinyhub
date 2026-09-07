@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -3570,5 +3571,56 @@ func TestPatchApp_MinWarmReplicasRejectsAboveMax(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "min_warm_replicas must be between 0 and 1000") {
 		t.Errorf("expected bound error message, got %q", rec.Body.String())
+	}
+}
+
+func TestListAppsPagination(t *testing.T) {
+	srv, store, token := projectEnv(t)
+	owner, err := store.GetUserByUsername("owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, slug := range []string{"page-a", "page-b", "page-c"} {
+		if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: owner.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	router := srv.Router()
+	read := func(t *testing.T, query string) []db.App {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, authedRequest(t, "GET", "/api/apps"+query, nil, token))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list: %d: %s", rec.Code, rec.Body.String())
+		}
+		var env struct {
+			Items []db.App `json:"items"`
+			Total int      `json:"total"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		if env.Total != 3 || env.Items == nil {
+			t.Fatalf("total=%d items=%v, want total=3 and a JSON array", env.Total, env.Items)
+		}
+		return env.Items
+	}
+	all := read(t, "")
+	for _, tc := range []struct {
+		query      string
+		start, end int
+	}{
+		{"?limit=1&offset=1", 1, 2},
+		{"?offset=1", 1, 3},
+		{"?limit=1&offset=99", 3, 3},
+		{"?limit=" + strconv.Itoa(math.MaxInt) + "&offset=1", 1, 3},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			got, _ := json.Marshal(read(t, tc.query))
+			want, _ := json.Marshal(all[tc.start:tc.end])
+			if !bytes.Equal(got, want) {
+				t.Fatalf("page=%s, want %s", got, want)
+			}
+		})
 	}
 }

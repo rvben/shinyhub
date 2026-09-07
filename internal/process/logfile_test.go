@@ -354,3 +354,45 @@ func TestLogReaderFollowFromRecoversAfterRotation(t *testing.T) {
 		t.Fatal("timed out waiting for rotated output")
 	}
 }
+
+func TestSnapshotTail_LongLinesAcrossChunks(t *testing.T) {
+	line := strings.Repeat("x", 96*1024)
+	for _, suffix := range []string{"", "\n"} {
+		t.Run(fmt.Sprintf("trailing_newline=%t", suffix != ""), func(t *testing.T) {
+			content := "discard\n" + line + "\nlast" + suffix
+			records, cursor, err := tailReaderWith(t, content).SnapshotTail(2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cursor != int64(len(content)) || len(records) != 2 {
+				t.Fatalf("cursor=%d records=%d", cursor, len(records))
+			}
+			if records[0].Line != line || records[0].EndOffset != int64(len("discard\n")+len(line)+1) {
+				t.Fatal("long line or its cursor changed across chunk boundaries")
+			}
+			if records[1].Line != "last" || records[1].EndOffset != cursor {
+				t.Fatalf("last record = %+v", records[1])
+			}
+		})
+	}
+}
+
+func BenchmarkSnapshotTail(b *testing.B) {
+	for _, size := range []int{1024, 4 * 1024 * 1024} {
+		b.Run(fmt.Sprintf("line_bytes=%d", size), func(b *testing.B) {
+			path := filepath.Join(b.TempDir(), "app.log")
+			if err := os.WriteFile(path, []byte(strings.Repeat("x", size)+"\n"), 0o600); err != nil {
+				b.Fatal(err)
+			}
+			reader := NewLogReader(path)
+			b.ReportAllocs()
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for b.Loop() {
+				if _, _, err := reader.SnapshotTail(1); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

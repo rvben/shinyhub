@@ -35,14 +35,14 @@ func NewFleetSignal(prx *Proxy, store fleetStore, log *slog.Logger) *FleetSignal
 	return &FleetSignal{prx: prx, store: store, log: log}
 }
 
-// fleetReplicaSessionCounts returns the per-index fleet-wide sum of active
+// ReplicaSessionCounts returns the per-index fleet-wide sum of active
 // sessions for slug from the replica_sessions table.
 //
 // It resolves slug's numeric app ID from the proxy pool. If the pool is not
 // registered or has no app ID set, or if no non-stale rows exist, it returns
 // an empty/nil slice. The autoscaler's existing len(counts)==0 early-return
 // then fires, so the controller takes no action rather than over-scaling.
-func (f *FleetSignal) fleetReplicaSessionCounts(slug string) []int64 {
+func (f *FleetSignal) ReplicaSessionCounts(slug string) []int64 {
 	appID, ok := f.prx.appIDForSlug(slug)
 	if !ok {
 		return nil
@@ -57,18 +57,6 @@ func (f *FleetSignal) fleetReplicaSessionCounts(slug string) []int64 {
 		return nil
 	}
 	return active
-}
-
-// ReplicaSessionCounts satisfies the autoscale.Signal interface by returning
-// the fleet-wide count. The autoscaler always calls this method; the name
-// matches the interface so FleetSignal can be used wherever *Proxy is used
-// today as a Signal.
-//
-// Callers that need the exact local in-memory count (UI/app-detail API,
-// admission, scale-drain) use *Proxy.ReplicaSessionCounts directly; the
-// FleetSignal adapter is only passed to the autoscaler.
-func (f *FleetSignal) ReplicaSessionCounts(slug string) []int64 {
-	return f.fleetReplicaSessionCounts(slug)
 }
 
 // RejectsByReason delegates to the underlying proxy unchanged. The rejection

@@ -66,7 +66,7 @@ func writeList[T any](w http.ResponseWriter, items []T, limit, offset int, extra
 		start = total
 	}
 	end := total
-	if limit > 0 && start+limit < end {
+	if limit > 0 && limit < end-start {
 		end = start + limit
 	}
 	writeListPage(w, items[start:end], total, limit, offset, extra)

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"math"
 	"net/http/httptest"
 	"testing"
 )
@@ -118,5 +119,15 @@ func TestWriteList_ExtraEnvelopeKeys(t *testing.T) {
 	// Extra keys never clobber the standard envelope fields.
 	if env["total"] != float64(1) {
 		t.Errorf("total = %v, want 1", env["total"])
+	}
+}
+
+func TestWriteList_LargeLimitDoesNotOverflow(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeList(rec, []int{1, 2, 3}, math.MaxInt, 1, nil)
+	env := decodeEnvelope(t, rec)
+	items := env["items"].([]any)
+	if len(items) != 2 || items[0] != float64(2) || items[1] != float64(3) {
+		t.Fatalf("page = %v, want [2 3]", items)
 	}
 }

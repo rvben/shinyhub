@@ -50,9 +50,8 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 
 	limit, offset := parsePagination(r)
 
-	// Fetch the full (bounded) app set; writeList paginates in-memory so the
-	// envelope carries an accurate total. The dashboard polls this list, so the
-	// count stays small.
+	// Fetch visible apps to count and apply token scope before pagination.
+	// Only load replica state and decorate apps on the requested page.
 	var (
 		apps []*db.App
 		err  error
@@ -76,6 +75,17 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		apps = scoped
+	}
+	total := len(apps)
+	start := min(offset, total)
+	end := total
+	if limit > 0 && limit < end-start {
+		end = start + limit
+	}
+	apps = apps[start:end]
+	if len(apps) == 0 {
+		writeListPage(w, apps, total, limit, offset, nil)
+		return
 	}
 	managedSlugs := map[string]struct{}{}
 	if !u.IsServiceAccount() && !isPrivilegedAppOperator(u) {
@@ -116,7 +126,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		}
 		a.ProjectName, a.ProjectIconEmoji = disp.decorate(a.ProjectSlug)
 	}
-	writeList(w, apps, limit, offset, nil)
+	writeListPage(w, apps, total, limit, offset, nil)
 }
 
 // liveReplicaView returns a detached replica slice with the single-node process

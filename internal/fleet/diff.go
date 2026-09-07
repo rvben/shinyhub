@@ -240,7 +240,7 @@ func unmanagedConfig(app AppEntry, o ObservedApp) []UnmanagedConfigItem {
 	if c.Autoscale == nil && o.Autoscale != nil &&
 		(o.Autoscale.Enabled || o.Autoscale.MinReplicas != 0 || o.Autoscale.MaxReplicas != 0 || o.Autoscale.Target != 0) {
 		out = append(out, UnmanagedConfigItem{
-			Key: "autoscale", Server: autoscaleDisplay(o.Autoscale.Enabled, o.Autoscale.MinReplicas, o.Autoscale.MaxReplicas, o.Autoscale.Target), Default: "off",
+			Key: "autoscale", Server: AutoscaleDisplay(o.Autoscale.Enabled, o.Autoscale.MinReplicas, o.Autoscale.MaxReplicas, o.Autoscale.Target), Default: "off",
 		})
 	}
 	return out
@@ -303,21 +303,21 @@ func appendAutoscaleDrift(d []ConfigDriftItem, desired *AutoscaleConfig, o *Obse
 	}
 	server := "(unset)"
 	if o != nil {
-		server = autoscaleDisplay(o.Enabled, o.MinReplicas, o.MaxReplicas, o.Target)
+		server = AutoscaleDisplay(o.Enabled, o.MinReplicas, o.MaxReplicas, o.Target)
 	}
 	return append(d, ConfigDriftItem{
 		Key:     "autoscale",
 		Server:  server,
-		Desired: autoscaleDisplay(enabled, desired.MinReplicas, desired.MaxReplicas, desired.Target),
+		Desired: AutoscaleDisplay(enabled, desired.MinReplicas, desired.MaxReplicas, desired.Target),
 	})
 }
 
-// autoscaleDisplay renders an autoscale policy as a compact drift string:
+// AutoscaleDisplay renders an autoscale policy as a compact drift string:
 // "off" when disabled with no remembered bounds, "off (min-max)" when disabled
 // but carrying bounds (so a bounds-only change is not shown as "off -> off"),
 // else "on(min-max @ target)" with target as a two-decimal fraction, or
 // "@ default" when target is 0 (inherit the runtime default).
-func autoscaleDisplay(enabled bool, min, max int, target float64) string {
+func AutoscaleDisplay(enabled bool, min, max int, target float64) string {
 	if !enabled {
 		if min == 0 && max == 0 && target == 0 {
 			return "off"
@@ -331,13 +331,6 @@ func autoscaleDisplay(enabled bool, min, max int, target float64) string {
 		return fmt.Sprintf("on(%d-%d @ %.2f)", min, max, target)
 	}
 	return fmt.Sprintf("on(%d-%d @ default)", min, max)
-}
-
-// AutoscaleDisplay exposes the canonical fleet comparison format to the API.
-// Persisted declarations and live app values must use one formatter or a
-// cosmetic difference could be mistaken for temporary drift.
-func AutoscaleDisplay(enabled bool, min, max int, target float64) string {
-	return autoscaleDisplay(enabled, min, max, target)
 }
 
 // DeclaredState returns every value governed by the effective declaration
