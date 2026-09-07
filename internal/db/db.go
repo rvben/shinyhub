@@ -654,3 +654,6 @@ func (s *Store) PingContext(ctx context.Context) error {
 func (s *Store) DB() Execer {
 	return s.db
 }
+
+// Stats returns connection-pool telemetry without exposing the raw connection.
+func (s *Store) Stats() sql.DBStats { return s.db.real.Stats() }

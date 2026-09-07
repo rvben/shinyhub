@@ -1520,6 +1520,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	var metricsReg *metrics.Registry
 	if cfg.Metrics.Enabled {
 		reg := metrics.New(version)
+		reg.RegisterDBStats(store.Stats)
 		metricsReg = reg
 		if usageRecorder != nil {
 			usageRecorder.SetMetrics(reg)

@@ -543,3 +543,11 @@ clispec-check:
 clispec-score: clispec-check build ## Score the binary against clispec v0.3
 	@$(CLISPEC) --output json score ./bin/shinyhub hosts > /tmp/clispec-score.json
 	@python3 -c "import json; d=json.load(open('/tmp/clispec-score.json')); s,m=d['score'],d['max']; print(f'clispec score: {s}/{m}'); raise SystemExit(0 if s==m else 1)"
+
+.PHONY: load-test-mixed test-load-mixed
+load-test-mixed: ## Profile a disposable Linux server with mixed HTTP, WebSocket, reporting and wake traffic
+	python3 loadtest/mixed/run.py
+
+test-load-mixed: ## Validate the mixed-load verdicts and database telemetry without Docker
+	python3 -m unittest discover -s loadtest/mixed -p 'test_*.py'
+	go test ./internal/metrics -run TestDatabasePoolTelemetryTracksCurrentStats

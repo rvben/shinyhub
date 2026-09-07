@@ -224,3 +224,14 @@ make load-test LT_SLUG=demo LT_SESSIONS=1000 LT_RAMP=60s LT_HOLD=30s
 `loadtest/results/` is gitignored (all files except `.gitignore`). Results
 are local to the machine that ran the test. Copy them out before deleting the
 working tree if you want to keep them.
+
+## Mixed traffic and saturation on Linux
+
+`make load-test-mixed` creates a disposable local Linux server with file-backed
+SQLite, deploys deterministic fixtures, and increases independent HTTP and
+WebSocket load while reporting and sleep/wake operations run concurrently. It
+records latency percentiles, failed and dropped work, CPU/memory, database-pool
+waits, durable usage counts, and CPU profiles. The runner owns and cleans up its
+container and database; it never targets an existing server. See
+[the mixed-load rig](../loadtest/mixed/README.md) for controls, workload limits,
+repeatable commands, and evidence interpretation.

@@ -310,3 +310,18 @@ client/edge trace links through ShinyHub to the app it proxies.
 This reuses the existing `tracing` config block; there is no separate
 server-tracing switch. See [tracing.md](tracing.md) for the configuration
 fields and the per-app proxy trace buffer.
+
+### Database connection pool
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `shinyhub_db_open_connections` | gauge | Open connections, including idle connections. |
+| `shinyhub_db_in_use_connections` | gauge | Connections currently borrowed by database operations. |
+| `shinyhub_db_max_open_connections` | gauge | Configured pool limit; zero means unlimited. |
+| `shinyhub_db_wait_count_total` | counter | Connection acquisitions that had to wait for the pool. |
+| `shinyhub_db_wait_duration_seconds_total` | counter | Cumulative time waiting to acquire a connection. |
+
+These metrics observe the server's actual pool and carry no DSN or query-text
+labels. Wait time excludes query execution and SQLite lock contention. Compare
+counter increases over the same interval as request latency and CPU usage;
+connection waits alone do not identify a slow query.
