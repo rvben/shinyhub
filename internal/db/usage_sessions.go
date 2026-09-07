@@ -267,10 +267,11 @@ func (s *Store) usageDurationExpr() string {
 	// modernc SQLite serializes time.Time with a trailing zone name that its
 	// date functions do not parse. The first 19 characters are the normalized
 	// UTC wall clock written by every recorder and remain parseable for both
-	// RFC3339 (T separator) and SQLite's native timestamp format.
+	// RFC3339 (T separator) and SQLite's native timestamp format. unixepoch
+	// returns integer seconds directly, avoiding text formatting and coercion.
 	return `MAX(0,
-		strftime('%s', substr(CAST(COALESCE(ended_at, heartbeat_at) AS TEXT), 1, 19)) -
-		strftime('%s', substr(CAST(started_at AS TEXT), 1, 19)))`
+		unixepoch(substr(CAST(COALESCE(ended_at, heartbeat_at) AS TEXT), 1, 19)) -
+		unixepoch(substr(CAST(started_at AS TEXT), 1, 19)))`
 }
 
 func (s *Store) usageDateExpr() string {
@@ -287,6 +288,70 @@ func (s *Store) usageViewerExpr() string {
 		WHEN user_id IS NOT NULL THEN 'u:' || CAST(user_id AS TEXT)
 		WHEN viewer_key IS NOT NULL THEN 'p:' || viewer_key
 		ELSE NULL END`
+}
+
+// usageRawAggregates derives headline and daily counts from the same grouped
+// scan. Cross-day uniqueness cannot be summed, so it is queried independently
+// in a scalar subquery when the policy permits identities. Keeping it in the
+// same statement gives uniqueness and eligibility the same database snapshot.
+func (s *Store) usageRawAggregates(ctx context.Context, appID int64, cutoff, activeCutoff time.Time, identityMode string) (UsageSummary, []UsageDay, int64, int64, error) {
+	var summary UsageSummary
+	var days []UsageDay
+	var eligibleTotal, unique int64
+	uniqueExpr, summaryUniqueExpr := "0", "0"
+	var args []any
+	if identityMode != "unattributed" {
+		uniqueExpr = "COUNT(DISTINCT " + s.usageViewerExpr() + ")"
+		summaryUniqueExpr = "(SELECT " + uniqueExpr + " FROM usage_sessions WHERE app_id = ? AND started_at >= ?)"
+		args = append(args, appID, cutoff)
+	}
+	args = append(args, identityMode, identityMode, activeCutoff, appID, cutoff)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+s.usageDateExpr()+`, COUNT(*), `+uniqueExpr+`, `+summaryUniqueExpr+`,
+		SUM(CASE WHEN principal_kind = 'person' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN principal_kind = 'anonymous' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN principal_kind = 'service_account' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN principal_kind = 'person' AND
+		  ((? = 'identified' AND identity_mode = 'identified' AND user_id IS NOT NULL) OR
+		   (? = 'pseudonymous' AND identity_mode = 'pseudonymous' AND viewer_key IS NOT NULL))
+		  THEN 1 ELSE 0 END),
+		SUM(CASE WHEN ended_at IS NULL AND heartbeat_at >= ? THEN 1 ELSE 0 END),
+		COALESCE(SUM(`+s.usageDurationExpr()+`), 0), MAX(started_at)
+		FROM usage_sessions WHERE app_id = ? AND started_at >= ? GROUP BY 1 ORDER BY 1`,
+		args...)
+	if err != nil {
+		return summary, nil, 0, 0, fmt.Errorf("usage daily aggregates: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var day UsageDay
+		var dayUnique, eligible, active, duration int64
+		var last any
+		if err := rows.Scan(&day.Date, &day.Sessions, &dayUnique, &unique, &day.AuthenticatedSessions,
+			&day.AnonymousSessions, &day.ServiceSessions, &eligible, &active, &duration, &last); err != nil {
+			return summary, nil, 0, 0, fmt.Errorf("scan usage daily aggregates: %w", err)
+		}
+		if identityMode != "unattributed" && eligible == day.AuthenticatedSessions {
+			day.UniqueViewers = &dayUnique
+		}
+		days = append(days, day)
+		summary.Sessions += day.Sessions
+		summary.AuthenticatedSessions += day.AuthenticatedSessions
+		summary.AnonymousSessions += day.AnonymousSessions
+		summary.ServiceSessions += day.ServiceSessions
+		summary.ActiveSessions += active
+		summary.TotalDurationSeconds += duration
+		eligibleTotal += eligible
+		if parsed, ok := usageTime(last); ok && (summary.LastOpenedAt == nil || parsed.After(*summary.LastOpenedAt)) {
+			summary.LastOpenedAt = &parsed
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return summary, nil, 0, 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return summary, nil, 0, 0, err
+	}
+	return summary, days, unique, eligibleTotal, nil
 }
 
 // AppUsageReport returns bounded aggregates and, when includeIdentities is
@@ -310,38 +375,11 @@ func (s *Store) AppUsageReport(ctx context.Context, appID int64, window time.Dur
 		Viewers: []UsageViewer{},
 		Recent:  []UsageRecentSession{},
 	}
-	var last any
-	var uniqueViewers int64
-	var eligiblePersonRows int64
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*),
-		       COUNT(DISTINCT `+s.usageViewerExpr()+`),
-		       COALESCE(SUM(CASE WHEN principal_kind = 'person' THEN 1 ELSE 0 END), 0),
-		       COALESCE(SUM(CASE WHEN principal_kind = 'anonymous' THEN 1 ELSE 0 END), 0),
-		       COALESCE(SUM(CASE WHEN principal_kind = 'service_account' THEN 1 ELSE 0 END), 0),
-		       COALESCE(SUM(CASE WHEN principal_kind = 'person' AND
-		         ((? = 'identified' AND identity_mode = 'identified' AND user_id IS NOT NULL) OR
-		          (? = 'pseudonymous' AND identity_mode = 'pseudonymous' AND viewer_key IS NOT NULL))
-		         THEN 1 ELSE 0 END), 0),
-		       COALESCE(SUM(CASE WHEN ended_at IS NULL AND heartbeat_at >= ? THEN 1 ELSE 0 END), 0),
-		       COALESCE(SUM(`+duration+`), 0), MAX(started_at)
-		FROM usage_sessions WHERE app_id = ? AND started_at >= ?`, identityMode, identityMode, activeCutoff, appID, cutoff).Scan(
-		&report.Summary.Sessions,
-		&uniqueViewers,
-		&report.Summary.AuthenticatedSessions,
-		&report.Summary.AnonymousSessions,
-		&report.Summary.ServiceSessions,
-		&eligiblePersonRows,
-		&report.Summary.ActiveSessions,
-		&report.Summary.TotalDurationSeconds,
-		&last,
-	)
+	rawSummary, rawDays, uniqueViewers, eligiblePersonRows, err := s.usageRawAggregates(ctx, appID, cutoff, activeCutoff, identityMode)
 	if err != nil {
-		return report, fmt.Errorf("usage summary: %w", err)
+		return report, err
 	}
-	if parsed, ok := usageTime(last); ok {
-		report.Summary.LastOpenedAt = &parsed
-	}
+	report.Summary = rawSummary
 	rawPeak, rawDailyPeaks, err := s.usageConcurrencyPeaks(ctx, s.db, appID, cutoff, now, now)
 	if err != nil {
 		return report, fmt.Errorf("usage concurrency peaks: %w", err)
@@ -403,33 +441,7 @@ func (s *Store) AppUsageReport(ctx context.Context, appID int64, window time.Dur
 		return report, err
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT `+s.usageDateExpr()+`, COUNT(*), COUNT(DISTINCT `+s.usageViewerExpr()+`),
-		       SUM(CASE WHEN principal_kind = 'person' THEN 1 ELSE 0 END),
-		       SUM(CASE WHEN principal_kind = 'anonymous' THEN 1 ELSE 0 END),
-		       SUM(CASE WHEN principal_kind = 'service_account' THEN 1 ELSE 0 END),
-		       SUM(CASE WHEN principal_kind = 'person' AND
-		         ((? = 'identified' AND identity_mode = 'identified' AND user_id IS NOT NULL) OR
-		          (? = 'pseudonymous' AND identity_mode = 'pseudonymous' AND viewer_key IS NOT NULL))
-		         THEN 1 ELSE 0 END)
-		FROM usage_sessions
-		WHERE app_id = ? AND started_at >= ?
-		GROUP BY 1 ORDER BY 1`, identityMode, identityMode, appID, cutoff)
-	if err != nil {
-		return report, fmt.Errorf("usage daily: %w", err)
-	}
-	for rows.Next() {
-		var day UsageDay
-		var dayUnique int64
-		var dayEligible int64
-		if err := rows.Scan(&day.Date, &day.Sessions, &dayUnique,
-			&day.AuthenticatedSessions, &day.AnonymousSessions, &day.ServiceSessions, &dayEligible); err != nil {
-			rows.Close()
-			return report, fmt.Errorf("scan usage day: %w", err)
-		}
-		if identityMode != "unattributed" && dayEligible == day.AuthenticatedSessions {
-			day.UniqueViewers = &dayUnique
-		}
+	for _, day := range rawDays {
 		if existing, ok := daysByDate[day.Date]; ok {
 			rolledPeople := existing.AuthenticatedSessions
 			existing.Sessions += day.Sessions
@@ -446,12 +458,6 @@ func (s *Store) AppUsageReport(ctx context.Context, appID int64, window time.Dur
 		} else {
 			daysByDate[day.Date] = day
 		}
-	}
-	if err := rows.Close(); err != nil {
-		return report, err
-	}
-	if err := rows.Err(); err != nil {
-		return report, err
 	}
 	for key, peak := range rawDailyPeaks {
 		day := daysByDate[key]

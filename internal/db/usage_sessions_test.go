@@ -469,3 +469,47 @@ func TestAppUsageReportWithholdsUniqueViewersAcrossIdentityTransitions(t *testin
 		}
 	}
 }
+
+func TestAppUsageReportDurationEncodingsAndSecondBoundaries(t *testing.T) {
+	dbtest.SkipIfPostgres(t) // Exercises SQLite's supported timestamp encodings.
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "duration-owner", "developer")
+	app := mustCreateApp(t, store, "duration-encodings", owner.ID)
+	base := time.Now().UTC().Truncate(24 * time.Hour).Add(-12 * time.Hour)
+	for _, fixture := range []struct {
+		id         string
+		start, end any
+	}{
+		{"driver", base.Add(900 * time.Millisecond), base.Add(1100 * time.Millisecond)},
+		{"rfc3339", base.Add(10900 * time.Millisecond).Format(time.RFC3339Nano), base.Add(12100 * time.Millisecond).Format(time.RFC3339Nano)},
+		{"backwards", base.Add(20 * time.Second).Format("2006-01-02 15:04:05"), base.Add(19 * time.Second).Format("2006-01-02 15:04:05")},
+	} {
+		if err := store.BeginUsageSession(db.UsageSessionStart{ID: fixture.id, Slug: app.Slug, InstanceID: "cp", StartedAt: base}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().Exec(`UPDATE usage_sessions SET started_at = ?, heartbeat_at = ?, ended_at = ? WHERE id = ?`, fixture.start, fixture.end, fixture.end, fixture.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, err := store.AppUsageReport(context.Background(), app.ID, 7*24*time.Hour, "unattributed", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Preserve the existing SQLite convention: subtract whole-second endpoints
+	// and clamp negative durations, including across fractional boundaries.
+	if report.Summary.Sessions != 3 || report.Summary.TotalDurationSeconds != 3 || report.Summary.AverageDurationSeconds != 1 {
+		t.Fatalf("summary: %+v", report.Summary)
+	}
+	if len(report.Daily) != 1 || report.Daily[0].Sessions != 3 || report.Summary.UniqueViewers != nil || report.Daily[0].UniqueViewers != nil {
+		t.Fatalf("daily/privacy: %+v", report)
+	}
+	want := map[string]int64{"driver": 1, "rfc3339": 2, "backwards": 0}
+	if len(report.Recent) != len(want) {
+		t.Fatalf("recent: %+v", report.Recent)
+	}
+	for _, session := range report.Recent {
+		if session.DurationSeconds != want[session.ID] {
+			t.Fatalf("duration: %+v", session)
+		}
+	}
+}
