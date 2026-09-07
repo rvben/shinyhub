@@ -406,7 +406,7 @@ type (
 
 // Proxy routes /app/:slug/* to the registered backend pool for that slug.
 type Proxy struct {
-	mu          sync.RWMutex
+	mu          poolMutex
 	pools       map[string]*backendPool
 	poolEpoch   map[string]uint64 // incremented whenever Deregister invalidates a pool generation
 	wakeTrigger func(slug string)

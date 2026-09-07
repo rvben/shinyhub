@@ -45,6 +45,40 @@ func Title(text string) string {
 	return `<title>` + html.EscapeString(text) + `</title>`
 }
 
+// FallbackMarkup returns only the missing tab identity markup. Detection
+// preserves app-authored titles and icons anywhere in the document, including
+// malformed pages. Callers can combine this with other edits in one copy.
+func FallbackMarkup(page []byte, href, title string) string {
+	var markup strings.Builder
+	if title != "" && !hasTitle(page) {
+		markup.WriteString(Title(title))
+		markup.WriteByte('\n')
+	}
+	if href != "" && !HasIcon(page) {
+		markup.WriteString(Link(href))
+		markup.WriteByte('\n')
+	}
+	return markup.String()
+}
+
+// lastTagPrefix bounds detection by the final possible tag. It is only a
+// lexical filter: the tokenizer remains responsible for comments, raw text,
+// attributes and malformed markup. It need not tokenize a multi-megabyte body
+// after the final possible icon/title has already been consumed.
+func lastTagPrefix(page []byte, prefix string) int {
+	for end := len(page); end > 0; {
+		i := bytes.LastIndexByte(page[:end], '<')
+		if i < 0 {
+			return -1
+		}
+		if len(page)-i >= len(prefix) && bytes.EqualFold(page[i:i+len(prefix)], []byte(prefix)) {
+			return i
+		}
+		end = i
+	}
+	return -1
+}
+
 // Ensure inserts a favicon link immediately before </head> unless the page
 // already declares a rel=icon link. Existing app-authored identity always wins.
 // The original bytes are returned unchanged when no insertion point exists.
@@ -108,9 +142,16 @@ func SetTitle(page []byte, text string) ([]byte, bool) {
 }
 
 func hasTitle(page []byte) bool {
+	last := lastTagPrefix(page, "<title")
+	if last < 0 {
+		return false
+	}
+	offset := 0
 	z := xhtml.NewTokenizer(bytes.NewReader(page))
-	for {
-		switch z.Next() {
+	for offset <= last {
+		typ := z.Next()
+		offset += len(z.Raw())
+		switch typ {
 		case xhtml.ErrorToken:
 			return false
 		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
@@ -120,6 +161,7 @@ func hasTitle(page []byte) bool {
 			}
 		}
 	}
+	return false
 }
 
 // titleElementBounds returns the raw byte range of the first title element.
@@ -160,9 +202,16 @@ func titleElementBounds(page []byte) (int, int, bool) {
 // "icon". Parsing only for detection lets Ensure preserve the source bytes and
 // tolerate attribute ordering, quoting, case, and additional rel tokens.
 func HasIcon(page []byte) bool {
+	last := lastTagPrefix(page, "<link")
+	if last < 0 {
+		return false
+	}
+	offset := 0
 	z := xhtml.NewTokenizer(bytes.NewReader(page))
-	for {
-		switch z.Next() {
+	for offset <= last {
+		typ := z.Next()
+		offset += len(z.Raw())
+		switch typ {
 		case xhtml.ErrorToken:
 			return false
 		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
@@ -182,6 +231,7 @@ func HasIcon(page []byte) bool {
 			}
 		}
 	}
+	return false
 }
 
 // EmojiSVG turns a validated app emoji into a compact, script-free SVG. The

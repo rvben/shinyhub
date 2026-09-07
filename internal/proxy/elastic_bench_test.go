@@ -11,9 +11,8 @@ import (
 // BenchmarkElasticAccounting_Contention measures the per-request elastic
 // accounting cost (clientConnOpened + clientConnClosed, the two accounting
 // sections the hot path runs via defer) across DISTINCT slugs, one per parallel
-// goroutine. With the state partitioned per-client under a shared read lock plus
-// cs.mu, this scales with GOMAXPROCS; the pre-scaling code took the global write
-// lock here and serialised unrelated apps. Run with -cpu 1,2,4,8 to observe
+// goroutine. Accounting readers use independent stripes plus cs.mu, avoiding a shared
+// RWMutex reader counter for unrelated apps. Run with -cpu 1,2,4,8 to observe
 // scaling.
 //
 //	GOWORK=off go test ./internal/proxy/ -run '^$' \

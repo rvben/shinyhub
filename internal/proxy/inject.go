@@ -71,6 +71,7 @@ func overlaySnippet(slug string) string {
 // CSP-enforcing app with a blocked script and a console error.
 type pageScript struct {
 	snippet  string
+	render   func() string // optional markup is materialized only after admission
 	cspHash  string
 	required bool
 	fallback string
@@ -78,12 +79,12 @@ type pageScript struct {
 
 // overlayPageScript is the status overlay as an injectable script.
 func overlayPageScript(slug string) pageScript {
-	return pageScript{snippet: overlaySnippet(slug), cspHash: overlayCSPHash}
+	return pageScript{render: func() string { return overlaySnippet(slug) }, cspHash: overlayCSPHash}
 }
 
 // navPageScript is the app switcher as an injectable script.
 func navPageScript(slug, name, homeURL, generation string) pageScript {
-	return pageScript{snippet: appnav.SnippetWithGeneration(slug, name, homeURL, generation), cspHash: appnav.CSPHash}
+	return pageScript{render: func() string { return appnav.SnippetWithGeneration(slug, name, homeURL, generation) }, cspHash: appnav.CSPHash}
 }
 
 // extendCSPForScripts returns policy with each hash allowed for scripts, and
@@ -269,7 +270,31 @@ func extendedCSPHeaderValues(header http.Header, name string, hashes []string) (
 	return updated, true
 }
 
+// Attribute names are ASCII and are not entity-decoded by the HTML parser.
+// If no http-equiv spelling exists, a meta policy is impossible. Candidates
+// still use the full parser below, preserving foreign-content semantics.
+func containsHTTPEquiv(body []byte) bool {
+	for start := 0; start < len(body); {
+		i := bytes.IndexByte(body[start:], '-')
+		if i < 0 {
+			return false
+		}
+		i += start
+		if i >= 4 && i+6 <= len(body) && bytes.EqualFold(body[i-4:i+6], []byte("http-equiv")) {
+			return true
+		}
+		start = i + 1
+	}
+	return false
+}
+
 func containsMetaCSP(body []byte) bool {
+	// Without a meta start tag there can be no meta policy. Keep the full HTML
+	// parser for candidates so its context handling (including foreign content
+	// and malformed markup) remains the authority for this security decision.
+	if lastHTMLTag(body, "<meta") < 0 || !containsHTTPEquiv(body) {
+		return false
+	}
 	doc, err := xhtml.Parse(bytes.NewReader(body))
 	if err != nil {
 		return true
@@ -380,6 +405,9 @@ func (p *Proxy) decorateAppPage(page, slug string, r *http.Request) string {
 // value sampled at registration would make SetStatusOverlay and SetAppNav
 // silently apply only to apps deployed after the call.
 func (p *Proxy) pageScriptsFor(r *http.Request, slug string, deploymentID int64) []pageScript {
+	if r == nil || !isPageLoad(r) {
+		return nil
+	}
 	var scripts []pageScript
 	support := p.supportPageScript(r, slug)
 	if support != nil {
@@ -477,13 +505,19 @@ func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, title
 			return nil
 		}
 
+		// A declared oversized page cannot be decorated. Preserve required support
+		// fallbacks, but do not consume optional pass-through bodies at all.
+		if resp.ContentLength > overlayMaxBodyBytes {
+			replaceWithRequiredFallback(resp, wanted)
+			return nil
+		}
+
 		// Read one byte past the cap so hitting it is distinguishable from a
 		// body that merely ends there.
 		orig := resp.Body
-		buf, err := io.ReadAll(io.LimitReader(orig, overlayMaxBodyBytes+1))
+		buf, err := readPageBody(orig, resp.ContentLength)
 		if err != nil || len(buf) > overlayMaxBodyBytes {
 			if replaceWithRequiredFallback(resp, wanted) {
-				_ = orig.Close()
 				return nil
 			}
 			// Either the read failed partway or the body is larger than we are
@@ -502,39 +536,33 @@ func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, title
 			resp.Body = io.NopCloser(bytes.NewReader(buf))
 		}
 
-		out := buf
-		changed := false
+		if !cspAllowsSelfImage(resp.Header.Get("Content-Security-Policy")) {
+			href = ""
+		}
+		headMarkup := favicon.FallbackMarkup(buf, href, title)
+		var bodyMarkup []string
 		scriptsInjected := false
-		if title != "" {
-			if withTitle, inserted := favicon.EnsureTitle(out, title); inserted {
-				out = withTitle
-				changed = true
-			}
-		}
-		if href != "" && cspAllowsSelfImage(resp.Header.Get("Content-Security-Policy")) {
-			if withIcon, inserted := favicon.Ensure(out, href); inserted {
-				out = withIcon
-				changed = true
-			}
-		}
 
 		if len(wanted) > 0 {
 			hashes := make([]string, 0, len(wanted))
-			var snippets strings.Builder
 			requiresSupportForm := false
 			for _, s := range wanted {
 				hashes = append(hashes, s.cspHash)
-				snippets.WriteString(s.snippet)
 				requiresSupportForm = requiresSupportForm || s.required
 			}
 
 			policies, policyOK := extendedCSPHeaderValues(resp.Header, "Content-Security-Policy", hashes)
 			reportPolicies, reportOK := extendedCSPHeaderValues(resp.Header, "Content-Security-Policy-Report-Only", hashes)
-			policyOK = policyOK && !containsMetaCSP(out) && (!requiresSupportForm || cspHeadersAllowSupportForm(resp.Header))
+			policyOK = policyOK && !containsMetaCSP(buf) && (!requiresSupportForm || cspHeadersAllowSupportForm(resp.Header))
 			if policyOK && reportOK {
-				if withScripts, injected := appnav.SpliceIntoBody(out, snippets.String()); injected {
-					out = withScripts
-					changed = true
+				if lastHTMLTag(buf, "</body>") >= 0 {
+					for _, script := range wanted {
+						markup := script.snippet
+						if script.render != nil {
+							markup = script.render()
+						}
+						bodyMarkup = append(bodyMarkup, markup)
+					}
 					scriptsInjected = true
 					if policies != nil {
 						resp.Header[http.CanonicalHeaderKey("Content-Security-Policy")] = policies
@@ -555,6 +583,7 @@ func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, title
 			}
 		}
 
+		out, changed := splicePageMarkup(buf, headMarkup, bodyMarkup...)
 		if !changed {
 			restore()
 			return nil
@@ -568,6 +597,89 @@ func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, title
 		resp.ContentLength = int64(len(out))
 		return nil
 	}
+}
+
+// readPageBody uses a trustworthy size only as an allocation hint. Reading one
+// extra byte still detects incorrect lengths and enforces the injection cap.
+func readPageBody(body io.Reader, length int64) ([]byte, error) {
+	if length < 0 || length > overlayMaxBodyBytes {
+		return io.ReadAll(io.LimitReader(body, overlayMaxBodyBytes+1))
+	}
+	buf := make([]byte, int(length)+1)
+	n := 0
+	for n < len(buf) {
+		read, err := body.Read(buf[n:])
+		n += read
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return buf[:n], err
+		}
+	}
+
+	rest, err := io.ReadAll(io.LimitReader(body, int64(overlayMaxBodyBytes+1-len(buf))))
+	return append(buf, rest...), err
+}
+
+// lastHTMLTag preserves the existing case-insensitive insertion semantics but
+// skips plain text in bulk rather than comparing at every byte of a large page.
+func lastHTMLTag(page []byte, tag string) int {
+	for end := len(page); end > 0; {
+		i := bytes.LastIndexByte(page[:end], '<')
+		if i < 0 {
+			return -1
+		}
+		if len(page)-i >= len(tag) && bytes.EqualFold(page[i:i+len(tag)], []byte(tag)) {
+			return i
+		}
+		end = i
+	}
+	return -1
+}
+
+// splicePageMarkup assembles both edits once, preserving source bytes and even
+// the ordering of malformed pages whose closing body precedes closing head.
+func splicePageMarkup(page []byte, head string, body ...string) ([]byte, bool) {
+	headAt, bodyAt := -1, -1
+	bodySize := 0
+	for _, part := range body {
+		bodySize += len(part)
+	}
+	if head != "" {
+		headAt = lastHTMLTag(page, "</head>")
+	}
+	if bodySize > 0 {
+		bodyAt = lastHTMLTag(page, "</body>")
+	}
+	if headAt < 0 {
+		head = ""
+	}
+	if bodyAt < 0 {
+		body = nil
+		bodySize = 0
+	}
+	if head == "" && bodySize == 0 {
+		return page, false
+	}
+	out := make([]byte, 0, len(page)+len(head)+bodySize)
+	first, second := []string{head}, body
+	if headAt < 0 || (bodyAt >= 0 && bodyAt < headAt) {
+		headAt, bodyAt, first, second = bodyAt, headAt, second, first
+	}
+	out = append(out, page[:headAt]...)
+	for _, part := range first {
+		out = append(out, part...)
+	}
+	if bodyAt >= 0 {
+		out = append(out, page[headAt:bodyAt]...)
+		for _, part := range second {
+			out = append(out, part...)
+		}
+		headAt = bodyAt
+	}
+	out = append(out, page[headAt:]...)
+	return out, true
 }
 
 func replaceWithRequiredFallback(resp *http.Response, scripts []pageScript) bool {

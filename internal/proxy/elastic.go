@@ -27,13 +27,11 @@ import (
 // per-client lock rather than the global pool write lock - letting unrelated
 // clients and unrelated slugs proceed in parallel on the routing hot path.
 //
-// LOCK ORDERING: cs.mu is ALWAYS acquired while already holding p.mu (read or
-// write); it is never held across a p.mu acquisition, which keeps the two-lock
-// scheme deadlock-free. Because every cs.mu holder also holds p.mu, a goroutine
-// holding the exclusive p.mu WRITE lock is the sole possible accessor and may
-// touch liveConns/releaseTimer WITHOUT cs.mu (RWMutex ordering gives it a
-// happens-before edge with the RLock paths). cs.mu is therefore only taken on
-// the scalable RLock paths, where several readers touch different clients at once.
+// LOCK ORDERING: acquire p.mu (read or write), or an accounting read stripe,
+// before cs.mu. Never acquire p.mu while holding cs.mu or an accounting stripe.
+// p.mu.Lock excludes both kinds of reader, so lifecycle writers can access
+// liveConns/releaseTimer without taking cs.mu. Concurrent readers take cs.mu
+// whenever they access those mutable fields.
 type clientSlot struct {
 	slotID       int
 	mu           sync.Mutex
@@ -43,7 +41,7 @@ type clientSlot struct {
 
 // open records a newly-opened connection for this client: it cancels any pending
 // grace timer (a reconnecting client must not have its worker reclaimed) and
-// increments liveConns. The caller must hold p.mu (read or write); open takes
+// increments liveConns. The caller must hold p.mu or an accounting stripe; open takes
 // cs.mu internally so it is safe on the shared-lock hot path.
 func (cs *clientSlot) open() {
 	cs.mu.Lock()
@@ -523,11 +521,11 @@ func (p *Proxy) placeClient(slug, clientID string, memOK bool) placement {
 // clientConnOpened records that clientID has opened a new connection to its
 // assigned worker. It cancels any pending release timer (a reconnecting client
 // must not have its worker killed mid-session) and increments liveConns.
-// Caller must NOT hold p.mu. Runs under the SHARED read lock plus cs.mu so
+// Caller must NOT hold p.mu. Runs under an accounting read stripe plus cs.mu so
 // unrelated clients open connections in parallel.
 func (p *Proxy) clientConnOpened(slug, clientID string) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	stripe := p.mu.accountingRLock(slug, clientID)
+	defer stripe.RUnlock()
 	if cs := p.lookupClientSlot(slug, clientID); cs != nil {
 		cs.open()
 	}
@@ -606,12 +604,12 @@ func (p *Proxy) armClientReleaseLocked(slug, clientID string) {
 // within clientGraceTTL the client's slot is deleted, the worker's
 // assignedClients is decremented, and - when the worker reaches zero assigned
 // clients - p.terminate is dispatched in a goroutine. Caller must NOT hold p.mu.
-// Runs under the SHARED read lock plus cs.mu so unrelated clients close
+// Runs under an accounting read stripe plus cs.mu so unrelated clients close
 // connections in parallel; the grace timer's callback takes the WRITE lock, so
 // it cannot fire while this (or an open) holds the read lock.
 func (p *Proxy) clientConnClosed(slug, clientID string, expected ...*clientSlot) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	stripe := p.mu.accountingRLock(slug, clientID)
+	defer stripe.RUnlock()
 
 	cs := p.lookupClientSlot(slug, clientID)
 	if cs == nil || (len(expected) > 0 && cs != expected[0]) {
@@ -693,7 +691,7 @@ func (p *Proxy) DeregisterElasticWorker(slug string, slotID int) {
 }
 
 // lookupClientSlot returns the clientSlot for clientID in slug's clients map,
-// or nil if absent. Callers must hold p.mu (read or write).
+// or nil if absent. Callers must hold p.mu (read or write) or an accounting stripe.
 func (p *Proxy) lookupClientSlot(slug, clientID string) *clientSlot {
 	if p.clients[slug] == nil {
 		return nil

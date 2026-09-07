@@ -1,7 +1,6 @@
 package process
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -360,36 +359,49 @@ func (r *LogReader) SnapshotTail(n int) ([]logstream.Record, int64, error) {
 		return nil, end, nil
 	}
 
+	// Find the exact suffix before allocating it. A reusable scan buffer
+	// avoids retaining every chunk of a long line alongside the final text.
 	const chunkSize = 32 * 1024
-	var chunks [][]byte
-	pos := end
-	newlines := 0
-	for pos > 0 && newlines <= n {
-		read := int64(chunkSize)
-		if pos < read {
-			read = pos
-		}
+	chunk := make([]byte, min(int64(chunkSize), end))
+	pos, start := end, int64(0)
+	lines := 0
+	found := false
+	for pos > 0 && !found {
+		read := min(int64(len(chunk)), pos)
 		pos -= read
-		chunk := make([]byte, read)
-		if _, err := f.ReadAt(chunk, pos); err != nil && err != io.EOF {
+		data := chunk[:read]
+		if _, err := f.ReadAt(data, pos); err != nil {
 			return nil, 0, err
 		}
-		chunks = append(chunks, chunk)
-		newlines += bytes.Count(chunk, []byte{'\n'})
-	}
-	// Assemble once in file order; prepending each chunk would repeatedly copy
-	// the whole suffix for long lines or large tail requests.
-	data := chunks[0]
-	if len(chunks) > 1 {
-		data = make([]byte, 0, end-pos)
-		for i := len(chunks) - 1; i >= 0; i-- {
-			data = append(data, chunks[i]...)
+		for i := len(data) - 1; i >= 0; i-- {
+			if data[i] != '\n' {
+				continue
+			}
+			// A trailing newline terminates the last record, not an empty one.
+			if pos+int64(i)+1 == end {
+				continue
+			}
+			lines++
+			if lines == n {
+				start = pos + int64(i) + 1
+				found = true
+				break
+			}
 		}
 	}
-	records := logstream.RecordsFromBytes(data, pos)
-	if len(records) > n {
-		records = records[len(records)-n:]
+	// Ordinary tails fit in the scan buffer: reuse those bytes instead of
+	// issuing a second read and allocating a builder/copy buffer.
+	if end-pos <= int64(len(chunk)) {
+		return logstream.RecordsFromBytes(chunk[start-pos:end-pos], start), end, nil
 	}
+	// Builder.String shares the final backing storage with the returned lines.
+	// No mutable byte buffer escapes and each record retains its exact cursor.
+	var text strings.Builder
+	text.Grow(int(end - start))
+	if _, err := io.CopyN(&text, io.NewSectionReader(f, start, end-start), end-start); err != nil {
+		return nil, 0, err
+	}
+	records := logstream.RecordsFromString(text.String(), start)
 	return records, end, nil
 }
 

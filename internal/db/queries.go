@@ -5751,14 +5751,35 @@ func (s *Store) MarkReplicaLostIfOwnedBy(appID int64, index int, workerID string
 // "2006-01-02 15:04:05"; values written via Go's time.Time round-trip as
 // RFC3339Nano. Returns (zero, false) on unrecognised input.
 func parseSQLiteTime(s string) (time.Time, bool) {
-	for _, layout := range []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02 15:04:05 -0700 MST",
-		"2006-01-02 15:04:05.999999999-07:00",
-		"2006-01-02 15:04:05",
+	// SQLite also accepts time.Time.String output, including its optional
+	// monotonic suffix. Only the wall-clock portion belongs in durable data.
+	if i := strings.Index(s, " m="); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	// Select the common layout by shape, avoiding allocated parse errors for
+	// every attempted layout. time.Parse still validates the complete value.
+	layout := time.RFC3339Nano
+	if len(s) > 10 && s[10] == ' ' {
+		switch {
+		case strings.Contains(s[11:], " "):
+			layout = "2006-01-02 15:04:05.999999999 -0700 MST"
+		case strings.ContainsAny(s[11:], "+-Z"):
+			layout = "2006-01-02 15:04:05.999999999Z07:00"
+		default:
+			layout = "2006-01-02 15:04:05"
+		}
+	}
+	if t, err := time.Parse(layout, s); err == nil {
+		return t.UTC(), true
+	}
+	// Retain SQLite's short date/time formats as well as zone-less ISO values,
+	// which the DATETIME driver accepted before the report used TEXT casts.
+	for _, fallback := range []string{
+		"2006-01-02T15:04:05.999999999", "2006-01-02 15:04",
+		"2006-01-02T15:04", "2006-01-02",
 	} {
-		if t, err := time.Parse(layout, s); err == nil {
+		if t, err := time.Parse(fallback, s); err == nil {
 			return t.UTC(), true
 		}
 	}

@@ -52,3 +52,25 @@ func RecordsFromBytes(data []byte, startOffset int64) []Record {
 	}
 	return records
 }
+
+// RecordsFromString splits immutable retained text without copying each line.
+// The records share data's backing storage; callers should pass only the
+// retained suffix, not an entire file when returning a small tail.
+func RecordsFromString(data string, startOffset int64) []Record {
+	if len(data) == 0 {
+		return nil
+	}
+	records := make([]Record, 0, strings.Count(data, "\n")+1)
+	lineStart := 0
+	for lineStart < len(data) {
+		i := strings.IndexByte(data[lineStart:], '\n')
+		if i < 0 {
+			records = append(records, Record{Line: strings.TrimSuffix(data[lineStart:], "\r"), EndOffset: startOffset + int64(len(data))})
+			break
+		}
+		i += lineStart
+		records = append(records, Record{Line: strings.TrimSuffix(data[lineStart:i], "\r"), EndOffset: startOffset + int64(i+1)})
+		lineStart = i + 1
+	}
+	return records
+}

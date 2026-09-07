@@ -1,7 +1,6 @@
 package db
 
 import (
-	"container/heap"
 	"context"
 	"database/sql"
 	"errors"
@@ -576,15 +575,43 @@ type usageQueryer interface {
 
 type usageEndHeap []int64
 
-func (h usageEndHeap) Len() int           { return len(h) }
-func (h usageEndHeap) Less(i, j int) bool { return h[i] < h[j] }
-func (h usageEndHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *usageEndHeap) Push(value any)    { *h = append(*h, value.(int64)) }
-func (h *usageEndHeap) Pop() any {
-	old := *h
-	last := old[len(old)-1]
-	*h = old[:len(old)-1]
-	return last
+// push and pop keep timestamp values unboxed on this per-row hot path.
+func (h *usageEndHeap) push(value int64) {
+	*h = append(*h, value)
+	i := len(*h) - 1
+	for i > 0 {
+		parent := (i - 1) / 2
+		if (*h)[parent] <= value {
+			break
+		}
+		(*h)[i] = (*h)[parent]
+		i = parent
+	}
+	(*h)[i] = value
+}
+
+func (h *usageEndHeap) pop() {
+	last := (*h)[len(*h)-1]
+	*h = (*h)[:len(*h)-1]
+	if len(*h) == 0 {
+		return
+	}
+	i := 0
+	for {
+		child := 2*i + 1
+		if child >= len(*h) {
+			break
+		}
+		if child+1 < len(*h) && (*h)[child+1] < (*h)[child] {
+			child++
+		}
+		if last <= (*h)[child] {
+			break
+		}
+		(*h)[i] = (*h)[child]
+		i = child
+	}
+	(*h)[i] = last
 }
 
 // usageConcurrencyPeaks streams retained half-open session intervals in start
@@ -594,7 +621,13 @@ func (h *usageEndHeap) Pop() any {
 // abandoned rows end at their last observed heartbeat. No identity material
 // participates in concurrency reporting.
 func (s *Store) usageConcurrencyPeaks(ctx context.Context, q usageQueryer, appID int64, windowStart, windowEnd, now time.Time) (int64, map[string]int64, error) {
-	rows, err := q.QueryContext(ctx, `SELECT started_at, ended_at, heartbeat_at
+	// Avoid the SQLite driver's generic DATETIME conversion on each row.
+	// PostgreSQL retains native time.Time values and its timezone semantics.
+	columns := "started_at, ended_at, heartbeat_at"
+	if _, sqlite := s.d.(sqliteDialect); sqlite {
+		columns = "CAST(started_at AS TEXT), CAST(ended_at AS TEXT), CAST(heartbeat_at AS TEXT)"
+	}
+	rows, err := q.QueryContext(ctx, `SELECT `+columns+`
 		FROM usage_sessions WHERE app_id = ? AND started_at < ?
 		AND COALESCE(ended_at, heartbeat_at) > ?
 		ORDER BY started_at, id`, appID, windowEnd, windowStart)
@@ -603,29 +636,35 @@ func (s *Store) usageConcurrencyPeaks(ctx context.Context, q usageQueryer, appID
 	}
 	defer rows.Close()
 	activeCutoff := now.Add(-usageSessionStaleAfter)
-	ends := &usageEndHeap{}
-	heap.Init(ends)
+	ends := usageEndHeap{}
 	daily := make(map[string]int64)
 	var peak int64
 	nextBoundary := time.Date(windowStart.Year(), windowStart.Month(), windowStart.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
 	popEnded := func(at time.Time) {
 		cutoff := at.UnixNano()
-		for ends.Len() > 0 && (*ends)[0] <= cutoff {
-			heap.Pop(ends)
+		for len(ends) > 0 && ends[0] <= cutoff {
+			ends.pop()
 		}
 	}
+	var dayKey string
+	var dayStart, dayEnd time.Time
 	record := func(at time.Time) {
-		current := int64(ends.Len())
+		current := int64(len(ends))
 		if current > peak {
 			peak = current
 		}
-		key := at.UTC().Format("2006-01-02")
-		if current > daily[key] {
-			daily[key] = current
+		if dayKey == "" || at.Before(dayStart) || !at.Before(dayEnd) {
+			utc := at.UTC()
+			dayStart = time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+			dayEnd = dayStart.AddDate(0, 0, 1)
+			dayKey = utc.Format("2006-01-02")
+		}
+		if current > daily[dayKey] {
+			daily[dayKey] = current
 		}
 	}
+	var startedRaw, endedRaw, heartbeatRaw any
 	for rows.Next() {
-		var startedRaw, endedRaw, heartbeatRaw any
 		if err := rows.Scan(&startedRaw, &endedRaw, &heartbeatRaw); err != nil {
 			return 0, nil, err
 		}
@@ -659,7 +698,7 @@ func (s *Store) usageConcurrencyPeaks(ctx context.Context, q usageQueryer, appID
 			nextBoundary = nextBoundary.AddDate(0, 0, 1)
 		}
 		popEnded(started)
-		heap.Push(ends, ended.UnixNano())
+		ends.push(ended.UnixNano())
 		record(started)
 	}
 	if err := rows.Err(); err != nil {
