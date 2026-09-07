@@ -1,5 +1,5 @@
 import unittest
-from run import parse_metrics, verdict, resources
+from run import parse_metrics, verdict, resources, container_resources
 
 class EvidenceTests(unittest.TestCase):
     def sample(self):
@@ -29,6 +29,16 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(got['db_wait_seconds'], 0.5)
         self.assertEqual(got['server_rss_peak_mb'], 2)
         self.assertEqual(resources(rows, 20, 30), {'samples': 0})
+
+    def test_docker_unavailable_cpu_is_not_a_zero_sample(self):
+        rows = [{'time': 10, 'stats': {'CPUPerc': '--'}},
+                {'time': 11, 'stats': {'CPUPerc': '153.5%'}},
+                {'time': 12, 'stats': {'CPUPerc': 'NaN%'}}]
+        got = container_resources(rows, 10, 12)
+        self.assertEqual(got['container_samples'], 1)
+        self.assertEqual(got['container_unavailable_samples'], 2)
+        self.assertEqual(got['container_cpu_percent_peak'], 153.5)
+        self.assertEqual(container_resources(rows, 10, 10)['container_samples'], 0)
 
     def test_prometheus_labels_and_counter_units_are_preserved(self):
         data = parse_metrics('# ignored\nprocess_cpu_seconds_total 12.5\nshinyhub_db_wait_count_total 3\nshinyhub_usage_persistence_events_total{result="start_dropped"} 2\nunrelated 42\n')

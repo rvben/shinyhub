@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -76,6 +77,25 @@ def resources(samples, start, end):
             'db_in_use_peak': max(r['metrics'].get('shinyhub_db_in_use_connections', 0) for r in rows),
             'goroutines_peak': max(r['metrics'].get('go_goroutines', 0) for r in rows),
             'generator_cpu_percent_peak': max((float(r['generator'].split()[0]) for r in rows if r.get('generator')), default=0)}
+
+
+
+def container_resources(rows, start, end):
+    cpu = []
+    unavailable = 0
+    for row in rows:
+        if not start <= row['time'] <= end:
+            continue
+        try:
+            value = float(row['stats']['CPUPerc'].rstrip('%'))
+            if not math.isfinite(value) or value < 0:
+                raise ValueError('invalid CPU sample')
+        except (KeyError, ValueError, TypeError, AttributeError):
+            unavailable += 1
+            continue
+        cpu.append(value)
+    return {'container_samples': len(cpu), 'container_unavailable_samples': unavailable,
+            'container_cpu_percent_peak': max(cpu, default=0)}
 
 
 def verdict(summary):
@@ -304,10 +324,8 @@ render_seconds = 0
             rows = [json.loads(line) for line in (result/'metrics.ndjson').read_text().splitlines() if line]
             stage['resources'] = resources(rows, stage['start'], stage['end'])
             container_rows = [json.loads(line) for line in (result/'container.ndjson').read_text().splitlines() if line]
-            container_rows = [r for r in container_rows if stage['start'] <= r['time'] <= stage['end'] and 'stats' in r]
-            stage['resources']['container_samples'] = len(container_rows)
-            stage['resources']['container_cpu_percent_peak'] = max((float(r['stats']['CPUPerc'].rstrip('%')) for r in container_rows), default=0)
-            if stage['resources']['samples'] < 2 or not container_rows:
+            stage['resources'].update(container_resources(container_rows, stage['start'], stage['end']))
+            if stage['resources']['samples'] < 2 or not stage['resources']['container_samples']:
                 stage['verdict']['status'] = 'invalid'
                 stage['verdict']['missing'].append('resource observations')
             stages.append(stage)

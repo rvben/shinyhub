@@ -93,7 +93,9 @@ production session count.
   outcomes. `generator` contains host k6 CPU percentage and RSS in KiB.
 - `container.ndjson`: Docker CPU and memory statistics for the entire target,
   including managed apps. Docker's CPU percentage uses 100% for one CPU;
-  a two-CPU quota approaches saturation at 200%.
+  a two-CPU quota approaches saturation at 200%. Unavailable Docker samples
+  are counted separately and excluded from CPU summaries; a stage with no
+  usable container samples is invalid.
 - `*-cpu.pprof`: ten seconds of server CPU samples during each stage lasting
   at least 15 seconds. Profiling is held constant between stages; its small
   overhead is included. Use `go tool pprof` with `tmp/mixed-build/shinyhub`.
