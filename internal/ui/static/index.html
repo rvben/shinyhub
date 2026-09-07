@@ -951,6 +951,10 @@
     </div>
     <pre id="log-pane-body" class="log-pane-body" aria-live="polite"></pre>
   </div>
+  </main>
+    </div>
+  </div>
+  <!-- Dialogs must stay outside the background regions made inert by modalTrap. -->
     <!-- New-app modal: create-only; hand-off to CLI for the first deploy -->
     <div id="new-app-modal" class="modal-overlay" hidden
          role="dialog" aria-modal="true" aria-labelledby="new-app-heading">
@@ -1359,8 +1363,8 @@
             <p id="support-session-app-status" class="profile-hint" role="status" aria-live="polite"></p>
 
             <label for="support-session-reason">Reason or ticket</label>
-            <textarea id="support-session-reason" required minlength="8" maxlength="500" rows="3" placeholder="What are you investigating, and why is access needed?" aria-describedby="support-session-reason-help"></textarea>
-            <p id="support-session-reason-help" class="profile-hint">Stored in the audit log. Be specific enough for another administrator to understand later.</p>
+            <textarea id="support-session-reason" required rows="3" placeholder="What are you investigating, and why is access needed?" aria-describedby="support-session-reason-help"></textarea>
+            <p id="support-session-reason-help" class="profile-hint">8–500 characters. Stored in the audit log. Be specific enough for another administrator to understand later.</p>
 
             <p class="support-session-warning" role="note"><strong>This is not read-only.</strong> Actions inside the app can change the user’s data. The session cannot access ShinyHub’s admin dashboard, other apps, API tokens, or privileged users.</p>
             <p id="support-session-error" class="error" role="alert" hidden></p>
@@ -1520,9 +1524,6 @@
         </div>
       </div>
     </div>
-  </main>
-    </div>
-  </div>
   <!-- Shared by #general-project and #new-app-project. Free text stays
        accepted in both, which is what allows creating a project inline. -->
   <datalist id="project-slugs"></datalist>

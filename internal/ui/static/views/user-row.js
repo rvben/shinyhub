@@ -44,3 +44,16 @@ export function supportSessionCaps(user, selfId, enabled = false) {
           ? 'Support sessions can target only human viewers or developers' : '')),
   };
 }
+
+// Effective permissions and their provenance are separate: automatic does not
+// imply that a person signs in through SSO.
+export function userRolePresentation(user) {
+  const role = user.role || 'viewer';
+  const label = role.charAt(0).toUpperCase() + role.slice(1);
+  const manual = user.manual_role === undefined ? role : user.manual_role;
+  return {
+    selected: manual || '',
+    automaticLabel: manual ? 'Use group/default role' : `${label} · Automatic`,
+    sourceLabel: manual ? 'Manual override' : (user.role_source === 'sso' ? 'From group rules' : 'Default role'),
+  };
+}

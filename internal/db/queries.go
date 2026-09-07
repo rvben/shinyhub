@@ -52,6 +52,8 @@ func IsValidMemberRole(s string) bool {
 // --- Users ---
 
 type User struct {
+	ManualRole   string
+	RoleSource   string
 	ID           int64
 	Username     string
 	PasswordHash string
@@ -123,12 +125,12 @@ func (s *Store) CreateUser(p CreateUserParams) error {
 func (s *Store) GetUserByUsername(username string) (*User, error) {
 	row := s.db.QueryRow(
 		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
-		        principal_type, service_account_key, managed_by FROM users WHERE username = ?`,
+		        principal_type, service_account_key, managed_by, COALESCE(manual_role, ''), role_source FROM users WHERE username = ?`,
 		username,
 	)
 	var u User
 	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
-		&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy); err != nil {
+		&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy, &u.ManualRole, &u.RoleSource); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -140,12 +142,12 @@ func (s *Store) GetUserByUsername(username string) (*User, error) {
 func (s *Store) GetUserByID(id int64) (*User, error) {
 	row := s.db.QueryRow(
 		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
-		        principal_type, service_account_key, managed_by FROM users WHERE id = ?`,
+		        principal_type, service_account_key, managed_by, COALESCE(manual_role, ''), role_source FROM users WHERE id = ?`,
 		id,
 	)
 	var u User
 	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
-		&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy); err != nil {
+		&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy, &u.ManualRole, &u.RoleSource); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -175,7 +177,7 @@ func (s *Store) LookupContextUser(id int64) (*auth.ContextUser, error) {
 func (s *Store) ListUsers() ([]*User, error) {
 	rows, err := s.db.Query(
 		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
-		        principal_type, service_account_key, managed_by FROM users ORDER BY username`)
+		        principal_type, service_account_key, managed_by, COALESCE(manual_role, ''), role_source FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +186,7 @@ func (s *Store) ListUsers() ([]*User, error) {
 	for rows.Next() {
 		var u User
 		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
-			&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy); err != nil {
+			&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy, &u.ManualRole, &u.RoleSource); err != nil {
 			return nil, err
 		}
 		users = append(users, &u)

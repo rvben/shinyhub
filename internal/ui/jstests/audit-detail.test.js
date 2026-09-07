@@ -34,3 +34,28 @@ test('audit detail ignores malformed, unrelated, and unapproved fields', () => {
 	});
 	assert.deepEqual(entries, [{label: 'Outcome', value: 'succeeded'}]);
 });
+
+test('support lifecycle exposes durable attribution without disclosing credentials', () => {
+  for (const action of ['support_session.start', 'support_session.stop']) {
+    const fields = auditDetailEntries({ action, resource_id:'session-42', created_at:'2026-09-07T09:00:00Z', detail:JSON.stringify({
+      actor_username:'admin', subject_username:'alice', subject_user_id:42,
+      app_slug:'sales', reason:'Investigating <script> as text', expires_at:'2026-09-07T09:15:00Z',
+      stopped_at:action.endsWith('stop') ? '2026-09-07T09:03:00Z' : undefined,
+      stop_reason:action.endsWith('stop') ? 'ended_by_actor' : undefined,
+      launch_code:'do-not-render', token:'do-not-render',
+    }) });
+    const values = Object.fromEntries(fields.map(({label,value})=>[label,value]));
+    assert.equal(values.Administrator,'admin');
+    assert.equal(values['Represented user'],'alice');
+    assert.equal(values.App,'sales');
+    assert.equal(values.Reason,'Investigating <script> as text');
+    assert.equal(values['Session ID'],'session-42');
+    assert.ok(values.Deadline);
+    if (action.endsWith('stop')) {
+      assert.equal(values['End cause'],'Ended in app');
+      assert.ok(values.Ended);
+    }
+    assert.doesNotMatch(JSON.stringify(fields),/do-not-render/);
+  }
+  assert.deepEqual(auditDetailEntries({action:'support_session.start', detail:'{"reason":{"secret":"hidden"}}'}), []);
+});

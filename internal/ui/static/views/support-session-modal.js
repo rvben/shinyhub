@@ -110,3 +110,13 @@ export function restoreFailedActionFocus(action, ownedFocus) {
   action.focus();
   return true;
 }
+
+// Unicode code points match Go's rune count and the database length check.
+export function supportReasonError(value) {
+  const reason = value.trim();
+  if (reason.includes('\0')) return 'Remove the null character from the reason.';
+  const length = [...reason].length;
+  if (length < 8) return 'Add a specific reason of at least 8 characters.';
+  if (length > 500) return 'Keep the reason to 500 characters or fewer.';
+  return '';
+}

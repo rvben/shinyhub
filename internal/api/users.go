@@ -57,6 +57,8 @@ func (s *Server) refuseSystemUser(w http.ResponseWriter, id int64) bool {
 
 // userResponse is the safe public view of a user (no password hash).
 type userResponse struct {
+	ManualRole        string `json:"manual_role"`
+	RoleSource        string `json:"role_source"`
 	ID                int64  `json:"id"`
 	Username          string `json:"username"`
 	Role              string `json:"role"`
@@ -69,6 +71,8 @@ type userResponse struct {
 
 func toUserResponse(u *db.User) userResponse {
 	return userResponse{
+		ManualRole:        u.ManualRole,
+		RoleSource:        u.RoleSource,
 		ID:                u.ID,
 		Username:          u.Username,
 		Role:              u.Role,

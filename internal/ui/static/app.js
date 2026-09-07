@@ -68,6 +68,7 @@ import { formatStatus } from '/static/views/status-label.js';
 import {
   consumeSupportDraft,
   clearSupportAppOwnedError,
+  supportReasonError,
   createSupportAppRequestGate,
   createSupportSessionModalLock,
   isFreshSupportDraft,
@@ -76,7 +77,7 @@ import {
   saveSupportDraft,
 } from '/static/views/support-session-modal.js';
 import { createSupportSessionRecovery } from '/static/views/support-session-recovery.js';
-import { userRowCaps, supportSessionCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
+import { userRowCaps, userRolePresentation, supportSessionCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
 import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
@@ -1630,7 +1631,7 @@ document.addEventListener('DOMContentLoaded', () => {
 				const details = document.createElement('details');
 				details.className = 'audit-details';
 				const summary = document.createElement('summary');
-				summary.textContent = 'View outcome';
+				summary.textContent = e.action.startsWith('support_session.') ? 'View session' : 'View outcome';
 				const facts = document.createElement('dl');
 				for (const entry of detailEntries) {
 					const term = document.createElement('dt');
@@ -1769,22 +1770,19 @@ document.addEventListener('DOMContentLoaded', () => {
       const roleCell = document.createElement('td');
       const select = document.createElement('select');
       select.className = 'users-row-role';
-      // "(SSO-managed)" clears any manual override (sends PATCH {role:""}),
-      // returning the user to group/default governance. Selected as the
-      // fallback when the user's role is not an explicit manual option.
-      const ssoOpt = document.createElement('option');
-      ssoOpt.value = '';
-      ssoOpt.textContent = '(SSO-managed)';
-      const explicitRoles = ['developer', 'operator', 'admin'];
-      if (!explicitRoles.includes(u.role)) ssoOpt.selected = true;
-      select.appendChild(ssoOpt);
-      for (const r of ['developer', 'operator', 'admin']) {
+      const rolePresentation = userRolePresentation(u);
+      select.setAttribute('aria-label', `Role for ${u.username}`);
+      const automatic = document.createElement('option');
+      automatic.value = '';
+      automatic.textContent = rolePresentation.automaticLabel;
+      select.appendChild(automatic);
+      for (const r of ['viewer', 'developer', 'operator', 'admin']) {
         const opt = document.createElement('option');
         opt.value = r;
         opt.textContent = r.charAt(0).toUpperCase() + r.slice(1);
-        if (u.role === r) opt.selected = true;
         select.appendChild(opt);
       }
+      select.value = rolePresentation.selected;
       if (!caps.canChangeRole) {
         select.disabled = true;
         if (caps.roleHint) select.title = caps.roleHint;
@@ -1792,6 +1790,10 @@ document.addEventListener('DOMContentLoaded', () => {
         select.addEventListener('change', () => updateUserRole(u.id, u.username, select));
       }
       roleCell.appendChild(select);
+      const roleSource = document.createElement('span');
+      roleSource.className = 'users-display-name';
+      roleSource.textContent = rolePresentation.sourceLabel;
+      roleCell.appendChild(roleSource);
       tr.appendChild(roleCell);
 
       // Created
@@ -2231,6 +2233,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.supportTarget = user;
     supportUsername.textContent = user.username;
     supportReason.value = draft?.reason || '';
+    supportReason.setCustomValidity('');
     supportApp.textContent = '';
     supportApp.removeAttribute('aria-invalid');
     supportApp.removeAttribute('aria-errormessage');
@@ -2344,8 +2347,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const target = state.supportTarget;
     const reason = supportReason.value.trim();
     if (!target || !supportApp.value) return;
-    if (reason.length < 8) {
-      setError(supportError, 'Add a specific reason of at least 8 characters.');
+    const reasonError = supportReasonError(reason);
+    if (reasonError) {
+      setError(supportError, reasonError);
       supportReason.focus();
       return;
     }
@@ -4790,6 +4794,7 @@ document.addEventListener('DOMContentLoaded', () => {
   resetPwClose.addEventListener('click', closeResetPasswordModal);
   resetPwCancel.addEventListener('click', closeResetPasswordModal);
   resetPwForm.addEventListener('submit', submitResetPassword);
+  supportReason?.addEventListener('input', () => supportReason.setCustomValidity(supportReasonError(supportReason.value)));
   if (supportForm) supportForm.addEventListener('submit', submitSupportSession);
   supportClose?.addEventListener('click', closeSupportSessionModal);
   supportCancel?.addEventListener('click', closeSupportSessionModal);

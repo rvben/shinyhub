@@ -132,3 +132,36 @@ test('failed async action restores focus only when that action owned it', () => 
   assert.equal(dom.window.document.activeElement, other, 'must not steal focus after user movement');
   dom.window.close();
 });
+
+test('every dashboard dialog remains outside the inert background in the complete document', async () => {
+  const { readFileSync } = await import('node:fs');
+  const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8');
+  const dom = new JSDOM(html);
+  const doc = dom.window.document;
+  doc.getElementById('app-shell').setAttribute('inert', '');
+  doc.getElementById('mobile-topbar')?.setAttribute('inert', '');
+  const dialogs = [...doc.querySelectorAll('.modal-overlay')];
+  assert.ok(dialogs.some(dialog => dialog.id === 'support-session-modal'));
+  for (const dialog of dialogs) {
+    assert.equal(dialog.closest('[inert]'), null, `${dialog.id} is inside an inert background`);
+    assert.equal(dialog.parentElement, doc.body, `${dialog.id} should escape dashboard layout`);
+  }
+  const dialog = doc.getElementById('support-session-modal');
+  dialog.hidden = false;
+  const reason = doc.getElementById('support-session-reason');
+  reason.focus();
+  assert.equal(doc.activeElement, reason);
+  dom.window.close();
+});
+
+test('support reasons count Unicode code points consistently with the server', async () => {
+  const { supportReasonError } = await import('../static/views/support-session-modal.js');
+  for (const text of ['1234567', '调查用户权限问', '😀'.repeat(7), '   1234567  ']) {
+    assert.match(supportReasonError(text), /at least 8/);
+  }
+  for (const text of ['調査のための確認'.repeat(45), '😀'.repeat(500), '  investigating access  ']) {
+    assert.equal(supportReasonError(text), '');
+  }
+  assert.match(supportReasonError('😀'.repeat(501)), /500/);
+  assert.match(supportReasonError('Investigating\0access'), /null character/);
+});

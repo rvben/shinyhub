@@ -351,6 +351,13 @@ func TestPatchUser_SetsManualOverride(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["role"] != "operator" || response["manual_role"] != "operator" || response["role_source"] != "manual" {
+		t.Fatalf("missing role provenance: %v", response)
+	}
 	u, _ := store.GetUserByID(bob.ID)
 	if u.Role != "operator" {
 		t.Fatalf("role = %q, want operator", u.Role)

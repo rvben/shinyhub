@@ -248,3 +248,44 @@ func TestDeleteUser_ConcurrentDeletesCannotReachZeroAdmins(t *testing.T) {
 		t.Fatalf("after concurrent deletes, want exactly 1 admin remaining, got %d", admins)
 	}
 }
+
+func TestUserRoleProvenanceAcrossReadPaths(t *testing.T) {
+	store := dbtest.New(t)
+	id := seedUser(t, store, "person", "viewer")
+	mappings := []auth.GroupRoleMapping{{Group: "devs", Role: "developer"}}
+	for _, step := range []struct {
+		name, role, manual, source string
+		apply                      func() error
+	}{
+		{"default", "viewer", "", "default", func() error { return nil }},
+		{"group", "developer", "", "sso", func() error { return store.ReconcileUserFromGroups(id, []string{"devs"}, mappings, "viewer") }},
+		{"manual viewer", "viewer", "viewer", "manual", func() error { return store.SetManualRole(id, "viewer") }},
+		{"clear", "viewer", "", "default", func() error { return store.ClearManualRole(id, nil, "viewer") }},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			if err := step.apply(); err != nil {
+				t.Fatal(err)
+			}
+			byID, err := store.GetUserByID(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			byName, err := store.GetUserByUsername("person")
+			if err != nil {
+				t.Fatal(err)
+			}
+			listed, err := store.ListUsers()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(listed) != 1 {
+				t.Fatalf("users = %d", len(listed))
+			}
+			for _, u := range []*db.User{byID, byName, listed[0]} {
+				if u.Role != step.role || u.ManualRole != step.manual || u.RoleSource != step.source {
+					t.Fatalf("role provenance = %q/%q/%q, want %q/%q/%q", u.Role, u.ManualRole, u.RoleSource, step.role, step.manual, step.source)
+				}
+			}
+		})
+	}
+}

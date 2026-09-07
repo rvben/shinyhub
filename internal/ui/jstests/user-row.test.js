@@ -51,3 +51,16 @@ test('support sessions are opt-in and limited to non-privileged people', () => {
   assert.equal(supportSessionCaps({ id: 2, username: 'root', role: 'admin' }, 1, true).canStart, false);
   assert.equal(supportSessionCaps({ id: 1, username: 'me', role: 'admin' }, 1, true).canStart, false);
 });
+
+test('effective roles never imply SSO and manual viewers can return to automatic governance', async () => {
+  const { userRolePresentation } = await import('../static/views/user-row.js');
+  assert.deepEqual(userRolePresentation({role:'viewer', manual_role:'', role_source:'default'}), {
+    selected:'', automaticLabel:'Viewer · Automatic', sourceLabel:'Default role',
+  });
+  assert.deepEqual(userRolePresentation({role:'developer', manual_role:'', role_source:'sso'}), {
+    selected:'', automaticLabel:'Developer · Automatic', sourceLabel:'From group rules',
+  });
+  assert.deepEqual(userRolePresentation({role:'viewer', manual_role:'viewer', role_source:'manual'}), {
+    selected:'viewer', automaticLabel:'Use group/default role', sourceLabel:'Manual override',
+  });
+});

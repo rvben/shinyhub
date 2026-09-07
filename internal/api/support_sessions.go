@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -107,8 +108,13 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 	}
 	req.AppSlug = strings.TrimSpace(req.AppSlug)
 	req.Reason = strings.TrimSpace(req.Reason)
-	if req.UserID <= 0 || req.AppSlug == "" || len(req.Reason) < 8 || len(req.Reason) > 500 {
+	reasonLength := utf8.RuneCountInString(req.Reason)
+	if req.UserID <= 0 || req.AppSlug == "" || reasonLength < 8 || reasonLength > 500 {
 		writeError(w, http.StatusBadRequest, "user_id, app_slug, and a reason between 8 and 500 characters are required")
+		return
+	}
+	if strings.ContainsRune(req.Reason, 0) {
+		writeError(w, http.StatusBadRequest, "reason must not contain null characters")
 		return
 	}
 	if req.UserID == admin.ID {

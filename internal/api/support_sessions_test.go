@@ -296,3 +296,46 @@ func TestListSupportSessionAppsReturnsOnlySubjectVisibleApps(t *testing.T) {
 		t.Fatalf("eligible apps = %v", slugs)
 	}
 }
+
+func TestSupportReasonUnicodeBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason string
+		want         int
+	}{
+		{"short ASCII", "1234567", 400}, {"short Chinese", "调查用户权限问", 400},
+		{"short emoji", strings.Repeat("😀", 7), 400},
+		{"Japanese", strings.Repeat("調査のための確認", 45), 201},
+		{"maximum emoji", strings.Repeat("😀", 500), 201},
+		{"too long", strings.Repeat("😀", 501), 400},
+		{"null character", "Investigating\x00access", 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, store, admin, subject := newSupportSessionServer(t, true)
+			token, _ := auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
+			body, _ := json.Marshal(map[string]any{"user_id": subject.ID, "app_slug": "sales", "reason": tc.reason})
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/support-sessions", body, token))
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+			events, err := store.ListAuditEvents("support_session.start", 10, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantEvents := 0
+			if tc.want == 201 {
+				wantEvents = 1
+			}
+			if len(events) != wantEvents {
+				t.Fatalf("start events=%d want=%d", len(events), wantEvents)
+			}
+			live, err := store.GetActiveSupportSessionForActor(admin.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (live != nil) != (tc.want == 201) {
+				t.Fatalf("unexpected live session: %+v", live)
+			}
+		})
+	}
+}
