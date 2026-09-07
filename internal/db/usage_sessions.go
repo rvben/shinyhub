@@ -294,7 +294,7 @@ func (s *Store) usageViewerExpr() string {
 // scan. Cross-day uniqueness cannot be summed, so it is queried independently
 // in a scalar subquery when the policy permits identities. Keeping it in the
 // same statement gives uniqueness and eligibility the same database snapshot.
-func (s *Store) usageRawAggregates(ctx context.Context, appID int64, cutoff, activeCutoff time.Time, identityMode string) (UsageSummary, []UsageDay, int64, int64, error) {
+func (s *Store) usageRawAggregates(ctx context.Context, q usageQueryer, appID int64, cutoff, activeCutoff time.Time, identityMode string) (UsageSummary, []UsageDay, int64, int64, error) {
 	var summary UsageSummary
 	var days []UsageDay
 	var eligibleTotal, unique int64
@@ -313,7 +313,7 @@ func (s *Store) usageRawAggregates(ctx context.Context, appID int64, cutoff, act
 		dayFilter = " AND " + s.usageDateExpr() + " >= ?"
 		args = append(args, cutoff.Format("2006-01-02"))
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+s.usageDateExpr()+`, COUNT(*), `+uniqueExpr+`, `+summaryUniqueExpr+`,
+	rows, err := q.QueryContext(ctx, `SELECT `+s.usageDateExpr()+`, COUNT(*), `+uniqueExpr+`, `+summaryUniqueExpr+`,
 		SUM(CASE WHEN principal_kind = 'person' THEN 1 ELSE 0 END),
 		SUM(CASE WHEN principal_kind = 'anonymous' THEN 1 ELSE 0 END),
 		SUM(CASE WHEN principal_kind = 'service_account' THEN 1 ELSE 0 END),
@@ -367,6 +367,27 @@ func (s *Store) AppUsageReport(ctx context.Context, appID int64, window time.Dur
 	if window <= 0 {
 		return UsageReport{}, errors.New("usage window must be positive")
 	}
+	// Retention moves raw contributions into rollups atomically. Keep every
+	// report query on one snapshot so that move cannot double-count or lose
+	// sessions between the raw, peak, and rollup reads.
+	opts := &sql.TxOptions{ReadOnly: true}
+	if s.IsPostgres() {
+		opts.Isolation = sql.LevelRepeatableRead
+	}
+	tx, err := s.db.real.BeginTx(ctx, opts)
+	if err != nil {
+		return UsageReport{}, err
+	}
+	defer tx.Rollback() // read-only snapshot; release it on every return path.
+	return s.appUsageReport(ctx, &boundTx{tx: tx, d: s.d}, appID, window, identityMode, includeIdentities)
+}
+
+type usageReportQueryer interface {
+	usageQueryer
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *Store) appUsageReport(ctx context.Context, q usageReportQueryer, appID int64, window time.Duration, identityMode string, includeIdentities bool) (UsageReport, error) {
 	now := time.Now().UTC()
 	calendarDays := int(math.Ceil(window.Hours() / 24))
 	// Reports and the UI chart use UTC calendar days, including today. Anchoring
@@ -382,12 +403,12 @@ func (s *Store) AppUsageReport(ctx context.Context, appID int64, window time.Dur
 		Viewers: []UsageViewer{},
 		Recent:  []UsageRecentSession{},
 	}
-	rawSummary, rawDays, uniqueViewers, eligiblePersonRows, err := s.usageRawAggregates(ctx, appID, cutoff, activeCutoff, identityMode)
+	rawSummary, rawDays, uniqueViewers, eligiblePersonRows, err := s.usageRawAggregates(ctx, q, appID, cutoff, activeCutoff, identityMode)
 	if err != nil {
 		return report, err
 	}
 	report.Summary = rawSummary
-	rawPeak, rawDailyPeaks, err := s.usageConcurrencyPeaks(ctx, s.db, appID, cutoff, now, now)
+	rawPeak, rawDailyPeaks, err := s.usageConcurrencyPeaks(ctx, q, appID, cutoff, now, now)
 	if err != nil {
 		return report, fmt.Errorf("usage concurrency peaks: %w", err)
 	}
@@ -395,7 +416,7 @@ func (s *Store) AppUsageReport(ctx context.Context, appID int64, window time.Dur
 
 	var aggregateSessions, aggregatePeople, aggregateAnonymous, aggregateService, aggregateDuration, aggregatePeak int64
 	var aggregateLast any
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(sessions), 0),
+	if err := q.QueryRowContext(ctx, `SELECT COALESCE(SUM(sessions), 0),
 		COALESCE(SUM(person_sessions), 0), COALESCE(SUM(anonymous_sessions), 0),
 		COALESCE(SUM(service_sessions), 0), COALESCE(SUM(total_duration_seconds), 0),
 		COALESCE(MAX(peak_concurrent_sessions), 0), MAX(last_opened_at)
@@ -429,7 +450,7 @@ func (s *Store) AppUsageReport(ctx context.Context, appID int64, window time.Dur
 	}
 
 	daysByDate := map[string]UsageDay{}
-	aggregateRows, err := s.db.QueryContext(ctx, `SELECT CAST(day AS TEXT), sessions, person_sessions,
+	aggregateRows, err := q.QueryContext(ctx, `SELECT CAST(day AS TEXT), sessions, person_sessions,
 		anonymous_sessions, service_sessions, peak_concurrent_sessions FROM usage_daily
 		WHERE app_id = ? AND day >= ? ORDER BY day`, appID, cutoff.Format("2006-01-02"))
 	if err != nil {
@@ -486,7 +507,7 @@ func (s *Store) AppUsageReport(ctx context.Context, appID int64, window time.Dur
 		return report, nil
 	}
 
-	viewerRows, err := s.db.QueryContext(ctx, `
+	viewerRows, err := q.QueryContext(ctx, `
 		SELECT us.user_id, u.username, u.display_name, COUNT(*),
 		       COALESCE(SUM(`+duration+`), 0), MAX(us.started_at)
 		FROM usage_sessions us
@@ -521,7 +542,7 @@ func (s *Store) AppUsageReport(ctx context.Context, appID int64, window time.Dur
 		return report, err
 	}
 
-	recentRows, err := s.db.QueryContext(ctx, `
+	recentRows, err := q.QueryContext(ctx, `
 		SELECT us.id, us.principal_kind, us.user_id, u.username, u.display_name, us.deployment_id,
 		       us.started_at, us.heartbeat_at, us.ended_at, `+duration+`
 		FROM usage_sessions us
