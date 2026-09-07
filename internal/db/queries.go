@@ -1218,10 +1218,28 @@ func (s *Store) CreateApp(p CreateAppParams) (bool, error) {
 
 func (s *Store) GetAppBySlug(slug string) (*App, error) {
 	defer s.timed("GetAppBySlug")()
-	row := s.db.QueryRow(`
-		SELECT `+appColumns+deploymentSummarySQL+`
-		FROM apps WHERE slug = ?`, slug)
-	return scanApp(row)
+	stmt, err := s.appLookupStatement()
+	if err != nil {
+		return nil, err
+	}
+	return scanApp(stmt.QueryRow(slug))
+}
+
+// appLookupStatement prepares once per store (and sql.DB prepares per pooled
+// connection as needed). Failed preparation is retried on the next call so an
+// early lookup before migration or a transient database error cannot poison the
+// store. The statement caches SQL execution machinery, not authorization data.
+func (s *Store) appLookupStatement() (*sql.Stmt, error) {
+	s.appLookupMu.Lock()
+	defer s.appLookupMu.Unlock()
+	if s.appLookupStmt == nil {
+		stmt, err := s.db.real.Prepare(s.d.rebind(`SELECT ` + appColumns + deploymentSummarySQL + ` FROM apps WHERE slug = ?`))
+		if err != nil {
+			return nil, err
+		}
+		s.appLookupStmt = stmt
+	}
+	return s.appLookupStmt, nil
 }
 
 // GetApp is an alias for GetAppBySlug.

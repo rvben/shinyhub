@@ -94,6 +94,11 @@ type Store struct {
 	db *boundDB
 	d  dialect
 
+	// Retain the hot app lookup statement, never its results. The sql.DB owns
+	// its per-connection driver statements and closes them with the store.
+	appLookupMu   sync.Mutex
+	appLookupStmt *sql.Stmt
+
 	// memory marks an in-memory SQLite store. Such a store is pinned to a single
 	// connection (see isMemoryDSN), which is what lets DeserializeSQLite treat
 	// that connection's database as the whole store.
