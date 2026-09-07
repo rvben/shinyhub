@@ -49,10 +49,16 @@ func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked au
 				next.ServeHTTP(w, r)
 				return
 			}
-			app, err := st.GetAppBySlug(slug)
-			if err != nil || app == nil {
-				next.ServeHTTP(w, r)
-				return
+			// Reuse the app authorized earlier in this request. Standalone
+			// use and rewritten paths still perform their own lookup.
+			app, _ := r.Context().Value(authorizedAppKey{}).(*db.App)
+			if app == nil || app.Slug != slug {
+				var err error
+				app, err = st.GetAppBySlug(slug)
+				if err != nil || app == nil {
+					next.ServeHTTP(w, r)
+					return
+				}
 			}
 			// Key off the durable deployments table, not deploy_count.
 			// deploy_count is a denormalized counter and may briefly lag

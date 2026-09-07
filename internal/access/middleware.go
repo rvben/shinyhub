@@ -1,6 +1,7 @@
 package access
 
 import (
+	"context"
 	"errors"
 	"html"
 	"net/http"
@@ -14,6 +15,10 @@ import (
 	"github.com/rvben/shinyhub/internal/favicon"
 	"github.com/rvben/shinyhub/internal/supportui"
 )
+
+// authorizedAppKey carries only this request's freshly authorized app. It must
+// never replace the access lookup on a subsequent request.
+type authorizedAppKey struct{}
 
 type store interface {
 	GetAppBySlug(slug string) (*db.App, error)
@@ -129,6 +134,7 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 			case http.StatusForbidden:
 				writeAccessDenied(w, r, http.StatusForbidden, "You don't have access to this app", slug, cfg)
 			default:
+				r = r.WithContext(context.WithValue(r.Context(), authorizedAppKey{}, app))
 				next.ServeHTTP(w, r)
 			}
 		})
