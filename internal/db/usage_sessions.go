@@ -306,6 +306,13 @@ func (s *Store) usageRawAggregates(ctx context.Context, appID int64, cutoff, act
 		args = append(args, appID, cutoff)
 	}
 	args = append(args, identityMode, identityMode, activeCutoff, appID, cutoff)
+	dayFilter := ""
+	if !s.IsPostgres() {
+		// The redundant UTC day bound lets SQLite use the day-ordered index
+		// for both filtering and grouping, avoiding a sort of all retained rows.
+		dayFilter = " AND " + s.usageDateExpr() + " >= ?"
+		args = append(args, cutoff.Format("2006-01-02"))
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+s.usageDateExpr()+`, COUNT(*), `+uniqueExpr+`, `+summaryUniqueExpr+`,
 		SUM(CASE WHEN principal_kind = 'person' THEN 1 ELSE 0 END),
 		SUM(CASE WHEN principal_kind = 'anonymous' THEN 1 ELSE 0 END),
@@ -316,7 +323,7 @@ func (s *Store) usageRawAggregates(ctx context.Context, appID int64, cutoff, act
 		  THEN 1 ELSE 0 END),
 		SUM(CASE WHEN ended_at IS NULL AND heartbeat_at >= ? THEN 1 ELSE 0 END),
 		COALESCE(SUM(`+s.usageDurationExpr()+`), 0), MAX(started_at)
-		FROM usage_sessions WHERE app_id = ? AND started_at >= ? GROUP BY 1 ORDER BY 1`,
+		FROM usage_sessions WHERE app_id = ? AND started_at >= ?`+dayFilter+` GROUP BY 1 ORDER BY 1`,
 		args...)
 	if err != nil {
 		return summary, nil, 0, 0, fmt.Errorf("usage daily aggregates: %w", err)

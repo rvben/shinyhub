@@ -327,6 +327,37 @@ func TestAppUsageReportHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestUsageDailyAggregationAvoidsTemporarySort(t *testing.T) {
+	dbtest.SkipIfPostgres(t)
+	store := mustOpenDB(t)
+	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	rows, err := store.DB().Query(`EXPLAIN QUERY PLAN
+		SELECT substr(CAST(started_at AS TEXT), 1, 10), COUNT(*)
+		FROM usage_sessions WHERE app_id = ? AND started_at >= ?
+		AND substr(CAST(started_at AS TEXT), 1, 10) >= ?
+		GROUP BY 1 ORDER BY 1`, 1, cutoff, cutoff.Format("2006-01-02"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	plan := strings.Join(details, "\n")
+	if strings.Contains(plan, "TEMP B-TREE") || !strings.Contains(plan, "idx_usage_sessions_app_day_started") {
+		t.Fatalf("daily aggregate query is not index-ordered:\n%s", plan)
+	}
+}
+
 func TestUsageConcurrencyQueryAvoidsTemporarySort(t *testing.T) {
 	dbtest.SkipIfPostgres(t)
 	store := mustOpenDB(t)
