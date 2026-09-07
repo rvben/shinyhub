@@ -315,6 +315,62 @@ func TestAppUsageReportStreamsPeakAcrossUTCDayBoundaries(t *testing.T) {
 	}
 }
 
+// The observed heartbeat is an end only for stale open sessions. Closed
+// sessions use ended_at, and fresh open sessions continue past the heartbeat.
+func TestAppUsageReportPeakIntervalEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		open, fresh bool
+		want        int64
+	}{
+		{"closed", false, false, 2},
+		{"freshly-closed", false, true, 1},
+		{"stale-open", true, false, 1},
+		{"fresh-open", true, true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := mustOpenDB(t)
+			owner := mustCreateUser(t, store, "interval-owner", "developer")
+			app := mustCreateApp(t, store, "interval-ends", owner.ID)
+			start := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+			if tc.fresh {
+				start = time.Now().UTC().Truncate(time.Second).Add(-10 * time.Second)
+			}
+			for _, row := range []struct {
+				id               string
+				start, heartbeat time.Time
+				end              any
+			}{
+				{"first", start, start.Add(time.Second), nil},
+				{"second", start.Add(2 * time.Second), start.Add(3 * time.Second), start.Add(3 * time.Second)},
+			} {
+				if row.id == "first" && !tc.open {
+					// A small fractional-second overlap must survive timestamp decoding.
+					row.end = start.Add(2*time.Second + 1999*time.Nanosecond)
+					if tc.fresh {
+						// A fresh closure remains half-open; only open sessions
+						// may extend past their observed end to now.
+						row.end = start.Add(2 * time.Second)
+					}
+				}
+				if err := store.BeginUsageSession(db.UsageSessionStart{ID: row.id, Slug: app.Slug, InstanceID: "test", StartedAt: row.start}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.DB().Exec(`UPDATE usage_sessions SET heartbeat_at = ?, ended_at = ? WHERE id = ?`, row.heartbeat, row.end, row.id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			report, err := store.AppUsageReport(context.Background(), app.ID, 24*time.Hour, "unattributed", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Summary.PeakConcurrentSessions != tc.want {
+				t.Fatalf("peak = %d, want %d", report.Summary.PeakConcurrentSessions, tc.want)
+			}
+		})
+	}
+}
+
 func TestAppUsageReportHonorsCancellation(t *testing.T) {
 	store := mustOpenDB(t)
 	owner := mustCreateUser(t, store, "usage-cancel-owner", "developer")
@@ -362,7 +418,7 @@ func TestUsageConcurrencyQueryAvoidsTemporarySort(t *testing.T) {
 	dbtest.SkipIfPostgres(t)
 	store := mustOpenDB(t)
 	rows, err := store.DB().Query(`EXPLAIN QUERY PLAN
-		SELECT started_at, ended_at, heartbeat_at
+		SELECT CAST(started_at AS TEXT), CAST(COALESCE(ended_at, heartbeat_at) AS TEXT), ended_at IS NULL
 		FROM usage_sessions WHERE app_id = ? AND started_at < ?
 		AND COALESCE(ended_at, heartbeat_at) > ?
 		ORDER BY started_at, id`, 1, time.Now().UTC(), time.Now().UTC().Add(-24*time.Hour))

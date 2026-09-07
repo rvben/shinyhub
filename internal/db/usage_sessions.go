@@ -636,9 +636,11 @@ func (h *usageEndHeap) pop() {
 func (s *Store) usageConcurrencyPeaks(ctx context.Context, q usageQueryer, appID int64, windowStart, windowEnd, now time.Time) (int64, map[string]int64, error) {
 	// Avoid the SQLite driver's generic DATETIME conversion on each row.
 	// PostgreSQL retains native time.Time values and its timezone semantics.
-	columns := "started_at, ended_at, heartbeat_at"
+	// A closed interval's end is authoritative; its heartbeat cannot affect
+	// concurrency. Fetch and decode only the two timestamps we actually use.
+	columns := "started_at, COALESCE(ended_at, heartbeat_at), ended_at IS NULL"
 	if _, sqlite := s.d.(sqliteDialect); sqlite {
-		columns = "CAST(started_at AS TEXT), CAST(ended_at AS TEXT), CAST(heartbeat_at AS TEXT)"
+		columns = "CAST(started_at AS TEXT), CAST(COALESCE(ended_at, heartbeat_at) AS TEXT), ended_at IS NULL"
 	}
 	rows, err := q.QueryContext(ctx, `SELECT `+columns+`
 		FROM usage_sessions WHERE app_id = ? AND started_at < ?
@@ -676,25 +678,22 @@ func (s *Store) usageConcurrencyPeaks(ctx context.Context, q usageQueryer, appID
 			daily[dayKey] = current
 		}
 	}
-	var startedRaw, endedRaw, heartbeatRaw any
+	var startedRaw, endedRaw any
+	var open bool
 	for rows.Next() {
-		if err := rows.Scan(&startedRaw, &endedRaw, &heartbeatRaw); err != nil {
+		if err := rows.Scan(&startedRaw, &endedRaw, &open); err != nil {
 			return 0, nil, err
 		}
 		started, ok := usageTime(startedRaw)
 		if !ok {
 			return 0, nil, fmt.Errorf("parse usage interval start")
 		}
-		heartbeat, ok := usageTime(heartbeatRaw)
+		ended, ok := usageTime(endedRaw)
 		if !ok {
-			return 0, nil, fmt.Errorf("parse usage interval heartbeat")
+			return 0, nil, fmt.Errorf("parse usage interval end")
 		}
-		ended, closed := usageTime(endedRaw)
-		if !closed {
-			ended = heartbeat
-			if !heartbeat.Before(activeCutoff) {
-				ended = now
-			}
+		if open && !ended.Before(activeCutoff) {
+			ended = now
 		}
 		if started.Before(windowStart) {
 			started = windowStart
