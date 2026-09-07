@@ -63,3 +63,59 @@ func BenchmarkAppUsageReportHighChurn(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkUsageSessionLifecycle measures the write cost paid once per socket,
+// including the transition from the live index to closed daily counters.
+func BenchmarkUsageSessionLifecycle(b *testing.B) {
+	store, app := usageWriteBenchmarkStore(b)
+	now := time.Now().UTC()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		id := fmt.Sprintf("lifecycle-%d", i)
+		if err := store.BeginUsageSession(db.UsageSessionStart{ID: id, Slug: app.Slug, InstanceID: "bench", StartedAt: now}); err != nil {
+			b.Fatal(err)
+		}
+		if err := store.EndUsageSession(id, now.Add(time.Second)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkUsageHeartbeatBatch(b *testing.B) {
+	store, app := usageWriteBenchmarkStore(b)
+	ids := make([]string, 100)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("heartbeat-%d", i)
+		if err := store.BeginUsageSession(db.UsageSessionStart{ID: ids[i], Slug: app.Slug, InstanceID: "bench"}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := store.HeartbeatUsageSessions(ids); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func usageWriteBenchmarkStore(b *testing.B) (*db.Store, *db.App) {
+	b.Helper()
+	store := dbtest.New(b)
+	if err := store.CreateUser(db.CreateUserParams{Username: "write-owner", PasswordHash: "h", Role: "developer"}); err != nil {
+		b.Fatal(err)
+	}
+	owner, err := store.GetUserByUsername("write-owner")
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "write-bench", Name: "Write", OwnerID: owner.ID}); err != nil {
+		b.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("write-bench")
+	if err != nil {
+		b.Fatal(err)
+	}
+	return store, app
+}

@@ -298,33 +298,32 @@ func (s *Store) usageRawAggregates(ctx context.Context, q usageQueryer, appID in
 	var summary UsageSummary
 	var days []UsageDay
 	var eligibleTotal, unique int64
-	uniqueExpr, summaryUniqueExpr := "0", "0"
+	var query string
 	var args []any
-	if identityMode != "unattributed" {
-		uniqueExpr = "COUNT(DISTINCT " + s.usageViewerExpr() + ")"
-		summaryUniqueExpr = "(SELECT " + uniqueExpr + " FROM usage_sessions WHERE app_id = ? AND started_at >= ?)"
-		args = append(args, appID, cutoff)
+	if s.IsPostgres() {
+		uniqueExpr, summaryUniqueExpr := "0", "0"
+		if identityMode != "unattributed" {
+			uniqueExpr = "COUNT(DISTINCT " + s.usageViewerExpr() + ")"
+			summaryUniqueExpr = "(SELECT " + uniqueExpr + " FROM usage_sessions WHERE app_id = ? AND started_at >= ?)"
+			args = append(args, appID, cutoff)
+		}
+		args = append(args, identityMode, identityMode, activeCutoff, appID, cutoff)
+		query = `SELECT ` + s.usageDateExpr() + `, COUNT(*), ` + uniqueExpr + `, ` + summaryUniqueExpr + `,
+			SUM(CASE WHEN principal_kind = 'person' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN principal_kind = 'anonymous' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN principal_kind = 'service_account' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN principal_kind = 'person' AND
+			  ((? = 'identified' AND identity_mode = 'identified' AND user_id IS NOT NULL) OR
+			   (? = 'pseudonymous' AND identity_mode = 'pseudonymous' AND viewer_key IS NOT NULL))
+			  THEN 1 ELSE 0 END),
+			SUM(CASE WHEN ended_at IS NULL AND heartbeat_at >= ? THEN 1 ELSE 0 END),
+			COALESCE(SUM(` + s.usageDurationExpr() + `), 0), MAX(started_at)
+			FROM usage_sessions WHERE app_id = ? AND started_at >= ? GROUP BY 1 ORDER BY 1`
+	} else {
+		query = s.usageClosedAggregateQuery(identityMode)
+		args = []any{appID, cutoff, cutoff.Format("2006-01-02"), activeCutoff, identityMode}
 	}
-	args = append(args, identityMode, identityMode, activeCutoff, appID, cutoff)
-	dayFilter := ""
-	if !s.IsPostgres() {
-		// The redundant UTC day bound lets SQLite use the day-ordered index
-		// for both filtering and grouping, avoiding a sort of all retained rows.
-		dayFilter = " AND " + s.usageDateExpr() + " >= ?"
-		args = append(args, cutoff.Format("2006-01-02"))
-	}
-	rows, err := q.QueryContext(ctx, `SELECT `+s.usageDateExpr()+`, COUNT(*), `+uniqueExpr+`, `+summaryUniqueExpr+`,
-		SUM(CASE WHEN principal_kind = 'person' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN principal_kind = 'anonymous' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN principal_kind = 'service_account' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN principal_kind = 'person' AND
-		  ((? = 'identified' AND identity_mode = 'identified' AND user_id IS NOT NULL) OR
-		   (? = 'pseudonymous' AND identity_mode = 'pseudonymous' AND viewer_key IS NOT NULL))
-		  THEN 1 ELSE 0 END),
-		SUM(CASE WHEN ended_at IS NULL AND heartbeat_at >= ? THEN 1 ELSE 0 END),
-		COALESCE(SUM(`+s.usageDurationExpr()+`), 0), MAX(started_at)
-		FROM usage_sessions WHERE app_id = ? AND started_at >= ?`+dayFilter+` GROUP BY 1 ORDER BY 1`,
-		args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return summary, nil, 0, 0, fmt.Errorf("usage daily aggregates: %w", err)
 	}
