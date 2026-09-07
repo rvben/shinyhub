@@ -235,3 +235,9 @@ waits, durable usage counts, and CPU profiles. The runner owns and cleans up its
 container and database; it never targets an existing server. See
 [the mixed-load rig](../loadtest/mixed/README.md) for controls, workload limits,
 repeatable commands, and evidence interpretation.
+
+The mixed rig also supports `--repeats 3 --require-quiet`, records generator
+load and target cgroup v2 CPU throttling, and compares per-run outcomes without
+averaging percentiles. Repetitions use fresh databases and must have matching
+binaries and workload parameters. Local Docker controls still share hardware
+with the generator; they do not establish isolated production capacity.

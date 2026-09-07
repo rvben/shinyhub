@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -29,6 +30,14 @@ func main() {
 		target, _ := url.Parse("http://127.0.0.1:9090")
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", httputil.NewSingleHostReverseProxy(target))
+		mux.HandleFunc("/resources", func(w http.ResponseWriter, r *http.Request) {
+			data := readTargetResources()
+			w.Header().Set("Content-Type", "application/json")
+			if data.validate() != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}
+			_ = json.NewEncoder(w).Encode(data)
+		})
 		log.Fatal(http.ListenAndServe("0.0.0.0:9091", mux))
 		return
 	}

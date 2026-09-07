@@ -8,7 +8,7 @@ volume, and synthetic credentials on exit. It never selects an existing server
 or saved CLI connection.
 
 Requirements: Python 3.10+, Go matching the repository, k6, and a running local
-Docker engine. Cache `debian:bookworm-slim` first. The runner resolves the image
+Docker engine using cgroup v2. Cache `debian:bookworm-slim` first. The runner resolves the image
 to its immutable local ID and records it; it does not pull images or publish
 anything. Binaries are cross-built for the Docker engine's architecture.
 
@@ -21,6 +21,12 @@ make load-test-mixed
 
 # Repeat a bracket around the first failing stage with a longer observation.
 python3 loadtest/mixed/run.py --steps 50,75,100 --seconds 60
+
+# Repeat identical sweeps on three fresh targets; reject busy hosts first.
+python3 loadtest/mixed/run.py --steps 1,100,150,200 --seconds 60 --repeats 3 --require-quiet
+
+# Exercise the repeated-run workflow locally at low load.
+python3 loadtest/mixed/run.py --steps 1 --seconds 10 --sessions 10000 --repeats 3
 
 # Vary the server budget or report workload independently.
 python3 loadtest/mixed/run.py --cpus 4 --memory 4g --report-interval 2
@@ -35,6 +41,13 @@ boundaries, verdicts, measured resource use and durable session counts.
 `metadata.json` records source commit/dirty state, tool versions, image ID,
 binary SHA-256 checksums, host platform and workload parameters. Keep the same
 image, CPU/memory limits, history size and driver for comparisons.
+
+With `--repeats`, every sweep gets a fresh container and seeded database. A
+separate `repeat-<id>/REPORT.md` and `comparison.json` compare the completed
+runs. Each stage is a consistent pass, consistent saturation, variable, or
+insufficient evidence. Missing runs and mismatched binaries/workloads cannot
+produce a consistent-pass result. Per-run percentiles are listed separately;
+they are never averaged or presented as a pooled percentile.
 
 ## Workload
 
@@ -91,6 +104,11 @@ production session count.
 - `metrics.ndjson`: two-second samples of server CPU, RSS, heap, goroutines,
   descriptors, database-pool wait counters and exceptional usage-persistence
   outcomes. `generator` contains host k6 CPU percentage and RSS in KiB.
+  `driver_load_average` records the generator host's 1/5/15-minute load.
+  `target` records cgroup v2 CPU usage, quota, throttled periods/time, and Linux
+  kernel CPU ticks, CPU count and load averages. Missing target observations
+  invalidate the stage. Reports include counter deltas and throttled-period
+  fractions; throttled time is scheduler accounting, not request latency.
 - `container.ndjson`: Docker CPU and memory statistics for the entire target,
   including managed apps. Docker's CPU percentage uses 100% for one CPU;
   a two-CPU quota approaches saturation at 200%. Unavailable Docker samples
@@ -115,3 +133,26 @@ listener; pprof remains container-loopback-only. Profiles are retrieved by a
 short-lived helper inside the disposable container. To stop a run, send SIGINT
 or SIGTERM and let cleanup finish. SIGKILL or an engine crash cannot run cleanup;
 remove only resources named with that run's `shinyhub-mixed-<id>` prefix.
+
+## Quiet-host checks and physical separation
+
+`--require-quiet` takes two observations five seconds apart after deployment
+and seeding, before each sweep. It rejects a run when either host's one-minute
+load exceeds 0.5 per logical CPU or target-kernel CPU activity exceeds 20%.
+The observations and reasons are saved in `preflight.json`. Busy or missing
+observations stop the run; they do not silently become a pass. During traffic,
+CPU throttling is measured rather than rejected, since saturation of the
+configured CPU quota is an expected experimental outcome.
+
+A quiet preflight is a measured starting condition, not a reservation of CPU
+resources. Other workloads can start later. Inspect the continuous host-load,
+CPU and throttling observations when comparing repetitions. Inside a VM,
+`/proc` describes that Linux kernel, not other workloads on the physical
+hypervisor; cgroup accounting also cannot reveal all ancestor/hypervisor limits.
+
+This runner currently drives local Docker from the host: the target and k6
+still share physical hardware. Three local low-load controls verify the rig,
+but do not substitute for a quiet Linux target and a physically separate
+load generator. That capacity experiment requires explicitly selected machines
+and a transport appropriate to their environment. Do not point this runner at
+a remote Docker context and assume local bind mounts or loopback ports work.

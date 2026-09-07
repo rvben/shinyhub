@@ -12,11 +12,13 @@ import secrets
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
+from evidence import target_resources, quiet_reasons, write_comparison
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -134,6 +136,11 @@ def summarize(stages, destination, metadata):
     for stage in stages:
         r = stage.get('resources', {})
         lines.append(f"| {stage['clients']} | {r.get('server_cpu_cores',0):.2f} | {r.get('server_rss_peak_mb',0):.1f} | {r.get('db_wait_count',0):.0f} / {r.get('db_wait_seconds',0):.2f} | {r.get('generator_cpu_percent_peak',0):.1f} |")
+    lines += ['', '| Clients | CPU throttled periods % | Throttled seconds | Target kernel busy % | Generator load peak |',
+              '|---:|---:|---:|---:|---:|']
+    for stage in stages:
+        r = stage.get('resources', {})
+        lines.append(f"| {stage['clients']} | {100*r.get('target_throttled_period_fraction',0):.1f} | {r.get('target_throttled_seconds',0):.2f} | {100*r.get('target_kernel_busy_fraction',0):.1f} | {r.get('driver_load_peak',0):.2f} |")
     lines += ['', 'Threshold failures and raw evidence:']
     for stage in stages:
         lines.append(f"- {stage['clients']} clients: " + (', '.join(stage['verdict']['failed'] + stage['verdict']['missing']) or 'all thresholds passed'))
@@ -157,6 +164,7 @@ def run(args):
     run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + secrets.token_hex(3)
     result = ROOT / 'loadtest/results' / ('mixed-' + run_id)
     result.mkdir(mode=0o700, parents=True)
+    print(f'Preparing target; evidence: {result}', flush=True)
     build = ROOT / 'tmp/mixed-build'
     build.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, GOOS='linux', GOARCH=arch, CGO_ENABLED='0')
@@ -209,7 +217,7 @@ render_seconds = 0
     metadata = {'commit': output(['git', 'rev-parse', 'HEAD']), 'dirty': bool(output(['git', 'status', '--porcelain'])),
                 'arch': arch, 'image_id': image, 'cpus': args.cpus, 'memory': args.memory,
                 'seed_sessions': args.sessions, 'seconds': args.seconds, 'steps': args.steps, 'report_interval': args.report_interval,
-                'go': output(['go', 'version']), 'k6': output(['k6', 'version']), 'driver_platform': platform.platform(), 'driver_cpus': os.cpu_count(),
+                'go': output(['go', 'version']), 'k6': output(['k6', 'version']), 'driver_platform': platform.platform(), 'driver_cpus': os.cpu_count(), 'require_quiet': args.require_quiet,
                 'binary_sha256': {name: hashlib.sha256((build/name).read_bytes()).hexdigest() for name in ('shinyhub','fixture','seed')}}
     (result / 'metadata.json').write_text(json.dumps(metadata, indent=2))
     def cleanup():
@@ -241,7 +249,12 @@ render_seconds = 0
                  '-v', f'{build}:/rig:ro', '-v', f'{inputs}:/input:ro', '-v', f'{volume}:/state', '-w', '/state', image,
                  '/bin/sh', '-ec', boot], stdout=subprocess.DEVNULL)
         host = 'http://' + output(['docker', 'port', container, '8080/tcp'])
-        metrics_url = 'http://' + output(['docker', 'port', container, '9091/tcp']) + '/metrics'
+        observation_host = 'http://' + output(['docker', 'port', container, '9091/tcp'])
+        metrics_url = observation_host + '/metrics'
+        def resource_sample():
+            return {'time': time.time(), 'driver_load_average': os.getloadavg(),
+                    'target': json.loads(request(observation_host + '/resources'))}
+
         deadline = time.monotonic() + 60
         while True:
             try: request(host + '/readyz'); break
@@ -265,6 +278,14 @@ render_seconds = 0
             if error.code not in (401, 403): raise
             anonymous = b''
         if b'id="mixed-fixture"' in anonymous: raise RuntimeError('fixture unexpectedly allows anonymous access')
+        if args.require_quiet:
+            samples = [resource_sample()]
+            time.sleep(5)
+            samples.append(resource_sample())
+            reasons = quiet_reasons(samples, os.cpu_count())
+            (result/'preflight.json').write_text(json.dumps({'samples': samples, 'reasons': reasons}, indent=2))
+            if reasons:
+                raise RuntimeError('quiet-host preflight failed: ' + '; '.join(reasons))
         stats_process = subprocess.Popen(['docker', 'stats', '--format', '{{json .}}', container], stdout=subprocess.PIPE, text=True)
         def container_stats():
             with (result / 'container.ndjson').open('w') as log:
@@ -279,6 +300,8 @@ render_seconds = 0
             with (result / 'metrics.ndjson').open('w') as log:
                 while not stop.is_set():
                     sample = {'time': time.time()}
+                    try: sample.update(resource_sample())
+                    except Exception as error: sample['resource_error'] = str(error)
                     try:
                         metrics = parse_metrics(request(metrics_url).decode())
                         required = ('process_cpu_seconds_total', 'process_resident_memory_bytes',
@@ -323,9 +346,10 @@ render_seconds = 0
                 stage['verdict']['missing'].append('durable WebSocket usage sessions')
             rows = [json.loads(line) for line in (result/'metrics.ndjson').read_text().splitlines() if line]
             stage['resources'] = resources(rows, stage['start'], stage['end'])
+            stage['resources'].update(target_resources(rows, stage['start'], stage['end']))
             container_rows = [json.loads(line) for line in (result/'container.ndjson').read_text().splitlines() if line]
             stage['resources'].update(container_resources(container_rows, stage['start'], stage['end']))
-            if stage['resources']['samples'] < 2 or not stage['resources']['container_samples']:
+            if stage['resources']['samples'] < 2 or not stage['resources']['container_samples'] or stage['resources']['target_samples'] < 2 or 'target_observation_error' in stage['resources']:
                 stage['verdict']['status'] = 'invalid'
                 stage['verdict']['missing'].append('resource observations')
             stages.append(stage)
@@ -339,11 +363,13 @@ render_seconds = 0
         print(result / 'REPORT.md', flush=True)
     finally:
         cleanup()
-    return 0
+    return result
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--repeats', type=int, default=1, help='repeat the whole sweep on fresh targets')
+    parser.add_argument('--require-quiet', action='store_true', help='reject busy generator/target kernels before the sweep')
     parser.add_argument('--steps', default='1,10,50,100,200,400')
     parser.add_argument('--seconds', type=int, default=30)
     parser.add_argument('--sessions', type=int, default=100000)
@@ -353,10 +379,27 @@ def main():
     parser.add_argument('--image', default='debian:bookworm-slim', help='must already exist locally; resolved to immutable image ID')
     args = parser.parse_args()
     args.steps = [int(n) for n in args.steps.split(',')]
-    if not args.steps or any(n < 1 or n > 2000 for n in args.steps) or args.seconds < 5 or args.seconds > 600 or args.report_interval < 1 or args.cpus <= 0 or not 0 <= args.sessions <= 1000000 or len(set(args.steps)) != len(args.steps):
-        parser.error('steps must be 1..2000, seconds 5..600, interval/CPU quota positive, sessions 0..1000000, and steps unique')
+    if not args.steps or any(n < 1 or n > 2000 for n in args.steps) or args.seconds < 5 or args.seconds > 600 or args.report_interval < 1 or args.cpus <= 0 or not 0 <= args.sessions <= 1000000 or len(set(args.steps)) != len(args.steps) or not 1 <= args.repeats <= 10:
+        parser.error('steps must be 1..2000, seconds 5..600, interval/CPU quota positive, sessions 0..1000000, steps unique, and repeats 1..10')
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
-    return run(args)
+    if args.repeats == 1:
+        run(args)
+        return 0
+    campaign = ROOT/'loadtest/results'/('repeat-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+secrets.token_hex(3))
+    campaign.mkdir(mode=0o700, parents=True)
+    paths = []
+    try:
+        for _ in range(args.repeats):
+            paths.append(str(run(args)))
+            write_comparison(paths, args.repeats, campaign)
+    finally:
+        write_comparison(paths, args.repeats, campaign)
+        print(campaign/'REPORT.md', flush=True)
+    return 0
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except RuntimeError as error:
+        print(f'Load test stopped: {error}', file=sys.stderr)
+        raise SystemExit(1)

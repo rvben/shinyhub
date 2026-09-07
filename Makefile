@@ -550,4 +550,4 @@ load-test-mixed: ## Profile a disposable Linux server with mixed HTTP, WebSocket
 
 test-load-mixed: ## Validate the mixed-load verdicts and database telemetry without Docker
 	python3 -m unittest discover -s loadtest/mixed -p 'test_*.py'
-	go test ./internal/metrics -run TestDatabasePoolTelemetryTracksCurrentStats
+	go test ./internal/metrics ./loadtest/mixed/fixture -run 'TestDatabasePoolTelemetryTracksCurrentStats|TestTargetResources'
