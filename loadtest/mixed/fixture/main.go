@@ -20,6 +20,9 @@ import (
 )
 
 func main() {
+	cgroup := flag.String("cgroup", "/sys/fs/cgroup", "target cgroup v2 directory")
+	observeAddr := flag.String("observe-addr", "0.0.0.0:9091", "metrics and resources listener")
+	metricsURL := flag.String("metrics-url", "http://127.0.0.1:9090", "server metrics URL")
 	mode := flag.String("mode", "serve", "serve, metrics, or fetch")
 	port := flag.Int("port", 8000, "listen port")
 	delay := flag.Duration("startup", 100*time.Millisecond, "deterministic startup delay")
@@ -27,18 +30,26 @@ func main() {
 	output := flag.String("out", "/state/profile.pprof", "profile output")
 	flag.Parse()
 	if *mode == "metrics" {
-		target, _ := url.Parse("http://127.0.0.1:9090")
+		target, err := url.Parse(*metricsURL)
+		if err != nil || target.Scheme != "http" || target.Host == "" {
+			log.Fatal("metrics-url must be an absolute HTTP URL")
+		}
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", httputil.NewSingleHostReverseProxy(target))
 		mux.HandleFunc("/resources", func(w http.ResponseWriter, r *http.Request) {
-			data := readTargetResources()
+			data := targetResources(func(path string) ([]byte, error) {
+				if strings.HasPrefix(path, "/sys/fs/cgroup/") {
+					path = strings.TrimRight(*cgroup, "/") + strings.TrimPrefix(path, "/sys/fs/cgroup")
+				}
+				return os.ReadFile(path)
+			})
 			w.Header().Set("Content-Type", "application/json")
 			if data.validate() != nil {
 				w.WriteHeader(http.StatusServiceUnavailable)
 			}
 			_ = json.NewEncoder(w).Encode(data)
 		})
-		log.Fatal(http.ListenAndServe("0.0.0.0:9091", mux))
+		log.Fatal(http.ListenAndServe(*observeAddr, mux))
 		return
 	}
 	if *mode == "fetch" {

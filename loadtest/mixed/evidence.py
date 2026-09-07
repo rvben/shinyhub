@@ -51,7 +51,7 @@ def compare_runs(paths, expected):
         root = Path(path)
         runs.append((json.loads((root/'metadata.json').read_text()), json.loads((root/'stages.json').read_text())))
     fields = ('arch', 'image_id', 'cpus', 'memory', 'seed_sessions', 'seconds', 'steps',
-              'report_interval', 'k6', 'binary_sha256', 'driver_cpus', 'driver_platform', 'go', 'require_quiet')
+              'transport', 'target_host', 'source_commit', 'report_interval', 'k6', 'binary_sha256', 'driver_cpus', 'driver_platform', 'go', 'require_quiet')
     compatible = bool(runs) and all(all(k in meta and meta[k] == runs[0][0].get(k) for k in fields) for meta, _ in runs)
     result = {'expected_runs': expected, 'completed_runs': len(runs), 'compatible': compatible, 'stages': []}
     clients = runs[0][0]['steps'] if runs else []
@@ -86,6 +86,6 @@ def write_comparison(paths, expected, destination):
         pages = ', '.join(f'{v:.1f}' for v in row['page_p95_ms'])
         reports = ', '.join(f'{v:.1f}' for v in row['report_p95_ms'])
         lines.append(f"| {row['clients']} | {', '.join(row['verdicts'])} | {pages} | {reports} | {row['consistency']} |")
-    lines += ['', 'Percentiles are shown separately, not averaged or pooled. A consistent pass is an observation under the recorded conditions, not a production capacity guarantee. Local Docker shares physical hardware with the generator; target-kernel metrics cannot reveal a hypervisor’s other workloads.', '', 'Evidence directories:']
+    lines += ['', 'Percentiles are shown separately, not averaged or pooled. A consistent pass is an observation under the recorded conditions, not a production capacity guarantee. Local Docker shares physical hardware with the generator. SSH includes network and tunnel overhead; physical hardware separation must be verified independently. Target-kernel metrics cannot reveal a hypervisor’s other workloads.', '', 'Evidence directories:']
     lines += [f'- {p}' for p in paths]
     (destination/'REPORT.md').write_text('\n'.join(lines)+'\n')

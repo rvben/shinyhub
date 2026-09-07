@@ -18,6 +18,7 @@ import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
+from remote import SSHTarget
 from evidence import target_resources, quiet_reasons, write_comparison
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -148,28 +149,56 @@ def summarize(stages, destination, metadata):
     failed = [s['clients'] for s in stages if s['verdict']['status'] == 'saturated']
     lines += ['', f'Largest tested passing stage: {max(passed) if passed else "none"}. First failing stage: {min(failed) if failed else "not reached"}.', '',
               'Interpret short runs as a saturation bracket, not a production sizing guarantee. Report and wake percentiles may have few samples; consult their counts. Metrics samples and container statistics include timestamps; CPU profiles cover 10 seconds of each stage. Connection-pool wait time excludes SQLite lock waits and query execution.', '',
-              'The load generator runs on the host outside the target CPU quota. Generator CPU and RSS are sampled; dropped iterations invalidate a throughput claim even when successful-request latency looks healthy.']
+              f"Transport: {metadata.get('transport', 'local-docker')}. Tested source: {metadata.get('source_commit') or metadata['commit']}. The load generator runs outside the target CPU quota. Generator CPU and RSS are sampled; dropped iterations invalidate a throughput claim even when successful-request latency looks healthy."]
     destination.write_text('\n'.join(lines) + '\n')
 
 
+def reuse_binaries(previous, build, arch):
+    """Reuse only the exact archived binaries described by the prior manifest."""
+    try:
+        metadata = json.loads((previous/'metadata.json').read_text())
+        if metadata['arch'] != arch:
+            raise ValueError('target architecture differs from archived build')
+        for name in ('shinyhub', 'fixture', 'seed'):
+            source = previous/'build'/name
+            if hashlib.sha256(source.read_bytes()).hexdigest() != metadata['binary_sha256'][name]:
+                raise ValueError(f'{name} archive checksum mismatch')
+            shutil.copy2(source, build/name)
+        if not metadata.get('go') or not (metadata.get('source_commit') or metadata.get('commit')):
+            raise ValueError('archived build provenance is incomplete')
+        return metadata
+    except (OSError, KeyError, ValueError) as error:
+        raise RuntimeError(f'cannot reuse archived binaries: {error}') from error
+
+
 def run(args):
-    for tool in ('docker', 'go', 'k6'):
+    required = ('ssh', 'tar', 'k6') if args.ssh_target else ('docker', 'k6')
+    if not args.reuse_build_from: required += ('go',)
+    for tool in required:
         if not shutil.which(tool):
             raise RuntimeError(f'{tool} is required')
-    arch = output(['docker', 'info', '--format', '{{.Architecture}}'])
+    run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + secrets.token_hex(3)
+    remote = SSHTarget(args.ssh_target, 'shinyhub-mixed-' + run_id.lower()) if args.ssh_target else None
+    remote_info = remote.probe() if remote else None
+    arch = remote_info['arch'] if remote else output(['docker', 'info', '--format', '{{.Architecture}}'])
     arch = {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(arch, arch)
     if arch not in ('arm64', 'amd64'):
         raise RuntimeError(f'unsupported Linux architecture: {arch}')
-    image = output(['docker', 'image', 'inspect', args.image, '--format', '{{.Id}}'])
-    run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + secrets.token_hex(3)
+    image = (remote_info['os'] + ' / ' + remote_info['kernel']) if remote else output(['docker', 'image', 'inspect', args.image, '--format', '{{.Id}}'])
     result = ROOT / 'loadtest/results' / ('mixed-' + run_id)
     result.mkdir(mode=0o700, parents=True)
     print(f'Preparing target; evidence: {result}', flush=True)
-    build = ROOT / 'tmp/mixed-build'
+    build = result / 'build'
     build.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, GOOS='linux', GOARCH=arch, CGO_ENABLED='0')
-    for name, package in [('shinyhub', './cmd/shinyhub'), ('fixture', './loadtest/mixed/fixture'), ('seed', './loadtest/mixed/seed')]:
-        command(['go', 'build', '-trimpath', '-ldflags=-s -w', '-o', str(build / name), package], cwd=ROOT, env=env)
+    previous = None
+    if args.reuse_build_from:
+        previous = reuse_binaries(args.reuse_build_from, build, arch)
+        if args.source_commit and args.source_commit != (previous.get('source_commit') or previous['commit']):
+            raise RuntimeError('requested source revision differs from archived build')
+    else:
+        env = dict(os.environ, GOWORK='off', GOOS='linux', GOARCH=arch, CGO_ENABLED='0')
+        for name, package in [('shinyhub', './cmd/shinyhub'), ('fixture', './loadtest/mixed/fixture'), ('seed', './loadtest/mixed/seed')]:
+            command(['go', 'build', '-buildvcs=false', '-trimpath', '-ldflags=-s -w', '-o', str(build / name), package], cwd=ROOT if name == 'fixture' else args.source_dir, env=env)
     inputs = result / 'inputs'
     inputs.mkdir(mode=0o700)
     password = secrets.token_urlsafe(24)
@@ -215,9 +244,10 @@ render_seconds = 0
     observer = stats_thread = None
     stages = []
     metadata = {'commit': output(['git', 'rev-parse', 'HEAD']), 'dirty': bool(output(['git', 'status', '--porcelain'])),
+                'source_commit': (previous.get('source_commit') or previous['commit']) if previous else args.source_commit, 'target_host': args.ssh_target or 'local-docker', 'transport': 'ssh-systemd' if remote else 'local-docker',
                 'arch': arch, 'image_id': image, 'cpus': args.cpus, 'memory': args.memory,
                 'seed_sessions': args.sessions, 'seconds': args.seconds, 'steps': args.steps, 'report_interval': args.report_interval,
-                'go': output(['go', 'version']), 'k6': output(['k6', 'version']), 'driver_platform': platform.platform(), 'driver_cpus': os.cpu_count(), 'require_quiet': args.require_quiet,
+                'go': previous['go'] if previous else output(['go', 'version']), 'k6': output(['k6', 'version']), 'driver_platform': platform.platform(), 'driver_cpus': os.cpu_count(), 'require_quiet': args.require_quiet,
                 'binary_sha256': {name: hashlib.sha256((build/name).read_bytes()).hexdigest() for name in ('shinyhub','fixture','seed')}}
     (result / 'metadata.json').write_text(json.dumps(metadata, indent=2))
     def cleanup():
@@ -234,26 +264,44 @@ render_seconds = 0
             stats_process.terminate(); stats_process.wait(timeout=10)
         if observer: observer.join(timeout=12)
         if stats_thread: stats_thread.join(timeout=5)
-        with (result/'container.log').open('w') as log:
-            subprocess.run(['docker','logs',container],stdout=log,stderr=subprocess.STDOUT)
-        subprocess.run(['docker', 'cp', container + ':/state/server.log', str(result / 'server.log')], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(['docker', 'rm', '-f', container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(['docker', 'volume', 'rm', volume], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        shutil.rmtree(inputs)
-        (result / 'auth.json').unlink(missing_ok=True)
+        try:
+            if remote:
+                remote.cleanup(result)
+            else:
+                with (result/'container.log').open('w') as log:
+                    subprocess.run(['docker','logs',container],stdout=log,stderr=subprocess.STDOUT)
+                subprocess.run(['docker', 'cp', container + ':/state/server.log', str(result / 'server.log')], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(['docker', 'rm', '-f', container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(['docker', 'volume', 'rm', volume], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        finally:
+            shutil.rmtree(inputs)
+            (result / 'auth.json').unlink(missing_ok=True)
+    def exec_args(argv):
+        return remote.exec_args(argv) if remote else ['docker', 'exec', container] + argv
+    def copy_profile(clients):
+        source = f'/state/{clients}-cpu.pprof'
+        destination = result / f'{clients}-cpu.pprof'
+        if remote: remote.copy(source, destination)
+        else: command(['docker', 'cp', container+':'+source, str(destination)], stdout=subprocess.DEVNULL)
     try:
-        command(['docker', 'volume', 'create', volume], stdout=subprocess.DEVNULL)
-        boot = 'cp /input/server.yaml /state/shinyhub.yaml; cp /input/password /state/password; /rig/shinyhub init --config /state/shinyhub.yaml --admin-user bench-admin --admin-password-file /state/password --output table; /rig/fixture -mode metrics & exec /rig/shinyhub serve --config /state/shinyhub.yaml --no-browser > /state/server.log 2>&1'
-        command(['docker', 'run', '-d', '--name', container, '--init', '--cpus', str(args.cpus), '--memory', args.memory,
-                 '--pids-limit', '2048', '--ulimit', 'nofile=65536:65536', '-p', '127.0.0.1::8080', '-p', '127.0.0.1::9091',
-                 '-v', f'{build}:/rig:ro', '-v', f'{inputs}:/input:ro', '-v', f'{volume}:/state', '-w', '/state', image,
-                 '/bin/sh', '-ec', boot], stdout=subprocess.DEVNULL)
-        host = 'http://' + output(['docker', 'port', container, '8080/tcp'])
-        observation_host = 'http://' + output(['docker', 'port', container, '9091/tcp'])
+        if remote:
+            host, observation_host = remote.start(build, inputs, args.cpus, args.memory, result)
+        else:
+            command(['docker', 'volume', 'create', volume], stdout=subprocess.DEVNULL)
+            boot = 'cp /input/server.yaml /state/shinyhub.yaml; cp /input/password /state/password; /rig/shinyhub init --config /state/shinyhub.yaml --admin-user bench-admin --admin-password-file /state/password --output table; /rig/fixture -mode metrics & exec /rig/shinyhub serve --config /state/shinyhub.yaml --no-browser > /state/server.log 2>&1'
+            command(['docker', 'run', '-d', '--name', container, '--init', '--cpus', str(args.cpus), '--memory', args.memory,
+                     '--pids-limit', '2048', '--ulimit', 'nofile=65536:65536', '-p', '127.0.0.1::8080', '-p', '127.0.0.1::9091',
+                     '-v', f'{build}:/rig:ro', '-v', f'{inputs}:/input:ro', '-v', f'{volume}:/state', '-w', '/state', image,
+                     '/bin/sh', '-ec', boot], stdout=subprocess.DEVNULL)
+            host = 'http://' + output(['docker', 'port', container, '8080/tcp'])
+            observation_host = 'http://' + output(['docker', 'port', container, '9091/tcp'])
         metrics_url = observation_host + '/metrics'
         def resource_sample():
-            return {'time': time.time(), 'driver_load_average': os.getloadavg(),
-                    'target': json.loads(request(observation_host + '/resources'))}
+            target = json.loads(request(observation_host + '/resources'))
+            quota, period = target['cpu_max'].split()
+            if quota == 'max' or not math.isclose(int(quota)/int(period), args.cpus, rel_tol=0.001):
+                raise RuntimeError('observed target CPU quota differs from requested limit')
+            return {'time': time.time(), 'driver_load_average': os.getloadavg(), 'target': target}
 
         deadline = time.monotonic() + 60
         while True:
@@ -264,9 +312,12 @@ render_seconds = 0
         admin = login(host, 'bench-admin', password)
         for slug in ('mixed', 'wake'):
             with (result / (slug + '-deploy.log')).open('w') as log:
-                command(['docker', 'exec', '-e', 'SHINYHUB_HOST=http://127.0.0.1:8080', '-e', 'SHINYHUB_TOKEN',
-                         container, '/rig/shinyhub', 'deploy', '/input/' + slug, '--slug', slug, '--visibility', 'shared', '--output', 'json'], stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, SHINYHUB_TOKEN=admin))
-        command(['docker', 'exec', container, '/rig/seed', '-sessions', str(args.sessions)], stdout=subprocess.DEVNULL)
+                if remote:
+                    remote.deploy(slug, admin, log)
+                else:
+                    command(['docker', 'exec', '-e', 'SHINYHUB_HOST=http://127.0.0.1:8080', '-e', 'SHINYHUB_TOKEN',
+                             container, '/rig/shinyhub', 'deploy', '/input/' + slug, '--slug', slug, '--visibility', 'shared', '--output', 'json'], stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, SHINYHUB_TOKEN=admin))
+        command(exec_args(['/rig/seed', '-sessions', str(args.sessions)]), stdout=subprocess.DEVNULL)
         viewer = login(host, 'bench-viewer', password)
         auth_file = result / 'auth.json'
         auth_file.write_text(json.dumps({'admin': admin, 'viewer': viewer}))
@@ -286,7 +337,7 @@ render_seconds = 0
             (result/'preflight.json').write_text(json.dumps({'samples': samples, 'reasons': reasons}, indent=2))
             if reasons:
                 raise RuntimeError('quiet-host preflight failed: ' + '; '.join(reasons))
-        stats_process = subprocess.Popen(['docker', 'stats', '--format', '{{json .}}', container], stdout=subprocess.PIPE, text=True)
+        stats_process = None if remote else subprocess.Popen(['docker', 'stats', '--format', '{{json .}}', container], stdout=subprocess.PIPE, text=True)
         def container_stats():
             with (result / 'container.ndjson').open('w') as log:
                 for line in stats_process.stdout:
@@ -295,7 +346,8 @@ render_seconds = 0
                     try: row = {'time': time.time(), 'stats': json.loads(line)}
                     except json.JSONDecodeError: row = {'time': time.time(), 'error': 'invalid Docker stats line'}
                     log.write(json.dumps(row)+'\n'); log.flush()
-        stats_thread = threading.Thread(target=container_stats, daemon=True); stats_thread.start()
+        if not remote:
+            stats_thread = threading.Thread(target=container_stats, daemon=True); stats_thread.start()
         def observe():
             with (result / 'metrics.ndjson').open('w') as log:
                 while not stop.is_set():
@@ -326,11 +378,12 @@ render_seconds = 0
             with (result / f'{clients}-k6.log').open('w') as log:
                 active = subprocess.Popen(['k6', 'run', str(HERE / 'mixed.js')], env=kenv, stdout=log, stderr=subprocess.STDOUT)
                 # The helper only fetches from container loopback. pprof is not exposed to the host.
-                profile = subprocess.Popen(['docker', 'exec', container, '/rig/fixture', '-mode', 'fetch', '-out', f'/state/{clients}-cpu.pprof'], stdout=subprocess.DEVNULL, stderr=log) if args.seconds >= 15 else None
+                profile = subprocess.Popen(exec_args(['/rig/fixture', '-mode', 'fetch', '-out', f'/state/{clients}-cpu.pprof']), stdout=subprocess.DEVNULL, stderr=log) if args.seconds >= 15 else None
                 code = active.wait()
                 if profile:
                     profile.wait(timeout=45)
-                    command(['docker', 'cp', f'{container}:/state/{clients}-cpu.pprof', str(result / f'{clients}-cpu.pprof')], stdout=subprocess.DEVNULL)
+                    if profile.returncode: raise RuntimeError('CPU profile capture failed')
+                    copy_profile(clients)
             if code not in (0, 99) or not summary.exists(): raise RuntimeError(f'k6 failed: {code}; inspect {clients}-k6.log')
             summary_data = json.loads(summary.read_text())
             stage.update(end=time.time(), verdict=verdict(summary_data))
@@ -347,9 +400,9 @@ render_seconds = 0
             rows = [json.loads(line) for line in (result/'metrics.ndjson').read_text().splitlines() if line]
             stage['resources'] = resources(rows, stage['start'], stage['end'])
             stage['resources'].update(target_resources(rows, stage['start'], stage['end']))
-            container_rows = [json.loads(line) for line in (result/'container.ndjson').read_text().splitlines() if line]
+            container_rows = [] if remote else [json.loads(line) for line in (result/'container.ndjson').read_text().splitlines() if line]
             stage['resources'].update(container_resources(container_rows, stage['start'], stage['end']))
-            if stage['resources']['samples'] < 2 or not stage['resources']['container_samples'] or stage['resources']['target_samples'] < 2 or 'target_observation_error' in stage['resources']:
+            if stage['resources']['samples'] < 2 or (not remote and not stage['resources']['container_samples']) or stage['resources']['target_samples'] < 2 or 'target_observation_error' in stage['resources']:
                 stage['verdict']['status'] = 'invalid'
                 stage['verdict']['missing'].append('resource observations')
             stages.append(stage)
@@ -368,6 +421,10 @@ render_seconds = 0
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ssh-target', help='authorized Linux SSH host with Python 3 and passwordless systemd sudo')
+    parser.add_argument('--reuse-build-from', type=Path, help='reuse checksum-verified binaries and provenance from a prior evidence directory')
+    parser.add_argument('--source-dir', type=Path, default=ROOT, help='source tree for application and seed binaries')
+    parser.add_argument('--source-commit', help='revision of an archived source tree, recorded with binary hashes')
     parser.add_argument('--repeats', type=int, default=1, help='repeat the whole sweep on fresh targets')
     parser.add_argument('--require-quiet', action='store_true', help='reject busy generator/target kernels before the sweep')
     parser.add_argument('--steps', default='1,10,50,100,200,400')
@@ -379,7 +436,7 @@ def main():
     parser.add_argument('--image', default='debian:bookworm-slim', help='must already exist locally; resolved to immutable image ID')
     args = parser.parse_args()
     args.steps = [int(n) for n in args.steps.split(',')]
-    if not args.steps or any(n < 1 or n > 2000 for n in args.steps) or args.seconds < 5 or args.seconds > 600 or args.report_interval < 1 or args.cpus <= 0 or not 0 <= args.sessions <= 1000000 or len(set(args.steps)) != len(args.steps) or not 1 <= args.repeats <= 10:
+    if not args.steps or any(n < 1 or n > 2000 for n in args.steps) or args.seconds < 5 or args.seconds > 600 or args.report_interval < 1 or not math.isfinite(args.cpus) or args.cpus <= 0 or not 0 <= args.sessions <= 1000000 or len(set(args.steps)) != len(args.steps) or not 1 <= args.repeats <= 10:
         parser.error('steps must be 1..2000, seconds 5..600, interval/CPU quota positive, sessions 0..1000000, steps unique, and repeats 1..10')
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     if args.repeats == 1:
@@ -391,6 +448,7 @@ def main():
     try:
         for _ in range(args.repeats):
             paths.append(str(run(args)))
+            args.reuse_build_from = Path(paths[0])
             write_comparison(paths, args.repeats, campaign)
     finally:
         write_comparison(paths, args.repeats, campaign)

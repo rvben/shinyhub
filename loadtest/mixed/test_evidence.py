@@ -42,7 +42,7 @@ class ComparisonTests(unittest.TestCase):
             for i, status in enumerate(['pass', 'pass', 'saturated']):
                 path = Path(root)/str(i)
                 path.mkdir()
-                metadata = {'steps': [100], 'binary_sha256': {'server': 'same'}, 'arch': 'arm64', 'image_id': 'image', 'cpus': 2, 'memory': '2g', 'seed_sessions': 100000, 'seconds': 60, 'report_interval': 5, 'k6': 'test', 'driver_cpus': 4, 'driver_platform': 'test', 'go': 'test', 'require_quiet': True}
+                metadata = {'transport': 'local-docker', 'target_host': 'local-docker', 'source_commit': None, 'steps': [100], 'binary_sha256': {'server': 'same'}, 'arch': 'arm64', 'image_id': 'image', 'cpus': 2, 'memory': '2g', 'seed_sessions': 100000, 'seconds': 60, 'report_interval': 5, 'k6': 'test', 'driver_cpus': 4, 'driver_platform': 'test', 'go': 'test', 'require_quiet': True}
                 (path/'metadata.json').write_text(json.dumps(metadata))
                 summary = path/'summary.json'
                 summary.write_text(json.dumps({'metrics': {'page_ms': {'values': {'p(95)': 10+i}}, 'report_ms': {'values': {'p(95)': 100+i}}}}))

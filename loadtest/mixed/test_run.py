@@ -1,10 +1,33 @@
+import hashlib
+import json
+from pathlib import Path
+import tempfile
 import unittest
-from run import parse_metrics, verdict, resources, container_resources
+from run import parse_metrics, verdict, resources, container_resources, reuse_binaries
 
 class EvidenceTests(unittest.TestCase):
     def sample(self):
         return {'metrics': {name: {'values': {'count': 5}} for name in
                            ('page_ms','asset_ms','report_ms','session_establish_ms','session_rtt_ms','wake_ms')}}
+
+    def test_reused_binaries_require_matching_architecture_and_checksums(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prior, destination = root/'prior', root/'destination'
+            (prior/'build').mkdir(parents=True)
+            destination.mkdir()
+            metadata = {'arch': 'amd64', 'commit': 'pinned', 'go': 'go test', 'binary_sha256': {}}
+            for name in ('shinyhub', 'fixture', 'seed'):
+                (prior/'build'/name).write_bytes(name.encode())
+                metadata['binary_sha256'][name] = hashlib.sha256(name.encode()).hexdigest()
+            (prior/'metadata.json').write_text(json.dumps(metadata))
+            self.assertEqual(reuse_binaries(prior, destination, 'amd64')['commit'], 'pinned')
+            self.assertEqual((destination/'shinyhub').read_bytes(), b'shinyhub')
+            with self.assertRaisesRegex(RuntimeError, 'architecture differs'):
+                reuse_binaries(prior, destination, 'arm64')
+            (prior/'build'/'fixture').write_bytes(b'changed')
+            with self.assertRaisesRegex(RuntimeError, 'checksum mismatch'):
+                reuse_binaries(prior, destination, 'amd64')
 
     def test_missing_observations_are_invalid(self):
         self.assertEqual(verdict({'metrics': {}})['status'], 'invalid')

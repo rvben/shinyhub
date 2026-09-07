@@ -2,15 +2,16 @@
 
 This rig measures the real ShinyHub server under concurrent authenticated HTTP,
 WebSocket, reporting, and wake-up traffic. It creates its own disposable Linux
-container and SQLite volume, deploys two apps through the CLI, seeds retained
-usage history, drives the server from the host, and removes the container,
-volume, and synthetic credentials on exit. It never selects an existing server
+target and SQLite database, deploys two apps through the CLI, seeds retained
+usage history, drives the server from the generator, and removes its target
+and synthetic credentials on exit. It never selects an existing server
 or saved CLI connection.
 
-Requirements: Python 3.10+, Go matching the repository, k6, and a running local
-Docker engine using cgroup v2. Cache `debian:bookworm-slim` first. The runner resolves the image
+Requirements: Python 3.10+, Go matching the repository, and k6. The default
+transport needs a running local Docker engine using cgroup v2; the SSH
+transport described below uses a separate Linux host. Cache `debian:bookworm-slim` first. The runner resolves the image
 to its immutable local ID and records it; it does not pull images or publish
-anything. Binaries are cross-built for the Docker engine's architecture.
+anything. Binaries are cross-built for the target's architecture.
 
 ```sh
 # Fast harness control, including auth, actual deployment and usage persistence.
@@ -42,7 +43,8 @@ boundaries, verdicts, measured resource use and durable session counts.
 binary SHA-256 checksums, host platform and workload parameters. Keep the same
 image, CPU/memory limits, history size and driver for comparisons.
 
-With `--repeats`, every sweep gets a fresh container and seeded database. A
+With `--repeats`, every sweep gets a fresh target and seeded database. The
+first run builds the binaries; subsequent runs reuse those exact artifacts. A
 separate `repeat-<id>/REPORT.md` and `comparison.json` compare the completed
 runs. Each stage is a consistent pass, consistent saturation, variable, or
 insufficient evidence. Missing runs and mismatched binaries/workloads cannot
@@ -116,7 +118,7 @@ production session count.
   usable container samples is invalid.
 - `*-cpu.pprof`: ten seconds of server CPU samples during each stage lasting
   at least 15 seconds. Profiling is held constant between stages; its small
-  overhead is included. Use `go tool pprof` with `tmp/mixed-build/shinyhub`.
+  overhead is included. Use `go tool pprof` with `build/shinyhub` in the corresponding evidence directory.
 - `*-summary.json`, `*-k6.log`, deployment logs and server logs: request counts,
   latency distributions, failure thresholds, dropped work and diagnostics.
 
@@ -150,9 +152,60 @@ CPU and throttling observations when comparing repetitions. Inside a VM,
 `/proc` describes that Linux kernel, not other workloads on the physical
 hypervisor; cgroup accounting also cannot reveal all ancestor/hypervisor limits.
 
-This runner currently drives local Docker from the host: the target and k6
-still share physical hardware. Three local low-load controls verify the rig,
-but do not substitute for a quiet Linux target and a physically separate
-load generator. That capacity experiment requires explicitly selected machines
-and a transport appropriate to their environment. Do not point this runner at
-a remote Docker context and assume local bind mounts or loopback ports work.
+The default Docker target and k6 share physical hardware. Use `--ssh-target`
+for a separate, explicitly authorized Linux machine. Do not point the Docker
+transport at a remote context: its bind mounts and port discovery are local.
+
+## Separate Linux target over SSH
+
+The SSH transport needs Python 3, systemd with cgroup v2 CPU accounting, and
+passwordless sudo for transient services on the target. It installs no packages.
+It starts an unprivileged service with the requested CPU and memory limits,
+private temporary storage, a two-hour expiry, and uniquely owned files under
+`/tmp/shinyhub-mixed-<id>`. Application and observation ports bind to remote
+loopback; an SSH tunnel exposes only local loopback endpoints to k6. SSH and
+network overhead are part of these measurements, so do not pool them with
+local Docker results. The service does not reserve physical CPUs; other target
+workloads and the hypervisor can still interfere.
+
+```sh
+python3 loadtest/mixed/run.py --ssh-target <authorized-ssh-alias> \
+  --steps 1,50,100,200,400 --seconds 60 --sessions 100000 \
+  --repeats 3 --require-quiet
+```
+
+The runner verifies uploaded binary hashes, records effective service limits,
+and reads CPU accounting from the service's actual cgroup, including managed
+apps. Target-kernel load and steal time are sampled alongside generator load.
+There is no `container.ndjson` for this transport: cgroup accounting provides
+the target CPU evidence. Each repetition uses fresh storage and a fresh service.
+Normal exit, SIGINT and SIGTERM stop the service and remove its files. If SSH
+is unavailable during cleanup, the runner reports the owned unit and host;
+reconnect and remove only that unit and directory. The expiry stops compute
+usage after an orchestrator crash but does not delete the evidence directory.
+
+To avoid building concurrent application edits, prepare a source archive:
+
+```sh
+revision=$(git rev-parse HEAD)
+mkdir -p "tmp/mixed-source-$revision"
+git archive "$revision" | tar -x -C "tmp/mixed-source-$revision"
+python3 loadtest/mixed/run.py --ssh-target <authorized-ssh-alias> \
+  --source-dir "tmp/mixed-source-$revision" --source-commit "$revision" \
+  --steps 1,50,100,200,400 --seconds 60 --sessions 100000 \
+  --repeats 3 --require-quiet
+```
+
+Application and seed binaries come from `--source-dir`; the observation helper
+comes from the current harness. Go workspace discovery and automatic VCS stamps
+are disabled for builds; the supplied revision and all binary hashes are recorded
+explicitly. Binaries are retained per run, so concurrent runs cannot overwrite
+the executable associated with an earlier profile.
+
+To repeat an experiment without recompiling, use
+`--reuse-build-from loadtest/results/mixed-<prior-run-id>`. This verifies every
+archived binary against its manifest and rejects a different target architecture.
+The source revision and compiler version come from that manifest, while new
+workload parameters and resource observations are recorded for the new run.
+Go is not required when reusing a build. Keep the archived `build/` directory
+with its `metadata.json`; missing or altered artifacts stop the run.
