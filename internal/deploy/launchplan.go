@@ -3,7 +3,6 @@ package deploy
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/process"
@@ -112,14 +111,10 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 			plan.DepPrep = []DepPrepStep{
 				{
 					Label: "ensure project",
-					// ensure project is best-effort: a missing pyproject.toml or
-					// uv init failure should not abort the run (uv sync below
-					// will still catch real problems). This matches server
-					// behaviour (deploy.go warns and continues on ensureProjectFn
-					// failure).
+
 					Run: func(ctx context.Context, bundleDir string) error {
 						if err := ensureProjectFn(ctx, bundleDir); err != nil {
-							slog.Warn("ensure project failed; continuing", "err", err)
+							return fmt.Errorf("uv sync: prepare Python project: %w", err)
 						}
 						return nil
 					},

@@ -204,6 +204,8 @@ func TestDeploy_GroupedHandoffAdmissionPreservesAuthority(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			before, _ := store.GetAppBySlug(app.Slug)
+			revision := appResourceRevision(before)
 			rec := deployBareGeneration(t, srv, token, app.Slug, "print('v2')", false)
 			if rec.Code != http.StatusConflict || rec.Header().Get("X-ShinyHub-Conflict") != "generation-handoff-deferred" {
 				t.Fatalf("admission: %d %s", rec.Code, rec.Body.String())
@@ -211,6 +213,10 @@ func TestDeploy_GroupedHandoffAdmissionPreservesAuthority(t *testing.T) {
 			active, _ := store.GetActiveDeploymentGeneration(app.ID)
 			if active.DeploymentID != old.DeploymentID {
 				t.Fatal("refused grouped update changed authority")
+			}
+			after, _ := store.GetAppBySlug(app.Slug)
+			if appResourceRevision(after) != revision {
+				t.Fatalf("deferred handoff invalidated saved plan: before=%+v after=%+v", before, after)
 			}
 		})
 	}

@@ -17,3 +17,9 @@ The addins use the CLI credential store and never read tokens. To select an
 explicit CLI installation, set `options(shinyhub.executable = '/path/to/shinyhub')`.
 Long-running development and deployment commands run in the Terminal, leaving
 the R session available. Readiness checks run synchronously in the Console.
+
+If publishing requires downtime, the terminal explains that active sessions
+will disconnect and asks you to type `deploy` to retry. That explicit choice
+applies the same reviewed plan; source edits made afterward are excluded.
+Press Enter to cancel. A stale plan asks you to publish again and review the
+new server state. The temporary plan is removed when the terminal command exits.

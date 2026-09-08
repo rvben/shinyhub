@@ -256,6 +256,9 @@ func TestApplyHandoffDeferralIsNotMisreportedAsStalePlan(t *testing.T) {
 	if applyErr == nil || !strings.Contains(applyErr.Error(), "--allow-downtime") {
 		t.Fatalf("apply error = %v, want handoff retry guidance", applyErr)
 	}
+	if _, code := classify(applyErr); code != 5 {
+		t.Fatalf("handoff exit=%d, want 5 for editor recovery", code)
+	}
 	if strings.Contains(applyErr.Error(), "remote state changed") {
 		t.Fatalf("handoff deferral was misreported as stale plan: %v", applyErr)
 	}

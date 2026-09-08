@@ -98,8 +98,23 @@ function createExtension(vscode, readCLI = runFile) {
       if (await runTask(project, 'Preview deployment', ['plan', project.dir, '--out', planPath, ...flags]) !== 0) return;
       const choice = await vscode.window.showInformationMessage(`Deploy ${path.basename(project.dir)} to ${host}? Review the plan in the terminal first.`, {modal: true}, 'Deploy');
       if (choice !== 'Deploy') return;
-      if (await runTask(project, 'Publish app', ['apply', planPath, ...flags]) === 0) {
+      let exitCode = await runTask(project, 'Publish app', ['apply', planPath, ...flags]);
+      // Saved-plan apply uses exit 5 for a deferred handoff and exit 2 for
+      // stale state. Never turn a stale plan into an automatic redeployment.
+      if (exitCode === 5) {
+        const retry = await vscode.window.showWarningMessage(
+          `Publishing ${path.basename(project.dir)} to ${host} requires downtime.`,
+          {modal: true, detail: 'The working version was preserved. Retrying will stop the app and disconnect active sessions. The same reviewed bundle will be deployed; later source edits are excluded.'},
+          'Deploy with downtime');
+        if (retry !== 'Deploy with downtime') return;
+        exitCode = await runTask(project, 'Publish with downtime', ['apply', planPath, '--allow-downtime', ...flags]);
+      }
+      if (exitCode === 0) {
         await vscode.window.showInformationMessage(`Published ${path.basename(project.dir)} to ${host}. Open the app URL in the terminal.`);
+      } else if (exitCode === 2) {
+        await vscode.window.showWarningMessage('The app changed on the server after this plan was reviewed. Run “ShinyHub: Publish App” again to review a new plan.');
+      } else {
+        await vscode.window.showErrorMessage('Publishing did not finish. Review the task output for the cause, then run “ShinyHub: Publish App” again.');
       }
     } finally {
       busy.delete(project.dir);

@@ -135,29 +135,17 @@ func TestResolveLaunch_PrepHostDeps_GatesDepPrep(t *testing.T) {
 	}
 }
 
-// TestResolveLaunch_EnsureProject_IsNonfatal verifies that a failing
-// ensureProjectFn does not cause the dep-prep step to return an error (it
-// should warn and continue). The subsequent uv sync step is allowed to fail,
-// so we stub that out as a no-op here to isolate the behaviour.
-func TestResolveLaunch_EnsureProject_IsNonfatal(t *testing.T) {
-	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
-
-	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string) error {
-		return errors.New("simulated ensure-project failure")
-	})
-	defer restoreEnsure()
-	restoreSync := SetSyncHooksForTest(func(context.Context, string, []string) error { return nil }, func(context.Context, string, []string) error { return nil })
-	defer restoreSync()
-
+func TestResolveLaunch_ProjectPreparationFailureStopsLocalRun(t *testing.T) {
+	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny==\n"})
+	cause := errors.New("uv add requirements: invalid version specifier")
+	restore := SetEnsureProjectForTest(func(context.Context, string) error { return cause })
+	defer restore()
 	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9100, PrepHostDeps: true})
 	if err != nil {
-		t.Fatalf("ResolveLaunch must not fail on ensure-project error: %v", err)
+		t.Fatal(err)
 	}
-	// Run each dep-prep step; ensure-project must not propagate its error.
-	for _, step := range plan.DepPrep {
-		if stepErr := step.Run(context.Background(), dir); stepErr != nil {
-			t.Fatalf("dep-prep step %q returned error: %v (ensure-project must be nonfatal)", step.Label, stepErr)
-		}
+	if err := plan.DepPrep[0].Run(context.Background(), dir); !errors.Is(err, cause) {
+		t.Fatalf("error=%v", err)
 	}
 }
 

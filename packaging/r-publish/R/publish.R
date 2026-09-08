@@ -52,11 +52,24 @@ choose_host <- function() {
   hosts$host[match(selected, labels)]
 }
 
-terminal_cli <- function(args, dir, cleanup = NULL) {
+terminal_command <- function(args, cleanup = NULL) {
   command <- paste(shQuote(c(cli_path(), args), type = "sh"), collapse = " ")
-  if (!is.null(cleanup)) {
-    command <- paste0(command, "; shinyhub_status=$?; rm -f -- ", shQuote(cleanup, type = "sh"), "; exit \"$shinyhub_status\"")
-  }
+  if (is.null(cleanup)) return(command)
+  remove_plan <- paste("rm -f --", shQuote(cleanup, type = "sh"))
+  retry <- paste(shQuote(c(cli_path(), args, "--allow-downtime"), type = "sh"), collapse = " ")
+  paste0("trap ", shQuote(remove_plan, type = "sh"), " EXIT; ", command,
+    "; shinyhub_status=$?; if [ \"$shinyhub_status\" -eq 5 ]; then ",
+    "printf '%s\\n' 'The working version was preserved. Retrying will stop the app and disconnect active sessions.' ",
+    "'The same reviewed bundle will be deployed; later source edits are excluded.' ",
+    "'Type deploy to approve downtime, or press Enter to cancel:'; ",
+    "IFS= read -r shinyhub_answer; if [ \"$shinyhub_answer\" = deploy ]; then ",
+    retry, "; shinyhub_status=$?; fi; fi; ",
+    "if [ \"$shinyhub_status\" -eq 2 ]; then printf '%s\\n' 'Server state changed. Publish again to review a new plan.'; fi; ",
+    "exit \"$shinyhub_status\"")
+}
+
+terminal_cli <- function(args, dir, cleanup = NULL) {
+  command <- terminal_command(args, cleanup)
   id <- rstudioapi::terminalExecute(command, workingDir = dir, show = TRUE)
   if (is.null(id)) stop("RStudio could not start a terminal.", call. = FALSE)
   invisible(id)

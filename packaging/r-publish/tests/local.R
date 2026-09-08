@@ -19,3 +19,33 @@ tryCatch({
     stopifnot(result$status == 0L, identical(result$output, args))
   }
 }, finally = unlink(dir, recursive = TRUE))
+
+if (.Platform$OS.type != "windows") {
+  work <- tempfile("shinyhub-retry-")
+  dir.create(work)
+  tryCatch({
+    cli <- file.path(work, "fake cli")
+    calls <- file.path(work, "calls")
+    writeLines(c("#!/bin/sh", paste("printf '%s\\n' \"$@\" >>", shQuote(calls)),
+      "for arg do if [ \"$arg\" = --allow-downtime ]; then exit 0; fi; done",
+      "exit \"$SHINYHUB_TEST_EXIT\""), cli)
+    Sys.chmod(cli, "0700")
+    previous <- options(shinyhub.executable = cli)
+    for (scenario in c("approve", "cancel", "stale")) {
+      plan <- file.path(work, "plan ' $(echo unsafe).plan")
+      writeLines("reviewed", plan)
+      unlink(calls)
+      Sys.setenv(SHINYHUB_TEST_EXIT = if (scenario == "stale") "2" else "5")
+      command <- shinyhub:::terminal_command(c("apply", plan, "--host=https://hub.example"), cleanup = plan)
+      script <- file.path(work, "publish.sh")
+      writeLines(command, script)
+      output <- suppressWarnings(system2("sh", shQuote(script), input = if (scenario == "approve") "deploy" else "", stdout = TRUE, stderr = TRUE))
+      recorded <- readLines(calls)
+      stopifnot(!file.exists(plan), sum(recorded == "apply") == if (scenario == "approve") 2L else 1L,
+        sum(recorded == "--allow-downtime") == if (scenario == "approve") 1L else 0L,
+        sum(recorded == plan) == if (scenario == "approve") 2L else 1L)
+    }
+    options(previous)
+    Sys.unsetenv("SHINYHUB_TEST_EXIT")
+  }, finally = unlink(work, recursive = TRUE))
+}

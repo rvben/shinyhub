@@ -20,7 +20,9 @@ const (
 // appResourceRevision is an opaque, deterministic fingerprint of the durable
 // app state a plan is allowed to rely on. Clients must compare it as an opaque
 // string; fields may be added in later server versions without changing the
-// protocol. Presentation-only fields are deliberately excluded.
+// protocol. CurrentVersion and LastDeploymentStatus describe the latest attempt,
+// including a refused one, so they are excluded. ReleaseNumber, ContentDigest,
+// and durable app settings still detect changes to the published app.
 func appResourceRevision(app *db.App) string {
 	snapshot := struct {
 		ID                       int64     `json:"id"`
@@ -35,9 +37,7 @@ func appResourceRevision(app *db.App) string {
 		UpdatedAt                time.Time `json:"updated_at"`
 		DeployCount              int       `json:"deploy_count"`
 		ReleaseNumber            int       `json:"release_number"`
-		CurrentVersion           string    `json:"current_version"`
 		ContentDigest            string    `json:"content_digest"`
-		LastDeploymentStatus     string    `json:"last_deployment_status"`
 		ManagedBy                *string   `json:"managed_by"`
 		Replicas                 int       `json:"replicas"`
 		MaxSessionsPerReplica    int       `json:"max_sessions_per_replica"`
@@ -67,9 +67,9 @@ func appResourceRevision(app *db.App) string {
 		IconMime: app.IconMime, IconEmoji: app.IconEmoji,
 		OwnerID: app.OwnerID, Access: app.Access,
 		Status: app.Status, UpdatedAt: app.UpdatedAt.UTC(), DeployCount: app.DeployCount,
-		ReleaseNumber: app.ReleaseNumber, CurrentVersion: app.CurrentVersion,
-		ContentDigest: app.ContentDigest, LastDeploymentStatus: app.LastDeploymentStatus,
-		ManagedBy: app.ManagedBy, Replicas: app.Replicas,
+		ReleaseNumber: app.ReleaseNumber,
+		ContentDigest: app.ContentDigest,
+		ManagedBy:     app.ManagedBy, Replicas: app.Replicas,
 		MaxSessionsPerReplica:   app.MaxSessionsPerReplica,
 		HibernateTimeoutMinutes: app.HibernateTimeoutMinutes, MemoryLimitMB: app.MemoryLimitMB,
 		CPUQuotaPercent: app.CPUQuotaPercent, ProjectSlug: app.ProjectSlug,

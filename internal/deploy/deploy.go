@@ -704,8 +704,8 @@ func resolveBuildTimeout(m *Manifest) time.Duration {
 // buildEnvironment runs the host-side dependency build under one timeout covering
 // the whole phase, with periodic progress logs. It owns the single uv sync: /
 // renv restore: error prefix that deployfail.Classify keys on, so a build failure
-// (including a timeout) is reported build_failed. EnsureProject stays best-effort
-// (a failure, including a timeout, warns and falls through to requirements mode).
+// (including project preparation or a timeout) is reported build_failed before
+// any candidate replicas are started.
 func buildEnvironment(p Params, appType string, buildTimeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
 	defer cancel()
@@ -738,7 +738,8 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) erro
 	switch appType {
 	case "python":
 		if cerr := ensureProjectFn(ctx, p.BundleDir); cerr != nil {
-			slog.Warn("deploy: project conversion failed; using requirements.txt", "slug", p.Slug, "err", cerr)
+			p.report(deployevent.Phase("dependencies", deployevent.StatusFailed, "Python project preparation failed"))
+			return fmt.Errorf("uv sync: prepare Python project: %w", cerr)
 		}
 		if err := pythonSyncFn(ctx, p.BundleDir, appEnv); err != nil {
 			p.report(deployevent.Phase("dependencies", deployevent.StatusFailed, "Python dependency build failed"))

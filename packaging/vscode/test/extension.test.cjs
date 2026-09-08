@@ -17,7 +17,14 @@ async function fixture(t, options = {}) {
       getConfiguration: () => ({get: () => '/installed path/shinyhub'}), saveAll: async () => options.saved !== false},
     window: {showQuickPick: async choices => options.cancelHost ? undefined : choices[0],
       showInformationMessage: async (...args) => { notices.push(args); return options.cancelDeploy ? undefined : 'Deploy'; },
-      showWarningMessage: async message => notices.push(message), showErrorMessage: async message => notices.push(message)},
+      showWarningMessage: async (message, detail) => {
+        notices.push(message);
+        if (detail?.modal) {
+          const plan = runs.find(task => task.execution.args[0] === 'plan').execution.args;
+          await fs.stat(path.dirname(plan[plan.indexOf('--out')+1]));
+          return options.downtimeChoice;
+        }
+      }, showErrorMessage: async message => notices.push(message)},
     commands: {registerCommand: (name, callback) => { commands.set(name, callback); return {dispose(){}}; }},
     ProcessExecution: class { constructor(executable, args, options) {Object.assign(this,{executable,args,options});} },
     Task: class { constructor(definition, scope, name, source, execution) {Object.assign(this,{definition,scope,name,source,execution});} },
@@ -79,4 +86,25 @@ test('nested app selection stops at workspace boundaries', async t => {
   const file = path.join(nested,'helpers','helper.R'); await fs.writeFile(file,'# helper');
   assert.equal(await appDirectory(file, f.dir),nested);
   assert.equal(await appDirectory(path.join(os.tmpdir(),'outside.R'),f.dir),f.dir);
+});
+
+for (const [name, codes, choice, expected] of [
+  ['approved downtime', [0,0,5,0], 'Deploy with downtime', ['doctor','plan','apply','apply']],
+  ['cancelled downtime', [0,0,5], undefined, ['doctor','plan','apply']],
+  ['stale plan', [0,0,2], 'Deploy with downtime', ['doctor','plan','apply']],
+  ['failed retry', [0,0,5,5], 'Deploy with downtime', ['doctor','plan','apply','apply']],
+  ['failed deployment', [0,0,3], 'Deploy with downtime', ['doctor','plan','apply']],
+]) test(name+' preserves explicit approval and the reviewed bundle', async t => {
+  const f=await fixture(t,{codes,downtimeChoice:choice});
+  await f.commands.get('shinyhub.publish')();
+  assert.deepEqual(f.runs.map(task=>task.execution.args[0]),expected);
+  const applies=f.runs.filter(task=>task.execution.args[0]==='apply');
+  assert.ok(!applies[0].execution.args.includes('--allow-downtime'));
+  if(applies.length===2){
+    assert.equal(applies[0].execution.args[1],applies[1].execution.args[1]);
+    assert.ok(applies[1].execution.args.includes('--allow-downtime'));
+  }
+  if(name==='stale plan')assert.ok(f.notices.some(message=>typeof message==='string'&&message.includes('review a new plan')));
+  if(name==='failed retry')assert.ok(f.notices.some(message=>typeof message==='string'&&message.includes('Publishing did not finish')));
+  await assert.rejects(fs.stat(path.dirname(applies[0].execution.args[1])),{code:'ENOENT'});
 });

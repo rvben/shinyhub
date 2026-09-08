@@ -2,12 +2,14 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/deployevent"
 	"github.com/rvben/shinyhub/internal/deployfail"
 )
 
@@ -55,21 +57,35 @@ func TestBuildEnvironment_TimesOutAsBuildFailed(t *testing.T) {
 	}
 }
 
-// An EnsureProject failure/timeout is non-fatal: buildEnvironment warns and
-// proceeds (the app falls back to requirements mode).
-func TestBuildEnvironment_EnsureProjectTimeoutIsNonFatal(t *testing.T) {
-	restore := SetSyncHooksForTest(
-		func(context.Context, string, []string) error { return nil },
-		func(context.Context, string, []string) error { return nil },
-	)
-	defer restore()
-	restoreEnsure := SetEnsureProjectForTest(func(ctx context.Context, _ string) error {
-		return context.DeadlineExceeded
-	})
-	defer restoreEnsure()
-
-	if err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir()}, "python", time.Second); err != nil {
-		t.Fatalf("EnsureProject timeout must be non-fatal, got %v", err)
+// Preparation errors must terminate the build before sync or replica startup.
+func TestBuildEnvironment_ProjectPreparationFailsInDependencies(t *testing.T) {
+	for _, cause := range []error{context.DeadlineExceeded, errors.New("uv add requirements: invalid version specifier")} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			restore := SetSyncHooksForTest(func(context.Context, string, []string) error {
+				t.Fatal("sync ran after failed preparation")
+				return nil
+			}, nil)
+			defer restore()
+			restoreEnsure := SetEnsureProjectForTest(func(context.Context, string) error { return cause })
+			defer restoreEnsure()
+			var events []deployevent.Event
+			err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir(), Progress: func(e deployevent.Event) { events = append(events, e) }}, "python", time.Second)
+			if !errors.Is(err, cause) || deployfail.Classify(err) != deployfail.BuildFailed {
+				t.Fatalf("error=%v", err)
+			}
+			failed := false
+			for _, e := range events {
+				if e.Phase == "dependencies" && e.Status == deployevent.StatusFailed {
+					failed = true
+				}
+				if e.Status == deployevent.StatusCompleted {
+					t.Fatalf("false success event: %+v", e)
+				}
+			}
+			if !failed {
+				t.Fatal("missing failed dependency event")
+			}
+		})
 	}
 }
 

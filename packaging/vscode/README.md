@@ -10,7 +10,12 @@ checks succeed and you select **Deploy**. The extension applies the exact saved
 bundle you reviewed; subsequent source edits cannot change it, and concurrent
 server changes fail the apply rather than being overwritten. The CLI follows
 readiness and prints the app URL. A failed or cancelled check stops the flow.
-Temporary plan files are removed on completion or cancellation.
+If the server preserves the working version because deployment requires downtime,
+the extension offers **Deploy with downtime** and explains that active sessions
+will disconnect. Only that explicit choice retries the same saved bundle. A
+stale plan instead asks you to publish again and review fresh server state.
+Temporary plan files remain available during the choice and retry, and are
+removed on completion or cancellation.
 
 Other commands start local development, check readiness, or preview deployment.
 The active file selects the nearest app directory within its workspace folder;

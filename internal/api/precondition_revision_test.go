@@ -21,6 +21,16 @@ func TestAppResourceRevisionIsStableAndOpaque(t *testing.T) {
 	if first != second || !strings.HasPrefix(first, "rev:app:") || len(first) != len("rev:app:")+64 {
 		t.Fatalf("revision is not stable and opaque: %q / %q", first, second)
 	}
+	app.CurrentVersion = "refused-attempt"
+	app.LastDeploymentStatus = "failed"
+	if appResourceRevision(app) != first {
+		t.Fatal("unpublished attempt changed revision")
+	}
+	app.ReleaseNumber++
+	if appResourceRevision(app) == first {
+		t.Fatal("published release did not change revision")
+	}
+	app.ReleaseNumber--
 	app.Access = "public"
 	if changed := appResourceRevision(app); changed == first {
 		t.Fatal("revision did not change with durable app state")
