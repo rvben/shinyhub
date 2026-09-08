@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.10](https://github.com/rvben/shinyhub/compare/v0.15.9...v0.15.10) - 2026-09-08
+
+### Added
+
+- **fleet**: add `fleet apply --refresh-stale` to refresh overdue enabled schedules, including on unchanged apps, and wait for successful completion before verifying freshness and producer compatibility. The option requires an updated server and implies `--verify-schedules`.
+- **schedules**: safely join existing runs or admit one refresh after rechecking server-side freshness. Recovery respects deployment fences, avoids duplicate refreshes, and never automatically retries a failed producer or repairs an incompatible deployment.
+
+### Fixed
+
+- **fleet**: report refresh run identities and mutation outcomes separately from deployment work, preserve recovery options, and verify health after an explicitly requested restart. Refresh admission and waiting share `--warm-timeout`; cancelling the CLI stops waiting without cancelling accepted server jobs.
+
 ## [0.15.9](https://github.com/rvben/shinyhub/compare/v0.15.8...v0.15.9) - 2026-09-08
 
 ### Added
