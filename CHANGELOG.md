@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.8](https://github.com/rvben/shinyhub/compare/v0.15.7...v0.15.8) - 2026-09-08
+
+### Fixed
+
+- **docker**: retain short-lived job containers until their exit status and final logs are collected, then remove them; prevent fast jobs from failing with “No such container”.
+- **support**: keep session dialogs interactive and accessible, validate Unicode reasons consistently, and expose session attribution, reasons, deadlines, and end causes in the audit log.
+- **support**: return to People after ending a session, provide dashboard recovery links for old app tabs, and display recovery deadlines in the browser's local time.
+- **identity**: show effective roles and their source accurately, including explicit viewer overrides and the option to return to group/default role rules.
+- **usage**: keep report totals and retention calculations on one database snapshot.
+
+### Performance
+
+- **server**: reduce allocations and contention in app responses, proxy injection, fleet signaling, favicon detection, and log tailing.
+- **access**: reuse authorized app records within each request and prepared database lookups.
+- **usage**: consolidate report queries, stream SQLite aggregates in day order, and incrementally aggregate closed sessions to avoid rescanning historical usage.
+
+### Developer tooling
+
+- Add reproducible mixed Linux load profiling, repeated-run contention checks, and isolated SSH targets with verified build reuse.
+
 ## [0.15.7](https://github.com/rvben/shinyhub/compare/v0.15.6...v0.15.7) - 2026-09-04
 
 ### Fixed
