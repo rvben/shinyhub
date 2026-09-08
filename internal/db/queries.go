@@ -563,7 +563,7 @@ func (s *Store) AuthenticateAPIKey(hash string) (*User, APIKeyInfo, error) {
 		v := createdBy.Int64
 		key.CreatedByUserID = &v
 	}
-	if key.ExternalID != "" {
+	if key.ExternalID != "" && !strings.HasPrefix(key.ExternalID, "trusted:") {
 		key.ManagedBy = "configuration"
 	}
 	return &u, key, nil
@@ -648,7 +648,7 @@ func scanAPIKeyInfo(rows *sql.Rows, k *APIKeyInfo, extra ...any) error {
 		v := createdBy.Int64
 		k.CreatedByUserID = &v
 	}
-	if k.ExternalID != "" {
+	if k.ExternalID != "" && !strings.HasPrefix(k.ExternalID, "trusted:") {
 		k.ManagedBy = "configuration"
 	}
 	return nil
@@ -735,7 +735,7 @@ func (s *Store) DeleteAPIKey(id int64, ownerID int64) error {
 func (s *Store) DeleteServiceCredential(id, ownerID int64) error {
 	var deletedID int64
 	err := s.db.QueryRow(`DELETE FROM api_keys
-		WHERE id = ? AND user_id = ? AND credential_type IN ('service', 'deploy_token') AND external_id = ''
+		WHERE id = ? AND user_id = ? AND credential_type IN ('service', 'deploy_token') AND (external_id = '' OR external_id LIKE 'trusted:%')
 		RETURNING id`, id, ownerID).Scan(&deletedID)
 	if err == nil {
 		return nil

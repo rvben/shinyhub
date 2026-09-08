@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/servertrace"
 	"github.com/rvben/shinyhub/internal/tracing"
+	"github.com/rvben/shinyhub/internal/trustedpublish"
 	"github.com/rvben/shinyhub/internal/usage"
 	"github.com/rvben/shinyhub/internal/worker"
 	"golang.org/x/sys/unix"
@@ -36,6 +38,7 @@ import (
 
 // Server holds the dependencies shared by all API handlers.
 type Server struct {
+	trustedVerifier *trustedpublish.Verifier
 	cfg             *config.Config
 	store           *db.Store
 	manager         *process.Manager
@@ -229,6 +232,7 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 	}
 	generationCtx, generationCancel := context.WithCancel(context.Background())
 	s := &Server{
+		trustedVerifier:         trustedpublish.NewVerifier(nil),
 		cfg:                     cfg,
 		store:                   store,
 		manager:                 manager,
@@ -816,6 +820,9 @@ func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, *auth.CredentialI
 	if err != nil {
 		return nil, nil, err
 	}
+	if strings.HasPrefix(key.ExternalID, "trusted:") && !s.trustedCredentialAllowed(key) {
+		return nil, nil, fmt.Errorf("trusted publisher policy no longer authorizes this credential")
+	}
 	if u.PrincipalType == "service_account" {
 		if key.CredentialType != "service" && key.CredentialType != "deploy_token" {
 			return nil, nil, fmt.Errorf("service account credential has invalid type")
@@ -838,6 +845,9 @@ func (s *Server) keyLookup(keyHash string) (*auth.ContextUser, *auth.CredentialI
 		contextUser.AppScope = key.AppScope
 		contextUser.AppScopeRestricted = !key.Unrestricted
 		credentialType = key.CredentialType
+	}
+	if strings.HasPrefix(key.ExternalID, "trusted:") {
+		credentialType = "trusted_publishing"
 	}
 	return contextUser, &auth.CredentialInfo{
 		Type:       credentialType,
@@ -876,6 +886,7 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Public endpoints
 	r.Post("/api/auth/login", s.handleLogin)
+	r.With(s.rateLimitByIP(s.tokenLimiter)).Post("/api/auth/trusted-publishing", s.handleTrustedPublishing)
 	r.Post("/api/auth/session", s.handleSessionLogin)
 	// Server-side handoff used by the access-denied 403 page so a user signed
 	// in to the wrong account can switch users in one click. Lives outside the
@@ -922,6 +933,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/apps/metrics", s.handleBatchMetrics)
 		r.Get("/api/apps/metrics/history", s.handleBatchMetricsHistory)
 		r.Get("/api/apps/{slug}", s.handleGetApp)
+		r.Get("/api/runtime-capabilities", s.handleRuntimeCapabilities)
+		r.Get("/api/apps/{slug}/capabilities", s.handleRuntimeCapabilities)
 		r.Patch("/api/apps/{slug}", s.handlePatchApp)
 		r.Delete("/api/apps/{slug}", s.handleDeleteApp)
 		r.With(rateLimitByUser(s.deployLimiter)).Post("/api/apps/{slug}/deploy", s.handleDeployApp)

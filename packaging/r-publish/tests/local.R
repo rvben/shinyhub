@@ -1,0 +1,21 @@
+library(shinyhub)
+dir <- tempfile("shinyhub-r-addin-")
+dir.create(dir)
+tryCatch({
+  nested <- file.path(dir, "apps", "sales ' $(echo nope)")
+  dir.create(file.path(nested, "helpers"), recursive = TRUE)
+  file.create(file.path(nested, "shinyhub.toml"))
+  file.create(file.path(nested, "helpers", "helper.R"))
+  stopifnot(identical(shinyhub:::app_dir(file.path(nested, "helpers", "helper.R"), dir), normalizePath(nested)))
+  stopifnot(identical(shinyhub:::app_dir(tempdir(), dir), normalizePath(dir)))
+  if (.Platform$OS.type != "windows") {
+    executable <- file.path(dir, "fake cli ' name")
+    writeLines(c("#!/bin/sh", "printf '%s\\n' \"$@\""), executable)
+    Sys.chmod(executable, "0700")
+    previous <- options(shinyhub.executable = executable)
+    args <- c("space here", "quote's", "$(touch should-not-exist)", "; exit 19")
+    result <- shinyhub:::cli_output(args)
+    options(previous)
+    stopifnot(result$status == 0L, identical(result$output, args))
+  }
+}, finally = unlink(dir, recursive = TRUE))

@@ -30,6 +30,8 @@ nav = [
     { "Fleet development" = "development/fleet.md" },
     { "Remote development" = "development/remote.md" },
     { "Doctor" = "doctor.md" },
+    { "Editor publishing" = "editor-publishing.md" },
+    { "Runtime capabilities" = "runtime-capabilities.md" },
   ]},
   { "Deploy applications" = [
     { "Application manifest" = "manifest.md" },
@@ -55,6 +57,7 @@ nav = [
     { "Isolation" = "isolation.md" },
     { "Identity forwarding" = "identity.md" },
     { "Native OIDC" = "native-oidc.md" },
+    { "Trusted publishing" = "trusted-publishing.md" },
     { "Metrics" = "metrics.md" },
     { "Tracing" = "tracing.md" },
     { "Zero-downtime upgrades" = "zero-downtime-upgrades.md" },

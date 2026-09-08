@@ -37,6 +37,8 @@ type serverInfoResponse struct {
 // rely on precondition headers and content-digest tracking, or must degrade
 // gracefully against an older server.
 type serverCapabilities struct {
+	RuntimeCapabilities       bool `json:"runtime_capabilities"`
+	TrustedPublishing         bool `json:"trusted_publishing"`
 	FleetPreconditions        bool `json:"fleet_preconditions"`
 	ContentDigest             bool `json:"content_digest"`
 	CLIConnect                bool `json:"cli_connect"`
@@ -60,6 +62,8 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		Commit:          buildCommit(),
 		ProtocolVersion: protocol.CurrentVersion,
 		Capabilities: serverCapabilities{
+			RuntimeCapabilities:       true,
+			TrustedPublishing:         len(s.cfg.Auth.TrustedPublishers) > 0,
 			FleetPreconditions:        true,
 			ContentDigest:             true,
 			CLIConnect:                true,

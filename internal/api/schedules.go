@@ -692,10 +692,13 @@ func (s *Server) validateScheduleProducerTopologyWithOrphanFence(app *db.App, de
 	if isolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation); isolation != "multiplex" {
 		return fmt.Errorf("data-producing schedules require worker_isolation=multiplex; %s workers do not yet have durable process identity across control-plane failover", isolation)
 	}
-	if orphanRisk, err := s.store.AppElasticOrphanRisk(app.ID); err != nil {
-		return fmt.Errorf("verify elastic orphan fence: %w", err)
-	} else if orphanRisk && !orphanFenceHeld {
-		return errors.New("data-producing schedules require a cleared elastic orphan fence; stop the app and explicitly set worker_isolation=multiplex before enabling a producer")
+	// An unsaved preflight candidate has no past workers to fence.
+	if app.ID != 0 {
+		if orphanRisk, err := s.store.AppElasticOrphanRisk(app.ID); err != nil {
+			return fmt.Errorf("verify elastic orphan fence: %w", err)
+		} else if orphanRisk && !orphanFenceHeld {
+			return errors.New("data-producing schedules require a cleared elastic orphan fence; stop the app and explicitly set worker_isolation=multiplex before enabling a producer")
+		}
 	}
 	placement := app.PlacementMap()
 	if len(placement) == 0 {

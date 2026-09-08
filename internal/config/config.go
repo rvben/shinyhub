@@ -21,6 +21,7 @@ import (
 	"github.com/rvben/shinyhub/internal/originhost"
 	"github.com/rvben/shinyhub/internal/sandbox"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
+	"github.com/rvben/shinyhub/internal/trustedpublish"
 )
 
 // OAuthConfig holds OAuth2 provider credentials.
@@ -694,7 +695,8 @@ type GroupRoleMapping struct {
 }
 
 type AuthConfig struct {
-	Secret string `yaml:"secret"`
+	Secret            string                  `yaml:"secret"`
+	TrustedPublishers []trustedpublish.Policy `yaml:"trusted_publishers"`
 	// OAuthDefaultRole is the role assigned to users created via just-in-time
 	// provisioning during OAuth/OIDC sign-in (i.e. first-time login). Allowed
 	// values: "viewer" (default), "developer", "operator". "admin" is
@@ -1568,6 +1570,9 @@ func loadRaw(path string) (*Config, error) {
 		},
 	}
 	if err := applyEnv(cfg); err != nil {
+		return nil, err
+	}
+	if err := trustedpublish.Validate(cfg.Auth.TrustedPublishers); err != nil {
 		return nil, err
 	}
 

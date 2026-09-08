@@ -1,0 +1,24 @@
+Name: Publish app to ShinyHub
+Description: Check, preview, and publish the active application.
+Binding: publish_app
+Interactive: true
+
+Name: Check ShinyHub deployment readiness
+Description: Check the active application and selected server.
+Binding: check_app
+Interactive: true
+
+Name: Preview ShinyHub deployment
+Description: Show what a deployment would change.
+Binding: preview_deploy
+Interactive: true
+
+Name: Develop app locally
+Description: Start the ShinyHub local development loop.
+Binding: develop_app
+Interactive: true
+
+Name: Connect to ShinyHub
+Description: Sign in to a server through the CLI browser flow.
+Binding: connect_server
+Interactive: true

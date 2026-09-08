@@ -34,6 +34,9 @@ binary backed by SQLite, with no external services to operate.
 
 ## Features
 
+- **Editor publishing.** Local VS Code/Positron and RStudio integrations run diagnostics, preview an exact bundle, and apply it after review. See [docs/editor-publishing.md](docs/editor-publishing.md).
+- **Runtime preflight.** Doctor checks isolation and producer/activation support against the target topology before upload. See [docs/runtime-capabilities.md](docs/runtime-capabilities.md).
+- **Trusted publishing API.** Exchange an explicitly trusted CI identity for a ten-minute, app-scoped credential. See [docs/trusted-publishing.md](docs/trusted-publishing.md).
 - **Develop with one command.** `shinyhub dev .` runs an app locally with safe,
   health-checked reloads; in a fleet checkout it discovers the right scope
   automatically. Add `--remote <host>` only when development needs that host.

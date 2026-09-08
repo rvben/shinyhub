@@ -193,6 +193,10 @@ func loginMissingCredsError() error {
 // ndjson - counts as a machine and gets the envelope, so nothing an agent or a
 // script reads has changed.
 func reportTo(w io.Writer, stderrIsTTY bool, format outputFormat, err error) int {
+	var childExit *ciChildExit
+	if errors.As(err, &childExit) {
+		return childExit.Code
+	}
 	if err == nil {
 		return 0
 	}

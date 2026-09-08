@@ -1,0 +1,101 @@
+{
+  "name": "shinyhub",
+  "displayName": "ShinyHub",
+  "description": "Develop, check, and publish apps with the ShinyHub CLI.",
+  "version": "0.1.0",
+  "publisher": "shinyhub",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "ShinyHub executes the project CLI and app code."
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "shinyhub.publish",
+        "title": "ShinyHub: Publish App",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "shinyhub.dev",
+        "title": "ShinyHub: Develop App Locally",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "shinyhub.doctor",
+        "title": "ShinyHub: Check Deployment Readiness",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "shinyhub.plan",
+        "title": "ShinyHub: Preview Deployment",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "shinyhub.connect",
+        "title": "ShinyHub: Connect to Server",
+        "enablement": "isWorkspaceTrusted"
+      }
+    ],
+    "configuration": {
+      "title": "ShinyHub",
+      "properties": {
+        "shinyhub.executable": {
+          "type": "string",
+          "default": "shinyhub",
+          "scope": "machine",
+          "description": "Path to the installed ShinyHub CLI on the machine running this extension."
+        }
+      }
+    },
+    "taskDefinitions": [
+      {
+        "type": "shinyhub",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Identifier of the editor-managed ShinyHub task."
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.cjs"
+  },
+  "files": [
+    "extension.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "activationEvents": [
+    "onCommand:shinyhub.publish",
+    "onCommand:shinyhub.dev",
+    "onCommand:shinyhub.doctor",
+    "onCommand:shinyhub.plan",
+    "onCommand:shinyhub.connect"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rvben/shinyhub.git"
+  },
+  "type": "commonjs"
+}

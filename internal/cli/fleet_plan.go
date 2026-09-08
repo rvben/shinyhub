@@ -193,6 +193,8 @@ func reportAppsFetchError(cfg *cliConfig, errOut io.Writer, err error) error {
 }
 
 type serverCaps struct {
+	RuntimeCapabilities       bool `json:"runtime_capabilities"`
+	TrustedPublishing         bool `json:"trusted_publishing"`
 	FleetPreconditions        bool `json:"fleet_preconditions"`
 	ContentDigest             bool `json:"content_digest"`
 	CLIConnect                bool `json:"cli_connect"`

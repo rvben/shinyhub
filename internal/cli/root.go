@@ -70,6 +70,7 @@ func AddCommandsTo(root *cobra.Command) {
 	root.PersistentFlags().BoolVar(&noColorFlag, "no-color", false,
 		"Disable colored output (also honours $NO_COLOR; color is off by default when not writing to a terminal)")
 	root.AddCommand(
+		newCICmd(),
 		newCompletionCmd(root),
 		newConnectCmd(),
 		newDoctorCmd(),

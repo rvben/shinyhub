@@ -55,10 +55,11 @@ type doctorReport struct {
 }
 
 type doctorLocalContext struct {
-	dir     string
-	slug    string
-	appType string
-	plan    *deploy.LaunchPlan
+	manifest *deploy.Manifest
+	dir      string
+	slug     string
+	appType  string
+	plan     *deploy.LaunchPlan
 }
 
 var doctorLookPath = exec.LookPath
@@ -74,7 +75,8 @@ remote ShinyHub and lists every actionable problem in one run.
 By default it validates the app directory and manifest, resolves the local
 launch command, checks the required local executable, verifies the selected
 server and credential, confirms the signed-in identity can deploy the target,
-and matches the app runtime to what the server offers.
+and checks runtime availability, isolation, and producer/activation support
+against the target topology.
 
 Use --local before connecting to check only local-run readiness. Use --remote
 to check only the selected server; add --slug to verify access to an existing
@@ -144,7 +146,7 @@ func runDoctor(cmd *cobra.Command, args []string, f *doctorFlags) error {
 	}
 
 	if !f.localOnly {
-		report.Checks, report.Host = runRemoteDoctor(report.Checks, report.Slug, local.appType)
+		report.Checks, report.Host = runRemoteDoctor(report.Checks, report.Slug, local.appType, local.manifest)
 	}
 
 	report.Summary = tallyDoctorChecks(report.Checks)
@@ -189,6 +191,7 @@ func runLocalDoctor(rawDir, requestedSlug string, checks []doctorCheck) (doctorL
 	}
 
 	manifest, manifestErr := deploy.LoadManifest(ctx.dir)
+	ctx.manifest = manifest
 	if manifestErr != nil {
 		checks = append(checks, doctorFail("manifest", manifestErr.Error(), "Fix shinyhub.toml, then run `shinyhub manifest validate`.", KindValidation, 1))
 		checks = append(checks,
@@ -256,7 +259,7 @@ func resolveDoctorExecutable(dir, executable string) (string, error) {
 	return doctorLookPath(executable)
 }
 
-func runRemoteDoctor(checks []doctorCheck, slug, appType string) ([]doctorCheck, string) {
+func runRemoteDoctor(checks []doctorCheck, slug, appType string, manifests ...*deploy.Manifest) ([]doctorCheck, string) {
 	cfg, cfgErr := loadConfig()
 	if cfgErr != nil {
 		kind, code := classify(cfgErr)
@@ -318,6 +321,14 @@ func runRemoteDoctor(checks []doctorCheck, slug, appType string) ([]doctorCheck,
 
 	permission := doctorDeployPermission(cfg, identity.CanCreateApps, slug)
 	checks = append(checks, permission)
+	requiresHostRuntime := true
+	if info.Capabilities.RuntimeCapabilities && permission.Status == "pass" {
+		var manifest *deploy.Manifest
+		if len(manifests) > 0 {
+			manifest = manifests[0]
+		}
+		checks = append(checks, doctorRuntimeCapabilities(cfg, slug, manifest, &requiresHostRuntime))
+	}
 	if slug == "" {
 		checks = append(checks, doctorSkip("roll-feasibility", "no target app slug was selected"))
 	} else if permission.Status == "pass" {
@@ -325,7 +336,11 @@ func runRemoteDoctor(checks []doctorCheck, slug, appType string) ([]doctorCheck,
 	} else {
 		checks = append(checks, doctorSkip("roll-feasibility", "deployment access to the target was not established"))
 	}
-	checks = append(checks, doctorRemoteRuntime(info.Runtimes, appType))
+	if requiresHostRuntime {
+		checks = append(checks, doctorRemoteRuntime(info.Runtimes, appType))
+	} else {
+		checks = append(checks, doctorWarn("remote-runtime", "the target runs in a container or on a worker; control-plane launchers do not determine its runtime availability", "Dependencies are checked in the target runtime at startup; verify its image or worker configuration."))
+	}
 	return checks, host
 }
 

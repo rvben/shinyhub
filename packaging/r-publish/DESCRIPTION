@@ -1,0 +1,12 @@
+Package: shinyhub
+Title: Publish Applications with the ShinyHub CLI
+Version: 0.1.0
+Authors@R:
+    person("Ruben J.", "Jongejan", email = "ruben.jongejan@gmail.com",
+           role = c("aut", "cre"))
+Description: RStudio addins for developing, checking, and publishing applications
+    through the installed ShinyHub command-line interface. Credentials remain in
+    the CLI credential store and deployment progress appears in the terminal.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Imports: rstudioapi (>= 0.15.0), jsonlite
