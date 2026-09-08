@@ -24,6 +24,7 @@ type fleetApplyFlags struct {
 	warmTimeout              time.Duration
 	waitForWarm              bool
 	verifySchedules          bool
+	refreshStale             bool
 	verifyHealth             bool
 	restartAfterWarm         bool
 	waitForServer            time.Duration
@@ -77,8 +78,9 @@ func newFleetApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.jsonOutput, "json", false, "Emit the machine-readable JSON envelope")
 	cmd.Flags().IntVar(&f.retries, "retries", 1, "Retry attempts after the first for transient deploy and config failures (deterministic deploy failures are never retried)")
 	cmd.Flags().IntVar(&f.healthTimeout, "health-timeout", 120, "Seconds to wait per app after deploy for a healthy status: running, or idle for an elastic (grouped/per_session) pool that boots workers on demand")
-	cmd.Flags().DurationVar(&f.warmTimeout, "warm-timeout", fleetWarmTimeout, "Maximum total time per app to confirm deploy-triggered bundle convergence")
+	cmd.Flags().DurationVar(&f.warmTimeout, "warm-timeout", fleetWarmTimeout, "Maximum total time per app for bundle convergence and stale schedule refreshes")
 	cmd.Flags().BoolVar(&f.waitForWarm, "wait-for-warm", false, "Require deploy-triggered schedules to satisfy their policy for the current bundle")
+	cmd.Flags().BoolVar(&f.refreshStale, "refresh-stale", false, "Refresh stale enabled schedules and wait for success (implies --verify-schedules; uses --warm-timeout)")
 	cmd.Flags().BoolVar(&f.verifySchedules, "verify-schedules", false, "After applying, require schedule freshness/convergence and reject unresolved producer writes")
 	cmd.Flags().BoolVar(&f.verifyHealth, "verify-health", false, "Require every non-stopped app to be serving or parked (hibernated/suspended), including unchanged apps")
 	cmd.Flags().BoolVar(&f.restartAfterWarm, "restart-after-warm", false, "Wait for bundle data convergence, then restart serving replicas")
@@ -109,6 +111,9 @@ func validateConcurrency(n int) error {
 }
 
 func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
+	if f.refreshStale {
+		f.verifySchedules = true
+	}
 	if f.restartAfterWarm {
 		f.waitForWarm = true
 	}
@@ -142,6 +147,10 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 			jsonOutput: f.jsonOutput,
 		}
 		return renderFleetPlan(cmd, synthetic, "shinyhub fleet apply --dry-run", pf.manifest, pf.host, pf.caps, pf.diff, pf.projectDiff)
+	}
+
+	if f.refreshStale && !pf.caps.ScheduleRefreshStale {
+		return validationErr("server does not support --refresh-stale", "upgrade the server to support safe stale schedule refresh admission")
 	}
 
 	// A slug is an app's durable identity, not mutable display metadata. The
@@ -221,6 +230,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		}
 	}
 	opt := convergeOpts{
+		context:                  cmd.Context(),
 		adopt:                    f.adopt,
 		prune:                    f.prune,
 		allowDegradedPrune:       f.allowUnsafeDegradedPrune,
@@ -231,6 +241,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		warmTimeout:              warmTimeoutDuration(f.warmTimeout),
 		waitForWarm:              f.waitForWarm,
 		verifySchedules:          f.verifySchedules,
+		refreshStale:             f.refreshStale,
 		verifyHealth:             f.verifyHealth,
 		restartAfterWarm:         f.restartAfterWarm,
 		concurrency:              f.concurrency,
@@ -370,6 +381,9 @@ func fleetApplyRecoveryCommand(f *fleetApplyFlags) string {
 	}
 	if f.verifyHealth {
 		parts = append(parts, "--verify-health")
+	}
+	if f.refreshStale {
+		parts = append(parts, "--refresh-stale")
 	}
 	if f.verifySchedules {
 		parts = append(parts, "--verify-schedules")

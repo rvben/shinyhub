@@ -976,6 +976,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/convergence/retry", s.handleRetryScheduleConvergence)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/activation/cancel", s.handleCancelScheduleActivation)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/run", s.handleRunSchedule)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/refresh-stale", s.handleRefreshStaleSchedule)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs", s.handleListScheduleRuns)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs/{run_id}", s.handleGetScheduleRun)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs/{run_id}/logs", s.handleScheduleRunLogs)

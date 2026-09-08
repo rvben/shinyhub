@@ -203,6 +203,7 @@ type serverCaps struct {
 	FleetStateChangeTracking  bool `json:"fleet_state_change_tracking"`
 	FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
 	ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
+	ScheduleRefreshStale      bool `json:"schedule_refresh_stale"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just

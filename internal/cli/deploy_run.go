@@ -147,6 +147,12 @@ func waitForDeployRunLoop(poll func() (string, error), timeout, pollEvery, progr
 				return status, nil
 			}
 		} else {
+			if errors.Is(err, context.Canceled) {
+				return lastStatus, err
+			}
+			if errors.Is(err, errDeployRunTimeout) {
+				return lastStatus, err
+			}
 			var he *deployHTTPError
 			if errors.As(err, &he) && he.fatal() {
 				return lastStatus, err
@@ -160,7 +166,7 @@ func waitForDeployRunLoop(poll func() (string, error), timeout, pollEvery, progr
 			// Yellow rather than styler.status("running"): here the word means a
 			// job still in flight, not the steady healthy state that status()
 			// paints green. Green would read as "this finished successfully".
-			fmt.Fprintf(out, "  %s: deploy-triggered run still %s %s\n", label, s.yellow("running"),
+			fmt.Fprintf(out, "  %s: run still %s %s\n", label, s.yellow("running"),
 				s.dim(fmt.Sprintf("(%s/%s)", t.Sub(start).Round(time.Second), timeout)))
 			lastProgress = t
 		}
@@ -448,7 +454,11 @@ func classifyAppCompatibilityFailure(res *applyResult, err error) {
 // failed deployment barrier may quarantine the app even when no enabled
 // deploy-trigger schedule appears in the schedule list.
 func requireAppCompatibilityClear(cfg *cliConfig, slug string) error {
-	req, err := http.NewRequest(http.MethodGet, cfg.Host+"/api/apps/"+slug, nil)
+	return requireAppCompatibilityClearContext(context.Background(), cfg, slug)
+}
+
+func requireAppCompatibilityClearContext(ctx context.Context, cfg *cliConfig, slug string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
 		return fmt.Errorf("verify app compatibility: build request: %w", err)
 	}
@@ -483,6 +493,11 @@ func requireAppCompatibilityClear(cfg *cliConfig, slug string) error {
 }
 
 func observedScheduleConvergenceWork(res applyResult) bool {
+	for _, refresh := range res.scheduleRefreshes {
+		if refresh.RunID > 0 && refresh.Status == "succeeded" {
+			return true
+		}
+	}
 	if len(res.deployRuns) > 0 {
 		return true
 	}
@@ -577,7 +592,11 @@ func describeNeverSucceeded(outcome scheduleGateOutcome, now time.Time) string {
 // deploy-trigger policy must match the authoritative producer state. It
 // consumes the API's answers instead of duplicating server policy in the CLI.
 func verifyEnabledScheduleFreshness(cfg *cliConfig, slug string, res *applyResult) error {
-	schedules, err := listSchedules(cfg, slug)
+	return verifyEnabledScheduleFreshnessContext(context.Background(), cfg, slug, res)
+}
+
+func verifyEnabledScheduleFreshnessContext(ctx context.Context, cfg *cliConfig, slug string, res *applyResult) error {
+	schedules, err := listSchedulesContext(ctx, cfg, slug)
 	if err != nil {
 		res.failureKind = failureScheduleStateMissing
 		return fmt.Errorf("verify schedule freshness: %w", err)
@@ -652,7 +671,7 @@ func verifyEnabledScheduleFreshness(cfg *cliConfig, slug string, res *applyResul
 		// a failure traceback. Only attach logs when this exact atomic snapshot
 		// identifies a terminal unsuccessful run.
 		if outcome.LastRunID > 0 && scheduleStatusHasFailureLog(outcome.LastRunStatus) {
-			appendScheduleLog(cfg, slug, schedule.ID, outcome.LastRunID, schedule.Name, res)
+			appendScheduleLogContext(ctx, cfg, slug, schedule.ID, outcome.LastRunID, schedule.Name, res)
 		}
 		res.freshnessGate = append(res.freshnessGate, outcome)
 		detail := ""

@@ -58,6 +58,8 @@ type applyResult struct {
 	failureKind string
 	note        string
 	deployRuns  []deployRunOutcome
+	// scheduleRefreshes separates explicit freshness recovery from deploy work.
+	scheduleRefreshes []scheduleRefreshOutcome
 	// warmGate records level checks on apps whose bundle was not registered by
 	// this apply. These are not deploy-triggered runs: they describe pre-existing state.
 	warmGate []scheduleGateOutcome
@@ -255,6 +257,13 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 				fmt.Fprintf(out, "     %s: deploy-triggered run %s\n", ff.Schedule, ff.Status)
 			}
 		}
+		for _, refresh := range r.scheduleRefreshes {
+			if refresh.RunID > 0 {
+				fmt.Fprintf(out, "     %s: refresh %s run #%d (%s)\n", refresh.Schedule, refresh.Disposition, refresh.RunID, refresh.Status)
+			} else {
+				fmt.Fprintf(out, "     %s: refresh %s\n", refresh.Schedule, refresh.Disposition)
+			}
+		}
 		for _, gate := range r.warmGate {
 			when := "before this apply"
 			if gate.Origin == "current_apply" {
@@ -444,7 +453,7 @@ func applyRecoveryGuidance(results []applyResult) (commands, notes []string, ful
 	}
 	if len(stale) > 0 {
 		notes = append(notes, fmt.Sprintf(
-			"Apply will not run producers itself; refresh %s with the schedule run commands below, then re-apply.",
+			"Refresh %s with the schedule run commands below, wait for success, then re-apply. Alternatively, add --refresh-stale to explicitly refresh overdue enabled schedules and wait during apply (requires server support). Investigate missed recurring runs if data becomes stale again.",
 			strings.Join(stale, ", ")))
 	}
 	return commands, notes, fullyGuided
@@ -545,6 +554,8 @@ func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o apply
 			switch {
 			case isDowntimeDeferral(r):
 				fmt.Fprintf(out, "    %s\n", s.dim("working version still serving; re-run with --allow-downtime to accept a stop-first deployment"))
+			case len(r.scheduleRefreshes) > 0:
+				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub schedule status %s", r.slug)))
 			case len(r.scheduleLogs) == 0 && len(r.warmGate) == 0 && len(r.freshnessGate) == 0:
 				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub apps logs %s --tail 200 --system", r.slug)))
 			}
@@ -620,21 +631,22 @@ func resultFailureKind(r applyResult) string {
 }
 
 type applyJSONApp struct {
-	Slug                 string                `json:"slug"`
-	AppURL               string                `json:"app_url"`
-	Action               string                `json:"action"`
-	Owned                bool                  `json:"owned"`
-	Digest               jsonDigest            `json:"digest"`
-	ConfigDrift          []jsonDriftItem       `json:"config_drift"`
-	Unmanaged            []jsonUnmanagedItem   `json:"unmanaged"`
-	AdoptRequired        bool                  `json:"adopt_required"`
-	AdoptFrom            string                `json:"adopt_from,omitempty"`
-	PruneEligible        bool                  `json:"prune_eligible"`
-	Result               *jsonResult           `json:"result,omitempty"`
-	DeployRuns           []deployRunOutcome    `json:"deploy_runs,omitempty"`
-	WarmGate             []scheduleGateOutcome `json:"warm_gate,omitempty"`
-	ScheduleVerification []scheduleGateOutcome `json:"schedule_verification,omitempty"`
-	WarmRestarted        bool                  `json:"warm_restarted,omitempty"`
+	Slug                 string                   `json:"slug"`
+	AppURL               string                   `json:"app_url"`
+	Action               string                   `json:"action"`
+	Owned                bool                     `json:"owned"`
+	Digest               jsonDigest               `json:"digest"`
+	ConfigDrift          []jsonDriftItem          `json:"config_drift"`
+	Unmanaged            []jsonUnmanagedItem      `json:"unmanaged"`
+	AdoptRequired        bool                     `json:"adopt_required"`
+	AdoptFrom            string                   `json:"adopt_from,omitempty"`
+	PruneEligible        bool                     `json:"prune_eligible"`
+	Result               *jsonResult              `json:"result,omitempty"`
+	DeployRuns           []deployRunOutcome       `json:"deploy_runs,omitempty"`
+	ScheduleRefreshes    []scheduleRefreshOutcome `json:"schedule_refreshes,omitempty"`
+	WarmGate             []scheduleGateOutcome    `json:"warm_gate,omitempty"`
+	ScheduleVerification []scheduleGateOutcome    `json:"schedule_verification,omitempty"`
+	WarmRestarted        bool                     `json:"warm_restarted,omitempty"`
 }
 
 // applyJSONProject is a project row in the apply JSON envelope: display
@@ -721,6 +733,7 @@ func writeFleetApplyJSONWithContext(out io.Writer, ctx applyReportContext, m *fl
 		if r, ok := bySlug[d.Slug]; ok {
 			aj.Result = resultToJSON(r)
 			aj.DeployRuns = r.deployRuns
+			aj.ScheduleRefreshes = r.scheduleRefreshes
 			aj.WarmGate = r.warmGate
 			aj.ScheduleVerification = r.freshnessGate
 			aj.WarmRestarted = r.warmRestarted

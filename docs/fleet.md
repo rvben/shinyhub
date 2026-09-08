@@ -369,14 +369,42 @@ rather than trusting a stale observation.
 | `-y/--yes` | Skip the interactive destructive-action confirmation. `--prune` in a non-interactive shell requires `--yes`. |
 | `--retries N` | Retry attempts *after* the first for deploys and transient config PATCH failures. Default 1 (so two attempts total). |
 | `--wait-for-warm` | Ask the server to reconcile every persisted enabled deploy-triggered schedule, including on unchanged apps; wait for each exact durable obligation and require the authoritative producer state to match the current digest and command. |
-| `--warm-timeout DURATION` | Per-app deadline shared by deploy-run waits and the final bundle-convergence check. Default 15 minutes. |
+| `--warm-timeout DURATION` | Per-app deadline shared by deploy-run waits, bundle-convergence checks, and stale-schedule recovery. Default 15 minutes. |
 | `--verify-schedules` | Read-only: require cron freshness and authoritative producer convergence for every enabled schedule, and reject unresolved producer-write uncertainty even if its schedule was later disabled; never dispatches work. |
+| `--refresh-stale` | Refresh persisted enabled schedules whose cron freshness is overdue, including on unchanged apps, then verify schedules. Joins an existing run or starts one when still stale. Requires server support; implies `--verify-schedules`. |
 | `--verify-health` | Require every app, unchanged as well as changed, to be in a state it serves from without operator action: `running`, `idle`, or parked (`hibernated` after its idle timeout, `suspended`). A parked app wakes on its first request and passes in one poll; the gate never wakes it, so a broken bundle in a hibernated app surfaces on wake, not here. Intentionally stopped apps remain excluded. The post-deploy wait for changed apps is stricter and still requires a serving replica. |
 | `--restart-after-warm` | After convergence repairs an already-running or unchanged app, cycle replicas so startup-loaded caches see the new data. Pre-start deploy/rollback producers already run before replica boot and do not cause a redundant cycle. Deliberately stopped apps stay stopped. |
 | `--allow-unsafe-degraded-prune` | Permit prune against a server without precondition support, accepting a documented race (see [Degraded mode](#degraded-mode)). |
 | `--json` | Emit the machine-readable result envelope. |
 | `-q/--quiet` | Collapse to the summary plus result line. |
 | `--provenance auto\|none` | Detect CI attribution (default) or intentionally omit it. |
+
+To recover overdue data during apply:
+
+```sh
+shinyhub fleet apply --refresh-stale --verify-health --warm-timeout 15m -f fleet.toml
+```
+
+Refreshes run sequentially within each app, bounded across apps by
+`--concurrency`. The server rechecks freshness before starting work and joins
+an already active run even when the schedule normally permits concurrent runs.
+The CLI waits for that exact run to succeed and checks freshness and producer
+compatibility again. Fresh or disabled schedules do not start work. Subsequent
+cron ticks retain their configured overlap behavior.
+
+`--refresh-stale` repairs overdue data; `--wait-for-warm` handles deployment
+producer convergence. When combined, warm convergence must pass first. A
+failed producer is not retried automatically. Add `--restart-after-warm` when
+serving processes must reload startup-cached data after recovery; deliberately
+stopped apps stay stopped. With `--verify-health`, health is checked after the
+restart.
+
+The warm deadline also bounds refresh requests and waiting. A CLI timeout does
+not cancel an accepted server job. Ambiguous admission responses are not
+retried automatically; inspect schedule status before retrying. `--dry-run`
+never refreshes, and unsupported servers are rejected before apply mutations.
+Repeated staleness still requires investigating the recurring scheduler or
+producer failures; refreshing during apply does not change cron behavior.
 
 An app slug is its durable URL identity and cannot be renamed in place. To
 replace a fleet app with a new slug, edit the slug and run `fleet plan`, then

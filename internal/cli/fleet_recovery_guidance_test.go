@@ -224,7 +224,7 @@ func TestApplyReport_RecoverySummaryWrapsToWidth(t *testing.T) {
 	}
 	// Wrapping must not drop or mangle the guidance.
 	joined := strings.Join(strings.Fields(strings.Join(lines, " ")), " ")
-	for _, want := range []string{"--allow-downtime", "Apply will not run producers itself"} {
+	for _, want := range []string{"--allow-downtime", "--refresh-stale", "wait for success"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("wrapped summary lost %q:\n%s", want, joined)
 		}

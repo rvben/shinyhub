@@ -468,6 +468,10 @@ func (m *Manager) Stop(ctx context.Context) {
 // Run returns as soon as the run row is inserted (or the skipped row is
 // finished).
 func (m *Manager) Run(scheduleID int64, trigger string, userID *int64) (int64, error) {
+	return m.runAdmitted(context.Background(), scheduleID, trigger, userID, nil)
+}
+
+func (m *Manager) runAdmitted(ctx context.Context, scheduleID int64, trigger string, userID *int64, refresh *refreshAdmission) (int64, error) {
 	m.mu.Lock()
 	stopped := m.stopped || m.draining
 	admission := m.admissionLockFor(scheduleID)
@@ -480,18 +484,50 @@ func (m *Manager) Run(scheduleID int64, trigger string, userID *int64) (int64, e
 	// Enter the read fence before loading any mutable declaration or deployment
 	// state. Otherwise a caller can snapshot command A, wait behind a deployment
 	// that publishes command B, and then execute stale A against B's bundle.
-	admission.Lock()
-	gate.RLock()
-	admission.Unlock()
+	if refresh == nil {
+		admission.Lock()
+	} else if err := waitAdmission(ctx, admission.TryLock); err != nil {
+		return 0, err
+	}
+	// Keep ordinary and recovery admission serialized through durable insertion.
+	defer admission.Unlock()
+	if refresh != nil {
+		if done, id, err := m.checkRefresh(scheduleID, refresh); done || err != nil {
+			return id, err
+		}
+	}
+	if refresh == nil {
+		gate.RLock()
+	} else if err := waitAdmission(ctx, gate.TryRLock); err != nil {
+		return 0, err
+	}
+	if refresh != nil {
+		if done, id, err := m.checkRefresh(scheduleID, refresh); done || err != nil {
+			gate.RUnlock()
+			return id, err
+		}
+	}
 	sched, err := m.store.GetSchedule(scheduleID)
 	if err != nil {
 		gate.RUnlock()
 		return 0, fmt.Errorf("get schedule %d: %w", scheduleID, err)
 	}
-	sched, err = m.asExplicitRepairPublisher(sched, trigger)
-	if err != nil {
-		gate.RUnlock()
-		return 0, err
+	if refresh != nil {
+		repair, repairErr := m.store.ScheduleProducerRepairRequired(scheduleID)
+		if repairErr != nil || repair {
+			gate.RUnlock()
+			if repairErr != nil {
+				return 0, repairErr
+			}
+			return 0, errors.New("schedule producer requires explicit repair")
+		}
+	}
+	if refresh == nil {
+		sched, err = m.asExplicitRepairPublisher(sched, trigger)
+		if err != nil {
+			gate.RUnlock()
+			return 0, err
+		}
 	}
 	app, err := m.store.GetAppByID(sched.AppID)
 	if err != nil {
@@ -525,6 +561,14 @@ func (m *Manager) Run(scheduleID int64, trigger string, userID *int64) (int64, e
 		gate.RUnlock()
 		return 0, fmt.Errorf("app %q has no deployments; cannot run schedule", app.Slug)
 	}
+	if err := ctx.Err(); err != nil {
+		gate.RUnlock()
+		return 0, err
+	}
+	if refresh != nil {
+		refresh.result.Status = "started"
+		return m.runRefresh(ctx, sched, app, deployments[0], userID, gate, refresh)
+	}
 	return m.runForDeployment(sched, app, deployments[0], trigger, userID, gate)
 }
 
@@ -544,8 +588,8 @@ func (m *Manager) RunForDeployment(scheduleID int64, trigger string, userID *int
 		return 0, ErrManagerStopped
 	}
 	admission.Lock()
+	defer admission.Unlock()
 	gate.RLock()
-	admission.Unlock()
 	sched, err := m.store.GetSchedule(scheduleID)
 	if err != nil {
 		gate.RUnlock()
@@ -714,6 +758,12 @@ func (m *Manager) runWithSkip(sched *db.Schedule, app *db.App, deployment *db.De
 		gate.RUnlock()
 		return m.recordSkipped(sched, deployment, trigger, userID)
 	}
+
+	return m.runWithOwnedSlot(sched, app, deployment, trigger, userID, gate, slot)
+}
+
+// runWithOwnedSlot transfers an already-acquired execution slot to the run.
+func (m *Manager) runWithOwnedSlot(sched *db.Schedule, app *db.App, deployment *db.Deployment, trigger string, userID *int64, gate *sync.RWMutex, slot *schedLock) (int64, error) {
 
 	runID, err := m.insertRunRow(sched, deployment, trigger, userID)
 	if err != nil {

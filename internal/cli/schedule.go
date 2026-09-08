@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -199,7 +200,11 @@ func lookupSchedule(cfg *cliConfig, slug, name string) (scheduleDTO, error) {
 
 // listSchedules fetches all schedules for the given app slug.
 func listSchedules(cfg *cliConfig, slug string) ([]scheduleDTO, error) {
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/schedules", nil)
+	return listSchedulesContext(context.Background(), cfg, slug)
+}
+
+func listSchedulesContext(ctx context.Context, cfg *cliConfig, slug string) ([]scheduleDTO, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", cfg.Host+"/api/apps/"+slug+"/schedules", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}

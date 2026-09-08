@@ -139,7 +139,7 @@ func TestDeployRunProgressLineIsPlainOffATerminal(t *testing.T) {
 	_, _ = waitForDeployRunLoop(poll, 5*time.Second, time.Second, time.Second,
 		now, sleep, &out, "warm")
 
-	if !strings.Contains(out.String(), "  warm: deploy-triggered run still running (1s/5s)\n") {
+	if !strings.Contains(out.String(), "  warm: run still running (1s/5s)\n") {
 		t.Errorf("deploy-triggered run progress line drifted:\n%q", out.String())
 	}
 	if i := strings.IndexByte(out.String(), 0x1b); i >= 0 {

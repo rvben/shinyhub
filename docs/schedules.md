@@ -440,6 +440,21 @@ also `unknown`, never healthy, until the observation is complete.
 runs the same schedule postcondition. It is appropriate for convergence, not
 for a read-only incident investigation.
 
+Use `shinyhub fleet apply --refresh-stale` to explicitly recover overdue data
+as part of apply. This implies `--verify-schedules`. The server rechecks each
+enabled stale schedule and either starts a refresh or returns the exact active
+run to join. Fresh and disabled schedules are left alone. Recovery never
+automatically retries a failed producer and uses the per-app `--warm-timeout`
+budget shared with deployment convergence. The timeout stops waiting; accepted
+jobs continue on the server. Unknown freshness fails closed.
+
+This option requires a server advertising `schedule_refresh_stale` and is
+separate from `--wait-for-warm`, which reconciles deployment-triggered producer
+requirements. If both are requested, deployment convergence must pass before
+freshness recovery begins. See [fleet apply](fleet.md) for restart and health
+verification behavior. Repeated missed refreshes still need investigation;
+apply recovery does not change the recurring schedule.
+
 Failed fleet gates have stable JSON `failure_kind` values such as
 `warm_wait_timeout`, `warm_bundle_not_ready`, and `schedule_stale`. When the
 latest atomic state identifies a failed run, `fleet apply` includes the last 25

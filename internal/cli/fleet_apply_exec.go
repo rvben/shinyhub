@@ -23,6 +23,7 @@ type attemptOutcome struct {
 
 // convergeOpts carries the run-wide knobs for one apply invocation.
 type convergeOpts struct {
+	context                  context.Context
 	adopt                    bool
 	prune                    bool
 	allowDegradedPrune       bool
@@ -33,6 +34,7 @@ type convergeOpts struct {
 	warmTimeout              time.Duration
 	waitForWarm              bool
 	verifySchedules          bool
+	refreshStale             bool
 	verifyHealth             bool
 	restartAfterWarm         bool
 	concurrency              int // max apps converged in parallel; <=1 means serial
@@ -540,9 +542,51 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 				return fail(err, attempts)
 			}
 		}
-		if opt.verifySchedules {
-			if err := verifyEnabledScheduleFreshness(cfg, d.Slug, &res); err != nil {
+		if opt.refreshStale {
+			if err := refreshStaleSchedulesContext(opt.context, cfg, d.Slug, &res, opt.warmTimeout, out); err != nil {
 				return fail(err, attempts)
+			}
+		}
+		if opt.verifySchedules || opt.refreshStale {
+			ctx := opt.context
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			cancel := func() {}
+			if opt.refreshStale {
+				ctx, cancel = context.WithDeadline(ctx, res.warmDeadline)
+			}
+			err := verifyEnabledScheduleFreshnessContext(ctx, cfg, d.Slug, &res)
+			if err == nil && opt.refreshStale {
+				err = requireAppCompatibilityClearContext(ctx, cfg, d.Slug)
+				if err != nil {
+					var quarantine *appCompatibilityQuarantineError
+					res.failureKind = failureScheduleStateMissing
+					if errors.As(err, &quarantine) {
+						res.failureKind = failureScheduleProducer
+					}
+				}
+			}
+			if opt.refreshStale && ctx.Err() != nil {
+				res.failureKind = failureScheduleRefreshTimeout
+			}
+			cancel()
+			if err != nil {
+				return fail(err, attempts)
+			}
+		}
+		if opt.restartAfterWarm && observedScheduleConvergenceWork(res) {
+			restarted, err := restartAppAfterWarm(cfg, d.Slug, out)
+			if err != nil {
+				res.failureKind = failureWarmRestartFailed
+				if opt.refreshStale {
+					res.mutation = mutationUnknown
+				}
+				return fail(err, attempts)
+			}
+			res.warmRestarted = restarted
+			if opt.refreshStale && restarted {
+				res.mutation = mutationPartial
 			}
 		}
 		if opt.verifyHealth {
@@ -551,13 +595,8 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 				return fail(err, attempts)
 			}
 		}
-		if opt.restartAfterWarm && observedScheduleConvergenceWork(res) {
-			restarted, err := restartAppAfterWarm(cfg, d.Slug, out)
-			if err != nil {
-				res.failureKind = failureWarmRestartFailed
-				return fail(err, attempts)
-			}
-			res.warmRestarted = restarted
+		if opt.refreshStale && res.mutation == mutationPartial {
+			res.mutation = mutationCommitted
 		}
 		return done(status)
 	}

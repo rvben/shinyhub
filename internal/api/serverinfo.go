@@ -47,6 +47,7 @@ type serverCapabilities struct {
 	FleetStateChangeTracking  bool `json:"fleet_state_change_tracking"`
 	FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
 	ServiceAccountCredentials bool `json:"service_account_credentials"`
+	ScheduleRefreshStale      bool `json:"schedule_refresh_stale"`
 	ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
 }
 
@@ -70,6 +71,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			FleetRunLifecycle:         true,
 			ServiceAccountCredentials: true,
 			ScheduleDeployConvergence: true,
+			ScheduleRefreshStale:      true,
 		},
 		Runtimes: detectRuntimes(),
 	})

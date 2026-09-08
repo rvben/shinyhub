@@ -79,6 +79,8 @@ func TestWaitForDeployRunLoop_TransientErrorThenSucceeds(t *testing.T) {
 	}{
 		{"", &deployHTTPError{statusCode: 503}},
 		{"", &deployHTTPError{statusCode: 503}},
+		// An individual HTTP client timeout must not exhaust the total wait.
+		{"", context.DeadlineExceeded},
 		{"succeeded", nil},
 	}
 	poll := func() (string, error) {
