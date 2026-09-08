@@ -1,0 +1,29 @@
+name: Trusted publishing live
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: trusted-publishing-live
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build CLI
+        run: go build -o "$RUNNER_TEMP/shinyhub" ./cmd/shinyhub
+      - name: Verify publishing, replay, scope, revocation, and expiry
+        env:
+          SHINYHUB_TEST_CLI: ${{ runner.temp }}/shinyhub
+        run: python3 scripts/trusted-publishing-live.py
