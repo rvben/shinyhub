@@ -49,7 +49,6 @@ node_modules/
 __pycache__/
 
 # npm install artifact from the render-rig driver, not a deliverable
-loadtest/render/driver/package-lock.json
 
 # Local investigation scratch. Not shipped, and it carries customer names
 # that must never reach a committed file.

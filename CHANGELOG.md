@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.16.1](https://github.com/rvben/shinyhub/compare/v0.16.0...v0.16.1) - 2026-09-08
+
+### Fixed
+
+- **proxy**: offer a new app session in a separate tab while readiness is still pending. Keep previous results visible as an offline snapshot, and prevent late readiness responses from covering them again.
+- **cli**: explain disk quota failures and the available recovery steps.
+- **docs**: meet page description length requirements.
+
+### Changed
+
+- **release checks**: require real Chromium/Python Shiny tests for sign-in, rolling-update session continuity, restart recovery, and sleep/wake before publishing artifacts. Track the browser driver's dependency lockfile so the gate runs from a clean checkout.
+
 ## [0.16.0](https://github.com/rvben/shinyhub/compare/v0.15.10...v0.16.0) - 2026-09-08
 
 ### Added
