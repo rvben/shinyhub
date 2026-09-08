@@ -23,6 +23,7 @@ const state = join(work, 'state');
 await mkdir(state, { mode: 0o700 });
 const binary = process.env.SHINYHUB_E2E_BINARY ? resolve(process.env.SHINYHUB_E2E_BINARY) : join(work, 'shinyhub');
 const config = join(state, 'shinyhub.yaml');
+const clientConfig = join(state, 'client.json');
 const passwordFile = join(state, 'password');
 const password = randomBytes(24).toString('hex');
 const username = 'lifecycle-admin';
@@ -122,7 +123,9 @@ try {
   };
   const app = join(state, 'input');
   await cp(join(root, 'loadtest/browser/app'), app, { recursive: true, filter: source => !source.includes('__pycache__') });
-  const deploy = () => command([binary, 'deploy', app, '--slug', 'browser', '--visibility', 'shared', '--output', 'json'], 'deploy',
+  // The CLI uses its own config resolution; XDG_CONFIG_HOME alone does not
+  // isolate it from an existing operator config or an inaccessible home.
+  const deploy = () => command([binary, 'deploy', app, '--config', clientConfig, '--slug', 'browser', '--visibility', 'shared', '--output', 'json'], 'deploy',
     { env: { ...env, SHINYHUB_HOST: host, SHINYHUB_TOKEN: token } });
   await check('deploy real Shiny v1', deploy);
 
