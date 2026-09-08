@@ -1,5 +1,5 @@
 ---
-description: "Exchange an explicitly trusted CI workload identity for an app-scoped, ten-minute deployment credential."
+description: "Exchange a trusted CI workload identity for an app-scoped, ten-minute deployment credential without storing a ShinyHub API key."
 ---
 
 # Trusted publishing

@@ -1,5 +1,5 @@
 ---
-description: "Develop, check, preview, and publish from VS Code, Positron, or RStudio using the existing CLI."
+description: "Develop, check, preview, and publish ShinyHub apps from VS Code, Positron, or RStudio using the CLI and saved server connections."
 ---
 
 # Editor publishing

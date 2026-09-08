@@ -1,5 +1,5 @@
 ---
-description: "Check isolation and producer support against the actual target topology before deploying."
+description: "Check app isolation, producer support, and placement against the target server topology before uploading a deployment bundle."
 ---
 
 # Runtime capability preflight
