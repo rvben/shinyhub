@@ -54,6 +54,7 @@
 
   var polls = 0;
   var timer = null;
+  var reloadTimer = null;
   var showing = false;
   var currentState = null;
   var previousFocus = null;
@@ -78,7 +79,7 @@
   // isShinyOverlay reports whether node is Shiny's disconnect marker in the
   // state that means a real disconnect. Shiny sets the "reloading" class when
   // it is tearing the page down on purpose (autoreload in development, a
-  // session reload); that is not a fault and must not raise an overlay.
+  // session reload). Give that navigation a grace period before recovery.
   function isShinyOverlay(node) {
     return (
       node &&
@@ -641,7 +642,26 @@
     poll();
   });
 
+  // Python Shiny can leave a "reloading" marker indefinitely when its server
+  // is restarted. Allow normal page navigation, then explain a stalled reload
+  // without automatically replacing the visitor's last visible results.
+  function checkMarker(node) {
+    if (!node || node.nodeType !== 1 || node.id !== SHINY_OVERLAY_ID) return;
+    if (isShinyOverlay(node)) {
+      onLost();
+    } else if (reloadTimer === null) {
+      reloadTimer = window.setTimeout(guard(function () {
+        reloadTimer = null;
+        if (document.getElementById(SHINY_OVERLAY_ID)) onLost();
+      }), 3000);
+    }
+  }
+
   var onBack = guard(function () {
+    if (reloadTimer !== null) {
+      window.clearTimeout(reloadTimer);
+      reloadTimer = null;
+    }
     if (showing) {
       teardown();
     }
@@ -666,9 +686,7 @@
       for (var i = 0; i < records.length; i++) {
         var rec = records[i];
         for (var a = 0; a < rec.addedNodes.length; a++) {
-          if (isShinyOverlay(rec.addedNodes[a])) {
-            onLost();
-          }
+          checkMarker(rec.addedNodes[a]);
         }
         for (var r = 0; r < rec.removedNodes.length; r++) {
           var node = rec.removedNodes[r];
@@ -685,8 +703,6 @@
     // Shiny raises its overlay on a socket close, which cannot have happened
     // before this script runs. The initial check exists for the reverse case:
     // a cached or restored page that already carries the marker.
-    if (isShinyOverlay(document.getElementById(SHINY_OVERLAY_ID))) {
-      onLost();
-    }
+    checkMarker(document.getElementById(SHINY_OVERLAY_ID));
   })();
 })();

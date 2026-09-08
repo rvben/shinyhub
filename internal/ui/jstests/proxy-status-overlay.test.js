@@ -462,3 +462,28 @@ test('motion and keyboard focus have explicit accessible fallbacks', () => {
   assert.match(source, /shinyhub-status-spinner, #" \+ DOT_ID/, 'the status pulse must also yield to reduced-motion preferences');
   assert.match(source, /:focus-visible/, 'actions need a visible keyboard focus treatment');
 });
+
+test('a stalled Shiny reload eventually offers recovery instead of a permanent grey page', async () => {
+  const h = mount({ statuses: [200] });
+  await h.disconnect({ reloading: true });
+  assert.equal(h.overlay(), null, 'normal reloads have a grace period');
+  assert.equal(await h.fireTimer(), 3000);
+  assert.ok(h.overlay(), 'a marker still present after the grace period needs recovery');
+  assert.equal(h.title(), 'This session was interrupted');
+  assert.equal(h.fetches.length, 1);
+});
+
+test('a completed reload cancels its recovery timer', async () => {
+  const h = mount();
+  await h.disconnect({ reloading: true });
+  await h.reconnect();
+  assert.equal(h.timers.length, 0);
+  assert.equal(h.overlay(), null);
+  assert.equal(h.fetches.length, 0);
+});
+
+test('a restored page with a stale reload marker also offers recovery', async () => {
+  const h = mount({ statuses: [200], preMarker: 'reloading' });
+  await h.fireTimer();
+  assert.equal(h.title(), 'This session was interrupted');
+});
