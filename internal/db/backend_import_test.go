@@ -1,8 +1,10 @@
 package db_test
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
@@ -75,6 +77,19 @@ func TestImportFrom_SQLiteToPostgresRoundTrip(t *testing.T) {
 	if err := src.UpsertReplica(db.UpsertReplicaParams{AppID: alpha.ID, Index: 0, Status: "running", Provider: "native", Tier: "default"}); err != nil {
 		t.Fatal(err)
 	}
+	// Closed usage has both authoritative raw history and a SQLite-only cache.
+	// Import the history so PostgreSQL's native aggregate reproduces the result.
+	started := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	if err := src.BeginUsageSession(db.UsageSessionStart{ID: "import-closed", Slug: alpha.Slug, UserID: viewer.ID, InstanceID: "import", StartedAt: started}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.DB().Exec(`UPDATE usage_sessions SET ended_at = ?, heartbeat_at = ? WHERE id = ?`, started.Add(2*time.Minute), started.Add(2*time.Minute), "import-closed"); err != nil {
+		t.Fatal(err)
+	}
+	var cachedSessions int
+	if err := src.DB().QueryRow(`SELECT sessions FROM usage_closed_daily WHERE app_id = ?`, alpha.ID).Scan(&cachedSessions); err != nil || cachedSessions != 1 {
+		t.Fatalf("source closed-usage cache: sessions=%d err=%v", cachedSessions, err)
+	}
 
 	// Migration-owned allocator state is data too: preserve its high-water mark
 	// so imported fleet run sequences can never be reused.
@@ -94,12 +109,29 @@ func TestImportFrom_SQLiteToPostgresRoundTrip(t *testing.T) {
 
 	// Every source table's row count must match the target's.
 	for _, table := range sourceTableNames(t, src) {
+		if table == "usage_closed_daily" {
+			if _, copied := counts[table]; copied {
+				t.Fatal("SQLite-only derived usage cache was imported")
+			}
+			continue
+		}
 		var srcN, dstN int
-		src.DB().QueryRow(`SELECT COUNT(*) FROM "` + table + `"`).Scan(&srcN)
-		target.DB().QueryRow(`SELECT COUNT(*) FROM "` + table + `"`).Scan(&dstN)
+		if err := src.DB().QueryRow(`SELECT COUNT(*) FROM "` + table + `"`).Scan(&srcN); err != nil {
+			t.Fatal(err)
+		}
+		if err := target.DB().QueryRow(`SELECT COUNT(*) FROM "` + table + `"`).Scan(&dstN); err != nil {
+			t.Fatal(err)
+		}
 		if srcN != dstN {
 			t.Errorf("row count mismatch for %s: source=%d target=%d (copied=%d)", table, srcN, dstN, counts[table])
 		}
+	}
+	usage, err := target.AppUsageReport(context.Background(), alpha.ID, 48*time.Hour, "identified", false)
+	if err != nil {
+		t.Fatalf("imported usage report: %v", err)
+	}
+	if usage.Summary.Sessions != 1 || usage.Summary.TotalDurationSeconds != 120 || usage.Summary.UniqueViewers == nil || *usage.Summary.UniqueViewers != 1 {
+		t.Fatalf("usage history did not survive cache-free import: %+v", usage.Summary)
 	}
 
 	// Spot-check preserved values through the target store's typed reads.

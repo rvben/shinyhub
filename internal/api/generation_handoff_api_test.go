@@ -502,15 +502,10 @@ func TestDeploy_TransientGenerationLedgerDeleteFailureRecoversWithoutRestart(t *
 		t.Fatalf("first deploy: %d %s", rec.Code, rec.Body.String())
 	}
 	old, _ := store.GetActiveDeploymentGeneration(app.ID)
-	if _, err := store.DB().Exec(fmt.Sprintf(`
-		CREATE TRIGGER fail_candidate_ledger_delete
-		BEFORE DELETE ON deployment_replicas
-		WHEN OLD.deployment_id != %d
-		BEGIN
-			SELECT RAISE(FAIL, 'injected generation ledger delete failure');
-		END`, old.DeploymentID)); err != nil {
-		t.Fatal(err)
-	}
+	dropFailure := installDBFailureTrigger(t, store, dbFailureTrigger{
+		name: "fail_candidate_ledger_delete", table: "deployment_replicas", event: "DELETE",
+		condition: fmt.Sprintf("OLD.deployment_id != %d", old.DeploymentID),
+	})
 	if rec := deployBareGeneration(t, srv, token, app.Slug, "print('v2')", false); rec.Code != http.StatusOK {
 		t.Fatalf("handoff with transient delete failure: %d %s", rec.Code, rec.Body.String())
 	}
@@ -518,9 +513,7 @@ func TestDeploy_TransientGenerationLedgerDeleteFailureRecoversWithoutRestart(t *
 	if err != nil || len(rows) == 0 {
 		t.Fatalf("injected failure did not retain a cleanup row: rows=%+v err=%v", rows, err)
 	}
-	if _, err := store.DB().Exec(`DROP TRIGGER fail_candidate_ledger_delete`); err != nil {
-		t.Fatal(err)
-	}
+	dropFailure()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		rows, err = store.ListDeploymentReplicas(app.ID)

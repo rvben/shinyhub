@@ -12,13 +12,15 @@ import (
 
 // TestSchemaParity asserts the Postgres baseline reproduces the cumulative
 // SQLite schema. What it compares:
-//   - table set (same tables in both backends)
+//   - table set (same authoritative tables in both backends)
 //   - column set per table (same column names)
 //   - column nullability (NOT NULL vs nullable)
 //   - unique-index/constraint column tuples (order-independent set)
 //   - foreign-key edges: fromCol -> referencedTable.referencedCol
 //
 // What it intentionally does NOT compare:
+//   - usage_closed_daily: SQLite-only derived counters; PostgreSQL queries
+//     the authoritative usage_sessions directly instead of materializing them.
 //   - column DEFAULT expressions: the Postgres migration uses GENERATED ALWAYS
 //     AS IDENTITY / bigserial defaults that have no SQLite equivalent.
 //   - raw type spellings: the SQLite->Postgres mapping deliberately changes
@@ -41,6 +43,7 @@ func TestSchemaParity(t *testing.T) {
 
 	sqSchema := introspectSQLite(t, sqliteStore)
 	pgSchema := introspectPostgres(t, pgStore)
+	delete(sqSchema, "usage_closed_daily")
 
 	// Same table set.
 	assertSameStringSet(t, "tables", tableNames(sqSchema), tableNames(pgSchema))
@@ -499,25 +502,25 @@ func sqliteFKList(store *db.Store, table string) ([]fkEdge, error) {
 	return edges, rows.Err()
 }
 
-// introspectPostgresFKs returns a map of table -> FK edges using information_schema.
+// introspectPostgresFKs pairs each local and referenced column by its position
+// within a constraint. Joining constraint_column_usage by name alone produces
+// a Cartesian product for composite foreign keys.
 func introspectPostgresFKs(t *testing.T, store *db.Store) map[string][]fkEdge {
 	t.Helper()
 	rows, err := store.DB().Query(`
-		SELECT
-			kcu.table_name,
-			kcu.column_name,
-			ccu.table_name  AS foreign_table_name,
-			ccu.column_name AS foreign_column_name
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu
-		  ON kcu.constraint_name = tc.constraint_name
-		 AND kcu.table_schema    = tc.table_schema
-		JOIN information_schema.constraint_column_usage ccu
-		  ON ccu.constraint_name = tc.constraint_name
-		 AND ccu.table_schema    = tc.table_schema
-		WHERE tc.table_schema   = 'public'
-		  AND tc.constraint_type = 'FOREIGN KEY'
-		ORDER BY kcu.table_name, kcu.column_name`)
+		SELECT source.relname, source_col.attname, target.relname, target_col.attname
+		FROM pg_catalog.pg_constraint constraint_def
+		JOIN pg_catalog.pg_class source ON source.oid = constraint_def.conrelid
+		JOIN pg_catalog.pg_namespace ns ON ns.oid = source.relnamespace
+		JOIN pg_catalog.pg_class target ON target.oid = constraint_def.confrelid
+		JOIN LATERAL unnest(constraint_def.conkey, constraint_def.confkey)
+		  AS columns(source_number, target_number) ON true
+		JOIN pg_catalog.pg_attribute source_col
+		  ON source_col.attrelid = source.oid AND source_col.attnum = columns.source_number
+		JOIN pg_catalog.pg_attribute target_col
+		  ON target_col.attrelid = target.oid AND target_col.attnum = columns.target_number
+		WHERE ns.nspname = 'public' AND constraint_def.contype = 'f'
+		ORDER BY source.relname, source_col.attname`)
 	if err != nil {
 		t.Fatalf("postgres fks query: %v", err)
 	}

@@ -113,10 +113,13 @@ func importTargetTablePristine(tx *boundTx, table string) (bool, error) {
 }
 
 // srcTables lists the source SQLite data tables to copy, excluding the schema
-// ledger (the target maintains its own) and SQLite internals.
+// ledger (the target maintains its own), SQLite internals, and SQLite's derived
+// closed-usage cache. PostgreSQL aggregates the imported raw usage_sessions;
+// copying that cache would require a table PostgreSQL deliberately does not own.
 func srcTables(src *Store) ([]string, error) {
 	rows, err := src.DB().Query(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations' ORDER BY name`)
+		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
+		 AND name NOT IN ('schema_migrations', 'usage_closed_daily') ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list source tables (source must be SQLite): %w", err)
 	}

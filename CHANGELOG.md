@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **fleet**: show downtime-required deployments as blocked, explain the isolation limitation, and clarify that the working version is preserved while other fleet resources can still converge.
 - **lifecycle**: fence generation cleanup and delayed lifetime callbacks against replacement workers when slots are reused.
+- **database**: import authoritative usage records across database backends without copying SQLite-only derived usage caches.
 
 ## [0.15.8](https://github.com/rvben/shinyhub/compare/v0.15.7...v0.15.8) - 2026-09-08
 
