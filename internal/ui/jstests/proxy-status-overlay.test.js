@@ -180,7 +180,7 @@ test('a disconnect raises the overlay and starts polling the ready probe', async
   assert.equal(h.overlay().getAttribute('aria-live'), 'polite', 'the state change is announced');
   assert.equal(h.overlay().getAttribute('role'), 'dialog', 'the blocking state uses dialog semantics');
   assert.equal(h.overlay().getAttribute('aria-modal'), 'true', 'the obscured page is exposed as modal');
-  assert.equal(h.document.activeElement, h.button(), 'focus starts on the recovery action');
+  assert.equal(h.document.activeElement, h.openLink(), 'focus starts on the action that preserves results');
 
   // Restart is offered immediately: the ready probe never wakes a hibernated
   // app, so for the commonest cause of a drop, waiting cannot fix it and
@@ -486,4 +486,30 @@ test('a restored page with a stale reload marker also offers recovery', async ()
   const h = mount({ statuses: [200], preMarker: 'reloading' });
   await h.fireTimer();
   assert.equal(h.title(), 'This session was interrupted');
+});
+
+test('a not-ready app can open a new session while preserving the old results', async () => {
+  const h = mount({ statuses: [503] });
+  await h.disconnect();
+  assert.equal(h.actionVisible(OPEN_ID), true, 'readiness may require the new session itself');
+  h.openLink().addEventListener('click', event => event.preventDefault());
+  h.openLink().click();
+  assert.match(h.overlay().className, /is-snapshot/);
+  assert.equal(h.overlay().hasAttribute('aria-modal'), false);
+  assert.equal(h.timers.length, 0, 'snapshot mode must stop readiness polling');
+});
+
+test('a readiness response arriving after new-tab recovery cannot cover the snapshot again', async () => {
+  const h = mount();
+  let resolve;
+  h.window.fetch = () => new Promise(done => { resolve = done; });
+  await h.disconnect();
+  h.openLink().addEventListener('click', event => event.preventDefault());
+  h.openLink().click();
+  resolve({ status: 200 });
+  await flush();
+  await flush();
+  assert.match(h.overlay().className, /is-snapshot/);
+  assert.equal(h.title(), 'Previous results');
+  assert.equal(h.timers.length, 0);
 });

@@ -127,6 +127,7 @@
       styles.textDecoration = "none";
       styles.boxShadow = "0 4px 14px rgba(56,189,248,0.25)";
     } else if (kind === "secondary") {
+      styles.boxShadow = "none";
       styles.background = "#0E1426";
       styles.color = "#E8EEFF";
       styles.border = "1px solid #2B3A63";
@@ -419,7 +420,8 @@
       state === "ready"
         ? "shinyhub-ready-pulse 760ms cubic-bezier(0.16,1,0.3,1) 2"
         : "";
-    show(ui.openLink, state === "ready");
+    Object.assign(ui.reloadButton.style, actionStyles(state === "waiting" ? "secondary" : "primary"));
+    show(ui.openLink, state === "ready" || state === "waiting");
     show(ui.restartButton, state === "ready");
     show(ui.reloadButton, !!reloadText);
     if (reloadText) {
@@ -428,7 +430,7 @@
     if (!ui.root.parentNode) {
       document.body.appendChild(ui.root);
     }
-    if (state === "ready") {
+    if (state === "ready" || state === "waiting") {
       ui.openLink.focus();
     } else if (reloadText) {
       ui.reloadButton.focus();
@@ -438,9 +440,10 @@
   }
 
   function enterSnapshot() {
-    if (!ui || currentState !== "ready") {
+    if (!ui || (currentState !== "ready" && currentState !== "waiting")) {
       return;
     }
+    stopPolling();
     currentState = "snapshot";
     var marker = document.getElementById(SHINY_OVERLAY_ID);
     if (marker) {
@@ -534,6 +537,8 @@
     previousFocus = null;
   }
 
+  // A new tab is offered even before readiness: on single-node servers the
+  // readiness probe waits for a WebSocket handshake from that new session.
   // Restart is offered immediately, not held back for the give-up state. The
   // ready probe is deliberately read-only: it never touches the upstream and
   // never triggers a wake. So for the most common cause of a mid-session drop,
@@ -544,7 +549,7 @@
     render(
       "waiting",
       "Connection interrupted",
-      "We are checking whether the app is available again. Restarting now begins a new session.",
+      "We are checking whether the app is available again. Start in a new tab to keep these results available.",
       "Restart now"
     );
   }
@@ -587,13 +592,13 @@
 
   var poll = guard(function () {
     timer = null;
-    if (!showing) {
+    if (!showing || currentState === "snapshot") {
       return;
     }
     window
       .fetch(readyURL, { cache: "no-store", credentials: "same-origin" })
       .then(function (res) {
-        if (!showing) {
+        if (!showing || currentState === "snapshot") {
           return;
         }
         if (res.status === 200) {
@@ -614,7 +619,7 @@
         guard(function () {
           // A failed fetch is indistinguishable from a down server from here,
           // so it counts as a miss rather than as an error state.
-          if (showing) {
+          if (showing && currentState !== "snapshot") {
             schedule();
           }
         })
