@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { providerVisibility, applyLoginProviders } from '../static/views/login-providers.js';
+import { providerVisibility, applyLoginProviders, groupAccessWarningText } from '../static/views/login-providers.js';
 
 // The GitHub and Google login buttons are static markup in index.html, hidden by
 // default; this module reveals a button ONLY when /api/auth/providers reports
@@ -137,4 +137,27 @@ test('re-applying with local re-enabled restores the form', () => {
   assert.equal(doc.querySelector('#login-form').hidden, true);
   applyLoginProviders(doc, { local: true, oidc: { enabled: true } });
   assert.equal(doc.querySelector('#login-form').hidden, false);
+});
+
+// --- groupAccessWarningText ---
+// user_groups (which Group access rules key on) is populated only by an OIDC
+// login's group claims or a forward-auth proxy's group header, never by a
+// plain GitHub/Google login. So this warns on the absence of OIDC alone,
+// even when other SSO providers are configured.
+
+test('oidc configured: no warning', () => {
+  assert.equal(groupAccessWarningText({ oidc: { enabled: true, display_name: 'Okta' } }), '');
+});
+
+test('no oidc configured: warns, even with github/google SSO present', () => {
+  const warning = groupAccessWarningText({ github: true, google: true, oidc: { enabled: false } });
+  assert.notEqual(warning, '');
+  assert.match(warning, /No OIDC provider is configured/);
+});
+
+test('a missing or partial response fails toward warning, not silence', () => {
+  assert.notEqual(groupAccessWarningText(undefined), '');
+  assert.notEqual(groupAccessWarningText({}), '');
+  // only a strict boolean true on oidc.enabled silences the warning
+  assert.notEqual(groupAccessWarningText({ oidc: { enabled: 'true' } }), '');
 });

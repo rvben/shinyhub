@@ -114,7 +114,7 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 				Action:       "scale_up",
 				ResourceType: "app",
 				ResourceID:   slug,
-				Detail:       fmt.Sprintf(`{"defrag":true,"restored":%d}`, restored),
+				Detail:       db.AuditDetail(map[string]any{"defrag": true, "restored": restored}),
 			})
 		}
 		return restored > 0, bootErr

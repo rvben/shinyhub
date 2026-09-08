@@ -30,8 +30,9 @@ and `SHINYHUB_TOKEN` without writing a credentials file.
 If a saved CLI credential expires or is revoked, the next authenticated command
 explains what happened and points back to `shinyhub connect`. Reconnecting
 replaces only that server's credential and preserves every other saved host.
-Failures other than a credential rejection—such as rate limiting, an unavailable
-server, or a network error—are reported directly and never trigger rotation.
+Failures other than a credential rejection, such as rate limiting, an
+unavailable server, or a network error, are reported directly and never
+trigger rotation.
 
 Refresh a still-working credential before it expires:
 

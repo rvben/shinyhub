@@ -98,7 +98,15 @@ func (s *Server) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
 	if s.manager != nil {
 		evict = s.manager.EvictReplicaIfWorker
 	}
+	// Counted before eviction, because afterwards the rows are gone and the
+	// event could no longer say how much user traffic this revocation displaced.
+	hosted := 0
+	if reps, lerr := s.store.ListReplicasByWorker(nodeID); lerr == nil {
+		hosted = len(reps)
+	}
+	evictionFailed := false
 	if err := lifecycle.LoseWorkerReplicas(s.store, nodeID, deregister, evict); err != nil {
+		evictionFailed = true
 		slog.Error("revoke worker: evict replicas", "node", nodeID, "err", err)
 	}
 	s.logAuditEvent(r, db.AuditEventParams{
@@ -106,7 +114,14 @@ func (s *Server) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
 		Action:       "revoke_worker",
 		ResourceType: "worker",
 		ResourceID:   nodeID,
-		IPAddress:    s.ClientIP(r),
+		// A revocation that could not evict is the case an incident review needs
+		// to find: the certificate is rejected while replicas may still be
+		// serving, and the failure otherwise exists only in the server log.
+		Detail: auditDetailJSON(map[string]any{
+			"replicas_hosted": hosted,
+			"eviction_failed": evictionFailed,
+		}),
+		IPAddress: s.ClientIP(r),
 	})
 	w.WriteHeader(http.StatusNoContent)
 }

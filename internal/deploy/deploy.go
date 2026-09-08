@@ -267,7 +267,7 @@ func sandboxedPythonSync(ctx context.Context, dir string, appEnv []string) error
 	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); os.IsNotExist(err) {
 		return nil
 	}
-	out, err := runSandboxedBuildStep(ctx, dir, []string{"uv", "sync"}, appEnv)
+	out, err := buildStepRunner(ctx, dir, []string{"uv", "sync"}, appEnv)
 	if err != nil {
 		switch ctx.Err() {
 		case context.DeadlineExceeded:
@@ -297,7 +297,11 @@ func sandboxedRSync(ctx context.Context, dir string, appEnv []string) error {
 		return err
 	}
 	argv := process.RenvRestoreArgv(lib)
-	out, err := runSandboxedBuildStep(ctx, dir, argv, appEnv)
+	// The plain-output policy goes after the app's own env so an app-set
+	// NO_COLOR cannot re-enable renv's escape sequences in output this function
+	// embeds in a structured error (os/exec is last-occurrence-wins).
+	buildEnv := append(append([]string{}, appEnv...), process.RenvPlainOutputEnv()...)
+	out, err := buildStepRunner(ctx, dir, argv, buildEnv)
 	if err != nil {
 		switch ctx.Err() {
 		case context.DeadlineExceeded:
@@ -305,7 +309,7 @@ func sandboxedRSync(ctx context.Context, dir string, appEnv []string) error {
 		case context.Canceled:
 			return fmt.Errorf("build canceled: %w", ctx.Err())
 		}
-		return fmt.Errorf("%w\n%s", err, out)
+		return fmt.Errorf("%w\n%s", err, process.StripANSI(out))
 	}
 	return nil
 }
@@ -318,6 +322,10 @@ var (
 	pythonSyncFn    = sandboxedPythonSync
 	rSyncFn         = sandboxedRSync
 	ensureProjectFn = process.EnsureProject
+	// buildStepRunner is the same kind of indirection one level down, so a test
+	// can supply the build output an interpreter would have produced without
+	// requiring uv or Rscript on the machine running the test.
+	buildStepRunner = runSandboxedBuildStep
 )
 
 // autoInstrumentPackages is the overlay layered into a Python app's
@@ -746,6 +754,10 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) erro
 			return fmt.Errorf("uv sync: %w", err)
 		}
 	case "r":
+		if err := requireRDependencies(ctx, p.BundleDir); err != nil {
+			p.report(deployevent.Phase("dependencies", deployevent.StatusFailed, "R dependency build failed"))
+			return fmt.Errorf("renv restore: %w", err)
+		}
 		if err := rSyncFn(ctx, p.BundleDir, appEnv); err != nil {
 			p.report(deployevent.Phase("dependencies", deployevent.StatusFailed, "R dependency build failed"))
 			return fmt.Errorf("renv restore: %w", err)
@@ -757,6 +769,64 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) erro
 	p.report(e)
 	return nil
 }
+
+// requireRDependencies fails an inferred R build that has no path to shiny.
+//
+// renv::restore has nothing to restore without renv.lock, so the build phase
+// installed nothing and still completed - and the deploy reported "Dependencies
+// ready" before dying two minutes later in the readiness window with a generic
+// "it likely crashed on startup", while the real cause sat in the app log as
+// `there is no package called 'shiny'`. The assumption behind the no-op holds
+// for Python, where a bundle can legitimately run against an ambient
+// interpreter, and does not hold for R without qualification: shiny is in no
+// base R installation.
+//
+// It IS reachable from a site library the operator installed, which
+// RLibPathsExpr deliberately keeps on the search path behind the bundle's own.
+// A missing lockfile therefore is not by itself the fault, so the ambient
+// library is probed before failing and a host carrying shiny keeps deploying
+// lockfile-free bundles exactly as before.
+//
+// The check is scoped to the inferred path. A bundle that declares its own
+// [app] command manages its packages itself and never reaches here, because
+// resolveBundleCommand returns an empty appType for it.
+func requireRDependencies(ctx context.Context, bundleDir string) error {
+	// Plumber APIs use R without Shiny. Keep their dependency preparation
+	// independent of this Shiny-specific missing-package check.
+	if m, err := LoadManifest(bundleDir); err == nil && m != nil && m.App.Framework == "plumber" {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "renv.lock")); err == nil {
+		return nil
+	}
+	if rShinyInstalledFn(ctx) {
+		return nil
+	}
+	return errors.New("no renv.lock in the bundle and no shiny package in the host R library, so " +
+		"nothing installs shiny and the app cannot load it at startup. Run renv::init() then " +
+		"renv::snapshot() in the app directory and redeploy, install shiny into the server's R " +
+		"library, or declare `[app] command` in shinyhub.toml if the app installs its own packages")
+}
+
+// rShinyInstalledFn is the seam that lets the check run on a machine without R.
+var rShinyInstalledFn = rShinyInstalled
+
+// rShinyInstalled reports whether shiny resolves anywhere on the ambient R
+// library search path. A host with no Rscript at all answers false, which is
+// the honest answer: that host cannot run the app either.
+func rShinyInstalled(ctx context.Context) bool {
+	probe, cancel := context.WithTimeout(ctx, rProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(probe, "Rscript", "-e",
+		"quit(status = if (length(find.package('shiny', quiet = TRUE)) > 0) 0 else 1)")
+	cmd.Env = process.SanitizedEnv()
+	return cmd.Run() == nil
+}
+
+// rProbeTimeout bounds the shiny probe. Loading a bare R session is
+// sub-second; anything longer is a sick host, and waiting on it would spend
+// the build budget to reach the same failure the health check reaches anyway.
+const rProbeTimeout = 30 * time.Second
 
 // startBuildProgress emits a heartbeat every buildProgressInterval until the
 // returned stop func is called, so a long build is visibly alive in the log.
@@ -976,6 +1046,13 @@ func resolveBundleCommand(p Params, m *Manifest, hostDeps bool) (baseCmd []strin
 		return m.App.Command, "", nil
 	default:
 		appType = DetectAppType(p.BundleDir)
+		// Detection is silent by construction, so an ambiguous bundle is reported
+		// here - the one place every inferred boot passes through - rather than
+		// left for the operator to infer from the runtime the app ended up on.
+		for _, warning := range AppTypeWarnings(p.BundleDir) {
+			slog.Warn("deploy: ambiguous app type", "slug", p.Slug, "detail", warning)
+			p.report(deployevent.Phase("bundle", deployevent.StatusWarning, warning))
+		}
 		// Container runtimes prepare dependencies inside the image/container, so
 		// running uv sync / renv::restore on the host would leak host state into
 		// what is supposed to be an isolated boot path (and fail outright on
@@ -1021,7 +1098,7 @@ func resolveBundleCommand(p Params, m *Manifest, hostDeps bool) (baseCmd []strin
 			}
 			return nil, appType, nil
 		default:
-			return nil, "", fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", p.BundleDir)
+			return nil, "", fmt.Errorf("no app entrypoint found in %s (add app.py, app.R, or ui.R and server.R, or declare [app] command in shinyhub.toml)", p.BundleDir)
 		}
 	}
 }
@@ -1774,8 +1851,15 @@ func ResumeReplica(p Params, index int) (*Result, error) {
 	}, nil
 }
 
-// DetectAppType returns "python" if app.py exists, "r" if app.R exists, or ""
-// if neither is found.
+// DetectAppType returns the runtime a bundle launches under: "python" for
+// app.py, "r" for either R Shiny layout, or "" when neither is recognized.
+//
+// R has two ordinary layouts. app.R is the single-file form; ui.R plus
+// server.R is the classic split form, which predates app.R and is still what
+// most published Shiny examples and RStudio's own "New Shiny App" scaffold
+// produce. shiny::runApp on a directory accepts either, so the launch command
+// is identical and only detection has to tell them apart. server.R is the file
+// that decides it, because a ui.R on its own cannot be run.
 func DetectAppType(bundleDir string) string {
 	if m, err := LoadManifest(bundleDir); err == nil && m != nil {
 		switch m.App.Framework {
@@ -1785,13 +1869,53 @@ func DetectAppType(bundleDir string) string {
 			return "r"
 		}
 	}
-	if _, err := os.Stat(filepath.Join(bundleDir, "app.py")); err == nil {
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(bundleDir, name))
+		return err == nil
+	}
+	if exists("app.py") {
 		return "python"
 	}
-	if _, err := os.Stat(filepath.Join(bundleDir, "app.R")); err == nil {
+	if exists("app.R") || exists("server.R") {
 		return "r"
 	}
 	return ""
+}
+
+// AppTypeWarnings reports what DetectAppType had to decide silently. Detection
+// is first-match-wins over a fixed order, so a bundle carrying entrypoints for
+// two runtimes deploys as the first one with nothing said - and a leftover
+// app.py (an abandoned prototype, an editor scaffold, a merge artifact) then
+// takes over an R developer's deploy, which surfaces only as an app that runs
+// the wrong code. The warning names the winner and the loser so the fix is
+// obvious. It is advisory: the precedence itself is unchanged, since bundles
+// already deployed under it must keep deploying the same way.
+//
+// It returns nil for a bundle that declares its own [app] command; that bundle
+// never reaches detection, so there is nothing ambiguous about it.
+func AppTypeWarnings(bundleDir string) []string {
+	if m, err := LoadManifest(bundleDir); err == nil && m != nil && len(m.App.Command) > 0 {
+		return nil
+	}
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(bundleDir, name))
+		return err == nil
+	}
+	// The R entrypoint is named rather than assumed: a classic bundle loses to a
+	// stray app.py exactly as a single-file one does, and an operator told to
+	// look for "app.R" in a bundle that has none learns nothing.
+	rEntrypoint := ""
+	switch {
+	case exists("app.R"):
+		rEntrypoint = "app.R"
+	case exists("server.R"):
+		rEntrypoint = "server.R"
+	}
+	if exists("app.py") && rEntrypoint != "" {
+		return []string{fmt.Sprintf("both app.py and %s found; app.py takes precedence and this deploys as a Python app. "+
+			"Remove app.py, or declare `[app] command` in shinyhub.toml, to deploy the R app.", rEntrypoint)}
+	}
+	return nil
 }
 
 // rLaunchFlags are the Rscript flags every R app launches with. They are
@@ -1975,6 +2099,26 @@ var ErrBundleTooLarge = errors.New("bundle exceeds extracted size limit")
 // errors.Is to map this to a 422 Unprocessable Entity response.
 var ErrBundleRejected = errors.New("bundle rejected")
 
+// sanitizeFSError rewrites a filesystem error raised while handling an
+// uploaded bundle so its message never contains a host path. os.MkdirAll,
+// os.Open and os.OpenFile all fail with an *fs.PathError whose Path field is
+// the absolute path under the operator's configured apps_dir, not something
+// the deployer supplied or is entitled to see; label replaces it with context
+// the deployer already has (a bundle-relative entry name, or a fixed phrase
+// when no entry is in scope yet). The underlying cause (permission denied, no
+// space left on device, ...) is kept via %w, so errors.Is against
+// fs.ErrPermission, fs.ErrExist, fs.ErrNotExist, or a specific syscall errno
+// still works; only the path is dropped. An error that is not a *fs.PathError
+// carries no host path to begin with (a corrupt zip entry, say) and is
+// returned unchanged.
+func sanitizeFSError(label string, err error) error {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return fmt.Errorf("%s: %w", label, pathErr.Err)
+	}
+	return err
+}
+
 const (
 	// DefaultMaxEntrySize caps the extracted size of a single file inside the
 	// bundle. Matches the upload size cap — a single file can never be larger
@@ -2010,7 +2154,7 @@ func ExtractBundle(src, destDir string) error {
 func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int64) error {
 	r, err := zip.OpenReader(src)
 	if err != nil {
-		return fmt.Errorf("open zip: %w", err)
+		return sanitizeFSError("open uploaded bundle", err)
 	}
 	defer r.Close()
 
@@ -2019,13 +2163,13 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 	}
 
 	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return err
+		return sanitizeFSError("prepare extraction directory", err)
 	}
 
 	// Resolve destDir to its real absolute path once so comparisons are stable.
 	absDestDir, err := filepath.Abs(destDir)
 	if err != nil {
-		return err
+		return sanitizeFSError("resolve extraction directory", err)
 	}
 
 	rules := bundle.DefaultRules()
@@ -2040,7 +2184,7 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 		// absDestDir. The separator-aware check catches both ".." and "../foo".
 		rel, err := filepath.Rel(absDestDir, target)
 		if err != nil || strings.HasPrefix(rel, "..") {
-			return fmt.Errorf("zip-slip detected in %q: entry escapes destination", f.Name)
+			return fmt.Errorf("%w: bundle entry %q escapes the destination directory", ErrBundleRejected, f.Name)
 		}
 
 		// Reject symlink entries outright: a bundle is application code, not a
@@ -2070,7 +2214,7 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, 0755); err != nil {
-				return err
+				return sanitizeFSError(fmt.Sprintf("create directory for bundle entry %q", f.Name), err)
 			}
 			continue
 		}
@@ -2099,17 +2243,21 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 // copy is aborted and ErrBundleTooLarge is returned; the partially-written
 // file is removed so caller cleanup logic isn't needed.
 func extractFile(f *zip.File, dest string, maxEntrySize int64) (int64, error) {
+	entryLabel := fmt.Sprintf("write bundle entry %q", f.Name)
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-		return 0, err
+		return 0, sanitizeFSError(fmt.Sprintf("create directory for bundle entry %q", f.Name), err)
 	}
 	rc, err := f.Open()
 	if err != nil {
+		// f.Open reads the entry out of the zip archive itself; any failure
+		// here is about the archive's internal structure, not the host
+		// filesystem, so there is no path to sanitize.
 		return 0, err
 	}
 	defer rc.Close()
 	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, safeFileMode(f.Mode()))
 	if err != nil {
-		return 0, err
+		return 0, sanitizeFSError(entryLabel, err)
 	}
 
 	var src io.Reader = rc
@@ -2121,11 +2269,11 @@ func extractFile(f *zip.File, dest string, maxEntrySize int64) (int64, error) {
 	closeErr := out.Close()
 	if copyErr != nil {
 		os.Remove(dest)
-		return 0, copyErr
+		return 0, sanitizeFSError(entryLabel, copyErr)
 	}
 	if closeErr != nil {
 		os.Remove(dest)
-		return 0, closeErr
+		return 0, sanitizeFSError(entryLabel, closeErr)
 	}
 	if maxEntrySize > 0 && n > maxEntrySize {
 		os.Remove(dest)

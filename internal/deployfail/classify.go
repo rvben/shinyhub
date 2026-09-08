@@ -43,7 +43,11 @@ func ClassifyMessage(msg string) Kind {
 	case strings.Contains(msg, "uv sync:"),
 		strings.Contains(msg, "renv restore:"):
 		return BuildFailed
-	case strings.Contains(msg, "no app.py or app.R found"),
+	case strings.Contains(msg, "no app entrypoint found"),
+		// A server older than classic-layout detection words the same failure
+		// "no app.py or app.R found". The CLI classifies whatever message the
+		// server it is talking to returned, so both spellings stay recognized.
+		strings.Contains(msg, "no app.py or app.R found"),
 		strings.Contains(msg, "read manifest:"),
 		strings.Contains(msg, "manifest [app] command:"):
 		return BundleInvalid

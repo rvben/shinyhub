@@ -15,6 +15,9 @@ const ACTION_LABELS = new Map([
   ['env.set', 'Environment updated'],
   ['env.delete', 'Environment updated'],
   ['data.push', 'Data updated'],
+  // Deliberately not "Data updated": a pull changes nothing, and grouping it
+  // under the same label would make a read look like a write in the timeline.
+  ['data.pull', 'Data read'],
   ['data.delete', 'Data updated'],
   ['schedule_create', 'Schedule created'],
   ['schedule_update', 'Schedule updated'],

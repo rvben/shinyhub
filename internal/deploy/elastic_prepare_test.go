@@ -258,7 +258,7 @@ func TestRun_ElasticUndeployableBundleFailsAtDeploy(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an elastic deploy of a bundle with no entrypoint to fail")
 	}
-	if !strings.Contains(err.Error(), "no app.py or app.R found") {
+	if !strings.Contains(err.Error(), "no app entrypoint found") {
 		t.Errorf("expected a missing-entrypoint error, got %v", err)
 	}
 }

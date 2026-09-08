@@ -18,7 +18,7 @@ or reconnect starts a new session.
 The dashboard reports sessions, peak concurrent sessions, average connected
 time, active sessions, last-opened time, daily opens, and a
 person/anonymous/service-account audience mix. Peak concurrency counts
-overlapping live connections—not distinct people—so it is available in every
+overlapping live connections, not distinct people, so it is available in every
 identity mode without retaining another identifier. Unique viewers are shown
 only when every person row in the selected window
 uses the same retained identity scheme. A prospective mode upgrade can therefore

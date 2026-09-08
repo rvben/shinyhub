@@ -74,6 +74,17 @@ func validationErr(msg, hint string) error {
 	return &ExitCodeError{Code: 1, Kind: KindValidation, Err: &hintedMsgError{msg: msg, hint: hint}}
 }
 
+// notFoundErr reports that a named resource does not exist. It carries the same
+// kind and exit code as a server 404 so a caller branches on one condition
+// whether the absence was detected client-side (scanning a list the server
+// returned) or by the server itself. Without it a mistyped name reads as kind
+// "internal", which tells an automated caller the server broke and the call is
+// worth retrying - the opposite of the truth, since the name will be just as
+// absent next time.
+func notFoundErr(msg, hint string) error {
+	return &ExitCodeError{Code: 1, Kind: KindNotFound, Err: &hintedMsgError{msg: msg, hint: hint}}
+}
+
 // authErr reports a credential problem the CLI detected locally: no saved login
 // for the targeted server, or no server selected at all. It carries the same
 // kind and exit code as a server 401 so callers can branch on one condition.

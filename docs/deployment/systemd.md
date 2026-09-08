@@ -46,5 +46,6 @@ service is down. `journalctl -u shinyhub` shows the two versions involved.
 Before applying pending migrations the server writes a pre-migration snapshot of
 the SQLite database beside it; see
 [Schema migrations on startup](../configuration.md#schema-migrations-on-startup).
-Those files are never pruned automatically, so include them in whatever
-disk-space policy covers `/var/lib/shinyhub`.
+Those files are pruned automatically down to a configurable retention count
+(default 5), so include at most that many full-size database copies in
+whatever disk-space policy covers `/var/lib/shinyhub`.

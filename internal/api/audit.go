@@ -1,9 +1,11 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
@@ -24,6 +26,41 @@ func (s *Server) canReadAudit(u *auth.ContextUser) bool {
 		return false
 	}
 	return u.Role == "admin" || (u.Role == "operator" && s.cfg.Auth.OperatorAuditAccess)
+}
+
+// auditDateLayout is the calendar-date form the date range accepts. Audit rows
+// are stamped in UTC and the page renders them in UTC, so a date names a UTC
+// day and needs no zone from the caller.
+const auditDateLayout = "2006-01-02"
+
+// parseAuditDateRange turns two optional YYYY-MM-DD bounds into an inclusive
+// UTC instant range. "until" covers the whole named day: an operator asking for
+// events until the 6th means through the end of the 6th, and a bound at
+// midnight would silently drop everything that happened during it.
+//
+// An unparseable or inverted range is rejected rather than ignored. Dropping a
+// filter the caller asked for returns more rows than requested, which reads as
+// "those events are in range" and is the wrong answer to give someone reading
+// an audit log.
+func parseAuditDateRange(rawSince, rawUntil string) (since, until time.Time, err error) {
+	rawSince, rawUntil = strings.TrimSpace(rawSince), strings.TrimSpace(rawUntil)
+	if rawSince != "" {
+		since, err = time.ParseInLocation(auditDateLayout, rawSince, time.UTC)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid audit since date, expected YYYY-MM-DD")
+		}
+	}
+	if rawUntil != "" {
+		until, err = time.ParseInLocation(auditDateLayout, rawUntil, time.UTC)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid audit until date, expected YYYY-MM-DD")
+		}
+		until = until.Add(24*time.Hour - time.Second)
+	}
+	if !since.IsZero() && !until.IsZero() && until.Before(since) {
+		return time.Time{}, time.Time{}, fmt.Errorf("audit until date is before since date")
+	}
+	return since, until, nil
 }
 
 // handleListAuditEvents returns the audit log. Admin only, unless
@@ -55,6 +92,12 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.EventID = eventID
 	}
+	since, until, err := parseAuditDateRange(r.URL.Query().Get("since"), r.URL.Query().Get("until"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	filter.Since, filter.Until = since, until
 	events, err := s.store.ListAuditEventsFiltered(filter, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")

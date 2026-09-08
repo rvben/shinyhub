@@ -9,6 +9,8 @@ applications as sibling Docker containers with CPU and memory limits.
 
 ## Start the reference stack
 
+On Linux:
+
 ```bash
 git clone https://github.com/rvben/shinyhub.git
 cd shinyhub/deploy/docker-compose
@@ -18,6 +20,26 @@ export SHINYHUB_DATA_ROOT=/srv/shinyhub
 export DOCKER_GID="$(stat -c %g /var/run/docker.sock)"
 
 docker compose up -d
+```
+
+Two of those lines are Linux-only. On macOS, with either OrbStack or Docker
+Desktop:
+
+```bash
+export SHINYHUB_AUTH_SECRET="$(openssl rand -hex 32)"
+export SHINYHUB_DATA_ROOT=$HOME/.shinyhub-data
+
+docker compose up -d
+```
+
+`/srv` does not exist inside the VM, so the data root has to be a path the VM
+maps in: Docker Desktop maps `/Users`, OrbStack maps `$HOME`. And `DOCKER_GID`
+stays unset, because the in-VM socket is `root:root` and the container already
+joins group `0`. Setting it with the Linux command fails outright, since BSD
+`stat` has no `-c`:
+
+```
+stat: illegal option -- c
 ```
 
 The control plane listens on host loopback at `http://127.0.0.1:8080`. Put an

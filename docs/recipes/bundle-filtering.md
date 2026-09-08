@@ -30,7 +30,7 @@ Example `.shinyhubignore`:
 scratch/
 *.ipynb
 
-# Large local fixtures — push these with: shinyhub data push
+# Large local fixtures - push these with: shinyhub data push
 fixtures/*
 
 # Re-include the seeded fixture needed at startup
@@ -42,24 +42,28 @@ fixtures/*
 `bundle.DefaultRules()` defines platform-enforced policy that applies
 regardless of any ignore file.
 
-**Cache and environment directories** — silently skipped, never reported:
-`.git`, `.venv`, `__pycache__`, `node_modules`, `.renv`, `.Rproj.user`.
-These exist only for local tooling and have no role at runtime.
+**Cache and environment directories**, silently skipped, never reported:
+`.git`, `.venv`, `__pycache__`, `node_modules`, `.renv`, `.Rproj.user`,
+`.shinyhub-run`, `renv/library`. These exist only for local tooling and have no
+role at runtime. `renv/library` is matched as a whole path rather than a first
+segment, because it is the restored project library that `renv::init()` writes
+inside `renv/`; the server rebuilds it from `renv.lock`, and its entries are
+usually symlinks into a machine-local renv cache that exists on no other host.
 
-**Reserved data directories** — reported in the `Skipped from bundle` summary:
+**Reserved data directories** - reported in the `Skipped from bundle` summary:
 
-- `data/` — reserved for the platform's persistent data mount
-- `datasets/` — reserved namespace for content shipped via `shinyhub data push`
-- `.shinyhub-data/` — internal data namespace
+- `data/` - reserved for the platform's persistent data mount
+- `datasets/` - reserved namespace for content shipped via `shinyhub data push`
+- `.shinyhub-data/` - internal data namespace
 
 Files here must be transferred with `shinyhub data push`.
 
-**Forbidden extensions** — reported in the `Skipped from bundle` summary:
+**Forbidden extensions** - reported in the `Skipped from bundle` summary:
 `.parquet`, `.duckdb`, `.duckdb.wal`, `.sqlite`, `.sqlite3`, `.db`, `.rds`,
 `.feather`, `.arrow`, `.h5`, `.hdf5`. Transfer these via `shinyhub data push`
 and read them from the app's data directory at runtime.
 
-**Oversized files** — any single file larger than 10 MiB is rejected and
+**Oversized files** - any single file larger than 10 MiB is rejected and
 reported in the `Skipped from bundle` summary. The 128 MiB total bundle limit
 is enforced separately at the multipart upload boundary.
 
@@ -67,9 +71,9 @@ is enforced separately at the multipart upload boundary.
 
 The per-tree ignore file is selected in this order:
 
-1. `.shinyhubignore` — if present at the bundle root
-2. `.gitignore` — if present at the bundle root and no `.shinyhubignore` exists
-3. No per-tree filter — if neither file is found
+1. `.shinyhubignore` - if present at the bundle root
+2. `.gitignore` - if present at the bundle root and no `.shinyhubignore` exists
+3. No per-tree filter - if neither file is found
 
 Only one file is loaded. The `bundle.Rules` filter runs after the per-tree
 filter and is always active.
@@ -89,7 +93,7 @@ entirely with `filepath.SkipDir`, which is faster for large trees.
 This matches the documented limitation in Git's gitignore specification: "It
 is not possible to re-include a file if a parent directory of that file is
 excluded." For directory-level excludes like `cached_data/`, no negation
-pattern works in practice anyway — omit `!` lines when you do not need them,
+pattern works in practice anyway - omit `!` lines when you do not need them,
 and the bundler takes the faster pruning path by default.
 
 ## Silent vs. visible exclusions
@@ -98,8 +102,8 @@ Files matched by the ignore file are filtered silently. No output is produced
 for them. They represent deliberate developer intent: the operator already
 knows they excluded those paths.
 
-Files rejected by `bundle.Rules` — data directories, forbidden extensions,
-oversized files — appear in a `Skipped from bundle` line printed to stderr
+Files rejected by `bundle.Rules` - data directories, forbidden extensions,
+oversized files - appear in a `Skipped from bundle` line printed to stderr
 after the bundle is built:
 
 ```text
@@ -145,12 +149,12 @@ shinyhub deploy --git https://github.com/org/repo --subdir apps/dashboard
 ```gitignore
 # .shinyhubignore
 
-# Scratch notebooks — not needed at runtime
+# Scratch notebooks - not needed at runtime
 scratch/
 *.ipynb
 .ipynb_checkpoints/
 
-# Large local fixtures — move to data dir with shinyhub data push
+# Large local fixtures - move to data dir with shinyhub data push
 fixtures/*
 
 # The seed fixture is small and required at startup

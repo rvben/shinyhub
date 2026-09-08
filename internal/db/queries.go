@@ -27,6 +27,11 @@ var (
 	ErrReservedCredentialName  = errors.New("credential name is reserved for server configuration")
 )
 
+// ErrUsernameExists is returned by CreateUser when the requested username is
+// already taken. A duplicate username is a permanent, deterministic conflict,
+// so callers surface it as HTTP 409 rather than a retryable server error.
+var ErrUsernameExists = errors.New("username already exists")
+
 // ErrSlugTaken is returned by CreateApp when the requested slug is already
 // used by another app. Callers should surface this as HTTP 409 Conflict.
 var ErrSlugTaken = errors.New("slug already taken")
@@ -117,6 +122,9 @@ func (s *Store) CreateUser(p CreateUserParams) error {
 		p.Username, p.PasswordHash, p.Role,
 	)
 	if err != nil {
+		if s.d.isUniqueViolation(err) {
+			return ErrUsernameExists
+		}
 		return fmt.Errorf("create user: %w", err)
 	}
 	return nil
@@ -707,25 +715,40 @@ func (s *Store) ListAllAPIKeys() ([]APIKeyAdminInfo, error) {
 // scoped to that user so they cannot delete other users' tokens.
 // For admin callers pass ownerID = 0 to bypass the ownership check.
 // Returns ErrNotFound if no matching row is deleted.
-func (s *Store) DeleteAPIKey(id int64, ownerID int64) error {
-	var deletedID int64
+//
+// The name and owner of the deleted row come back with it. They are gone from
+// the table by the time the caller could look them up, and RETURNING them here
+// is both the only way to learn them and free of the window a read-then-delete
+// would open.
+func (s *Store) DeleteAPIKey(id int64, ownerID int64) (DeletedAPIKey, error) {
+	var deleted DeletedAPIKey
 	var err error
 	if ownerID == 0 {
 		err = s.db.QueryRow(`DELETE FROM api_keys
 			WHERE id = ? AND credential_type = 'personal' AND external_id = ''
-			RETURNING id`, id).Scan(&deletedID)
+			RETURNING id, name, user_id`, id).Scan(&deleted.ID, &deleted.Name, &deleted.UserID)
 	} else {
 		err = s.db.QueryRow(`DELETE FROM api_keys
 			WHERE id = ? AND user_id = ? AND credential_type = 'personal' AND external_id = ''
-			RETURNING id`, id, ownerID).Scan(&deletedID)
+			RETURNING id, name, user_id`, id, ownerID).Scan(&deleted.ID, &deleted.Name, &deleted.UserID)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
+		return DeletedAPIKey{}, ErrNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("delete api key: %w", err)
+		return DeletedAPIKey{}, fmt.Errorf("delete api key: %w", err)
 	}
-	return nil
+	return deleted, nil
+}
+
+// DeletedAPIKey identifies a token that has just been revoked, for the audit
+// trail. A token is addressed by numeric ID, which resolves to nothing once the
+// row is gone, so the name and the owner are the only parts of the record that
+// stay meaningful afterwards.
+type DeletedAPIKey struct {
+	ID     int64
+	Name   string
+	UserID int64
 }
 
 // DeleteServiceCredential deletes an unmanaged service credential owned by the
@@ -3647,7 +3670,11 @@ func (s *Store) ConsumeAppLaunchCode(codeHash, appSlug string) (*auth.ContextUse
 // literals; new audit producers should prefer constants so handlers and tests
 // can reference the same identifier.
 const (
-	AuditDataPush       = "data.push"
+	AuditDataPush = "data.push"
+	// AuditDataPull records a read of an app's persistent data. It is the only
+	// data action that changes nothing, and it is audited anyway: the trail is
+	// there to answer who saw an app's data, not only who altered it.
+	AuditDataPull       = "data.pull"
 	AuditDataDelete     = "data.delete"
 	AuditAppIconSet     = "app.icon.set"
 	AuditAppIconCleared = "app.icon.clear"
@@ -3739,11 +3766,16 @@ type AuditEventFilter struct {
 	Action  string
 	EventID int64
 	RunID   string
+	// Since and Until bound created_at, both inclusive, in UTC. A zero value
+	// means that end is unbounded, so the two are independent: an operator can
+	// ask for everything after an incident without also naming an end.
+	Since time.Time
+	Until time.Time
 }
 
-func auditEventWhere(filter AuditEventFilter) (string, []any) {
-	clauses := make([]string, 0, 3)
-	args := make([]any, 0, 3)
+func (s *Store) auditEventWhere(filter AuditEventFilter) (string, []any) {
+	clauses := make([]string, 0, 5)
+	args := make([]any, 0, 5)
 	if filter.Action != "" {
 		clauses = append(clauses, "ae.action = ?")
 		args = append(args, filter.Action)
@@ -3755,6 +3787,14 @@ func auditEventWhere(filter AuditEventFilter) (string, []any) {
 	if filter.RunID != "" {
 		clauses = append(clauses, "ae.run_id = ?")
 		args = append(args, filter.RunID)
+	}
+	if !filter.Since.IsZero() {
+		clauses = append(clauses, "ae.created_at >= ?")
+		args = append(args, s.d.utcTimestampArg(filter.Since))
+	}
+	if !filter.Until.IsZero() {
+		clauses = append(clauses, "ae.created_at <= ?")
+		args = append(args, s.d.utcTimestampArg(filter.Until))
 	}
 	if len(clauses) == 0 {
 		return "", args
@@ -3774,7 +3814,7 @@ func (s *Store) CountAuditEvents(action string) (int64, error) {
 // CountAuditEventsFiltered counts rows matching an exact contextual filter.
 func (s *Store) CountAuditEventsFiltered(filter AuditEventFilter) (int64, error) {
 	var n int64
-	where, args := auditEventWhere(filter)
+	where, args := s.auditEventWhere(filter)
 	query := `SELECT COUNT(*) FROM audit_events ae` + where
 	if err := s.db.QueryRow(query, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count audit events: %w", err)
@@ -3804,7 +3844,7 @@ func (s *Store) ListAuditEventsFiltered(filter AuditEventFilter, limit, offset i
 		       ae.credential_id, ae.credential_type, ae.credential_name
 		FROM audit_events ae
 		LEFT JOIN users u ON u.id = ae.user_id`
-	where, args := auditEventWhere(filter)
+	where, args := s.auditEventWhere(filter)
 	query += where
 	query += ` ORDER BY ae.created_at DESC, ae.id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)

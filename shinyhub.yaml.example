@@ -45,6 +45,12 @@ auth:
   # REQUIRED. 32+ characters. Generate with: openssl rand -hex 32
   # The server refuses to start with this placeholder. Do not ship it.
   secret: change-me-to-a-random-string  # SHINYHUB_AUTH_SECRET
+  # Preferred alternative to the two lines above: keep the secret in a file the
+  # server's user alone can read, and unset SHINYHUB_AUTH_SECRET. A process
+  # environment is readable by any process of the same user, which on the
+  # native runtime includes every deployed app. Read once at startup; a
+  # group- or world-readable file is refused. See docs/isolation.md.
+  # secret_file: /etc/shinyhub/auth.secret   # SHINYHUB_AUTH_SECRET_FILE
   # Role assigned to users created on first OAuth/OIDC login.
   # One of: viewer (default, safe), developer, operator. "admin" is not allowed.
   # Bump to "developer" when your IdP only ever sees trusted employees.

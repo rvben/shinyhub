@@ -1481,6 +1481,10 @@ body[data-auth="out"] {
 .badge-stopped   { background: var(--gray-bg);     color: var(--text-soft); }
 .badge-suspended { background: var(--gray-bg);     color: var(--text-soft); }
 .badge-unknown   { background: var(--gray-bg);     color: var(--text-soft); }
+/* Reconciling is the startup window before a surviving process is re-adopted:
+   the server has a record but no confirmation. Grey with the rest of the
+   "no claim" family, deliberately not red — nothing is known to be wrong. */
+.badge-reconciling { background: var(--gray-bg);   color: var(--text-soft); }
 .badge-new       { background: var(--accent-glow); color: var(--cyan-bright); }
 
 /* Live: a gently breathing dot, mirroring the detail-header pill. */
@@ -1618,6 +1622,11 @@ body[data-auth="out"] {
    amber = security-sensitive (token, access grant/revoke)
    red   = destructive or failure
    gray  = auth / informational */
+/* The base every action badge carries (.badge sets no colours of its own), so
+   an action with no rule below still reads as a badge rather than as bare text.
+   It is declared first on purpose: the per-action rules that follow have equal
+   specificity, so source order is what lets them paint over it. */
+.badge-action-default             { background: var(--gray-bg);    color: var(--text-soft); }
 .badge-action-deploy              { background: var(--green-bg);   color: var(--green); }
 .badge-action-restart             { background: var(--green-bg);   color: var(--green); }
 .badge-action-rollback            { background: var(--green-bg);   color: var(--green); }
@@ -1635,11 +1644,16 @@ body[data-auth="out"] {
 .badge-action-update_user         { background: var(--accent-dim); color: var(--electric); }
 .badge-action-delete_user         { background: var(--red-bg);     color: var(--red); }
 .badge-action-reset_user_password { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-revoke_sessions     { background: var(--yellow-bg);  color: var(--yellow); }
 .badge-action-create_token        { background: var(--yellow-bg);  color: var(--yellow); }
 .badge-action-delete_token        { background: var(--yellow-bg);  color: var(--yellow); }
 .badge-action-env-set             { background: var(--accent-dim); color: var(--electric); }
 .badge-action-env-delete          { background: var(--red-bg);     color: var(--red); }
 .badge-action-data-push           { background: var(--accent-dim); color: var(--electric); }
+/* A pull is the only data action that changes nothing, so it is grey rather
+   than the blue the config-change actions share: it should read as a record of
+   access, not of a modification. */
+.badge-action-data-pull           { background: var(--gray-bg);    color: var(--text-soft); }
 .badge-action-data-delete         { background: var(--red-bg);     color: var(--red); }
 .badge-action-schedule_create     { background: var(--accent-dim); color: var(--electric); }
 .badge-action-schedule_update,
@@ -1659,7 +1673,15 @@ body[data-auth="out"] {
 .badge-action-autoscale_scale_up   { background: var(--accent-dim); color: var(--electric); }
 .badge-action-autoscale_scale_down { background: var(--accent-dim); color: var(--electric); }
 .badge-action-deploy_rejected_quota { background: var(--red-bg);   color: var(--red); }
-.badge-action-default             { background: var(--gray-bg);    color: var(--text-soft); }
+/* Actions whose severity should read at a glance rather than sit neutral. */
+.badge-action-app_crashed         { background: var(--red-bg);     color: var(--red); }
+.badge-action-transfer_ownership  { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-set_member_role     { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-change_own_password { background: var(--yellow-bg);  color: var(--yellow); }
+.badge-action-create_service_credential { background: var(--yellow-bg); color: var(--yellow); }
+.badge-action-delete_service_credential { background: var(--red-bg);    color: var(--red); }
+.badge-action-revoke_worker       { background: var(--red-bg);     color: var(--red); }
+.badge-action-connect_cli         { background: var(--yellow-bg);  color: var(--yellow); }
 
 /* Grid card autoscale indicator */
 .badge-autoscale {
@@ -1727,6 +1749,24 @@ body[data-auth="out"] {
 }
 .audit-context[hidden] { display: none; }
 .audit-context a { flex: none; color: var(--cyan); font-weight: 650; text-underline-offset: 3px; }
+
+/* Date range. The "From"/"to" labels are visible rather than screen-reader
+   only: two bare date inputs side by side do not say which end is which. */
+.audit-date-range {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.audit-date-range label {
+  color: var(--text-soft); font-size: 0.78rem; white-space: nowrap;
+}
+.audit-date-range input[type="date"] {
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface-2); color: var(--text); font: inherit;
+  font-size: 0.82rem; color-scheme: inherit;
+}
+.audit-date-range input[type="date"]:focus-visible {
+  outline: 2px solid var(--cyan); outline-offset: 1px;
+}
+.audit-date-range button[hidden] { display: none; }
 #audit-table tbody tr.audit-event-selected {
   background: color-mix(in oklab, var(--cyan) 9%, var(--surface));
   outline: 2px solid var(--cyan); outline-offset: -2px;
@@ -1750,6 +1790,8 @@ body[data-auth="out"] {
 }
 .audit-details dt { color: var(--text-muted); font-size: 0.72rem; }
 .audit-details dd { margin: 0; color: var(--text-soft); overflow-wrap: anywhere; }
+
+.audit-detail-error { color: var(--red); font-weight: 650; }
 
 /* ── Users table ── */
 #users-table {
@@ -1856,6 +1898,17 @@ body[data-auth="out"] {
   border-color: var(--red);
   color: var(--red);
   background: var(--red-bg);
+}
+
+.users-row-actions .btn-row.btn-row-warn {
+  border-color: color-mix(in srgb, var(--yellow) 46%, var(--line-2));
+  color: var(--yellow);
+}
+
+.users-row-actions .btn-row.btn-row-warn:hover:not(:disabled) {
+  border-color: var(--yellow);
+  color: var(--yellow);
+  background: var(--yellow-bg);
 }
 
 .users-row-actions .btn-row:disabled {
@@ -2491,6 +2544,20 @@ fieldset.settings-block > legend {
   font-family: var(--mono);
   font-size: 0.85em;
   color: var(--text-soft);
+}
+/* Inline warning inside a settings block, e.g. group access with no group-
+   supplying identity provider configured. Same treatment as the other
+   feature-specific warning boxes (.support-session-warning etc), scoped here
+   because a settings block is a distinct layout context. */
+.settings-block-warning {
+  margin: 0 0 1.1rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--yellow) 38%, var(--line));
+  border-radius: 8px;
+  background: var(--yellow-bg);
+  color: var(--text-soft);
+  font-size: 0.82rem;
+  line-height: 1.5;
 }
 .settings-block-body {
   display: flex;
@@ -3965,7 +4032,7 @@ fieldset.settings-block { min-width: 0; }
   border-top: 1px solid var(--line);
 }
 
-.env-form h5 {
+.env-form h3 {
   font-weight: 700;
   font-size: 0.78rem;
   letter-spacing: 0.08em;
@@ -6115,7 +6182,7 @@ fieldset.settings-block { min-width: 0; }
   padding: 2rem 1.75rem;
   max-width: 44rem;
 }
-.logs-empty h3 {
+.logs-empty h2 {
   margin: 0 0 0.5rem;
   font-size: 1.05rem;
   font-weight: 600;
@@ -6836,7 +6903,13 @@ a.ov-activity-target:hover { color: var(--text); }
   color: var(--text-muted); font-size: 0.75rem; line-height: 1.4;
 }
 .ov-activity-actor { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ov-activity-separator { color: var(--text-dim); }
+/* --text-dim sits at ~2.2:1 on this card, which on a 0.75rem middle dot is
+   close enough to invisible that the divider stops dividing anything. It is
+   aria-hidden decoration, so it carries no contrast requirement, but a
+   decoration nobody can see is not worth drawing: it inherits the
+   contrast-safe --text-muted of .ov-activity-meta instead. The glyph is one
+   narrow character among words, so matching their colour costs no hierarchy. */
+.ov-activity-separator { color: var(--text-muted); }
 .ov-activity-status {
   display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px;
   border: 1px solid var(--line-2); border-radius: 999px;

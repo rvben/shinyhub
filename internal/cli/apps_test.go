@@ -563,6 +563,48 @@ func TestAppsLogs_TailValidation(t *testing.T) {
 	}
 }
 
+// TestAppsLogs_LinesAlias_MapsToTailParam proves --lines (the name a caller
+// coming from a different log tool tends to reach for) works instead of
+// hitting cobra's bare "unknown flag" error, by mapping onto the real --tail
+// query param.
+func TestAppsLogs_LinesAlias_MapsToTailParam(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "")
+
+	stdout, stderr, err := execCLISplit(t, "apps", "logs", "demo", "--lines", "10")
+	if err != nil {
+		t.Fatalf("Execute: %v, stdout=%q stderr=%q", err, stdout, stderr)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	if !strings.Contains((*reqs)[0].Query, "tail=10") {
+		t.Errorf("query missing tail=10: %q", (*reqs)[0].Query)
+	}
+	if !strings.Contains(stderr, "--lines is deprecated") {
+		t.Errorf("stderr = %q, want a deprecation note naming --lines", stderr)
+	}
+}
+
+// TestAppsLogs_TailWinsOverLinesAlias asserts that when both flags are passed,
+// the real --tail flag decides the value, not the deprecated alias.
+func TestAppsLogs_TailWinsOverLinesAlias(t *testing.T) {
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, "")
+
+	if _, err := execCLI(t, "apps", "logs", "demo", "--tail", "20", "--lines", "999"); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	if !strings.Contains((*reqs)[0].Query, "tail=20") {
+		t.Errorf("query = %q, want tail=20 (the explicit --tail value)", (*reqs)[0].Query)
+	}
+}
+
 // TestAppsLogs_ServerErrorExitsNonZero asserts that a 4xx/5xx from the log
 // streaming endpoint is returned as a non-nil error (exit non-zero in the CLI).
 func TestAppsLogs_ServerErrorExitsNonZero(t *testing.T) {

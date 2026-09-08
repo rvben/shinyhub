@@ -1789,3 +1789,78 @@ func TestCreateSchedule_BundleChangeDispatchesCurrentDeployment(t *testing.T) {
 		t.Errorf("no current-bundle deploy run recorded")
 	}
 }
+
+// TestScheduleWrites_AuditRecordsDetail pins the detail blob on the two
+// schedule events that recorded nothing. Both name the schedule by row id, so
+// after a delete the id resolves to nothing and the trail cannot say which
+// schedule went, on which app, or what it ran; a manual run recorded no link to
+// the run row it started, leaving the audit entry and the run history
+// unjoinable.
+func TestScheduleWrites_AuditRecordsDetail(t *testing.T) {
+	srv, store, token := newScheduleE2EServerWithJobs(t)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "reports", Name: "reports", OwnerID: 1, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("reports")
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	mkSchedule := func(name, cron string) int64 {
+		t.Helper()
+		id, err := store.CreateSchedule(db.CreateScheduleParams{
+			AppID: app.ID, Name: name, CronExpr: cron, CommandJSON: `["true"]`,
+			Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip",
+			OnSuccess: "none", RollFallback: "defer",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	// The delete target is created FIRST so the schedule that gets run does not
+	// share an id with the run row it produces. With one schedule both are 1,
+	// and an assertion on run_id passes even when the handler records the
+	// schedule id instead.
+	delID := mkSchedule("weekly-purge", "0 4 * * 0")
+	runID := mkSchedule("nightly-export", "0 3 * * *")
+	if delID == runID {
+		t.Fatalf("schedule ids collided (%d): the run_id assertion below needs them distinct", runID)
+	}
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, "POST", fmt.Sprintf("/api/apps/reports/schedules/%d/run", runID), nil, token))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("manual run = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	ran := latestAuditDetail(t, store, "schedule_run_manual")
+	if ran["app"] != "reports" || ran["name"] != "nightly-export" {
+		t.Errorf("schedule_run_manual detail = %v, want the app and schedule name", ran)
+	}
+	// The run id is what joins this event to the run history. Any positive
+	// number would satisfy a presence check, so this compares against the id
+	// the endpoint returned to the caller, and rejects the schedule's own id.
+	var started struct {
+		RunID float64 `json:"run_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	if ran["run_id"] != started.RunID {
+		t.Errorf("schedule_run_manual run_id = %v, want %v (the run the response named, not the schedule id %d)",
+			ran["run_id"], started.RunID, runID)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, "DELETE", fmt.Sprintf("/api/apps/reports/schedules/%d", delID), nil, token))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete = %d, want 204: %s", rec.Code, rec.Body.String())
+	}
+	gone := latestAuditDetail(t, store, "schedule_delete")
+	if gone["app"] != "reports" || gone["name"] != "weekly-purge" || gone["cron"] != "0 4 * * 0" {
+		t.Errorf("schedule_delete detail = %v, want the app, name and cron of the deleted row", gone)
+	}
+}

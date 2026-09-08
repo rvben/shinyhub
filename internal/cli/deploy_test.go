@@ -1128,6 +1128,27 @@ func TestBuildBundlePreview_ComposesFileInputSnapshot(t *testing.T) {
 	t.Fatal("composed entry not found")
 }
 
+// TestContentRejectionsExcludesRoutineCacheDirSkips pins the distinction
+// summarizeDeploymentRejections relies on: a .venv/.git/node_modules skip is
+// bundler housekeeping that never held deployable content, while an oversized
+// file or a protected data/dataset dir is genuine content loss the operator
+// needs to know about. Mixing the two under one label (the pre-fix behavior)
+// makes every deploy of a normal Python project print a "content dropped"
+// warning for its own virtualenv.
+func TestContentRejectionsExcludesRoutineCacheDirSkips(t *testing.T) {
+	groups := []bundleSkippedPaths{
+		{Reason: bundle.FilterSkipCacheDir.String(), Paths: []string{".venv"}},
+		{Reason: bundle.FilterRejectFileSize.String(), Paths: []string{"big.bin"}},
+	}
+	got := contentRejections(groups)
+	if len(got) != 1 || got[0].Reason != bundle.FilterRejectFileSize.String() {
+		t.Fatalf("contentRejections = %+v, want only the file-size rejection", got)
+	}
+	if summary := summarizeDeploymentRejections(groups); !strings.Contains(summary, "big.bin") || strings.Contains(summary, ".venv") {
+		t.Fatalf("summarizeDeploymentRejections = %q, want big.bin but not .venv", summary)
+	}
+}
+
 func TestBuildBundlePreview_RejectsEscapingInputSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "app.py", "print('hi')")
@@ -1498,6 +1519,50 @@ func TestDeploy_DeployRun_FailureIsFatal(t *testing.T) {
 	cmd.SetArgs([]string{dir, "--slug", "warmapp", "--wait-for-warm"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatalf("expected non-nil error when deploy-triggered run fails under --wait-for-warm")
+	}
+}
+
+// A bundle with no app.py, no app.R, and no [app] command in shinyhub.toml is
+// a user-fixable bundle problem, not a shinyhub-internal fault. `doctor`
+// already classifies the identical deploy.ResolveLaunch failure as
+// kind=validation; deploy must match it. This exercises the NDJSON path
+// specifically because runDeploy re-wraps a bundle-prep failure in a fresh
+// ExitCodeError before returning it (to also emit the NDJSON error event),
+// and that re-wrap silently dropped any Kind the inner error carried unless
+// it re-classifies rather than discarding it.
+func TestDeploy_MissingEntrypointClassifiesAsValidation(t *testing.T) {
+	dir := t.TempDir()
+	writeTestCLIConfig(t, "http://127.0.0.1:1")
+
+	stdout, _, err := execCLISplit(t, "deploy", dir, "--slug", "demo", "-o", "ndjson")
+	if err == nil {
+		t.Fatal("deploy on a bundle with no entrypoint should fail")
+	}
+	if kind, code := classify(err); kind != KindValidation || code != 1 {
+		t.Errorf("classify(err) = (%q,%d), want (%q,1)", kind, code, KindValidation)
+	}
+	if !strings.Contains(stdout, "no app entrypoint found") {
+		t.Errorf("ndjson error event missing entrypoint detail: %s", stdout)
+	}
+}
+
+// A user coming from git or another PaaS reaches for "push" or "publish"
+// before "deploy". Neither name is within cobra's default Levenshtein
+// distance of "deploy" (both differ by more than 2 edits) and neither is a
+// prefix of it, so without an explicit SuggestFor hint the root command's
+// unknown-command suggestion picks an unrelated near-miss ("use" is within
+// distance 2 of "push") instead of the command that actually deploys.
+func TestDeploy_PushAndPublishSuggestDeploy(t *testing.T) {
+	for _, typo := range []string{"push", "publish"} {
+		t.Run(typo, func(t *testing.T) {
+			_, _, err := execCLISplit(t, typo)
+			if err == nil {
+				t.Fatalf("`shinyhub %s` should fail (no such command)", typo)
+			}
+			if !strings.Contains(err.Error(), "Did you mean this?") || !strings.Contains(err.Error(), "deploy") {
+				t.Errorf("error = %q, want a suggestion naming `deploy`", err.Error())
+			}
+		})
 	}
 }
 

@@ -186,3 +186,47 @@ func TestDeleteProjectRefusesWhileReferenced(t *testing.T) {
 		t.Fatalf("DELETE a missing project = %d, want 404", rec.Code)
 	}
 }
+
+// TestProjectWrites_AuditRecordDetail pins the three project audit events to a
+// detail blob describing the write. resource_id carries only the slug, so
+// without this the trail says "someone changed a project" and nothing more; for
+// a delete the slug it names no longer resolves to a row at all, making the
+// captured metadata the only surviving description of what was removed.
+func TestProjectWrites_AuditRecordsDetail(t *testing.T) {
+	srv, store := newTestServer(t)
+	_, adminTok := mkUser(t, store, "boss", "admin")
+
+	if rec := do(t, srv, "POST", "/api/projects", adminTok,
+		[]byte(`{"slug":"analytics","name":"Analytics","description":"Revenue dashboards","icon_emoji":"📊"}`)); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", rec.Code, rec.Body.String())
+	}
+	created := latestAuditDetail(t, store, db.AuditProjectCreate)
+	if created["name"] != "Analytics" || created["icon_emoji"] != "📊" {
+		t.Errorf("project.create detail = %v, want the stored display metadata", created)
+	}
+
+	if rec := do(t, srv, "PATCH", "/api/projects/analytics", adminTok,
+		[]byte(`{"name":"Revenue"}`)); rec.Code != http.StatusOK {
+		t.Fatalf("patch = %d: %s", rec.Code, rec.Body.String())
+	}
+	updated := latestAuditDetail(t, store, db.AuditProjectUpdate)
+	name, _ := updated["name"].(map[string]any)
+	if name["old"] != "Analytics" || name["new"] != "Revenue" {
+		t.Errorf("project.update name = %v, want {old:Analytics new:Revenue}", updated["name"])
+	}
+	// Only the field the request set is reported. A PATCH that omits
+	// description must not claim the description changed, and must not report
+	// it as unchanged either - an audit reader would take that as evidence the
+	// caller sent it.
+	if _, ok := updated["description"]; ok {
+		t.Errorf("project.update reports a field the request did not set: %v", updated)
+	}
+
+	if rec := do(t, srv, "DELETE", "/api/projects/analytics", adminTok, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete = %d: %s", rec.Code, rec.Body.String())
+	}
+	deleted := latestAuditDetail(t, store, db.AuditProjectDelete)
+	if deleted["name"] != "Revenue" || deleted["description"] != "Revenue dashboards" {
+		t.Errorf("project.delete detail = %v, want the metadata the row held when it was deleted", deleted)
+	}
+}

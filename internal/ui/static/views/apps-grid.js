@@ -56,7 +56,9 @@ export async function mountAppsGrid(ctx) {
 
   function viewObject() {
     return {
-      title: '',
+      // Matches the page's own <h1>, so a tab, a bookmark and a history entry
+      // name the page rather than repeating the product name.
+      title: 'Apps',
       unmount() {
         appsView.hidden = true;
         ctx.metrics.setTargets([]);

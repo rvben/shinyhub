@@ -21,6 +21,7 @@ type fakeUpgrader struct {
 	upgrades   int
 	upgradeErr error
 	stopped    bool
+	hasParent  bool
 	exitCh     chan struct{}
 }
 
@@ -29,6 +30,7 @@ func newFakeUpgrader() *fakeUpgrader { return &fakeUpgrader{exitCh: make(chan st
 func (f *fakeUpgrader) Listen(network, addr string) (net.Listener, error) { return nil, nil }
 func (f *fakeUpgrader) Ready() error                                      { return nil }
 func (f *fakeUpgrader) Exit() <-chan struct{}                             { return f.exitCh }
+func (f *fakeUpgrader) HasParent() bool                                   { return f.hasParent }
 
 func (f *fakeUpgrader) Upgrade() error {
 	f.mu.Lock()

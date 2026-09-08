@@ -760,7 +760,13 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	if s.scheduler != nil {
 		_ = s.scheduler.Remove(id)
 	}
-	s.audit(r, "schedule_delete", "schedule", fmt.Sprintf("%d", id), "")
+	// The schedule row is gone by the time anyone reads this event, so the id in
+	// resource_id resolves to nothing. Record what identified it - which app,
+	// what it was called, and when it ran - or the audit trail says only that
+	// some numbered schedule was deleted.
+	s.audit(r, "schedule_delete", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
+		`{"app":%q,"name":%q,"cron":%q}`, app.Slug, sc.Name, sc.CronExpr,
+	))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -835,7 +841,9 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to start run: "+err.Error())
 		return
 	}
-	s.audit(r, "schedule_run_manual", "schedule", fmt.Sprintf("%d", id), "")
+	s.audit(r, "schedule_run_manual", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
+		`{"app":%q,"name":%q,"run_id":%d}`, app.Slug, sc.Name, runID,
+	))
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "started", "run_id": runID})
 }
 

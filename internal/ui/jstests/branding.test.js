@@ -124,7 +124,7 @@ test('signed-in brand links pair ShinyHub with the configured site subtitle', ()
   for (const link of homeLinks) {
     assert.equal(link.getAttribute('href'), '/home');
     assert.ok(link.hasAttribute('data-nav'));
-    assert.equal(link.getAttribute('aria-label'), 'ShinyHub — ACME Analytics home');
+    assert.equal(link.getAttribute('aria-label'), 'ShinyHub: ACME Analytics home');
     assert.ok(link.querySelector('.brand-art'));
     assert.equal(link.querySelector('.sr-only').textContent, 'ShinyHub');
     assert.equal(link.querySelector('.brand-subtitle').textContent, 'ACME Analytics');

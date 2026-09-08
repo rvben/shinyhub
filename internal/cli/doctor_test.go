@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/rvben/shinyhub/internal/bundle"
 )
 
 func doctorTestApp(t *testing.T) string {
@@ -22,19 +25,26 @@ func doctorTestApp(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("# shiny app\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("shiny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return dir
 }
 
 func stubDoctorRuntime(t *testing.T) {
 	t.Helper()
-	previous := doctorLookPath
+	previousLookPath := doctorLookPath
 	doctorLookPath = func(name string) (string, error) {
 		if name == "uv" {
 			return "/opt/bin/uv", nil
 		}
 		return "", errors.New("not found")
 	}
-	t.Cleanup(func() { doctorLookPath = previous })
+	t.Cleanup(func() { doctorLookPath = previousLookPath })
+
+	previousSyntaxCheck := doctorPythonSyntaxCheck
+	doctorPythonSyntaxCheck = func(dir, entryFile string) error { return nil }
+	t.Cleanup(func() { doctorPythonSyntaxCheck = previousSyntaxCheck })
 }
 
 func decodeDoctorReport(t *testing.T, raw string) doctorReport {
@@ -75,6 +85,166 @@ func TestDoctorLocalReadyProvidesRunCommand(t *testing.T) {
 	}
 	if len(report.NextSteps) != 1 || !strings.Contains(report.NextSteps[0], "shinyhub run") || !strings.Contains(report.NextSteps[0], "--check") {
 		t.Errorf("next_steps = %v", report.NextSteps)
+	}
+}
+
+func TestDoctorCatchesPythonSyntaxError(t *testing.T) {
+	isolatedCredentials(t)
+	stubDoctorRuntime(t)
+	dir := doctorTestApp(t)
+
+	previous := doctorPythonSyntaxCheck
+	doctorPythonSyntaxCheck = func(dir, entryFile string) error {
+		return errors.New(`  File "app.py", line 3
+    app_ui = ui.page_fluid(ui.h2("hello")
+                                         ^
+SyntaxError: '(' was never closed`)
+	}
+	t.Cleanup(func() { doctorPythonSyntaxCheck = previous })
+
+	stdout, _, err := execCLISplit(t, "doctor", dir, "--local", "--output", "json")
+	if err == nil {
+		t.Fatal("an app.py with a syntax error must block local readiness")
+	}
+	report := decodeDoctorReport(t, stdout)
+	check := doctorCheckNamed(t, report, "python-syntax")
+	if check.Status != "fail" || !strings.Contains(check.Detail, "SyntaxError") {
+		t.Errorf("python-syntax = %+v", check)
+	}
+	if kind, code := classify(err); kind != KindValidation || code != 1 {
+		t.Errorf("classify(err) = (%q, %d), want (%q, 1)", kind, code, KindValidation)
+	}
+}
+
+func TestDoctorPassesPythonSyntaxCheckForValidApp(t *testing.T) {
+	isolatedCredentials(t)
+	stubDoctorRuntime(t)
+	dir := doctorTestApp(t)
+
+	stdout, _, err := execCLISplit(t, "doctor", dir, "--local", "--output", "json")
+	if err != nil {
+		t.Fatalf("doctor --local: %v", err)
+	}
+	report := decodeDoctorReport(t, stdout)
+	if got := doctorCheckNamed(t, report, "python-syntax"); got.Status != "pass" {
+		t.Errorf("python-syntax = %+v", got)
+	}
+}
+
+// A compile that could not run at all - uv could not provision an interpreter,
+// the machine is offline, the toolchain is broken - says nothing about the
+// user's file. Reporting that as a syntax error sends them hunting for a defect
+// that may not exist and blocks a deploy that would have worked, so the check
+// reports skip and readiness stands.
+func TestDoctorReportsSkipWhenSyntaxCheckCannotRun(t *testing.T) {
+	isolatedCredentials(t)
+	stubDoctorRuntime(t)
+	dir := doctorTestApp(t)
+
+	previous := doctorPythonSyntaxCheck
+	doctorPythonSyntaxCheck = func(dir, entryFile string) error {
+		return fmt.Errorf("%w: error: Failed to download python-3.12: network unreachable", errSyntaxCheckUnavailable)
+	}
+	t.Cleanup(func() { doctorPythonSyntaxCheck = previous })
+
+	stdout, _, err := execCLISplit(t, "doctor", dir, "--local", "--output", "json")
+	if err != nil {
+		t.Fatalf("an inconclusive syntax check must not block readiness: %v", err)
+	}
+	report := decodeDoctorReport(t, stdout)
+	if report.Status != "ready" {
+		t.Errorf("report.Status = %q, want ready", report.Status)
+	}
+	check := doctorCheckNamed(t, report, "python-syntax")
+	if check.Status != "skip" {
+		t.Errorf("python-syntax = %+v, want status skip", check)
+	}
+	if !strings.Contains(check.Detail, "network unreachable") {
+		t.Errorf("python-syntax detail = %q, want it to carry why the check could not run", check.Detail)
+	}
+}
+
+func TestDoctorCatchesMissingPythonDependencyDeclaration(t *testing.T) {
+	isolatedCredentials(t)
+	stubDoctorRuntime(t)
+	dir := doctorTestApp(t)
+	if err := os.Remove(filepath.Join(dir, "requirements.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := execCLISplit(t, "doctor", dir, "--local", "--output", "json")
+	if err == nil {
+		t.Fatal("a python app with no pyproject.toml and no requirements.txt must block local readiness: `uv run --no-project` installs nothing and `shiny` cannot start")
+	}
+	report := decodeDoctorReport(t, stdout)
+	check := doctorCheckNamed(t, report, "python-dependencies")
+	if check.Status != "fail" || !strings.Contains(check.Detail, "pyproject.toml") || !strings.Contains(check.Detail, "requirements.txt") {
+		t.Errorf("python-dependencies = %+v", check)
+	}
+}
+
+func TestDoctorAcceptsProjectModeWithoutRequirementsTxt(t *testing.T) {
+	isolatedCredentials(t)
+	stubDoctorRuntime(t)
+	dir := doctorTestApp(t)
+	if err := os.Remove(filepath.Join(dir, "requirements.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname = \"demo\"\nversion = \"0.1.0\"\ndependencies = [\"shiny\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := execCLISplit(t, "doctor", dir, "--local", "--output", "json")
+	if err != nil {
+		t.Fatalf("a pyproject.toml-only (project mode) app must remain ready: %v", err)
+	}
+	report := decodeDoctorReport(t, stdout)
+	if got := doctorCheckNamed(t, report, "python-dependencies"); got.Status != "pass" {
+		t.Errorf("python-dependencies = %+v", got)
+	}
+}
+
+func TestDoctorWarnsAboutFilesDroppedFromBundle(t *testing.T) {
+	isolatedCredentials(t)
+	stubDoctorRuntime(t)
+	dir := doctorTestApp(t)
+	f, err := os.Create(filepath.Join(dir, "big.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(bundle.DefaultRules().MaxFileBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := execCLISplit(t, "doctor", dir, "--local", "--output", "json")
+	if err != nil {
+		t.Fatalf("an oversized file must warn, not block: %v", err)
+	}
+	report := decodeDoctorReport(t, stdout)
+	if report.Status != "ready" {
+		t.Fatalf("report.Status = %q, want ready", report.Status)
+	}
+	check := doctorCheckNamed(t, report, "bundle-contents")
+	if check.Status != "warn" || !strings.Contains(check.Detail, "big.bin") || !strings.Contains(check.Detail, "reject-file-size") {
+		t.Errorf("bundle-contents = %+v", check)
+	}
+}
+
+func TestDoctorBundleContentsPassesWhenNothingIsDropped(t *testing.T) {
+	isolatedCredentials(t)
+	stubDoctorRuntime(t)
+	dir := doctorTestApp(t)
+
+	stdout, _, err := execCLISplit(t, "doctor", dir, "--local", "--output", "json")
+	if err != nil {
+		t.Fatalf("doctor --local: %v", err)
+	}
+	report := decodeDoctorReport(t, stdout)
+	if got := doctorCheckNamed(t, report, "bundle-contents"); got.Status != "pass" {
+		t.Errorf("bundle-contents = %+v", got)
 	}
 }
 

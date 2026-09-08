@@ -57,7 +57,7 @@ func runFleetValidate(cmd *cobra.Command, f *fleetValidateFlags) error {
 			fmt.Fprintf(errOut, "no %s found. Run 'shinyhub fleet init' to generate one from your\n"+
 				"deployed apps, or pass -f <path> to point at an existing manifest.\n",
 				filepath.Base(f.file))
-			return &ExitCodeError{Code: 1, Err: fmt.Errorf("manifest not found: %s", f.file), Reported: true}
+			return &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf("manifest not found: %s", f.file), Reported: true}
 		}
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("read %s: %w", f.file, err)}
 	}
@@ -69,7 +69,7 @@ func runFleetValidate(cmd *cobra.Command, f *fleetValidateFlags) error {
 			fmt.Fprintf(errOut, "  ✗ %s\n", p)
 		}
 		fmt.Fprintf(errOut, "\n%d problem(s) found. Fix these and re-run.\n", len(probs))
-		return &ExitCodeError{Code: 1, Err: fmt.Errorf("%d manifest problem(s)", len(probs)), Reported: true}
+		return &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf("%d manifest problem(s)", len(probs)), Reported: true}
 	}
 
 	if quietFlag {

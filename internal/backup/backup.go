@@ -380,12 +380,20 @@ func RestoreForce(cfg *config.Config, archivePath string, force bool) (movedAsid
 	return restore(cfg, archivePath, force)
 }
 
+// ServerRunningError is the running-server refusal. It is a distinct type so a
+// caller can tell an operator precondition ("stop the server") apart from a
+// fault, and phrase the remedy in terms of whatever interface the operator is
+// actually holding.
+type ServerRunningError struct{ Reason string }
+
+func (e *ServerRunningError) Error() string {
+	return "refusing to restore: " + e.Reason + "; stop the server first"
+}
+
 func restore(cfg *config.Config, archivePath string, force bool) (movedAside []string, err error) {
 	if !force {
 		if reason := runningServerSignal(cfg); reason != "" {
-			return nil, fmt.Errorf(
-				"refusing to restore: %s; stop the server first, or use RestoreForce to override",
-				reason)
+			return nil, &ServerRunningError{Reason: reason}
 		}
 	}
 
@@ -509,14 +517,18 @@ func restore(cfg *config.Config, archivePath string, force bool) (movedAside []s
 }
 
 // runningServerSignal reports why a ShinyHub server for cfg appears to be
-// live, or "" if neither available signal fires. Two independent signals are
-// checked because neither alone is reliable: server.pid_file is opt-in
-// (config.ServerConfig.PIDFile) and can go stale after an unclean crash; the
+// live, or "" if no available signal fires. Three independent signals are
+// checked because none alone is reliable: the runtime marker beside the
+// database is always published but only for a file-backed database; the
+// server.pid_file signal is opt-in (config.ServerConfig.PIDFile); and the
 // listener probe fires for whatever is bound to the configured address, not
-// provably ShinyHub itself, but ShinyHub always binds that address while
-// running and nothing else should be answering on a dedicated host's app
-// port. Either signal alone is sufficient to report "running".
+// provably ShinyHub itself, and reaches the wrong address when restore is
+// invoked without the serving host and port. Any one signal is sufficient to
+// report "running".
 func runningServerSignal(cfg *config.Config) string {
+	if path, m, ok := liveRuntimeMarker(cfg); ok {
+		return fmt.Sprintf("%s names running process %d serving %s", path, m.PID, m.Addr)
+	}
 	if cfg.Server.PIDFile != "" {
 		if pid, ok := readAlivePID(cfg.Server.PIDFile); ok {
 			return fmt.Sprintf("pid file %s names running process %d", cfg.Server.PIDFile, pid)
@@ -609,6 +621,17 @@ func extract(archivePath, dbDest, appsDir, appDataDir string) error {
 		}
 	}
 
+	appsRoot, err := os.OpenRoot(appsDir)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", appsDir, err)
+	}
+	defer appsRoot.Close()
+	dataRoot, err := os.OpenRoot(appDataDir)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", appDataDir, err)
+	}
+	defer dataRoot.Close()
+
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -625,11 +648,11 @@ func extract(archivePath, dbDest, appsDir, appDataDir string) error {
 				return err
 			}
 		case strings.HasPrefix(hdr.Name, appsPrefix):
-			if err := extractInto(tr, hdr, appsDir, appsPrefix); err != nil {
+			if err := extractInto(tr, hdr, appsRoot, appsPrefix); err != nil {
 				return err
 			}
 		case strings.HasPrefix(hdr.Name, appDataPrefix):
-			if err := extractInto(tr, hdr, appDataDir, appDataPrefix); err != nil {
+			if err := extractInto(tr, hdr, dataRoot, appDataPrefix); err != nil {
 				return err
 			}
 		default:
@@ -638,26 +661,69 @@ func extract(archivePath, dbDest, appsDir, appDataDir string) error {
 	}
 }
 
-// extractInto writes one tar entry beneath base, rejecting any path that would
-// escape base (tarslip / path traversal guard).
-func extractInto(tr *tar.Reader, hdr *tar.Header, base, prefix string) error {
-	rel := strings.TrimPrefix(hdr.Name, prefix)
-	dest := filepath.Join(base, filepath.Clean("/"+rel))
-	cleanBase := filepath.Clean(base)
-	if dest != cleanBase && !strings.HasPrefix(dest, cleanBase+string(os.PathSeparator)) {
-		return fmt.Errorf("archive entry %q escapes %s", hdr.Name, base)
+// extractInto writes one tar entry beneath root. Every write goes through
+// *os.Root, so an entry cannot escape the tree even by way of a symlink the
+// archive itself created: a restored .venv legitimately links out to uv's
+// interpreter store, but nothing may be written *through* such a link.
+func extractInto(tr *tar.Reader, hdr *tar.Header, root *os.Root, prefix string) error {
+	rel := archiveRelPath(hdr.Name, prefix)
+	if rel == "" {
+		return nil
 	}
 	switch hdr.Typeflag {
 	case tar.TypeDir:
-		return os.MkdirAll(dest, 0o750)
+		return root.MkdirAll(rel, 0o750)
 	case tar.TypeReg:
-		if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
+		if err := mkdirParent(root, rel); err != nil {
 			return err
 		}
-		return writeFile(tr, dest, os.FileMode(hdr.Mode)&0o777)
+		return writeFileIn(root, tr, rel, os.FileMode(hdr.Mode)&0o777)
+	case tar.TypeSymlink:
+		if err := mkdirParent(root, rel); err != nil {
+			return err
+		}
+		// Restoring over a preserved tree is expected to be repeatable, and
+		// Symlink fails on an existing name.
+		if err := root.Remove(rel); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("replace %s: %w", hdr.Name, err)
+		}
+		if err := root.Symlink(hdr.Linkname, rel); err != nil {
+			return fmt.Errorf("link %s: %w", hdr.Name, err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported archive entry type %d for %q", hdr.Typeflag, hdr.Name)
 	}
+}
+
+// archiveRelPath normalises a tar entry name into a root-relative path,
+// returning "" for an entry that addresses the root itself.
+func archiveRelPath(name, prefix string) string {
+	rel := strings.TrimPrefix(strings.TrimPrefix(name, prefix), "/")
+	rel = strings.TrimPrefix(filepath.Clean("/"+filepath.FromSlash(rel)), string(os.PathSeparator))
+	if rel == "." {
+		return ""
+	}
+	return rel
+}
+
+func mkdirParent(root *os.Root, rel string) error {
+	if dir := filepath.Dir(rel); dir != "." && dir != string(os.PathSeparator) {
+		return root.MkdirAll(dir, 0o750)
+	}
+	return nil
+}
+
+func writeFileIn(root *os.Root, r io.Reader, rel string, mode os.FileMode) error {
+	out, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", rel, err)
+	}
+	if _, err := io.Copy(out, r); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("write %s: %w", rel, err)
+	}
+	return out.Close()
 }
 
 func writeFile(r io.Reader, dest string, mode os.FileMode) error {
@@ -750,8 +816,24 @@ func addTree(tw *tar.Writer, root, prefix string) error {
 			})
 		case fi.Mode().IsRegular():
 			return addFile(tw, p, name)
+		case fi.Mode()&os.ModeSymlink != 0:
+			// A Python app's .venv reaches its interpreter through symlinks into
+			// uv's shared store, so dropping them yields a restored venv that uv
+			// rejects as invalid and refuses to repair in place. The link target
+			// is recorded verbatim, including one that points outside the tree.
+			target, err := os.Readlink(p)
+			if err != nil {
+				return fmt.Errorf("read link %s: %w", p, err)
+			}
+			return tw.WriteHeader(&tar.Header{
+				Name:     name,
+				Linkname: target,
+				Mode:     0o777,
+				Typeflag: tar.TypeSymlink,
+				ModTime:  fi.ModTime(),
+			})
 		default:
-			return nil // skip sockets/symlinks/devices
+			return nil // skip sockets/devices
 		}
 	})
 }

@@ -168,7 +168,9 @@ func (s *Server) handleUpdateFleetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Status != "running" {
-		p := db.AuditEventParams{UserID: &u.ID, Action: "fleet_apply_finished", ResourceType: "fleet", ResourceID: run.FleetID, IPAddress: s.ClientIP(r), RunID: run.ID}
+		// The action name says an apply ended, not how. A failed apply and a
+		// clean one are the same row without the terminal status on it.
+		p := db.AuditEventParams{UserID: &u.ID, Action: "fleet_apply_finished", ResourceType: "fleet", ResourceID: run.FleetID, Detail: db.AuditDetail(map[string]any{"status": req.Status}), IPAddress: s.ClientIP(r), RunID: run.ID}
 		requestAuditCredential(r, &p)
 		s.store.LogAuditEvent(p)
 	}

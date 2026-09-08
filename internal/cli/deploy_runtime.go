@@ -8,16 +8,17 @@ import (
 	"path/filepath"
 )
 
-// looksLikeRApp reports whether dir is, heuristically, an R Shiny bundle: it has
-// app.R, no app.py, and no shinyhub.toml that could redefine the run command.
-// Used only to decide whether to emit a best-effort pre-flight warning, so a
+// looksLikeRApp reports whether dir is, heuristically, an R Shiny bundle: it
+// carries an R entrypoint in either layout (app.R, or the classic server.R),
+// no app.py, and no shinyhub.toml that could redefine the run command. Used
+// only to decide whether to emit a best-effort pre-flight warning, so a
 // conservative heuristic (skip when uncertain) is correct.
 func looksLikeRApp(dir string) bool {
 	has := func(name string) bool {
 		_, err := os.Stat(filepath.Join(dir, name))
 		return err == nil
 	}
-	return has("app.R") && !has("app.py") && !has("shinyhub.toml")
+	return (has("app.R") || has("server.R")) && !has("app.py") && !has("shinyhub.toml")
 }
 
 // serverRuntimeAvailable does a best-effort GET /api/server-info and reports

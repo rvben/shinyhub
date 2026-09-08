@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -173,6 +174,112 @@ func TestPlanBundleExplainsIgnoredAndProtectedPaths(t *testing.T) {
 	}
 }
 
+func planTestServerForSlug(t *testing.T, slug string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/server-info":
+			_, _ = io.WriteString(w, `{"version":"dev","capabilities":{"content_digest":true},"runtimes":{"python":true}}`)
+		case "/api/apps/" + slug:
+			_, _ = io.WriteString(w, `{"app":{"slug":"`+slug+`","status":"running","access":"private","deploy_count":4},"can_manage":true}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func writeOversizedFile(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(bundle.DefaultRules().MaxFileBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPlanWarnsAboutFilesDroppedFromBundle pins CD-F3: plan's default view had
+// no visibility at all into files the bundler silently drops, even though
+// deploy already prints the same rejection to stderr. A file over the size
+// limit must surface as a plan-level warning, in both the raw JSON field and
+// the shared plan-model warnings the default table view renders.
+func TestPlanWarnsAboutFilesDroppedFromBundle(t *testing.T) {
+	dir := planTestBundle(t)
+	writeOversizedFile(t, filepath.Join(dir, "big.bin"))
+	srv := planTestServerForSlug(t, "demo")
+	writeTestCLIConfig(t, srv.URL)
+
+	stdout, stderr, err := execCLISplit(t, "plan", dir, "--slug", "demo", "-o", "json")
+	if err != nil {
+		t.Fatalf("plan: %v (stdout=%q stderr=%q)", err, stdout, stderr)
+	}
+	var got deploymentPlan
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("decode plan: %v\n%s", err, stdout)
+	}
+	if !containsSubstring(got.Warnings, "big.bin") {
+		t.Fatalf("plan.Warnings = %v, want one mentioning the dropped file", got.Warnings)
+	}
+	found := false
+	for _, notice := range got.Plan.Warnings {
+		if strings.Contains(notice.Summary, "big.bin") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("plan.Plan.Warnings = %+v, want one mentioning the dropped file (this is what the default table view renders)", got.Plan.Warnings)
+	}
+}
+
+func containsSubstring(items []string, substr string) bool {
+	for _, item := range items {
+		if strings.Contains(item, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPlanDetailsUsesSkippedLabelAndExcludesCacheDirs pins CD-F3's second half:
+// the --details view labeled every dropped path "Protected", the same word
+// used for real access-control concepts elsewhere, and it listed a routine
+// .git cache-dir skip under that label right alongside genuine content loss.
+func TestPlanDetailsUsesSkippedLabelAndExcludesCacheDirs(t *testing.T) {
+	dir := planTestBundle(t)
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeOversizedFile(t, filepath.Join(dir, "big.bin"))
+	srv := planTestServerForSlug(t, "demo")
+	writeTestCLIConfig(t, srv.URL)
+
+	stdout, stderr, err := execCLISplit(t, "plan", dir, "--slug", "demo", "--details", "-o", "table")
+	if err != nil {
+		t.Fatalf("plan --details: %v (stdout=%q stderr=%q)", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Skipped") {
+		t.Fatalf("plan --details output = %q, want a Skipped row", stdout)
+	}
+	if strings.Contains(stdout, "Protected") {
+		t.Fatalf("plan --details output = %q, must not use the confusing Protected label", stdout)
+	}
+	if !strings.Contains(stdout, "big.bin") {
+		t.Fatalf("plan --details output = %q, want the dropped file named", stdout)
+	}
+	if strings.Contains(stdout, ".git") {
+		t.Fatalf("plan --details output = %q, must not surface the routine .git cache-dir skip", stdout)
+	}
+}
+
 func TestPlanDigestMatchesSubsequentDeployUpload(t *testing.T) {
 	dir := planTestBundle(t)
 	var uploadedDigest string
@@ -226,8 +333,39 @@ func TestPlanDigestMatchesSubsequentDeployUpload(t *testing.T) {
 
 func TestPlanRequiresExplicitDirectory(t *testing.T) {
 	_, _, err := execCLISplit(t, "plan", "-o", "table")
-	if err == nil || !strings.Contains(err.Error(), "pass `.`") {
-		t.Fatalf("error = %v, want explicit-directory guidance", err)
+	if err == nil {
+		t.Fatal("plan with no directory should fail")
+	}
+	// The message says what is wrong and the hint says what to type. Both are
+	// rendered to a human (separate lines in table mode) and both reach a
+	// machine (message and hint fields of the error envelope), so the guidance
+	// is pinned where it is actually read rather than anywhere in Error().
+	if !strings.Contains(err.Error(), "missing directory argument") {
+		t.Errorf("message = %q, does not name the missing argument", err.Error())
+	}
+	var he hintedError
+	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "pass `.`") {
+		t.Errorf("hint = %q, want explicit-directory guidance", hintOf(err))
+	}
+}
+
+// A bundle with no app.py, no app.R, and no [app] command in shinyhub.toml is
+// a user-fixable bundle problem, not a shinyhub-internal fault. `doctor`
+// already classifies the identical deploy.ResolveLaunch failure as
+// kind=validation; plan must match it rather than falling through to the
+// internal-error default, which is what a bare fmt.Errorf wrap produced.
+func TestPlan_MissingEntrypointClassifiesAsValidation(t *testing.T) {
+	dir := t.TempDir()
+
+	_, _, err := execCLISplit(t, "plan", dir, "--slug", "demo", "-o", "json")
+	if err == nil {
+		t.Fatal("plan on a bundle with no entrypoint should fail")
+	}
+	if !strings.Contains(err.Error(), "no app entrypoint found") {
+		t.Errorf("message = %q, want it to name the missing entrypoint", err.Error())
+	}
+	if kind, code := classify(err); kind != KindValidation || code != 1 {
+		t.Errorf("classify(err) = (%q,%d), want (%q,1)", kind, code, KindValidation)
 	}
 }
 

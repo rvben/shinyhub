@@ -452,8 +452,8 @@ func singlePlanDetailLines(s styler, plan deploymentPlan, width int) []string {
 	if plan.Bundle.IgnoreFile != "" {
 		lines = append(lines, wrapPlanValue("  Ignored     ", fmt.Sprintf("%d paths via %s", len(plan.Bundle.IgnoredPaths), plan.Bundle.IgnoreFile), width)...)
 	}
-	for _, group := range plan.Bundle.ProtectedPaths {
-		lines = append(lines, wrapPlanValue("  Protected   ", group.Reason+": "+strings.Join(group.Paths, ", "), width)...)
+	for _, group := range contentRejections(plan.Bundle.ProtectedPaths) {
+		lines = append(lines, wrapPlanValue("  Skipped     ", group.Reason+": "+strings.Join(group.Paths, ", "), width)...)
 	}
 	lines = append(lines, "", "Launch")
 	lines = append(lines, wrapPlanValue("  Runtime     ", plan.Launch.Runtime, width)...)

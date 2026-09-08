@@ -49,9 +49,29 @@ func deployFailureMessage(err error) string {
 		return "deploy failed: could not obtain a Python interpreter for this app. " +
 			"If this host cannot reach GitHub's python-build-standalone releases, set build.python_preference: only-system " +
 			"in the server config to use a preinstalled interpreter, or build.python_install_mirror to an internal mirror."
+	case deployfail.Classify(err) == deployfail.Crashed:
+		return "deploy failed: the app exited during startup, before it accepted a connection. " +
+			"Check the app logs for the error it printed on the way out."
+	case deployfail.Classify(err) == deployfail.ReadinessTimeout:
+		// Not a crash. The process was still running when the readiness window
+		// closed, so telling the operator it crashed sends them to look for an
+		// error the log does not contain, and the log they do find says the app
+		// is listening. The overwhelmingly common cause is an entrypoint that
+		// picks its own address, because the launcher's own host and port are
+		// then simply ignored.
+		return "deploy failed: the app kept running but never answered on the address ShinyHub assigned it, " +
+			"so it did not crash and the app log will not show an error. " +
+			"Check whether the entrypoint starts the app itself with a host or port of its own " +
+			"(a runApp() call left in app.R, or app.run() in app.py): the log line reporting where it is " +
+			"listening names the address it chose instead. End the entrypoint with the app object and let " +
+			"ShinyHub start it. If the address is already correct, the app needs longer to start than its " +
+			"readiness window allows; raise `[app] startup_timeout_seconds` in shinyhub.toml."
 	case strings.Contains(msg, "health check"):
-		return "deploy failed: the app did not pass its health check - it likely crashed on startup. " +
-			"Check the app logs for the cause."
+		// A health-check failure that is neither of the two above (a replica
+		// that could not be started at all, say). Report what is known instead
+		// of guessing at a cause.
+		return "deploy failed: the app did not pass its health check. " + msg +
+			". Check the app logs for the cause."
 	default:
 		return "deploy failed: " + msg
 	}

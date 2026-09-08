@@ -350,8 +350,11 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 	}
 	s.store.LogAuditEvent(db.AuditEventParams{
 		Action: "schedule_activation_roll", ResourceType: "app", ResourceID: app.Slug,
-		Detail: fmt.Sprintf(`{"activation_id":%d,"schedule_run_id":%d,"target_generation":%d}`,
-			a.ID, derefActivationRunID(a.ScheduleRunID), a.TargetGeneration),
+		Detail: db.AuditDetail(map[string]any{
+			"activation_id":     a.ID,
+			"schedule_run_id":   derefActivationRunID(a.ScheduleRunID),
+			"target_generation": a.TargetGeneration,
+		}),
 	})
 	return nil
 }
@@ -418,8 +421,12 @@ func (s *Server) restartActivationPool(ctx context.Context, app *db.App, current
 	}
 	s.store.LogAuditEvent(db.AuditEventParams{
 		Action: "schedule_activation_restart", ResourceType: "app", ResourceID: app.Slug,
-		Detail: fmt.Sprintf(`{"activation_id":%d,"schedule_run_id":%d,"target_generation":%d,"capacity_reason":%q}`,
-			a.ID, derefActivationRunID(a.ScheduleRunID), a.TargetGeneration, capacityErr.Error()),
+		Detail: db.AuditDetail(map[string]any{
+			"activation_id":     a.ID,
+			"schedule_run_id":   derefActivationRunID(a.ScheduleRunID),
+			"target_generation": a.TargetGeneration,
+			"capacity_reason":   capacityErr.Error(),
+		}),
 	})
 	return nil
 }

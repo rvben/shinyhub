@@ -195,7 +195,9 @@ func lookupSchedule(cfg *cliConfig, slug, name string) (scheduleDTO, error) {
 			return s, nil
 		}
 	}
-	return scheduleDTO{}, fmt.Errorf("schedule %q not found for app %q", name, slug)
+	return scheduleDTO{}, notFoundErr(
+		fmt.Sprintf("schedule %q not found for app %q", name, slug),
+		fmt.Sprintf("run `shinyhub schedule list %s` to see the schedules this app has", slug))
 }
 
 // listSchedules fetches all schedules for the given app slug.
@@ -244,9 +246,10 @@ func listSchedulesContext(ctx context.Context, cfg *cliConfig, slug string) ([]s
 func newScheduleLsCmd() *cobra.Command {
 	f := &listFlags{}
 	lsCmd := &cobra.Command{
-		Use:   "ls <slug>",
-		Short: "List scheduled jobs for an app",
-		Args:  cobra.ExactArgs(1),
+		Use:     "ls <slug>",
+		Short:   "List scheduled jobs for an app",
+		Aliases: []string{"list"},
+		Args:    cobra.ExactArgs(1),
 	}
 	addListFlags(lsCmd, f)
 	lsCmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -381,18 +384,20 @@ func newScheduleAddCmd() *cobra.Command {
 		var command []string
 		switch {
 		case flags.cmd != "" && flags.cmdJSON != "":
-			return fmt.Errorf("specify exactly one of --cmd or --cmd-json")
+			return validationErr("specify exactly one of --cmd or --cmd-json",
+				"pass --cmd \"<command>\" for a shell command, or --cmd-json for an argv array")
 		case flags.cmd != "":
 			command, err = shellwords.Parse(flags.cmd)
 			if err != nil {
-				return fmt.Errorf("parse --cmd: %w", err)
+				return validationErr(fmt.Sprintf("parse --cmd: %v", err),
+					"--cmd takes one shell command line, e.g. --cmd \"Rscript job.R\"; use --cmd-json for arguments that contain quotes")
 			}
 		case flags.cmdJSON != "":
 			if err := json.Unmarshal([]byte(flags.cmdJSON), &command); err != nil {
-				return fmt.Errorf("parse --cmd-json: %w", err)
+				return validationErr(fmt.Sprintf("parse --cmd-json: %v", err), "--cmd-json takes a JSON array of arguments, e.g. [\"Rscript\",\"job.R\"]")
 			}
 		default:
-			return fmt.Errorf("one of --cmd or --cmd-json is required")
+			return validationErr("one of --cmd or --cmd-json is required", "pass --cmd \"<command>\" for a shell command, or --cmd-json for an argv array")
 		}
 		if strings.TrimSpace(flags.deployTrigger) != "never" {
 			if err := requireScheduleDeployConvergence(cfg, flags.deployTrigger); err != nil {
@@ -570,10 +575,12 @@ Timezone is tri-state:
 
 		changed := cmd.Flags().Changed
 		if changed("cmd") && changed("cmd-json") {
-			return fmt.Errorf("specify at most one of --cmd or --cmd-json")
+			return validationErr("specify at most one of --cmd or --cmd-json",
+				"pass --cmd \"<command>\" for a shell command, or --cmd-json for an argv array")
 		}
 		if changed("timezone") && flags.clearTZ {
-			return fmt.Errorf("specify at most one of --timezone or --clear-timezone")
+			return validationErr("specify at most one of --timezone or --clear-timezone",
+				"pass --timezone <IANA name> to set one, or --clear-timezone to fall back to the server timezone")
 		}
 
 		payload := map[string]any{}
@@ -584,13 +591,15 @@ Timezone is tri-state:
 		case changed("cmd"):
 			command, err := shellwords.Parse(flags.cmd)
 			if err != nil {
-				return fmt.Errorf("parse --cmd: %w", err)
+				return validationErr(fmt.Sprintf("parse --cmd: %v", err),
+					"--cmd takes one shell command line, e.g. --cmd \"Rscript job.R\"; use --cmd-json for arguments that contain quotes")
 			}
 			payload["command"] = command
 		case changed("cmd-json"):
 			var command []string
 			if err := json.Unmarshal([]byte(flags.cmdJSON), &command); err != nil {
-				return fmt.Errorf("parse --cmd-json: %w", err)
+				return validationErr(fmt.Sprintf("parse --cmd-json: %v", err),
+					"--cmd-json takes a JSON array of arguments, e.g. [\"Rscript\",\"job.R\"]")
 			}
 			payload["command"] = command
 		}
@@ -634,7 +643,8 @@ Timezone is tri-state:
 		}
 
 		if len(payload) == 0 {
-			return fmt.Errorf("nothing to update: supply at least one field flag (see --help)")
+			return validationErr("nothing to update: supply at least one field flag",
+				"see `shinyhub schedule update --help` for the fields this command can change")
 		}
 
 		cfg, err := loadConfig()
@@ -699,9 +709,10 @@ Timezone is tri-state:
 
 func newScheduleRmCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "rm <slug> <name>",
-		Short: "Remove a scheduled job from an app",
-		Args:  cobra.ExactArgs(2),
+		Use:     "rm <slug> <name>",
+		Short:   "Remove a scheduled job from an app",
+		Aliases: []string{"delete"},
+		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			slug, name := args[0], args[1]
 
@@ -1007,7 +1018,9 @@ func newScheduleLogsCmd() *cobra.Command {
 				return fmt.Errorf("decode runs: %w", err)
 			}
 			if len(runs) == 0 {
-				return fmt.Errorf("no runs found for schedule %q", name)
+				return notFoundErr(
+					fmt.Sprintf("no runs found for schedule %q", name),
+					"the schedule has not run yet; trigger one with `shinyhub schedule run "+slug+" "+name+"`")
 			}
 			runID = runs[0].ID
 		}

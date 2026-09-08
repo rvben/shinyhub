@@ -162,6 +162,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &user.ID, Action: "create_user", ResourceType: "user",
 			ResourceID: user.Username, IPAddress: s.ClientIP(r),
+			Detail: db.AuditDetail(map[string]any{"provider": providerOIDC, "role": user.Role}),
 		})
 	}
 	// Refresh the IdP-governed display name from the OIDC name claim. No-op for
@@ -210,6 +211,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	s.logAuditEvent(r, db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),
+		Detail: db.AuditDetail(map[string]any{"grant": grantSessionCookie, "provider": providerOIDC}),
 	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }

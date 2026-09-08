@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -328,8 +329,39 @@ type Manager struct {
 	logRunRecorder           LogRunRecorder
 	logSinkFactory           LogRunSinkFactory
 	consumerLifetimeResolver ConsumerLifetimeResolver
+	logMaxSize               int64
 
 	autoInstrumentApps bool
+
+	// recoveryPending marks the startup window in which processes that survived
+	// a restart have not been re-adopted yet. Until it clears, an absent entry
+	// means "not looked at", not "not running", and a reader that cannot tell
+	// those apart reports a healthy app as down.
+	recoveryPending atomic.Bool
+}
+
+// MarkRecoveryPending declares that a startup re-adoption pass is going to run,
+// so this Manager's inventory is not yet a complete picture of what is alive.
+// Set it before anything can read the Manager; RecoverProcesses clears it.
+//
+// A Manager nobody schedules recovery for - every test fixture, every embedded
+// use - never sets this and is authoritative from the moment it is built, which
+// is correct: there is nothing pending to reconcile.
+func (m *Manager) MarkRecoveryPending() { m.recoveryPending.Store(true) }
+
+// ClearRecoveryPending records that the startup re-adoption pass has finished.
+// Called whichever way recovery ends, including its error paths: once the pass
+// is over the Manager is as complete as it is going to get, and the watchdog
+// owns reconciliation from there.
+func (m *Manager) ClearRecoveryPending() { m.recoveryPending.Store(false) }
+
+// RecoveryPending reports whether startup re-adoption is still outstanding.
+// A nil Manager reports false: no Manager means no pending pass.
+func (m *Manager) RecoveryPending() bool {
+	if m == nil {
+		return false
+	}
+	return m.recoveryPending.Load()
 }
 
 func (m *Manager) SetConsumerLifetimeResolver(resolver ConsumerLifetimeResolver) {
@@ -357,6 +389,17 @@ func (m *Manager) SetLogRunSinkFactory(factory LogRunSinkFactory) {
 func (m *Manager) SetStopGrace(d time.Duration) {
 	if d > 0 {
 		m.stopGrace = d
+	}
+}
+
+// SetLogMaxSize sets the per-replica primary log file size cap in bytes,
+// applied to every log file opened by a future Start call. A non-positive
+// value is ignored, leaving DefaultLogMaxSize in effect. Must be called
+// before the manager begins starting processes; not safe to call
+// concurrently with Start.
+func (m *Manager) SetLogMaxSize(n int64) {
+	if n > 0 {
+		m.logMaxSize = n
 	}
 }
 
@@ -511,6 +554,7 @@ func NewManager(appsDir string, rt Runtime) *Manager {
 		runtimes:       map[string]Runtime{DefaultTier: rt},
 		defaultTier:    DefaultTier,
 		stopGrace:      defaultStopGrace,
+		logMaxSize:     DefaultLogMaxSize,
 	}
 }
 
@@ -731,7 +775,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		StartedAt: startedAt,
 	}
 	logPath := logRunPath(m.appsDir, p.Slug, p.Index, run.RunID)
-	lf, err := OpenLogFile(logPath, DefaultLogMaxSize)
+	lf, err := OpenLogFile(logPath, m.logMaxSize)
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)
 	}

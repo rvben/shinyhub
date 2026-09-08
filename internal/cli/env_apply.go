@@ -471,7 +471,7 @@ func newEnvApplyCmd() *cobra.Command {
 		}
 		for k := range secretSet {
 			if !envKeyRegex.MatchString(k) {
-				return fmt.Errorf("--secret value %q is not a valid env key", k)
+				return validationErr(fmt.Sprintf("--secret value %q is not a valid env key", k), "")
 			}
 		}
 		desiredByKey := make(map[string]envFileEntry, len(entries))
@@ -485,7 +485,7 @@ func newEnvApplyCmd() *cobra.Command {
 		// certainly a typo — fail loudly rather than silently no-op.
 		for k := range secretSet {
 			if _, ok := desiredByKey[k]; !ok {
-				return fmt.Errorf("--secret %q not present in %s", k, path)
+				return validationErr(fmt.Sprintf("--secret %q not present in %s", k, path), "")
 			}
 		}
 

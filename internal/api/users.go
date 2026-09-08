@@ -34,25 +34,51 @@ func requireAdmin(w http.ResponseWriter, r *http.Request) (*auth.ContextUser, bo
 	return u, true
 }
 
-// refuseSystemUser writes a response and returns true when the caller should
-// abort: either the target is a server-managed system user (403) or the DB
-// lookup failed unexpectedly (500). ErrNotFound is allowed through so the
+// refuseSystemUser writes a response and returns stop=true when the caller
+// should abort: either the target is a server-managed system user (403) or the
+// DB lookup failed unexpectedly (500). ErrNotFound is allowed through so the
 // downstream handler emits its own 404. Fails closed — never silently lets a
 // mutation proceed when the target identity cannot be confirmed.
-func (s *Server) refuseSystemUser(w http.ResponseWriter, id int64) bool {
+//
+// It also hands back the user it looked up, so a handler that goes on to
+// destroy or re-credential that row can name it in the audit trail without a
+// second query. The returned user is nil when the row does not exist, which is
+// the only case that continues with stop=false and no user.
+func (s *Server) refuseSystemUser(w http.ResponseWriter, id int64) (*db.User, bool) {
 	u, err := s.store.GetUserByID(id)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			return false
+			return nil, false
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
-		return true
+		return nil, true
 	}
 	if u.PrincipalType == "service_account" {
 		writeError(w, http.StatusForbidden, "cannot modify system user")
-		return true
+		return nil, true
 	}
-	return false
+	return u, false
+}
+
+// targetUserDetail names the user an admin action was aimed at, so the audit
+// row stays readable after the row itself is gone. resource_id carries the
+// numeric ID, which is unresolvable the moment the user is deleted — the one
+// case where naming the target matters most. Role travels with it because
+// deleting an administrator and deleting a viewer are not the same event.
+//
+// A nil user means the lookup found no such row; the handler still records what
+// was attempted, and an absent username stays absent rather than becoming an
+// empty string that reads as a user with no name.
+func targetUserDetail(u *db.User, extra map[string]any) string {
+	fields := map[string]any{}
+	for k, v := range extra {
+		fields[k] = v
+	}
+	if u != nil {
+		fields["username"] = u.Username
+		fields["role"] = u.Role
+	}
+	return db.AuditDetail(fields)
 }
 
 // userResponse is the safe public view of a user (no password hash).
@@ -160,6 +186,14 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		PasswordHash: hash,
 		Role:         role,
 	}); err != nil {
+		if errors.Is(err, db.ErrUsernameExists) {
+			writeError(w, http.StatusConflict, "username already exists")
+			return
+		}
+		if errors.Is(err, db.ErrReservedUsername) {
+			writeError(w, http.StatusConflict, "username is reserved")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -175,7 +209,12 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Action:       "create_user",
 		ResourceType: "user",
 		ResourceID:   req.Username,
-		IPAddress:    s.ClientIP(r),
+		// The role an account is created with is as consequential as a later
+		// change to it, which update_user already records. Without it here, an
+		// account created straight into admin is indistinguishable from one
+		// created as a viewer.
+		Detail:    db.AuditDetail(map[string]any{"provider": providerLocal, "role": role}),
+		IPAddress: s.ClientIP(r),
 	})
 	writeJSON(w, http.StatusCreated, toUserResponse(user))
 }
@@ -196,7 +235,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	if s.refuseSystemUser(w, id) {
+	if _, stop := s.refuseSystemUser(w, id); stop {
 		return
 	}
 	// An admin cannot change their own role via the API (the UI also blocks it):
@@ -283,7 +322,8 @@ func (s *Server) handlePatchUserPassword(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	if s.refuseSystemUser(w, id) {
+	target, stop := s.refuseSystemUser(w, id)
+	if stop {
 		return
 	}
 
@@ -323,7 +363,10 @@ func (s *Server) handlePatchUserPassword(w http.ResponseWriter, r *http.Request)
 		Action:       "reset_user_password",
 		ResourceType: "user",
 		ResourceID:   strconv.FormatInt(id, 10),
-		IPAddress:    s.ClientIP(r),
+		// The reset also bumps the token epoch above, so this row is the record
+		// of two things happening to the account at once.
+		Detail:    targetUserDetail(target, map[string]any{"sessions_revoked": true}),
+		IPAddress: s.ClientIP(r),
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -342,7 +385,8 @@ func (s *Server) handleRevokeUserSessions(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	if s.refuseSystemUser(w, id) {
+	target, stop := s.refuseSystemUser(w, id)
+	if stop {
 		return
 	}
 	if err := s.store.BumpTokenEpoch(id); err != nil {
@@ -358,7 +402,10 @@ func (s *Server) handleRevokeUserSessions(w http.ResponseWriter, r *http.Request
 		Action:       "revoke_sessions",
 		ResourceType: "user",
 		ResourceID:   strconv.FormatInt(id, 10),
-		IPAddress:    s.ClientIP(r),
+		// scope distinguishes an admin revoking somebody else's sessions from the
+		// self-service "sign out everywhere" that records the same action name.
+		Detail:    targetUserDetail(target, map[string]any{"scope": "other_user"}),
+		IPAddress: s.ClientIP(r),
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -375,7 +422,8 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	if s.refuseSystemUser(w, id) {
+	target, stop := s.refuseSystemUser(w, id)
+	if stop {
 		return
 	}
 	// An admin cannot delete their own account via the API (the UI also blocks
@@ -407,7 +455,11 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		Action:       "delete_user",
 		ResourceType: "user",
 		ResourceID:   strconv.FormatInt(id, 10),
-		IPAddress:    s.ClientIP(r),
+		// The row is gone by now, so resource_id resolves to nothing forever
+		// after. Without the name here the audit trail records that somebody was
+		// deleted and not who.
+		Detail:    targetUserDetail(target, nil),
+		IPAddress: s.ClientIP(r),
 	})
 	w.WriteHeader(http.StatusNoContent)
 }

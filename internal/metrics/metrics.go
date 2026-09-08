@@ -126,7 +126,7 @@ func New(version string) *Registry {
 
 	stateTransitions := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "shinyhub_app_state_transitions_total",
-		Help: "Total app lifecycle state transitions by event (hibernate, wake, restart).",
+		Help: "Total app lifecycle state transitions by event (hibernate, sleep, wake).",
 	}, []string{"event"})
 	reg.MustRegister(stateTransitions)
 
@@ -256,7 +256,7 @@ func New(version string) *Registry {
 	}, []string{"slug", "schedule", "status"})
 	reg.MustRegister(runs)
 
-	return &Registry{
+	r := &Registry{
 		reg:                     reg,
 		httpRequests:            httpRequests,
 		httpDuration:            httpDuration,
@@ -292,6 +292,8 @@ func New(version string) *Registry {
 		providerLogLatency: providerLogLatency,
 		runs:               runs,
 	}
+	seedBoundedSeries(r)
+	return r
 }
 
 // RecordDeploy increments the deployment counter for the given result, which

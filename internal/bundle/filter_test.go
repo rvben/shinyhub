@@ -75,7 +75,7 @@ func TestDefaultRules_Stable(t *testing.T) {
 	if r.MaxFileBytes != 10*1024*1024 {
 		t.Errorf("MaxFileBytes = %d, want 10MiB", r.MaxFileBytes)
 	}
-	want := []string{".git", ".venv", "__pycache__", "node_modules", ".renv", ".Rproj.user", ".shinyhub-run"}
+	want := []string{".git", ".venv", "__pycache__", "node_modules", ".renv", ".Rproj.user", ".shinyhub-run", "renv/library"}
 	if strings.Join(r.CacheDirs, ",") != strings.Join(want, ",") {
 		t.Errorf("CacheDirs = %v, want %v", r.CacheDirs, want)
 	}
@@ -85,6 +85,46 @@ func TestDefaultRules_SkipsShinyhubRunDir(t *testing.T) {
 	r := DefaultRules()
 	if got := r.Inspect(".shinyhub-run/data/cache.bin", 10); got != FilterSkipCacheDir {
 		t.Fatalf("Inspect(.shinyhub-run/...) = %v, want FilterSkipCacheDir", got)
+	}
+}
+
+// renv::init() + renv::install() restores into renv/library, whose package
+// directories are symlinks into a machine-local cache. It is a build artifact
+// of renv.lock, so it is skipped the way .venv is - and skipping it is what
+// keeps the zipper from ever meeting those symlinks.
+func TestInspect_SkipsRestoredRenvLibrary(t *testing.T) {
+	r := DefaultRules()
+	skips := []string{
+		"renv/library",
+		"renv/library/macos/R-4.4/aarch64-apple-darwin20/R6",
+		"renv/library/macos/R-4.4/aarch64-apple-darwin20/shiny/DESCRIPTION",
+	}
+	for _, p := range skips {
+		if got := r.Inspect(p, 100); got != FilterSkipCacheDir {
+			t.Errorf("Inspect(%q) = %v, want FilterSkipCacheDir", p, got)
+		}
+	}
+}
+
+// Only renv/library is a build artifact. The lockfile, renv's activation
+// script and its settings are the bundle's own source and must still ship, so
+// the nested rule must not degrade into "anything under renv/", nor into
+// "any path segment named library".
+func TestInspect_KeepsRenvSourceFiles(t *testing.T) {
+	r := DefaultRules()
+	accepts := []string{
+		"renv.lock",
+		"renv/activate.R",
+		"renv/settings.json",
+		"renv/.gitignore",
+		"renv/librarian.R",
+		"library/helpers.R",
+		"app/renv/library/x.R",
+	}
+	for _, p := range accepts {
+		if got := r.Inspect(p, 100); got != FilterAccept {
+			t.Errorf("Inspect(%q) = %v, want FilterAccept", p, got)
+		}
 	}
 }
 

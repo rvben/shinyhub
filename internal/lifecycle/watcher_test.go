@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -668,6 +669,38 @@ func TestWatchdog_RestartsOnCrash(t *testing.T) {
 	}
 }
 
+// TestWatcher_CrashReasonPrefersExitVerdictOverLogTail pins the persisted
+// replicas.exit_reason to the deterministic exit verdict rather than an
+// unscoped live log tail. The manager's log tail is still readable from disk
+// after the crash (e.g. a later restart attempt's startup banner lands at the
+// same path), so a reader taking the tail as the crash cause records the
+// wrong thing forever: the in-memory verdict that briefly agrees with it
+// disappears on the next server restart, exposing the stale DB value.
+func TestWatcher_CrashReasonPrefersExitVerdictOverLogTail(t *testing.T) {
+	mgr := &fakeManager{
+		logTail: "INFO:     Started server process [1]\nINFO:     Waiting for application startup.",
+		lastExit: map[replicaKey]process.ExitVerdict{
+			{slug: "myapp", index: 0}: {Reason: "replica exited with code 137"},
+		},
+	}
+	st := newFakeStore(
+		map[string]*db.App{"myapp": {ID: 1, Slug: "myapp", Status: "running", Replicas: 1}},
+		nil,
+	)
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st, nil)
+
+	w.handleCrashedLocked("myapp", 0)
+
+	if len(st.upsertedReplicas) == 0 {
+		t.Fatal("expected the crash to be recorded")
+	}
+	got := st.upsertedReplicas[len(st.upsertedReplicas)-1].Reason
+	want := "replica exited with code 137"
+	if got != want {
+		t.Fatalf("exit_reason = %q, want %q (the exit verdict, not the live log tail)", got, want)
+	}
+}
+
 func TestWatcher_ActivationFenceBlocksRuntimeMutationBetweenRepairAttempts(t *testing.T) {
 	app := &db.App{
 		ID: 1, Slug: "myapp", Status: "running", Replicas: 1,
@@ -1313,6 +1346,48 @@ func TestWake_TriggeredOnWakeTrigger(t *testing.T) {
 	ur := st.upsertedReplicas[len(st.upsertedReplicas)-1]
 	if ur.Status != "running" || ur.PID == nil || *ur.PID != 33 || ur.Port == nil || *ur.Port != 20033 {
 		t.Fatalf("unexpected UpsertReplica params after wake: %+v", ur)
+	}
+}
+
+// TestWake_AllReplicasFailMarksAppCrashed proves that a wake against a bundle
+// that can never boot (every replica's deploy call errors) is recorded as a
+// "crashed" app with the boot error and an app_crashed audit event, instead of
+// silently reverting to "hibernated" with no operator-visible signal.
+func TestWake_AllReplicasFailMarksAppCrashed(t *testing.T) {
+	prx := newFakeProxy()
+	st := newFakeStore(
+		map[string]*db.App{"app": {ID: 1, Slug: "app", Status: "hibernated", Replicas: 1}},
+		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
+	)
+	bootErr := errors.New("exec: \"python\": executable file not found in $PATH")
+	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
+		func(_, _ string, _ int) (*deploy.Result, error) {
+			return nil, bootErr
+		})
+
+	w.WakeTrigger("app")
+	waitNotWaking(t, st, "app")
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if got := st.apps["app"].Status; got != "crashed" {
+		t.Fatalf("app status after all-replica wake failure = %q, want crashed", got)
+	}
+	reason := st.crashReasons["app"]
+	if !strings.Contains(reason, bootErr.Error()) {
+		t.Fatalf("crash reason = %q, want it to contain the boot error %q", reason, bootErr.Error())
+	}
+	var found bool
+	for _, ev := range st.auditEvents {
+		if ev.Action == "app_crashed" && ev.ResourceID == "app" {
+			found = true
+			if !strings.Contains(ev.Detail, bootErr.Error()) {
+				t.Errorf("app_crashed audit detail = %q, want it to contain the boot error", ev.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected an app_crashed audit event after a total wake failure")
 	}
 }
 

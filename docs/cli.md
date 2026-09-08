@@ -1,12 +1,85 @@
 ---
-description: "Shell completion for bash, zsh, and fish, and how the CLI stays predictable when a workstation and its server run different versions."
+description: "Browse every CLI command, configure shell completion, and understand compatibility when your workstation and ShinyHub server run different versions."
 ---
 
-# CLI completion and compatibility
+# CLI reference, completion, and compatibility
 
 ShinyHub's CLI is designed to remain discoverable after the first successful
 deploy and predictable when a workstation and remote server are upgraded at
 different times.
+
+## Every command
+
+This is the complete top-level list, the same one `shinyhub --help` prints.
+Each command carries its own `--help` with the flags and subcommands, and
+`shinyhub schema` prints the whole tree as machine-readable JSON.
+
+Set up a workstation or a CI job:
+
+| Command | What it does |
+|---|---|
+| `connect` | Connect this CLI to a ShinyHub server, through the browser or with credentials |
+| `ci` | Run a command with a short-lived deployment credential from trusted CI identity |
+| `login` | Authenticate with a username, password or token you already hold |
+| `logout` | Sign out of the current ShinyHub server |
+| `hosts` | List saved ShinyHub servers and show which one is current |
+| `use` | Switch the current ShinyHub server to a saved host |
+| `whoami` | Show the current login: username, role, and server |
+| `completion` | Generate or install shell completions |
+| `schema` | Print a machine-readable description of this CLI (clispec v0.3) |
+
+`connect` and `login` overlap, so: prefer `connect`. It does everything `login`
+does, takes the same `--username`/`--password` and a token via `--token-file`,
+and adds browser authorization, which is the only way in when a server's
+sign-in is SSO. It is also safe to re-run, because a saved credential that
+still authenticates is reused untouched. Reach for `login` when you already
+hold a credential and want it saved without any of that.
+
+Build and ship an application:
+
+| Command | What it does |
+|---|---|
+| `dev` | Develop an app locally or on an explicit remote host |
+| `run` | Run a Shiny app bundle locally in the foreground |
+| `doctor` | Check whether an app and remote are ready to deploy |
+| `manifest` | Work with the bundle manifest (`shinyhub.toml`) |
+| `plan` | Preview one app deployment (read-only, no changes) |
+| `apply` | Apply an exact saved plan |
+| `deploy` | Deploy an application or API to ShinyHub |
+| `drafts` | List, preview, promote, or delete retained deployment drafts |
+| `fleet` | Declaratively reconcile a fleet of apps from a manifest |
+
+Operate what is running:
+
+| Command | What it does |
+|---|---|
+| `apps` | Manage apps |
+| `projects` | Manage app projects (grouping) |
+| `env` | Manage app environment variables |
+| `data` | Manage an app's persistent data dir |
+| `share` | Manage shared-data mounts between apps |
+| `schedule` | Manage scheduled jobs for an app |
+| `top` | Live CPU, memory and session usage for every app |
+
+Run and administer the server:
+
+| Command | What it does |
+|---|---|
+| `init` | Set up ShinyHub for its first run |
+| `serve` | Run the ShinyHub server |
+| `worker` | Run ShinyHub as a remote worker that joins a control plane |
+| `healthcheck` | Exit successfully when a ShinyHub server is ready |
+| `users` | Manage user accounts (admin) |
+| `service-accounts` | Manage non-interactive deployment identities (admin) |
+| `tokens` | Manage API tokens |
+| `backup` | Write a consistent snapshot of all durable state to an archive |
+| `restore` | Restore durable state from a backup archive (server must be stopped) |
+| `migrate-backend` | Copy all data from the current SQLite database to a fresh Postgres database |
+| `rotate-secret` | Re-encrypt all at-rest secrets under a new `auth.secret` |
+| `resolve-legacy-schedule-writers` | Resolve the fail-closed fence left by schedule writers from an older server |
+
+`backup` and `restore` are the pair to reach for before an upgrade or a host
+move; see [Configuration](configuration.md) for what durable state they cover.
 
 ## Go from deployment to the app
 
@@ -202,8 +275,8 @@ shinyhub doctor --remote
 
 Version warnings do not make Doctor fail when the advertised protocol is still
 compatible. An unsupported protocol is a blocker because guessing across a
-breaking API boundary would be less useful—and less safe—than stopping with the
-exact upgrade command.
+breaking API boundary would be less useful, and less safe, than stopping with
+the exact upgrade command.
 
 ## Maintain the release contract
 

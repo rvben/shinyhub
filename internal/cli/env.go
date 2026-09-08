@@ -102,8 +102,12 @@ func newEnvCmd() *cobra.Command {
 
 		if !changed {
 			// Value was already set to this exact value; no restart needed.
+			// restart_required is always included and always false here: an
+			// unchanged value can never leave a running app out of sync. Keeping
+			// the key present in both outcomes gives "env set" one stable JSON
+			// shape instead of a field that only appears on some responses.
 			return renderAction(cmd, "unchanged",
-				map[string]any{"slug": slug, "key": key},
+				map[string]any{"slug": slug, "key": key, "restart_required": false},
 				fmt.Sprintf("%s: %s unchanged", slug, key))
 		}
 
@@ -111,7 +115,7 @@ func newEnvCmd() *cobra.Command {
 		// endpoint directly. Re-PUTing the env var would trigger changed=false
 		// (the value is now identical to what we just stored) and skip the
 		// restart inside maybeRestartForChange.
-		data := map[string]any{"slug": slug, "key": key}
+		restartRequired := false
 		if setFlags.restart {
 			restartReq, err := http.NewRequest("POST",
 				cfg.Host+"/api/apps/"+slug+"/restart", nil)
@@ -132,20 +136,22 @@ func newEnvCmd() *cobra.Command {
 		} else if rr, _ := result["restart_required"].(bool); rr {
 			// The running app keeps serving the old value until it is cycled.
 			// Make the stale-config trap visible instead of silently leaving it.
-			data["restart_required"] = true
+			restartRequired = true
 			printRestartNudge(cmd, slug)
 		}
 
-		return renderAction(cmd, "set", data,
+		return renderAction(cmd, "set",
+			map[string]any{"slug": slug, "key": key, "restart_required": restartRequired},
 			fmt.Sprintf("%s: set %s", slug, key))
 	}
 
 	lsF := &listFlags{}
 
 	envLsCmd := &cobra.Command{
-		Use:   "ls <slug>",
-		Short: "List environment variables for an app",
-		Args:  cobra.ExactArgs(1),
+		Use:     "ls <slug>",
+		Aliases: []string{"list"},
+		Short:   "List environment variables for an app",
+		Args:    cobra.ExactArgs(1),
 	}
 	addListFlags(envLsCmd, lsF)
 	envLsCmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -187,9 +193,10 @@ func newEnvCmd() *cobra.Command {
 	}
 
 	envRmCmd := &cobra.Command{
-		Use:   "rm <slug> KEY",
-		Short: "Remove an environment variable from an app",
-		Args:  cobra.ExactArgs(2),
+		Use:     "rm <slug> KEY",
+		Short:   "Remove an environment variable from an app",
+		Aliases: []string{"delete"},
+		Args:    cobra.ExactArgs(2),
 	}
 	envRmCmd.Flags().BoolVar(&rmFlags.restart, "restart", false, "Restart the app after deleting")
 	envRmCmd.RunE = func(cmd *cobra.Command, args []string) error {

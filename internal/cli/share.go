@@ -30,9 +30,10 @@ type sharedDataDTO struct {
 func newShareLsCmd() *cobra.Command {
 	f := &listFlags{}
 	cmd := &cobra.Command{
-		Use:   "ls <slug>",
-		Short: "List shared-data mounts for an app",
-		Args:  cobra.ExactArgs(1),
+		Use:     "ls <slug>",
+		Short:   "List shared-data mounts for an app",
+		Aliases: []string{"list"},
+		Args:    cobra.ExactArgs(1),
 	}
 	addListFlags(cmd, f)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -118,9 +119,10 @@ func newShareAddCmd() *cobra.Command {
 
 func newShareRmCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "rm <slug> <source-slug>",
-		Short: "Remove a shared-data mount from an app",
-		Args:  cobra.ExactArgs(2),
+		Use:     "rm <slug> <source-slug>",
+		Short:   "Remove a shared-data mount from an app",
+		Aliases: []string{"delete"},
+		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			slug, sourceSlug := args[0], args[1]
 

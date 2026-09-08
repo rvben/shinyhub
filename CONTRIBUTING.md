@@ -62,7 +62,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 - `refactor(scope): …`
 - `chore: …` / `ci: …`
 
-Keep commits focused — one logical change per commit.
+Keep commits focused: one logical change per commit.
 
 ## License
 

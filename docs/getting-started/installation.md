@@ -8,6 +8,37 @@ ShinyHub is distributed as a Python package, a standalone server binary, and a
 container image. Start with one `uvx` command for a local evaluation; install it
 once, use Docker, or use the standalone binary for a long-lived server.
 
+## What it needs to run
+
+ShinyHub itself is small. It is one binary with an embedded database and no
+external services, and an idle server with a handful of applications registered
+sits in the tens of MiB resident. Size the host for the applications instead:
+every running replica is its own R or Python process, and those dominate both
+memory and CPU.
+
+- **Memory.** Budget per replica, not per application: replicas multiplied by
+  what one worker of that application costs, plus headroom. The platform's own
+  floor assumes a Shiny worker in the 150 to 350 MiB range and refuses to
+  allocate a new elastic worker when free memory would fall below
+  `server.min_available_memory_mb` (256 MiB by default). A single-application
+  evaluation host is comfortable well under 1 GiB; a real fleet is sized by
+  adding up its workers.
+- **CPU.** The platform reserves no cores for itself. Concurrency comes from
+  replicas and workers, so cores are sized against the application processes
+  you intend to run at once. See [Scaling](../scaling.md).
+- **Disk.** The dependency trees are what grow, not the platform. A minimal R
+  application whose only dependency is `shiny` occupies about 60 MiB once its
+  library is restored, and each application keeps
+  `storage.version_retention` deployments (5 by default) plus its logs. A
+  single bundle upload is capped at `storage.max_bundle_mb`, 128 MiB by
+  default.
+
+Hibernation is what lets a modest host hold many applications: one that has
+been idle past its timeout (30 minutes by default) is stopped and its memory
+released, and the next request starts it again. See
+[App performance](../app-performance.md) for the trade-off against first-hit
+latency.
+
 ## Try it without installing
 
 ```bash

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -229,6 +230,74 @@ func resolveJWTUser(claims *Claims, userLookup UserLookup) (*ContextUser, error)
 	return u, nil
 }
 
+// WrongSchemeError reports that a credential was sent under the wrong
+// Authorization scheme: a session JWT under Token, or an API key or deploy
+// token under Bearer.
+//
+// It is deliberately reported to the caller, unlike every other authentication
+// failure. What it discloses is the shape of the string the caller just sent,
+// which they already have; it says nothing about whether the credential exists,
+// is current, or belongs to anyone, so it is not an oracle. Without it the two
+// mistakes are indistinguishable from a wrong password, and a developer who
+// guesses the more common Bearer convention for an API key has nothing at all
+// to go on.
+type WrongSchemeError struct {
+	Sent string // the scheme the request used
+	Want string // the scheme this credential's shape requires
+}
+
+func (e *WrongSchemeError) Error() string {
+	return fmt.Sprintf("credential sent as %q must use the %q authorization scheme", e.Sent, e.Want)
+}
+
+// writeUnauthorized answers 401. A wrong-scheme failure additionally names the
+// scheme to use, in the WWW-Authenticate header RFC 7235 defines for exactly
+// this, so `curl -i` shows it without any body change. Browsers prompt only for
+// Basic and Digest, so naming Bearer or Token here cannot raise a dialog, and
+// the header is only ever set when the request already carried an Authorization
+// header of its own.
+func writeUnauthorized(w http.ResponseWriter, err error) {
+	var wrong *WrongSchemeError
+	if errors.As(err, &wrong) {
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf(
+			"%s realm=\"shinyhub\", error=\"invalid_request\", error_description=%q",
+			wrong.Want, wrong.Error()))
+	}
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
+// LooksLikeJWT reports whether token has the structural shape of a compact
+// JWS / JWT: exactly three non-empty segments separated by ".", with a header
+// segment that begins with "eyJ". A JWT header is base64url-encoded JSON that
+// always starts with the bytes `{"`, which encode to the literal prefix "eyJ".
+// API keys (shk_...) and opaque deploy tokens (hex, UUID, base64 secrets) do not
+// have two dot separators with an "eyJ" header, so they never match.
+//
+// This is a statement about the shape of a string and nothing else. It says
+// nothing about whether the token is valid, current, or known to this server,
+// which is what makes it safe to act on before authentication.
+func LooksLikeJWT(token string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+	}
+	return strings.HasPrefix(parts[0], "eyJ")
+}
+
+// schemeForToken returns the Authorization scheme a credential of this shape
+// must be sent under.
+func schemeForToken(token string) string {
+	if LooksLikeJWT(token) {
+		return "Bearer"
+	}
+	return "Token"
+}
+
 func authenticateHeader(header, secret string, keyLookup APIKeyLookup, userLookup UserLookup, revoked RevocationChecker) (*authResult, error) {
 	if header == "" {
 		return nil, nil
@@ -239,6 +308,16 @@ func authenticateHeader(header, secret string, keyLookup APIKeyLookup, userLooku
 		return nil, fmt.Errorf("invalid authorization header")
 	}
 	scheme, token := parts[0], parts[1]
+
+	// A session JWT is only accepted under Bearer and an API key or deploy
+	// token only under Token, and until now sending one under the other scheme
+	// produced the same bare 401 as a wrong password. Bearer is the far more
+	// common convention, so an API key arrives under it regularly. Answer the
+	// structural mistake as a structural mistake; see WrongSchemeError.
+	if want := schemeForToken(token); !strings.EqualFold(scheme, want) &&
+		(strings.EqualFold(scheme, "bearer") || strings.EqualFold(scheme, "token")) {
+		return nil, &WrongSchemeError{Sent: scheme, Want: want}
+	}
 
 	switch strings.ToLower(scheme) {
 	case "bearer":
@@ -396,7 +475,7 @@ func BearerMiddleware(secret string, keyLookup APIKeyLookup, userLookup UserLook
 
 			result, err := authenticateRequest(r, secret, keyLookup, userLookup, revoked)
 			if err != nil || result == nil || result.User == nil || result.User.SupportSession != nil {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				writeUnauthorized(w, err)
 				return
 			}
 

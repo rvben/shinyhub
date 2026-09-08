@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +29,19 @@ func newHealthcheckCmd() *cobra.Command {
 		Short: "Exit successfully when a ShinyHub server is ready",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// --host is a persistent flag registered on the shared root command
+			// for the developer subcommands (login, apps, deploy, ...), which
+			// resolve it against the saved multi-host credentials store.
+			// healthcheck is a standalone readiness probe with no credentials
+			// and no saved hosts: it never reads hostFlagOverride, so accepting
+			// --host here would silently do nothing. Reject it loudly instead of
+			// letting the operator believe it pointed the probe somewhere.
+			if cmd.Flags().Changed("host") {
+				return cli.ValidationError(
+					"--host has no effect on healthcheck",
+					"use --url to point healthcheck at a specific readiness endpoint",
+				)
+			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 			defer cancel()
 			client := &http.Client{

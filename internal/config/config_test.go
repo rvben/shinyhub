@@ -555,6 +555,136 @@ func TestStorage_AppQuotaMB_EnvOverride(t *testing.T) {
 	}
 }
 
+// TestStorage_AppLogMaxSizeMB_DefaultsToFive pins the retention window that
+// existing installs already run with (process.DefaultLogMaxSize, 5 MiB) as
+// the value an unset config normalizes to, so introducing the knob does not
+// change any deployed instance's behavior.
+func TestStorage_AppLogMaxSizeMB_DefaultsToFive(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.AppLogMaxSizeMB != 5 {
+		t.Errorf("AppLogMaxSizeMB default: got %d, want 5", cfg.Storage.AppLogMaxSizeMB)
+	}
+}
+
+func TestStorage_AppLogMaxSizeMB_FromYAML(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+storage:
+  app_log_max_size_mb: 50
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.AppLogMaxSizeMB != 50 {
+		t.Errorf("AppLogMaxSizeMB: got %d, want 50", cfg.Storage.AppLogMaxSizeMB)
+	}
+}
+
+func TestStorage_AppLogMaxSizeMB_EnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_APP_LOG_MAX_SIZE_MB", "20")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.AppLogMaxSizeMB != 20 {
+		t.Errorf("AppLogMaxSizeMB from env: got %d, want 20", cfg.Storage.AppLogMaxSizeMB)
+	}
+}
+
+func TestStorage_AppLogMaxSizeMB_EnvRejectsNonPositive(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+			t.Setenv("SHINYHUB_APP_LOG_MAX_SIZE_MB", v)
+			if _, err := config.Load(""); err == nil {
+				t.Errorf("expected an error for SHINYHUB_APP_LOG_MAX_SIZE_MB=%s, got nil", v)
+			}
+		})
+	}
+}
+
+// TestDatabase_PreMigrationSnapshotRetention_DefaultsToFive pins the default
+// retention window for pre-migration snapshots, matching
+// storage.version_retention's default so upgrade history and bundle version
+// history are bounded the same way.
+func TestDatabase_PreMigrationSnapshotRetention_DefaultsToFive(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Database.PreMigrationSnapshotRetention != 5 {
+		t.Errorf("PreMigrationSnapshotRetention default: got %d, want 5", cfg.Database.PreMigrationSnapshotRetention)
+	}
+}
+
+func TestDatabase_PreMigrationSnapshotRetention_FromYAML(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+database:
+  pre_migration_snapshot_retention: 3
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Database.PreMigrationSnapshotRetention != 3 {
+		t.Errorf("PreMigrationSnapshotRetention: got %d, want 3", cfg.Database.PreMigrationSnapshotRetention)
+	}
+}
+
+func TestDatabase_PreMigrationSnapshotRetention_NonPositiveNormalizesToDefault(t *testing.T) {
+	path := writeYAML(t, `
+auth:
+  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+database:
+  pre_migration_snapshot_retention: -1
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Database.PreMigrationSnapshotRetention != 5 {
+		t.Errorf("expected a non-positive value to normalize to the default 5, got %d", cfg.Database.PreMigrationSnapshotRetention)
+	}
+}
+
+// TestDatabase_PreMigrationSnapshotRetention_EnvRejectsNonPositive pairs with
+// the YAML case above: an absent YAML field normalizes to the default, while
+// an explicitly set environment variable holding a meaningless value is an
+// error. SHINYHUB_APP_LOG_MAX_SIZE_MB behaves identically.
+func TestDatabase_PreMigrationSnapshotRetention_EnvRejectsNonPositive(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+			t.Setenv("SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT_RETENTION", v)
+			if _, err := config.Load(""); err == nil {
+				t.Errorf("expected an error for SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT_RETENTION=%s, got nil", v)
+			}
+		})
+	}
+}
+
+func TestDatabase_PreMigrationSnapshotRetention_EnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT_RETENTION", "10")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Database.PreMigrationSnapshotRetention != 10 {
+		t.Errorf("PreMigrationSnapshotRetention from env: got %d, want 10", cfg.Database.PreMigrationSnapshotRetention)
+	}
+}
+
 func TestConfig_RuntimeReplicaDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(`
@@ -1520,8 +1650,10 @@ func TestApplyEnvNumericErrorsAreFatal(t *testing.T) {
 		{"docker default memory", "SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB", "512m"},
 		{"docker default cpu", "SHINYHUB_RUNTIME_DOCKER_DEFAULT_CPU_PERCENT", "50pct"},
 		{"version retention", "SHINYHUB_STORAGE_VERSION_RETENTION", "five"},
+		{"pre-migration snapshot retention", "SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT_RETENTION", "five"},
 		{"app quota", "SHINYHUB_APP_QUOTA_MB", "1G"},
 		{"max bundle mb", "SHINYHUB_MAX_BUNDLE_MB", "128mb"},
+		{"app log max size mb", "SHINYHUB_APP_LOG_MAX_SIZE_MB", "5mb"},
 		{"default replicas", "SHINYHUB_RUNTIME_DEFAULT_REPLICAS", "two"},
 		{"max replicas", "SHINYHUB_RUNTIME_MAX_REPLICAS", "100x"},
 		{"default max sessions", "SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA", "ten"},

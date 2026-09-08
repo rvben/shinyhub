@@ -77,6 +77,59 @@ func TestDeployFailureMessage(t *testing.T) {
 	}
 }
 
+// readinessTimeoutErr is the error a replica that stayed alive but never
+// answered produces: waitHealthyContract returns the "did not become healthy
+// within" form, and bootReplicas joins it under "all replicas failed health
+// check". internal/deployfail's TestClassify pins that this text classifies as
+// ReadinessTimeout, which is what these cases depend on.
+func readinessTimeoutErr() error {
+	return errors.New("all replicas failed health check: replica 0: health: " +
+		"app at http://127.0.0.1:20211/ did not become healthy within 20s (last readiness status 0)")
+}
+
+// A readiness timeout is not a crash. Reproduced against a running server with
+// an app.R ending in runApp(host=..., port=9922): the process bound its own
+// port, stayed alive for the whole readiness window, and the deploy reported
+// "it likely crashed on startup" with the app's own "Listening on
+// http://127.0.0.1:9922" printed directly underneath it. The message sent the
+// developer to look in the log for a crash that had not happened.
+func TestDeployFailureMessage_ReadinessTimeoutIsNotReportedAsACrash(t *testing.T) {
+	got := deployFailureMessage(readinessTimeoutErr())
+
+	// Absence is the regression itself: the old message was confident and
+	// wrong, and a fix that merely appended a hint would still leave it there.
+	for _, forbidden := range []string{"crashed on startup", "likely crashed"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("readiness timeout must not be reported as a crash; got %q", got)
+		}
+	}
+	// Second bound: saying what did not happen is worthless on its own. The
+	// message has to name the cause the developer can act on, or it has only
+	// traded a wrong answer for no answer.
+	for _, want := range []string{"never answered", "host or port of its own", "startup_timeout_seconds"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("readiness timeout message = %q; want it to contain %q", got, want)
+		}
+	}
+}
+
+// The crash message must keep saying a crash happened. Splitting the two apart
+// is only an improvement if each half still lands: a fix that reported every
+// health-check failure as a timeout would pass the test above and be just as
+// misleading in the other direction.
+func TestDeployFailureMessage_CrashIsStillReportedAsACrash(t *testing.T) {
+	err := errors.New("all replicas failed health check: replica 0: health: " +
+		"app at http://127.0.0.1:20211/ crashed on startup before becoming healthy")
+	got := deployFailureMessage(err)
+
+	if !strings.Contains(got, "exited during startup") {
+		t.Errorf("crash message = %q; want it to say the app exited during startup", got)
+	}
+	if strings.Contains(got, "never answered") {
+		t.Errorf("a real crash must not be reported as a readiness timeout; got %q", got)
+	}
+}
+
 // TestDeployFailureMessage_HookNotMisreportedAsRuntimeMissing pins the exact
 // regression: the hook message must not claim the server is missing a runtime.
 // Asserting on absence matters here because the old behaviour produced a

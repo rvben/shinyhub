@@ -20,16 +20,19 @@ test('reserved account row is fully read-only', () => {
   assert.equal(caps.canChangeRole, false);
   assert.equal(caps.canDelete, false);
   assert.equal(caps.canResetPassword, false);
+  assert.equal(caps.canRevokeSessions, false);
   assert.equal(caps.roleHint, RESERVED_USER_HINT);
   assert.equal(caps.deleteHint, RESERVED_USER_HINT);
+  assert.equal(caps.revokeSessionsHint, RESERVED_USER_HINT);
 });
 
-test('your own row cannot self-demote or self-delete but can reset password', () => {
+test('your own row cannot self-demote or self-delete but can reset password and revoke sessions', () => {
   const caps = userRowCaps({ id: 1, username: 'admin' }, 1);
   assert.equal(caps.isSelf, true);
   assert.equal(caps.canChangeRole, false);
   assert.equal(caps.canDelete, false);
   assert.equal(caps.canResetPassword, true);
+  assert.equal(caps.canRevokeSessions, true);
   assert.equal(caps.roleHint, 'You cannot change your own role');
   assert.equal(caps.deleteHint, 'You cannot delete yourself');
 });
@@ -39,6 +42,7 @@ test('an ordinary other user is fully manageable', () => {
   assert.equal(caps.canChangeRole, true);
   assert.equal(caps.canDelete, true);
   assert.equal(caps.canResetPassword, true);
+  assert.equal(caps.canRevokeSessions, true);
   assert.equal(caps.roleHint, '');
   assert.equal(caps.deleteHint, '');
 });

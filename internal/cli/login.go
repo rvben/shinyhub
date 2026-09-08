@@ -43,7 +43,14 @@ that server's URL, keeping any other servers you are signed in to. The server
 you log in to becomes the current one.
 
 Omit --host to re-authenticate with the current server. Give --name to label a
-server so you can switch to it with ` + "`shinyhub use <name>`" + `.`,
+server so you can switch to it with ` + "`shinyhub use <name>`" + `.
+
+login or connect? login is the direct path: you already hold a username,
+password or token, and you want it saved. It never opens a browser and always
+authenticates afresh. connect is the broader command and is usually the one to
+reach for. It accepts the same --username/--password, adds browser
+authorization (the only way in when a server's sign-in is SSO), and re-running
+it is a no-op while the saved credential still works.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runLogin(cmd, f)
 		},
@@ -84,7 +91,7 @@ func runLogin(cmd *cobra.Command, f *loginFlags) error {
 	// Prompt for missing fields when stdin is a terminal. Without this the
 	// snippet `shinyhub login --host X --username Y` shown in the new-user
 	// handoff modal POSTed an empty password and surfaced a confusing
-	// "login failed: 401 Unauthorized" — the receiving user had no obvious
+	// "login failed: 401 Unauthorized", and the receiving user had no obvious
 	// way to provide their password without re-reading --help. Scripts that
 	// pipe credentials still work because the tty check fails and the empty
 	// strings are passed through unchanged (which the server rejects with a
@@ -262,7 +269,7 @@ func promptLine(r io.Reader, w io.Writer, prompt string) (string, error) {
 // echoing. A trailing newline is printed afterwards because ReadPassword
 // suppresses the user's own. Reads always go through the readPassword seam
 // because term.ReadPassword has to operate on the real terminal fd to
-// disable echo — there is no portable way to do that on a generic Reader.
+// disable echo: there is no portable way to do that on a generic Reader.
 func promptPassword(w io.Writer, prompt string) (string, error) {
 	fmt.Fprint(w, prompt)
 	pw, err := readPassword()

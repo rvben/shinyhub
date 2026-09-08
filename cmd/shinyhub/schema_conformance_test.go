@@ -43,8 +43,14 @@ func TestSchema_EveryCommandHasExplicitEffects(t *testing.T) {
 		}
 	}
 	for path, cm := range paths {
-		if _, ok := cm["effects"]; !ok {
-			t.Errorf("command %q has no explicit effects declaration", path)
+		// A command missing from schemaAnnotations still serializes an "effects"
+		// key (schemaCommand.Effects has no `omitempty`), just holding "" rather
+		// than being absent: schemaCommandFor leaves Effects unset when the path
+		// is not found in the registry. Checking key presence alone can never
+		// fail, so this checks the value is non-empty instead.
+		effects, _ := cm["effects"].(string)
+		if effects == "" {
+			t.Errorf("command %q has no explicit effects declaration (missing a schema_annotations.go entry)", path)
 		}
 	}
 }

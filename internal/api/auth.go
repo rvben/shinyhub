@@ -245,25 +245,67 @@ func requestCredential(r *http.Request) *credentialResponse {
 	}
 }
 
-func (s *Server) authenticateCredentials(req loginRequest) (*db.User, error) {
+// loginFailure names why authenticateCredentials rejected a sign-in. Every
+// value here becomes the same 401 with the same body, because telling an
+// unauthenticated caller which of them applied is how username enumeration
+// works. The audit log, which only administrators can read, keeps them apart:
+// a run of unknown_user is somebody guessing names, a run of bad_password
+// against one name is somebody guessing that account's password, and the two
+// call for different responses.
+type loginFailure string
+
+// Two endpoints accept the same credentials and record the same "login" action
+// against the same user: /api/auth/login hands back a bearer token for the CLI,
+// /api/auth/session sets a browser cookie. Without the grant on the row an
+// operator cannot tell an automated client signing in from a person signing in,
+// which is most of what the distinction is good for.
+const (
+	grantBearerToken   = "bearer_token"
+	grantSessionCookie = "session_cookie"
+)
+
+// Every successful login records which identity source vouched for the user.
+// Recording it only on the SSO paths would make an absent provider ambiguous
+// between "signed in with a local password" and "this row predates the field",
+// so the local paths name themselves too.
+const (
+	providerLocal  = "local"
+	providerGitHub = "github"
+	providerGoogle = "google"
+	providerOIDC   = "oidc"
+)
+
+const (
+	loginFailureUnknownUser loginFailure = "unknown_user"
+	loginFailureBadPassword loginFailure = "bad_password"
+	loginFailureNotLocal    loginFailure = "not_a_local_login"
+	loginFailureLookup      loginFailure = "lookup_failed"
+)
+
+// authenticateCredentials returns the reason alongside the error so callers can
+// record it without a second lookup. It performs the same work on every path,
+// including the dummy hash comparisons that keep a miss from being measurably
+// faster than a hit; deriving the reason costs nothing beyond the branch that
+// already existed.
+func (s *Server) authenticateCredentials(req loginRequest) (*db.User, loginFailure, error) {
 	user, err := s.store.GetUserByUsername(req.Username)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			auth.VerifyPassword(dummyHash, req.Password) // constant-time guard
-			return nil, db.ErrNotFound
+			return nil, loginFailureUnknownUser, db.ErrNotFound
 		}
-		return nil, err
+		return nil, loginFailureLookup, err
 	}
 
 	if err := auth.VerifyPassword(user.PasswordHash, req.Password); err != nil {
-		return nil, db.ErrNotFound
+		return nil, loginFailureBadPassword, db.ErrNotFound
 	}
 	if user.PrincipalType == "service_account" || db.IsReservedUsername(user.Username) {
 		auth.VerifyPassword(dummyHash, req.Password)
-		return nil, db.ErrNotFound
+		return nil, loginFailureNotLocal, db.ErrNotFound
 	}
 
-	return user, nil
+	return user, "", nil
 }
 
 // rejectIfLocalLoginDisabled writes a 403 and returns true when the built-in
@@ -292,13 +334,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.authenticateCredentials(req)
+	user, why, err := s.authenticateCredentials(req)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			s.logAuditEvent(r, db.AuditEventParams{
 				Action:       "login_failed",
 				ResourceType: "user",
 				ResourceID:   req.Username,
+				Detail:       db.AuditDetail(map[string]any{"reason": string(why), "grant": grantBearerToken}),
 				IPAddress:    s.ClientIP(r),
 			})
 			writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -319,6 +362,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Action:       "login",
 		ResourceType: "user",
 		ResourceID:   user.Username,
+		Detail:       db.AuditDetail(map[string]any{"grant": grantBearerToken, "provider": providerLocal}),
 		IPAddress:    s.ClientIP(r),
 	})
 	writeJSON(w, http.StatusOK, loginResponse{
@@ -341,13 +385,14 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.authenticateCredentials(req)
+	user, why, err := s.authenticateCredentials(req)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			s.logAuditEvent(r, db.AuditEventParams{
 				Action:       "login_failed",
 				ResourceType: "user",
 				ResourceID:   req.Username,
+				Detail:       db.AuditDetail(map[string]any{"reason": string(why), "grant": grantSessionCookie}),
 				IPAddress:    s.ClientIP(r),
 			})
 			writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -368,6 +413,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		Action:       "login",
 		ResourceType: "user",
 		ResourceID:   user.Username,
+		Detail:       db.AuditDetail(map[string]any{"grant": grantSessionCookie, "provider": providerLocal}),
 		IPAddress:    s.ClientIP(r),
 	})
 	auth.SetSessionCookie(w, r, token, s.cfg.TrustedProxyNets)
@@ -387,9 +433,12 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		// Revoke the caller's own JWT so it cannot be reused for the remainder
 		// of its signed lifetime. Only JWT-authenticated requests populate
 		// TokenInfo; API-key callers have no jti to revoke.
+		tokenRevoked := false
 		if t := auth.TokenInfoFromContext(r.Context()); t != nil && t.JTI != "" {
 			if err := s.store.RevokeToken(t.JTI, u.ID, t.ExpiresAt); err != nil {
 				slog.Warn("revoke token on logout", "user", u.Username, "err", err)
+			} else {
+				tokenRevoked = true
 			}
 		}
 		s.logAuditEvent(r, db.AuditEventParams{
@@ -397,9 +446,62 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			Action:       "logout",
 			ResourceType: "user",
 			ResourceID:   u.Username,
-			IPAddress:    s.ClientIP(r),
+			// A logout that revoked nothing leaves a working credential behind:
+			// either the caller authenticated with an API key, which logout does
+			// not touch, or the revocation failed. Both are worth being able to
+			// see afterwards, and neither is visible from the action alone.
+			Detail:    db.AuditDetail(map[string]any{"token_revoked": tokenRevoked}),
+			IPAddress: s.ClientIP(r),
 		})
 	}
+	auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRevokeOwnSessions ends every session and bearer token for the calling
+// account, not just the credential that called it.
+//
+// Logout is deliberately narrow: it revokes the one JWT it was called with, so
+// signing out of a shared machine does not kick you off your own laptop. That
+// is the wrong scope for the case it is easy to confuse it with - a credential
+// you believe someone else now has - and until this endpoint existed, the only
+// way to cover that was to ask an administrator. Bumping the account's token
+// epoch invalidates every JWT issued before now, which is every browser session
+// and every bearer token for the account.
+//
+// API keys are not sessions and are unaffected: they are named, listed, and
+// revoked individually under /api/tokens.
+func (s *Server) handleRevokeOwnSessions(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if _, stop := s.refuseSystemUser(w, u.ID); stop {
+		return
+	}
+	if err := s.store.BumpTokenEpoch(u.ID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		slog.Error("revoke own sessions", "user", u.Username, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	s.logAuditEvent(r, db.AuditEventParams{
+		UserID:       &u.ID,
+		Action:       "revoke_sessions",
+		ResourceType: "user",
+		ResourceID:   strconv.FormatInt(u.ID, 10),
+		// The admin-driven revocation in users.go records the same action name
+		// against the same resource type, so scope is what separates "I signed
+		// myself out everywhere" from "an administrator signed me out".
+		Detail:    db.AuditDetail(map[string]any{"username": u.Username, "scope": "self"}),
+		IPAddress: s.ClientIP(r),
+	})
+	// The caller's own cookie is now dead too, so clear it rather than leave the
+	// browser presenting a credential the server will reject on every request.
 	auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -583,7 +685,10 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 			Action:       "change_own_password",
 			ResourceType: "user",
 			ResourceID:   u.Username,
-			IPAddress:    s.ClientIP(r),
+			// The rotation bumps the token epoch above, so this one action ended
+			// every other session the account had.
+			Detail:    db.AuditDetail(map[string]any{"sessions_revoked": true}),
+			IPAddress: s.ClientIP(r),
 		})
 	}
 
@@ -593,7 +698,10 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 			Action:       "update_profile",
 			ResourceType: "user",
 			ResourceID:   u.Username,
-			IPAddress:    s.ClientIP(r),
+			// update_profile is the only action name this endpoint has, so the
+			// field says which part of the profile actually moved.
+			Detail:    db.AuditDetail(map[string]any{"changed": []string{"display_name"}}),
+			IPAddress: s.ClientIP(r),
 		})
 	}
 
@@ -887,7 +995,8 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 		ownerID = 0
 	}
 
-	if err := s.store.DeleteAPIKey(id, ownerID); err != nil {
+	deleted, err := s.store.DeleteAPIKey(id, ownerID)
+	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "token not found")
 			return
@@ -896,11 +1005,19 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	detail := map[string]any{"token_name": deleted.Name}
+	// An admin may revoke a token belonging to someone else. UserID on the row
+	// is the caller, so without the owner here the trail records who did it and
+	// not whose access ended.
+	if deleted.UserID != u.ID {
+		detail["owner_user_id"] = deleted.UserID
+	}
 	s.logAuditEvent(r, db.AuditEventParams{
 		UserID:       &u.ID,
 		Action:       "delete_token",
 		ResourceType: "token",
 		ResourceID:   strconv.FormatInt(id, 10),
+		Detail:       db.AuditDetail(detail),
 		IPAddress:    s.ClientIP(r),
 	})
 	w.WriteHeader(http.StatusNoContent)
@@ -949,7 +1066,14 @@ func (s *Server) handleSessionHandoff(w http.ResponseWriter, r *http.Request) {
 				Action:       "logout_handoff",
 				ResourceType: "user",
 				ResourceID:   claims.Subject,
-				IPAddress:    s.ClientIP(r),
+				// The token id is what ties this event to the session that was
+				// revoked, so a reader tracing a specific session can follow it
+				// from issue to revocation rather than seeing only that some
+				// session of this user ended.
+				Detail: auditDetailJSON(map[string]any{
+					"token_id": claims.ID,
+				}),
+				IPAddress: s.ClientIP(r),
 			})
 		}
 	}

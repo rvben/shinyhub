@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -123,6 +124,52 @@ func TestLoginProvidersGated(t *testing.T) {
 		"login-providers.js must hide #login-form when local login is disabled")
 	assertContains(t, "style.css", ".login-box form[hidden]",
 		"style.css must override the form display:grid with a [hidden] rule so the SSO-only hidden form is actually hidden")
+}
+
+// TestGroupAccessSSOWarning pins that the Group access settings section warns
+// when no OIDC provider is configured. user_groups (which group rules key on)
+// is populated only by an OIDC login's group claims or a forward-auth proxy's
+// group header (see ReconcileUserFromGroups, internal/db/reconcile.go); a
+// plain GitHub or Google login never carries a group claim. Without this, an
+// operator could grant a group viewer/manager access with no signal that the
+// rule can never take effect. The decision is the pure, unit-tested
+// groupAccessWarningText (jstests/login-providers.test.js); app.js applies it
+// from the same /api/auth/providers fetch loadProviders already makes.
+func TestGroupAccessSSOWarning(t *testing.T) {
+	assertContains(t, "index.html", `id="group-access-sso-warning" class="settings-block-warning" hidden`,
+		"the Group access section needs a warning element, hidden by default so a slow/failed providers fetch never shows a stale warning")
+	assertContains(t, "views/login-providers.js", "providerVisibility(providers).oidc",
+		"groupAccessWarningText must key off the same OIDC signal as the login button, not re-derive it")
+	assertContains(t, "app.js", "groupAccessWarningText(data)",
+		"loadProviders must apply groupAccessWarningText to the Group access warning element")
+	assertContains(t, "app.js", "getElementById('group-access-sso-warning')",
+		"loadProviders must locate the warning element to show or hide it")
+}
+
+// TestUsagePrivacyErrorMessage pins that saveUsagePrivacy rewrites the server's
+// usage_identity_mode validation errors (internal/api/apps.go, PATCH
+// /api/apps/{slug}) through the pure, unit-tested usagePrivacyErrorMessage
+// (jstests/usage-privacy.test.js) before displaying them, so the raw wire
+// field name never reaches the on-screen error next to the plain-language
+// "Usage identity granularity" label.
+func TestUsagePrivacyErrorMessage(t *testing.T) {
+	assertContains(t, "app.js", "setError(errEl, usagePrivacyErrorMessage(message))",
+		"saveUsagePrivacy must pass the server error through usagePrivacyErrorMessage before displaying it")
+	assertContains(t, "views/usage-privacy.js", "usage_identity_mode cannot collect more identity than the hub policy",
+		"usage-privacy.js must recognize the exact server message it is meant to rewrite, or a wording drift silently stops rewriting it")
+
+	// The rewrite is a lookup keyed by the server's exact wording, and a lookup
+	// miss fails silently: the raw wire text reaches the screen and nothing
+	// reports that the table went stale. Pinning both halves against the
+	// handler that emits them turns a reword on either side into a build
+	// failure instead.
+	for _, msg := range []string{
+		"usage_identity_mode cannot collect more identity than the hub policy",
+		"usage_identity_mode must be disabled, unattributed, pseudonymous, identified, or null",
+	} {
+		assertFileContains(t, "../api/apps.go", msg,
+			"usage-privacy.js keys its rewrite on this exact message; if the handler no longer emits it, the rewrite is dead and the raw field name reaches the user")
+	}
 }
 
 // TestLoginBrandSlot pins the login card's brand slot. Signed out, the sidebar
@@ -1100,6 +1147,28 @@ func TestFrontendConsumesBrandingObject(t *testing.T) {
 		"router.js must compose document.title as current.title + ' · ' + brandTitle so page titles include the brand name")
 }
 
+// TestEveryPageViewNamesItself guards that each routed page hands the router a
+// title. router.js sets document.title from `current.title` and falls back to
+// the bare brand name when a view omits one, so a missing title is invisible
+// on screen and only shows up in the browser tab, a bookmark and every history
+// entry - which is exactly where a page needs its name. The page views declare
+// theirs in views/*.js; /tokens is mounted inline in app.js and is the one that
+// has to be pinned here.
+func TestEveryPageViewNamesItself(t *testing.T) {
+	for path, title := range map[string]string{
+		"views/apps-grid.js": "title: 'Apps'",
+		"views/launchpad.js": "title: 'Apps'",
+		"views/users.js":     "title: 'Identity'",
+		"views/workers.js":   "title: 'Workers'",
+		"views/audit-log.js": "title: 'Audit Log'",
+		"views/overview.js":  "title: 'Overview'",
+		"app.js":             "title: 'API tokens'",
+	} {
+		assertContains(t, path, title,
+			"a routed page must return a title to the router, or its browser tab and bookmarks read as the bare product name")
+	}
+}
+
 // TestAppsPayloadExposesFleetFields guards the JSON contract for the two fleet
 // fields added to db.App. The apps grid / detail JS reads body.managed_by and
 // body.content_digest; if either field is renamed the build breaks here rather
@@ -1244,6 +1313,119 @@ func TestRenderPacingControlWired(t *testing.T) {
 		"render-pacing.js must export renderPacingAdvice so it can be imported by app.js and unit-tested")
 }
 
+// TestAuditActionListCoversEveryServerAction pins views/audit-log.js's
+// AUDIT_ACTIONS against the actions the server actually records.
+//
+// That list populates the Audit Log page's action filter. An action the server
+// writes but the list omits is therefore missing from the dropdown, and an
+// operator who filters for it cannot: the action is simply not offered, which
+// reads as "that never happened" rather than "this page cannot ask that
+// question". The gap is invisible on screen, so a test is the only thing that
+// can find it.
+//
+// The scan covers the three literal forms the server emits actions in: the
+// db.AuditEventParams{Action: "..."} field, the s.audit(r, "...") helper, and
+// the Audit* constants in internal/db. Actions assembled at runtime, or
+// written inside a SQL string, cannot be found this way, so they are listed as
+// exceptions with the reason - which keeps this test honest about what it does
+// not check rather than silently covering less than it claims.
+func TestAuditActionListCoversEveryServerAction(t *testing.T) {
+	// schedule_run_ is a prefix concatenated with a run status
+	// (internal/jobs/manager.go); the resulting schedule_run_* actions are on
+	// the JS list individually.
+	dynamic := map[string]string{
+		"schedule_run_": "prefix concatenated with the run status at emit time",
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?m)(?:^|[^A-Za-z0-9_])Action:\s*"([^"]+)"`),
+		regexp.MustCompile(`\.audit\(\s*\w+\s*,\s*"([^"]+)"`),
+		regexp.MustCompile(`(?m)^\s*Audit\w+\s*=\s*"([^"]+)"`),
+	}
+	emitted := map[string]string{}
+	for _, root := range []string{"..", "../../cmd"} {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			for _, re := range patterns {
+				for _, m := range re.FindAllStringSubmatch(string(b), -1) {
+					if _, skip := dynamic[m[1]]; !skip {
+						emitted[m[1]] = path
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+	if len(emitted) < 30 {
+		t.Fatalf("found only %d audit actions in the server source; the scan is broken, not the list", len(emitted))
+	}
+
+	b, err := fs.ReadFile(ui.Static(), "views/audit-log.js")
+	if err != nil {
+		t.Fatalf("read views/audit-log.js: %v", err)
+	}
+	src := string(b)
+	_, rest, ok := strings.Cut(src, "export const AUDIT_ACTIONS = [")
+	if !ok {
+		t.Fatal("views/audit-log.js no longer declares AUDIT_ACTIONS; the filter dropdown and the badge styling both read it")
+	}
+	block, _, ok := strings.Cut(rest, "];")
+	if !ok {
+		t.Fatal("AUDIT_ACTIONS is not a closed array literal")
+	}
+	listed := map[string]bool{}
+	for _, m := range regexp.MustCompile(`'([^']+)'`).FindAllStringSubmatch(block, -1) {
+		listed[m[1]] = true
+	}
+
+	for action, path := range emitted {
+		if !listed[action] {
+			t.Errorf("%s records audit action %q, which AUDIT_ACTIONS omits: it cannot be selected in the Audit Log filter", path, action)
+		}
+	}
+}
+
+// TestHeadingLevelsNeverSkip walks index.html in source order and asserts no
+// heading is more than one level deeper than the heading before it.
+//
+// A screen reader's heading list is the page's table of contents, and a jump
+// from h1 straight to h3 tells the reader a level exists that they missed, so
+// they go hunting for a section that was never written. Each view section in
+// this file opens with its own h1, and going shallower is always legal, so a
+// single walk over the whole document is a valid check: the only thing it can
+// report is a genuine downward skip.
+func TestHeadingLevelsNeverSkip(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	src := string(b)
+	headings := regexp.MustCompile(`<h([1-6])[ >]`).FindAllStringSubmatchIndex(src, -1)
+	if len(headings) < 20 {
+		t.Fatalf("found only %d headings in index.html; the matcher is broken, not the markup", len(headings))
+	}
+	previous := 0
+	for _, m := range headings {
+		level := int(src[m[2]] - '0')
+		if previous != 0 && level > previous+1 {
+			line := 1 + strings.Count(src[:m[0]], "\n")
+			t.Errorf("index.html:%d: h%d follows h%d, skipping h%d", line, level, previous, previous+1)
+		}
+		previous = level
+	}
+}
+
 // assertFileContains reads an on-disk file (not embedded) by absolute path and
 // asserts it contains needle.
 func assertFileContains(t *testing.T, absPath, needle, contract string) {
@@ -1346,7 +1528,7 @@ func TestLifecycleControlsWiring(t *testing.T) {
 	}
 	assertContains(t, "app.js", "if_not_running=true",
 		"Start must use the idempotent restart form so a second click does not cycle an app another operator already brought up")
-	assertContains(t, "app.js", "'stop', 'sleep',",
+	assertContains(t, "views/audit-log.js", "'stop', 'sleep',",
 		"the audit-log filter must list the sleep action or sleep events render as an unknown action and cannot be filtered")
 
 	// The detail header shows the same actions as the card, driven by the same
@@ -1933,34 +2115,37 @@ func TestSeedReplicasConsumesNewFields(t *testing.T) {
 		"seedReplicasFromStatus must read r.metrics_available to show n/a for PID-less replicas on initial load; see plan-01 Contract 5")
 }
 
-// TestKnownActionsAutoscale pins the knownActions array in app.js to include
-// the two new autoscale audit actions and to not duplicate create_user.
+// TestKnownActionsAutoscale pins the AUDIT_ACTIONS array in views/audit-log.js
+// to include the two new autoscale audit actions and to not duplicate
+// create_user. AUDIT_ACTIONS is the single source of truth for both the
+// Action column's badge styling and the Audit Log filter dropdown (app.js
+// imports it rather than declaring its own list).
 func TestKnownActionsAutoscale(t *testing.T) {
-	assertContains(t, "app.js", "'autoscale_scale_up'",
-		"knownActions in app.js renderAuditEvents must include autoscale_scale_up; see Contract 8")
-	assertContains(t, "app.js", "'autoscale_scale_down'",
-		"knownActions in app.js renderAuditEvents must include autoscale_scale_down; see Contract 8")
+	assertContains(t, "views/audit-log.js", "'autoscale_scale_up'",
+		"AUDIT_ACTIONS in views/audit-log.js must include autoscale_scale_up; see Contract 8")
+	assertContains(t, "views/audit-log.js", "'autoscale_scale_down'",
+		"AUDIT_ACTIONS in views/audit-log.js must include autoscale_scale_down; see Contract 8")
 
-	// Assert no duplicate create_user: count occurrences inside knownActions.
-	b, err := fs.ReadFile(ui.Static(), "app.js")
+	// Assert no duplicate create_user: count occurrences inside AUDIT_ACTIONS.
+	b, err := fs.ReadFile(ui.Static(), "views/audit-log.js")
 	if err != nil {
-		t.Fatalf("read app.js: %v", err)
+		t.Fatalf("read views/audit-log.js: %v", err)
 	}
 	src := string(b)
-	// Locate knownActions array by finding the renderAuditEvents function
-	// and extracting the array body up to its closing bracket.
-	start := strings.Index(src, "const knownActions = [")
+	// Locate the AUDIT_ACTIONS array and extract its body up to the closing
+	// bracket.
+	start := strings.Index(src, "export const AUDIT_ACTIONS = [")
 	if start < 0 {
-		t.Fatal("app.js: cannot find `const knownActions = [` inside renderAuditEvents")
+		t.Fatal("views/audit-log.js: cannot find `export const AUDIT_ACTIONS = [`")
 	}
 	end := strings.Index(src[start:], "];")
 	if end < 0 {
-		t.Fatal("app.js: cannot find closing `];` for knownActions array")
+		t.Fatal("views/audit-log.js: cannot find closing `];` for AUDIT_ACTIONS array")
 	}
 	arrayBody := src[start : start+end+2]
 	count := strings.Count(arrayBody, "'create_user'")
 	if count != 1 {
-		t.Fatalf("app.js knownActions: 'create_user' appears %d time(s); want exactly 1 (remove the duplicate OAuth comment block; see Contract 8)", count)
+		t.Fatalf("views/audit-log.js AUDIT_ACTIONS: 'create_user' appears %d time(s); want exactly 1", count)
 	}
 }
 
@@ -2204,6 +2389,59 @@ func TestUsersRoleDropdownAllowsAutomaticGovernance(t *testing.T) {
 	assertContains(t, "app.js", "userRolePresentation(u)", "users must see their effective role and its source")
 }
 
+// TestDefaultActionBadgeRuleComesFirst guards the source order the action badge
+// colours depend on. app.js puts badge-action-default on every action badge and
+// adds the per-action class on top, because .badge itself sets no background or
+// colour and a listed action with no rule of its own would otherwise render as
+// bare text. The two classes have equal specificity, so the only thing deciding
+// which colour wins is which rule the stylesheet declares last: with the default
+// declared after the per-action rules, every badge silently turns grey.
+func TestDefaultActionBadgeRuleComesFirst(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	css := string(b)
+	def := strings.Index(css, ".badge-action-default")
+	if def < 0 {
+		t.Fatal("style.css no longer defines .badge-action-default, which every action badge carries as its base")
+	}
+	// Two bounds: the default must come after the shared .badge block it builds
+	// on, and before the first per-action colour rule it must not override.
+	base := strings.Index(css, ".badge {")
+	if base < 0 || def < base {
+		t.Errorf(".badge-action-default at %d must be declared after the shared .badge block at %d", def, base)
+	}
+	for _, action := range []string{".badge-action-deploy ", ".badge-action-login_failed"} {
+		if at := strings.Index(css, action); at < 0 || def > at {
+			t.Errorf(".badge-action-default at %d must be declared before %s at %d, or it overrides that action's colour", def, action, at)
+		}
+	}
+}
+
+// TestUsersRoleDropdownOffersViewer keeps Viewer available in both user controls.
+func TestUsersRoleDropdownOffersViewer(t *testing.T) {
+	assertContains(t, "app.js", "for (const r of ['viewer', 'developer', 'operator', 'admin'])",
+		"the People table must offer every global role, including Viewer")
+	// The exact multi-line block (not a bare "viewer" option string) because
+	// #service-credential-role also offers a Viewer option elsewhere in the
+	// same file; a looser needle would pass even with #new-user-role reverted.
+	assertContains(t, "index.html", "<select id=\"new-user-role\">\n            <option value=\"viewer\">Viewer</option>",
+		`the "+ New user" modal's role <select> must offer Viewer alongside Developer/Operator/Admin`)
+}
+
+// TestUsersPageWiresRevokeSessions guards the "sign someone out immediately"
+// path. The server has a dedicated endpoint for this
+// (POST /api/users/{id}/revoke-sessions, handleRevokeUserSessions in
+// internal/api/users.go) and the CLI exposes it directly
+// (shinyhub users revoke-sessions), but until this fix the only UI path to
+// force a re-login was deleting the account outright. Losing this wiring
+// would silently remove the softer lockout option from the dashboard again.
+func TestUsersPageWiresRevokeSessions(t *testing.T) {
+	assertContains(t, "app.js", "/api/users/${id}/revoke-sessions",
+		"the Identity page must call the server's dedicated revoke-sessions endpoint")
+}
+
 // TestMemberRoleDropdownWiring guards the Access-tab member-role control. The
 // member list must render an editable <select> (viewer/manager) per member and
 // PATCH /api/apps/:slug/members/:user_id on change so a manager can promote or
@@ -2258,9 +2496,68 @@ func TestGroupAccessShowsManifestSource(t *testing.T) {
 // gray default). See internal/api/apps.go (grant/revoke/reconcile_group_access).
 func TestAuditKnownActionsIncludeGroupAccess(t *testing.T) {
 	for _, a := range []string{"grant_group_access", "revoke_group_access", "reconcile_group_access"} {
-		assertContains(t, "app.js", "'"+a+"'",
-			"app.js knownActions must include "+a+" so the audit badge is labelled")
+		assertContains(t, "views/audit-log.js", "'"+a+"'",
+			"AUDIT_ACTIONS in views/audit-log.js must include "+a+" so the audit badge is labelled")
 	}
+}
+
+// TestAuditActionFilterWiring guards the Audit Log page's action filter. The
+// server supports filtering GET /api/audit by action, run, event, and a
+// since/until date range (see internal/api/audit.go's AuditEventFilter), so the
+// dropdown must be populated from the same AUDIT_ACTIONS list used for badge
+// styling and must reset to page 0 through the shared applyAuditFilters, which
+// carries the date range with it; there is no resource or user filter to wire
+// since the server cannot answer one.
+func TestAuditActionFilterWiring(t *testing.T) {
+	assertContains(t, "index.html", `id="audit-action-filter"`,
+		"index.html must expose #audit-action-filter so the Audit Log page can offer an action filter")
+	assertContains(t, "app.js", "for (const action of AUDIT_ACTIONS)",
+		"app.js must populate the audit action filter's options from AUDIT_ACTIONS")
+	assertContains(t, "app.js", "auditActionFilter.addEventListener('change', applyAuditFilters)",
+		"changing the audit action filter must go through applyAuditFilters, so the active date range survives the change")
+	assertContains(t, "app.js", "if (auditActionFilter) auditActionFilter.value = selection.action || '';",
+		"updateAuditContext must keep the audit action filter in sync with the active selection")
+}
+
+// TestAuditDateRangeWiring guards the Audit Log page's date range. The pieces
+// live in three files that no jsdom test can import together: the inputs in
+// index.html, their listeners in the app.js IIFE, and the query building in
+// views/audit-log.js (unit-tested separately). A range whose inputs never reach
+// the request is the failure this pins - the operator picks two dates, the page
+// reloads, and the listing is unchanged.
+func TestAuditDateRangeWiring(t *testing.T) {
+	assertContains(t, "index.html", `id="audit-since"`,
+		"index.html must expose #audit-since so the Audit Log page can offer a start date")
+	assertContains(t, "index.html", `id="audit-until"`,
+		"index.html must expose #audit-until so the Audit Log page can offer an end date")
+	assertContains(t, "app.js", "auditSince?.addEventListener('change', applyAuditFilters)",
+		"the audit start date must reload the listing when it changes")
+	assertContains(t, "app.js", "auditUntil?.addEventListener('change', applyAuditFilters)",
+		"the audit end date must reload the listing when it changes")
+	// 'input' fires on every keystroke inside a native date picker, which would
+	// query the log for partially-typed years.
+	assertNotContains(t, "app.js", "auditSince?.addEventListener('input'",
+		"the audit date inputs must listen on 'change', not 'input': a partially typed date is a real value that would be queried")
+	assertContains(t, "app.js", "since: auditSince ? auditSince.value : ''",
+		"applyAuditFilters must read the start date out of the input, or the picker changes nothing")
+	assertContains(t, "app.js", "until: auditUntil ? auditUntil.value : ''",
+		"applyAuditFilters must read the end date out of the input, or the picker changes nothing")
+	assertContains(t, "app.js", "auditRangeSuffix",
+		"updateAuditContext must describe the active range, so an empty listing says which window was searched")
+	assertContains(t, "style.css", ".audit-date-range",
+		"the audit date range needs its own style; unstyled inputs inherit no spacing from .toolbar-actions")
+}
+
+// TestAuditDetailErrorIsFlaggedNotOrdinary guards the detail_error contract
+// (db.AuditDetail, internal/db/audit_detail.go): a detail the server failed
+// to encode must render as a visible problem, never as one more ordinary
+// field a reader would trust like every other row's detail.
+func TestAuditDetailErrorIsFlaggedNotOrdinary(t *testing.T) {
+	assertContains(t, "app.js", "detailEntries[0].isError",
+		"renderAuditEvents must branch on auditDetailEntries' isError flag instead of always rendering the generic details expander")
+	assertContains(t, "app.js", "audit-detail-error",
+		"a detail_error entry must be tagged with the audit-detail-error class so it is styled as a problem")
+	assertContains(t, "style.css", ".audit-detail-error", "audit-detail-error must have a distinct (red) style, not the default table text color")
 }
 
 // TestMinWarmReplicasUIContract guards the pre-warming knob on the Configuration
@@ -2314,6 +2611,28 @@ func TestKebabMenusAreWired(t *testing.T) {
 		"the app-detail header kebab's per-app visibility must be decided in one place, from appCardActions")
 	assertNotContains(t, "views/app-detail.js", "headerKebab",
 		"app-detail.js must not also set the header kebab's visibility; ctx.setDetailApp already drives it through syncDetailHeaderActions")
+}
+
+// TestAppDetailDeployHiddenForPerAppViewer guards the Deploy button shown at
+// the top of the app-detail page. Unlike the kebab's Restart/Sleep/Stop/Start
+// items, Deploy was never gated on canManageApp: a per-app Viewer (reachable
+// whenever their global role clears the route guard, e.g. developer/operator
+// with a Viewer member grant on this one app) saw an enabled Deploy button
+// that the API always answers with 403. It must be hidden the same way the
+// other manager-only controls already are.
+func TestAppDetailDeployHiddenForPerAppViewer(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(b)
+	body := funcBody(t, src, "function syncDetailHeaderActions(app)")
+	if !strings.Contains(body, "canManageApp(state.user, app)") {
+		t.Fatal("syncDetailHeaderActions must compute canManage from canManageApp, the same source of truth the kebab items use")
+	}
+	if !strings.Contains(body, "dDeploy.hidden = !canManage") {
+		t.Fatal("syncDetailHeaderActions must hide app-detail-deploy when the viewer cannot manage this app")
+	}
 }
 
 // TestKebabItemActivationReturnsFocus pins the ordering the focus handoff needs.
@@ -2847,9 +3166,13 @@ func TestDetailTabsAreFolderTabs(t *testing.T) {
 // an SSE stream for an app awaiting its first deploy. Such an app has no log
 // file, so the stream errors immediately and printed "(log stream disconnected)";
 // instead the tab must render a "No logs yet" empty state.
+//
+// The gate is awaitingFirstDeploy, not deploy_count: deploy_count counts only
+// SUCCESSFUL deploys, so an app whose first deploy crashed on startup reads 0
+// and had its traceback hidden behind first-deploy onboarding copy.
 func TestLogsTabEmptyStateForNeverDeployed(t *testing.T) {
-	assertContains(t, "views/app-detail.js", "(app.deploy_count || 0) === 0",
-		"renderLogs must short-circuit on a never-deployed app instead of opening EventSource")
+	assertContains(t, "views/app-detail.js", "if (awaitingFirstDeploy(app)) {",
+		"renderLogs must short-circuit on a never-attempted app instead of opening EventSource")
 	assertContains(t, "views/app-detail.js", "No logs yet",
 		"the never-deployed Logs tab must show a 'No logs yet' empty state")
 	assertContains(t, "style.css", "\n.logs-empty {",
@@ -2861,10 +3184,44 @@ func TestLogsTabEmptyStateForNeverDeployed(t *testing.T) {
 		t.Fatalf("read app-detail.js: %v", err)
 	}
 	js := string(b)
-	guard := strings.Index(js, "(app.deploy_count || 0) === 0")
-	viewer := strings.Index(js, "return createLogsViewer(")
+	logs := strings.Index(js, "function renderLogs(")
+	if logs < 0 {
+		t.Fatal("app-detail.js: renderLogs is gone")
+	}
+	guard := strings.Index(js[logs:], "if (awaitingFirstDeploy(app)) {")
+	viewer := strings.Index(js[logs:], "return createLogsViewer(")
 	if guard < 0 || viewer < 0 || guard > viewer {
-		t.Fatal("app-detail.js: the never-deployed guard must come before the multi-replica log viewer is opened")
+		t.Fatal("app-detail.js: renderLogs' never-deployed guard must come before the multi-replica log viewer is opened")
+	}
+	// A crashed first deploy must reach the log viewer. Gating on deploy_count
+	// anywhere in renderLogs would put it back behind the empty state.
+	end := strings.Index(js[logs:], "\nfunction ")
+	if end < 0 {
+		end = len(js) - logs
+	}
+	if strings.Contains(js[logs:logs+end], "app.deploy_count") {
+		t.Fatal("app-detail.js: renderLogs must not gate on deploy_count, which counts successes only and hides a crashed first deploy's traceback")
+	}
+}
+
+// TestBrowserBundleFilterIsShared guards that the browser's folder-drop deploy
+// classifies bundle entries through the shared, unit-tested predicate. Inlining
+// the rules back into app.js's IIFE would put them out of reach of jsdom, which
+// is how the client half silently skipped the slash-bearing cache directories
+// (renv/library) that the CLI excludes.
+func TestBrowserBundleFilterIsShared(t *testing.T) {
+	assertContains(t, "app.js", "import { inspectBundleEntry } from '/static/views/bundle-filter.js';",
+		"app.js must classify dropped-folder entries through the shared bundle filter")
+	b, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	if strings.Contains(string(b), "function inspectBundleEntry(") {
+		t.Fatal("app.js: inspectBundleEntry must live in views/bundle-filter.js, where jsdom can test it")
+	}
+	// Both call sites must go through it, or an entry class escapes the rules.
+	if n := strings.Count(string(b), "inspectBundleEntry(rules,"); n != 2 {
+		t.Fatalf("app.js: want both the directory and file walk to classify through the shared filter, got %d call sites", n)
 	}
 }
 
@@ -3167,7 +3524,7 @@ func TestRootHomeUIContract(t *testing.T) {
 		"the SPA registers /home as the stable authenticated home alias")
 	assertContains(t, "index.html", `href="/home" data-nav class="brand brand-home" aria-label="ShinyHub home"`,
 		"the signed-in desktop and mobile brand marks must be accessible links to the stable home route")
-	assertContains(t, "views/branding.js", "`ShinyHub — ${intent.siteTitle} home`",
+	assertContains(t, "views/branding.js", "`ShinyHub: ${intent.siteTitle} home`",
 		"signed-in home links must identify ShinyHub and the configured hub title")
 	assertContains(t, "views/branding.js", "renderSignedInBrand(doc, slot, intent.siteTitle)",
 		"signed-in branding must keep the ShinyHub lockup and render the hub title as a subtitle")
@@ -3662,6 +4019,7 @@ func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
 	}
 
 	checkGuard("async function deleteUser(id, username, btn)", "deleteUser", "btn.disabled = true", "btn.disabled = false")
+	checkGuard("async function revokeUserSessions(id, username, btn)", "revokeUserSessions", "btn.disabled = true", "btn.disabled = false")
 	checkGuard("async function revokeToken(id, name, btn)", "revokeToken", "btn.disabled = true", "btn.disabled = false")
 	checkGuard("async function submitNewUser(event)", "submitNewUser", "submitBtn.disabled = true", "submitBtn.disabled = false")
 	checkGuard("async function performRestart(slug, btn, cardLocal = false)", "the Restart request handler", "btn.disabled = true", "btn.disabled = false")
@@ -3674,6 +4032,9 @@ func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
 	// call site, not just declare an unused parameter.
 	if !strings.Contains(src, "deleteUser(u.id, u.username, delBtn)") {
 		t.Fatal("the Delete user button click handler must pass its own button through to deleteUser for the disable guard")
+	}
+	if !strings.Contains(src, "revokeUserSessions(u.id, u.username, revokeBtn)") {
+		t.Fatal("the Sign out everywhere button click handler must pass its own button through to revokeUserSessions for the disable guard")
 	}
 	if !strings.Contains(src, "revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'), btn)") {
 		t.Fatal("the Revoke token button click handler must pass its own button through to revokeToken for the disable guard")
@@ -3977,5 +4338,192 @@ func TestProjectEditModalDoesNotClearDescription(t *testing.T) {
 	}
 	if strings.Contains(body, "icon_emoji: iconEmoji, description") {
 		t.Error("buildProjectPatchBody must never include description unconditionally in the initial object literal: \"\" is an explicit clear")
+	}
+}
+
+// TestEveryInlineRouteNamesItsPage guards the class of defect behind the wrong
+// browser-tab titles: a route whose mount returns no title falls back to the
+// bare product name (router.js), so two different pages become
+// indistinguishable in a tab strip, in history and in a bookmark.
+//
+// Routes that delegate to a mount* module are covered by
+// jstests/route-titles.test.js, which can import those modules. A route that
+// builds its own object literal inline cannot be imported (app.js is one large
+// IIFE), so it is pinned here instead. Today that is only /tokens; the check is
+// written over whatever the file contains so the next inline route added
+// without a title fails rather than shipping unnoticed.
+func TestEveryInlineRouteNamesItsPage(t *testing.T) {
+	app := readStatic(t, "app.js")
+	// Each registration's callback body, up to the next registration. An inline
+	// route is one that constructs its own return value rather than handing off
+	// to a mount function.
+	reg := regexp.MustCompile(`router\.register\('([^']+)'`)
+	locs := reg.FindAllStringSubmatchIndex(app, -1)
+	if len(locs) == 0 {
+		t.Fatal("no router.register calls found in app.js; this test is no longer checking anything")
+	}
+	inline := 0
+	for i, loc := range locs {
+		path := app[loc[2]:loc[3]]
+		end := len(app)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		body := app[loc[0]:end]
+		if !strings.Contains(body, "return {") {
+			continue // delegates to a mount* module; covered by route-titles.test.js
+		}
+		inline++
+		if !strings.Contains(body, "title:") {
+			t.Errorf("route %q returns an inline object with no title:, so its browser tab, "+
+				"history entry and bookmark all fall back to the bare product name", path)
+		}
+	}
+	if inline == 0 {
+		t.Fatal("no inline route objects found, so this test would pass however app.js were broken; " +
+			"if every route now delegates to a mount module, delete this test rather than leaving it vacuous")
+	}
+}
+
+// TestTokensRouteTitleMatchesItsHeading ties the /tokens tab title to the
+// page's own <h1>. The two live in different files, so renaming the heading
+// without the title (or the reverse) would leave the tab naming a page that no
+// longer exists - which is exactly what /users did before it was fixed.
+func TestTokensRouteTitleMatchesItsHeading(t *testing.T) {
+	heading := regexp.MustCompile(`<h1 id="tokens-heading">([^<]+)</h1>`).
+		FindStringSubmatch(readStatic(t, "index.html"))
+	if heading == nil {
+		t.Fatal("index.html no longer has an <h1 id=\"tokens-heading\">; update this test with the new heading id")
+	}
+	assertContains(t, "app.js", "title: '"+heading[1]+"'",
+		"the /tokens route title must match the page's own <h1> text ("+heading[1]+")")
+}
+
+// longDashInCopy reports the user-visible substrings of one line of dashboard
+// source that contain an em or en dash.
+//
+// Two contexts count as user-visible: a quoted string literal (which is what a
+// JS view assigns to textContent) and the text between two HTML tags. A code
+// comment is deliberately NOT checked - those are covered by the project's
+// writing-style rule but are invisible to an operator, and folding them in here
+// would bury a real copy regression under dozens of prose comments.
+//
+// The lone-dash placeholder is exempt. Rendering an em dash as the value of an
+// empty table cell is a deliberate typographic convention in this UI (unknown
+// CPU, no deployment source, no audit detail yet), used in dozens of places. A
+// gate that failed on it would be wrong rather than strict, and the first person
+// to hit it would silently delete the convention to get green.
+var (
+	copyQuotedSpan = regexp.MustCompile("'[^']*'|\"[^\"]*\"|`[^`]*`")
+	copyHTMLText   = regexp.MustCompile(`>[^<>]*<`)
+	// A quoted lone dash is the placeholder literal itself. It has to be removed
+	// from a span before the span is judged, because it routinely appears nested
+	// inside a larger one: `<dd>${x != null ? x : '—'}</dd>` is HTML text
+	// containing a placeholder, not copy containing a dash. Written as an
+	// alternation rather than a backreference, which RE2 does not support.
+	copyPlaceholder = regexp.MustCompile(`'\s*[\x{2014}\x{2013}]\s*'` +
+		`|"\s*[\x{2014}\x{2013}]\s*"` +
+		`|` + "`" + `\s*[\x{2014}\x{2013}]\s*` + "`")
+	copyLoneDashCell = regexp.MustCompile(`^>\s*[\x{2014}\x{2013}]\s*<$`)
+)
+
+func longDashInCopy(line string) []string {
+	var bad []string
+	spans := append(copyQuotedSpan.FindAllString(line, -1), copyHTMLText.FindAllString(line, -1)...)
+	for _, span := range spans {
+		if copyLoneDashCell.MatchString(strings.TrimSpace(span)) {
+			continue
+		}
+		if !strings.ContainsAny(copyPlaceholder.ReplaceAllString(span, ""), "—–") {
+			continue
+		}
+		bad = append(bad, strings.TrimSpace(span))
+	}
+	return bad
+}
+
+// TestUserVisibleCopyAvoidsLongDashes gates the dashboard's own copy on the
+// project's writing-style rule: no em or en dashes in anything a user reads.
+//
+// This is the enforcement point for a rule that is otherwise only written down.
+// The dashboard had accumulated about twenty of them in live copy - the tokens
+// page, the audit empty state, deploy and network error messages - because
+// nothing in the suite could see them. An instruction competes for attention and
+// loses at some rate; this does not.
+func TestUserVisibleCopyAvoidsLongDashes(t *testing.T) {
+	var checked, offending int
+	err := fs.WalkDir(ui.Static(), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || (!strings.HasSuffix(path, ".js") && !strings.HasSuffix(path, ".html")) {
+			return nil
+		}
+		body, err := fs.ReadFile(ui.Static(), path)
+		if err != nil {
+			return err
+		}
+		checked++
+		for i, line := range strings.Split(string(body), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, "/*") {
+				continue
+			}
+			for _, span := range longDashInCopy(line) {
+				offending++
+				t.Errorf("%s:%d: user-visible copy contains an em or en dash: %s\n"+
+					"\tUse a hyphen, a comma, parentheses, or two sentences. "+
+					"A lone dash as an empty-value placeholder is exempt and does not reach here.",
+					path, i+1, span)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk static: %v", err)
+	}
+	// Without this, an ui.Static() that resolved to an empty or wrong-rooted FS
+	// would make the sweep above pass while checking nothing at all.
+	if checked < 20 {
+		t.Fatalf("only %d static files were checked, so this gate is not seeing the dashboard; "+
+			"ui.Static() is probably rooted somewhere unexpected", checked)
+	}
+	_ = offending
+}
+
+// TestLongDashCheckerDistinguishesCopyFromPlaceholders is the second bound on
+// the gate above. The sweep passing proves nothing on its own: it would also
+// pass if longDashInCopy always returned nil, or if it skipped every context
+// that matters. These cases fix both what it must catch and what it must not.
+func TestLongDashCheckerDistinguishesCopyFromPlaceholders(t *testing.T) {
+	mustFlag := []struct{ name, line string }{
+		{"js string", "  el.textContent = 'No API tokens yet — create one to use the CLI.';"},
+		{"template literal", "  title.textContent = `Logs — ${slug}`;"},
+		{"html text", "      <p class=\"intro\">Shown once at creation — store it safely.</p>"},
+		{"en dash range", "  range.textContent = `Showing ${a}–${b}`;"},
+		{"double-quoted attribute copy", "  <input placeholder=\"Europe/Amsterdam — empty inherits the default\">"},
+		// Stripping placeholders must not blind the checker to a real dash that
+		// happens to share a line with one.
+		{"copy alongside a placeholder", "  <dd>${n != null ? n : '—'} — awaiting first deploy</dd>"},
+	}
+	for _, c := range mustFlag {
+		if got := longDashInCopy(c.line); len(got) == 0 {
+			t.Errorf("%s: expected a finding, got none for %q", c.name, c.line)
+		}
+	}
+
+	mustPass := []struct{ name, line string }{
+		{"lone dash html placeholder", "        <dd class=\"stat-value\" id=\"app-detail-cpu\">—</dd>"},
+		{"lone dash js placeholder", "    userCell.textContent = e.username || '—';"},
+		{"plain copy", "  el.textContent = 'No API tokens yet. Create one to use the CLI.';"},
+		{"hyphen range", "  range.textContent = `Showing ${a}-${b}`;"},
+		// The false positive this checker shipped with: a placeholder literal
+		// nested inside a larger HTML-text span.
+		{"placeholder nested in html text", "        <dd>${app.release_number != null ? 'v' + app.release_number : '—'}</dd>"},
+	}
+	for _, c := range mustPass {
+		if got := longDashInCopy(c.line); len(got) > 0 {
+			t.Errorf("%s: expected no finding, got %v for %q", c.name, got, c.line)
+		}
 	}
 }

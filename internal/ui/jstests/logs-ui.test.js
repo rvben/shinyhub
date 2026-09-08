@@ -4,12 +4,17 @@ import { JSDOM } from 'jsdom';
 import {
   appendBoundedLogEntry,
   createLogsViewer,
+  DEFAULT_LOG_TAIL,
   externalLogsCommand,
   filterLogEntries,
   formatLogSourceLabel,
   isFollowableLogSource,
   isExternalLogSource,
   isLiveLogSource,
+  logsAreTruncated,
+  logsEmptyMessage,
+  MAX_LOG_TAIL,
+  nextLoadMoreTail,
   normalizeLogSources,
   retainedLogDownloadURL,
   safeExternalLogsURL,
@@ -42,7 +47,7 @@ test('normalizeLogSources keeps distinct runs of one replica and sorts current f
 
 test('source labels and liveness are explicit', () => {
   const source = { replica: 2, status: 'running', tier: 'burst' };
-  assert.equal(formatLogSourceLabel(source), 'Replica #2 — Running · burst');
+  assert.equal(formatLogSourceLabel(source), 'Replica #2: Running · burst');
   assert.equal(isLiveLogSource(source), true);
   assert.equal(isFollowableLogSource(source), true);
   assert.equal(isFollowableLogSource({ ...source, stream_available: false }), false);
@@ -134,7 +139,11 @@ test('external live and stopped runs provide an actionable permission-safe AWS h
   assert.equal(panel.querySelector('#logs-download').textContent, 'External logs');
   assert.match(panel.querySelector('.logs-external-identity').textContent, /Task task-old.*eu-west-1.*analytics/);
   panel.querySelector('.logs-external-actions button').click();
-  await tick();
+  // The clipboard write resolves as a microtask, but the confirmation text is
+  // set via announce() (logs-ui.js), which defers to its own setTimeout(0) -
+  // an extra macrotask hop a single fixed-delay tick does not reliably cover
+  // under a loaded test runner. Poll for the announcement's final text.
+  await waitUntil(() => /command copied.*replica 2/i.test(panel.querySelector('#logs-announcement').textContent));
   assert.equal(copied.at(-1), "aws ecs describe-tasks --cluster 'analytics' --tasks 'arn:aws:ecs:eu-west-1:123:task/analytics/task-old' --region 'eu-west-1'");
   assert.match(panel.querySelector('#logs-announcement').textContent, /command copied.*replica 2/i);
 });
@@ -311,6 +320,10 @@ test('CloudWatch permission failures degrade to the direct AWS handoff', async (
 
   await waitUntil(() => /CloudWatch output is unavailable/i.test(panel.querySelector('#detail-logs-body').textContent));
   assert.match(panel.querySelector('.logs-status-text').textContent, /Delayed/i);
+  // announce() defers its own textContent write via a separate setTimeout(0),
+  // independent of the detail-body render awaited above, so it needs its own
+  // poll rather than an assumption that both settle together.
+  await waitUntil(() => /Direct AWS access remains available/i.test(panel.querySelector('#logs-announcement').textContent));
   assert.match(panel.querySelector('#logs-announcement').textContent, /Direct AWS access remains available/i);
   assert.equal(panel.querySelector('.logs-external-actions a').textContent, 'Open task logs');
 });
@@ -534,7 +547,12 @@ test('external log command remains available when clipboard access fails', async
   assert.equal(panel.querySelector('#logs-source').value, 'task-old');
   assert.equal(new URL(dom.window.location.href).searchParams.get('log_source'), 'task-old');
   panel.querySelector('.logs-external-actions button').click();
-  await tick();
+  // The rejected clipboard write is itself a promise, and the fallback text
+  // it triggers is announced via announce() (logs-ui.js), which defers the
+  // actual textContent write to its own setTimeout(0) on top of that. Two
+  // stacked macrotask hops is not reliably covered by one fixed-delay tick
+  // under a loaded test runner, so poll for the announcement's final text.
+  await waitUntil(() => /shown for manual copying/i.test(panel.querySelector('#logs-announcement').textContent));
   const fallback = panel.querySelector('.logs-external-command');
   assert.equal(fallback.textContent, externalLogsCommand(source));
   assert.equal(fallback.tabIndex, 0);
@@ -584,6 +602,59 @@ test('terminal snapshots append only lines not already observed live', () => {
   assert.deepEqual(unseenLogSuffix(['same'], ['same']), []);
 });
 
+// F6: the Logs tab silently capped static/history sources at 200 lines with
+// no way to see further back, and Search over that truncated buffer returned
+// a false "no match" for content that was simply never loaded. These pure
+// helpers back the "Load older lines" affordance and its truncation caveats.
+test('nextLoadMoreTail grows the requested window five-fold, capped at the server maximum', () => {
+  assert.equal(nextLoadMoreTail(DEFAULT_LOG_TAIL), 1000);
+  assert.equal(nextLoadMoreTail(1000), 5000);
+  assert.equal(nextLoadMoreTail(5000), MAX_LOG_TAIL);
+  assert.equal(nextLoadMoreTail(MAX_LOG_TAIL), MAX_LOG_TAIL);
+  assert.equal(nextLoadMoreTail(1), 1000, 'the current window is floored at the default before multiplying, so the first grown request is never smaller than 5x the default');
+});
+
+test('logsAreTruncated flags a session that dropped rendered entries or never loaded a source in full', () => {
+  const source = { source_id: 'a', external_logs: undefined };
+  assert.equal(logsAreTruncated([source], { trimmed: 3, fullyLoadedSourceIDs: new Set(['a']) }), true,
+    'client-side buffer eviction alone is enough to call the session truncated');
+  assert.equal(logsAreTruncated([source], { trimmed: 0, fullyLoadedSourceIDs: new Set() }), true,
+    'a source never proven complete is truncated even with nothing trimmed');
+  assert.equal(logsAreTruncated([source], { trimmed: 0, fullyLoadedSourceIDs: new Set(['a']) }), false);
+  const external = { source_id: 'b', stream_available: false, external_logs: { provider: 'aws_ecs' } };
+  assert.equal(logsAreTruncated([external], { trimmed: 0, fullyLoadedSourceIDs: new Set() }), false,
+    'an externally retained source has no ShinyHub-side window to be incomplete about');
+  assert.equal(logsAreTruncated([], { trimmed: 0, fullyLoadedSourceIDs: new Set() }), false);
+});
+
+test('logsEmptyMessage names the reason no lines are visible and offers Load older lines when it would help', () => {
+  assert.equal(
+    logsEmptyMessage({ hasSearch: false, truncated: false, canLoadMore: false, hasScopedSources: true, allExternal: false, hasAnySources: true }),
+    'Waiting for application output…',
+  );
+  assert.equal(
+    logsEmptyMessage({ hasSearch: false, truncated: false, canLoadMore: false, hasScopedSources: false, allExternal: false, hasAnySources: false }),
+    'No retained log sources were found.',
+  );
+  assert.equal(
+    logsEmptyMessage({ hasSearch: false, truncated: false, canLoadMore: false, hasScopedSources: true, allExternal: true, hasAnySources: true }),
+    'Application output is retained by its provider. Use the access details above.',
+  );
+  assert.equal(
+    logsEmptyMessage({ hasSearch: true, truncated: false, canLoadMore: false, hasScopedSources: true, allExternal: false, hasAnySources: true }),
+    'No visible log lines match this search.',
+  );
+  assert.equal(
+    logsEmptyMessage({ hasSearch: true, truncated: true, canLoadMore: true, hasScopedSources: true, allExternal: false, hasAnySources: true }),
+    'No matches in the log history loaded so far. Older output may not be loaded yet, so try Load older lines.',
+  );
+  assert.equal(
+    logsEmptyMessage({ hasSearch: true, truncated: true, canLoadMore: false, hasScopedSources: true, allExternal: false, hasAnySources: true }),
+    'No matches in the log history loaded so far. Older output may not be loaded yet.',
+    'still names the real reason for zero matches even when there is nothing left to load on demand',
+  );
+});
+
 test('selected source downloads its complete retained run while all scope exports visible output', async (t) => {
   const old = {
     source_id: 'old-run', run_id: 'old-run', replica: 4, status: 'stopped',
@@ -621,7 +692,10 @@ test('selected source downloads its complete retained run while all scope export
   const download = panel.querySelector('#logs-download');
   assert.equal(download.textContent, 'Download retained run');
   download.click();
-  await tick();
+  // The download completes as a microtask, but the confirmation text is set
+  // via announce()'s own deferred setTimeout(0), so poll for it rather than
+  // gambling on a single fixed-delay tick.
+  await waitUntil(() => /complete retained run/i.test(panel.querySelector('#logs-announcement').textContent));
   assert.match(requested.at(-1), /replica=4&download=true&run=old-run/);
   assert.equal(saved.at(-1).filename, 'demo-replica-4-old-run.log');
   assert.match(panel.querySelector('#logs-announcement').textContent, /complete retained run/i);
@@ -672,9 +746,12 @@ test('viewer merges live replicas, identifies every line, and loads ended logs o
   streams[1].onopen();
   streams[0].onmessage({ data: 'zero live' });
   streams[1].onmessage({ data: 'one live' });
-  await tick();
-
   const panel = dom.window.document.querySelector('#panel');
+  // Entries land via scheduleRender's requestAnimationFrame hop, not
+  // synchronously with onmessage, so poll for the settled row count instead
+  // of gambling on a single fixed-delay tick.
+  await waitUntil(() => panel.querySelectorAll('.log-entry-source').length === 4);
+
   assert.match(panel.querySelector('#logs-source').textContent, /All current replicas \(2 live, 3 total\)/);
   assert.deepEqual(
     [...panel.querySelectorAll('.log-entry-source')].map((el) => el.textContent),
@@ -713,7 +790,10 @@ test('pause buffers incoming lines and resume renders them', async (t) => {
   assert.doesNotMatch(panel.querySelector('#detail-logs-body').textContent, /buffered/);
   assert.equal(pause.textContent, 'Resume (1)');
   pause.click();
-  await tick();
+  // Resuming flushes the buffered line via scheduleRender's deferred
+  // requestAnimationFrame hop, not synchronously with the click, so poll for
+  // the rendered text instead of gambling on a single fixed-delay tick.
+  await waitUntil(() => /buffered while paused/.test(panel.querySelector('#detail-logs-body').textContent));
   assert.match(panel.querySelector('#detail-logs-body').textContent, /buffered while paused/);
   assert.equal(pause.getAttribute('aria-pressed'), 'false');
 });
@@ -803,11 +883,15 @@ test('pruning the selected run resets scope, reconnects current logs, and repair
   assert.equal(panel.querySelector('#logs-source').value, 'old-run');
   assert.equal(streams.length, 0, 'historical selection must not open current streams');
 
-  await new Promise((resolve) => setTimeout(resolve, 70));
-  assert.equal(panel.querySelector('#logs-source').value, 'all');
+  // The stale-source fallback runs on the interval poll (refreshEveryMs) and
+  // then reconnects and rerenders asynchronously, so poll for each settled
+  // condition instead of gambling on one fixed-delay wait.
+  await waitUntil(() => panel.querySelector('#logs-source').value === 'all');
   assert.equal(dom.window.location.search, '');
   assert.equal(streams.length, 1, 'falling back to all must open the current stream');
+  await waitUntil(() => /no longer retained/i.test(panel.querySelector('#detail-logs-body').textContent));
   assert.match(panel.querySelector('#detail-logs-body').textContent, /no longer retained/i);
+  await waitUntil(() => /no longer retained/i.test(panel.querySelector('#logs-announcement').textContent));
   assert.match(panel.querySelector('#logs-announcement').textContent, /no longer retained/i);
 });
 
@@ -844,8 +928,10 @@ test('a run that stops reconciles its final retained lines without duplicating s
   await tick();
   stream.onmessage({ data: 'boot' });
   stream.onmessage({ data: 'ready' });
-  await tick();
-  await new Promise((resolve) => setTimeout(resolve, 70));
+  // Terminal reconciliation runs on the discovery interval poll and then
+  // fetches and merges the final retained lines asynchronously, so poll for
+  // the fully merged text instead of gambling on fixed-delay waits.
+  await waitUntil(() => panel.querySelector('#detail-logs-body').textContent.includes('final crash detail'));
 
   const output = panel.querySelector('#detail-logs-body').textContent;
   assert.equal((output.match(/boot/g) || []).length, 1);
@@ -878,9 +964,12 @@ test('retention gaps are surfaced as source-specific operational events', async 
   t.after(() => { cleanup(); dom.window.close(); });
   await tick();
   stream.listeners.get('retention-gap')({ data: 'Output before this point is no longer retained' });
-  await tick();
-
+  // Both the detail body and the announcement update via scheduleRender's/
+  // announce()'s own deferred hops, not synchronously with the event, so
+  // poll for each settled condition instead of one fixed-delay tick.
+  await waitUntil(() => /Replica #2 reconnected.*no longer retained/i.test(panel.querySelector('#detail-logs-body').textContent));
   assert.match(panel.querySelector('#detail-logs-body').textContent, /Replica #2 reconnected.*no longer retained/i);
+  await waitUntil(() => /earlier output from replica 2.*no longer retained/i.test(panel.querySelector('#logs-announcement').textContent));
   assert.match(panel.querySelector('#logs-announcement').textContent, /earlier output from replica 2.*no longer retained/i);
 });
 
@@ -907,17 +996,142 @@ test('shared-log delivery degradation stays connected and reports recovery', asy
   await tick();
   stream.onopen();
   stream.listeners.get('stream-degraded')({ data: 'temporarily delayed' });
-  await tick();
+  // The status text/class update with the event, but the detail body and
+  // announcement render via their own deferred hops (scheduleRender /
+  // announce), so poll for those instead of gambling on one fixed-delay tick.
+  await waitUntil(() => /Replica #2 live output delayed/i.test(panel.querySelector('#detail-logs-body').textContent));
 
   assert.equal(panel.querySelector('.logs-status-text').textContent, 'Delayed · 1 live source waiting for log storage');
   assert.ok(panel.querySelector('.logs-stream-status').classList.contains('is-degraded'));
   assert.match(panel.querySelector('#detail-logs-body').textContent, /Replica #2 live output delayed/i);
+  await waitUntil(() => /temporarily delayed.*catch up automatically/i.test(panel.querySelector('#logs-announcement').textContent));
   assert.match(panel.querySelector('#logs-announcement').textContent, /temporarily delayed.*catch up automatically/i);
 
   stream.listeners.get('stream-recovered')({ data: 'recovered' });
-  await tick();
+  await waitUntil(() => /Replica #2 live output delivery recovered/i.test(panel.querySelector('#detail-logs-body').textContent));
   assert.equal(panel.querySelector('.logs-status-text').textContent, 'Live · 1 connected source');
   assert.ok(panel.querySelector('.logs-stream-status').classList.contains('is-connected'));
   assert.match(panel.querySelector('#detail-logs-body').textContent, /Replica #2 live output delivery recovered/i);
+  await waitUntil(() => /recovered and is catching up/i.test(panel.querySelector('#logs-announcement').textContent));
   assert.match(panel.querySelector('#logs-announcement').textContent, /recovered and is catching up/i);
+});
+
+test('Load older lines grows a static source past the default cap and retires itself once the run is fully loaded', async (t) => {
+  const source = { source_id: 'run-9', run_id: 'run-9', replica: 9, status: 'stopped', current: false, has_log: true };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs?log_source=run-9',
+    pretendToBeVisual: true,
+  });
+  const requested = [];
+  const api = async (url) => {
+    requested.push(url);
+    if (url.endsWith('/logs/sources')) return { ok: true, json: async () => ({ sources: [source] }) };
+    const tail = Number((url.match(/tail=(\d+)/) || [])[1]);
+    // The first fetch fills the default window exactly (nothing yet proves the
+    // run is shorter than that); the grown fetch returns fewer lines than it
+    // asked for, which is what proves the run is now fully loaded.
+    const count = tail === DEFAULT_LOG_TAIL ? DEFAULT_LOG_TAIL : 300;
+    const text = Array.from({ length: count }, (_, i) => `line ${i}`).join('\n') + '\n';
+    return { ok: true, text: async () => text };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, api, refreshEveryMs: 60_000 });
+  t.after(() => { cleanup(); dom.window.close(); });
+  // The initial fetch resolves as a microtask, but the render it triggers is
+  // deferred to a requestAnimationFrame callback (scheduleRender in
+  // logs-ui.js), so a single fixed-delay tick is not reliably long enough
+  // under a loaded test runner (jsdom's rAF shim can land past 20ms when the
+  // process is busy with other concurrent test files). Poll for the rendered
+  // count instead of guessing a delay.
+  await waitUntil(() => panel.querySelectorAll('.log-entry').length === DEFAULT_LOG_TAIL);
+
+  const loadMore = panel.querySelector('#logs-load-more');
+  assert.equal(loadMore.hidden, false, 'a fetch that exactly filled the requested window has not proven the run is shorter');
+  assert.equal(loadMore.textContent, 'Load older lines (up to 1,000)');
+  assert.equal(panel.querySelectorAll('.log-entry').length, DEFAULT_LOG_TAIL);
+
+  loadMore.click();
+  await waitUntil(() => panel.querySelectorAll('.log-entry').length === 300);
+
+  assert.match(requested.at(-1), /replica=9&run=run-9&tail=1000&follow=false/);
+  assert.equal(loadMore.hidden, true, 'a fetch returning fewer lines than the 1,000 requested proves the run is now fully loaded');
+  assert.equal(panel.querySelectorAll('.log-entry').length, 300, 'the grown fetch replaces the buffer rather than appending onto it');
+  assert.match(panel.querySelector('#detail-logs-body').textContent, /line 299/);
+  assert.match(panel.querySelector('#logs-announcement').textContent, /Loaded 300 lines for replica 9/);
+});
+
+test('Load older lines targets only a single selected static source, never live, external, or the aggregated view', async (t) => {
+  const live = { source_id: 'live-1', replica: 1, status: 'running', current: true, has_log: true };
+  const stopped = { source_id: 'run-9', run_id: 'run-9', replica: 9, status: 'stopped', current: false, has_log: true };
+  const external = {
+    source_id: 'ext-2', replica: 2, status: 'stopped', current: false, has_log: true, stream_available: false,
+    external_logs: { provider: 'aws_ecs', region: 'eu-west-1', resource: 'arn:aws:ecs:eu-west-1:1:task/x', cluster: 'x' },
+  };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs',
+    pretendToBeVisual: true,
+  });
+  class FakeEventSource { close() {} }
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) return { ok: true, json: async () => ({ sources: [live, stopped, external] }) };
+    const count = DEFAULT_LOG_TAIL;
+    return { ok: true, text: async () => Array.from({ length: count }, (_, i) => `line ${i}`).join('\n') + '\n' };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({
+    panel, app: { slug: 'demo' }, api, EventSourceClass: FakeEventSource, refreshEveryMs: 60_000,
+  });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await tick();
+
+  const loadMore = panel.querySelector('#logs-load-more');
+  const select = panel.querySelector('#logs-source');
+  assert.equal(select.value, 'all');
+  assert.equal(loadMore.hidden, true, 'the aggregated view has no single source to grow');
+
+  select.value = 'live-1';
+  select.dispatchEvent(new dom.window.Event('change'));
+  await tick();
+  assert.equal(loadMore.hidden, true, 'a live source keeps growing on its own via the stream');
+
+  select.value = 'ext-2';
+  select.dispatchEvent(new dom.window.Event('change'));
+  await tick();
+  assert.equal(loadMore.hidden, true, 'an externally retained source has no ShinyHub tail parameter to grow');
+
+  select.value = 'run-9';
+  select.dispatchEvent(new dom.window.Event('change'));
+  await tick();
+  assert.equal(loadMore.hidden, false, 'a single selected static source is exactly the case Load older lines targets');
+});
+
+test('a search that misses names unloaded history as the reason rather than reporting a flat no-match', async (t) => {
+  const source = { source_id: 'run-9', run_id: 'run-9', replica: 9, status: 'stopped', current: false, has_log: true };
+  const dom = new JSDOM('<section id="panel"></section>', {
+    url: 'https://shinyhub.test/apps/demo/logs?log_source=run-9',
+    pretendToBeVisual: true,
+  });
+  const api = async (url) => {
+    if (url.endsWith('/logs/sources')) return { ok: true, json: async () => ({ sources: [source] }) };
+    const text = Array.from({ length: DEFAULT_LOG_TAIL }, (_, i) => `line ${i}`).join('\n') + '\n';
+    return { ok: true, text: async () => text };
+  };
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, api, refreshEveryMs: 60_000 });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await tick();
+
+  const search = panel.querySelector('#logs-search');
+  search.value = 'needle not in the loaded window';
+  search.dispatchEvent(new dom.window.Event('input'));
+  // Filtering re-renders via scheduleRender's deferred hop, not synchronously
+  // with the input event, so poll for the settled message instead of
+  // gambling on a single fixed-delay tick.
+  await waitUntil(() => /Older output may not be loaded yet/.test(panel.querySelector('#detail-logs-body').textContent));
+
+  assert.match(
+    panel.querySelector('#detail-logs-body').textContent,
+    /Older output may not be loaded yet, so try Load older lines\./,
+    'an empty search result over a truncated buffer must not read as a plain no-match',
+  );
 });

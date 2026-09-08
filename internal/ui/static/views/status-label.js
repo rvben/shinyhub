@@ -14,6 +14,11 @@
 //                            slow freeze that fights the near-instant warm wake.
 //   suspended  → "Paused"    A frozen-but-resumable replica. "Suspended" is the
 //                            system's word; "Paused" is the operator's.
+//   reconciling → "Checking…" A replica the server recorded as running but has
+//                            not re-adopted yet, in the seconds after a restart.
+//                            "Reconciling" is control-plane vocabulary; what the
+//                            operator needs to read is that nobody is claiming
+//                            anything about this replica yet.
 //
 // Everything else keeps its standard name (Running, Deploying, Degraded, …) —
 // excellent copy leaves clear, recognized vocabulary alone.
@@ -27,6 +32,7 @@ const STATUS_LABELS = {
   hibernated: 'Sleeping',
   stopped:    'Stopped',
   suspended:  'Paused',
+  reconciling: 'Checking…',
   unknown:    'Unknown',
 };
 

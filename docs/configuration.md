@@ -57,7 +57,7 @@ be rolled back by restoring the old binary and that file:
 ```
 INFO pre-migration snapshot written
      path=/var/lib/shinyhub/shinyhub.db.pre-migration-v58-20260819T091223Z.sqlite
-     pending_migrations=1 note="never pruned automatically"
+     pending_migrations=1 retention=5
 ```
 
 The snapshot is written only when migrations are actually pending, so ordinary
@@ -65,12 +65,18 @@ restarts and same-version reloads write nothing. It is a complete, self-containe
 database (no `-wal`/`-shm` sidecars) taken with `VACUUM INTO`, safe to run while
 the server is live.
 
-Snapshots are **never deleted automatically**. Removing old ones is an explicit
-operator decision, so a disk-space policy is yours to set.
+After a new snapshot is written, older ones beyond
+`database.pre_migration_snapshot_retention` are pruned automatically, so an
+instance upgraded regularly does not accumulate one full-size copy of the
+database per upgrade forever. The newest snapshot is always kept regardless of
+the retention count: it is the only route back to the build that ran before
+the last upgrade, and a snapshot cannot be regenerated afterwards since it is
+a copy of a schema version the current binary no longer writes.
 
 ```yaml
 database:
-  pre_migration_snapshot: false   # SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT
+  pre_migration_snapshot: false        # SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT
+  pre_migration_snapshot_retention: 5  # SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT_RETENTION
 ```
 
 Turn it off when an external backup already covers the upgrade, or when the
@@ -135,6 +141,16 @@ rejected, with the move-it-into-place instructions above. Note the difference in
 scope, which matters when choosing between them - a snapshot rolls back the
 database alone, so any deploy that landed after it was taken stays on disk while
 the database no longer knows about it. An archive rolls back all three together.
+
+The `systemctl stop` is not advisory. Restoring into a live server renames the
+database out from under an open connection. `shinyhub restore` refuses to run
+while it can see a server: a running server publishes `<database>-running.json`
+beside its database file, so the refusal works from the database path alone,
+which is the one setting a restore cannot get wrong. `server.pid_file` naming a
+live process and anything listening on `server.host`/`server.port` are also
+treated as a running server. A marker left by a crash names a dead process and
+is ignored. `--force` skips the check, for a server you have confirmed stopped
+by other means.
 
 ## Dedicated application origin
 
@@ -232,8 +248,8 @@ from is not served at all.
 
 ## Environment overrides
 
-Configuration keys generally map to `SHINYHUB_<UPPER_SNAKE_CASE>` variables.
-For example:
+Most configuration keys have an environment variable, named
+`SHINYHUB_<UPPER_SNAKE_CASE>`. For example:
 
 ```bash
 export SHINYHUB_BASE_URL=https://hub.example.com
@@ -244,6 +260,119 @@ export SHINYHUB_RUNTIME_DOCKER_DEFAULT_MEMORY_MB=512
 
 Prefer environment variables or a secrets manager for credentials such as OAuth
 client secrets and database passwords.
+
+### The names are a fixed list, and a name that is not on it is only warned about
+
+The variables are read by name from an explicit list, not derived from the YAML
+key at runtime, so the mapping is not always mechanical: `server.base_url` is
+`SHINYHUB_BASE_URL` rather than `SHINYHUB_SERVER_BASE_URL`, while the listener
+is `SHINYHUB_SERVER_HOST` and `SHINYHUB_SERVER_PORT`. Names are written next to
+their key in
+[`shinyhub.yaml.example`](https://github.com/rvben/shinyhub/blob/main/shinyhub.yaml.example)
+and on the page that documents the setting; take the name from there rather than
+deriving it from the key. That file does not carry every name, so a key shown
+there without one may still have a variable, `server.host` and `server.port`
+being two such keys.
+
+A `SHINYHUB_*` variable that is not on the list changes nothing: the server
+still comes up healthy on the value the variable was meant to replace. It does
+say so, though. Startup logs one warning per unrecognized name, with the name
+ShinyHub thinks you meant when one is close enough:
+
+```
+WARN ignoring unrecognized environment variable; nothing reads it
+     name=SHINYHUB_PORT did_you_mean=SHINYHUB_SERVER_PORT
+WARN ignoring unrecognized environment variable; nothing reads it
+     name=SHINYHUB_TOTALLY_MADE_UP
+```
+
+`SHINYHUB_PORT` is the classic one: it is not a name ShinyHub reads (the port
+is `SHINYHUB_SERVER_PORT`), so setting it leaves the server on port 8080. It
+warns rather than refuses to boot, because a shared environment may legitimately
+carry a `SHINYHUB_` variable meant for something else, so the warning is yours
+to read.
+
+The startup log states the address that actually took effect, which is the
+cheapest way to confirm an override landed:
+
+```
+INFO listening version=0.15.7 addr=127.0.0.1:8080
+```
+
+### Log level and format
+
+Two variables have no configuration-file equivalent, because logging is wired
+before the config file is read:
+
+```bash
+export SHINYHUB_LOG_LEVEL=debug   # debug | info (default) | warn | error
+export SHINYHUB_LOG_FORMAT=json   # json | text
+```
+
+The format defaults to `text` when stdout is a terminal and `json` otherwise,
+so a service-managed server logs JSON without being told to.
+
+### auth.secret is the exception: prefer a file
+
+A process environment is readable by any process running as the same user
+(`/proc/<pid>/environ` on Linux, `ps eww` on macOS), and on the native runtime
+every deployed app is such a process. `auth.secret` signs every session token
+and derives the key encrypting every app's secret env vars, so it is the one
+credential worth taking out of the environment:
+
+```bash
+install -m 600 /dev/null /etc/shinyhub/auth.secret
+openssl rand -hex 32 > /etc/shinyhub/auth.secret
+export SHINYHUB_AUTH_SECRET_FILE=/etc/shinyhub/auth.secret
+unset SHINYHUB_AUTH_SECRET
+```
+
+Equivalently, `auth.secret_file` in the config file. The server reads it once at
+startup, trims surrounding whitespace, and refuses a file that is group- or
+world-readable. Setting both the file and `SHINYHUB_AUTH_SECRET` to different
+values is an error, since one of them would silently win. While the secret still
+comes from the environment on the native runtime, startup logs a warning.
+
+This narrows one exposure; it is not a tenant boundary. See
+[isolation.md](isolation.md) for why the native runtime should not host
+mutually-untrusting tenants.
+
+## Application logs and how long they are kept
+
+An application's stdout and stderr are written to one file per replica run,
+under `<apps_dir>/<slug>/logs/replica-<index>-<run-id>.log`. A run is one start
+of one replica: every restart, redeploy, hibernate-and-wake, and watchdog
+recovery opens a new file rather than appending to the previous one, so a run's
+output is never mixed with another's.
+
+Two separate limits apply, and only the second is configurable.
+
+**Within a run.** The file is capped at 5 MiB. On reaching the cap it is renamed
+to `<file>.1` and a fresh file is opened, and only one such backup is kept, so a
+single very chatty run retains its last 10 MiB or so and loses the rest. This
+cap is a constant with no configuration key: an application that logs a request
+per line at volume will lose its startup output.
+
+**Across runs.** Maintenance keeps the newest runs per app replica slot and
+deletes the rest, database rows and files together:
+
+```yaml
+maintenance:
+  app_log_run_retention_count: 20   # SHINYHUB_APP_LOG_RUN_RETENTION_COUNT
+  interval: 1h
+```
+
+The default is 20 runs per replica slot. `-1` keeps every run, which is the
+setting to reach for when you want a long forensic window on a quiet
+application; `0` selects the default rather than deleting everything. Pruning
+happens at `maintenance.interval` (and once at startup), and only completed runs
+are eligible, so the run currently serving is never removed. On an HA data plane
+the same setting governs the shared chunks as well; see
+[HA data plane](deployment/ha-data-plane.md).
+
+Disk cost is bounded by the product of these numbers: at the defaults, at most
+about 200 MiB of logs per replica slot for an application that fills every file,
+and far less in practice, since most runs never approach the cap.
 
 ## Host capacity
 
@@ -320,5 +449,5 @@ for the runner image, security boundary, lifecycle, and real-provider tests.
 ## Client configuration is different
 
 For client commands such as `deploy`, `apps`, and `fleet`, `SHINYHUB_CONFIG`
-selects the local credentials file—not the server YAML. Automation can avoid a
+selects the local credentials file, not the server YAML. Automation can avoid a
 credentials file by setting `SHINYHUB_HOST` and `SHINYHUB_TOKEN`.

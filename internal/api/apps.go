@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net/http"
 	"os"
@@ -129,11 +130,21 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	writeListPage(w, apps, total, limit, offset, nil)
 }
 
+// replicaStatusReconciling is a presentation-only replica status, never stored.
+// It names the startup window in which a process that survived a server restart
+// has not been re-adopted yet, so the control plane knows what was recorded but
+// has not confirmed it. It exists because the two statuses that would otherwise
+// be reported are both assertions the server cannot yet make: "running" claims a
+// process was found alive, and "stopped" claims it was found dead.
+const replicaStatusReconciling = "reconciling"
+
 // liveReplicaView returns a detached replica slice with the single-node process
 // manager overlaid on durable rows. In native/SQLite mode the manager is the
 // authority for whether a process exists: a DB row that still says running but
 // has no manager entry is reported stopped, not counted as live. Clustered mode
 // keeps the shared DB as authority because another server can own the process.
+// The one exception is the startup re-adoption window, where the manager is
+// empty because it has not looked yet; see replicaStatusReconciling.
 func (s *Server) liveReplicaView(slug string, stored []*db.Replica) []*db.Replica {
 	byIndex := make(map[int]*db.Replica, len(stored))
 	for _, rep := range stored {
@@ -146,8 +157,22 @@ func (s *Server) liveReplicaView(slug string, stored []*db.Replica) []*db.Replic
 
 	if s.manager != nil && !s.clustered {
 		live := s.manager.AllForSlug(slug)
+		// While startup re-adoption is outstanding the Manager is empty for a
+		// reason that has nothing to do with the app: nothing has looked yet. The
+		// override below reads that emptiness as proof of death, so during the
+		// window it would report every process that survived the restart as
+		// stopped and erase the PID that identifies it - a healthy, serving app
+		// shown as down, which is the one reading an operator acts on.
+		reconciling := s.manager.RecoveryPending()
 		for _, rep := range byIndex {
 			if rep.Status == db.ReplicaStatusRunning && (rep.Index >= len(live) || live[rep.Index] == nil) {
+				if reconciling {
+					// Not "stopped" and not "running": unexamined. The recorded PID
+					// stays so the row still names the process recovery is about to
+					// adjudicate.
+					rep.Status = replicaStatusReconciling
+					continue
+				}
 				rep.Status = string(process.StatusStopped)
 				rep.PID, rep.Port = nil, nil
 			}
@@ -412,8 +437,14 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Action:       "create_app",
 		ResourceType: "app",
 		ResourceID:   req.Slug,
-		IPAddress:    s.ClientIP(r),
-		RunID:        s.knownFleetRunID(r),
+		Detail: auditDetailJSON(map[string]any{
+			"name":     app.Name,
+			"access":   app.Access,
+			"owner_id": app.OwnerID,
+			"replicas": app.Replicas,
+		}),
+		IPAddress: s.ClientIP(r),
+		RunID:     s.knownFleetRunID(r),
 	})
 	w.Header().Set(hdrResourceRevision, appResourceRevision(app))
 	writeJSON(w, http.StatusCreated, app)
@@ -727,7 +758,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		clearPlacement       bool // an explicit null placement was provided
 		placementJSON        string
 		placementTotal       int
-		newPlacementTiers    []string // tiers (count>0) the new placement would run on
+		newPlacementTiers    []string       // tiers (count>0) the new placement would run on
+		newPlacementMap      map[string]int // the new placement object provided (nil when clearing or unset)
 		setAutoscale         bool
 		autoEnabled          bool
 		autoMin              int
@@ -1172,6 +1204,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			}
 			b, _ := json.Marshal(pm)
 			placementJSON, placementTotal, setPlacement = string(b), total, true
+			newPlacementMap = pm
 			for tier, count := range pm {
 				if count > 0 {
 					newPlacementTiers = append(newPlacementTiers, tier)
@@ -1335,6 +1368,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	oldWorkerMaxSessionLifetime := app.WorkerMaxSessionLifetimeSecs
 	oldProjectSlug := app.ProjectSlug
 	oldUsageIdentityMode := app.UsageIdentityMode
+	oldMaxSessions := app.MaxSessionsPerReplica
+	oldPlacementMap := app.PlacementMap()
 	if setUsageIdentityMode && s.usagePolicy == nil {
 		writeError(w, http.StatusServiceUnavailable, "usage privacy policy unavailable")
 		return
@@ -1344,7 +1379,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// never leaves the row half-updated. The managed_by marker is a separate
 	// follow-up write (SetAppManagedBy) that runs after this transaction commits;
 	// the post-patch refetch exposes the final consistent state to the caller.
-	priorStatus, _, priorMemoryLimitMB, priorCPUQuotaPercent, projectCreated, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
+	priorStatus, priorReplicas, priorMemoryLimitMB, priorCPUQuotaPercent, projectCreated, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:                         slug,
 		SetHibernate:                 setHibernateTimeout,
 		HibernateMinutes:             hibernateTimeout,
@@ -1507,6 +1542,19 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	cpuChanged := setCPUQuotaPercent && !intPtrEqual(oldCPUQuotaPercent, cpuQuotaPercent)
 	resourceChanged := memChanged || cpuChanged
 
+	// Same "changed", not merely "present", rule as the resource limits above:
+	// requesting the pool's current shape or a worker dial's current value is a
+	// no-op that must not restart the app or write a phantom audit entry.
+	replicasChanged := setReplicas && newReplicas != priorReplicas
+	maxSessionsChanged := setMaxSessions && newMaxSessions != oldMaxSessions
+	placementChanged := (setPlacement && !maps.Equal(oldPlacementMap, newPlacementMap)) ||
+		(clearPlacement && len(oldPlacementMap) > 0)
+	workerIsolationChanged := setWorkerIsolation && oldWorkerIsolation != newWorkerIsolation
+	workerGroupedSizeChanged := setWorkerGroupedSize && oldWorkerGroupedSize != newWorkerGroupedSize
+	workerMaxWorkersChanged := setWorkerMaxWorkers && oldWorkerMaxWorkers != newWorkerMaxWorkers
+	workerWarmSparesChanged := setWorkerWarmSpares && oldWorkerWarmSpares != newWorkerWarmSpares
+	workerMaxSessionLifetimeChanged := setWorkerMaxSessionLifetime && oldWorkerMaxSessionLifetime != newWorkerMaxSessionLifetime
+
 	// Post-commit side effects. These only take effect once the settings are
 	// durably persisted.
 	if setMaxSessions && s.proxy != nil {
@@ -1554,8 +1602,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			s.proxy.ReconcileElasticWarmSpares(slug)
 		}
 	}
-	workerChanged := setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerMaxSessionLifetime
-	if (setReplicas || setPlacement || clearPlacement || resourceChanged || workerChanged) && priorStatus == "running" {
+	workerChanged := workerIsolationChanged || workerGroupedSizeChanged || workerMaxWorkersChanged || workerMaxSessionLifetimeChanged
+	if (replicasChanged || placementChanged || resourceChanged || workerChanged) && priorStatus == "running" {
 		// Mark in-flight synchronously before launching the goroutine so the
 		// first GET after this PATCH returns observes the redeploy even though
 		// the app row still reads "running". The redeploy goroutine clears it.
@@ -1574,12 +1622,14 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Audit any non-resource field touch exactly as before (these log even with
-	// an empty detail). For resource limits, audit only a real change, so a no-op
-	// resource-only PATCH neither redeploys nor logs a phantom update_app event.
+	// an empty detail). For resource limits, the pool shape (replicas/placement),
+	// worker dials and the session cap, audit only a real change, so a no-op
+	// PATCH (e.g. --replicas set to the value it already is) neither redeploys
+	// nor logs a phantom update_app event.
 	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug || setIdentityHeaders || setUsageIdentityMode ||
-		setReplicas || setMaxSessions || setRenderSeconds || setMinWarmReplicas || setManagedBy ||
-		setPlacement || clearPlacement || setAutoscale ||
-		setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerWarmSpares || setWorkerMaxSessionLifetime ||
+		replicasChanged || maxSessionsChanged || setRenderSeconds || setMinWarmReplicas || setManagedBy ||
+		placementChanged || setAutoscale ||
+		workerIsolationChanged || workerGroupedSizeChanged || workerMaxWorkersChanged || workerWarmSparesChanged || workerMaxSessionLifetimeChanged ||
 		setEphemeralDataAck
 	if u := auth.UserFromContext(r.Context()); u != nil && (nonResourceTouched || memChanged || cpuChanged) {
 		detail := patchAppAuditDetail(
@@ -1587,13 +1637,16 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			setRenderSeconds, newRenderSeconds,
 			memChanged, oldMemoryLimitMB, memoryLimitMB,
 			cpuChanged, oldCPUQuotaPercent, cpuQuotaPercent,
-			setWorkerIsolation, oldWorkerIsolation, newWorkerIsolation,
-			setWorkerGroupedSize, oldWorkerGroupedSize, newWorkerGroupedSize,
-			setWorkerMaxWorkers, oldWorkerMaxWorkers, newWorkerMaxWorkers,
-			setWorkerWarmSpares, oldWorkerWarmSpares, newWorkerWarmSpares,
-			setWorkerMaxSessionLifetime, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime,
+			workerIsolationChanged, oldWorkerIsolation, newWorkerIsolation,
+			workerGroupedSizeChanged, oldWorkerGroupedSize, newWorkerGroupedSize,
+			workerMaxWorkersChanged, oldWorkerMaxWorkers, newWorkerMaxWorkers,
+			workerWarmSparesChanged, oldWorkerWarmSpares, newWorkerWarmSpares,
+			workerMaxSessionLifetimeChanged, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime,
 			setProjectSlug, oldProjectSlug, newProjectSlug,
-			setUsageIdentityMode, oldUsageIdentityMode, newUsageIdentityMode)
+			setUsageIdentityMode, oldUsageIdentityMode, newUsageIdentityMode,
+			replicasChanged, priorReplicas, newReplicas,
+			placementChanged, oldPlacementMap, newPlacementMap,
+			maxSessionsChanged, oldMaxSessions, newMaxSessions)
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
 			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r), RunID: s.knownFleetRunID(r),
@@ -1610,6 +1663,18 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"app": app}
 	if block := s.buildRenderPacingBlock(effectiveRenderSeconds, effectiveCap); block != nil {
 		resp["render_pacing"] = block
+	}
+	// Judged on the refetched app, so the effective limit and the placement
+	// tiers are both the post-patch state this request just produced.
+	if (setMemoryLimitMB || setCPUQuotaPercent) && s.manager != nil {
+		defMemMB, defCPUPct := s.cfg.Runtime.DefaultResourcesForApp(app)
+		memEnforced, cpuEnforced := s.manager.ResourceEnforcement(s.tiersForApp(app)...)
+		if warn := unenforcedLimitWarning(
+			setMemoryLimitMB, deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defMemMB), memEnforced,
+			setCPUQuotaPercent, deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defCPUPct), cpuEnforced,
+		); warn != "" {
+			warnings = append(warnings, warn)
+		}
 	}
 	for _, warn := range warnings {
 		addWarningHeader(w, warn)
@@ -1656,9 +1721,37 @@ func addWarningHeader(w http.ResponseWriter, msg string) {
 	w.Header().Set("X-ShinyHub-Warning", msg)
 }
 
+// unenforcedLimitWarning reports that a per-app resource limit this request
+// sets will not actually be applied, or "" when every limit it sets is
+// enforced. Native mode applies limits as cgroup v2 memory.max / cpu.max, which
+// requires the controllers to be delegated to the service; where they are not,
+// the value is stored and displayed but nothing constrains the process, and an
+// operator who reads "memory-limit set to 512 MiB" has been told something
+// false. Only an effective limit above zero is warned about: clearing a limit
+// or setting it to unlimited asks the runtime to enforce nothing, so there is
+// nothing to fail to enforce.
+func unenforcedLimitWarning(setMem bool, effMemMB int, memEnforced bool, setCPU bool, effCPUPct int, cpuEnforced bool) string {
+	var unenforced []string
+	if setMem && effMemMB > 0 && !memEnforced {
+		unenforced = append(unenforced, "memory")
+	}
+	if setCPU && effCPUPct > 0 && !cpuEnforced {
+		unenforced = append(unenforced, "CPU")
+	}
+	if len(unenforced) == 0 {
+		return ""
+	}
+	subject, verb, tail := unenforced[0]+" limit", "is", "for the limit to take effect"
+	if len(unenforced) == 2 {
+		subject, verb, tail = "memory and CPU limits", "are", "for the limits to take effect"
+	}
+	return "the " + subject + " " + verb + " recorded but not enforced on this host: the native runtime applies limits through cgroup v2, and the controllers are not delegated to the ShinyHub service. Delegate them (systemd Delegate=yes), or run the app under the Docker runtime, " + tail
+}
+
 // patchAppAuditDetail builds a JSON detail blob for the update_app audit event,
 // recording only the fields that were actually changed in this PATCH. Resource
-// limits are recorded as {old,new} (nil renders as JSON null = inherit).
+// limits, the pool shape (replicas/placement), worker dials and the session cap
+// are recorded as {old,new} (nil renders as JSON null = inherit/unset).
 func patchAppAuditDetail(
 	setMinWarmReplicas bool, minWarmReplicas int,
 	setRenderSeconds bool, renderSeconds float64,
@@ -1671,6 +1764,9 @@ func patchAppAuditDetail(
 	setWorkerMaxSessionLifetime bool, oldWorkerMaxSessionLifetime, newWorkerMaxSessionLifetime int,
 	setProjectSlug bool, oldProject, newProject string,
 	setUsageIdentityMode bool, oldUsageIdentityMode, newUsageIdentityMode *string,
+	replicasChanged bool, oldReplicas, newReplicas int,
+	placementChanged bool, oldPlacement, newPlacement map[string]int,
+	maxSessionsChanged bool, oldMaxSessions, newMaxSessions int,
 ) string {
 	d := map[string]any{}
 	if setMinWarmReplicas {
@@ -1705,6 +1801,15 @@ func patchAppAuditDetail(
 	}
 	if setUsageIdentityMode {
 		d["usage_identity_mode"] = map[string]any{"old": oldUsageIdentityMode, "new": newUsageIdentityMode}
+	}
+	if replicasChanged {
+		d["replicas"] = map[string]any{"old": oldReplicas, "new": newReplicas}
+	}
+	if placementChanged {
+		d["placement"] = map[string]any{"old": oldPlacement, "new": newPlacement}
+	}
+	if maxSessionsChanged {
+		d["max_sessions_per_replica"] = map[string]any{"old": oldMaxSessions, "new": newMaxSessions}
 	}
 	if len(d) == 0 {
 		return ""
@@ -1742,6 +1847,27 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 	if prev == nil {
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
 			slog.Error("restore: mark stopped (no previous deployment)", "slug", slug, "err", err)
+		}
+		// A first deploy has no previous pool to fall back to, so every durable
+		// replica row for this app belongs to the attempt that just failed its
+		// health check. bootReplicaAttempt already stopped that process; confirm
+		// the stop and clear the row's pid/port/status the same way activation
+		// recovery does, so the row does not keep reporting "starting" forever.
+		// liveReplicaView only downgrades a *running* row when the manager has no
+		// live entry for it, so a "starting" row with no live entry would
+		// otherwise pass straight through into the API response unchanged.
+		rows, err := s.store.ListReplicas(app.ID)
+		if err != nil {
+			slog.Error("restore: list replicas (no previous deployment)", "slug", slug, "err", err)
+			return
+		}
+		for _, row := range rows {
+			if row.Status == "stopped" {
+				continue
+			}
+			if cerr := s.confirmActivationReplicaStopped(app, row.Index); cerr != nil {
+				slog.Error("restore: confirm replica stopped (no previous deployment)", "slug", slug, "idx", row.Index, "err", cerr)
+			}
 		}
 		return
 	}
@@ -2203,18 +2329,31 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	defer dropUncommitted()
 
-	if err := os.MkdirAll(filepath.Dir(bundleZip), 0o750); err != nil {
+	// A store failure here is the operator's to fix (out of space, read-only
+	// mount, wrong ownership on apps_dir) and looks identical to a broken bundle
+	// from the client side, so name the cause rather than answering "internal
+	// error" to a deployer who would otherwise keep re-uploading a good bundle.
+	// The full error, host paths included, stays in the server log.
+	storeFailed := func(stage string, err error) {
+		slog.Error("deploy_store_bundle_failed", "slug", slug, "stage", stage, "err", err)
+		if status, msg, ok := bundleStorageFailure(err); ok {
+			writeError(w, status, msg)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal error")
+	}
+	if err := os.MkdirAll(filepath.Dir(bundleZip), 0o750); err != nil {
+		storeFailed("create bundle directory", err)
 		return
 	}
 	out, err := os.OpenFile(bundleZip, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		storeFailed("create bundle file", err)
 		return
 	}
 	if _, err := io.Copy(out, file); err != nil {
 		out.Close()
-		writeError(w, http.StatusInternalServerError, "internal error")
+		storeFailed("write bundle file", err)
 		return
 	}
 	out.Close()
@@ -2227,6 +2366,13 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, deploy.ErrBundleTooLarge) {
 			writeError(w, http.StatusRequestEntityTooLarge, "bundle extracted size exceeds limit")
+			return
+		}
+		// deploy.ExtractBundle has already stripped host paths from the
+		// filesystem errors it raises, so the cause survives as an errno and can
+		// be named for the deployer.
+		if status, msg, ok := bundleStorageFailure(err); ok {
+			writeError(w, status, msg)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -3232,8 +3378,17 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "deploy",
 			ResourceType: "app",
 			ResourceID:   slug,
-			IPAddress:    s.ClientIP(r),
-			RunID:        runID,
+			// The deployment id and content digest are what let a reader tie
+			// this event to a specific bundle on disk, and to the rollback that
+			// may later target it.
+			Detail: auditDetailJSON(map[string]any{
+				"deployment_id":  pendingDep.ID,
+				"version":        version,
+				"content_digest": pendingDep.ContentDigest,
+				"deploy_count":   updatedApp.DeployCount,
+			}),
+			IPAddress: s.ClientIP(r),
+			RunID:     runID,
 		})
 	}
 
@@ -3666,8 +3821,16 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "rollback",
 			ResourceType: "app",
 			ResourceID:   slug,
-			IPAddress:    s.ClientIP(r),
-			RunID:        runID,
+			// Which bundle the app landed on is the whole point of a rollback
+			// event; "targeted" distinguishes an operator naming a deployment
+			// from the default step back to the previous one.
+			Detail: auditDetailJSON(map[string]any{
+				"to_deployment_id": prev.ID,
+				"to_version":       prev.Version,
+				"targeted":         reqBody.DeploymentID != nil,
+			}),
+			IPAddress: s.ClientIP(r),
+			RunID:     runID,
 		})
 	}
 	// Rollbacks are not counted as deploys — deploy_count tracks forward deployments only.
@@ -3857,7 +4020,15 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "restart",
 			ResourceType: "app",
 			ResourceID:   slug,
-			IPAddress:    s.ClientIP(r),
+			// app still holds the pre-restart row; updatedApp is the reload
+			// after the pool came back. Recording where the app was separates a
+			// routine cycle of a healthy app from an operator reviving one that
+			// had crashed, which is the question an audit reader is asking.
+			Detail: auditDetailJSON(map[string]any{
+				"previous_status": app.Status,
+				"replicas":        updatedApp.Replicas,
+			}),
+			IPAddress: s.ClientIP(r),
 		})
 	}
 	s.decorateAppForCaller(u, updatedApp)
@@ -3975,6 +4146,10 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Captured before the post-stop reload overwrites app: the audit event
+	// records what this stop actually interrupted, and a stop of an already
+	// stopped app is a different fact from a stop that took a running one down.
+	previousStatus := app.Status
 
 	// Serialize with any in-flight deploy/restart on this slug.
 	release := s.acquireDeployLock(slug)
@@ -4037,7 +4212,10 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "stop",
 			ResourceType: "app",
 			ResourceID:   slug,
-			IPAddress:    s.ClientIP(r),
+			Detail: auditDetailJSON(map[string]any{
+				"previous_status": previousStatus,
+			}),
+			IPAddress: s.ClientIP(r),
 		})
 	}
 	s.decorateAppForCaller(u, app)
@@ -4058,6 +4236,11 @@ func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "sleep is unavailable on this server")
 		return
 	}
+	// Captured before the post-sleep reload overwrites app, so the event says
+	// which state the operator put to sleep rather than the hibernated state it
+	// ends in, which is the same for every sleep and therefore records nothing.
+	previousStatus := app.Status
+	isolation := app.WorkerIsolation
 
 	// Serialize with any in-flight deploy/restart/stop on this slug.
 	release := s.acquireDeployLock(slug)
@@ -4095,7 +4278,11 @@ func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "sleep",
 			ResourceType: "app",
 			ResourceID:   slug,
-			IPAddress:    s.ClientIP(r),
+			Detail: auditDetailJSON(map[string]any{
+				"previous_status":  previousStatus,
+				"worker_isolation": isolation,
+			}),
+			IPAddress: s.ClientIP(r),
 		})
 	}
 	s.decorateAppForCaller(u, app)

@@ -54,7 +54,11 @@ func (d FilterDecision) String() string {
 // Rules is the per-bundle policy. Total bundle size is enforced separately
 // at the multipart layer because per-entry inspection cannot know it.
 type Rules struct {
-	MaxFileBytes   int64    `json:"maxFileBytes"`
+	MaxFileBytes int64 `json:"maxFileBytes"`
+	// CacheDirs are build/VCS caches excluded from every bundle. An entry
+	// without a slash matches the first path segment; an entry with one
+	// ("renv/library") matches that whole prefix, because the directory it
+	// names is not at the bundle root.
 	CacheDirs      []string `json:"cacheDirs"`
 	DataExtensions []string `json:"dataExtensions"`
 	// MaxBundleBytes is informational for clients (UI shows it, server
@@ -69,6 +73,12 @@ func DefaultRules() Rules {
 		CacheDirs: []string{
 			".git", ".venv", "__pycache__", "node_modules", ".renv", ".Rproj.user",
 			".shinyhub-run",
+			// renv::init() restores into renv/library, and by default every
+			// package there is a symlink into the developer's machine-local renv
+			// cache. It is a build artifact of renv.lock the same way .venv is one
+			// of uv.lock: the server rebuilds it from the lockfile, and the links
+			// point at paths that exist on no other host.
+			"renv/library",
 		},
 		DataExtensions: []string{
 			".parquet",
@@ -101,6 +111,12 @@ func (r Rules) Inspect(relPath string, size int64) FilterDecision {
 		return FilterRejectDatasetDir
 	}
 	for _, c := range r.CacheDirs {
+		if strings.ContainsRune(c, '/') {
+			if clean == c || strings.HasPrefix(clean, c+"/") {
+				return FilterSkipCacheDir
+			}
+			continue
+		}
 		if first == c {
 			return FilterSkipCacheDir
 		}

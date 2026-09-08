@@ -44,6 +44,7 @@ nav = [
     { "Scheduled jobs" = "schedules.md" },
     { "Fleet reconciliation" = "fleet.md" },
     { "Bundle filtering" = "recipes/bundle-filtering.md" },
+    { "Link to a Shiny view" = "bookmarking.md" },
   ]},
   { "Framework recipes" = [
     { "R Shiny" = "recipes/r-shiny.md" },
@@ -61,7 +62,9 @@ nav = [
     { "Native OIDC" = "native-oidc.md" },
     { "Trusted publishing" = "trusted-publishing.md" },
     { "Metrics" = "metrics.md" },
+    { "Usage analytics" = "usage-analytics.md" },
     { "Tracing" = "tracing.md" },
+    { "Support sessions" = "support-sessions.md" },
     { "Zero-downtime upgrades" = "zero-downtime-upgrades.md" },
     { "Secret rotation" = "secret-rotation.md" },
   ]},

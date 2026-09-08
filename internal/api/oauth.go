@@ -118,6 +118,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &user.ID, Action: "create_user", ResourceType: "user",
 			ResourceID: user.Username, IPAddress: s.ClientIP(r),
+			Detail: db.AuditDetail(map[string]any{"provider": providerGitHub, "role": user.Role}),
 		})
 	}
 	// Refresh the IdP-governed display name from GitHub. No-op for accounts with
@@ -143,6 +144,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	s.logAuditEvent(r, db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),
+		Detail: db.AuditDetail(map[string]any{"grant": grantSessionCookie, "provider": providerGitHub}),
 	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -242,6 +244,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &user.ID, Action: "create_user", ResourceType: "user",
 			ResourceID: user.Username, IPAddress: s.ClientIP(r),
+			Detail: db.AuditDetail(map[string]any{"provider": providerGoogle, "role": user.Role}),
 		})
 	}
 	// Refresh the IdP-governed display name from Google. No-op for accounts with
@@ -265,6 +268,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	s.logAuditEvent(r, db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),
+		Detail: db.AuditDetail(map[string]any{"grant": grantSessionCookie, "provider": providerGoogle}),
 	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }

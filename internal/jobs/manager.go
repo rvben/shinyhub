@@ -17,6 +17,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/schedulespec"
+	"github.com/rvben/shinyhub/internal/storage"
 	"golang.org/x/sys/unix"
 )
 
@@ -190,7 +191,7 @@ func NewManager(procMgr *process.Manager, tierOrder []string, defaultTier string
 	if lockRoot == "" {
 		lockRoot = appsDir
 	}
-	publicationLockDir := filepath.Join(lockRoot, ".shinyhub-locks")
+	publicationLockDir := filepath.Join(lockRoot, storage.LockDirName)
 	if err := os.MkdirAll(publicationLockDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create publication lock directory: %w", err)
 	}

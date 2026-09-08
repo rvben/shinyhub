@@ -19,7 +19,7 @@ The two knobs are:
 
 A session that's already been admitted keeps a sticky cookie
 (`shinyhub_rep_<slug>`) and routes to the same replica until it
-closes — the cap only gates *new* admissions.
+closes - the cap only gates *new* admissions.
 
 The product of the two is the **admission ceiling**:
 
@@ -43,7 +43,7 @@ cap to the runtime default. Both knobs are validated client-side (replicas
 
 ```bash
 curl -X PATCH https://shinyhub.example.com/api/apps/<slug> \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Token $SHINYHUB_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"replicas": 3, "max_sessions_per_replica": 10}'
 ```
@@ -69,7 +69,7 @@ instead.
 
 Scale **horizontally** (raise `replicas`) when:
 
-- The app is **CPU-bound** — its event loop is the bottleneck and
+- The app is **CPU-bound** - its event loop is the bottleneck and
   extra cores actually help.
 - You expect **more than ~10 concurrent users** steady state.
 - Each replica's memory footprint × N still fits within your host
@@ -96,7 +96,7 @@ near-linear throughput win with no tail cost. One run at
 Raise `max_sessions_per_replica` (or set it to 0 for the runtime
 default) when:
 
-- The app is **I/O-bound** — sessions spend most of their time
+- The app is **I/O-bound** - sessions spend most of their time
   waiting on the network, the database, or a file read, not holding
   the event loop.
 - Per-session CPU cost is very low (a few milliseconds per
@@ -104,8 +104,8 @@ default) when:
 - Adding replicas isn't an option (memory constraint or a stateful
   pattern that requires a single process).
 
-Pure I/O-bound apps can often safely carry 30–50 sessions per
-replica. Still put a ceiling on it — unbounded admission is how
+Pure I/O-bound apps can often safely carry 30 to 50 sessions per
+replica. Still put a ceiling on it - unbounded admission is how
 event loops get into trouble under load spikes. A cap of 50 is an
 order of magnitude better than no cap.
 
@@ -210,10 +210,10 @@ Pacing is visible in the rejection rollup, on the app detail page and in
 `shinyhub apps show`, and as the `reason` label on
 `shinyhub_admission_rejects_total`:
 
-- `render-deferred` — a page load was sent to the wait page. Expected during
+- `render-deferred` - a page load was sent to the wait page. Expected during
   bursts. One patient browser re-polls every ~1.75 s, so this counts waiting,
   not refusal.
-- `render-paced` — a session waited out the park window and was shed. This is
+- `render-paced` - a session waited out the park window and was shed. This is
   the one to alert on.
 
 Sustained `render-paced` means the host cannot render as fast as users
@@ -338,7 +338,7 @@ shinyhub apps set <slug> --min-warm-replicas 1
 
 ```bash
 curl -X PATCH https://shinyhub.example.com/api/apps/<slug> \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Token $SHINYHUB_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"min_warm_replicas": 1}'
 ```
@@ -541,14 +541,14 @@ Service temporarily at capacity, please retry.
 Browsers that respect `Retry-After` (Chromium, Firefox) will back
 off before reloading; users see a brief loading spinner and then
 get in. A sustained red badge on every replica's Overview card is
-the signal that 503s are happening in anger — either raise
+the signal that 503s are happening in anger - either raise
 `replicas` or investigate why sessions are lingering (a leaking
 session, a chatty per-session WebSocket, etc.).
 
 ## Troubleshooting
 
 **"I set replicas=3 but only one is running."** Wait for the
-watcher — new replicas come up sequentially. Check the Replicas
+watcher - new replicas come up sequentially. Check the Replicas
 card; each should transition `starting` → `running` within a few
 seconds. If a replica sticks in `starting`, check its log via the
 Logs tab for an import-time error.
@@ -560,7 +560,7 @@ cookie) round-robin across all replicas in least-loaded order. To
 force redistribution, clear cookies (or restart the app, which
 invalidates all stickies).
 
-**"p99 is high but I don't see 503s."** The cap isn't saturated —
-your bottleneck is the compute inside each admitted session. Either
+**"p99 is high but I don't see 503s."** The cap isn't saturated.
+Your bottleneck is the compute inside each admitted session. Either
 scale replicas (if CPU-bound) or add output caching (if work is
 repeatable across sessions).

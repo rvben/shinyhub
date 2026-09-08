@@ -23,6 +23,7 @@ binary backed by SQLite, with no external services to operate.
 
 ## Contents
 
+- [Who it is for](#who-it-is-for)
 - [Features](#features)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
@@ -31,6 +32,33 @@ binary backed by SQLite, with no external services to operate.
 - [Status](#status)
 - [Contributing](#contributing)
 - [License](#license)
+
+## Who it is for
+
+A team that has a Linux host and a handful of Shiny, Dash, or Streamlit
+applications, and wants them behind real URLs with logins, deploys, logs, and
+an audit trail, without running a platform to get there. The comparison is
+usually against Posit Connect, ShinyProxy, or a hand-rolled Docker Compose
+setup, and it comes down to a few axes. ShinyHub's answers:
+
+- **Cost and licensing.** MIT, self-hosted, no per-user or per-application
+  license.
+- **What you have to operate.** One Go binary and one SQLite file. No JVM, no
+  Kubernetes, no broker, and no database server to run. Postgres is optional
+  and only for [multi-instance HA](docs/deployment/ha-data-plane.md).
+- **How apps run.** As ordinary host processes by default. A container per
+  application is opt-in (`runtime.mode: docker`), a container per browser
+  session is never required, and idle applications hibernate instead of
+  holding memory.
+- **What you assemble yourself.** Nothing for the common path: routing, login
+  (OAuth, OIDC, or an auth proxy), per-app access control, logs, metrics, and
+  deployment history are in the box.
+
+Where it is deliberately not the answer: the native runtime is not a security
+boundary between tenants who do not trust each other. Use the Docker runtime or
+separate hosts for that, and read
+[Worker isolation](docs/isolation.md#do-not-run-mutually-untrusting-tenants-on-the-native-runtime)
+before deciding.
 
 ## Features
 
@@ -77,12 +105,12 @@ standalone server binary see [Binary](#binary).
 uvx shinyhub serve
 ```
 
-On the first run, ShinyHub asks for an administrator username and password,
-creates a private loopback-only `shinyhub.yaml`, prepares the SQLite database,
-opens the dashboard, and deploys **ShinyHub Tour**—a real reactive Python Shiny
-app with bundled example data—through the normal build and runtime pipeline.
-Nothing sensitive is echoed. The database, bundles, and per-app data land under
-`./data/` by default and remain there across restarts.
+On the first run, ShinyHub asks for an administrator username and password (at
+least 15 characters), creates a private loopback-only `shinyhub.yaml`, prepares
+the SQLite database, opens the dashboard, and deploys **ShinyHub Tour**, a real
+reactive Python Shiny app with bundled example data, through the normal build
+and runtime pipeline. Nothing sensitive is echoed. The database, bundles, and
+per-app data land under `./data/` by default and remain there across restarts.
 
 The example is added only when this interactive process creates a fresh local
 configuration and administrator. Existing installs, explicit `--config` runs,
@@ -145,7 +173,7 @@ shinyhub deploy . --open
 app runtimes. If a saved credential still authenticates, it returns `current`
 without opening a browser or rotating the key, so it is safe to run at the top
 of an entrypoint or Make target. Otherwise it opens a browser authorization
-page. Sign in with whatever the server supports—including SSO—and confirm the
+page. Sign in with whatever the server supports, including SSO, and confirm the
 matching verification code. The CLI creates its credential locally, so the
 secret never appears in browser history or server logs. The resulting personal
 token expires after 90 days and is saved in the owner-readable client
@@ -181,7 +209,7 @@ ordinary pipe outside CI, and does not change local or remote state. See
 
 `shinyhub plan .` then shows the exact archive, content digest, ignored paths,
 launch and manifest effects, remote create-or-update state, permissions, and
-start/stop lifecycle—without making a change. Its final line is the exact
+start/stop lifecycle, without making a change. Its final line is the exact
 deploy command to run. Use `--detailed-exitcode` or `--fail-on-changes` for a CI
 gate. See [Deployment plan](docs/deployment-plan.md).
 
@@ -332,7 +360,7 @@ controlled explicitly:
 | Guide | Topic |
 |---|---|
 | [Working with several servers](docs/hosts.md) | Saving a credential per server, `hosts` / `use` / `--host`, which token a command sends, and the credentials file. |
-| [CLI completion and compatibility](docs/cli.md) | One-command shell completion, saved-host suggestions, version-skew diagnostics, and upgrade behavior. |
+| [CLI reference, completion, and compatibility](docs/cli.md) | The complete command index, one-command shell completion, saved-host suggestions, version-skew diagnostics, and upgrade behavior. |
 | [Environment and secrets](docs/environment.md) | Per-app env vars, encrypted secrets, what apps and builds inherit from the server environment, and private package indexes. |
 | [Persistent data dir](docs/data.md) | Pushing data, the app-visible path, authorization, quota, and concurrency. |
 | [Scheduled jobs and shared data](docs/schedules.md) | Per-app cron schedules and read-only cross-app data mounts. |
@@ -350,6 +378,7 @@ controlled explicitly:
 | [Native OIDC login (SSO)](docs/native-oidc.md) | Terminate OpenID Connect SSO in ShinyHub itself - config, claim mapping, group-to-role, sessions/logout, behind-a-proxy, and HA - no external auth proxy. |
 | [Identity forwarding to apps](docs/identity.md) | The trusted `X-Shinyhub-*` headers and signed token apps read to know the connected user, with one-call Python/R helpers. |
 | [Bookmarking Shiny views](docs/bookmarking.md) | Opt-in Python Shiny integration for exact and selectively filtered URL bookmarks. |
+| [Support sessions](docs/support-sessions.md) | Short-lived, app-scoped viewer or developer sessions for administrators, without global impersonation. |
 | [Reverse-proxy auth - Caddy](docs/reverse-proxy/caddy.md) | Authenticate users via Caddy `forward_auth` and forward the identity to ShinyHub. |
 | [Reverse-proxy auth - nginx](docs/reverse-proxy/nginx.md) | Authenticate users via nginx `auth_request` and forward the identity to ShinyHub. |
 | [CLI/CI behind an auth proxy](docs/reverse-proxy/deploying-behind-a-proxy.md) | Deploy and manage apps from the CLI or CI when ShinyHub is behind an auth proxy that blocks non-browser clients. |

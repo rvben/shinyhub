@@ -3,6 +3,8 @@ package backup
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/config"
@@ -21,6 +23,13 @@ type SnapshotResult struct {
 	Path string
 	// Skipped explains why no snapshot was written, empty when one was.
 	Skipped string
+	// PruneErr is set when a new snapshot was written but removing old
+	// snapshots beyond database.pre_migration_snapshot_retention failed. The
+	// new snapshot itself is unaffected; a failure to reclaim space on the
+	// safety net for a bad upgrade must never block that upgrade from
+	// starting, so callers log this and continue rather than treating it as
+	// an error.
+	PruneErr string
 }
 
 // PreMigrationSnapshot copies the SQLite database aside before pending
@@ -30,7 +39,9 @@ type SnapshotResult struct {
 //
 // A snapshot that cannot be written is an error, never a silent skip: startup
 // must stop rather than migrate a database the operator cannot get back.
-// Snapshots are never pruned here - removing one is an explicit decision.
+// After a successful snapshot, older ones beyond
+// database.pre_migration_snapshot_retention are pruned so an unattended
+// string of upgrades cannot grow this list forever.
 func PreMigrationSnapshot(cfg *config.Config, store *db.Store, now time.Time) (SnapshotResult, error) {
 	pending, err := store.PendingMigrations()
 	if err != nil {
@@ -84,5 +95,48 @@ func PreMigrationSnapshot(cfg *config.Config, store *db.Store, now time.Time) (S
 		return res, fmt.Errorf("pre-migration snapshot: %w", err)
 	}
 	res.Path = dest
+	if perr := pruneOldSnapshots(dbPath, cfg.Database.PreMigrationSnapshotRetention); perr != nil {
+		res.PruneErr = perr.Error()
+	}
 	return res, nil
+}
+
+// pruneOldSnapshots removes pre-migration snapshot files for dbPath beyond the
+// newest keep. Snapshots are ordered by modification time rather than by
+// name: the embedded schema version's digit width varies ("v9" versus "v10"),
+// which sorts wrong lexically, while the file's mtime always reflects the
+// real order snapshots were taken in.
+func pruneOldSnapshots(dbPath string, keep int) error {
+	if keep <= 0 {
+		keep = 5
+	}
+	matches, err := filepath.Glob(dbPath + ".pre-migration-v*-*.sqlite")
+	if err != nil {
+		return fmt.Errorf("list pre-migration snapshots: %w", err)
+	}
+	if len(matches) <= keep {
+		return nil
+	}
+
+	type snapshot struct {
+		path    string
+		modTime time.Time
+	}
+	snaps := make([]snapshot, 0, len(matches))
+	for _, m := range matches {
+		info, serr := os.Stat(m)
+		if serr != nil {
+			continue
+		}
+		snaps = append(snaps, snapshot{path: m, modTime: info.ModTime()})
+	}
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].modTime.Before(snaps[j].modTime) })
+
+	toDelete := len(snaps) - keep
+	for i := 0; i < toDelete; i++ {
+		if err := os.Remove(snaps[i].path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove old pre-migration snapshot %s: %w", snaps[i].path, err)
+		}
+	}
+	return nil
 }

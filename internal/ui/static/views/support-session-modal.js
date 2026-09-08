@@ -80,7 +80,7 @@ export function restoreSupportAppSelection(select, submit, appSlug, { focusOnMis
   }
   const placeholder = select.ownerDocument.createElement('option');
   placeholder.value = '';
-  placeholder.textContent = 'Choose an app — previous selection unavailable';
+  placeholder.textContent = 'Choose an app (previous selection unavailable)';
   placeholder.disabled = true;
   placeholder.selected = true;
   select.prepend(placeholder);

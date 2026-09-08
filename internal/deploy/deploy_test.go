@@ -67,6 +67,16 @@ func TestExtractBundle_ZipSlip(t *testing.T) {
 	if _, err := os.Stat(escaped); err == nil {
 		t.Error("zip-slip: file escaped destDir — path traversal not prevented")
 	}
+
+	// The refusal has to carry ErrBundleRejected, because that sentinel is what
+	// the deploy handler classifies on. An unwrapped error is indistinguishable
+	// from a disk failure there and comes back as 500 "internal error", telling
+	// the uploader the server broke rather than that their bundle was refused.
+	// The sibling symlink rejection two checks below has always been wrapped;
+	// this one was not.
+	if !errors.Is(err, deploy.ErrBundleRejected) {
+		t.Errorf("error = %v, want it to wrap deploy.ErrBundleRejected", err)
+	}
 }
 
 func TestExtractBundle_RejectsPerEntryOverflow(t *testing.T) {
@@ -127,6 +137,74 @@ func TestExtractBundle_WithinLimitsSucceeds(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(destDir, "app.py")); err != nil {
 		t.Error("expected app.py to be extracted")
+	}
+}
+
+// TestExtractBundle_MkdirFailureDoesNotLeakHostPath proves that when the
+// extraction directory itself cannot be created, the returned error still
+// names the underlying cause but drops the absolute host path (the directory
+// under the operator's configured apps_dir, not something the deployer
+// supplied). A file sitting where a directory component needs to exist makes
+// os.MkdirAll fail with ENOTDIR: a structural failure, not a permission
+// check, so it reproduces identically whether the test runs as root or not.
+func TestExtractBundle_MkdirFailureDoesNotLeakHostPath(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "app.zip")
+	if err := createTestBundle(zipPath, map[string]string{"app.py": "print('hi')"}); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	destDir := filepath.Join(blocker, "extracted")
+
+	err := deploy.ExtractBundleWithLimits(zipPath, destDir, 0, 0)
+	if err == nil {
+		t.Fatal("expected error when the extraction directory cannot be created, got nil")
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Fatalf("extract error leaks the host path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("extract error = %q, want it to still name the underlying cause (not a directory)", err.Error())
+	}
+}
+
+// TestExtractBundle_EntryWriteFailureDoesNotLeakHostPath is the same proof for
+// a failure while writing a single bundle entry: the deployer is entitled to
+// the bundle-relative entry name (they wrote it) but not the server's
+// absolute apps_dir layout.
+func TestExtractBundle_EntryWriteFailureDoesNotLeakHostPath(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "app.zip")
+	if err := createTestBundle(zipPath, map[string]string{"sub/app.py": "print('hi')"}); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := filepath.Join(dir, "extracted")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A plain file already at "sub" blocks extraction from creating the
+	// "sub/" directory the "sub/app.py" entry needs.
+	if err := os.WriteFile(filepath.Join(destDir, "sub"), []byte("occupied"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := deploy.ExtractBundleWithLimits(zipPath, destDir, 0, 0)
+	if err == nil {
+		t.Fatal("expected error when a bundle entry's directory cannot be created, got nil")
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Fatalf("extract error leaks the host path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sub/app.py") {
+		t.Errorf("extract error = %q, want it to name the bundle-relative entry (sub/app.py)", err.Error())
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("extract error = %q, want it to still name the underlying cause (not a directory)", err.Error())
 	}
 }
 

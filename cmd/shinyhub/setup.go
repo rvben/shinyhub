@@ -53,13 +53,19 @@ func newInitCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Set up ShinyHub for its first run",
-		Long: `Creates a private server configuration with a cryptographically random
+		// The terminal prompt states the password minimum before you type it.
+		// An unattended caller never sees that prompt, so the requirement has to
+		// be here too, or the only way to learn it is to have a run rejected.
+		Long: fmt.Sprintf(`Creates a private server configuration with a cryptographically random
 auth secret, prepares the database, and creates the first administrator.
 
 Existing configuration and users are never overwritten. In a terminal, missing
 credentials are prompted for without echoing the password. For unattended setup,
 set SHINYHUB_ADMIN_USER and SHINYHUB_ADMIN_PASSWORD, or pass --admin-user and
---admin-password-file.`,
+--admin-password-file.
+
+The administrator password must be at least %d characters, whichever way it is
+supplied.`, auth.MinPasswordLength),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			result, err := runSetup(cmd, f)
@@ -78,7 +84,7 @@ set SHINYHUB_ADMIN_USER and SHINYHUB_ADMIN_PASSWORD, or pass --admin-user and
 	}
 	cmd.Flags().StringVar(&f.configPath, "config", "", "Path to the server config file (overrides SHINYHUB_CONFIG; default ./shinyhub.yaml)")
 	cmd.Flags().StringVar(&f.adminUser, "admin-user", "", "Username for the first administrator (default admin in a terminal)")
-	cmd.Flags().StringVar(&f.adminPasswordFile, "admin-password-file", "", "Read the first administrator password from a file")
+	cmd.Flags().StringVar(&f.adminPasswordFile, "admin-password-file", "", fmt.Sprintf("Read the first administrator password from a file (at least %d characters)", auth.MinPasswordLength))
 	return cmd
 }
 
@@ -88,7 +94,11 @@ set SHINYHUB_ADMIN_USER and SHINYHUB_ADMIN_PASSWORD, or pass --admin-user and
 // copyable recovery instruction instead of a partial setup.
 func maybeRunInteractiveSetup(cmd *cobra.Command) (*setupResult, error) {
 	path := serverConfigPath()
-	if os.Getenv("SHINYHUB_AUTH_SECRET") != "" {
+	// Either way of supplying the secret means the deployment is configured
+	// and wants nothing set up for it. Recognising only the environment
+	// variable would make the file - the form this project recommends - look
+	// like an uninitialised install.
+	if os.Getenv("SHINYHUB_AUTH_SECRET") != "" || os.Getenv("SHINYHUB_AUTH_SECRET_FILE") != "" {
 		return nil, nil
 	}
 	if _, err := os.Stat(path); err == nil {
@@ -98,7 +108,15 @@ func maybeRunInteractiveSetup(cmd *cobra.Command) (*setupResult, error) {
 	}
 
 	if !setupIsStdinTTY() {
-		return nil, fmt.Errorf("ShinyHub is not initialized: run `shinyhub init` in a terminal, then `shinyhub serve`; for unattended setup, set SHINYHUB_AUTH_SECRET, SHINYHUB_ADMIN_USER, and SHINYHUB_ADMIN_PASSWORD")
+		// An uninitialised install is a setup state with a documented remedy,
+		// not a fault: telling a supervisor this start is worth retrying would
+		// be wrong, since it never clears without someone running init.
+		return nil, &shinycli.ExitCodeError{
+			Code: 1,
+			Kind: shinycli.KindValidation,
+			Err: fmt.Errorf("ShinyHub is not initialized: run `shinyhub init` in a terminal, then `shinyhub serve`; " +
+				"for unattended setup, set SHINYHUB_AUTH_SECRET_FILE (or SHINYHUB_AUTH_SECRET), SHINYHUB_ADMIN_USER, and SHINYHUB_ADMIN_PASSWORD"),
+		}
 	}
 
 	w := cmd.ErrOrStderr()
@@ -129,7 +147,9 @@ func runSetup(cmd *cobra.Command, f *setupFlags) (setupResult, error) {
 			return result, fmt.Errorf("prepare defaults: %w", err)
 		}
 		if os.Getenv("SHINYHUB_AUTH_SECRET") == "" && sqliteDatabaseExists(maintenanceCfg.Database.DSN) {
-			return result, fmt.Errorf("found an existing database at %s but no server config or SHINYHUB_AUTH_SECRET; refusing to generate a replacement secret because existing encrypted data may depend on the original one", maintenanceCfg.Database.DSN)
+			return result, setupValidationErr(
+				"set SHINYHUB_AUTH_SECRET to the secret this database was created with, or move the database aside to start a fresh install",
+				"found an existing database at %s but no server config or SHINYHUB_AUTH_SECRET; refusing to generate a replacement secret because existing encrypted data may depend on the original one", maintenanceCfg.Database.DSN)
 		}
 
 		secret := os.Getenv("SHINYHUB_AUTH_SECRET")
@@ -159,7 +179,9 @@ func runSetup(cmd *cobra.Command, f *setupFlags) (setupResult, error) {
 		if cfg.HasSSOLoginPath() {
 			return result, nil
 		}
-		return result, fmt.Errorf("local login is disabled and no SSO login path is configured")
+		return result, setupValidationErr(
+			"set auth.local_login: true so setup can create a local administrator, or configure an SSO provider (GitHub, Google, OIDC, or forward-auth)",
+			"local login is disabled and no SSO login path is configured")
 	}
 
 	if err := prepareSetupDatabaseDir(cfg.Database.DSN); err != nil {
@@ -203,7 +225,9 @@ func runSetup(cmd *cobra.Command, f *setupFlags) (setupResult, error) {
 		return result, err
 	}
 	if _, err := store.GetUserByUsername(username); err == nil {
-		return result, fmt.Errorf("user %q already exists but is not a usable local administrator; choose a different --admin-user", username)
+		return result, setupValidationErr(
+			adminNameHint+" with a different name, or give the existing user the admin role and a local password",
+			"user %q already exists but is not a usable local administrator", username)
 	} else if !errors.Is(err, db.ErrNotFound) {
 		return result, fmt.Errorf("check administrator username: %w", err)
 	}
@@ -242,7 +266,9 @@ func setupCredentials(cmd *cobra.Command, f *setupFlags) (string, string, error)
 
 	if !setupIsStdinTTY() {
 		if username == "" || password == "" {
-			return "", "", fmt.Errorf("administrator credentials are required for unattended setup: set SHINYHUB_ADMIN_USER and SHINYHUB_ADMIN_PASSWORD, or pass --admin-user and --admin-password-file")
+			return "", "", setupValidationErr(
+				"set SHINYHUB_ADMIN_USER and SHINYHUB_ADMIN_PASSWORD, or pass --admin-user and --admin-password-file",
+				"administrator credentials are required for unattended setup")
 		}
 		if err := validateSetupUsername(username); err != nil {
 			return "", "", err
@@ -279,8 +305,12 @@ func setupCredentials(cmd *cobra.Command, f *setupFlags) (string, string, error)
 		return username, password, nil
 	}
 
+	// The length requirement goes in the prompt, not only in the rejection.
+	// A minimum a person learns by having their first choice refused reads as
+	// an arbitrary obstacle; one stated up front is just the rule.
+	passwordPrompt := fmt.Sprintf("Administrator password (at least %d characters): ", auth.MinPasswordLength)
 	for {
-		first, err := promptSetupPassword(cmd.ErrOrStderr(), "Administrator password: ")
+		first, err := promptSetupPassword(cmd.ErrOrStderr(), passwordPrompt)
 		if err != nil {
 			return "", "", fmt.Errorf("read administrator password: %w", err)
 		}
@@ -300,6 +330,63 @@ func setupCredentials(cmd *cobra.Command, f *setupFlags) (string, string, error)
 	}
 }
 
+// bootstrapAdminFromEnv creates the administrator named by SHINYHUB_ADMIN_USER
+// when that username is not taken yet. It is the unattended counterpart to
+// `shinyhub init`, and it only ever creates: an existing username is left
+// exactly as it is, password included.
+func bootstrapAdminFromEnv(store *db.Store, localLoginEnabled bool, logger *slog.Logger) error {
+	adminUser := os.Getenv("SHINYHUB_ADMIN_USER")
+	if adminUser == "" {
+		return nil
+	}
+	adminPass := os.Getenv("SHINYHUB_ADMIN_PASSWORD")
+	if adminPass == "" {
+		return fmt.Errorf("SHINYHUB_ADMIN_PASSWORD must not be empty when SHINYHUB_ADMIN_USER is set")
+	}
+	if !localLoginEnabled {
+		logger.Warn("SHINYHUB_ADMIN_USER is set but local login is disabled (auth.local_login: false); this admin cannot sign in with a password - grant admin via SSO (e.g. group_role_mappings) instead",
+			"username", adminUser)
+	}
+	// `shinyhub init` refuses a password below the minimum, and so does every
+	// password set through the API. This path accepts anything, which is what
+	// makes a local dev instance possible - .air.toml bootstraps admin/admin.
+	// Failing here would break that, so it warns instead: an operator
+	// bootstrapping a real deployment is told that the password they just set is
+	// one their own users would be refused, rather than finding out when
+	// somebody guesses it.
+	if err := auth.ValidateNewPassword(adminPass); err != nil {
+		logger.Warn("SHINYHUB_ADMIN_PASSWORD is weaker than ShinyHub accepts anywhere else; change it before this deployment is reachable by anyone else",
+			"username", adminUser, "reason", err.Error(), "minimum_characters", auth.MinPasswordLength)
+	}
+	_, err := store.GetUserByUsername(adminUser)
+	switch {
+	case errors.Is(err, db.ErrNotFound):
+		hash, err := auth.HashPassword(adminPass)
+		if err != nil {
+			return fmt.Errorf("hash admin password: %w", err)
+		}
+		if err := store.CreateUser(db.CreateUserParams{
+			Username:     adminUser,
+			PasswordHash: hash,
+			Role:         "admin",
+		}); err != nil {
+			logger.Warn("could not create admin user", "err", err)
+		} else {
+			logger.Info("admin user created", "username", adminUser)
+		}
+	case err != nil:
+		return fmt.Errorf("check admin user: %w", err)
+	default:
+		// Bootstrap creates, it never resets. Silence here reads as "the
+		// password in my environment is the password that works", and the login
+		// that then fails looks like a broken build rather than a credential
+		// this path was never going to change.
+		logger.Info("admin user already exists; SHINYHUB_ADMIN_PASSWORD was not applied and the stored password is unchanged",
+			"username", adminUser)
+	}
+	return nil
+}
+
 func ensureUsableFirstLogin(cfg *config.Config, store *db.Store, configPath string) error {
 	users, err := store.ListUsers()
 	if err != nil {
@@ -313,10 +400,19 @@ func ensureUsableFirstLogin(cfg *config.Config, store *db.Store, configPath stri
 	if !cfg.Auth.LocalLoginEnabled() || cfg.HasSSOLoginPath() {
 		return nil
 	}
-	if configPath == defaultServerConfigPath {
-		return fmt.Errorf("no usable local administrator exists; run `shinyhub init` to create one, then start the server again")
+	// A server with no administrator is a known, actionable setup state with a
+	// documented remedy, not an unexpected fault. Classifying it as "internal"
+	// tells a supervisor the start is worth retrying, which it never is until
+	// someone runs init.
+	initCmd := "shinyhub init"
+	if configPath != defaultServerConfigPath {
+		initCmd = fmt.Sprintf("shinyhub init --config %s", shellQuote(configPath))
 	}
-	return fmt.Errorf("no usable local administrator exists; run `shinyhub init --config %s` to create one, then start the server again", shellQuote(configPath))
+	return &shinycli.ExitCodeError{
+		Code: 1,
+		Kind: shinycli.KindValidation,
+		Err:  fmt.Errorf("no usable local administrator exists; run `%s` to create one, then start the server again", initCmd),
+	}
 }
 
 func setupConfigPath(explicit string) string {
@@ -337,35 +433,66 @@ func generateSetupSecret() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
+// setupValidationErr marks a setup failure the operator fixes by supplying
+// something different: a flag, an environment variable, a longer password. The
+// same reasoning as the uninitialised-install path above applies to all of
+// them. Reporting one as "internal" tells a supervisor the run is worth
+// retrying unchanged, and none of these ever clears on its own.
+//
+// hint comes first because the message takes the format arguments. It carries
+// the remedy and nothing else: the envelope renders hint as its own field, so a
+// remedy folded into the message reaches a reader who renders the two
+// separately as an empty hint beside a sentence that does too much work.
+func setupValidationErr(hint, format string, args ...any) error {
+	return shinycli.ValidationError(fmt.Sprintf(format, args...), hint)
+}
+
+// secretHint is shared by both auth-secret failures: either way the operator
+// has supplied a secret ShinyHub will not accept, and both ways out are the
+// same two.
+const secretHint = "unset SHINYHUB_AUTH_SECRET to have setup generate one, or set it to at least 32 random characters (openssl rand -hex 32)"
+
+// adminNameHint names both ways of supplying the administrator username, so a
+// reader who reached setup through the environment is not told only about the
+// flag, or the other way round.
+const adminNameHint = "pass --admin-user or set SHINYHUB_ADMIN_USER"
+
 func validateSetupSecret(secret string) error {
 	switch {
 	case secret == "change-me-to-a-random-string":
-		return fmt.Errorf("SHINYHUB_AUTH_SECRET is the placeholder value; omit it to generate a secure secret automatically")
+		return setupValidationErr(secretHint, "SHINYHUB_AUTH_SECRET is the placeholder value")
 	case len(secret) < 32:
-		return fmt.Errorf("SHINYHUB_AUTH_SECRET must be at least 32 characters (got %d); omit it to generate a secure secret automatically", len(secret))
+		return setupValidationErr(secretHint, "SHINYHUB_AUTH_SECRET must be at least 32 characters (got %d)", len(secret))
 	}
 	return nil
 }
 
 func validateSetupUsername(username string) error {
 	if username == "" {
-		return fmt.Errorf("administrator username cannot be empty")
+		return setupValidationErr(adminNameHint, "administrator username cannot be empty")
 	}
 	if username != strings.TrimSpace(username) || strings.ContainsAny(username, "\t\r\n ") {
-		return fmt.Errorf("administrator username cannot contain whitespace")
+		return setupValidationErr(adminNameHint+" with a name that has no spaces or tabs in it",
+			"administrator username cannot contain whitespace")
 	}
 	if len(username) > 128 {
-		return fmt.Errorf("administrator username must be 128 characters or fewer")
+		return setupValidationErr(adminNameHint+" with a shorter name",
+			"administrator username must be 128 characters or fewer")
 	}
 	if db.IsSystemUser(username) {
-		return fmt.Errorf("administrator username %q is reserved", username)
+		return setupValidationErr("ShinyHub keeps this name for one of its own system accounts; "+adminNameHint+" with a different name",
+			"administrator username %q is reserved", username)
 	}
 	return nil
 }
 
 func validateSetupPassword(password string) error {
 	if err := auth.ValidateNewPassword(password); err != nil {
-		return fmt.Errorf("administrator %w", err)
+		// %s, not %w: nothing matches on the policy error, and the envelope's
+		// message is a sentence rather than a wrap chain.
+		return setupValidationErr(
+			fmt.Sprintf("supply a password of %d to 72 characters in SHINYHUB_ADMIN_PASSWORD or --admin-password-file", auth.MinPasswordLength),
+			"administrator %s", err)
 	}
 	return nil
 }

@@ -55,7 +55,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			fmt.Fprintf(errOut, "no %s found. Run 'shinyhub fleet init' to generate one from your\n"+
 				"deployed apps, or pass -f <path> to point at an existing manifest.\n",
 				filepath.Base(file))
-			return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("manifest not found: %s", file), Reported: true}
+			return nil, &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf("manifest not found: %s", file), Reported: true}
 		}
 		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("read %s: %w", file, err)}
 	}
@@ -103,7 +103,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		}
 		total := len(probs) + len(srcProbs) + len(bundleProbs)
 		fmt.Fprintf(errOut, "\n%d problem(s) found. Nothing was changed. Fix these and re-run.\n", total)
-		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("%d manifest problem(s)", total), Reported: true}
+		return nil, &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf("%d manifest problem(s)", total), Reported: true}
 	}
 
 	cfg, err := loadConfig()

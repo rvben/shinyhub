@@ -170,6 +170,14 @@ type ContainerLister interface {
 const inventoryRecoveryTimeout = 15 * time.Second
 
 func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, defaultMaxSessions int, identityGlobal bool, defaultWorkerIsolation string) {
+	// Deferred, and on every exit path including the early returns: until this
+	// pass ends, an app whose process survived the restart has no Manager entry
+	// and readers must not conclude it is down. Once the pass is over the Manager
+	// is as complete as it is going to get - even if a step failed - and the
+	// watchdog owns reconciliation from there.
+	if mgr != nil {
+		defer mgr.ClearRecoveryPending()
+	}
 	apps, err := store.ListRunningApps()
 	if err != nil {
 		slog.Error("process recovery: list running apps", "err", err)

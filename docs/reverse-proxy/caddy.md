@@ -179,7 +179,7 @@ export SHINYHUB_FORWARD_AUTH_SHARED_SECRET=$(openssl rand -hex 32)
 ```
 
 After restarting both services, sign in through Caddy in a browser and open the
-following URL—not the direct ShinyHub listener—so the check covers
+following URL, not the direct ShinyHub listener, so the check covers
 `forward_auth`, copied identity headers, and the proxy credential together:
 
 ```text

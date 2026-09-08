@@ -112,7 +112,7 @@ func prepareDeployment(dir string) (*bundlePreview, *deploypkg.LaunchPlan, error
 		Port: 4000, BindHost: "127.0.0.1", PrepHostDeps: true,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("launch contract: %w", err)
+		return nil, nil, launchContractError(err)
 	}
 	return bundle, launch, nil
 }
@@ -204,7 +204,8 @@ func resolveDeploymentSource(args []string, f *deployFlags) (*deploymentSource, 
 	source := &deploymentSource{cleanup: func() {}}
 	if f.git != "" {
 		if len(args) > 0 {
-			return nil, fmt.Errorf("directory argument and --git cannot be used together; choose one source")
+			return nil, validationErr("directory argument and --git cannot be used together",
+				"choose one source: a local path, or --git <url>")
 		}
 		cloned, err := gitClone(f.git, f.branch, f.subdir)
 		if err != nil {
@@ -231,10 +232,10 @@ func resolveDeploymentSource(args []string, f *deployFlags) (*deploymentSource, 
 		}
 	} else {
 		if f.branch != "" || f.subdir != "" {
-			return nil, fmt.Errorf("--branch and --subdir require --git")
+			return nil, validationErr("--branch and --subdir require --git", "pass --git <url> to deploy from a repository")
 		}
 		if len(args) == 0 {
-			return nil, fmt.Errorf("missing directory argument: pass `.` to use the current directory or a path like `./app`")
+			return nil, validationErr("missing directory argument", "pass `.` to use the current directory, or a path like `./app`")
 		}
 		abs, err := filepath.Abs(args[0])
 		if err != nil {
@@ -246,11 +247,14 @@ func resolveDeploymentSource(args []string, f *deployFlags) (*deploymentSource, 
 	info, err := os.Stat(source.Dir)
 	if err != nil {
 		source.cleanup()
-		return nil, fmt.Errorf("source %s: %w", source.Label, err)
+		// A path that cannot be stat'd is nearly always a typo or a wrong working
+		// directory, so it is the caller's input to fix rather than a tool fault.
+		return nil, validationErr(fmt.Sprintf("source %s: %v", source.Label, err),
+			"check the path exists and is readable from this directory")
 	}
 	if !info.IsDir() {
 		source.cleanup()
-		return nil, fmt.Errorf("source %s is not a directory", source.Label)
+		return nil, validationErr(fmt.Sprintf("source %s is not a directory", source.Label), "point at the app bundle directory, not a file")
 	}
 
 	if f.slug != "" {
@@ -263,10 +267,11 @@ func resolveDeploymentSource(args []string, f *deployFlags) (*deploymentSource, 
 	if !slugpkg.Valid(source.Slug) {
 		source.cleanup()
 		if f.slug == "" {
-			return nil, fmt.Errorf("could not derive a valid slug from %q (got %q): pass --slug explicitly. Slug rule: %s",
-				filepath.Base(source.Dir), source.Slug, slugpkg.HumanRule)
+			return nil, validationErr(
+				fmt.Sprintf("could not derive a valid slug from %q (got %q)", filepath.Base(source.Dir), source.Slug),
+				"pass --slug explicitly; a slug must be "+slugpkg.HumanRule)
 		}
-		return nil, fmt.Errorf("invalid slug %q: must be %s", source.Slug, slugpkg.HumanRule)
+		return nil, validationErr(fmt.Sprintf("invalid slug %q", source.Slug), "a slug must be "+slugpkg.HumanRule)
 	}
 	visibility, err := resolveVisibilityFlag(f.visibility)
 	if err != nil {
@@ -279,10 +284,10 @@ func resolveDeploymentSource(args []string, f *deployFlags) (*deploymentSource, 
 
 func runPlan(cmd *cobra.Command, args []string, f *planFlags) error {
 	if f.force && f.out == "" {
-		return fmt.Errorf("--force requires --out")
+		return validationErr("--force requires --out", "")
 	}
 	if cmd.Flags().Changed("expires-in") && f.out == "" {
-		return fmt.Errorf("--expires-in requires --out")
+		return validationErr("--expires-in requires --out", "")
 	}
 	if f.failOnChanges {
 		f.detailedExitcode = true
@@ -328,6 +333,9 @@ func runPlan(cmd *cobra.Command, args []string, f *planFlags) error {
 		}
 	}
 	warnings := []string{}
+	if rejected := summarizeDeploymentRejections(bundle.ProtectedPaths); rejected != "" {
+		warnings = append(warnings, rejected)
+	}
 	if info.looksLikeShinyhub() {
 		diagnosis := diagnoseCompatibility(version, info)
 		if diagnosis.Level == compatibilityIncompatible {

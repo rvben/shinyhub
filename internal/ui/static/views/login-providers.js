@@ -76,3 +76,17 @@ export function applyLoginProviders(doc, providers) {
   }
   return v;
 }
+
+// groupAccessWarningText flags Group access rules that can never take effect.
+// user_groups is populated only by an OIDC login's group claims or a
+// forward-auth proxy's trusted group header (see ReconcileUserFromGroups in
+// internal/db/reconcile.go) - a GitHub or Google login carries no group
+// claim, so github/google here do not help even though providerVisibility()
+// counts them toward anySSO. Forward-auth's enabled state is not reported by
+// /api/auth/providers, so an OIDC-less server may still have it running; the
+// wording below names that possibility rather than claiming no provider can
+// ever supply groups.
+export function groupAccessWarningText(providers) {
+  if (providerVisibility(providers).oidc) return '';
+  return 'No OIDC provider is configured. Group access rules take effect only for OIDC sign-ins or a forward-auth proxy that supplies a group header, so unless one of those is set up, the rules below will not grant anyone access.';
+}

@@ -470,11 +470,11 @@ function renderActivityOperation(operation, index) {
     const changeLabel = count === 1 ? 'change' : 'changes';
     const recent = operation.truncated ? 'recent ' : '';
     meta.appendChild(el('span', null, `${count} ${recent}${allAppChanges ? `app ${changeLabel}` : changeLabel}`));
-    meta.appendChild(el('span', 'ov-activity-separator', '·'));
+    meta.appendChild(activitySeparator());
   }
   meta.appendChild(el('span', 'ov-activity-actor', operation.actorLabel));
   if (operation.kind !== 'group' && operation.resourceTypeLabel) {
-    meta.appendChild(el('span', 'ov-activity-separator', '·'));
+    meta.appendChild(activitySeparator());
     meta.appendChild(el('span', null, operation.resourceTypeLabel));
   }
   copy.appendChild(meta);
@@ -565,6 +565,17 @@ function appendActivityTarget(parent, target, href, focusKey) {
     return;
   }
   parent.appendChild(el('span', 'ov-activity-target ov-activity-target--static', target));
+}
+
+// The dot between two pieces of activity metadata is a visual divider and
+// nothing more: the flex gap already separates the parts for a sighted reader,
+// and a screen reader that announces it reads "middle dot" between every field.
+// Built here rather than inline at each site so the two can never disagree
+// about whether it is decoration.
+function activitySeparator() {
+  const dot = el('span', 'ov-activity-separator', '·');
+  dot.setAttribute('aria-hidden', 'true');
+  return dot;
 }
 
 function renderActivityTime(createdAt, cls = 'ov-activity-time') {

@@ -6,6 +6,7 @@ import (
 	"runtime/debug"
 	"sync"
 
+	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/protocol"
 )
 
@@ -17,8 +18,12 @@ type serverInfoResponse struct {
 	// requirements before issuing a mutating call.
 	Version string `json:"version"`
 	// Commit is the git SHA the binary was built from (short form), present only
-	// when built with VCS stamping. More precise than the semver tag for support
-	// and for confirming a hotfix actually reached production.
+	// when built with VCS stamping AND the caller is signed in. More precise than
+	// the semver tag for support and for confirming a hotfix actually reached
+	// production; that precision is also what makes it worth withholding from an
+	// anonymous caller, who would otherwise be handed the exact revision to
+	// compare against a list of security fixes. Its one consumer, the About
+	// dialog, is behind the login already.
 	Commit string `json:"commit,omitempty"`
 	// ProtocolVersion is the compatibility contract spoken by the HTTP API.
 	// It changes only for a breaking response/request change; additive features
@@ -55,11 +60,12 @@ type serverCapabilities struct {
 
 // handleServerInfo advertises server capability flags so a fleet-aware CLI
 // can detect precondition + digest support and degrade gracefully against
-// older servers. Unauthenticated and side-effect free.
+// older servers. Unauthenticated and side-effect free; the build commit is the
+// one field that requires a signed-in caller.
 func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, serverInfoResponse{
 		Version:         s.version,
-		Commit:          buildCommit(),
+		Commit:          s.commitForCaller(r),
 		ProtocolVersion: protocol.CurrentVersion,
 		Capabilities: serverCapabilities{
 			RuntimeCapabilities:       true,
@@ -80,6 +86,32 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		Runtimes: detectRuntimes(),
 	})
 }
+
+// commitForCaller returns the build commit for a signed-in caller and "" for an
+// anonymous one.
+//
+// Only the session cookie counts. This route sits outside the authenticated
+// group, so it is also outside the per-IP limiter that throttles failed
+// credentials; checking API keys here would add an unmetered "is this key
+// valid" oracle for the sake of a field no CLI reads. A cookie is a JWT this
+// server signed, so verifying one costs a signature check and never a lookup
+// keyed on attacker-supplied input.
+func (s *Server) commitForCaller(r *http.Request) string {
+	commit := currentCommit()
+	if commit == "" {
+		return ""
+	}
+	u, _, err := auth.AuthenticateBrowserSession(r, s.cfg.Auth.Secret, s.userLookup, s.revocationChecker())
+	if err != nil || u == nil {
+		return ""
+	}
+	return commit
+}
+
+// currentCommit is buildCommit behind a seam. A test binary carries no VCS
+// stamping, so buildCommit is unconditionally "" under `go test` and every
+// assertion about who may see the commit would hold for the wrong reason.
+var currentCommit = buildCommit
 
 var (
 	commitOnce sync.Once

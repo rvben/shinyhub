@@ -111,7 +111,7 @@ the declared value.
 
 The live URL contains a field exactly when its current value differs
 semantically from its baseline. `False`, `0`, an empty string, and an empty
-selection are real values—not shorthand for “omit.” Returning a field to its
+selection are real values, not shorthand for “omit.” Returning a field to its
 baseline removes it again.
 
 When `baseline=` is omitted, the helper learns the first materialized value on

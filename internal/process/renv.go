@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -170,6 +171,37 @@ func RenvRestoreArgv(lib string) []string {
 	return []string{"Rscript", "-e", expr}
 }
 
+// RenvPlainOutputEnv asks renv and the R packages it prints through to emit
+// plain text. A build's combined output is embedded verbatim in a structured
+// API error, where colour codes and cursor moves are not decoration but
+// literal escape bytes inside a JSON string.
+//
+// It is environment rather than an options() call for the same reason
+// RenvPolicyEnv is: renv decides whether it is on a terminal while the project
+// profile is being sourced, before any expression can run. NO_COLOR is the
+// cross-tool convention renv, cli and crayon all honour; R_CLI_NUM_COLORS
+// covers cli specifically, which reads its own variable first.
+//
+// The escapes are stripped from the output as well (StripANSI). Suppression
+// depends on which packages the deployer's lockfile pulls in and on their
+// versions, so it removes most of the noise but cannot be relied on alone.
+func RenvPlainOutputEnv() []string {
+	return []string{"NO_COLOR=1", "R_CLI_NUM_COLORS=1"}
+}
+
+// ansiEscape matches the escape sequences an R console emits: CSI sequences
+// (colour via SGR, and the cursor hide/show renv's progress bar uses), OSC
+// strings up to either terminator, and the two-byte escapes.
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]` +
+	`|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)` +
+	`|\x1b[@-Z\\-_]`)
+
+// StripANSI removes terminal escape sequences from build output so it can be
+// embedded in a structured response as readable text.
+func StripANSI(b []byte) []byte {
+	return ansiEscape.ReplaceAll(b, nil)
+}
+
 // renvRestoreCmd builds the renv::restore command. renv evaluates the
 // project's renv profile (deployer-controlled R code), so the env is
 // scrubbed of server secrets via SanitizedEnv.
@@ -177,7 +209,7 @@ func renvRestoreCmd(ctx context.Context, bundleDir, lib string) *exec.Cmd {
 	argv := RenvRestoreArgv(lib)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = bundleDir
-	cmd.Env = append(SanitizedEnv(), RenvPolicyEnv()...)
+	cmd.Env = append(append(SanitizedEnv(), RenvPolicyEnv()...), RenvPlainOutputEnv()...)
 	return cmd
 }
 
@@ -203,7 +235,7 @@ func SyncR(ctx context.Context, bundleDir string) error {
 		case context.Canceled:
 			return fmt.Errorf("build canceled: %w", ctx.Err())
 		}
-		return fmt.Errorf("%w\n%s", err, out)
+		return fmt.Errorf("%w\n%s", err, StripANSI(out))
 	}
 	return nil
 }

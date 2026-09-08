@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -123,6 +124,55 @@ func TestCreateUser_RejectsInvalidRole(t *testing.T) {
 	srv.Router().ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid role, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A duplicate username is a permanent, deterministic conflict. Reporting it as
+// 500 tells an automated caller the request is worth retrying, which it never
+// is, so the status code carries real behavioural weight here.
+func TestCreateUser_DuplicateUsernameConflicts(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"})
+	admin, _ := store.GetUserByUsername("admin")
+	adminToken, _ := auth.IssueJWT(admin.ID, "admin", "admin", "test-secret")
+
+	body, _ := json.Marshal(map[string]string{
+		"username": "dupe",
+		"password": "secret123-long-enough",
+		"role":     "developer",
+	})
+
+	req := authedRequest(t, "POST", "/api/users", body, adminToken)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
+		t.Fatalf("first create: got %d, want 200/201: %s", rec.Code, rec.Body.String())
+	}
+
+	req = authedRequest(t, "POST", "/api/users", body, adminToken)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate create: got %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "already exists") {
+		t.Errorf("duplicate create body = %s, want it to name the conflict", rec.Body.String())
+	}
+}
+
+// CreateUser must report a taken username as ErrUsernameExists rather than an
+// opaque wrapped SQL error, so the handler can classify it without string
+// matching on driver text.
+func TestStoreCreateUser_DuplicateReturnsSentinel(t *testing.T) {
+	_, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "taken", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	err := store.CreateUser(db.CreateUserParams{Username: "taken", PasswordHash: hash, Role: "developer"})
+	if !errors.Is(err, db.ErrUsernameExists) {
+		t.Fatalf("duplicate create error = %v, want ErrUsernameExists", err)
 	}
 }
 

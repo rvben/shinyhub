@@ -30,9 +30,10 @@ func newProjectsCmd() *cobra.Command {
 func newProjectsListCmd() *cobra.Command {
 	f := &listFlags{}
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List projects visible to you",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Short:   "List projects visible to you",
+		Aliases: []string{"ls"},
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
@@ -159,8 +160,9 @@ func runProjectsSet(cmd *cobra.Command, slug string, f *projectsSetFlags) error 
 
 func newProjectsRmCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "rm <slug>",
-		Short: "Delete a project's display metadata",
+		Use:     "rm <slug>",
+		Short:   "Delete a project's display metadata",
+		Aliases: []string{"delete"},
 		Long: "Deletes the project. Refused while any app still names it: move those\n" +
 			"apps first with `shinyhub apps set <app> --project <other>` or clear\n" +
 			"them with `--project \"\"`. Deleting never touches apps.",

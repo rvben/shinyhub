@@ -211,7 +211,11 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if created {
-		s.audit(r, db.AuditProjectCreate, "project", req.Slug, "")
+		s.audit(r, db.AuditProjectCreate, "project", req.Slug, projectAuditDetail(map[string]any{
+			"name":        p.Name,
+			"description": p.Description,
+			"icon_emoji":  p.IconEmoji,
+		}))
 		writeJSON(w, http.StatusCreated, map[string]any{"project": p})
 		return
 	}
@@ -245,7 +249,20 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	err := s.store.UpdateProject(db.UpdateProjectParams{
+	// Read the project before writing it so the audit event can say what each
+	// field changed from. UpdateProject reports its own not-found, so this read
+	// only moves that answer earlier; a project deleted in between still fails
+	// the update.
+	before, err := s.store.GetProject(slug)
+	if errors.Is(err, db.ErrProjectNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	err = s.store.UpdateProject(db.UpdateProjectParams{
 		Slug:           slug,
 		SetName:        req.Name != nil,
 		Name:           derefStringOrEmpty(req.Name),
@@ -267,7 +284,17 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	s.audit(r, db.AuditProjectUpdate, "project", slug, "")
+	changed := map[string]any{}
+	if req.Name != nil && *req.Name != before.Name {
+		changed["name"] = map[string]any{"old": before.Name, "new": *req.Name}
+	}
+	if req.Description != nil && *req.Description != before.Description {
+		changed["description"] = map[string]any{"old": before.Description, "new": *req.Description}
+	}
+	if req.IconEmoji != nil && *req.IconEmoji != before.IconEmoji {
+		changed["icon_emoji"] = map[string]any{"old": before.IconEmoji, "new": *req.IconEmoji}
+	}
+	s.audit(r, db.AuditProjectUpdate, "project", slug, projectAuditDetail(changed))
 	writeJSON(w, http.StatusOK, map[string]any{"project": p})
 }
 
@@ -298,6 +325,18 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "project still has apps; move or delete them first")
 		return
 	}
+	// Capture the display metadata before the row goes: after the delete the
+	// slug in resource_id resolves to nothing, so this is the only chance to
+	// record what was removed.
+	before, err := s.store.GetProject(slug)
+	if errors.Is(err, db.ErrProjectNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
 	err = s.store.DeleteProject(slug)
 	if errors.Is(err, db.ErrProjectNotFound) {
 		writeError(w, http.StatusNotFound, "not found")
@@ -307,8 +346,20 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	s.audit(r, db.AuditProjectDelete, "project", slug, "")
+	s.audit(r, db.AuditProjectDelete, "project", slug, projectAuditDetail(map[string]any{
+		"name":        before.Name,
+		"description": before.Description,
+		"icon_emoji":  before.IconEmoji,
+	}))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// projectAuditDetail renders a project audit event's detail blob. An empty
+// detail leaves the audit log's Details column blank, which for a project write
+// means the trail records only that some project changed - and for a delete the
+// slug it names no longer resolves to anything.
+func projectAuditDetail(fields map[string]any) string {
+	return auditDetailJSON(fields)
 }
 
 // projectDisplay is the slug -> display metadata map used to decorate app

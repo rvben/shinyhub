@@ -26,7 +26,10 @@ test('mountUsers shows the view, loads users, updates nav, and unmount hides it'
   assert.equal(view.hidden, false, 'view must be revealed on mount');
   assert.equal(loaded, 1, 'loadUsers must be called once');
   assert.equal(navUpdated, 1, 'updateActiveNav must be called once');
-  assert.equal(handle.title, 'Users');
+  // Identity, not Users: the page was renamed in the navigation and in its own
+  // <h1> when it grew service accounts, and the tab has to say what the page
+  // says. route-titles.test.js pins the same rule across every routed view.
+  assert.equal(handle.title, 'Identity');
 
   handle.unmount();
   assert.equal(view.hidden, true, 'view must be hidden on unmount');

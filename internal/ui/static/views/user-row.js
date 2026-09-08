@@ -27,8 +27,10 @@ export function userRowCaps(user, selfId) {
     canChangeRole: !isSelf && !reserved,
     canDelete: !isSelf && !reserved,
     canResetPassword: !reserved,
+    canRevokeSessions: !reserved,
     roleHint: reserved ? RESERVED_USER_HINT : (isSelf ? 'You cannot change your own role' : ''),
     deleteHint: reserved ? RESERVED_USER_HINT : (isSelf ? 'You cannot delete yourself' : ''),
+    revokeSessionsHint: reserved ? RESERVED_USER_HINT : '',
   };
 }
 

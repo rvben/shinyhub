@@ -16,7 +16,7 @@ gets the result in under a millisecond.
 
 On a CPU-bound synthetic app (one replica, small input domain, 45 ms
 compute per call), adding `@cache` to a module-scope helper produced
-a 37–64× drop in median response time and +21% throughput at the
+a 37× to 64× drop in median response time and +21% throughput at the
 saturation point where the uncached version starts dropping requests:
 
 | app      | concurrency | interactions / 30 s | p50 ms | p95 ms |
@@ -27,7 +27,7 @@ saturation point where the uncached version starts dropping requests:
 | cached   | 30 | 3 329 |   2.7 | 174.6 |
 
 Your mileage will vary with compute cost, input-domain size, and
-cache hit rate — but the shape of the win is reliable: the median
+cache hit rate - but the shape of the win is reliable: the median
 collapses to a dict lookup, and throughput stops falling off at
 saturation.
 
@@ -69,14 +69,14 @@ app = App(app_ui, server)
 Three properties make this work:
 
 1. **`expensive_plot` is defined at module scope**, not inside
-   `server()`. That's what makes the cache survive across sessions —
+   `server()`. That's what makes the cache survive across sessions:
    one dict per process, not one per session.
 2. **All arguments are hashable.** Lists and dicts aren't; convert to
    `tuple(sorted(...))` or `frozenset(...)` before calling.
 3. **The function is a pure function of its arguments.** No
    `datetime.now`, no global-state reads, no reads from a DB that
    changes over time. If the result should refresh when data changes,
-   output caching is the wrong tool — use `@reactive.poll` or
+   output caching is the wrong tool - use `@reactive.poll` or
    `@reactive.file_reader` instead.
 
 ## When to bound the cache
@@ -87,10 +87,10 @@ space is genuinely small and each entry is small:
 | Key space | Entry size | Recommendation |
 |-----------|-----------|----------------|
 | < 100 | < 1 MB | `@cache` is fine |
-| small but entries are big (DataFrames, figures) | any | `@lru_cache(maxsize=32)` — bound for memory |
+| small but entries are big (DataFrames, figures) | any | `@lru_cache(maxsize=32)` - bound for memory |
 | large (date ranges, free-text) | any | `@lru_cache(maxsize=256)` + measure |
 
-Size the bound by **N × peak entry size** — that's the steady-state
+Size the bound by **N × peak entry size** - that's the steady-state
 memory added per replica. ShinyHub's per-app memory limit
 (`memory_limit_mb`) still applies, so an unbounded cache that OOMs
 will trigger an OOM-kill and restart.
@@ -103,7 +103,7 @@ will trigger an OOM-kill and restart.
   leaks between users. If the key captures the user explicitly, you're
   fine.
 - **Time-sensitive data.** Prices, live metrics, "rows added in the
-  last minute" — either don't cache or use `@reactive.poll` with a
+  last minute" - either don't cache or use `@reactive.poll` with a
   TTL-keyed helper (`def fetch(bucket=int(time.time() // 60))`).
 - **Cheap computations.** If the work is under ~5 ms, the caching
   overhead and cognitive cost aren't worth it.
@@ -112,7 +112,7 @@ will trigger an OOM-kill and restart.
 
 The cache is **per-process**, so each replica has its own dict.
 Increasing `replicas` doesn't dilute the hit rate once warm (random
-input selection still covers the small key space quickly) — but it
+input selection still covers the small key space quickly) - but it
 does multiply total memory overhead by the replica count. Don't
 forget that when sizing `memory_limit_mb`.
 
@@ -124,7 +124,7 @@ own replica and then hit for the rest of the session.
 ## Interaction with schedules
 
 If a [scheduled job](../schedules.md) produces a file that the app
-reads, output-caching the file read is safe — but key it by the
+reads, output-caching the file read is safe - but key it by the
 file's mtime so fresh writes invalidate the cache:
 
 ```python
@@ -159,5 +159,5 @@ info = expensive_plot.cache_info()
 
 A hit ratio above ~90% under steady load confirms the cache is doing
 its job. A ratio near 0 means your key space is too large or the
-function isn't actually being called through the cached entry point —
-double-check the module-scope definition.
+function isn't actually being called through the cached entry point.
+Double-check the module-scope definition.

@@ -29,6 +29,13 @@ func uvSyncCmd(ctx context.Context, dir string) *exec.Cmd {
 	return cmd
 }
 
+// uvBuildOutput prepares captured build output for embedding in an error that
+// ends up in a JSON response. uv writes plain text into a pipe, but the build
+// backends it runs are the app author's own code and colour their output
+// whether or not anything is reading it from a terminal. The R build path
+// (SyncR) strips for the same reason.
+func uvBuildOutput(out []byte) []byte { return StripANSI(out) }
+
 // uvPythonInstallCmd builds the `uv python install <version>` command with a
 // scrubbed env, for the same reason as uvSyncCmd.
 func uvPythonInstallCmd(version string) *exec.Cmd {
@@ -52,7 +59,7 @@ func Sync(ctx context.Context, dir string) error {
 		case context.Canceled:
 			return fmt.Errorf("build canceled: %w", ctx.Err())
 		}
-		return fmt.Errorf("%w\n%s", err, out)
+		return fmt.Errorf("%w\n%s", err, uvBuildOutput(out))
 	}
 	return nil
 }
@@ -141,13 +148,13 @@ func EnsureProject(ctx context.Context, dir string) error {
 		return nil
 	}
 	if out, err := uvInitCmd(ctx, dir).CombinedOutput(); err != nil {
-		return fmt.Errorf("uv init: %w\n%s", err, out)
+		return fmt.Errorf("uv init: %w\n%s", err, uvBuildOutput(out))
 	}
 	if out, err := uvAddRequirementsCmd(ctx, dir).CombinedOutput(); err != nil {
 		_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
 		_ = os.Remove(filepath.Join(dir, "uv.lock"))
 		_ = fsx.RemoveAll(filepath.Join(dir, ".venv"))
-		return fmt.Errorf("uv add requirements: %w\n%s", err, out)
+		return fmt.Errorf("uv add requirements: %w\n%s", err, uvBuildOutput(out))
 	}
 	// shiny's UI imports shinychat, which imports pydantic unconditionally while
 	// declaring it optional (shinychat 0.5.0). Add pydantic for shiny apps so they
@@ -157,7 +164,7 @@ func EnsureProject(ctx context.Context, dir string) error {
 			_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
 			_ = os.Remove(filepath.Join(dir, "uv.lock"))
 			_ = fsx.RemoveAll(filepath.Join(dir, ".venv"))
-			return fmt.Errorf("uv add pydantic (shiny chat dependency): %w\n%s", err, out)
+			return fmt.Errorf("uv add pydantic (shiny chat dependency): %w\n%s", err, uvBuildOutput(out))
 		}
 	}
 	_ = os.WriteFile(filepath.Join(dir, SynthesizedProjectMarker), []byte("1\n"), 0o644)
@@ -178,7 +185,7 @@ func EnsurePython(version string) error {
 	}
 	out, err := uvPythonInstallCmd(version).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("uv python install %s: %w\n%s", version, err, out)
+		return fmt.Errorf("uv python install %s: %w\n%s", version, err, uvBuildOutput(out))
 	}
 	return nil
 }

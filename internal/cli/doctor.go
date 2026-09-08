@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,6 +64,52 @@ type doctorLocalContext struct {
 }
 
 var doctorLookPath = exec.LookPath
+
+// doctorSyntaxCheckTimeout bounds the py_compile subprocess. `uv run` may have
+// to provision a managed interpreter on first use, which needs the network, so
+// an unbounded call can hang doctor indefinitely on an offline machine.
+const doctorSyntaxCheckTimeout = 60 * time.Second
+
+// errSyntaxCheckUnavailable reports that the compile could not be performed at
+// all. It is deliberately distinct from a compile failure: "this file has a
+// syntax error" and "nothing could tell me whether it does" are different
+// answers, and reporting the second as the first sends the caller hunting for
+// a defect that may not exist.
+var errSyntaxCheckUnavailable = errors.New("syntax check unavailable")
+
+// pythonCompileFailures are the exception names py_compile reports for a file
+// it could not parse. A non-zero exit naming none of them came from uv or the
+// interpreter itself (no network for a managed Python, a broken toolchain) and
+// says nothing about the file.
+var pythonCompileFailures = []string{"SyntaxError", "IndentationError", "TabError"}
+
+// doctorPythonSyntaxCheck compiles a Python entry file without installing any
+// dependencies, so it catches a broken app.py (the CLI's most common deploy
+// failure) even when no requirements are declared yet. It is a package var so
+// tests can replace the real `uv` subprocess with a fake.
+var doctorPythonSyntaxCheck = func(dir, entryFile string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), doctorSyntaxCheckTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "uv", "run", "--no-project", "python", "-m", "py_compile", entryFile)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	detail := strings.TrimSpace(string(out))
+	if ctx.Err() != nil {
+		return fmt.Errorf("%w: uv did not finish within %s", errSyntaxCheckUnavailable, doctorSyntaxCheckTimeout)
+	}
+	for _, name := range pythonCompileFailures {
+		if strings.Contains(detail, name) {
+			return errors.New(detail)
+		}
+	}
+	if detail == "" {
+		detail = err.Error()
+	}
+	return fmt.Errorf("%w: %s", errSyntaxCheckUnavailable, detail)
+}
 
 func newDoctorCmd() *cobra.Command {
 	f := &doctorFlags{}
@@ -179,6 +226,7 @@ func runLocalDoctor(rawDir, requestedSlug string, checks []doctorCheck) (doctorL
 		return ctx, appendLocalSkipped(checks, "the app directory is unavailable")
 	}
 	checks = append(checks, doctorPass("app-directory", ctx.dir))
+	checks = append(checks, doctorBundleContents(ctx.dir))
 
 	ctx.slug = requestedSlug
 	if ctx.slug == "" {
@@ -207,7 +255,7 @@ func runLocalDoctor(rawDir, requestedSlug string, checks []doctorCheck) (doctorL
 
 	plan, launchErr := deploy.ResolveLaunch(ctx.dir, deploy.LaunchOptions{Port: 4000, BindHost: "127.0.0.1", PrepHostDeps: true})
 	if launchErr != nil {
-		checks = append(checks, doctorFail("entrypoint", launchErr.Error(), "Add app.py or app.R at the bundle root, or declare [app] command in shinyhub.toml.", KindValidation, 1))
+		checks = append(checks, doctorFail("entrypoint", launchErr.Error(), "Add app.py, app.R, or ui.R and server.R at the bundle root, or declare [app] command in shinyhub.toml.", KindValidation, 1))
 		checks = append(checks, doctorSkip("local-runtime", "the launch command could not be resolved"))
 		return ctx, checks
 	}
@@ -233,15 +281,64 @@ func runLocalDoctor(rawDir, requestedSlug string, checks []doctorCheck) (doctorL
 		return ctx, checks
 	}
 	checks = append(checks, doctorPass("local-runtime", fmt.Sprintf("%s available at %s", executable, resolved)))
+
+	if ctx.appType == "python" {
+		checks = append(checks, doctorPythonDependencies(ctx.dir))
+		// appType == "python" is set by DetectAppType only when app.py exists
+		// (internal/deploy/deploy.go), so the entry file is known to be there.
+		switch syntaxErr := doctorPythonSyntaxCheck(ctx.dir, "app.py"); {
+		case syntaxErr == nil:
+			checks = append(checks, doctorPass("python-syntax", "app.py compiles"))
+		case errors.Is(syntaxErr, errSyntaxCheckUnavailable):
+			checks = append(checks, doctorSkip("python-syntax", syntaxErr.Error()))
+		default:
+			checks = append(checks, doctorFail("python-syntax", syntaxErr.Error(), "Fix the syntax error, then run `shinyhub doctor` again.", KindValidation, 1))
+		}
+	}
 	return ctx, checks
 }
 
 func appendLocalSkipped(checks []doctorCheck, reason string) []doctorCheck {
 	return append(checks,
+		doctorSkip("bundle-contents", reason),
 		doctorSkip("app-slug", reason),
 		doctorSkip("manifest", reason),
 		doctorSkip("entrypoint", reason),
 		doctorSkip("local-runtime", reason))
+}
+
+// doctorBundleContents reports files the deploy bundler would silently drop
+// (oversized files, protected data/dataset directories). It runs regardless
+// of app type, right after the directory itself is confirmed readable, so a
+// bundle that would deploy incompletely is flagged before anything else.
+func doctorBundleContents(dir string) doctorCheck {
+	preview, err := buildBundlePreview(dir)
+	if err != nil {
+		return doctorFail("bundle-contents", err.Error(), "Fix the error preventing the bundle from being built.", KindValidation, 1)
+	}
+	rejections := contentRejections(preview.ProtectedPaths)
+	if len(rejections) == 0 {
+		return doctorPass("bundle-contents", fmt.Sprintf("%d file(s) ready to deploy", preview.FileCount))
+	}
+	return doctorWarn("bundle-contents", summarizeSkippedPaths(rejections),
+		"Push large or protected data separately with `shinyhub data push`, or adjust .shinyhubignore.")
+}
+
+// doctorPythonDependencies catches the CLI's most common Python deploy
+// failure: a bundle with an app.py but no pyproject.toml and no
+// requirements.txt. `uv run --no-project` then installs nothing, so `shiny`
+// itself is never on PATH and the launch command fails to spawn.
+func doctorPythonDependencies(dir string) doctorCheck {
+	if fileExists(filepath.Join(dir, "pyproject.toml")) {
+		return doctorPass("python-dependencies", "pyproject.toml declares dependencies (project mode)")
+	}
+	if fileExists(filepath.Join(dir, "requirements.txt")) {
+		return doctorPass("python-dependencies", "requirements.txt declares dependencies")
+	}
+	return doctorFail("python-dependencies",
+		"no pyproject.toml or requirements.txt; `uv run --no-project` installs nothing and the app cannot start",
+		"Add a requirements.txt (or a pyproject.toml) listing the packages the app imports, e.g. shiny.",
+		KindValidation, 1)
 }
 
 func resolveDoctorExecutable(dir, executable string) (string, error) {

@@ -878,3 +878,67 @@ func TestDataPut_RestartFailure_SurfacedInResponse(t *testing.T) {
 		t.Errorf("app.Status = %q, want %q", app.Status, "stopped")
 	}
 }
+
+// TestDataList_DataBytesExcludesTheBundle pins the distinction the listing
+// exists to make. used_bytes is the quota denominator, so it has to count the
+// bundle, its retained versions, and the restored dependency library; a
+// listing of pushed files reporting only that number tells an author who
+// pushed one 5-byte CSV that their data directory holds megabytes. data_bytes
+// is the per-app data dir alone, and the two must not collapse into each other.
+func TestDataList_DataBytesExcludesTheBundle(t *testing.T) {
+	appsDir := t.TempDir()
+	dataDir := t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 500)
+
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+
+	// One small pushed file.
+	appDataDir := filepath.Join(dataDir, "demo")
+	if err := os.MkdirAll(appDataDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDataDir, "a.csv"), []byte("hello"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// A bundle an order of magnitude larger, standing in for a restored
+	// library. Its size has to dominate the pushed file so a swapped field is
+	// unambiguous rather than a rounding argument.
+	bundleDir := filepath.Join(appsDir, "demo", "versions", "1", "renv", "library")
+	if err := os.MkdirAll(bundleDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "pkg.so"), make([]byte, 40000), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	req := dataListReq(t, "demo", token)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		UsedBytes int64 `json:"used_bytes"`
+		DataBytes int64 `json:"data_bytes"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// Two bounds, not one: an exact 5 rules out the bundle leaking in, and the
+	// non-zero floor rules out a field that is simply always absent or zero.
+	if resp.DataBytes != 5 {
+		t.Errorf("data_bytes = %d, want exactly 5 (the pushed file, nothing else)", resp.DataBytes)
+	}
+	// used_bytes keeps its meaning: it is what the quota is checked against, so
+	// it must still carry the bundle.
+	if resp.UsedBytes < 40000 {
+		t.Errorf("used_bytes = %d, want >= 40000; the quota denominator must still count the bundle", resp.UsedBytes)
+	}
+	if resp.UsedBytes <= resp.DataBytes {
+		t.Errorf("used_bytes = %d and data_bytes = %d; with a bundle on disk the two must not be equal", resp.UsedBytes, resp.DataBytes)
+	}
+}

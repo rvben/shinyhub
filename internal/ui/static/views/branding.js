@@ -99,7 +99,7 @@ export function applyBranding(doc, branding) {
   for (const slot of slots) {
     if (slot.classList.contains('brand-home')) {
       slot.setAttribute('aria-label', intent.siteTitle
-        ? `ShinyHub — ${intent.siteTitle} home`
+        ? `ShinyHub: ${intent.siteTitle} home`
         : 'ShinyHub home');
       if (intent.logo || intent.siteTitle) {
         renderSignedInBrand(doc, slot, intent.siteTitle);

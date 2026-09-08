@@ -15,6 +15,7 @@ import { deploymentTimelineModels, provenanceModel, relativeTime } from '/static
 import { statusPillClass } from '/static/views/stat-format.js';
 import { formatStatus } from '/static/views/status-label.js';
 import { appStatusView } from '/static/views/app-card-badge.js';
+import { awaitingFirstDeploy, firstDeployFailed } from '/static/views/app-deploy-state.js';
 import { crashBanner } from '/static/views/crash-banner.js';
 import { connectivityBanner } from '/static/views/connectivity-banner.js';
 import { renderTrendsCard } from '/static/views/trends-card.js';
@@ -571,13 +572,18 @@ function provenanceIcon(name) {
 }
 
 function renderLogs(panel, app, replicasStatus, ctx) {
-  // An app awaiting its first deploy has no log sources. Keep the intentional
-  // first-deploy guidance instead of mounting a viewer that can only report an
-  // unavailable source.
-  if ((app.deploy_count || 0) === 0) {
+  // An app nobody has ever tried to deploy has no log sources. Keep the
+  // intentional first-deploy guidance instead of mounting a viewer that can
+  // only report an unavailable source.
+  //
+  // The gate is "has a deploy ever been ATTEMPTED", not "has one ever
+  // succeeded": a first deploy that crashed on startup writes its traceback to
+  // the app log, and gating on deploy_count (successes only) hid exactly that
+  // traceback behind "awaiting its first deploy".
+  if (awaitingFirstDeploy(app)) {
     panel.innerHTML = `
       <div class="logs-empty">
-        <h3>No logs yet</h3>
+        <h2>No logs yet</h2>
         <p>This app is awaiting its first deploy. Output appears here once it's
            deployed and running.</p>
         <p><a href="/apps/${app.slug}/overview" data-nav>Deploy from the Overview tab →</a></p>
@@ -852,7 +858,7 @@ async function renderDeployments(panel, app, ctx) {
     try {
       resp = await ctx.api(`/api/apps/${app.slug}/deployments`);
     } catch {
-      errWrap.querySelector('.error').textContent = 'Network error — could not load deployments.';
+      errWrap.querySelector('.error').textContent = 'Network error: could not load deployments.';
       errWrap.hidden = false;
       list.hidden = true;
       return;
@@ -899,7 +905,11 @@ async function renderDeployments(panel, app, ctx) {
 }
 
 function renderOverview(panel, app, replicasStatus, envelope, ctx) {
-  if (app.deploy_count === 0) {
+  // Onboarding is for an app nobody has deployed yet. An app whose deploy was
+  // attempted and failed gets the failure summary below instead: it has a
+  // cause to explain, and showing it the brand-new-app snippet claimed nothing
+  // had been deployed while the crash sat in its log.
+  if (awaitingFirstDeploy(app)) {
     panel.innerHTML = `
       <section class="emptystate-card">
         <p class="emptystate-eyebrow"><span class="sparkle" aria-hidden="true"></span>Awaiting deploy</p>
@@ -922,6 +932,40 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
     });
     return;
   }
+  // Deployed at least once, never successfully, newest attempt failed: there is
+  // no running bundle for the normal overview cards to describe, but there IS a
+  // failure to explain. Name it and point at the two tabs that carry the
+  // detail, instead of the current-deployment grid full of dashes.
+  if (firstDeployFailed(app)) {
+    panel.innerHTML = `
+      <section class="emptystate-card">
+        <p class="emptystate-eyebrow">Deploy failed</p>
+        <h2>This app has never started</h2>
+        <p class="lead">A deploy was attempted and failed, so there is no
+           running version yet. The startup output, including any traceback,
+           is on the Logs tab.</p>
+        <div class="snippet" id="overview-failed-error" hidden>
+          <pre><code id="overview-failed-error-text"></code></pre>
+        </div>
+        <div class="emptystate-actions">
+          <a class="emptystate-btn emptystate-btn-primary" href="/apps/${app.slug}/logs" data-nav>View logs</a>
+          <a class="emptystate-btn" href="/apps/${app.slug}/deployments" data-nav>Deployment history</a>
+          <button type="button" class="emptystate-btn" id="overview-deploy-btn">Deploy again</button>
+        </div>
+      </section>
+    `;
+    // last_error is server-supplied text (a boot error, often a traceback tail).
+    // textContent, never interpolation, so it cannot inject markup.
+    const failedError = (app.last_error || '').trim();
+    if (failedError) {
+      document.getElementById('overview-failed-error-text').textContent = failedError;
+      document.getElementById('overview-failed-error').hidden = false;
+    }
+    document.getElementById('overview-deploy-btn').addEventListener('click', () => {
+      ctx.openDeployModal(app);
+    });
+    return;
+  }
   panel.innerHTML = `
     <div class="overview-grid">
       <section class="overview-card overview-release">
@@ -939,7 +983,7 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
         </div>
       </section>
       <div id="overview-trends" class="overview-card overview-trends">
-        <h3>Trends</h3>
+        <h2>Trends</h2>
         <p class="trends-empty">Collecting...</p>
       </div>
       <section class="overview-card overview-autoscale">
@@ -1272,7 +1316,7 @@ function renderTraces(panel, app, ctx) {
       const query = session ? `?development_session_id=${encodeURIComponent(session)}` : '';
       r = await ctx.api(`/api/apps/${app.slug}/traces${query}`);
     } catch {
-      errEl.textContent = 'Network error — could not load traces.';
+      errEl.textContent = 'Network error: could not load traces.';
       errEl.hidden = false;
       return;
     }

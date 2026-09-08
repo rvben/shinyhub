@@ -4,6 +4,47 @@
 export const MAX_RENDERED_LOG_ENTRIES = 2500;
 const MAX_CONCURRENT_PROVIDER_READS = 3;
 
+// Matches internal/api/logs.go's defaultLogTail/maxLogTail: a static source's
+// first fetch pulls this many lines, and Load older lines can grow the
+// request up to this ceiling. Keeping both in one place means neither one can
+// drift from what the server actually honors.
+export const DEFAULT_LOG_TAIL = 200;
+export const MAX_LOG_TAIL = 10000;
+
+// Each click on Load older lines multiplies the requested history rather than
+// adding a fixed amount, so a handful of clicks reach the server's ceiling
+// instead of trickling toward it one small page at a time.
+export function nextLoadMoreTail(current, max = MAX_LOG_TAIL) {
+  return Math.min(max, Math.max(current, DEFAULT_LOG_TAIL) * 5);
+}
+
+// A source's loaded window may not cover its full retained history: a static
+// or provider source's fetch is bounded by its tail/page parameter, and a
+// live source's pre-stream burst carries the same bound. Search and the
+// toolbar cap notice both read this, so neither one claims a completeness the
+// buffer cannot back up (an empty search result is not proof of no match).
+export function logsAreTruncated(scoped, { trimmed = 0, fullyLoadedSourceIDs } = {}) {
+  if (trimmed > 0) return true;
+  const loaded = fullyLoadedSourceIDs instanceof Set ? fullyLoadedSourceIDs : new Set(fullyLoadedSourceIDs || []);
+  return scoped.some((source) => !isExternalLogSource(source) && !loaded.has(source.source_id));
+}
+
+// The empty-output message shown under the log viewport. Pulled out as a pure
+// function so the truncation caveat (and its wording) is unit-tested without
+// standing up the whole DOM-driven viewer.
+export function logsEmptyMessage({ hasSearch, truncated, canLoadMore, hasScopedSources, allExternal, hasAnySources }) {
+  if (hasSearch) {
+    if (!truncated) return 'No visible log lines match this search.';
+    return canLoadMore
+      ? 'No matches in the log history loaded so far. Older output may not be loaded yet, so try Load older lines.'
+      : 'No matches in the log history loaded so far. Older output may not be loaded yet.';
+  }
+  if (hasScopedSources && allExternal) {
+    return 'Application output is retained by its provider. Use the access details above.';
+  }
+  return hasAnySources ? 'Waiting for application output…' : 'No retained log sources were found.';
+}
+
 const LIVE_STATUSES = new Set(['running', 'starting', 'deploying', 'waking']);
 
 export function isLiveLogSource(source) {
@@ -101,11 +142,11 @@ function titleCase(value) {
 export function formatLogSourceLabel(source) {
   const place = source.tier || source.provider || '';
   if (source.current !== false) {
-    return `Replica #${source.replica} — ${titleCase(source.status)}${place ? ` · ${place}` : ''}`;
+    return `Replica #${source.replica}: ${titleCase(source.status)}${place ? ` · ${place}` : ''}`;
   }
   const when = source.started_at || source.updated_at;
   const stamp = when ? new Date(when).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Earlier run';
-  return `Replica #${source.replica} — ${stamp} · ${titleCase(source.status)}`;
+  return `Replica #${source.replica}: ${stamp} · ${titleCase(source.status)}`;
 }
 
 export function filterLogEntries(entries, query) {
@@ -233,6 +274,7 @@ export function createLogsViewer({
           </label>
         </div>
         <div class="logs-toolbar-actions">
+          <button id="logs-load-more" type="button" class="btn-row" hidden>Load older lines</button>
           <button id="logs-pause" type="button" class="btn-row" aria-pressed="false">Pause live</button>
           <button id="logs-copy" type="button" class="btn-row">Copy visible</button>
           <button id="logs-download" type="button" class="btn-row">Download visible</button>
@@ -255,6 +297,7 @@ export function createLogsViewer({
 
   const sourceSelect = panel.querySelector('#logs-source');
   const searchInput = panel.querySelector('#logs-search');
+  const loadMoreButton = panel.querySelector('#logs-load-more');
   const pauseButton = panel.querySelector('#logs-pause');
   const copyButton = panel.querySelector('#logs-copy');
   const downloadButton = panel.querySelector('#logs-download');
@@ -270,6 +313,12 @@ export function createLogsViewer({
   let selected = 'all';
   let entries = [];
   let trimmed = 0;
+  // Load older lines only re-fetches the single selected static source (the
+  // common case: browsing a stopped/crashed run's history); provider sources
+  // paginate forward by cursor only, and a live source keeps growing via its
+  // own stream, so neither offers a meaningful "older" fetch to grow.
+  let staticTail = DEFAULT_LOG_TAIL;
+  const fullyLoadedSourceIDs = new Set();
   let paused = false;
   let pendingWhilePaused = 0;
   let stickToBottom = true;
@@ -395,12 +444,14 @@ export function createLogsViewer({
       const empty = doc.createElement('p');
       empty.className = 'logs-output-empty';
       const scoped = scopedSources();
-      if (searchInput.value) empty.textContent = 'No visible log lines match this search.';
-      else if (scoped.length > 0 && scoped.every(isExternalLogSource)) {
-        empty.textContent = 'Application output is retained by its provider. Use the access details above.';
-      } else {
-        empty.textContent = sources.length ? 'Waiting for application output…' : 'No retained log sources were found.';
-      }
+      empty.textContent = logsEmptyMessage({
+        hasSearch: Boolean(searchInput.value),
+        truncated: logsAreTruncated(scoped, { trimmed, fullyLoadedSourceIDs }),
+        canLoadMore: !loadMoreButton.hidden,
+        hasScopedSources: scoped.length > 0,
+        allExternal: scoped.length > 0 && scoped.every(isExternalLogSource),
+        hasAnySources: sources.length > 0,
+      });
       fragment.appendChild(empty);
     } else {
       for (const entry of visible) fragment.appendChild(createEntryRow(entry));
@@ -453,6 +504,14 @@ export function createLogsViewer({
     const parts = [`${visible.length.toLocaleString()} visible line${visible.length === 1 ? '' : 's'}`];
     if (trimmed) parts.push(`${trimmed.toLocaleString()} older lines omitted from this session`);
     if (query) parts.push(`${entries.length.toLocaleString()} buffered`);
+    // Separate from the trimmed note above: this flags server-side history
+    // that has never been fetched at all, which trimmed (client-side buffer
+    // eviction) does not cover. Suppressed once a search is active because
+    // logsEmptyMessage already carries the equivalent caveat for zero-match
+    // search results, and a non-empty search result mid-load is not truncated.
+    if (!query && logsAreTruncated(scopedSources(), { trimmed: 0, fullyLoadedSourceIDs })) {
+      parts.push('showing recent history only');
+    }
     summary.textContent = parts.join(' · ');
     jumpButton.hidden = stickToBottom;
   }
@@ -638,10 +697,10 @@ export function createLogsViewer({
     }
   }
 
-  function staticLogURL(source) {
+  function staticLogURL(source, tail = DEFAULT_LOG_TAIL) {
     const run = source.legacy ? 'legacy' : source.run_id;
     const runParam = run ? `&run=${encodeURIComponent(run)}` : '';
-    return `/api/apps/${encodeURIComponent(app.slug)}/logs?replica=${source.replica}${runParam}&tail=200&follow=false`;
+    return `/api/apps/${encodeURIComponent(app.slug)}/logs?replica=${source.replica}${runParam}&tail=${tail}&follow=false`;
   }
 
   function providerLogURL(source, cursor = '') {
@@ -825,8 +884,8 @@ export function createLogsViewer({
     scheduleNextProviderPoll();
   }
 
-  async function fetchStaticLines(source) {
-    const resp = await api(staticLogURL(source));
+  async function fetchStaticLines(source, tail = DEFAULT_LOG_TAIL) {
+    const resp = await api(staticLogURL(source, tail));
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const text = await resp.text();
     if (!text) return [];
@@ -836,18 +895,71 @@ export function createLogsViewer({
   async function loadStaticSource(source, generation) {
     if (!source.has_log) {
       addEntry({ kind: 'event', replica: source.replica, line: `Replica #${source.replica} has no retained output` });
+      fullyLoadedSourceIDs.add(source.source_id);
       return;
     }
     try {
-      const lines = await fetchStaticLines(source);
+      const lines = await fetchStaticLines(source, DEFAULT_LOG_TAIL);
       if (destroyed || generation !== scopeGeneration) return;
+      // Fewer lines than requested means the retained file is shorter than
+      // the tail window, so this fetch already holds everything there is.
+      if (lines.length < DEFAULT_LOG_TAIL) fullyLoadedSourceIDs.add(source.source_id);
+      else fullyLoadedSourceIDs.delete(source.source_id);
       for (const line of lines) {
         addEntry({ kind: 'line', source_id: source.source_id, replica: source.replica, line });
       }
+      updateLoadMoreControl();
     } catch {
       if (destroyed || generation !== scopeGeneration) return;
       addEntry({ kind: 'event', replica: source.replica, line: `Replica #${source.replica} log is unavailable` });
     }
+  }
+
+  // Re-fetches the selected static source with a larger tail and replaces the
+  // buffered lines wholesale (a bigger tail is always a superset of a smaller
+  // one for the same retained file). Scoped to a single non-live source: a
+  // provider source only paginates forward by cursor, and a live source's
+  // history keeps growing on its own via the stream, so "older" does not
+  // apply to either. Any transient status events buffered for this source
+  // (e.g. its initial discovery event) are dropped by the replacement; that
+  // is an acceptable trade for a source whose selection already implies it is
+  // not actively changing state.
+  async function loadMoreStaticHistory() {
+    if (selected === 'all') return;
+    const source = sources.find((item) => item.source_id === selected);
+    if (!source || !source.has_log || isLiveLogSource(source) ||
+      isExternalLogSource(source) || isInlineProviderLogSource(source)) return;
+    if (staticTail >= MAX_LOG_TAIL) return;
+    const generation = scopeGeneration;
+    const requestedTail = nextLoadMoreTail(staticTail);
+    loadMoreButton.disabled = true;
+    loadMoreButton.textContent = 'Loading…';
+    try {
+      const lines = await fetchStaticLines(source, requestedTail);
+      if (destroyed || generation !== scopeGeneration) return;
+      staticTail = requestedTail;
+      if (lines.length < requestedTail) fullyLoadedSourceIDs.add(source.source_id);
+      else fullyLoadedSourceIDs.delete(source.source_id);
+      entries = lines.map((line) => ({ kind: 'line', source_id: source.source_id, replica: source.replica, line }));
+      trimmed = 0;
+      scheduleRender(true);
+      announce(`Loaded ${lines.length.toLocaleString()} lines for replica ${source.replica}.`);
+    } catch {
+      if (!destroyed) announce('Could not load more log history.');
+    } finally {
+      if (!destroyed) updateLoadMoreControl();
+    }
+  }
+
+  function updateLoadMoreControl() {
+    const source = selected !== 'all' ? sources.find((item) => item.source_id === selected) : null;
+    const eligible = Boolean(source) && source.has_log && !isLiveLogSource(source) &&
+      !isExternalLogSource(source) && !isInlineProviderLogSource(source) &&
+      !fullyLoadedSourceIDs.has(source.source_id) && staticTail < MAX_LOG_TAIL;
+    loadMoreButton.hidden = !eligible;
+    if (!eligible) return;
+    loadMoreButton.disabled = false;
+    loadMoreButton.textContent = `Load older lines (up to ${nextLoadMoreTail(staticTail).toLocaleString()})`;
   }
 
   async function reconcileTerminalSource(source, generation, terminalMessage = '') {
@@ -973,10 +1085,13 @@ export function createLogsViewer({
     providerNextPollAt.clear();
     entries = [];
     trimmed = 0;
+    staticTail = DEFAULT_LOG_TAIL;
+    fullyLoadedSourceIDs.clear();
     pendingWhilePaused = 0;
     pauseButton.textContent = paused ? 'Resume' : 'Pause live';
     for (const source of scopedSources()) loadSource(source, scopeGeneration);
     updateConnectionStatus();
+    updateLoadMoreControl();
     scheduleRender(true);
     // Source identity and output must change atomically. Waiting for the next
     // animation frame leaves the previous run's lines visible under the newly
@@ -1035,6 +1150,10 @@ export function createLogsViewer({
           loadSource(source, scopeGeneration);
         }
       }
+      // A live source can finish (or a terminal source's retained bytes can
+      // arrive) without the selection itself changing, so eligibility for
+      // Load older lines is re-checked here rather than only from resetScope.
+      updateLoadMoreControl();
     }
     updateConnectionStatus();
   }
@@ -1068,6 +1187,9 @@ export function createLogsViewer({
     announce(selected === 'all' ? 'Showing all current replica runs' : `Showing ${source ? formatLogSourceLabel(source) : 'selected log run'}`);
   });
   searchInput.addEventListener('input', () => scheduleRender(true));
+  loadMoreButton.addEventListener('click', () => {
+    loadMoreStaticHistory();
+  });
   pauseButton.addEventListener('click', () => {
     // Finish the already-scheduled frame before entering pause. Otherwise a
     // line arriving between the click and that frame would leak into the DOM

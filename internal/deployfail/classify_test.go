@@ -15,7 +15,13 @@ func TestClassify(t *testing.T) {
 		{"python runtime missing via uv", `uv sync: exec: "uv": executable file not found in $PATH`, RuntimeMissing},
 		{"build failed uv sync", `uv sync: error: failed to resolve dependencies for pandas`, BuildFailed},
 		{"build failed renv", `renv restore: error: package 'shiny' is not available`, BuildFailed},
-		{"bundle invalid no entrypoint", `no app.py or app.R found in /data/apps/x/versions/1`, BundleInvalid},
+		{"bundle invalid no entrypoint", `no app entrypoint found in /data/apps/x/versions/1 (add app.py, app.R, or ui.R and server.R, or declare [app] command in shinyhub.toml)`, BundleInvalid},
+		// A CLI classifies whatever the server it is talking to returned, and a
+		// server predating classic-layout detection words this failure
+		// differently. Dropping the old spelling would turn every such response
+		// into an unhelpful server_error against exactly the older deployments
+		// most likely to hit it.
+		{"bundle invalid no entrypoint from an older server", `no app.py or app.R found in /data/apps/x/versions/1`, BundleInvalid},
 		{"bundle invalid bad manifest", `read manifest: toml: line 3: expected '='`, BundleInvalid},
 		{"bundle invalid manifest command", `manifest [app] command: empty command`, BundleInvalid},
 		{"readiness timeout", `all replicas failed health check: replica 0: health: app at http://127.0.0.1:1/ did not become healthy within 120s`, ReadinessTimeout},

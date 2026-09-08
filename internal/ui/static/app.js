@@ -17,10 +17,12 @@ import {
 } from '/static/views/fleet-health.js';
 import { createFocusTrap } from '/static/views/focus-trap.js';
 import {
+  AUDIT_ACTIONS,
   auditEmptyMessage,
   auditListPath,
   auditLoadError,
   auditLoadingMessage,
+  auditRangeSuffix,
   createLatestRequestGate,
   mountAuditLog,
 } from '/static/views/audit-log.js';
@@ -37,8 +39,10 @@ import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { headerStats } from '/static/views/stat-format.js';
 import { appCardFacts } from '/static/views/app-card-facts.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
+import { inspectBundleEntry } from '/static/views/bundle-filter.js';
 import { createAppCardLifecycle, requestAppRestart, restartConfirmationCopy } from '/static/views/app-card-lifecycle.js';
-import { applyLoginProviders } from '/static/views/login-providers.js';
+import { applyLoginProviders, groupAccessWarningText } from '/static/views/login-providers.js';
+import { usagePrivacyErrorMessage } from '/static/views/usage-privacy.js';
 import { applyBranding } from '/static/views/branding.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
 import { segmentApps } from '/static/views/fleet-ui.js';
@@ -196,7 +200,7 @@ document.addEventListener('DOMContentLoaded', () => {
     apps: [],
     auditPage: 0,
     auditHasMore: false,
-    auditSelection: { event: '', run: '', action: '' },
+    auditSelection: { event: '', run: '', action: '', since: '', until: '' },
     canCreateApps: false,
     canManageApps: false,
     resetPwTargetId: null,
@@ -280,6 +284,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const auditContext = document.getElementById('audit-context');
   const auditContextCopy = document.getElementById('audit-context-copy');
   const auditPagination = document.getElementById('audit-pagination');
+  const auditActionFilter = document.getElementById('audit-action-filter');
+  const auditSince = document.getElementById('audit-since');
+  const auditUntil = document.getElementById('audit-until');
+  const auditRangeClear = document.getElementById('audit-range-clear');
   const tabAudit    = document.getElementById('tab-audit');
   const tabUsers    = document.getElementById('tab-users');
   const tabWorkers  = document.getElementById('tab-workers');
@@ -445,25 +453,6 @@ document.addEventListener('DOMContentLoaded', () => {
     return BUNDLE_RULES;
   }
 
-  // Classify a single entry (file or directory) relative to the bundle root.
-  // Returns one of: 'accept', 'skipCacheDir', 'rejectDataDir',
-  // 'rejectDatasetDir', 'rejectExtension', 'rejectFileSize'.
-  // Directory decisions should pass size=0. The leading-slash strip keeps
-  // first-segment classification in lockstep with server-side bundle.Inspect,
-  // which operates on paths cleaned via path.Clean.
-  function inspectBundleEntry(rules, relPath, size) {
-    const clean = relPath.replace(/^\/+/, '');
-    const first = clean.split('/')[0];
-    if (first === 'data') return 'rejectDataDir';
-    if (first === 'datasets' || first === '.shinyhub-data') return 'rejectDatasetDir';
-    if (rules.cacheDirs.includes(first)) return 'skipCacheDir';
-    const lower = clean.toLowerCase();
-    for (const ext of rules.dataExtensions) {
-      if (lower.endsWith(ext.toLowerCase())) return 'rejectExtension';
-    }
-    if (rules.maxFileBytes > 0 && size > rules.maxFileBytes) return 'rejectFileSize';
-    return 'accept';
-  }
 
   let activeEventSource = null;
   let deployState = null; // { slug, appName, blob, fileCount, rejections: Map<string, string[]>, xhr }
@@ -909,7 +898,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.apps = [];
     state.auditPage = 0;
     state.auditHasMore = false;
-    state.auditSelection = { event: '', run: '', action: '' };
+    state.auditSelection = { event: '', run: '', action: '', since: '', until: '' };
     auditRequests.invalidate();
     state.canCreateApps = false;
     state.canManageApps = false;
@@ -1549,39 +1538,6 @@ document.addEventListener('DOMContentLoaded', () => {
       auditTable.hidden = noEvents;
     }
 
-    const knownActions = [
-      // Deployment actions (green)
-      'deploy', 'restart', 'rollback', 'fleet_apply_started', 'fleet_apply_finished',
-      // Auth actions
-      'login', 'login_failed', 'logout',
-      // App lifecycle (blue - config)
-      'create_app', 'update_app', 'delete_app', 'stop', 'sleep', 'set_access',
-      // User management (blue - config)
-      'create_user', 'update_user', 'delete_user', 'reset_user_password',
-      'support_session.start', 'support_session.stop',
-      // Token management (amber - security)
-      'create_token', 'delete_token',
-      // Environment (blue - config)
-      'env.set', 'env.delete',
-      // Data (blue - config)
-      'data.push', 'data.delete',
-      // Schedules (blue - config)
-			'schedule_create', 'schedule_update', 'schedule_delete', 'schedule_run_manual',
-			'schedule_run_succeeded', 'schedule_run_failed', 'schedule_run_timed_out',
-			'schedule_run_cancelled', 'schedule_run_interrupted',
-			'schedule_activation_roll', 'schedule_activation_outcome',
-      // Access management (amber - security)
-      'grant_access', 'revoke_access',
-      // Group-access management (amber - security)
-      'grant_group_access', 'revoke_group_access', 'reconcile_group_access',
-      // Shared data (blue - config)
-      'shared_data_grant', 'shared_data_revoke',
-      // Autoscale scale events (blue - config)
-      'autoscale_scale_up', 'autoscale_scale_down',
-      // Deploy quota rejection (red)
-      'deploy_rejected_quota',
-    ];
-
     for (const e of events) {
       const tr = document.createElement('tr');
       tr.id = `audit-event-${e.id}`;
@@ -1607,12 +1563,18 @@ document.addEventListener('DOMContentLoaded', () => {
       // Action badge
       const actionCell = document.createElement('td');
       const badge = document.createElement('span');
-      // Replace dots with hyphens so the class name is valid CSS and
-      // matches the stylesheet's .badge-action-env-set etc. selectors.
-      const actionClass = knownActions.includes(e.action)
-        ? `badge-action-${e.action.replace(/\./g, '-')}`
-        : 'badge-action-default';
-      badge.className = `badge ${actionClass}`;
+      // badge-action-default is the base, not the fallback: .badge itself
+      // carries no colours, so an action that is on the known list but has no
+      // colour rule of its own would otherwise render as bare text on the row
+      // background. Every badge starts neutral and a per-action rule, when the
+      // stylesheet has one, paints over it (the default rule is declared before
+      // them, so the specific colour wins the equal-specificity tie).
+      // Dots become hyphens so the class name is valid CSS and matches the
+      // stylesheet's .badge-action-env-set etc. selectors.
+      const actionClass = AUDIT_ACTIONS.includes(e.action)
+        ? ` badge-action-${e.action.replace(/\./g, '-')}`
+        : '';
+      badge.className = `badge badge-action-default${actionClass}`;
       badge.textContent = e.action;
       actionCell.appendChild(badge);
       tr.appendChild(actionCell);
@@ -1629,6 +1591,15 @@ document.addEventListener('DOMContentLoaded', () => {
 			const detailEntries = auditDetailEntries(e);
 			if (detailEntries.length === 0) {
 				detailCell.textContent = '—';
+			} else if (detailEntries.length === 1 && detailEntries[0].isError) {
+				// A detail_error entry means the server failed to encode what it
+				// meant to record. Show it inline as a visible problem instead of
+				// behind the same "View outcome" expander normal fields use, where
+				// it would read as one more ordinary fact.
+				const warning = document.createElement('span');
+				warning.className = 'audit-detail-error';
+				warning.textContent = `Recording failed: ${detailEntries[0].value}`;
+				detailCell.appendChild(warning);
 			} else {
 				const details = document.createElement('details');
 				details.className = 'audit-details';
@@ -1664,9 +1635,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (events.length === 0) {
       auditRange.textContent = 'No events';
     } else if (state.auditTotal != null) {
-      auditRange.textContent = `Showing ${start}–${end} of ${state.auditTotal}`;
+      auditRange.textContent = `Showing ${start}-${end} of ${state.auditTotal}`;
     } else {
-      auditRange.textContent = `Showing ${start}–${end}`;
+      auditRange.textContent = `Showing ${start}-${end}`;
     }
     auditPrev.disabled = state.auditPage === 0;
     auditNext.disabled = !state.auditHasMore;
@@ -1677,14 +1648,45 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function updateAuditContext(selection) {
-    const filtered = !!(selection.event || selection.run || selection.action);
+    const range = auditRangeSuffix(selection);
+    const filtered = !!(selection.event || selection.run || selection.action || range);
     if (auditContext && auditContextCopy) {
       auditContext.hidden = !filtered;
       if (selection.event) auditContextCopy.textContent = `Showing audit event ${selection.event}.`;
       else if (selection.run) auditContextCopy.textContent = `Showing events from run ${selection.run}.`;
-      else if (selection.action) auditContextCopy.textContent = `Showing ${selection.action} events.`;
+      else if (selection.action) auditContextCopy.textContent = `Showing ${selection.action} events${range}.`;
+      else if (range) auditContextCopy.textContent = `Showing events${range}.`;
       else auditContextCopy.textContent = '';
     }
+    // Keep the filter controls in sync with the active selection, including
+    // when it changes from outside them (a deep link with ?action= or ?since=,
+    // or the "View all events" link clearing everything).
+    if (auditActionFilter) auditActionFilter.value = selection.action || '';
+    // A deep link into one event or run replaces the browsing filters, so the
+    // date inputs show nothing rather than a range that is not being applied.
+    const rangeActive = !selection.event && !selection.run;
+    if (auditSince) auditSince.value = rangeActive ? (selection.since || '') : '';
+    if (auditUntil) auditUntil.value = rangeActive ? (selection.until || '') : '';
+    // An empty end bound would otherwise let the picker offer a date that
+    // inverts the range, which the server rejects.
+    if (auditSince && auditUntil) {
+      auditSince.max = auditUntil.value || '';
+      auditUntil.min = auditSince.value || '';
+    }
+    if (auditRangeClear) auditRangeClear.hidden = !(auditSince?.value || auditUntil?.value);
+  }
+
+  // Re-runs the listing from the current filter controls, from page 0: a date
+  // range narrows the result set, so the old offset would land the operator on
+  // a page that no longer exists and read as an empty log.
+  function applyAuditFilters() {
+    loadAuditEvents(0, {
+      event: '',
+      run: '',
+      action: auditActionFilter ? auditActionFilter.value : '',
+      since: auditSince ? auditSince.value : '',
+      until: auditUntil ? auditUntil.value : '',
+    });
   }
 
   async function loadUsers() {
@@ -1832,6 +1834,19 @@ document.addEventListener('DOMContentLoaded', () => {
         resetBtn.addEventListener('click', () => openResetPasswordModal(u));
       }
       actions.appendChild(resetBtn);
+
+      const revokeBtn = document.createElement('button');
+      revokeBtn.type = 'button';
+      revokeBtn.className = 'btn-row btn-row-warn';
+      revokeBtn.textContent = 'Sign out everywhere';
+      revokeBtn.setAttribute('aria-label', `Sign out ${u.username} everywhere`);
+      if (!caps.canRevokeSessions) {
+        revokeBtn.disabled = true;
+        if (caps.revokeSessionsHint) revokeBtn.title = caps.revokeSessionsHint;
+      } else {
+        revokeBtn.addEventListener('click', () => revokeUserSessions(u.id, u.username, revokeBtn));
+      }
+      actions.appendChild(revokeBtn);
 
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
@@ -2194,6 +2209,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     setError(usersError, '');
     loadUsers();
+  }
+
+  async function revokeUserSessions(id, username, btn) {
+    if (!confirm(`Sign out "${username}" everywhere? Every active session ends immediately; they will need to log in again.`)) return;
+    if (btn) btn.disabled = true;
+    let resp;
+    try {
+      resp = await api(`/api/users/${id}/revoke-sessions`, {method: 'POST'});
+    } catch {
+      setError(usersError, 'Network error');
+      return;
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (!resp.ok) { setError(usersError, `Failed to sign out ${username}`); return; }
+    setError(usersError, '');
   }
 
   async function deleteUser(id, username, btn) {
@@ -2908,7 +2940,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function openLogs(slug) {
     closeLogs();
-    logPaneTitle.textContent = `Logs — ${slug}`;
+    logPaneTitle.textContent = `Logs: ${slug}`;
     logPaneBody.textContent = '';
     setHidden(logPane, false);
 
@@ -3638,7 +3670,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!resp.ok) {
       let message = 'Privacy setting could not be saved.';
       try { const body = await resp.json(); if (body && body.error) message = body.error; } catch { /* non-JSON */ }
-      setError(errEl, message);
+      setError(errEl, usagePrivacyErrorMessage(message));
       recomputeDirty('usage-privacy');
       return;
     }
@@ -4479,7 +4511,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (b && b.error) {
             message = b.error;
             if (b.used_bytes !== undefined && b.quota_bytes !== undefined) {
-              message += ` — quota: ${formatBytes(b.used_bytes + b.requested_bytes)} requested, ${formatBytes(b.quota_bytes)} limit`;
+              message += ` (quota: ${formatBytes(b.used_bytes + b.requested_bytes)} requested, ${formatBytes(b.quota_bytes)} limit)`;
             }
           }
         } catch { /* non-JSON */ }
@@ -4809,6 +4841,33 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   auditPrev.addEventListener('click', () => loadAuditEvents(state.auditPage - 1, state.auditSelection));
   auditNext.addEventListener('click', () => loadAuditEvents(state.auditPage + 1, state.auditSelection));
+
+  // Audit Log action filter. Options come from AUDIT_ACTIONS, the same list
+  // that drives the badge styling, so a new action type is filterable the
+  // moment it is added there. GET /api/audit supports action, run, event, and
+  // an inclusive since/until date range (see internal/api/audit.go); there is
+  // no resource or user filter to expose.
+  if (auditActionFilter) {
+    for (const action of AUDIT_ACTIONS) {
+      const opt = document.createElement('option');
+      opt.value = action;
+      opt.textContent = action;
+      auditActionFilter.appendChild(opt);
+    }
+    auditActionFilter.addEventListener('change', applyAuditFilters);
+  }
+  // Dates are UTC calendar days, matching how the table renders created_at.
+  // 'change' rather than 'input': a native date picker emits a partial value
+  // on every keystroke, and firing on those would query the log for year 0002.
+  auditSince?.addEventListener('change', applyAuditFilters);
+  auditUntil?.addEventListener('change', applyAuditFilters);
+  auditRangeClear?.addEventListener('click', () => {
+    if (auditSince) auditSince.value = '';
+    if (auditUntil) auditUntil.value = '';
+    applyAuditFilters();
+    // Focus would otherwise be lost with the button that hides itself.
+    auditActionFilter?.focus();
+  });
 
   // Apps search + sort. Restore previous values from sessionStorage.
   const appsSearchEl = document.getElementById('apps-search');
@@ -5298,7 +5357,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const cap = rules && rules.maxBundleBytes > 0 ? rules.maxBundleBytes : 0;
     if (cap > 0 && blobSize > cap) {
       const mib = Math.round(cap / (1024 * 1024));
-      setError(deployError, `Bundle is ${formatBytes(blobSize)} — exceeds the ${mib} MiB upload limit. Use the CLI for larger bundles.`);
+      setError(deployError, `Bundle is ${formatBytes(blobSize)}, which exceeds the ${mib} MiB upload limit. Use the CLI for larger bundles.`);
       deploySubmit.disabled = true;
       return;
     }
@@ -5899,6 +5958,17 @@ document.addEventListener('DOMContentLoaded', () => {
       // Google buttons start hidden in index.html, so a failed fetch or a
       // native-only server never shows a dead button (see login-providers.js).
       applyLoginProviders(document, data);
+      // Group access section: warn when granting a group rule cannot take
+      // effect. The section itself is static markup shown/hidden by view
+      // routing, so setting this once here (rather than per Access-tab visit)
+      // is enough; a failed fetch simply leaves the warning absent, same as
+      // every other providers-driven affordance above.
+      const groupWarnEl = document.getElementById('group-access-sso-warning');
+      if (groupWarnEl) {
+        const warning = groupAccessWarningText(data);
+        groupWarnEl.textContent = warning;
+        groupWarnEl.hidden = !warning;
+      }
     } catch (e) { /* non-critical */ }
   }
 
@@ -6172,7 +6242,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // surfaces from disagreeing about what an app offers. The whole menu is
   // hidden when nothing applies, rather than opening onto an empty list.
   function syncDetailHeaderActions(app) {
-    const acts = app ? appCardActions(app, canManageApp(state.user, app)) : null;
+    const canManage = !!app && canManageApp(state.user, app);
+    const acts = app ? appCardActions(app, canManage) : null;
     const items = [
       ['app-detail-restart', !!acts && acts.showRestart],
       ['app-detail-sleep', !!acts && acts.showSleep],
@@ -6189,6 +6260,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const kebabBtn = document.getElementById('app-detail-kebab');
     const menu = kebabBtn && kebabBtn.closest('.kebab-menu');
     if (menu) menu.hidden = !anyShown;
+    // A per-app Viewer reaches this page whenever their global role clears
+    // the route guard (developer/operator/admin) even though their member
+    // role on this specific app cannot deploy; the API always 403s for them.
+    // Hide the button rather than inviting a click that can never succeed.
+    const dDeploy = document.getElementById('app-detail-deploy');
+    if (dDeploy) dDeploy.hidden = !canManage;
   }
 
   // Wire the app-detail header actions once. They are static markup and always
@@ -6300,7 +6377,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (tokensView) tokensView.hidden = false;
     renderCLIConnectRequest();
     loadTokens();
-    return { unmount() { if (tokensView) tokensView.hidden = true; } };
+    // Matches the page's own <h1>, so a tab, a bookmark and a history entry
+    // name this page instead of falling back to the bare product name.
+    return { title: 'API tokens', unmount() { if (tokensView) tokensView.hidden = true; } };
   });
   router.register('/workers', () => {
     hideAllPageViews();

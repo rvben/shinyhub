@@ -362,6 +362,112 @@ func TestAddCommandsTo_RegistersLogout(t *testing.T) {
 	t.Fatalf("AddCommandsTo did not register `logout` subcommand")
 }
 
+// A mistyped subcommand inside ANY command group must fail the same way a
+// mistyped subcommand at the root does: a non-zero exit classified as
+// validation, not a silent success. Before enforceUnknownSubcommandErrors,
+// cobra's own subcommand-arg check (legacyArgs) only fires for the root
+// command (!cmd.HasParent()), so every group below it accepted a stray
+// argument, printed its own help, and returned nil - exit 0 for what is a
+// typo. This runs the check against a representative sample of every group
+// registered in AddCommandsTo, including a group nested two levels deep
+// (service-accounts credentials), so the fix is confirmed uniform rather than
+// hand-applied per group.
+func TestGroupCommands_RejectUnknownSubcommand(t *testing.T) {
+	groups := [][]string{
+		{"apps"},
+		{"tokens"},
+		{"env"},
+		{"data"},
+		{"schedule"},
+		{"share"},
+		{"fleet"},
+		{"manifest"},
+		{"projects"},
+		{"users"},
+		{"service-accounts"},
+		{"service-accounts", "credentials"},
+	}
+	for _, group := range groups {
+		name := strings.Join(group, " ")
+		t.Run(name, func(t *testing.T) {
+			args := append(append([]string{}, group...), "frobnicate-not-a-real-subcommand")
+			_, _, err := execCLISplit(t, args...)
+			if err == nil {
+				t.Fatalf("%q with an unknown subcommand should fail, got nil error", name)
+			}
+			if !strings.Contains(err.Error(), "unknown command") {
+				t.Errorf("%q error = %q, want it to name the unknown command", name, err.Error())
+			}
+			if kind, code := classify(err); kind != KindValidation || code != 1 {
+				t.Errorf("%q classify(err) = (%q,%d), want (%q,1)", name, kind, code, KindValidation)
+			}
+		})
+	}
+}
+
+// The fix must not regress the legitimate case: a bare group command with no
+// arguments still prints its help and exits 0 (nil error), exactly as before.
+func TestGroupCommands_BareInvocationStillPrintsHelpAndSucceeds(t *testing.T) {
+	stdout, _, err := execCLISplit(t, "apps")
+	if err != nil {
+		t.Fatalf("bare `apps` should succeed (print help), got error: %v", err)
+	}
+	if !strings.Contains(stdout, "Usage:") {
+		t.Errorf("bare `apps` stdout = %q, want it to contain cobra's usage/help block", stdout)
+	}
+}
+
+// The "Did you mean" suggestion cobra prints for a root-level typo must also
+// appear for a group-level typo, since requireKnownSubcommand mirrors cobra's
+// own SuggestionsFor mechanism rather than reimplementing it.
+func TestGroupCommands_UnknownSubcommandSuggestsCloseMatch(t *testing.T) {
+	_, _, err := execCLISplit(t, "apps", "lst")
+	if err == nil {
+		t.Fatal("`apps lst` should fail")
+	}
+	if !strings.Contains(err.Error(), "Did you mean this?") || !strings.Contains(err.Error(), "list") {
+		t.Errorf("error = %q, want a suggestion naming `list`", err.Error())
+	}
+}
+
+// The tree spells the same two operations both ways: `apps list` but `data ls`,
+// `apps delete` but `data rm`. Whichever a user learns first, they carry to the
+// next group and hit "unknown command" for an operation that plainly exists.
+// Every list and remove command answers to both spellings.
+func TestListAndRemoveCommandsAnswerToBothSpellings(t *testing.T) {
+	for _, path := range [][]string{
+		{"apps", "ls"}, {"apps", "rm"},
+		{"apps", "members", "ls"},
+		{"tokens", "ls"},
+		{"data", "list"}, {"data", "delete"},
+		{"env", "list"}, {"env", "delete"},
+		{"projects", "ls"}, {"projects", "delete"},
+		{"schedule", "list"}, {"schedule", "delete"},
+		{"share", "list"}, {"share", "delete"},
+		{"users", "ls"}, {"users", "rm"},
+	} {
+		name := strings.Join(path, " ")
+		t.Run(name, func(t *testing.T) {
+			root := &cobra.Command{Use: "shinyhub"}
+			AddCommandsTo(root)
+			cmd, _, err := root.Find(path)
+			if err != nil {
+				t.Fatalf("Find(%q): %v", name, err)
+			}
+			// Find falls back to the deepest command it did resolve, so a missing
+			// alias returns the parent group with no error. Comparing the resolved
+			// command's own name against the last path element is what separates
+			// "the alias resolved" from "cobra gave up one level short".
+			if cmd.Name() == path[len(path)-1] {
+				t.Fatalf("%q resolved to the command literally named %q, so the alias was not exercised", name, cmd.Name())
+			}
+			if cmd.Name() == path[len(path)-2] {
+				t.Fatalf("%q resolved to its parent group %q: the alias is missing", name, cmd.Name())
+			}
+		})
+	}
+}
+
 func TestAddCommandsTo_RegistersCompletionInstaller(t *testing.T) {
 	parent := &cobra.Command{Use: "parent"}
 	AddCommandsTo(parent)

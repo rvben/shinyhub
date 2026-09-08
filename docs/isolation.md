@@ -65,6 +65,16 @@ directories - is read-only to the app. `TMPDIR` is pointed at a private
 directory inside the app's own tree so a well-behaved app gets an isolated
 scratch area while `/tmp` remains available as a fallback.
 
+**"Read-only" is not "unreadable".** It bounds what an app can *change*, not
+what it can *see*. A native app process reads the filesystem exactly as the
+ShinyHub service user does, and `standard` does not narrow that at all:
+`/etc/passwd`, the service user's `~/.ssh`, other apps' bundles and stored
+files, and the control-plane database are all readable by any app you deploy.
+Anything on the host the service user can read is readable by every app on that
+host. Run the Docker runtime if that is not acceptable, and see [Do not run
+mutually-untrusting tenants on the native
+runtime](#do-not-run-mutually-untrusting-tenants-on-the-native-runtime).
+
 To keep cache-writing launchers working under the read-only root, `TMPDIR`,
 `UV_CACHE_DIR`, and `XDG_CACHE_HOME` are pointed at writable subdirectories of
 the app's own tree. (`uv run` initializes a cache even with `--frozen
@@ -145,14 +155,52 @@ not, apps keep running.
 | | Native + `standard` | Docker runtime |
 |---|---|---|
 | Filesystem write confinement | yes (Landlock) | yes |
+| Host filesystem readable by apps | yes, all of it | no (image plus mounts) |
 | Privilege-escalation block (`NO_NEW_PRIVS`) | yes | yes |
 | Process / PID isolation | no | yes |
 | Network isolation | no | yes (namespace) |
 | Separate user boundary | no (same UID) | yes |
+| Control-plane environment readable by apps | yes (same UID) | no |
 | Needs a container runtime | no | yes |
 
 Reach for native isolation when you want meaningful hardening of the lightweight
 native runtime; reach for Docker when you need full multi-tenant isolation.
+
+### Do not run mutually-untrusting tenants on the native runtime
+
+"Same UID" has a consequence sharper than the rest of the table, so it is worth
+stating outright: **a deployed app can read the control plane's entire process
+environment.** Any process can read the environment of another process of the
+same user - `/proc/<pid>/environ` on Linux, `ps eww <pid>` on macOS - and on the
+native runtime the app is such a process. Nothing in the `standard` dial changes
+this; Landlock confines writes, not reads of kernel-exposed process state.
+
+If `auth.secret` is in that environment, an app can read it. That secret signs
+every session token and derives the key that encrypts every app's secret env
+vars, so reading it means forging a token for any user, including an admin, and
+decrypting every other app's secrets. The privilege needed is "can deploy one
+app."
+
+Two conclusions follow:
+
+- **The native runtime is not a boundary between tenants who do not trust each
+  other.** Use it when every app on the host is code you would run yourself.
+  Use the Docker runtime for self-service deployment by people who are not all
+  equally trusted.
+- **Keep the secret out of the environment either way.** Write it to a file
+  readable only by the server's user and point `auth.secret_file` at it
+  (`SHINYHUB_AUTH_SECRET_FILE`), then unset `SHINYHUB_AUTH_SECRET`. The server
+  reads the file once at startup and refuses one that is group- or
+  world-readable. It warns at startup while the secret still comes from the
+  environment on the native runtime.
+
+  ```bash
+  install -m 600 /dev/null /etc/shinyhub/auth.secret
+  openssl rand -hex 32 > /etc/shinyhub/auth.secret
+  ```
+
+  This narrows the exposure; it does not replace the first point. An app running
+  as the server's user has other ways to reach the server's memory and files.
 
 ---
 
@@ -215,7 +263,7 @@ Verified CLI flags (`shinyhub apps set --help`):
 
 ```bash
 curl -X PATCH https://shinyhub.example.com/api/apps/<slug> \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Token $SHINYHUB_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "worker_isolation": "per_session",

@@ -159,6 +159,50 @@ func List(dataDir string, maxEntries int) ([]FileInfo, error) {
 	return out, nil
 }
 
+// Open returns a reader for the file at rel inside dataDir, along with its
+// stat, for streaming back to a client. The caller owns the handle and must
+// close it.
+//
+// The error contract is Delete's, deliberately: the same path that can be
+// removed is the one that can be read back, so a caller gets ErrFileNotFound
+// for a missing path, ErrNotAFile for a directory or other non-regular entry,
+// and ErrInvalidPath (via SanitizeRelPath and SafeJoin) for traversal attempts,
+// reserved prefixes and symlinked components. Nothing here follows a symlink:
+// SafeJoin rejects one anywhere in the path, and the reopened handle is
+// re-stated so a regular file cannot be swapped for a device or a FIFO between
+// the check and the open.
+func Open(dataDir, rel string) (*os.File, os.FileInfo, error) {
+	clean, err := SanitizeRelPath(rel)
+	if err != nil {
+		return nil, nil, err
+	}
+	target, err := SafeJoin(dataDir, clean)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := os.Open(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, ErrFileNotFound
+		}
+		return nil, nil, err
+	}
+	// Stat the open descriptor rather than the path. Statting the path and then
+	// opening it leaves a window in which the name can be repointed at something
+	// that is not a regular file; this way the mode reported is the mode of the
+	// thing actually being read.
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, ErrNotAFile
+	}
+	return f, fi, nil
+}
+
 // Delete removes the file at rel inside dataDir. It returns ErrFileNotFound if
 // the path does not exist, ErrNotAFile if the path is a directory or non-regular
 // entry, and ErrInvalidPath (via SanitizeRelPath) for traversal attempts or

@@ -347,6 +347,51 @@ func TestManagerCreatesImmutableLogRunPerStart(t *testing.T) {
 	}
 }
 
+// TestManagerAppliesConfiguredLogMaxSize verifies SetLogMaxSize's value
+// reaches OpenLogFile, backing the operator-configurable retention window
+// (storage.app_log_max_size_mb). Without the wiring, Start always opens the
+// log with the hardcoded 5 MiB DefaultLogMaxSize, so a much smaller
+// configured cap has no effect and the primary log never rotates.
+func TestManagerAppliesConfiguredLogMaxSize(t *testing.T) {
+	appsDir := t.TempDir()
+	rt := newFakeRuntime()
+	m := process.NewManager(appsDir, rt)
+	const capBytes = 200
+	m.SetLogMaxSize(capBytes)
+
+	info, err := m.Start(process.StartParams{
+		Slug: "demo", AppID: 1, Index: 0, Dir: t.TempDir(), Command: []string{"app"}, Port: 19010,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	line := strings.Repeat("x", 60) + "\n" // 61 bytes/line
+	for i := 0; i < 6; i++ {               // 366 bytes total, well past capBytes
+		if _, err := rt.log.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := m.StopReplica("demo", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	runs, err := m.LogRuns("demo")
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("LogRuns = %+v, %v", runs, err)
+	}
+	if runs[0].RunID != info.LogRunID {
+		t.Fatalf("run id = %q, want %q", runs[0].RunID, info.LogRunID)
+	}
+	if runs[0].SizeBytes == 0 {
+		t.Fatal("primary log is empty; rotation should leave the newest lines in the primary file")
+	}
+	if runs[0].SizeBytes > capBytes {
+		t.Fatalf("primary log is %d bytes, exceeding the configured cap of %d; SetLogMaxSize was not applied to this run's log file", runs[0].SizeBytes, capBytes)
+	}
+}
+
 // TestManagerStopAll verifies StopAll terminates every tracked app across
 // slugs, backing the server.shutdown_apps=stop path.
 func TestManagerStopAll(t *testing.T) {

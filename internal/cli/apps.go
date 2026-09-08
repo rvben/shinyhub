@@ -59,8 +59,9 @@ func newTokensCmd() *cobra.Command {
 func newAppsListCmd() *cobra.Command {
 	f := &listFlags{}
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List all apps",
+		Use:     "list",
+		Short:   "List all apps",
+		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsList(cmd, f)
 		},
@@ -632,6 +633,7 @@ var isStdoutTTY = func() bool { return isTTY(os.Stdout) }
 
 type appsLogsFlags struct {
 	tail     int
+	linesAlt int
 	follow   bool
 	noFollow bool
 	replica  int
@@ -679,6 +681,12 @@ func newAppsLogsCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&f.tail, "tail", 200,
 		"Number of initial lines to emit (1..10000)")
+	// --lines is a hidden alias for --tail: the two most common log tools
+	// (docker, kubectl) name this flag differently from each other, and this
+	// command's flag is --tail, so a --lines habit otherwise hits a bare
+	// "unknown flag" error instead of doing what the caller obviously meant.
+	cmd.Flags().IntVar(&f.linesAlt, "lines", 0, "Deprecated alias for --tail")
+	_ = cmd.Flags().MarkHidden("lines")
 	cmd.Flags().BoolVarP(&f.follow, "follow", "f", false,
 		"Force streaming even when stdout is not a terminal")
 	cmd.Flags().BoolVar(&f.noFollow, "no-follow", false,
@@ -695,8 +703,14 @@ func newAppsLogsCmd() *cobra.Command {
 }
 
 func runAppsLogs(cmd *cobra.Command, args []string, f *appsLogsFlags) error {
+	// --lines is a hidden alias for --tail (see newAppsLogsCmd). --tail wins
+	// when both are passed, since it is the documented, non-deprecated name.
+	if cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail") {
+		f.tail = f.linesAlt
+		fmt.Fprintln(cmd.ErrOrStderr(), "Note: --lines is deprecated, use --tail instead")
+	}
 	if f.tail <= 0 || f.tail > 10000 {
-		return fmt.Errorf("--tail must be between 1 and 10000")
+		return validationErr("--tail must be between 1 and 10000", "")
 	}
 	if f.follow && f.noFollow {
 		return validationErr("--follow and --no-follow are mutually exclusive", "pass at most one")
@@ -1316,19 +1330,19 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	}
 	if memoryLimitChanged && f.memoryLimitMB != -1 {
 		if err := deploy.ValidateMemoryLimitMB(f.memoryLimitMB); err != nil {
-			return fmt.Errorf("--memory-limit-mb: %w (or -1 to clear/inherit)", err)
+			return validationErr(fmt.Sprintf("--memory-limit-mb: %v (or -1 to clear/inherit)", err), "")
 		}
 	}
 	if cpuQuotaChanged && f.cpuQuotaPercent != -1 {
 		if err := deploy.ValidateCPUQuotaPercent(f.cpuQuotaPercent); err != nil {
-			return fmt.Errorf("--cpu-quota-percent: %w (or -1 to clear/inherit)", err)
+			return validationErr(fmt.Sprintf("--cpu-quota-percent: %v (or -1 to clear/inherit)", err), "")
 		}
 	}
 	if replicasChanged && f.replicas < 1 {
-		return fmt.Errorf("--replicas must be >= 1")
+		return validationErr("--replicas must be >= 1", "")
 	}
 	if capChanged && (f.maxSessionsPerReplica < 0 || f.maxSessionsPerReplica > 1000) {
-		return fmt.Errorf("--max-sessions-per-replica must be between 0 and 1000")
+		return validationErr("--max-sessions-per-replica must be between 0 and 1000", "")
 	}
 	// Mirrors the server-side guard (Task 6) so an out-of-range or non-finite
 	// value fails fast without a round trip.
@@ -1336,28 +1350,28 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		return validationErr("--render-seconds must be a finite number between 0 and 600", "")
 	}
 	if minWarmReplicasChanged && (f.minWarmReplicas < 0 || f.minWarmReplicas > 1000) {
-		return fmt.Errorf("--min-warm-replicas must be between 0 and 1000")
+		return validationErr("--min-warm-replicas must be between 0 and 1000", "")
 	}
 	if warmSparesChanged && (f.warmSpares < 0 || f.warmSpares > 1000) {
-		return fmt.Errorf("--warm-spares must be between 0 and 1000")
+		return validationErr("--warm-spares must be between 0 and 1000", "")
 	}
 	if warmSparesChanged && maxWorkersChanged && f.warmSpares > f.maxWorkers {
-		return fmt.Errorf("--warm-spares must be <= --max-workers")
+		return validationErr("--warm-spares must be <= --max-workers", "")
 	}
 	if hibernateChanged && f.hibernateTimeout < -1 {
-		return fmt.Errorf("--hibernate-timeout must be -1 (reset to global default), 0 (disable), or a positive number of minutes")
+		return validationErr("--hibernate-timeout must be -1 (reset to global default), 0 (disable), or a positive number of minutes", "")
 	}
 	// Validate the autoscale flags client-side for fast feedback; the server
 	// remains the authority on the cross-field rules (min >= 1 when enabled,
 	// max <= the runtime ceiling) since those depend on server config.
 	if autoscaleTargetChanged && (f.autoscaleTarget < 0 || f.autoscaleTarget > 1) {
-		return fmt.Errorf("--autoscale-target must be in [0,1] (0 inherits the runtime default)")
+		return validationErr("--autoscale-target must be in [0,1] (0 inherits the runtime default)", "")
 	}
 	if autoscaleMinChanged && f.autoscaleMin < 0 {
-		return fmt.Errorf("--autoscale-min must be >= 0")
+		return validationErr("--autoscale-min must be >= 0", "")
 	}
 	if autoscaleMaxChanged && f.autoscaleMax < 0 {
-		return fmt.Errorf("--autoscale-max must be >= 0")
+		return validationErr("--autoscale-max must be >= 0", "")
 	}
 
 	// --tier and --replicas both set the pool size/shape, so only one may be
@@ -1366,18 +1380,18 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	var placement map[string]int
 	if tierChanged {
 		if replicasChanged {
-			return fmt.Errorf("--tier and --replicas are mutually exclusive")
+			return validationErr("--tier and --replicas are mutually exclusive", "")
 		}
 		placement = make(map[string]int, len(f.tiers))
 		for _, spec := range f.tiers {
 			name, countStr, ok := strings.Cut(spec, "=")
 			name = strings.TrimSpace(name)
 			if !ok || name == "" {
-				return fmt.Errorf("--tier must be name=count, got %q", spec)
+				return validationErr(fmt.Sprintf("--tier must be name=count, got %q", spec), "")
 			}
 			count, err := strconv.Atoi(strings.TrimSpace(countStr))
 			if err != nil || count < 0 {
-				return fmt.Errorf("--tier %q count must be a non-negative integer", spec)
+				return validationErr(fmt.Sprintf("--tier %q count must be a non-negative integer", spec), "")
 			}
 			placement[name] = count
 		}
@@ -1881,9 +1895,10 @@ func runAppsAccessRevoke(cmd *cobra.Command, args []string) error {
 func newAppsAccessListCmd() *cobra.Command {
 	f := &listFlags{}
 	cmd := &cobra.Command{
-		Use:   "list <slug>",
-		Short: "List members granted access to an app",
-		Args:  cobra.ExactArgs(1),
+		Use:     "list <slug>",
+		Short:   "List members granted access to an app",
+		Aliases: []string{"ls"},
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsAccessList(cmd, args, f)
 		},
@@ -2189,9 +2204,10 @@ type appsDeleteFlags struct {
 func newAppsDeleteCmd() *cobra.Command {
 	f := &appsDeleteFlags{}
 	cmd := &cobra.Command{
-		Use:   "delete <slug>",
-		Short: "Permanently delete an app and all its data",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <slug>",
+		Short:   "Permanently delete an app and all its data",
+		Aliases: []string{"rm"},
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppsDelete(cmd, args, f)
 		},
@@ -2426,8 +2442,9 @@ type tokensListFlags struct {
 func newTokensListCmd() *cobra.Command {
 	f := &tokensListFlags{}
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List your API tokens",
+		Use:     "list",
+		Short:   "List your API tokens",
+		Aliases: []string{"ls"},
 		Long: "List your API tokens.\n\n" +
 			"With --all (admin only), list every token on the server with its\n" +
 			"owning user - the credential inventory for revoking stale or\n" +

@@ -7,7 +7,7 @@ description: "Run cron-style jobs against an app's bundle as short-lived process
 ShinyHub can run cron-style jobs against an app's bundle. Each run is a
 short-lived process spawned in the same runtime (native or Docker), with the
 same env vars (incl. encrypted secrets), the same `app-data` directory, and
-the same resource limits as the serving app — but **independent of whether
+the same resource limits as the serving app - but **independent of whether
 the app is running, hibernated, or degraded**.
 
 Scheduled runs do **not** wake a hibernated app. The run produces output to
@@ -125,13 +125,13 @@ ShinyHub evaluates cron expressions in the schedule's **effective timezone**, de
 
 1. The schedule's own `timezone` field (non-empty IANA name).
 2. The server-level `scheduler.timezone` config key (or `SHINYHUB_SCHEDULER_TIMEZONE` env var).
-3. UTC (always the final fallback — the server never reads the host's `TZ`/`time.Local`).
+3. UTC (always the final fallback - the server never reads the host's `TZ`/`time.Local`).
 
 The effective timezone is shown in the UI and API responses as `effective_timezone`. When it comes from the server default, `timezone_inherited` is `true`.
 
 **DST behaviour** (matches robfig/cron semantics):
 
-- **Spring-forward gap** (e.g. Europe/Amsterdam 2:00 → 3:00): a cron expression that targets a non-existent local time (e.g. `30 2 * * *` on the clock-change Sunday) fires zero times that day — the non-existent local time is skipped. The next fire is the matching time the following day.
+- **Spring-forward gap** (e.g. Europe/Amsterdam 2:00 → 3:00): a cron expression that targets a non-existent local time (e.g. `30 2 * * *` on the clock-change Sunday) fires zero times that day - the non-existent local time is skipped. The next fire is the matching time the following day.
 - **Fall-back overlap** (e.g. 3:00 → 2:00): a cron expression targeting a repeated local wall-clock time fires **twice** on the fall-back day, once per UTC instant. For example, `30 2 * * *` in Europe/Amsterdam fires at 00:30 UTC (02:30 CEST, before the clock change) and again at 01:30 UTC (02:30 CET, after the clock change).
 
 Configure the server default in `shinyhub.yaml`:
@@ -475,15 +475,15 @@ shinyhub share add report --from fetch
 ```
 
 The consumer now sees `data/shared/fetch/` as a read-only directory inside
-its bundle (the same path in both runtimes — Docker enforces RO; native is
+its bundle (the same path in both runtimes - Docker enforces RO; native is
 RO by convention).
 
 ## Worked example: parquet warm + dashboard
 
 `fetch` (the producer):
 
-- `app.py` — minimal Shiny app that just shows the latest fetch time
-- `helpers/fetch.py` — runs an Athena query and writes to `data/latest.parquet` atomically
+- `app.py` - minimal Shiny app that just shows the latest fetch time
+- `helpers/fetch.py` - runs an Athena query and writes to `data/latest.parquet` atomically
 - Schedule `daily-fetch` with `cron: "0 6 * * *"`, `cmd: "uv run --with-requirements requirements.txt python helpers/fetch.py"`
 
 `report` (the consumer):
@@ -493,13 +493,13 @@ RO by convention).
 
 The consumer reads stale data while the next fetch runs; on success the
 fetcher atomically replaces the parquet (`os.rename`), so the consumer
-either sees the old file or the new one — never a partial write.
+either sees the old file or the new one - never a partial write.
 
 ## Limits + caveats
 
 - **Control-plane ownership.** Only the active control-plane owner runs the scheduler. Clustered deployments use the shared PostgreSQL ownership lease; do not run independent servers against one SQLite file. Plain scheduled jobs do not require producer/activation support. Deploy-triggered producers and automatic serving-data activation retain the topology restrictions documented in [runtime capabilities](runtime-capabilities.md).
 - **No per-schedule env or resource overrides.** Schedules inherit from the app.
-- **Timezone.** Each schedule fires in its effective timezone (see "Timezone resolution" above). Schedules without an explicit timezone inherit the server default; the fallback is always UTC, never the host `TZ`. Server-default changes take effect on restart — running schedules are not hot-reloaded on config change.
+- **Timezone.** Each schedule fires in its effective timezone (see "Timezone resolution" above). Schedules without an explicit timezone inherit the server default; the fallback is always UTC, never the host `TZ`. Server-default changes take effect on restart - running schedules are not hot-reloaded on config change.
 - **`run_once` catch-up runs at startup only.** It does not re-fire missed runs from arbitrary points in time.
 - **Native runtime read-only enforcement.** RO is a convention for native (filesystem permits writes through the symlink). Producer semantics require native execution; use atomic replacement and appropriate filesystem permissions for the data contract.
 - **Activation scope.** `on_success = "roll"` is limited to self-rolls for multiplex apps on the native runtime. Unsupported topology is rejected when the schedule or app placement is written; `roll_fallback` applies only to a supported roll that fails capacity admission.

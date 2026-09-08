@@ -53,6 +53,7 @@ var mut = boolp(true) // mutating
 // schemaAnnotations is keyed by command path: space-joined command names
 // below the root, e.g. "apps list", "schedule add", "serve".
 var schemaAnnotations = map[string]cmdAnnotation{
+	"drafts":         {Mutating: ro},
 	"drafts list":    {Mutating: ro, Notes: "Lists at most 100 retained drafts; expires_at and created_at are Unix seconds."},
 	"drafts preview": {Mutating: boolp(true), Notes: "Creates a private expiring preview or returns the existing preview. Does not replace production."},
 	"drafts promote": {Mutating: boolp(true), Notes: "Deploys the retained reviewed bundle. Rejects expired drafts and changed production baselines."},
@@ -112,6 +113,11 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "status", Type: "string", Desc: "migrated"},
 		{Name: "tables", Type: "integer", Desc: "number of tables copied"},
 		{Name: "rows", Type: "integer", Desc: "total rows copied"},
+	}},
+	"resolve-legacy-schedule-writers": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "clear when nothing needs resolving, resolved once acknowledged"},
+		{Name: "legacy_schedule_writers", Type: "integer", Desc: "Legacy fenced runs found (clear) or interrupted (resolved)"},
+		{Name: "producer_repair_required", Type: "boolean", Desc: "Present and true when status is resolved: a producer rerun is required before consumers can start"},
 	}},
 	"worker": {Mutating: mut, Streaming: true},
 
@@ -559,6 +565,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "status", Type: "string", Desc: "set | unchanged"},
 		{Name: "slug", Type: "string"},
 		{Name: "key", Type: "string"},
+		{Name: "restart_required", Type: "boolean", Desc: "the running app must be restarted to pick up this value; present and stable across both status values"},
 	}},
 	"env ls": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "key", Type: "string"},
@@ -590,6 +597,17 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "bytes", Type: "integer", Desc: "File size in bytes"},
 		{Name: "dry_run", Type: "boolean", Desc: "Present and true when --dry-run skipped the upload"},
 	}},
+	// ro: a pull changes nothing on the server. It does write a local file, but
+	// Mutating describes the effect on the server, and marking it mut would make
+	// a caller that skips mutating commands skip a read.
+	"data pull": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "downloaded"},
+		{Name: "slug", Type: "string"},
+		{Name: "path", Type: "string", Desc: "Source path inside the data dir"},
+		{Name: "local", Type: "string", Desc: `Local destination, or "-" when the bytes went to stdout`},
+		{Name: "bytes", Type: "integer", Desc: "Bytes received"},
+		{Name: "sha256", Type: "string", Desc: "Digest of the received bytes, for verifying a restore"},
+	}},
 	"data ls": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "path", Type: "string"},
 		{Name: "size", Type: "integer"},
@@ -600,7 +618,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "limit", Type: "integer"},
 		{Name: "offset", Type: "integer"},
 		{Name: "quota_mb", Type: "integer", Desc: "Storage quota in megabytes (0 = no quota)"},
-		{Name: "used_bytes", Type: "integer", Desc: "Total bytes used across all files"},
+		{Name: "used_bytes", Type: "integer", Desc: "Bytes charged against the quota: deployment bundles plus this data dir"},
+		{Name: "data_bytes", Type: "integer", Desc: "Bytes held by the listed data files alone"},
 	}},
 	"data rm": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "removed"},

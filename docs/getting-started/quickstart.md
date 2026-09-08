@@ -19,7 +19,8 @@ for Python applications. No ShinyHub account or external service is required.
 uvx shinyhub serve
 ```
 
-On the first run, ShinyHub asks you to create a local administrator, then:
+On the first run, ShinyHub asks you to create a local administrator. The prompt
+states the password minimum (15 characters) before you type. Then it:
 
 - writes a private, loopback-only `shinyhub.yaml`;
 - creates a persistent SQLite database under `./data/`;

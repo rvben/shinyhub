@@ -2,7 +2,6 @@ package api
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -88,7 +87,7 @@ func (s *Server) handleEndDevelopmentSession(w http.ResponseWriter, r *http.Requ
 	if u := auth.UserFromContext(r.Context()); u != nil {
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &u.ID, Action: "end_development_session", ResourceType: "app",
-			ResourceID: slug, Detail: fmt.Sprintf(`{"development_session_id":%q}`, id),
+			ResourceID: slug, Detail: db.AuditDetail(map[string]any{"development_session_id": id}),
 			IPAddress: s.ClientIP(r),
 		})
 	}

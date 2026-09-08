@@ -105,6 +105,40 @@ func TestSweepOrphanDirs_ReportsUnownedDirsOnly(t *testing.T) {
 	}
 }
 
+// A fresh install has no apps and no orphans, but the server creates its own
+// lock directory under both roots on the way up. Reporting those means the
+// first log an operator ever reads warns about the server's own bookkeeping.
+func TestSweepOrphanDirs_SkipsPlatformLockDirInBothRoots(t *testing.T) {
+	cfg := mkCfg(t)
+	for _, base := range []string{cfg.Storage.AppsDir, cfg.Storage.AppDataDir} {
+		if err := os.MkdirAll(filepath.Join(base, LockDirName), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A real orphan alongside it: the exclusion must be the lock dir only, not
+	// a blanket "ignore dot-directories" or "ignore this root".
+	if err := os.MkdirAll(filepath.Join(cfg.Storage.AppDataDir, ".stray"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	orphans, err := SweepOrphanDirs(cfg, nil)
+	if err != nil {
+		t.Fatalf("SweepOrphanDirs: %v", err)
+	}
+	got := map[string]bool{}
+	for _, p := range orphans {
+		got[p] = true
+	}
+	for _, base := range []string{cfg.Storage.AppsDir, cfg.Storage.AppDataDir} {
+		if p := filepath.Join(base, LockDirName); got[p] {
+			t.Errorf("reported the platform lock dir as an orphan: %s", p)
+		}
+	}
+	if p := filepath.Join(cfg.Storage.AppDataDir, ".stray"); !got[p] {
+		t.Errorf("orphans = %v, want %s reported", orphans, p)
+	}
+}
+
 func TestSweepOrphanDirs_MissingRootsOK(t *testing.T) {
 	cfg := mkCfg(t) // neither root created yet
 	orphans, err := SweepOrphanDirs(cfg, nil)

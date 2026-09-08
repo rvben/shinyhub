@@ -20,6 +20,13 @@ import (
 // for the given slug. Callers should surface this as 409 Conflict.
 var ErrSlugInUse = errors.New("slug already has on-disk state")
 
+// LockDirName is the platform-owned directory ShinyHub creates at the top of
+// AppsDir and AppDataDir to hold its own operation-fence lock files. It shares
+// the namespace with per-app slug directories but is never one, so every
+// consumer of that namespace has to agree on the name. It lives here, beside
+// the sweep that must skip it, so the writers and the reader cannot drift.
+const LockDirName = ".shinyhub-locks"
+
 // RequireFreeSlug returns ErrSlugInUse (wrapped with the offending path) if
 // either the per-app code dir or per-app data dir already exists for slug.
 // Callers must invoke this before creating the DB row so a partial-failure
@@ -58,7 +65,14 @@ func OnAppDelete(cfg *config.Config, slug string) error {
 // of a bug, and auto-deleting user bytes on boot is unacceptable. Callers log
 // the result so an operator can investigate and reclaim space deliberately.
 // The platform-owned upload-temp dir name is treated as part of an app's data
-// dir, not a top-level slug, so it is never reported.
+// dir, not a top-level slug, so it is never reported. LockDirName sits at the
+// top of both roots and is skipped for the same reason: ShinyHub creates it on
+// every boot, so reporting it makes the very first log of a fresh install warn
+// about state the server itself just wrote.
+//
+// Anything else keeps being reported even when the name could not be a slug.
+// The sweep exists to surface bytes nobody owns, and an operator's stray
+// directory is exactly that.
 func SweepOrphanDirs(cfg *config.Config, known map[string]bool) ([]string, error) {
 	var orphans []string
 	var errs []error
@@ -75,7 +89,7 @@ func SweepOrphanDirs(cfg *config.Config, known map[string]bool) ([]string, error
 			if !e.IsDir() {
 				continue
 			}
-			if known[e.Name()] {
+			if known[e.Name()] || e.Name() == LockDirName {
 				continue
 			}
 			orphans = append(orphans, filepath.Join(base, e.Name()))

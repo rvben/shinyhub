@@ -5,7 +5,7 @@ description: "An optional shinyhub.toml at a bundle root that sets the launch co
 # Bundle manifest (`shinyhub.toml`)
 
 A bundle may include a `shinyhub.toml` file at its root. The manifest is
-optional — bundles without one deploy exactly as before — but when present it
+optional - bundles without one deploy exactly as before - but when present it
 is the canonical, declarative source of truth for the app's settings,
 post-deploy hooks, and scheduled jobs.
 
@@ -34,7 +34,7 @@ timeout_seconds = 600
 
 Unknown top-level keys, unknown fields inside any section, and unknown
 trigger values all fail the deploy at parse time with HTTP 400. A typo in
-`replicas` (e.g. `replcias`) does not silently no-op — the operator sees the
+`replicas` (e.g. `replcias`) does not silently no-op - the operator sees the
 error immediately. This is deliberate: declarative configuration that
 silently drops values is worse than no declarative configuration.
 
@@ -47,7 +47,7 @@ Deploy proceeds in this order:
 
 1. The bundle is uploaded, validated, and unzipped into a fresh version
    directory.
-2. **Phase A — `[app]` settings.** Applied atomically to the database after
+2. **Phase A - `[app]` settings.** Applied atomically to the database after
    the previous process is stopped and the proxy is deregistered, but before
    the new bundle boots. A failure here aborts the deploy with 400 (validation)
    or 500 (DB error); the app row is left untouched.
@@ -57,7 +57,7 @@ Deploy proceeds in this order:
    bundle run to durable success while the app remains stopped. Their bundle
    digest, command fingerprint, deployment, run, and publication generation
    are recorded before any consumer can start.
-6. **Phase B — `[[schedule]]` blocks** reconcile atomically by name into the
+6. **Phase B - `[[schedule]]` blocks** reconcile atomically by name into the
    schedules table, and the exact declaration set is snapshotted with the
    deployment for rollback. The scheduler is reloaded so new cron expressions
    take effect immediately.
@@ -66,7 +66,7 @@ Deploy proceeds in this order:
    again. Only then are the new app processes started and proxy-registered.
 8. The deployment is promoted and its complete schedule convergence state is
    materialized.
-9. **Phase C — `[access]` group rules** reconcile into the per-app group
+9. **Phase C - `[access]` group rules** reconcile into the per-app group
    access table as `source = manifest`, preserving any manually-managed
    rules. Unlike schedules, this is declarative: a group removed from the
    manifest loses its manifest rule on the next deploy.
@@ -84,7 +84,7 @@ started (e.g. during early-startup deploys), the reload is skipped and
 the schedule rows are still written. The scheduler picks them up when it
 starts.
 
-## `[app]` — app-level settings
+## `[app]` - app-level settings
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -378,7 +378,7 @@ hibernate_timeout_minutes = -1
 
 Equivalent to `shinyhub apps set --hibernate-timeout -1`.
 
-## `[[schedule]]` — scheduled jobs
+## `[[schedule]]` - scheduled jobs
 
 Each `[[schedule]]` block defines one cron-driven job. See
 [schedules](schedules.md) for the full semantic model; the manifest
@@ -440,7 +440,7 @@ name **creates** the schedule (audit: `schedule_create`); subsequent
 deploys that include the same name **update** it in place, preserving its
 ID and audit trail (audit: `schedule_update`).
 
-Schedules **not** present in the manifest are left alone — removing a
+Schedules **not** present in the manifest are left alone - removing a
 `[[schedule]]` block does NOT delete the schedule from the database. Use
 `shinyhub schedule delete` or the UI to remove a schedule. This avoids
 silently dropping schedules that were created interactively while the
@@ -501,7 +501,7 @@ another cycle.
 The imperative equivalent is `shinyhub schedule add --deploy-trigger
 bundle_change`; add `--follow` to stream a dispatched run.
 
-## `[[hook]]` — deploy lifecycle hooks
+## `[[hook]]` - deploy lifecycle hooks
 
 | Field | Required | Meaning |
 |---|---|---|
@@ -510,7 +510,7 @@ bundle_change`; add `--follow` to stream a dispatched run.
 | `timeout` | no | Wall-clock cap. Defaults to 5 minutes. Accepts Go duration syntax (`30s`, `2m`, `1h`). |
 
 Hooks run sequentially in the order they appear in the manifest. The
-first failing hook aborts the deploy — subsequent hooks do not run, and
+first failing hook aborts the deploy - subsequent hooks do not run, and
 the new bundle does not start.
 
 Stdout and stderr are merged into the version's `deploy-hooks.log`. Each hook
@@ -591,9 +591,9 @@ Semantics:
 
 Re-deploying the same bundle yields the same state:
 
-- `[app]` settings are deterministic — applying twice with the same values
+- `[app]` settings are deterministic - applying twice with the same values
   is a no-op aside from audit-event noise.
-- `[[schedule]]` upserts by name — IDs are stable across deploys; cron or
+- `[[schedule]]` upserts by name - IDs are stable across deploys; cron or
   command changes update the row in place.
 - `[[hook]]` blocks run every deploy; they are expected to be idempotent
   (e.g. `migrate.py` should handle "already migrated").

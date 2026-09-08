@@ -212,7 +212,7 @@
           <label for="apps-sort" class="sr-only">Sort apps</label>
           <select id="apps-sort" class="apps-sort" aria-label="Sort apps">
             <option value="default">Default order</option>
-            <option value="name">Name A–Z</option>
+            <option value="name">Name A-Z</option>
             <option value="deploy">Most recent deploy</option>
             <option value="status">Status</option>
           </select>
@@ -321,7 +321,7 @@ auth:
           </div>
         </div>
       </section>
-      <p class="tokens-intro">Personal tokens for the CLI and API. Use with <code>Authorization: token &lt;value&gt;</code> or <code>SHINYHUB_TOKEN</code>. A token is shown once at creation — store it somewhere safe.</p>
+      <p class="tokens-intro">Personal tokens for the CLI and API. Use with <code>Authorization: token &lt;value&gt;</code> or <code>SHINYHUB_TOKEN</code>. A token is shown once at creation, so store it somewhere safe.</p>
       <p id="tokens-error" class="error" role="alert" hidden></p>
       <div id="tokens-list" class="tokens-list"></div>
     </section>
@@ -352,6 +352,19 @@ auth:
     <section id="audit-view" hidden>
       <div class="toolbar">
         <h1>Audit Log</h1>
+        <div class="toolbar-actions">
+          <label for="audit-action-filter" class="sr-only">Filter by action</label>
+          <select id="audit-action-filter" class="apps-sort" aria-label="Filter audit events by action">
+            <option value="">All actions</option>
+          </select>
+          <div class="audit-date-range">
+            <label for="audit-since">From</label>
+            <input type="date" id="audit-since" aria-label="Show audit events on or after this date (UTC)">
+            <label for="audit-until">to</label>
+            <input type="date" id="audit-until" aria-label="Show audit events on or before this date (UTC)">
+            <button type="button" id="audit-range-clear" class="linklike" hidden>Clear dates</button>
+          </div>
+        </div>
       </div>
       <div id="audit-context" class="audit-context" hidden>
         <p id="audit-context-copy"></p>
@@ -359,7 +372,7 @@ auth:
       </div>
       <p id="audit-loading" class="env-empty" role="status" hidden>Loading audit events…</p>
       <p id="audit-error" class="error" role="alert" hidden></p>
-      <p id="audit-empty" class="env-empty" hidden>No audit events recorded yet — every mutating action will appear here.</p>
+      <p id="audit-empty" class="env-empty" hidden>No audit events recorded yet. Every mutating action will appear here.</p>
       <table id="audit-table">
         <thead>
           <tr>
@@ -501,7 +514,7 @@ auth:
         </section>
         <section id="detail-configuration-panel" class="settings-tab-panel" role="tabpanel" hidden>
           <section class="settings-block">
-            <h3 class="settings-block-title">General</h3>
+            <h2 class="settings-block-title">General</h2>
             <p class="settings-block-desc">Name the app and group it with related ones. The URL slug (<code>/app/&lt;slug&gt;/</code>) is part of the app's address and can't be changed after creation.</p>
             <div class="settings-block-body">
               <label class="scaling-row">
@@ -564,7 +577,7 @@ auth:
           </section>
 
           <section class="settings-block" id="usage-privacy-settings">
-            <h3 class="settings-block-title">Usage privacy</h3>
+            <h2 class="settings-block-title">Usage privacy</h2>
             <p class="settings-block-desc">Choose how much viewer identity this app keeps. An app can be stricter than the hub policy, never more identifying.</p>
             <div class="settings-block-body">
               <label class="scaling-row">
@@ -591,7 +604,7 @@ auth:
           </section>
 
           <section class="settings-block">
-            <h3 class="settings-block-title">Resources</h3>
+            <h2 class="settings-block-title">Resources</h2>
             <p class="settings-block-desc">Per-replica caps on memory and CPU. Enforced under the Docker runtime.</p>
             <p id="resources-runtime-note" class="settings-inline-note" hidden></p>
             <div class="settings-block-body">
@@ -670,7 +683,7 @@ auth:
           </fieldset>
 
           <section class="settings-block">
-            <h3 class="settings-block-title">Scaling</h3>
+            <h2 class="settings-block-title">Scaling</h2>
             <p class="settings-block-desc">How many processes serve this app, and how many sessions each one admits.</p>
             <div class="settings-block-body">
               <label class="scaling-row">
@@ -736,7 +749,7 @@ auth:
           </section>
 
           <section class="settings-block">
-            <h3 class="settings-block-title">Render pacing</h3>
+            <h2 class="settings-block-title">Render pacing</h2>
             <p class="settings-block-desc">Admit page loads at a rate this host can actually render, so a burst queues on a wait page instead of stalling every session at once.</p>
             <div class="settings-block-body">
               <label class="scaling-row">
@@ -816,7 +829,7 @@ auth:
           </fieldset>
 
           <section class="settings-block">
-            <h3 class="settings-block-title">Environment variables</h3>
+            <h2 class="settings-block-title">Environment variables</h2>
             <p class="settings-block-desc">Key/value pairs passed to the app process when it starts. Secrets are encrypted at rest and write-only.</p>
             <div class="settings-block-body">
               <div class="env-header">
@@ -830,7 +843,7 @@ auth:
             </div>
 
             <form id="env-form" class="env-form" hidden>
-              <h5 id="env-form-heading">Add variable</h5>
+              <h3 id="env-form-heading">Add variable</h3>
               <div class="env-form-row">
                 <label for="env-form-key">Key</label>
                 <input id="env-form-key" type="text" pattern="[A-Z_][A-Z0-9_]*" required autocomplete="off" spellcheck="false">
@@ -852,7 +865,7 @@ auth:
           </section>
 
           <section id="danger-zone" class="settings-block danger-zone" hidden>
-            <h3 class="settings-block-title">Danger zone</h3>
+            <h2 class="settings-block-title">Danger zone</h2>
             <p class="settings-block-desc">Deleting an app stops it, removes all deployments and history, and releases the slug. This cannot be undone.</p>
             <div class="settings-block-body">
               <div class="danger-zone-row">
@@ -870,7 +883,7 @@ auth:
         </section>
         <section id="detail-data-panel"          class="settings-tab-panel" role="tabpanel" hidden>
           <section class="settings-block">
-            <h3 class="settings-block-title">Data files</h3>
+            <h2 class="settings-block-title">Data files</h2>
             <p class="settings-block-desc">Files in this app's persistent data directory, available to the running app and kept across deploys.</p>
             <div class="settings-block-body">
               <div class="env-header">
@@ -883,7 +896,7 @@ auth:
               </table>
 
               <form id="data-upload-form" class="env-form" hidden>
-                <h5>Upload file</h5>
+                <h3>Upload file</h3>
                 <div class="env-form-row">
                   <label for="data-file-input">File</label>
                   <input id="data-file-input" type="file" required>
@@ -905,7 +918,7 @@ auth:
           </section>
 
           <section class="settings-block">
-            <h3 class="settings-block-title">Shared data</h3>
+            <h2 class="settings-block-title">Shared data</h2>
             <p class="settings-block-desc">Mount another app's persistent data dir read-only. It appears at <code>data/shared/&lt;source-slug&gt;/</code> inside this app. Read-only is enforced under the Docker runtime; under native it is a convention only.</p>
             <div class="settings-block-body">
               <div id="shared-data-list" class="shared-data-table"></div>
@@ -933,7 +946,7 @@ auth:
           </fieldset>
 
           <section class="settings-block">
-            <h3 class="settings-block-title">Members</h3>
+            <h2 class="settings-block-title">Members</h2>
             <p class="settings-block-desc">People granted direct access. On a private app this is what admits them; the manager role also lets them deploy, configure, and manage members.</p>
             <div class="settings-block-body">
               <ul id="members-list"></ul>
@@ -947,8 +960,9 @@ auth:
           </section>
 
           <section class="settings-block">
-            <h3 class="settings-block-title">Group access</h3>
+            <h2 class="settings-block-title">Group access</h2>
             <p class="settings-block-desc">Grant an IdP group viewer or manager access. Group access is additive and does not restrict a public or shared app.</p>
+            <p id="group-access-sso-warning" class="settings-block-warning" hidden></p>
             <div class="settings-block-body">
               <ul id="group-access-list"></ul>
               <div class="grant-row">
@@ -978,576 +992,576 @@ auth:
   </main>
     </div>
   </div>
-  <!-- Dialogs must stay outside the background regions made inert by modalTrap. -->
-    <!-- New-app modal: create-only; hand-off to CLI for the first deploy -->
-    <div id="new-app-modal" class="modal-overlay" hidden
-         role="dialog" aria-modal="true" aria-labelledby="new-app-heading">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2 id="new-app-heading" class="modal-title">New app</h2>
-          <button id="new-app-close" type="button" aria-label="Close new app modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
-        </div>
-        <div class="modal-body">
-          <p id="new-app-step" class="onboarding-step" aria-live="polite">Step 1 of 2 · App details</p>
-          <div class="handoff-card">
-            <form id="new-app-form">
-              <label for="new-app-name">Display name</label>
-              <input id="new-app-name" type="text" required maxlength="128"
-                     placeholder="My Sales Dashboard">
+  <!-- New-app modal: create-only; hand-off to CLI for the first deploy -->
+  <div id="new-app-modal" class="modal-overlay" hidden
+       role="dialog" aria-modal="true" aria-labelledby="new-app-heading">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="new-app-heading" class="modal-title">New app</h2>
+        <button id="new-app-close" type="button" aria-label="Close new app modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <p id="new-app-step" class="onboarding-step" aria-live="polite">Step 1 of 2 · App details</p>
+        <div class="handoff-card">
+          <form id="new-app-form">
+            <label for="new-app-name">Display name</label>
+            <input id="new-app-name" type="text" required maxlength="128"
+                   placeholder="My Sales Dashboard">
 
-              <label for="new-app-slug">Slug</label>
-              <input id="new-app-slug" type="text" required
-                     maxlength="63"
+            <label for="new-app-slug">Slug</label>
+            <input id="new-app-slug" type="text" required
+                   maxlength="63"
+                   pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                   placeholder="lowercase-letters-digits-dashes"
+                   autocomplete="off" spellcheck="false"
+                   aria-describedby="new-app-slug-hint">
+            <p class="hint" id="new-app-slug-hint">1-63 chars, lowercase letters, digits and dashes. Must start and end with a letter or digit. Used in the URL: <code>/app/&lt;slug&gt;/</code>.</p>
+
+            <details class="new-app-optional">
+              <summary>Add to a project <span class="hint-inline">(optional)</span></summary>
+              <label for="new-app-project">Project slug</label>
+              <input id="new-app-project" type="text" maxlength="63" list="project-slugs"
                      pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-                     placeholder="lowercase-letters-digits-dashes"
-                     autocomplete="off" spellcheck="false"
-                     aria-describedby="new-app-slug-hint">
-              <p class="hint" id="new-app-slug-hint">1-63 chars, lowercase letters, digits and dashes. Must start and end with a letter or digit. Used in the URL: <code>/app/&lt;slug&gt;/</code>.</p>
+                     autocomplete="off" spellcheck="false">
+            </details>
 
-              <details class="new-app-optional">
-                <summary>Add to a project <span class="hint-inline">(optional)</span></summary>
-                <label for="new-app-project">Project slug</label>
-                <input id="new-app-project" type="text" maxlength="63" list="project-slugs"
-                       pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-                       autocomplete="off" spellcheck="false">
-              </details>
+            <p id="new-app-error" class="error" hidden></p>
 
-              <p id="new-app-error" class="error" hidden></p>
+            <div class="modal-actions">
+              <button type="button" id="new-app-cancel">Cancel</button>
+              <button type="submit" id="new-app-submit" class="btn-primary">Create</button>
+            </div>
+          </form>
 
-              <div class="modal-actions">
-                <button type="button" id="new-app-cancel">Cancel</button>
-                <button type="submit" id="new-app-submit" class="btn-primary">Create</button>
-              </div>
-            </form>
+          <hr class="handoff-card-divider" aria-hidden="true">
 
-            <hr class="handoff-card-divider" aria-hidden="true">
-
-            <div>
-              <p class="handoff-section-label" id="new-app-snippet-label">Deploy from your machine after creating</p>
-              <div class="snippet">
-                <pre><code id="new-app-snippet"></code></pre>
-                <button type="button" id="new-app-snippet-copy" class="copy-btn"
-                        aria-label="Copy CLI commands to clipboard">
-                  <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
-                       stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                       stroke-linejoin="round" aria-hidden="true">
-                    <rect x="4" y="3" width="8" height="10" rx="1.2"/>
-                    <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
-                  </svg>
-                  <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
-                       stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
-                       stroke-linejoin="round" aria-hidden="true">
-                    <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
-                  </svg>
-                  <span class="copy-label" aria-hidden="true">Copy</span>
-                  <span class="sr-only" id="new-app-snippet-status" aria-live="polite"></span>
-                </button>
-              </div>
+          <div>
+            <p class="handoff-section-label" id="new-app-snippet-label">Deploy from your machine after creating</p>
+            <div class="snippet">
+              <pre><code id="new-app-snippet"></code></pre>
+              <button type="button" id="new-app-snippet-copy" class="copy-btn"
+                      aria-label="Copy CLI commands to clipboard">
+                <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
+                     stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                     stroke-linejoin="round" aria-hidden="true">
+                  <rect x="4" y="3" width="8" height="10" rx="1.2"/>
+                  <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
+                </svg>
+                <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
+                     stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                     stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
+                </svg>
+                <span class="copy-label" aria-hidden="true">Copy</span>
+                <span class="sr-only" id="new-app-snippet-status" aria-live="polite"></span>
+              </button>
             </div>
           </div>
+        </div>
 
-          <section id="new-app-handoff" hidden>
-            <p class="handoff-success">Your app is ready for code.</p>
-            <p class="hint">Upload a folder or <code>.zip</code> now, or copy the commands above to deploy from your terminal.</p>
-            <div class="modal-actions">
-              <button type="button" id="new-app-done">Done for now</button>
-              <button type="button" id="new-app-deploy-now" class="btn-primary">Upload app</button>
-            </div>
-          </section>
+        <section id="new-app-handoff" hidden>
+          <p class="handoff-success">Your app is ready for code.</p>
+          <p class="hint">Upload a folder or <code>.zip</code> now, or copy the commands above to deploy from your terminal.</p>
+          <div class="modal-actions">
+            <button type="button" id="new-app-done">Done for now</button>
+            <button type="button" id="new-app-deploy-now" class="btn-primary">Upload app</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+  <!-- Deploy modal: accepts folder drop, zip drop, or file pick -->
+  <div id="deploy-modal" class="modal-overlay" hidden
+       role="dialog" aria-modal="true" aria-labelledby="deploy-modal-heading">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="deploy-modal-heading" class="modal-title">Deploy<span id="deploy-app-name"></span></h2>
+        <button id="deploy-modal-close" type="button" aria-label="Close deploy modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <div id="deploy-dropzone" class="dropzone">
+          <p>Drop a folder or <code>.zip</code> here,</p>
+          <p>or <button id="deploy-pick" type="button" class="linklike">pick a file</button>.</p>
+        </div>
+        <input id="deploy-file" type="file" accept=".zip" aria-label="Choose an app bundle (.zip file)" hidden>
+
+        <ul id="deploy-summary" class="deploy-summary" hidden>
+          <li>Source: <span id="deploy-source-name">—</span></li>
+          <li>Files: <span id="deploy-file-count">0</span></li>
+          <li>Bundle size: <span id="deploy-bundle-size">0 B</span></li>
+          <li id="deploy-ignored-row" hidden>
+            Ignored: <span id="deploy-ignored-list"></span>
+          </li>
+        </ul>
+
+        <div id="deploy-progress-wrap" class="deploy-progress" hidden>
+          <progress id="deploy-progress-bar" max="100" value="0" aria-label="Upload progress"></progress>
+          <span id="deploy-progress-text">0%</span>
+        </div>
+
+        <div id="deploy-result" class="deploy-result" hidden>
+          <p class="deploy-result-heading">Deploy succeeded.</p>
+          <ul id="deploy-result-list" class="deploy-result-list" aria-label="Manifest changes applied"></ul>
+        </div>
+
+        <p id="deploy-error" class="error" hidden></p>
+
+        <div class="modal-actions">
+          <button type="button" id="deploy-cancel">Cancel</button>
+          <button type="button" id="deploy-submit" class="btn-primary" disabled>Deploy</button>
+        </div>
+
+        <hr class="handoff-card-divider" aria-hidden="true">
+
+        <div>
+          <p class="handoff-section-label">Or deploy from your CLI</p>
+          <div class="snippet">
+            <pre><code id="deploy-cli-snippet"></code></pre>
+            <button type="button" id="deploy-cli-snippet-copy" class="copy-btn"
+                    aria-label="Copy CLI commands to clipboard">
+              <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
+                   stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                   stroke-linejoin="round" aria-hidden="true">
+                <rect x="4" y="3" width="8" height="10" rx="1.2"/>
+                <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
+              </svg>
+              <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
+                   stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                   stroke-linejoin="round" aria-hidden="true">
+                <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
+              </svg>
+              <span class="copy-label" aria-hidden="true">Copy</span>
+              <span class="sr-only" id="deploy-cli-snippet-status" aria-live="polite"></span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
-    <!-- Deploy modal: accepts folder drop, zip drop, or file pick -->
-    <div id="deploy-modal" class="modal-overlay" hidden
-         role="dialog" aria-modal="true" aria-labelledby="deploy-modal-heading">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2 id="deploy-modal-heading" class="modal-title">Deploy<span id="deploy-app-name"></span></h2>
-          <button id="deploy-modal-close" type="button" aria-label="Close deploy modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+  </div>
+  <!-- Profile modal: self-service display name + own password, plus logout -->
+  <div id="profile-modal" class="modal-overlay" hidden
+       role="dialog" aria-modal="true" aria-labelledby="profile-heading">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="profile-heading" class="modal-title">Your profile</h2>
+        <button id="profile-close" type="button" aria-label="Close profile"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="profile-identity">
+          <span id="profile-avatar" class="identity-avatar identity-avatar-lg" aria-hidden="true">?</span>
+          <div class="profile-identity-meta">
+            <span id="profile-username" class="profile-username"></span>
+            <span id="profile-role" class="profile-role"></span>
+            <span id="profile-login" class="profile-login"></span>
+          </div>
         </div>
-        <div class="modal-body">
-          <div id="deploy-dropzone" class="dropzone">
-            <p>Drop a folder or <code>.zip</code> here,</p>
-            <p>or <button id="deploy-pick" type="button" class="linklike">pick a file</button>.</p>
+
+        <fieldset id="theme-picker" class="profile-appearance">
+          <legend>Appearance</legend>
+          <div class="theme-options">
+            <label class="theme-option"><input type="radio" name="theme-pref" value="system"> System</label>
+            <label class="theme-option"><input type="radio" name="theme-pref" value="light"> Light</label>
+            <label class="theme-option"><input type="radio" name="theme-pref" value="dark"> Dark</label>
           </div>
-          <input id="deploy-file" type="file" accept=".zip" aria-label="Choose an app bundle (.zip file)" hidden>
+        </fieldset>
 
-          <ul id="deploy-summary" class="deploy-summary" hidden>
-            <li>Source: <span id="deploy-source-name">—</span></li>
-            <li>Files: <span id="deploy-file-count">0</span></li>
-            <li>Bundle size: <span id="deploy-bundle-size">0 B</span></li>
-            <li id="deploy-ignored-row" hidden>
-              Ignored: <span id="deploy-ignored-list"></span>
-            </li>
-          </ul>
-
-          <div id="deploy-progress-wrap" class="deploy-progress" hidden>
-            <progress id="deploy-progress-bar" max="100" value="0" aria-label="Upload progress"></progress>
-            <span id="deploy-progress-text">0%</span>
+        <form id="profile-form">
+          <div id="profile-name-field">
+            <label for="profile-display-name">Display name</label>
+            <input id="profile-display-name" type="text" maxlength="80"
+                   autocomplete="name" spellcheck="false" placeholder="Your name">
+            <p class="profile-hint">Shown across the dashboard. Leave blank to use your username.</p>
           </div>
 
-          <div id="deploy-result" class="deploy-result" hidden>
-            <p class="deploy-result-heading">Deploy succeeded.</p>
-            <ul id="deploy-result-list" class="deploy-result-list" aria-label="Manifest changes applied"></ul>
-          </div>
+          <fieldset id="profile-password-section" class="profile-password">
+            <legend>Change password</legend>
+            <label for="profile-current-password">Current password</label>
+            <input id="profile-current-password" type="password"
+                   autocomplete="current-password" placeholder="Your current password">
+            <label for="profile-new-password">New password</label>
+            <input id="profile-new-password" type="password" minlength="15"
+                   autocomplete="new-password" placeholder="At least 15 characters">
+          </fieldset>
+          <p id="profile-password-managed" class="profile-hint" hidden>Your name and password are managed by your identity provider.</p>
 
-          <p id="deploy-error" class="error" hidden></p>
+          <p class="profile-tokens-link">
+            <a href="/tokens" data-nav id="profile-tokens-link">Manage API tokens &rarr;</a>
+          </p>
+
+          <p id="profile-error" class="error" role="alert" hidden></p>
+          <p id="profile-success" class="profile-success" role="status" aria-live="polite" hidden></p>
+
+          <div class="modal-actions profile-actions">
+            <button id="logout-button" type="button" class="profile-logout">Log out</button>
+            <button id="profile-submit" type="submit" class="btn-primary">Save changes</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  <!-- About: which ShinyHub is this, and what can it run. Filled by
+       views/about.js from /api/server-info when the dialog opens.
+       The product name is static markup and none of this is a .brand slot,
+       on purpose: branding.js rewrites those, and an operator white-labeling
+       the front door must still leave a signed-in reader able to name the
+       software in a bug report. Behind a click and behind the login, so an
+       anonymous visitor sees only the operator's brand. -->
+  <div id="about-modal" class="modal-overlay" hidden
+       role="dialog" aria-modal="true" aria-labelledby="about-heading">
+    <div class="modal-card about-card">
+      <div class="modal-header">
+        <h2 id="about-heading" class="modal-title">About</h2>
+        <button id="about-close" type="button" aria-label="Close about"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <p class="about-wordmark" role="img" aria-label="ShinyHub">
+          <span class="about-brand-art" aria-hidden="true"></span>
+        </p>
+        <p id="about-version" class="about-version"></p>
+        <p id="about-build" class="about-build" hidden></p>
+
+        <section class="about-section" aria-labelledby="about-runtimes-heading">
+          <h3 id="about-runtimes-heading" class="about-section-title">App runtimes</h3>
+          <dl id="about-runtimes" class="about-runtimes"></dl>
+          <p class="about-hint">Launch tools detected directly on this host. App bundles may provide additional runtimes.</p>
+        </section>
+
+        <p class="about-links">
+          <a href="https://github.com/rvben/shinyhub" target="_blank" rel="noopener noreferrer">Documentation and source</a>
+        </p>
+      </div>
+    </div>
+  </div>
+  <!-- New API token modal -->
+  <div id="new-token-modal" class="modal-overlay" hidden
+       role="dialog" aria-modal="true" aria-labelledby="new-token-heading">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="new-token-heading" class="modal-title">New API token</h2>
+        <button id="new-token-close" type="button" aria-label="Close new token modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <form id="new-token-form">
+          <label for="new-token-name">Token name</label>
+          <input id="new-token-name" type="text" required maxlength="64"
+                 autocomplete="off" spellcheck="false" placeholder="e.g. ci-deploy or laptop">
+          <p class="profile-hint">A label to recognise it later. Must be unique among your tokens.</p>
+
+          <label for="new-token-expiry">Expires</label>
+          <select id="new-token-expiry">
+            <option value="30">30 days</option>
+            <option value="90" selected>90 days</option>
+            <option value="365">365 days</option>
+          </select>
+          <p class="profile-hint">An expired token stops authenticating; create a new one to replace it.</p>
+
+          <p id="new-token-error" class="error" hidden></p>
 
           <div class="modal-actions">
-            <button type="button" id="deploy-cancel">Cancel</button>
-            <button type="button" id="deploy-submit" class="btn-primary" disabled>Deploy</button>
+            <button type="button" id="new-token-cancel">Cancel</button>
+            <button type="submit" id="new-token-submit" class="btn-primary">Create token</button>
           </div>
+        </form>
 
-          <hr class="handoff-card-divider" aria-hidden="true">
-
-          <div>
-            <p class="handoff-section-label">Or deploy from your CLI</p>
-            <div class="snippet">
-              <pre><code id="deploy-cli-snippet"></code></pre>
-              <button type="button" id="deploy-cli-snippet-copy" class="copy-btn"
-                      aria-label="Copy CLI commands to clipboard">
-                <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
-                     stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                     stroke-linejoin="round" aria-hidden="true">
-                  <rect x="4" y="3" width="8" height="10" rx="1.2"/>
-                  <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
-                </svg>
-                <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
-                     stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
-                     stroke-linejoin="round" aria-hidden="true">
-                  <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
-                </svg>
-                <span class="copy-label" aria-hidden="true">Copy</span>
-                <span class="sr-only" id="deploy-cli-snippet-status" aria-live="polite"></span>
-              </button>
-            </div>
+        <div id="token-reveal" class="token-reveal" hidden>
+          <p class="token-reveal-warning" role="alert">
+            Copy this token now. For security it is <strong>shown only once</strong> and cannot be retrieved again.
+          </p>
+          <div class="snippet">
+            <pre><code id="token-reveal-value"></code></pre>
+            <button type="button" id="token-reveal-copy" class="copy-btn"
+                    aria-label="Copy token to clipboard">
+              <span class="copy-label">Copy</span>
+            </button>
+          </div>
+          <p id="token-reveal-status" class="sr-only" role="status" aria-live="polite"></p>
+          <div class="modal-actions">
+            <button type="button" id="token-reveal-done" class="btn-primary">Done</button>
           </div>
         </div>
       </div>
     </div>
-    <!-- Profile modal: self-service display name + own password, plus logout -->
-    <div id="profile-modal" class="modal-overlay" hidden
-         role="dialog" aria-modal="true" aria-labelledby="profile-heading">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2 id="profile-heading" class="modal-title">Your profile</h2>
-          <button id="profile-close" type="button" aria-label="Close profile"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
-        </div>
-        <div class="modal-body">
-          <div class="profile-identity">
-            <span id="profile-avatar" class="identity-avatar identity-avatar-lg" aria-hidden="true">?</span>
-            <div class="profile-identity-meta">
-              <span id="profile-username" class="profile-username"></span>
-              <span id="profile-role" class="profile-role"></span>
-              <span id="profile-login" class="profile-login"></span>
-            </div>
-          </div>
+  </div>
 
-          <fieldset id="theme-picker" class="profile-appearance">
-            <legend>Appearance</legend>
-            <div class="theme-options">
-              <label class="theme-option"><input type="radio" name="theme-pref" value="system"> System</label>
-              <label class="theme-option"><input type="radio" name="theme-pref" value="light"> Light</label>
-              <label class="theme-option"><input type="radio" name="theme-pref" value="dark"> Dark</label>
+  <!-- New user modal (admin only) -->
+  <div id="new-user-modal" class="modal-overlay" hidden
+       role="dialog" aria-modal="true" aria-labelledby="new-user-heading">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="new-user-heading" class="modal-title">New user</h2>
+        <button id="new-user-close" type="button" aria-label="Close new user modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <form id="new-user-form">
+          <label for="new-user-username">Username</label>
+          <input id="new-user-username" type="text" required maxlength="64"
+                 autocomplete="off" spellcheck="false" placeholder="alice">
+
+          <label for="new-user-password">Password</label>
+          <input id="new-user-password" type="password" required minlength="15"
+                 autocomplete="new-password" placeholder="At least 15 characters">
+
+          <label for="new-user-role">Role</label>
+          <select id="new-user-role">
+            <option value="viewer">Viewer</option>
+            <option value="developer" selected>Developer</option>
+            <option value="operator">Operator</option>
+            <option value="admin">Admin</option>
+          </select>
+
+          <p id="new-user-error" class="error" hidden></p>
+
+          <div class="modal-actions">
+            <button type="button" id="new-user-cancel">Cancel</button>
+            <button type="submit" id="new-user-submit" class="btn-primary">Create</button>
+          </div>
+        </form>
+
+        <hr class="handoff-card-divider" aria-hidden="true">
+
+        <div>
+          <p class="handoff-section-label">Share this with the new user to log in</p>
+          <div class="snippet">
+            <pre><code id="new-user-snippet"></code></pre>
+            <button type="button" id="new-user-snippet-copy" class="copy-btn"
+                    aria-label="Copy CLI commands to clipboard">
+              <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
+                   stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                   stroke-linejoin="round" aria-hidden="true">
+                <rect x="4" y="3" width="8" height="10" rx="1.2"/>
+                <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
+              </svg>
+              <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
+                   stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                   stroke-linejoin="round" aria-hidden="true">
+                <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
+              </svg>
+              <span class="copy-label" aria-hidden="true">Copy</span>
+              <span class="sr-only" id="new-user-snippet-status" aria-live="polite"></span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="service-credential-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="service-credential-heading">
+    <div class="modal-card service-credential-modal-box">
+      <div class="modal-header"><div><h2 id="service-credential-heading" class="modal-title">New automation credential</h2><p id="service-credential-context" class="modal-context" hidden></p></div><button id="service-credential-close" type="button" aria-label="Close credential dialog"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button></div>
+      <div class="modal-body">
+        <form id="service-credential-form">
+          <label for="service-credential-name">Name</label>
+          <input id="service-credential-name" type="text" required maxlength="64" placeholder="analytics production CI" autocomplete="off">
+          <label for="service-credential-role">Role</label>
+          <select id="service-credential-role" aria-describedby="service-credential-role-help service-credential-role-warning"><option value="developer" selected>Developer</option><option value="operator">Operator</option><option value="viewer">Viewer</option><option value="admin">Admin (platform-wide)</option></select>
+          <small id="service-credential-role-help" class="field-hint">Can deploy and manage apps inside this credential’s scope.</small>
+          <p id="service-credential-role-warning" class="credential-privilege-warning" role="status" hidden></p>
+          <fieldset class="service-scope-fieldset"><legend>App operations</legend>
+            <label class="service-scope-choice"><input type="radio" name="service-scope" value="apps" checked><span><strong>Selected apps</strong><small>Recommended for a team or pipeline</small></span></label>
+            <div id="service-credential-app-list" class="service-credential-app-list">
+              <label for="service-credential-apps" class="service-field-label">App slugs</label>
+              <input id="service-credential-apps" type="text" placeholder="sales-dashboard, forecasting" aria-describedby="service-credential-apps-help service-credential-error" aria-errormessage="service-credential-error">
+              <small id="service-credential-apps-help" class="field-hint">Comma-separated app slugs. Apps may be created later.</small>
             </div>
+            <label class="service-scope-choice"><input type="radio" name="service-scope" value="all"><span><strong>All apps</strong><small>Use only for platform-wide automation</small></span></label>
           </fieldset>
-
-          <form id="profile-form">
-            <div id="profile-name-field">
-              <label for="profile-display-name">Display name</label>
-              <input id="profile-display-name" type="text" maxlength="80"
-                     autocomplete="name" spellcheck="false" placeholder="Your name">
-              <p class="profile-hint">Shown across the dashboard. Leave blank to use your username.</p>
-            </div>
-
-            <fieldset id="profile-password-section" class="profile-password">
-              <legend>Change password</legend>
-              <label for="profile-current-password">Current password</label>
-              <input id="profile-current-password" type="password"
-                     autocomplete="current-password" placeholder="Your current password">
-              <label for="profile-new-password">New password</label>
-              <input id="profile-new-password" type="password" minlength="15"
-                     autocomplete="new-password" placeholder="At least 15 characters">
-            </fieldset>
-            <p id="profile-password-managed" class="profile-hint" hidden>Your name and password are managed by your identity provider.</p>
-
-            <p class="profile-tokens-link">
-              <a href="/tokens" data-nav id="profile-tokens-link">Manage API tokens &rarr;</a>
-            </p>
-
-            <p id="profile-error" class="error" role="alert" hidden></p>
-            <p id="profile-success" class="profile-success" role="status" aria-live="polite" hidden></p>
-
-            <div class="modal-actions profile-actions">
-              <button id="logout-button" type="button" class="profile-logout">Log out</button>
-              <button id="profile-submit" type="submit" class="btn-primary">Save changes</button>
-            </div>
-          </form>
-        </div>
+          <label for="service-credential-expiry">Expires after</label>
+          <select id="service-credential-expiry"><option value="30">30 days</option><option value="90" selected>90 days</option><option value="180">180 days</option><option value="365">365 days</option></select>
+          <div id="service-credential-plan" class="credential-plan" role="status"></div>
+          <p id="service-credential-error" class="error" role="alert" hidden></p>
+          <div class="modal-actions"><button id="service-credential-cancel" type="button">Cancel</button><button id="service-credential-submit" type="submit" class="btn-primary">Create credential</button></div>
+        </form>
+        <section id="service-credential-secret" class="credential-secret" hidden aria-labelledby="service-credential-secret-heading">
+          <h3 id="service-credential-secret-heading">Store this one-time credential now</h3><p>ShinyHub stores only its hash. You cannot reveal it again.</p>
+          <p id="service-credential-created-summary" class="credential-created-summary"></p>
+          <p id="service-credential-created-warning" class="credential-privilege-warning" role="alert" hidden></p>
+          <div class="credential-secret-value"><code id="service-credential-token"></code><button id="service-credential-copy" type="button" class="copy-btn">Copy</button></div>
+          <p id="service-credential-copy-status" class="field-hint" role="status"></p>
+          <div class="modal-actions"><button id="service-credential-done" type="button" class="btn-primary">I’ve stored this credential</button></div>
+        </section>
       </div>
     </div>
-    <!-- About: which ShinyHub is this, and what can it run. Filled by
-         views/about.js from /api/server-info when the dialog opens.
-         The product name is static markup and none of this is a .brand slot,
-         on purpose: branding.js rewrites those, and an operator white-labeling
-         the front door must still leave a signed-in reader able to name the
-         software in a bug report. Behind a click and behind the login, so an
-         anonymous visitor sees only the operator's brand. -->
-    <div id="about-modal" class="modal-overlay" hidden
-         role="dialog" aria-modal="true" aria-labelledby="about-heading">
-      <div class="modal-card about-card">
-        <div class="modal-header">
-          <h2 id="about-heading" class="modal-title">About</h2>
-          <button id="about-close" type="button" aria-label="Close about"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
-        </div>
-        <div class="modal-body">
-          <p class="about-wordmark" role="img" aria-label="ShinyHub">
-            <span class="about-brand-art" aria-hidden="true"></span>
-          </p>
-          <p id="about-version" class="about-version"></p>
-          <p id="about-build" class="about-build" hidden></p>
-
-          <section class="about-section" aria-labelledby="about-runtimes-heading">
-            <h3 id="about-runtimes-heading" class="about-section-title">App runtimes</h3>
-            <dl id="about-runtimes" class="about-runtimes"></dl>
-            <p class="about-hint">Launch tools detected directly on this host. App bundles may provide additional runtimes.</p>
-          </section>
-
-          <p class="about-links">
-            <a href="https://github.com/rvben/shinyhub" target="_blank" rel="noopener noreferrer">Documentation and source</a>
-          </p>
-        </div>
+  </div>
+  <!-- App-scoped support session confirmation (admin only) -->
+  <div id="support-session-modal" class="modal-overlay" hidden
+       role="dialog" aria-modal="true" aria-labelledby="support-session-heading">
+    <div class="modal-card support-session-card">
+      <div class="modal-header">
+        <h2 id="support-session-heading" class="modal-title">Start a support session</h2>
+        <button id="support-session-close" type="button" aria-label="Close support session modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
       </div>
-    </div>
-    <!-- New API token modal -->
-    <div id="new-token-modal" class="modal-overlay" hidden
-         role="dialog" aria-modal="true" aria-labelledby="new-token-heading">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2 id="new-token-heading" class="modal-title">New API token</h2>
-          <button id="new-token-close" type="button" aria-label="Close new token modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+      <div class="modal-body">
+        <div class="support-session-intro">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3 21 19H3L12 3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 8.5v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1" fill="currentColor"/></svg>
+          <p>You’ll enter one app as <strong id="support-session-username"></strong> for up to 15 minutes. A persistent banner identifies you as the administrator.</p>
         </div>
-        <div class="modal-body">
-          <form id="new-token-form">
-            <label for="new-token-name">Token name</label>
-            <input id="new-token-name" type="text" required maxlength="64"
-                   autocomplete="off" spellcheck="false" placeholder="e.g. ci-deploy or laptop">
-            <p class="profile-hint">A label to recognise it later. Must be unique among your tokens.</p>
+        <form id="support-session-form">
+          <label for="support-session-app">App</label>
+          <select id="support-session-app" required aria-describedby="support-session-app-status"></select>
+          <p id="support-session-app-status" class="profile-hint" role="status" aria-live="polite"></p>
 
-            <label for="new-token-expiry">Expires</label>
-            <select id="new-token-expiry">
-              <option value="30">30 days</option>
-              <option value="90" selected>90 days</option>
-              <option value="365">365 days</option>
-            </select>
-            <p class="profile-hint">An expired token stops authenticating; create a new one to replace it.</p>
+          <label for="support-session-reason">Reason or ticket</label>
+          <textarea id="support-session-reason" required rows="3" placeholder="What are you investigating, and why is access needed?" aria-describedby="support-session-reason-help"></textarea>
+          <p id="support-session-reason-help" class="profile-hint">8-500 characters. Stored in the audit log. Be specific enough for another administrator to understand later.</p>
 
-            <p id="new-token-error" class="error" hidden></p>
-
-            <div class="modal-actions">
-              <button type="button" id="new-token-cancel">Cancel</button>
-              <button type="submit" id="new-token-submit" class="btn-primary">Create token</button>
-            </div>
-          </form>
-
-          <div id="token-reveal" class="token-reveal" hidden>
-            <p class="token-reveal-warning" role="alert">
-              Copy this token now — for security it is <strong>shown only once</strong> and cannot be retrieved again.
-            </p>
-            <div class="snippet">
-              <pre><code id="token-reveal-value"></code></pre>
-              <button type="button" id="token-reveal-copy" class="copy-btn"
-                      aria-label="Copy token to clipboard">
-                <span class="copy-label">Copy</span>
-              </button>
-            </div>
-            <p id="token-reveal-status" class="sr-only" role="status" aria-live="polite"></p>
-            <div class="modal-actions">
-              <button type="button" id="token-reveal-done" class="btn-primary">Done</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- New user modal (admin only) -->
-    <div id="new-user-modal" class="modal-overlay" hidden
-         role="dialog" aria-modal="true" aria-labelledby="new-user-heading">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2 id="new-user-heading" class="modal-title">New user</h2>
-          <button id="new-user-close" type="button" aria-label="Close new user modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
-        </div>
-        <div class="modal-body">
-          <form id="new-user-form">
-            <label for="new-user-username">Username</label>
-            <input id="new-user-username" type="text" required maxlength="64"
-                   autocomplete="off" spellcheck="false" placeholder="alice">
-
-            <label for="new-user-password">Password</label>
-            <input id="new-user-password" type="password" required minlength="15"
-                   autocomplete="new-password" placeholder="At least 15 characters">
-
-            <label for="new-user-role">Role</label>
-            <select id="new-user-role">
-              <option value="developer">Developer</option>
-              <option value="operator">Operator</option>
-              <option value="admin">Admin</option>
-            </select>
-
-            <p id="new-user-error" class="error" hidden></p>
-
-            <div class="modal-actions">
-              <button type="button" id="new-user-cancel">Cancel</button>
-              <button type="submit" id="new-user-submit" class="btn-primary">Create</button>
-            </div>
-          </form>
-
-          <hr class="handoff-card-divider" aria-hidden="true">
-
-          <div>
-            <p class="handoff-section-label">Share this with the new user to log in</p>
-            <div class="snippet">
-              <pre><code id="new-user-snippet"></code></pre>
-              <button type="button" id="new-user-snippet-copy" class="copy-btn"
-                      aria-label="Copy CLI commands to clipboard">
-                <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
-                     stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                     stroke-linejoin="round" aria-hidden="true">
-                  <rect x="4" y="3" width="8" height="10" rx="1.2"/>
-                  <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
-                </svg>
-                <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
-                     stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
-                     stroke-linejoin="round" aria-hidden="true">
-                  <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
-                </svg>
-                <span class="copy-label" aria-hidden="true">Copy</span>
-                <span class="sr-only" id="new-user-snippet-status" aria-live="polite"></span>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div id="service-credential-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="service-credential-heading">
-      <div class="modal-card service-credential-modal-box">
-        <div class="modal-header"><div><h2 id="service-credential-heading" class="modal-title">New automation credential</h2><p id="service-credential-context" class="modal-context" hidden></p></div><button id="service-credential-close" type="button" aria-label="Close credential dialog"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button></div>
-        <div class="modal-body">
-          <form id="service-credential-form">
-            <label for="service-credential-name">Name</label>
-            <input id="service-credential-name" type="text" required maxlength="64" placeholder="analytics production CI" autocomplete="off">
-            <label for="service-credential-role">Role</label>
-            <select id="service-credential-role" aria-describedby="service-credential-role-help service-credential-role-warning"><option value="developer" selected>Developer</option><option value="operator">Operator</option><option value="viewer">Viewer</option><option value="admin">Admin — platform-wide</option></select>
-            <small id="service-credential-role-help" class="field-hint">Can deploy and manage apps inside this credential’s scope.</small>
-            <p id="service-credential-role-warning" class="credential-privilege-warning" role="status" hidden></p>
-            <fieldset class="service-scope-fieldset"><legend>App operations</legend>
-              <label class="service-scope-choice"><input type="radio" name="service-scope" value="apps" checked><span><strong>Selected apps</strong><small>Recommended for a team or pipeline</small></span></label>
-              <div id="service-credential-app-list" class="service-credential-app-list">
-                <label for="service-credential-apps" class="service-field-label">App slugs</label>
-                <input id="service-credential-apps" type="text" placeholder="sales-dashboard, forecasting" aria-describedby="service-credential-apps-help service-credential-error" aria-errormessage="service-credential-error">
-                <small id="service-credential-apps-help" class="field-hint">Comma-separated app slugs. Apps may be created later.</small>
-              </div>
-              <label class="service-scope-choice"><input type="radio" name="service-scope" value="all"><span><strong>All apps</strong><small>Use only for platform-wide automation</small></span></label>
-            </fieldset>
-            <label for="service-credential-expiry">Expires after</label>
-            <select id="service-credential-expiry"><option value="30">30 days</option><option value="90" selected>90 days</option><option value="180">180 days</option><option value="365">365 days</option></select>
-            <div id="service-credential-plan" class="credential-plan" role="status"></div>
-            <p id="service-credential-error" class="error" role="alert" hidden></p>
-            <div class="modal-actions"><button id="service-credential-cancel" type="button">Cancel</button><button id="service-credential-submit" type="submit" class="btn-primary">Create credential</button></div>
-          </form>
-          <section id="service-credential-secret" class="credential-secret" hidden aria-labelledby="service-credential-secret-heading">
-            <h3 id="service-credential-secret-heading">Store this one-time credential now</h3><p>ShinyHub stores only its hash. You cannot reveal it again.</p>
-            <p id="service-credential-created-summary" class="credential-created-summary"></p>
-            <p id="service-credential-created-warning" class="credential-privilege-warning" role="alert" hidden></p>
-            <div class="credential-secret-value"><code id="service-credential-token"></code><button id="service-credential-copy" type="button" class="copy-btn">Copy</button></div>
-            <p id="service-credential-copy-status" class="field-hint" role="status"></p>
-            <div class="modal-actions"><button id="service-credential-done" type="button" class="btn-primary">I’ve stored this credential</button></div>
-          </section>
-        </div>
-      </div>
-    </div>
-    <!-- App-scoped support session confirmation (admin only) -->
-    <div id="support-session-modal" class="modal-overlay" hidden
-         role="dialog" aria-modal="true" aria-labelledby="support-session-heading">
-      <div class="modal-card support-session-card">
-        <div class="modal-header">
-          <h2 id="support-session-heading" class="modal-title">Start a support session</h2>
-          <button id="support-session-close" type="button" aria-label="Close support session modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
-        </div>
-        <div class="modal-body">
-          <div class="support-session-intro">
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3 21 19H3L12 3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 8.5v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1" fill="currentColor"/></svg>
-            <p>You’ll enter one app as <strong id="support-session-username"></strong> for up to 15 minutes. A persistent banner identifies you as the administrator.</p>
-          </div>
-          <form id="support-session-form">
-            <label for="support-session-app">App</label>
-            <select id="support-session-app" required aria-describedby="support-session-app-status"></select>
-            <p id="support-session-app-status" class="profile-hint" role="status" aria-live="polite"></p>
-
-            <label for="support-session-reason">Reason or ticket</label>
-            <textarea id="support-session-reason" required rows="3" placeholder="What are you investigating, and why is access needed?" aria-describedby="support-session-reason-help"></textarea>
-            <p id="support-session-reason-help" class="profile-hint">8–500 characters. Stored in the audit log. Be specific enough for another administrator to understand later.</p>
-
-            <p class="support-session-warning" role="note"><strong>This is not read-only.</strong> Actions inside the app can change the user’s data. The session cannot access ShinyHub’s admin dashboard, other apps, API tokens, or privileged users.</p>
-            <p id="support-session-error" class="error" role="alert" hidden></p>
+          <p class="support-session-warning" role="note"><strong>This is not read-only.</strong> Actions inside the app can change the user’s data. The session cannot access ShinyHub’s admin dashboard, other apps, API tokens, or privileged users.</p>
+          <p id="support-session-error" class="error" role="alert" hidden></p>
 			<button type="button" id="support-session-apps-retry" hidden>Retry loading apps</button>
 			<button type="button" id="support-session-reauth" hidden>Sign out and sign in again</button>
 
-            <div class="modal-actions">
-              <button type="button" id="support-session-cancel">Cancel</button>
-              <button type="submit" id="support-session-submit" class="btn-support">Start 15-minute session</button>
-            </div>
-          </form>
-        </div>
+          <div class="modal-actions">
+            <button type="button" id="support-session-cancel">Cancel</button>
+            <button type="submit" id="support-session-submit" class="btn-support">Start 15-minute session</button>
+          </div>
+        </form>
       </div>
     </div>
-    <!-- Reset password modal -->
-    <div id="reset-password-modal" class="modal-overlay" hidden
-         role="dialog" aria-modal="true" aria-labelledby="reset-password-heading">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2 id="reset-password-heading" class="modal-title">Reset password: <span id="reset-password-username"></span></h2>
-          <button id="reset-password-close" type="button" aria-label="Close reset password modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
-        </div>
-        <div class="modal-body">
-          <form id="reset-password-form">
-            <label for="reset-password-input">New password</label>
-            <input id="reset-password-input" type="password" required minlength="15"
-                   autocomplete="new-password" placeholder="At least 15 characters">
-
-            <p id="reset-password-error" class="error" hidden></p>
-
-            <div class="modal-actions">
-              <button type="button" id="reset-password-cancel">Cancel</button>
-              <button type="submit" id="reset-password-submit" class="btn-primary">Reset password</button>
-            </div>
-          </form>
-        </div>
+  </div>
+  <!-- Reset password modal -->
+  <div id="reset-password-modal" class="modal-overlay" hidden
+       role="dialog" aria-modal="true" aria-labelledby="reset-password-heading">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="reset-password-heading" class="modal-title">Reset password: <span id="reset-password-username"></span></h2>
+        <button id="reset-password-close" type="button" aria-label="Close reset password modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
       </div>
-    </div>
-    <!-- Schedule add/edit modal -->
-    <div class="modal-overlay" id="schedule-form-modal" hidden
-         role="dialog" aria-modal="true" aria-labelledby="schedule-form-title">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2 id="schedule-form-title" class="modal-title">Add schedule</h2>
-          <button id="schedule-form-close" type="button" aria-label="Close schedule form"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
-        </div>
-        <div class="modal-body">
-          <form id="schedule-form" class="schedule-form">
-            <fieldset>
-              <legend>Job</legend>
-              <p class="schedule-form-intro">Name the job and enter the command exactly as the runtime should execute it.</p>
-              <label for="sched-name">Name</label>
-              <input id="sched-name" name="name" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
-              <label for="sched-command">Command <span>one token per line</span></label>
-              <textarea id="sched-command" name="command" rows="3" required placeholder="python&#10;fetch.py" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea>
-            </fieldset>
+      <div class="modal-body">
+        <form id="reset-password-form">
+          <label for="reset-password-input">New password</label>
+          <input id="reset-password-input" type="password" required minlength="15"
+                 autocomplete="new-password" placeholder="At least 15 characters">
 
-            <fieldset>
-              <legend>Timing</legend>
-              <label for="sched-cron">Cron expression</label>
-              <input id="sched-cron" name="cron_expr" required placeholder="0 6 * * *" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="cron-preview">
-              <div id="cron-preview" class="hint">Five-field cron · evaluated in the server timezone</div>
-              <label for="sched-timezone">Timezone <span>optional</span></label>
-              <input id="sched-timezone" name="timezone" placeholder="Europe/Amsterdam — empty inherits the server default" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
-              <label class="schedule-enabled-row"><input type="checkbox" id="sched-enabled" name="enabled" checked> Enabled</label>
-            </fieldset>
-
-            <fieldset class="schedule-producer-policy">
-              <legend>Code and data compatibility</legend>
-              <p class="schedule-form-intro">Choose when this producer must rebuild data for newly deployed code.</p>
-              <label for="sched-deploy-trigger">When the app bundle changes</label>
-              <select id="sched-deploy-trigger" name="deploy_trigger" aria-describedby="sched-deploy-trigger-help">
-                <option value="bundle_change">Run for every bundle change — recommended for data producers</option>
-                <option value="first_deploy">Run only for the first deployment</option>
-                <option value="never">Do not run because of deployments</option>
-              </select>
-              <p id="sched-deploy-trigger-help">The deploy waits for a successful producer result from the exact candidate bundle before its replicas start.</p>
-            </fieldset>
-
-            <details class="schedule-advanced">
-              <summary>Advanced execution and rollout</summary>
-            <fieldset>
-              <legend>Execution limits</legend>
-              <label for="sched-timeout">Timeout <span>seconds</span></label>
-              <input id="sched-timeout" name="timeout_seconds" type="number" min="1" max="86400" value="3600">
-              <label for="sched-overlap">When a previous run is active</label>
-              <select id="sched-overlap" name="overlap_policy">
-                <option value="skip">Skip this run</option>
-                <option value="queue">Queue one run</option>
-                <option value="concurrent">Run concurrently</option>
-              </select>
-              <label for="sched-missed">After downtime</label>
-              <select id="sched-missed" name="missed_policy">
-                <option value="skip">Skip missed runs</option>
-                <option value="run_once">Run once on startup</option>
-              </select>
-            </fieldset>
-
-            <section class="schedule-after-success" aria-labelledby="schedule-after-success-title">
-              <h3 id="schedule-after-success-title">After success</h3>
-              <label for="sched-on-success">Serving app action</label>
-              <select id="sched-on-success" name="on_success" aria-describedby="sched-on-success-help">
-                <option value="none">No app action</option>
-                <option value="roll">Gracefully roll this app</option>
-              </select>
-              <p id="sched-on-success-help">A roll starts one temporary surge replica, waits for health, then replaces serving replicas one at a time without dropping below the warm floor.</p>
-              <div id="sched-roll-options" hidden>
-                <label for="sched-min-roll-interval">Minimum roll interval <span>seconds · optional</span></label>
-                <input id="sched-min-roll-interval" name="min_roll_interval_seconds" type="number" min="0" step="60" value="0" inputmode="numeric" aria-describedby="sched-min-roll-help">
-                <p id="sched-min-roll-help">Coalesces high-cadence successes. For example, 3600 rolls at most once per hour.</p>
-                <label for="sched-roll-fallback">When a surge does not fit</label>
-                <select id="sched-roll-fallback" name="roll_fallback" aria-describedby="sched-roll-fallback-help">
-                  <option value="defer">Wait for capacity</option>
-                  <option value="restart">Restart in place</option>
-                </select>
-                <p id="sched-roll-fallback-help">Restarting in place makes fresh data visible without surge memory, but the app is unavailable while it starts.</p>
-                <label for="sched-max-defer-age">Maximum defer age <span>seconds · optional</span></label>
-                <input id="sched-max-defer-age" name="max_defer_age_seconds" type="number" min="0" step="60" value="0" inputmode="numeric" aria-describedby="sched-max-defer-help">
-                <p id="sched-max-defer-help">Zero retries indefinitely. A non-zero age fails the activation loudly after capacity remains unavailable.</p>
-              </div>
-            </section>
-            </details>
-            <aside id="schedule-consequence" class="schedule-consequence" role="status" aria-live="polite"></aside>
-            <p id="schedule-form-error" class="error" role="alert" aria-live="assertive" hidden></p>
-            <div class="modal-actions">
-              <button type="button" id="schedule-form-cancel">Cancel</button>
-              <button type="submit" class="btn-primary">Save</button>
-            </div>
-          </form>
-        </div>
-      </div>
-    </div>
-    <div id="project-edit-modal" class="modal-overlay" hidden
-         role="dialog" aria-modal="true" aria-labelledby="project-edit-title">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2 id="project-edit-title" class="modal-title">Edit project</h2>
-        </div>
-        <div class="modal-body">
-          <p class="hint">Slug <code id="project-edit-slug"></code> cannot be changed.</p>
-
-          <label for="project-edit-name">Name</label>
-          <input id="project-edit-name" type="text" maxlength="128" autocomplete="off">
-
-          <label for="project-edit-description">Description</label>
-          <input id="project-edit-description" type="text" maxlength="280" autocomplete="off">
-
-          <label for="project-edit-icon">Icon</label>
-          <input id="project-edit-icon" type="text" maxlength="16" autocomplete="off"
-                 aria-describedby="project-edit-icon-hint">
-          <p class="hint" id="project-edit-icon-hint">A single emoji. Leave empty for none.</p>
+          <p id="reset-password-error" class="error" hidden></p>
 
           <div class="modal-actions">
-            <button type="button" data-close-project-edit>Cancel</button>
-            <button type="button" id="project-edit-save" class="btn-primary">Save</button>
+            <button type="button" id="reset-password-cancel">Cancel</button>
+            <button type="submit" id="reset-password-submit" class="btn-primary">Reset password</button>
           </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  <!-- Schedule add/edit modal -->
+  <div class="modal-overlay" id="schedule-form-modal" hidden
+       role="dialog" aria-modal="true" aria-labelledby="schedule-form-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="schedule-form-title" class="modal-title">Add schedule</h2>
+        <button id="schedule-form-close" type="button" aria-label="Close schedule form"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <form id="schedule-form" class="schedule-form">
+          <fieldset>
+            <legend>Job</legend>
+            <p class="schedule-form-intro">Name the job and enter the command exactly as the runtime should execute it.</p>
+            <label for="sched-name">Name</label>
+            <input id="sched-name" name="name" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
+            <label for="sched-command">Command <span>one token per line</span></label>
+            <textarea id="sched-command" name="command" rows="3" required placeholder="python&#10;fetch.py" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea>
+          </fieldset>
+
+          <fieldset>
+            <legend>Timing</legend>
+            <label for="sched-cron">Cron expression</label>
+            <input id="sched-cron" name="cron_expr" required placeholder="0 6 * * *" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="cron-preview">
+            <div id="cron-preview" class="hint">Five-field cron · evaluated in the server timezone</div>
+            <label for="sched-timezone">Timezone <span>optional</span></label>
+            <input id="sched-timezone" name="timezone" placeholder="Europe/Amsterdam (empty inherits the server default)" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+            <label class="schedule-enabled-row"><input type="checkbox" id="sched-enabled" name="enabled" checked> Enabled</label>
+          </fieldset>
+
+          <fieldset class="schedule-producer-policy">
+            <legend>Code and data compatibility</legend>
+            <p class="schedule-form-intro">Choose when this producer must rebuild data for newly deployed code.</p>
+            <label for="sched-deploy-trigger">When the app bundle changes</label>
+            <select id="sched-deploy-trigger" name="deploy_trigger" aria-describedby="sched-deploy-trigger-help">
+              <option value="bundle_change">Run for every bundle change (recommended for data producers)</option>
+              <option value="first_deploy">Run only for the first deployment</option>
+              <option value="never">Do not run because of deployments</option>
+            </select>
+            <p id="sched-deploy-trigger-help">The deploy waits for a successful producer result from the exact candidate bundle before its replicas start.</p>
+          </fieldset>
+
+          <details class="schedule-advanced">
+            <summary>Advanced execution and rollout</summary>
+          <fieldset>
+            <legend>Execution limits</legend>
+            <label for="sched-timeout">Timeout <span>seconds</span></label>
+            <input id="sched-timeout" name="timeout_seconds" type="number" min="1" max="86400" value="3600">
+            <label for="sched-overlap">When a previous run is active</label>
+            <select id="sched-overlap" name="overlap_policy">
+              <option value="skip">Skip this run</option>
+              <option value="queue">Queue one run</option>
+              <option value="concurrent">Run concurrently</option>
+            </select>
+            <label for="sched-missed">After downtime</label>
+            <select id="sched-missed" name="missed_policy">
+              <option value="skip">Skip missed runs</option>
+              <option value="run_once">Run once on startup</option>
+            </select>
+          </fieldset>
+
+          <section class="schedule-after-success" aria-labelledby="schedule-after-success-title">
+            <h3 id="schedule-after-success-title">After success</h3>
+            <label for="sched-on-success">Serving app action</label>
+            <select id="sched-on-success" name="on_success" aria-describedby="sched-on-success-help">
+              <option value="none">No app action</option>
+              <option value="roll">Gracefully roll this app</option>
+            </select>
+            <p id="sched-on-success-help">A roll starts one temporary surge replica, waits for health, then replaces serving replicas one at a time without dropping below the warm floor.</p>
+            <div id="sched-roll-options" hidden>
+              <label for="sched-min-roll-interval">Minimum roll interval <span>seconds · optional</span></label>
+              <input id="sched-min-roll-interval" name="min_roll_interval_seconds" type="number" min="0" step="60" value="0" inputmode="numeric" aria-describedby="sched-min-roll-help">
+              <p id="sched-min-roll-help">Coalesces high-cadence successes. For example, 3600 rolls at most once per hour.</p>
+              <label for="sched-roll-fallback">When a surge does not fit</label>
+              <select id="sched-roll-fallback" name="roll_fallback" aria-describedby="sched-roll-fallback-help">
+                <option value="defer">Wait for capacity</option>
+                <option value="restart">Restart in place</option>
+              </select>
+              <p id="sched-roll-fallback-help">Restarting in place makes fresh data visible without surge memory, but the app is unavailable while it starts.</p>
+              <label for="sched-max-defer-age">Maximum defer age <span>seconds · optional</span></label>
+              <input id="sched-max-defer-age" name="max_defer_age_seconds" type="number" min="0" step="60" value="0" inputmode="numeric" aria-describedby="sched-max-defer-help">
+              <p id="sched-max-defer-help">Zero retries indefinitely. A non-zero age fails the activation loudly after capacity remains unavailable.</p>
+            </div>
+          </section>
+          </details>
+          <aside id="schedule-consequence" class="schedule-consequence" role="status" aria-live="polite"></aside>
+          <p id="schedule-form-error" class="error" role="alert" aria-live="assertive" hidden></p>
+          <div class="modal-actions">
+            <button type="button" id="schedule-form-cancel">Cancel</button>
+            <button type="submit" class="btn-primary">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  <div id="project-edit-modal" class="modal-overlay" hidden
+       role="dialog" aria-modal="true" aria-labelledby="project-edit-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="project-edit-title" class="modal-title">Edit project</h2>
+      </div>
+      <div class="modal-body">
+        <p class="hint">Slug <code id="project-edit-slug"></code> cannot be changed.</p>
+
+        <label for="project-edit-name">Name</label>
+        <input id="project-edit-name" type="text" maxlength="128" autocomplete="off">
+
+        <label for="project-edit-description">Description</label>
+        <input id="project-edit-description" type="text" maxlength="280" autocomplete="off">
+
+        <label for="project-edit-icon">Icon</label>
+        <input id="project-edit-icon" type="text" maxlength="16" autocomplete="off"
+               aria-describedby="project-edit-icon-hint">
+        <p class="hint" id="project-edit-icon-hint">A single emoji. Leave empty for none.</p>
+
+        <div class="modal-actions">
+          <button type="button" data-close-project-edit>Cancel</button>
+          <button type="button" id="project-edit-save" class="btn-primary">Save</button>
         </div>
       </div>
     </div>
+  </div>
   <!-- Shared by #general-project and #new-app-project. Free text stays
        accepted in both, which is what allows creating a project inline. -->
   <datalist id="project-slugs"></datalist>

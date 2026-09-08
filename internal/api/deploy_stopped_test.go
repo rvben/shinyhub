@@ -385,6 +385,84 @@ func TestDeploy_FailedDeployStillRestoresARunningApp(t *testing.T) {
 	}
 }
 
+// A first deploy that boots a replica and then fails its health check must not
+// leave the replica's durable row stuck reporting "starting" forever: the
+// process is stopped and its pool entry is gone, but restorePreviousPool has
+// no previous pool to fall back to on a first deploy, so it must clear the row
+// itself. Without that, GET /api/apps/<slug> reports a "starting" replica
+// (with the failed attempt's real pid and port) with no way for an operator to
+// ever clear it, since nothing is running to transition away from it.
+func TestDeploy_FirstDeployHealthCheckFailureClearsStuckReplicaRow(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	seedStoppedTestApp(t, store, "fresh", "stopped", 0)
+
+	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.PoolResult, error) {
+		p.HealthCheck = func(string, time.Duration, http.RoundTripper) error {
+			return errors.New("app never became healthy")
+		}
+		return deploy.Run(p)
+	})
+
+	rec := postStoppedTestBundle(t, srv, token, "fresh", "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("a failing health check must fail the deploy, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	app, err := store.GetAppBySlug("fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Status != "stopped" {
+		t.Fatalf("status = %q, want stopped after a failed first deploy", app.Status)
+	}
+
+	replicas, err := store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replicas) == 0 {
+		t.Fatal("no replica rows recorded; a health check failure still boots a replica before failing")
+	}
+	for _, rep := range replicas {
+		if rep.Status != "stopped" {
+			t.Errorf("replica %d status = %q, want stopped: a failed first deploy must not leave a replica row stuck reporting starting", rep.Index, rep.Status)
+		}
+		if rep.PID != nil {
+			t.Errorf("replica %d pid = %d, want cleared", rep.Index, *rep.PID)
+		}
+	}
+
+	// The operator-visible surface: GET /api/apps/<slug> must not report the
+	// app, or any replica, as still starting once the failed attempt has been
+	// cleaned up.
+	getReq := httptest.NewRequest("GET", "/api/apps/fresh", nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	getRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/apps/fresh failed: %d %s", getRec.Code, getRec.Body.String())
+	}
+	var getBody struct {
+		App struct {
+			Status string `json:"status"`
+		} `json:"app"`
+		ReplicasStatus []struct {
+			Status string `json:"status"`
+		} `json:"replicas_status"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &getBody); err != nil {
+		t.Fatalf("decode GET response: %v (%s)", err, getRec.Body.String())
+	}
+	if getBody.App.Status == "starting" {
+		t.Errorf("GET /api/apps/fresh reports app status %q, want not stuck starting", getBody.App.Status)
+	}
+	for i, rep := range getBody.ReplicasStatus {
+		if rep.Status == "starting" {
+			t.Errorf("replicas_status[%d].status = starting, want cleared after the failed attempt", i)
+		}
+	}
+}
+
 // A hibernated app is asleep, not withdrawn: the next request wakes it, so a
 // deploy legitimately brings it back up rather than leaving it down.
 func TestDeploy_HibernatedAppStillEndsRunning(t *testing.T) {

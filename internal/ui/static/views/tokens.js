@@ -75,7 +75,7 @@ export function renderTokenList(container, models, doc, options = {}) {
     empty.setAttribute('data-tokens-empty', '');
     empty.textContent = options.mutable === false
       ? 'This shared account cannot create API tokens.'
-      : 'No API tokens yet — create one to use the CLI or API.';
+      : 'No API tokens yet. Create one to use the CLI or API.';
     container.appendChild(empty);
     return;
   }

@@ -465,9 +465,16 @@ type DatabaseConfig struct {
 	// pending migration, giving a rollback point for an upgrade that turns out
 	// bad. Defaults to true; set false when an external backup already covers
 	// it or the database is too large to copy inside the start timeout.
-	// Snapshots are never pruned automatically - deleting them is an explicit
-	// operator decision.
 	PreMigrationSnapshot bool `yaml:"pre_migration_snapshot"`
+	// PreMigrationSnapshotRetention caps how many pre-migration snapshot files
+	// this database path keeps (SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT_RETENTION).
+	// After a new snapshot is written, the oldest ones beyond this count are
+	// removed. Left unset in YAML it takes the default 5, matching
+	// storage.version_retention so upgrade history is bounded the same way
+	// bundle version history already is; the environment variable is an
+	// explicit setting and rejects a non-positive value rather than falling
+	// back.
+	PreMigrationSnapshotRetention int `yaml:"pre_migration_snapshot_retention"`
 }
 
 type ServerConfig struct {
@@ -697,6 +704,21 @@ type GroupRoleMapping struct {
 type AuthConfig struct {
 	Secret            string                  `yaml:"secret"`
 	TrustedPublishers []trustedpublish.Policy `yaml:"trusted_publishers"`
+
+	// SecretFile, when set, supplies Secret from a file the server reads once
+	// at startup, instead of from the environment. On the native runtime a
+	// deployed app runs as the same OS user as the control plane, and a
+	// process environment is readable by any process of that user
+	// (/proc/<pid>/environ on Linux, `ps eww` on macOS). Since auth.secret
+	// signs every JWT and derives the key encrypting every app's secret env
+	// vars, an environment variable holding it is readable by exactly the code
+	// it is meant to be secret from. A file can be restricted to the server's
+	// own user; the server refuses one that is group- or world-readable.
+	SecretFile string `yaml:"secret_file"`
+
+	// SecretSource records where Secret came from ("env", "file", or "" for
+	// the config file), so startup can warn about the readable one.
+	SecretSource string `yaml:"-"`
 	// OAuthDefaultRole is the role assigned to users created via just-in-time
 	// provisioning during OAuth/OIDC sign-in (i.e. first-time login). Allowed
 	// values: "viewer" (default), "developer", "operator". "admin" is
@@ -849,6 +871,13 @@ type StorageConfig struct {
 	// mebibytes. Must stay aligned with the UI's DEPLOY_MAX_BYTES (asserted
 	// by a test). 0 means "no cap"; default 128 matches the existing UI.
 	MaxBundleMB int `yaml:"max_bundle_mb"`
+	// AppLogMaxSizeMB caps the primary per-replica log file before it rotates
+	// to a single ".1" backup, in mebibytes. Retained forensic history per app
+	// replica is therefore bounded at roughly 2x this value. Left unset in YAML
+	// it takes the default 5, matching process.DefaultLogMaxSize and preserving
+	// existing installs' behavior; the environment variable is an explicit
+	// setting and rejects a non-positive value rather than falling back.
+	AppLogMaxSizeMB int `yaml:"app_log_max_size_mb"`
 }
 
 // RuntimeConfig controls how app processes are started and isolated.
@@ -1575,6 +1604,11 @@ func loadRaw(path string) (*Config, error) {
 	if err := trustedpublish.Validate(cfg.Auth.TrustedPublishers); err != nil {
 		return nil, err
 	}
+	// applyEnv reads a fixed allowlist of names, so a variable it does not know
+	// about is not partially applied - it is inert. Say so, or the operator sees
+	// a healthy startup log on the default port with nothing anywhere naming the
+	// variable they set.
+	warnUnrecognizedEnv()
 
 	// Validate the listen port range. Port 0 is allowed here (OS-assigned), but
 	// the serve command further rejects it because zero-downtime upgrades need a
@@ -1648,6 +1682,9 @@ func loadRaw(path string) (*Config, error) {
 	if cfg.Storage.VersionRetention <= 0 {
 		cfg.Storage.VersionRetention = 5
 	}
+	if cfg.Database.PreMigrationSnapshotRetention <= 0 {
+		cfg.Database.PreMigrationSnapshotRetention = 5
+	}
 	if cfg.Storage.AppQuotaMB < 0 {
 		cfg.Storage.AppQuotaMB = 0
 	}
@@ -1684,6 +1721,9 @@ func loadRaw(path string) (*Config, error) {
 	}
 	if cfg.Storage.MaxBundleMB < 0 {
 		cfg.Storage.MaxBundleMB = 128
+	}
+	if cfg.Storage.AppLogMaxSizeMB <= 0 {
+		cfg.Storage.AppLogMaxSizeMB = 5
 	}
 	if cfg.Auth.DeployToken != "" {
 		if cfg.Auth.DeployTokenRole == "" {
@@ -1917,7 +1957,56 @@ func loadRaw(path string) (*Config, error) {
 	if abs, err := filepath.Abs(cfg.Storage.AppDataDir); err == nil {
 		cfg.Storage.AppDataDir = abs
 	}
+	if err := resolveAuthSecretFile(&cfg.Auth); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+// resolveAuthSecretFile loads auth.secret_file into auth.secret.
+//
+// A file that is readable beyond its owner is rejected rather than accepted
+// with a warning: the whole point of moving off the environment variable is to
+// take the secret out of reach of processes running as other users, and a
+// mode-0644 file gives that reach straight back while looking like the secure
+// option.
+//
+// Configuring both the file and SHINYHUB_AUTH_SECRET with different values is
+// an error. Silently preferring one leaves an operator who thinks they have
+// rotated the secret running on the other, and leaves the environment variable
+// - the readable copy this setting exists to remove - in place.
+func resolveAuthSecretFile(auth *AuthConfig) error {
+	if auth.SecretFile == "" {
+		return nil
+	}
+	fi, err := os.Stat(auth.SecretFile)
+	if err != nil {
+		return fmt.Errorf("auth.secret_file: %w", err)
+	}
+	if mode := fi.Mode().Perm(); mode&0o077 != 0 {
+		return fmt.Errorf(
+			"auth.secret_file %s is mode %04o; it holds the key that signs every session and encrypts every app secret, so it must not be readable by group or other: chmod 600 %s",
+			auth.SecretFile, mode, auth.SecretFile)
+	}
+	data, err := os.ReadFile(auth.SecretFile)
+	if err != nil {
+		return fmt.Errorf("auth.secret_file: %w", err)
+	}
+	// Trailing newlines are what `openssl rand -hex 32 > secret` and every
+	// editor produce; a secret that silently differs by one byte from what the
+	// operator generated invalidates every session at the next restart.
+	secret := strings.TrimSpace(string(data))
+	if secret == "" {
+		return fmt.Errorf("auth.secret_file %s is empty", auth.SecretFile)
+	}
+	if auth.Secret != "" && auth.Secret != secret {
+		return fmt.Errorf(
+			"auth.secret_file %s and auth.secret (or SHINYHUB_AUTH_SECRET) hold different secrets; the environment copy is the one this setting exists to remove, so unset it",
+			auth.SecretFile)
+	}
+	auth.Secret = secret
+	auth.SecretSource = "file"
+	return nil
 }
 
 // normalizeTracing applies defaults and validates the tracing block. When
@@ -2539,6 +2628,10 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 func applyEnv(cfg *Config) error {
 	if v := os.Getenv("SHINYHUB_AUTH_SECRET"); v != "" {
 		cfg.Auth.Secret = v
+		cfg.Auth.SecretSource = "env"
+	}
+	if v := os.Getenv("SHINYHUB_AUTH_SECRET_FILE"); v != "" {
+		cfg.Auth.SecretFile = v
 	}
 	if v := os.Getenv("SHINYHUB_AUTH_OAUTH_DEFAULT_ROLE"); v != "" {
 		cfg.Auth.OAuthDefaultRole = v
@@ -2693,6 +2786,22 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Storage.VersionRetention = n
 	}
+	if v := os.Getenv("SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT_RETENTION"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT_RETENTION: %q is not an integer: %w", v, err)
+		}
+		// An unset field in a YAML file means "no opinion" and normalizes to the
+		// default. Setting this variable is an explicit act, so a value that
+		// cannot mean anything is an error rather than a silent fall back to
+		// five - which would keep snapshots the operator asked to bound
+		// differently and say nothing. SHINYHUB_APP_LOG_MAX_SIZE_MB reads the
+		// same way.
+		if n <= 0 {
+			return fmt.Errorf("SHINYHUB_DB_PRE_MIGRATION_SNAPSHOT_RETENTION must be positive, got %q", v)
+		}
+		cfg.Database.PreMigrationSnapshotRetention = n
+	}
 	if v := os.Getenv("SHINYHUB_AUDIT_RETENTION_DAYS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
@@ -2730,6 +2839,16 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_MAX_BUNDLE_MB: %q is not an integer: %w", v, err)
 		}
 		cfg.Storage.MaxBundleMB = n
+	}
+	if v := os.Getenv("SHINYHUB_APP_LOG_MAX_SIZE_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_APP_LOG_MAX_SIZE_MB: %q is not an integer: %w", v, err)
+		}
+		if n <= 0 {
+			return fmt.Errorf("SHINYHUB_APP_LOG_MAX_SIZE_MB must be positive, got %q", v)
+		}
+		cfg.Storage.AppLogMaxSizeMB = n
 	}
 	if v := os.Getenv("SHINYHUB_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v

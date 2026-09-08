@@ -29,7 +29,7 @@ func TestDeployPermissionSummaryReportsAppScope(t *testing.T) {
 		CanCreateApps: true,
 		AppScope:      []string{"energy", "observability"},
 	}
-	if got := deployPermissionSummary(identity); got != "Yes — restricted to energy, observability" {
+	if got := deployPermissionSummary(identity); got != "Yes, restricted to energy, observability" {
 		t.Fatalf("permission summary = %q", got)
 	}
 	if got := deployNextStep(identity); got != "Next: deploy one of the allowlisted apps: energy, observability." {

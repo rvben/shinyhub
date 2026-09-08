@@ -60,10 +60,10 @@ func appScopeError(identity remoteIdentity, slug string) error {
 
 func deployPermissionSummary(identity remoteIdentity) string {
 	if !identity.CanCreateApps {
-		return "No — ask a server administrator for developer access"
+		return "No: ask a server administrator for developer access"
 	}
 	if len(identity.AppScope) > 0 {
-		return "Yes — restricted to " + strings.Join(identity.AppScope, ", ")
+		return "Yes, restricted to " + strings.Join(identity.AppScope, ", ")
 	}
 	return "Yes"
 }
@@ -95,8 +95,8 @@ func newConnectCmd() *cobra.Command {
 saved credential that still authenticates is reused without opening a browser
 or rotating the key, so this command is safe to run unconditionally. When no
 valid credential exists, a terminal opens the server in your browser, where you
-can use any configured sign-in method—including SSO—and approve a private 90-day
-CLI credential. The credential itself never passes through the browser.
+can use any configured sign-in method (including SSO) and approve a private
+90-day CLI credential. The credential itself never passes through the browser.
 
 For a headless machine or CI, pass --token-file or set SHINYHUB_HOST and
 SHINYHUB_TOKEN. Username/password is available with --username; a missing
@@ -106,7 +106,15 @@ from another device.
 
 Use --refresh to rotate the current saved credential through browser approval.
 The existing credential remains untouched unless the replacement authenticates
-successfully; ShinyHub then revokes the previous API key.`,
+successfully; ShinyHub then revokes the previous API key.
+
+connect or login? Prefer connect. It does everything login does (it takes the
+same --username/--password, and a token via --token-file) and adds browser
+authorization, which is the only way in when a server's sign-in is SSO. It is
+also safe to re-run: a saved credential that still works is reused untouched.
+Reach for login when you already hold a username, password or token and want
+the credential saved without any of that: it never opens a browser and always
+authenticates afresh.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runConnect(cmd, args, f)
@@ -278,8 +286,8 @@ func connectMissingCredentialError() error {
 		"rerun with --no-browser to copy the authorization URL, pass --token-file <path>, set SHINYHUB_HOST and SHINYHUB_TOKEN, or pass --username <name> --password <password>")
 }
 
-// offerConnectForFirstDeploy turns the most common discovery path—running
-// `shinyhub deploy .` before configuring the CLI—into the onboarding flow.
+// offerConnectForFirstDeploy turns the most common discovery path (running
+// `shinyhub deploy .` before configuring the CLI) into the onboarding flow.
 // It is intentionally terminal/table-only: scripts retain the existing fast,
 // structured auth error and never block on input.
 func offerConnectForFirstDeploy(cmd *cobra.Command) (bool, error) {

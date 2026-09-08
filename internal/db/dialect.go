@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -52,6 +53,15 @@ type dialect interface {
 	// "return all rows". SQLite uses -1; Postgres uses a large positive int
 	// because Postgres rejects negative LIMIT values.
 	noLimit() int
+	// utcTimestampArg renders an instant as a bound argument comparable against
+	// a DATETIME/timestamptz column holding UTC. SQLite stores those columns as
+	// "YYYY-MM-DD HH:MM:SS" text and compares them lexicographically, so the
+	// bound must match that shape exactly and carry no zone suffix. Postgres
+	// parses the literal, and does so in the session's time zone unless the
+	// literal says otherwise, so it gets an explicit UTC offset: without it a
+	// server running in Europe/Amsterdam would silently shift every bound by an
+	// hour or two.
+	utcTimestampArg(t time.Time) string
 }
 
 type sqliteDialect struct{}
@@ -85,6 +95,10 @@ func (sqliteDialect) isUniqueViolation(err error) bool {
 
 // SQLite treats -1 as "no limit" in a LIMIT clause.
 func (sqliteDialect) noLimit() int { return -1 }
+
+func (sqliteDialect) utcTimestampArg(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05")
+}
 
 type pgDialect struct{}
 
@@ -131,3 +145,7 @@ func (pgDialect) isUniqueViolation(err error) bool {
 // Postgres rejects negative LIMIT values; use a large positive integer instead.
 // 2^31-1 rows is the practical upper bound for any paged listing.
 func (pgDialect) noLimit() int { return 1<<31 - 1 }
+
+func (pgDialect) utcTimestampArg(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05+00:00")
+}

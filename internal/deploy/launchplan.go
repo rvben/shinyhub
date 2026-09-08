@@ -167,7 +167,7 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 			plan.Command = buildRCommandReload(bundleDir, opts.Port, bindHost, opts.Reload)
 		}
 	default:
-		return nil, fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", bundleDir)
+		return nil, fmt.Errorf("no app entrypoint found in %s (add app.py, app.R, or ui.R and server.R, or declare [app] command in shinyhub.toml)", bundleDir)
 	}
 	return plan, nil
 }

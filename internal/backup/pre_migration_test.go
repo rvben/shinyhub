@@ -226,6 +226,50 @@ func TestPreMigrationSnapshot_FailureIsAnError(t *testing.T) {
 	}
 }
 
+// An unattended string of upgrades must not grow the pre-migration snapshot
+// list forever: each of these calls leaves a migration pending (mirroring a
+// repeatedly-upgraded install that never runs Migrate in between, as this
+// test harness does not), so four calls with a retention of two must leave
+// only the two most recently written snapshots on disk.
+func TestPreMigrationSnapshot_PrunesOldSnapshotsBeyondRetention(t *testing.T) {
+	cfg, store, dbPath := snapCfg(t)
+	cfg.Database.PreMigrationSnapshotRetention = 2
+	makePending(t, store)
+
+	var paths []string
+	for i := 0; i < 4; i++ {
+		res, err := backup.PreMigrationSnapshot(cfg, store, snapAt.Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatalf("snapshot %d: %v", i, err)
+		}
+		if res.Path == "" {
+			t.Fatalf("snapshot %d: expected a path, skipped %q", i, res.Skipped)
+		}
+		if res.PruneErr != "" {
+			t.Fatalf("snapshot %d: unexpected prune error: %s", i, res.PruneErr)
+		}
+		paths = append(paths, res.Path)
+	}
+
+	matches, err := filepath.Glob(dbPath + ".pre-migration-*")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("snapshot files present = %d, want 2 (retention=2); found %v", len(matches), matches)
+	}
+	for _, want := range paths[2:] {
+		if _, err := os.Stat(want); err != nil {
+			t.Errorf("newest snapshot %s must survive pruning: %v", want, err)
+		}
+	}
+	for _, gone := range paths[:2] {
+		if _, err := os.Stat(gone); err == nil {
+			t.Errorf("oldest snapshot %s must be pruned, still exists", gone)
+		}
+	}
+}
+
 // assertNoSnapshots proves nothing matching the snapshot naming pattern was
 // written next to the database.
 func assertNoSnapshots(t *testing.T, dbPath string) {

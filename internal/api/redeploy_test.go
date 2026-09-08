@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -242,6 +243,260 @@ func TestPatchApp_WarmSparesDoesNotBootStoppedApp(t *testing.T) {
 	case slotID := <-spawned:
 		t.Fatalf("settings edit booted stopped app worker slot %d", slotID)
 	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+// TestPatchApp_ReplicasUnchanged_NoRedeployNoAudit proves that PATCHing
+// replicas to the value the pool already runs at is a no-op: it neither
+// cycles the pool nor writes a phantom update_app audit event. A real change
+// to the same field still triggers both, naming the field in the detail.
+func TestPatchApp_ReplicasUnchanged_NoRedeployNoAudit(t *testing.T) {
+	const slug = "replicas-noop"
+	store, app := newRedeployTestStore(t, slug, "running")
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateAppReplicas(app.ID, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(&config.Config{Auth: config.AuthConfig{Secret: "test-secret"}}, store, nil, proxy.New())
+	entered := make(chan struct{}, 1)
+	s.SetDeployRunForTest(func(deploy.Params) (*deploy.PoolResult, error) {
+		entered <- struct{}{}
+		return &deploy.PoolResult{}, nil
+	})
+	token, _ := auth.IssueJWT(app.OwnerID, "bob", "admin", "test-secret")
+
+	patch := func(body map[string]any) {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest("PATCH", "/api/apps/"+slug, bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PATCH %v: got %d, want 200: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	countUpdateApp := func() int {
+		events, _ := store.ListAuditEvents("", 50, 0)
+		n := 0
+		for _, e := range events {
+			if e.Action == "update_app" && e.ResourceID == slug {
+				n++
+			}
+		}
+		return n
+	}
+	redeployed := func() bool {
+		select {
+		case <-entered:
+			return true
+		case <-time.After(150 * time.Millisecond):
+			return false
+		}
+	}
+
+	patch(map[string]any{"replicas": 2})
+	if redeployed() {
+		t.Error("unchanged replicas triggered a pool redeploy")
+	}
+	if s.isRedeployInFlight(slug) {
+		t.Error("unchanged replicas left redeploy_in_flight set")
+	}
+	if n := countUpdateApp(); n != 0 {
+		t.Errorf("no-op replicas PATCH logged %d update_app events, want 0", n)
+	}
+
+	patch(map[string]any{"replicas": 3})
+	if !redeployed() {
+		t.Fatal("changed replicas did not trigger a pool redeploy")
+	}
+	if n := countUpdateApp(); n != 1 {
+		t.Errorf("real replicas change logged %d update_app events, want 1", n)
+	}
+	events, _ := store.ListAuditEvents("update_app", 10, 0)
+	if len(events) == 0 || !strings.Contains(events[0].Detail, "replicas") {
+		t.Errorf("audit detail missing replicas: %+v", events)
+	}
+}
+
+// TestPatchApp_PlacementUnchanged_NoRedeployNoAudit proves that PATCHing
+// placement to the map the pool already runs is a no-op even though the keys
+// arrive in a different order, since comparison is by value, not by the raw
+// JSON string. A real change to the map still redeploys and audits.
+func TestPatchApp_PlacementUnchanged_NoRedeployNoAudit(t *testing.T) {
+	const slug = "placement-noop"
+	store, app := newRedeployTestStore(t, slug, "running")
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAppPlacement(app.ID, `{"local":1,"burst":2}`, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Auth: config.AuthConfig{Secret: "test-secret"},
+		Runtime: config.RuntimeConfig{
+			MaxReplicas: 8,
+			Tiers: []config.TierConfig{
+				{Name: "local", Runtime: "native"},
+				{Name: "burst", Runtime: "docker"},
+			},
+		},
+	}
+	s := New(cfg, store, nil, proxy.New())
+	entered := make(chan struct{}, 1)
+	s.SetDeployRunForTest(func(deploy.Params) (*deploy.PoolResult, error) {
+		entered <- struct{}{}
+		return &deploy.PoolResult{}, nil
+	})
+	token, _ := auth.IssueJWT(app.OwnerID, "bob", "admin", "test-secret")
+
+	patch := func(body map[string]any) {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest("PATCH", "/api/apps/"+slug, bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PATCH %v: got %d, want 200: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	countUpdateApp := func() int {
+		events, _ := store.ListAuditEvents("", 50, 0)
+		n := 0
+		for _, e := range events {
+			if e.Action == "update_app" && e.ResourceID == slug {
+				n++
+			}
+		}
+		return n
+	}
+	redeployed := func() bool {
+		select {
+		case <-entered:
+			return true
+		case <-time.After(150 * time.Millisecond):
+			return false
+		}
+	}
+
+	// Same map, keys reordered on the wire: still a no-op.
+	patch(map[string]any{"placement": map[string]int{"burst": 2, "local": 1}})
+	if redeployed() {
+		t.Error("unchanged placement triggered a pool redeploy")
+	}
+	if s.isRedeployInFlight(slug) {
+		t.Error("unchanged placement left redeploy_in_flight set")
+	}
+	if n := countUpdateApp(); n != 0 {
+		t.Errorf("no-op placement PATCH logged %d update_app events, want 0", n)
+	}
+
+	patch(map[string]any{"placement": map[string]int{"local": 2, "burst": 2}})
+	if !redeployed() {
+		t.Fatal("changed placement did not trigger a pool redeploy")
+	}
+	if n := countUpdateApp(); n != 1 {
+		t.Errorf("real placement change logged %d update_app events, want 1", n)
+	}
+	events, _ := store.ListAuditEvents("update_app", 10, 0)
+	if len(events) == 0 || !strings.Contains(events[0].Detail, "placement") {
+		t.Errorf("audit detail missing placement: %+v", events)
+	}
+}
+
+// TestPatchApp_WorkerIsolationUnchanged_NoRedeployNoAudit proves that PATCHing
+// a worker dial to the value it already holds is a no-op, matching the
+// replicas/placement/resource-limit gate above. A real change still
+// redeploys and audits.
+func TestPatchApp_WorkerIsolationUnchanged_NoRedeployNoAudit(t *testing.T) {
+	const slug = "worker-noop"
+	store, app := newRedeployTestStore(t, slug, "running")
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		Slug: slug, SetWorkerIsolation: true, WorkerIsolation: "per_session",
+		SetWorkerMaxWorkers: true, WorkerMaxWorkers: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(&config.Config{Auth: config.AuthConfig{Secret: "test-secret"}}, store, nil, proxy.New())
+	entered := make(chan struct{}, 1)
+	s.SetDeployRunForTest(func(deploy.Params) (*deploy.PoolResult, error) {
+		entered <- struct{}{}
+		return &deploy.PoolResult{}, nil
+	})
+	token, _ := auth.IssueJWT(app.OwnerID, "bob", "admin", "test-secret")
+
+	patch := func(body map[string]any) {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest("PATCH", "/api/apps/"+slug, bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PATCH %v: got %d, want 200: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	countUpdateApp := func() int {
+		events, _ := store.ListAuditEvents("", 50, 0)
+		n := 0
+		for _, e := range events {
+			if e.Action == "update_app" && e.ResourceID == slug {
+				n++
+			}
+		}
+		return n
+	}
+	redeployed := func() bool {
+		select {
+		case <-entered:
+			return true
+		case <-time.After(150 * time.Millisecond):
+			return false
+		}
+	}
+
+	patch(map[string]any{"worker_isolation": "per_session"})
+	if redeployed() {
+		t.Error("unchanged worker_isolation triggered a pool redeploy")
+	}
+	if s.isRedeployInFlight(slug) {
+		t.Error("unchanged worker_isolation left redeploy_in_flight set")
+	}
+	if n := countUpdateApp(); n != 0 {
+		t.Errorf("no-op worker_isolation PATCH logged %d update_app events, want 0", n)
+	}
+
+	patch(map[string]any{"worker_isolation": "grouped", "worker_grouped_size": 2})
+	if !redeployed() {
+		t.Fatal("changed worker_isolation did not trigger a pool redeploy")
+	}
+	if n := countUpdateApp(); n != 1 {
+		t.Errorf("real worker_isolation change logged %d update_app events, want 1", n)
+	}
+	events, _ := store.ListAuditEvents("update_app", 10, 0)
+	if len(events) == 0 || !strings.Contains(events[0].Detail, "worker_isolation") {
+		t.Errorf("audit detail missing worker_isolation: %+v", events)
 	}
 }
 

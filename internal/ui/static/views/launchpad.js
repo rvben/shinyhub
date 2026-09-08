@@ -236,7 +236,9 @@ export function mountLaunchpad(ctx) {
   timer = setInterval(() => { if (!disposed) load(false); }, POLL_MS);
 
   return {
-    title: '',
+    // "Launchpad" is the internal surface name; the visitor sees Apps, both in
+    // the navigation and in the page's <h1>, so the tab has to say Apps too.
+    title: 'Apps',
     unmount() {
       stop();
       view.hidden = true;

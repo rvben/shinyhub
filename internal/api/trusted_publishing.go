@@ -101,6 +101,6 @@ func (s *Server) handleTrustedPublishing(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusConflict, "credential exchange failed; request a fresh CI identity token before retrying")
 		return
 	}
-	s.logAuditEvent(r, db.AuditEventParams{UserID: &account.ID, Action: "trusted_publish", ResourceType: "token", ResourceID: policy.Name, IPAddress: s.ClientIP(r)})
+	s.logAuditEvent(r, db.AuditEventParams{UserID: &account.ID, Action: "trusted_publish", ResourceType: "token", ResourceID: policy.Name, Detail: auditDetailJSON(map[string]any{"credential_id": id, "apps": policy.Apps, "expires_at": expires}), IPAddress: s.ClientIP(r)})
 	writeJSON(w, http.StatusCreated, map[string]any{"token": raw, "token_type": "Token", "expires_at": expires, "expires_in": int(trustedpublish.CredentialLifetime.Seconds()), "apps": policy.Apps, "id": id})
 }

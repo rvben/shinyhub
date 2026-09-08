@@ -125,9 +125,10 @@ func lookupUserID(cfg *cliConfig, username string) (int64, error) {
 func newUsersListCmd() *cobra.Command {
 	f := &listFlags{}
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List all user accounts",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Short:   "List all user accounts",
+		Aliases: []string{"ls"},
+		Args:    cobra.NoArgs,
 	}
 	addListFlags(cmd, f)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -294,9 +295,10 @@ func newUsersResetPasswordCmd() *cobra.Command {
 func newUsersDeleteCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "delete <username>",
-		Short: "Permanently delete a user account",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <username>",
+		Short:   "Permanently delete a user account",
+		Aliases: []string{"rm"},
+		Args:    cobra.ExactArgs(1),
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip confirmation prompt")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {

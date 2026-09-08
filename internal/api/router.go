@@ -29,6 +29,7 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/servertrace"
+	"github.com/rvben/shinyhub/internal/storage"
 	"github.com/rvben/shinyhub/internal/tracing"
 	"github.com/rvben/shinyhub/internal/trustedpublish"
 	"github.com/rvben/shinyhub/internal/usage"
@@ -226,7 +227,7 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 		// of the source tree while retaining a shared fence namespace.
 		appsDir = filepath.Join(os.TempDir(), "shinyhub-api")
 	}
-	appOperationLockDir := filepath.Join(appsDir, ".shinyhub-locks")
+	appOperationLockDir := filepath.Join(appsDir, storage.LockDirName)
 	if err := os.MkdirAll(appOperationLockDir, 0o750); err != nil {
 		slog.Error("create app operation lock directory", "path", appOperationLockDir, "err", err)
 	}
@@ -919,6 +920,10 @@ func (s *Server) buildRouter() chi.Router {
 		// An unauthenticated logout has nothing to revoke — the client can
 		// just discard its own session cookie.
 		r.Post("/api/auth/logout", s.handleLogout)
+		// "Sign out everywhere", the self-service half of the admin-only
+		// /api/users/{id}/revoke-sessions. Logout ends the one credential that
+		// called it; this ends them all.
+		r.Post("/api/auth/revoke-sessions", s.handleRevokeOwnSessions)
 		r.Get("/api/auth/me", s.handleMe)
 		r.Patch("/api/auth/me", s.handlePatchMe) // self-service profile: display name + own password
 		r.Get("/api/apps", s.handleListApps)
@@ -975,6 +980,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Put("/api/apps/{slug}/env/{key}", s.handleUpsertAppEnv)
 		r.Delete("/api/apps/{slug}/env/{key}", s.handleDeleteAppEnv)
 		r.Get("/api/apps/{slug}/data", s.handleDataList)
+		r.Get("/api/apps/{slug}/data/*", s.handleDataGet)
 		r.With(rateLimitByUser(s.dataLimiter)).Put("/api/apps/{slug}/data/*", s.handleDataPut)
 		r.Delete("/api/apps/{slug}/data/*", s.handleDataDelete)
 

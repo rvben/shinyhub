@@ -159,7 +159,12 @@ var restoreCmd = &cobra.Command{
 		"a '.pre-restore-<timestamp>' suffix; for Postgres the current database\n" +
 		"is dumped to 'pre-restore-<timestamp>.dump' beside the archive before\n" +
 		"pg_restore loads the backup. Postgres restores require pg_dump and\n" +
-		"pg_restore on PATH.",
+		"pg_restore on PATH.\n\n" +
+		"Refuses to run while a server is detected: one publishes\n" +
+		"'<database>-running.json' beside its database file while it runs, and\n" +
+		"a live server.pid_file or a listener on server.host:server.port count\n" +
+		"too. Pass --force for a server you have confirmed stopped by other\n" +
+		"means.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.LoadForMaintenance(serverConfigPath())
@@ -170,6 +175,14 @@ var restoreCmd = &cobra.Command{
 		moved, err := backup.RestoreForce(cfg, args[0], force)
 		for _, p := range moved {
 			fmt.Fprintf(cmd.ErrOrStderr(), "previous state preserved at %s\n", p)
+		}
+		var running *backup.ServerRunningError
+		if errors.As(err, &running) {
+			// A server that is up is something the operator can fix, not a
+			// fault to retry, and the remedy they can reach from here is the
+			// flag rather than the Go API behind it.
+			return cli.ValidationError(running.Error(),
+				"stop the server, or pass --force once you have confirmed it is stopped")
 		}
 		if err != nil {
 			return err
@@ -301,8 +314,12 @@ var resolveLegacyWritersCmd = &cobra.Command{
 		}
 		defer store.Close()
 
-		if _, err := backup.PreMigrationSnapshot(cfg, store, time.Now()); err != nil {
+		snap, err := backup.PreMigrationSnapshot(cfg, store, time.Now())
+		if err != nil {
 			return fmt.Errorf("pre-migration snapshot: %w", err)
+		}
+		if snap.PruneErr != "" {
+			slog.Warn("prune old pre-migration snapshots failed", "err", snap.PruneErr)
 		}
 		if err := store.Migrate(); err != nil {
 			return fmt.Errorf("migrate database: %w", err)
@@ -467,6 +484,29 @@ func main() {
 // listenFunc constructs a listener; injected so the metrics listener can be
 // routed through the upgrader (for zero-downtime handoff) or a fake in tests.
 type listenFunc func(network, addr string) (net.Listener, error)
+
+// preflightAddrFree reports early that addr can still be bound, so a port
+// conflict is named before the expensive part of startup rather than after it.
+// It is deliberately not the authority: the socket opened here is closed again
+// immediately and the serving listener is still acquired later through the
+// upgrader, which keeps accept behaviour during startup exactly as it was (a
+// client connecting before the server serves is refused, not parked in a
+// backlog). Something else can take the address in between; that case still
+// fails at the real bind, with the same message it always did.
+//
+// An upgrade child is skipped: it inherits its listeners from a parent that is
+// still bound, so probing would report a conflict with the very process this
+// one is replacing and abort every zero-downtime handoff.
+func preflightAddrFree(upg upgrade.Upgrader, label, addr string) error {
+	if upg.HasParent() {
+		return nil
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("cannot bind %s %s: %w (is another ShinyHub already running here?)", label, addr, err)
+	}
+	return ln.Close()
+}
 
 // startMetricsListener binds addr via listen and serves the Prometheus scrape
 // endpoint at /metrics on its own listener, separate from the main application
@@ -1009,6 +1049,24 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	defer signal.Stop(sighup)
 	upgrade.WireSignals(ctx, upg, sighup, logger)
 
+	// Fail fast on the commonest startup mistake, a second instance on a port
+	// something else already holds. The serving bind is the last thing this
+	// function does, so without this check the conflict is only discovered after
+	// migrations, the pre-migration snapshot, admin bootstrap and the ownership
+	// election have all run: a process that can never serve does real work on the
+	// way to finding that out.
+	preflight := []struct{ label, addr string }{
+		{"server.port", fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)},
+	}
+	if cfg.Metrics.Enabled {
+		preflight = append(preflight, struct{ label, addr string }{"metrics.addr", cfg.Metrics.Addr})
+	}
+	for _, p := range preflight {
+		if err := preflightAddrFree(upg, p.label, p.addr); err != nil {
+			return err
+		}
+	}
+
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
@@ -1026,6 +1084,25 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			slog.Warn("store close", "err", err)
 		}
 	}()
+	// On the native runtime a deployed app runs as the same OS user as this
+	// process, and a process environment is readable by any process of that
+	// user. auth.secret signs every session token and derives the key
+	// encrypting every app's secret env vars, so holding it in the environment
+	// puts it within reach of the code it is meant to be secret from.
+	if cfg.Auth.SecretSource == "env" && cfg.Runtime.Mode != "docker" {
+		logger.Warn("auth.secret comes from SHINYHUB_AUTH_SECRET, which any process running as this user can read (/proc/<pid>/environ, ps eww); native-runtime apps run as this user",
+			"remedy", "write the secret to a mode-0600 file and set auth.secret_file (SHINYHUB_AUTH_SECRET_FILE), then unset SHINYHUB_AUTH_SECRET")
+	}
+
+	// Publish liveness beside the database, so `shinyhub restore` can tell this
+	// server is up from the database path alone. Its other two signals both
+	// depend on settings a maintenance invocation commonly omits, and omitting
+	// them disables the guard without saying so.
+	clearMarker, err := backup.PublishRuntimeMarker(cfg)
+	if err != nil {
+		return fmt.Errorf("publish runtime marker: %w", err)
+	}
+	defer clearMarker()
 	// Copy the database aside before changing its schema, so a bad upgrade can
 	// be rolled back by putting the old binary and this file back. A snapshot
 	// that cannot be written aborts startup: migrating a database the operator
@@ -1034,10 +1111,15 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	if err != nil {
 		return fmt.Errorf("pre-migration snapshot: %w (set database.pre_migration_snapshot: false to skip it)", err)
 	}
+	if snap.PruneErr != "" {
+		slog.Warn("prune old pre-migration snapshots failed", "err", snap.PruneErr,
+			"remedy", "delete stale *.pre-migration-v*.sqlite files beside the database by hand")
+	}
 	switch {
 	case snap.Path != "":
 		slog.Info("pre-migration snapshot written", "path", snap.Path,
-			"pending_migrations", len(snap.Pending), "note", "never pruned automatically")
+			"pending_migrations", len(snap.Pending),
+			"retention", cfg.Database.PreMigrationSnapshotRetention)
 	case len(snap.Pending) > 0 && store.IsPostgres():
 		slog.Warn("applying migrations with no snapshot; take a pg_dump before upgrading a Postgres deployment",
 			"pending_migrations", len(snap.Pending))
@@ -1093,34 +1175,8 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// readyCh is closed once HTTP listener is live. /readyz returns 503 until then.
 	readyCh := make(chan struct{})
 
-	// Bootstrap admin user from env if provided and no users exist
-	if adminUser := os.Getenv("SHINYHUB_ADMIN_USER"); adminUser != "" {
-		adminPass := os.Getenv("SHINYHUB_ADMIN_PASSWORD")
-		if adminPass == "" {
-			return fmt.Errorf("SHINYHUB_ADMIN_PASSWORD must not be empty when SHINYHUB_ADMIN_USER is set")
-		}
-		if !cfg.Auth.LocalLoginEnabled() {
-			slog.Warn("SHINYHUB_ADMIN_USER is set but local login is disabled (auth.local_login: false); this admin cannot sign in with a password - grant admin via SSO (e.g. group_role_mappings) instead",
-				"username", adminUser)
-		}
-		_, err := store.GetUserByUsername(adminUser)
-		if errors.Is(err, db.ErrNotFound) {
-			hash, err := auth.HashPassword(adminPass)
-			if err != nil {
-				return fmt.Errorf("hash admin password: %w", err)
-			}
-			if err := store.CreateUser(db.CreateUserParams{
-				Username:     adminUser,
-				PasswordHash: hash,
-				Role:         "admin",
-			}); err != nil {
-				slog.Warn("could not create admin user", "err", err)
-			} else {
-				slog.Info("admin user created", "username", adminUser)
-			}
-		} else if err != nil {
-			return fmt.Errorf("check admin user: %w", err)
-		}
+	if err := bootstrapAdminFromEnv(store, cfg.Auth.LocalLoginEnabled(), slog.Default()); err != nil {
+		return err
 	}
 
 	// The built-in deployment identity always exists as an explicit service
@@ -1195,8 +1251,16 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime)
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
+	// Processes that survived the last shutdown are still running and still
+	// serving, but this Manager has not adopted them yet: RecoverProcesses does
+	// that from ownerWork, after ownership is acquired, while the listener is
+	// already answering. Declare the pass outstanding here - before anything can
+	// read the Manager - so a reader knows an absent entry means "not looked at"
+	// rather than "not running". RecoverProcesses clears it on every exit path.
+	mgr.MarkRecoveryPending()
 	mgr.SetDefaultTier(defaultTier)
 	mgr.SetStopGrace(cfg.Server.StopGrace)
+	mgr.SetLogMaxSize(int64(cfg.Storage.AppLogMaxSizeMB) << 20)
 	mgr.SetLogRunRecorder(process.LogRunRecorder{
 		Begin: func(run process.LogRun) error {
 			// AppID is absent only in local/test-style starts that are not backed by

@@ -96,6 +96,12 @@ func newDeployCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "deploy [dir]",
 		Short: "Deploy an application or API to ShinyHub",
+		// "push" and "publish" are the names someone coming from git or another
+		// PaaS reaches for first. Neither is within cobra's default Levenshtein
+		// distance of "deploy" and neither is a name prefix of it, so without an
+		// explicit hint the root's unknown-command suggestion picks an unrelated
+		// near-miss (e.g. "use") instead of the command that actually does this.
+		SuggestFor: []string{"push", "publish"},
 		Long: `Deploy a Shiny app bundle to ShinyHub.
 
 Bundle: the given directory is zipped and uploaded. Pass '.' to deploy the
@@ -267,7 +273,12 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 			if writeErr := writeDeployEvent(stdOut, e); writeErr != nil {
 				return writeErr
 			}
-			return &ExitCodeError{Code: 1, Err: err, Reported: true}
+			// Re-classify rather than dropping a fresh untyped ExitCodeError over
+			// err: classify() matches the outermost *ExitCodeError in the chain, so
+			// wrapping a KindValidation error (e.g. launchContractError) in a new
+			// wrapper with no Kind of its own silently reset it to kind=internal.
+			kind, code := classify(err)
+			return &ExitCodeError{Code: code, Kind: kind, Err: err, Reported: true}
 		}
 		return err
 	}
@@ -287,6 +298,12 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	summary := summarizeDeploymentRejections(bundlePlan.ProtectedPaths)
 	if summary != "" {
 		fmt.Fprintln(errW, summary)
+	}
+	if linkNote := summarizeSkippedLinks(bundlePlan.SkippedLinks); linkNote != "" {
+		fmt.Fprintln(errW, linkNote)
+	}
+	for _, w := range deploypkg.AppTypeWarnings(abs) {
+		fmt.Fprintln(errW, "Warning: "+w)
 	}
 	if f.watchMode {
 		if err := validateRepeatedWatchHooks(abs, f.allowRepeatedHooks); err != nil {
@@ -670,7 +687,7 @@ func prepareDeploymentForFlags(dir string, f *deployFlags) (*bundlePreview, *dep
 		Port: 4000, BindHost: "127.0.0.1", PrepHostDeps: true,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("launch contract: %w", err)
+		return nil, nil, launchContractError(err)
 	}
 	return bundlePlan, launch, nil
 }
@@ -1245,7 +1262,12 @@ type bundlePreview struct {
 	IgnoreFile        string               `json:"ignore_file,omitempty"`
 	IgnoredPaths      []string             `json:"ignored_paths,omitempty"`
 	ProtectedPaths    []bundleSkippedPaths `json:"protected_paths,omitempty"`
-	Buffer            *bytes.Buffer        `json:"-"`
+	// SkippedLinks are symlinks the walk could not turn into a bundle entry: a
+	// link to a directory (a zip entry is a byte stream, and following one
+	// invites a cycle) or a dangling link. They are reported rather than
+	// dropped silently, because a symlinked directory can be deliberate.
+	SkippedLinks []string      `json:"skipped_links,omitempty"`
+	Buffer       *bytes.Buffer `json:"-"`
 }
 
 type bundleSkippedPaths struct {
@@ -1330,6 +1352,30 @@ func buildBundlePreviewFromSpec(spec bundleBuildSpec) (*bundlePreview, error) {
 			}
 		}
 
+		// filepath.Walk lstats, so a symlink to a directory arrives here looking
+		// like a file: IsDir() is false, nothing prunes it, and os.Open follows it
+		// to the real directory where io.Copy fails with "is a directory" - which
+		// aborted the whole deploy. Resolve the target once and decide from that,
+		// before the size rule runs, so a link to a file is measured and archived
+		// as the file it names rather than as the link.
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, statErr := os.Stat(path)
+			if statErr != nil || target.IsDir() {
+				// A link the rules exclude anyway is an ordinary rejection: a
+				// symlinked .venv or node_modules is a cache like any other and
+				// must not become operator-facing noise. The size is 0 because
+				// only the name-based rules can apply to an entry with no
+				// archivable bytes.
+				if decision := rules.Inspect(relSlash, 0); decision != bundle.FilterAccept {
+					rejected[decision] = append(rejected[decision], relSlash)
+				} else {
+					preview.SkippedLinks = append(preview.SkippedLinks, relSlash)
+				}
+				return nil
+			}
+			info = target
+		}
+
 		size := int64(0)
 		if !info.IsDir() {
 			size = info.Size()
@@ -1407,6 +1453,7 @@ func buildBundlePreviewFromSpec(spec bundleBuildSpec) (*bundlePreview, error) {
 	preview.CompressedBytes = buf.Len()
 	sort.Strings(preview.Files)
 	sort.Strings(preview.IgnoredPaths)
+	sort.Strings(preview.SkippedLinks)
 	for decision, paths := range rejected {
 		sort.Strings(paths)
 		preview.ProtectedPaths = append(preview.ProtectedPaths, bundleSkippedPaths{
@@ -1508,14 +1555,35 @@ func summarizeSkippedPaths(groups []bundleSkippedPaths) string {
 	return "Skipped from bundle (push with `shinyhub data push`): " + strings.Join(parts, "; ")
 }
 
-func summarizeDeploymentRejections(groups []bundleSkippedPaths) string {
+// contentRejections filters out routine cache-dir skips (.venv, .git,
+// node_modules) so callers can distinguish genuine content loss from bundler
+// housekeeping that never held deployable content in the first place.
+func contentRejections(groups []bundleSkippedPaths) []bundleSkippedPaths {
 	filtered := make([]bundleSkippedPaths, 0, len(groups))
 	for _, group := range groups {
 		if group.Reason != bundle.FilterSkipCacheDir.String() {
 			filtered = append(filtered, group)
 		}
 	}
-	return summarizeSkippedPaths(filtered)
+	return filtered
+}
+
+func summarizeDeploymentRejections(groups []bundleSkippedPaths) string {
+	return summarizeSkippedPaths(contentRejections(groups))
+}
+
+// summarizeSkippedLinks reports symlinks the bundler could not archive. A zip
+// entry is a byte stream, so a link to a directory has no representation and a
+// dangling one has no bytes; both used to abort the deploy. Skipping them is
+// announced rather than silent, because a symlinked directory of shared code
+// can be deliberate and its absence would otherwise surface as a missing-file
+// error at runtime.
+func summarizeSkippedLinks(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	return "Skipped symlinks (a bundle cannot carry a directory or dangling link; copy the contents in, or exclude it): " +
+		strings.Join(paths, ", ")
 }
 
 func summarizeRejections(r map[bundle.FilterDecision][]string) string {

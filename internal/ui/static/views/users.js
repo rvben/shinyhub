@@ -11,7 +11,10 @@ export function mountUsers(ctx) {
   }
   ctx.updateActiveNav(location.pathname);
   return {
-    title: 'Users',
+    // The page is called Identity in the navigation and in its <h1>; the tab
+    // said Users, which is the old name for a page that now also covers
+    // service accounts.
+    title: 'Identity',
     unmount() { view.hidden = true; },
   };
 }

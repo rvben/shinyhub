@@ -885,6 +885,14 @@ func derefIntOr0(p *int) int {
 	return *p
 }
 
+// wakeReplicaFailure pairs a failed replica's index with the error that
+// wakeReplica returned for it, so the caller can build a crash reason naming
+// which replica failed and why, once it knows the whole wake failed.
+type wakeReplicaFailure struct {
+	index int
+	err   error
+}
+
 // wakeReplica brings one replica back up. For a replica persisted as suspended it
 // tries the warm Resume path first; on any resume error (or when resume is
 // unconfigured / the replica was not suspended) it falls back to the existing
@@ -1163,10 +1171,18 @@ func (w *Watcher) handleCrashedLocked(slug string, index int) {
 	if err != nil {
 		return
 	}
-	reason := w.crashReason(slug, index, nil, derefIntOr0(app.MemoryLimitMB))
+	// The deterministic exit verdict, when available, is the crash cause and
+	// wins over the live log tail: liveReplicaView (internal/api/apps.go)
+	// shows exactly verdict.Reason, unadorned, whenever an in-memory verdict
+	// exists, so persisting anything else here means the record reads
+	// differently once the in-memory verdict is gone (a server restart empties
+	// it), even though it describes the same historical crash. The tail
+	// remains the only source for a replica the manager never computed a
+	// verdict for, e.g. one adopted without having been waited on locally.
 	verdict, hasVerdict := w.mgr.LastExit(slug, index)
-	if reason == "" && hasVerdict {
-		reason = verdict.Reason
+	reason := verdict.Reason
+	if !hasVerdict || reason == "" {
+		reason = w.crashReason(slug, index, nil, derefIntOr0(app.MemoryLimitMB))
 	}
 	if reason == "" {
 		reason = "replica process exited unexpectedly"
@@ -2321,6 +2337,7 @@ func (w *Watcher) driveWakingApp(slug string) {
 			var wg sync.WaitGroup
 			var started atomic.Int32
 			var persistenceFailed atomic.Bool
+			var firstFailure atomic.Pointer[wakeReplicaFailure]
 			for i := 0; i < app.Replicas; i++ {
 				wg.Add(1)
 				go func(idx int) {
@@ -2328,6 +2345,7 @@ func (w *Watcher) driveWakingApp(slug string) {
 					res, consumerBooted, err := w.wakeReplica(slug, deployments[0].BundleDir, idx, suspendedByIdx[idx])
 					if err != nil {
 						slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
+						firstFailure.CompareAndSwap(nil, &wakeReplicaFailure{index: idx, err: err})
 						return
 					}
 					pid, port := res.PID, res.Port
@@ -2364,8 +2382,32 @@ func (w *Watcher) driveWakingApp(slug string) {
 				return
 			}
 			if started.Load() == 0 {
-				// No replica came up; the deferred guard reverts waking -> hibernated
-				// so a later request retries instead of being stuck in waking.
+				// No replica came up. Reverting silently to hibernated (the deferred
+				// guard's default) would make the wake retry forever against a bundle
+				// that can never boot, with no signal anywhere an operator would look.
+				// Record it as crashed instead, exactly like the steady-state
+				// exhausted-restart-budget path below: last_error carries the boot
+				// error plus the log tail, and the audit log gets an app_crashed
+				// entry. Only do this while the app is still the one we started
+				// waking; a concurrent stop/delete already recorded its own newer
+				// intent and must not be overwritten with "crashed".
+				if cur, gerr := w.store.GetAppBySlug(slug); gerr == nil && cur.Status == "waking" {
+					var bootErr error
+					idx := 0
+					if f := firstFailure.Load(); f != nil {
+						bootErr, idx = f.err, f.index
+					}
+					reason := w.crashReason(slug, idx, bootErr, derefIntOr0(app.MemoryLimitMB))
+					if reason == "" {
+						reason = "wake failed: no replica could start"
+					}
+					if err := w.store.MarkAppCrashed(slug, reason); err != nil {
+						slog.Warn("watcher: mark crashed after wake failure failed", "slug", slug, "err", err)
+					} else {
+						finalized = true
+					}
+					w.auditAppCrashed(slug, reason)
+				}
 				return
 			}
 		}

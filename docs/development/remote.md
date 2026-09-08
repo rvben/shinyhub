@@ -35,7 +35,7 @@ invocation into a remote mutation.
 
 ## Choose the target lifecycle
 
-### Attach an existing app — default
+### Attach an existing app - default
 
 ```bash
 shinyhub dev . --remote dev --slug sales-dev

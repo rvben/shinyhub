@@ -109,6 +109,34 @@ deployment. Operators get explicit state, bounded resources, and recovery
 paths. Viewers get the part that matters: a dashboard that opens quickly and
 stays dependable.
 
+## Where ShinyHub fits
+
+ShinyHub is for a team that has a Linux host and a handful of Shiny, Dash, or
+Streamlit applications, and wants them behind real URLs with logins, deploys,
+logs, and an audit trail, without running a platform to get there. The
+comparison is usually against Posit Connect, ShinyProxy, or a Docker Compose
+setup someone assembled by hand, and it comes down to a few axes.
+
+- **Cost and licensing.** MIT, self-hosted, no per-user or per-application
+  license.
+- **What you have to operate.** One Go binary and one SQLite file. No JVM, no
+  Kubernetes, no broker, and no database server to run. Postgres is optional
+  and only for [multi-instance HA](deployment/ha-data-plane.md).
+- **How apps run.** As ordinary host processes by default. A container per
+  application is opt-in (`runtime.mode: docker`), a container per browser
+  session is never required, and idle applications hibernate instead of
+  holding memory.
+- **What you assemble yourself.** Nothing for the common path: routing, login
+  (OAuth, OIDC, or an auth proxy), per-app access control, logs, metrics, and
+  deployment history are in the box.
+
+Where it is deliberately not the answer: the native runtime is not a security
+boundary between tenants who do not trust each other. Use the Docker runtime or
+separate hosts for that, and read
+[Do not run mutually-untrusting tenants on the native runtime](isolation.md#do-not-run-mutually-untrusting-tenants-on-the-native-runtime)
+before deciding. For what the host itself needs, see
+[What it needs to run](getting-started/installation.md#what-it-needs-to-run).
+
 <div class="shiny-final" markdown>
 
 ### See a real ShinyHub instance

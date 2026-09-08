@@ -171,7 +171,7 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 		Action:       "warm_shrink",
 		ResourceType: "app",
 		ResourceID:   slug,
-		Detail:       fmt.Sprintf(`{"from":%d,"to":%d}`, app.Replicas, effectiveFloor),
+		Detail:       db.AuditDetail(map[string]any{"from": app.Replicas, "to": effectiveFloor}),
 	})
 
 	return true, nil
@@ -395,7 +395,7 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 		Action:       "warm_expand",
 		ResourceType: "app",
 		ResourceID:   slug,
-		Detail:       fmt.Sprintf(`{"from":%d,"to":%d}`, liveBefore, liveAfter),
+		Detail:       db.AuditDetail(map[string]any{"from": liveBefore, "to": liveAfter}),
 	})
 
 	return anyRestored > 0, firstErr

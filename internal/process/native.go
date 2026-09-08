@@ -580,6 +580,15 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	cmd.Env = append(nativeChildEnv(p), extraEnv...)
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
+	// logWriter is not an *os.File, so os/exec hands the child a pipe and
+	// cmd.Wait blocks until every holder of its write end closes it - not just
+	// the leader. A launcher (uv, Rscript, a shell) forks a child that inherits
+	// that end, so killing the leader alone left Wait blocked forever: the
+	// manager never learned the replica had exited, no crash was recorded, and
+	// the orphaned child went on serving on the replica's port with nothing
+	// supervising it. WaitDelay bounds that wait, so the leader's death always
+	// reaches Wait and the group reaping below can run.
+	cmd.WaitDelay = leaderExitPipeGrace
 	// Place the child in its own process group so signals can be sent to the
 	// entire group, avoiding orphaned sub-processes.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -727,6 +736,15 @@ func waitForProcessGroupExit(ctx context.Context, pgid int) error {
 	}
 }
 
+// leaderExitPipeGrace is how long cmd.Wait keeps draining the log pipe after
+// the leader has exited. It only ever elapses when something other than the
+// leader still holds the write end, which is exactly the orphan case, and the
+// group is killed immediately afterwards - so the only output it can cost is
+// what an orphan would have written inside the window. Well under the
+// watchdog's interval, so an orphaned replica is reaped within one tick
+// rather than outliving the server's attention entirely.
+const leaderExitPipeGrace = 5 * time.Second
+
 func killOrphanedProcessGroup(pgid int, timeout time.Duration) error {
 	if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
 		return nil
@@ -862,6 +880,11 @@ func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	cmd.Env = append(nativeChildEnv(p), extraEnv...)
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
+	// Same pipe ownership as Start: a descendant holding the log pipe keeps
+	// cmd.Wait blocked past the leader's exit. Here the ctx branch below is the
+	// usual rescue, so this bounds only the case where the job runs under a ctx
+	// with no deadline and would otherwise never be reported finished.
+	cmd.WaitDelay = leaderExitPipeGrace
 	cmd.SysProcAttr = oneShotSysProcAttr()
 	cmd.ExtraFiles = append(cmd.ExtraFiles, p.LifetimeFiles...)
 

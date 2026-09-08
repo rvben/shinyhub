@@ -33,6 +33,9 @@ type Upgrader interface {
 	// Exit is closed when this process should shut down: after Stop, or after a
 	// successful Upgrade handed off to a ready successor.
 	Exit() <-chan struct{}
+	// HasParent reports whether this process was started by an upgrade handoff
+	// and therefore inherits its listeners from a parent that is still bound.
+	HasParent() bool
 	// Stop disables further upgrades and closes Exit.
 	Stop()
 }

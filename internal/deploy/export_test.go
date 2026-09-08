@@ -27,6 +27,15 @@ func SetSyncHooksForTest(py, r func(context.Context, string, []string) error) (r
 	return func() { pythonSyncFn, rSyncFn = origPy, origR }
 }
 
+// SetRShinyInstalledForTest pins the ambient-shiny probe so a lockfile-free R
+// bundle's fate does not depend on whether the machine running the test has R
+// and shiny installed. Returns a restore func - pair with defer. Test use only.
+func SetRShinyInstalledForTest(installed bool) (restore func()) {
+	orig := rShinyInstalledFn
+	rShinyInstalledFn = func(context.Context) bool { return installed }
+	return func() { rShinyInstalledFn = orig }
+}
+
 // SetEnsureProjectForTest swaps the ensure-project hook. Returns a restore
 // func — pair with defer. Test use only.
 func SetEnsureProjectForTest(fn func(context.Context, string) error) (restore func()) {

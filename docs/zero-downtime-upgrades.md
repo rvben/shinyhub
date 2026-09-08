@@ -121,7 +121,8 @@ straggler is force-closed.
 - **A rollback point is taken automatically.** Before applying pending
   migrations the successor copies the SQLite database aside as
   `<dsn>.pre-migration-v<version>-<timestamp>.sqlite`, and logs the path. It is
-  written only when migrations are pending, and never pruned. See
+  written only when migrations are pending, and older snapshots are pruned
+  down to a configurable retention count afterward. See
   [Schema migrations on startup](configuration.md#schema-migrations-on-startup)
   for the opt-out and the Postgres equivalent.
 - **Rolling back to an older binary needs the snapshot.** An older build refuses

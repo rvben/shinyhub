@@ -165,6 +165,13 @@ func (e *hintedMsgError) Error() string { return e.msg }
 func (e *hintedMsgError) Hint() string  { return e.hint }
 func (e *hintedMsgError) Unwrap() error { return e.cause }
 
+// ValidationError returns a KindValidation error pairing a message with the
+// remedy, for callers outside this package (the server-side maintenance
+// commands) that need the same envelope the CLI's own validation failures use.
+func ValidationError(msg, hint string) error {
+	return &ExitCodeError{Code: 1, Kind: KindValidation, Err: &hintedMsgError{msg: msg, hint: hint}}
+}
+
 // confirmationRequiredError returns a KindConfirmationRequired error for
 // interactive-only operations run without a TTY. bypassFlag names the flag
 // that skips the prompt (e.g. "--yes"), surfaced in the envelope hint field.
@@ -181,6 +188,24 @@ func loginMissingCredsError() error {
 		Err: &hintedMsgError{
 			msg:  "username and password required",
 			hint: "pass --username and --password, or --token, for non-interactive login"}}
+}
+
+// launchContractError wraps a deploy.ResolveLaunch failure (plan's and
+// deploy's shared "launch contract" step) as a validation error. ResolveLaunch
+// only inspects bundle content - the manifest TOML, the [app] command
+// template, entrypoint detection - so anything it returns describes something
+// the caller can fix in the bundle, never a shinyhub-side fault. `doctor`
+// classifies the identical ResolveLaunch call as KindValidation; before this,
+// plan and deploy wrapped the same error in a bare fmt.Errorf with no Kind
+// attached, so it fell through classify's default case to kind=internal - the
+// wrong category for a missing app.py or a bad shinyhub.toml.
+func launchContractError(err error) error {
+	return &ExitCodeError{Code: 1, Kind: KindValidation,
+		Err: &hintedMsgError{
+			msg:   fmt.Sprintf("launch contract: %s", err),
+			hint:  "run `shinyhub doctor` on this directory for a detailed diagnosis",
+			cause: err,
+		}}
 }
 
 // reportTo renders err to w and returns the process exit code. Pure function

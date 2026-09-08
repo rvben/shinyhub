@@ -30,8 +30,9 @@ move those responsibilities into a database, object store, and wake gateway and
 would be a different deployment architecture rather than a cheaper version of
 this one.
 
-Scaleway currently documents a 15-minute scale-to-zero window, 128–12,228 MB
-memory, 70–6,000 mvCPU, and a 60-minute maximum HTTP request. Consult the
+Scaleway currently documents a 15-minute scale-to-zero window, 128 to
+12,228 MB memory, 70 to 6,000 mvCPU, and a 60-minute maximum HTTP request.
+Consult the
 [current provider limits](https://www.scaleway.com/en/docs/serverless-containers/reference-content/containers-limitations/)
 before changing production sizing.
 

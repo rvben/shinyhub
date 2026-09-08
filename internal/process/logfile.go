@@ -424,9 +424,16 @@ func (r *LogReader) Tail(n int) ([]string, error) {
 	return lines, nil
 }
 
-// maxLogFollowRead bounds one poll while still accommodating the capped primary
-// file plus one unusually long line written across the snapshot boundary.
-const maxLogFollowRead = DefaultLogMaxSize + 512*1024
+// followReadHeadroom accommodates one unusually long line written to the log
+// between the stat that measures how many new bytes are available and the
+// read that follows it.
+const followReadHeadroom = 64 * 1024
+
+// maxLogFollowRead bounds one poll's read when the available-bytes stat
+// cannot be trusted (a Stat error on this iteration). The per-app log size
+// cap is operator-configurable (see Manager.SetLogMaxSize), so this fallback
+// stays generous rather than tied to DefaultLogMaxSize.
+const maxLogFollowRead = 64 << 20
 
 // Follow sends new lines written to the log file to lines until ctx is
 // cancelled. It polls the file at 100 ms intervals.
@@ -474,7 +481,8 @@ func (r *LogReader) FollowFrom(ctx context.Context, offset int64, records chan<-
 		if err != nil {
 			continue
 		}
-		if info, statErr := f.Stat(); statErr == nil && info.Size() < offset {
+		info, statErr := f.Stat()
+		if statErr == nil && info.Size() < offset {
 			offset = 0
 			gapBeforeNext = true
 		}
@@ -482,7 +490,16 @@ func (r *LogReader) FollowFrom(ctx context.Context, offset int64, records chan<-
 			f.Close()
 			continue
 		}
-		data, readErr := io.ReadAll(io.LimitReader(f, maxLogFollowRead))
+		// Size the read to what the stat just measured as available, so this
+		// poll keeps up regardless of the configured per-app log size cap.
+		// The stat result falls back to maxLogFollowRead on a Stat error.
+		limit := int64(maxLogFollowRead)
+		if statErr == nil {
+			if avail := info.Size() - offset; avail >= 0 {
+				limit = avail + followReadHeadroom
+			}
+		}
+		data, readErr := io.ReadAll(io.LimitReader(f, limit))
 		f.Close()
 		if readErr != nil || len(data) == 0 {
 			continue

@@ -372,3 +372,33 @@ test('activity CSS keeps rows inert and gives coarse-pointer controls 44px targe
   assert.match(reducedMotion, /\.ov-activity-disclosure \.ov-activity-icon \{ transition: none; \}/);
   assert.match(reducedMotion, /\.ov-activity-audit:hover \.ov-activity-icon \{ transform: none; \}/);
 });
+
+test('the dot between activity metadata fields is hidden from assistive tech', () => {
+  // Two separate call sites render this dot: one after a grouped run's change
+  // count, one before a single event's resource type. Both are decoration - the
+  // flex gap does the separating - and a screen reader that announces them
+  // reads "middle dot" between every field on the page.
+  const runID = '0123456789abcdef';
+  const grouped = renderActivityBrief({
+    state: 'ready', updatedAt: new Date().toISOString(), events: [
+      event(2, 'deploy', 'energy', '2026-08-22T14:34:00Z', { run_id: runID }),
+      event(1, 'update_app', 'observability', '2026-08-22T14:33:00Z', { run_id: runID }),
+    ],
+  });
+  const single = renderActivityBrief({
+    state: 'ready',
+    updatedAt: new Date().toISOString(),
+    events: [event(1, 'restart', 'observability', '2026-08-22T14:42:00Z')],
+  });
+
+  for (const [label, node] of [['grouped run', grouped], ['single event', single]]) {
+    const dots = [...node.querySelectorAll('.ov-activity-separator')];
+    // Both bounds: at least one dot exists here (so an empty list cannot pass
+    // this vacuously), and every one of them is hidden.
+    assert.ok(dots.length > 0, `${label} renders no separator, so this test proves nothing`);
+    for (const dot of dots) {
+      assert.equal(dot.getAttribute('aria-hidden'), 'true',
+        `${label}: a separator is exposed to assistive tech`);
+    }
+  }
+});

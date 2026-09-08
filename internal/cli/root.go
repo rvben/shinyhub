@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/rvben/shinyhub/internal/auth"
 )
 
 // version is set by the parent binary (cmd/shinyhub) via SetVersion,
@@ -107,6 +110,59 @@ func AddCommandsTo(root *cobra.Command) {
 		return &ExitCodeError{Code: 1, Kind: KindValidation, Err: err}
 	})
 	silenceUsageOnError(root)
+	enforceUnknownSubcommandErrors(root)
+}
+
+// enforceUnknownSubcommandErrors gives every command group in the tree (a
+// command with subcommands of its own but no action of its own - "apps",
+// "env", "fleet", and every other group registered above) the same "unknown
+// command" treatment cobra reserves for the ROOT command only. cobra's
+// default subcommand-arg validator (legacyArgs) checks !cmd.HasParent()
+// before producing an error, so a bare group node with no RunE silently
+// accepted a mistyped subcommand (e.g. "apps frobnicate"), printed its own
+// help, and exited 0 - the success exit code, for what is a typo. Root
+// itself is skipped: its own legacyArgs handling already produces this error
+// and is left untouched.
+func enforceUnknownSubcommandErrors(cmd *cobra.Command) {
+	for _, sub := range cmd.Commands() {
+		if sub.HasSubCommands() && !sub.Runnable() {
+			requireKnownSubcommand(sub)
+		}
+		enforceUnknownSubcommandErrors(sub)
+	}
+}
+
+// requireKnownSubcommand turns a bare command-group node into a runnable
+// command whose Args validator rejects any positional argument that is not a
+// registered subcommand, and whose RunE reproduces the original no-args
+// behaviour (print help, exit 0). cobra only consults a command's Args
+// validator once the command is Runnable - Command.execute short-circuits to
+// printing help before ever reaching ValidateArgs otherwise - so both fields
+// have to change together.
+func requireKnownSubcommand(cmd *cobra.Command) {
+	cmd.Args = func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return nil
+		}
+		msg := fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())
+		// SuggestionsFor (unlike cobra's own internal findSuggestions, which this
+		// mirrors) never defaults SuggestionsMinimumDistance away from its Go
+		// zero value, so an unset 0 would reject every Levenshtein-based match
+		// outright and only prefix matches would ever surface.
+		if cmd.SuggestionsMinimumDistance <= 0 {
+			cmd.SuggestionsMinimumDistance = 2
+		}
+		if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
+			msg += "\n\nDid you mean this?\n"
+			for _, s := range suggestions {
+				msg += "\t" + s + "\n"
+			}
+		}
+		return errors.New(msg)
+	}
+	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cmd.Help()
+	}
 }
 
 type cliConfig struct {
@@ -168,23 +224,13 @@ func authHeader(token string) string {
 	return "Token " + token
 }
 
-// looksLikeJWT reports whether token has the structural shape of a compact
-// JWS / JWT: exactly three non-empty segments separated by ".", with a header
-// segment that begins with "eyJ". A JWT header is base64url-encoded JSON that
-// always starts with the bytes `{"`, which encode to the literal prefix "eyJ".
-// API keys (shk_…) and opaque deploy tokens (hex, UUID, base64 secrets) do not
-// have two dot separators with an "eyJ" header, so they never match.
+// looksLikeJWT defers to the server's own detector. The client and the server
+// must agree on which credentials are JWTs: the client picks the Authorization
+// scheme from this answer and the server picks its validation path from the
+// same one, so two copies that drift by a single edge case produce a 401 that
+// neither side can explain.
 func looksLikeJWT(token string) bool {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return false
-	}
-	for _, p := range parts {
-		if p == "" {
-			return false
-		}
-	}
-	return strings.HasPrefix(parts[0], "eyJ")
+	return auth.LooksLikeJWT(token)
 }
 
 // saveConfig stores one server's credentials and makes it the current host,

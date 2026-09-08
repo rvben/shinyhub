@@ -266,6 +266,30 @@ func TestEnvLs_MasksSecrets(t *testing.T) {
 	}
 }
 
+// TestEnvList_IsAliasForLs proves "env list" (the name a caller reaching for
+// the plural/full word tends to type) runs the same command as "env ls"
+// instead of hitting cobra's bare "unknown command" error.
+func TestEnvList_IsAliasForLs(t *testing.T) {
+	resetFormatState(t)
+	_, reqs, setResp := setupCLITest(t)
+	setResp(200, `{"items":[],"total":0,"limit":0,"offset":0}`)
+
+	root := testRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetArgs([]string{"env", "list", "demo"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(*reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(*reqs))
+	}
+	if (*reqs)[0].Path != "/api/apps/demo/env" {
+		t.Errorf("path = %q, want /api/apps/demo/env", (*reqs)[0].Path)
+	}
+}
+
 func TestEnvRm(t *testing.T) {
 	_, reqs, setResp := setupCLITest(t)
 	setResp(204, "")
@@ -318,6 +342,67 @@ func TestEnvCmd_ServerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid key") {
 		t.Errorf("expected error to contain server error text, got: %v", err)
+	}
+}
+
+// TestEnvSet_ShapeStableAcrossOutcomes proves "env set" emits the same JSON
+// field set whether the value changed or was already set to the same value,
+// so a script parsing the response never has to branch on status to find a
+// field that only exists on one outcome.
+func TestEnvSet_ShapeStableAcrossOutcomes(t *testing.T) {
+	resetFormatState(t)
+
+	runEnvSet := func(t *testing.T, mockResp string) map[string]any {
+		t.Helper()
+		_, _, setResp := setupCLITest(t)
+		setResp(200, mockResp)
+		root := testRoot()
+		var buf bytes.Buffer
+		root.SetOut(&buf)
+		root.SetArgs([]string{"env", "set", "demo", "FOO=bar"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &body); err != nil {
+			t.Fatalf("unmarshal output %q: %v", buf.String(), err)
+		}
+		return body
+	}
+
+	setBody := runEnvSet(t, `{"changed":true}`)
+	unchangedBody := runEnvSet(t, `{"changed":false}`)
+
+	if setBody["status"] != "set" {
+		t.Fatalf("expected status set, got %v", setBody["status"])
+	}
+	if unchangedBody["status"] != "unchanged" {
+		t.Fatalf("expected status unchanged, got %v", unchangedBody["status"])
+	}
+
+	fieldsOf := func(m map[string]any) map[string]bool {
+		out := map[string]bool{}
+		for k := range m {
+			if k == "status" {
+				continue
+			}
+			out[k] = true
+		}
+		return out
+	}
+	setFields, unchangedFields := fieldsOf(setBody), fieldsOf(unchangedBody)
+	if len(setFields) != len(unchangedFields) {
+		t.Errorf("set fields %v and unchanged fields %v have different shapes", setFields, unchangedFields)
+	}
+	for k := range setFields {
+		if !unchangedFields[k] {
+			t.Errorf("field %q is present when status is set but missing when status is unchanged", k)
+		}
+	}
+	if rr, ok := unchangedBody["restart_required"]; !ok {
+		t.Error("unchanged response is missing restart_required")
+	} else if rr != false {
+		t.Errorf("restart_required = %v on an unchanged value, want false", rr)
 	}
 }
 
