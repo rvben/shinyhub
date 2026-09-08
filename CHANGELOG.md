@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+## [0.16.0](https://github.com/rvben/shinyhub/compare/v0.15.10...v0.16.0) - 2026-09-08
+
+### Added
+
+- **bookmarks**: add `Field(baseline=...)` and keep live Python Shiny URLs
+  minimal by including only values that differ from their baselines, while
+  preserving exact selective links.
+
+- **cli**: explain deployment phases and health waits ([8a2d4a6](https://github.com/rvben/shinyhub/commit/8a2d4a6624e25b80e3671b34a65ea558ed683fc7))
+- **platform**: add trusted CI publishing and editor integrations ([015da6f](https://github.com/rvben/shinyhub/commit/015da6ff660a0fda5789c82101d0a4017b22deb0))
+- **cli**: coordinate live fleet progress with CI-friendly logs ([a38e08f](https://github.com/rvben/shinyhub/commit/a38e08ff178e49ec95f15c697b9b746cbfb8d00a))
+
+### Fixed
+
+- **bookmarks**: let URL restoration continue when a registered Python Shiny
+  input has not initialized its client value yet.
+- **fleet**: preserve the last real application timestamp and provenance when
+  an identical `fleet apply` only verifies already-converged state.
+
+- **publishing**: recover explicit downtime and fail dependency preparation early ([f730b27](https://github.com/rvben/shinyhub/commit/f730b27af25a04573e9d3ff660d991f9332d246a))
+- **cli**: respect credential app scope during preflight ([d1f4598](https://github.com/rvben/shinyhub/commit/d1f4598cb1fef753beb183e301c76785605e6b5f))
+- **proxy**: offer recovery when a Shiny reload stalls ([ee47bf2](https://github.com/rvben/shinyhub/commit/ee47bf2f97263c2c283b2e4fb2d2a65b478b63fa))
+- **ui**: preserve app return paths through sign-in ([1b77c2f](https://github.com/rvben/shinyhub/commit/1b77c2fa237a99792b580a9f5981669f9a643e1e))
+- **ui**: make support sessions discoverable with setup guidance ([fabfcfc](https://github.com/rvben/shinyhub/commit/fabfcfccf74db9248a4a5dc7b6a12cab5e8b26d5))
+- **db**: serialize deployment publication before reading state ([4a170de](https://github.com/rvben/shinyhub/commit/4a170de50f7b32891e6640c474cbe18b8bc3e121))
+
 ## [0.15.10](https://github.com/rvben/shinyhub/compare/v0.15.9...v0.15.10) - 2026-09-08
 
 ### Added
@@ -129,21 +157,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **analytics**: store privacy-clamped usage sessions correctly on PostgreSQL.
 - **serve**: warn at startup when the SIGHUP re-exec target cannot resolve ([628b3f7](https://github.com/rvben/shinyhub/commit/628b3f70870f6964fd0d7ae4c5476550e801f99b))
 - **packaging**: pass the binary's own path as argv[0] in the wheel launcher ([59941f1](https://github.com/rvben/shinyhub/commit/59941f1f870ed740a86733ff569eabf028756b5f))
-
-## Unreleased
-
-### Added
-
-- **bookmarks**: add `Field(baseline=...)` and keep live Python Shiny URLs
-  minimal by including only values that differ from their baselines, while
-  preserving exact selective links.
-
-### Fixed
-
-- **bookmarks**: let URL restoration continue when a registered Python Shiny
-  input has not initialized its client value yet.
-- **fleet**: preserve the last real application timestamp and provenance when
-  an identical `fleet apply` only verifies already-converged state.
 
 ## [0.14.0](https://github.com/rvben/shinyhub/compare/v0.13.1...v0.14.0) - 2026-08-31
 
