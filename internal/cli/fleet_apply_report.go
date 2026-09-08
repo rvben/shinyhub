@@ -214,6 +214,9 @@ func renderResultRows(out io.Writer, s styler, res []applyResult, wSlug int) {
 	for _, r := range res {
 		statusWord := s.status(string(r.status))
 		if r.status == statusFailed {
+			if isDowntimeDeferral(r) {
+				statusWord = s.yellow("blocked")
+			}
 			if k := resultFailureKind(r); k != "" {
 				statusWord += " " + s.dim("["+string(k)+"]")
 			}
@@ -436,7 +439,7 @@ func applyRecoveryGuidance(results []applyResult) (commands, notes []string, ful
 	}
 	if len(deferred) > 0 {
 		notes = append(notes, fmt.Sprintf(
-			"The working version was preserved for %s because a no-downtime handoff is unsupported for its current shape; re-run with --allow-downtime to accept a stop-first deployment.",
+			"The update was blocked for %s to preserve the working version: this deployment requires stopping the old version before starting its replacement. Other apps can still deploy; incomplete fleet convergence causes a nonzero exit code. If an interruption is acceptable, add --allow-downtime to the apply command below. Without that flag, retrying will be blocked again while downtime is required.",
 			strings.Join(deferred, ", ")))
 	}
 	if len(stale) > 0 {

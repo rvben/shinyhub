@@ -2477,7 +2477,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		case producerBarrierEntered || prestartPlan.deploymentRepairRequired || len(prestartPlan.producers) > 0:
 			unsupportedReason = "this deployment changes shared producer state and requires an explicit stop-first deploy"
 		case deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "multiplex" || targetIsolation != "multiplex":
-			unsupportedReason = "parallel generation handoff currently supports multiplex isolation only"
+			unsupportedReason = fmt.Sprintf("worker isolation is %q (target: %q); deploying without downtime currently requires multiplex isolation for both versions, so this update requires stopping the old version before starting its replacement", deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation), targetIsolation)
 		case manifest != nil:
 			// Manifest reconciliation has deliberate omitted-key reset semantics
 			// (identity/privacy/access included). V1 therefore treats every present
