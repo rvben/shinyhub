@@ -3,23 +3,29 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/fargate"
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 const (
@@ -139,8 +145,8 @@ func startInstance(t *testing.T, id string, port int, dsn, tmp, ecsEndpoint stri
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	// Auth secret is shared so both instances derive the SAME sticky-cookie key
-	// (cross-instance affinity). Dummy AWS env keeps the owner's ECS reconcile a
-	// fast, hermetic no-op (connection-refused in ms, single attempt). The admin
+	// (cross-instance affinity). Dummy AWS env sends provider operations to the
+	// hermetic ECS fixture without depending on credentials or real AWS. The admin
 	// credentials satisfy the guard that refuses to start a local-login server with
 	// no password-backed administrator; both instances share one database, so
 	// whichever boots second finds the row already there and leaves it alone.
@@ -168,22 +174,63 @@ func startInstance(t *testing.T, id string, port int, dsn, tmp, ecsEndpoint stri
 	return inst
 }
 
-// newEmptyECS exposes the one ECS operation owner startup needs in this test.
-// The HA fixture seeds an already-running off-host replica directly in the
-// database, so the provider inventory is intentionally empty; returning a
-// successful empty ListTasks response proves the fail-closed producer fence can
-// contact its authority without making this control-plane test depend on AWS.
-func newEmptyECS(t *testing.T) *httptest.Server {
+// newRunningECS reports the same live tasks as the replica rows. Recovery uses
+// provider inventory as its liveness authority: an empty successful inventory
+// would declare the seeded app absent and exercise cold wake instead of HA.
+func newRunningECS(t *testing.T, slug string, deploymentID int64, endpoints []string) *httptest.Server {
 	t.Helper()
+	arns := make([]string, len(endpoints))
+	tasks := make(map[string]map[string]any, len(endpoints))
+	for index, endpoint := range endpoints {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		arn := fmt.Sprintf("arn:aws:ecs:us-east-1:000000000000:task/shinyhub-test/replica-%d", index)
+		arns[index] = arn
+		tags := []map[string]string{
+			{"key": process.LabelSlug, "value": slug},
+			{"key": process.LabelReplicaIndex, "value": strconv.Itoa(index)},
+			{"key": process.LabelDeploymentID, "value": strconv.FormatInt(deploymentID, 10)},
+			{"key": process.LabelPort, "value": u.Port()},
+		}
+		tasks[arn] = map[string]any{
+			"taskArn": arn, "lastStatus": "RUNNING", "launchType": "FARGATE", "tags": tags,
+			"containers": []any{map[string]any{
+				"name": "app", "networkInterfaces": []any{map[string]string{"privateIpv4Address": u.Hostname()}},
+			}},
+		}
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-		if target := r.Header.Get("X-Amz-Target"); !strings.HasSuffix(target, ".ListTasks") {
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		target := r.Header.Get("X-Amz-Target")
+		switch {
+		case strings.HasSuffix(target, ".ListTasks"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"taskArns": arns})
+		case strings.HasSuffix(target, ".DescribeTasks"):
+			var request struct {
+				Tasks []string `json:"tasks"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode DescribeTasks: %v", err)
+				http.Error(w, "invalid request", http.StatusBadRequest)
+				return
+			}
+			selected := make([]map[string]any, 0, len(request.Tasks))
+			for _, arn := range request.Tasks {
+				if task, ok := tasks[arn]; ok {
+					selected = append(selected, task)
+				} else {
+					t.Errorf("DescribeTasks requested unknown task %q", arn)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"tasks": selected})
+		default:
+			// In particular, RunTask/StopTask would violate the assertion that
+			// existing off-host replicas survive owner startup and failover.
 			t.Errorf("unexpected ECS operation %q", target)
 			http.Error(w, "unexpected ECS operation", http.StatusBadRequest)
-			return
 		}
-		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
-		_, _ = w.Write([]byte(`{"taskArns":[]}`))
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -222,7 +269,7 @@ func get(t *testing.T, url string, cookie *http.Cookie) (int, []*http.Cookie, st
 	}
 	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
 	if err != nil {
-		return 0, nil, ""
+		return 0, nil, err.Error()
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -247,7 +294,7 @@ func pollStatus(t *testing.T, url string, want int, timeout time.Duration) {
 // is treated as "declared gone" by RecoverProcesses and would mark the replica
 // lost (recovery.go:301). App status MUST be 'running' so RecoverProcesses
 // (ListRunningApps) actually iterates it.
-func seedRunningFargateApp(t *testing.T, store *db.Store, slug string, endpoints []string) {
+func seedRunningFargateApp(t *testing.T, store *db.Store, slug string, endpoints []string) *db.Deployment {
 	t.Helper()
 	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "x", Role: "admin"}); err != nil {
 		t.Fatalf("create user: %v", err)
@@ -266,11 +313,37 @@ func seedRunningFargateApp(t *testing.T, store *db.Store, slug string, endpoints
 	if err != nil {
 		t.Fatalf("get app: %v", err)
 	}
+	if err := store.UpdateAppReplicas(app.ID, len(endpoints)); err != nil {
+		t.Fatalf("set app replicas: %v", err)
+	}
+	bundleDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundleDir, "app.py"), []byte("raise RuntimeError('HA fixture must adopt existing tasks, never launch replacements')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	if err := zw.AddFS(os.DirFS(bundleDir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(archive.Bytes()), int64(archive.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := bundle.DigestZipReader(zr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	dep, err := store.CreateDeployment(db.CreateDeploymentParams{
-		AppID: app.ID, Version: "v1", BundleDir: filepath.Join(t.TempDir(), "bundle"),
+		AppID: app.ID, Version: "v1", BundleDir: bundleDir,
 	})
 	if err != nil {
 		t.Fatalf("create deployment: %v", err)
+	}
+	if err := store.SetDeploymentDigest(dep.ID, digest); err != nil {
+		t.Fatalf("set deployment digest: %v", err)
 	}
 	for idx, ep := range endpoints {
 		if err := store.UpsertReplica(db.UpsertReplicaParams{
@@ -281,6 +354,7 @@ func seedRunningFargateApp(t *testing.T, store *db.Store, slug string, endpoints
 			t.Fatalf("upsert replica %d: %v", idx, err)
 		}
 	}
+	return dep
 }
 
 // stickyCookie returns the shinyhub_rep_<slug> cookie from a response's
@@ -312,8 +386,9 @@ func TestKillTheActive_StandbyTakesOver(t *testing.T) {
 	const slug = "demo-app"
 	stub0 := newStub(t, 0)
 	stub1 := newStub(t, 1)
-	ecs := newEmptyECS(t)
-	seedRunningFargateApp(t, store, slug, []string{stub0.srv.URL, stub1.srv.URL})
+	endpoints := []string{stub0.srv.URL, stub1.srv.URL}
+	dep := seedRunningFargateApp(t, store, slug, endpoints)
+	ecs := newRunningECS(t, slug, dep.ID, endpoints)
 
 	// --- boot instance A and confirm it serves (/readyz=200) ---
 	instA := startInstance(t, "a", 18090, dsn, tmp, ecs.URL)
