@@ -162,3 +162,9 @@ func (s *Store) RepairDeploymentGenerationLedger() error {
 	}
 	return nil
 }
+
+// DeleteDeploymentReplicaIdentity removes only the confirmed process incarnation.
+func (s *Store) DeleteDeploymentReplicaIdentity(appID, deploymentID int64, index, pid int) error {
+	_, err := s.db.Exec(`DELETE FROM deployment_replicas WHERE app_id = ? AND deployment_id = ? AND idx = ? AND pid = ?`, appID, deploymentID, index, pid)
+	return err
+}

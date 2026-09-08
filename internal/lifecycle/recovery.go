@@ -259,10 +259,10 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		}
 		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, defaultWorkerIsolation)
 		generationOK := true
-		if resolvedIso == "grouped" {
-			// Client bindings are process-local. After a hub restart, grouped
+		if isElasticIsolation(resolvedIso) {
+			// Client bindings are process-local. After a hub restart, elastic
 			// generations must be stopped, never adopted as fixed replicas.
-			generationOK = cleanupGroupedDeploymentGenerations(store, app)
+			generationOK = cleanupElasticDeploymentGenerations(store, mgr, app)
 		} else {
 			generationOK = reconcileDeploymentGenerationProjection(store, app)
 		}
@@ -281,7 +281,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			slog.Warn("process recovery: load active generation token", "slug", app.Slug, "err", err)
 		}
 		// Elastic-mode apps (grouped or per_session) are demand-driven: workers
-		// are ephemeral and are never persisted to the replicas table. Set up
+		// have durable native identities but no recoverable client bindings. Set up
 		// the elastic proxy pool and keep the app status as "running" so the
 		// first incoming request can trigger a fresh spawn. Skip the normal
 		// replica-adoption loop entirely.
@@ -1389,9 +1389,9 @@ func markRecoveryDown(store *db.Store, slug string) {
 	}
 }
 
-// cleanupGroupedDeploymentGenerations retains every ledger whose process
+// cleanupElasticDeploymentGenerations retains every ledger whose process
 // identity could not be safely stopped. That failure blocks fresh workers.
-func cleanupGroupedDeploymentGenerations(store *db.Store, app *db.App) bool {
+func cleanupElasticDeploymentGenerations(store *db.Store, mgr *process.Manager, app *db.App) bool {
 	rows, err := store.ListDeploymentReplicas(app.ID)
 	if err != nil {
 		return false
@@ -1402,6 +1402,13 @@ func cleanupGroupedDeploymentGenerations(store *db.Store, app *db.App) bool {
 			stopped[row.DeploymentID] = true
 		}
 		id := row.DeploymentID
+		_, nativeTier := mgr.RuntimeForTier(row.Tier).(*process.NativeRuntime)
+		localWorkerID := row.WorkerID == "" || (row.PID != nil && row.WorkerID == strconv.Itoa(*row.PID))
+		if !nativeTier || !localWorkerID || (row.Provider != "" && row.Provider != "native") {
+			slog.Error("elastic recovery: cannot confirm remote worker termination", "slug", app.Slug, "worker_id", row.WorkerID, "provider", row.Provider)
+			stopped[id] = false
+			continue
+		}
 		if !stopRecordedNativeReplica(store, app, row.PID, row.Provider, &id) {
 			stopped[id] = false
 		}

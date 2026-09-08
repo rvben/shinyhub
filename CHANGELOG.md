@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **isolation**: record native elastic worker identities before allowing app code to execute; recover grouped and per-session pools only after confirming survivor cleanup, retaining unresolved remote identities.
+
+- **docs**: describe scheduler control-plane ownership and the remaining producer/activation topology restrictions.
+
 ## [0.16.3](https://github.com/rvben/shinyhub/compare/v0.16.2...v0.16.3) - 2026-09-09
 
 ### Added

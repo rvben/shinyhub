@@ -2163,55 +2163,57 @@ func TestWorkerDownMonitor_ReapsLongDeadWorkers(t *testing.T) {
 	}
 }
 
-func TestRecoverProcesses_GroupedGenerationsAreReapedWithoutFixedReplicaAdoption(t *testing.T) {
-	for _, inherit := range []bool{false, true} {
-		t.Run(fmt.Sprintf("inherit=%t", inherit), func(t *testing.T) {
-			store := mustOpenStore(t)
-			app := mustCreateApp(t, store, "grouped-recovery")
-			mode := "grouped"
-			if inherit {
-				mode = ""
-			}
-			if _, err := store.DB().Exec("UPDATE apps SET status='running', worker_isolation=?, worker_grouped_size=4, worker_max_workers=2 WHERE id=?", mode, app.ID); err != nil {
-				t.Fatal(err)
-			}
-			var exits []<-chan error
-			for index, version := range []string{"old", "new"} {
-				bundle := t.TempDir()
-				dep, err := store.BeginDeployment(app.ID, version, bundle)
-				if err != nil {
+func TestRecoverProcesses_ElasticGenerationsAreReapedWithoutFixedReplicaAdoption(t *testing.T) {
+	for _, isolation := range []string{"grouped", "per_session"} {
+		for _, inherit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/inherit=%t", isolation, inherit), func(t *testing.T) {
+				store := mustOpenStore(t)
+				app := mustCreateApp(t, store, "grouped-recovery")
+				mode := isolation
+				if inherit {
+					mode = ""
+				}
+				if _, err := store.DB().Exec("UPDATE apps SET status='running', worker_isolation=?, worker_grouped_size=4, worker_max_workers=2 WHERE id=?", mode, app.ID); err != nil {
 					t.Fatal(err)
 				}
-				if err := store.PromoteDeployment(dep.ID); err != nil {
-					t.Fatal(err)
+				var exits []<-chan error
+				for index, version := range []string{"old", "new"} {
+					bundle := t.TempDir()
+					dep, err := store.BeginDeployment(app.ID, version, bundle)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := store.PromoteDeployment(dep.ID); err != nil {
+						t.Fatal(err)
+					}
+					pid, done := startNativeProcess(t, bundle)
+					exits = append(exits, done)
+					if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{AppID: app.ID, DeploymentID: dep.ID, Index: index, PID: &pid, Status: "running", Provider: "native"}); err != nil {
+						t.Fatal(err)
+					}
 				}
-				pid, done := startNativeProcess(t, bundle)
-				exits = append(exits, done)
-				if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{AppID: app.ID, DeploymentID: dep.ID, Index: index, PID: &pid, Status: "running", Provider: "native"}); err != nil {
-					t.Fatal(err)
+				mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+				defer mgr.StopAll()
+				lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, isolation)
+				for _, done := range exits {
+					select {
+					case <-done:
+					case <-time.After(2 * time.Second):
+						t.Fatal("grouped survivor was not stopped")
+					}
 				}
-			}
-			mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-			defer mgr.StopAll()
-			lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "grouped")
-			for _, done := range exits {
-				select {
-				case <-done:
-				case <-time.After(2 * time.Second):
-					t.Fatal("grouped survivor was not stopped")
+				rows, err := store.ListDeploymentReplicas(app.ID)
+				if err != nil || len(rows) != 0 {
+					t.Fatalf("cleanup ledger: %v %v", rows, err)
 				}
-			}
-			rows, err := store.ListDeploymentReplicas(app.ID)
-			if err != nil || len(rows) != 0 {
-				t.Fatalf("cleanup ledger: %v %v", rows, err)
-			}
-			replicas, err := store.ListReplicas(app.ID)
-			if err != nil || len(replicas) != 0 {
-				t.Fatalf("elastic workers projected as fixed replicas: %v %v", replicas, err)
-			}
-			if mgr.HasRunning(app.Slug) {
-				t.Fatal("elastic workers were adopted without their client bindings")
-			}
-		})
+				replicas, err := store.ListReplicas(app.ID)
+				if err != nil || len(replicas) != 0 {
+					t.Fatalf("elastic workers projected as fixed replicas: %v %v", replicas, err)
+				}
+				if mgr.HasRunning(app.Slug) {
+					t.Fatal("elastic workers were adopted without their client bindings")
+				}
+			})
+		}
 	}
 }

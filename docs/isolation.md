@@ -475,6 +475,14 @@ restart. Connected clients need a new worker on their next request. The
 configured pristine spare target is reconciled again during recovery, so a
 restarted host begins prebooting new spares without waiting for client demand.
 
+Local native workers wait behind a startup guard until their process identity
+is saved. Recovery verifies the recorded process against its deployment bundle
+and confirms termination before opening a fresh elastic pool. If a survivor
+cannot be identified or stopped, the app remains failed and the record is kept
+for investigation. This prevents a restart from silently forgetting native
+workers; it does not preserve browser sessions or enable clustered isolation.
+Remote worker fencing and shared session admission are still required for that.
+
 **Elastic apps skip fixed-replica booting at deploy.** For `grouped` and
 `per_session` apps, the deploy pipeline boots no fixed replicas. The app is
 marked running, then any configured warm spares are provisioned asynchronously.

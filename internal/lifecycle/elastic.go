@@ -237,27 +237,51 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		return
 	}
 
+	// Local native workers cannot execute app code until their identity is durable.
+	_, guarded := s.Manager.RuntimeForTier(tier).(*process.NativeRuntime)
+
 	// Start the worker process. slotID is the replica index so the cgroup is
 	// named app-<slug>-<slotID> and the Manager's entry is keyed by it.
 	info, err := s.Manager.Start(process.StartParams{
-		Slug:            slug,
-		AppID:           app.ID,
-		Index:           slotID,
-		Tier:            tier,
-		Dir:             dep.BundleDir,
-		Command:         plan.Command,
-		Port:            port,
-		Env:             plan.Env, // launch-coupled only (PORT, the renv policy) - per-app env added by Manager's envResolver
-		MemoryLimitMB:   memMB,
-		CPUQuotaPercent: cpuPct,
-		AppVersion:      dep.Version,
-		DeploymentID:    dep.ID,
-		ContentDigest:   dep.ContentDigest,
+		GuardUntilAcknowledged: guarded,
+		Slug:                   slug,
+		AppID:                  app.ID,
+		Index:                  slotID,
+		Tier:                   tier,
+		Dir:                    dep.BundleDir,
+		Command:                plan.Command,
+		Port:                   port,
+		Env:                    plan.Env, // launch-coupled only (PORT, the renv policy) - per-app env added by Manager's envResolver
+		MemoryLimitMB:          memMB,
+		CPUQuotaPercent:        cpuPct,
+		AppVersion:             dep.Version,
+		DeploymentID:           dep.ID,
+		ContentDigest:          dep.ContentDigest,
 	})
 	if err != nil {
 		slog.Warn("elastic spawn: start process", "slug", slug, "slotID", slotID, "err", err)
 		s.releaseReservation(slug, slotID)
 		return
+	}
+
+	if guarded {
+		if err := s.Store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+			AppID: app.ID, DeploymentID: dep.ID, Index: slotID,
+			PID: &info.PID, Port: &info.Port, Status: "starting",
+			Provider: info.Provider, Tier: tier, EndpointURL: info.EndpointURL,
+			WorkerID: info.WorkerID,
+		}); err != nil {
+			slog.Error("elastic spawn: record guarded worker", "slug", slug, "slotID", slotID, "err", err)
+			_ = s.stopWorker(slug, slotID)
+			s.releaseReservation(slug, slotID)
+			return
+		}
+		if err := s.Manager.AcknowledgeReplicaStart(slug, slotID); err != nil {
+			slog.Error("elastic spawn: acknowledge durable worker", "slug", slug, "slotID", slotID, "err", err)
+			_ = s.stopWorker(slug, slotID)
+			s.releaseReservation(slug, slotID)
+			return
+		}
 	}
 
 	transport := s.Manager.TransportForWorker(tier, info.WorkerID)
@@ -278,7 +302,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	}
 	if healthErr := hc(info.EndpointURL, healthTimeout, transport); healthErr != nil {
 		slog.Warn("elastic spawn: health check failed", "slug", slug, "slotID", slotID, "err", healthErr)
-		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
+		if stopErr := s.stopWorker(slug, slotID); stopErr != nil {
 			slog.Warn("elastic spawn: stop after health failure", "slug", slug, "slotID", slotID, "err", stopErr)
 		}
 		s.releaseReservation(slug, slotID)
@@ -288,7 +312,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	// a deploy until the lease changes hands, so checking immediately before
 	// publication keeps this worker out of the proxy after handoff.
 	if s.CanMutate != nil && !s.CanMutate() {
-		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
+		if stopErr := s.stopWorker(slug, slotID); stopErr != nil {
 			slog.Warn("elastic spawn: stop after ownership loss", "slug", slug, "slotID", slotID, "err", stopErr)
 		}
 		s.releaseReservation(slug, slotID)
@@ -310,7 +334,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		}
 	}
 	if s.CanMutate != nil && !s.CanMutate() {
-		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
+		if stopErr := s.stopWorker(slug, slotID); stopErr != nil {
 			slog.Warn("elastic spawn: stop before registration after ownership loss", "slug", slug, "slotID", slotID, "err", stopErr)
 		}
 		s.releaseReservation(slug, slotID)
@@ -328,7 +352,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	}
 	if regErr != nil {
 		slog.Warn("elastic spawn: proxy register failed", "slug", slug, "slotID", slotID, "err", regErr)
-		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
+		if stopErr := s.stopWorker(slug, slotID); stopErr != nil {
 			slog.Warn("elastic spawn: stop after register failure", "slug", slug, "slotID", slotID, "err", stopErr)
 		}
 		// The slot is still in workerBooting state; release it so capacity
@@ -338,7 +362,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	}
 	if s.CanMutate != nil && !s.CanMutate() {
 		s.Proxy.DeregisterElasticWorker(slug, slotID)
-		if stopErr := s.Manager.StopReplica(slug, slotID); stopErr != nil {
+		if stopErr := s.stopWorker(slug, slotID); stopErr != nil {
 			slog.Warn("elastic spawn: stop after registration ownership loss", "slug", slug, "slotID", slotID, "err", stopErr)
 		}
 		return
@@ -616,7 +640,7 @@ func (s *ElasticSpawner) Terminate(slug string, slotID int) {
 	// This prevents the timer goroutine from lingering after an early exit.
 	// A missing entry (already fired or never armed) is a no-op.
 	s.CancelLifetime(slug, slotID)
-	if err := s.Manager.StopReplica(slug, slotID); err != nil {
+	if err := s.stopWorker(slug, slotID); err != nil {
 		slog.Debug("elastic terminate: stop replica (may already be stopped)",
 			"slug", slug, "slotID", slotID, "err", err)
 	}
@@ -720,4 +744,20 @@ func waitElasticHealthy(endpointURL, readyPath string, readyStatus int, timeout 
 		return fmt.Errorf("elastic worker at %s did not become healthy within %s (last readiness status %d)", healthURL, timeout, lastStatus)
 	}
 	return fmt.Errorf("elastic worker at %s did not become healthy within %s", healthURL, timeout)
+}
+
+// stopWorker retains the durable identity until the runtime confirms exit.
+// Matching PID and deployment prevents delayed cleanup deleting a replacement.
+func (s *ElasticSpawner) stopWorker(slug string, slotID int) error {
+	info, ok := s.Manager.GetReplica(slug, slotID)
+	if !ok {
+		return process.ErrReplicaNotFound
+	}
+	if _, native := s.Manager.RuntimeForTier(info.Tier).(*process.NativeRuntime); !native {
+		return s.Manager.StopReplica(slug, slotID)
+	}
+	if err := s.Manager.StopReplicaConfirmed(slug, slotID); err != nil {
+		return err
+	}
+	return s.Store.DeleteDeploymentReplicaIdentity(info.AppID, info.DeploymentID, slotID, info.PID)
 }
