@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.9](https://github.com/rvben/shinyhub/compare/v0.15.8...v0.15.9) - 2026-09-08
+
+### Added
+
+- **deploy**: support parallel handoff for code updates to grouped apps on a single server's default native tier. A replacement worker passes readiness before new clients reach it, while existing client bindings and WebSockets keep using the old version. Unchanged manifests are supported when their settings match the live app; configuration changes and unsupported deployment shapes still require explicit downtime permission.
+- **deploy**: retain old grouped workers through reconnect grace, replenish warm spares after publication, and recover recorded worker identities safely after a server restart. The configured drain timeout remains the hard limit for old sessions.
+
+### Fixed
+
+- **fleet**: show downtime-required deployments as blocked, explain the isolation limitation, and clarify that the working version is preserved while other fleet resources can still converge.
+- **lifecycle**: fence generation cleanup and delayed lifetime callbacks against replacement workers when slots are reused.
+
 ## [0.15.8](https://github.com/rvben/shinyhub/compare/v0.15.7...v0.15.8) - 2026-09-08
 
 ### Fixed
