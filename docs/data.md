@@ -50,7 +50,9 @@ are kept off the public surface even when the app itself is public.
 ## Quota
 
 `storage.app_quota_mb` caps the combined on-disk footprint of the app's deploy
-bundles plus its data dir. The check runs on every `PUT` and is
+bundles (including retained versions and their runtime environments) plus its
+data dir. Allow headroom for retained versions and the next deployment. The
+check runs on every deployment upload and data `PUT` and is
 overwrite-aware: replacing a 100 MB file with a 50 MB one always succeeds. Set
 it to `0` to disable.
 

@@ -552,6 +552,8 @@ func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o apply
 			// than a command, for the same reason the recovery commands never
 			// pre-fill the flag that drops live sessions.
 			switch {
+			case isDiskQuotaError(r.err):
+				// The quota error already carries the operator recovery step.
 			case isDowntimeDeferral(r):
 				fmt.Fprintf(out, "    %s\n", s.dim("working version still serving; re-run with --allow-downtime to accept a stop-first deployment"))
 			case len(r.scheduleRefreshes) > 0:

@@ -534,7 +534,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// attributed to the deploy. A post-deploy failure (config patch, deploy-triggered run)
 		// uses fail directly and must NOT inherit a deploy attempt's kind.
 		res.deployFailed = true
-		if res.status == statusFailed {
+		if res.status == statusFailed && !isDiskQuotaError(err) {
 			if tail, lerr := fetchLogTail(cfg, d.Slug, logTailLines); lerr == nil {
 				res.logTail = tail
 			}

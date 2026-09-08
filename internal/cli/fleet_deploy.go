@@ -151,6 +151,9 @@ func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundl
 		}
 	}
 	if resp.StatusCode >= 300 {
+		if err := parseDiskQuotaError("deploy "+slug, resp.StatusCode, rb); err != nil {
+			return "", false, nil, failureKindFromBody(resp.StatusCode, rb), err
+		}
 		// A refused no-downtime handoff preserves the working version and races
 		// nothing, so it is a precondition the operator clears with
 		// --allow-downtime, not a state change to re-plan. It is classified

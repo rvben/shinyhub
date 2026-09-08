@@ -51,6 +51,9 @@ func loginFailedError(resp *http.Response) error {
 // retain the server's response because `connect` cannot replace them. All other
 // failures report the operation, status, and server error envelope.
 func httpError(token, op string, resp *http.Response, body []byte) error {
+	if err := parseDiskQuotaError(op, resp.StatusCode, body); err != nil {
+		return err
+	}
 	if resp.StatusCode == http.StatusUnauthorized && looksLikeJWT(token) {
 		return &httpStatusError{
 			Status: resp.StatusCode,
