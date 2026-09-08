@@ -65,6 +65,9 @@ const (
 // "?param=..." pragma suffix. It returns ok=false for in-memory databases,
 // which cannot be backed up.
 func dbFilePath(dsn string) (path string, ok bool) {
+	if db.IsPostgresDSN(dsn) {
+		return "", false
+	}
 	if strings.Contains(dsn, ":memory:") || strings.Contains(dsn, "mode=memory") {
 		return "", false
 	}

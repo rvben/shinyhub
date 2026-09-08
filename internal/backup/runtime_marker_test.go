@@ -181,14 +181,23 @@ func TestRuntimeMarkerWithdrawalLeavesASuccessorsMarkerAlone(t *testing.T) {
 // publish and no marker path to read. Publishing must stay a no-op rather than
 // an error that would abort startup.
 func TestRuntimeMarkerIsAbsentForNonFileDatabases(t *testing.T) {
-	cfg := mkCfg(t)
-	cfg.Database.DSN = ":memory:"
-	if _, ok := backup.RuntimeMarkerPath(cfg); ok {
-		t.Error("an in-memory database reported a marker path")
+	for _, dsn := range []string{
+		":memory:",
+		"file:shared?mode=memory&cache=shared",
+		"postgres://db.example.test/shinyhub?sslmode=require",
+		"postgresql://db.example.test/shinyhub",
+	} {
+		t.Run(dsn, func(t *testing.T) {
+			cfg := mkCfg(t)
+			cfg.Database.DSN = dsn
+			if path, ok := backup.RuntimeMarkerPath(cfg); ok {
+				t.Errorf("non-file database reported marker path %q", path)
+			}
+			clear, err := backup.PublishRuntimeMarker(cfg)
+			if err != nil {
+				t.Fatalf("PublishRuntimeMarker on a non-file database: %v", err)
+			}
+			clear()
+		})
 	}
-	clear, err := backup.PublishRuntimeMarker(cfg)
-	if err != nil {
-		t.Fatalf("PublishRuntimeMarker on a non-file database: %v", err)
-	}
-	clear()
 }

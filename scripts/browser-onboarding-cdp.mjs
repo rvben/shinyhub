@@ -318,14 +318,14 @@ async function verifyLiveLogs(client, target, expectedLine) {
     pauseDisabled: document.querySelector('#logs-pause')?.disabled,
   }))()`);
   if (initial.sourceOptions[0] !== 'All current replicas (2 live, 2 total)' ||
-      !initial.sourceOptions.some(option => option.startsWith('Replica #0 — Running')) ||
-      !initial.sourceOptions.some(option => option.startsWith('Replica #1 — Running')) ||
+      !initial.sourceOptions.some(option => option.startsWith('Replica #0: Running')) ||
+      !initial.sourceOptions.some(option => option.startsWith('Replica #1: Running')) ||
       initial.outputLabel !== 'Application log output' || initial.pauseDisabled !== false) {
     throw new Error(`two-replica logs workspace contract was incomplete: ${JSON.stringify(initial)}`);
   }
 
   await verifyMobileLogsLayout(client, screenshotPath);
-  await selectLogSource(client, 'Replica #1 — Running');
+  await selectLogSource(client, 'Replica #1: Running');
   await waitFor(
     client,
     `new URL(location.href).searchParams.has('log_source') && document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
@@ -339,7 +339,7 @@ async function verifyLiveLogs(client, target, expectedLine) {
   await waitFor(client, `document.body.dataset.auth === 'in'`, 'the restored authenticated session');
   await waitFor(
     client,
-    `document.querySelector('#logs-source')?.selectedOptions[0]?.textContent.trim().startsWith('Replica #1 — Running') && document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
+    `document.querySelector('#logs-source')?.selectedOptions[0]?.textContent.trim().startsWith('Replica #1: Running') && document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
     'Replica #1 selection to survive refresh',
     30_000,
   );
@@ -360,7 +360,7 @@ async function verifyReconnectedLogs(client, target, expectedLine) {
   await fs.writeFile(`${screenshotPath}.ready`, 'ready\n');
   await waitFor(
     client,
-    `document.querySelector('#logs-source')?.selectedOptions[0]?.textContent.trim().startsWith('Replica #1 — Running') && document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
+    `document.querySelector('#logs-source')?.selectedOptions[0]?.textContent.trim().startsWith('Replica #1: Running') && document.querySelector('.logs-status-text')?.textContent.trim() === 'Live · 1 connected source'`,
     'Replica #1 to reconnect through the restarted control plane',
     45_000,
   );
@@ -386,7 +386,7 @@ async function verifyHistoricalLogs(client, target, expectedLine) {
   try {
     await waitFor(
       client,
-      `document.querySelector('#logs-source')?.selectedOptions[0]?.textContent.trim().startsWith('Replica #1 — Stopped')`,
+      `document.querySelector('#logs-source')?.selectedOptions[0]?.textContent.trim().startsWith('Replica #1: Stopped')`,
       'the selected Replica #1 run to become retained and stopped',
       30_000,
     );
@@ -419,8 +419,8 @@ async function verifyHistoricalLogs(client, target, expectedLine) {
     pauseDisabled: document.querySelector('#logs-pause')?.disabled,
   }))()`);
   if (!history.hasPersistentSelection || history.sourceOptions[0] !== 'All current replicas (1 live, 2 total)' ||
-      !history.sourceOptions.some(option => option.startsWith('Replica #0 — Running')) ||
-      !history.sourceOptions.some(option => option.startsWith('Replica #1 —') && option.includes('Stopped')) ||
+      !history.sourceOptions.some(option => option.startsWith('Replica #0: Running')) ||
+      !history.sourceOptions.some(option => option.startsWith('Replica #1:') && option.includes('Stopped')) ||
       !history.historyGroups.includes('Current runs') || history.pauseDisabled !== true) {
     throw new Error(`scale-down history contract was incomplete: ${JSON.stringify(history)}`);
   }
