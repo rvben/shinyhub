@@ -300,6 +300,7 @@ type replicaBackend struct {
 	// client identities as a spare.
 	spare        bool
 	everAssigned bool
+	handoffReady bool // readiness-tested deploy worker; arm lifetime on first assignment
 }
 
 // backendPool holds a fixed-size slice of replicas for one slug.
@@ -406,10 +407,13 @@ type (
 
 // Proxy routes /app/:slug/* to the registered backend pool for that slug.
 type Proxy struct {
-	mu          poolMutex
-	pools       map[string]*backendPool
-	poolEpoch   map[string]uint64 // incremented whenever Deregister invalidates a pool generation
-	wakeTrigger func(slug string)
+	// cancelElasticLifetime only cancels a timer; called under mu and must not
+	// call back into the proxy or wait for an app operation.
+	cancelElasticLifetime func(string, int)
+	mu                    poolMutex
+	pools                 map[string]*backendPool
+	poolEpoch             map[string]uint64 // incremented whenever Deregister invalidates a pool generation
+	wakeTrigger           func(slug string)
 	// appStatusFn reports an app's lifecycle status and (for a crashed app) its
 	// failure reason. When set, a no-backend miss for a "crashed" or "stopped"
 	// app serves a clear status page instead of the endlessly-retrying loading
@@ -564,7 +568,7 @@ type Proxy struct {
 	resume func(slug string, slotID int)
 	// warmSpareConsumed notifies lifecycle when a pristine running spare is
 	// assigned without a resume, so its max-session-lifetime timer starts then.
-	warmSpareConsumed func(slug string, slotID int)
+	warmSpareConsumed func(slug string, slotID int, epoch uint64)
 
 	// memGuard is the optional host-memory admission floor for elastic pools:
 	// while the host reports less available memory than the floor, NO new
@@ -651,6 +655,15 @@ func (p *Proxy) SetTerminateFunc(fn func(slug string, slotID int)) {
 	p.terminate = fn
 }
 
+// SetCancelElasticLifetimeFunc wires synchronous invalidation of lifetime
+// callbacks when generation retirement removes an elastic worker's route.
+// The callback must not call back into the proxy or acquire an app operation.
+func (p *Proxy) SetCancelElasticLifetimeFunc(fn func(string, int)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cancelElasticLifetime = fn
+}
+
 // SetSpawnFunc registers the callback invoked (via a goroutine) when the
 // elastic routing decides to allocate a new worker slot (decisionAllocate).
 // The callback is responsible for starting the worker process and subsequently
@@ -672,7 +685,7 @@ func (p *Proxy) SetResumeFunc(fn func(slug string, slotID int)) {
 
 // SetWarmSpareConsumedFunc registers the callback invoked once when a running
 // (non-frozen fallback) warm spare receives its first client.
-func (p *Proxy) SetWarmSpareConsumedFunc(fn func(slug string, slotID int)) {
+func (p *Proxy) SetWarmSpareConsumedFunc(fn func(slug string, slotID int, epoch uint64)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.warmSpareConsumed = fn
@@ -1009,6 +1022,19 @@ func (p *Proxy) stickyCookieValue(slug string, index int, deploymentID int64) st
 // following top-level reload is therefore routed to the active generation and
 // receives a fresh signed affinity cookie.
 func (p *Proxy) ClearGenerationAffinity(w http.ResponseWriter, r *http.Request, slug string) {
+	// Elastic affinity is server-side and keyed by the client cookie. Give the
+	// reload a new client identity; open requests keep their original binding.
+	p.mu.RLock()
+	pool := p.pools[slug]
+	elastic := pool != nil && poolIsElastic(pool)
+	p.mu.RUnlock()
+	if elastic {
+		http.SetCookie(w, &http.Cookie{
+			Name: clientCookiePrefix + slug, Value: "", Path: "/app/" + slug + "/",
+			HttpOnly: true, SameSite: http.SameSiteLaxMode,
+			Secure: proxytrust.Scheme(r, p.trustedProxyNets()) == "https", MaxAge: -1,
+		})
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookiePrefix + slug,
 		Value:    "",
@@ -1868,6 +1894,9 @@ func (p *Proxy) RegisterGenerationReplica(slug string, deploymentID int64, index
 	if !ok || index < 0 || index >= len(slots) {
 		return fmt.Errorf("register generation %s#%d: generation not staged or index out of range", slug, index)
 	}
+	if pool.mode == config.IsolationGrouped && index != len(slots)-1 {
+		return fmt.Errorf("register grouped generation %s#%d: slot was not reserved for this candidate", slug, index)
+	}
 	ownerAppID := pool.appID.Load()
 	if len(expectedAppID) > 1 {
 		return fmt.Errorf("register generation %s#%d: multiple expected app IDs", slug, index)
@@ -1898,6 +1927,14 @@ func (p *Proxy) ActivateGeneration(slug string, deploymentID int64) (int64, erro
 	if !ok {
 		p.mu.Unlock()
 		return 0, fmt.Errorf("activate %s: deployment %d is not staged", slug, deploymentID)
+	}
+	if pool.mode == config.IsolationGrouped {
+		previous, err := p.activateGroupedGenerationLocked(pool, deploymentID, slots)
+		p.mu.Unlock()
+		if err == nil {
+			p.clearWSReady(slug)
+		}
+		return previous, err
 	}
 	for index, rep := range slots {
 		if rep == nil {
@@ -1947,6 +1984,7 @@ func (p *Proxy) RetireGeneration(slug string, deploymentID int64) bool {
 	if _, ok := pool.drainingGenerations[deploymentID]; !ok {
 		return false
 	}
+	p.removeGroupedGenerationLocked(slug, pool, deploymentID)
 	delete(pool.drainingGenerations, deploymentID)
 	delete(pool.generationTokens, deploymentID)
 	return true
@@ -1968,10 +2006,11 @@ func (p *Proxy) TryRetireGeneration(slug string, deploymentID int64) bool {
 		return false
 	}
 	for _, replica := range replicas {
-		if replica != nil && replica.activeConns.Load() > 0 {
+		if replica != nil && (replica.activeConns.Load() > 0 || (pool.mode == config.IsolationGrouped && replica.assignedClients > 0)) {
 			return false
 		}
 	}
+	p.removeGroupedGenerationLocked(slug, pool, deploymentID)
 	delete(pool.drainingGenerations, deploymentID)
 	delete(pool.generationTokens, deploymentID)
 	return true
@@ -2041,6 +2080,35 @@ func (p *Proxy) RevertGeneration(slug string, failedDeploymentID, previousDeploy
 	previous, ok := pool.drainingGenerations[previousDeploymentID]
 	if !ok {
 		return fmt.Errorf("revert %s: previous deployment %d is not draining", slug, previousDeploymentID)
+	}
+	if pool.mode == config.IsolationGrouped {
+		// Move only the failed generation out of routing. Its unique slots
+		// remain reserved, and old client bindings continue to name old slots.
+		failed := make([]*replicaBackend, pool.nextSlotID)
+		for slot, worker := range pool.workers {
+			if worker.deploymentID == failedDeploymentID {
+				failed[slot] = worker
+				delete(pool.workers, slot)
+				for cid, cs := range p.clients[slug] {
+					if cs.slotID == slot {
+						if cs.releaseTimer != nil {
+							cs.releaseTimer.Stop()
+						}
+						delete(p.clients[slug], cid)
+					}
+				}
+			}
+		}
+		for _, worker := range previous {
+			worker.draining.Store(false)
+		}
+		delete(pool.drainingGenerations, previousDeploymentID)
+		if pool.candidates == nil {
+			pool.candidates = make(map[int64][]*replicaBackend)
+		}
+		pool.candidates[failedDeploymentID] = failed
+		pool.activeDeploymentID = previousDeploymentID
+		return nil
 	}
 	for _, rep := range previous {
 		if rep != nil {
@@ -2127,7 +2195,7 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 	// cookie namespaces so a deployer-controlled app cannot set the platform's
 	// session/sticky/elastic-client-id cookies in a visitor's browser, then
 	// (when enabled) add the status overlay to HTML page loads.
-	rp.ModifyResponse = p.modifyResponseFor(slugCopy)
+	rp.ModifyResponse = p.modifyResponseFor(slugCopy, deploymentID)
 	rp.Director = func(req *http.Request) {
 		scheme := "http"
 		if req.TLS != nil {
@@ -2159,6 +2227,13 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 			req.URL.RawPath = singleJoiningSlash(targetPath, rawRelative)
 		}
 		req.Host = target.Host
+	}
+
+	if pool.activeDeploymentID == 0 {
+		pool.activeDeploymentID = deploymentID
+	}
+	if slotID >= pool.nextSlotID {
+		pool.nextSlotID = slotID + 1
 	}
 
 	// Update the existing booting placeholder in-place to preserve the
@@ -2518,6 +2593,16 @@ func (p *Proxy) PoolSessionSnapshot() map[string]PoolSessionStat {
 	out := make(map[string]PoolSessionStat, len(p.pools))
 	for slug, pool := range p.pools {
 		var sessions, admitting int
+		if poolIsElastic(pool) {
+			for _, worker := range pool.workers {
+				sessions += int(worker.activeConns.Load())
+				if !worker.draining.Load() && worker.status == workerRunning {
+					admitting++
+				}
+			}
+			out[slug] = PoolSessionStat{Sessions: sessions, Cap: perWorkerCap(pool.mode, pool.groupedSize), Replicas: admitting}
+			continue
+		}
 		for _, rep := range pool.replicas {
 			if rep == nil {
 				continue
@@ -2848,7 +2933,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		d := decide(pool.workerStates(), pool.mode, pool.groupedSize, pool.maxWorkers, pinnedSlot)
+		d := decide(pool.workerStatesForClient(pinnedSlot), pool.mode, pool.groupedSize, pool.maxWorkers, pinnedSlot)
 
 		switch d.kind {
 		case decisionRoute:
@@ -2915,7 +3000,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				wkr2 := pool2.workers[d.slotID]
-				if wkr2 == nil || wkr2.status != workerRunning {
+				if wkr2 == nil || wkr2.status != workerRunning || wkr2.draining.Load() {
 					p.mu.Unlock()
 					p.serveMissPage(rec, r, slug, nil)
 					return
@@ -2932,12 +3017,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					cs = &clientSlot{slotID: d.slotID}
 					p.clients[slug][cid] = cs
 					wkr.assignedClients++
-					wasSpare := wkr.spare && !wkr.everAssigned
+					wasSpare := (wkr.spare || wkr.handoffReady) && !wkr.everAssigned
+					wkr.handoffReady = false
 					wkr.everAssigned = true
 					wkr.spare = false
 					if wasSpare {
 						if warmSpareConsumedFn != nil {
-							go warmSpareConsumedFn(slug, d.slotID)
+							go warmSpareConsumedFn(slug, d.slotID, p.poolEpoch[slug])
 						}
 						go p.ReconcileElasticWarmSpares(slug)
 					}

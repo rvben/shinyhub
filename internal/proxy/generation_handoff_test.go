@@ -2,6 +2,7 @@ package proxy_test
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
 
@@ -74,99 +76,156 @@ func TestGenerationHandoffPreservesOpenRequestAndRepinsNewRequests(t *testing.T)
 }
 
 func TestGenerationHandoffKeepsOpenWebSocketWhileNewWorkUsesActive(t *testing.T) {
-	backend := func(version string) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-				_, _ = io.WriteString(w, version)
-				return
+	for _, grouped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("grouped=%t", grouped), func(t *testing.T) {
+			backend := func(version string) *httptest.Server {
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+						_, _ = io.WriteString(w, version)
+						return
+					}
+					conn, buf, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						return
+					}
+					defer conn.Close()
+					_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+					_ = buf.Flush()
+					for {
+						line, err := buf.ReadString('\n')
+						if err != nil {
+							return
+						}
+						_, _ = buf.WriteString(version + ":" + line)
+						_ = buf.Flush()
+					}
+				}))
 			}
-			conn, buf, err := w.(http.Hijacker).Hijack()
-			if err != nil {
-				return
-			}
-			defer conn.Close()
-			_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
-			_ = buf.Flush()
-			for {
-				line, err := buf.ReadString('\n')
-				if err != nil {
-					return
+			v1, v2 := backend("v1"), backend("v2")
+			defer v1.Close()
+			defer v2.Close()
+			p := proxy.New()
+			p.SetPoolSize("dashboard", 1)
+			if grouped {
+				p.SetPoolMode("dashboard", config.IsolationGrouped, 4, 2)
+				if err := p.RegisterElasticWorker("dashboard", 0, v1.URL, nil, 101); err != nil {
+					t.Fatal(err)
 				}
-				_, _ = buf.WriteString(version + ":" + line)
-				_ = buf.Flush()
+			} else if err := p.RegisterReplica("dashboard", 0, v1.URL, nil, 101); err != nil {
+				t.Fatal(err)
 			}
-		}))
-	}
-	v1, v2 := backend("v1"), backend("v2")
-	defer v1.Close()
-	defer v2.Close()
-	p := proxy.New()
-	p.SetPoolSize("dashboard", 1)
-	if err := p.RegisterReplica("dashboard", 0, v1.URL, nil, 101); err != nil {
-		t.Fatal(err)
-	}
-	oldCookie := generationRequest(t, p, nil, "v1")
-	front := httptest.NewServer(p)
-	defer front.Close()
+			oldCookies := generationRequestCookies(t, p, nil, "v1")
+			front := httptest.NewServer(p)
+			defer front.Close()
 
-	openWS := func(cookie *http.Cookie) (net.Conn, *bufio.Reader) {
-		conn, err := net.DialTimeout("tcp", front.Listener.Addr().String(), 2*time.Second)
-		if err != nil {
-			t.Fatalf("dial proxy: %v", err)
-		}
-		header := ""
-		if cookie != nil {
-			header = "Cookie: " + cookie.String() + "\r\n"
-		}
-		_, _ = io.WriteString(conn, "GET /app/dashboard/ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"+header+"\r\n")
-		reader := bufio.NewReader(conn)
-		status, err := reader.ReadString('\n')
-		if err != nil || !strings.Contains(status, "101") {
-			t.Fatalf("websocket status = %q, err=%v", status, err)
-		}
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				t.Fatalf("read websocket headers: %v", err)
+			openWS := func(cookies []*http.Cookie) (net.Conn, *bufio.Reader) {
+				conn, err := net.DialTimeout("tcp", front.Listener.Addr().String(), 2*time.Second)
+				if err != nil {
+					t.Fatalf("dial proxy: %v", err)
+				}
+				if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				header := ""
+				if len(cookies) > 0 {
+					values := make([]string, 0, len(cookies))
+					for _, cookie := range cookies {
+						values = append(values, cookie.Name+"="+cookie.Value)
+					}
+					header = "Cookie: " + strings.Join(values, "; ") + "\r\n"
+				}
+				_, _ = io.WriteString(conn, "GET /app/dashboard/ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"+header+"\r\n")
+				reader := bufio.NewReader(conn)
+				status, err := reader.ReadString('\n')
+				if err != nil || !strings.Contains(status, "101") {
+					t.Fatalf("websocket status = %q, err=%v", status, err)
+				}
+				for {
+					line, err := reader.ReadString('\n')
+					if err != nil {
+						t.Fatalf("read websocket headers: %v", err)
+					}
+					if line == "\r\n" {
+						break
+					}
+				}
+				return conn, reader
 			}
-			if line == "\r\n" {
-				break
+			oldConn, oldReader := openWS(oldCookies)
+			defer oldConn.Close()
+			slot := 0
+			if grouped {
+				var err error
+				slot, err = p.StageGroupedGeneration("dashboard", 202)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err := p.StageGeneration("dashboard", 202, 1); err != nil {
+				t.Fatal(err)
 			}
-		}
-		return conn, reader
-	}
-	oldConn, oldReader := openWS(oldCookie)
-	defer oldConn.Close()
-	if err := p.StageGeneration("dashboard", 202, 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.RegisterGenerationReplica("dashboard", 202, 0, v2.URL, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := p.ActivateGeneration("dashboard", 202); err != nil {
-		t.Fatal(err)
-	}
-	_, _ = io.WriteString(oldConn, "still-here\n")
-	if got, err := oldReader.ReadString('\n'); err != nil || got != "v1:still-here\n" {
-		t.Fatalf("old websocket after cutover = %q, err=%v", got, err)
-	}
-	if p.TryRetireGeneration("dashboard", 101) {
-		t.Fatal("retired generation with an open websocket")
-	}
-	generationRequest(t, p, oldCookie, "v2")
-	newConn, newReader := openWS(nil)
-	_, _ = io.WriteString(newConn, "new\n")
-	if got, err := newReader.ReadString('\n'); err != nil || got != "v2:new\n" {
-		t.Fatalf("new websocket after cutover = %q, err=%v", got, err)
-	}
-	_ = newConn.Close()
-	_ = oldConn.Close()
-	deadline := time.Now().Add(2 * time.Second)
-	for !p.TryRetireGeneration("dashboard", 101) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if p.IsGenerationDraining("dashboard", 101) {
-		t.Fatal("old generation did not retire after its websocket closed")
+			if err := p.RegisterGenerationReplica("dashboard", 202, slot, v2.URL, nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := p.ActivateGeneration("dashboard", 202); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(oldConn, "still-here\n")
+			if got, err := oldReader.ReadString('\n'); err != nil || got != "v1:still-here\n" {
+				t.Fatalf("old websocket after cutover = %q, err=%v", got, err)
+			}
+			if p.TryRetireGeneration("dashboard", 101) {
+				t.Fatal("retired generation with an open websocket")
+			}
+			oldClientVersion := "v2"
+			if grouped {
+				oldClientVersion = "v1"
+			}
+			generationRequestCookies(t, p, oldCookies, oldClientVersion)
+			// A reconnect uses the full browser cookie set. Grouped affinity is
+			// the client-id cookie, not the informational replica cookie.
+			_ = oldConn.Close()
+			reconnected, reconnectedReader := openWS(oldCookies)
+			defer reconnected.Close()
+			_, _ = io.WriteString(reconnected, "reconnected\n")
+			if got, err := reconnectedReader.ReadString('\n'); err != nil || got != oldClientVersion+":reconnected\n" {
+				t.Fatalf("reconnected websocket = %q, err=%v", got, err)
+			}
+			generationRequestCookies(t, p, nil, "v2")
+			newConn, newReader := openWS(nil)
+			_, _ = io.WriteString(newConn, "new\n")
+			if got, err := newReader.ReadString('\n'); err != nil || got != "v2:new\n" {
+				t.Fatalf("new websocket after cutover = %q, err=%v", got, err)
+			}
+			_ = newConn.Close()
+			_ = reconnected.Close()
+			// Wait until reverse-proxy accounting observes the socket closes,
+			// then confirm grouped bindings still protect the reconnect window.
+			closedDeadline := time.Now().Add(2 * time.Second)
+			for {
+				sessions, _ := p.GenerationDrainingSessions("dashboard", 101)
+				if sessions == 0 {
+					break
+				}
+				if time.Now().After(closedDeadline) {
+					t.Fatal("closed websocket retained an active connection")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if grouped && p.TryRetireGeneration("dashboard", 101) {
+				t.Fatal("retired grouped clients before their reconnect grace expired")
+			}
+			// Exercise the real 15-second client grace timer. No manual worker
+			// deregistration: idle retirement must follow natural binding expiry.
+			deadline := time.Now().Add(20 * time.Second)
+			for !p.TryRetireGeneration("dashboard", 101) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if p.IsGenerationDraining("dashboard", 101) {
+				t.Fatal("old generation did not retire after its client grace expired")
+			}
+			generationRequestCookies(t, p, oldCookies, "v2")
+
+		})
 	}
 }
 
@@ -229,8 +288,22 @@ func TestGenerationRetirementWaitsForActiveRequest(t *testing.T) {
 
 func generationRequest(t *testing.T, p *proxy.Proxy, cookie *http.Cookie, want string) *http.Cookie {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/app/dashboard/", nil)
+	var cookies []*http.Cookie
 	if cookie != nil {
+		cookies = append(cookies, cookie)
+	}
+	for _, c := range generationRequestCookies(t, p, cookies, want) {
+		if c.Name == "shinyhub_rep_dashboard" {
+			return c
+		}
+	}
+	return cookie
+}
+
+func generationRequestCookies(t *testing.T, p *proxy.Proxy, cookies []*http.Cookie, want string) []*http.Cookie {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/app/dashboard/", nil)
+	for _, cookie := range cookies {
 		req.AddCookie(cookie)
 	}
 	rec := httptest.NewRecorder()
@@ -244,10 +317,5 @@ func generationRequest(t *testing.T, p *proxy.Proxy, cookie *http.Cookie, want s
 	if res.StatusCode != http.StatusOK || string(body) != want {
 		t.Fatalf("response = %d %q, want 200 %q", res.StatusCode, body, want)
 	}
-	for _, c := range res.Cookies() {
-		if c.Name == "shinyhub_rep_dashboard" {
-			return c
-		}
-	}
-	return cookie
+	return res.Cookies()
 }

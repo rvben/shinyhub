@@ -484,6 +484,8 @@ type Params struct {
 	// GenerationScoped stages a complete fixed-replica generation beside the
 	// active pool. It is never visible until the caller explicitly activates it.
 	GenerationScoped bool
+	// GroupedHandoff stages one healthy worker in the existing monotonic slot space.
+	GroupedHandoff bool
 	// Preparation selects how the deploy-time preparation phase behaves. The
 	// zero value (PrepareRequired) is normal promotion. Callers bringing an
 	// already-promoted bundle back up set an activation mode so recovery neither
@@ -1112,7 +1114,14 @@ func Run(p Params) (*PoolResult, error) {
 	}
 
 	p.Proxy.SetPoolAppID(p.Slug, p.AppID)
-	if p.GenerationScoped {
+	if p.GroupedHandoff {
+		slot, err := p.Proxy.StageGroupedGeneration(p.Slug, p.DeploymentID)
+		if err != nil {
+			return nil, err
+		}
+		asn = []process.TierAssignment{{Index: slot, Tier: p.effectiveDefaultTier()}}
+		total = 1
+	} else if p.GenerationScoped {
 		if err := p.Proxy.StageGeneration(p.Slug, p.DeploymentID, total); err != nil {
 			return nil, err
 		}
@@ -1137,7 +1146,7 @@ func Run(p Params) (*PoolResult, error) {
 	// preparation phase still runs here, because the deploy is the only moment
 	// that happens exactly once, before any worker can serve a request, and that
 	// can still fail the deploy.
-	if resolvedMode == config.IsolationGrouped || resolvedMode == config.IsolationPerSession {
+	if !p.GroupedHandoff && (resolvedMode == config.IsolationGrouped || resolvedMode == config.IsolationPerSession) {
 		res, err := prepareElasticPool(p, hostDeps, resolvedMode)
 		if err == nil {
 			p.Proxy.ReconcileElasticWarmSpares(p.Slug)
@@ -1451,7 +1460,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		CPUQuotaPercent:        p.CPUQuotaPercent,
 		AppVersion:             p.AppVersion,
 		DeploymentID:           p.DeploymentID,
-		GenerationScoped:       p.GenerationScoped,
+		GenerationScoped:       p.GenerationScoped && !p.GroupedHandoff,
 		ContentDigest:          p.ContentDigest,
 		TargetWorker:           targetWorker,
 		MaxSessions:            p.MaxSessionsPerReplica,

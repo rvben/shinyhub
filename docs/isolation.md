@@ -461,12 +461,15 @@ worker dial also triggers a full redeploy.
 
 **Elastic apps are still prepared at deploy.** The dependency build
 (`uv sync` / `renv::restore`) and the manifest's `[[hook]] on = "post-deploy"`
-blocks run once per deploy, before any worker can serve a request, exactly as
+blocks run once per deploy, before any worker of that version can serve a request, exactly as
 they do for a multiplex pool. A failure in either fails the deploy. Preparation
 cannot be deferred to the workers: they launch with `uv run --frozen
 --no-sync`, which performs no dependency work of its own, and a worker spawn
 happens long after the deploy has reported its result, so a failure there would
-be unattributable. The same runtime rule applies as everywhere else: under a
+be unattributable. A supported [grouped deployment handoff](deployment-plan.md#grouped-worker-handoff)
+also health-checks one replacement worker before cutover while existing clients
+continue on the old version. Hooks and configuration changes require a stop-first
+deployment. The same runtime rule applies as everywhere else: under a
 container runtime the host does not prepare deps, so hooks are skipped and the
 skipped count is reported back to the developer.
 

@@ -899,7 +899,7 @@ func (m *Manager) AcknowledgeGenerationReplicaStart(slug string, deploymentID in
 		return fmt.Errorf("app %s deployment %d: %w", slug, deploymentID, ErrReplicaNotFound)
 	}
 	pool := m.entries[key]
-	if index >= len(pool) || pool[index] == nil {
+	if index < 0 || index >= len(pool) || pool[index] == nil || pool[index].info.DeploymentID != deploymentID {
 		m.mu.Unlock()
 		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
 	}
@@ -971,9 +971,17 @@ func (m *Manager) stopReplica(slug string, index int, requireConfirmed bool) err
 }
 
 func (m *Manager) stopReplicaByPoolKey(slug, poolKey string, index int, requireConfirmed bool) error {
+	return m.stopReplicaEntry(slug, poolKey, index, nil, requireConfirmed)
+}
+
+// stopReplicaEntry captures the runtime handle only if the slot still owns the
+// expected incarnation. Grouped generations share a pool key, and stop-first
+// deployment can reuse their indices while an older retirement is queued.
+// A nil expected entry retains ordinary current-slot stop semantics.
+func (m *Manager) stopReplicaEntry(slug, poolKey string, index int, expected *entry, requireConfirmed bool) error {
 	m.mu.Lock()
 	pool := m.entries[poolKey]
-	if index >= len(pool) || pool[index] == nil {
+	if index < 0 || index >= len(pool) || pool[index] == nil || (expected != nil && pool[index] != expected) {
 		m.mu.Unlock()
 		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
 	}
@@ -1538,7 +1546,7 @@ func (m *Manager) GetGenerationReplica(slug string, deploymentID int64, index in
 		return nil, false
 	}
 	pool := m.entries[key]
-	if index < 0 || index >= len(pool) || pool[index] == nil {
+	if index < 0 || index >= len(pool) || pool[index] == nil || pool[index].info.DeploymentID != deploymentID {
 		return nil, false
 	}
 	snap := *pool[index].info
@@ -1554,7 +1562,7 @@ func (m *Manager) HandleGenerationReplica(slug string, deploymentID int64, index
 		return RunHandle{}, false
 	}
 	pool := m.entries[key]
-	if index < 0 || index >= len(pool) || pool[index] == nil {
+	if index < 0 || index >= len(pool) || pool[index] == nil || pool[index].info.DeploymentID != deploymentID {
 		return RunHandle{}, false
 	}
 	return pool[index].handle, true
@@ -1611,16 +1619,20 @@ func (m *Manager) StopGeneration(slug string, deploymentID int64) error {
 		return fmt.Errorf("app %s deployment %d: %w", slug, deploymentID, ErrReplicaNotFound)
 	}
 	pool := m.entries[poolKey]
-	indices := make([]int, 0, len(pool))
+	type generationStopTarget struct {
+		index int
+		entry *entry
+	}
+	targets := make([]generationStopTarget, 0, len(pool))
 	for i, e := range pool {
-		if e != nil {
-			indices = append(indices, i)
+		if e != nil && e.info.DeploymentID == deploymentID {
+			targets = append(targets, generationStopTarget{index: i, entry: e})
 		}
 	}
 	m.mu.Unlock()
 	var errs []error
-	for _, index := range indices {
-		if err := m.stopReplicaByPoolKey(slug, poolKey, index, true); err != nil {
+	for _, target := range targets {
+		if err := m.stopReplicaEntry(slug, poolKey, target.index, target.entry, true); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -1632,11 +1644,19 @@ func (m *Manager) StopGeneration(slug string, deploymentID int64) error {
 func (m *Manager) StopGenerationReplica(slug string, deploymentID int64, index int, requireConfirmed bool) error {
 	m.mu.Lock()
 	poolKey, ok := m.poolKeyForDeploymentLocked(slug, deploymentID)
+	var expected *entry
+	if ok {
+		pool := m.entries[poolKey]
+		ok = index >= 0 && index < len(pool) && pool[index] != nil && pool[index].info.DeploymentID == deploymentID
+		if ok {
+			expected = pool[index]
+		}
+	}
 	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("app %s deployment %d replica %d: %w", slug, deploymentID, index, ErrReplicaNotFound)
 	}
-	return m.stopReplicaByPoolKey(slug, poolKey, index, requireConfirmed)
+	return m.stopReplicaEntry(slug, poolKey, index, expected, requireConfirmed)
 }
 
 // Adopt re-registers a process that was not started by this Manager instance

@@ -173,15 +173,23 @@ func poolIsElastic(pool *backendPool) bool {
 // []workerState that the pure decide() function consumes. Callers must hold
 // the pool lock (p.mu) for the duration of the call.
 func (pool *backendPool) workerStates() []workerState {
+	return pool.workerStatesForClient(-1)
+}
+
+func (pool *backendPool) workerStatesForClient(pinnedSlot int) []workerState {
 	if len(pool.workers) == 0 {
 		return nil
 	}
 	out := make([]workerState, 0, len(pool.workers))
 	for _, w := range pool.workers {
+		status := w.status
+		if w.draining.Load() && w.slotID != pinnedSlot {
+			status = workerDraining
+		}
 		out = append(out, workerState{
 			slotID:          w.slotID,
 			assignedClients: w.assignedClients,
-			status:          w.status,
+			status:          status,
 		})
 	}
 	return out
@@ -210,6 +218,9 @@ func addElasticWorker(pool *backendPool, r *replicaBackend) {
 // workers map. It is a no-op for unknown slot IDs. Callers must hold the pool
 // lock.
 func removeElasticWorker(pool *backendPool, slotID int) {
+	if w := pool.workers[slotID]; w != nil {
+		w.assignedClients = 0
+	}
 	delete(pool.workers, slotID)
 }
 
@@ -248,10 +259,10 @@ func (p *Proxy) reconcileElasticWarmSpares(slug string, expectedEpoch *uint64) {
 	var spareIDs, retireableSpareIDs []int
 	active := 0
 	for id, w := range pool.workers {
-		if w.status != workerDraining {
+		if w.status != workerDraining && !w.draining.Load() {
 			active++
 		}
-		if w.spare && !w.everAssigned && w.assignedClients == 0 && w.status != workerDraining {
+		if w.spare && !w.everAssigned && w.assignedClients == 0 && w.status != workerDraining && !w.draining.Load() {
 			spareIDs = append(spareIDs, id)
 			if w.status == workerRunning || w.status == workerSuspended {
 				retireableSpareIDs = append(retireableSpareIDs, id)
@@ -371,7 +382,7 @@ func (p *Proxy) reserveWorker(slug, _ string) int {
 	// not consume capacity for new reservations.
 	active := 0
 	for _, w := range pool.workers {
-		if w.status != workerDraining {
+		if w.status != workerDraining && !w.draining.Load() {
 			active++
 		}
 	}
@@ -430,6 +441,12 @@ func (p *Proxy) bindClientLocked(slug, clientID string, slotID int) {
 	p.clients[slug][clientID] = &clientSlot{slotID: slotID}
 	if pool != nil {
 		if w, ok := pool.workers[slotID]; ok {
+			if w.handoffReady && !w.everAssigned {
+				w.handoffReady = false
+				if p.warmSpareConsumed != nil {
+					go p.warmSpareConsumed(slug, slotID, p.poolEpoch[slug])
+				}
+			}
 			w.assignedClients++
 			w.everAssigned = true
 			w.spare = false
@@ -817,9 +834,13 @@ func (p *Proxy) ElasticWorkersSnapshot(slug string) (ElasticPoolSnapshot, bool) 
 		Workers:           make([]ElasticWorkerStatus, 0, len(pool.workers)),
 	}
 	for _, w := range pool.workers {
+		status := w.status.label()
+		if w.draining.Load() {
+			status = "draining"
+		}
 		snap.Workers = append(snap.Workers, ElasticWorkerStatus{
 			SlotID:       w.slotID,
-			Status:       w.status.label(),
+			Status:       status,
 			Sessions:     w.assignedClients,
 			ActiveConns:  w.activeConns.Load(),
 			DeploymentID: w.deploymentID,

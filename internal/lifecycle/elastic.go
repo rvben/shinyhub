@@ -62,10 +62,16 @@ type ElasticSpawner struct {
 	// keyed by "slug/slotID". Terminate cancels the timer via Stop so that
 	// an early client-disconnect does not leave a goroutine for the remaining
 	// lifetime duration.
+	lifetimeMu     sync.Mutex
 	lifetimeTimers sync.Map
 
 	warmRetryMu sync.Mutex
 	warmRetries map[string]*elasticWarmRetry
+}
+
+type elasticLifetime struct {
+	timer *time.Timer
+	epoch uint64
 }
 
 type elasticWarmRetry struct {
@@ -96,6 +102,10 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		}
 	}
 	defer releaseAppOperation()
+	if !s.Proxy.ElasticSlotCanStart(slug, slotID) {
+		s.releaseReservation(slug, slotID)
+		return
+	}
 	if s.CanMutate != nil && !s.CanMutate() {
 		s.releaseReservation(slug, slotID)
 		return
@@ -415,21 +425,67 @@ func (s *ElasticSpawner) armLifetime(app *db.App, slug string, slotID int) {
 	}
 	lifetime := time.Duration(app.WorkerMaxSessionLifetimeSecs) * time.Second
 	key := slug + "/" + strconv.Itoa(slotID)
-	timer := time.AfterFunc(lifetime, func() {
-		slog.Info("elastic spawn: max session lifetime reached, terminating worker",
-			"slug", slug, "slotID", slotID, "lifetime_s", app.WorkerMaxSessionLifetimeSecs)
-		s.lifetimeTimers.Delete(key)
-		s.Terminate(slug, slotID)
+	backstop := &elasticLifetime{epoch: s.Proxy.PoolEpoch(slug)}
+	// Serialize publication with cancellation, including an expiration that
+	// runs immediately. Old callbacks cannot consume a replacement backstop.
+	s.lifetimeMu.Lock()
+	defer s.lifetimeMu.Unlock()
+	backstop.timer = time.AfterFunc(lifetime, func() {
+		s.expireLifetime(slug, slotID, backstop)
 	})
-	if prior, loaded := s.lifetimeTimers.Swap(key, timer); loaded {
-		prior.(*time.Timer).Stop()
+	if prior, loaded := s.lifetimeTimers.Swap(key, backstop); loaded {
+		prior.(*elasticLifetime).timer.Stop()
+	}
+}
+
+func (s *ElasticSpawner) expireLifetime(slug string, slotID int, backstop *elasticLifetime) {
+	release := func() {}
+	if s.AcquireAppOperation != nil {
+		var err error
+		release, err = s.AcquireAppOperation(slug)
+		if err != nil {
+			return
+		}
+	}
+	defer release()
+	key := slug + "/" + strconv.Itoa(slotID)
+	s.lifetimeMu.Lock()
+	current := s.lifetimeTimers.CompareAndDelete(key, backstop)
+	s.lifetimeMu.Unlock()
+	if !current || s.Proxy.PoolEpoch(slug) != backstop.epoch {
+		return
+	}
+	slog.Info("elastic spawn: max session lifetime reached, terminating worker", "slug", slug, "slotID", slotID)
+	s.Terminate(slug, slotID)
+}
+
+// CancelLifetime invalidates a worker's timer, including callbacks already
+// queued behind a deployment operation. It never calls back into the proxy.
+func (s *ElasticSpawner) CancelLifetime(slug string, slotID int) {
+	s.lifetimeMu.Lock()
+	defer s.lifetimeMu.Unlock()
+	key := slug + "/" + strconv.Itoa(slotID)
+	if v, ok := s.lifetimeTimers.LoadAndDelete(key); ok {
+		v.(*elasticLifetime).timer.Stop()
 	}
 }
 
 // WarmSpareConsumed starts the lifetime backstop for a pristine spare that was
 // kept running because snapshotting was unavailable. Frozen spares start the
 // same timer in Resume after readiness succeeds.
-func (s *ElasticSpawner) WarmSpareConsumed(slug string, slotID int) {
+func (s *ElasticSpawner) WarmSpareConsumed(slug string, slotID int, epoch uint64) {
+	release := func() {}
+	if s.AcquireAppOperation != nil {
+		var err error
+		release, err = s.AcquireAppOperation(slug)
+		if err != nil {
+			return
+		}
+	}
+	defer release()
+	if s.Proxy.PoolEpoch(slug) != epoch || !s.Proxy.ElasticSlotCanStart(slug, slotID) {
+		return
+	}
 	app, err := s.Store.GetAppBySlug(slug)
 	if err != nil {
 		slog.Warn("elastic warm spare: load lifetime after assignment", "slug", slug, "slotID", slotID, "err", err)
@@ -557,10 +613,7 @@ func (s *ElasticSpawner) Terminate(slug string, slotID int) {
 	// Cancel the max_session_lifetime backstop timer if it is still armed.
 	// This prevents the timer goroutine from lingering after an early exit.
 	// A missing entry (already fired or never armed) is a no-op.
-	key := slug + "/" + strconv.Itoa(slotID)
-	if v, ok := s.lifetimeTimers.LoadAndDelete(key); ok {
-		v.(*time.Timer).Stop()
-	}
+	s.CancelLifetime(slug, slotID)
 	if err := s.Manager.StopReplica(slug, slotID); err != nil {
 		slog.Debug("elastic terminate: stop replica (may already be stopped)",
 			"slug", slug, "slotID", slotID, "err", err)

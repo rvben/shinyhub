@@ -1910,6 +1910,9 @@ func (s *Server) persistDrainingGeneration(app *db.App, deployment *db.Deploymen
 	if active.DeploymentID != deployment.ID {
 		return fmt.Errorf("deployment history points to %d while active generation is %d", deployment.ID, active.DeploymentID)
 	}
+	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "grouped" {
+		return s.persistGroupedGeneration(app, deployment)
+	}
 	rows, err := s.store.ListReplicas(app.ID)
 	if err != nil {
 		return fmt.Errorf("list active replicas: %w", err)
@@ -1961,7 +1964,7 @@ func (s *Server) persistDeployedPool(app *db.App, deployment *db.Deployment, res
 // startup recovery owns that identity-safe cleanup path.
 func (s *Server) stopAndForgetCandidate(slug string, deploymentID int64) bool {
 	s.proxy.AbortGeneration(slug, deploymentID)
-	if err := s.manager.StopGeneration(slug, deploymentID); err != nil {
+	if err := s.stopGenerationForCleanup(slug, deploymentID); err != nil {
 		slog.Warn("deploy: retaining candidate identity for startup cleanup",
 			"slug", slug, "deployment_id", deploymentID, "err", err)
 		return false
@@ -2019,7 +2022,7 @@ func (s *Server) retireGenerationWhenIdle(ctx context.Context, slug string, depl
 		}
 		if routeRetired {
 			if !processStopped {
-				if err := s.manager.StopGeneration(slug, deploymentID); err != nil {
+				if err := s.stopGenerationForCleanup(slug, deploymentID); err != nil {
 					cleanupFailures++
 					slog.Warn("deploy: retrying retired generation process cleanup", "slug", slug, "deployment_id", deploymentID, "err", err)
 					if cleanupFailures >= 8 {
@@ -2438,7 +2441,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetIsolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
+	currentIsolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
+	targetIsolation := currentIsolation
 	if manifest != nil && manifest.App.Worker != nil && manifest.App.Worker.Isolation != nil {
 		targetIsolation = *manifest.App.Worker.Isolation
 	}
@@ -2462,6 +2466,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// live even when this node has no local runtime entry.
 	liveUpgrade := prevActive != nil && !keepStopped &&
 		(activeProcessPresent || activeRoutePresent || durableServingState || s.clustered)
+	groupedHandoff := currentIsolation == "grouped" && targetIsolation == "grouped"
 	generationHandoff := liveUpgrade
 	unsupportedReason := ""
 	if liveUpgrade {
@@ -2472,21 +2477,22 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			unsupportedReason = "parallel generation handoff is unavailable"
 		case s.proxy.HasDrainingGeneration(slug):
 			unsupportedReason = "the previous generation is still draining; switch or close its remaining sessions before deploying again"
-		case len(durableGenerationRows) > 0:
+		case hasBlockingGenerationRows(durableGenerationRows, prevActive.ID, groupedHandoff):
 			unsupportedReason = "a previous generation still has pending process cleanup"
 		case producerBarrierEntered || prestartPlan.deploymentRepairRequired || len(prestartPlan.producers) > 0:
 			unsupportedReason = "this deployment changes shared producer state and requires an explicit stop-first deploy"
-		case deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "multiplex" || targetIsolation != "multiplex":
-			unsupportedReason = fmt.Sprintf("worker isolation is %q (target: %q); deploying without downtime currently requires multiplex isolation for both versions, so this update requires stopping the old version before starting its replacement", deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation), targetIsolation)
-		case manifest != nil:
+		case !groupedHandoff && (currentIsolation != "multiplex" || targetIsolation != "multiplex"):
+			unsupportedReason = fmt.Sprintf("worker isolation is %q (target: %q); deploying without downtime currently supports matching multiplex or grouped isolation for both versions, so this update requires stopping the old version before starting its replacement", deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation), targetIsolation)
+		case manifest != nil && !(groupedHandoff && s.groupedManifestHandoffSafe(app, prevActive, manifest)):
 			// Manifest reconciliation has deliberate omitted-key reset semantics
-			// (identity/privacy/access included). V1 therefore treats every present
-			// manifest as configuration-bearing rather than trying to infer a
-			// partial syntactic diff.
+			// (identity/privacy/access included). Grouped handoff accepts an
+			// unchanged declaration only when its live policy also matches.
 			unsupportedReason = "this bundle contains a manifest whose configuration must be reconciled by an explicit stop-first deploy"
 		}
 		if unsupportedReason == "" {
-			if len(activeRows) == 0 {
+			if groupedHandoff {
+				unsupportedReason = s.groupedHandoffRuntimeReason(app)
+			} else if len(activeRows) == 0 {
 				unsupportedReason = "the current generation has no durable replica identities"
 			} else {
 				for _, replica := range activeRows {
@@ -2508,11 +2514,15 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if manifest != nil && manifest.App.Replicas != nil {
 			projected.Replicas = *manifest.App.Replicas
 		}
+		if groupedHandoff {
+			projected.Replicas = 1
+		}
 		if capacityErr := s.generationHandoffCapacityCheck(&projected); capacityErr != nil {
 			unsupportedReason = capacityErr.Error()
 		}
 	}
 	generationHandoff = generationHandoff && unsupportedReason == ""
+	groupedHandoff = groupedHandoff && generationHandoff
 	if !generationHandoff && releaseGenerationLaunch != nil {
 		releaseGenerationLaunch()
 	}
@@ -2534,6 +2544,13 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	drainingRowsStaged := false
 	if generationHandoff {
+		if groupedHandoff {
+			if err := s.store.MarkElasticOrphanRisk(app.ID); err != nil {
+				_ = s.store.FailDeploymentWithReason(pendingDep.ID, "persist grouped worker lifetime fence")
+				writeError(w, http.StatusInternalServerError, "persist grouped worker lifetime fence")
+				return
+			}
+		}
 		if err := s.persistDrainingGeneration(app, prevActive); err != nil {
 			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "record current generation before handoff: "+err.Error())
 			writeError(w, http.StatusConflict, "working version preserved: current generation could not be recorded safely")
@@ -2541,7 +2558,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		drainingRowsStaged = true
 		defer func() {
-			if drainingRowsStaged {
+			// Fixed replicas retain their legacy projection on failure. Grouped
+			// workers have no such projection, so keep their active identities.
+			if drainingRowsStaged && !groupedHandoff {
 				_ = s.store.DeleteDeploymentReplicas(prevActive.ID)
 			}
 		}()
@@ -2647,6 +2666,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		DeploymentID:          pendingDep.ID,
 		AppVersion:            version,
 		GenerationScoped:      generationHandoff,
+		GroupedHandoff:        groupedHandoff,
 		LaunchReservationHeld: generationHandoff,
 		// A stopped app is built and validated but not booted, so a broken
 		// bundle is still rejected here rather than at start time.
@@ -2970,7 +2990,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// The manager performs the final all-replicas-running validation before
 		// any durable or proxy publication. A candidate that died after readiness
 		// therefore cannot become the authority on a later restart.
-		managerPrevious, activateErr := s.manager.ActivateGeneration(slug, pendingDep.ID)
+		managerPrevious, activateErr := s.activateDeployManagerGeneration(app, pendingDep.ID, prevActive.ID, result, groupedHandoff)
 		if activateErr != nil {
 			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "candidate failed final activation validation: "+activateErr.Error())
 			s.stopAndForgetCandidate(slug, pendingDep.ID)
@@ -2994,7 +3014,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				slog.Warn("deploy: promotion returned an error but durable candidate authority was confirmed",
 					"slug", slug, "deployment_id", pendingDep.ID, "err", promoteErr)
 			case activeErr == nil && active.DeploymentID != pendingDep.ID:
-				if selectErr := s.manager.SelectGeneration(slug, managerPrevious); selectErr != nil {
+				if selectErr := s.selectDeployManagerGeneration(slug, managerPrevious, groupedHandoff); selectErr != nil {
 					drainingRowsStaged = false
 					_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
 					slog.Error("deploy: promotion failed and manager rollback requires startup repair; preserving both generations",
@@ -3026,7 +3046,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			revertErr := s.store.RevertDeploymentActivation(pendingDep.ID, managerPrevious, "proxy publication failed: "+activateErr.Error())
 			var selectErr error
 			if revertErr == nil {
-				selectErr = s.manager.SelectGeneration(slug, managerPrevious)
+				selectErr = s.selectDeployManagerGeneration(slug, managerPrevious, groupedHandoff)
 			}
 			if revertErr == nil && selectErr == nil {
 				deploymentPromoted = false
@@ -3055,17 +3075,26 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// The candidate is now the durable and routed authority. Keep the old
 		// generation ledger until its sessions drain and physical stop succeeds.
 		drainingRowsStaged = false
-		if err := s.persistDeployedPool(app, pendingDep, result); err != nil {
-			slog.Error("deploy: active generation projection will require reconciliation", "slug", slug, "err", err)
-		} else {
-			if err := s.store.DeleteDeploymentReplicas(pendingDep.ID); err != nil {
-				slog.Warn("deploy: active generation ledger cleanup will retry",
-					"slug", slug, "deployment_id", pendingDep.ID, "err", err)
-				s.startGenerationLedgerCleanup(slug, pendingDep.ID)
+		// Elastic workers retain their deployment ledger until confirmed stopped.
+		if !groupedHandoff {
+			if err := s.persistDeployedPool(app, pendingDep, result); err != nil {
+				slog.Error("deploy: active generation projection will require reconciliation", "slug", slug, "err", err)
+			} else {
+				if err := s.store.DeleteDeploymentReplicas(pendingDep.ID); err != nil {
+					slog.Warn("deploy: active generation ledger cleanup will retry",
+						"slug", slug, "deployment_id", pendingDep.ID, "err", err)
+					s.startGenerationLedgerCleanup(slug, pendingDep.ID)
+				}
 			}
 		}
 		if proxyPrevious != 0 {
 			s.startGenerationRetirement(slug, proxyPrevious)
+		}
+		if groupedHandoff {
+			// Cutover drains the old warm spares too. Replenish the new
+			// generation now, even when no clients arrive after deployment.
+			// Spawn callbacks wait for this app operation to finish.
+			s.proxy.ReconcileElasticWarmSpares(slug)
 		}
 		if s.metrics != nil {
 			s.metrics.RecordGenerationHandoff("success")

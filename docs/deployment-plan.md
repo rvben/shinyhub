@@ -151,6 +151,33 @@ producers itself; the recovery lists the `shinyhub schedule run <slug>
 <schedule>` commands to run first, and only for schedules that are plainly
 overdue rather than already refreshing.
 
+### Grouped worker handoff
+
+Code updates to an app using `grouped` isolation can deploy without stopping
+its existing workers. ShinyHub prepares the replacement bundle and health-checks
+one new worker before publishing it. Existing client bindings and WebSockets
+remain on the old version; new clients use the replacement. The **Switch to
+latest** action gives that browser a new binding without moving other clients.
+No additional flag is needed, and `--allow-downtime` still permits a fallback
+rather than forcing one.
+
+This path supports matching `grouped` isolation on the default native tier of
+a single server. An unchanged manifest is accepted when its declared settings
+still match the live app. Changed configuration, hooks, shared producer changes,
+explicit placement, other providers, and an older generation still draining or
+awaiting cleanup require the existing stop-first path. The server also checks
+that there is memory for the additional worker before starting it. A candidate
+that fails readiness leaves the old version serving.
+
+Old workers count as draining and do not accept new clients or consume the new
+generation's `max_workers` allowance. They retain memory until their clients
+finish, including the reconnect grace window. `server.drain_timeout` remains
+the hard limit: sessions still using the old version at that deadline are
+terminated. Further workers and warm spares start on demand using the newly
+published bundle. A server restart ends grouped sessions and cleans up recorded
+workers before starting a fresh pool; this feature covers app deployment, not
+session preservation across a server restart.
+
 Re-running fleet apply recomputes current state. Already completed resources
 become unchanged, so they are not applied twice. Deploy attempts automatically
 retry only readiness timeouts, transport failures, and server errors; config

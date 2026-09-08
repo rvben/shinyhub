@@ -249,7 +249,16 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			slog.Warn("process recovery: skipped compatibility-quarantined app", "slug", app.Slug)
 			continue
 		}
-		if ok := reconcileDeploymentGenerationProjection(store, app); !ok {
+		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, defaultWorkerIsolation)
+		generationOK := true
+		if resolvedIso == "grouped" {
+			// Client bindings are process-local. After a hub restart, grouped
+			// generations must be stopped, never adopted as fixed replicas.
+			generationOK = cleanupGroupedDeploymentGenerations(store, app)
+		} else {
+			generationOK = reconcileDeploymentGenerationProjection(store, app)
+		}
+		if !generationOK {
 			if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: "failed"}); err != nil {
 				slog.Error("generation recovery: persist failed state", "slug", app.Slug, "err", err)
 			}
@@ -270,7 +279,6 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		// replica-adoption loop entirely.
 		// Resolve once so the guard and SetPoolMode use the same effective mode
 		// (fleet default applies when the per-app field is empty).
-		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, defaultWorkerIsolation)
 		if isElasticIsolation(resolvedIso) {
 			prx.SetPoolAppID(app.Slug, app.ID)
 			prx.SetPoolMode(app.Slug,
@@ -1371,4 +1379,34 @@ func markRecoveryDown(store *db.Store, slug string) {
 	if err := store.MarkRecoveryHibernated(slug); err != nil {
 		slog.Error("process recovery: mark hibernated", "slug", slug, "err", err)
 	}
+}
+
+// cleanupGroupedDeploymentGenerations retains every ledger whose process
+// identity could not be safely stopped. That failure blocks fresh workers.
+func cleanupGroupedDeploymentGenerations(store *db.Store, app *db.App) bool {
+	rows, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil {
+		return false
+	}
+	stopped := make(map[int64]bool)
+	for _, row := range rows {
+		if _, seen := stopped[row.DeploymentID]; !seen {
+			stopped[row.DeploymentID] = true
+		}
+		id := row.DeploymentID
+		if !stopRecordedNativeReplica(store, app, row.PID, row.Provider, &id) {
+			stopped[id] = false
+		}
+	}
+	ok := true
+	for id, gone := range stopped {
+		if !gone {
+			ok = false
+			continue
+		}
+		if err := store.DeleteDeploymentReplicas(id); err != nil {
+			ok = false
+		}
+	}
+	return ok
 }

@@ -1522,3 +1522,146 @@ func TestManager_ExitMonitorRecoversFromPanic(t *testing.T) {
 		t.Fatal("StopReplica hung; a panic in the exit monitor left the done channel unclosed")
 	}
 }
+
+func TestManagerGroupedGenerationRetirementUsesExactDeployment(t *testing.T) {
+	m := process.NewManager(t.TempDir(), newFakeRuntime())
+	defer m.StopAll()
+	for index, id := range []int64{101, 202} {
+		if _, err := m.Start(process.StartParams{Slug: "grouped", Index: index, Port: 20001 + index, Command: []string{"app"}, DeploymentID: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := m.GetGenerationReplica("grouped", 101, 1); ok {
+		t.Fatal("generation lookup returned another version")
+	}
+	if err := m.StopGenerationReplica("grouped", 101, 1, true); err == nil {
+		t.Fatal("generation-specific stop accepted another version")
+	}
+	if err := m.StopGeneration("grouped", 101); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.GetReplica("grouped", 0); ok {
+		t.Fatal("old worker survived retirement")
+	}
+	if info, ok := m.GetReplica("grouped", 1); !ok || info.Status != process.StatusRunning {
+		t.Fatal("retirement stopped new worker")
+	}
+}
+
+type generationStopBarrierRuntime struct {
+	*fakeRuntime
+	signal func(process.RunHandle, syscall.Signal) error
+}
+
+func (r *generationStopBarrierRuntime) Signal(handle process.RunHandle, signal syscall.Signal) error {
+	return r.signal(handle, signal)
+}
+
+func TestManagerGroupedGenerationRetirementRejectsReusedSlot(t *testing.T) {
+	rt := &generationStopBarrierRuntime{fakeRuntime: newFakeRuntime()}
+	m := process.NewManager(t.TempDir(), rt)
+	t.Cleanup(func() { _ = m.StopAll() })
+	start := func(index int, deploymentID int64) *process.ProcessInfo {
+		t.Helper()
+		info, err := m.Start(process.StartParams{Slug: "grouped", Index: index, Port: 20100 + index, Command: []string{"app"}, DeploymentID: deploymentID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	first := start(0, 101)
+	start(1, 101)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	rt.signal = func(handle process.RunHandle, signal syscall.Signal) error {
+		if handle.PID == first.PID {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+		}
+		return rt.fakeRuntime.Signal(handle, signal)
+	}
+	retired := make(chan error, 1)
+	go func() { retired <- m.StopGeneration("grouped", 101) }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retirement did not reach first worker")
+	}
+	// Retirement has snapshotted both workers, but is waiting on worker 0.
+	// A stop-first replacement reuses worker 1 before retirement reaches it.
+	if err := m.StopReplicaConfirmed("grouped", 1); err != nil {
+		t.Fatal(err)
+	}
+	replacement := start(1, 202)
+	unblock()
+	select {
+	case err := <-retired:
+		if !errors.Is(err, process.ErrReplicaNotFound) {
+			t.Fatalf("retirement must report the removed incarnation, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("retirement did not finish")
+	}
+	if info, ok := m.GetReplica("grouped", 1); !ok || info.PID != replacement.PID || info.Status != process.StatusRunning {
+		t.Fatalf("old retirement stopped or removed replacement: %+v", info)
+	}
+}
+
+func TestManagerGroupedGenerationStopCleanupPreservesReplacement(t *testing.T) {
+	rt := &generationStopBarrierRuntime{fakeRuntime: newFakeRuntime()}
+	m := process.NewManager(t.TempDir(), rt)
+	t.Cleanup(func() { _ = m.StopAll() })
+	old, err := m.Start(process.StartParams{Slug: "grouped", Port: 20200, Command: []string{"app"}, DeploymentID: 101})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	rt.signal = func(handle process.RunHandle, signal syscall.Signal) error {
+		err := rt.fakeRuntime.Signal(handle, signal)
+		if handle.PID == old.PID {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+		}
+		return err
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- m.StopGenerationReplica("grouped", 101, 0, true) }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop did not signal old worker")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if info, ok := m.GetReplica("grouped", 0); ok && info.Status == process.StatusStopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("old worker exit was not observed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Replace after the old handle was captured and exited, but before its
+	// stop waiter can remove the slot. Cleanup must preserve the new entry.
+	replacement, err := m.Start(process.StartParams{Slug: "grouped", Port: 20201, Command: []string{"app"}, DeploymentID: 202})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unblock()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop did not finish")
+	}
+	if info, ok := m.GetReplica("grouped", 0); !ok || info.PID != replacement.PID || info.Status != process.StatusRunning {
+		t.Fatalf("old stop cleanup removed replacement: %+v", info)
+	}
+}

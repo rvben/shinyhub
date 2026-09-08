@@ -53,7 +53,7 @@ func TestRunningElasticWarmSpare_NotifiesConsumptionAndReplenishes(t *testing.T)
 	spawned := make(chan int, 2)
 	consumed := make(chan int, 1)
 	p.SetSpawnFunc(func(_ string, slotID int) { spawned <- slotID })
-	p.SetWarmSpareConsumedFunc(func(_ string, slotID int) { consumed <- slotID })
+	p.SetWarmSpareConsumedFunc(func(_ string, slotID int, _ uint64) { consumed <- slotID })
 	p.ReconcileElasticWarmSpares("warm")
 	slotID := <-spawned
 	if err := p.RegisterElasticWorker("warm", slotID, backend.URL, nil, 7); err != nil {

@@ -148,6 +148,11 @@ func (p *Proxy) snapshotSessions(slugFilter map[string]struct{}) []db.ReplicaSes
 	p.mu.RLock()
 	snaps := make([]poolSnap, 0, len(p.pools))
 	for slug, pool := range p.pools {
+		if poolIsElastic(pool) {
+			// Grouped generations retain worker slots, not fixed replica rows.
+			// Their capacity is reported by ElasticWorkersSnapshot.
+			continue
+		}
 		if pool.appID.Load() == 0 {
 			continue // not wired for clustering; skip
 		}
