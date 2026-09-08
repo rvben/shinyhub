@@ -73,6 +73,12 @@ func main() {
 		return
 	}
 
+	version := "0"
+	if data, err := os.ReadFile("version.txt"); err == nil {
+		version = strings.TrimSpace(string(data))
+	} else if !os.IsNotExist(err) {
+		log.Fatal(err)
+	}
 	time.Sleep(*delay)
 	page := `<!doctype html><html><head><title>Mixed load fixture</title><meta charset="utf-8"><link rel="stylesheet" href="style.css"></head><body><h1 id="mixed-fixture">Mixed load fixture</h1>` + strings.Repeat("<p>Representative dashboard content.</p>", 850) + `<script src="app.js"></script></body></html>`
 	mux := http.NewServeMux()
@@ -80,6 +86,8 @@ func main() {
 		mime, body := "text/html; charset=utf-8", page
 		switch r.URL.Path {
 		case "/":
+		case "/version":
+			mime, body = "text/plain", version
 		case "/app.js":
 			mime, body = "application/javascript", "/* mixed-js */\n"+strings.Repeat("// fixture asset padding\n", 2700)
 		case "/style.css":

@@ -19,6 +19,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from remote import SSHTarget
+from lifecycle import LifecycleProbe
 from evidence import target_resources, quiet_reasons, write_comparison
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -101,9 +102,11 @@ def container_resources(rows, start, end):
             'container_cpu_percent_peak': max(cpu, default=0)}
 
 
-def verdict(summary):
+def verdict(summary, phases=False):
     metrics = summary.get('metrics', {})
     required = ('page_ms', 'asset_ms', 'report_ms', 'session_establish_ms', 'session_rtt_ms', 'wake_ms')
+    if phases:
+        required = tuple(required) + tuple(f'{metric}{{phase:{phase}}}' for metric in ('page_ms', 'report_ms') for phase in ('early', 'middle', 'late'))
     missing = [name for name in required if metrics.get(name, {}).get('values', {}).get('count', 0) == 0]
     failed = [name + ': ' + threshold for name, metric in metrics.items()
               for threshold, value in metric.get('thresholds', {}).items() if not value.get('ok', False)]
@@ -142,6 +145,19 @@ def summarize(stages, destination, metadata):
     for stage in stages:
         r = stage.get('resources', {})
         lines.append(f"| {stage['clients']} | {100*r.get('target_throttled_period_fraction',0):.1f} | {r.get('target_throttled_seconds',0):.2f} | {100*r.get('target_kernel_busy_fraction',0):.1f} | {r.get('driver_load_peak',0):.2f} |")
+    if metadata.get('lifecycle_interval'):
+        lines += ['', '| Clients | Complete deploy/restart/wake cycles | Lifecycle errors |', '|---:|---:|---:|']
+        for stage in stages:
+            lifecycle = stage.get('lifecycle', {})
+            lines.append(f"| {stage['clients']} | {lifecycle.get('completed_cycles', 0)} | {len(lifecycle.get('errors', []))} |")
+    if metadata['seconds'] >= 300:
+        lines += ['', '| Clients | Window | Page p95 ms | Report p95 ms | Reports sampled |', '|---:|---|---:|---:|---:|']
+        for stage in stages:
+            metrics = json.loads(Path(stage['summary']).read_text())['metrics']
+            for phase in ('early', 'middle', 'late'):
+                page = metrics.get(f'page_ms{{phase:{phase}}}', {}).get('values', {})
+                report = metrics.get(f'report_ms{{phase:{phase}}}', {}).get('values', {})
+                lines.append(f"| {stage['clients']} | {phase} | {page.get('p(95)', float('nan')):.1f} | {report.get('p(95)', float('nan')):.1f} | {report.get('count', 0):.0f} |")
     lines += ['', 'Threshold failures and raw evidence:']
     for stage in stages:
         lines.append(f"- {stage['clients']} clients: " + (', '.join(stage['verdict']['failed'] + stage['verdict']['missing']) or 'all thresholds passed'))
@@ -226,7 +242,7 @@ usage:
   enabled: true
   identity_mode: unattributed
 ''')
-    for slug, startup in [('mixed', '100ms'), ('wake', '750ms')]:
+    for slug, startup in [('mixed', '100ms'), ('wake', '750ms')] + ([('lifecycle', '100ms')] if args.lifecycle_interval else []):
         bundle = inputs / slug
         bundle.mkdir()
         shutil.copy2(build / 'fixture', bundle / 'fixture')
@@ -235,6 +251,9 @@ command = ["./fixture", "-port", "{{port}}", "-startup", "{startup}"]
 max_sessions_per_replica = 0
 render_seconds = 0
 ''')
+    if args.lifecycle_interval:
+        with (inputs/'lifecycle/shinyhub.toml').open('a') as manifest:
+            manifest.write('memory_limit_mb = 128\n')
     container = 'shinyhub-mixed-' + run_id.lower()
     volume = container + '-state'
     active = None
@@ -242,16 +261,23 @@ render_seconds = 0
     stats_process = None
     profile = None
     observer = stats_thread = None
+    lifecycle = None
     stages = []
     metadata = {'commit': output(['git', 'rev-parse', 'HEAD']), 'dirty': bool(output(['git', 'status', '--porcelain'])),
                 'source_commit': (previous.get('source_commit') or previous['commit']) if previous else args.source_commit, 'target_host': args.ssh_target or 'local-docker', 'transport': 'ssh-systemd' if remote else 'local-docker',
                 'arch': arch, 'image_id': image, 'cpus': args.cpus, 'memory': args.memory,
-                'seed_sessions': args.sessions, 'seconds': args.seconds, 'steps': args.steps, 'report_interval': args.report_interval,
+                'seed_sessions': args.sessions, 'seconds': args.seconds, 'steps': args.steps, 'report_interval': args.report_interval, 'lifecycle_interval': args.lifecycle_interval, 'ws_hold': min(args.seconds, 30),
                 'go': previous['go'] if previous else output(['go', 'version']), 'k6': output(['k6', 'version']), 'driver_platform': platform.platform(), 'driver_cpus': os.cpu_count(), 'require_quiet': args.require_quiet,
+                'harness_sha256': {name: hashlib.sha256((HERE/name).read_bytes()).hexdigest() for name in ('run.py', 'remote.py', 'lifecycle.py', 'evidence.py')},
+                'workload_sha256': hashlib.sha256((HERE/'mixed.js').read_bytes()).hexdigest(),
                 'binary_sha256': {name: hashlib.sha256((build/name).read_bytes()).hexdigest() for name in ('shinyhub','fixture','seed')}}
     (result / 'metadata.json').write_text(json.dumps(metadata, indent=2))
     def cleanup():
         stop.set()
+        lifecycle_error = None
+        if lifecycle:
+            try: lifecycle.close()
+            except Exception as error: lifecycle_error = error
         if active and active.poll() is None:
             active.terminate()
             try: active.wait(timeout=10)
@@ -276,6 +302,7 @@ render_seconds = 0
         finally:
             shutil.rmtree(inputs)
             (result / 'auth.json').unlink(missing_ok=True)
+        if lifecycle_error: raise lifecycle_error
     def exec_args(argv):
         return remote.exec_args(argv) if remote else ['docker', 'exec', container] + argv
     def copy_profile(clients):
@@ -310,7 +337,7 @@ render_seconds = 0
                 if time.monotonic() > deadline: raise RuntimeError('server readiness timed out')
                 time.sleep(0.5)
         admin = login(host, 'bench-admin', password)
-        for slug in ('mixed', 'wake'):
+        for slug in ('mixed', 'wake') + (('lifecycle',) if args.lifecycle_interval else ()):
             with (result / (slug + '-deploy.log')).open('w') as log:
                 if remote:
                     remote.deploy(slug, admin, log)
@@ -373,20 +400,29 @@ render_seconds = 0
             before_sessions = json.loads(request(host+'/api/apps/mixed/usage?days=7', token=admin))['summary']['sessions']
             stage = {'clients': clients, 'start': time.time(), 'summary': str(summary), 'usage_sessions_before': before_sessions}
             kenv = dict(os.environ, K6_NO_USAGE_REPORT='true', LT_HOST=host, LT_AUTH_FILE=str(auth_file),
-                        LT_CLIENTS=str(clients), LT_DURATION=f'{args.seconds}s', LT_WS_HOLD=str(args.seconds),
+                        LT_CLIENTS=str(clients), LT_DURATION=f'{args.seconds}s', LT_WS_HOLD=str(min(args.seconds, 30)),
                         LT_REPORT_INTERVAL=str(args.report_interval), LT_SUMMARY=str(summary), LT_SEED_SESSIONS=str(args.sessions))
             with (result / f'{clients}-k6.log').open('w') as log:
                 active = subprocess.Popen(['k6', 'run', str(HERE / 'mixed.js')], env=kenv, stdout=log, stderr=subprocess.STDOUT)
+                if args.lifecycle_interval:
+                    lifecycle = LifecycleProbe(host, admin, remote.deploy, result / f'{clients}-lifecycle.ndjson', args.lifecycle_interval)
+                    lifecycle.start()
                 # The helper only fetches from container loopback. pprof is not exposed to the host.
                 profile = subprocess.Popen(exec_args(['/rig/fixture', '-mode', 'fetch', '-out', f'/state/{clients}-cpu.pprof']), stdout=subprocess.DEVNULL, stderr=log) if args.seconds >= 15 else None
                 code = active.wait()
+                if lifecycle: lifecycle.close()
                 if profile:
                     profile.wait(timeout=45)
                     if profile.returncode: raise RuntimeError('CPU profile capture failed')
                     copy_profile(clients)
             if code not in (0, 99) or not summary.exists(): raise RuntimeError(f'k6 failed: {code}; inspect {clients}-k6.log')
             summary_data = json.loads(summary.read_text())
-            stage.update(end=time.time(), verdict=verdict(summary_data))
+            stage.update(end=time.time(), verdict=verdict(summary_data, phases=args.seconds >= 300))
+            if lifecycle:
+                stage['lifecycle'] = lifecycle.result()
+                if lifecycle.errors or not lifecycle.cycles:
+                    stage['verdict']['status'] = 'invalid'
+                    stage['verdict']['missing'].append('successful lifecycle checks')
             connected = summary_data['metrics'].get('session_established', {}).get('values', {}).get('count', 0)
             deadline = time.monotonic()+15
             while True:
@@ -429,6 +465,7 @@ def main():
     parser.add_argument('--require-quiet', action='store_true', help='reject busy generator/target kernels before the sweep')
     parser.add_argument('--steps', default='1,10,50,100,200,400')
     parser.add_argument('--seconds', type=int, default=30)
+    parser.add_argument('--lifecycle-interval', type=int, default=0, help='SSH only: deploy/restart/sleep/wake a versioned fixture every N seconds (minimum 15; 0 disables)')
     parser.add_argument('--sessions', type=int, default=100000)
     parser.add_argument('--report-interval', type=int, default=5)
     parser.add_argument('--cpus', type=float, default=2)
@@ -436,8 +473,10 @@ def main():
     parser.add_argument('--image', default='debian:bookworm-slim', help='must already exist locally; resolved to immutable image ID')
     args = parser.parse_args()
     args.steps = [int(n) for n in args.steps.split(',')]
-    if not args.steps or any(n < 1 or n > 2000 for n in args.steps) or args.seconds < 5 or args.seconds > 600 or args.report_interval < 1 or not math.isfinite(args.cpus) or args.cpus <= 0 or not 0 <= args.sessions <= 1000000 or len(set(args.steps)) != len(args.steps) or not 1 <= args.repeats <= 10:
-        parser.error('steps must be 1..2000, seconds 5..600, interval/CPU quota positive, sessions 0..1000000, steps unique, and repeats 1..10')
+    if not args.steps or any(n < 1 or n > 2000 for n in args.steps) or args.seconds < 5 or args.seconds > 1800 or args.report_interval < 1 or not math.isfinite(args.cpus) or args.cpus <= 0 or not 0 <= args.sessions <= 1000000 or len(set(args.steps)) != len(args.steps) or not 1 <= args.repeats <= 10:
+        parser.error('steps must be 1..2000, seconds 5..1800, interval/CPU quota positive, sessions 0..1000000, steps unique, and repeats 1..10')
+    if args.seconds * len(args.steps) > 5400 or args.lifecycle_interval and (not args.ssh_target or not 15 <= args.lifecycle_interval <= args.seconds):
+        parser.error('sweep must fit within 90 minutes; lifecycle interval requires SSH and must be 15..seconds')
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     if args.repeats == 1:
         run(args)

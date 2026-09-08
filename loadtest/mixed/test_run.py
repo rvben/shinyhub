@@ -35,6 +35,14 @@ class EvidenceTests(unittest.TestCase):
         sample['metrics']['session_rtt_ms']['values']['count'] = 0
         self.assertEqual(verdict(sample)['missing'], ['session_rtt_ms'])
 
+    def test_soak_requires_observations_in_every_latency_window(self):
+        sample = self.sample()
+        self.assertEqual(len(verdict(sample, phases=True)['missing']), 6)
+        for metric in ('page_ms', 'report_ms'):
+            for phase in ('early', 'middle', 'late'):
+                sample['metrics'][f'{metric}{{phase:{phase}}}'] = {'values': {'count': 5}}
+        self.assertEqual(verdict(sample, phases=True)['status'], 'pass')
+
     def test_saturation_includes_dropped_work(self):
         sample = self.sample()
         self.assertEqual(verdict(sample)['status'], 'pass')

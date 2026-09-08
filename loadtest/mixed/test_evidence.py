@@ -51,6 +51,10 @@ class ComparisonTests(unittest.TestCase):
             self.assertEqual(compare_runs(paths[:2], 3)['stages'][0]['consistency'], 'insufficient evidence')
             self.assertEqual(compare_runs(paths, 3)['stages'][0]['consistency'], 'variable')
             self.assertEqual(compare_runs(paths[:2], 2)['stages'][0]['consistency'], 'consistent pass')
+            for key, value in [('lifecycle_interval', 30), ('ws_hold', 30), ('workload_sha256', 'different'), ('harness_sha256', {'run.py': 'different'})]:
+                changed = dict(metadata, **{key: value})
+                (paths[2]/'metadata.json').write_text(json.dumps(changed))
+                self.assertFalse(compare_runs(paths, 3)['compatible'])
             metadata['binary_sha256'] = {'server': 'changed'}
             (paths[2]/'metadata.json').write_text(json.dumps(metadata))
             self.assertFalse(compare_runs(paths, 3)['compatible'])

@@ -27,6 +27,20 @@ class RemoteTests(unittest.TestCase):
         profile = shlex.split(target.exec_args(['/rig/fixture', '-mode', 'fetch'])[-1])
         self.assertIn('http://127.0.0.1:1235/debug/pprof/profile?seconds=10', profile)
 
+    def test_version_changes_only_owned_bundle_contents(self):
+        target = SSHTarget('test-host', 'shinyhub-mixed-test')
+        target.ports = [1234, 1235, 1236]
+        target.shell = Mock()
+        target.deploy('lifecycle', 'synthetic', None, version=7)
+        script = target.shell.call_args.args[0]
+        self.assertIn('/input/lifecycle/version.txt', script)
+        self.assertNotIn('shinyhub.toml', script)
+        self.assertIn('--allow-downtime', script)
+        self.assertEqual(target.shell.call_args.kwargs['timeout'], 120)
+        for slug, version in [('mixed', 7), ('lifecycle', '7; false'), ('lifecycle', -1)]:
+            with self.assertRaises(ValueError):
+                target.deploy(slug, 'synthetic', None, version=version)
+
     def test_diagnostic_failure_still_stops_service(self):
         target = SSHTarget('test-host', 'shinyhub-mixed-test')
         target.created = target.started = True

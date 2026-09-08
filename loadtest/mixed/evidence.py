@@ -53,6 +53,11 @@ def compare_runs(paths, expected):
     fields = ('arch', 'image_id', 'cpus', 'memory', 'seed_sessions', 'seconds', 'steps',
               'transport', 'target_host', 'source_commit', 'report_interval', 'k6', 'binary_sha256', 'driver_cpus', 'driver_platform', 'go', 'require_quiet')
     compatible = bool(runs) and all(all(k in meta and meta[k] == runs[0][0].get(k) for k in fields) for meta, _ in runs)
+    # Older evidence used a single session lasting the whole stage. Never pool
+    # it with reconnecting sessions or a different lifecycle/workload mix.
+    for key, default in (('lifecycle_interval', 0), ('workload_sha256', None), ('harness_sha256', None)):
+        compatible = compatible and all(meta.get(key, default) == runs[0][0].get(key, default) for meta, _ in runs)
+    compatible = compatible and all(meta.get('ws_hold', meta['seconds']) == runs[0][0].get('ws_hold', runs[0][0]['seconds']) for meta, _ in runs)
     result = {'expected_runs': expected, 'completed_runs': len(runs), 'compatible': compatible, 'stages': []}
     clients = runs[0][0]['steps'] if runs else []
     for client in clients:

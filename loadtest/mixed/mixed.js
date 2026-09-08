@@ -1,6 +1,7 @@
 import http from 'k6/http';
 import ws from 'k6/ws';
 import { sleep } from 'k6';
+import execution from 'k6/execution';
 import { Rate, Trend, Counter } from 'k6/metrics';
 
 const host = __ENV.LT_HOST;
@@ -35,14 +36,21 @@ export const options = {
   page_ms:['p(95)<250','p(99)<500'], asset_ms:['p(99)<500'], report_ms:['p(95)<2000'],
   session_establish_ms:['p(95)<1000'], session_rtt_ms:['p(99)<250'], wake_ms:['p(95)<3000'],
   dropped_iterations:['count==0'],
+  ...(parseInt(duration, 10) >= 300 ? Object.fromEntries(['early','middle','late'].flatMap(phase => [
+   [`page_ms{phase:${phase}}`, ['p(95)<250']], [`report_ms{phase:${phase}}`, ['p(95)<2000']],
+  ])) : {}),
  },
 };
 function params(who,kind,html=false) {
  return {redirects:0, timeout:'5s', headers:{...(who==='admin'?{Authorization:`Bearer ${auth.admin}`}:{ }), Cookie:`shiny_session=${auth[who]}`, Accept:html?'text/html':'*/*'}, tags:{kind}};
 }
+function phase() {
+ const elapsed = (Date.now() - execution.scenario.startTime) / 1000;
+ return {phase: ['early','middle','late'][Math.min(2,Math.floor(elapsed / (parseInt(duration,10) / 3)))]};
+}
 function observed(res,marker,metric) {
  const ok=res.status===200 && typeof res.body==='string' && res.body.includes(marker);
- metric.add(res.timings.duration); failures.add(!ok); return ok;
+ metric.add(res.timings.duration,phase()); failures.add(!ok); return ok;
 }
 export function page() {
  observed(http.get(`${host}/app/mixed/`,params('viewer','page',true)), 'id="mixed-fixture"', pages);
@@ -53,7 +61,7 @@ export function report() {
  const res=http.get(`${host}/api/apps/mixed/usage?days=7`,params('admin','report'));
  let ok=false;
  try { ok=res.status===200 && res.json().summary.sessions >= Number(__ENV.LT_SEED_SESSIONS); } catch (_) {}
- reports.add(res.timings.duration); failures.add(!ok);
+ reports.add(res.timings.duration,phase()); failures.add(!ok);
 }
 export function session() {
  const root=`${host}/app/mixed/`;

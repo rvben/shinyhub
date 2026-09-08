@@ -118,12 +118,19 @@ exec ../rig/shinyhub serve --config shinyhub.yaml --no-browser > server.log 2>&1
             args += ['-url', f'http://127.0.0.1:{self.ports[1]}/debug/pprof/profile?seconds=10']
         return self.ssh + [quote_command(args)]
 
-    def deploy(self, slug, token, log):
+    def deploy(self, slug, token, log, version=None):
         # Send credentials on stdin; they never appear in SSH command arguments.
         script = f'export SHINYHUB_HOST=http://127.0.0.1:{self.ports[0]}\nexport SHINYHUB_TOKEN={shlex.quote(token)}\n'
         script += quote_command([self.root+'/rig/shinyhub', 'deploy', self.root+'/input/'+slug,
                                 '--slug', slug, '--visibility', 'shared', '--output', 'json'])
-        self.shell(script, stdout=log, stderr=subprocess.STDOUT)
+        if version is not None:
+            if slug != 'lifecycle' or type(version) is not int or version < 1:
+                raise ValueError('version updates are restricted to the lifecycle fixture')
+            # Lifecycle transitions deliberately replace this separate app;
+            # traffic and held sessions continue on the mixed fixture.
+            script += " --allow-downtime"
+            script = f"printf '%s\\n' {version} > {self.root}/input/lifecycle/version.txt\n" + script
+        self.shell(script, stdout=log, stderr=subprocess.STDOUT, timeout=120)
 
     def copy(self, source, destination):
         path = source.replace('/state/', self.root+'/state/')

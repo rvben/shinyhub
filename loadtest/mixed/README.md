@@ -2,7 +2,7 @@
 
 This rig measures the real ShinyHub server under concurrent authenticated HTTP,
 WebSocket, reporting, and wake-up traffic. It creates its own disposable Linux
-target and SQLite database, deploys two apps through the CLI, seeds retained
+target and SQLite database, deploys fixture apps through the CLI, seeds retained
 usage history, drives the server from the generator, and removes its target
 and synthetic credentials on exit. It never selects an existing server
 or saved CLI connection.
@@ -40,7 +40,7 @@ Results land in `loadtest/results/mixed-<UTC timestamp>-<random suffix>/` and ar
 ignored by Git. `REPORT.md` is a readable summary; `stages.json` contains stage
 boundaries, verdicts, measured resource use and durable session counts.
 `metadata.json` records source commit/dirty state, tool versions, image ID,
-binary SHA-256 checksums, host platform and workload parameters. Keep the same
+binary, workload and harness SHA-256 checksums, host platform and workload parameters. Keep the same
 image, CPU/memory limits, history size and driver for comparisons.
 
 With `--repeats`, every sweep gets a fresh target and seeded database. The
@@ -59,7 +59,8 @@ they are never averaged or presented as a pooled percentile.
   production user navigates twice per second. k6 uses an arrival-rate executor;
   slow responses do not silently reduce offered load. VUs are bounded, and
   dropped iterations fail the stage.
-- A separate stream holds **N WebSockets** for the stage duration, sending and
+- A separate stream holds **N WebSockets**, reconnecting every 30 seconds (or
+  after the stage duration for shorter stages), sending and
   checking an echo heartbeat every second. Establishment requires the fixture's
   first frame; success requires the socket to stay open and exchange heartbeats.
   Session cookies and affinity cookies are forwarded through the real proxy.
@@ -84,6 +85,28 @@ manifest so the test explores server resources rather than an arbitrary
 configured session ceiling. The HTTP user is a shared-app viewer; reports and
 sleep operations use an administrator session token. Only two synthetic users
 are created, so this does not model the cardinality of a large user directory.
+
+## Lifecycle soak
+
+On an authorized SSH test host, add `--lifecycle-interval 30 --seconds 1200`
+with a previously passing `--steps` value. This creates a third fixture app.
+Every cycle deploys a new version marker in its bundle, restarts it, then sleeps
+and wakes it. After each operation a fresh request must return the exact new
+marker; stale versions and failed operations invalidate the stage. The explicit
+startup page or HTTP 503 may be retried for up to 15 seconds during
+asynchronous activation. The fixed-worker
+fixture uses an explicit stop-first deployment (`--allow-downtime`), followed
+by restart and manual sleep/wake. Its memory budget is 128 MiB. This checks
+publication and recovery correctness, not zero-downtime deployment continuity.
+Held WebSockets remain on the traffic app; this does not test reconnect behavior
+when their own app is restarted.
+
+`*-lifecycle.ndjson` records completed operations and failures, with cycle totals
+in `stages.json`. Runs of at least five minutes also report separate early,
+middle and late page/report percentiles and apply latency thresholds to each
+third. Inspect the corresponding resource samples for growth after warmup;
+RSS growth alone does not establish a memory leak. Stages are bounded to 30
+minutes and a sweep to 90 minutes, within the disposable service lifetime.
 
 ## Evidence and verdicts
 
