@@ -2252,7 +2252,10 @@ func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID
 // every older pending attempt for the same app. It is idempotent for an already
 // succeeded target so a caller can safely recover an ambiguous commit result.
 func (s *Store) PromoteDeployment(id int64) error {
-	tx, err := s.db.Begin()
+	// Reserve SQLite's writer before reading the target. Otherwise another
+	// connection can advance the WAL and make the later write upgrade fail
+	// immediately with SQLITE_BUSY(_SNAPSHOT), despite busy_timeout.
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("promote deployment %d: begin: %w", id, err)
 	}
@@ -2320,7 +2323,9 @@ func (s *Store) PromoteDeployment(id int64) error {
 // records that the candidate did not remain active, in one transaction so a
 // restart can never select the failed generation between those writes.
 func (s *Store) RevertDeploymentActivation(failedID, previousID int64, reason string) error {
-	tx, err := s.db.Begin()
+	// Compensation also reads before writing; it needs the same eager writer
+	// reservation as promotion so contention cannot strand the active pointer.
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("revert deployment activation %d: begin: %w", failedID, err)
 	}
