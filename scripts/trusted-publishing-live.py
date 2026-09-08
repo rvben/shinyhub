@@ -83,7 +83,7 @@ def main():
     token = credential["token"]
     assert request(HOST + "/api/auth/me", token=token)[0] == 200
     assert request(HOST + "/api/apps/outside-ci-publishing-scope", token=token)[0] in (403, 404)
-    assert request(HOST + "/api/apps", "POST", {"slug": "outside-ci-publishing-scope"}, token)[0] == 403
+    assert request(HOST + "/api/apps", "POST", {"slug": "outside-ci-publishing-scope", "name": "Scope rejection probe"}, token)[0] == 403
     print("PASS: workload exchange, assertion replay rejection, and app scope", flush=True)
     expiry = datetime.datetime.fromisoformat(credential["expires_at"].replace("Z", "+00:00")).timestamp()
     assert request(HOST + "/api/apps/" + SLUG, token=token)[0] == 404, "fixture already exists; inspect before retrying"
