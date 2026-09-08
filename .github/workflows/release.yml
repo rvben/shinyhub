@@ -77,6 +77,22 @@ jobs:
       - name: Build-provisioning gate (sandboxed uv sync)
         run: make test-provisioning
 
+      # Exercise the tagged application with real Shiny and a fresh browser
+      # before any release artifact is published.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Chromium system dependencies
+        run: |
+          cd loadtest/render/driver
+          npm ci --no-audit --no-fund
+          npx --no-install playwright install-deps chromium
+
+      - name: Real Shiny browser lifecycle release gate
+        timeout-minutes: 12
+        run: make test-browser-lifecycle-e2e
+
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:

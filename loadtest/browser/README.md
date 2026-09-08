@@ -27,7 +27,9 @@ credentials, addresses, screenshots, logs, and measurements under ignored
    its draining replica can exit.
 5. Explicitly restart the app. With `server.status_overlay` enabled (the server
    default), the disconnected tab must offer recovery. A Shiny reload marker
-   receives a three-second grace period. Start a new session using the offered
+   receives a three-second grace period. New-tab recovery is available while
+   readiness is pending: a new session may be needed to establish readiness.
+   Start a new session using the offered
    action; expect v2, a new label, and working calculations. If opening a new
    tab, verify the old tab preserves its results and identifies them as a
    snapshot. A restart does not preserve in-memory session state.
@@ -41,3 +43,27 @@ Record the application revision, fixture/runtime versions, browser, configuratio
 and results for each step. Browser automation latency is not a precise app
 startup measurement. This is a bounded acceptance check, not a claim about all
 Shiny versions, R Shiny behavior, arbitrary app workloads, or long-term capacity.
+
+## Automated release check
+
+Run `make test-browser-lifecycle-e2e` with Go, Node 20+, uv, and system Python
+3.12 available. The target installs the render driver's lockfile-pinned
+Playwright and its Chromium, builds the current application, and runs the
+sequence against a fresh loopback server and an extension-free browser context.
+On Linux, install browser system dependencies first with
+`cd loadtest/render/driver && npm ci && npx --no-install playwright install-deps chromium`.
+
+The test asserts the exact sign-in return URL, reactive calculations, old/new
+session identities across rolling deployment, new-tab recovery while readiness is pending, preservation and labeling of the previous results, and a
+reactive session after sleep/wake. Missing recovery controls fail the check;
+there is no manual-reload fallback that can hide a regression. It runs in CI and
+against the exact release tree before artifact publication.
+
+The run has a ten-minute deadline and bounded waits for each browser/API step.
+It removes its server state, disposable credentials, and browser context even
+on failure. Logs, recovery/snapshot screenshots, and a `result.json` stay in an ignored
+`loadtest/results/browser-lifecycle-*` directory. Timings describe complete test
+steps, including automation and assertions; they are not startup benchmarks.
+To verify an already-built binary, set `SHINYHUB_E2E_BINARY` explicitly. Otherwise
+the check always builds the current source. The report records the binary hash
+and browser version so results can be tied to the tested executable.

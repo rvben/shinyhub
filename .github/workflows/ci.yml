@@ -143,7 +143,7 @@ jobs:
   # This guards packaging and browser session restoration in one user journey.
   test-browser-onboarding-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -161,6 +161,15 @@ jobs:
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Chromium system dependencies
+        run: |
+          cd loadtest/render/driver
+          npm ci --no-audit --no-fund
+          npx --no-install playwright install-deps chromium
+
+      - name: Real Shiny browser lifecycle E2E
+        run: make test-browser-lifecycle-e2e
 
       - name: App-detail logs browser E2E
         run: make test-browser-logs-e2e
