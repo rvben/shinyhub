@@ -6,14 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.16.2](https://github.com/rvben/shinyhub/compare/v0.16.1...v0.16.2) - 2026-09-08
+
 ### Added
 
-- **APIs**: add explicit FastAPI and Plumber framework declarations, managed uv/renv launch paths, OpenAPI readiness and route prefixes, with runnable examples and publishing documentation.
-- **drafts**: retain deployment uploads, create private expiring previews with independent data and credentials, grant reviewers access, and promote the exact retained source archive with production revision checks. Add `deploy --draft`, `drafts list|preview|promote|delete`, audit events and automatic expiry cleanup. Initial previews reject hooks, schedules and access-group declarations.
+- **APIs**: publish FastAPI and Plumber services with explicit framework declarations, managed uv/renv launch paths, OpenAPI readiness checks, route prefixes, examples, and documentation.
+- **Deployment drafts**: retain uploaded bundles, create private expiring previews with separate data and credentials, grant reviewer access, and promote the exact reviewed source with production revision checks. Includes `deploy --draft` and `drafts list|preview|promote|delete`. Initial previews reject hooks, schedules, and access-group declarations.
+- **Persistent data**: download files with `shinyhub data pull`, report their SHA-256 digests, and include the data directory's size in listings.
+- **Audit log**: filter by UTC date range, show before/after changes and affected principals, and include draft, trusted-publishing, and schedule-refresh events in the action filter.
+- **Configuration**: load the authentication secret from a restricted file, warn about unrecognized environment variables, and configure retention for pre-migration snapshots and per-app logs.
 
 ### Fixed
 
-- **docs**: describe scheduler control-plane ownership and the remaining producer/activation topology restrictions.
+- **Backup and recovery**: preserve symlinks in backups, detect a running SQLite server using a marker beside its database, and skip file markers for PostgreSQL connection URLs.
+- **Process lifecycle**: reap orphaned child processes, report replicas as reconciling during startup recovery, and surface wakes that fail on every replica.
+- **Deployment**: recognize classic `ui.R` and `server.R` apps, reject missing Shiny dependencies earlier without imposing that requirement on Plumber APIs, explain filesystem and readiness failures, and strip terminal escapes from build errors.
+- **App settings**: avoid restarting apps for unchanged replica and worker settings, and warn when the runtime cannot enforce requested resource limits.
+- **Dashboard**: keep failed-first-deploy logs and recovery actions accessible, keep dialogs outside inert background regions, preserve automatic role governance and support-session attribution, and add contrast and page-title regression checks.
+- **CLI and documentation**: classify invalid input consistently, add actionable setup and command guidance, describe scheduler topology restrictions, and keep published commands and pages discoverable.
+- **Release checks**: isolate lifecycle deployment credentials and update browser-onboarding expectations for the revised replica labels.
 
 ## [0.16.1](https://github.com/rvben/shinyhub/compare/v0.16.0...v0.16.1) - 2026-09-08
 
