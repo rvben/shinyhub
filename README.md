@@ -34,6 +34,8 @@ binary backed by SQLite, with no external services to operate.
 
 ## Features
 
+- **API publishing.** Managed FastAPI and Plumber launchers with uv/renv preparation, OpenAPI readiness and app-route-aware documentation. See [docs/apis.md](docs/apis.md).
+- **Deployment drafts.** Retain an upload, review a private preview with separate data and credentials, and promote the exact source archive. See [docs/drafts.md](docs/drafts.md).
 - **Editor publishing.** Local VS Code/Positron and RStudio integrations run diagnostics, preview an exact bundle, and apply it after review. See [docs/editor-publishing.md](docs/editor-publishing.md).
 - **Runtime preflight.** Doctor checks isolation and producer/activation support against the target topology before upload. See [docs/runtime-capabilities.md](docs/runtime-capabilities.md).
 - **Trusted publishing API.** Exchange an explicitly trusted CI identity for a ten-minute, app-scoped credential. See [docs/trusted-publishing.md](docs/trusted-publishing.md).

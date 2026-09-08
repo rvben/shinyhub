@@ -3,6 +3,8 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/process"
@@ -33,6 +35,7 @@ type LaunchPlan struct {
 // LaunchOptions are the Manager-free inputs both consumers supply. See the
 // design spec section 4.2 for the PrepHostDeps vs CommandHostDeps distinction.
 type LaunchOptions struct {
+	AppPath               string   // canonical external route prefix, e.g. /app/sales
 	CommandOverride       []string // API/explicit command; substituted but not validated; skips detection/prep/auto-instrument
 	Port                  int
 	Workers               int // threaded to buildCommand; currently unused there, kept for fidelity
@@ -64,7 +67,7 @@ func ResolveLaunch(bundleDir string, opts LaunchOptions) (*LaunchPlan, error) {
 		Manifest:  m,
 		Env:       []string{fmt.Sprintf("PORT=%d", opts.Port)},
 		BindHost:  bindHost,
-		ReadyPath: "/",
+		ReadyPath: defaultReadinessPath(m),
 		Timeout:   defaultHealthTimeout,
 	}
 	// The renv policy is decided by the bundle, before the command is, because
@@ -104,6 +107,25 @@ func ResolveLaunch(bundleDir string, opts LaunchOptions) (*LaunchPlan, error) {
 
 func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions, plan *LaunchPlan) (*LaunchPlan, error) {
 	appType := DetectAppType(bundleDir)
+	if m != nil && m.App.Framework != "" {
+		entry := "app.py"
+		if m.App.Framework == "plumber" {
+			appType = "r"
+			entry = "plumber.R"
+		} else {
+			appType = "python"
+		}
+		if info, err := os.Stat(filepath.Join(bundleDir, entry)); err != nil || info.IsDir() {
+			return nil, fmt.Errorf("framework %s requires %s at the bundle root", m.App.Framework, entry)
+		}
+		if m.App.Framework == "fastapi" {
+			_, projectErr := os.Stat(filepath.Join(bundleDir, "pyproject.toml"))
+			_, requirementsErr := os.Stat(filepath.Join(bundleDir, "requirements.txt"))
+			if projectErr != nil && requirementsErr != nil {
+				return nil, fmt.Errorf("FastAPI requires requirements.txt or pyproject.toml declaring fastapi and uvicorn")
+			}
+		}
+	}
 	plan.AppType = appType
 	switch appType {
 	case "python":
@@ -128,14 +150,22 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 		if opts.HonorManifestTracing && m != nil && m.Tracing.Auto != nil {
 			auto = *m.Tracing.Auto
 		}
-		plan.Command = withPythonReload(buildCommandFn(bundleDir, opts.Port, opts.Workers, bindHost, auto, opts.CommandHostDeps), opts.Reload)
+		if m != nil && m.App.Framework == "fastapi" {
+			plan.Command = buildFastAPICommand(bundleDir, opts.Port, bindHost, opts.AppPath, auto, opts.CommandHostDeps, opts.Reload)
+		} else {
+			plan.Command = withPythonReload(buildCommandFn(bundleDir, opts.Port, opts.Workers, bindHost, auto, opts.CommandHostDeps), opts.Reload)
+		}
 	case "r":
 		if opts.PrepHostDeps {
 			plan.DepPrep = []DepPrepStep{{Label: "renv restore", Run: func(ctx context.Context, dir string) error {
 				return rSyncFn(ctx, dir, opts.AppEnv)
 			}}}
 		}
-		plan.Command = buildRCommandReload(bundleDir, opts.Port, bindHost, opts.Reload)
+		if m != nil && m.App.Framework == "plumber" {
+			plan.Command = buildPlumberCommand(bundleDir, opts.Port, bindHost, opts.AppPath)
+		} else {
+			plan.Command = buildRCommandReload(bundleDir, opts.Port, bindHost, opts.Reload)
+		}
 	default:
 		return nil, fmt.Errorf("no app.py or app.R found in %s (add one, or declare [app] command in shinyhub.toml)", bundleDir)
 	}
@@ -162,4 +192,35 @@ func buildRCommandReload(bundleDir string, port int, bindHost string, reload boo
 		"options(shiny.autoreload=TRUE); shiny::runApp('.', host='%s', port=%d, launch.browser=FALSE)",
 		bindHost, port)
 	return rscriptCommand(bundleDir, expr)
+}
+
+// Both managed API launchers expose OpenAPI without requiring a root handler.
+func defaultReadinessPath(m *Manifest) string {
+	if m != nil && m.App.Framework != "" {
+		return "/openapi.json"
+	}
+	return "/"
+}
+
+func buildFastAPICommand(bundleDir string, port int, bindHost, appPath string, autoInstrument, hostDeps, reload bool) []string {
+	base := pythonCommandPrefix(bundleDir, autoInstrument, hostDeps)
+	cmd := append(base, "uvicorn", "app:app", "--host", bindHost, "--port", fmt.Sprint(port))
+	if appPath != "" {
+		cmd = append(cmd, "--root-path", appPath)
+	}
+	if reload {
+		cmd = append(cmd, "--reload")
+	}
+	return cmd
+}
+
+func buildPlumberCommand(bundleDir string, port int, bindHost, appPath string) []string {
+	router := "plumber::pr('plumber.R')"
+	prefix := ""
+	if appPath != "" {
+		// Plumber's documentation endpoint derives its server URL at request
+		// time. Set the public URL without changing the internal route paths.
+		prefix = fmt.Sprintf("options(plumber.apiURL=%q); ", appPath)
+	}
+	return rscriptCommand(bundleDir, prefix+fmt.Sprintf("plumber::pr_run(%s, host='%s', port=%d, docs=TRUE, swaggerCallback=function(...) NULL)", router, bindHost, port))
 }

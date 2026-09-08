@@ -144,6 +144,15 @@ local smoke test from passing under looser rules than production. Avoid checks
 that depend on authentication or external services unless those dependencies
 must genuinely block the app from receiving traffic.
 
+### `[app] framework`
+
+Set `framework = "fastapi"` for `app.py` exporting `app`, or
+`framework = "plumber"` for `plumber.R`. These managed launchers retain uv/renv
+dependency preparation and default readiness to `/openapi.json`. The field is
+read from the bundle on every boot, including local development and previews.
+It is mutually exclusive with `command`. Omit it to retain existing app
+inference. See [Publish APIs](apis.md).
+
 ### `[app] command`
 
 Override the platform's automatic launch-command inference. When set, the

@@ -204,6 +204,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	bindHost := s.Manager.AppBindHostFor(tier)
 
 	plan, err := deploy.ResolveLaunch(dep.BundleDir, deploy.LaunchOptions{
+		AppPath:  "/app/" + slug,
 		Port:     port,
 		BindHost: bindHost,
 		// Do not re-run host dep-prep: the venv was built during the initial
@@ -564,7 +565,8 @@ func (s *ElasticSpawner) Resume(slug string, slotID int) {
 	transport := s.Manager.TransportForWorker(info.Tier, info.WorkerID)
 
 	plan, planErr := deploy.ResolveLaunch(deps[0].BundleDir, deploy.LaunchOptions{
-		Port: info.Port, BindHost: s.Manager.AppBindHostFor(info.Tier), PrepHostDeps: false,
+		AppPath: "/app/" + slug,
+		Port:    info.Port, BindHost: s.Manager.AppBindHostFor(info.Tier), PrepHostDeps: false,
 		CommandHostDeps: s.Manager.HostPreparesDepsFor(info.Tier),
 	})
 	if planErr != nil {

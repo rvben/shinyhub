@@ -36,6 +36,7 @@ func (s *Server) RunDevelopmentAppReaper(ctx context.Context, interval time.Dura
 }
 
 func (s *Server) reapExpiredDevelopmentApps(ctx context.Context, now time.Time) {
+	defer s.reapExpiredDraftBundles(ctx, now)
 	if ended, err := s.store.EndStaleDevelopmentSessions(developmentSessionLeaseTimeout); err != nil {
 		slog.Error("end stale development sessions", "err", err)
 	} else if ended > 0 {

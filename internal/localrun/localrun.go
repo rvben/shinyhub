@@ -400,7 +400,8 @@ var errReloadSuperseded = errors.New("reload superseded by a newer change")
 func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []string, noSync, depsChanged bool, stdout, stderr io.Writer) (*childProcess, error) {
 	port := deploy.AllocatePort()
 	baseOpts := deploy.LaunchOptions{
-		Port: port, Workers: 1, BindHost: "127.0.0.1", Reload: false,
+		AppPath: "/app/" + slug,
+		Port:    port, Workers: 1, BindHost: "127.0.0.1", Reload: false,
 		CommandHostDeps: !noSync, AutoInstrumentDefault: false,
 		HonorManifestTracing: false, AppEnv: userEnv,
 	}

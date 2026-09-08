@@ -49,6 +49,8 @@ func sanitizeSlug(name string) string {
 // constructed fresh per command instance (no package-level state) so repeated
 // or shuffled test runs cannot leak flag values between each other.
 type deployFlags struct {
+	draft              bool
+	draftTTL           time.Duration
 	slug               string
 	wait               bool
 	waitForWarm        bool
@@ -93,7 +95,7 @@ func newDeployCmd() *cobra.Command {
 	f := &deployFlags{}
 	cmd := &cobra.Command{
 		Use:   "deploy [dir]",
-		Short: "Deploy a Shiny app to ShinyHub",
+		Short: "Deploy an application or API to ShinyHub",
 		Long: `Deploy a Shiny app bundle to ShinyHub.
 
 Bundle: the given directory is zipped and uploaded. Pass '.' to deploy the
@@ -108,6 +110,11 @@ to exclude more. Validate the optional manifest first with
 Server: connect once with 'shinyhub connect https://hub.example.com'. The saved
 current server is used by default; the global --host flag targets a different
 saved name or URL for one command. CI can set SHINYHUB_HOST and SHINYHUB_TOKEN.
+
+Drafts: --draft retains the exact upload without changing production. The app
+must already exist. Add --open to start a private preview. Use 'shinyhub drafts'
+to list, preview, promote or delete drafts. Preview data and credentials are
+independent; hooks, schedules and access-group declarations are not yet supported.
 
 Availability: redeploys keep a supported live app serving while the candidate
 starts. If the server cannot safely hand off, it returns 409 and preserves the
@@ -159,6 +166,16 @@ event stream suitable for CI logs and automation. New CLIs automatically fall
 back to the legacy response when deploying to an older server.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if f.draft && (f.watch || f.start || f.wait || f.waitForWarm || f.restartAfterWarm || f.allowDowntime || f.visibility != "") {
+				return validationErr("--draft cannot be combined with watch, start, wait, warm, visibility or downtime flags", "use --draft --open for a private preview")
+			}
+			if cmd.Flags().Changed("draft-ttl") && !f.draft {
+				return validationErr("--draft-ttl requires --draft", "add --draft")
+			}
+			if f.draft && (f.draftTTL < 15*time.Minute || f.draftTTL > 7*24*time.Hour) {
+				return validationErr("draft TTL must be between 15m and 168h", "choose a bounded draft lifetime")
+			}
+
 			if !f.watch {
 				if cmd.Flags().Changed("watch-delay") || cmd.Flags().Changed("allow-repeated-hooks") || f.create || f.ephemeral || cmd.Flags().Changed("ttl") {
 					return validationErr("--watch-delay, --allow-repeated-hooks, --create, --ephemeral, and --ttl require --watch", "add --watch or remove the watch-only flag")
@@ -168,6 +185,8 @@ back to the legacy response when deploying to an older server.`,
 			return runDeployWatch(cmd, args, f)
 		},
 	}
+	cmd.Flags().BoolVar(&f.draft, "draft", false, "Retain a private draft without replacing production; --open also starts a preview")
+	cmd.Flags().DurationVar(&f.draftTTL, "draft-ttl", 24*time.Hour, "Draft and preview lifetime (15m to 168h)")
 	cmd.Flags().StringVar(&f.slug, "slug", "", "App slug; serves at /app/<slug>/ (lowercase letters, digits, single hyphens; no leading/trailing hyphen). Defaults to the directory name")
 	cmd.Flags().BoolVar(&f.wait, "wait", false, "Wait until the app is healthy: running, or idle for an elastic (grouped/per_session) pool that boots workers on demand")
 	cmd.Flags().IntVar(&f.waitTimeout, "wait-timeout", 300, "Seconds to wait for healthy status when --wait is set (first-run dependency installs can take minutes)")
@@ -194,7 +213,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 	// Opening a stopped or still-starting app is a broken promise. Treat --open
 	// as the complete success-to-use workflow, including the two prerequisites
 	// a person would otherwise have to discover and spell out themselves.
-	if f.open {
+	if f.open && !f.draft {
 		f.start = true
 		f.wait = true
 	}
@@ -286,6 +305,10 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 			fmt.Fprintln(errW, "Warning: this looks like an R app, but the server reports no R runtime (Rscript). "+
 				"The deploy will likely fail - ask your administrator to install R or use a container runtime.")
 		}
+	}
+
+	if f.draft {
+		return runCreateDraft(cmd, cfg, slug, bundlePlan, f, format)
 	}
 
 	if !f.watchMode {

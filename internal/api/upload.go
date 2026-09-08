@@ -25,6 +25,9 @@ var (
 // the file (when present) and removes any temp files that ParseMultipartForm
 // spilled to disk. cleanup is always non-nil so deferring it is unconditional.
 func readBundleUpload(w http.ResponseWriter, r *http.Request, maxSize int64) (multipart.File, func(), error) {
+	if file, ok := r.Context().Value(draftUploadKey{}).(multipart.File); ok {
+		return file, func() {}, nil
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
 	cleanup := func() {

@@ -53,6 +53,11 @@ var mut = boolp(true) // mutating
 // schemaAnnotations is keyed by command path: space-joined command names
 // below the root, e.g. "apps list", "schedule add", "serve".
 var schemaAnnotations = map[string]cmdAnnotation{
+	"drafts list":    {Mutating: ro, Notes: "Lists at most 100 retained drafts; expires_at and created_at are Unix seconds."},
+	"drafts preview": {Mutating: boolp(true), Notes: "Creates a private expiring preview or returns the existing preview. Does not replace production."},
+	"drafts promote": {Mutating: boolp(true), Notes: "Deploys the retained reviewed bundle. Rejects expired drafts and changed production baselines."},
+	"drafts delete":  {Mutating: boolp(true), Notes: "Removes the preview and retained source archive."},
+
 	"ci": {Mutating: mut, Streaming: true, ExitCodePassthrough: true,
 		ArgTypes: map[string]string{"--identity-token-file": "path"},
 		Notes:    "Exchanges a CI workload identity for a ten-minute app-scoped credential. Requires an explicit HTTPS host. Child command, output, and exit code pass through; put child flags after --. Never saves or prints credentials. GitHub Actions supports automatic OIDC acquisition; other providers use --identity-token-file (or - for stdin). No automatic renewal or exchange retries."},

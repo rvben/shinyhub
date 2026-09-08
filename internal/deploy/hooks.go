@@ -56,6 +56,10 @@ type Hook struct {
 // has no null literal: the convention mirrors the CLI's
 // `--hibernate-timeout -1`.
 type AppSettings struct {
+	// Framework selects a managed API launcher; empty retains existing inference.
+	// FastAPI exports app:app from app.py; Plumber reads plumber.R.
+	Framework string `toml:"framework"`
+
 	HibernateTimeoutMinutes *int `toml:"hibernate_timeout_minutes"`
 	Replicas                *int `toml:"replicas"`
 	MaxSessionsPerReplica   *int `toml:"max_sessions_per_replica"`
@@ -367,6 +371,15 @@ func validateHook(h Hook) error {
 }
 
 func normalizeAndValidateApp(a *AppSettings) error {
+	switch a.Framework {
+	case "", "fastapi", "plumber":
+	default:
+		return fmt.Errorf("framework must be fastapi or plumber when declared, got %q", a.Framework)
+	}
+	if a.Framework != "" && a.Command != nil {
+		return fmt.Errorf("framework and command are mutually exclusive")
+	}
+
 	if a.HibernateTimeoutMinutes != nil {
 		switch v := *a.HibernateTimeoutMinutes; {
 		case v == -1:

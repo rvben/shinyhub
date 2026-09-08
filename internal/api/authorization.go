@@ -267,6 +267,15 @@ func (s *Server) jitOAuthRole() string {
 }
 
 func (s *Server) requireManageApp(w http.ResponseWriter, r *http.Request, slug string) (*db.App, bool) {
+	if target, _ := r.Context().Value(draftPreviewKey{}).(string); target != "" && target == slug {
+		app, err := s.store.GetAppBySlug(slug)
+		if err != nil {
+			writeError(w, 404, "preview not found")
+			return nil, false
+		}
+		return app, true
+	}
+
 	app, u, ok := s.requireViewApp(w, r, slug)
 	if !ok {
 		return nil, false

@@ -913,6 +913,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Use(bearer)
 		r.Use(csrf)
 		r.Use(s.ownerGuard)
+		r.Use(s.draftMutationGuard)
 
 		// Logout is authenticated so we can revoke the caller's JWT by jti.
 		// An unauthenticated logout has nothing to revoke — the client can
@@ -938,6 +939,11 @@ func (s *Server) buildRouter() chi.Router {
 		r.Patch("/api/apps/{slug}", s.handlePatchApp)
 		r.Delete("/api/apps/{slug}", s.handleDeleteApp)
 		r.With(rateLimitByUser(s.deployLimiter)).Post("/api/apps/{slug}/deploy", s.handleDeployApp)
+		r.With(rateLimitByUser(s.deployLimiter)).Post("/api/apps/{slug}/drafts", s.handleCreateDraft)
+		r.Get("/api/apps/{slug}/drafts", s.handleListDrafts)
+		r.Delete("/api/apps/{slug}/drafts/{draftID}", s.handleDeleteDraft)
+		r.With(rateLimitByUser(s.deployLimiter)).Post("/api/apps/{slug}/drafts/{draftID}/preview", s.handlePreviewDraft)
+		r.With(rateLimitByUser(s.deployLimiter)).Post("/api/apps/{slug}/drafts/{draftID}/promote", s.handlePromoteDraft)
 		r.Post("/api/apps/{slug}/development-sessions/{sessionID}/heartbeat", s.handleHeartbeatDevelopmentSession)
 		r.Post("/api/apps/{slug}/development-sessions/{sessionID}/end", s.handleEndDevelopmentSession)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/rollback", s.handleRollbackApp)

@@ -61,6 +61,7 @@ type CreateDevelopmentAppParams struct {
 	App             CreateAppParams
 	Session         UpsertDevelopmentSessionParams
 	DefaultReplicas int
+	DraftID         string // atomically bind a private preview to its retained draft
 }
 
 // CreateDevelopmentApp commits the app, optional implicit project, session,
@@ -137,6 +138,30 @@ func (s *Store) CreateDevelopmentApp(p CreateDevelopmentAppParams) (bool, error)
 			INSERT INTO ephemeral_apps (app_id, development_session_id, expires_at)
 			VALUES (?, ?, ?)`, appID, p.Session.ID, p.Session.ExpiresAt); err != nil {
 			return false, fmt.Errorf("create ephemeral development app marker: %w", err)
+		}
+	}
+	if p.DraftID != "" {
+		if p.App.Access != "private" || p.Session.TargetKind != DevelopmentTargetEphemeral {
+			return false, fmt.Errorf("draft previews must be private and ephemeral")
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE deployment_drafts SET preview_app_id = ?
+            WHERE id = ? AND preview_app_id IS NULL AND expires_at > ?`, appID, p.DraftID, time.Now().Unix())
+		if err != nil {
+			return false, err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return false, fmt.Errorf("draft preview already exists or draft expired")
+		}
+		// Copy execution policy only. Credentials, access and writable/shared
+		// data are deliberately independent of the production application.
+		for _, column := range []string{"replicas", "replica_placement", "memory_limit_mb", "cpu_quota_percent",
+			"max_sessions_per_replica", "worker_isolation", "worker_grouped_size", "worker_max_workers",
+			"worker_max_session_lifetime_secs", "hibernate_timeout_minutes", "render_seconds"} {
+			_, err := tx.ExecContext(ctx, `UPDATE apps SET `+column+` = (SELECT `+column+` FROM apps
+                WHERE id = (SELECT app_id FROM deployment_drafts WHERE id = ?)) WHERE id = ?`, p.DraftID, appID)
+			if err != nil {
+				return false, err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

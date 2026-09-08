@@ -497,7 +497,7 @@ either sees the old file or the new one — never a partial write.
 
 ## Limits + caveats
 
-- **Single-instance only.** Running two ShinyHub processes against the same DB will double-fire schedules.
+- **Control-plane ownership.** Only the active control-plane owner runs the scheduler. Clustered deployments use the shared PostgreSQL ownership lease; do not run independent servers against one SQLite file. Plain scheduled jobs do not require producer/activation support. Deploy-triggered producers and automatic serving-data activation retain the topology restrictions documented in [runtime capabilities](runtime-capabilities.md).
 - **No per-schedule env or resource overrides.** Schedules inherit from the app.
 - **Timezone.** Each schedule fires in its effective timezone (see "Timezone resolution" above). Schedules without an explicit timezone inherit the server default; the fallback is always UTC, never the host `TZ`. Server-default changes take effect on restart — running schedules are not hot-reloaded on config change.
 - **`run_once` catch-up runs at startup only.** It does not re-fire missed runs from arbitrary points in time.

@@ -2403,6 +2403,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "bundle content digest could not be established")
 		return
 	}
+	if expected, _ := r.Context().Value(draftDigestKey{}).(string); expected != "" && digest != expected {
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "draft bundle changed while copying")
+		writeError(w, http.StatusConflict, "draft bundle changed while copying; upload a new draft")
+		return
+	}
 	if err := s.store.SetDeploymentDigest(pendingDep.ID, digest); err != nil {
 		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "bundle content digest could not be persisted")
 		slog.Error("deploy: content digest persistence is required before runtime mutation",

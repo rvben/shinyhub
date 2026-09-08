@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **APIs**: add explicit FastAPI and Plumber framework declarations, managed uv/renv launch paths, OpenAPI readiness and route prefixes, with runnable examples and publishing documentation.
+- **drafts**: retain deployment uploads, create private expiring previews with independent data and credentials, grant reviewers access, and promote the exact retained source archive with production revision checks. Add `deploy --draft`, `drafts list|preview|promote|delete`, audit events and automatic expiry cleanup. Initial previews reject hooks, schedules and access-group declarations.
+
+### Fixed
+
+- **docs**: describe scheduler control-plane ownership and the remaining producer/activation topology restrictions.
+
 ## [0.16.1](https://github.com/rvben/shinyhub/compare/v0.16.0...v0.16.1) - 2026-09-08
 
 ### Fixed

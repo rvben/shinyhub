@@ -813,7 +813,7 @@ func resolveBootParams(p Params, hostDeps bool) (baseCmd []string, appType strin
 
 	hc = p.HealthCheck
 	if hc == nil {
-		readyPath := "/"
+		readyPath := defaultReadinessPath(m)
 		readyStatus := 0
 		if m != nil {
 			if m.App.ReadinessPath != "" {
@@ -958,6 +958,11 @@ func hostEnvironmentPresent(bundleDir, appType string) bool {
 // per-replica command once a port is allocated. appType is set only on that
 // inferred path, and is the caller's signal that the bundle was type-detected.
 func resolveBundleCommand(p Params, m *Manifest, hostDeps bool) (baseCmd []string, appType string, err error) {
+	if len(p.Command) == 0 && m != nil && m.App.Framework != "" {
+		if _, err := ResolveLaunch(p.BundleDir, LaunchOptions{Port: 1}); err != nil {
+			return nil, "", err
+		}
+	}
 	switch {
 	case len(p.Command) > 0:
 		return p.Command, "", nil
@@ -1428,6 +1433,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	// HonorManifestTracing is false: resolveBootParams already applied the
 	// manifest [tracing] override when computing autoInstrument.
 	plan, err := ResolveLaunch(p.BundleDir, LaunchOptions{
+		AppPath:               "/app/" + p.Slug,
 		CommandOverride:       baseCmd,
 		Port:                  port,
 		Workers:               p.Workers,
@@ -1728,7 +1734,22 @@ func ResumeReplica(p Params, index int) (*Result, error) {
 
 	hc := p.HealthCheck
 	if hc == nil {
-		hc = waitHealthy
+		m, err := LoadManifest(p.BundleDir)
+		if err != nil {
+			return nil, fmt.Errorf("resume readiness manifest: %w", err)
+		}
+		readyPath, readyStatus := defaultReadinessPath(m), 0
+		if m != nil {
+			if m.App.ReadinessPath != "" {
+				readyPath = m.App.ReadinessPath
+			}
+			if m.App.ReadinessStatus != nil {
+				readyStatus = *m.App.ReadinessStatus
+			}
+		}
+		hc = func(endpoint string, timeout time.Duration, tr http.RoundTripper) error {
+			return waitHealthyContract(endpoint, readyPath, readyStatus, timeout, tr, nil)
+		}
 	}
 	if err := hc(ep.URL, resumeProbeTimeout, transport); err != nil {
 		return nil, fmt.Errorf("resume readiness: %w", err)
@@ -1756,6 +1777,14 @@ func ResumeReplica(p Params, index int) (*Result, error) {
 // DetectAppType returns "python" if app.py exists, "r" if app.R exists, or ""
 // if neither is found.
 func DetectAppType(bundleDir string) string {
+	if m, err := LoadManifest(bundleDir); err == nil && m != nil {
+		switch m.App.Framework {
+		case "fastapi":
+			return "python"
+		case "plumber":
+			return "r"
+		}
+	}
 	if _, err := os.Stat(filepath.Join(bundleDir, "app.py")); err == nil {
 		return "python"
 	}
@@ -1845,6 +1874,11 @@ func useProjectMode(bundleDir string, hostDeps bool) bool {
 // BuildRCommand. hostDeps gates project mode for a synthesized project (see
 // useProjectMode).
 func buildCommand(bundleDir string, port, workers int, bindHost string, autoInstrument, hostDeps bool) []string {
+	return append(pythonCommandPrefix(bundleDir, autoInstrument, hostDeps),
+		"shiny", "run", "app.py", "--host", bindHost, "--port", fmt.Sprintf("%d", port))
+}
+
+func pythonCommandPrefix(bundleDir string, autoInstrument, hostDeps bool) []string {
 	base := []string{"uv", "run", "--no-project"}
 	if useProjectMode(bundleDir, hostDeps) {
 		switch _, lockErr := os.Stat(filepath.Join(bundleDir, "uv.lock")); {
@@ -1864,11 +1898,7 @@ func buildCommand(bundleDir string, port, workers int, bindHost string, autoInst
 		}
 		base = append(base, "opentelemetry-instrument")
 	}
-	return append(base,
-		"shiny", "run", "app.py",
-		"--host", bindHost,
-		"--port", fmt.Sprintf("%d", port),
-	)
+	return base
 }
 
 // waitHealthy polls the app's root endpoint until it responds with a 2xx/3xx
