@@ -319,7 +319,7 @@ func runRemoteDoctor(checks []doctorCheck, slug, appType string, manifests ...*d
 	checks = append(checks, doctorPass("authentication", fmt.Sprintf("signed in as %s (%s)", identity.Username, identity.Role)))
 	checks = append(checks, doctorCredentialLifecycle(identity.Credential, os.Getenv("SHINYHUB_TOKEN") != "", time.Now()))
 
-	permission := doctorDeployPermission(cfg, identity.CanCreateApps, slug)
+	permission := doctorDeployPermission(cfg, identity, slug)
 	checks = append(checks, permission)
 	requiresHostRuntime := true
 	if info.Capabilities.RuntimeCapabilities && permission.Status == "pass" {
@@ -442,7 +442,14 @@ func doctorCredentialLifecycle(credential *remoteCredential, fromEnvironment boo
 	}
 }
 
-func doctorDeployPermission(cfg *cliConfig, canCreate bool, slug string) doctorCheck {
+func doctorDeployPermission(cfg *cliConfig, identity remoteIdentity, slug string) doctorCheck {
+	if err := appScopeError(identity, slug); err != nil {
+		return doctorFail("deploy-permission", err.Error(), "Use a credential authorized for this app.", KindAuth, 3)
+	}
+	canCreate := identity.CanCreateApps
+	if slug == "" && len(identity.AppScope) > 0 {
+		return doctorWarn("deploy-permission", "this credential is restricted to: "+strings.Join(identity.AppScope, ", "), "Pass --slug to check permission for a specific app.")
+	}
 	if slug == "" {
 		if canCreate {
 			return doctorPass("deploy-permission", "this identity may create apps; pass --slug to check an existing target")

@@ -43,6 +43,21 @@ type remoteIdentity struct {
 	Credential         *remoteCredential
 }
 
+// appScopeError checks the credential's allowlist independently of role-level
+// create permission. Older servers omit the list for unrestricted identities.
+func appScopeError(identity remoteIdentity, slug string) error {
+	if slug == "" || len(identity.AppScope) == 0 {
+		return nil
+	}
+	for _, allowed := range identity.AppScope {
+		if allowed == slug {
+			return nil
+		}
+	}
+	return &httpStatusError{Status: http.StatusForbidden,
+		msg: fmt.Sprintf("app %q is outside this credential's app scope; choose an allowed app (%s) or use a credential authorized for this target", slug, strings.Join(identity.AppScope, ", "))}
+}
+
 func deployPermissionSummary(identity remoteIdentity) string {
 	if !identity.CanCreateApps {
 		return "No — ask a server administrator for developer access"

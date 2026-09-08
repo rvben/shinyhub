@@ -449,6 +449,9 @@ func fetchDeploymentTarget(cfg *cliConfig, slug string) (deploymentRemotePreview
 	if err != nil {
 		return remote, "", err
 	}
+	if err := appScopeError(identity, slug); err != nil {
+		return remote, "", err
+	}
 	if identity.CanCreateAppsKnown && !identity.CanCreateApps {
 		return remote, "", &httpStatusError{Status: http.StatusForbidden,
 			msg: fmt.Sprintf("app %q is new and this identity cannot create apps; ask an administrator for the developer role", slug)}
