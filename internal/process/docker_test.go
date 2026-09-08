@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 )
@@ -740,6 +741,9 @@ func TestDockerRuntime_RunOnce_ExitsCleanly(t *testing.T) {
 	if info.Code != 5 {
 		t.Fatalf("expected exit 5, got %d", info.Code)
 	}
+	if !strings.Contains(buf.String(), "hello") {
+		t.Fatalf("missing final container output: %q", buf.String())
+	}
 }
 
 func TestHostPublishPort_FallsBackToBindPort(t *testing.T) {
@@ -807,5 +811,66 @@ func TestDockerRuntime_RunOnce_SharedMountIsReadOnly(t *testing.T) {
 	}
 	if info.Code == 0 {
 		t.Fatalf("expected nonzero exit (write to RO mount), got 0; output=%q", buf.String())
+	}
+}
+
+// A fast job can exit before wait or attach arrives. Docker must retain it
+// until both the exit result and final output have reached the caller.
+func TestDockerRuntimeRunOnce_RetainsFastExitUntilCollected(t *testing.T) {
+	for _, code := range []int{0, 5} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			var autoRemove, removed atomic.Bool
+			waited := make(chan struct{})
+			mux := http.NewServeMux()
+			mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {
+				var cfg struct{ HostConfig struct{ AutoRemove bool } }
+				if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+					t.Error(err)
+				}
+				autoRemove.Store(cfg.HostConfig.AutoRemove)
+				w.WriteHeader(http.StatusCreated)
+				io.WriteString(w, `{"Id":"fast"}`)
+			})
+			mux.HandleFunc("/containers/fast/start", func(w http.ResponseWriter, r *http.Request) {
+				removed.Store(autoRemove.Load()) // exits immediately at start
+				w.WriteHeader(http.StatusNoContent)
+			})
+			mux.HandleFunc("/containers/fast/wait", func(w http.ResponseWriter, r *http.Request) {
+				defer close(waited)
+				if removed.Load() {
+					http.NotFound(w, r)
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]int{"StatusCode": code})
+			})
+			mux.HandleFunc("/containers/fast/attach", func(w http.ResponseWriter, r *http.Request) {
+				<-waited // delay the final log until the wait request has completed
+				if removed.Load() {
+					http.NotFound(w, r)
+					return
+				}
+				w.Write([]byte{1, 0, 0, 0, 0, 0, 0, 6})
+				io.WriteString(w, "hello\n")
+			})
+			mux.HandleFunc("/containers/fast", func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete {
+					t.Errorf("unexpected method %s", r.Method)
+				}
+				removed.Store(true)
+				w.WriteHeader(http.StatusNoContent)
+			})
+			rt := newDockerRuntimeWithServer(t, mux)
+			var output bytes.Buffer
+			info, err := rt.RunOnce(context.Background(), StartParams{Slug: "fast", Dir: t.TempDir(), Command: []string{"sh", "-c", "echo hello"}}, &output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Code != code || output.String() != "hello\n" {
+				t.Fatalf("exit=%d output=%q", info.Code, output.String())
+			}
+			if !removed.Load() {
+				t.Fatal("one-shot container was not cleaned up")
+			}
+		})
 	}
 }

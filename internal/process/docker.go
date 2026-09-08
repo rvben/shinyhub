@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -462,9 +463,17 @@ func (r *DockerRuntime) imageForCommand(cmd []string) string {
 // streamLogs attaches to the container stdout/stderr and copies to w.
 // Docker attach uses a multiplexed stream format with 8-byte frame headers.
 func (r *DockerRuntime) streamLogs(id string, w io.Writer) {
+	r.streamLogsContext(context.Background(), id, w)
+}
+
+func (r *DockerRuntime) streamLogsContext(ctx context.Context, id string, w io.Writer) {
 	attachURL := fmt.Sprintf("%s/containers/%s/attach?stream=1&stdout=1&stderr=1&logs=1",
 		r.client.base, url.PathEscape(id))
-	resp, err := r.client.stream.Post(attachURL, "", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, attachURL, nil)
+	if err != nil {
+		return
+	}
+	resp, err := r.client.stream.Do(req)
 	if err != nil || resp == nil {
 		return
 	}
@@ -512,8 +521,8 @@ func sigName(sig syscall.Signal) string {
 	}
 }
 
-// RunOnce creates a one-shot container with AutoRemove=true, starts it, and
-// blocks on /containers/{id}/wait. Ctx cancel sends SIGTERM via the kill API,
+// RunOnce retains a one-shot container until its exit status and logs have been
+// collected, then removes it. Ctx cancel sends SIGTERM via the kill API,
 // then SIGKILL after a 10-second grace.
 func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io.Writer) (ExitInfo, error) {
 	image := r.imageForCommand(p.Command)
@@ -535,7 +544,7 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 			LabelKind:    KindScheduleRun,
 		},
 		NetworkMode: network,
-		AutoRemove:  true,
+		AutoRemove:  false,
 	}
 	if p.AppDataPath != "" {
 		cfg.Mounts = append(cfg.Mounts,
@@ -558,12 +567,25 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	if err != nil {
 		return ExitInfo{}, fmt.Errorf("create one-shot container for %s: %w", p.Slug, err)
 	}
+	defer func() { _ = r.client.removeContainer(id) }()
 	if err := r.client.startContainer(id); err != nil {
-		_ = r.client.removeContainer(id)
 		return ExitInfo{}, fmt.Errorf("start one-shot container for %s: %w", p.Slug, err)
 	}
 
-	go r.streamLogs(id, logWriter)
+	logCtx, cancelLogs := context.WithCancel(context.Background())
+	logsDone := make(chan struct{})
+	go func() {
+		defer close(logsDone)
+		r.streamLogsContext(logCtx, id, logWriter)
+	}()
+	defer func() {
+		// Normally attach reaches EOF on exit. Bound draining when the daemon
+		// fails or leaves the stream open, and never outlive the caller's writer.
+		timer := time.AfterFunc(5*time.Second, cancelLogs)
+		defer timer.Stop()
+		defer cancelLogs()
+		<-logsDone
+	}()
 
 	waitDone := make(chan waitResult, 1)
 	go func() {
