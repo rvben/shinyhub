@@ -1911,6 +1911,40 @@ body[data-auth="out"] {
 }
 .identity-tabs button[aria-selected="true"] { border-bottom-color: var(--cyan-bright); color: var(--text); }
 .identity-tabs button:hover { color: var(--cyan-bright); background: transparent; box-shadow: none; transform: none; }
+/* Support-session discovery belongs beside the People workflow. */
+.support-session-settings { padding: 0.5rem 0 1.5rem; margin-bottom: 1rem; border-bottom: 1px solid var(--line-2); }
+.support-settings-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.75rem; }
+.support-settings-heading h2 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+#support-settings-status { color: var(--text-soft); font-size: 0.8rem; }
+.support-session-settings p, .support-settings-guide li { max-width: 72ch; color: var(--text-soft); font-size: 0.85rem; line-height: 1.65; }
+.support-session-settings p { margin: 0.65rem 0; }
+.support-session-settings summary { width: fit-content; padding: 0.65rem 0; color: var(--cyan-bright); cursor: pointer; font-size: 0.85rem; font-weight: 600; }
+.support-session-settings summary:focus-visible, .users-support-action button:focus-visible { outline: 2px solid var(--cyan-bright); outline-offset: 4px; }
+.support-settings-guide { max-width: 48rem; padding-top: 0.25rem; }
+.support-settings-guide ol { padding-left: 1.5rem; }
+.support-settings-guide li + li { margin-top: 0.5rem; }
+.support-settings-guide pre { max-width: 100%; overflow-x: auto; padding: 1rem; background: var(--surface-2); border: 1px solid var(--line-2); font-size: 0.8rem; line-height: 1.6; }
+.support-settings-guide p code { overflow-wrap: anywhere; }
+.users-support-action { display: grid; justify-items: start; gap: 0.4rem; max-width: 13rem; }
+.users-support-hint { color: var(--text-soft); font-size: 0.72rem; line-height: 1.5; white-space: normal; }
+.users-row-actions { align-items: start; }
+@media (max-width: 640px) {
+  #users-table:not([hidden]) { display: block; overflow: visible; }
+  #users-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  #users-table tbody { display: block; }
+  #users-table tbody tr { display: grid; grid-template-columns: 1fr 1fr; padding: 1rem; gap: 0.75rem; border-bottom: 1px solid var(--line-2); }
+  #users-table td { display: block; padding: 0; border: 0; min-width: 0; }
+  #users-table td:first-child, #users-table td:last-child { grid-column: 1 / -1; white-space: normal; }
+  #users-table td:first-child { font-weight: 600; overflow-wrap: anywhere; }
+  #users-table td:nth-child(2)::before { content: 'Role'; }
+  #users-table td:nth-child(3)::before { content: 'Created'; }
+  #users-table td:nth-child(2)::before, #users-table td:nth-child(3)::before { display: block; color: var(--text-soft); font-size: 0.72rem; margin-bottom: 0.3rem; }
+  #users-table .users-row-role { max-width: 100%; }
+  .users-row-actions { flex-wrap: wrap; justify-content: flex-start; }
+  .users-row-actions .btn-row { min-height: 44px; }
+  .support-session-settings summary { min-height: 44px; }
+}
+
 .service-account-explainer {
   display: grid; grid-template-columns: minmax(16rem, 0.8fr) minmax(20rem, 1.2fr); gap: 2rem;
   align-items: end; padding: 0.5rem 0 1.5rem; border-bottom: 1px solid var(--line-2);

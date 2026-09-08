@@ -1,3 +1,4 @@
+import { renderSupportSessionSettings, createSupportSessionAction } from '/static/views/support-session-settings.js';
 import { createRouter } from '/static/router.js';
 import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
@@ -77,7 +78,7 @@ import {
   saveSupportDraft,
 } from '/static/views/support-session-modal.js';
 import { createSupportSessionRecovery } from '/static/views/support-session-recovery.js';
-import { userRowCaps, userRolePresentation, supportSessionCaps, RESERVED_USER_HINT } from '/static/views/user-row.js';
+import { userRowCaps, userRolePresentation, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
 import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
@@ -1687,6 +1688,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function loadUsers() {
     setError(usersError, '');
+    state.supportSessions = { enabled: null };
+    renderSupportSessionSettings(document, null, true);
 
     const showLoading = usersBody.childElementCount === 0;
     if (showLoading) {
@@ -1700,7 +1703,10 @@ document.addEventListener('DOMContentLoaded', () => {
       tr.appendChild(td);
       usersBody.appendChild(tr);
     }
-    const clearUsersLoading = () => usersBody.removeAttribute('aria-busy');
+    const clearUsersLoading = () => {
+      usersBody.removeAttribute('aria-busy');
+      renderSupportSessionSettings(document, state.supportSessions.enabled);
+    };
 
     let resp;
     try {
@@ -1735,7 +1741,6 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const u of users) {
       const tr = document.createElement('tr');
       const caps = userRowCaps(u, selfId);
-      const supportCaps = supportSessionCaps(u, selfId, !!state.supportSessions.enabled);
 
       // Username
       const nameCell = document.createElement('td');
@@ -1809,20 +1814,10 @@ document.addEventListener('DOMContentLoaded', () => {
       const actions = document.createElement('div');
       actions.className = 'users-row-actions';
 
-      if (state.supportSessions.enabled) {
-        const supportBtn = document.createElement('button');
-        supportBtn.type = 'button';
-        supportBtn.className = 'btn-row btn-row-support';
-        supportBtn.textContent = 'Support session';
-        supportBtn.setAttribute('aria-label', `Start support session as ${u.username}`);
-        if (!supportCaps.canStart) {
-          supportBtn.disabled = true;
-          supportBtn.title = supportCaps.hint;
-        } else {
-          supportBtn.addEventListener('click', () => openSupportSessionModal(u));
-        }
-        actions.appendChild(supportBtn);
-      }
+      actions.appendChild(createSupportSessionAction({
+        document, user: u, selfId, enabled: state.supportSessions.enabled,
+        onStart: () => openSupportSessionModal(u),
+      }));
 
       const resetBtn = document.createElement('button');
       resetBtn.type = 'button';

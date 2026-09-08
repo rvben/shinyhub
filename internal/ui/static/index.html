@@ -254,6 +254,30 @@
         <button id="identity-services-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="identity-services-panel">Service accounts</button>
       </div>
       <section id="identity-people-panel" role="tabpanel" aria-labelledby="identity-people-tab">
+        <section class="support-session-settings" aria-labelledby="support-settings-heading">
+          <div class="support-settings-heading"><h2 id="support-settings-heading">Support sessions</h2><span id="support-settings-status" role="status">Checking status…</span></div>
+          <p>Open one app as a viewer or developer for up to 15 minutes. Actions use their permissions and can change data; your administrator session stays separate.</p>
+          <p id="support-settings-message">Checking whether this server allows support sessions.</p>
+          <details id="support-settings-setup">
+            <summary>Set up support sessions</summary>
+            <div class="support-settings-guide">
+              <p>Disabled by default because app code must run on a separate origin to protect your administrator credentials. A server administrator can enable this in the deployment configuration.</p>
+              <ol>
+                <li>Choose a separate app hostname and route it to ShinyHub with working DNS and HTTPS.</li>
+                <li>Merge the example below into your server configuration, replacing both example URLs with your own.</li>
+                <li>Restart ShinyHub, then use <strong>Refresh</strong> above to check the status.</li>
+              </ol>
+              <pre aria-label="Example server configuration"><code>server:
+  base_url: https://hub.example.com
+  app_origin: https://apps.example.com
+
+auth:
+  support_sessions: true</code></pre>
+              <p>Using environment variables? Set <code>SHINYHUB_BASE_URL</code>, <code>SHINYHUB_APP_ORIGIN</code>, and <code>SHINYHUB_SUPPORT_SESSIONS=true</code>. Keep the WebSocket session recheck interval at its default of 30 seconds or lower, and above zero.</p>
+              <p>Sessions require a reason and are recorded in the audit log. Native sign-in must be less than 10 minutes old. The selected person must already have access to the app.</p>
+            </div>
+          </details>
+        </section>
         <p id="users-error" class="error" hidden></p>
         <table id="users-table">
           <thead><tr><th scope="col">Person</th><th scope="col">Role</th><th scope="col">Created</th><th scope="col" class="users-actions-col">Actions</th></tr></thead>

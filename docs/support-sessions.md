@@ -33,7 +33,13 @@ timer.
 
 ## Administrator flow
 
-On **Identity → People**, choose **Support session** beside a viewer or
+On **Identity → People**, the **Support sessions** section shows whether the
+feature is enabled and includes an expandable setup guide. When disabled, the
+action beside an eligible person opens that guide. Unavailable actions explain
+account restrictions directly beneath the button. If status cannot be confirmed,
+use **Refresh** to retry.
+
+Once enabled, choose **Support session** beside a viewer or
 developer. Select an app and enter a reason or ticket reference. Starting the
 session redirects to the application origin and establishes a separate cookie
 scoped to `/app/<slug>/` for at most 15 minutes.
