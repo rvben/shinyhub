@@ -179,10 +179,10 @@ func TestFleetHealthLoop_ProgressAndTimeoutNameLastStatus(t *testing.T) {
 	if !strings.Contains(err.Error(), "last status: hibernated") {
 		t.Errorf("timeout error must carry the last status, got: %v", err)
 	}
-	if !strings.Contains(buf.String(), "still hibernated") {
+	if !strings.Contains(buf.String(), "demo: hibernated") {
 		t.Errorf("progress lines must show the observed status, got:\n%s", buf.String())
 	}
-	if strings.Contains(buf.String(), "still starting") {
+	if strings.Contains(buf.String(), "demo: starting") {
 		t.Errorf("progress lines must not claim starting for a hibernated app, got:\n%s", buf.String())
 	}
 }

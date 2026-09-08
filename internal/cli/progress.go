@@ -187,3 +187,36 @@ func humanElapsed(d time.Duration) string {
 	}
 	return fmt.Sprintf("%dm%02ds", secs/60, secs%60)
 }
+
+// waitUpdates keeps unchanged waits quiet while reporting transitions promptly.
+// Repeated reminders back off to once a minute; polling remains independent.
+type waitUpdates struct {
+	last     time.Time
+	state    string
+	interval time.Duration
+}
+
+func (u *waitUpdates) due(now time.Time, state string) bool {
+	if state != u.state {
+		u.state, u.last = state, now
+		return true
+	}
+	if now.Sub(u.last) < u.interval {
+		return false
+	}
+	u.last = now
+	if u.interval < time.Minute {
+		u.interval *= 2
+		if u.interval > time.Minute {
+			u.interval = time.Minute
+		}
+	}
+	return true
+}
+
+func waitTiming(elapsed, remaining time.Duration) string {
+	if remaining < 0 {
+		remaining = 0
+	}
+	return humanElapsed(elapsed) + " elapsed, timeout in " + humanElapsed(remaining)
+}

@@ -90,14 +90,16 @@ func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundl
 	if err := ensureFleetAppWithRun(cfg, slug, visibility, project, out, runID); err != nil {
 		return "", false, nil, ensureFailureKind(err), err
 	}
+	updateFleetProgress(out, "Building bundle", "", time.Time{}, false)
 	buf, summary, err := zipDirFromSpec(spec)
 	if err != nil {
 		return "", false, nil, deployfail.ZipError, fmt.Errorf("bundle %s: %w", slug, err)
 	}
-	if summary != "" {
+	if summary != "" && !updateFleetProgress(out, "Bundle ready", summary, time.Time{}, false) {
 		fmt.Fprintf(out, "  %s: %s\n", slug, summary)
 	}
 
+	updateFleetProgress(out, "Deploying bundle", summary, time.Time{}, false)
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("bundle", "bundle.zip")
@@ -164,7 +166,7 @@ func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundl
 	var keptStopped bool
 	if err := json.Unmarshal(rb, &deployResp); err == nil {
 		keptStopped, _ = deployResp["kept_stopped"].(bool)
-		if summary := formatHookExecutionSummary(deployResp); summary != "" {
+		if summary := formatHookExecutionSummary(deployResp); summary != "" && !updateFleetProgress(out, "Bundle deployed", summary, time.Time{}, false) {
 			fmt.Fprintf(out, "  %s: %s\n", slug, summary)
 		}
 		if warn := formatHooksSkippedWarning(deployResp["hooks_skipped"]); warn != "" {
@@ -357,8 +359,8 @@ func verifyFleetHealthyForAction(cfg *cliConfig, slug string, out io.Writer, tim
 }
 
 // waitForFleetHealthLoop blocks until poll reports ready, a terminal startup
-// failure, or timeout elapses. Every progressEvery it writes a one-line update
-// (app, elapsed/timeout) to out so a long first-run uv sync reads as progress
+// failure, or timeout elapses. Status changes are immediate; unchanged updates
+// back off from progressEvery to one minute so a long first-run uv sync reads as progress
 // rather than a hang. A fatal poll error (auth / gone) aborts immediately;
 // transient 5xx and transport errors keep the loop going until the deadline.
 // now and sleep are injected so the cadence is deterministic in tests.
@@ -367,11 +369,12 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 	s := stylerFor(out)
 	start := now()
 	deadline := start.Add(timeout)
-	lastProgress := start
+	updates := waitUpdates{last: start, interval: progressEvery}
 	var lastErr error
 	var lastStatus string
 	lastPollOK := false
 	unknownReported := false
+	updateFleetProgress(out, "Checking health", "", deadline, false)
 	for {
 		ready, status, err := poll()
 		// A poll may consume the remaining request budget. Measure after it returns
@@ -379,15 +382,20 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 		t := now()
 		if err == nil && ready {
 			if status == "stopped" {
-				fmt.Fprintf(out, "  %s: %s\n", slug, s.dim("stopped (excluded from --verify-health)"))
+				if !updateFleetProgress(out, "Stopped", "Excluded from health verification", time.Time{}, false) {
+					fmt.Fprintf(out, "  %s: %s\n", slug, s.dim("stopped (excluded from --verify-health)"))
+				}
 				return nil
 			}
 			if appstatus.Class(status) == appstatus.KindParked {
-				fmt.Fprintf(out, "  %s: %s\n", slug, s.dim(status+" (parked, wakes on first request)"))
+				if !updateFleetProgress(out, "Parked", status+" · wakes on first request", time.Time{}, false) {
+					fmt.Fprintf(out, "  %s: %s\n", slug, s.dim(status+" (parked, wakes on first request)"))
+				}
 				return nil
 			}
-			fmt.Fprintf(out, "  %s: %s after %s\n",
-				slug, s.status("healthy"), s.dim(t.Sub(start).Round(time.Second).String()))
+			if !updateFleetProgress(out, "Healthy", "", time.Time{}, false) {
+				fmt.Fprintf(out, "  %s: %s after %s\n", slug, s.status("healthy"), s.dim(t.Sub(start).Round(time.Second).String()))
+			}
 			return nil
 		}
 		// A poll that fails on or after the deadline was cut short by this
@@ -420,10 +428,14 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 		if !t.Before(deadline) {
 			break
 		}
-		if t.Sub(lastProgress) >= progressEvery {
-			fmt.Fprintf(out, "  %s: still %s %s\n", slug, s.status(waitingStatusWord(lastStatus)),
-				s.dim(fmt.Sprintf("(%s/%s)", t.Sub(start).Round(time.Second), timeout)))
-			lastProgress = t
+		displayStatus := waitingStatusWord(lastStatus)
+		if err != nil {
+			displayStatus = "status unavailable; retrying"
+		}
+		live := updateFleetProgress(out, "Waiting for healthy status", displayStatus, deadline, displayStatus == "degraded" || err != nil)
+		if !live && updates.due(t, displayStatus) {
+			fmt.Fprintf(out, "  %s: %s %s\n", slug, s.status(displayStatus),
+				s.dim("("+waitTiming(t.Sub(start), deadline.Sub(t))+")"))
 		}
 		delay := pollEvery
 		if remaining := deadline.Sub(t); remaining < delay {

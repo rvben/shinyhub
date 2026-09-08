@@ -35,6 +35,33 @@ failure: the URL remains visible and JSON reports `opened: false`. A route-check
 failure is different—it exits non-zero while explicitly preserving the fact
 that the deployment became healthy.
 
+## Fleet progress
+
+`shinyhub fleet apply` uses one live display in an interactive terminal. Apps
+keep their manifest order, with a spinner for active work, a check for completed
+work, and a failure mark for errors. Each row shows its current phase and elapsed
+time; schedule waits include the schedule and run ID, and health waits show the
+observed status. Countdown values are labeled `timeout in`, not estimated finish
+times. Warnings and logs remain visible above the display, and the final report
+includes recovery commands when needed.
+
+`CI=true` (also `CI=1` or `GITLAB_CI=true`) disables animation and default color,
+even if the runner allocates a terminal. Redirected output and `TERM=dumb` also
+use durable event lines. Status changes appear promptly; unchanged wait reminders
+back off to once a minute. Refresh admission and completion remain explicit.
+`FORCE_COLOR=1` can enable color in CI, but never cursor movement. `NO_COLOR` and
+`--no-color` still take precedence; in an interactive terminal they preserve the
+live layout without color. False CI values such as `false` and `0` do not disable
+interactive output.
+
+The live display needs at least 50 columns and room for every app. Smaller
+terminals and larger fleets use the event log. If the terminal is resized during
+a run, output switches to event lines to preserve existing logs. Long labels are
+clipped to prevent wrapping. `LANG=C` selects ASCII progress markers.
+
+With `fleet apply --json`, stdout remains a single JSON report and progress goes
+to stderr, using the same terminal/CI rules.
+
 ## Automation
 
 Outside CI, redirected stdout defaults to one JSON result document. In CI the

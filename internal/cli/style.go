@@ -46,6 +46,22 @@ type styler struct {
 
 // stylerFor returns the styler that applies to w.
 func stylerFor(w io.Writer) styler {
+	// Wrappers retain color policy, but only the owner of the terminal can redraw.
+	var wrapped io.Writer
+	switch v := w.(type) {
+	case *syncWriter:
+		wrapped = v.w
+	case *resultWarningWriter:
+		wrapped = v.Writer
+	case *fleetAppProgress:
+		wrapped = v.display.out
+	}
+	if wrapped != nil {
+		s := stylerFor(wrapped)
+		s.redraw = false
+		return s
+	}
+
 	f, isFile := w.(*os.File)
 	if !isFile {
 		return styler{}
@@ -54,7 +70,7 @@ func stylerFor(w io.Writer) styler {
 	return styler{
 		color:  colorEnabledFor(tty),
 		tty:    tty,
-		redraw: tty && os.Getenv("TERM") != "dumb",
+		redraw: redrawEnabledFor(tty),
 		ascii:  !utf8Locale(),
 	}
 }
@@ -67,8 +83,9 @@ func stylerFor(w io.Writer) styler {
 //  3. CLICOLOR=0              off  (BSD convention)
 //  4. TERM=dumb               off  (terminal cannot render attributes)
 //  5. CLICOLOR_FORCE/FORCE_COLOR  on   (color into a pipe, for CI logs)
-//  6. writer is a terminal    on
-//  7. otherwise               off
+//  6. CI / GITLAB_CI enabled  off
+//  7. writer is a terminal    on
+//  8. otherwise               off
 //
 // The force variables only override the terminal test, never an explicit
 // opt-out, and stylerFor still requires an *os.File - so a stray FORCE_COLOR in
@@ -89,7 +106,13 @@ func colorEnabledFor(tty bool) bool {
 	if envSetNonZero("CLICOLOR_FORCE") || envSetNonZero("FORCE_COLOR") {
 		return true
 	}
-	return tty
+	return tty && !isCIEnvironment(os.Getenv)
+}
+
+// CI has durable logs even when a runner allocates a pseudo-terminal.
+// Explicit false/0 values allow interactive use; FORCE_COLOR never enables motion.
+func redrawEnabledFor(tty bool) bool {
+	return tty && os.Getenv("TERM") != "dumb" && !isCIEnvironment(os.Getenv)
 }
 
 // envSetNonZero reports whether name is set to anything other than "" or "0".

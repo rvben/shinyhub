@@ -47,7 +47,7 @@ func TestFleetHealthLoop_ProgressLinesWhileWaiting(t *testing.T) {
 	if n := strings.Count(out, "demo"); n < 2 {
 		t.Fatalf("want repeated progress lines naming the app, got %d:\n%s", n, out)
 	}
-	if !strings.Contains(out, "/2m0s") {
+	if !strings.Contains(out, "timeout in ") {
 		t.Fatalf("progress line must show elapsed/timeout, got:\n%s", out)
 	}
 }
@@ -842,5 +842,28 @@ func TestDeployAppBundle_EmitsManifestWarningsBeforeHealthWait(t *testing.T) {
 	}
 	if note > healthy {
 		t.Errorf("the advisory must precede the health line so it explains what follows, got:\n%s", out)
+	}
+}
+
+func TestFleetHealthLoop_ReportsChangesBetweenReminders(t *testing.T) {
+	var out bytes.Buffer
+	cur := time.Unix(0, 0)
+	states := []string{"starting", "starting", "degraded", "degraded", "running"}
+	calls := 0
+	poll := func() (bool, string, error) {
+		status := states[calls]
+		calls++
+		return status == "running", status, nil
+	}
+	err := waitForFleetHealthLoop("demo", 15*time.Minute, time.Second, 15*time.Second, poll,
+		func() time.Time { return cur }, func(d time.Duration) { cur = cur.Add(d) }, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "  demo: starting (0s elapsed, timeout in 15m00s)\n" +
+		"  demo: degraded (2s elapsed, timeout in 14m58s)\n" +
+		"  demo: healthy after 4s\n"
+	if out.String() != want {
+		t.Fatalf("progress:\n%s\nwant:\n%s", out.String(), want)
 	}
 }

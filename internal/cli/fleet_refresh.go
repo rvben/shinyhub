@@ -133,14 +133,17 @@ func refreshStaleSchedulesContext(parent context.Context, cfg *cliConfig, slug s
 		if admission.RunID == 0 {
 			continue
 		}
-		fmt.Fprintf(out, "  %s: %s refresh run #%d for %s\n", slug, admission.Status, admission.RunID, schedule.Name)
+		if !updateFleetProgress(out, "Refreshing data", fmt.Sprintf("%s · run #%d (%s)", schedule.Name, admission.RunID, admission.Status), res.warmDeadline, false) {
+			fmt.Fprintf(out, "  %s/%s: refresh %s (run #%d)\n", slug, schedule.Name, admission.Status, admission.RunID)
+		}
+		refreshStarted := time.Now()
 		status, err := waitForDeployRunLoop(func() (string, error) {
 			status, err := pollScheduleRunStatusContext(ctx, cfg, slug, schedule.ID, admission.RunID)
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return status, errors.Join(errDeployRunTimeout, ctx.Err())
 			}
 			return status, err
-		}, time.Until(res.warmDeadline), time.Second, 10*time.Second, time.Now, time.Sleep, out, slug+"/"+schedule.Name)
+		}, time.Until(res.warmDeadline), time.Second, 10*time.Second, time.Now, time.Sleep, out, slug+"/"+schedule.Name, runWaitPresentation{phase: "Refreshing data", detail: fmt.Sprintf("%s · run #%d", schedule.Name, admission.RunID)})
 		res.scheduleRefreshes[index].Status = status
 		if err != nil {
 			appendScheduleLogContext(ctx, cfg, slug, schedule.ID, admission.RunID, schedule.Name, res)
@@ -150,6 +153,9 @@ func refreshStaleSchedulesContext(parent context.Context, cfg *cliConfig, slug s
 			res.failureKind = failureScheduleRefreshFailed
 			appendScheduleLogContext(ctx, cfg, slug, schedule.ID, admission.RunID, schedule.Name, res)
 			return fail(fmt.Errorf("schedule %q refresh run #%d %s", schedule.Name, admission.RunID, status))
+		}
+		if !updateFleetProgress(out, "Data refreshed", fmt.Sprintf("%s · run #%d", schedule.Name, admission.RunID), time.Time{}, false) {
+			fmt.Fprintf(out, "  %s/%s: %s (run #%d, %s)\n", slug, schedule.Name, stylerFor(out).status("succeeded"), admission.RunID, humanElapsed(time.Since(refreshStarted)))
 		}
 	}
 	return nil

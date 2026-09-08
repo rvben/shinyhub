@@ -69,6 +69,10 @@ func (w *resultWarningWriter) addFleetWarning(message string) {
 // worker pool; otherwise the serial path. Both share convergeApp; any change to
 // one loop body MUST be mirrored in the other so the paths cannot diverge.
 func convergeFleet(cfg *cliConfig, pf *preflightResult, opt convergeOpts, out io.Writer) []applyResult {
+	if display := newFleetLiveDisplay(out, pf.diff); display != nil {
+		defer display.close()
+		out = display
+	}
 	marker := "fleet:" + opt.fleetID
 	entries := make(map[string]fleet.AppEntry, len(pf.manifest.Apps))
 	for _, a := range pf.manifest.Apps {
@@ -247,7 +251,7 @@ func resolveDeployRuns(cfg *cliConfig, slug string, refs []deployRunRef, opt con
 			// within an app. Include the slug in live progress so two apps with a
 			// same-named schedule remain distinguishable when their lines interleave.
 			label := fleetDeployRunLabel(slug, ref.Schedule)
-			status, werr := waitForDeployRunLoop(poll, remaining, 2*time.Second, fleetHealthProgressInterval, time.Now, time.Sleep, out, label)
+			status, werr := waitForDeployRunLoop(poll, remaining, 2*time.Second, fleetHealthProgressInterval, time.Now, time.Sleep, out, label, runWaitPresentation{phase: "Running schedule", detail: fmt.Sprintf("%s · run #%d", ref.Schedule, ref.RunID)})
 			oc.Status = status
 			res.deployRuns = append(res.deployRuns, oc)
 			if werr != nil {
@@ -470,7 +474,9 @@ func convergeApp(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs flee
 	return convergeAppFromSpec(cfg, d, entry, obs, bundleBuildSpec{Dir: srcDir}, opt, marker, out)
 }
 
-func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs fleet.ObservedApp, spec bundleBuildSpec, opt convergeOpts, marker string, out io.Writer) applyResult {
+func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, obs fleet.ObservedApp, spec bundleBuildSpec, opt convergeOpts, marker string, out io.Writer) (result applyResult) {
+	out, finishProgress := beginFleetApp(out, d.Slug)
+	defer func() { finishProgress(result) }()
 	start := time.Now()
 	res := applyResult{slug: d.Slug, action: d.Action, mutation: mutationNone}
 	stateAlreadyRecorded := false

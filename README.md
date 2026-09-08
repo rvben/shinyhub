@@ -318,7 +318,7 @@ controlled explicitly:
 | `NO_COLOR=1` | No ANSI color ([no-color.org](https://no-color.org)). |
 | `CLICOLOR=0` | No ANSI color. |
 | `TERM=dumb` | No color, and no in-place redraw: the deploy progress line becomes one line per step. |
-| `CI=1` or `GITLAB_CI=1` | Default to the human-readable table for job logs. Explicit `--output` still wins. |
+| `CI=true` / `CI=1` or `GITLAB_CI=true` / `GITLAB_CI=1` | Human-readable job logs with no animation or default color, even on a terminal. Explicit `--output` still wins. |
 | `CLICOLOR_FORCE=1` | Color even when piped, for a CI log that renders ANSI. `FORCE_COLOR` is an alias. |
 | `LANG=C` (any non-UTF-8 locale) | ASCII glyphs (`v`, `x`, `\|/-\`) instead of Unicode. |
 

@@ -11,7 +11,7 @@ import (
 // from a known environment regardless of the developer's shell.
 func clearColorEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR", "TERM"} {
+	for _, name := range []string{"NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR", "TERM", "CI", "GITLAB_CI"} {
 		t.Setenv(name, "")
 		os.Unsetenv(name)
 	}
@@ -188,6 +188,50 @@ func TestUTF8Locale(t *testing.T) {
 			}
 			if got := utf8Locale(); got != tc.want {
 				t.Errorf("utf8Locale() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCIAnimationAndColorPolicy(t *testing.T) {
+	for _, env := range []string{"CI", "GITLAB_CI"} {
+		for _, value := range []string{"true", "1", "TRUE"} {
+			t.Run(env+"="+value, func(t *testing.T) {
+				clearColorEnv(t)
+				t.Setenv("TERM", "xterm-256color")
+				t.Setenv(env, value)
+				if redrawEnabledFor(true) || colorEnabledFor(true) {
+					t.Fatal("CI terminal enabled animation or default color")
+				}
+				t.Setenv("FORCE_COLOR", "1")
+				if redrawEnabledFor(true) || !colorEnabledFor(true) {
+					t.Fatal("forced color must never enable animation")
+				}
+				t.Setenv("NO_COLOR", "1")
+				if colorEnabledFor(true) {
+					t.Fatal("NO_COLOR must win")
+				}
+			})
+		}
+	}
+	for _, value := range []string{"", "false", "0", "off"} {
+		t.Run("interactive="+value, func(t *testing.T) {
+			clearColorEnv(t)
+			t.Setenv("CI", value)
+			t.Setenv("TERM", "xterm-256color")
+			if !redrawEnabledFor(true) {
+				t.Fatal("interactive terminal lost redraw")
+			}
+			if redrawEnabledFor(false) {
+				t.Fatal("pipe enabled redraw")
+			}
+			t.Setenv("NO_COLOR", "1")
+			if !redrawEnabledFor(true) {
+				t.Fatal("NO_COLOR must preserve animation")
+			}
+			t.Setenv("TERM", "dumb")
+			if redrawEnabledFor(true) {
+				t.Fatal("dumb terminal enabled redraw")
 			}
 		})
 	}

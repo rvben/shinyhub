@@ -101,10 +101,8 @@ func TestEnvPlanTextPaintsMarkers(t *testing.T) {
 }
 
 // TestFleetProgressLinesArePlainOffATerminal pins the exact text of the two
-// fleet progress lines. Both now compose their status word and elapsed counter
-// through the styler, and the existing loop tests either discard the output or
-// assert a substring, so without this nothing would notice the piped form
-// drifting from what it printed before.
+// fleet progress lines, including readable elapsed time and timeout budget.
+// Redirected output must never contain terminal escapes.
 func TestFleetProgressLinesArePlainOffATerminal(t *testing.T) {
 	var ready bytes.Buffer
 	var calls int
@@ -119,7 +117,7 @@ func TestFleetProgressLinesArePlainOffATerminal(t *testing.T) {
 	if !strings.Contains(ready.String(), "  demo: healthy after 3s\n") {
 		t.Errorf("ready line drifted:\n%q", ready.String())
 	}
-	if !strings.Contains(ready.String(), "  demo: still starting (1s/2m0s)\n") {
+	if !strings.Contains(ready.String(), "  demo: starting (1s elapsed, timeout in 1m59s)\n") {
 		t.Errorf("waiting line drifted:\n%q", ready.String())
 	}
 	if i := strings.IndexByte(ready.String(), 0x1b); i >= 0 {
@@ -139,7 +137,7 @@ func TestDeployRunProgressLineIsPlainOffATerminal(t *testing.T) {
 	_, _ = waitForDeployRunLoop(poll, 5*time.Second, time.Second, time.Second,
 		now, sleep, &out, "warm")
 
-	if !strings.Contains(out.String(), "  warm: run still running (1s/5s)\n") {
+	if !strings.Contains(out.String(), "  warm: running (1s elapsed, timeout in 4s)\n") {
 		t.Errorf("deploy-triggered run progress line drifted:\n%q", out.String())
 	}
 	if i := strings.IndexByte(out.String(), 0x1b); i >= 0 {

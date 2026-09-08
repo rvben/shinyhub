@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -37,10 +38,20 @@ func TestFleetRefreshUnchangedWaitsExactRunAndVerifies(t *testing.T) {
 				}
 			}))
 			defer srv.Close()
-			res := convergeApp(&cliConfig{Host: srv.URL}, fleet.AppDiff{Slug: "a", Action: fleet.ActionUnchanged}, fleet.AppEntry{Slug: "a"}, fleet.ObservedApp{}, "", convergeOpts{refreshStale: true, warmTimeout: time.Second}, "", io.Discard)
+			var out bytes.Buffer
+			res := convergeApp(&cliConfig{Host: srv.URL}, fleet.AppDiff{Slug: "a", Action: fleet.ActionUnchanged}, fleet.AppEntry{Slug: "a"}, fleet.ObservedApp{}, "", convergeOpts{refreshStale: true, warmTimeout: time.Second}, "", &out)
 			if res.status != statusUnchanged || res.err != nil || posts != 1 || polls != 1 || lists != 2 {
 				t.Fatalf("result=%+v requests post=%d poll=%d lists=%d", res, posts, polls, lists)
 			}
+			for _, want := range []string{
+				"a/refresh-data: refresh " + disposition + " (run #42)",
+				"a/refresh-data: succeeded (run #42,",
+			} {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("missing %q in progress:\n%s", want, out.String())
+				}
+			}
+
 			wantMutation := mutationNone
 			if disposition == "started" {
 				wantMutation = mutationCommitted

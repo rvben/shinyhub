@@ -122,19 +122,40 @@ func deployRunStatusOK(status string) bool {
 	return status == "succeeded"
 }
 
+type runWaitPresentation struct{ phase, detail string }
+
 // waitForDeployRunLoop polls the run's status until it leaves "running" or the
-// timeout elapses, emitting a progress line every progressEvery. now and sleep
+// timeout elapses, emitting increasingly spaced progress reminders. now and sleep
 // are injected so the cadence is deterministic in tests. It returns the last
 // observed status; on timeout it also returns errDeployRunTimeout. Transient
 // poll errors (5xx / transport) are retried until the deadline; a fatal 4xx
 // aborts immediately.
 func waitForDeployRunLoop(poll func() (string, error), timeout, pollEvery, progressEvery time.Duration,
-	now func() time.Time, sleep func(time.Duration), out io.Writer, label string) (string, error) {
+	now func() time.Time, sleep func(time.Duration), out io.Writer, label string, presentation ...runWaitPresentation) (resultStatus string, resultErr error) {
 	s := stylerFor(out)
+	view := runWaitPresentation{phase: "Running schedule", detail: label}
+	if len(presentation) > 0 {
+		view = presentation[0]
+	}
+	defer func() {
+		phase := "Schedule " + resultStatus
+		warning := !deployRunStatusOK(resultStatus)
+		if resultErr != nil {
+			phase, warning = "Schedule wait failed", true
+			if errors.Is(resultErr, errDeployRunTimeout) {
+				phase = "Schedule timed out"
+			}
+			if errors.Is(resultErr, context.Canceled) {
+				phase = "Schedule wait cancelled"
+			}
+		}
+		updateFleetProgress(out, phase, view.detail, time.Time{}, warning)
+	}()
 	start := now()
 	deadline := start.Add(timeout)
-	lastProgress := start
+	updates := waitUpdates{last: start, state: "running", interval: progressEvery}
 	lastStatus := "running"
+	updateFleetProgress(out, view.phase, view.detail, deadline, false)
 	for {
 		status, err := poll()
 		// Measure the deadline after the request returns. A context-aware poll can
@@ -162,13 +183,21 @@ func waitForDeployRunLoop(poll func() (string, error), timeout, pollEvery, progr
 		if !t.Before(deadline) {
 			return lastStatus, errDeployRunTimeout
 		}
-		if t.Sub(lastProgress) >= progressEvery {
+		displayStatus := "running"
+		if err != nil {
+			displayStatus = "status unavailable; retrying"
+		}
+		phase := view.phase
+		if err != nil {
+			phase = "Status unavailable; retrying"
+		}
+		live := updateFleetProgress(out, phase, view.detail, deadline, err != nil)
+		if !live && updates.due(t, displayStatus) {
 			// Yellow rather than styler.status("running"): here the word means a
 			// job still in flight, not the steady healthy state that status()
 			// paints green. Green would read as "this finished successfully".
-			fmt.Fprintf(out, "  %s: run still %s %s\n", label, s.yellow("running"),
-				s.dim(fmt.Sprintf("(%s/%s)", t.Sub(start).Round(time.Second), timeout)))
-			lastProgress = t
+			fmt.Fprintf(out, "  %s: %s %s\n", label, s.yellow(displayStatus),
+				s.dim("("+waitTiming(t.Sub(start), deadline.Sub(t))+")"))
 		}
 		delay := pollEvery
 		if remaining := deadline.Sub(t); remaining < delay {
@@ -347,7 +376,7 @@ func verifyExistingWarmGateWithWait(cfg *cliConfig, slug, bundleDir string, res 
 				return pollScheduleRunStatusContext(ctx, cfg, slug, schedule.ID, outcome.ActiveRunID)
 			}
 			status, waitErr := waitForDeployRunLoop(poll, remaining, 2*time.Second, fleetHealthProgressInterval,
-				time.Now, time.Sleep, out, fleetDeployRunLabel(slug, name)+" (active)")
+				time.Now, time.Sleep, out, fleetDeployRunLabel(slug, name)+" (active)", runWaitPresentation{phase: "Waiting for warm-up", detail: fmt.Sprintf("%s · run #%d (active)", name, outcome.ActiveRunID)})
 			if waitErr != nil {
 				res.warmGate = append(res.warmGate, outcome)
 				res.failureKind = failureWarmStateUnavailable

@@ -366,3 +366,32 @@ func TestRestartAppAfterWarm_KeepsStoppedAppStopped(t *testing.T) {
 		t.Fatalf("restarted=%v hits=%d, want false/0", restarted, restartHits)
 	}
 }
+
+func TestWaitForDeployRunLoop_QuietRemindersAndRecovery(t *testing.T) {
+	var out bytes.Buffer
+	start := time.Unix(0, 0)
+	cur := start
+	poll := func() (string, error) {
+		elapsed := cur.Sub(start)
+		if elapsed == 95*time.Second {
+			return "", errors.New("temporary outage")
+		}
+		if elapsed >= 100*time.Second {
+			return "succeeded", nil
+		}
+		return "running", nil
+	}
+	status, err := waitForDeployRunLoop(poll, 15*time.Minute-194*time.Millisecond, time.Second, 10*time.Second,
+		func() time.Time { return cur }, func(d time.Duration) { cur = cur.Add(d) }, &out, "demo/refresh-data")
+	if err != nil || status != "succeeded" {
+		t.Fatalf("status=%s err=%v", status, err)
+	}
+	want := "  demo/refresh-data: running (10s elapsed, timeout in 14m50s)\n" +
+		"  demo/refresh-data: running (30s elapsed, timeout in 14m30s)\n" +
+		"  demo/refresh-data: running (1m10s elapsed, timeout in 13m50s)\n" +
+		"  demo/refresh-data: status unavailable; retrying (1m35s elapsed, timeout in 13m25s)\n" +
+		"  demo/refresh-data: running (1m36s elapsed, timeout in 13m24s)\n"
+	if out.String() != want {
+		t.Fatalf("progress:\n%s\nwant:\n%s", out.String(), want)
+	}
+}
