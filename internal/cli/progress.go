@@ -58,8 +58,11 @@ func (p *progress) frames() []string {
 // draw repaints the animated line in place.
 func (p *progress) draw() {
 	f := p.frames()
-	fmt.Fprintf(p.w, "%s%s %s %s", eraseLine,
-		p.s.yellow(f[p.frame%len(f)]), p.label, p.s.dim(humanElapsed(time.Since(p.started))))
+	elapsed := humanElapsed(time.Since(p.started))
+	width := planOutputWidth(p.w) - 1
+	label := fleetClip(p.label, max(0, width-len(elapsed)-3), p.s.glyphEllipsis())
+	line := fmt.Sprintf("%s %s %s", p.s.yellow(f[p.frame%len(f)]), label, p.s.dim(elapsed))
+	fmt.Fprint(p.w, eraseLine+fleetClip(line, width, p.s.glyphEllipsis()))
 	p.frame++
 }
 

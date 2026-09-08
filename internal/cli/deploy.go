@@ -718,6 +718,7 @@ func waitForHealthyWithContext(parent context.Context, cfg *cliConfig, slug stri
 	var lastStatus string
 	var lastObservation appHealthObservation
 	unknownReported := false
+	lastReason := ""
 	for {
 		ready, observation, err := pollAppHealthContext(ctx, cfg, slug)
 		status := observation.App.Status
@@ -763,6 +764,20 @@ func waitForHealthyWithContext(parent context.Context, cfg *cliConfig, slug stri
 			printLogTailForObservation(cfg, slug, errOut, lastObservation)
 			return fleetHealthFailure(slug, "deploy", startedAt, lastObservation)
 		}
+		reason := healthWaitReason(observation)
+		if err != nil {
+			reason = "Status check unavailable; retrying"
+		}
+		if p.s.redraw {
+			p.label = fmt.Sprintf("Waiting for %s to be healthy", slug)
+			if reason != "" {
+				p.label = slug + ": " + reason
+			}
+		} else if reason != "" && reason != lastReason {
+			p.note(slug + ": " + reason)
+		}
+		lastReason = reason
+
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			break
@@ -795,6 +810,9 @@ func waitForHealthyWithContext(parent context.Context, cfg *cliConfig, slug stri
 	if hint := unknownStatusHint(lastStatus); hint != "" {
 		return fmt.Errorf("deploy committed, but %s never reported a status this CLI recognises within %s (timed out): %s. "+
 			"Check the app with `shinyhub apps show %s`", slug, timeout, hint, slug)
+	}
+	if reason := healthWaitReason(lastObservation); reason != "" {
+		return fmt.Errorf("deploy committed, but %s is still %s after %s (timed out): %s; run: shinyhub apps show %s", slug, waitingStatusWord(lastStatus), humanElapsed(timeout), reason, shellQuote(slug))
 	}
 	return fmt.Errorf("deploy committed, but %s is still %s after %s (timed out). "+
 		"First-run dependency installs can take longer than this; the app has not failed. "+
@@ -969,8 +987,12 @@ type appHealthObservation struct {
 		ContentDigest    string     `json:"content_digest,omitempty"`
 		LastReplicaError string     `json:"last_replica_error"`
 	} `json:"app"`
-	Replicas         []replicaHealthObservation `json:"replicas_status"`
-	RedeployInFlight bool                       `json:"redeploy_in_flight"`
+	Replicas                 []replicaHealthObservation    `json:"replicas_status"`
+	RedeployInFlight         bool                          `json:"redeploy_in_flight"`
+	CompatibilityQuarantined bool                          `json:"compatibility_quarantined"`
+	ProducerRepairRequired   bool                          `json:"producer_repair_required"`
+	Schedules                []healthScheduleObservation   `json:"deploy_trigger_schedules"`
+	Activations              []healthActivationObservation `json:"latest_schedule_activations"`
 }
 
 type replicaHealthObservation struct {

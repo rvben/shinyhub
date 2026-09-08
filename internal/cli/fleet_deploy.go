@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/appstatus"
+	"github.com/rvben/shinyhub/internal/deployevent"
 	"github.com/rvben/shinyhub/internal/deployfail"
 )
 
@@ -119,6 +120,7 @@ func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundl
 	}
 	req.Header.Set("Authorization", authHeader(cfg.Token))
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", deployevent.MediaType)
 	if allowDowntime {
 		req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	}
@@ -133,8 +135,21 @@ func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundl
 	if err != nil {
 		return "", false, nil, deployfail.TransportError, fmt.Errorf("deploy %s: %w", slug, err)
 	}
-	rb, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	var rb []byte
+	if resp.StatusCode < 300 && isDeployEventResponse(resp) {
+		var streamKind deployfail.Kind
+		rb, streamKind, err = consumeFleetDeployEvents(resp, slug, out)
+		resp.Body.Close()
+		if err != nil {
+			return "", false, nil, streamKind, err
+		}
+	} else {
+		rb, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", false, nil, deployfail.Unknown, fmt.Errorf("read deployment result for %s: %w", slug, err)
+		}
+	}
 	if resp.StatusCode >= 300 {
 		// A refused no-downtime handoff preserves the working version and races
 		// nothing, so it is a precondition the operator clears with
@@ -308,7 +323,7 @@ func waitForFleetHealthy(cfg *cliConfig, slug string, out io.Writer, timeout tim
 		return ready, observation.App.Status, err
 	}
 	err := waitForFleetHealthLoop(slug, timeout, 2*time.Second, fleetHealthProgressInterval,
-		poll, time.Now, time.Sleep, out)
+		poll, time.Now, time.Sleep, out, func() string { return healthWaitReason(last) })
 	if err != nil {
 		if isTerminalStatus(last.App.Status) {
 			err = fleetHealthFailure(slug, "deploy", startedAt, last)
@@ -348,7 +363,7 @@ func verifyFleetHealthyForAction(cfg *cliConfig, slug string, out io.Writer, tim
 		return ready, status, err
 	}
 	err := waitForFleetHealthLoop(slug, timeout, 2*time.Second, fleetHealthProgressInterval,
-		poll, time.Now, time.Sleep, out)
+		poll, time.Now, time.Sleep, out, func() string { return healthWaitReason(last) })
 	if err != nil {
 		if isTerminalStatus(last.App.Status) {
 			err = fleetHealthFailure(slug, action, applyStartedAt, last)
@@ -365,13 +380,14 @@ func verifyFleetHealthyForAction(cfg *cliConfig, slug string, out io.Writer, tim
 // transient 5xx and transport errors keep the loop going until the deadline.
 // now and sleep are injected so the cadence is deterministic in tests.
 func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.Duration,
-	poll func() (bool, string, error), now func() time.Time, sleep func(time.Duration), out io.Writer) error {
+	poll func() (bool, string, error), now func() time.Time, sleep func(time.Duration), out io.Writer, reasonForPoll ...func() string) error {
 	s := stylerFor(out)
 	start := now()
 	deadline := start.Add(timeout)
 	updates := waitUpdates{last: start, interval: progressEvery}
 	var lastErr error
 	var lastStatus string
+	var lastReason string
 	lastPollOK := false
 	unknownReported := false
 	updateFleetProgress(out, "Checking health", "", deadline, false)
@@ -414,6 +430,10 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 			}
 		} else {
 			lastStatus = status
+			lastReason = ""
+			if len(reasonForPoll) > 0 {
+				lastReason = reasonForPoll[0]()
+			}
 			// A status this CLI cannot classify is reported on first sighting,
 			// not on the progress cadence: it is the one thing the operator
 			// can act on before the timeout burns.
@@ -432,9 +452,16 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 		if err != nil {
 			displayStatus = "status unavailable; retrying"
 		}
-		live := updateFleetProgress(out, "Waiting for healthy status", displayStatus, deadline, displayStatus == "degraded" || err != nil)
+		detail := displayStatus
+		paintedStatus := s.status(displayStatus)
+		if err == nil && lastReason != "" {
+			detail = lastReason
+			displayStatus += "; " + lastReason
+			paintedStatus += "; " + lastReason
+		}
+		live := updateFleetProgress(out, "Waiting for healthy status", detail, deadline, lastStatus == "degraded" || err != nil)
 		if !live && updates.due(t, displayStatus) {
-			fmt.Fprintf(out, "  %s: %s %s\n", slug, s.status(displayStatus),
+			fmt.Fprintf(out, "  %s: %s %s\n", slug, paintedStatus,
 				s.dim("("+waitTiming(t.Sub(start), deadline.Sub(t))+")"))
 		}
 		delay := pollEvery
@@ -454,6 +481,9 @@ func waitForFleetHealthLoop(slug string, timeout, pollEvery, progressEvery time.
 		detail = hint
 	} else if lastStatus != "" {
 		detail = "last status: " + lastStatus
+	}
+	if lastReason != "" {
+		detail += "; " + lastReason
 	}
 	if !lastPollOK && lastErr != nil {
 		if detail != "" {
@@ -515,7 +545,10 @@ func fleetHealthFailure(slug, action string, applyStartedAt time.Time, observati
 	if observation.App.LastDeployedAt != nil {
 		message += "; last deployed " + observation.App.LastDeployedAt.UTC().Format(time.RFC3339)
 	}
-	hint := fmt.Sprintf("shinyhub apps logs %s --system --tail 200", slug)
+	if reason := healthWaitReason(observation); reason != "" && !strings.Contains(message, reason) {
+		message += "; " + reason
+	}
+	hint := fmt.Sprintf("shinyhub apps logs %s --system --tail 200", shellQuote(slug))
 	if crashedReplica != nil && crashedReplica.LastExit != nil && crashedReplica.LastExit.RunID != "" {
 		hint += " --run " + shellQuote(crashedReplica.LastExit.RunID)
 	}

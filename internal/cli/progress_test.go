@@ -177,3 +177,13 @@ func TestProgressASCIIFrames(t *testing.T) {
 		}
 	}
 }
+
+func TestProgressLongReasonStaysOnOneTerminalLine(t *testing.T) {
+	var out bytes.Buffer
+	p := redrawProgress(&out, "demo: "+strings.Repeat("❤️", 100))
+	p.draw()
+	frame := strings.TrimPrefix(out.String(), eraseLine)
+	if fleetVisibleWidth(frame) >= defaultPlanWidth || !strings.Contains(frame, "…") || !strings.Contains(frame, "0s") {
+		t.Fatalf("reason wraps the spinner line: %q", frame)
+	}
+}

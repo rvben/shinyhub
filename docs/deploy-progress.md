@@ -45,6 +45,21 @@ observed status. Countdown values are labeled `timeout in`, not estimated finish
 times. Warnings and logs remain visible above the display, and the final report
 includes recovery commands when needed.
 
+Fleet deploys also negotiate the server's deployment event stream, showing
+actual dependency builds, hook execution, replica startup, and recovery phases.
+A failure names its phase and retains the server's recovery result (for example,
+that the previous deployment remained available). A missing final stream result
+is reported as an unknown outcome with an inspection command; it does not cause
+an automatic upload retry. Older servers keep their ordinary JSON response.
+
+Health waits explain current server observations: a blocking schedule and run
+ID, delayed data activation, an unavailable worker, a replica failure reason, or
+a deployment that is still running while the current version serves traffic.
+Changes in the reason appear immediately in CI, even when the app status stays
+`degraded`. Timeouts retain the latest observed reason. Historical process exits
+and completed activations are not treated as current blockers; when the server
+has no detail, the CLI keeps the status-only message.
+
 `CI=true` (also `CI=1` or `GITLAB_CI=true`) disables animation and default color,
 even if the runner allocates a terminal. Redirected output and `TERM=dumb` also
 use durable event lines. Status changes appear promptly; unchanged wait reminders

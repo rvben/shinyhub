@@ -182,6 +182,10 @@ func deployWithRetry(cfg *cliConfig, slug string, spec bundleBuildSpec, visibili
 			return promoted, attempts, committed, deployRuns, failed, nil
 		}
 		failed = append(failed, attemptOutcome{Attempt: attempts, Kind: kind, Err: err.Error()})
+		var uncertain *fleetDeployOutcomeError
+		if errors.As(err, &uncertain) {
+			return "", attempts, committed, deployRuns, failed, err
+		}
 		if attempts == total {
 			return "", attempts, committed, deployRuns, failed, err
 		}
@@ -522,6 +526,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 	failDeploy := func(err error, attempts int, mutation applyMutationState) applyResult {
 		fail(err, attempts)
 		res.mutation = mutation
+		var outcome *fleetDeployOutcomeError
+		if errors.As(err, &outcome) && res.mutation != mutationPartial {
+			res.mutation = outcome.mutation
+		}
 		// Mark this as a deploy-bearing failure so the top-level failure_kind is
 		// attributed to the deploy. A post-deploy failure (config patch, deploy-triggered run)
 		// uses fail directly and must NOT inherit a deploy attempt's kind.
@@ -665,6 +673,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		res.attemptsDetail = failed
 		if err != nil {
 			wentLive := committed
+			var outcome *fleetDeployOutcomeError
+			if errors.As(err, &outcome) && outcome.mutation == mutationPartial {
+				wentLive = true
+			}
 			if !wentLive {
 				wentLive = adoptBundleWentLive(cfg, d.Slug, d.ServerDigest)
 			}
