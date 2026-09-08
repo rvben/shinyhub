@@ -1,5 +1,6 @@
 import { renderSupportSessionSettings, createSupportSessionAction } from '/static/views/support-session-settings.js';
 import { createRouter } from '/static/router.js';
+import { startAuthenticatedRouter } from '/static/auth-navigation.js';
 import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountOverview } from '/static/views/overview.js';
@@ -5771,8 +5772,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // who landed on /#deploy=<slug> would persist the slug, log in, and
       // then never get the deploy modal (the bootstrap path doesn't run on
       // an interactive login).
-      await router.start();
-      consumeNextParam();
+      if (await startAuthenticatedRouter(router)) return;
       await handleDeployHash();
       await restorePendingSupportSession();
     } finally {
@@ -6364,8 +6364,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = await response.json();
     showLoggedIn(payload);
     restoreCLIConnectRoute();
-    await router.start();
-    consumeNextParam();
+    if (await startAuthenticatedRouter(router)) return;
     await handleDeployHash();
     await restorePendingSupportSession();
   }
@@ -6394,54 +6393,6 @@ document.addEventListener('DOMContentLoaded', () => {
     try { sessionStorage.setItem('pendingDeploy', match[1]); } catch { /* storage may be blocked */ }
     // Clear the hash without adding a history entry.
     history.replaceState(null, '', window.location.pathname + window.location.search);
-  }
-
-  // consumeNextParam reads a same-origin `next=<path>` query parameter from
-  // the current URL, validates it, removes it from the address bar, and
-  // navigates to it. Returns true if a navigation was triggered.
-  //
-  // Producer: internal/access/middleware.go renderAccessDeniedPage sends
-  // unauthenticated browsers to /?next=<original>, where <original> is the
-  // RequestURI of the protected app — which always lives under /app/<slug>
-  // (the proxy path served outside the SPA). The earlier consumer handed
-  // these to router.navigate(), but the SPA router has no /app/... route
-  // so mount() fell through to the no-match branch and replaced the URL
-  // with /. The user never made it back to the app they asked for.
-  //
-  // Strategy: any path that's not part of the SPA (anything outside the
-  // SPA_ROUTE_PREFIXES allow-list) is dispatched as a full document
-  // navigation via window.location.replace(). SPA paths still go through
-  // the router so we don't reload the world for an in-app route.
-  //
-  // Same-origin enforcement: the value must be a relative path starting
-  // with a single `/`, must not begin with `//` (protocol-relative), and
-  // must not contain `\` (Windows-separator normalization). It must not be
-  // `/` or `/login` (those would no-op or loop). Anything else falls
-  // through silently.
-  const SPA_ROUTE_PREFIXES = ['/launchpad', '/apps/', '/users', '/workers', '/audit-log', '/tokens'];
-  function consumeNextParam() {
-    const params = new URLSearchParams(window.location.search);
-    const raw = params.get('next');
-    if (!raw) return false;
-    // Strip the param from the URL regardless of validity so the bad value
-    // can't loop forever on refresh.
-    params.delete('next');
-    const search = params.toString();
-    const cleaned = window.location.pathname + (search ? '?' + search : '');
-    history.replaceState(null, '', cleaned);
-    if (!raw.startsWith('/') || raw.startsWith('//') || raw.includes('\\')) return false;
-    if (raw === '/' || raw === '/login') return false;
-    const isSpaRoute = SPA_ROUTE_PREFIXES.some(p =>
-      p.endsWith('/') ? raw.startsWith(p) : (raw === p || raw.startsWith(p + '/') || raw.startsWith(p + '?')),
-    );
-    if (isSpaRoute) {
-      router.navigate(raw, { replace: true });
-    } else {
-      // Proxy / static / unknown path — SPA can't handle it. Hard-navigate
-      // so /app/<slug>/ actually loads through internal/proxy.
-      window.location.replace(raw);
-    }
-    return true;
   }
 
   async function handleDeployHash() {

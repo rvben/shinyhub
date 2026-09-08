@@ -703,48 +703,18 @@ func TestRouterStartIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestSPAConsumesNextQueryParam guards the access-denied → log-in →
-// original-app round trip. internal/access/middleware.go renderAccessDeniedPage
-// builds /?next=<RequestURI> when an unauthenticated browser hits a private
-// app at /app/<slug>/...; the SPA used to ignore the parameter and dump every
-// user on /. Both the bootstrap (initialize) path and the interactive login
-// submit handler must call consumeNextParam after router.start() so the user
-// lands on the page they originally requested.
-//
-// Critically: the producer's path is /app/<slug>/... (proxy-served, NOT a
-// SPA route). consumeNextParam MUST hard-navigate (window.location.replace)
-// for paths outside the SPA route allow-list — handing /app/... to
-// router.navigate falls through to the no-match branch and lands the user
-// on / again, which silently regresses the entire fix.
+// Both authentication entry points must preserve the app return path. The real
+// router and redirect behavior are exercised by auth-navigation.test.js.
 func TestSPAConsumesNextQueryParam(t *testing.T) {
 	b, err := fs.ReadFile(ui.Static(), "app.js")
 	if err != nil {
-		t.Fatalf("read app.js: %v", err)
+		t.Fatal(err)
 	}
-	src := string(b)
-	if !strings.Contains(src, "function consumeNextParam(") {
-		t.Fatal("app.js: must define consumeNextParam(); see internal/access/middleware.go renderAccessDeniedPage which advertises /?next=<original>")
+	if got := strings.Count(string(b), "if (await startAuthenticatedRouter(router)) return;"); got != 2 {
+		t.Fatalf("authenticated router entry points = %d; want bootstrap and interactive login", got)
 	}
-	got := strings.Count(src, "consumeNextParam()")
-	// One definition site is matched by `consumeNextParam(` above; here we
-	// count the ()-suffixed call form to require >=2 invocations (bootstrap
-	// + interactive-login).
-	if got < 2 {
-		t.Fatalf("app.js: consumeNextParam() called %d time(s); want at least 2 (bootstrap path AND interactive login submit handler) so a logged-out user reaching /?next=/app/foo/ gets returned to /app/foo/ after logging in", got)
-	}
-	if !strings.Contains(src, "internal/access/middleware.go") {
-		t.Fatal("app.js: consumeNextParam should reference internal/access/middleware.go in a comment so future readers can find the producer of the next= parameter")
-	}
-	// The proxy path /app/<slug>/ is NOT a SPA route. consumeNextParam must
-	// hard-navigate it via window.location.replace; router.navigate would
-	// land on / instead.
-	if !strings.Contains(src, "window.location.replace(raw)") {
-		t.Fatal("app.js: consumeNextParam must use window.location.replace(raw) for non-SPA paths — the access-denied next= value is /app/<slug>/..., which the SPA router cannot mount. Without a hard navigation the user is dumped on / after login.")
-	}
-	// A SPA-route allow-list must exist so /apps/<slug> still goes through
-	// the router (avoiding a full reload for an in-SPA target).
-	if !strings.Contains(src, "SPA_ROUTE_PREFIXES") {
-		t.Fatal("app.js: consumeNextParam must consult a SPA route allow-list (SPA_ROUTE_PREFIXES) so SPA paths take router.navigate while non-SPA paths take window.location.replace")
+	if _, err := fs.ReadFile(ui.Static(), "auth-navigation.js"); err != nil {
+		t.Fatal(err)
 	}
 }
 
