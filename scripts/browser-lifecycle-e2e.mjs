@@ -147,6 +147,9 @@ try {
   await check('private app sign-in preserves the requested URL', async () => {
     await page.goto(appURL + '?check=return');
     await page.getByRole('link', { name: 'Log in', exact: true }).click();
+    // The initial session check focuses Username when it finishes. Wait for
+    // that signed-out state before filling so it cannot steal the input focus.
+    await page.locator('body[data-auth="out"]').waitFor();
     await page.locator('#login-form').getByLabel('Username', { exact: true }).fill(username);
     await page.locator('#login-form').getByLabel('Password', { exact: true }).fill(password);
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
