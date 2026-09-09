@@ -2100,7 +2100,7 @@ func validateAppOrigin(server *ServerConfig) error {
 		return fmt.Errorf("server.app_origin and server.base_url must use canonicalizable DNS names or IP addresses")
 	}
 	if baseHostname == appHostname {
-		return fmt.Errorf("server.app_origin must use a different host from server.base_url")
+		return fmt.Errorf("server.app_origin must use a different hostname from server.base_url; cookies are shared across ports, so a different port alone cannot isolate control-plane credentials. Use an application hostname such as https://apps.example.com")
 	}
 	return nil
 }

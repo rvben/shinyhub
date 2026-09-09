@@ -26,6 +26,20 @@ This boundary keeps untrusted application JavaScript away from the
 administrator's control-plane cookie.
 Host validation uses browser-equivalent IDNA, IP, port, case, and root-dot
 canonicalization; ambiguous numeric IP spellings are rejected.
+
+The application hostname can point to the same reverse proxy and ShinyHub
+instance as the control hostname. Both names need valid TLS coverage, which
+can come from one certificate containing both DNS names; a separate certificate
+is not required. A different port on the same hostname is not supported:
+cookies are shared across ports, so it does not provide the required credential
+isolation in the current design. Cookie paths, cookie prefixes, or replacing
+only the app cookie with a token do not establish that boundary.
+
+See [Caddy support-session setup](reverse-proxy/caddy.md#support-sessions-dns-tls-and-preflight)
+for DNS, certificate, and forward-auth requirements. Before restarting, run
+`shinyhub validate-config --config /etc/shinyhub/shinyhub.yaml` with the service's
+environment and permissions; see [configuration preflight](configuration.md#validate-before-restarting).
+
 The live WebSocket recheck interval must also remain enabled at 30 seconds or
 less; the default is 30 seconds. This bounds explicit-stop and revocation
 propagation, while the 15-minute deadline is enforced by a separate connection

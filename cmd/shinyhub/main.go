@@ -442,7 +442,7 @@ func init() {
 		"Confirm every old server and listed job process tree is stopped, then record uncertainty and clear the fence")
 	restoreCmd.Flags().Bool("force", false, "Restore even if a running server is detected (only after confirming the server is stopped)")
 	const configUsage = "Path to the server config file (overrides SHINYHUB_CONFIG; default ./shinyhub.yaml)"
-	for _, c := range []*cobra.Command{serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, resolveLegacyWritersCmd} {
+	for _, c := range []*cobra.Command{serveCmd, validateConfigCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, resolveLegacyWritersCmd} {
 		c.Flags().StringVar(&configPath, "config", "", configUsage)
 	}
 }
@@ -454,7 +454,7 @@ var buildRootOnce sync.Once
 // tests to call; registration happens exactly once per process.
 func buildRoot() *cobra.Command {
 	buildRootOnce.Do(func() {
-		rootCmd.AddCommand(newInitCmd(), serveCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, resolveLegacyWritersCmd, newHealthcheckCmd(), newWorkerCmd(), newSandboxCmd())
+		rootCmd.AddCommand(newInitCmd(), serveCmd, validateConfigCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, resolveLegacyWritersCmd, newHealthcheckCmd(), newWorkerCmd(), newSandboxCmd())
 		cli.AddCommandsTo(rootCmd)
 	})
 	return rootCmd

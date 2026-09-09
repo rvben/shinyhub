@@ -16,7 +16,39 @@ The server checks, in order:
 2. `SHINYHUB_CONFIG`
 3. `./shinyhub.yaml`
 
-`init`, `backup`, and `restore` use the same resolution order.
+`init`, `validate-config`, `backup`, and `restore` use the same resolution order.
+
+## Validate before restarting
+
+Run the candidate binary against the candidate configuration before stopping the
+running service:
+
+```sh
+shinyhub validate-config --config /etc/shinyhub/shinyhub.yaml
+```
+
+The command uses the same configuration loader, defaults, and environment
+overrides as `serve`. Run it with the service's environment (including secrets),
+working directory, and file permissions so it checks the effective deployment
+configuration. It exits with status `0` on success and `1` on a configuration
+error, reporting the validation error without dumping the configuration.
+`--output json` is available for automation.
+
+A file explicitly selected with `--config` or `SHINYHUB_CONFIG` must exist.
+Without an explicit path, a missing `./shinyhub.yaml` permits environment-only
+configuration. An existing default file is still loaded and validated.
+
+Validation does not start listeners, open or migrate a database, launch apps,
+or modify server state. It does not verify DNS, certificate coverage, SSO,
+database connectivity, or runtime readiness. Continue to check `/readyz` after
+starting the service.
+
+If startup validation fails, ShinyHub exits before opening its HTTP listener.
+A refused connection to `/readyz` therefore cannot show the configuration error;
+read the process's stderr or service log. For a systemd service named
+`shinyhub`, use `journalctl -u shinyhub -n 100 --no-pager`. Run preflight before
+the deployment's stop/restart step; an `ExecStartPre` check alone is too late to
+preserve the running instance during a restart.
 
 ## Minimal server
 

@@ -67,6 +67,7 @@ Run and administer the server:
 |---|---|
 | `init` | Set up ShinyHub for its first run |
 | `serve` | Run the ShinyHub server |
+| `validate-config` | Validate server configuration before restarting; see [configuration preflight](configuration.md#validate-before-restarting) |
 | `worker` | Run ShinyHub as a remote worker that joins a control plane |
 | `healthcheck` | Exit successfully when a ShinyHub server is ready |
 | `users` | Manage user accounts (admin) |

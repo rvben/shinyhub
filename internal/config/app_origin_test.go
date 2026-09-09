@@ -93,6 +93,11 @@ func TestAppOriginRejectsSameCookieHostAcrossPortsAndSpelling(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "different host") {
 				t.Fatalf("Load error = %v, want same cookie-host rejection", err)
 			}
+			for _, hint := range []string{"cookies are shared across ports", "https://apps.example.com"} {
+				if !strings.Contains(err.Error(), hint) {
+					t.Errorf("Load error = %v, missing setup hint %q", err, hint)
+				}
+			}
 		})
 	}
 }

@@ -36,21 +36,25 @@ Browser --> Caddy (TLS, auth) --> ShinyHub :8080
 
 ```caddy
 shiny.example.com, apps.example.com {
-    # Step 1: authenticate via your auth service.
-    forward_auth auth-service:9091 {
-        uri /api/verify
+    route {
+        # Never accept identity or the proxy credential from the browser.
+        request_header -X-Forwarded-User
+        request_header -X-Forwarded-Email
+        request_header -X-Forwarded-Groups
+        request_header -X-ShinyHub-Forward-Auth-Secret
 
-        # Copy the authenticated user identity onto the upstream request.
-        copy_headers X-Forwarded-User X-Forwarded-Email X-Forwarded-Groups
-    }
+        # Step 1: authenticate via your auth service.
+        forward_auth auth-service:9091 {
+            uri /api/verify
+            copy_headers X-Forwarded-User X-Forwarded-Email X-Forwarded-Groups
+        }
 
-    # Step 2: proxy to ShinyHub. A bare reverse_proxy already tunnels the Shiny
-    # WebSocket automatically (see "WebSockets" below); flush_interval -1 also
-    # disables buffering so SSE log-streaming works.
-    reverse_proxy localhost:8080 {
-        flush_interval -1
-        # Supply this through Caddy's environment, not source control.
-        header_up X-ShinyHub-Forward-Auth-Secret {$SHINYHUB_FORWARD_AUTH_SHARED_SECRET}
+        # Step 2: proxy HTTP and WebSockets; disable buffering for SSE.
+        reverse_proxy localhost:8080 {
+            flush_interval -1
+            # Supply this through Caddy's environment, not source control.
+            header_up X-ShinyHub-Forward-Auth-Secret {$SHINYHUB_FORWARD_AUTH_SHARED_SECRET}
+        }
     }
 }
 ```
@@ -58,6 +62,12 @@ shiny.example.com, apps.example.com {
 Adjust `auth-service:9091` and `/api/verify` to match your auth service (for
 example Authelia at `authelia:9091/api/verify`, or oauth2-proxy at
 `oauth2-proxy:4180/oauth2/auth`).
+
+The `route` block preserves the order: remove incoming identity headers,
+authenticate, then proxy. If you configure additional or differently named
+identity headers, update both the removal and copying lists. See Caddy's
+[forward_auth](https://caddyserver.com/docs/caddyfile/directives/forward_auth)
+and [route](https://caddyserver.com/docs/caddyfile/directives/route) references.
 
 ## WebSockets (Shiny reactivity)
 
@@ -89,8 +99,8 @@ interferes with it. If interactions disconnect, check these in order:
    sends the app's WebSocket subpath to a `file_server` or default handler
    instead of `reverse_proxy`, turns the `101` into a non-upgrade response.
 4. **Watch global timeouts.** Short `servers { timeouts { read_timeout ... } }`
-   values can close long-lived WebSocket sessions. ShinyHub itself never
-   times out an established WebSocket.
+   values can close long-lived WebSocket sessions. Support-session WebSockets
+   also have a hard session deadline and close after revocation is detected.
 
 ### Diagnosing an upgrade failure
 
@@ -193,6 +203,60 @@ If the identity request returns `403`, inspect the ShinyHub log. A missing or
 incorrect proxy credential produces a rate-limited warning naming the proxy IP
 and configured `secret_header`; secret values are never logged.
 
+## Support sessions: DNS, TLS, and preflight
+
+The two names in the Caddyfile can resolve to the same Caddy address and use the
+same ShinyHub listener. Create an A/AAAA record for each name, or a DNS alias
+for the application name pointing to the control name. Browsers must continue
+to use the distinct names in their URLs; do not redirect the app hostname back
+to the control hostname or rewrite its Host to the control hostname upstream.
+
+TLS must cover the exact browser-facing DNS names, such as `shiny.example.com`
+and `apps.example.com`. One certificate with both SANs is sufficient. If your
+organization supplies the certificate, add this directive to the existing
+two-host Caddy site block, using the paths readable by Caddy:
+
+```caddy
+tls /etc/caddy/certs/shinyhub.pem /etc/caddy/certs/shinyhub.key
+```
+
+Otherwise, Caddy can manage certificates for the configured names where the
+deployment supports its certificate issuance process. A certificate covering
+only a short name does not also cover that name with a DNS suffix appended.
+See Caddy's [TLS directive](https://caddyserver.com/docs/caddyfile/directives/tls).
+
+Keep the `server.base_url`, `server.app_origin`, and `auth.forward_auth` settings
+above, and add `support_sessions: true` under the existing `auth` mapping:
+
+```yaml
+auth:
+  support_sessions: true
+  # Keep your existing secret and forward_auth settings here.
+```
+
+Configure the auth service to accept both hostnames, including WebSocket
+requests on the app hostname. Keep `forward_auth` on both hosts in this example;
+the support cookie and guard take precedence over the forwarded administrator
+identity inside ShinyHub's app access checks. Do not remove or rename ShinyHub's
+support cookies at the edge, and do not bypass authentication just because a
+request includes one. If SSO needs to redirect during launch, it must preserve
+the return URL; the launch capability expires after 60 seconds and is single-use.
+
+Before stopping the current service, validate the candidate configurations with
+each service's environment and file permissions:
+
+```sh
+shinyhub validate-config --config /etc/shinyhub/shinyhub.yaml
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+After applying them, verify SSO on the control hostname, start a support session
+for a test app, and confirm its represented identity and reactive interactions.
+End the session and confirm the dashboard still has the administrator identity.
+The ShinyHub command checks configuration, not the live DNS/TLS/SSO path. If
+ShinyHub exits before `/readyz` can respond, inspect its stderr or service log;
+see [preflight and startup diagnostics](../configuration.md#validate-before-restarting).
+
 ## Notes
 
 **Trust boundary.** ShinyHub checks the DIRECT peer IP of the TCP connection,
@@ -206,9 +270,8 @@ Caddy running on a different host, add that interface's CIDR to
 **Auto-provisioning.** When a user header is received from a trusted peer and
 no matching account exists, ShinyHub creates one with `default_role`. If the
 user is a member of any group listed in `admin_groups`, the role is promoted to
-`admin` regardless of `default_role`. Subsequent logins re-apply group-based
-admin promotion, but the middleware never downgrades a role: a user removed
-from an admin group keeps the `admin` role until an operator changes it.
+`admin` regardless of `default_role`. Subsequent authenticated requests re-apply
+group mappings, including revoking group-derived roles when memberships change.
 
 **Large deploy uploads.** ShinyHub accepts bundles up to `storage.max_bundle_mb`
 (default 128 MB). Caddy's default request body limit is high, but if your auth
