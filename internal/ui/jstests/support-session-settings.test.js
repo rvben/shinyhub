@@ -55,3 +55,12 @@ test('self and service accounts remain unavailable with visible reasons', () => 
     assert.ok(action.querySelector('.users-support-hint').textContent);
   }
 });
+
+test('trusted-app mode identifies the administrator authority risk', () => {
+  const document = fixture();
+  renderSupportSessionSettings(document, true, false, true);
+  assert.match(document.getElementById('support-settings-status').textContent, /trusted apps/);
+  assert.match(document.getElementById('support-settings-message').textContent, /administrator browser permissions/);
+  renderSupportSessionSettings(document, false, false, true);
+  assert.equal(document.getElementById('support-settings-status').textContent, 'Not enabled');
+});

@@ -1,13 +1,15 @@
 import { supportSessionCaps } from './user-row.js';
 
-export function renderSupportSessionSettings(document, enabled, loading = false) {
+export function renderSupportSessionSettings(document, enabled, loading = false, trustedApps = false) {
   const known = typeof enabled === 'boolean';
   document.getElementById('support-settings-status').textContent = loading ? 'Checking status…' : !known
-    ? 'Status unavailable' : enabled ? 'Enabled' : 'Not enabled';
+    ? 'Status unavailable' : enabled ? (trustedApps ? 'Enabled · trusted apps' : 'Enabled') : 'Not enabled';
   document.getElementById('support-settings-message').textContent = loading ? 'Checking whether this server allows support sessions.' : !known
     ? 'Support-session status could not be confirmed. Refresh to try again.'
     : enabled
-      ? 'Choose Support session beside an eligible person below. Administrators, operators, service accounts, and your own account cannot be represented.'
+      ? trustedApps
+        ? 'Trusted-app mode: malicious or compromised app code may act with your administrator browser permissions. Start support sessions only for apps you trust.'
+        : 'Choose Support session beside an eligible person below. Administrators, operators, service accounts, and your own account cannot be represented.'
       : 'Enable support sessions in your server configuration to get started. Expand the setup guide below for instructions.';
 }
 

@@ -9,7 +9,8 @@ viewer or developer. They deliberately do not provide GitLab-style global
 impersonation: the capability cannot reach the dashboard, API, another app,
 an operator or administrator account, or a service account.
 
-The feature is off by default. It requires a dedicated application origin:
+The feature is off by default. By default, enabling it requires a dedicated
+application origin to isolate untrusted app JavaScript:
 
 ```yaml
 server:
@@ -21,7 +22,8 @@ auth:
 ```
 
 `SHINYHUB_SUPPORT_SESSIONS=true` is the environment equivalent. ShinyHub
-refuses to start when support sessions are enabled without `server.app_origin`.
+refuses to start when support sessions are enabled without `server.app_origin`
+unless the hoster explicitly opts into trusted-app mode below.
 This boundary keeps untrusted application JavaScript away from the
 administrator's control-plane cookie.
 Host validation uses browser-equivalent IDNA, IP, port, case, and root-dot
@@ -44,6 +46,39 @@ The live WebSocket recheck interval must also remain enabled at 30 seconds or
 less; the default is 30 seconds. This bounds explicit-stop and revocation
 propagation, while the 15-minute deadline is enforced by a separate connection
 timer.
+
+## Trusted-app mode: one hostname
+
+Hosters who trust their app publishers, deployed code, and dependencies can
+explicitly accept same-origin hosting:
+
+```yaml
+server:
+  base_url: https://hub.example.com
+  # Leave app_origin unset.
+auth:
+  support_sessions: true
+  support_sessions_trusted_apps: true
+```
+
+The acknowledgement is `SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS=true` when using
+environment variables. **Malicious or compromised app JavaScript may act with
+the administrator's browser authority**, even while the support session
+represents a viewer. This mode does not isolate hostile apps from the dashboard;
+choose it only when that trust model fits your deployment. ShinyHub logs the
+mode at startup and displays it in the support-session settings.
+
+HTTPS is still required. App scope, the 15-minute deadline, bounded connection
+rechecks, explicit revocation, audit attribution, and existing backend credential
+filtering remain in place. Launch keeps the administrator's dashboard cookie and
+creates a separate app-scoped support cookie. The fallback guard prevents app
+requests from silently using the admin cookie or forward-auth identity after
+support ends, until the original deadline; the dashboard remains usable.
+
+This option does not change validation of an explicitly configured `app_origin`:
+that setting still describes an isolated hostname. Leave it unset for trusted-app
+hosting on the existing hostname and port. A configured isolated origin takes
+precedence over the trusted-app acknowledgement.
 
 ## Administrator flow
 
@@ -68,7 +103,7 @@ stop request cannot restore an administrator identity on the app origin.
 While that guard is present, any app on the origin other than the bound one
 answers with a page that names the session, links back to the bound app and
 offers the same end control; after the session has ended, the page says so and
-explains that the origin stays signed out until the original deadline. No app
+explains that app access stays blocked until the original deadline. No app
 is ever rendered anonymously behind the guard. The
 rail is mounted outside the app's body and repairs
 itself after normal single-page-app body rewrites or accidental removal.
@@ -98,8 +133,10 @@ offers both a retry and an idempotent precautionary end action.
 - The support JWT is nonrenewable, bound to one immutable app identity (not
   merely its reusable slug), rejected by `/api`, and
   carried in a separate HttpOnly, SameSite cookie. The administrator's
-  control-origin session is never replaced; any ordinary app-origin identity
-  is cleared before the support cookie and cross-app guard are installed.
+  control-origin session is never replaced. With an isolated app origin, its
+  ordinary identity is cleared before the support cookie and cross-app guard
+  are installed; trusted-app mode retains the shared-host admin cookie for
+  dashboard access.
   Every routed backend is stamped with that immutable app ID. A clustered
   instance fences all old backends before publishing an app ID replacement,
   and both HTTP and WebSocket paths reject any backend-ID mismatch.
@@ -128,8 +165,9 @@ offers both a retry and an idempotent precautionary end action.
 Application JavaScript runs in the same document as the injected rail. The
 self-healing mount protects against ordinary framework rewrites, not code that
 is intentionally written to fight or counterfeit platform UI. Treat deployed
-application code as trusted for operator-facing presentation; the separate app
-origin remains the hard boundary protecting control-plane credentials and APIs.
+application code as trusted for operator-facing presentation. In isolated mode,
+the separate app origin protects control-plane credentials and APIs. Trusted-app
+mode deliberately has no such browser boundary.
 The response includes a plain, usable rail before enhancement, so the identity
 warning and native POST end form remain present when JavaScript is disabled or
 `connect-src` denies scripted requests. Policies that block the required

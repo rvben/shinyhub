@@ -2657,6 +2657,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		redirectEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets, navOpts...)(redirect)
 		controlAppHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, navOpts...)(redirectEmptyState)
 		appHandler = appOriginDispatch(parsedAppOrigin, cfg.TrustedProxyNets, store, cfg.Auth.Secret, controlAppHandler, appHandler)
+	} else if cfg.Auth.SupportSessions && cfg.Auth.SupportSessionsTrustedApps {
+		slog.Warn("trusted-app support sessions enabled: malicious or compromised app JavaScript may act with the administrator's browser authority; only deploy trusted app code")
+		appHandler = trustedAppSupportDispatch(appHandler, store, cfg.Auth.Secret, cfg.TrustedProxyNets)
 	}
 	mux.Handle("/app/", appHandler)
 	if cfg.Auth.SupportSessions {

@@ -25,9 +25,11 @@ func TestValidateConfigCommand(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	valid := filepath.Join(dir, "valid.yaml")
+	trusted := filepath.Join(dir, "trusted.yaml")
 	invalid := filepath.Join(dir, "invalid.yaml")
 	malformed := filepath.Join(dir, "malformed.yaml")
 	for path, body := range map[string]string{
+		trusted:   "auth:\n  support_sessions: true\n  support_sessions_trusted_apps: true\nserver:\n  base_url: https://hub.example.com\n",
 		valid:     "auth:\n  support_sessions: true\nserver:\n  base_url: https://hub.example.com\n  app_origin: https://apps.example.com\n",
 		invalid:   "auth:\n  support_sessions: true\nserver:\n  base_url: https://hub.example.com\n  app_origin: https://hub.example.com:8443\n",
 		malformed: "server: [\n",
@@ -43,6 +45,7 @@ func TestValidateConfigCommand(t *testing.T) {
 		origin    string
 		wantError string
 	}{
+		{name: "trusted apps preflight", args: []string{"validate-config", "--config", trusted}},
 		{name: "flag after command", args: []string{"validate-config", "--config", valid}},
 		{name: "flag before command", args: []string{"--config", valid, "validate-config"}},
 		{name: "environment path", args: []string{"validate-config"}, envPath: valid},
@@ -100,7 +103,7 @@ func TestValidateConfigCommand(t *testing.T) {
 				t.Fatal("validation exposed the auth secret")
 			}
 			entries, err := os.ReadDir(dir)
-			if err != nil || len(entries) != 3 {
+			if err != nil || len(entries) != 4 {
 				t.Fatalf("validation modified the working directory: entries=%v error=%v", entries, err)
 			}
 		})

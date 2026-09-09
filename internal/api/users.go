@@ -133,6 +133,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	writeList(w, resp, limit, offset, map[string]any{
 		"support_sessions": map[string]any{
 			"enabled":          s.cfg.Auth.SupportSessions,
+			"trusted_apps":     s.cfg.Auth.SupportSessions && s.cfg.Auth.SupportSessionsTrustedApps && s.cfg.Server.AppOrigin == "",
 			"duration_seconds": int(db.SupportSessionDuration.Seconds()),
 		},
 	})

@@ -51,7 +51,7 @@ func (s *Server) requireSupportSessionAdmin(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return nil, false
 	}
-	if !s.cfg.Auth.SupportSessions || s.cfg.Server.AppOrigin == "" {
+	if !s.cfg.Auth.SupportSessions || (s.cfg.Server.AppOrigin == "" && !s.cfg.Auth.SupportSessionsTrustedApps) {
 		writeError(w, http.StatusNotFound, "not found")
 		return nil, false
 	}
@@ -63,7 +63,11 @@ func (s *Server) requireSupportSessionAdmin(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) supportSessionAppURL(slug string) string {
-	appURL, _ := url.Parse(s.cfg.Server.AppOrigin)
+	origin := s.cfg.Server.AppOrigin
+	if origin == "" && s.cfg.Auth.SupportSessionsTrustedApps {
+		origin = s.cfg.Server.BaseURL
+	}
+	appURL, _ := url.Parse(origin)
 	appURL.Path = "/" + strings.TrimPrefix(path.Join(appURL.Path, "app", slug), "/") + "/"
 	appURL.RawQuery = ""
 	appURL.Fragment = ""

@@ -66,8 +66,12 @@ auth:
   # Optional, app-scoped admin troubleshooting sessions. Each session lasts at
   # most 15 minutes, requires a reason, is fully audited, and can target only a
   # viewer or developer. This safety-sensitive feature is off by default and
-  # requires server.app_origin to keep app code on a separate origin.
+  # requires server.app_origin by default to isolate app code.
   # support_sessions: false             # SHINYHUB_SUPPORT_SESSIONS
+  # Explicit alternative for trusted app publishers/code and dependencies:
+  # leave server.app_origin unset and use an HTTPS server.base_url. Malicious
+  # or compromised app JavaScript may act with the admin's browser authority.
+  # support_sessions_trusted_apps: false # SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS
 
   # Optional: map IdP groups to global roles. Groups come from the OIDC `groups`
   # claim (see oauth.oidc.groups_claim) or the forward-auth groups header.

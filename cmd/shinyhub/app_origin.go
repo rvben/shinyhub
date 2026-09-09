@@ -110,6 +110,23 @@ func appOriginRedirectHandler(store appLaunchStore, appOrigin *url.URL) http.Han
 }
 
 func consumeAppLaunch(w http.ResponseWriter, r *http.Request, store appLaunchStore, jwtSecret string, trustedNets []*net.IPNet, rawCode string) {
+	consumeAppLaunchWithSharedHost(w, r, store, jwtSecret, trustedNets, rawCode, false)
+}
+
+// trustedAppSupportDispatch exchanges support capabilities on the control host.
+// App authorization still prefers support credentials and the fallback guard;
+// the dashboard continues to authenticate using the ordinary admin cookie.
+func trustedAppSupportDispatch(next http.Handler, store appLaunchStore, jwtSecret string, trustedNets []*net.IPNet) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if code := r.URL.Query().Get(appLaunchQueryParam); code != "" {
+			consumeAppLaunchWithSharedHost(w, r, store, jwtSecret, trustedNets, code, true)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func consumeAppLaunchWithSharedHost(w http.ResponseWriter, r *http.Request, store appLaunchStore, jwtSecret string, trustedNets []*net.IPNet, rawCode string, sharedHost bool) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "invalid app launch", http.StatusBadRequest)
 		return
@@ -124,6 +141,12 @@ func consumeAppLaunch(w http.ResponseWriter, r *http.Request, store appLaunchSto
 	if err != nil || user == nil {
 		// Do not disclose database health or whether a code ever existed.
 		http.Error(w, "app launch expired or already used", http.StatusUnauthorized)
+		return
+	}
+	// A shared-host launch must never replace the administrator's cookie with
+	// an ordinary app identity, even if a stale ordinary launch code is supplied.
+	if sharedHost && user.SupportSession == nil {
+		http.Error(w, "support launch required", http.StatusForbidden)
 		return
 	}
 	token, tokenInfo, err := auth.IssueSessionTokenWithInfo(user, jwtSecret)
@@ -142,8 +165,11 @@ func consumeAppLaunch(w http.ResponseWriter, r *http.Request, store appLaunchSto
 		}
 		// Remove any ordinary app-origin identity and install a root guard so
 		// leaving this slug cannot fall back to the administrator via a stale
-		// cookie or forward-auth context.
-		auth.ClearSessionCookie(w, r, trustedNets)
+		// cookie or forward-auth context. On a shared host retain the admin
+		// cookie for dashboard/API use; app access is still guarded.
+		if !sharedHost {
+			auth.ClearSessionCookie(w, r, trustedNets)
+		}
 		auth.SetSupportSessionGuardCookie(w, r, support.ID, tokenInfo.ExpiresAt, trustedNets)
 		auth.SetSupportSessionCookie(w, r, token, slug, tokenInfo.ExpiresAt, trustedNets)
 	} else {

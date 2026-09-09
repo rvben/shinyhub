@@ -266,3 +266,18 @@ func TestSupportStopNeverClearsRootGuardEarly(t *testing.T) {
 		t.Fatalf("identity drift made the prior support session impossible to replace: %v", err)
 	}
 }
+
+func TestTrustedAppSupportRejectsOrdinaryLaunchWithoutChangingAdminCookie(t *testing.T) {
+	raw := "stale-ordinary-launch"
+	sum := sha256.Sum256([]byte(raw))
+	store := &fakeAppLaunchStore{createdHash: hex.EncodeToString(sum[:]), createdSlug: "sales", user: &auth.ContextUser{ID: 42, Username: "viewer", Role: "viewer"}}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("ordinary launch reached app") })
+	handler := trustedAppSupportDispatch(next, store, "test-secret", nil)
+	req := httptest.NewRequest("GET", "https://hub.example.com/app/sales/?__shinyhub_launch="+raw, nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "admin-session"})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || len(rec.Result().Cookies()) != 0 {
+		t.Fatalf("ordinary launch status=%d cookies=%v", rec.Code, rec.Result().Cookies())
+	}
+}

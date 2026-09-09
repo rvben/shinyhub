@@ -205,6 +205,12 @@ and configured `secret_header`; secret values are never logged.
 
 ## Support sessions: DNS, TLS, and preflight
 
+This section describes the default, isolated-hostname setup. Hosters who trust
+all deployed app code can instead keep their single-host Caddy/forward-auth
+configuration and explicitly enable [trusted-app support sessions](../support-sessions.md#trusted-app-mode-one-hostname).
+That choice accepts administrator browser authority exposure to compromised app
+JavaScript; it still requires HTTPS and configuration preflight.
+
 The two names in the Caddyfile can resolve to the same Caddy address and use the
 same ShinyHub listener. Create an A/AAAA record for each name, or a DNS alias
 for the application name pointing to the control name. Browsers must continue

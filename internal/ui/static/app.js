@@ -1708,7 +1708,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const clearUsersLoading = () => {
       usersBody.removeAttribute('aria-busy');
-      renderSupportSessionSettings(document, state.supportSessions.enabled);
+      renderSupportSessionSettings(document, state.supportSessions.enabled, false, state.supportSessions.trusted_apps === true);
     };
 
     let resp;

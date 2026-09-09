@@ -502,6 +502,14 @@ Two defenses apply:
 that leave it unset retain same-origin behavior for compatibility and should be
 treated as trusted-app deployments.
 
+Support sessions require the isolated hostname by default. Hosters may instead
+explicitly set `auth.support_sessions_trusted_apps: true` while leaving
+`server.app_origin` unset, using an HTTPS `server.base_url`. This acknowledges
+that malicious or compromised app JavaScript may act with the administrator's
+browser authority. The support capability remains app-scoped, expiring, revocable
+and audited, but same-origin app code is trusted. This is a different trust model,
+not equivalent browser isolation. See [support sessions](docs/support-sessions.md).
+
 ## Backup, restore, and recovery drill
 
 `shinyhub backup --out <archive>` writes a snapshot of the database plus the

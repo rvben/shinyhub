@@ -755,9 +755,14 @@ type AuthConfig struct {
 	OperatorAuditAccess bool `yaml:"operator_audit_access"`
 
 	// SupportSessions enables short-lived, app-scoped admin troubleshooting
-	// sessions. It is deliberately opt-in and requires server.app_origin so app
-	// code never shares an origin with the control-plane session cookie.
+	// sessions. By default server.app_origin must isolate app code from the
+	// control plane. Trusted-app hosting requires a separate explicit opt-in.
 	SupportSessions bool `yaml:"support_sessions"`
+
+	// SupportSessionsTrustedApps acknowledges that malicious or compromised app
+	// JavaScript may act with the administrator's browser authority. Allows
+	// support sessions without app_origin; does not relax configured app origins.
+	SupportSessionsTrustedApps bool `yaml:"support_sessions_trusted_apps"`
 
 	ForwardAuth ForwardAuthConfig `yaml:"forward_auth"`
 
@@ -1620,7 +1625,16 @@ func loadRaw(path string) (*Config, error) {
 		return nil, err
 	}
 	if cfg.Auth.SupportSessions && cfg.Server.AppOrigin == "" {
-		return nil, fmt.Errorf("auth.support_sessions requires server.app_origin to be configured")
+		if !cfg.Auth.SupportSessionsTrustedApps {
+			return nil, fmt.Errorf("auth.support_sessions requires server.app_origin to be configured, or explicit auth.support_sessions_trusted_apps acknowledgement; trusted app JavaScript may act with the administrator's browser authority")
+		}
+		base, err := url.Parse(cfg.Server.BaseURL)
+		if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil || (base.Path != "" && base.Path != "/") || base.RawQuery != "" || base.Fragment != "" {
+			return nil, fmt.Errorf("trusted-app support sessions require server.base_url to be a bare HTTPS origin")
+		}
+		if _, err := originhost.Hostname(base.Host); err != nil {
+			return nil, fmt.Errorf("trusted-app support sessions require a canonicalizable server.base_url hostname")
+		}
 	}
 	if cfg.Auth.SupportSessions {
 		recheck := cfg.SessionRecheckInterval()
@@ -2658,6 +2672,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_SUPPORT_SESSIONS: %w", err)
 		}
 		cfg.Auth.SupportSessions = b
+	}
+	if v := os.Getenv("SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS: %w", err)
+		}
+		cfg.Auth.SupportSessionsTrustedApps = b
 	}
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_ENABLED"); v != "" {
 		b, err := parseBoolEnv(v)

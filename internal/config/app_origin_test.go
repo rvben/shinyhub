@@ -133,3 +133,50 @@ func TestForwardAuthRejectsInvalidProxySharedSecret(t *testing.T) {
 		})
 	}
 }
+
+func TestTrustedAppSupportSessionsRequireExplicitAcknowledgement(t *testing.T) {
+	for _, tc := range []struct{ name, extra, want string }{
+		{"acknowledged", "", ""},
+		{"http", "  base_url: http://hub.example.com\n", "bare HTTPS"},
+		{"path", "  base_url: https://hub.example.com/prefix\n", "bare HTTPS"},
+		{"port split still isolated", "  app_origin: https://hub.example.com:8443\n", "different hostname"},
+		{"recheck still required", "  session_recheck_interval: 0\n", "session_recheck_interval"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := "  base_url: https://hub.example.com\n" + tc.extra
+			if strings.Contains(tc.extra, "base_url:") {
+				server = tc.extra
+			}
+			p := writeYAML(t, "auth:\n  secret: 01234567890123456789012345678901\n  support_sessions: true\n  support_sessions_trusted_apps: true\nserver:\n"+server)
+			cfg, err := config.Load(p)
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("error=%v want %s", err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.Auth.SupportSessionsTrustedApps || cfg.Server.AppOrigin != "" {
+				t.Fatal("trusted mode not retained")
+			}
+		})
+	}
+}
+
+func TestTrustedAppSupportSessionsEnvironmentOverride(t *testing.T) {
+	p := writeYAML(t, "auth:\n  secret: 01234567890123456789012345678901\n  support_sessions: true\nserver:\n  base_url: https://hub.example.com\n")
+	t.Setenv("SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS", "true")
+	if _, err := config.Load(p); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS", "false")
+	if _, err := config.Load(p); err == nil {
+		t.Fatal("explicit false allowed shared-host support")
+	}
+	t.Setenv("SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS", "typo")
+	if _, err := config.Load(p); err == nil || !strings.Contains(err.Error(), "SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS") {
+		t.Fatalf("bad env: %v", err)
+	}
+}

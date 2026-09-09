@@ -261,11 +261,11 @@
           <details id="support-settings-setup">
             <summary>Set up support sessions</summary>
             <div class="support-settings-guide">
-              <p>Disabled by default because app code must run on a separate origin to protect your administrator credentials. A server administrator can enable this in the deployment configuration.</p>
+              <p>Disabled by default. The recommended setup uses a separate app hostname to isolate app code from your administrator session. A server administrator can enable this in the deployment configuration.</p>
               <ol>
                 <li>Choose a separate app hostname and route it to ShinyHub with working DNS and HTTPS.</li>
                 <li>Merge the example below into your server configuration, replacing both example URLs with your own.</li>
-                <li>Restart ShinyHub, then use <strong>Refresh</strong> above to check the status.</li>
+                <li>Run <code>shinyhub validate-config</code> with your service configuration before restarting, then use <strong>Refresh</strong> above to check the status.</li>
               </ol>
               <pre aria-label="Example server configuration"><code>server:
   base_url: https://hub.example.com
@@ -274,6 +274,7 @@
 auth:
   support_sessions: true</code></pre>
               <p>Using environment variables? Set <code>SHINYHUB_BASE_URL</code>, <code>SHINYHUB_APP_ORIGIN</code>, and <code>SHINYHUB_SUPPORT_SESSIONS=true</code>. Keep the WebSocket session recheck interval at its default of 30 seconds or lower, and above zero.</p>
+              <p>For a single hostname, leave <code>server.app_origin</code> unset and explicitly set <code>auth.support_sessions_trusted_apps: true</code> (or <code>SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS=true</code>). This trusts all deployed app code and its dependencies: malicious or compromised app JavaScript may act with your administrator browser permissions. HTTPS is still required.</p>
               <p>Sessions require a reason and are recorded in the audit log. Native sign-in must be less than 10 minutes old. The selected person must already have access to the app.</p>
             </div>
           </details>
