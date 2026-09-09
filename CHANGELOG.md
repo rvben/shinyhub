@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.16.3](https://github.com/rvben/shinyhub/compare/v0.16.2...v0.16.3) - 2026-09-09
+
+### Added
+
+- **Support sessions**: hosters can explicitly enable `auth.support_sessions_trusted_apps` to use the existing HTTPS hostname and port without `server.app_origin`. This trusts deployed app code and its dependencies: malicious or compromised app JavaScript may act with the administrator's browser authority. Isolated app hosting remains the default. Trusted-app mode preserves the administrator's dashboard session, scoped support credentials, expiry, revocation, and auditing, and is identified in startup logs and dashboard settings.
+- **Configuration preflight**: run `shinyhub validate-config` before restarting to check the same configuration and environment overrides as the server, without opening listeners or changing state. Supports structured output and rejects missing explicitly selected files.
+
+### Fixed
+
+- **Release checks**: wait for the initial signed-out state before entering credentials in the browser lifecycle test, avoiding a race with login autofocus.
+
+### Improved
+
+- **Deployment guidance**: explain why different ports do not isolate cookies, document the trusted-app alternative, and clarify Caddy DNS, shared-certificate, forward-auth and preflight setup.
+
 ## [0.16.2](https://github.com/rvben/shinyhub/compare/v0.16.1...v0.16.2) - 2026-09-08
 
 ### Added
