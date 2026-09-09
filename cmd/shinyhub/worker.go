@@ -76,12 +76,17 @@ func newWorkerCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("docker runtime: %w", err)
 			}
+			authorityClient, err := worker.NewClient(serverURL, ag.Certs(), ag.CACerts())
+			if err != nil {
+				return fmt.Errorf("worker authority client: %w", err)
+			}
 			replicas := worker.NewReplicaServer(worker.ReplicaServerConfig{
-				Runtime:   rt,
-				DataDir:   dataDir,
-				NodeID:    ag.NodeID(),
-				Advertise: advertiseAddr,
-				Bundles:   ag.Bundles(),
+				Runtime:          rt,
+				DataDir:          dataDir,
+				NodeID:           ag.NodeID(),
+				Advertise:        advertiseAddr,
+				Bundles:          ag.Bundles(),
+				AuthorizeElastic: authorityClient.AuthorizeElastic,
 			})
 			if err := replicas.RebuildFromContainers(); err != nil {
 				slog.Warn("agent: rebuild data-plane table from containers", "err", err)
@@ -182,6 +187,7 @@ func serveWorkerMTLS(ctx context.Context, logger *slog.Logger, cfg *config.Confi
 	r := chi.NewRouter()
 	r.Post("/api/workers/register", wapi.HandleRegister)
 	r.Post("/api/workers/heartbeat", wapi.HandleHeartbeat)
+	r.Post("/api/workers/elastic/authorize", wapi.HandleElasticAuthorize)
 	r.Get("/internal/bundles/{digest}", wapi.HandleBundleFetch)
 
 	tlsConf, err := ca.ListenerTLSConfig(cfg.Worker.AdvertiseHosts...)

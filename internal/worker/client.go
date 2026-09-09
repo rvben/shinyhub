@@ -178,3 +178,29 @@ func (c *Client) FetchBundle(ctx context.Context, digest string) (io.ReadCloser,
 	}
 	return resp.Body, nil
 }
+
+// AuthorizeElastic asks the control plane to validate a live lease and bound
+// reservation over the worker's rotating mTLS identity. No authority is cached.
+func (c *Client) AuthorizeElastic(ctx context.Context, authority workerapi.ElasticAuthority) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	body, err := json.Marshal(authority)
+	if err != nil {
+		return fmt.Errorf("encode elastic authorization: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.serverURL+"/api/workers/elastic/authorize", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "shinyhub-worker")
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return fmt.Errorf("elastic authorization: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("elastic authorization refused: status %d", resp.StatusCode)
+	}
+	return nil
+}

@@ -1034,3 +1034,6 @@ func (r *NativeRuntime) Resume(_ context.Context, handle RunHandle) (ReplicaEndp
 	}
 	return ReplicaEndpoint{Provider: "native", WorkerID: strconv.Itoa(pid), Handle: handle}, nil
 }
+
+// SupportsGuardedStart advertises that durable identity can precede execution.
+func (r *NativeRuntime) SupportsGuardedStart() bool { return true }

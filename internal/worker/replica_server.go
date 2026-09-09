@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -57,6 +58,9 @@ type ReplicaServerConfig struct {
 	// Bundles, when set, is called on every remote replica start to pull and
 	// verify the app bundle by content digest, returning the local extracted dir.
 	Bundles BundleEnsurer
+	// AuthorizeElastic must verify the live controller lease AND the immutable
+	// reservation binding. Nil disables the experimental elastic protocol.
+	AuthorizeElastic func(context.Context, api.ElasticAuthority) error
 }
 
 // replicaServer runs and tracks app replicas on a worker and proxies their
@@ -69,9 +73,13 @@ type replicaServer struct {
 	allocate  func() int
 	bundles   BundleEnsurer
 
-	mu          sync.RWMutex
-	byContainer map[string]*replicaRecord
-	byToken     map[string]*replicaRecord
+	mu               sync.RWMutex
+	byContainer      map[string]*replicaRecord
+	byToken          map[string]*replicaRecord
+	elasticMu        sync.Mutex
+	elasticGuards    map[string]io.WriteCloser
+	elasticFenced    bool
+	authorizeElastic func(context.Context, api.ElasticAuthority) error
 }
 
 // NewReplicaServer constructs a replicaServer from the given config. If
@@ -82,14 +90,16 @@ func NewReplicaServer(cfg ReplicaServerConfig) *replicaServer {
 		alloc = deploy.AllocatePort
 	}
 	return &replicaServer{
-		runtime:     cfg.Runtime,
-		dataDir:     cfg.DataDir,
-		nodeID:      cfg.NodeID,
-		advertise:   cfg.Advertise,
-		allocate:    alloc,
-		bundles:     cfg.Bundles,
-		byContainer: make(map[string]*replicaRecord),
-		byToken:     make(map[string]*replicaRecord),
+		runtime:          cfg.Runtime,
+		dataDir:          cfg.DataDir,
+		nodeID:           cfg.NodeID,
+		advertise:        cfg.Advertise,
+		allocate:         alloc,
+		bundles:          cfg.Bundles,
+		byContainer:      make(map[string]*replicaRecord),
+		byToken:          make(map[string]*replicaRecord),
+		elasticGuards:    make(map[string]io.WriteCloser),
+		authorizeElastic: cfg.AuthorizeElastic,
 	}
 }
 
@@ -448,6 +458,9 @@ func (s *replicaServer) RebuildFromContainers() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, c := range containers {
+		if c.Labels[process.LabelLaunchID] != "" {
+			continue
+		}
 		if _, isReplica := c.Labels["shinyhub.replica_index"]; !isReplica {
 			continue
 		}
@@ -502,6 +515,7 @@ func (s *replicaServer) RebuildFromContainers() error {
 // itself is slow or fails. Signalling runs outside the lock: a Signal error
 // (e.g. the runtime is already gone) is logged and does not abort the loop.
 func (s *replicaServer) StopAll() {
+	s.fenceElastic()
 	s.mu.Lock()
 	recs := make([]*replicaRecord, 0, len(s.byContainer))
 	for _, rec := range s.byContainer {
@@ -521,6 +535,9 @@ func (s *replicaServer) StopAll() {
 // Routes registers the replica-control and data-plane endpoints on r. The agent
 // mounts this on its mTLS listener.
 func (s *replicaServer) Routes(r chi.Router) {
+	r.Post("/v1/elastic/prepare", s.handleElasticPrepare)
+	r.Post("/v1/elastic/ack", s.handleElasticAck)
+	r.Post("/v1/elastic/stop", s.handleElasticStop)
 	r.Get("/v1/inventory", s.handleInventory)
 	r.Post("/v1/replicas", s.handleStart)
 	r.Post("/v1/replicas/run-once", s.handleRunOnce)

@@ -56,6 +56,14 @@ func (s *Store) beginElasticWrite(ctx context.Context, owner ElasticOwner) (writ
 	if err != nil {
 		return nil, err
 	}
+	if err := s.checkElasticOwner(ctx, tx, owner); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
+func (s *Store) checkElasticOwner(ctx context.Context, tx writeTx, owner ElasticOwner) error {
 	now := s.d.now()
 	if s.IsPostgres() {
 		now = "clock_timestamp()"
@@ -68,11 +76,15 @@ func (s *Store) beginElasticWrite(ctx context.Context, owner ElasticOwner) (writ
 			err = ErrElasticFenced
 		}
 	}
-	if err != nil {
-		_ = tx.Rollback()
-		return nil, err
+	return err
+}
+
+// Recheck after app-row waits and immediately before committing the grant.
+func (s *Store) commitElasticWrite(ctx context.Context, tx writeTx, owner ElasticOwner) error {
+	if err := s.checkElasticOwner(ctx, tx, owner); err != nil {
+		return err
 	}
-	return tx, nil
+	return tx.Commit()
 }
 
 // ReserveElasticSession is the storage primitive for the future clustered
@@ -106,7 +118,7 @@ func (s *Store) ReserveElasticSession(ctx context.Context, owner ElasticOwner, a
 		if existing.DeploymentID != deploymentID || existing.Owner != owner || existing.State == "stopping" {
 			return nil, ErrElasticConflict
 		}
-		return existing, tx.Commit()
+		return existing, s.commitElasticWrite(ctx, tx, owner)
 	}
 	if !errors.Is(err, ErrNotFound) {
 		return nil, err
@@ -126,7 +138,7 @@ func (s *Store) ReserveElasticSession(ctx context.Context, owner ElasticOwner, a
 	if err != nil {
 		return nil, err
 	}
-	return r, tx.Commit()
+	return r, s.commitElasticWrite(ctx, tx, owner)
 }
 
 // AdvanceElasticReservation records launch progress under the original owner.
@@ -167,7 +179,10 @@ func (s *Store) transitionElasticReservation(ctx context.Context, owner ElasticO
 		return ErrElasticFenced
 	}
 	if r.State == next && r.Owner == owner {
-		return tx.Commit()
+		return s.commitElasticWrite(ctx, tx, owner)
+	}
+	if takeover && next == "stopping" && r.State == "stopped" && r.Owner == owner {
+		return s.commitElasticWrite(ctx, tx, owner) // retry of a fully confirmed stop
 	}
 	if r.State == "stopped" || (!takeover && r.State != previous) {
 		return ErrElasticConflict
@@ -176,7 +191,7 @@ func (s *Store) transitionElasticReservation(ctx context.Context, owner ElasticO
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitElasticWrite(ctx, tx, owner)
 }
 
 // ListElasticReservations includes terminal rows to retain non-reusable slots.

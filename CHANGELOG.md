@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **isolation**: add the internal remote elastic launch protocol with immutable worker bindings, guarded Docker creation, live mTLS authorization, durable stop tombstones and confirmed-removal capacity release. Clustered session routing remains disabled pending integration.
+
 ### Fixed
 
 - **isolation**: record native elastic worker identities before allowing app code to execute; recover grouped and per-session pools only after confirming survivor cleanup, retaining unresolved remote identities.

@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -46,6 +48,9 @@ func dockerLabels(p StartParams) map[string]string {
 	if p.ContentDigest != "" {
 		labels[LabelContentDigest] = p.ContentDigest
 	}
+	if p.LaunchID != "" {
+		labels[LabelLaunchID] = p.LaunchID
+	}
 	if p.MaxSessions > 0 {
 		labels[LabelMaxSessions] = strconv.Itoa(p.MaxSessions)
 	}
@@ -55,9 +60,10 @@ func dockerLabels(p StartParams) map[string]string {
 // DockerRuntime implements Runtime using the Docker Engine API.
 // Each app runs in its own container with the bundle directory mounted at /app.
 type DockerRuntime struct {
-	client      *dockerClient
-	pythonImage string
-	rImage      string
+	startupGuards sync.Map // container ID -> *dockerStartupGuard, only while guarded
+	client        *dockerClient
+	pythonImage   string
+	rImage        string
 	// networkMode is the Docker network mode applied to every container this
 	// runtime starts. "bridge" (default, isolated namespace + 127.0.0.1 host
 	// port mapping) or "host" (shares the host network stack).
@@ -271,6 +277,16 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		return ReplicaEndpoint{}, fmt.Errorf("create container for %s: %w", p.Slug, err)
 	}
 
+	ep := ReplicaEndpoint{
+		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
+		Provider: providerDocker, WorkerID: id, Handle: RunHandle{ContainerID: id},
+	}
+	if p.GuardUntilAcknowledged {
+		guard := &dockerStartupGuard{runtime: r, id: id, logWriter: logWriter, done: make(chan struct{})}
+		r.startupGuards.Store(id, guard)
+		ep.StartupGuard = guard
+		return ep, nil
+	}
 	if err := r.client.startContainer(id); err != nil {
 		if err := r.client.removeContainer(id); err != nil {
 			slog.Warn("docker cleanup container after failed start", "container", id, "err", err)
@@ -407,6 +423,17 @@ func (r *DockerRuntime) Signal(handle RunHandle, sig syscall.Signal) error {
 }
 
 func (r *DockerRuntime) Wait(ctx context.Context, handle RunHandle) error {
+	if pending, ok := r.startupGuards.Load(handle.ContainerID); ok {
+		guard := pending.(*dockerStartupGuard)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-guard.done:
+		}
+		if guard.result != nil {
+			return guard.result
+		}
+	}
 	code, err := r.client.waitContainer(ctx, handle.ContainerID)
 	if err != nil {
 		return err
@@ -615,4 +642,57 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 type waitResult struct {
 	code int
 	err  error
+}
+
+// SupportsGuardedStart advertises that durable identity can precede execution.
+func (r *DockerRuntime) SupportsGuardedStart() bool { return true }
+
+// dockerStartupGuard leaves the container in Docker's created state until the
+// acknowledgement has been written and closed. A controller crash therefore
+// cannot leave app code running before its identity has been persisted.
+type dockerStartupGuard struct {
+	mu           sync.Mutex
+	runtime      *DockerRuntime
+	id           string
+	logWriter    io.Writer
+	acknowledged bool
+	closed       bool
+	done         chan struct{}
+	result       error
+}
+
+func (g *dockerStartupGuard) Write(p []byte) (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return 0, io.ErrClosedPipe
+	}
+	if string(p) != "ready\n" || g.acknowledged {
+		return 0, errors.New("invalid startup acknowledgement")
+	}
+	g.acknowledged = true
+	return len(p), nil
+}
+
+func (g *dockerStartupGuard) Close() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return g.result
+	}
+	g.closed = true
+	defer close(g.done)
+	defer g.runtime.startupGuards.Delete(g.id)
+	if g.acknowledged {
+		if err := g.runtime.client.startContainer(g.id); err == nil {
+			go g.runtime.streamLogs(g.id, g.logWriter)
+			return nil
+		} else {
+			g.result = fmt.Errorf("start guarded container %s: %w", g.id, err)
+		}
+	}
+	if err := g.runtime.client.removeContainer(g.id); err != nil {
+		g.result = errors.Join(g.result, fmt.Errorf("remove guarded container %s: %w", g.id, err))
+	}
+	return g.result
 }

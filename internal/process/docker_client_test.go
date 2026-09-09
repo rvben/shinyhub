@@ -374,3 +374,42 @@ func TestDockerClientListByLabelUsesExactManagedFilterAndIncludesExited(t *testi
 		t.Errorf("exited container = %+v", containers[1])
 	}
 }
+
+func TestDockerClientListContainersRejectsUnverifiedEmptyInventory(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		body      string
+		wantError bool
+	}{
+		{"failed empty array", http.StatusInternalServerError, "[]", true},
+		{"failed null", http.StatusInternalServerError, "null", true},
+		{"successful null", http.StatusOK, "null", true},
+		{"missing identity", http.StatusOK, `[{}]`, true},
+		{"empty identity", http.StatusOK, `[{"Id":""}]`, true},
+		{"null row", http.StatusOK, `[null]`, true},
+		{"trailing value", http.StatusOK, `[] []`, true},
+		{"trailing garbage", http.StatusOK, `[] invalid`, true},
+		{"authoritative empty array", http.StatusOK, "[]", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			containers, err := newTestDockerClient(server).listContainers(ManagedContainerFilterJSON)
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("HTTP %d %s accepted as absence proof: %+v", tc.status, tc.body, containers)
+				}
+				return
+			}
+			if err != nil || containers == nil || len(containers) != 0 {
+				t.Fatalf("valid empty inventory = %+v, err=%v", containers, err)
+			}
+		})
+	}
+}

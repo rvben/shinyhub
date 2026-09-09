@@ -481,7 +481,22 @@ and confirms termination before opening a fresh elastic pool. If a survivor
 cannot be identified or stopped, the app remains failed and the record is kept
 for investigation. This prevents a restart from silently forgetting native
 workers; it does not preserve browser sessions or enable clustered isolation.
-Remote worker fencing and shared session admission are still required for that.
+Shared session routing remains a separate requirement for clustered operation.
+
+The internal remote elastic protocol now binds each reservation to one worker
+and one launch payload. Docker creates the container without starting it; a
+separate acknowledgement starts execution after identity persistence. Every
+command is authorized against the live controller lease over worker mTLS.
+Uncertain launch and stop outcomes retain capacity. A worker restart requires
+explicit cleanup and replacement rather than restoring a saved route.
+A worker fenced by the control plane keeps elastic admission closed until the
+worker restarts; unconfirmed removals retain their journals for reconciliation.
+
+This protocol is not yet connected to clustered session routing. Its `ready`
+state means execution was acknowledged, not that an application health probe
+passed. Authorization is checked when accepting commands; an accepted command
+can finish after its controller lease expires. Serialized stop confirmation
+and retained reservations prevent replacement from overtaking that command.
 
 **Elastic apps skip fixed-replica booting at deploy.** For `grouped` and
 `per_session` apps, the deploy pipeline boots no fixed replicas. The app is

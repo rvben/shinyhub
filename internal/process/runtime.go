@@ -47,8 +47,9 @@ type ReplicaEndpoint struct {
 	WorkerID     string        // stable identity: PID (stringified), container ID, task ARN
 	Handle       RunHandle     // operational handle
 	ExternalLogs *ExternalLogs // provider-owned log destination, when ShinyHub cannot stream output
-	// StartupGuard is non-nil only for a guarded native launch. The child blocks
-	// before exec until the control plane acknowledges durable PID persistence.
+	// StartupGuard blocks app execution until the control plane writes "ready\n"
+	// and closes the guard after durably persisting the runtime identity. Closing
+	// without acknowledgement aborts the launch.
 	StartupGuard io.WriteCloser
 }
 
@@ -374,4 +375,9 @@ type ContainerInfo struct {
 type TaskRef struct {
 	ARN    string
 	Labels map[string]string
+}
+
+// GuardedStartCapable advertises support for StartParams.GuardUntilAcknowledged.
+type GuardedStartCapable interface {
+	SupportsGuardedStart() bool
 }

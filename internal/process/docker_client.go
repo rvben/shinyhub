@@ -433,16 +433,32 @@ func (c *dockerClient) listContainers(filtersJSON string) ([]containerSummary, e
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list containers: unexpected HTTP status %d", resp.StatusCode)
+	}
 	var raw []struct {
 		ID     string            `json:"Id"`
 		Labels map[string]string `json:"Labels"`
 		State  string            `json:"State"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decode containers: %w", err)
+	}
+	// Inventory is used as proof of removal. A null response is not an
+	// authoritative empty list and must not release reserved capacity.
+	if raw == nil {
+		return nil, fmt.Errorf("decode containers: expected an array, got null")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("decode containers: unexpected trailing data")
 	}
 	out := make([]containerSummary, len(raw))
 	for i, r := range raw {
+		if strings.TrimSpace(r.ID) == "" {
+			return nil, fmt.Errorf("decode containers: missing container identity")
+		}
 		out[i] = containerSummary{ID: r.ID, Labels: r.Labels, State: r.State}
 	}
 	return out, nil

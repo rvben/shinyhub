@@ -243,6 +243,8 @@ type StartParams struct {
 	// native app code cannot exec until ReplicaStarted durably records its PID.
 	LaunchReservationHeld  bool
 	GuardUntilAcknowledged bool
+	// LaunchID is a durable launch intent identifier for runtime discovery.
+	LaunchID string
 }
 
 // LogRun describes the durable lifecycle metadata emitted for one process

@@ -21,6 +21,8 @@ const (
 	LabelAppVersion = "shinyhub.app_version"
 	// LabelContentDigest is the SHA-256 content digest of the deployed bundle.
 	LabelContentDigest = "shinyhub.content_digest"
+	// LabelLaunchID identifies a durable guarded launch intent.
+	LabelLaunchID = "shinyhub.launch_id"
 	// LabelPort is the port the app binds inside the replica so recovery can
 	// rebuild the full route URL from the resource alone.
 	LabelPort = "shinyhub.port"
