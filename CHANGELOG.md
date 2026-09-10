@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - **isolation**: record native elastic worker identities before allowing app code to execute; recover grouped and per-session pools only after confirming survivor cleanup, retaining unresolved remote identities.
+- **cli**: report HTTP 422 responses as validation errors instead of internal ones, so a schedule the app's tier cannot honour no longer carries the client/server version-skew hint.
 
 - **docs**: describe scheduler control-plane ownership and the remaining producer/activation topology restrictions.
 

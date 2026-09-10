@@ -19,7 +19,12 @@ import (
 // classify so both typed-HTTP error types use identical mapping logic.
 func statusKind(status int) (Kind, int) {
 	switch {
-	case status == 400:
+	// 400 is a request the server could not parse; 422 is one it parsed but
+	// cannot apply (a schedule the app's tier cannot honour, a rejected env
+	// key). Both are the caller's input to change, so both are validation:
+	// the internal kind's version-skew hint would send the operator after a
+	// client/server mismatch that does not exist.
+	case status == 400 || status == 422:
 		return KindValidation, 1
 	case status == 401 || status == 403:
 		return KindAuth, 3

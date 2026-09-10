@@ -36,7 +36,7 @@ type kindInfo struct {
 // kindTable is the finite set of kinds this binary emits. The schema
 // generator serializes it as the errors array; tests pin it to the spec.
 var kindTable = []kindInfo{
-	{KindValidation, 1, false, "Invalid flags, arguments, manifest, or request (HTTP 400)"},
+	{KindValidation, 1, false, "Invalid flags, arguments, manifest, or request (HTTP 400/422)"},
 	{KindNotFound, 1, false, "Resource does not exist (HTTP 404)"},
 	{KindConfirmationRequired, 1, false, "Confirmation needed but stdin is not a TTY; hint names the bypass flag"},
 	{KindInternal, 1, false, "Unexpected or unclassified error"},

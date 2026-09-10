@@ -28,6 +28,13 @@ func TestClassify(t *testing.T) {
 	}{
 		{"explicit kind wins", &ExitCodeError{Code: 6, Kind: KindServerNotReady, Err: errors.New("x")}, KindServerNotReady, 6},
 		{"http 400", &httpStatusError{Status: 400, msg: "bad"}, KindValidation, 1},
+		// The server answers 422 when a request parses but cannot be applied
+		// (a schedule whose producer semantics the app's tier cannot honour, an
+		// env key the app rejects). That is the caller's input, so it must not
+		// fall to the internal kind, whose hint sends the operator chasing a
+		// client/server version mismatch instead of reading the message.
+		{"http 422", &httpStatusError{Status: 422, msg: "tier cannot honour producer schedules"}, KindValidation, 1},
+		{"deploy http 422", &deployHTTPError{statusCode: 422, body: "rejected"}, KindValidation, 1},
 		{"http 401", &httpStatusError{Status: 401, msg: "no"}, KindAuth, 3},
 		{"http 403", &httpStatusError{Status: 403, msg: "no"}, KindAuth, 3},
 		{"http 404", &httpStatusError{Status: 404, msg: "gone"}, KindNotFound, 1},
