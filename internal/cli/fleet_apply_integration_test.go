@@ -38,6 +38,17 @@ type fleetFakeServer struct {
 	nextDigest string // digest a deploy will promote to
 	deploys    int
 	url        string
+	// deployPreflight advertises the deploy_preflight capability; every
+	// POST .../deploy-preflight then answers preflightReply verbatim and is
+	// recorded in preflights (slug -> request body) in arrival order.
+	deployPreflight bool
+	preflightReply  string
+	preflights      []fakePreflight
+}
+
+type fakePreflight struct {
+	slug string
+	body []byte
 }
 
 func newFleetFake(preconds bool) *fleetFakeServer {
@@ -83,8 +94,17 @@ func (s *fleetFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/api/server-info":
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"capabilities": map[string]bool{"fleet_preconditions": s.preconds, "content_digest": true},
+			"capabilities": map[string]bool{
+				"fleet_preconditions": s.preconds, "content_digest": true, "deploy_preflight": s.deployPreflight,
+			},
 		})
+
+	case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy-preflight"):
+		slug := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/apps/"), "/deploy-preflight")
+		raw, _ := io.ReadAll(r.Body)
+		s.preflights = append(s.preflights, fakePreflight{slug: slug, body: raw})
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(s.preflightReply))
 
 	case r.Method == "GET" && r.URL.Path == "/api/apps":
 		list := make([]fakeApp, 0, len(s.apps))

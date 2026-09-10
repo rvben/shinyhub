@@ -133,6 +133,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 
 	localDigests := map[string]string{}
 	bundles := localBundles
+	bundleFacts := map[string]fleetBundleFacts{}
 	var resolveProblems []string
 	for i := range m.Apps {
 		app := &m.Apps[i]
@@ -157,12 +158,12 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			spec = bundleBuildSpec{Dir: dir}
 			bundles[app.Slug] = spec
 		}
-		dg, derr := digestBundleSpec(spec)
+		preview, derr := previewBundleSpec(spec)
 		if derr != nil {
 			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, derr))
 			continue
 		}
-		localDigests[app.Slug] = dg
+		localDigests[app.Slug] = preview.Digest
 		bm, merr := deploy.LoadManifest(dir)
 		if merr != nil {
 			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, merr))
@@ -171,6 +172,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		if bm != nil {
 			app.Bundle = bundleFleetConfig(bm.App)
 		}
+		bundleFacts[app.Slug] = resolveFleetBundleFacts(spec, bm, preview)
 	}
 	if len(resolveProblems) > 0 {
 		fmt.Fprintf(errOut, "shinyhub fleet %s: resolving sources\n\n", cmdName)
@@ -242,6 +244,31 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			})
 		}
 		projectDiff = fleet.DiffProjects(m, observedProjects)
+	}
+
+	// Rehearse every deploy the diff implies against the server's own
+	// validators. A bundle the deploy handler would reject (an elastic pool
+	// with a data-producing schedule, replicas above the server ceiling) is
+	// reported here with the deploy's message, before plan prints a diff that
+	// apply could never complete and before apply converges any app.
+	serverProblems, sperr := fleetServerPreflight(cfg, caps, m, diff, bundleFacts)
+	if sperr != nil {
+		// The error is typed by what went wrong (transport, credential,
+		// server failure, undecodable reply), so the envelope kind and exit
+		// code follow from it rather than from a fixed code.
+		fmt.Fprintf(errOut, "  %s %v\n", s.failMark(), sperr)
+		runCleanups()
+		kind, code := classify(sperr)
+		return nil, &ExitCodeError{Code: code, Kind: kind, Err: sperr, Reported: true}
+	}
+	if len(serverProblems) > 0 {
+		fmt.Fprintf(errOut, "shinyhub fleet %s: checking with the server\n\n", cmdName)
+		for _, p := range serverProblems {
+			fmt.Fprintf(errOut, "  %s %s\n", s.failMark(), p)
+		}
+		fmt.Fprintf(errOut, "\n%d problem(s) the server would reject at deploy. Nothing was changed.\n", len(serverProblems))
+		runCleanups()
+		return nil, &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf("%d server preflight problem(s)", len(serverProblems)), Reported: true}
 	}
 
 	return &preflightResult{

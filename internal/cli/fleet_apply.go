@@ -52,10 +52,12 @@ func newFleetApplyCmd() *cobra.Command {
 			"fleet-declared config drift, stamps ownership, and - only with\n" +
 			"--prune - removes fleet-owned apps absent from the manifest\n" +
 			"(this also removes their persistent data directory). Non-atomic,\n" +
-			"continue-on-error, per-app retry.\n\n" +
+			"continue-on-error, per-app retry. Every deploy the diff implies is\n" +
+			"rehearsed against the server before the first change, so a bundle the\n" +
+			"server would reject stops the run with nothing changed.\n\n" +
 			"Exit codes:\n" +
 			"  0  all converged (or --dry-run report)\n" +
-			"  1  usage / manifest validation error\n" +
+			"  1  usage / manifest validation error, or a deploy the server would reject\n" +
 			"  3  transport / auth error\n" +
 			"  4  partial: >=1 app failed to converge\n" +
 			"  5  conflicts: >=1 app skipped on a precondition 409\n" +

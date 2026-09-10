@@ -2459,8 +2459,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// start and fail at exec with no R interpreter or restored renv. A clear
 	// 400 here beats a cryptic task-startup failure later.
 	if deploy.DetectAppType(bundleDir) == "r" && s.appTargetsFargate(app) {
-		writeError(w, http.StatusBadRequest,
-			"R apps are not supported on Fargate tiers: the Fargate runner image is Python-only. Place this app on a native or docker tier.")
+		writeError(w, http.StatusBadRequest, rOnFargateDeployMsg)
 		return
 	}
 

@@ -1861,6 +1861,19 @@ func ResumeReplica(p Params, index int) (*Result, error) {
 // is identical and only detection has to tell them apart. server.R is the file
 // that decides it, because a ui.R on its own cannot be run.
 func DetectAppType(bundleDir string) string {
+	return DetectAppTypeIn(bundleDir, func(name string) bool {
+		_, err := os.Stat(filepath.Join(bundleDir, name))
+		return err == nil
+	})
+}
+
+// DetectAppTypeIn is DetectAppType for a bundle that is not yet on disk in
+// its final form: present reports whether a root-level file will be in the
+// bundle. A client assembling an upload uses it with the upload's own file
+// list, so an entrypoint contributed by a shared input or excluded by an
+// ignore file is judged as the server will judge the extracted bundle. The
+// manifest is still read from bundleDir, which no input can replace.
+func DetectAppTypeIn(bundleDir string, present func(name string) bool) string {
 	if m, err := LoadManifest(bundleDir); err == nil && m != nil {
 		switch m.App.Framework {
 		case "fastapi":
@@ -1869,14 +1882,10 @@ func DetectAppType(bundleDir string) string {
 			return "r"
 		}
 	}
-	exists := func(name string) bool {
-		_, err := os.Stat(filepath.Join(bundleDir, name))
-		return err == nil
-	}
-	if exists("app.py") {
+	if present("app.py") {
 		return "python"
 	}
-	if exists("app.R") || exists("server.R") {
+	if present("app.R") || present("server.R") {
 		return "r"
 	}
 	return ""

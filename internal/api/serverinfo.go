@@ -56,6 +56,7 @@ type serverCapabilities struct {
 	ServiceAccountCredentials bool `json:"service_account_credentials"`
 	ScheduleRefreshStale      bool `json:"schedule_refresh_stale"`
 	ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
+	DeployPreflight           bool `json:"deploy_preflight"`
 }
 
 // handleServerInfo advertises server capability flags so a fleet-aware CLI
@@ -82,6 +83,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			ServiceAccountCredentials: true,
 			ScheduleDeployConvergence: true,
 			ScheduleRefreshStale:      true,
+			DeployPreflight:           true,
 		},
 		Runtimes: detectRuntimes(),
 	})

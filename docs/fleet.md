@@ -329,6 +329,26 @@ replays a saved plan. `--detailed-exitcode` makes it exit `2` when changes
 are pending (useful in CI gates). `--json` emits a stable machine-readable
 envelope; `-q/--quiet` collapses to the summary.
 
+Before the diff is printed, `plan` rehearses every deploy the diff implies
+against the server. For each app it would create, adopt, or redeploy, the
+server runs the validators its deploy endpoint runs (bundle manifest policy,
+schedule topology such as a data-producing `[[schedule]]` under `grouped`
+isolation, replica and autoscale ceilings, tier compatibility, colocated
+shared-data placement) on the bundle's `shinyhub.toml` and the app's
+`[app.config]` settings, and changes nothing. The app type it judges is the
+one the server will detect from the upload, so an entrypoint that arrives
+through a `[[bundle_file]]` input or is excluded by `.shinyhubignore` counts
+as it will at deploy. A rejection is printed with the deploy's own message and
+the command exits `1`, so a manifest the server would refuse fails in CI
+before any app has been converged. A question the server did not answer (a
+connection failure, a `5xx`, a rejected credential) is reported with that
+failure's own kind and exit code, never as a rejection. Servers that advertise
+`deploy_preflight` answer the full check; servers with only
+`runtime_capabilities` are asked the runtime-topology question for bundles
+that declare producer or roll schedules; older servers are not asked.
+Config-only drift is not rehearsed, because the server validates that patch in
+place before writing.
+
 An operational setting omitted from both manifest layers is not drift and is
 never changed by `apply`. When its stored value is an override rather than the
 field's unset/default representation, `plan` nevertheless labels it
@@ -351,7 +371,10 @@ then for each app, in order: deploys changed apps, reconciles durable config
 declared by either manifest (with `[app.config]` taking precedence), and stamps
 ownership. Convergence is non-atomic and
 continue-on-error: one failing app does not abort the rest, and the exit code
-reflects the worst outcome.
+reflects the worst outcome. The server rehearsal `plan` performs runs first,
+before the first mutation: a bundle any app's deploy would reject stops the
+run with exit `1` and nothing changed, instead of leaving the apps ahead of it
+converged and the rest untouched.
 
 Adopting an existing app does not create a deployment when its non-empty
 content digest and every declared setting already match. On servers that
@@ -495,7 +518,7 @@ applicable code.
 | Code | Meaning |
 |---|---|
 | `0` | Success, or a report was printed (including `--dry-run` and a clean plan). |
-| `1` | Usage error or manifest validation failure. |
+| `1` | Usage error, manifest validation failure, or a deploy the server rehearsed and rejected (before any change, in both `plan` and `apply`). |
 | `2` | `plan --detailed-exitcode` only: changes are pending. |
 | `3` | Transport or auth error (could not reach the server / not logged in). |
 | `4` | Partial: at least one app failed after retries. |

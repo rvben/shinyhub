@@ -305,6 +305,13 @@ func LoadManifest(bundleDir string) (*Manifest, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", ManifestFilename, err)
 	}
+	return ParseManifest(data)
+}
+
+// ParseManifest decodes and validates shinyhub.toml content exactly as a
+// deploy does, so a caller holding the bytes (a preflight request, a test)
+// gets the same manifest and the same error text as LoadManifest.
+func ParseManifest(data []byte) (*Manifest, error) {
 	var m Manifest
 	meta, err := toml.Decode(string(data), &m)
 	if err != nil {

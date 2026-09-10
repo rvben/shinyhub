@@ -12,9 +12,19 @@ func digestLocalDir(dir string) (string, error) {
 }
 
 func digestBundleSpec(spec bundleBuildSpec) (string, error) {
-	preview, err := buildBundlePreviewFromSpec(spec)
+	preview, err := previewBundleSpec(spec)
 	if err != nil {
-		return "", fmt.Errorf("bundle %s: %w", spec.Dir, err)
+		return "", err
 	}
 	return preview.Digest, nil
+}
+
+// previewBundleSpec builds the upload exactly as apply would, so both the
+// digest and the file list describe the bytes the server will receive.
+func previewBundleSpec(spec bundleBuildSpec) (*bundlePreview, error) {
+	preview, err := buildBundlePreviewFromSpec(spec)
+	if err != nil {
+		return nil, fmt.Errorf("bundle %s: %w", spec.Dir, err)
+	}
+	return preview, nil
 }

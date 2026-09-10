@@ -39,10 +39,11 @@ func newFleetPlanCmd() *cobra.Command {
 		Use:   "plan",
 		Short: "Preview the fleet reconcile diff (read-only, no changes)",
 		Long: "Validates the manifest, resolves sources, fetches server state,\n" +
-			"and prints the would-be diff. Makes only GET requests.\n\n" +
+			"and prints the would-be diff. Every deploy the diff implies is rehearsed\n" +
+			"against the server first, which changes nothing.\n\n" +
 			"Exit codes:\n" +
 			"  0  report printed (default), or no changes (--detailed-exitcode)\n" +
-			"  1  usage / manifest validation error\n" +
+			"  1  usage / manifest validation error, or a deploy the server would reject\n" +
 			"  2  --detailed-exitcode / --fail-on-changes only: changes are pending\n" +
 			"  3  transport / auth error\n" +
 			"  6  server not ready (reachable host, but shinyhub is not up yet)\n\n" +
@@ -206,6 +207,7 @@ type serverCaps struct {
 	FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
 	ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
 	ScheduleRefreshStale      bool `json:"schedule_refresh_stale"`
+	DeployPreflight           bool `json:"deploy_preflight"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just

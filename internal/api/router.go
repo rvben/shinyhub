@@ -941,6 +941,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/apps/{slug}", s.handleGetApp)
 		r.Get("/api/runtime-capabilities", s.handleRuntimeCapabilities)
 		r.Get("/api/apps/{slug}/capabilities", s.handleRuntimeCapabilities)
+		r.Post("/api/apps/{slug}/deploy-preflight", s.handleDeployPreflight)
 		r.Patch("/api/apps/{slug}", s.handlePatchApp)
 		r.Delete("/api/apps/{slug}", s.handleDeleteApp)
 		r.With(rateLimitByUser(s.deployLimiter)).Post("/api/apps/{slug}/deploy", s.handleDeployApp)
