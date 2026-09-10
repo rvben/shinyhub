@@ -6,12 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.16.4](https://github.com/rvben/shinyhub/compare/v0.16.3...v0.16.4) - 2026-09-10
+
 ### Added
 
 - **isolation**: add the internal remote elastic launch protocol with immutable worker bindings, guarded Docker creation, live mTLS authorization, durable stop tombstones and confirmed-removal capacity release. Clustered session routing remains disabled pending integration.
 
 - **fleet**: rehearse every deploy against the server before plan and apply, so a bundle the server would reject stops the run before any app is changed.
 - **schedules**: allow data-producing schedules under grouped and per-session isolation on local native tiers, now that elastic workers record their identity before executing. Producer rejections name the tier and runtime that lack the publication locks instead of the isolation mode, and the marker left by pre-upgrade elastic workers is discharged automatically once the app's consumer-lifetime lock is free.
+- **schedules**: allow data-producing schedules on native elastic pools ([a74ec77](https://github.com/rvben/shinyhub/commit/a74ec77a5563e10a4506e731dcf0c8f6c09b849a))
+- **fleet**: rehearse deploys against the server before plan and apply ([8706bbc](https://github.com/rvben/shinyhub/commit/8706bbc8aa5bc6a0641248f4ba810611e0c8214f))
+- **isolation**: add guarded remote elastic launch protocol ([cdfcdd8](https://github.com/rvben/shinyhub/commit/cdfcdd85121d8145a8513dce5f294ee6ec1e2c36))
+- **db**: add fenced elastic session reservations ([6ac0a96](https://github.com/rvben/shinyhub/commit/6ac0a962d120010a8b7bcdd6eb54a8616abd6686))
 
 ### Fixed
 
@@ -19,6 +25,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **cli**: report HTTP 422 responses as validation errors instead of internal ones, so a schedule the app's tier cannot honour no longer carries the client/server version-skew hint.
 
 - **docs**: describe scheduler control-plane ownership and the remaining producer/activation topology restrictions.
+- **cli**: classify HTTP 422 responses as validation errors ([d45d123](https://github.com/rvben/shinyhub/commit/d45d12348b58560fea412f3394f216ffdeaf302c))
+- **isolation**: persist native elastic workers before execution ([75a03e8](https://github.com/rvben/shinyhub/commit/75a03e800667a0b37454547d7c800c6fffafe31e))
 
 ## [0.16.3](https://github.com/rvben/shinyhub/compare/v0.16.2...v0.16.3) - 2026-09-09
 
