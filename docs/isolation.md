@@ -482,6 +482,10 @@ cannot be identified or stopped, the app remains failed and the record is kept
 for investigation. This prevents a restart from silently forgetting native
 workers; it does not preserve browser sessions or enable clustered isolation.
 Shared session routing remains a separate requirement for clustered operation.
+Because a native elastic worker is recorded before it executes and inherits
+the server's publication and consumer-lifetime locks, a grouped or
+per-session app on a local native tier may also carry deploy-triggered
+producer schedules; see [schedules](schedules.md) for the producer rules.
 
 The internal remote elastic protocol now binds each reservation to one worker
 and one launch payload. Docker creates the container without starting it; a

@@ -65,21 +65,34 @@ Fields:
 > the schedule instead of sending a field that server would ignore.
 
 > **Producer runtime:** schedules that declare producer semantics
-> (`deploy_trigger != "never"` or `on_success = "roll"`) currently require the
-> native runtime **and effective `worker_isolation = "multiplex"`**. Native
-> multiplex children have durable replica identities and inherit the server's physical publication
-> fence. Docker, remote-worker, Fargate, and ECS launches have a
-> request-accepted-before-handle-persisted window that cannot be fenced safely
-> after control-plane failure; elastic `grouped`/`per_session` workers likewise
-> lack durable failover identity. These topologies are rejected at write time
-> and revalidated when the server starts and when a producer runs, including
-> apps that inherit a changed fleet isolation default.
+> (`deploy_trigger != "never"` or `on_success = "roll"`) require every tier the
+> app's processes run on to be a **local native tier**. A producer publishes
+> behind two physical locks that only processes inheriting the server's file
+> descriptors can honour: the exclusive candidate-producer fence held while the
+> new data is written, and the consumer-lifetime lock every native worker holds
+> for as long as it runs. Docker, remote-worker, Fargate, and ECS launches have
+> a request-accepted-before-handle-persisted window that cannot be fenced after
+> a control-plane failure, so those tiers are rejected at write time and
+> revalidated when the server starts and when a producer runs, including apps
+> whose placement inherits a changed default tier. The rejection names the
+> tier and its runtime.
 
-> Once an elastic worker launch has been attempted, the app carries a durable
-> orphan-risk marker. Moving it into producer-capable multiplex mode requires
-> stopping the app and explicitly setting `worker_isolation = "multiplex"`;
-> the server holds the app operation lock and proves the entire native consumer
-> process tree absent before it clears that marker.
+> Worker isolation is not part of that rule. Native `grouped` and
+> `per_session` workers record their identity before they execute and inherit
+> the same locks, so an elastic pool can host a deploy-triggered producer. A
+> deploy that runs a producer is always stop-first, which recycles every
+> worker of the pool onto the published data at once. Automatic serving-data
+> activation (`on_success = "roll"`) still requires multiplex.
+
+> An app that ran elastic workers under a ShinyHub version without durable
+> worker identities carries an orphan-risk marker, because such a worker could
+> have outlived the server's knowledge of it. The server discharges the marker
+> by itself once the app's consumer-lifetime lock is observed free, which
+> proves that no such worker survives on the host: at startup after recovery,
+> and under the app operation lock before it validates a schedule write, a
+> topology change, or a deploy. Until then producer schedules are refused with
+> a message naming the lock; stopping the app once, or rebooting the host, is
+> enough.
 
 > **Unclean 0.12.x upgrade:** upgrade only after scheduled runs have drained.
 > If migration finds a run that was still `running`, startup fails closed because

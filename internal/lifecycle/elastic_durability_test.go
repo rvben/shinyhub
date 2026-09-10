@@ -70,6 +70,11 @@ func TestElasticNativeLaunchRequiresDurableIdentity(t *testing.T) {
 			if !checked {
 				t.Fatal("worker did not reach readiness")
 			}
+			// A worker whose identity is recorded before it executes can never
+			// become an untracked survivor, so it leaves no orphan-risk marker.
+			if risk, err := store.AppElasticOrphanRisk(app.ID); err != nil || risk {
+				t.Fatalf("recorded native worker left an orphan-risk marker: risk=%v err=%v", risk, err)
+			}
 			if scenario == "replacement_controller" {
 				oldWorker, _ := mgr.GetReplica(app.Slug, 0)
 				replacement := process.NewManager(t.TempDir(), process.NewNativeRuntime())

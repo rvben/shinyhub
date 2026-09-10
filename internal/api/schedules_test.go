@@ -145,8 +145,8 @@ func TestSchedules_DataProducersRequireNativeRuntime(t *testing.T) {
 		wantStatus       int
 	}{
 		{name: "native-multiplex", mode: "native", workerIsolation: "multiplex", wantStatus: http.StatusCreated},
-		{name: "native-grouped", mode: "native", workerIsolation: "grouped", wantStatus: http.StatusUnprocessableEntity},
-		{name: "native-inherited-grouped", mode: "native", workerIsolation: "", defaultIsolation: "grouped", wantStatus: http.StatusUnprocessableEntity},
+		{name: "native-grouped", mode: "native", workerIsolation: "grouped", wantStatus: http.StatusCreated},
+		{name: "native-inherited-grouped", mode: "native", workerIsolation: "", defaultIsolation: "grouped", wantStatus: http.StatusCreated},
 		{name: "docker", mode: "docker", workerIsolation: "multiplex", wantStatus: http.StatusUnprocessableEntity},
 		{name: "fargate", mode: "fargate", workerIsolation: "multiplex", wantStatus: http.StatusUnprocessableEntity},
 		{name: "ecs-ec2", mode: "ecs-ec2", workerIsolation: "multiplex", wantStatus: http.StatusUnprocessableEntity},
@@ -178,10 +178,8 @@ func TestSchedules_DataProducersRequireNativeRuntime(t *testing.T) {
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), tc.wantStatus)
 			}
-			if tc.wantStatus != http.StatusCreated &&
-				!strings.Contains(rec.Body.String(), "orphan-process fence") &&
-				!strings.Contains(rec.Body.String(), "worker_isolation=multiplex") {
-				t.Fatalf("rejection does not explain physical fencing: %s", rec.Body.String())
+			if tc.wantStatus != http.StatusCreated && !strings.Contains(rec.Body.String(), "local native tier") {
+				t.Fatalf("rejection does not name the tier requirement: %s", rec.Body.String())
 			}
 		})
 	}

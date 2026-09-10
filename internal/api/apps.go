@@ -1294,44 +1294,19 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Validate topology and, when explicitly leaving elastic mode, discharge
-	// the durable orphan-risk marker under the same per-app operation lock used
-	// by elastic spawn. Keep the physical consumer fence through the settings
-	// commit so no surviving worker or concurrent spawn can slip between proof
-	// and persistence.
-	orphanFenceHeld := false
-	clearOrphanRiskAfterPatch := false
+	// Validate the projected topology under the same per-app operation lock
+	// elastic spawn takes. A stale orphan-risk marker is discharged first, so
+	// an app whose pre-upgrade elastic workers are provably gone is judged on
+	// the topology it is about to have.
 	if setWorkerIsolation || setPlacement || clearPlacement {
+		if err := s.dischargeElasticOrphanRisk(app.ID); err != nil {
+			reqLog(r).Error("discharge elastic orphan-risk marker", "slug", slug, "err", err)
+			writeError(w, http.StatusInternalServerError, "verify elastic worker lifetime")
+			return
+		}
 		projected := *app
 		if setWorkerIsolation {
 			projected.WorkerIsolation = newWorkerIsolation
-		}
-		if setWorkerIsolation && deploy.ResolveWorkerIsolation(projected.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "multiplex" {
-			orphanRisk, riskErr := s.store.AppElasticOrphanRisk(app.ID)
-			if riskErr != nil {
-				writeError(w, http.StatusInternalServerError, "check elastic orphan fence")
-				return
-			}
-			if orphanRisk {
-				if app.Status != "stopped" {
-					writeError(w, http.StatusConflict, "stop the app before clearing its elastic orphan fence and switching to multiplex")
-					return
-				}
-				if s.jobs == nil {
-					writeError(w, http.StatusServiceUnavailable, "consumer lifetime fence unavailable")
-					return
-				}
-				fenceCtx, cancelFence := context.WithTimeout(r.Context(), 2*time.Second)
-				releaseFence, fenceErr := s.jobs.AcquireExclusiveConsumerLifetime(fenceCtx, app.ID)
-				cancelFence()
-				if fenceErr != nil {
-					writeError(w, http.StatusConflict, "an elastic worker may still be alive; reboot or terminate it before switching to producer-capable multiplex mode")
-					return
-				}
-				defer releaseFence()
-				orphanFenceHeld = true
-				clearOrphanRiskAfterPatch = true
-			}
 		}
 		if setPlacement {
 			projected.ReplicaPlacement = placementJSON
@@ -1350,7 +1325,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("app topology would invalidate schedule %q: %v", schedule.Name, err))
 				return
 			}
-			if err := s.validateScheduleProducerTopologyWithOrphanFence(&projected, schedule.DeployTrigger, schedule.OnSuccess, orphanFenceHeld); err != nil {
+			if err := s.validateScheduleProducerTopology(&projected, schedule.DeployTrigger, schedule.OnSuccess); err != nil {
 				writeError(w, http.StatusUnprocessableEntity,
 					fmt.Sprintf("app topology would invalidate schedule %q: %v", schedule.Name, err))
 				return
@@ -1434,16 +1409,6 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if clearOrphanRiskAfterPatch {
-		if err := s.store.ClearElasticOrphanRisk(app.ID); err != nil {
-			// The topology is already multiplex, but retaining the marker is safe:
-			// producer enablement remains fail-closed until a later stopped/fenced
-			// transition proves the old elastic process tree absent.
-			writeError(w, http.StatusInternalServerError, "clear elastic orphan fence")
-			return
-		}
-	}
-
 	if setManagedBy {
 		if err := s.store.SetAppManagedBy(slug, newManagedBy); err != nil {
 			if errors.Is(err, db.ErrNotFound) {
@@ -2447,6 +2412,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, ve.Error())
 			return
 		}
+		if err := s.dischargeElasticOrphanRisk(app.ID); err != nil {
+			reqLog(r).Error("discharge elastic orphan-risk marker", "slug", slug, "err", err)
+			writeError(w, http.StatusInternalServerError, "verify elastic worker lifetime")
+			return
+		}
 		if ve := s.validateManifestActivationTopology(app, manifest); ve != nil {
 			writeError(w, http.StatusBadRequest, ve.Error())
 			return
@@ -2694,7 +2664,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	drainingRowsStaged := false
 	if generationHandoff {
-		if groupedHandoff {
+		// Draining grouped workers on a tier without durable identity may
+		// outlive the server's knowledge of them; record that before the
+		// handoff. Native workers are recorded before they execute, so a
+		// native handoff leaves no marker.
+		if _, native := s.manager.RuntimeForTier(s.elasticSpawnTier()).(*process.NativeRuntime); groupedHandoff && !native {
 			if err := s.store.MarkElasticOrphanRisk(app.ID); err != nil {
 				_ = s.store.FailDeploymentWithReason(pendingDep.ID, "persist grouped worker lifetime fence")
 				writeError(w, http.StatusInternalServerError, "persist grouped worker lifetime fence")

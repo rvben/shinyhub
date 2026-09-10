@@ -93,9 +93,8 @@ type Manager struct {
 	// (per-app value over the runtime default) so a scheduled job is capped by the
 	// same ceiling as its replicas. nil leaves jobs uncapped (the pre-existing
 	// behavior). Set once at startup via SetResourceResolver, before any run.
-	resolveResources       func(app *db.App) (memoryMB, cpuPct int)
-	defaultWorkerIsolation string
-	onUnsafePublication    func(appID int64, slug, status string)
+	resolveResources    func(app *db.App) (memoryMB, cpuPct int)
+	onUnsafePublication func(appID int64, slug, status string)
 
 	// globalSem caps the number of schedule runs executing simultaneously
 	// across every schedule. overlap_policy "concurrent" otherwise spawns an
@@ -142,14 +141,6 @@ type Manager struct {
 	// arbitrarily long without turning a successful run into lost activation.
 	terminalCtx    context.Context
 	terminalCancel context.CancelFunc
-}
-
-// SetDefaultWorkerIsolation supplies the fleet fallback used when an app
-// inherits worker isolation. Producer execution revalidates this at the
-// physical write boundary so a configuration-only change cannot turn a
-// previously safe multiplex app into an untracked elastic pool.
-func (m *Manager) SetDefaultWorkerIsolation(mode string) {
-	m.defaultWorkerIsolation = mode
 }
 
 // ErrManagerStopped is returned by Run once Stop has been called.
@@ -1024,6 +1015,25 @@ func (m *Manager) AcquireExclusiveConsumerLifetime(ctx context.Context, appID in
 	return release, err
 }
 
+// ConsumerLifetimeFree reports whether no process holds the app's
+// consumer-lifetime lock. Every native consumer inherits that lock for as
+// long as it runs, tracked or not, so a free lock proves that no native
+// worker of the app survives on this host. The probe never waits: it tries
+// one exclusive acquisition and releases it at once.
+func (m *Manager) ConsumerLifetimeFree(appID int64) (bool, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	release, _, err := m.acquireConsumerLifetimeFileLockContext(ctx, appID, unix.LOCK_EX)
+	if errors.Is(err, context.Canceled) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	release()
+	return true, nil
+}
+
 // AcquirePublicationRecoveryFences takes an exclusive physical-writer fence
 // for every app in stable order. A successor owner holds these while it
 // terminalizes inherited running rows and decides which consumers are safe to
@@ -1516,21 +1526,11 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	}
 	rt := m.procMgr.RuntimeForTier(jobTier)
 	if schedulePublishesData(sched, trigger) {
-		isolation := app.WorkerIsolation
-		if isolation == "" {
-			isolation = m.defaultWorkerIsolation
-		}
-		if isolation == "" {
-			isolation = "multiplex"
-		}
-		if isolation != "multiplex" {
-			fmt.Fprintf(logFile, "shinyhub: data-producing schedules require worker_isolation=multiplex; effective mode is %q\n", isolation)
-			m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
-			return
-		}
+		// A producer publishes behind locks that only processes inheriting the
+		// server's descriptors can honour, whatever the app's worker isolation.
 		inheritor, ok := rt.(process.LifetimeFileInheritor)
 		if !ok || !inheritor.InheritsLifetimeFiles() {
-			fmt.Fprintf(logFile, "shinyhub: data-producing schedules require a native runtime with inherited lifetime fences; tier %q is unsupported\n", jobTier)
+			fmt.Fprintf(logFile, "shinyhub: data-producing schedules need a local native tier whose processes inherit the server's publication and consumer-lifetime locks; tier %q does not\n", jobTier)
 			m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
 			return
 		}

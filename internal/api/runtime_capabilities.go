@@ -51,7 +51,7 @@ func (s *Server) handleRuntimeCapabilities(w http.ResponseWriter, r *http.Reques
 		features[string(candidate)] = capabilityResult(config.ValidateWorkerSettings(config.WorkerSettings{Isolation: candidate, GroupedSize: 1, MaxWorkers: 1}, s.clustered, 0, 0), "Use multiplex on a clustered server, or a single-node server for grouped/per-session workers.")
 	}
 	producerErr := s.validateScheduleProducerTopology(app, schedulespec.DeployTriggerBundleChange, "none")
-	features["deploy_producers"] = capabilityResult(producerErr, "Use local native tiers and multiplex isolation. If elastic workers ran before, stop the app and explicitly set multiplex to clear its orphan fence.")
+	features["deploy_producers"] = capabilityResult(producerErr, "Place the app on a local native tier; any worker isolation works. If the app ran elastic workers under an earlier ShinyHub version, stop it once so the server can verify they are gone.")
 	activationErr := s.validateScheduleActivationForApp(app, "roll")
 	if activationErr == nil {
 		activationErr = s.validateScheduleProducerTopology(app, schedulespec.DeployTriggerNever, "roll")

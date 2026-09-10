@@ -760,31 +760,66 @@ func TestManager_ConsumerLifetimeFenceBlocksCandidateExclusion(t *testing.T) {
 	releaseExclusive()
 }
 
-func TestManager_PhysicalBoundaryRejectsInheritedElasticProducer(t *testing.T) {
+// The probe answers at once in both directions and never keeps the lock: a
+// held consumer lifetime reads as not free, a released one reads as free, and
+// the exclusive fence is still available right after a free probe.
+func TestManager_ConsumerLifetimeFreeObservesInheritedLockWithoutWaiting(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+	releaseConsumer, _, err := m.AcquireConsumerLifetime(st.app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	free, err := m.ConsumerLifetimeFree(st.app.ID)
+	if err != nil || free {
+		t.Fatalf("held consumer lifetime probed as free=%v err=%v", free, err)
+	}
+	if waited := time.Since(started); waited > 500*time.Millisecond {
+		t.Fatalf("probe waited %v for a held lock instead of answering at once", waited)
+	}
+	releaseConsumer()
+	free, err = m.ConsumerLifetimeFree(st.app.ID)
+	if err != nil || !free {
+		t.Fatalf("released consumer lifetime probed as free=%v err=%v", free, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	releaseExclusive, err := m.AcquireExclusiveConsumerLifetime(ctx, st.app.ID)
+	if err != nil {
+		t.Fatalf("probe left the consumer-lifetime lock held: %v", err)
+	}
+	releaseExclusive()
+}
+
+// The physical write boundary judges the runtime, not the app's worker
+// isolation: a producer for an elastic pool runs as long as its processes
+// inherit the server's lifetime locks.
+func TestManager_PhysicalBoundaryAcceptsElasticProducerOnInheritingRuntime(t *testing.T) {
 	runtime := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
 	schedule := makeSchedule("concurrent", 30)
 	schedule.DeployTrigger = "bundle_change"
 	app := makeApp()
-	app.WorkerIsolation = ""
+	app.WorkerIsolation = "grouped"
 	store := newFakeStore(schedule, app)
 	pending := &db.Deployment{ID: 9, AppID: app.ID, Version: "v2", BundleDir: t.TempDir(), ContentDigest: "sha256:v2", Status: db.DeploymentPending}
 	manager := newTestManager(t, runtime, store)
-	manager.SetDefaultWorkerIsolation("per_session")
 	release := manager.AcquireProducerGates([]int64{schedule.ID})
 	runID, err := manager.RunCandidateProducerLocked(schedule, app, pending)
 	release()
-	if err == nil {
-		t.Fatal("producer was accepted after inherited isolation became elastic")
+	if err != nil {
+		t.Fatalf("grouped producer was refused at the physical boundary: %v", err)
 	}
 	run, getErr := store.GetScheduleRun(runID)
-	if getErr != nil || run.Status != "failed" {
-		t.Fatalf("rejected producer run=%+v err=%v", run, getErr)
+	if getErr != nil || run.Status != "succeeded" {
+		t.Fatalf("grouped producer run=%+v err=%v", run, getErr)
 	}
 	runtime.mu.Lock()
 	calls := runtime.calls
 	runtime.mu.Unlock()
-	if calls != 0 {
-		t.Fatalf("elastic producer executed %d times", calls)
+	if calls != 1 {
+		t.Fatalf("grouped producer executed %d times, want 1", calls)
 	}
 }
 

@@ -113,7 +113,11 @@ func TestPatchApp_RejectsTopologyThatInvalidatesRollSchedule(t *testing.T) {
 	}
 }
 
-func TestPatchApp_ClearsElasticOrphanRiskOnlyForStoppedFencedTransition(t *testing.T) {
+// A producer schedule is refused while a native consumer the server never
+// recorded might still be serving the app. The marker an earlier version left
+// behind is discharged only once the app's consumer-lifetime lock is free;
+// holding that lock here stands in for such a survivor.
+func TestPatchApp_DischargesElasticOrphanRiskOnceConsumersAreProvablyGone(t *testing.T) {
 	srv, store, token, jm := buildScheduleE2EServer(t)
 	srv.SetJobs(jm, nil)
 	if _, err := store.CreateApp(db.CreateAppParams{Slug: "wapp", Name: "Worker App", OwnerID: 1}); err != nil {
@@ -126,25 +130,33 @@ func TestPatchApp_ClearsElasticOrphanRiskOnlyForStoppedFencedTransition(t *testi
 	if err := store.MarkElasticOrphanRisk(app.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DB().Exec(`UPDATE apps SET status = 'running' WHERE id = ?`, app.ID); err != nil {
+	releaseSurvivor, _, err := jm.AcquireConsumerLifetime(app.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	rec := patchWorkerApp(t, srv, token, []byte(`{"worker_isolation":"multiplex"}`))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("running app cleared orphan risk: status=%d body=%s", rec.Code, rec.Body.String())
+	producer := []byte(`{"name":"refresh","cron_expr":"0 2 * * *","command":["true"],"timeout_seconds":60,"overlap_policy":"skip","missed_policy":"skip","deploy_trigger":"bundle_change"}`)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/apps/wapp/schedules", producer, token))
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "consumer-lifetime lock") {
+		t.Fatalf("producer enabled beside a possible survivor: status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if risk, err := store.AppElasticOrphanRisk(app.ID); err != nil || !risk {
-		t.Fatalf("risk after rejected running transition=%v err=%v", risk, err)
-	}
-	if _, err := store.DB().Exec(`UPDATE apps SET status = 'stopped' WHERE id = ?`, app.ID); err != nil {
-		t.Fatal(err)
-	}
+	// Settings that enable no producer are not held up by the marker, and the
+	// marker stays until the lock is proven free.
 	rec = patchWorkerApp(t, srv, token, []byte(`{"worker_isolation":"multiplex"}`))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("stopped fenced transition status=%d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("multiplex settings beside a possible survivor: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if risk, err := store.AppElasticOrphanRisk(app.ID); err != nil || !risk {
+		t.Fatalf("marker discharged while the consumer lock was held: risk=%v err=%v", risk, err)
+	}
+	releaseSurvivor()
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/apps/wapp/schedules", producer, token))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("producer refused after the consumer lock was proven free: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if risk, err := store.AppElasticOrphanRisk(app.ID); err != nil || risk {
-		t.Fatalf("risk after stopped fenced transition=%v err=%v", risk, err)
+		t.Fatalf("marker kept after the consumer lock was proven free: risk=%v err=%v", risk, err)
 	}
 }
 

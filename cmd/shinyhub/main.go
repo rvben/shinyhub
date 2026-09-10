@@ -2175,7 +2175,6 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	if err != nil {
 		return fmt.Errorf("init jobs manager: %w", err)
 	}
-	jobsMgr.SetDefaultWorkerIsolation(cfg.Runtime.DefaultWorkerIsolation)
 	mgr.SetConsumerLifetimeResolver(jobsMgr.AcquireConsumerLifetime)
 	watcher.SetConsumerBootGate(jobsMgr.AcquireCompatibleConsumerBootGate)
 	elasticSpawner.AcquireConsumerBootGate = jobsMgr.AcquireCompatibleConsumerBootGate
@@ -2416,6 +2415,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// apps. Elastic workers are ephemeral and must not be re-adopted; the
 		// pool starts empty and clients trigger fresh spawns on next request.
 		lifecycle.ReapElasticOrphans(store, mgr)
+		// Apps that ran elastic workers under a version without durable worker
+		// identities carry an orphan-risk marker. With every known worker
+		// stopped, a free consumer-lifetime lock proves no unknown one survived,
+		// and the marker no longer needs to block producer schedules.
+		lifecycle.DischargeElasticOrphanRisk(store, jobsMgr)
 		// Remove ShinyHub-managed containers no live replica re-adopted across
 		// every configured local container tier. Shared Docker daemons are
 		// deduplicated by endpoint.
@@ -2974,26 +2978,29 @@ func validateStoredProducerTopology(store *db.Store, runtimeCfg config.RuntimeCo
 				continue
 			}
 
-			isolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, runtimeCfg.DefaultWorkerIsolation)
-			if isolation != "multiplex" {
-				topologyErrs = append(topologyErrs, fmt.Errorf("app %q has enabled producer schedule %q but effective worker_isolation=%q; set the app explicitly to multiplex or disable its producer policy before starting this version", app.Slug, schedule.Name, isolation))
-				continue
-			}
-			orphanRisk, err := store.AppElasticOrphanRisk(app.ID)
-			if err != nil {
-				return fmt.Errorf("app %q producer schedule %q: read elastic orphan-risk marker: %w", app.Slug, schedule.Name, err)
-			}
-			if orphanRisk {
-				topologyErrs = append(topologyErrs, fmt.Errorf("app %q has enabled producer schedule %q but its elastic orphan-risk marker is uncleared; keep the app stopped and complete the explicit worker_isolation=multiplex safety transition, or disable its producer policy before restarting", app.Slug, schedule.Name))
-				continue
-			}
-
+			// A producer publishes behind locks that only local native processes
+			// inherit, so every tier the app's processes run on must be native:
+			// the placed replica tiers and, under elastic isolation, the default
+			// tier its workers spawn on. Worker isolation itself is not judged.
 			placement := app.PlacementMap()
 			if len(placement) == 0 {
 				placement = map[string]int{runtimeCfg.DefaultTierName(): app.Replicas}
 			}
-			tiers := make([]string, 0, len(placement))
+			roles := make(map[string]string, len(placement)+1)
 			for tier := range placement {
+				roles[tier] = "is placed on"
+			}
+			if deploy.ResolveWorkerIsolation(app.WorkerIsolation, runtimeCfg.DefaultWorkerIsolation) != "multiplex" {
+				spawnTier := runtimeCfg.DefaultTierName()
+				if spawnTier == "" {
+					spawnTier = process.DefaultTier
+				}
+				if _, placed := roles[spawnTier]; !placed {
+					roles[spawnTier] = "starts elastic workers on"
+				}
+			}
+			tiers := make([]string, 0, len(roles))
+			for tier := range roles {
 				tiers = append(tiers, tier)
 			}
 			sort.Strings(tiers)
@@ -3010,11 +3017,11 @@ func validateStoredProducerTopology(store *db.Store, runtimeCfg config.RuntimeCo
 					ok = true
 				}
 				if !ok {
-					topologyErrs = append(topologyErrs, fmt.Errorf("app %q producer schedule %q is placed on unresolved tier %q; restore that tier in runtime.tiers or move/disable the producer before restarting", app.Slug, schedule.Name, tier))
+					topologyErrs = append(topologyErrs, fmt.Errorf("app %q producer schedule %q: the app %s unresolved tier %q; restore that tier in runtime.tiers or move/disable the producer before restarting", app.Slug, schedule.Name, roles[tier], tier))
 					continue
 				}
 				if runtimeName != "native" {
-					topologyErrs = append(topologyErrs, fmt.Errorf("app %q producer schedule %q is placed on tier %q using runtime %q; data-producing schedules require a local native tier, so move the app or disable its producer policy before restarting", app.Slug, schedule.Name, tier, runtimeName))
+					topologyErrs = append(topologyErrs, fmt.Errorf("app %q producer schedule %q: the app %s tier %q using runtime %q; data-producing schedules require a local native tier, so move the app or disable its producer policy before restarting", app.Slug, schedule.Name, roles[tier], tier, runtimeName))
 				}
 			}
 		}

@@ -121,26 +121,6 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		s.releaseReservation(slug, slotID)
 		return
 	}
-	// Producer-capable apps are deliberately multiplex-only until elastic
-	// workers have durable identities and a failover orphan fence. Re-evaluate
-	// the inherited fleet default here: configuration can change without an app
-	// or schedule mutation passing through the API validators.
-	if isolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.RuntimeCfg.DefaultWorkerIsolation); isolation != "multiplex" {
-		schedules, schedulesErr := s.Store.ListSchedulesByApp(app.ID)
-		if schedulesErr != nil {
-			slog.Error("elastic spawn: cannot prove app has no producer schedule", "slug", slug, "slotID", slotID, "err", schedulesErr)
-			s.releaseReservation(slug, slotID)
-			return
-		}
-		for _, schedule := range schedules {
-			if schedule.Enabled && (schedule.DeployTrigger != "never" || schedule.OnSuccess == "roll") {
-				slog.Error("elastic spawn refused: data-producing schedules require worker_isolation=multiplex",
-					"slug", slug, "slotID", slotID, "effective_worker_isolation", isolation, "schedule", schedule.Name)
-				s.releaseReservation(slug, slotID)
-				return
-			}
-		}
-	}
 	if quarantined, qerr := s.Store.AppCompatibilityQuarantined(app.ID); qerr != nil || quarantined {
 		if qerr != nil {
 			slog.Error("elastic spawn: compatibility quarantine unavailable", "slug", slug, "slotID", slotID, "err", qerr)
@@ -181,14 +161,6 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		return
 	}
 	dep := deps[0]
-	// Persist the possibility of an untracked elastic survivor before launch.
-	// It is cleared only by an explicit stopped-app transition that acquires the
-	// exclusive physical consumer-lifetime fence.
-	if err := s.Store.MarkElasticOrphanRisk(app.ID); err != nil {
-		slog.Error("elastic spawn: persist orphan-risk fence", "slug", slug, "slotID", slotID, "err", err)
-		s.releaseReservation(slug, slotID)
-		return
-	}
 
 	// Resolve effective resource limits using the same path as the deploy fn.
 	defaultMem, defaultCPU := s.RuntimeCfg.DefaultResourcesForApp(app)
@@ -239,6 +211,35 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 
 	// Local native workers cannot execute app code until their identity is durable.
 	_, guarded := s.Manager.RuntimeForTier(tier).(*process.NativeRuntime)
+	if !guarded {
+		// A worker the server cannot record before it executes may outlive the
+		// server's knowledge of it, and it holds none of the lifetime locks a
+		// producer publishes behind. A producer app therefore gets no such
+		// worker at all; any other app carries the marker that keeps producers
+		// refused until the consumer-lifetime lock proves the worker gone. The
+		// schedules are read here rather than trusted from validation time,
+		// because the tier's runtime can change without any app or schedule
+		// mutation passing through the API validators.
+		schedules, schedulesErr := s.Store.ListSchedulesByApp(app.ID)
+		if schedulesErr != nil {
+			slog.Error("elastic spawn: cannot prove app has no producer schedule", "slug", slug, "slotID", slotID, "err", schedulesErr)
+			s.releaseReservation(slug, slotID)
+			return
+		}
+		for _, schedule := range schedules {
+			if schedule.Enabled && (schedule.DeployTrigger != "never" || schedule.OnSuccess == "roll") {
+				slog.Error("elastic spawn refused: producer schedules need workers with durable identity that inherit the server's lifetime locks; the tier's runtime provides neither",
+					"slug", slug, "slotID", slotID, "tier", tier, "schedule", schedule.Name)
+				s.releaseReservation(slug, slotID)
+				return
+			}
+		}
+		if err := s.Store.MarkElasticOrphanRisk(app.ID); err != nil {
+			slog.Error("elastic spawn: persist orphan-risk marker", "slug", slug, "slotID", slotID, "err", err)
+			s.releaseReservation(slug, slotID)
+			return
+		}
+	}
 
 	// Start the worker process. slotID is the replica index so the cgroup is
 	// named app-<slug>-<slotID> and the Manager's entry is keyed by it.
@@ -691,6 +692,53 @@ func ReapElasticOrphans(store *db.Store, mgr *process.Manager) {
 	}
 	if reaped > 0 {
 		slog.Info("elastic orphan reap: done", "reaped", reaped)
+	}
+}
+
+// ConsumerLifetimeProber reports whether an app's consumer-lifetime lock is
+// free, which proves that no native worker of the app survives on this host.
+type ConsumerLifetimeProber interface {
+	ConsumerLifetimeFree(appID int64) (bool, error)
+}
+
+// DischargeElasticOrphanRisk clears the orphan-risk marker of every app whose
+// consumer-lifetime lock is free. The marker records that an elastic worker
+// without a durable identity once ran for the app; once recovery has stopped
+// every worker it knows about, a free lock proves that no unknown one
+// survived either. An app whose lock is still held keeps its marker, and its
+// producer schedules stay refused, until that worker exits.
+//
+// Call once on startup after ReapElasticOrphans and before the scheduler and
+// the API admit work, so nothing can spawn between the probe and the clear.
+func DischargeElasticOrphanRisk(store *db.Store, prober ConsumerLifetimeProber) {
+	apps, err := store.ListApps(0, 0)
+	if err != nil {
+		slog.Error("elastic orphan-risk discharge: list apps", "err", err)
+		return
+	}
+	for _, app := range apps {
+		marked, err := store.AppElasticOrphanRisk(app.ID)
+		if err != nil {
+			slog.Error("elastic orphan-risk discharge: read marker", "slug", app.Slug, "err", err)
+			continue
+		}
+		if !marked {
+			continue
+		}
+		free, err := prober.ConsumerLifetimeFree(app.ID)
+		if err != nil {
+			slog.Error("elastic orphan-risk discharge: probe consumer-lifetime lock", "slug", app.Slug, "err", err)
+			continue
+		}
+		if !free {
+			slog.Warn("elastic orphan-risk marker kept: a worker from an earlier version still holds the app's consumer-lifetime lock, so producer schedules stay refused until it exits", "slug", app.Slug)
+			continue
+		}
+		if err := store.ClearElasticOrphanRisk(app.ID); err != nil {
+			slog.Error("elastic orphan-risk discharge: clear marker", "slug", app.Slug, "err", err)
+			continue
+		}
+		slog.Info("elastic orphan-risk marker discharged: no worker holds the app's consumer-lifetime lock", "slug", app.Slug)
 	}
 }
 

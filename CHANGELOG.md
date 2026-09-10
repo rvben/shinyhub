@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **isolation**: add the internal remote elastic launch protocol with immutable worker bindings, guarded Docker creation, live mTLS authorization, durable stop tombstones and confirmed-removal capacity release. Clustered session routing remains disabled pending integration.
 
 - **fleet**: rehearse every deploy against the server before plan and apply, so a bundle the server would reject stops the run before any app is changed.
+- **schedules**: allow data-producing schedules under grouped and per-session isolation on local native tiers, now that elastic workers record their identity before executing. Producer rejections name the tier and runtime that lack the publication locks instead of the isolation mode, and the marker left by pre-upgrade elastic workers is discharged automatically once the app's consumer-lifetime lock is free.
 
 ### Fixed
 

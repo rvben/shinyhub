@@ -8,8 +8,9 @@ import (
 	"testing"
 )
 
-// The bundle the server's deploy guard rejects: an elastic pool combined
-// with a deploy-triggered producer schedule.
+// A bundle whose deploy depends on the server's topology: an elastic pool
+// combined with a deploy-triggered producer schedule, which the server rejects
+// on a tier whose processes do not inherit its lifetime locks.
 const groupedProducerBundleManifest = `[app.worker]
 isolation = "grouped"
 grouped_size = 4
@@ -22,7 +23,7 @@ cmd = "python refresh.py"
 deploy_trigger = "first_deploy"
 `
 
-const groupedProducerRejection = `schedule "refresh-data": data-producing schedules require worker_isolation=multiplex; grouped workers do not yet have durable process identity across control-plane failover`
+const groupedProducerRejection = `schedule "refresh-data": data-producing schedules need a local native tier, whose processes inherit the server's publication and consumer-lifetime locks; tier "local" uses docker`
 
 // writeFleetTree writes a fleet manifest plus one source dir per app and
 // returns the fleet manifest path. bundles maps slug -> shinyhub.toml content
@@ -243,6 +244,7 @@ func TestFleetPlan_ServerPreflightFallsBackToRuntimeCapabilities(t *testing.T) {
 		case r.Method == "GET" && r.URL.Path == "/api/apps":
 			_, _ = w.Write([]byte(`[]`))
 		case r.Method == "GET" && r.URL.Path == "/api/apps/reporting/capabilities":
+			// An older server's reply, from before elastic pools could host producers.
 			_, _ = w.Write([]byte(`{"isolation":"grouped","features":{"grouped":{"supported":true},"deploy_producers":{"supported":false,"reason":"grouped workers do not yet have durable process identity.","remedy":"Use multiplex isolation."}}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)

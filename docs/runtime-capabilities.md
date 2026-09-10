@@ -27,8 +27,8 @@ when any replica uses the local native runtime.
 |---|---|
 | Multiplex workers | Single-node and clustered control planes |
 | Grouped/per-session workers | Single-node control plane |
-| Deploy-triggered producers | Local native tiers, multiplex workers, cleared orphan fence |
-| Automatic serving-data activation (`on_success = "roll"`) | Single-node, local native tiers, multiplex workers, cleared orphan fence |
+| Deploy-triggered producers | Local native tiers, any worker isolation, no surviving elastic worker from a pre-durable-identity version |
+| Automatic serving-data activation (`on_success = "roll"`) | Single-node, local native tiers, multiplex workers, no surviving elastic worker from a pre-durable-identity version |
 
 This is a topology check, not a promise of available capacity or an upgrade to
 distributed workers. Resource limits, worker budgets, readiness, scheduling,
@@ -47,7 +47,8 @@ The response includes `isolation`, `clustered`, `tiers`,
 feature has `supported`; unavailable features also include `reason` and
 `remedy`. Feature names are `multiplex`, `grouped`, `per_session`,
 `deploy_producers`, and `data_activation`. The API calls the same topology
-validators as schedule writes, preserving fail-closed orphan fencing.
+validators as schedule writes, so a producer rejection here names the same
+tier, runtime, or surviving worker the write would name.
 
 ## Deploy preflight
 

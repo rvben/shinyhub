@@ -71,7 +71,7 @@ func TestValidateStoredProducerTopologyChecksEverySafetyBoundary(t *testing.T) {
 		}
 	})
 
-	t.Run("effective elastic isolation is rejected", func(t *testing.T) {
+	t.Run("elastic isolation is accepted on a local native tier", func(t *testing.T) {
 		store, app := storedProducerFixture(t, "none", "bundle_change", true)
 		// Empty means inherit the fleet default. Fresh rows historically stored
 		// multiplex explicitly, so model an app that deliberately chose inherit.
@@ -82,13 +82,39 @@ func TestValidateStoredProducerTopologyChecksEverySafetyBoundary(t *testing.T) {
 			DefaultWorkerIsolation: "per_session",
 			Tiers:                  []config.TierConfig{{Name: "local", Runtime: "native"}},
 		}
-		err := validateStoredProducerTopology(store, runtimeCfg)
-		if err == nil || !strings.Contains(err.Error(), `effective worker_isolation="per_session"`) {
-			t.Fatalf("elastic producer error = %v", err)
+		if err := validateStoredProducerTopology(store, runtimeCfg); err != nil {
+			t.Fatalf("native elastic producer topology rejected: %v", err)
 		}
 	})
 
-	t.Run("uncleared orphan risk is rejected", func(t *testing.T) {
+	t.Run("elastic spawn tier that is not native is rejected", func(t *testing.T) {
+		// Elastic workers always start on the default tier, whatever the app's
+		// placement says, so that tier is the one that must be native.
+		store, app := storedProducerFixture(t, "none", "bundle_change", true)
+		if err := store.SetAppPlacement(app.ID, `{"gpu":1}`, 1); err != nil {
+			t.Fatal(err)
+		}
+		runtimeCfg := config.RuntimeConfig{
+			DefaultWorkerIsolation: "multiplex",
+			Tiers:                  []config.TierConfig{{Name: "local", Runtime: "docker"}, {Name: "gpu", Runtime: "native"}},
+		}
+		if err := validateStoredProducerTopology(store, runtimeCfg); err != nil {
+			t.Fatalf("multiplex producer placed on a native tier rejected: %v", err)
+		}
+		if _, err := store.DB().Exec(`UPDATE apps SET worker_isolation = '' WHERE id = ?`, app.ID); err != nil {
+			t.Fatal(err)
+		}
+		runtimeCfg.DefaultWorkerIsolation = "per_session"
+		err := validateStoredProducerTopology(store, runtimeCfg)
+		if err == nil || !strings.Contains(err.Error(), `tier "local"`) || !strings.Contains(err.Error(), `runtime "docker"`) {
+			t.Fatalf("elastic producer on a docker spawn tier: error = %v, want the spawn tier named", err)
+		}
+	})
+
+	t.Run("uncleared orphan risk does not block startup", func(t *testing.T) {
+		// The marker records a runtime fact, not a configuration: after process
+		// recovery the server discharges it itself once no consumer holds the
+		// app's lifetime lock, and producer enablement checks it until then.
 		store, app := storedProducerFixture(t, "none", "bundle_change", true)
 		if err := store.MarkElasticOrphanRisk(app.ID); err != nil {
 			t.Fatal(err)
@@ -97,9 +123,8 @@ func TestValidateStoredProducerTopologyChecksEverySafetyBoundary(t *testing.T) {
 			DefaultWorkerIsolation: "multiplex",
 			Tiers:                  []config.TierConfig{{Name: "local", Runtime: "native"}},
 		}
-		err := validateStoredProducerTopology(store, runtimeCfg)
-		if err == nil || !strings.Contains(err.Error(), "elastic orphan-risk marker is uncleared") {
-			t.Fatalf("orphan-risk producer error = %v", err)
+		if err := validateStoredProducerTopology(store, runtimeCfg); err != nil {
+			t.Fatalf("orphan-risk marker blocked startup: %v", err)
 		}
 	})
 

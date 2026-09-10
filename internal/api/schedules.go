@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
+	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
@@ -285,6 +287,11 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.validateScheduleActivationForApp(app, onSuccess); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if err := s.dischargeElasticOrphanRisk(app.ID); err != nil {
+		reqLog(r).Error("discharge elastic orphan-risk marker", "slug", app.Slug, "err", err)
+		writeError(w, http.StatusInternalServerError, "verify elastic worker lifetime")
 		return
 	}
 	if err := s.validateScheduleProducerTopology(app, deployTrigger, onSuccess); err != nil {
@@ -560,6 +567,11 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	if err := s.dischargeElasticOrphanRisk(app.ID); err != nil {
+		reqLog(r).Error("discharge elastic orphan-risk marker", "slug", app.Slug, "err", err)
+		writeError(w, http.StatusInternalServerError, "verify elastic worker lifetime")
+		return
+	}
 	if err := s.validateScheduleProducerTopology(app, deployTrigger, normalizedAction); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -671,42 +683,33 @@ func (s *Server) validateScheduleActivationForApp(app *db.App, action string) er
 	return nil
 }
 
-// validateScheduleProducerTopology rejects publication semantics on remote
-// container, worker, and ECS runtimes until their launch protocol durably records intent
-// before execution and can fence that intent across owner failover. Native and
-// its child share an inherited physical lifetime fence. Docker create/start and
-// ECS RunTask both have acceptance-before-handle-persistence windows that an
-// inventory scan cannot prove empty.
-func (s *Server) validateScheduleProducerTopology(app *db.App, deployTrigger, onSuccess string) error {
-	return s.validateScheduleProducerTopologyWithOrphanFence(app, deployTrigger, onSuccess, false)
-}
+// producerTierRequirement opens every producer rejection with the property
+// the topology lacks, so an operator learns what to change rather than which
+// mode was refused.
+const producerTierRequirement = "data-producing schedules need a local native tier, whose processes inherit the server's publication and consumer-lifetime locks"
 
-// validateScheduleProducerTopologyWithOrphanFence permits the one carefully
-// fenced topology transition that clears elastic orphan risk. The caller must
-// hold both the app-operation exclusion and the app's exclusive physical
-// consumer-lifetime lock through the multiplex settings commit.
-func (s *Server) validateScheduleProducerTopologyWithOrphanFence(app *db.App, deployTrigger, onSuccess string, orphanFenceHeld bool) error {
+// validateScheduleProducerTopology decides whether a data-producing schedule
+// may exist on this app. A producer publishes behind two physical locks that
+// only local native processes inherit: the exclusive candidate-producer fence
+// and the consumer-lifetime lock every native worker holds while it runs.
+// Any worker isolation qualifies, because native elastic workers record their
+// identity before they execute. Container, ECS and remote runtimes have
+// acceptance-before-handle-persistence windows that no inventory scan can
+// prove empty, so they are refused.
+//
+// An app that ran elastic workers under a ShinyHub version without durable
+// identities carries an orphan-risk marker. Its producers stay refused until
+// the consumer-lifetime lock is observed free, which proves that no such
+// worker survives on this host. This check is read-only; handlers holding the
+// app operation lock discharge the marker through dischargeElasticOrphanRisk
+// before validating.
+func (s *Server) validateScheduleProducerTopology(app *db.App, deployTrigger, onSuccess string) error {
 	if deployTrigger == schedulespec.DeployTriggerNever && onSuccess != "roll" {
 		return nil
 	}
-	if isolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation); isolation != "multiplex" {
-		return fmt.Errorf("data-producing schedules require worker_isolation=multiplex; %s workers do not yet have durable process identity across control-plane failover", isolation)
-	}
-	// An unsaved preflight candidate has no past workers to fence.
-	if app.ID != 0 {
-		if orphanRisk, err := s.store.AppElasticOrphanRisk(app.ID); err != nil {
-			return fmt.Errorf("verify elastic orphan fence: %w", err)
-		} else if orphanRisk && !orphanFenceHeld {
-			return errors.New("data-producing schedules require a cleared elastic orphan fence; stop the app and explicitly set worker_isolation=multiplex before enabling a producer")
-		}
-	}
-	placement := app.PlacementMap()
-	if len(placement) == 0 {
-		placement = map[string]int{s.cfg.Runtime.DefaultTierName(): app.Replicas}
-	}
-	for tier := range placement {
+	for _, tier := range s.producerTiers(app) {
 		if s.nodeForTier != nil && s.nodeForTier(tier) != "" {
-			return fmt.Errorf("data-producing schedules do not yet support remote worker tier %q because orphan one-shot fencing is unavailable", tier)
+			return fmt.Errorf("%s; tier %q runs on a remote worker node", producerTierRequirement, tier)
 		}
 		runtimeName, ok := s.cfg.Runtime.RuntimeForTier(tier)
 		if !ok && tier == s.cfg.Runtime.DefaultTierName() && len(s.cfg.Runtime.Tiers) == 0 {
@@ -716,11 +719,93 @@ func (s *Server) validateScheduleProducerTopologyWithOrphanFence(app *db.App, de
 			}
 			ok = true
 		}
-		if !ok || runtimeName != "native" {
-			return fmt.Errorf("data-producing schedule cannot establish an orphan-process fence on tier %q", tier)
+		if !ok {
+			return fmt.Errorf("%s; tier %q is not configured", producerTierRequirement, tier)
+		}
+		if runtimeName != "native" {
+			return fmt.Errorf("%s; tier %q uses %s", producerTierRequirement, tier, runtimeName)
 		}
 	}
+	// An unsaved preflight candidate has no past workers to account for.
+	if app.ID == 0 {
+		return nil
+	}
+	orphanRisk, err := s.store.AppElasticOrphanRisk(app.ID)
+	if err != nil {
+		return fmt.Errorf("read elastic orphan-risk marker: %w", err)
+	}
+	if !orphanRisk {
+		return nil
+	}
+	if s.jobs == nil {
+		return errors.New("cannot verify that no elastic worker from an earlier ShinyHub version is still serving this app: consumer-lifetime lock unavailable")
+	}
+	free, err := s.jobs.ConsumerLifetimeFree(app.ID)
+	if err != nil {
+		return fmt.Errorf("probe consumer-lifetime lock: %w", err)
+	}
+	if !free {
+		return errors.New("an elastic worker started by an earlier ShinyHub version may still be serving this app and holds its consumer-lifetime lock; stop the app, make sure no worker process of it remains (a host reboot also clears it), then retry")
+	}
 	return nil
+}
+
+// producerTiers lists, in stable order, every tier the app's processes run
+// on: the placed replica tiers and, when the app is not multiplex, the tier
+// elastic workers spawn on.
+func (s *Server) producerTiers(app *db.App) []string {
+	placement := app.PlacementMap()
+	if len(placement) == 0 {
+		placement = map[string]int{s.cfg.Runtime.DefaultTierName(): app.Replicas}
+	}
+	seen := make(map[string]bool, len(placement)+1)
+	for tier := range placement {
+		seen[tier] = true
+	}
+	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "multiplex" {
+		seen[s.elasticSpawnTier()] = true
+	}
+	tiers := make([]string, 0, len(seen))
+	for tier := range seen {
+		tiers = append(tiers, tier)
+	}
+	sort.Strings(tiers)
+	return tiers
+}
+
+// elasticSpawnTier is the tier elastic workers start on. Spawn uses the
+// runtime's default tier and ignores the app's placement.
+func (s *Server) elasticSpawnTier() string {
+	if tier := s.cfg.Runtime.DefaultTierName(); tier != "" {
+		return tier
+	}
+	return process.DefaultTier
+}
+
+// dischargeElasticOrphanRisk clears an app's orphan-risk marker once the
+// consumer-lifetime lock proves that no native worker of the app survives.
+// The caller holds the app operation lock, which elastic spawn also takes, so
+// no worker can start between the probe and the clear. Without a jobs
+// manager the marker stays and producer validation keeps refusing.
+func (s *Server) dischargeElasticOrphanRisk(appID int64) error {
+	if s.jobs == nil {
+		return nil
+	}
+	orphanRisk, err := s.store.AppElasticOrphanRisk(appID)
+	if err != nil {
+		return fmt.Errorf("read elastic orphan-risk marker: %w", err)
+	}
+	if !orphanRisk {
+		return nil
+	}
+	free, err := s.jobs.ConsumerLifetimeFree(appID)
+	if err != nil {
+		return fmt.Errorf("probe consumer-lifetime lock: %w", err)
+	}
+	if !free {
+		return nil
+	}
+	return s.store.ClearElasticOrphanRisk(appID)
 }
 
 // DELETE /api/apps/{slug}/schedules/{id}

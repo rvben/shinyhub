@@ -13,8 +13,9 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 )
 
-// groupedProducerManifest is the bundle manifest the deploy guard rejects: an
-// elastic pool combined with a deploy-triggered producer schedule.
+// groupedProducerManifest combines an elastic pool with a deploy-triggered
+// producer schedule. It deploys on a local native tier, whose workers inherit
+// the server's lifetime locks, and the deploy guard rejects it anywhere else.
 const groupedProducerManifest = `[app.worker]
 isolation = "grouped"
 grouped_size = 4
@@ -26,6 +27,10 @@ cron = "0 2 * * *"
 cmd = "python refresh.py"
 deploy_trigger = "first_deploy"
 `
+
+// containerTier is a server whose only tier runs Docker. Its processes do not
+// inherit the server's lifetime locks, so producer schedules are rejected.
+var containerTier = config.RuntimeConfig{Tiers: []config.TierConfig{{Name: "local", Runtime: "docker"}}}
 
 type deployPreflightReply struct {
 	Valid     bool   `json:"valid"`
@@ -89,13 +94,14 @@ func TestDeployPreflight_MatchesDeployRejection(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		manifest string
+		runtime  config.RuntimeConfig
 		wantHint string
 	}{
-		{name: "grouped pool with producer schedule", manifest: groupedProducerManifest, wantHint: "worker_isolation=multiplex"},
+		{name: "producer schedule on a container tier", manifest: groupedProducerManifest, runtime: containerTier, wantHint: "local native tier"},
 		{name: "malformed manifest", manifest: "[app]\nreplicas = \"many\"\n", wantHint: "shinyhub.toml"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, store, token := newManifestE2EServer(t)
+			srv, store, token := newManifestE2EServerCfg(t, tc.runtime)
 			seeded := seedStoppedTestApp(t, store, "reporting", "stopped", 0)
 
 			body, ctype := buildMultiFileBundleUpload(t, map[string]string{
@@ -146,9 +152,20 @@ func TestDeployPreflight_AcceptsDeployableManifest(t *testing.T) {
 	srv, store, token := newManifestE2EServer(t)
 	seedStoppedTestApp(t, store, "reporting", "stopped", 0)
 
-	// A producer schedule on a multiplex pool is the supported topology.
-	multiplexProducer := strings.Replace(groupedProducerManifest, `isolation = "grouped"`, `isolation = "multiplex"`, 1)
+	// A producer schedule on a grouped pool deploys on a native tier: the
+	// candidate producer runs behind the exclusive consumer fence and native
+	// workers record their identity before they execute.
 	reply := decodeDeployPreflight(t, postDeployPreflight(t, srv, token, "reporting",
+		preflightBody(t, groupedProducerManifest, nil, "python")))
+	if !reply.Valid || len(reply.Problems) != 0 {
+		t.Fatalf("grouped producer preflight = %+v, want valid", reply)
+	}
+	if reply.Isolation != "grouped" {
+		t.Fatalf("isolation = %q, want the projected grouped mode", reply.Isolation)
+	}
+
+	multiplexProducer := strings.Replace(groupedProducerManifest, `isolation = "grouped"`, `isolation = "multiplex"`, 1)
+	reply = decodeDeployPreflight(t, postDeployPreflight(t, srv, token, "reporting",
 		preflightBody(t, multiplexProducer, nil, "python")))
 	if !reply.Valid || len(reply.Problems) != 0 {
 		t.Fatalf("multiplex producer preflight = %+v, want valid", reply)
@@ -157,8 +174,8 @@ func TestDeployPreflight_AcceptsDeployableManifest(t *testing.T) {
 		t.Fatalf("isolation = %q, want multiplex", reply.Isolation)
 	}
 
-	// A plain schedule keeps grouped isolation deployable: only producer
-	// semantics are fenced, and the preflight must not over-reject.
+	// A plain schedule stays deployable too: no producer semantics, nothing
+	// to fence.
 	plainGrouped := strings.Replace(groupedProducerManifest, `deploy_trigger = "first_deploy"`, `deploy_trigger = "never"`, 1)
 	reply = decodeDeployPreflight(t, postDeployPreflight(t, srv, token, "reporting",
 		preflightBody(t, plainGrouped, nil, "python")))
@@ -194,7 +211,7 @@ func TestDeployPreflight_SettingsStageUsesServerPolicy(t *testing.T) {
 	// A deploy-stage rejection is reported alone: deploy would have stopped
 	// there and the settings PATCH would never have run.
 	reply = decodeDeployPreflight(t, postDeployPreflight(t, srv, token, "reporting",
-		preflightBody(t, groupedProducerManifest, map[string]any{"replicas": 5}, "python")))
+		preflightBody(t, "[app]\nreplicas = \"many\"\n", map[string]any{"replicas": 5}, "python")))
 	if len(reply.Problems) != 1 || reply.Problems[0].Stage != "deploy" {
 		t.Fatalf("preflight = %+v, want only the deploy-stage problem", reply)
 	}
@@ -207,21 +224,34 @@ func TestDeployPreflight_SettingsStageUsesServerPolicy(t *testing.T) {
 }
 
 func TestDeployPreflight_NewAppProjectsServerDefaults(t *testing.T) {
+	inherited := groupedProducerManifest[strings.Index(groupedProducerManifest, "[[schedule]]"):]
+
+	// The bundle inherits the server default (grouped) and declares a
+	// producer. On a native tier that deploys, and the reply reports the mode
+	// the app would be created with.
 	srv, store, token := newManifestE2EServerCfg(t, config.RuntimeConfig{DefaultWorkerIsolation: "grouped"})
 	if _, err := store.GetAppBySlug("brand-new"); err == nil {
 		t.Fatal("fixture app must not exist")
 	}
-
-	// The bundle inherits the server default (grouped) and declares a
-	// producer: deploy after create would fail, so the preflight must too.
-	inherited := groupedProducerManifest[strings.Index(groupedProducerManifest, "[[schedule]]"):]
 	reply := decodeDeployPreflight(t, postDeployPreflight(t, srv, token, "brand-new",
 		preflightBody(t, inherited, nil, "python")))
-	if reply.Valid || len(reply.Problems) != 1 || !strings.Contains(reply.Problems[0].Message, "grouped workers") {
-		t.Fatalf("new-app preflight = %+v, want the inherited grouped rejection", reply)
+	if !reply.Valid || len(reply.Problems) != 0 {
+		t.Fatalf("new-app preflight = %+v, want valid", reply)
 	}
 	if reply.Isolation != "grouped" {
 		t.Fatalf("isolation = %q, want the server default", reply.Isolation)
+	}
+	if _, err := store.GetAppBySlug("brand-new"); err == nil {
+		t.Fatal("preflight created the app")
+	}
+
+	// On a container tier the deploy after create would fail, so the
+	// preflight must say so without creating anything.
+	srv, store, token = newManifestE2EServerCfg(t, containerTier)
+	reply = decodeDeployPreflight(t, postDeployPreflight(t, srv, token, "brand-new",
+		preflightBody(t, inherited, nil, "python")))
+	if reply.Valid || len(reply.Problems) != 1 || !strings.Contains(reply.Problems[0].Message, "local native tier") {
+		t.Fatalf("new-app preflight on a container tier = %+v, want the tier rejection", reply)
 	}
 	if _, err := store.GetAppBySlug("brand-new"); err == nil {
 		t.Fatal("preflight created the app")
