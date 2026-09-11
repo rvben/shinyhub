@@ -2,21 +2,26 @@ import { Container, getContainer } from "@cloudflare/containers";
 import {
   decorateDemoLogin,
   DEMO_SCRIPT_PATH,
-  DEMO_SESSION_PATH,
   DEMO_STYLE_PATH,
   demoLoginScript,
   demoLoginStyles,
 } from "./demo-login";
-import { DEMO_READY_PATH, demoWakeResponse } from "./demo-wake";
+import { DEMO_READY_PATH, demoStartResponse, demoWakeResponse } from "./demo-wake";
 import {
   APP_HOST,
   classifyColdRequest,
   classifyEdgeRequest,
   DEMO_HOST,
+  DEMO_NEXT_PARAM,
+  DEMO_SESSION_PATH,
+  DEMO_START_PATH,
+  demoURL,
   ENTRY_URL,
   isAsleep,
   mayAssumeAwake,
+  requestedDestination,
   robotsBody,
+  safeDestination,
 } from "./edge-policy.ts";
 
 interface Env {
@@ -149,6 +154,11 @@ export default {
         secFetchDest: request.headers.get("sec-fetch-dest"),
         accept: request.headers.get("accept"),
       });
+      // The page the visitor came for, which the cold path carries across the
+      // wake so a deep link does not decay into the dashboard. It is only ever a
+      // path on the control host, so it cannot redirect them off the demo.
+      const destination = requestedDestination(url.pathname, url.search);
+
       if (coldVerdict === "refuse") {
         return new Response(`The ShinyHub demo is asleep. Open ${ENTRY_URL} to start it.\n`, {
           status: 503,
@@ -160,17 +170,28 @@ export default {
         });
       }
       if (coldVerdict === "redirect-to-entry") {
-        return Response.redirect(ENTRY_URL, 303);
+        return Response.redirect(demoURL("/", destination), 303);
+      }
+      if (coldVerdict === "start") {
+        return demoStartResponse(destination, request.method);
       }
       if (coldVerdict === "wake") {
         ctx.waitUntil(container.start().catch((error: unknown) => {
           console.error("Unable to start the ShinyHub demo container", error);
         }));
-        // Only a navigation is ever classified as a wake, so there is always a
-        // page to render the wait in. Starting the container is left to run past
-        // this response rather than held open for the whole boot.
-        return demoWakeResponse();
+        // A wake is only ever a document navigation or the start page's form
+        // submission, so there is always a page to render the wait in. Starting
+        // the container is left to run past this response rather than held open
+        // for the whole boot.
+        return demoWakeResponse(destination);
       }
+    }
+
+    // Reached only once the container is up, because the cold gate answers the
+    // start button with the wake page. There is nothing left to wait for, so the
+    // visitor goes straight to the page they came for.
+    if (url.hostname === DEMO_HOST && url.pathname === DEMO_START_PATH) {
+      return Response.redirect(demoURL("/", requestedDestination(url.pathname, url.search)), 303);
     }
 
     if (url.hostname === DEMO_HOST && url.pathname === DEMO_SESSION_PATH) {
@@ -200,16 +221,23 @@ export default {
           }),
         },
       ));
+      // The end of the cold path. A visitor who followed a link to an app now
+      // has the session that link needed, so this is where the page they asked
+      // for finally gets served rather than the dashboard.
+      const next = safeDestination(url.searchParams.get(DEMO_NEXT_PARAM));
+
       const sessionCookie = loginResponse.headers.get("set-cookie");
       if (!loginResponse.ok || sessionCookie === null) {
-        return Response.redirect(new URL("/?demo_error=1", url).toString(), 303);
+        const retry = new URL(demoURL("/", next));
+        retry.searchParams.set("demo_error", "1");
+        return Response.redirect(retry.toString(), 303);
       }
 
       return new Response(null, {
         status: 303,
         headers: {
           "cache-control": "no-store",
-          location: "/",
+          location: next ?? "/",
           "set-cookie": sessionCookie,
         },
       });
@@ -242,7 +270,11 @@ export default {
       && request.method === "GET"
       && responseHeaders.get("content-type")?.includes("text/html")
     ) {
-      return decorateDemoLogin(response, url.searchParams.has("demo_error"));
+      return decorateDemoLogin(
+        response,
+        url.searchParams.has("demo_error"),
+        safeDestination(url.searchParams.get(DEMO_NEXT_PARAM)),
+      );
     }
 
     return response;

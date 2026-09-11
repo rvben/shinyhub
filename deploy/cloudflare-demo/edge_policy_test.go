@@ -84,6 +84,11 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 		`accept: request.headers.get("accept")`,
 		`coldVerdict === "refuse"`,
 		`coldVerdict === "redirect-to-entry"`,
+		// Every verdict the policy can return needs a branch here. An
+		// unhandled one falls through to the proxy, which forwards to the
+		// container, which is the wake the gate exists to withhold.
+		`coldVerdict === "start"`,
+		`demoStartResponse(destination, request.method)`,
 		`coldVerdict === "wake"`,
 		`ctx.waitUntil(container.start()`,
 		// Which statuses mean the container is down decides whether the
@@ -100,15 +105,55 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 
 	// The entry page lives on the control host, so a redirect resolved against
 	// the request would send an app-origin visitor to a URL the edge then
-	// rejects as a static 404. Reading the first redirect after the branch, not
-	// merely looking for the absolute one somewhere in the file, because the
-	// session handler below issues a redirect of its own that would cover for
-	// this one.
+	// rejects as a static 404. demoURL is what keeps it absolute and on that
+	// host while carrying the page the visitor actually asked for. Reading the
+	// first redirect after the branch, not merely looking for the right one
+	// somewhere in the file, because the handlers below issue redirects of
+	// their own that would cover for this one.
 	entryBranch := indexOf(t, worker, "src/index.ts", `coldVerdict === "redirect-to-entry"`)
 	rest := worker[entryBranch:]
 	redirect := indexOf(t, rest, "the redirect-to-entry branch", "Response.redirect(")
-	if !strings.HasPrefix(rest[redirect:], `Response.redirect(ENTRY_URL, 303)`) {
-		t.Errorf("the redirect-to-entry branch does not redirect to the absolute entry URL, so an app-origin visitor is sent to a path its own host does not serve: %.60s", rest[redirect:])
+	if !strings.HasPrefix(rest[redirect:], `Response.redirect(demoURL("/", destination), 303)`) {
+		t.Errorf("the redirect-to-entry branch does not redirect through demoURL, so an app-origin visitor is sent to a path its own host does not serve: %.60s", rest[redirect:])
+	}
+
+	// A cold deep link is only worth carrying if every hop carries it. The
+	// destination is read once, before the branches, and each of the three
+	// answers a cold request can get passes it on; the last hop is the session
+	// handler, which is where the visitor finally has the session the deep
+	// link needed.
+	destination := indexOf(t, worker, "src/index.ts", `requestedDestination(url.pathname, url.search)`)
+	if destination > entryBranch {
+		t.Error("the requested destination is resolved after the cold branches, so the page the visitor asked for cannot reach them")
+	}
+	for _, required := range []string{
+		`demoWakeResponse(destination)`,
+		`const next = safeDestination(url.searchParams.get(DEMO_NEXT_PARAM))`,
+		`location: next ?? "/"`,
+	} {
+		if !strings.Contains(worker, required) {
+			t.Errorf("demo Worker drops the page a cold deep link asked for: missing %q", required)
+		}
+	}
+
+	// The start page is the only place a request with no browser headers may
+	// ask for the container, so its button has to post. A form that got to the
+	// container any other way would be reachable by the crawlers this gate was
+	// built to keep out.
+	start, err := os.ReadFile("src/demo-wake.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startSource := string(start)
+	form := indexOf(t, startSource, "src/demo-wake.ts", `<form class="start-form"`)
+	if !strings.Contains(startSource[form:form+120], `method="post"`) {
+		t.Errorf("the start page's form is not a post, so nothing distinguishes pressing its button from a crawler fetching the page: %.120s", startSource[form:])
+	}
+	// The form is the only interactive element on the page, and the page's own
+	// policy would block its submission if this directive were left at the
+	// wake page's 'none'.
+	if !strings.Contains(startSource, `form-action 'self'`) {
+		t.Error("the start page's content security policy does not allow its own form to submit")
 	}
 
 	// Reading container state is a round trip to the Durable Object in front of
@@ -154,6 +199,32 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 	}
 	if wakeCalled > firstProbe {
 		t.Error("the smoke test probes the demo before waking it, which the edge now refuses")
+	}
+
+	// The start page and its button are only reachable while the container is
+	// asleep, and the smoke test's own wake is what ends that. So the bare
+	// request that can observe them has to run before the wake, bounded on both
+	// sides: after the helper that issues it exists, and before the demo is
+	// started. Run in the other order it would still pass, having checked the
+	// warm login page instead of the page this gate was built to serve.
+	entryDefined := indexOf(t, smokeSource, "scripts/demo-smoke.sh", "\nentry() {")
+	entryCalled := indexOf(t, smokeSource, "scripts/demo-smoke.sh", "\nentry\n")
+	if entryCalled < entryDefined {
+		t.Error("the smoke test calls entry before defining it")
+	}
+	if entryCalled > wakeCalled {
+		t.Error("the smoke test requests an entry page only after waking the demo, so it can never see the start page")
+	}
+	for _, required := range []string{
+		`x-shinyhub-demo-state: asleep`,
+		`must never be refused`,
+		`start page does not offer the button that starts the demo`,
+		`start_path=/__demo/start`,
+		`--request POST --write-out '%{http_code}' \` + "\n" + `  "$base_url$start_path"`,
+	} {
+		if !strings.Contains(smokeSource, required) {
+			t.Errorf("release smoke test no longer covers the start page a sleeping demo serves: missing %q", required)
+		}
 	}
 }
 
