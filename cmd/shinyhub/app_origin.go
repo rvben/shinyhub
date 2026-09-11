@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/apporigin"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
-	"github.com/rvben/shinyhub/internal/favicon"
 	"github.com/rvben/shinyhub/internal/originhost"
 	"github.com/rvben/shinyhub/internal/proxytrust"
 	"github.com/rvben/shinyhub/internal/supportui"
@@ -41,7 +41,7 @@ func appOriginBoundary(next http.Handler, appOrigin *url.URL, trustedNets []*net
 			next.ServeHTTP(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/app/") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == favicon.RootURL {
+		if apporigin.Admits(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

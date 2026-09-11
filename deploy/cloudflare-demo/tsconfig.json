@@ -7,5 +7,9 @@
     "strict": true,
     "types": ["@cloudflare/workers-types"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  // Tests run on Node (node --test, which strips types itself), not on the
+  // Workers runtime this config describes. Typechecking them here would fail on
+  // node: imports that the Worker deliberately has no types for.
+  "exclude": ["src/**/*.test.ts"]
 }

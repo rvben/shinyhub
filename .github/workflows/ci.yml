@@ -56,6 +56,33 @@ jobs:
       - name: Build
         run: go build -o /tmp/shinyhub ./cmd/shinyhub
 
+  # The Worker decides what reaches the demo container, and a request that
+  # reaches a sleeping container wakes it. deploy/cloudflare-demo only deploys
+  # after a release, so without this the cost boundary would first be checked
+  # once it was already live. Its own job because these tests are TypeScript run
+  # through Node's type stripping, which needs a newer runtime than the jsdom
+  # tests pin, and because the type check needs the Worker's own dependencies.
+  # The Go tests that pin the Worker's wiring run in the test job above.
+  test-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: deploy/cloudflare-demo/package-lock.json
+
+      - name: Type-check the demo Worker
+        working-directory: deploy/cloudflare-demo
+        run: |
+          npm ci
+          npm run check
+
+      - name: Test (demo Worker)
+        run: make test-worker
+
   # The race suite is split in two jobs of about equal length: internal/api is
   # a third of the suite's race time on its own and every other package fits
   # in the remainder, so the two halves finish together. Both build the same

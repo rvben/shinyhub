@@ -8,17 +8,19 @@ import {
   demoLoginStyles,
 } from "./demo-login";
 import { DEMO_READY_PATH, demoWakeResponse } from "./demo-wake";
+import {
+  APP_HOST,
+  classifyEdgeRequest,
+  DEMO_HOST,
+  robotsBody,
+} from "./edge-policy";
 
 interface Env {
   SHINYHUB_DEMO: DurableObjectNamespace<ShinyHubDemo>;
 }
 
-const allowedHosts = new Set([
-  "demo.shinyhub.dev",
-  "apps.demo.shinyhub.dev",
-]);
+const allowedHosts = new Set([DEMO_HOST, APP_HOST]);
 
-const DEMO_HOST = "demo.shinyhub.dev";
 const DEMO_VIEWER_USERNAME = "demo-viewer";
 const DEMO_VIEWER_PASSWORD = "explore-shinyhub-demo";
 
@@ -45,6 +47,20 @@ export default {
     const url = new URL(request.url);
     if (!allowedHosts.has(url.hostname)) {
       return new Response("Not found", { status: 404 });
+    }
+
+    // Answer what the edge can answer before touching the container: a
+    // forwarded request wakes a sleeping one, and wake time is what the
+    // container bills for.
+    const verdict = classifyEdgeRequest(url.hostname, url.pathname);
+    if (verdict === "serve-robots") {
+      return demoAsset(robotsBody, "text/plain; charset=utf-8");
+    }
+    if (verdict === "reject") {
+      return new Response("Not found", {
+        status: 404,
+        headers: { "cache-control": "no-store" },
+      });
     }
 
     if (url.hostname === DEMO_HOST && request.method === "GET") {

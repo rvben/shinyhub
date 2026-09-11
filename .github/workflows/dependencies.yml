@@ -20,13 +20,18 @@ jobs:
       min-age: 7d
       max-bump: minor
       prepare-command: python3 -m pip install uv
+      # make test is test-go, test-js and test-worker, so a target added there is
+      # validated here without editing this list. The demo Worker is a separate
+      # npm package with its own dependencies, so it is installed and type-checked
+      # on its own; otherwise a bump to its TypeScript or container library would
+      # reach the release deploy unvalidated.
       validation-command: >-
         npm ci &&
         go vet ./... &&
         go vet -tags "integration e2e" ./... &&
-        make test-go &&
-        make test-js &&
+        make test &&
         make vuln &&
+        (cd deploy/cloudflare-demo && npm ci && npm run check) &&
         go build -o /tmp/shinyhub ./cmd/shinyhub
       fail-on-blocked: false
       branch: deps/upd
