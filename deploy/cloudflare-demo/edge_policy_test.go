@@ -215,8 +215,12 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 	if entryCalled > wakeCalled {
 		t.Error("the smoke test requests an entry page only after waking the demo, so it can never see the start page")
 	}
+	// Which file each grep reads is the whole check. Pointed at the other one
+	// they both find nothing, the state reads as awake, and the start page goes
+	// unexamined on every run while the smoke test reports success.
 	for _, required := range []string{
-		`x-shinyhub-demo-state: asleep`,
+		`grep -qi '^x-shinyhub-demo-state: asleep' "$headers"`,
+		`grep -q "$start_path" "$body"`,
 		`must never be refused`,
 		`start page does not offer the button that starts the demo`,
 		`start_path=/__demo/start`,
@@ -225,6 +229,86 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 		if !strings.Contains(smokeSource, required) {
 			t.Errorf("release smoke test no longer covers the start page a sleeping demo serves: missing %q", required)
 		}
+	}
+}
+
+// The start page is served while the container is asleep and its button is
+// pressed whenever the visitor gets to it, which can be after somebody else has
+// woken the demo. That post lands on a path the warm demo does not serve, so the
+// Worker answers it itself; the deep link the visitor came for is still in the
+// query string and this is the hop that has to carry it.
+func TestDemoWorkerCarriesADeepLinkPastAStartButtonPressedTooLate(t *testing.T) {
+	source, err := os.ReadFile("src/index.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := string(source)
+
+	warmStart := indexOf(t, worker, "src/index.ts", `url.pathname === DEMO_START_PATH`)
+	session := indexOf(t, worker, "src/index.ts", `url.pathname === DEMO_SESSION_PATH`)
+	if warmStart > session {
+		t.Fatal("the warm start branch is below the session handler, so the anchors below read the wrong handler")
+	}
+	// Reading the first redirect inside the branch rather than looking for the
+	// right one somewhere in the file: every other handler here redirects too,
+	// and any of them would cover for a warm start button that dropped the page
+	// its visitor asked for.
+	redirect := indexOf(t, worker[warmStart:session], "the warm start branch", "Response.redirect(")
+	branch := worker[warmStart+redirect : session]
+	if !strings.HasPrefix(branch, `Response.redirect(demoURL("/", requestedDestination(url.pathname, url.search)), 303)`) {
+		t.Errorf("a start button pressed once the demo is awake loses the page it was carrying, landing the visitor on the dashboard instead: %.90s", branch)
+	}
+}
+
+// The two pages the edge renders while the container is down are the whole demo
+// for whoever arrives then, and neither can be imported by a test: they answer
+// with the Workers runtime's Response. So their contract is read from the source
+// one function at a time. Read over the whole file instead, each check would be
+// satisfied by whichever of the two pages happened to say the right thing, and
+// the two differ in precisely the ways that matter.
+func TestDemoEdgePagesAnswerAsThemselves(t *testing.T) {
+	source, err := os.ReadFile("src/demo-wake.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages := string(source)
+	startAt := indexOf(t, pages, "src/demo-wake.ts", "export function demoStartResponse")
+	wakeAt := indexOf(t, pages, "src/demo-wake.ts", "export function demoWakeResponse")
+	if startAt > wakeAt {
+		t.Fatal("src/demo-wake.ts declares the wake page before the start page, so the slices below read the wrong function")
+	}
+	startPage := pages[startAt:wakeAt]
+	wakePage := pages[wakeAt:]
+
+	// A sleeping demo is not an error. The status is what an unfurler, a monitor
+	// and a search crawler all read, and a 503 here would make a shared link
+	// preview as a broken site rather than as the demo it is.
+	if !strings.Contains(startPage, "status: 200") {
+		t.Error("the start page is not answered with a 200, so a link to a sleeping demo previews as an error")
+	}
+	// The state header is what the release smoke test reads to tell the start
+	// page from the real login page, and the wake page carries the same header
+	// with a different value.
+	if !strings.Contains(startPage, `"x-shinyhub-demo-state": "asleep"`) {
+		t.Error("the start page does not report the demo as asleep, so nothing downstream can tell it from the warm login page")
+	}
+	if !strings.Contains(wakePage, `"x-shinyhub-demo-state": "waking"`) {
+		t.Error("the wake page does not report the demo as waking")
+	}
+	// The start page runs nothing: its only moving part is a form. Saying so in
+	// the policy is what keeps an injected script inert even if one ever reached
+	// the markup.
+	if !strings.Contains(startPage, `script-src 'none'`) {
+		t.Error("the start page's content security policy permits script, which nothing on the page needs")
+	}
+
+	// Without JavaScript the wake page cannot poll, so the refresh is the whole
+	// mechanism. It has to name the landing page: the visitor who needs it
+	// arrived by posting the start button, and a refresh with no URL re-requests
+	// that post target, which answers with a redirect rather than the demo.
+	refresh := indexOf(t, wakePage, "demoWakeResponse", "<noscript>")
+	if !strings.Contains(within(wakePage, refresh, 110), "url=${landing}") {
+		t.Errorf("the wake page's no-script refresh does not name the landing page, so a visitor without JavaScript reloads the request that got them here: %.110s", wakePage[refresh:])
 	}
 }
 

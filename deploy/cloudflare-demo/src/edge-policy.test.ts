@@ -19,8 +19,8 @@ import {
   safeDestination,
 } from "./edge-policy.ts";
 
-const navigation = { secFetchDest: "document", accept: "text/html,application/xhtml+xml" };
-const programmatic = { secFetchDest: null, accept: "*/*" };
+const navigation = { secFetchDest: "document", secFetchSite: "none", accept: "text/html,application/xhtml+xml" };
+const programmatic = { secFetchDest: null, secFetchSite: null, accept: "*/*" };
 
 test("app origin admits proxied app paths", () => {
   assert.equal(appOriginAdmits("/app/streamlit-demo/"), true);
@@ -193,6 +193,48 @@ test("the start page's button wakes the container", () => {
   }), "wake");
 });
 
+// A post needs no headers to be believed, which also means any page on the web
+// can make a visitor's browser send one. A browser says so when it does:
+// Sec-Fetch-Site reads cross-site on a form another origin submitted here, and
+// nothing legitimate posts this path from off-site. The start page is what that
+// request is answered with, so a person who followed a link that tried it still
+// sees the demo and can start it themselves.
+test("a cross-site post to the start path is offered the start page rather than the container", () => {
+  assert.equal(classifyColdRequest({
+    hostname: DEMO_HOST,
+    method: "POST",
+    pathname: DEMO_START_PATH,
+    secFetchDest: "document",
+    secFetchSite: "cross-site",
+    accept: "text/html",
+  }), "start");
+});
+
+test("the start page's own button still wakes the container", () => {
+  for (const secFetchSite of ["same-origin", "same-site", "none", null]) {
+    assert.equal(classifyColdRequest({
+      hostname: DEMO_HOST,
+      method: "POST",
+      pathname: DEMO_START_PATH,
+      secFetchDest: "document",
+      secFetchSite,
+      accept: "text/html",
+    }), "wake", String(secFetchSite));
+  }
+});
+
+// Only the post is judged on where it came from. A shared link is cross-site by
+// definition, and following one is how most visitors arrive.
+test("a visitor arriving from a link on another site wakes the container", () => {
+  assert.equal(classifyColdRequest({
+    hostname: DEMO_HOST,
+    method: "GET",
+    pathname: "/",
+    ...navigation,
+    secFetchSite: "cross-site",
+  }), "wake");
+});
+
 test("the start path wakes nothing when it is merely fetched", () => {
   for (const method of ["GET", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
     assert.notEqual(classifyColdRequest({
@@ -341,9 +383,10 @@ test("the whole surface offers exactly two ways to spend a cold start", () => {
   // navigation by every signal a plain HTTP client can produce.
   const senders = {
     browser: navigation,
-    crawler: { secFetchDest: null, accept: "text/html,application/xhtml+xml;q=0.9" },
+    offsite: { ...navigation, secFetchSite: "cross-site" },
+    crawler: { secFetchDest: null, secFetchSite: null, accept: "text/html,application/xhtml+xml;q=0.9" },
     script: programmatic,
-    subresource: { secFetchDest: "empty", accept: "text/html" },
+    subresource: { secFetchDest: "empty", secFetchSite: "same-origin", accept: "text/html" },
   };
   const woken: string[] = [];
   for (const hostname of [DEMO_HOST, APP_HOST]) {
@@ -362,6 +405,11 @@ test("the whole surface offers exactly two ways to spend a cold start", () => {
     `browser: GET ${DEMO_HOST}/login`,
     `browser: POST ${DEMO_HOST}${DEMO_START_PATH}`,
     `crawler: POST ${DEMO_HOST}${DEMO_START_PATH}`,
+    // A link from another site is how most visitors arrive, so following one
+    // wakes the demo. Its button posted from another site does not: that is the
+    // one request a page elsewhere can make a visitor's browser send here.
+    `offsite: GET ${DEMO_HOST}/`,
+    `offsite: GET ${DEMO_HOST}/login`,
     `script: POST ${DEMO_HOST}${DEMO_START_PATH}`,
     `subresource: POST ${DEMO_HOST}${DEMO_START_PATH}`,
   ]);

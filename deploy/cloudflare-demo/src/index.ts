@@ -152,6 +152,7 @@ export default {
         method: request.method,
         pathname: url.pathname,
         secFetchDest: request.headers.get("sec-fetch-dest"),
+        secFetchSite: request.headers.get("sec-fetch-site"),
         accept: request.headers.get("accept"),
       });
       // The page the visitor came for, which the cold path carries across the

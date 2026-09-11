@@ -139,6 +139,7 @@ export interface ColdRequest {
   method: string;
   pathname: string;
   secFetchDest: string | null;
+  secFetchSite: string | null;
   accept: string | null;
 }
 
@@ -189,9 +190,13 @@ export function classifyColdRequest(request: ColdRequest): ColdVerdict {
   // Bots fetch and parse; they do not fill in forms. A post to the start path is
   // therefore the one request that needs no header to be believed, which is what
   // lets the start page hand a visitor the container even when nothing about
-  // their request distinguishes them from a crawler.
+  // their request distinguishes them from a crawler. The exception is a post a
+  // browser says came from somewhere else: any page on the web can submit a form
+  // here, and Sec-Fetch-Site is how the browser reports that it did. Such a post
+  // is answered with the start page, so a visitor whose click was borrowed still
+  // arrives at the demo and can start it deliberately.
   if (request.method === "POST" && request.pathname === DEMO_START_PATH) {
-    return "wake";
+    return request.secFetchSite === "cross-site" ? "start" : "wake";
   }
   // The one-click entry is a form post, so it arrives without the headers that
   // distinguish a browser navigating from a script, and it has nowhere to render

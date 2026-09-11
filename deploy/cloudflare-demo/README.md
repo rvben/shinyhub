@@ -8,14 +8,13 @@ the image whenever Cloudflare replaces its ephemeral filesystem.
 The Worker keeps the container cold start out of the first-page critical path.
 When a visitor opens the demo while the container is asleep, `/` returns a small
 self-contained boot page from the edge immediately and starts the named
-container in the background. The page
-waits on `/__demo/ready`, which reports the container's state while it is asleep
-and gates on ShinyHub's real `/healthz` once it is up, then reloads into the
-normal UI. A start does not always take, and that probe deliberately starts
-nothing, so when it reports the container down the page reopens the demo rather
-than waiting on it: reopening is a navigation, and a navigation is the only
-request that may start a container. Warm requests continue to proxy directly
-without showing the boot page.
+container in the background. The page waits on `/__demo/ready`, which reports
+the container's state while it is asleep and gates on ShinyHub's real `/healthz`
+once it is up, then reloads into the normal UI. A start does not always take,
+and that probe deliberately starts nothing, so when it reports the container
+down the page reopens the demo rather than waiting on it: reopening is a
+navigation, and a navigation is the only request that may start a container.
+Warm requests continue to proxy directly without showing the boot page.
 
 Memory and disk bill for the whole time the container is awake, so the Worker
 decides at the edge what is allowed to reach it (`src/edge-policy.ts`). It
@@ -31,7 +30,13 @@ page cannot set, so unlike `Accept: text/html` it is not something a crawler
 produces merely by asking for HTML. The second rests on a plainer fact: bots
 fetch and parse, they do not submit forms, so a POST to `/__demo/start` is the
 one request the gate can believe with no headers at all. That is what lets a
-visitor through whose browser tells the edge nothing.
+visitor through whose browser tells the edge nothing. The one thing it will not
+believe is a browser saying that post came from somewhere else: any page on the
+web can submit a form here, and `Sec-Fetch-Site` is how a browser reports that
+one did. Those get the start page, so a visitor whose click was borrowed still
+lands on the demo and can start it deliberately. Only the post is judged on
+where it came from; a shared link is cross-site by definition, and following one
+is how most visitors arrive.
 
 Everything else on an entry path is answered with the start page, a 200 rendered
 at the edge that costs nothing and says what is true: the demo is asleep, and
@@ -49,9 +54,14 @@ rides the whole cold path as a `demo_next` query parameter: the redirect to the
 entry page, the start page's form, the wake page, and finally the one-click
 entry POST, which is where the session that link needed finally exists and the
 visitor is sent on to the page instead of the dashboard. Every one of those URLs
-is built by `demoURL`, which resolves against the demo host and drops any
-destination that does not land back on it, so a `demo_next` a stranger writes
-can only ever move someone around the demo.
+is built by `demoURL`. The `Location` that entry POST finally answers with is
+the one that is not, because there it is the destination itself. Both end at
+`safeDestination`, which resolves the value against the demo host and then reads
+the string it is about to return rather than the one it was handed: a
+destination can resolve onto this host and still come back as `//evil.example`,
+because `.` and `..` segments are removed after the origin is settled, and that
+value is a path here and another origin to every browser. So a `demo_next` a
+stranger writes can only ever move someone around the demo.
 
 Reading container state is a round trip to the Durable Object, so the Worker
 holds its own observation for a few seconds and forwards warm traffic without

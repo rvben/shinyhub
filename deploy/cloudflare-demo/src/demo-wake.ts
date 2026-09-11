@@ -342,7 +342,7 @@ export function demoWakeResponse(destination: string | null): Response {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#030510">
-  <noscript><meta http-equiv="refresh" content="4"></noscript>
+  <noscript><meta http-equiv="refresh" content="4; url=${landing}"></noscript>
   <title>Starting ShinyHub Demo</title>
   <style nonce="${nonce}">${wakeStyles}</style>
 </head>
