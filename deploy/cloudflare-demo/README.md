@@ -8,9 +8,33 @@ the image whenever Cloudflare replaces its ephemeral filesystem.
 The Worker keeps the container cold start out of the first-page critical path.
 When the container is asleep, `/` returns a small self-contained boot page from
 the edge immediately and starts the named container in the background. The page
-waits on `/__demo/ready`, which gates on ShinyHub's real `/healthz`, then reloads
-into the normal UI. Warm requests continue to proxy directly without showing the
-boot page.
+waits on `/__demo/ready`, which reports the container's state while it is asleep
+and gates on ShinyHub's real `/healthz` once it is up, then reloads into the
+normal UI. A start does not always take, and that probe deliberately starts
+nothing, so when it reports the container down the page reopens the demo rather
+than waiting on it: reopening is a navigation, and a navigation is the only
+request that may start a container. Warm requests continue to proxy directly
+without showing the boot page.
+
+Memory and disk bill for the whole time the container is awake, so the Worker
+decides at the edge what is allowed to reach it (`src/edge-policy.ts`). It
+serves `robots.txt` itself, and on the app origin it answers with a static 404
+whatever the server would 404 anyway, mirroring `internal/apporigin`. While the
+container is asleep, only a browser navigating to `/` or `/login` on the demo
+host, or the one-click entry POST, may start it. Any other navigation is sent to
+the demo's entry page, including a link into an app on the app origin, whose page
+could not be served before the container is up anyway; the redirect names that
+page absolutely, because the app origin does not serve it. Everything else is
+refused with a 503 that never touches the container. Before that gate existed,
+sparse automated traffic to control-plane paths woke the demo around the clock
+and was the entire metered charge on the bill.
+
+Reading container state is a round trip to the Durable Object, so the Worker
+holds its own observation for a few seconds and forwards warm traffic without
+asking again. The container sleeps only after ten idle minutes, so one seen
+healthy that recently is still up; the memo can at worst forward to a container
+that has since crashed, which starts it again, and it can never refuse a visitor
+the gate would have admitted.
 
 Cloudflare Containers require the Workers Paid plan ($5 USD/month minimum).
 The plan's included container allowance covers an idle or lightly used demo;

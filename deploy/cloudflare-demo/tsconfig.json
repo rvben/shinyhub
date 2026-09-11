@@ -1,5 +1,8 @@
 {
   "compilerOptions": {
+    // src/edge-policy.ts is imported both by the bundled Worker and by
+    // node --test, whose ESM resolver requires the extension in the specifier.
+    "allowImportingTsExtensions": true,
     "lib": ["ES2024"],
     "module": "ESNext",
     "moduleResolution": "Bundler",

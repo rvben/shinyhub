@@ -129,9 +129,9 @@ func TestCloudflareDemoColdStartStaysOffTheRootRequestPath(t *testing.T) {
 	workerSource := string(worker)
 	for _, required := range []string{
 		`container.getState()`,
-		`state.status !== "healthy"`,
+		`if (!healthy) {`,
 		`ctx.waitUntil(container.start()`,
-		`return demoWakeResponse()`,
+		`demoWakeResponse()`,
 		`url.pathname === DEMO_READY_PATH`,
 		`new URL("/healthz", url)`,
 	} {

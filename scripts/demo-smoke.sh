@@ -31,6 +31,39 @@ check() {
   exit 1
 }
 
+# The Worker spends a cold start only on a visitor opening the demo, so the
+# smoke test arrives the way a browser does. A bare probe is refused at the edge
+# while the container is asleep, by design. The navigation is repeated each
+# round because it is the only thing that starts the container, and the first
+# one can land before the deployment has propagated.
+wake() {
+  attempt=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    curl --silent --show-error --output /dev/null \
+      --connect-timeout 10 --max-time 30 \
+      --header 'Sec-Fetch-Dest: document' \
+      --header 'Sec-Fetch-Mode: navigate' \
+      --header 'Accept: text/html,application/xhtml+xml' \
+      "$base_url/" || true
+    if code=$(curl --silent --show-error --output /dev/null \
+      --connect-timeout 10 --max-time 30 --write-out '%{http_code}' \
+      "$base_url/__demo/ready"); then
+      if [ "$code" = "204" ]; then
+        printf '%s -> awake\n' "$base_url/"
+        return
+      fi
+    fi
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      sleep "$retry_delay"
+    fi
+    attempt=$((attempt + 1))
+  done
+  echo "$base_url/ -> demo container did not wake after $max_attempts attempts" >&2
+  exit 1
+}
+
+wake
+
 check "$base_url/healthz" 200
 check "$base_url/__demo/ready" 204
 check "$base_url/" 200 302

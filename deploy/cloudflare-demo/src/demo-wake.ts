@@ -151,7 +151,18 @@ const wakeScript = String.raw`
   const detail = document.querySelector('#wake-detail');
   const retry = document.querySelector('#wake-retry');
   let failures = 0;
+  let down = 0;
   let settled = false;
+
+  // Reopening the demo is a real navigation, because a navigation is the only
+  // request that may start a container. The probe below deliberately starts
+  // nothing, so a container that crashed before it ever served anything cannot
+  // be polled back to life however long the page waits. This is the same move
+  // the page makes when it has no script at all.
+  const reopen = () => {
+    settled = true;
+    window.location.replace(document.documentElement.dataset.landing || '/');
+  };
 
   const check = async () => {
     if (settled) return;
@@ -173,6 +184,15 @@ const wakeScript = String.raw`
         window.location.replace('/');
         return;
       }
+      // The demo reports itself down rather than merely not ready yet. A start
+      // takes a moment to show, so the container is given a few probes to say
+      // otherwise before the visitor is handed back to the gate that can start
+      // it again.
+      down = response.headers.get('x-shinyhub-demo-state') === 'asleep' ? down + 1 : 0;
+      if (down >= 3) {
+        reopen();
+        return;
+      }
     } catch (_) {
       // A cold container can outlive one probe. The next probe joins the same wake.
     } finally {
@@ -188,13 +208,7 @@ const wakeScript = String.raw`
     setTimeout(check, 1_500);
   };
 
-  retry.addEventListener('click', () => {
-    failures = 0;
-    retry.hidden = true;
-    status.textContent = 'Starting the live demo';
-    detail.textContent = 'This page is already running at the edge. The demo compute is waking in the background.';
-    check();
-  });
+  retry.addEventListener('click', reopen);
 
   check();
 })();

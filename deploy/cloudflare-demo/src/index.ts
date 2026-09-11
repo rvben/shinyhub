@@ -10,10 +10,14 @@ import {
 import { DEMO_READY_PATH, demoWakeResponse } from "./demo-wake";
 import {
   APP_HOST,
+  classifyColdRequest,
   classifyEdgeRequest,
   DEMO_HOST,
+  ENTRY_URL,
+  isAsleep,
+  mayAssumeAwake,
   robotsBody,
-} from "./edge-policy";
+} from "./edge-policy.ts";
 
 interface Env {
   SHINYHUB_DEMO: DurableObjectNamespace<ShinyHubDemo>;
@@ -36,6 +40,29 @@ function demoAsset(body: string, contentType: string): Response {
     },
   });
 }
+
+// The wake page polls for this, so it reports whether the demo can serve a
+// request rather than whether the container process exists. A container that is
+// down is reported as down rather than as one more not-yet: this probe starts
+// nothing, so the page has to know the difference between a wait that ends on
+// its own and one that never will.
+type DemoState = "ready" | "starting" | "asleep";
+
+function demoStateResponse(state: DemoState): Response {
+  const ready = state === "ready";
+  const headers = new Headers({
+    "cache-control": "no-store",
+    "x-shinyhub-demo-state": state,
+  });
+  if (!ready) {
+    headers.set("retry-after", "2");
+  }
+  return new Response(null, { status: ready ? 204 : 503, headers });
+}
+
+// When this isolate last saw the container healthy. Module scope, so it is kept
+// across the requests one isolate serves and lost when it is recycled.
+let lastHealthyAt: number | null = null;
 
 export class ShinyHubDemo extends Container {
   defaultPort = 8080;
@@ -76,6 +103,20 @@ export default {
     headers.set("x-forwarded-proto", "https");
 
     const container = getContainer(env.SHINYHUB_DEMO, "public-demo");
+    // Container state lives in the Durable Object, so reading it is a round trip
+    // in front of every request, each warm app proxy hop included. An isolate
+    // that saw the container healthy moments ago forwards without asking again.
+    const now = Date.now();
+    let healthy = mayAssumeAwake(lastHealthyAt, now);
+    let asleep = false;
+    if (!healthy) {
+      const state = await container.getState();
+      healthy = state.status === "healthy";
+      asleep = isAsleep(state.status);
+      if (healthy) {
+        lastHealthyAt = now;
+      }
+    }
 
     if (url.hostname === DEMO_HOST && url.pathname === DEMO_READY_PATH) {
       if (request.method !== "GET") {
@@ -84,6 +125,9 @@ export default {
           headers: { allow: "GET", "cache-control": "no-store" },
         });
       }
+      if (asleep) {
+        return demoStateResponse("asleep");
+      }
 
       const healthURL = new URL("/healthz", url);
       const healthResponse = await container.fetch(new Request(healthURL, {
@@ -91,26 +135,40 @@ export default {
         headers,
       }));
       await healthResponse.body?.cancel();
-      return new Response(null, {
-        status: healthResponse.ok ? 204 : 503,
-        headers: {
-          "cache-control": "no-store",
-          "retry-after": "2",
-          "x-shinyhub-demo-state": healthResponse.ok ? "ready" : "starting",
-        },
-      });
+      return demoStateResponse(healthResponse.ok ? "ready" : "starting");
     }
 
-    if (
-      url.hostname === DEMO_HOST
-      && request.method === "GET"
-      && url.pathname === "/"
-    ) {
-      const state = await container.getState();
-      if (state.status !== "healthy") {
+    // Only a visitor opening the demo may spend a cold start. Everything else
+    // that arrives while the container is down is answered here, so crawlers and
+    // background probes no longer keep it awake around the clock.
+    if (!healthy) {
+      const coldVerdict = classifyColdRequest({
+        hostname: url.hostname,
+        method: request.method,
+        pathname: url.pathname,
+        secFetchDest: request.headers.get("sec-fetch-dest"),
+        accept: request.headers.get("accept"),
+      });
+      if (coldVerdict === "refuse") {
+        return new Response(`The ShinyHub demo is asleep. Open ${ENTRY_URL} to start it.\n`, {
+          status: 503,
+          headers: {
+            "cache-control": "no-store",
+            "content-type": "text/plain; charset=utf-8",
+            "retry-after": "60",
+          },
+        });
+      }
+      if (coldVerdict === "redirect-to-entry") {
+        return Response.redirect(ENTRY_URL, 303);
+      }
+      if (coldVerdict === "wake") {
         ctx.waitUntil(container.start().catch((error: unknown) => {
           console.error("Unable to start the ShinyHub demo container", error);
         }));
+        // Only a navigation is ever classified as a wake, so there is always a
+        // page to render the wait in. Starting the container is left to run past
+        // this response rather than held open for the whole boot.
         return demoWakeResponse();
       }
     }
