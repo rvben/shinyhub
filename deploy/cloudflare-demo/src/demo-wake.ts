@@ -1,8 +1,21 @@
 import orbitHubLockupDarkSource from "../../../internal/ui/static/brand/orbit-hub-lockup-dark.svg";
+import { DEMO_START_PATH, demoURL, ENTRY_URL } from "./edge-policy.ts";
 
 export const DEMO_READY_PATH = "/__demo/ready";
 
 const orbitHubLockupDark = orbitHubLockupDarkSource.replace(/^<\?xml[^>]+>\s*/, "");
+
+// Both pages interpolate a destination a stranger can write into an attribute.
+// The value is already known to be a same-origin path, and the URL parser
+// percent-encodes the angle brackets, but neither fact is visible where the
+// interpolation happens, so the escape is done where it can be read.
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
 
 const wakeStyles = String.raw`
 :root {
@@ -145,13 +158,53 @@ button[hidden] { display: none; }
 }
 `;
 
+const startStyles = String.raw`
+body { overflow: auto; }
+
+.start-form { margin: 2.5rem 0 0; }
+
+.start-form button {
+  margin-top: 0;
+  padding: 0.85rem 1.4rem;
+  border-color: var(--signal);
+  background: var(--signal);
+  color: var(--canvas);
+  font-size: 0.8125rem;
+}
+
+.start-form button:hover { border-color: var(--sparkle); background: var(--sparkle); }
+
+.notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+  margin: 1.6rem 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+`;
+
 const wakeScript = String.raw`
 (() => {
   const status = document.querySelector('#wake-status');
   const detail = document.querySelector('#wake-detail');
   const retry = document.querySelector('#wake-retry');
   let failures = 0;
+  let down = 0;
   let settled = false;
+
+  // Reopening the demo is a real navigation, because a navigation is the only
+  // request that may start a container. The probe below deliberately starts
+  // nothing, so a container that crashed before it ever served anything cannot
+  // be polled back to life however long the page waits. This is the same move
+  // the page makes when it has no script at all.
+  const reopen = () => {
+    settled = true;
+    window.location.replace(document.documentElement.dataset.landing || '/');
+  };
 
   const check = async () => {
     if (settled) return;
@@ -170,7 +223,19 @@ const wakeScript = String.raw`
         document.documentElement.dataset.ready = 'true';
         status.textContent = 'Demo ready';
         detail.textContent = 'Opening ShinyHub…';
-        window.location.replace('/');
+        // Built on the control host by the Worker, so the page a visitor asked
+        // for survives the wake without this script having to trust the URL it
+        // was loaded from.
+        window.location.replace(document.documentElement.dataset.landing || '/');
+        return;
+      }
+      // The demo reports itself down rather than merely not ready yet. A start
+      // takes a moment to show, so the container is given a few probes to say
+      // otherwise before the visitor is handed back to the gate that can start
+      // it again.
+      down = response.headers.get('x-shinyhub-demo-state') === 'asleep' ? down + 1 : 0;
+      if (down >= 3) {
+        reopen();
         return;
       }
     } catch (_) {
@@ -188,27 +253,96 @@ const wakeScript = String.raw`
     setTimeout(check, 1_500);
   };
 
-  retry.addEventListener('click', () => {
-    failures = 0;
-    retry.hidden = true;
-    status.textContent = 'Starting the live demo';
-    detail.textContent = 'This page is already running at the edge. The demo compute is waking in the background.';
-    check();
-  });
+  retry.addEventListener('click', reopen);
 
   check();
 })();
 `;
 
-export function demoWakeResponse(): Response {
+const START_TITLE = "ShinyHub Live Demo";
+const START_DESCRIPTION = "A real ShinyHub control plane running Python, R, Dash and Streamlit apps. "
+  + "The demo environment sleeps when nobody is using it; press start and it opens in about a minute.";
+
+// The page everything that is not a browser navigating gets when the container
+// is asleep: a link unfurler, an uptime monitor, a crawler, a fetch from a
+// script. It is rendered here at the edge, so answering with it costs nothing,
+// and it carries the Open Graph tags that make a shared demo link preview as
+// what it is instead of as an error. The button is the way through: bots read
+// pages, they do not submit forms, so a post from here is the one request the
+// gate can believe without a header.
+export function demoStartResponse(destination: string | null, method: string): Response {
   const nonce = crypto.randomUUID().replaceAll("-", "");
+  const action = escapeHtml(demoURL(DEMO_START_PATH, destination));
   const html = String.raw`<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#030510">
-  <noscript><meta http-equiv="refresh" content="4"></noscript>
+  <meta name="description" content="${escapeHtml(START_DESCRIPTION)}">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="ShinyHub">
+  <meta property="og:url" content="${escapeHtml(ENTRY_URL)}">
+  <meta property="og:title" content="${escapeHtml(START_TITLE)}">
+  <meta property="og:description" content="${escapeHtml(START_DESCRIPTION)}">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="${escapeHtml(START_TITLE)}">
+  <meta name="twitter:description" content="${escapeHtml(START_DESCRIPTION)}">
+  <title>${escapeHtml(START_TITLE)}</title>
+  <style nonce="${nonce}">${wakeStyles}${startStyles}</style>
+</head>
+<body>
+  <main>
+    <div class="brand">${orbitHubLockupDark}</div>
+    <h1>The live demo is resting</h1>
+    <p class="intro">ShinyHub runs this demo on compute that stops when nobody is using it, so an idle demo costs nothing to keep online. Starting it takes about a minute, and it will bring you straight in.</p>
+    <form class="start-form" method="post" action="${action}">
+      <button type="submit">Start the live demo</button>
+    </form>
+    <ul class="notes">
+      <li>No account created</li>
+      <li>Read-only access</li>
+      <li>Resets automatically</li>
+    </ul>
+  </main>
+</body>
+</html>`;
+
+  return new Response(method === "HEAD" ? null : html, {
+    status: 200,
+    headers: {
+      "cache-control": "no-store",
+      // No script at all, so nothing here needs to run. The form is the whole
+      // page, which is why form-action is the one directive opened up.
+      "content-security-policy": `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'`,
+      "content-type": "text/html; charset=utf-8",
+      "cross-origin-opener-policy": "same-origin",
+      "permissions-policy": "camera=(), microphone=(), geolocation=()",
+      "referrer-policy": "strict-origin-when-cross-origin",
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "x-content-type-options": "nosniff",
+      // robots.txt already disallows the whole demo. This repeats it for the
+      // crawlers that read the tag and ignore the file.
+      "x-robots-tag": "noindex",
+      "x-shinyhub-demo-state": "asleep",
+    },
+  });
+}
+
+// The page a visitor waits on while the container boots. destination is the path
+// they originally asked for, which the wake outlives: it is folded into the URL
+// this page navigates to once the demo answers, so the demo login can send them
+// on to it rather than dropping them on the dashboard.
+export function demoWakeResponse(destination: string | null): Response {
+  const nonce = crypto.randomUUID().replaceAll("-", "");
+  const landing = escapeHtml(demoURL("/", destination));
+  const html = String.raw`<!doctype html>
+<html lang="en" data-landing="${landing}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#030510">
+  <noscript><meta http-equiv="refresh" content="4; url=${landing}"></noscript>
   <title>Starting ShinyHub Demo</title>
   <style nonce="${nonce}">${wakeStyles}</style>
 </head>

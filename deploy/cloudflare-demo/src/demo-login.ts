@@ -1,4 +1,5 @@
-export const DEMO_SESSION_PATH = "/__demo/session";
+import { DEMO_SESSION_PATH, demoURL } from "./edge-policy.ts";
+
 export const DEMO_STYLE_PATH = "/__demo/assets/v1/login.css";
 export const DEMO_SCRIPT_PATH = "/__demo/assets/v1/login.js";
 
@@ -247,10 +248,21 @@ export const demoLoginScript = String.raw`
 })();
 `;
 
-function entryMarkup(showError: boolean): string {
+function entryMarkup(showError: boolean, destination: string | null): string {
   const error = showError
     ? `<p class="demo-entry-error" role="alert">The demo could not open just now. Please try again.</p>`
     : "";
+
+  // The session this button creates is what the deep link was missing, so the
+  // page the visitor came for rides on the form's action and is where they are
+  // sent once they have one. demoURL keeps the URL on this host and percent
+  // encodes the destination into it; escaping it again is what makes the
+  // attribute safe to read without tracing where the value came from.
+  const action = demoURL(DEMO_SESSION_PATH, destination)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 
   return `
     <section class="demo-entry" aria-labelledby="demo-entry-title">
@@ -261,7 +273,7 @@ function entryMarkup(showError: boolean): string {
       <h2 id="demo-entry-title">Explore ShinyHub, already running.</h2>
       <p class="demo-entry-copy">Step into a real read-only control plane and launch working Python, R, Dash, and Streamlit applications.</p>
       ${error}
-      <form class="demo-entry-form" method="post" action="${DEMO_SESSION_PATH}">
+      <form class="demo-entry-form" method="post" action="${action}">
         <button class="demo-entry-button" type="submit">
           <span class="demo-entry-button-label">Continue as Demo Viewer</span>
           <svg aria-hidden="true" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.75 9h10.5M10 4.75 14.25 9 10 13.25"/></svg>
@@ -279,7 +291,7 @@ function entryMarkup(showError: boolean): string {
     </button>`;
 }
 
-export function decorateDemoLogin(response: Response, showError: boolean): Response {
+export function decorateDemoLogin(response: Response, showError: boolean, destination: string | null): Response {
   return new HTMLRewriter()
     .on("head", {
       element(element) {
@@ -299,7 +311,7 @@ export function decorateDemoLogin(response: Response, showError: boolean): Respo
     })
     .on(".login-brand", {
       element(element) {
-        element.after(entryMarkup(showError), { html: true });
+        element.after(entryMarkup(showError, destination), { html: true });
       },
     })
     .on("body", {

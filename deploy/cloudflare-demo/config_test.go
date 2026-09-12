@@ -129,9 +129,9 @@ func TestCloudflareDemoColdStartStaysOffTheRootRequestPath(t *testing.T) {
 	workerSource := string(worker)
 	for _, required := range []string{
 		`container.getState()`,
-		`state.status !== "healthy"`,
+		`if (!healthy) {`,
 		`ctx.waitUntil(container.start()`,
-		`return demoWakeResponse()`,
+		`demoWakeResponse(destination)`,
 		`url.pathname === DEMO_READY_PATH`,
 		`new URL("/healthz", url)`,
 	} {
@@ -149,7 +149,7 @@ func TestCloudflareDemoColdStartStaysOffTheRootRequestPath(t *testing.T) {
 		`Waking the live demo`,
 		`orbit-hub-lockup-dark.svg`,
 		`fetch('${DEMO_READY_PATH}'`,
-		`window.location.replace('/')`,
+		`window.location.replace(document.documentElement.dataset.landing || '/')`,
 		`@media (prefers-reduced-motion: reduce)`,
 		`content-security-policy`,
 		`x-shinyhub-demo-state`,

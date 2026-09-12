@@ -83,6 +83,9 @@ jobs:
       - name: Test the demo configuration
         run: go test ./deploy/cloudflare-demo
 
+      - name: Test the demo Worker
+        run: make test-worker
+
       - name: Verify Cloudflare deployment credentials
         working-directory: deploy/cloudflare-demo
         env:
