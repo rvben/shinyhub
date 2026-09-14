@@ -93,10 +93,12 @@ type userResponse struct {
 	ServiceAccountKey string `json:"service_account_key,omitempty"`
 	ManagedBy         string `json:"managed_by,omitempty"`
 	CreatedAt         string `json:"created_at"`
+	HasLocalPassword  bool   `json:"has_local_password"`
 }
 
 func toUserResponse(u *db.User) userResponse {
 	return userResponse{
+		HasLocalPassword:  db.HasLocalPassword(u.PasswordHash),
 		ManualRole:        u.ManualRole,
 		RoleSource:        u.RoleSource,
 		ID:                u.ID,
@@ -128,9 +130,31 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		resp = append(resp, toUserResponse(u))
 	}
+	providers := []string{}
+	if s.github != nil {
+		providers = append(providers, "GitHub")
+	}
+	if s.googleOAuth != nil {
+		providers = append(providers, "Google")
+	}
+	if s.oidcProvider != nil {
+		name := s.oidcProvider.DisplayName
+		if name == "" {
+			name = "your organization’s single sign-on"
+		}
+		providers = append(providers, name)
+	}
+	if s.cfg.Auth.ForwardAuth.Enabled {
+		providers = append(providers, "your organization’s sign-in gateway")
+	}
 	// ListUsers already orders by username, so the page is stably sorted.
 	limit, offset := parsePagination(r)
 	writeList(w, resp, limit, offset, map[string]any{
+		"onboarding": map[string]any{
+			"local":     s.cfg.Auth.LocalLoginEnabled(),
+			"providers": providers,
+			"sso":       s.github != nil || s.googleOAuth != nil || s.oidcProvider != nil || s.cfg.Auth.ForwardAuth.Enabled,
+		},
 		"support_sessions": map[string]any{
 			"enabled":          s.cfg.Auth.SupportSessions,
 			"trusted_apps":     s.cfg.Auth.SupportSessions && s.cfg.Auth.SupportSessionsTrustedApps && s.cfg.Server.AppOrigin == "",

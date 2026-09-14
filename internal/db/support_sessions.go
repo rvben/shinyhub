@@ -232,7 +232,7 @@ func (s *Store) consumeSupportLaunch(codeHash, appSlug string) (*auth.ContextUse
 	}
 	subject, err := s.LookupContextUser(subjectID.Int64)
 	if err != nil || subject == nil || subject.TokenEpoch != subjectEpoch || subject.IsServiceAccount() ||
-		subject.Role != subjectRole || (subjectRole != string(auth.RoleViewer) && subjectRole != string(auth.RoleDeveloper)) {
+		subject.Role != subjectRole || !auth.IsValidGlobalRole(subjectRole) {
 		return nil, ErrNotFound
 	}
 	subject.SupportSession = &auth.SupportSessionContext{

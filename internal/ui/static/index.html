@@ -243,9 +243,8 @@
 
     <section id="users-view" hidden aria-labelledby="identity-heading">
       <div class="toolbar">
-        <div><h1 id="identity-heading">Identity</h1><p class="identity-page-intro">People sign in. Service accounts give automation its own scoped credentials.</p></div>
+        <div><h1 id="identity-heading">Identity</h1><p class="identity-page-intro">Manage people, their roles, and service accounts for automation.</p></div>
         <div class="toolbar-actions">
-          <button id="new-user-button" type="button">+ New person</button>
           <button id="users-refresh" class="toolbar-btn-quiet" type="button">Refresh</button>
         </div>
       </div>
@@ -254,36 +253,31 @@
         <button id="identity-services-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="identity-services-panel">Service accounts</button>
       </div>
       <section id="identity-people-panel" role="tabpanel" aria-labelledby="identity-people-tab">
-        <section class="support-session-settings" aria-labelledby="support-settings-heading">
-          <div class="support-settings-heading"><h2 id="support-settings-heading">Support sessions</h2><span id="support-settings-status" role="status">Checking status…</span></div>
-          <p>Open one app as a viewer or developer for up to 15 minutes. Actions use their permissions and can change data; your administrator session stays separate.</p>
-          <p id="support-settings-message">Checking whether this server allows support sessions.</p>
-          <details id="support-settings-setup">
-            <summary>Set up support sessions</summary>
-            <div class="support-settings-guide">
-              <p>Disabled by default. The recommended setup uses a separate app hostname to isolate app code from your administrator session. A server administrator can enable this in the deployment configuration.</p>
-              <ol>
-                <li>Choose a separate app hostname and route it to ShinyHub with working DNS and HTTPS.</li>
-                <li>Merge the example below into your server configuration, replacing both example URLs with your own.</li>
-                <li>Run <code>shinyhub validate-config</code> with your service configuration before restarting, then use <strong>Refresh</strong> above to check the status.</li>
-              </ol>
-              <pre aria-label="Example server configuration"><code>server:
-  base_url: https://hub.example.com
-  app_origin: https://apps.example.com
-
-auth:
-  support_sessions: true</code></pre>
-              <p>Using environment variables? Set <code>SHINYHUB_BASE_URL</code>, <code>SHINYHUB_APP_ORIGIN</code>, and <code>SHINYHUB_SUPPORT_SESSIONS=true</code>. Keep the WebSocket session recheck interval at its default of 30 seconds or lower, and above zero.</p>
-              <p>For a single hostname, leave <code>server.app_origin</code> unset and explicitly set <code>auth.support_sessions_trusted_apps: true</code> (or <code>SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS=true</code>). This trusts all deployed app code and its dependencies: malicious or compromised app JavaScript may act with your administrator browser permissions. HTTPS is still required.</p>
-              <p>Sessions require a reason and are recorded in the audit log. Native sign-in must be less than 10 minutes old. The selected person must already have access to the app.</p>
-            </div>
-          </details>
-        </section>
-        <p id="users-error" class="error" hidden></p>
+        <div class="people-filters">
+          <label for="people-search">Find a person<input id="people-search" type="search" placeholder="Search by username or name" autocomplete="off"></label>
+          <label for="people-role-filter">Role<select id="people-role-filter"><option value="">All roles</option><option value="viewer">Viewer</option><option value="developer">Developer</option><option value="operator">Operator</option><option value="admin">Admin</option></select></label>
+          <span id="people-count" role="status"></span>
+        </div>
+        <p id="users-error" class="error" role="alert" hidden></p>
         <table id="users-table">
           <thead><tr><th scope="col">Person</th><th scope="col">Role</th><th scope="col">Created</th><th scope="col" class="users-actions-col">Actions</th></tr></thead>
           <tbody id="users-body"></tbody>
         </table>
+        <section id="people-invitations" class="people-invitations" hidden aria-labelledby="people-invitations-heading">
+          <h2 id="people-invitations-heading">Pending invitations</h2>
+          <p class="profile-hint">Accounts appear in People after the invitation is accepted.</p>
+          <p id="people-invitations-error" class="error" role="alert" hidden></p>
+          <div id="people-invitations-list"></div>
+        </section>
+        <details id="people-joining" class="people-joining" hidden>
+          <summary>How people join</summary>
+          <p id="people-onboarding" class="identity-page-intro" hidden></p>
+          <div class="people-joining-actions">
+            <button id="people-signin-copy" type="button" hidden>Copy sign-in link</button>
+            <button id="new-user-button" type="button" hidden>Invite person</button>
+          </div>
+          <p id="people-onboarding-status" class="profile-hint" role="status"></p>
+        </details>
       </section>
       <section id="identity-services-panel" role="tabpanel" aria-labelledby="identity-services-tab" hidden>
         <div class="service-account-explainer">
@@ -1284,64 +1278,47 @@ auth:
     </div>
   </div>
 
-  <!-- New user modal (admin only) -->
+  <!-- Add person (admin only) -->
   <div id="new-user-modal" class="modal-overlay" hidden
        role="dialog" aria-modal="true" aria-labelledby="new-user-heading">
     <div class="modal-card">
       <div class="modal-header">
-        <h2 id="new-user-heading" class="modal-title">New user</h2>
-        <button id="new-user-close" type="button" aria-label="Close new user modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
+        <h2 id="new-user-heading" class="modal-title">Invite person</h2>
+        <button id="new-user-close" type="button" aria-label="Close invite person dialog">Close</button>
       </div>
       <div class="modal-body">
         <form id="new-user-form">
+          <p class="person-form-intro">Choose a username and role. This person will set their own password using a private invitation link.</p>
           <label for="new-user-username">Username</label>
           <input id="new-user-username" type="text" required maxlength="64"
-                 autocomplete="off" spellcheck="false" placeholder="alice">
-
-          <label for="new-user-password">Password</label>
-          <input id="new-user-password" type="password" required minlength="15"
-                 autocomplete="new-password" placeholder="At least 15 characters">
-
-          <label for="new-user-role">Role</label>
-          <select id="new-user-role">
-            <option value="viewer">Viewer</option>
-            <option value="developer" selected>Developer</option>
-            <option value="operator">Operator</option>
-            <option value="admin">Admin</option>
-          </select>
-
-          <p id="new-user-error" class="error" hidden></p>
-
+                 autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="new-user-username-help">
+          <p id="new-user-username-help" class="profile-hint">The name this person will use to sign in. They’ll appear in People once they accept.</p>
+          <fieldset id="new-user-role" class="person-role-choices" aria-describedby="new-user-role-help">
+            <legend>Role</legend>
+            <label><input type="radio" name="role" value="viewer" checked><span><strong>Viewer</strong><span>Use apps they have access to.</span></span></label>
+            <label><input type="radio" name="role" value="developer"><span><strong>Developer</strong><span>Create apps and manage their own apps.</span></span></label>
+            <label><input type="radio" name="role" value="operator"><span><strong>Operator</strong><span>Access and manage all apps.</span></span></label>
+            <label><input type="radio" name="role" value="admin"><span><strong>Admin</strong><span>Full access, including people and server settings.</span></span></label>
+          </fieldset>
+          <p id="new-user-role-help" class="profile-hint">This role applies across ShinyHub. Individual app access and management permissions are managed in each app’s Access tab.</p>
+          <p id="new-user-error" class="error" role="alert" hidden></p>
           <div class="modal-actions">
             <button type="button" id="new-user-cancel">Cancel</button>
-            <button type="submit" id="new-user-submit" class="btn-primary">Create</button>
+            <button type="submit" id="new-user-submit" class="btn-primary">Create invitation</button>
           </div>
         </form>
-
-        <hr class="handoff-card-divider" aria-hidden="true">
-
-        <div>
-          <p class="handoff-section-label">Share this with the new user to log in</p>
-          <div class="snippet">
-            <pre><code id="new-user-snippet"></code></pre>
-            <button type="button" id="new-user-snippet-copy" class="copy-btn"
-                    aria-label="Copy CLI commands to clipboard">
-              <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
-                   stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                   stroke-linejoin="round" aria-hidden="true">
-                <rect x="4" y="3" width="8" height="10" rx="1.2"/>
-                <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
-              </svg>
-              <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
-                   stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
-                   stroke-linejoin="round" aria-hidden="true">
-                <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
-              </svg>
-              <span class="copy-label" aria-hidden="true">Copy</span>
-              <span class="sr-only" id="new-user-snippet-status" aria-live="polite"></span>
-            </button>
+        <section id="new-user-success" hidden aria-labelledby="new-user-success-heading">
+          <h3 id="new-user-success-heading" tabindex="-1">Invitation ready</h3>
+          <p id="new-user-result-detail" class="profile-hint"></p>
+          <p>Send this link privately to the intended person. Anyone with the link can create this account.</p>
+          <pre class="person-signin-details" id="new-user-snippet"></pre>
+          <p class="profile-hint">Copy this link before closing. It works once. You can replace it from Pending invitations if you need a new link. No email is sent automatically.</p>
+          <p id="new-user-snippet-status" role="status"></p>
+          <div class="modal-actions">
+            <button type="button" id="new-user-snippet-copy">Copy invitation link</button>
+            <button type="button" id="new-user-done" class="btn-primary">Done</button>
           </div>
-        </div>
+        </section>
       </div>
     </div>
   </div>
@@ -1405,7 +1382,8 @@ auth:
           <textarea id="support-session-reason" required rows="3" placeholder="What are you investigating, and why is access needed?" aria-describedby="support-session-reason-help"></textarea>
           <p id="support-session-reason-help" class="profile-hint">8-500 characters. Stored in the audit log. Be specific enough for another administrator to understand later.</p>
 
-          <p class="support-session-warning" role="note"><strong>This is not read-only.</strong> Actions inside the app can change the user’s data. The session cannot access ShinyHub’s admin dashboard, other apps, API tokens, or privileged users.</p>
+          <p class="support-session-warning" role="note"><strong>This is not read-only.</strong> Actions inside the app can change the user’s data. The session cannot access ShinyHub’s admin dashboard, other apps, or API tokens.</p>
+          <p id="support-session-trusted-warning" class="support-session-warning" role="note" hidden>Trusted-app mode: malicious or compromised app code may act with your administrator browser permissions. Start support sessions only for apps you trust.</p>
           <p id="support-session-error" class="error" role="alert" hidden></p>
 			<button type="button" id="support-session-apps-retry" hidden>Retry loading apps</button>
 			<button type="button" id="support-session-reauth" hidden>Sign out and sign in again</button>

@@ -1,13 +1,14 @@
 ---
-description: "Give administrators a short-lived, app-scoped way to reproduce a viewer's experience without granting broad impersonation access."
+description: "Give administrators a short-lived, app-scoped way to reproduce another person's app experience without granting broad impersonation access."
 ---
 
 # Support sessions
 
 Support sessions let a human administrator troubleshoot one application as a
-viewer or developer. They deliberately do not provide GitLab-style global
-impersonation: the capability cannot reach the dashboard, API, another app,
-an operator or administrator account, or a service account.
+another human user, including an operator or administrator. The capability
+cannot reach the dashboard, API, or another app. Service accounts and your own
+account cannot be represented. The represented person’s role applies only
+inside the selected app; it does not grant a ShinyHub administrator session.
 
 The feature is off by default. By default, enabling it requires a dedicated
 application origin to isolate untrusted app JavaScript:
@@ -66,7 +67,7 @@ environment variables. **Malicious or compromised app JavaScript may act with
 the administrator's browser authority**, even while the support session
 represents a viewer. This mode does not isolate hostile apps from the dashboard;
 choose it only when that trust model fits your deployment. ShinyHub logs the
-mode at startup and displays it in the support-session settings.
+mode at startup and displays it in the support-session confirmation.
 
 HTTPS is still required. App scope, the 15-minute deadline, bounded connection
 rechecks, explicit revocation, audit attribution, and existing backend credential
@@ -82,14 +83,13 @@ precedence over the trusted-app acknowledgement.
 
 ## Administrator flow
 
-On **Identity → People**, the **Support sessions** section shows whether the
-feature is enabled and includes an expandable setup guide. When disabled, the
-action beside an eligible person opens that guide. Unavailable actions explain
-account restrictions directly beneath the button. If status cannot be confirmed,
-use **Refresh** to retry.
+On **Identity → People**, support-session actions appear only when the server
+reports that the feature is enabled. Configure it using the instructions above,
+then use **Refresh** to reload availability. Unavailable actions explain account
+restrictions directly beneath the button. Trusted-app mode displays its security
+warning in the confirmation dialog before starting a session.
 
-Once enabled, choose **Support session** beside a viewer or
-developer. Select an app and enter a reason or ticket reference. Starting the
+Once enabled, open another person’s **More actions** menu and choose **Support session**. Select an app and enter a reason or ticket reference. Starting the
 session redirects to the application origin and establishes a separate cookie
 scoped to `/app/<slug>/` for at most 15 minutes.
 
@@ -125,7 +125,7 @@ offers both a retry and an idempotent precautionary end action.
 - Only a live human administrator can start a session. Native login must be no
   more than 10 minutes old; forward-auth deployments delegate freshness to the
   upstream identity gateway. API keys do not qualify.
-- Only human `viewer` and `developer` accounts can be represented. The target
+- Human viewers, developers, operators, and administrators can be represented. The target
   must already be allowed to open the selected app.
 - The launch URL is a single-use random capability accepted for 60 seconds.
   Only its SHA-256 hash is stored. An unactivated launch is aborted on handled

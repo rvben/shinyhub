@@ -877,39 +877,11 @@ func TestDeploymentRowFitsLongVersionIDs(t *testing.T) {
 		"the four-column Deployments grid must let both version and source grow without overlapping the timestamp or action")
 }
 
-// TestNewUserSnippetIsRunnable guards the new-user handoff. The snippet is
-// shown to the admin who creates a new user and shared via Slack/email with
-// the recipient; the recipient must be able to paste it into a shell and have
-// it work. Two failure modes drove the fix:
-//
-//  1. The original snippet was `shinyhub login --host X --username Y` with no
-//     password flag and no prompt — the recipient got "login failed: 401" and
-//     no hint about what to do. The CLI now prompts interactively for a
-//     missing password (see internal/cli/login.go), so this snippet is
-//     runnable as-is.
-//
-//  2. The snippet must not include `--password <value>` because that leaks
-//     the password into shell history (and into the clipboard via the copy
-//     button). Generating a snippet with a literal password would be a
-//     regression.
-//
-// We assert the renderer emits the prompt-friendly form and never the
-// password-baked form.
-func TestNewUserSnippetIsRunnable(t *testing.T) {
-	b, err := fs.ReadFile(ui.Static(), "app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	src := string(b)
-	if !strings.Contains(src, "shinyhub login --host ${origin} --username ${username}") {
-		t.Fatal("app.js renderNewUserSnippet must emit `shinyhub login --host ${origin} --username ${username}` so the new user can paste-and-run; the CLI prompts for the missing password (see internal/cli/login.go runLogin)")
-	}
-	// Belt and braces: no `--password ` form should be produced anywhere in
-	// the rendered snippets — that would leak credentials into shell history
-	// and the clipboard.
-	if strings.Contains(src, "--password ${") || strings.Contains(src, "--password \"") {
-		t.Fatal("app.js: handoff snippets must not include `--password <value>`; the CLI prompts interactively, and embedding the password leaks it into shell history and the clipboard")
-	}
+// Invitations hand off a browser link without collecting the recipient's password.
+func TestNewUserInvitationHandoff(t *testing.T) {
+	assertContains(t, "views/new-person.js", "${origin}/invite#${result.token}", "the invitation secret must be in the fragment, not an HTTP query")
+	assertContains(t, "views/new-person.js", "api('/api/user-invitations'", "the primary People action creates an invitation")
+	assertContains(t, "accept-invitation.html", `autocomplete="new-password"`, "the recipient chooses their own password")
 }
 
 // TestSPADoesNotShipClientSideLogoutDance guards against a regression to the
@@ -2321,7 +2293,7 @@ func TestResponsiveAndStatePolish(t *testing.T) {
 	// Loading states on the two list views.
 	assertContains(t, "app.js", "Loading apps…",
 		"loadApps must show a loading placeholder on first paint")
-	assertContains(t, "app.js", "Loading users…",
+	assertContains(t, "app.js", "Loading people…",
 		"loadUsers must show a loading row on first paint")
 	assertContains(t, "app.js", "aria-busy",
 		"the loading states must set aria-busy while fetching")
@@ -2423,11 +2395,10 @@ func TestDefaultActionBadgeRuleComesFirst(t *testing.T) {
 func TestUsersRoleDropdownOffersViewer(t *testing.T) {
 	assertContains(t, "app.js", "for (const r of ['viewer', 'developer', 'operator', 'admin'])",
 		"the People table must offer every global role, including Viewer")
-	// The exact multi-line block (not a bare "viewer" option string) because
-	// #service-credential-role also offers a Viewer option elsewhere in the
-	// same file; a looser needle would pass even with #new-user-role reverted.
-	assertContains(t, "index.html", "<select id=\"new-user-role\">\n            <option value=\"viewer\">Viewer</option>",
-		`the "+ New user" modal's role <select> must offer Viewer alongside Developer/Operator/Admin`)
+	for _, role := range []string{"viewer", "developer", "operator", "admin"} {
+		assertContains(t, "index.html", `type="radio" name="role" value="`+role+`"`, "the invitation form must visibly offer every global role")
+	}
+
 }
 
 // TestUsersPageWiresRevokeSessions guards the "sign someone out immediately"
@@ -4021,7 +3992,10 @@ func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
 	checkGuard("async function deleteUser(id, username, btn)", "deleteUser", "btn.disabled = true", "btn.disabled = false")
 	checkGuard("async function revokeUserSessions(id, username, btn)", "revokeUserSessions", "btn.disabled = true", "btn.disabled = false")
 	checkGuard("async function revokeToken(id, name, btn)", "revokeToken", "btn.disabled = true", "btn.disabled = false")
-	checkGuard("async function submitNewUser(event)", "submitNewUser", "submitBtn.disabled = true", "submitBtn.disabled = false")
+	// Invitation request guards are exercised behaviorally by new-person.test.js.
+	assertContains(t, "views/new-person.js", "if (busy || form.hidden) return;", "invitation creation rejects duplicate submissions")
+	assertContains(t, "views/new-person.js", "setBusy(true)", "invitation creation disables inputs while pending")
+	assertContains(t, "views/new-person.js", "setBusy(false)", "invitation creation restores inputs after completion")
 	checkGuard("async function performRestart(slug, btn, cardLocal = false)", "the Restart request handler", "btn.disabled = true", "btn.disabled = false")
 	checkGuard("async function lifecycleAction(slug, path, btn, failureMessage)", "the Sleep/Stop/Start handler", "btn.disabled = true", "btn.disabled = false")
 	if !strings.Contains(src, "appRestartFeedback.get(slug)?.phase === 'pending'") {

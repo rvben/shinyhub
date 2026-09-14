@@ -40,48 +40,58 @@ func newSupportSessionServer(t *testing.T, enabled bool) (*api.Server, *db.Store
 }
 
 func TestCreateSupportSessionReturnsSingleUseAppCapability(t *testing.T) {
-	srv, store, admin, subject := newSupportSessionServer(t, true)
-	token, _ := auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
-	body, _ := json.Marshal(map[string]any{
-		"user_id": subject.ID, "app_slug": "sales", "reason": "Investigating ticket SUP-1042",
-	})
-	rec := httptest.NewRecorder()
-	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/support-sessions", body, token))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	var response struct {
-		ID        string    `json:"id"`
-		LaunchURL string    `json:"launch_url"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}
-	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
-		t.Fatal(err)
-	}
-	launch, err := url.Parse(response.LaunchURL)
-	if err != nil || launch.Host != "apps.example.com" || launch.Path != "/app/sales/" {
-		t.Fatalf("launch URL = %q (%v)", response.LaunchURL, err)
-	}
-	raw := launch.Query().Get("__shinyhub_launch")
-	if response.ID == "" || raw == "" || time.Until(response.ExpiresAt) > 15*time.Minute || time.Until(response.ExpiresAt) < 14*time.Minute {
-		t.Fatalf("unexpected response: %+v", response)
-	}
-	sum := sha256.Sum256([]byte(raw))
-	impersonated, err := store.ConsumeAppLaunchCode(hex.EncodeToString(sum[:]), "sales")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if impersonated.ID != subject.ID || impersonated.SupportSession == nil ||
-		impersonated.SupportSession.ActorID != admin.ID || impersonated.SupportSession.AppSlug != "sales" {
-		t.Fatalf("dual principal = %+v", impersonated)
-	}
-	if _, err := store.ConsumeAppLaunchCode(hex.EncodeToString(sum[:]), "sales"); err == nil {
-		t.Fatal("launch capability replay should fail")
-	}
-	events, err := store.ListAuditEvents("support_session.start", 10, 0)
-	if err != nil || len(events) != 1 || events[0].ResourceID != response.ID ||
-		!strings.Contains(events[0].Detail, "Investigating ticket SUP-1042") || strings.Contains(events[0].Detail, raw) {
-		t.Fatalf("start audit events=%+v err=%v", events, err)
+	for _, role := range []string{"viewer", "developer", "operator", "admin"} {
+		t.Run(role, func(t *testing.T) {
+
+			srv, store, admin, subject := newSupportSessionServer(t, true)
+			if _, err := store.DB().Exec("UPDATE users SET role = ? WHERE id = ?", role, subject.ID); err != nil {
+				t.Fatal(err)
+			}
+			subject.Role = role
+			token, _ := auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
+			body, _ := json.Marshal(map[string]any{
+				"user_id": subject.ID, "app_slug": "sales", "reason": "Investigating ticket SUP-1042",
+			})
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/support-sessions", body, token))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+			}
+			var response struct {
+				ID        string    `json:"id"`
+				LaunchURL string    `json:"launch_url"`
+				ExpiresAt time.Time `json:"expires_at"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+				t.Fatal(err)
+			}
+			launch, err := url.Parse(response.LaunchURL)
+			if err != nil || launch.Host != "apps.example.com" || launch.Path != "/app/sales/" {
+				t.Fatalf("launch URL = %q (%v)", response.LaunchURL, err)
+			}
+			raw := launch.Query().Get("__shinyhub_launch")
+			if response.ID == "" || raw == "" || time.Until(response.ExpiresAt) > 15*time.Minute || time.Until(response.ExpiresAt) < 14*time.Minute {
+				t.Fatalf("unexpected response: %+v", response)
+			}
+			sum := sha256.Sum256([]byte(raw))
+			impersonated, err := store.ConsumeAppLaunchCode(hex.EncodeToString(sum[:]), "sales")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if impersonated.ID != subject.ID || impersonated.SupportSession == nil ||
+				impersonated.SupportSession.ActorID != admin.ID || impersonated.SupportSession.AppSlug != "sales" {
+				t.Fatalf("dual principal = %+v", impersonated)
+			}
+			if _, err := store.ConsumeAppLaunchCode(hex.EncodeToString(sum[:]), "sales"); err == nil {
+				t.Fatal("launch capability replay should fail")
+			}
+			events, err := store.ListAuditEvents("support_session.start", 10, 0)
+			if err != nil || len(events) != 1 || events[0].ResourceID != response.ID ||
+				!strings.Contains(events[0].Detail, "Investigating ticket SUP-1042") || strings.Contains(events[0].Detail, raw) {
+				t.Fatalf("start audit events=%+v err=%v", events, err)
+			}
+
+		})
 	}
 }
 
@@ -236,20 +246,7 @@ func TestCreateSupportSessionIsOptInAndRequiresRecentAuthentication(t *testing.T
 	}
 }
 
-func TestCreateSupportSessionRejectsPrivilegedTargetsAndSelf(t *testing.T) {
-	for _, role := range []string{"operator", "admin"} {
-		t.Run(role, func(t *testing.T) {
-			srv, store, admin, _ := newSupportSessionServer(t, true)
-			_, targetID := seedUserAndJWT(t, store, "target-"+role, role)
-			token, _ := auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
-			body, _ := json.Marshal(map[string]any{"user_id": targetID, "app_slug": "sales", "reason": "Investigating support ticket"})
-			rec := httptest.NewRecorder()
-			srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/support-sessions", body, token))
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-			}
-		})
-	}
+func TestCreateSupportSessionRejectsSelf(t *testing.T) {
 	t.Run("self", func(t *testing.T) {
 		srv, _, admin, _ := newSupportSessionServer(t, true)
 		token, _ := auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
@@ -337,5 +334,43 @@ func TestSupportReasonUnicodeBoundaries(t *testing.T) {
 				t.Fatalf("unexpected live session: %+v", live)
 			}
 		})
+	}
+}
+
+func TestSupportSessionPrivilegedTargetsCanSelectPrivateApps(t *testing.T) {
+	for _, role := range []string{"operator", "admin"} {
+		t.Run(role, func(t *testing.T) {
+			srv, store, admin, _ := newSupportSessionServer(t, true)
+			_, targetID := seedUserAndJWT(t, store, "target", role)
+			if _, err := store.CreateApp(db.CreateAppParams{Slug: "private-app", Name: "Private", OwnerID: admin.ID, Access: "private"}); err != nil {
+				t.Fatal(err)
+			}
+			token, _ := auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
+			list := httptest.NewRecorder()
+			srv.Router().ServeHTTP(list, authedRequest(t, "GET", "/api/users/"+strconv.FormatInt(targetID, 10)+"/support-apps", nil, token))
+			if list.Code != 200 || !strings.Contains(list.Body.String(), "private-app") {
+				t.Fatalf("list: %d %s", list.Code, list.Body.String())
+			}
+			body, _ := json.Marshal(map[string]any{"user_id": targetID, "app_slug": "private-app", "reason": "Investigating support ticket"})
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, authedRequest(t, "POST", "/api/support-sessions", body, token))
+			if rec.Code != 201 {
+				t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestSupportSessionRejectsServiceAccountTarget(t *testing.T) {
+	srv, store, admin, target := newSupportSessionServer(t, true)
+	if _, err := store.DB().Exec("UPDATE users SET principal_type = 'service_account', role = 'admin' WHERE id = ?", target.ID); err != nil {
+		t.Fatal(err)
+	}
+	token, _ := auth.IssueJWT(admin.ID, admin.Username, admin.Role, "test-secret")
+	body, _ := json.Marshal(map[string]any{"user_id": target.ID, "app_slug": "sales", "reason": "Investigating support ticket"})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, "POST", "/api/support-sessions", body, token))
+	if rec.Code != 403 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
 }

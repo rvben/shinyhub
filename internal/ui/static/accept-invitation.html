@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Accept invitation · ShinyHub</title>
+  <link rel="icon" href="/static/brand/favicon.ico">
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/views/accept-invitation.js"></script>
+</head>
+<body class="invitation-page">
+  <main class="invitation-card">
+    <a class="invitation-brand" href="/login">ShinyHub</a>
+    <h1 id="invitation-heading">You’re invited</h1>
+    <p id="invitation-status" role="status">Checking your invitation…</p>
+    <p id="invitation-error" class="error" role="alert" hidden></p>
+    <button id="invitation-retry" type="button" hidden>Try again</button>
+    <form id="invitation-form" hidden>
+      <dl class="invitation-account"><div><dt>Username</dt><dd id="invitation-username"></dd></div><div><dt>Role</dt><dd id="invitation-role"></dd></div></dl>
+      <p id="invitation-role-description" class="profile-hint"></p>
+      <label for="invitation-password">Choose your password</label>
+      <input id="invitation-password" type="password" autocomplete="new-password" required minlength="15" aria-describedby="invitation-password-help">
+      <p id="invitation-password-help" class="profile-hint">Use at least 15 characters. A few unrelated words make a good passphrase.</p>
+      <label for="invitation-confirm">Confirm password</label>
+      <input id="invitation-confirm" type="password" autocomplete="new-password" required minlength="15">
+      <label class="invitation-show"><input id="invitation-show-password" type="checkbox"> Show passwords</label>
+      <button id="invitation-submit" type="submit" class="btn-primary">Create account and sign in</button>
+    </form>
+    <a id="invitation-signin" href="/login?next=%2Fapps" hidden>Continue to sign in</a>
+    <p class="invitation-footer">Your administrator chose your access. Your password is yours to set.</p>
+  </main>
+</body>
+</html>

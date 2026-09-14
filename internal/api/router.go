@@ -901,6 +901,8 @@ func (s *Server) buildRouter() chi.Router {
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/google/login", s.handleGoogleLogin)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/google/callback", s.handleGoogleCallback)
 	r.Get("/api/auth/providers", s.handleGetProviders)
+	r.With(s.rateLimitByIP(s.tokenLimiter)).Post("/api/auth/invitations/preview", s.handlePublicUserInvitation)
+	r.With(s.rateLimitByIP(s.tokenLimiter)).Post("/api/auth/invitations/accept", s.handlePublicUserInvitation)
 	r.With(s.rateLimitByIP(s.connectLimiter)).Get("/api/auth/cli-connect/status", s.handleCLIConnectStatus)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/login", s.handleOIDCLogin)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/callback", s.handleOIDCCallback)
@@ -1021,6 +1023,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/service-accounts/{key}/credentials", s.handleListServiceCredentials)
 		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/service-accounts/{key}/credentials", s.handleCreateServiceCredential)
 		r.Delete("/api/service-accounts/{key}/credentials/{id}", s.handleDeleteServiceCredential)
+		r.Get("/api/user-invitations", s.handleListUserInvitations)
+		r.With(rateLimitByUser(s.userLimiter)).Post("/api/user-invitations", s.handleCreateUserInvitation)
+		r.Delete("/api/user-invitations/{id}", s.handleRevokeUserInvitation)
+		r.With(rateLimitByUser(s.userLimiter)).Post("/api/user-invitations/{id}/replace", s.handleReplaceUserInvitation)
 		r.Get("/api/users", s.handleListUsers)                                        // admin: list all users
 		r.With(rateLimitByUser(s.userLimiter)).Post("/api/users", s.handleCreateUser) // admin: create user
 		r.Get("/api/users/{username}", s.handleGetUser)                               // any auth: lookup by username

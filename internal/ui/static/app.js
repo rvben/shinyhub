@@ -1,4 +1,7 @@
-import { renderSupportSessionSettings, createSupportSessionAction } from '/static/views/support-session-settings.js';
+import { createPersonActions } from '/static/views/person-actions.js';
+import { applyPeopleOnboarding, createInvitationList } from '/static/views/people-onboarding.js';
+import { createNewPersonController } from '/static/views/new-person.js';
+import { createSupportSessionAction } from '/static/views/support-session-settings.js';
 import { createRouter } from '/static/router.js';
 import { startAuthenticatedRouter } from '/static/auth-navigation.js';
 import { createMetricsController } from '/static/metrics-controller.js';
@@ -308,12 +311,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const newUserClose   = document.getElementById('new-user-close');
   const newUserCancel  = document.getElementById('new-user-cancel');
   const newUserForm    = document.getElementById('new-user-form');
-  const newUserUsername = document.getElementById('new-user-username');
-  const newUserPassword = document.getElementById('new-user-password');
-  const newUserRole     = document.getElementById('new-user-role');
-  const newUserError    = document.getElementById('new-user-error');
-  const newUserSnippet  = document.getElementById('new-user-snippet');
-  const newUserSnippetCopy = document.getElementById('new-user-snippet-copy');
   const identityPeopleTab = document.getElementById('identity-people-tab');
   const identityServicesTab = document.getElementById('identity-services-tab');
   const identityPeoplePanel = document.getElementById('identity-people-panel');
@@ -1689,10 +1686,27 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  let peopleInventory = [];
+  let personActionMenus = [];
+  let peopleOnboarding = null;
+  const invitationList = createInvitationList({
+    document, api, onUnauthorized: handleUnauthorized,
+    confirm: message => window.confirm(message),
+    announce: message => flashToast(message, 'success'),
+    onReplaced: result => newPerson.showInvitation(result, true),
+    canInvite: () => peopleOnboarding?.local === true,
+  });
+
   async function loadUsers() {
+    personActionMenus.forEach(menu => menu.close());
+    peopleInventory = [];
+    document.getElementById('people-count').textContent = 'Loading people…';
+    document.getElementById('people-search').disabled = true;
+    document.getElementById('people-role-filter').disabled = true;
     setError(usersError, '');
     state.supportSessions = { enabled: null };
-    renderSupportSessionSettings(document, null, true);
+    peopleOnboarding = null;
+    applyPeopleOnboarding(document, null);
 
     const showLoading = usersBody.childElementCount === 0;
     if (showLoading) {
@@ -1702,13 +1716,15 @@ document.addEventListener('DOMContentLoaded', () => {
       td.colSpan = 4;
       td.className = 'grid-loading';
       td.setAttribute('role', 'status');
-      td.textContent = 'Loading users…';
+      td.textContent = 'Loading people…';
       tr.appendChild(td);
       usersBody.appendChild(tr);
     }
     const clearUsersLoading = () => {
+      document.getElementById('people-count').textContent = '';
+      document.getElementById('people-search').disabled = false;
+      document.getElementById('people-role-filter').disabled = false;
       usersBody.removeAttribute('aria-busy');
-      renderSupportSessionSettings(document, state.supportSessions.enabled, false, state.supportSessions.trusted_apps === true);
     };
 
     let resp;
@@ -1728,6 +1744,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const uBody = (await resp.json()) || [];
       // Standard {items,...} list envelope; tolerate a bare array for resilience.
       users = Array.isArray(uBody) ? uBody : (Array.isArray(uBody.items) ? uBody.items : []);
+      peopleOnboarding = uBody.onboarding || null;
+      applyPeopleOnboarding(document, peopleOnboarding, identityPeoplePanel.hidden);
+      invitationList.load();
       if (!Array.isArray(uBody) && uBody.support_sessions) {
         state.supportSessions = uBody.support_sessions;
       }
@@ -1738,10 +1757,25 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderUsers(users) {
+    personActionMenus.forEach(menu => menu.close());
+    personActionMenus = [];
+    peopleInventory = users;
+    const query = document.getElementById('people-search').value.trim().toLocaleLowerCase();
+    const roleFilter = document.getElementById('people-role-filter').value;
+    const filtered = users.filter(user => (!roleFilter || user.role === roleFilter)
+      && `${user.username} ${user.display_name || ''}`.toLocaleLowerCase().includes(query));
+    document.getElementById('people-count').textContent = query || roleFilter
+      ? `${filtered.length} of ${users.length} people` : `${users.length} ${users.length === 1 ? 'person' : 'people'}`;
     usersBody.textContent = '';
+    if (!filtered.length) {
+      const row = usersBody.insertRow();
+      const cell = row.insertCell();
+      cell.colSpan = 4;
+      cell.textContent = users.length ? 'No people match. Try another name or choose All roles.' : 'No people yet. Invite someone or share your sign-in link to get started.';
+    }
     const selfId = state.user ? state.user.id : null;
 
-    for (const u of users) {
+    for (const u of filtered) {
       const tr = document.createElement('tr');
       const caps = userRowCaps(u, selfId);
 
@@ -1765,6 +1799,12 @@ document.addEventListener('DOMContentLoaded', () => {
         nameCell.appendChild(tag);
       }
       nameCell.appendChild(makeCopyButton(u.username, `Copy username ${u.username}`));
+      if (typeof u.has_local_password === 'boolean') {
+        const signIn = document.createElement('span');
+        signIn.className = 'users-display-name';
+        signIn.textContent = u.has_local_password ? (peopleOnboarding?.local === false ? 'Password sign-in disabled' : 'Password sign-in') : 'Single sign-on';
+        nameCell.appendChild(signIn);
+      }
       // Friendly display name (when set) as a subtitle under the username.
       if (u.display_name) {
         const dn = document.createElement('span');
@@ -1791,6 +1831,7 @@ document.addEventListener('DOMContentLoaded', () => {
         select.appendChild(opt);
       }
       select.value = rolePresentation.selected;
+      select.dataset.previous = rolePresentation.selected;
       if (!caps.canChangeRole) {
         select.disabled = true;
         if (caps.roleHint) select.title = caps.roleHint;
@@ -1800,7 +1841,7 @@ document.addEventListener('DOMContentLoaded', () => {
       roleCell.appendChild(select);
       const roleSource = document.createElement('span');
       roleSource.className = 'users-display-name';
-      roleSource.textContent = rolePresentation.sourceLabel;
+      roleSource.textContent = caps.isSelf ? `${rolePresentation.sourceLabel} · Your role can be changed by another admin.` : rolePresentation.sourceLabel;
       roleCell.appendChild(roleSource);
       tr.appendChild(roleCell);
 
@@ -1817,19 +1858,21 @@ document.addEventListener('DOMContentLoaded', () => {
       const actions = document.createElement('div');
       actions.className = 'users-row-actions';
 
-      actions.appendChild(createSupportSessionAction({
+      const supportAction = createSupportSessionAction({
         document, user: u, selfId, enabled: state.supportSessions.enabled,
         onStart: () => openSupportSessionModal(u),
-      }));
+      });
+      if (supportAction) actions.appendChild(supportAction);
 
       const resetBtn = document.createElement('button');
       resetBtn.type = 'button';
       resetBtn.className = 'btn-row';
       resetBtn.textContent = 'Reset password';
       resetBtn.setAttribute('aria-label', `Reset password for ${u.username}`);
-      if (!caps.canResetPassword) {
+      if (!caps.canResetPassword || u.has_local_password === false || peopleOnboarding?.local === false) {
         resetBtn.disabled = true;
-        resetBtn.title = RESERVED_USER_HINT;
+        resetBtn.title = caps.reserved ? RESERVED_USER_HINT : 'Password is managed by the sign-in provider';
+        resetBtn.hidden = !caps.reserved;
       } else {
         resetBtn.addEventListener('click', () => openResetPasswordModal(u));
       }
@@ -1851,7 +1894,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
       delBtn.className = 'btn-row btn-row-danger';
-      delBtn.textContent = 'Delete';
+      delBtn.textContent = 'Delete person';
       delBtn.setAttribute('aria-label', `Delete user ${u.username}`);
       if (!caps.canDelete) {
         delBtn.disabled = true;
@@ -1861,7 +1904,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       actions.appendChild(delBtn);
 
-      actionsCell.appendChild(actions);
+      const personMenu = createPersonActions(document, u.username, [...actions.children]);
+      personActionMenus.push(personMenu);
+      actionsCell.appendChild(personMenu.element);
       tr.appendChild(actionsCell);
 
       usersBody.appendChild(tr);
@@ -1876,7 +1921,7 @@ document.addEventListener('DOMContentLoaded', () => {
     identityServicesTab.setAttribute('aria-selected', String(services));
 	identityPeopleTab.tabIndex = services ? -1 : 0;
 	identityServicesTab.tabIndex = services ? 0 : -1;
-    newUserButton.hidden = services;
+    applyPeopleOnboarding(document, peopleOnboarding, services);
     if (services) loadServiceAccounts();
   }
 
@@ -2196,7 +2241,8 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify({role: newRole}),
       });
     } catch {
-      setError(usersError, 'Network error');
+      selectEl.value = previous;
+      setError(usersError, `Could not change the role for ${username}. Check your connection and try again.`);
       selectEl.disabled = false;
       return;
     }
@@ -2204,10 +2250,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
       setError(usersError, `Failed to update role for ${username}`);
-      if (previous) selectEl.value = previous;
+      selectEl.value = previous;
       return;
     }
     setError(usersError, '');
+    flashToast(`Role updated for ${username}.`, 'success');
     loadUsers();
   }
 
@@ -2226,10 +2273,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) { setError(usersError, `Failed to sign out ${username}`); return; }
     setError(usersError, '');
+    flashToast(`${username} signed out everywhere.`, 'success');
   }
 
   async function deleteUser(id, username, btn) {
-    if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    if (!confirm(`Delete person "${username}"? This cannot be undone.`)) return;
     if (btn) btn.disabled = true;
     let resp;
     try {
@@ -2243,7 +2291,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) { setError(usersError, `Failed to delete ${username}`); return; }
     setError(usersError, '');
-    loadUsers();
+    flashToast(`${username} deleted.`, 'success');
+    await loadUsers();
+    document.getElementById('users-refresh').focus();
   }
 
   function openResetPasswordModal(user) {
@@ -2258,6 +2308,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function openSupportSessionModal(user, draft = null) {
+    document.getElementById('support-session-trusted-warning').hidden = state.supportSessions.trusted_apps !== true;
     state.supportTarget = user;
     supportUsername.textContent = user.username;
     supportReason.value = draft?.reason || '';
@@ -2502,63 +2553,17 @@ document.addEventListener('DOMContentLoaded', () => {
     closeResetPasswordModal();
   }
 
-  function renderNewUserSnippet() {
-    if (!newUserSnippet) return;
-    const origin = window.location.origin;
-    const username = newUserUsername.value.trim() || '<username>';
-    newUserSnippet.textContent =
-      `shinyhub login --host ${origin} --username ${username}`;
-  }
-
-  function openNewUserModal() {
-    newUserForm.reset();
-    setError(newUserError, '');
-    renderNewUserSnippet();
-    newUserModal.hidden = false;
-    modalTrap(newUserModal).activate();
-    newUserUsername.focus();
-  }
-
-  function closeNewUserModal() {
-    newUserModal.hidden = true;
-    modalTrap(newUserModal).release();
-    newUserForm.reset();
-    setError(newUserError, '');
-  }
-
-  async function submitNewUser(event) {
-    event.preventDefault();
-    const username = newUserUsername.value.trim();
-    const password = newUserPassword.value;
-    const role     = newUserRole.value;
-    if (!username || password.length < 15) {
-      setError(newUserError, 'Username and 15+ char password are required');
-      return;
-    }
-    const submitBtn = newUserForm.querySelector('button[type="submit"]');
-    if (submitBtn) submitBtn.disabled = true;
-    let resp;
-    try {
-      resp = await api('/api/users', {
-        method: 'POST',
-        body: JSON.stringify({username, password, role}),
-      });
-    } catch {
-      setError(newUserError, 'Network error');
-      return;
-    } finally {
-      if (submitBtn) submitBtn.disabled = false;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Failed to create user';
-      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
-      setError(newUserError, msg);
-      return;
-    }
-    closeNewUserModal();
-    loadUsers();
-  }
+  const newPerson = createNewPersonController({
+    document, api, origin: window.location.origin,
+    activate: () => modalTrap(newUserModal).activate(),
+    release: () => modalTrap(newUserModal).release(),
+    onCreated: () => invitationList.load(),
+    onUnauthorized: handleUnauthorized,
+    copy: text => navigator.clipboard.writeText(text),
+  });
+  function openNewUserModal() { newPerson.open(); }
+  function closeNewUserModal() { newPerson.close(); }
+  function submitNewUser(event) { return newPerson.submit(event); }
 
   // ── API tokens (self-service, /tokens page) ────────────────────────────────
   async function loadTokens() {
@@ -4734,11 +4739,17 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch { document.getElementById('service-credential-copy-status').textContent = 'Copy is unavailable in this browser'; }
   });
   document.getElementById('workers-refresh')?.addEventListener('click', () => loadWorkers());
+  document.getElementById('people-search').addEventListener('input', () => renderUsers(peopleInventory));
+  document.getElementById('people-role-filter').addEventListener('change', () => renderUsers(peopleInventory));
+  document.getElementById('people-signin-copy').addEventListener('click', async () => {
+    const status = document.getElementById('people-onboarding-status');
+    try { await navigator.clipboard.writeText(`${window.location.origin}/login`); status.textContent = 'Sign-in link copied. People need access through your sign-in provider.'; flashToast('Sign-in link copied.', 'success'); }
+    catch { status.textContent = `Could not copy. Share ${window.location.origin}/login`; }
+  });
   newUserButton.addEventListener('click', openNewUserModal);
   newUserClose.addEventListener('click', closeNewUserModal);
   newUserCancel.addEventListener('click', closeNewUserModal);
   newUserForm.addEventListener('submit', submitNewUser);
-  newUserUsername.addEventListener('input', renderNewUserSnippet);
 
   // API tokens page + new-token modal wiring.
   if (newTokenButton) newTokenButton.addEventListener('click', openNewTokenModal);
@@ -4802,23 +4813,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target === e.currentTarget) closeAboutModal();
   });
 
-  if (newUserSnippetCopy) {
-    const copyLabel  = newUserSnippetCopy.querySelector('.copy-label');
-    const copyStatus = document.getElementById('new-user-snippet-status');
-    newUserSnippetCopy.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(newUserSnippet.textContent);
-        newUserSnippetCopy.classList.add('is-copied');
-        if (copyLabel)  copyLabel.textContent  = 'Copied';
-        if (copyStatus) copyStatus.textContent = 'Copied to clipboard';
-        setTimeout(() => {
-          newUserSnippetCopy.classList.remove('is-copied');
-          if (copyLabel)  copyLabel.textContent  = 'Copy';
-          if (copyStatus) copyStatus.textContent = '';
-        }, 2000);
-      } catch { /* clipboard unavailable */ }
-    });
-  }
   resetPwClose.addEventListener('click', closeResetPasswordModal);
   resetPwCancel.addEventListener('click', closeResetPasswordModal);
   resetPwForm.addEventListener('submit', submitResetPassword);

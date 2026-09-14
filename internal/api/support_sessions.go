@@ -135,8 +135,8 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if subject.PrincipalType == "service_account" || (subject.Role != "viewer" && subject.Role != "developer") {
-		writeError(w, http.StatusForbidden, "support sessions can target only human viewers or developers")
+	if subject.PrincipalType == "service_account" || !auth.IsValidGlobalRole(subject.Role) {
+		writeError(w, http.StatusForbidden, "support sessions can target only human users")
 		return
 	}
 	app, err := s.store.GetAppBySlug(req.AppSlug)
@@ -148,7 +148,7 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	canAccess := app.Access == "public" || app.Access == "shared"
+	canAccess := subject.Role == "admin" || subject.Role == "operator" || app.Access == "public" || app.Access == "shared"
 	if !canAccess {
 		canAccess, err = s.store.UserCanAccessApp(req.AppSlug, subject.ID)
 	}
@@ -300,11 +300,16 @@ func (s *Server) handleListSupportSessionApps(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if subject == nil || subject.PrincipalType == "service_account" ||
-		(subject.Role != string(auth.RoleViewer) && subject.Role != string(auth.RoleDeveloper)) {
+		!auth.IsValidGlobalRole(subject.Role) {
 		writeError(w, http.StatusNotFound, "eligible user not found")
 		return
 	}
-	apps, err := s.store.ListAppsVisibleToUser(subject.ID, 0, 0)
+	var apps []*db.App
+	if subject.Role == "admin" || subject.Role == "operator" {
+		apps, err = s.store.ListApps(0, 0)
+	} else {
+		apps, err = s.store.ListAppsVisibleToUser(subject.ID, 0, 0)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

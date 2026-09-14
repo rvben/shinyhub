@@ -26,6 +26,12 @@ history, and optional process or container isolation.
 - Enable metrics, structured logs, and retention appropriate to the installation.
 - Back up the database, bundles, and persistent app-data directory together.
 
+## People onboarding
+
+Use SSO for organization-managed identities or private, expiring invitations
+for local accounts. Recipients choose their own passwords. See
+[People and invitations](people.md) for roles, invitation handling, and audit behavior.
+
 ## Deployment identities
 
 Interactive people and non-interactive automation are separate principal

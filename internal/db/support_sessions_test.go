@@ -11,71 +11,77 @@ import (
 )
 
 func TestSupportSessionLifecycleRevokesItsBoundToken(t *testing.T) {
-	store := dbtest.New(t)
-	for _, user := range []db.CreateUserParams{
-		{Username: "admin", PasswordHash: "hash", Role: "admin"},
-		{Username: "alice", PasswordHash: "hash", Role: "developer"},
-	} {
-		if err := store.CreateUser(user); err != nil {
-			t.Fatal(err)
-		}
-	}
-	admin, _ := store.GetUserByUsername("admin")
-	alice, _ := store.GetUserByUsername("alice")
-	if _, err := store.CreateApp(db.CreateAppParams{
-		Slug: "sales", Name: "Sales", ProjectSlug: "default", OwnerID: admin.ID, Access: "public",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	app, _ := store.GetAppBySlug("sales")
-	expires := time.Now().UTC().Add(db.SupportSessionDuration)
-	if err := store.CreateSupportSession(db.CreateSupportSessionParams{
-		ID: "support-id", ActorUserID: admin.ID, ActorUsername: admin.Username,
-		ActorTokenEpoch: admin.TokenEpoch, SubjectUserID: alice.ID, SubjectUsername: alice.Username,
-		SubjectRole: alice.Role, SubjectTokenEpoch: alice.TokenEpoch, AppID: app.ID, AppSlug: "sales",
-		Reason: "Investigating SUP-1042", LaunchCodeHash: "launch-hash", ExpiresAt: expires,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	user, err := store.ConsumeAppLaunchCode("launch-hash", "sales")
-	if err != nil || user.SupportSession == nil {
-		t.Fatalf("consume support launch: user=%+v err=%v", user, err)
-	}
-	if _, err := store.ConsumeAppLaunchCode("launch-hash", "sales"); !errors.Is(err, db.ErrNotFound) {
-		t.Fatalf("replay error = %v, want not found", err)
-	}
-	if err := store.ActivateSupportSession("support-id", "support-jti", expires); err != nil {
-		t.Fatal(err)
-	}
-	stopped, err := store.StopSupportSession("support-id", "ended_by_actor", "192.0.2.1")
-	if err != nil || stopped.StoppedAt == nil || stopped.StopReason != "ended_by_actor" {
-		t.Fatalf("stop result = %+v, err=%v", stopped, err)
-	}
-	if !stopped.NewlyStopped {
-		t.Fatal("first stop must be identified as the audit winner")
-	}
-	var stopDetailJSON string
-	if err := store.DB().QueryRow(`SELECT detail FROM audit_events WHERE action = 'support_session.stop' AND resource_id = ?`, "support-id").Scan(&stopDetailJSON); err != nil {
-		t.Fatal(err)
-	}
-	var stopDetail map[string]any
-	if err := json.Unmarshal([]byte(stopDetailJSON), &stopDetail); err != nil {
-		t.Fatal(err)
-	}
-	if stopDetail["stop_reason"] != "ended_by_actor" || stopDetail["expires_at"] == nil {
-		t.Fatalf("stop audit detail = %#v", stopDetail)
-	}
-	revoked, err := store.IsTokenRevoked("support-jti")
-	if err != nil || !revoked {
-		t.Fatalf("token revoked = %v, err=%v", revoked, err)
-	}
-	// Ending twice is safe for banner retries and does not lose the first cause.
-	again, err := store.StopSupportSession("support-id", "retry", "192.0.2.1")
-	if err != nil || again.StopReason != "ended_by_actor" {
-		t.Fatalf("idempotent stop = %+v, err=%v", again, err)
-	}
-	if again.NewlyStopped {
-		t.Fatal("idempotent stop must not produce a second audit winner")
+	for _, role := range []string{"viewer", "developer", "operator", "admin"} {
+		t.Run(role, func(t *testing.T) {
+
+			store := dbtest.New(t)
+			for _, user := range []db.CreateUserParams{
+				{Username: "admin", PasswordHash: "hash", Role: "admin"},
+				{Username: "alice", PasswordHash: "hash", Role: role},
+			} {
+				if err := store.CreateUser(user); err != nil {
+					t.Fatal(err)
+				}
+			}
+			admin, _ := store.GetUserByUsername("admin")
+			alice, _ := store.GetUserByUsername("alice")
+			if _, err := store.CreateApp(db.CreateAppParams{
+				Slug: "sales", Name: "Sales", ProjectSlug: "default", OwnerID: admin.ID, Access: "public",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			app, _ := store.GetAppBySlug("sales")
+			expires := time.Now().UTC().Add(db.SupportSessionDuration)
+			if err := store.CreateSupportSession(db.CreateSupportSessionParams{
+				ID: "support-id", ActorUserID: admin.ID, ActorUsername: admin.Username,
+				ActorTokenEpoch: admin.TokenEpoch, SubjectUserID: alice.ID, SubjectUsername: alice.Username,
+				SubjectRole: alice.Role, SubjectTokenEpoch: alice.TokenEpoch, AppID: app.ID, AppSlug: "sales",
+				Reason: "Investigating SUP-1042", LaunchCodeHash: "launch-hash", ExpiresAt: expires,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			user, err := store.ConsumeAppLaunchCode("launch-hash", "sales")
+			if err != nil || user.SupportSession == nil {
+				t.Fatalf("consume support launch: user=%+v err=%v", user, err)
+			}
+			if _, err := store.ConsumeAppLaunchCode("launch-hash", "sales"); !errors.Is(err, db.ErrNotFound) {
+				t.Fatalf("replay error = %v, want not found", err)
+			}
+			if err := store.ActivateSupportSession("support-id", "support-jti", expires); err != nil {
+				t.Fatal(err)
+			}
+			stopped, err := store.StopSupportSession("support-id", "ended_by_actor", "192.0.2.1")
+			if err != nil || stopped.StoppedAt == nil || stopped.StopReason != "ended_by_actor" {
+				t.Fatalf("stop result = %+v, err=%v", stopped, err)
+			}
+			if !stopped.NewlyStopped {
+				t.Fatal("first stop must be identified as the audit winner")
+			}
+			var stopDetailJSON string
+			if err := store.DB().QueryRow(`SELECT detail FROM audit_events WHERE action = 'support_session.stop' AND resource_id = ?`, "support-id").Scan(&stopDetailJSON); err != nil {
+				t.Fatal(err)
+			}
+			var stopDetail map[string]any
+			if err := json.Unmarshal([]byte(stopDetailJSON), &stopDetail); err != nil {
+				t.Fatal(err)
+			}
+			if stopDetail["stop_reason"] != "ended_by_actor" || stopDetail["expires_at"] == nil {
+				t.Fatalf("stop audit detail = %#v", stopDetail)
+			}
+			revoked, err := store.IsTokenRevoked("support-jti")
+			if err != nil || !revoked {
+				t.Fatalf("token revoked = %v, err=%v", revoked, err)
+			}
+			// Ending twice is safe for banner retries and does not lose the first cause.
+			again, err := store.StopSupportSession("support-id", "retry", "192.0.2.1")
+			if err != nil || again.StopReason != "ended_by_actor" {
+				t.Fatalf("idempotent stop = %+v, err=%v", again, err)
+			}
+			if again.NewlyStopped {
+				t.Fatal("idempotent stop must not produce a second audit winner")
+			}
+
+		})
 	}
 }
 

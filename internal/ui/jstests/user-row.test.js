@@ -47,12 +47,12 @@ test('an ordinary other user is fully manageable', () => {
   assert.equal(caps.deleteHint, '');
 });
 
-test('support sessions are opt-in and limited to non-privileged people', () => {
+test('support sessions are opt-in and available for other human users', () => {
   assert.equal(supportSessionCaps({ id: 2, username: 'alice', role: 'developer' }, 1).canStart, false);
   assert.equal(supportSessionCaps({ id: 2, username: 'alice', role: 'viewer' }, 1, true).canStart, true);
   assert.equal(supportSessionCaps({ id: 2, username: 'alice', role: 'developer' }, 1, true).canStart, true);
-  assert.equal(supportSessionCaps({ id: 2, username: 'ops', role: 'operator' }, 1, true).canStart, false);
-  assert.equal(supportSessionCaps({ id: 2, username: 'root', role: 'admin' }, 1, true).canStart, false);
+  assert.equal(supportSessionCaps({ id: 2, username: 'ops', role: 'operator' }, 1, true).canStart, true);
+  assert.equal(supportSessionCaps({ id: 2, username: 'root', role: 'admin' }, 1, true).canStart, true);
   assert.equal(supportSessionCaps({ id: 1, username: 'me', role: 'admin' }, 1, true).canStart, false);
 });
 

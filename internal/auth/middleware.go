@@ -202,7 +202,7 @@ func resolveJWTUser(claims *Claims, userLookup UserLookup) (*ContextUser, error)
 		return nil, ErrTokenRevoked
 	}
 	if claims.SupportSessionID != "" {
-		if u == nil || u.Role != claims.Role || (u.Role != string(RoleViewer) && u.Role != string(RoleDeveloper)) || u.IsServiceAccount() {
+		if u == nil || u.Role != claims.Role || !IsValidGlobalRole(u.Role) || u.IsServiceAccount() {
 			return nil, ErrSupportSessionInvalid
 		}
 		if claims.ActorID <= 0 || claims.SupportAppID <= 0 || claims.SupportAppSlug == "" {
@@ -395,7 +395,7 @@ func AuthenticateSupportSessionForStop(r *http.Request, secret string) (*Context
 	}
 	if claims.SupportSessionID == "" || claims.SupportAppID <= 0 || claims.SupportAppSlug == "" ||
 		claims.ActorID <= 0 || claims.ActorUsername == "" || claims.UserID <= 0 || claims.Subject == "" ||
-		(claims.Role != string(RoleViewer) && claims.Role != string(RoleDeveloper)) {
+		!IsValidGlobalRole(claims.Role) {
 		return nil, nil, ErrSupportSessionInvalid
 	}
 	user := userFromClaims(claims)

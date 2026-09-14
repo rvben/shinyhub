@@ -1964,20 +1964,7 @@ body[data-auth="out"] {
 }
 .identity-tabs button[aria-selected="true"] { border-bottom-color: var(--cyan-bright); color: var(--text); }
 .identity-tabs button:hover { color: var(--cyan-bright); background: transparent; box-shadow: none; transform: none; }
-/* Support-session discovery belongs beside the People workflow. */
-.support-session-settings { padding: 0.5rem 0 1.5rem; margin-bottom: 1rem; border-bottom: 1px solid var(--line-2); }
-.support-settings-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.75rem; }
-.support-settings-heading h2 { margin: 0; font-size: 1.05rem; font-weight: 600; }
-#support-settings-status { color: var(--text-soft); font-size: 0.8rem; }
-.support-session-settings p, .support-settings-guide li { max-width: 72ch; color: var(--text-soft); font-size: 0.85rem; line-height: 1.65; }
-.support-session-settings p { margin: 0.65rem 0; }
-.support-session-settings summary { width: fit-content; padding: 0.65rem 0; color: var(--cyan-bright); cursor: pointer; font-size: 0.85rem; font-weight: 600; }
-.support-session-settings summary:focus-visible, .users-support-action button:focus-visible { outline: 2px solid var(--cyan-bright); outline-offset: 4px; }
-.support-settings-guide { max-width: 48rem; padding-top: 0.25rem; }
-.support-settings-guide ol { padding-left: 1.5rem; }
-.support-settings-guide li + li { margin-top: 0.5rem; }
-.support-settings-guide pre { max-width: 100%; overflow-x: auto; padding: 1rem; background: var(--surface-2); border: 1px solid var(--line-2); font-size: 0.8rem; line-height: 1.6; }
-.support-settings-guide p code { overflow-wrap: anywhere; }
+.users-support-action button:focus-visible { outline: 2px solid var(--cyan-bright); outline-offset: 4px; }
 .users-support-action { display: grid; justify-items: start; gap: 0.4rem; max-width: 13rem; }
 .users-support-hint { color: var(--text-soft); font-size: 0.72rem; line-height: 1.5; white-space: normal; }
 .users-row-actions { align-items: start; }
@@ -1995,7 +1982,6 @@ body[data-auth="out"] {
   #users-table .users-row-role { max-width: 100%; }
   .users-row-actions { flex-wrap: wrap; justify-content: flex-start; }
   .users-row-actions .btn-row { min-height: 44px; }
-  .support-session-settings summary { min-height: 44px; }
 }
 
 .service-account-explainer {
@@ -7479,3 +7465,81 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 .profile-tokens-link { margin: 0.25rem 0 0.5rem; }
 .profile-tokens-link a { color: var(--brand-primary); text-decoration: none; font-size: 0.9rem; }
 .profile-tokens-link a:hover { text-decoration: underline; }
+
+/* People creation: show the full role choice and a separate success handoff. */
+.person-form-intro { margin: 0 0 1rem; color: var(--text-soft); line-height: 1.6; }
+.person-role-choices { border: 0; padding: 0; margin: 1.5rem 0 0; min-width: 0; }
+.person-role-choices legend { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; }
+.modal-card form .person-role-choices label { display: flex; align-items: flex-start; gap: 0.75rem; margin: 0; padding: 0.65rem 0; cursor: pointer; }
+.person-role-choices label + label { border-top: 1px solid var(--line-2); }
+.person-role-choices input { accent-color: var(--accent); margin-top: 0.2rem; flex-shrink: 0; }
+.person-role-choices input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.person-role-choices label span span { display: block; color: var(--text-soft); line-height: 1.5; margin-top: 0.2rem; }
+.person-signin-details { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font); color: var(--text); line-height: 1.8; }
+#new-user-success p { color: var(--text-soft); line-height: 1.6; }
+
+.people-filters { display: flex; align-items: end; gap: 1rem; margin: 0 0 1rem; flex-wrap: wrap; }
+.people-filters label { display: grid; gap: 0.4rem; font-size: 0.8rem; color: var(--text-soft); }
+.people-filters label:first-child { flex: 1; min-width: min(100%, 16rem); }
+.people-filters input, .people-filters select { min-height: 44px; width: 100%; background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--radius); padding: 0.5rem 0.75rem; color: var(--text); font: inherit; }
+.people-filters input:focus-visible, .people-filters select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#people-count { padding-bottom: 0.75rem; font-size: 0.8rem; color: var(--text-soft); }
+.users-row-actions { flex-wrap: wrap; }
+#users-table td.users-username { font-family: var(--font); overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .people-filters label:first-child { flex-basis: 100%; }
+  #users-table td[colspan] { grid-column: 1 / -1; }
+}
+
+#people-onboarding { margin: 0.75rem 0; max-width: 75ch; line-height: 1.6; }
+.people-invitations { margin-top: 2rem; border-top: 1px solid var(--line-2); padding-top: 1.5rem; }
+.people-invitations h2 { font-size: 1rem; margin: 0; }
+.person-invitation { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem; padding: 1rem 0; border-bottom: 1px solid var(--line-2); }
+.person-invitation strong { overflow-wrap: anywhere; }
+.person-invitation p { color: var(--text-soft); font-size: 0.8rem; margin: 0.35rem 0 0; }
+.person-invitation button { min-height: 44px; }
+.invitation-page { display: grid; place-items: center; padding: 2rem 1rem; }
+.invitation-page main.invitation-card { width: min(100%, 32rem); margin: 0; padding: 2rem; background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--radius-lg); }
+.invitation-brand { display: inline-block; color: var(--text); font-size: 1rem; font-weight: 700; text-decoration: none; margin-bottom: 2rem; }
+.invitation-card h1 { font-size: 1.75rem; margin: 0 0 1rem; }
+.invitation-card p { color: var(--text-soft); line-height: 1.6; }
+.invitation-card .error { color: var(--red); }
+.invitation-card label { display: block; margin: 1rem 0 0.4rem; font-size: 0.85rem; }
+.invitation-card input[type="password"], .invitation-card input[type="text"] { width: 100%; min-height: 44px; padding: 0.65rem; font: inherit; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line-2); border-radius: var(--radius); }
+.invitation-card input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.invitation-account { display: flex; flex-wrap: wrap; gap: 2rem; margin: 1.5rem 0 0.5rem; }
+.invitation-account dt { color: var(--text-soft); font-size: 0.8rem; }
+.invitation-account dd { margin: 0.35rem 0 0; overflow-wrap: anywhere; font-weight: 600; }
+.invitation-card .invitation-show { display: flex; align-items: center; gap: 0.5rem; min-height: 44px; }
+#invitation-submit { width: 100%; min-height: 44px; margin-top: 1rem; }
+.invitation-footer { border-top: 1px solid var(--line-2); padding-top: 1.5rem; margin-top: 2rem; font-size: 0.8rem; }
+@media (max-width: 480px) { .invitation-page main.invitation-card { padding: 1.5rem; } }
+
+.invitation-card .profile-hint { font-size: 0.875rem; }
+
+.invitation-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+#invitation-signin { display: inline-block; margin-top: 1rem; font-weight: 600; }
+#invitation-signin[hidden] { display: none; }
+
+.people-joining { margin-top: 1.5rem; border-top: 1px solid var(--line-2); padding-top: 1rem; font-size: 0.875rem; color: var(--text-soft); }
+.people-joining[hidden] { display: none; }
+.people-joining summary { cursor: pointer; width: fit-content; padding: 0.5rem 0; }
+.people-joining-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+#people-onboarding-status:empty { display: none; }
+
+/* People: keep exceptional account actions out of the directory scan. */
+#users-table { overflow: visible; }
+.person-actions { display: flex; justify-content: flex-end; }
+.person-actions.kebab-open { z-index: 20; }
+.person-actions > button { width: 44px; min-height: 44px; border-color: transparent; background: transparent; }
+.person-actions-list { min-width: 13rem; max-width: calc(100vw - 3rem); white-space: normal; }
+.person-actions-list[hidden] { display: none; }
+.person-actions-list button { min-height: 44px; font: inherit; font-size: 0.875rem; }
+.person-actions-list button:hover { background: var(--surface); color: var(--text); }
+.person-actions-list .person-action-danger { color: var(--danger, #f87171); border-top: 1px solid var(--line-2); border-radius: 0; margin-top: 4px; }
+.person-actions-list .person-action-danger:hover { color: var(--danger, #f87171); }
+@media (max-width: 640px) {
+  #users-table tbody tr { position: relative; }
+  #users-table td:first-child { padding-right: 3rem; }
+  #users-table td:last-child { position: absolute; right: 0.75rem; top: 0.5rem; }
+}

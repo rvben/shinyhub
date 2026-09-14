@@ -2716,6 +2716,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	mux.Handle("/readyz", probeMethods(readyzHandler(prx, readyCh, store)))
 	mux.Handle("/activez", probeMethods(activezHandler(ownerAndReady)))
 	mux.Handle("/static/", ui.Handler())
+	mux.Handle("/invite", ui.InvitationHandler())
 
 	// GET /internal/runtime-bundle/{digest} streams a bundle to a managed runtime
 	// runner presenting a short-lived HMAC capability token. Keep the original

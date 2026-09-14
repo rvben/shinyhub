@@ -215,55 +215,61 @@ func TestRevokedAppAccessKeepsSupportSafetyRail(t *testing.T) {
 }
 
 func TestSupportSessionRejectsPublicAppRecreatedAtSameSlug(t *testing.T) {
-	store := makeStore(t)
-	for _, user := range []db.CreateUserParams{
-		{Username: "admin", PasswordHash: "h", Role: "admin"},
-		{Username: "alice", PasswordHash: "h", Role: "viewer"},
-	} {
-		if err := store.CreateUser(user); err != nil {
-			t.Fatal(err)
-		}
-	}
-	admin, _ := store.GetUserByUsername("admin")
-	alice, _ := store.GetUserByUsername("alice")
-	if _, err := store.CreateApp(db.CreateAppParams{Slug: "sales", Name: "Original", OwnerID: admin.ID, Access: "public"}); err != nil {
-		t.Fatal(err)
-	}
-	original, _ := store.GetAppBySlug("sales")
-	// Keep a higher row alive so SQLite cannot recycle the deleted rowid.
-	if _, err := store.CreateApp(db.CreateAppParams{Slug: "anchor", Name: "Anchor", OwnerID: admin.ID, Access: "private"}); err != nil {
-		t.Fatal(err)
-	}
-	issued := &auth.ContextUser{ID: alice.ID, Username: alice.Username, Role: alice.Role, TokenEpoch: alice.TokenEpoch,
-		SupportSession: &auth.SupportSessionContext{
-			ID: "support-id", ActorID: admin.ID, ActorUsername: admin.Username, ActorTokenEpoch: admin.TokenEpoch,
-			AppID: original.ID, AppSlug: "sales", ExpiresAt: time.Now().Add(15 * time.Minute),
-		},
-	}
-	token, _, err := auth.IssueSessionTokenWithInfo(issued, "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.DeleteApp("sales"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.CreateApp(db.CreateAppParams{Slug: "sales", Name: "Replacement", OwnerID: admin.ID, Access: "public"}); err != nil {
-		t.Fatal(err)
-	}
-	reached := false
-	handler := access.Middleware(store, "test-secret", nil, store.LookupContextUser)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reached = true
-		_, _ = w.Write([]byte("replacement content"))
-	}))
-	req := httptest.NewRequest(http.MethodGet, "/app/sales/", nil)
-	req.AddCookie(&http.Cookie{Name: auth.SupportSessionCookieName, Value: token})
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict || reached || strings.Contains(rec.Body.String(), "replacement content") {
-		t.Fatalf("status=%d reached=%v body=%s", rec.Code, reached, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "no longer the app approved") || !strings.Contains(rec.Body.String(), "End support session") {
-		t.Fatalf("scope-blocked safety page missing: %s", rec.Body.String())
+	for _, role := range []string{"viewer", "developer", "operator", "admin"} {
+		t.Run(role, func(t *testing.T) {
+
+			store := makeStore(t)
+			for _, user := range []db.CreateUserParams{
+				{Username: "admin", PasswordHash: "h", Role: "admin"},
+				{Username: "alice", PasswordHash: "h", Role: role},
+			} {
+				if err := store.CreateUser(user); err != nil {
+					t.Fatal(err)
+				}
+			}
+			admin, _ := store.GetUserByUsername("admin")
+			alice, _ := store.GetUserByUsername("alice")
+			if _, err := store.CreateApp(db.CreateAppParams{Slug: "sales", Name: "Original", OwnerID: admin.ID, Access: "public"}); err != nil {
+				t.Fatal(err)
+			}
+			original, _ := store.GetAppBySlug("sales")
+			// Keep a higher row alive so SQLite cannot recycle the deleted rowid.
+			if _, err := store.CreateApp(db.CreateAppParams{Slug: "anchor", Name: "Anchor", OwnerID: admin.ID, Access: "private"}); err != nil {
+				t.Fatal(err)
+			}
+			issued := &auth.ContextUser{ID: alice.ID, Username: alice.Username, Role: alice.Role, TokenEpoch: alice.TokenEpoch,
+				SupportSession: &auth.SupportSessionContext{
+					ID: "support-id", ActorID: admin.ID, ActorUsername: admin.Username, ActorTokenEpoch: admin.TokenEpoch,
+					AppID: original.ID, AppSlug: "sales", ExpiresAt: time.Now().Add(15 * time.Minute),
+				},
+			}
+			token, _, err := auth.IssueSessionTokenWithInfo(issued, "test-secret")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.DeleteApp("sales"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.CreateApp(db.CreateAppParams{Slug: "sales", Name: "Replacement", OwnerID: admin.ID, Access: "public"}); err != nil {
+				t.Fatal(err)
+			}
+			reached := false
+			handler := access.Middleware(store, "test-secret", nil, store.LookupContextUser)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				_, _ = w.Write([]byte("replacement content"))
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/app/sales/", nil)
+			req.AddCookie(&http.Cookie{Name: auth.SupportSessionCookieName, Value: token})
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict || reached || strings.Contains(rec.Body.String(), "replacement content") {
+				t.Fatalf("status=%d reached=%v body=%s", rec.Code, reached, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "no longer the app approved") || !strings.Contains(rec.Body.String(), "End support session") {
+				t.Fatalf("scope-blocked safety page missing: %s", rec.Body.String())
+			}
+
+		})
 	}
 }
 
