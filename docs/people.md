@@ -1,5 +1,5 @@
 ---
-description: "Onboard people through SSO or private invitations, then manage their roles and access."
+description: "Onboard people in ShinyHub through SSO or private invitations, manage roles and access, and start app-scoped support sessions."
 ---
 
 # People and invitations
