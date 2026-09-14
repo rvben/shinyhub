@@ -1,2 +1,2 @@
-shiny>=1.6
+shiny>=1.7
 PyJWT>=2.13
