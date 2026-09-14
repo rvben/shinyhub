@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.16.5](https://github.com/rvben/shinyhub/compare/v0.16.4...v0.16.5) - 2026-09-14
+
+### Added
+
+- **People**: invite people to deployments with password sign-in using expiring, single-use links, with replacement and revocation controls. Accepting an invitation signs the person in and opens Apps.
+- **Demo**: show a start page when the demo is asleep and require a same-origin request to start it.
+
+### Improved
+
+- **People**: lead with search and role filters, explain how people join below the directory, and keep account security actions in accessible per-person menus. SSO-only deployments hide invitations and use the configured identity provider for onboarding.
+- **Support sessions**: allow administrators to troubleshoot as another human administrator or operator, as well as developers and viewers. Sessions retain their app scope, required reason, 15-minute expiry, revocation, and audit trail; self-targeting and service accounts remain excluded.
+- **Demo**: filter crawlers and unserved app-origin requests at the edge, and reserve cold starts for visitors opening the demo.
+
+### Fixed
+
+- **Security**: update gRPC to 1.83.2 for CVE-2026-84445.
+- **Release checks**: advance the previous-release CLI compatibility baseline to v0.16.4.
+
 ## [0.16.4](https://github.com/rvben/shinyhub/compare/v0.16.3...v0.16.4) - 2026-09-10
 
 ### Added
