@@ -47,6 +47,25 @@ fail() {
   exit 1
 }
 
+# Released CLIs can finish --wait before the proxy serves the app's first
+# response. A 200 startup page is not the fixture, and one immediate curl makes
+# otherwise compatible deployments fail depending on scheduling/load.
+wait_for_app() {
+  local host="$1"
+  local slug="$2"
+  local deadline=$((SECONDS + 60))
+  local response="${WORK}/${slug}-response.html"
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    if curl -fsS --max-time 2 "${host}/app/${slug}/" -o "${response}" \
+      2>"${WORK}/${slug}-probe.log" \
+      && grep -Fq 'shinyhub remote-worker E2E' "${response}"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v uv >/dev/null 2>&1 || fail "uv is required"
 
@@ -184,7 +203,7 @@ exercise_current_against_released_server() {
   "${CURRENT_BIN}" deploy "${app_dir}" --slug "${slug}" \
     --visibility public --wait --config "${config}" --output table \
     >"${WORK}/current-${lane}-deploy.log" 2>&1 || fail "current deploy to ${lane} server"
-  curl -fsS "${host}/app/${slug}/" | grep -Fq 'shinyhub remote-worker E2E' \
+  wait_for_app "${host}" "${slug}" \
     || fail "app deployed by current CLI is not serving on ${lane} server"
 
   if [ "${lane}" = "previous" ]; then
@@ -289,7 +308,7 @@ exercise_released_cli_against_current_server() {
   "${released_bin}" deploy "${app_dir}" --slug "${slug}" \
     --visibility public --wait --config "${config}" --output table \
     >"${WORK}/${lane}-deploy.log" 2>&1 || fail "${lane} CLI deploy to current server"
-  curl -fsS "${CURRENT_HOST}/app/${slug}/" | grep -Fq 'shinyhub remote-worker E2E' \
+  wait_for_app "${CURRENT_HOST}" "${slug}" \
     || fail "app deployed by ${lane} CLI is not serving on current server"
 }
 

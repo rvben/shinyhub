@@ -64,10 +64,14 @@ sweeps its own live upgraded connections every `server.session_recheck_interval`
 | A public app was made private | same, for a connection admitted anonymously |
 
 A lapsed connection is closed at the socket, without a WebSocket close frame.
-The browser sees a dropped connection, reconnects, and meets the normal access
-check, which answers with the proper 401 or 403. So the window in which a
-revoked user keeps a session they already had open is one sweep interval, not
-the session's natural lifetime.
+The browser sees a dropped connection. Automatic reconnection depends on the
+app and runtime; ShinyHub's default status overlay offers a fresh session in a
+new tab or a restart in the current tab. Any new connection meets the normal
+access check, which denies a user who has lost admission. If only business
+entitlements changed, an admitted user's new session receives the updated set.
+The old connection normally closes within one sweep interval plus query/sweep
+time. This does not erase results already delivered or cancel work already
+accepted by the app; starting a fresh session can lose unsaved state.
 
 The sweep is per-instance by design. A hijacked connection can only be closed by
 the process holding it, so in a high-availability deployment every instance

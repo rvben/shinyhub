@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/rvben/shinyhub/compare/v0.16.5...v0.17.0) - 2026-09-16
+
 ### Added
 
 - **App entitlements**: define business permissions for an individual app and assign them to users or identity-provider groups through the API and `apps entitlements` CLI. Inspect effective grants and their sources; every change is recorded atomically in the audit log.
@@ -14,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Changed
 
 - **Session permissions**: entitlement changes reach subsequent HTTP requests without a redeploy and close WebSocket sessions with stale permission snapshots. An entitlement-only check continues every 30 seconds when general session rechecking is disabled. Lookup failures reject new authenticated app requests and close sessions holding business entitlements.
+- **Release checks**: exercise entitlement grants and revocations in real Python Shiny with the locally built identity helper, including server-side denial, disconnection of every privileged tab, and fresh-session recovery. Document recovery limits and a staged migration from app-local access lists.
+- **Compatibility checks**: test both CLI/server upgrade directions against v0.16.5 as the previous release.
+
+### Fixed
+
+- **Compatibility checks**: wait for the deployed app's response instead of treating a transient startup page as an upgrade failure.
 
 ## [0.16.5](https://github.com/rvben/shinyhub/compare/v0.16.4...v0.16.5) - 2026-09-14
 

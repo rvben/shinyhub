@@ -82,11 +82,18 @@ requests receive no entitlements.
 
 Shiny sessions retain the identity verified at their WebSocket handshake.
 Every instance compares its live connections' effective entitlement sets during
-the session sweep. A change closes affected connections; the browser reconnects
-through the access gate with a fresh identity. This normally happens within
+the session sweep. A change closes affected connections, normally within
 `server.session_recheck_interval` (default 30 seconds), plus query/sweep time.
-Both grants and revocations can cause reconnection and loss of unsaved session
-state. A redundant grant that leaves the effective set unchanged does not.
+The next connection passes through the access gate with a fresh identity.
+A redundant grant that leaves the effective set unchanged does not close the
+session.
+
+Automatic reconnection is not guaranteed. With ShinyHub's default status overlay,
+a disconnected Shiny app offers a new session in a new tab or a restart in the
+current tab. Apps with their own reconnect behavior may recover differently;
+test the deployed app and runtime. Both grants and revocations can interrupt
+work and lose unsaved session state. Previously delivered results may remain
+visible as an offline snapshot; revocation does not erase data already received.
 
 When general session rechecking is disabled, an entitlement-only sweep still
 runs every 30 seconds. If the database cannot verify a connection's nonempty
@@ -145,8 +152,35 @@ All endpoints require management access to the named app:
 
 ## Migrating app-local lists
 
-Define the permissions the app actually checks, resolve users to existing
-accounts, and inspect the proposed effective sets including group-derived
-grants. Update the app to check `entitlements` and remove its CSV override path
-in the same deployment. Do not leave both active after migration. Subsequent
-assignment changes require no app deployment.
+Use a staging copy of the app to validate the change before replacing its
+production authorization path:
+
+1. Inventory every protected operation and the current decision for each
+   affected user, including CSV overrides and IdP-derived roles. Agree on the
+   intended result where those sources disagree. Prefer permissions such as
+   `report_export` when an app really needs a capability rather than a user tier.
+2. Resolve CSV entries to existing ShinyHub accounts. Resolve unknown or
+   ambiguous entries explicitly; do not infer identity from an email alias or
+   create accounts merely to make an import succeed.
+3. Define and assign the proposed entitlements in the staging app. Run
+   `shinyhub apps entitlements effective <slug> <username>` for each affected
+   user and compare every contributing source with the intended permissions.
+   A direct `power_user` grant does not remove a group-derived `enterprise_user`
+   grant. If those tiers are exclusive, fix the assignments or define and test
+   the app's conflict handling before proceeding.
+4. Test the app with users who have no grant, a direct grant, a group grant,
+   and both sources. Removing a direct grant must preserve a matching group
+   grant; removing the final source must deny the protected operation. Revoke
+   while multiple tabs are open, verify disconnection, and verify the new
+   session's server-side decision. Ordinary app access should still work.
+5. Apply the reviewed assignments to the production app, inspect its effective
+   sets again, and deploy the app's helper upgrade and entitlement checks
+   together with removal of its CSV loaders and override logic. Check protected
+   operations on the server, even if the UI hides their controls. Do not leave
+   two authorization paths active after migration.
+
+Retain a record of the reviewed mapping and a known rollback deployment. An
+older bundle may restore its CSV behavior and stop honoring ShinyHub grants or
+revocations; reassess access before using it as a rollback. After migration,
+assignment changes require no app deployment. Direct grants currently have no
+expiry, so assign responsibility for periodic review and removal.
