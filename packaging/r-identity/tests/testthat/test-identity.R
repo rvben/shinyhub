@@ -17,7 +17,7 @@ test_that("the field names match the Python helper's Identity", {
   expect_setequal(
     names(u),
     c(
-      "user_id", "username", "role", "groups", "name", "email",
+      "user_id", "username", "role", "groups", "entitlements", "name", "email",
       "groups_truncated", "claims"
     )
   )

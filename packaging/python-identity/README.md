@@ -51,6 +51,7 @@ Both return an `Identity` or `None`. `Identity` fields:
 | `username` | `str` | Username |
 | `role` | `str` | Platform role: `viewer`, `developer`, `operator`, or `admin` |
 | `groups` | `tuple[str, ...]` | Verified group names |
+| `entitlements` | `tuple[str, ...]` | Effective business permissions for this app; empty for older servers |
 | `groups_truncated` | `bool` | `True` when the group list was capped at 100 |
 | `email` | `str` | `""` unless the deployment's IdP asserts one |
 | `name` | `str` | Display name; `""` unless the IdP asserts one |
@@ -168,8 +169,11 @@ that introduced identity forwarding); the token contract is stable across
 server releases. Claims a later server added (`email`, `name`) are simply
 `""` when an older server minted the token.
 
-**Upgrading from 0.3:** additive only. `shinyhub_identity.testing` is new;
-nothing else changed.
+**Upgrading from 0.4:** adds `Identity.entitlements` and entitlement support in
+the testing and local-development helpers. Older server tokens produce an empty
+tuple. Use this verified claim for app-specific permissions.
+
+**Upgrading from 0.3:** also adds `shinyhub_identity.testing`.
 
 **Upgrading from 0.2:** a rejected token now raises `IdentityError` instead of
 returning `None` with a warning, so code that treated `None` as "not logged in"

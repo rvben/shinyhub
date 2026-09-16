@@ -38,6 +38,7 @@ server <- function(input, output, session) {
 | `user_id` | Decimal user ID |
 | `username` | Username |
 | `role` | Platform role: `viewer`, `developer`, `operator`, or `admin` |
+| `entitlements` | Character vector of business permissions for this app; empty for older servers |
 | `groups` | Character vector of verified group names |
 | `groups_truncated` | `TRUE` when the group list was capped at 100 |
 | `email` | `""` unless the deployment's IdP asserts one |
@@ -159,8 +160,12 @@ that introduced identity forwarding); the token contract is stable across
 server releases. Claims a later server added (`email`, `name`) are simply
 `""` when an older server minted the token.
 
-**Upgrading from 0.3:** additive only. The `shinyhub_test_*` helpers and
-`with_shinyhub_identity()` are new; nothing else changed.
+**Upgrading from 0.4:** adds `user$entitlements` and entitlement support in the
+testing and local-development helpers. Older server tokens produce an empty
+character vector. Use this verified claim for app-specific permissions.
+
+**Upgrading from 0.3:** also adds the `shinyhub_test_*` helpers and
+`with_shinyhub_identity()`.
 
 **Upgrading from 0.2:** a rejected token now raises a `shinyhub_identity_error`
 condition instead of returning `NULL` with a warning, so code that treated

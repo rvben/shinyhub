@@ -17,7 +17,8 @@ shinyhub_test_token(
   slug = NULL,
   issuer = "shinyhub",
   expires_in = shinyhub_test_token_ttl(),
-  issued_at = NULL
+  issued_at = NULL,
+  entitlements = character(0)
 )
 }
 \arguments{
@@ -52,6 +53,9 @@ server's cap; omitted when \code{FALSE}.}
 an already-expired token.}
 
 \item{issued_at}{The \code{iat} claim, in epoch seconds. Defaults to now.}
+
+\item{entitlements}{App-specific business permissions, sorted and deduplicated.
+Omitted when empty.}
 }
 \value{
 The token, as a string.

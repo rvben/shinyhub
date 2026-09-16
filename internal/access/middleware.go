@@ -25,6 +25,10 @@ type store interface {
 	UserCanAccessApp(slug string, userID int64) (bool, error)
 }
 
+type entitlementSource interface {
+	AppEntitlementsForUser(appID, userID int64) ([]string, error)
+}
+
 type supportSessionObserver interface {
 	ObserveSupportSession(id string) error
 }
@@ -134,6 +138,19 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 			case http.StatusForbidden:
 				writeAccessDenied(w, r, http.StatusForbidden, "You don't have access to this app", slug, cfg)
 			default:
+				if user != nil {
+					if source, ok := st.(entitlementSource); ok {
+						names, err := source.AppEntitlementsForUser(app.ID, user.ID)
+						if err != nil {
+							http.Error(w, "app permissions temporarily unavailable", http.StatusServiceUnavailable)
+							return
+						}
+						// Never mutate an upstream or cached ContextUser in place.
+						boundUser := *user
+						boundUser.EntitlementAppID, boundUser.Entitlements = app.ID, names
+						r = r.WithContext(auth.WithUser(r.Context(), &boundUser))
+					}
+				}
 				r = r.WithContext(context.WithValue(r.Context(), authorizedAppKey{}, app))
 				next.ServeHTTP(w, r)
 			}

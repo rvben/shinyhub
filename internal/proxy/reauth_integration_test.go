@@ -152,6 +152,11 @@ func newReauthChain(t *testing.T, appAccess string) *reauthChain {
 
 	backend := wsEchoBackend(t)
 	prx := proxy.New()
+	app, err := store.GetAppBySlug(slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prx.SetPoolAppID(slug, app.ID)
 	if err := prx.Register(slug, backend.URL); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -173,11 +178,13 @@ const reauthSecret = "recheck-chain-secret"
 func (c *reauthChain) sweep() int {
 	return c.proxy.RecheckSessions(func(p proxy.ConnPrincipal) (bool, string, error) {
 		return access.Recheck(c.store, c.store.LookupContextUser, c.store.IsTokenRevoked, access.Principal{
-			Slug:         p.Slug,
-			UserID:       p.UserID,
-			Role:         p.Role,
-			SessionEpoch: p.SessionEpoch,
-			JTI:          p.JTI,
+			Slug:                   p.Slug,
+			EntitlementAppID:       p.EntitlementAppID,
+			EntitlementFingerprint: p.EntitlementFingerprint,
+			UserID:                 p.UserID,
+			Role:                   p.Role,
+			SessionEpoch:           p.SessionEpoch,
+			JTI:                    p.JTI,
 		})
 	})
 }
@@ -403,11 +410,13 @@ func TestReauthChain_TimerDrivenSweepClosesRevokedSession(t *testing.T) {
 		defer close(done)
 		c.proxy.StartSessionRecheck(ctx, 10*time.Millisecond, func(p proxy.ConnPrincipal) (bool, string, error) {
 			return access.Recheck(c.store, c.store.LookupContextUser, c.store.IsTokenRevoked, access.Principal{
-				Slug:         p.Slug,
-				UserID:       p.UserID,
-				Role:         p.Role,
-				SessionEpoch: p.SessionEpoch,
-				JTI:          p.JTI,
+				Slug:                   p.Slug,
+				EntitlementAppID:       p.EntitlementAppID,
+				EntitlementFingerprint: p.EntitlementFingerprint,
+				UserID:                 p.UserID,
+				Role:                   p.Role,
+				SessionEpoch:           p.SessionEpoch,
+				JTI:                    p.JTI,
 			})
 		})
 	}()

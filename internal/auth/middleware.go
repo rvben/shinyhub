@@ -40,6 +40,11 @@ type ContextUser struct {
 	ID       int64
 	Username string
 	Role     string
+	// Entitlements are resolved once per admitted request, against the live
+	// database, and only apply to EntitlementAppID. They confer no platform or
+	// app-management privileges. A zero app ID means no snapshot was resolved.
+	EntitlementAppID int64
+	Entitlements     []string
 	// PrincipalType distinguishes interactive people from non-interactive
 	// service accounts. Empty is treated as "human" for compatibility with
 	// callers that construct ContextUser values directly.

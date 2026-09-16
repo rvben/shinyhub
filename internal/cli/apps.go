@@ -38,6 +38,7 @@ func newAppsCmd() *cobra.Command {
 		newAppsStartCmd(),
 		newAppsSetCmd(),
 		newAppsAccessCmd(),
+		newAppsEntitlementsCmd(),
 		newAppsTransferCmd(),
 		newAppsDeleteCmd(),
 		newAppsStopCmd(),

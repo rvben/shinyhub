@@ -59,6 +59,7 @@ nav = [
     { "Application performance" = "app-performance.md" },
     { "Isolation" = "isolation.md" },
     { "Identity forwarding" = "identity.md" },
+    { "App entitlements" = "entitlements.md" },
     { "People and invitations" = "people.md" },
     { "Native OIDC" = "native-oidc.md" },
     { "Trusted publishing" = "trusted-publishing.md" },

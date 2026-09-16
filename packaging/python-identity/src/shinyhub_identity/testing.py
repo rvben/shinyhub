@@ -84,6 +84,7 @@ def mint_token(
     email: str = "",
     name: str = "",
     groups: Sequence[str] = (),
+    entitlements: Sequence[str] = (),
     groups_truncated: bool = False,
     key: Union[bytes, bytearray, str, None] = None,
     slug: str | None = None,
@@ -130,6 +131,8 @@ def mint_token(
     }
     if app_role:
         claims["app_role"] = app_role
+    if entitlements:
+        claims["entitlements"] = sorted(set(entitlements))
     if email:
         claims["email"] = email
     if name:

@@ -58,6 +58,7 @@ sweeps its own live upgraded connections every `server.session_recheck_interval`
 | An admin revoked the user's sessions, or their password changed | `users.token_epoch` no longer matches the connection's |
 | The user was deleted | the user row is gone |
 | The user's global role changed | the live role no longer matches the one the app was told |
+| The user's app entitlements changed | the effective business permission set differs from the handshake snapshot |
 | The user signed out | that session token's `jti` is revoked |
 | The user lost access to the app (membership or group grant removed) | the admission check is re-run against the live database |
 | A public app was made private | same, for a connection admitted anonymously |
@@ -73,11 +74,10 @@ the process holding it, so in a high-availability deployment every instance
 sweeps its own connections, standbys included, rather than the control-plane
 owner doing it for the cluster.
 
-Two kinds of drift are deliberately not swept, because they are not access
-decisions: group membership and profile fields (email, display name) change what
-a live session is *told* about the user, not whether it may stay open. Both are
-already bounded by the caches described below, and reach the app on its next
-HTTP request.
+Raw group/profile claim drift is not itself swept. Group changes that alter an
+app's effective entitlements do close affected sessions. Raw groups and profile
+updates otherwise reach apps on a subsequent HTTP request, after the upstream
+change has reached ShinyHub and any identity cache has expired.
 
 ### Token validity window
 
@@ -166,6 +166,7 @@ The identity token is a standard JWT signed with HS256. Its claims are:
 | `email` | string | The user's email when the IdP asserts one (forward-auth `email_header`, or persisted from an OAuth/OIDC login); omitted for local-password accounts |
 | `name` | string | The user's display name when the IdP asserts one (forward-auth `name_header`, or persisted from an OAuth/OIDC login); omitted for local-password accounts |
 | `groups` | array of strings | Sorted group names, capped at 100 (all names, including comma-bearing ones) |
+| `entitlements` | array of strings | Effective business permissions for this app only; omitted when empty. See [App entitlements](entitlements.md) |
 | `groups_truncated` | bool | `true` when the list was truncated to 100; absent otherwise |
 | `support_session_id` | string | Random support-session ID; present only during a support session |
 | `act` | object | Administrator actor with `sub` (decimal ID) and `preferred_username`; the top-level `sub` remains the represented user |
@@ -182,7 +183,7 @@ Rather than decode the token yourself, use the one-call helper for your
 language, so your app needs no JWT plumbing and stays testable without SSO.
 Both read the injected `SHINYHUB_IDENTITY_KEY` / `SHINYHUB_APP_SLUG`
 automatically, and both return the same identity shape: `user_id`, `username`,
-`role`, `groups`, `name`, `email`, `groups_truncated`, and the raw verified
+`role`, `groups`, `entitlements`, `name`, `email`, `groups_truncated`, and the raw verified
 `claims`. `email` and `name` are empty when the IdP asserted none.
 
 The helpers are versioned independently of the server: their versions track
@@ -494,7 +495,7 @@ manifest has no effect.
 ```yaml
 # shinyhub.yaml
 server:
-  session_recheck_interval: 30s   # default; 0 disables the sweep
+  session_recheck_interval: 30s   # default; 0 disables general session checks
 ```
 
 How often each instance re-authorizes its live WebSocket app sessions (see
@@ -503,15 +504,17 @@ long a revoked user keeps a session that was already open; ordinary HTTP
 requests are authorized on every request and are unaffected by this setting.
 
 The value is a duration, so write `30s` or `2m`, not `30`. A bare `0` turns the
-sweep off, restoring the older behaviour where an open session outlived every
-revocation. `SHINYHUB_SESSION_RECHECK_INTERVAL` overrides the YAML key.
+general sweep off. An entitlement-only sweep still runs every 30 seconds so
+business permissions remain revocable. `SHINYHUB_SESSION_RECHECK_INTERVAL`
+overrides the YAML key.
 
 Lowering it costs little: a sweep decides once per distinct (app, user) pair
 that holds a live connection, not once per connection and not once per request,
 so a user with eight tabs open costs one decision. An instance with no upgraded
-connections does no work at all. If the database is unreachable the sweep fails
-open and keeps every connection, because dropping every live session on a
-transient error is worse than a few more seconds of access for one revoked user.
+connections does no work at all. If the database is unreachable, connections
+holding nonempty business entitlements close because their permissions cannot
+be verified. Other connections retain the existing fail-open behavior on lookup
+errors. See [App entitlements](entitlements.md) for propagation and IdP limits.
 
 ### Key rotation
 

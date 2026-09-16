@@ -91,6 +91,7 @@ class Identity:
     username: str
     role: str
     groups: tuple[str, ...] = ()
+    entitlements: tuple[str, ...] = ()
     # "" when the upstream IdP asserted no email / name, which is the normal
     # case for local username/password accounts.
     name: str = ""
@@ -146,6 +147,11 @@ def _reason_for(exc: Exception) -> str:
 
 def _identity_from_claims(claims: Mapping[str, Any]) -> Identity:
     groups = claims.get("groups") or []
+    entitlements = claims.get("entitlements", [])
+    if not isinstance(entitlements, list) or not all(
+        isinstance(value, str) and value for value in entitlements
+    ):
+        raise IdentityError("malformed", "entitlements must be an array of nonempty strings")
     return Identity(
         user_id=str(claims.get("sub", "")),
         username=claims.get("preferred_username", ""),
@@ -153,6 +159,7 @@ def _identity_from_claims(claims: Mapping[str, Any]) -> Identity:
         email=claims.get("email", ""),
         name=claims.get("name", ""),
         groups=tuple(groups),
+        entitlements=tuple(entitlements),
         groups_truncated=bool(claims.get("groups_truncated", False)),
         claims=claims,
     )
@@ -215,6 +222,11 @@ def _dev_identity() -> Identity | None:
         if g.strip()
     )
     role = os.environ.get("SHINYHUB_IDENTITY_DEV_ROLE", "viewer")
+    entitlements = tuple(
+        value.strip()
+        for value in os.environ.get("SHINYHUB_IDENTITY_DEV_ENTITLEMENTS", "").split(",")
+        if value.strip()
+    )
     email = os.environ.get("SHINYHUB_IDENTITY_DEV_EMAIL", "")
     name = os.environ.get("SHINYHUB_IDENTITY_DEV_NAME", "")
     claims: Mapping[str, Any] = {
@@ -225,6 +237,7 @@ def _dev_identity() -> Identity | None:
         "email": email,
         "name": name,
         "groups": list(groups),
+        "entitlements": list(entitlements),
     }
     if not _dev_logged:
         _dev_logged = True
@@ -241,6 +254,7 @@ def _dev_identity() -> Identity | None:
         email=email,
         name=name,
         groups=groups,
+        entitlements=entitlements,
         groups_truncated=False,
         claims=claims,
     )

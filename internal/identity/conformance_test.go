@@ -86,7 +86,7 @@ func TestConformance_HelpersVerifyRealToken(t *testing.T) {
 	keyHex := hex.EncodeToString(key)
 	tok, err := identity.MintToken(key, identity.TokenParams{
 		UserID: 42, Username: "alice", Role: "admin", Email: "alice@example.com",
-		Name: "Alice Liddell", Groups: []string{"team-a", "team-b"}, Slug: conformanceSlug,
+		Name: "Alice Liddell", Groups: []string{"team-a", "team-b"}, Entitlements: []string{"power_user", "report_export"}, Slug: conformanceSlug,
 	})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
@@ -96,13 +96,13 @@ func TestConformance_HelpersVerifyRealToken(t *testing.T) {
 from shinyhub_identity import current_user
 u = current_user({"x-shinyhub-identity-token": os.environ["TOK"]})
 print(json.dumps({"username": u.username, "role": u.role, "user_id": u.user_id,
-                  "email": u.email, "name": u.name, "groups": list(u.groups),
+                  "email": u.email, "name": u.name, "groups": list(u.groups), "entitlements": list(u.entitlements),
                   "groups_truncated": u.groups_truncated}))`
 
 	rScript := `source(Sys.getenv("RFILE"))
 u <- verify_token(Sys.getenv("TOK"))
 cat(jsonlite::toJSON(list(username = u$username, role = u$role, user_id = u$user_id,
-                          email = u$email, name = u$name, groups = u$groups,
+                          email = u$email, name = u$name, groups = u$groups, entitlements = u$entitlements,
                           groups_truncated = u$groups_truncated), auto_unbox = TRUE), "\n")`
 
 	env := []string{"TOK=" + tok, "SHINYHUB_IDENTITY_KEY=" + keyHex, "SHINYHUB_APP_SLUG=" + conformanceSlug}
@@ -116,7 +116,7 @@ cat(jsonlite::toJSON(list(username = u$username, role = u$role, user_id = u$user
 			want := map[string]any{
 				"username": "alice", "role": "admin", "user_id": "42",
 				"email": "alice@example.com", "name": "Alice Liddell",
-				"groups": []any{"team-a", "team-b"}, "groups_truncated": false,
+				"groups": []any{"team-a", "team-b"}, "groups_truncated": false, "entitlements": []any{"power_user", "report_export"},
 			}
 			for field, wantValue := range want {
 				if !reflect.DeepEqual(got[field], wantValue) {

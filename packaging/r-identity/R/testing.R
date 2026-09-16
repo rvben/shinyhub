@@ -109,6 +109,8 @@ shinyhub_test_token_ttl <- function() {
 #'   the server.
 #' @param groups_truncated Set when the user's group list was cut to the
 #'   server's cap; omitted when \code{FALSE}.
+#' @param entitlements App-specific business permissions, sorted and deduplicated.
+#'   Omitted when empty.
 #' @param key Raw key bytes or a hex string. Defaults to
 #'   \code{\link{shinyhub_test_key}}.
 #' @param slug The audience to mint for. Defaults to
@@ -148,7 +150,8 @@ shinyhub_test_token <- function(user_id = 42,
                                 slug = NULL,
                                 issuer = "shinyhub",
                                 expires_in = shinyhub_test_token_ttl(),
-                                issued_at = NULL) {
+                                issued_at = NULL,
+                                entitlements = character(0)) {
   resolved <- .shinyhub_test_resolve(key, slug)
   now <- if (is.null(issued_at)) floor(as.numeric(Sys.time())) else floor(as.numeric(issued_at))
 
@@ -176,6 +179,7 @@ shinyhub_test_token <- function(user_id = 42,
     exp = now + expires_in
   )
   if (nzchar(app_role)) claims$app_role <- app_role
+  if (length(entitlements) > 0) claims$entitlements <- as.list(sort(unique(entitlements)))
   if (nzchar(email)) claims$email <- email
   if (nzchar(name)) claims$name <- name
   if (isTRUE(groups_truncated)) claims$groups_truncated <- TRUE

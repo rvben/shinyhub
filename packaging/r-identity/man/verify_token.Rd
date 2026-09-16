@@ -22,7 +22,7 @@ has already rejected the token by then.}
 }
 \value{
 A \code{shinyhub_identity}: a list of \code{user_id},
-  \code{username}, \code{role}, \code{groups}, \code{name}, \code{email},
+  \code{username}, \code{role}, \code{groups}, \code{entitlements}, \code{name}, \code{email},
   \code{groups_truncated}, and the raw \code{claims}.
 
   Every failure raises a \code{shinyhub_identity_error} condition, including

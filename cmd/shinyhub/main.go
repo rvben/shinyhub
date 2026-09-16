@@ -2618,31 +2618,43 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// closes the ones whose identity has been revoked. Deliberately started
 	// outside the owner scope - an HA standby holds its own connections and no
 	// other instance can close them for it.
-	if every := cfg.SessionRecheckInterval(); every > 0 {
+	every := cfg.SessionRecheckInterval()
+	recheckAppSessions := every > 0
+	if !recheckAppSessions {
+		every = 30 * time.Second // business permission snapshots must always be revocable
+	}
+	{
 		recheckCtx, cancelRecheck := context.WithCancel(context.Background())
 		recheckCancel = cancelRecheck
 		recheckWG.Add(1)
 		go func() {
 			defer recheckWG.Done()
 			prx.StartSessionRecheck(recheckCtx, every, func(c proxy.ConnPrincipal) (bool, string, error) {
-				return access.Recheck(store, appUserLookup, store.IsTokenRevoked, access.Principal{
-					Slug:              c.Slug,
-					UserID:            c.UserID,
-					Role:              c.Role,
-					SessionEpoch:      c.SessionEpoch,
-					JTI:               c.JTI,
-					ActorID:           c.ActorID,
-					ActorRole:         c.ActorRole,
-					ActorSessionEpoch: c.ActorSessionEpoch,
-					SupportAppID:      c.SupportAppID,
-					RoutedAppID:       c.RoutedAppID,
-					SupportExpiresAt:  c.SupportExpiresAt,
-				})
+				principal := access.Principal{
+					Slug:                   c.Slug,
+					EntitlementAppID:       c.EntitlementAppID,
+					EntitlementFingerprint: c.EntitlementFingerprint,
+					UserID:                 c.UserID,
+					Role:                   c.Role,
+					SessionEpoch:           c.SessionEpoch,
+					JTI:                    c.JTI,
+					ActorID:                c.ActorID,
+					ActorRole:              c.ActorRole,
+					ActorSessionEpoch:      c.ActorSessionEpoch,
+					SupportAppID:           c.SupportAppID,
+					RoutedAppID:            c.RoutedAppID,
+					SupportExpiresAt:       c.SupportExpiresAt,
+				}
+				if !recheckAppSessions {
+					return access.RecheckEntitlements(store, principal)
+				}
+				return access.Recheck(store, appUserLookup, store.IsTokenRevoked, principal)
 			})
 		}()
-		slog.Info("session recheck started", "interval", every)
-	} else {
-		slog.Warn("session recheck disabled: revoking a user will not close the app sessions they already have open")
+		slog.Info("session recheck started", "interval", every, "entitlements_only", !recheckAppSessions)
+	}
+	if !recheckAppSessions {
+		slog.Warn("general session recheck disabled; app entitlements still checked every 30s")
 	}
 	// The pages these two middlewares answer with instead of the app - denied,
 	// and awaiting a first deploy - are dead ends for the same reason app pages

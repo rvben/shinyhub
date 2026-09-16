@@ -118,6 +118,9 @@ func (p *Provider) PayloadFor(user *auth.ContextUser, slug string, appID int64) 
 		Email: user.Email, Name: user.DisplayName,
 		Groups: claim, GroupsTruncated: truncated, Slug: slug,
 	}
+	if appID > 0 && user.EntitlementAppID == appID {
+		params.Entitlements = user.Entitlements
+	}
 	if support := user.SupportSession; support != nil {
 		params.SupportSessionID = support.ID
 		params.ActorID = support.ActorID

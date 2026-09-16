@@ -408,7 +408,29 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	}},
 
 	// ── apps access (container) ───────────────────────────────────────────────
-	"apps access": {Mutating: ro},
+	"apps access":       {Mutating: ro},
+	"apps entitlements": {Mutating: ro},
+	"apps entitlements define": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string"}, {Name: "slug", Type: "string"}, {Name: "entitlement", Type: "string"},
+	}},
+	"apps entitlements delete": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string"}, {Name: "slug", Type: "string"}, {Name: "entitlement", Type: "string"},
+	}},
+	"apps entitlements grant":        {Mutating: mut, OutputFields: entitlementMutationFields},
+	"apps entitlements revoke":       {Mutating: mut, OutputFields: entitlementMutationFields},
+	"apps entitlements group-grant":  {Mutating: mut, OutputFields: entitlementMutationFields},
+	"apps entitlements group-revoke": {Mutating: mut, OutputFields: entitlementMutationFields},
+	"apps entitlements list": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "name", Type: "string"}, {Name: "description", Type: "string"},
+	}, EnvelopeFields: entitlementListEnvelope},
+	"apps entitlements grants": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "entitlement", Type: "string"}, {Name: "source", Type: "string"},
+		{Name: "user_id", Type: "integer"}, {Name: "username", Type: "string"}, {Name: "group", Type: "string"},
+	}, EnvelopeFields: entitlementListEnvelope},
+	"apps entitlements effective": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string"}, {Name: "slug", Type: "string"}, {Name: "user_id", Type: "integer"},
+		{Name: "entitlements", Type: "array", Items: &typeSpec{Type: "string"}}, {Name: "sources", Type: "array"},
+	}},
 
 	"apps access set": {
 		Mutating: mut,

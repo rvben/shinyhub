@@ -523,7 +523,8 @@ type ServerConfig struct {
 	// membership removed, app made private). It bounds how long a revoked user
 	// keeps the session they already had open; the request path is unaffected.
 	//
-	// Written as a duration ("30s", "2m") or as a bare 0 to turn the sweep off.
+	// Written as a duration ("30s", "2m") or as a bare 0 to turn general checks off.
+	// Business entitlements still have an independent 30s fallback sweep.
 	// A pointer so an explicit 0 (never re-check, the behaviour before this
 	// existed) is distinguishable from an absent key, which applies the default
 	// (see the SessionRecheckInterval accessor). Negative values disable too.
@@ -3398,9 +3399,8 @@ func (c *Config) HostBudgetMB() int { return c.Server.HostBudgetMB }
 
 // SessionRecheckInterval returns how often live WebSocket app sessions are
 // re-authorized. Unset applies the default; an explicit 0 or a negative value
-// disables the sweep entirely, which restores the pre-existing behaviour where
-// a session that was already open outlived any revocation. 0 from this accessor
-// means disabled.
+// disables general checks. The server still runs an entitlement-only sweep
+// every 30 seconds. 0 from this accessor means general checking is disabled.
 func (c *Config) SessionRecheckInterval() time.Duration {
 	switch {
 	case c.Server.SessionRecheckInterval == nil:

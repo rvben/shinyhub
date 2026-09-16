@@ -85,7 +85,8 @@ func SanitizeGroups(groups []string) (string, []string, bool) {
 // TokenClaims is the identity token payload. Apps verify iss, aud (their own
 // slug, injected as SHINYHUB_APP_SLUG), signature, and exp with ~30 s leeway.
 type TokenClaims struct {
-	Role string `json:"role"`
+	Role         string   `json:"role"`
+	Entitlements []string `json:"entitlements,omitempty"`
 	// AppRole is the caller's capability on THIS app: "owner", "manager"
 	// (global admin/operator or a manager-role member/group), or "viewer".
 	// Empty when the membership lookup was unavailable.
@@ -116,6 +117,7 @@ type TokenParams struct {
 	Email            string   // empty when the upstream IdP provided none
 	Name             string   // display name; empty when the IdP provided none
 	Groups           []string // pre-sanitized claim slice from SanitizeGroups
+	Entitlements     []string // app-scoped business permissions; never IdP groups
 	GroupsTruncated  bool
 	Slug             string // becomes aud
 	SupportSessionID string
@@ -136,6 +138,7 @@ func MintToken(key []byte, p TokenParams) (string, error) {
 	}
 	claims := TokenClaims{
 		Role:              p.Role,
+		Entitlements:      p.Entitlements,
 		AppRole:           p.AppRole,
 		Email:             p.Email,
 		Name:              p.Name,

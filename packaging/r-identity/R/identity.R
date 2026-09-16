@@ -50,12 +50,21 @@
 # claims stay available under $claims.
 .shinyhub_identity <- function(claims) {
   groups <- claims$groups
+  entitlements <- claims$entitlements
+  if ("entitlements" %in% names(claims) &&
+      (!is.list(entitlements) || !is.null(names(entitlements)) ||
+       !all(vapply(entitlements, function(value) {
+         is.character(value) && length(value) == 1 && !is.na(value) && nzchar(value)
+       }, logical(1))))) {
+    .shinyhub_error("malformed", "entitlements must be an array of nonempty strings")
+  }
   structure(
     list(
       user_id = .shinyhub_chr(claims$sub),
       username = .shinyhub_chr(claims$preferred_username),
       role = .shinyhub_chr(claims$role),
       groups = if (is.null(groups)) character(0) else as.character(unlist(groups)),
+      entitlements = if (is.null(entitlements)) character(0) else as.character(unlist(entitlements)),
       name = .shinyhub_chr(claims$name),
       email = .shinyhub_chr(claims$email),
       groups_truncated = isTRUE(claims$groups_truncated),
@@ -77,7 +86,7 @@
 #'   Values above 60 have no effect: jose applies its own 60-second grace and
 #'   has already rejected the token by then.
 #' @return A \code{shinyhub_identity}: a list of \code{user_id},
-#'   \code{username}, \code{role}, \code{groups}, \code{name}, \code{email},
+#'   \code{username}, \code{role}, \code{groups}, \code{entitlements}, \code{name}, \code{email},
 #'   \code{groups_truncated}, and the raw \code{claims}.
 #'
 #'   Every failure raises a \code{shinyhub_identity_error} condition, including
@@ -189,6 +198,14 @@ verify_token <- function(token, key = NULL, slug = NULL, leeway = 30) {
       "wrong_audience",
       sprintf("token audience does not include this app's slug (%s)", slug)
     )
+  }
+  if ("entitlements" %in% names(claims)) {
+    # jose simplifies arrays, so a singleton array and a scalar both become
+    # a character vector. Preserve the signed JSON shape for strict validation.
+    raw_claims <- jsonlite::fromJSON(rawToChar(jose::base64url_decode(
+      strsplit(token, ".", fixed = TRUE)[[1]][[2]]
+    )), simplifyVector = FALSE)
+    claims["entitlements"] <- list(raw_claims$entitlements)
   }
   .shinyhub_identity(claims)
 }
@@ -315,6 +332,11 @@ current_user <- function(session, key = NULL, slug = NULL, leeway = 30) {
     fixed = TRUE
   )[[1]])
   groups <- groups[nzchar(groups)]
+  entitlements <- trimws(strsplit(
+    Sys.getenv("SHINYHUB_IDENTITY_DEV_ENTITLEMENTS", unset = ""),
+    ",", fixed = TRUE
+  )[[1]])
+  entitlements <- entitlements[nzchar(entitlements)]
   role <- Sys.getenv("SHINYHUB_IDENTITY_DEV_ROLE", unset = "viewer")
   if (!nzchar(role)) {
     role <- "viewer"
@@ -326,7 +348,8 @@ current_user <- function(session, key = NULL, slug = NULL, leeway = 30) {
     role = role,
     email = Sys.getenv("SHINYHUB_IDENTITY_DEV_EMAIL", unset = ""),
     name = Sys.getenv("SHINYHUB_IDENTITY_DEV_NAME", unset = ""),
-    groups = as.list(groups)
+    groups = as.list(groups),
+    entitlements = as.list(entitlements)
   ))
 }
 

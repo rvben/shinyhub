@@ -17,25 +17,27 @@ import (
 // The proxy holds no store and no secret, so it cannot interpret these fields;
 // it only carries them back to the injected Reauthorizer.
 type ConnPrincipal struct {
-	Slug              string
-	UserID            int64 // 0 when the connection was admitted anonymously
-	Role              string
-	SessionEpoch      int64
-	JTI               string
-	ActorID           int64
-	ActorRole         string
-	ActorSessionEpoch int64
-	SupportAppID      int64
-	RoutedAppID       int64
-	SupportExpiresAt  time.Time
+	Slug                   string
+	EntitlementAppID       int64
+	EntitlementFingerprint string
+	UserID                 int64 // 0 when the connection was admitted anonymously
+	Role                   string
+	SessionEpoch           int64
+	JTI                    string
+	ActorID                int64
+	ActorRole              string
+	ActorSessionEpoch      int64
+	SupportAppID           int64
+	RoutedAppID            int64
+	SupportExpiresAt       time.Time
 }
 
 // Reauthorizer re-decides whether a live upgraded connection may stay open.
 //
-// It must report revoked=true with a short reason ONLY when access has
-// definitively lapsed. A non-nil error means the decision could not be made and
-// the connection is kept. Failing open on error is deliberate: a database blip
-// must not drop every live session on the instance.
+// revoked=true requests closure, including when business permissions can no
+// longer be verified. A non-nil error keeps the connection; the authorizer must
+// explicitly choose closure for permission snapshots that require fail-closed
+// behavior.
 type Reauthorizer func(ConnPrincipal) (revoked bool, reason string, err error)
 
 // connPrincipal reads the identity the access middleware attached to this
@@ -45,6 +47,10 @@ type Reauthorizer func(ConnPrincipal) (revoked bool, reason string, err error)
 func connPrincipal(r *http.Request, slug string, routedAppID int64) ConnPrincipal {
 	p := ConnPrincipal{Slug: slug, RoutedAppID: routedAppID}
 	if u := auth.UserFromContext(r.Context()); u != nil {
+		if u.EntitlementAppID > 0 && u.EntitlementAppID == routedAppID {
+			p.EntitlementAppID = u.EntitlementAppID
+			p.EntitlementFingerprint = auth.EntitlementFingerprint(u.Entitlements)
+		}
 		p.UserID = u.ID
 		p.Role = u.Role
 		p.SessionEpoch = u.TokenEpoch

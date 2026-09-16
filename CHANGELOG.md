@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **App entitlements**: define business permissions for an individual app and assign them to users or identity-provider groups through the API and `apps entitlements` CLI. Inspect effective grants and their sources; every change is recorded atomically in the audit log.
+- **Identity helpers**: Python and R helpers 0.5.0 expose a separate, signed `entitlements` claim. Existing apps retain their group and platform-role semantics; apps adopting entitlements must update their helpers and remove legacy access-list overrides.
+
+### Changed
+
+- **Session permissions**: entitlement changes reach subsequent HTTP requests without a redeploy and close WebSocket sessions with stale permission snapshots. An entitlement-only check continues every 30 seconds when general session rechecking is disabled. Lookup failures reject new authenticated app requests and close sessions holding business entitlements.
+
 ## [0.16.5](https://github.com/rvben/shinyhub/compare/v0.16.4...v0.16.5) - 2026-09-14
 
 ### Added

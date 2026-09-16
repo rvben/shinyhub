@@ -20,7 +20,9 @@ import (
 // connection findable again.
 type Principal struct {
 	// Slug is the app the connection is bound to.
-	Slug string
+	Slug                   string
+	EntitlementAppID       int64
+	EntitlementFingerprint string
 	// UserID is 0 for a connection admitted anonymously to a public app.
 	UserID int64
 	// Role is the user's global role at the upgrade. It is compared against the
@@ -47,11 +49,9 @@ type Principal struct {
 // Recheck re-decides whether an already-open upgraded connection may stay open,
 // reading the live database rather than anything cached on the connection.
 //
-// It reports revoked=true with a short human-readable reason ONLY when access
-// has definitively lapsed. A non-nil error means the decision could not be made
-// and the caller must keep the connection: dropping every live session on a
-// transient database error is a far worse outcome than a few more seconds of
-// access for a principal already revoked.
+// It reports revoked=true when access has lapsed, or a nonempty entitlement
+// snapshot can no longer be verified. Other lookup failures return an error and
+// preserve the existing connection's availability behavior.
 //
 // The checks below fall into two groups. The first re-runs admission through
 // decide, so anything that would stop the user opening this connection now also
@@ -64,6 +64,20 @@ func Recheck(st store, lookup auth.UserLookup, revoked auth.RevocationChecker, p
 	if !p.SupportExpiresAt.IsZero() && !time.Now().Before(p.SupportExpiresAt) {
 		return true, "support session expired", nil
 	}
+	entRevoked, reason, entErr := RecheckEntitlements(st, p)
+	if entRevoked {
+		return true, reason, nil
+	}
+	// An unavailable entitlement snapshot must not mask a definitive logout,
+	// epoch bump, role change, or admission revocation from the other checks.
+	isRevoked, reason, err := recheckAccessAndIdentity(st, lookup, revoked, p)
+	if isRevoked {
+		return true, reason, nil
+	}
+	return false, "", errors.Join(entErr, err)
+}
+
+func recheckAccessAndIdentity(st store, lookup auth.UserLookup, revoked auth.RevocationChecker, p Principal) (bool, string, error) {
 	if p.ActorID > 0 {
 		if p.SupportAppID <= 0 || p.RoutedAppID <= 0 || p.RoutedAppID != p.SupportAppID {
 			return true, "support session routed app replaced", nil
@@ -98,6 +112,9 @@ func Recheck(st store, lookup auth.UserLookup, revoked auth.RevocationChecker, p
 	}
 	if p.SupportAppID > 0 && app.ID != p.SupportAppID {
 		return true, "support session app replaced", nil
+	}
+	if p.EntitlementAppID > 0 && app.ID != p.EntitlementAppID {
+		return true, "entitlement app replaced", nil
 	}
 
 	// An anonymous connection carries no identity to revoke. The only thing
@@ -146,6 +163,33 @@ func Recheck(st store, lookup auth.UserLookup, revoked auth.RevocationChecker, p
 	}
 	if status != http.StatusOK {
 		return true, "access to the app was removed", nil
+	}
+	return false, "", nil
+}
+
+// RecheckEntitlements verifies only the app-business permission snapshot. It
+// remains active when the optional general session sweep is disabled.
+func RecheckEntitlements(st store, p Principal) (bool, string, error) {
+	if p.EntitlementFingerprint != "" {
+		source, ok := st.(entitlementSource)
+		var names []string
+		var err error
+		if !ok {
+			err = errors.New("entitlement source unavailable")
+		} else {
+			names, err = source.AppEntitlementsForUser(p.EntitlementAppID, p.UserID)
+		}
+		if err != nil {
+			// A connection holding business privileges must not retain them
+			// indefinitely when the database cannot confirm they remain valid.
+			if p.EntitlementFingerprint != auth.EntitlementFingerprint(nil) {
+				return true, "app permissions could not be verified", nil
+			}
+			return false, "", err
+		}
+		if auth.EntitlementFingerprint(names) != p.EntitlementFingerprint {
+			return true, "app entitlements changed", nil
+		}
 	}
 	return false, "", nil
 }
