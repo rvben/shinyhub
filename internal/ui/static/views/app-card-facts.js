@@ -53,8 +53,6 @@ export function appCardFacts(app, live = null, now = Date.now()) {
   if (app.autoscale_enabled && Number(app.autoscale_min_replicas) === 0
       && (status === 'hibernated' || status === 'idle')) {
     facts.push(fact('Scales to zero'));
-  } else if (app.managed_by) {
-    facts.push(fact('Fleet managed', '', `Managed by ${app.managed_by}`));
   } else if (replicas && (status === 'running' || status === 'degraded')) {
     const ready = replicas.filter(replica => replica.status === 'running').length;
     if (configured > 1 || ready !== configured) facts.push(fact(`${ready}/${configured} ready`));

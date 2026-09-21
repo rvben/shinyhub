@@ -8,7 +8,7 @@ import "testing"
 func TestIsUIPath(t *testing.T) {
 	uiRoutes := []string{
 		"/login", "/home", "/launchpad", "/apps", "/users", "/workers", "/audit-log", "/tokens",
-		"/apps/my-app", "/apps/my-app/logs",
+		"/apps/my-app", "/apps/my-app/logs", "/projects/team-dashboards",
 	}
 	for _, p := range uiRoutes {
 		if !IsUIPath(p) {

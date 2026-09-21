@@ -35,7 +35,7 @@ export function isPrimaryNavActive(hrefPath, currentPath, role) {
     return homeSurfaceForSession(role) === 'overview' ? href === '/' : href === '/apps';
   }
   if (current === '/launchpad') return href === '/apps';
-  if (current.startsWith('/apps/') && href === '/apps') return true;
+  if ((current.startsWith('/apps/') || current.startsWith('/projects/')) && href === '/apps') return true;
   return href === current;
 }
 

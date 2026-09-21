@@ -241,6 +241,48 @@
       </div>
     </section>
 
+    <section id="project-detail-view" hidden aria-labelledby="project-detail-heading">
+      <nav class="detail-breadcrumb" aria-label="Breadcrumb">
+        <a href="/apps" data-nav>Apps</a>
+        <span aria-hidden="true">›</span>
+        <span id="project-detail-breadcrumb" aria-current="page">Project</span>
+      </nav>
+      <div class="project-detail-header">
+        <div class="project-detail-identity">
+          <div id="project-detail-icon" class="project-detail-avatar" aria-hidden="true"></div>
+          <div class="project-detail-copy">
+            <div class="project-detail-title-row">
+              <h1 id="project-detail-heading">Project</h1>
+              <span id="project-detail-count" class="project-detail-count"></span>
+            </div>
+            <code id="project-detail-slug" class="project-detail-slug"></code>
+            <p id="project-detail-description" class="project-detail-description"></p>
+          </div>
+        </div>
+        <div class="project-detail-actions">
+          <button id="project-detail-edit" type="button" class="toolbar-btn-quiet" hidden>Edit project</button>
+          <button id="project-detail-add" type="button" class="btn-primary" hidden>Add app</button>
+          <button id="project-detail-refresh" type="button" class="toolbar-btn-quiet">Refresh</button>
+        </div>
+      </div>
+      <div class="project-detail-section-heading">
+        <h2>Apps in this project</h2>
+        <p>Status and deployment controls stay live while this page is open.</p>
+      </div>
+      <p id="project-detail-loading" class="loading-state" role="status">Loading project…</p>
+      <p id="project-detail-error" class="error" role="alert" hidden></p>
+      <div id="project-detail-grid" class="app-grid project-detail-grid"></div>
+      <div id="project-detail-empty" class="emptystate-card project-detail-empty" hidden
+           role="region" aria-labelledby="project-detail-empty-heading">
+        <h2 id="project-detail-empty-heading">No apps in this project</h2>
+        <p class="lead">Add an app here to keep its status, deployments, and access controls together.</p>
+        <div class="emptystate-actions">
+          <button id="project-detail-empty-add" type="button" class="emptystate-btn emptystate-btn-primary" hidden>Add app</button>
+          <a href="/apps" data-nav class="emptystate-btn">Back to all apps</a>
+        </div>
+      </div>
+    </section>
+
     <section id="users-view" hidden aria-labelledby="identity-heading">
       <div class="toolbar">
         <div><h1 id="identity-heading">Identity</h1><p class="identity-page-intro">Manage people, their roles, and service accounts for automation.</p></div>
@@ -1536,6 +1578,7 @@
         <input id="project-edit-icon" type="text" maxlength="16" autocomplete="off"
                aria-describedby="project-edit-icon-hint">
         <p class="hint" id="project-edit-icon-hint">A single emoji. Leave empty for none.</p>
+        <p id="project-edit-error" class="error" role="alert" hidden></p>
 
         <div class="modal-actions">
           <button type="button" data-close-project-edit>Cancel</button>

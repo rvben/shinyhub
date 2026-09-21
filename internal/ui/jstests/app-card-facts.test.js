@@ -57,7 +57,7 @@ test('a hibernated scale-to-zero app describes its policy', () => {
   assert.equal(facts.at(-1).text, 'Scales to zero');
 });
 
-test('fleet governance outranks routine readiness after a metrics poll', () => {
+test('operational readiness remains visible for fleet-managed apps', () => {
   const facts = appCardFacts({
     release_number: 3,
     released_at: '2026-08-14T11:00:00Z',
@@ -65,10 +65,9 @@ test('fleet governance outranks routine readiness after a metrics poll', () => {
     replicas: 3,
   }, {
     status: 'running',
-    replicas: [{ status: 'running' }, { status: 'running' }, { status: 'running' }],
+    replicas: [{ status: 'running' }, { status: 'running' }, { status: 'starting' }],
   }, now);
-  assert.equal(facts.at(-1).text, 'Fleet managed');
-  assert.equal(facts.at(-1).title, 'Managed by fleet:production');
+  assert.equal(facts.at(-1).text, '2/3 ready');
 });
 
 test('invalid release timestamps do not create misleading recency', () => {

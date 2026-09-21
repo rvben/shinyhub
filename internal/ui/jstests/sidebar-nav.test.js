@@ -43,6 +43,7 @@ test('isPrimaryNavActive: contextual home and legacy Launchpad alias select Apps
   assert.equal(isPrimaryNavActive('/apps', '/home', 'viewer'), true);
   assert.equal(isPrimaryNavActive('/apps', '/launchpad', 'admin'), true);
   assert.equal(isPrimaryNavActive('/apps', '/apps/demo/logs', 'admin'), true);
+  assert.equal(isPrimaryNavActive('/apps', '/projects/analytics', 'admin'), true);
 });
 
 test('groupAppsByProject: ungrouped first, named projects sorted, apps sorted by name', () => {

@@ -6,6 +6,7 @@ import { createRouter } from '/static/router.js';
 import { startAuthenticatedRouter } from '/static/auth-navigation.js';
 import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
+import { mountProjectDetail } from '/static/views/project-detail.js';
 import { mountOverview } from '/static/views/overview.js';
 import { mountLaunchpad } from '/static/views/launchpad.js';
 import { renderAppAvatar, avatarView } from '/static/views/app-avatar.js';
@@ -41,6 +42,7 @@ import {
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { headerStats } from '/static/views/stat-format.js';
 import { appCardFacts } from '/static/views/app-card-facts.js';
+import { renderAppAttention } from '/static/views/app-attention.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
 import { inspectBundleEntry } from '/static/views/bundle-filter.js';
 import { createAppCardLifecycle, requestAppRestart, restartConfirmationCopy } from '/static/views/app-card-lifecycle.js';
@@ -223,12 +225,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // rebuilt with the DOM and never retains detached cards.
   const appCardLifecycleControls = new Map();
   const appRestartFeedback = new Map();
+  const appLiveViews = new Map();
   let appRestartFeedbackVersion = 0;
 
   const loginView = document.getElementById('login-view');
   const overviewView = document.getElementById('overview-view');
   const launchpadView = document.getElementById('launchpad-view');
   const appsView = document.getElementById('apps-view');
+  const projectDetailView = document.getElementById('project-detail-view');
   const appDetailView = document.getElementById('app-detail-view');
   const loginForm = document.getElementById('login-form');
   const usernameInput = document.getElementById('login-username');
@@ -266,6 +270,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const aboutClose   = document.getElementById('about-close');
   const loadServerInfo = createServerInfoLoader((url) => fetch(url));
   const appGrid = document.getElementById('app-grid');
+  const projectDetailGrid = document.getElementById('project-detail-grid');
   const emptyState = document.getElementById('empty-state');
   const emptyStateHeading = document.getElementById('empty-state-heading');
   const emptyStateEyebrow = document.getElementById('empty-state-eyebrow');
@@ -565,6 +570,34 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function attentionRail(gridEl) {
+    return Array.from(gridEl.children).find((child) => child.classList.contains('app-attention')) || null;
+  }
+
+  function mountAttentionRail(gridEl, apps) {
+    const current = attentionRail(gridEl);
+    const next = renderAppAttention(document, apps, appLiveViews);
+    if (current && next && current.dataset.signature === next.dataset.signature) return;
+
+    const keepFocus = current ? focusedKey(current) : '';
+    if (current && next) current.replaceWith(next);
+    else if (current) current.remove();
+    else if (next) gridEl.prepend(next);
+    if (keepFocus && (!next || !restoreFocus(next, keepFocus))) {
+      const parts = keepFocus.split(':');
+      if (parts[0] === 'attention' && parts[1]) restoreFocus(gridEl, `app:${parts[1]}:title`);
+    }
+  }
+
+  function refreshAttentionRail() {
+    const grid = !projectDetailView.hidden ? projectDetailGrid : appGrid;
+    if (appsView.hidden && projectDetailView.hidden) return;
+    const visible = Array.from(grid.querySelectorAll('.app-card[data-slug]'))
+      .map((card) => state.apps.find((app) => app.slug === card.dataset.slug))
+      .filter(Boolean);
+    mountAttentionRail(grid, visible);
+  }
+
   // syncCardFromModel brings one card back in line with the stored app model,
   // optionally merging a live view first (a /metrics sample, or the row a
   // lifecycle action just returned). The badge, the lifecycle menu and the facts
@@ -579,12 +612,17 @@ document.addEventListener('DOMContentLoaded', () => {
   function syncCardFromModel(slug, live = null) {
     const app = state.apps && state.apps.find((item) => item.slug === slug);
     if (!app) return null;
-    if (live) applyLiveStatus(app, live);
-    paintCardStatusBadge(appGrid.querySelector(`.app-header .badge[data-slug="${slug}"]`), app, formatStatus);
-    const kebabEl = appGrid.querySelector(`.kebab-menu[data-slug="${slug}"]`);
+    if (live) {
+      appLiveViews.set(slug, live);
+      applyLiveStatus(app, live);
+    }
+    const grid = !projectDetailView.hidden ? projectDetailGrid : appGrid;
+    paintCardStatusBadge(grid.querySelector(`.app-header .badge[data-slug="${slug}"]`), app, formatStatus);
+    const kebabEl = grid.querySelector(`.kebab-menu[data-slug="${slug}"]`);
     if (kebabEl) syncCardActions(kebabEl, appCardActions(app, canManageApp(state.user, app)));
-    const factsEl = appGrid.querySelector(`.app-card-facts[data-slug="${slug}"]`);
+    const factsEl = grid.querySelector(`.app-card-facts[data-slug="${slug}"]`);
     if (factsEl) renderCardFacts(factsEl, app, live);
+    refreshAttentionRail();
     return app;
   }
 
@@ -617,7 +655,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const entry = { phase, message, version: ++appRestartFeedbackVersion };
     appRestartFeedback.set(slug, entry);
     const control = appCardLifecycleControls.get(slug);
-    const card = appGrid.querySelector(`.app-card[data-slug="${slug}"]`);
+    const grid = !projectDetailView.hidden ? projectDetailGrid : appGrid;
+    const card = grid.querySelector(`.app-card[data-slug="${slug}"]`);
     applyRestartFeedbackToCard(slug, card, control);
     return entry;
   }
@@ -627,7 +666,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (expectedVersion !== null && current && current.version !== expectedVersion) return;
     appRestartFeedback.delete(slug);
     const control = appCardLifecycleControls.get(slug);
-    const card = appGrid.querySelector(`.app-card[data-slug="${slug}"]`);
+    const grid = !projectDetailView.hidden ? projectDetailGrid : appGrid;
+    const card = grid.querySelector(`.app-card[data-slug="${slug}"]`);
     applyRestartFeedbackToCard(slug, card, control);
   }
 
@@ -642,9 +682,11 @@ document.addEventListener('DOMContentLoaded', () => {
     gridEl.textContent = '';
     appCardLifecycleControls.clear();
     const total = groups.reduce((n, g) => n + g.apps.length, 0);
+    const visibleApps = groups.flatMap((group) => group.apps);
     const empty = total === 0;
     emptyEl.hidden = !empty;
     if (empty) renderEmptyStateCopy();
+    else mountAttentionRail(gridEl, visibleApps);
 
     // A lone ungrouped group needs no heading: it would label the whole grid
     // "All apps", which is what the grid already is. This keeps the dashboard
@@ -690,6 +732,16 @@ document.addEventListener('DOMContentLoaded', () => {
           edit.addEventListener('click', () => { openProjectEditModal(group); });
           disclosure.header.appendChild(edit);
         }
+        if (group.project) {
+          const openProject = document.createElement('a');
+          openProject.href = `/projects/${encodeURIComponent(group.project)}`;
+          openProject.setAttribute('data-nav', '');
+          openProject.className = 'app-grid-group-open';
+          openProject.dataset.focusKey = `group:${group.project}:open`;
+          openProject.textContent = 'View project';
+          openProject.setAttribute('aria-label', `View project ${group.name}`);
+          disclosure.header.appendChild(openProject);
+        }
         gridEl.appendChild(disclosure.root);
         cardHost = disclosure.body;
       }
@@ -701,6 +753,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const header = document.createElement('div');
       header.className = 'app-header';
+
+      const heading = document.createElement('div');
+      heading.className = 'app-card-heading';
+      heading.appendChild(renderAppAvatar(document, avatarView(app), 'app-card-avatar'));
 
       const identity = document.createElement('div');
       identity.className = 'app-card-identity';
@@ -714,16 +770,13 @@ document.addEventListener('DOMContentLoaded', () => {
         : `View ${app.name}`);
       const name = document.createElement('strong');
       name.textContent = app.name;
-      const manageArrow = document.createElement('span');
-      manageArrow.className = 'app-card-manage-arrow';
-      manageArrow.setAttribute('aria-hidden', 'true');
-      manageArrow.textContent = '›';
-      titleLink.append(name, manageArrow);
+      titleLink.appendChild(name);
       const slug = document.createElement('div');
       slug.className = 'app-card-slug';
       slug.textContent = `/${app.slug}`;
       identity.append(titleLink, slug);
-      header.appendChild(identity);
+      heading.appendChild(identity);
+      header.appendChild(heading);
 
       // Every badge goes in one wrapping container rather than straight into
       // the header row. The header is a nowrap flex row inside a ~310px grid
@@ -744,10 +797,25 @@ document.addEventListener('DOMContentLoaded', () => {
       badge.dataset.slug = app.slug;
       badges.appendChild(badge);
 
+      let description = null;
+      if (app.description) {
+        description = document.createElement('p');
+        description.className = 'app-card-description';
+        description.textContent = app.description;
+      }
+
       const facts = document.createElement('div');
       facts.className = 'app-card-facts';
       facts.dataset.slug = app.slug;
       renderCardFacts(facts, app);
+
+      let governance = null;
+      if (app.managed_by) {
+        governance = document.createElement('p');
+        governance.className = 'app-card-governance';
+        governance.textContent = 'Fleet managed';
+        governance.title = `Managed by ${app.managed_by}`;
+      }
 
       const actions = document.createElement('div');
       actions.className = 'app-actions';
@@ -769,12 +837,12 @@ document.addEventListener('DOMContentLoaded', () => {
         openLink.target = '_blank';
         openLink.rel = 'noopener noreferrer';
         openLink.dataset.focusKey = `app:${app.slug}:open`;
-        openLink.append(document.createTextNode('Open app'));
+        openLink.append(document.createTextNode('Open dashboard'));
         const externalArrow = document.createElement('span');
         externalArrow.setAttribute('aria-hidden', 'true');
         externalArrow.textContent = '↗';
         openLink.appendChild(externalArrow);
-        openLink.setAttribute('aria-label', `Open ${app.name} app in a new tab`);
+        openLink.setAttribute('aria-label', `Open ${app.name} dashboard in a new tab`);
         actions.appendChild(openLink);
       }
 
@@ -832,7 +900,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       card.appendChild(header);
+      if (description) card.appendChild(description);
       card.appendChild(facts);
+      if (governance) card.appendChild(governance);
       card.appendChild(lifecycleControl.root);
       card.appendChild(actions);
       applyRestartFeedbackToCard(app.slug, card, lifecycleControl);
@@ -902,6 +972,7 @@ document.addEventListener('DOMContentLoaded', () => {
     supportRecovery.clear();
     appRestartFeedback.clear();
     appCardLifecycleControls.clear();
+    appLiveViews.clear();
     newAppButton.hidden = true;
     closeProfileModal();
     renderIdentity(null);
@@ -910,6 +981,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(overviewView, true);
     setHidden(launchpadView, true);
     setHidden(appsView, true);
+    setHidden(projectDetailView, true);
     setHidden(usersView, true);
     setHidden(auditView, true);
     setHidden(appDetailView, true);
@@ -1256,10 +1328,19 @@ document.addEventListener('DOMContentLoaded', () => {
       for (const slug of appRestartFeedback.keys()) {
         if (!visibleSlugs.has(slug)) appRestartFeedback.delete(slug);
       }
+      // A list reload is a newer snapshot than any retained metrics response.
+      // Render from that snapshot, then let the next poll repopulate live views.
+      appLiveViews.clear();
     }
     clearGridLoading();
-    renderApps();
+    // Rebuild cards only when the Apps index owns the screen. A project page
+    // renders the same cards into its own grid; rebuilding the hidden fleet
+    // grid would replace its lifecycle-control registry behind its back.
+    if (!appsView.hidden) renderApps();
     syncSidebar();
+    // Consumers outside the Apps index (notably a mounted project page) own
+    // their card DOM and need to rebuild it from this newer app snapshot.
+    document.dispatchEvent(new CustomEvent('shinyhub:apps-reloaded'));
     // The poller follows what is on screen, and the mounted view is what decides
     // that: the grid watches every app, an app's detail page watches one. A
     // reload triggered from a detail page (a setting saved, an app deployed)
@@ -1305,6 +1386,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function openProjectEditModal(group) {
     const modal = document.getElementById('project-edit-modal');
+    setError(document.getElementById('project-edit-error'), '');
+    projectEditSave.disabled = false;
+    projectEditSave.textContent = 'Save';
+    projectEditCancel.disabled = false;
+    modal.removeAttribute('aria-busy');
     // A row may be missing if the modal is opened before the first projects
     // fetch, or if the project was created on another tab. Refetch once.
     if (!projectRows.has(group.project)) await populateProjectDatalist();
@@ -1330,6 +1416,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function saveProjectEdit() {
     const modal = document.getElementById('project-edit-modal');
+    if (projectEditSave.disabled) return;
     const slug = modal.dataset.slug;
     const body = buildProjectPatchBody({
       name: document.getElementById('project-edit-name').value,
@@ -1337,15 +1424,45 @@ document.addEventListener('DOMContentLoaded', () => {
       description: document.getElementById('project-edit-description').value,
       descriptionKnown: modal.dataset.descriptionKnown === '1',
     });
-    const resp = await api(`/api/projects/${encodeURIComponent(slug)}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      setError(appError, 'Could not save the project. Check the name and icon and try again.');
+    projectEditSave.disabled = true;
+    projectEditSave.textContent = 'Saving…';
+    projectEditCancel.disabled = true;
+    modal.setAttribute('aria-busy', 'true');
+    let resp;
+    try {
+      resp = await api(`/api/projects/${encodeURIComponent(slug)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      setError(document.getElementById('project-edit-error'), 'Could not reach the server. Check your connection and try again.');
+      projectEditSave.disabled = false;
+      projectEditSave.textContent = 'Save';
+      projectEditCancel.disabled = false;
+      modal.removeAttribute('aria-busy');
       return;
     }
+    if (resp.status === 401) {
+      projectEditSave.disabled = false;
+      projectEditSave.textContent = 'Save';
+      projectEditCancel.disabled = false;
+      modal.removeAttribute('aria-busy');
+      await handleUnauthorized();
+      return;
+    }
+    if (!resp.ok) {
+      setError(document.getElementById('project-edit-error'), 'Could not save the project. Check the name and icon and try again.');
+      projectEditSave.disabled = false;
+      projectEditSave.textContent = 'Save';
+      projectEditCancel.disabled = false;
+      modal.removeAttribute('aria-busy');
+      return;
+    }
+    projectEditSave.disabled = false;
+    projectEditSave.textContent = 'Save';
+    projectEditCancel.disabled = false;
+    modal.removeAttribute('aria-busy');
     modal.hidden = true;
     modalTrap(modal).release();
     // Refetch rather than patching state in place: the grid, the sidebar and
@@ -5174,8 +5291,10 @@ document.addEventListener('DOMContentLoaded', () => {
     renderNewAppSnippet('');
   }
 
-  function openNewAppModal() {
+  function openNewAppModal(projectSlug = '') {
     resetNewAppModal();
+    newAppProject.value = projectSlug;
+    if (projectSlug && newAppOptional) newAppOptional.open = true;
     const firstApp = !state.apps || state.apps.length === 0;
     newAppHeading.textContent = firstApp ? 'Deploy your first app' : 'New app';
     newAppModal.hidden = false;
@@ -5706,8 +5825,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   bindDropzoneEvents();
 
-  newAppButton.addEventListener('click', openNewAppModal);
-  emptyStateCTA.addEventListener('click', openNewAppModal);
+  newAppButton.addEventListener('click', () => openNewAppModal());
+  emptyStateCTA.addEventListener('click', () => openNewAppModal());
   newAppClose.addEventListener('click', closeNewAppModal);
   newAppCancel.addEventListener('click', closeNewAppModal);
   newAppDone.addEventListener('click', closeNewAppModal);
@@ -5725,6 +5844,7 @@ document.addEventListener('DOMContentLoaded', () => {
   newAppForm.addEventListener('submit', submitNewApp);
 
   function closeProjectEditModal() {
+    if (projectEditSave.disabled) return;
     projectEditModal.hidden = true;
     modalTrap(projectEditModal).release();
   }
@@ -6193,12 +6313,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // through the same accessible, auto-dismissing toast used everywhere else
     // in the dashboard instead of a blocking window.alert().
     flashToast,
+    openProjectEditModal,
+    openNewAppModal,
   };
 
   const appDetailMount = mountAppDetail({
     ...ctx,
     openDeployModal,
   });
+  const projectDetailMount = mountProjectDetail(ctx);
 
   // syncCardActions shows exactly the secondary rows that apply to a card's
   // current state, and hides the whole kebab when none do (a viewer, or an app
@@ -6328,6 +6451,7 @@ document.addEventListener('DOMContentLoaded', () => {
     overviewView.hidden = true;
     launchpadView.hidden = true;
     appsView.hidden = true;
+    projectDetailView.hidden = true;
     usersView.hidden = true;
     workersView.hidden = true;
     auditView.hidden = true;
@@ -6362,6 +6486,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // Preserve old bookmarks without preserving a second navigation concept.
   router.register('/launchpad', () => ctx.navigate('/apps', { replace: true }));
   router.register('/apps', mountAppsDestination);
+  router.register('/projects/:slug', (params) => {
+    const role = ctx.state.user && ctx.state.user.role;
+    if (appsSurfaceForSession(role, ctx.state.canManageApps) === 'viewer') {
+      return ctx.navigate('/apps', { replace: true });
+    }
+    hideAllPageViews();
+    return projectDetailMount(params);
+  });
   router.register('/users', () => {
     hideAllPageViews();
     return mountUsers({ ...ctx, loadUsers });

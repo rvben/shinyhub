@@ -514,7 +514,7 @@ func TestGridStatusBadgeRefreshesFromMetricsPoll(t *testing.T) {
 }
 
 // TestAppCardHasExplicitManageLink pins the card's two destinations. The app
-// name leads to administration and says so to assistive technology; Open app
+// name leads to administration and says so to assistive technology; Open dashboard
 // launches the active release in a new tab. The rest of the card is not a
 // nested/oversized link, leaving text selectable and actions unambiguous.
 func TestAppCardHasExplicitManageLink(t *testing.T) {
@@ -522,12 +522,30 @@ func TestAppCardHasExplicitManageLink(t *testing.T) {
 		"a manageable app-name link must identify its management destination")
 	assertContains(t, "app.js", ": `View ${app.name}`",
 		"a read-only app-name link must not promise management access")
-	assertContains(t, "app.js", "openLink.setAttribute('aria-label', `Open ${app.name} app in a new tab`)",
+	assertContains(t, "app.js", "openLink.setAttribute('aria-label', `Open ${app.name} dashboard in a new tab`)",
 		"the launch action must identify its new-tab destination")
 	assertNotContains(t, "app.js", "app-card-body-link",
 		"the whole card must not be a link when it contains independent actions")
 	assertContains(t, "style.css", ".app-card-title:focus-visible",
 		"the explicit app-name link needs a visible keyboard focus state")
+}
+
+// TestAppAttentionRailWiring guards the exception-first Apps index. The pure
+// admission and renderer logic lives in app-attention.js; these assertions pin
+// its integration into the initial render and the live metrics refresh path.
+func TestAppAttentionRailWiring(t *testing.T) {
+	assertContains(t, "app.js", "import { renderAppAttention } from '/static/views/app-attention.js'",
+		"the Apps index must import the exception rail renderer")
+	assertContains(t, "app.js", "mountAttentionRail(gridEl, visibleApps)",
+		"the initial filtered grid render must mount exceptions above project groups")
+	assertContains(t, "app.js", "appLiveViews.set(slug, live)",
+		"live metrics must feed exception admission and recovery")
+	assertContains(t, "app.js", "refreshAttentionRail()",
+		"a live app update must refresh the rail without rebuilding the card grid")
+	assertContains(t, "style.css", ".app-attention-item.is-danger",
+		"danger exceptions need a distinct, non-color-only row treatment")
+	assertContains(t, "views/app-attention.js", "action.textContent = 'Inspect app'",
+		"each exception must provide an explicit recovery destination")
 }
 
 // TestAuditUnwrapsEnvelope guards the audit-log consumer.
@@ -1765,14 +1783,14 @@ func TestDashboardFleetSurfaceWiring(t *testing.T) {
 	assertContains(t, "views/app-detail.js", "body.fleet_state",
 		"app detail passes the fleet_state API envelope to the fleet presentation helpers")
 
-	// Apps grid wiring: imports the helper, preserves fleet context as a quiet
-	// card fact, and segments the list.
+	// Apps grid wiring: imports the helper, preserves fleet context in a quiet
+	// metadata slot, and segments the list.
 	assertContains(t, "app.js", "/static/views/fleet-ui.js",
 		"apps grid imports the fleet-ui helper module")
-	assertContains(t, "views/app-card-facts.js", "Fleet managed",
-		"apps grid cards preserve fleet ownership without adding another header badge")
-	assertContains(t, "views/app-card-facts.js", "Managed by ${app.managed_by}",
-		"the fleet fact tooltip must retain the specific fleet id")
+	assertContains(t, "app.js", "app-card-governance",
+		"apps grid cards preserve fleet ownership without displacing operational facts")
+	assertContains(t, "app.js", "governance.title = `Managed by ${app.managed_by}`",
+		"the fleet metadata tooltip must retain the specific fleet id")
 	assertContains(t, "app.js", "segmentApps",
 		"apps grid filters by the All/Fleet-managed/Unmanaged segment")
 
@@ -3528,6 +3546,17 @@ func TestAppIconUIContract(t *testing.T) {
 		"the Launchpad tile renders the icon-or-monogram via the shared helper")
 	assertContains(t, "views/launchpad.js", "emoji: t.emoji",
 		"the Launchpad tile passes the emoji through to the shared avatar renderer")
+
+	// The operator Apps grid uses the same identity data as the Launchpad. It
+	// must not silently drop an uploaded image/emoji or the app description.
+	assertContains(t, "app.js", "renderAppAvatar(document, avatarView(app), 'app-card-avatar')",
+		"the admin Apps card renders the app icon-or-monogram via the shared helper")
+	assertContains(t, "app.js", "description.textContent = app.description",
+		"the admin Apps card renders the app description as text")
+	assertContains(t, "style.css", ".app-card-avatar--img",
+		"uploaded images in admin Apps cards have a bounded image treatment")
+	assertContains(t, "style.css", ".app-card-description",
+		"admin Apps card descriptions have a dedicated readable treatment")
 
 	// Detail header avatar is rendered for the current app.
 	assertContains(t, "index.html", `id="app-detail-icon"`,

@@ -12,6 +12,11 @@ import (
 // unknown tabs as Overview.
 var appDetailPath = regexp.MustCompile(`^/apps/` + slugpkg.Pattern + `(/[a-z-]+)?/?$`)
 
+// projectDetailPath serves the client-rendered project overview on direct
+// loads and refreshes. Project slugs use the same canonical slug grammar as
+// apps, so malformed paths still receive a real 404 from the server.
+var projectDetailPath = regexp.MustCompile(`^/projects/` + slugpkg.Pattern + `/?$`)
+
 // ExactUIRoutes is the single source of truth for the client-side SPA routes
 // that are matched by an EXACT path (as opposed to the /apps/<slug> pattern).
 // Both IsUIPath (the shell-fallback guard) and the server's mux registrations
@@ -29,5 +34,5 @@ func IsUIPath(path string) bool {
 			return true
 		}
 	}
-	return appDetailPath.MatchString(path)
+	return appDetailPath.MatchString(path) || projectDetailPath.MatchString(path)
 }
