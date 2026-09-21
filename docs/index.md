@@ -5,6 +5,13 @@ hide:
   - toc
 ---
 
+<nav class="shiny-site-nav" aria-label="Primary site navigation">
+  <a href="getting-started/quickstart/">Documentation</a>
+  <span aria-hidden="true"></span>
+  <a href="demo/">Live demo</a>
+  <a href="getting-started/installation/">Installation</a>
+</nav>
+
 <section class="shiny-hero" markdown>
 
 <div class="shiny-hero__copy" markdown>

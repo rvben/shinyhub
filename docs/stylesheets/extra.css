@@ -33,6 +33,39 @@
   box-shadow: none;
 }
 
+.shiny-site-nav {
+  display: flex;
+  gap: clamp(1.25rem, 3vw, 2.5rem);
+  align-items: center;
+  min-height: 3rem;
+  padding: 0 0 0.8rem;
+  border-bottom: 1px solid var(--sh-line);
+}
+
+.shiny-site-nav a {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-decoration: none;
+  transition: color 180ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.shiny-site-nav a:first-child {
+  color: var(--md-default-fg-color);
+}
+
+.shiny-site-nav a:hover {
+  color: var(--md-accent-fg-color);
+}
+
+.shiny-site-nav > span {
+  width: 0.3rem;
+  height: 0.3rem;
+  margin-left: calc(clamp(1.25rem, 3vw, 2.5rem) * -1 + 0.55rem);
+  border-radius: 50%;
+  background: var(--sh-cyan);
+}
+
 [data-md-color-scheme="slate"] .md-header,
 [data-md-color-scheme="slate"] .md-tabs {
   background: rgba(3, 5, 16, 0.94);
@@ -362,6 +395,16 @@
 }
 
 @media (max-width: 600px) {
+  .shiny-site-nav {
+    gap: 1.15rem;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  .shiny-site-nav > span {
+    margin-left: -0.65rem;
+  }
+
   .shiny-hero {
     gap: 1.5rem;
     padding-top: 0;
@@ -432,6 +475,7 @@ button.md-header__button {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .shiny-site-nav a,
   .md-typeset .shiny-button {
     transition: none;
   }
