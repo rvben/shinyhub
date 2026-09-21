@@ -21,7 +21,7 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dependencies = [
-  "shiny>=1.6.4,<2",
+  "shiny>=1.8.0,<2",
 ]
 
 [project.urls]
@@ -30,7 +30,7 @@ Repository = "https://github.com/rvben/shinyhub"
 Issues     = "https://github.com/rvben/shinyhub/issues"
 
 [project.optional-dependencies]
-test = ["pytest>=9", "pytest-asyncio>=1.2"]
+test = ["pytest>=9", "pytest-asyncio>=1.4"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/shinyhub_bookmarks"]
