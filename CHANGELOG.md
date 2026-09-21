@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.17.2](https://github.com/rvben/shinyhub/compare/v0.17.1...v0.17.2) - 2026-09-21
+
+### Added
+
+- **ui**: add project pages and app attention ([907df31](https://github.com/rvben/shinyhub/commit/907df318aa43ed25fd594613318e34c396c27b77))
+- **ui**: improve admin app overview ([0327ed0](https://github.com/rvben/shinyhub/commit/0327ed081dea6e78f181cfd8c7e2c7cd44806edd))
+
 ## [0.17.1](https://github.com/rvben/shinyhub/compare/v0.17.0...v0.17.1) - 2026-09-21
 
 ### Improved
