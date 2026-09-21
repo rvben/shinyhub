@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.17.1](https://github.com/rvben/shinyhub/compare/v0.17.0...v0.17.1) - 2026-09-21
+
 ## [0.17.0](https://github.com/rvben/shinyhub/compare/v0.16.5...v0.17.0) - 2026-09-16
 
 ### Added
