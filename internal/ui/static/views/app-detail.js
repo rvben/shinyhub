@@ -11,7 +11,12 @@ import {
   renderAutoscaleSummary,
   renderRejectsByReason,
 } from '/static/views/autoscale.js';
-import { deploymentTimelineModels, provenanceModel, relativeTime } from '/static/views/deployment-row.js';
+import {
+  deploymentTimelineModels,
+  deploymentTimeModel,
+  provenanceModel,
+  relativeTime,
+} from '/static/views/deployment-row.js';
 import { statusPillClass } from '/static/views/stat-format.js';
 import { formatStatus } from '/static/views/status-label.js';
 import { appStatusView } from '/static/views/app-card-badge.js';
@@ -377,6 +382,12 @@ export function mountAppDetail(ctx) {
   // which would drop a selection the visitor had made inside the header.
   function applyHeader(app, body) {
     setText(document.getElementById('app-detail-heading'), app.name);
+    const descriptionEl = document.getElementById('app-detail-description');
+    if (descriptionEl) {
+      const description = typeof app.description === 'string' ? app.description.trim() : '';
+      setText(descriptionEl, description);
+      descriptionEl.hidden = !description;
+    }
     setText(document.getElementById('app-detail-slug'), '/' + app.slug);
     const deployCountEl = document.getElementById('app-detail-deploy-count');
     setText(deployCountEl, pluralize(app.deploy_count, 'deploy', 'deploys'));
@@ -966,6 +977,10 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
     });
     return;
   }
+  const deployed = deploymentTimeModel(app.released_at || app.last_deployed_at);
+  const deployedMarkup = deployed
+    ? `<time datetime="${deployed.datetime}">${deployed.absolute}</time> · ${deployed.relative}`
+    : '—';
   panel.innerHTML = `
     <div class="overview-grid">
       <section class="overview-card overview-release">
@@ -974,7 +989,7 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
           <span class="overview-version"${app.released_version ? ` title="bundle ${app.released_version}"` : ''}>${app.release_number != null ? 'v' + app.release_number : '—'}</span>
         </div>
         <dl class="overview-dl">
-          <dt>Deployed</dt><dd${(app.released_at || app.last_deployed_at) ? ` title="${new Date(app.released_at || app.last_deployed_at).toLocaleString()}"` : ''}>${(app.released_at || app.last_deployed_at) ? relativeTime(new Date(app.released_at || app.last_deployed_at)) : '—'}</dd>
+          <dt>Deployed</dt><dd>${deployedMarkup}</dd>
           <dt>Total deploys</dt><dd>${app.deploy_count}</dd>
         </dl>
         <div class="overview-links">

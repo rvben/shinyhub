@@ -17,6 +17,23 @@ export function relativeTime(date, now = Date.now()) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+// deploymentTimeModel keeps the exact, local date and time visible wherever a
+// deployment is summarized. Relative age is useful scanning context, but it
+// must not be the only visible timestamp because operators often need to
+// correlate a release with an incident or log entry precisely.
+export function deploymentTimeModel(value, now = Date.now()) {
+  const date = value ? new Date(value) : null;
+  if (!date || !Number.isFinite(date.getTime())) return null;
+  return {
+    datetime: date.toISOString(),
+    absolute: new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(date),
+    relative: relativeTime(date, now),
+  };
+}
+
 // deploymentRowModel turns one raw deployment record into the fields the row
 // needs. `releaseLabel` is the human-friendly version ("v3") from the server's
 // release_number (rank among succeeded deploys); it is empty for failed/pending

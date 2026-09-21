@@ -399,7 +399,10 @@
         <div class="app-detail-bar">
           <div class="app-detail-identity">
             <span id="app-detail-icon" class="app-detail-icon-slot" aria-hidden="true"></span>
-            <h1 id="app-detail-heading" class="app-detail-title"></h1>
+            <div class="app-detail-name">
+              <h1 id="app-detail-heading" class="app-detail-title"></h1>
+              <p id="app-detail-description" class="app-detail-description" hidden></p>
+            </div>
             <span id="app-detail-status" class="status-pill" role="status" aria-live="polite"></span>
             <span id="app-detail-fleet-badge"></span>
           </div>
@@ -848,8 +851,8 @@
                 <input id="env-form-value" type="text" autocomplete="off" spellcheck="false">
               </div>
               <div class="env-form-row env-form-checks">
-                <label><input type="checkbox" id="env-form-secret"> Secret (encrypted at rest, write-only)</label>
-                <label><input type="checkbox" id="env-form-restart" checked> Restart app after saving</label>
+                <label><input type="checkbox" id="env-form-secret"><span>Secret (encrypted at rest, write-only)</span></label>
+                <label><input type="checkbox" id="env-form-restart" checked><span>Restart app after saving</span></label>
               </div>
               <p class="error" id="env-form-error" hidden></p>
               <div class="env-form-actions">
@@ -901,7 +904,7 @@
                   <input id="data-dest-input" type="text" autocomplete="off" spellcheck="false" placeholder="optional subpath (defaults to filename)">
                 </div>
                 <div class="env-form-row env-form-checks">
-                  <label><input type="checkbox" id="data-restart-input"> Restart app after upload</label>
+                  <label><input type="checkbox" id="data-restart-input"><span>Restart app after upload</span></label>
                 </div>
                 <progress id="data-progress" max="100" value="0" aria-label="Upload progress" hidden></progress>
                 <p id="data-error" class="error" hidden></p>
@@ -1446,7 +1449,7 @@
             <div id="cron-preview" class="hint">Five-field cron · evaluated in the server timezone</div>
             <label for="sched-timezone">Timezone <span>optional</span></label>
             <input id="sched-timezone" name="timezone" placeholder="Europe/Amsterdam (empty inherits the server default)" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
-            <label class="schedule-enabled-row"><input type="checkbox" id="sched-enabled" name="enabled" checked> Enabled</label>
+            <label class="schedule-enabled-row"><input type="checkbox" id="sched-enabled" name="enabled" checked><span>Enabled</span></label>
           </fieldset>
 
           <fieldset class="schedule-producer-policy">

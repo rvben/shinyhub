@@ -50,6 +50,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 const CRASHED_APP = {
   slug: 'crash-app',
   name: 'Crash App',
+  description: 'Explains intentional failures for release testing.',
   status: 'starting',
   deploy_count: 0,
   deploying: false,
@@ -189,6 +190,26 @@ test('a failed first deploy does not get the "awaiting first deploy" onboarding 
     assert.deepEqual(hrefs, ['/apps/crash-app/logs', '/apps/crash-app/deployments']);
   } finally {
     h.restore();
+  }
+});
+
+test('the detail header shows a configured description and hides an empty one', async () => {
+  const described = await mountDetail({ app: CRASHED_APP, tab: 'overview' });
+  try {
+    const description = described.doc.getElementById('app-detail-description');
+    assert.equal(description.textContent, 'Explains intentional failures for release testing.');
+    assert.equal(description.hidden, false);
+  } finally {
+    described.restore();
+  }
+
+  const empty = await mountDetail({ app: NEW_APP, tab: 'overview' });
+  try {
+    const description = empty.doc.getElementById('app-detail-description');
+    assert.equal(description.textContent, '');
+    assert.equal(description.hidden, true);
+  } finally {
+    empty.restore();
   }
 });
 

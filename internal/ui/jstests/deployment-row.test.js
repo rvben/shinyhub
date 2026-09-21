@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   relativeTime,
+  deploymentTimeModel,
   deploymentRowModel,
   deploymentListModels,
   deploymentTimelineModels,
@@ -24,6 +25,21 @@ test('relativeTime renders compact buckets and tolerates bad input', () => {
   assert.equal(relativeTime(new Date(NOW - 2 * 86400 * 1000), NOW), '2d ago');
   assert.equal(relativeTime(null, NOW), '');
   assert.equal(relativeTime('not-a-date', NOW), '');
+});
+
+test('deploymentTimeModel exposes an exact local date and time with relative context', () => {
+  const value = '2026-06-14T11:55:00Z';
+  const date = new Date(value);
+  assert.deepEqual(deploymentTimeModel(value, NOW), {
+    datetime: date.toISOString(),
+    absolute: new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(date),
+    relative: '5m ago',
+  });
+  assert.equal(deploymentTimeModel(null, NOW), null);
+  assert.equal(deploymentTimeModel('not-a-date', NOW), null);
 });
 
 test('provenance presents pipeline first with durable revision and optional MR', () => {

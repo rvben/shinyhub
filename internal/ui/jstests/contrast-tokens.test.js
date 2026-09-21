@@ -82,10 +82,9 @@ test('the contrast helper is calibrated against known values', () => {
 });
 
 test('body text tokens clear WCAG AA on every surface, in both themes', () => {
-  // --text-dim is deliberately excluded: it is a decorative token (hairlines,
-  // disabled glyphs), not body text, and holding it to the body-text floor
-  // would make this gate wrong rather than strict.
-  const bodyTokens = ['text', 'text-soft', 'text-muted'];
+  // Include the dimmest text token too: it appears in supporting metadata as
+  // well as disabled controls, so it must remain readable on every surface.
+  const bodyTokens = ['text', 'text-soft', 'text-muted', 'text-dim'];
   for (const [themeName, tokens] of [['dark', dark], ['light', light]]) {
     for (const token of bodyTokens) {
       const fg = tokens[token];
@@ -123,13 +122,13 @@ test('the Overview activity separator is readable on every surface', () => {
 test('the gate distinguishes the fixed separator from the broken one', () => {
   // The second bound. Asserting only that the current token passes would also
   // pass if the floor were set to 1:1, or if the maths always returned a large
-  // number. The token the finding reported must still be measured as failing.
-  const broken = dark['text-dim'];
+  // number. Keep the original failing colour as an explicit fixture now that
+  // the production --text-dim token has itself been made contrast-safe.
+  const broken = '#3E4C74';
   const ratio = contrast(broken, dark['surface-2']);
   assert.ok(
     ratio < AA_BODY,
-    `--text-dim (${broken}) now measures ${ratio.toFixed(2)}:1 on --surface-2. `
-      + 'If that is deliberate, this control needs a new known-bad colour; as '
-      + 'written the separator test above can no longer tell fixed from broken.',
+    `known-bad fixture ${broken} measures ${ratio.toFixed(2)}:1 on --surface-2; `
+      + 'the contrast gate can no longer distinguish a regression from a pass.',
   );
 });
