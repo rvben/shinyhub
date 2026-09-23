@@ -91,8 +91,8 @@ export function provenanceModel(raw) {
       mark: '',
       markIcon: '',
       providerIcon: '',
-      headerText: '',
-      headerDetail: '',
+      verb: 'Deployed',
+      summary: '',
     };
   }
   if (originKind === 'direct' || originKind === 'rollback') {
@@ -108,30 +108,32 @@ export function provenanceModel(raw) {
     const channelLabel = channelLabels[channel] || 'API';
     const isRollback = originKind === 'rollback';
     let label;
-    let headerLead;
+    let verb = 'Deployed';
+    let phrase;
     let mark;
     let markIcon = '';
     if (isRollback) {
       label = 'Rollback';
-      headerLead = 'Rolled back';
+      verb = 'Rolled back';
+      phrase = '';
       mark = '';
       markIcon = 'rollback';
     } else if (channel === 'dashboard') {
       label = 'Manual deployment';
-      headerLead = 'Deployed manually';
+      phrase = 'from the dashboard';
       mark = '';
       markIcon = 'manual';
     } else if (isDevelopment) {
       label = 'Remote development';
-      headerLead = 'Deployed from a live development session';
+      phrase = 'from a live development session';
       mark = 'DEV';
     } else if (channel === 'cli') {
       label = 'CLI deployment';
-      headerLead = 'Deployed via ShinyHub CLI';
+      phrase = 'via ShinyHub CLI';
       mark = 'CLI';
     } else {
       label = 'Direct API deployment';
-      headerLead = 'Deployed via API';
+      phrase = 'via API';
       mark = 'API';
     }
     return {
@@ -145,8 +147,8 @@ export function provenanceModel(raw) {
       mark,
       markIcon,
       providerIcon: '',
-      headerText: actor ? `${headerLead} by ${actor}` : headerLead,
-      headerDetail: isDevelopment ? 'Remote development' : channelLabel,
+      verb,
+      summary: [phrase, actor ? `by ${actor}` : ''].filter(Boolean).join(' '),
       developmentSession,
     };
   }
@@ -171,8 +173,8 @@ export function provenanceModel(raw) {
     mark: '',
     markIcon: '',
     providerIcon: deploymentProviderIcon(metadata.provider),
-    headerText: '',
-    headerDetail: details.join(' · ') || `fleet ${raw.fleet_id || 'run'}`,
+    verb: 'Deployed',
+    summary: '',
     runID: raw.run_id,
   };
 }

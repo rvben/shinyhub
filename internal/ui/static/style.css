@@ -5503,7 +5503,7 @@ fieldset.settings-block { min-width: 0; }
   .app-detail-header .status-pill.is-live::before { animation: none; }
 }
 
-/* Meta line: slug + version mono chips, deploy count, deployed-ago. */
+/* Meta line: the app's URL slug as a mono chip. */
 .app-detail-meta {
   display: flex;
   align-items: center;
@@ -5523,7 +5523,66 @@ fieldset.settings-block { min-width: 0; }
   padding: 0.1rem 0.45rem;
 }
 .meta-chip[hidden] { display: none; }
-#app-detail-deployed:empty { display: none; }
+
+/* Release strip: what is live, when it went live, what deployed it, and a way
+   into the full history. One line on wide screens; on narrow ones the
+   sentence wraps and the history link drops below it. */
+.app-detail-release {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.85rem;
+  margin-top: 0.85rem;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: rgba(var(--surface-rgb), 0.42);
+  color: var(--text-soft);
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+.app-detail-release[hidden] { display: none; }
+.release-version {
+  flex: none;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: var(--bg-deep);
+  color: var(--cyan-bright);
+  font: 600 0.76rem/1.35 var(--mono);
+}
+.release-summary {
+  flex: 1 1 22rem;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.release-summary time { color: var(--text); font-variant-numeric: tabular-nums; }
+.release-age { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.release-source .provenance-provider {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  margin-inline-end: 0.35rem;
+  vertical-align: -6px;
+}
+.app-detail-release .release-source .provenance-provider svg { width: 15px; height: 15px; }
+.release-source a { color: var(--cyan-bright); font-weight: 600; text-decoration: none; }
+.release-source a:hover { text-decoration: underline; }
+.release-revision { color: var(--text-muted); font: 400 0.82rem/1.5 var(--mono); letter-spacing: -0.01em; }
+.release-history {
+  flex: none;
+  margin-inline-start: auto;
+  color: var(--cyan-bright);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 0.2em;
+  transition: color var(--ease), text-decoration-color var(--ease);
+}
+.release-history::after { content: " \2192"; }
+.release-history:hover { text-decoration-color: currentColor; }
 
 /* Metric tiles: real fleet aggregates (CPU/Memory/Replicas/Sessions). */
 .app-detail-stats {
@@ -5977,7 +6036,6 @@ fieldset.settings-block { min-width: 0; }
   display: grid;
   grid-template-columns: minmax(15rem, 0.78fr) minmax(0, 1.22fr);
   grid-template-areas:
-    "release trends"
     "autoscale trends"
     "replicas replicas"
     "rejects rejects";
@@ -5985,9 +6043,8 @@ fieldset.settings-block { min-width: 0; }
   align-items: stretch;
 }
 .overview-grid.has-fleet-state {
-  grid-template-columns: minmax(0, 1.22fr) minmax(15rem, 0.78fr);
   grid-template-areas:
-    "fleet release"
+    "fleet fleet"
     "autoscale trends"
     "replicas replicas"
     "rejects rejects";
@@ -5999,7 +6056,6 @@ fieldset.settings-block { min-width: 0; }
   border-radius: var(--radius-lg);
   background: rgba(var(--surface-rgb), 0.42);
 }
-.overview-release { grid-area: release; }
 .overview-trends { grid-area: trends; }
 .overview-autoscale { grid-area: autoscale; }
 .overview-replicas { grid-area: replicas; }
@@ -6029,31 +6085,6 @@ fieldset.settings-block { min-width: 0; }
 }
 .overview-dl dt { color: var(--text-muted); }
 .overview-dl dd { color: var(--text-soft); font-variant-numeric: tabular-nums; }
-.overview-version {
-  flex: none;
-  padding: 0.18rem 0.5rem;
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius);
-  background: var(--bg-deep);
-  color: var(--cyan-bright);
-  font: 600 0.76rem/1.35 var(--mono);
-}
-.overview-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem 1rem;
-  margin-top: 1.1rem;
-}
-.overview-links a {
-  color: var(--cyan-bright);
-  font-size: 0.82rem;
-  font-weight: 600;
-  text-decoration: underline;
-  text-decoration-color: transparent;
-  text-underline-offset: 0.2em;
-  transition: color var(--ease), text-decoration-color var(--ease);
-}
-.overview-links a:hover { text-decoration-color: currentColor; }
 
 .fleet-change-review {
   padding: 0;
@@ -6274,7 +6305,6 @@ fieldset.settings-block { min-width: 0; }
   .overview-grid {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
-      "release"
       "trends"
       "replicas"
       "autoscale"
@@ -6284,7 +6314,6 @@ fieldset.settings-block { min-width: 0; }
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "fleet"
-      "release"
       "trends"
       "autoscale"
       "replicas"
@@ -6573,19 +6602,6 @@ fieldset.settings-block { min-width: 0; }
 
 /* ── App detail: Deployments tab ─────────────────────────────────────────── */
 
-.app-detail-provenance {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  width: fit-content;
-  max-width: 100%;
-  margin-top: 14px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-.app-detail-provenance[hidden] { display: none; }
 .provenance-provider {
   display: grid;
   place-items: center;
@@ -6615,32 +6631,16 @@ fieldset.settings-block { min-width: 0; }
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.provenance-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-width: 65ch; }
-.provenance-primary { color: var(--text-soft); font-size: 0.875rem; line-height: 1.55; letter-spacing: -0.005em; }
-.provenance-primary a,
 .deployment-source-primary a { color: var(--cyan-bright); font-weight: 600; text-decoration: none; }
-.provenance-primary a:hover,
 .deployment-source-primary a:hover,
 .deployment-source-detail a:hover { text-decoration: underline; }
-.provenance-detail,
 .deployment-source-detail {
   color: var(--text-muted);
   font: 400 0.82rem/1.5 var(--mono);
   letter-spacing: -0.01em;
   overflow-wrap: anywhere;
 }
-.provenance-detail a,
 .deployment-source-detail a { color: inherit; text-underline-offset: 2px; }
-.provenance-open {
-  min-height: 40px;
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-muted);
-  font: 600 0.75rem/1.35 var(--font);
-  letter-spacing: 0.02em;
-  text-decoration: none;
-}
-.provenance-open:hover { color: var(--cyan-bright); }
 
 .deployments-list { list-style: none; padding: 0; margin: 0; }
 .deployment-row,
@@ -6857,8 +6857,6 @@ fieldset.settings-block { min-width: 0; }
 
 @media (max-width: 700px) {
   #app-detail-view { padding-inline: 0; }
-  .app-detail-provenance { grid-template-columns: auto minmax(0, 1fr); }
-  .provenance-open { grid-column: 2; min-height: 44px; }
   .deployments-head { display: none; }
   .development-session-summary {
     grid-template-columns: minmax(0, 1fr) auto;

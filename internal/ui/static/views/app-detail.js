@@ -13,10 +13,9 @@ import {
 } from '/static/views/autoscale.js';
 import {
   deploymentTimelineModels,
-  deploymentTimeModel,
-  provenanceModel,
   relativeTime,
 } from '/static/views/deployment-row.js';
+import { releaseStripModel, renderReleaseStrip } from '/static/views/release-strip.js';
 import { statusPillClass } from '/static/views/stat-format.js';
 import { formatStatus } from '/static/views/status-label.js';
 import { appStatusView } from '/static/views/app-card-badge.js';
@@ -389,32 +388,6 @@ export function mountAppDetail(ctx) {
       descriptionEl.hidden = !description;
     }
     setText(document.getElementById('app-detail-slug'), '/' + app.slug);
-    const deployCountEl = document.getElementById('app-detail-deploy-count');
-    setText(deployCountEl, pluralize(app.deploy_count, 'deploy', 'deploys'));
-    // Release chip (human-friendly vN) + deployed-ago meta. The epoch version is
-    // kept on the chip's title for support.
-    const versionEl = document.getElementById('app-detail-version');
-    if (versionEl) {
-      if (app.release_number != null) {
-        setText(versionEl, 'v' + app.release_number);
-        if (app.released_version) versionEl.title = 'bundle ' + app.released_version;
-        versionEl.hidden = false;
-      } else {
-        versionEl.hidden = true;
-      }
-    }
-    const deployedEl = document.getElementById('app-detail-deployed');
-    if (deployedEl) {
-      const deployedAt = app.released_at || app.last_deployed_at;
-      if (deployedAt) {
-        const d = new Date(deployedAt);
-        setText(deployedEl, 'deployed ' + relativeTime(d));
-        deployedEl.title = d.toLocaleString();
-      } else {
-        setText(deployedEl, '');
-        deployedEl.removeAttribute('title');
-      }
-    }
     const statusEl = document.getElementById('app-detail-status');
     // Derive the pill from the same appStatusView the apps-grid card uses, so
     // the two surfaces always agree: a zero-deploy app reads "Awaiting deploy"
@@ -440,7 +413,9 @@ export function mountAppDetail(ctx) {
     if (fleetSlot) {
       renderFleetBadges(fleetSlot, app, body.fleet_state);
     }
-    renderHeaderProvenance(document.getElementById('app-detail-provenance'), app.deployment_provenance);
+    renderReleaseStrip(document, document.getElementById('app-detail-release'), releaseStripModel(app), {
+      markFor: provenanceMark,
+    });
   }
 
   // Placeholder values for the metric tiles until the first metrics poll
@@ -476,48 +451,23 @@ function externalLink(label, href, className = '') {
   return a;
 }
 
-function renderHeaderProvenance(host, raw) {
-  if (!host) return;
-  host.replaceChildren();
-  const model = provenanceModel(raw);
-  host.hidden = !model.available;
-  if (!model.available) return;
-
+// provenanceMark draws the icon that leads the release strip's source: the
+// official GitLab/GitHub mark, or ShinyHub's own manual, rollback or CI glyph.
+// Channels named in words only (CLI, API, live development) get no mark, since
+// the sentence beside it already says the same thing.
+function provenanceMark(model) {
+  const icon = model.providerIcon || model.markIcon;
+  if (!icon) return null;
   const mark = document.createElement('span');
   mark.className = 'provenance-provider';
-  if (model.providerIcon === 'gitlab' || model.providerIcon === 'github') {
-    mark.classList.add('is-brand', `is-${model.providerIcon}`);
-    mark.append(providerBrandIcon(model.providerIcon));
-  } else if (model.providerIcon) {
-    mark.classList.add(`is-${model.providerIcon}`);
-    mark.append(provenanceIcon(model.providerIcon));
-  } else if (model.markIcon) {
-    mark.classList.add(`is-${model.markIcon}`);
-    mark.append(provenanceIcon(model.markIcon));
+  if (icon === 'gitlab' || icon === 'github') {
+    mark.classList.add('is-brand', `is-${icon}`);
+    mark.append(providerBrandIcon(icon));
   } else {
-    mark.textContent = model.mark;
+    mark.classList.add(`is-${icon}`);
+    mark.append(provenanceIcon(icon));
   }
-  mark.setAttribute('aria-hidden', 'true');
-  const copy = document.createElement('span');
-  copy.className = 'provenance-copy';
-  const primary = document.createElement('span');
-  primary.className = 'provenance-primary';
-  if (model.headerText) {
-    primary.textContent = model.headerText;
-  } else {
-    primary.append('Deployed by ');
-    primary.append(model.url ? externalLink(model.label, model.url) : model.label);
-  }
-  const detail = document.createElement('span');
-  detail.className = 'provenance-detail';
-  detail.append(model.headerDetail || model.detail);
-  if (model.change) {
-    detail.append(' · ');
-    detail.append(model.change.url ? externalLink(model.change.label, model.change.url) : model.change.label);
-  }
-  copy.append(primary, detail);
-  host.append(mark, copy);
-  if (model.url) host.append(externalLink('Open pipeline ↗', model.url, 'provenance-open'));
+  return mark;
 }
 
 // Exact paths from the providers' official brand kits. They are inlined so the
@@ -977,34 +927,16 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
     });
     return;
   }
-  const deployed = deploymentTimeModel(app.released_at || app.last_deployed_at);
-  const deployedMarkup = deployed
-    ? `<time datetime="${deployed.datetime}">${deployed.absolute}</time> · ${deployed.relative}`
-    : '—';
   panel.innerHTML = `
     <div class="overview-grid">
-      <section class="overview-card overview-release">
-        <div class="overview-card-heading">
-          <h2>Current deployment</h2>
-          <span class="overview-version"${app.released_version ? ` title="bundle ${app.released_version}"` : ''}>${app.release_number != null ? 'v' + app.release_number : '—'}</span>
-        </div>
-        <dl class="overview-dl">
-          <dt>Deployed</dt><dd>${deployedMarkup}</dd>
-          <dt>Total deploys</dt><dd>${app.deploy_count}</dd>
-        </dl>
-        <div class="overview-links">
-          <a href="/apps/${app.slug}/logs" data-nav>View logs</a>
-          <a href="/apps/${app.slug}/deployments" data-nav>Deployment history</a>
-        </div>
+      <section class="overview-card overview-autoscale">
+        <h2>Autoscale</h2>
+        <dl id="autoscale-summary" class="overview-dl"></dl>
       </section>
       <div id="overview-trends" class="overview-card overview-trends">
         <h2>Trends</h2>
         <p class="trends-empty">Collecting...</p>
       </div>
-      <section class="overview-card overview-autoscale">
-        <h2>Autoscale</h2>
-        <dl id="autoscale-summary" class="overview-dl"></dl>
-      </section>
       <section class="overview-card overview-replicas">
         <div class="overview-card-heading overview-replicas-heading">
           <h2>Replicas</h2>

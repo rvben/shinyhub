@@ -59,6 +59,9 @@ test('provenance presents pipeline first with durable revision and optional MR',
   assert.deepEqual(p.change, { label: 'MR !87', url: 'https://gitlab.example/mr/87' });
   assert.equal(p.mark, '');
   assert.equal(p.providerIcon, 'gitlab');
+  // The pipeline label is itself the source link, so no summary phrase.
+  assert.equal(p.verb, 'Deployed');
+  assert.equal(p.summary, '');
 });
 
 test('deployment provider marks recognize brand aliases and keep a neutral fallback', () => {
@@ -81,8 +84,8 @@ test('legacy deployments expose an explicit provenance fallback', () => {
     mark: '',
     markIcon: '',
     providerIcon: '',
-    headerText: '',
-    headerDetail: '',
+    verb: 'Deployed',
+    summary: '',
   });
 });
 
@@ -90,34 +93,34 @@ test('direct deployment provenance distinguishes dashboard, CLI, watch, and API 
   const dashboard = provenanceModel({ origin: { kind: 'direct', channel: 'dashboard', actor: 'admin' } });
   assert.equal(dashboard.label, 'Manual deployment');
   assert.equal(dashboard.detail, 'admin · Dashboard');
-  assert.equal(dashboard.headerText, 'Deployed manually by admin');
-  assert.equal(dashboard.headerDetail, 'Dashboard');
+  assert.equal(dashboard.verb, 'Deployed');
+  assert.equal(dashboard.summary, 'from the dashboard by admin');
   assert.equal(dashboard.mark, '');
   assert.equal(dashboard.markIcon, 'manual');
 
   const cli = provenanceModel({ origin: { kind: 'direct', channel: 'cli', actor: 'release-bot' } });
   assert.equal(cli.label, 'CLI deployment');
-  assert.equal(cli.headerText, 'Deployed via ShinyHub CLI by release-bot');
+  assert.equal(cli.summary, 'via ShinyHub CLI by release-bot');
   assert.equal(cli.mark, 'CLI');
 
   const watch = provenanceModel({ origin: { kind: 'direct', channel: 'watch', actor: 'dev' } });
   assert.equal(watch.label, 'Remote development');
   assert.equal(watch.detail, 'dev · Remote development');
-  assert.equal(watch.headerText, 'Deployed from a live development session by dev');
-  assert.equal(watch.headerDetail, 'Remote development');
+  assert.equal(watch.summary, 'from a live development session by dev');
   assert.equal(watch.mark, 'DEV');
 
   const api = provenanceModel({ origin: { kind: 'direct', channel: 'api' } });
   assert.equal(api.label, 'Direct API deployment');
   assert.equal(api.detail, 'API');
-  assert.equal(api.headerText, 'Deployed via API');
+  assert.equal(api.summary, 'via API');
 });
 
 test('rollback provenance names the action and authenticated actor', () => {
   const p = provenanceModel({ origin: { kind: 'rollback', channel: 'dashboard', actor: 'admin' } });
   assert.equal(p.label, 'Rollback');
   assert.equal(p.detail, 'admin · Dashboard');
-  assert.equal(p.headerText, 'Rolled back by admin');
+  assert.equal(p.verb, 'Rolled back');
+  assert.equal(p.summary, 'by admin');
   assert.equal(p.mark, '');
   assert.equal(p.markIcon, 'rollback');
 });

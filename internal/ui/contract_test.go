@@ -3034,14 +3034,14 @@ func TestSidebarLayoutCSS(t *testing.T) {
 }
 
 // TestVersionDisplayUsesReleaseNumber pins the human-friendly version display:
-// the header/overview show the server's release_number (vN) and date, the
+// the release strip shows the server's release_number (vN) and date, the
 // deployments row renders the release label, and the raw epoch is no longer the
 // visible version label (kept only on hover/title).
 func TestVersionDisplayUsesReleaseNumber(t *testing.T) {
 	assertContains(t, "views/app-detail-envelope.js", "body.release_number",
 		"normalizeAppEnvelope must read release_number from the GET envelope")
-	assertContains(t, "views/app-detail.js", "'v' + app.release_number",
-		"the header/overview version must show the release number, not the epoch")
+	assertContains(t, "views/release-strip.js", "`v${app.release_number}`",
+		"the release strip version must show the release number, not the epoch")
 	assertContains(t, "views/app-detail.js", "m.releaseLabel",
 		"the deployments row must render the release label (vN)")
 	assertContains(t, "views/deployment-row.js", "release_number",
@@ -3059,14 +3059,25 @@ func TestVersionDisplayUsesReleaseNumber(t *testing.T) {
 
 // TestAppDetailHeaderTiles pins the redesigned detail header: real metric tiles
 // (CPU/Memory/Replicas/Sessions) fed by fleet aggregates, a status pill with a
-// running pulse, version/deployed meta, and removal of the dead Uptime metric.
+// running pulse, one release strip, and removal of the dead Uptime metric.
 func TestAppDetailHeaderTiles(t *testing.T) {
 	assertContains(t, "index.html", `class="app-detail-stats"`, "header must use a metric-tile group")
 	for _, id := range []string{`id="app-detail-cpu"`, `id="app-detail-ram"`,
 		`id="app-detail-replicas"`, `id="app-detail-sessions"`,
-		`id="app-detail-version"`, `id="app-detail-deployed"`} {
+		`id="app-detail-release"`} {
 		assertContains(t, "index.html", id, "header must expose "+id)
 	}
+	// The release strip is the only place the page states the live release, so
+	// the version, deployed time, deploy count and source are not repeated in
+	// the meta line, a separate provenance row, or an Overview card.
+	for _, id := range []string{`id="app-detail-version"`, `id="app-detail-deployed"`,
+		`id="app-detail-deploy-count"`, `id="app-detail-provenance"`} {
+		assertNotContains(t, "index.html", id, "the release strip replaces "+id)
+	}
+	assertContains(t, "views/app-detail.js", "renderReleaseStrip(document, document.getElementById('app-detail-release'), releaseStripModel(app)",
+		"applyHeader must render the release strip from releaseStripModel")
+	assertNotContains(t, "views/app-detail.js", "Current deployment",
+		"the Overview must not repeat the release strip in a Current deployment card")
 	b, err := fs.ReadFile(ui.Static(), "index.html")
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
