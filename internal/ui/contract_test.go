@@ -2322,9 +2322,8 @@ func TestResponsiveAndStatePolish(t *testing.T) {
 
 	// SSE log streams surface a disconnect/reconnect state instead of freezing
 	// silently. The app-detail viewer intentionally lets EventSource reconnect;
-	// it reports that state in its dedicated status region.
-	assertContains(t, "app.js", "(log stream disconnected)",
-		"app.js log-pane SSE onerror must append a disconnect notice")
+	// it reports that state in its dedicated status region. The quick-view log
+	// pane's own version of this is pinned separately in TestLogPaneWiring.
 	assertContains(t, "views/logs-ui.js", "Reconnecting ·",
 		"the app-detail log viewer must expose its reconnect state")
 	assertContains(t, "views/logs-ui.js", "stream.onerror",
@@ -3191,6 +3190,57 @@ func TestLogsTabEmptyStateForNeverDeployed(t *testing.T) {
 	if strings.Contains(js[logs:logs+end], "app.deploy_count") {
 		t.Fatal("app-detail.js: renderLogs must not gate on deploy_count, which counts successes only and hides a crashed first deploy's traceback")
 	}
+}
+
+// TestLogPaneWiring pins the quick-view log pane (the kebab menu's "View
+// logs", the deploy modal's re-entry link, and schedule-run logs all share
+// one overlay). The controller lives in views/log-pane.js (unit-tested in
+// jstests/log-pane.test.js) because app.js is not jsdom-importable; this test
+// pins the wiring jsdom cannot exercise directly:
+//   - app.js delegates to it instead of opening EventSources itself, so both
+//     call sites share one cap/reconnect implementation.
+//   - it closes on the same post-mount onNavigated() hook as the sidebar
+//     drawer, so Back/Forward cannot leave it streaming over a new page.
+//   - its onerror reports status without closing the stream, matching the
+//     Logs tab viewer's reconnect-friendly design.
+//   - index.html gives it dialog semantics and a non-flooding status region
+//     instead of an aria-live log that announces every appended line.
+func TestLogPaneWiring(t *testing.T) {
+	assertContains(t, "app.js", "'/static/views/log-pane.js'",
+		"app.js must import the log-pane module")
+	assertContains(t, "app.js", "createLogPane(",
+		"app.js must construct the log-pane controller")
+	assertNotContains(t, "app.js", "new EventSource(",
+		"app.js must delegate SSE log streaming to log-pane.js instead of opening EventSources directly")
+	assertContains(t, "app.js", "logPaneController.onNavigated()",
+		"the log pane must close from the post-mount onNavigated hook, like the sidebar drawer, so Back/Forward cannot leave it streaming over a new page")
+
+	assertContains(t, "views/log-pane.js", "appendBoundedLogEntry(lines, text, MAX_RENDERED_LOG_ENTRIES)",
+		"the log pane must reuse the Logs tab's render cap instead of duplicating the trim logic")
+
+	b, err := fs.ReadFile(ui.Static(), "views/log-pane.js")
+	if err != nil {
+		t.Fatalf("read views/log-pane.js: %v", err)
+	}
+	src := string(b)
+	onerror := strings.Index(src, "es.onerror = () => setStatus(")
+	if onerror < 0 {
+		t.Fatal("views/log-pane.js: es.onerror must report a status instead of appending a disconnect line into the log text")
+	}
+	lineEnd := strings.Index(src[onerror:], "\n")
+	if lineEnd < 0 {
+		lineEnd = len(src) - onerror
+	}
+	if strings.Contains(src[onerror:onerror+lineEnd], ".close(") {
+		t.Fatal("views/log-pane.js: es.onerror must not close the EventSource on a transient error, or the browser can never auto-retry")
+	}
+
+	assertContains(t, "index.html", `<div id="log-pane" class="log-pane" hidden role="dialog" aria-modal="true" aria-labelledby="log-pane-title">`,
+		"the log pane must use dialog semantics like every other overlay in the app")
+	assertContains(t, "index.html", `<p id="log-pane-status" class="log-pane-status" role="status" hidden></p>`,
+		"the log pane must expose a dedicated status region for connection-state changes")
+	assertContains(t, "index.html", `<pre id="log-pane-body" class="log-pane-body"></pre>`,
+		"the log pane body must not be an aria-live region, or every appended line is announced to screen readers")
 }
 
 // TestBrowserBundleFilterIsShared guards that the browser's folder-drop deploy

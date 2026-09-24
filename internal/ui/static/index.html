@@ -1021,13 +1021,19 @@
       </div>
     </section>
 
-  <!-- Log pane: hidden overlay that shows SSE log output for one app -->
-  <div id="log-pane" class="log-pane" hidden role="log" aria-label="Application logs">
+  <!-- Log pane: hidden overlay that shows SSE log output for one app. Modal
+       semantics match the other overlays (role=dialog, focus trap on open,
+       closes on navigate/Escape/backdrop-adjacent close button). The stream
+       itself is plain text, not a live region: a flood of appended lines
+       would otherwise be announced one by one. Only #log-pane-status
+       (role=status) reports discrete connection-state changes. -->
+  <div id="log-pane" class="log-pane" hidden role="dialog" aria-modal="true" aria-labelledby="log-pane-title">
     <div class="log-pane-header">
       <span id="log-pane-title" class="log-pane-title"></span>
       <button id="log-pane-close" type="button" aria-label="Close log pane">Close</button>
     </div>
-    <pre id="log-pane-body" class="log-pane-body" aria-live="polite"></pre>
+    <p id="log-pane-status" class="log-pane-status" role="status" hidden></p>
+    <pre id="log-pane-body" class="log-pane-body"></pre>
   </div>
   </main>
     </div>
