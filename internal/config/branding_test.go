@@ -248,3 +248,46 @@ func TestValidateBrandingAssetContainmentAndResolution(t *testing.T) {
 		t.Fatalf("uppercase HTTPS URL logo must pass: %v", err)
 	}
 }
+
+// TestValidateBrandingRejectsLogoFaviconBasenameCollision proves that a logo
+// and a favicon which resolve to the same served basename but are DIFFERENT
+// files fail validation instead of silently colliding in resolvedAssets,
+// where the later resolve() call would overwrite the earlier one and the
+// /branding/logo.png URL would serve whichever file validation happened to
+// process last.
+func TestValidateBrandingRejectsLogoFaviconBasenameCollision(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "brand"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "icons"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "brand", "logo.png"), []byte("logo-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "icons", "logo.png"), []byte("favicon-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b := &BrandingConfig{AssetsDir: dir, Logo: "brand/logo.png", Favicon: "icons/logo.png"}
+	if err := validateBranding(b); err == nil {
+		t.Fatal("logo and favicon resolving to the same served basename from different files must fail validation, not silently collide")
+	}
+}
+
+// TestValidateBrandingAllowsLogoFaviconSameFile proves the collision check
+// does not reject the legitimate case of Logo and Favicon deliberately
+// pointing at the exact same file (same absolute path).
+func TestValidateBrandingAllowsLogoFaviconSameFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mark.png"), []byte("mark-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b := &BrandingConfig{AssetsDir: dir, Logo: "mark.png", Favicon: "mark.png"}
+	if err := validateBranding(b); err != nil {
+		t.Fatalf("logo and favicon pointing at the exact same file must be allowed: %v", err)
+	}
+	if b.resolvedAssets["mark.png"] != filepath.Join(dir, "mark.png") {
+		t.Fatalf("mark.png not resolved: %+v", b.resolvedAssets)
+	}
+}

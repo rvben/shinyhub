@@ -95,21 +95,33 @@ func validateBranding(b *BrandingConfig) error {
 		}
 	}
 	b.resolvedAssets = map[string]string{}
-	resolve := func(ref string) (string, error) {
+	// resolvedAssets is keyed by served basename (the /branding/<basename> URL
+	// construction in internal/ui/branding.go looks assets up the same way), so
+	// two different source files that happen to share a basename would
+	// otherwise silently collide: whichever resolve() call ran last wins the
+	// key, and the other role serves the wrong file with no error. Logo and
+	// Favicon deliberately pointing at the exact same file is fine and common
+	// (one image used for both); only a same-basename, different-file collision
+	// is rejected.
+	resolve := func(role, ref string) (string, error) {
 		abs, err := resolveLocalAsset(b.AssetsDir, ref)
 		if err != nil {
 			return "", err
 		}
-		b.resolvedAssets[filepath.Base(abs)] = abs
+		base := filepath.Base(abs)
+		if existing, ok := b.resolvedAssets[base]; ok && existing != abs {
+			return "", fmt.Errorf("branding: %s %q and an earlier asset both resolve to the served name %q but are different files (%s vs %s); rename one so /branding/%s does not serve the wrong file", role, ref, base, existing, abs, base)
+		}
+		b.resolvedAssets[base] = abs
 		return abs, nil
 	}
 	if b.Logo != "" && !isHTTPURL(b.Logo) {
-		if _, err := resolve(b.Logo); err != nil {
+		if _, err := resolve("logo", b.Logo); err != nil {
 			return err
 		}
 	}
 	if b.Favicon != "" && !isHTTPURL(b.Favicon) {
-		if _, err := resolve(b.Favicon); err != nil {
+		if _, err := resolve("favicon", b.Favicon); err != nil {
 			return err
 		}
 	}
