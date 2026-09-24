@@ -4,7 +4,26 @@ import (
 	"strings"
 
 	"github.com/rvben/shinyhub/internal/deployfail"
+	"github.com/rvben/shinyhub/internal/process"
 )
+
+// deployFailureDiagnostic builds the apps.last_error text for a deploy whose
+// replicas never came up: the raw boot error plus the tail of replica 0's log,
+// where a Python/R traceback lands. This is the same shape
+// process.BuildCrashDiagnostic gives the runtime watchdog for a crashed app
+// (internal/lifecycle/watcher.go's crashReason) - a first deploy that fails
+// otherwise leaves apps.last_error empty forever, because
+// deployFailureMessage's generic, classification-based text is written to
+// deployments.failure_reason, a separate column the Overview tab's failed-
+// first-deploy box does not read. Reads index 0 since apps.last_error is a
+// single field regardless of replica count.
+func (s *Server) deployFailureDiagnostic(slug string, bootErr error) string {
+	var tail string
+	if s.manager != nil {
+		tail = s.manager.LogTail(slug, 0, process.CrashDiagnosticTailLines)
+	}
+	return process.BuildCrashDiagnostic(bootErr, tail)
+}
 
 // deployFailureMessage turns a raw deploy error into an actionable, developer-
 // facing message for the HTTP 500 body. The server otherwise collapses a rich

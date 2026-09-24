@@ -1683,6 +1683,11 @@ func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 type UpdateAppStatusParams struct {
 	Slug   string
 	Status string
+	// LastError is recorded for a non-"crashed" status write (e.g. "failed");
+	// zero value clears it, matching every existing caller that leaves it
+	// unset because a plain status change (start, stop, hibernate, ...) has no
+	// diagnostic to record. Ignored when Status is "crashed" - see below.
+	LastError string
 }
 
 func (s *Store) UpdateAppStatus(p UpdateAppStatusParams) error {
@@ -1701,8 +1706,8 @@ func (s *Store) UpdateAppStatus(p UpdateAppStatusParams) error {
 		)
 	} else {
 		res, err = s.db.Exec(
-			`UPDATE apps SET status = ?, last_error = '', crashed_at = 0, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
-			p.Status, p.Slug,
+			`UPDATE apps SET status = ?, last_error = ?, crashed_at = 0, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`,
+			p.Status, p.LastError, p.Slug,
 		)
 	}
 	if err != nil {
@@ -2574,11 +2579,21 @@ func (s *Store) GetAppDataPublication(appID int64) (*AppDataPublication, error) 
 	return &p, nil
 }
 
+// compatibilityQuarantineReason is recorded as apps.last_error by
+// EnforceCompatibilityQuarantines. It covers all three EXISTS clauses below:
+// an interrupted deployment/producer barrier, a schedule run still "running"
+// (so it never confirmed completion), and a recorded data-uncertainty row.
+// One fixed message is honest because the shared symptom is the same in all
+// three - the server cannot prove the app's data is compatible with what is
+// about to run - even though the UPDATE has no per-app specific detail to
+// report.
+const compatibilityQuarantineReason = "the server restarted while a data-affecting deployment or schedule run was in progress; compatibility with existing data could not be confirmed, so the app was quarantined"
+
 // EnforceCompatibilityQuarantines repairs app soft status from every durable
 // compatibility fence. Startup runs it before process or scheduler recovery.
 func (s *Store) EnforceCompatibilityQuarantines() error {
 	_, err := s.db.Exec(`
-		UPDATE apps SET status = 'failed', last_error = '', crashed_at = 0, updated_at = CURRENT_TIMESTAMP
+		UPDATE apps SET status = 'failed', last_error = ?, crashed_at = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE apps.status <> 'stopped' AND (EXISTS (
 			SELECT 1 FROM deployments failed
 			WHERE failed.app_id = apps.id AND failed.status IN ('pending', 'failed')
@@ -2596,7 +2611,7 @@ func (s *Store) EnforceCompatibilityQuarantines() error {
 			SELECT 1 FROM schedule_data_uncertainty uncertainty
 			JOIN app_schedules sc ON sc.id = uncertainty.schedule_id
 			WHERE sc.app_id = apps.id
-		))`)
+		))`, compatibilityQuarantineReason)
 	if err != nil {
 		return fmt.Errorf("enforce compatibility quarantines: %w", err)
 	}
@@ -2628,15 +2643,23 @@ func (s *Store) FailDeploymentWithReason(id int64, reason string) error {
 // boundary non-runnable and terminalizes its pending deployment. The ordering
 // cannot be split: a crash after failing the row but before failing the app
 // would otherwise let startup recover the previous consumer.
+//
+// reason is recorded on both rows; callers that also hold a boot diagnostic use
+// QuarantineAndFailDeploymentWithAppStatus to put it on the app instead.
 func (s *Store) QuarantineAndFailDeployment(id int64, reason string) error {
-	return s.QuarantineAndFailDeploymentWithAppStatus(id, reason, "failed")
+	return s.QuarantineAndFailDeploymentWithAppStatus(id, reason, reason, "failed")
 }
 
 // QuarantineAndFailDeploymentWithAppStatus preserves an operator-stopped app
 // while atomically terminalizing the failed compatibility boundary. The failed
 // deployment/barrier remains the durable quarantine; lifecycle status controls
-// whether the UI says failed or deliberately stopped.
-func (s *Store) QuarantineAndFailDeploymentWithAppStatus(id int64, reason, appStatus string) error {
+// whether the UI says failed or deliberately stopped. reason becomes
+// deployments.failure_reason (the durable quarantine record) and lastError
+// becomes apps.last_error, so an operator looking at the app - not the
+// deployment history - can still see why it is down. The two differ when the
+// caller has a boot diagnostic (raw error plus log tail) that is more useful
+// on the app than the classified reason.
+func (s *Store) QuarantineAndFailDeploymentWithAppStatus(id int64, reason, lastError, appStatus string) error {
 	if appStatus != "failed" && appStatus != "stopped" {
 		return fmt.Errorf("quarantine deployment %d: invalid app status %q", id, appStatus)
 	}
@@ -2646,10 +2669,10 @@ func (s *Store) QuarantineAndFailDeploymentWithAppStatus(id int64, reason, appSt
 	}
 	defer tx.Rollback() //nolint:errcheck
 	res, err := tx.Exec(`
-		UPDATE apps SET status = ?, last_error = '', crashed_at = 0, updated_at = CURRENT_TIMESTAMP
+		UPDATE apps SET status = ?, last_error = ?, crashed_at = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE id = (SELECT app_id FROM deployments
 		            WHERE id = ? AND status = ? AND
-		                  (producer_barrier_entered = 1 OR prior_schedule_snapshot_recorded = 0))`, appStatus, id, DeploymentPending)
+		                  (producer_barrier_entered = 1 OR prior_schedule_snapshot_recorded = 0))`, appStatus, lastError, id, DeploymentPending)
 	if err != nil {
 		return fmt.Errorf("quarantine deployment %d app: %w", id, err)
 	}

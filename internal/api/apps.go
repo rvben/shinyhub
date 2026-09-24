@@ -1807,10 +1807,16 @@ func activationPreparation(prepared bool) deploy.PreparationMode {
 // deploy/rollback that already tore down the running pool. prev is the
 // deployment that was authoritative before the attempt (nil if the app had
 // never been deployed). Best-effort: a restore failure marks the app degraded
-// rather than masking the original error.
-func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployment) {
+// rather than masking the original error. failureDiagnostic explains why the
+// deploy/rollback attempt that triggered this restore failed; it is recorded
+// as apps.last_error only when prev is nil, since a first deploy has no other
+// diagnostic and nothing else will ever explain the "stopped" status it is
+// left in. Once prev is non-nil, a failure below is a RESTORE failure - a
+// more proximate cause than failureDiagnostic - so those branches record
+// their own local reason instead.
+func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployment, failureDiagnostic string) {
 	if prev == nil {
-		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
+		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped", LastError: failureDiagnostic}); err != nil {
 			slog.Error("restore: mark stopped (no previous deployment)", "slug", slug, "err", err)
 		}
 		// A first deploy has no previous pool to fall back to, so every durable
@@ -1838,7 +1844,8 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 	}
 	if info, err := os.Stat(prev.BundleDir); err != nil || !info.IsDir() {
 		slog.Error("restore: previous bundle missing; cannot recover pool", "slug", slug, "bundle", prev.BundleDir)
-		if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); uerr != nil {
+		if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded",
+			LastError: "the previous deployment's bundle is missing on disk, so it could not be restored after the failed deploy"}); uerr != nil {
 			slog.Error("restore: mark degraded", "slug", slug, "err", uerr)
 		}
 		return
@@ -1857,7 +1864,8 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
 	if gateErr != nil {
 		slog.Error("restore: acquire publication fence", "slug", slug, "err", gateErr)
-		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded",
+			LastError: fmt.Sprintf("could not restore the previous deployment: %v", gateErr)})
 		return
 	}
 	defer releaseConsumerBoot()
@@ -1888,7 +1896,8 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 	result, err := s.deployRun(params)
 	if err != nil {
 		slog.Error("restore: previous pool failed to start; app is down", "slug", slug, "err", err)
-		if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); uerr != nil {
+		if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded",
+			LastError: s.deployFailureDiagnostic(slug, err)}); uerr != nil {
 			slog.Error("restore: mark degraded", "slug", slug, "err", uerr)
 		}
 		return
@@ -1922,7 +1931,8 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 		if s.proxy != nil {
 			s.proxy.Deregister(slug)
 		}
-		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded",
+			LastError: "the previous deployment restarted, but its replica state could not be saved"})
 		return
 	}
 	if uerr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); uerr != nil {
@@ -1937,14 +1947,14 @@ func (s *Server) restorePreviousPool(slug string, app *db.App, prev *db.Deployme
 // version, which is the exact outcome stopping it was meant to prevent - and a
 // failing CI pipeline would be the thing that did it. Nothing was serving for a
 // kept-stopped deploy, so the recovery is to record that it is still down.
-func (s *Server) restoreAfterFailedDeploy(slug string, app *db.App, prev *db.Deployment, keepStopped bool) {
+func (s *Server) restoreAfterFailedDeploy(slug string, app *db.App, prev *db.Deployment, keepStopped bool, failureDiagnostic string) {
 	if keepStopped {
-		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
+		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped", LastError: failureDiagnostic}); err != nil {
 			slog.Error("deploy: persist stopped status after failed deploy", "slug", slug, "err", err)
 		}
 		return
 	}
-	s.restorePreviousPool(slug, app, prev)
+	s.restorePreviousPool(slug, app, prev, failureDiagnostic)
 }
 
 func (s *Server) persistStartingDeploymentReplica(app *db.App, deployment *db.Deployment, result deploy.Result) error {
@@ -2706,8 +2716,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// observed dead. ErrReplicaNotFound is the expected first-deploy case.
 	if !generationHandoff {
 		if err := s.confirmAppConsumersStopped(app); err != nil {
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "existing consumers could not be confirmed stopped before data publication")
-			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed"})
+			const consumersReason = "existing consumers could not be confirmed stopped before data publication"
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, consumersReason)
+			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed", LastError: consumersReason})
 			writeError(w, http.StatusConflict, "existing consumers could not be confirmed stopped; no producer was run")
 			return
 		}
@@ -2740,7 +2751,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			if producerBarrierEntered {
 				_ = s.manager.Stop(slug)
 			} else if !generationHandoff {
-				s.restoreAfterFailedDeploy(slug, app, prevActive, keepStopped)
+				s.restoreAfterFailedDeploy(slug, app, prevActive, keepStopped, fmt.Sprintf("manifest apply failed: %v", err))
 			}
 			writeError(w, http.StatusInternalServerError, "manifest apply failed")
 			return
@@ -2910,6 +2921,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			err = errors.Join(err, fmt.Errorf("restore previous schedule declarations: %w", declarationRestoreErr))
 		}
 		reason := deployFailureMessage(err)
+		// diagnostic is apps.last_error: the raw boot error plus the tail of the
+		// app's own log, not deployFailureMessage's generic classification text.
+		// deployments.failure_reason (reason, above) is a separate column the
+		// failed-first-deploy Overview box does not read.
+		diagnostic := s.deployFailureDiagnostic(slug, err)
 		kind := deployfail.Classify(err)
 		slog.Error("deploy_run_failed", "slug", slug, "err", err)
 		if producerBarrierEntered {
@@ -2917,7 +2933,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			if keepStopped {
 				quarantineStatus = "stopped"
 			}
-			if qerr := s.store.QuarantineAndFailDeploymentWithAppStatus(pendingDep.ID, reason, quarantineStatus); qerr != nil {
+			if qerr := s.store.QuarantineAndFailDeploymentWithAppStatus(pendingDep.ID, reason, diagnostic, quarantineStatus); qerr != nil {
 				// Leave the row pending. Pending deployment admission is itself a
 				// durable fail-closed fence, and startup retries atomic quarantine.
 				slog.Error("deploy: persist compatibility quarantine; leaving deployment pending", "slug", slug, "err", qerr)
@@ -2925,7 +2941,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		} else {
 			_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
 			if declarationRestoreErr != nil {
-				_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed"})
+				_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed", LastError: diagnostic})
 			}
 		}
 		// Revert manifest [app] settings so the restored old pool runs under
@@ -3014,7 +3030,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			recoveryMessage = "Previous deployment remained available"
 		} else {
 			deployResponse.event(deployevent.Phase("recovery", deployevent.StatusStarted, "Restoring the previous deployment"))
-			s.restoreAfterFailedDeploy(slug, &preManifestApp, prevActive, keepStopped)
+			s.restoreAfterFailedDeploy(slug, &preManifestApp, prevActive, keepStopped, diagnostic)
 			if recovered, rerr := s.store.GetAppBySlug(slug); rerr == nil {
 				switch recovered.Status {
 				case "running":
@@ -3580,8 +3596,9 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.SetGenerationActivationToken(slug, pendingDep.ID, pendingDep.ActivationToken)
 	}
 	if err := s.confirmAppConsumersStopped(app); err != nil {
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "existing consumers could not be confirmed stopped before rollback data publication")
-		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed"})
+		const consumersReason = "existing consumers could not be confirmed stopped before rollback data publication"
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, consumersReason)
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed", LastError: consumersReason})
 		writeError(w, http.StatusConflict, "existing consumers could not be confirmed stopped; no rollback producer was run")
 		return
 	}
@@ -3679,8 +3696,12 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			err = errors.Join(err, fmt.Errorf("restore previous schedule declarations: %w", declarationRestoreErr))
 		}
 		slog.Error("rollback_failed", "slug", slug, "err", err)
+		// diagnostic is apps.last_error: the raw boot error plus the tail of the
+		// app's own log, not deployFailureMessage's generic classification text
+		// (used below for the HTTP response and deployments.failure_reason).
+		diagnostic := s.deployFailureDiagnostic(slug, err)
 		if producerBarrierEntered {
-			if qerr := s.store.QuarantineAndFailDeployment(pendingDep.ID, deployFailureMessage(err)); qerr != nil {
+			if qerr := s.store.QuarantineAndFailDeploymentWithAppStatus(pendingDep.ID, deployFailureMessage(err), diagnostic, "failed"); qerr != nil {
 				slog.Error("rollback: persist compatibility quarantine; leaving deployment pending", "slug", slug, "err", qerr)
 			}
 			// The target producer may already have replaced shared data. Starting
@@ -3688,10 +3709,10 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			_ = s.manager.Stop(slug)
 		} else if declarationRestoreErr == nil {
 			_ = s.store.FailDeployment(pendingDep.ID)
-			s.restorePreviousPool(slug, app, prevActive)
+			s.restorePreviousPool(slug, app, prevActive, diagnostic)
 		} else {
 			_ = s.store.FailDeploymentWithReason(pendingDep.ID, deployFailureMessage(err))
-			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed"})
+			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed", LastError: diagnostic})
 			_ = s.manager.Stop(slug)
 		}
 		writeErrorWithKind(w, http.StatusInternalServerError, deployFailureMessage(err), deployfail.Classify(err))

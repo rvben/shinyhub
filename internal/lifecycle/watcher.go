@@ -810,14 +810,6 @@ func (w *Watcher) abortWarmClaim(slug string) {
 	}
 }
 
-// crashLogTailLines bounds how many trailing app-log lines are captured as a
-// crash reason; crashReasonMaxBytes caps the total so a runaway log line cannot
-// bloat the apps row.
-const (
-	crashLogTailLines   = 20
-	crashReasonMaxBytes = 8000
-)
-
 // auditAppCrashed records a system-generated (nil user) "app_crashed" audit
 // event so the audit log has a queryable record of an app going down and why,
 // not just the app row's transient last_error. Best-effort, like all audit
@@ -834,18 +826,12 @@ func (w *Watcher) auditAppCrashed(slug, reason string) {
 // crashReason builds a short diagnostic for a crashed app: the boot/restart error
 // (when present) followed by the tail of the replica's log, where a Python/R
 // traceback lands. The end of the text - the actual error - is preserved when the
-// reason is truncated.
+// reason is truncated. The combine-and-truncate shape is shared with the deploy
+// handler's failure diagnostic (process.BuildCrashDiagnostic); this method adds
+// the OOM-specific lead-in, which depends on watcher-only exit-verdict state.
 func (w *Watcher) crashReason(slug string, index int, bootErr error, appMemLimitMB int) string {
-	tail := w.mgr.LogTail(slug, index, crashLogTailLines)
-	var reason string
-	switch {
-	case bootErr != nil && tail != "":
-		reason = bootErr.Error() + "\n\n" + tail
-	case bootErr != nil:
-		reason = bootErr.Error()
-	default:
-		reason = tail
-	}
+	tail := w.mgr.LogTail(slug, index, process.CrashDiagnosticTailLines)
+	reason := process.BuildCrashDiagnostic(bootErr, tail)
 	// When the most recent exit was a kernel OOM-kill, lead with a line that
 	// names the memory limit so the operator sees the ceiling was hit rather
 	// than reading it as a code bug. The verdict's own limit wins; fall back to
@@ -862,8 +848,8 @@ func (w *Watcher) crashReason(slug string, index int, bootErr error, appMemLimit
 			reason = line
 		}
 	}
-	if len(reason) > crashReasonMaxBytes {
-		reason = "...\n" + reason[len(reason)-crashReasonMaxBytes:]
+	if len(reason) > process.CrashDiagnosticMaxBytes {
+		reason = "...\n" + reason[len(reason)-process.CrashDiagnosticMaxBytes:]
 	}
 	return reason
 }
