@@ -758,7 +758,7 @@ func (s *Store) PruneUsageSessions(retention time.Duration) (int64, error) {
 	if retention <= 0 {
 		return 0, nil
 	}
-	if err := s.finalizeStaleUsageSessions(retention); err != nil {
+	if _, err := s.FinalizeStaleUsageSessions(); err != nil {
 		return 0, err
 	}
 	var total int64
@@ -774,15 +774,25 @@ func (s *Store) PruneUsageSessions(retention time.Duration) (int64, error) {
 	}
 }
 
-func (s *Store) finalizeStaleUsageSessions(retention time.Duration) error {
-	_, err := s.db.Exec(`UPDATE usage_sessions SET ended_at = heartbeat_at
+// FinalizeStaleUsageSessions closes out open sessions whose heartbeat has
+// gone silent for longer than usageSessionStaleAfter, regardless of any
+// retention configuration: a crashed replica that never sends an explicit
+// end event must not stay "open" indefinitely just because raw or aggregate
+// retention is disabled. An unfinalized session is excluded from the
+// usage_closed_daily fast path (its trigger only fires once ended_at is
+// set), so leaving it open forever would force every future usage report to
+// keep rescanning it. It must run independently of PruneUsageSessions, which
+// only finalizes as a prerequisite to rollup and is itself gated on
+// retention being enabled.
+func (s *Store) FinalizeStaleUsageSessions() (int64, error) {
+	defer s.timed("FinalizeStaleUsageSessions")()
+	res, err := s.db.Exec(`UPDATE usage_sessions SET ended_at = heartbeat_at
 		WHERE ended_at IS NULL
-		  AND started_at < ` + s.d.nowMinusSeconds(int(retention.Seconds())) + `
 		  AND heartbeat_at < ` + s.d.nowMinusSeconds(int(usageSessionStaleAfter.Seconds())))
 	if err != nil {
-		return fmt.Errorf("finalize stale usage sessions: %w", err)
+		return 0, fmt.Errorf("finalize stale usage sessions: %w", err)
 	}
-	return nil
+	return res.RowsAffected()
 }
 
 func (s *Store) rollupUsageBatch(retention time.Duration, limit int) (int64, error) {

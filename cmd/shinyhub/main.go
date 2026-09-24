@@ -594,7 +594,8 @@ func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manag
 	pruneRateLimits := store.IsPostgres()
 	const rateLimitRetention = time.Hour
 	if auditRetention <= 0 && usageRawRetention <= 0 && usageAggregateRetention <= 0 && keepRuns <= 0 &&
-		keepAppLogs <= 0 && keepFleetRuns <= 0 && developmentSessionRetention <= 0 && !pruneRateLimits {
+		keepAppLogs <= 0 && keepFleetRuns <= 0 && developmentSessionRetention <= 0 && !pruneRateLimits &&
+		!usageCfg.Enabled {
 		return
 	}
 
@@ -604,6 +605,18 @@ func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manag
 				slog.Warn("prune_audit_events_failed", "err", err)
 			} else if n > 0 {
 				slog.Info("pruned_audit_events", "removed", n, "retention_days", cfg.AuditRetentionDays)
+			}
+		}
+		// Finalizing stale (crashed, heartbeat-silent) sessions must run whenever
+		// usage tracking is on, regardless of retention: an unfinalized session
+		// never enters the usage_closed_daily fast path (its trigger only fires
+		// once ended_at is set), so leaving it open forever would force every
+		// future usage report to keep rescanning it even with retention disabled.
+		if usageCfg.Enabled {
+			if n, err := store.FinalizeStaleUsageSessions(); err != nil {
+				slog.Warn("finalize_stale_usage_sessions_failed", "err", err)
+			} else if n > 0 {
+				slog.Info("finalized_stale_usage_sessions", "closed", n)
 			}
 		}
 		if usageRawRetention > 0 {

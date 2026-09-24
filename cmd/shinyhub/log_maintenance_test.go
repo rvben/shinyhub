@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -148,5 +149,46 @@ func TestRunMaintenancePrunesFleetRunsAndDevelopmentSessions(t *testing.T) {
 	}
 	if _, err := store.GetDevelopmentSession(app.ID, "sess-old"); err != db.ErrNotFound {
 		t.Errorf("expected sess-old to be pruned, got %v", err)
+	}
+}
+
+// TestRunMaintenanceFinalizesStaleUsageSessionsIndependentOfRetention proves
+// runMaintenance closes out a crashed (heartbeat-stale) usage session even
+// when both usage retention knobs are disabled. Without independent
+// finalization, a session that never gets ended_at set stays in the
+// usage_closed_daily fast path's live re-scan forever whenever an operator
+// tracks usage but never enables retention.
+func TestRunMaintenanceFinalizesStaleUsageSessionsIndependentOfRetention(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner3", PasswordHash: "hash", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner3")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "usage-demo", Name: "Usage Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// started_at (and therefore the initial heartbeat_at) is far enough in the
+	// past to be stale, but well inside any retention window would-be enforce -
+	// retention is disabled below, so only heartbeat staleness should matter.
+	if err := store.BeginUsageSession(db.UsageSessionStart{
+		ID: "crashed-1", Slug: "usage-demo", InstanceID: "cp",
+		StartedAt: time.Now().UTC().Add(-5 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // maintenance still runs its prompt first pass, then exits.
+	runMaintenance(ctx, store, nil, nil, config.MaintenanceConfig{
+		Interval: time.Hour,
+	}, config.UsageConfig{Enabled: true, RawRetentionDays: 0, AggregateRetentionDays: 0})
+
+	var endedAt sql.NullTime
+	if err := store.DB().QueryRow(`SELECT ended_at FROM usage_sessions WHERE id = ?`, "crashed-1").Scan(&endedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !endedAt.Valid {
+		t.Fatal("expected crashed-1 to be finalized (ended_at set) despite retention being disabled")
 	}
 }

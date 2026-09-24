@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -128,6 +129,57 @@ func TestUsageSessionRetentionAndForeignKeyPrivacy(t *testing.T) {
 	}
 	if userID != nil {
 		t.Fatalf("deleted viewer identity retained as %v", userID)
+	}
+}
+
+// TestFinalizeStaleUsageSessionsIgnoresSessionAge proves finalization depends
+// only on heartbeat staleness, not on how long ago the session started. A
+// crashed replica's session must be closed out promptly, not only once it is
+// old enough to be a retention-pruning candidate.
+func TestFinalizeStaleUsageSessionsIgnoresSessionAge(t *testing.T) {
+	store := mustOpenDB(t)
+	owner := mustCreateUser(t, store, "finalize-owner", "developer")
+	app := mustCreateApp(t, store, "finalize-app", owner.ID)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if err := store.BeginUsageSession(db.UsageSessionStart{
+		ID: "recent-crashed", Slug: app.Slug, InstanceID: "cp", StartedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE usage_sessions SET heartbeat_at = ? WHERE id = 'recent-crashed'`,
+		now.Add(-5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.BeginUsageSession(db.UsageSessionStart{
+		ID: "recent-live", Slug: app.Slug, InstanceID: "cp", StartedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.HeartbeatUsageSessions([]string{"recent-live"}); err != nil {
+		t.Fatal(err)
+	}
+
+	finalized, err := store.FinalizeStaleUsageSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalized != 1 {
+		t.Fatalf("FinalizeStaleUsageSessions finalized %d, want 1", finalized)
+	}
+	var ended sql.NullTime
+	if err := store.DB().QueryRow(`SELECT ended_at FROM usage_sessions WHERE id = 'recent-crashed'`).Scan(&ended); err != nil {
+		t.Fatal(err)
+	}
+	if !ended.Valid {
+		t.Fatal("expected recent-crashed to be finalized despite being younger than any retention window")
+	}
+	if err := store.DB().QueryRow(`SELECT ended_at FROM usage_sessions WHERE id = 'recent-live'`).Scan(&ended); err != nil {
+		t.Fatal(err)
+	}
+	if ended.Valid {
+		t.Fatal("expected recent-live to remain open")
 	}
 }
 
