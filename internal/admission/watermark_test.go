@@ -59,3 +59,18 @@ func TestWatermarkFailsOpenOnStaleReading(t *testing.T) {
 		t.Fatal("reading older than 5s must fail open (admit), not shed on stale data")
 	}
 }
+
+// BenchmarkWatermark_ConcurrentAdmit measures Admit() under concurrent callers.
+// Admit runs on every render-admission decision while record only runs once a
+// second from the background sampler, so this is almost entirely concurrent
+// readers: run with -cpu=8 (or higher) to see them contend.
+func BenchmarkWatermark_ConcurrentAdmit(b *testing.B) {
+	w := NewWatermark(90, func() (float64, error) { return 0, nil })
+	w.SetReadingForTest(50)
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			w.Admit()
+		}
+	})
+}
