@@ -585,13 +585,16 @@ func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manag
 	usageAggregateRetention := time.Duration(usageCfg.AggregateRetentionDays) * 24 * time.Hour
 	keepRuns := cfg.ScheduleRunRetentionCount
 	keepAppLogs := cfg.AppLogRunRetentionCount
+	keepFleetRuns := cfg.FleetRunRetentionCount
+	developmentSessionRetention := time.Duration(cfg.DevelopmentSessionRetentionDays) * 24 * time.Hour
 	// The database-backed login limiter only writes rows on a Postgres backend,
 	// so its ledger only needs sweeping there. Retention must comfortably exceed
 	// the longest limiter window (login uses 1m) so an in-window row is never
 	// dropped; raise it if a longer-window bucket is ever added.
 	pruneRateLimits := store.IsPostgres()
 	const rateLimitRetention = time.Hour
-	if auditRetention <= 0 && usageRawRetention <= 0 && usageAggregateRetention <= 0 && keepRuns <= 0 && keepAppLogs <= 0 && !pruneRateLimits {
+	if auditRetention <= 0 && usageRawRetention <= 0 && usageAggregateRetention <= 0 && keepRuns <= 0 &&
+		keepAppLogs <= 0 && keepFleetRuns <= 0 && developmentSessionRetention <= 0 && !pruneRateLimits {
 		return
 	}
 
@@ -660,6 +663,20 @@ func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manag
 				slog.Warn("prune_rate_limit_counters_failed", "err", err)
 			} else if n > 0 {
 				slog.Info("pruned_rate_limit_counters", "removed", n)
+			}
+		}
+		if keepFleetRuns > 0 {
+			if n, err := store.PruneFleetRuns(keepFleetRuns); err != nil {
+				slog.Warn("prune_fleet_runs_failed", "err", err)
+			} else if n > 0 {
+				slog.Info("pruned_fleet_runs", "removed", n, "keep_per_fleet", keepFleetRuns)
+			}
+		}
+		if developmentSessionRetention > 0 {
+			if n, err := store.PruneDevelopmentSessions(developmentSessionRetention); err != nil {
+				slog.Warn("prune_development_sessions_failed", "err", err)
+			} else if n > 0 {
+				slog.Info("pruned_development_sessions", "removed", n, "retention_days", cfg.DevelopmentSessionRetentionDays)
 			}
 		}
 	}

@@ -97,3 +97,56 @@ func TestRunMaintenancePrunesDatabaseBeforeLocalLogFiles(t *testing.T) {
 		t.Fatalf("disabled usage retained %d expired rows", usageRows)
 	}
 }
+
+// TestRunMaintenancePrunesFleetRunsAndDevelopmentSessions proves runMaintenance
+// actually invokes the fleet run and development session prune knobs when
+// configured, not just that the underlying Store methods work in isolation.
+func TestRunMaintenancePrunesFleetRunsAndDevelopmentSessions(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner2", PasswordHash: "hash", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner2")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "fleet-demo", Name: "Fleet Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("fleet-demo")
+
+	for i, id := range []string{"run-old", "run-new"} {
+		if _, _, err := store.CreateFleetRun(db.CreateFleetRunParams{
+			ID: id, FleetID: "acme", Kind: "fleet_apply",
+		}); err != nil {
+			t.Fatalf("create fleet run %d: %v", i, err)
+		}
+		if err := store.FinishFleetRun(id, "succeeded", 0, ""); err != nil {
+			t.Fatalf("finish fleet run %d: %v", i, err)
+		}
+	}
+
+	if err := store.UpsertDevelopmentSession(db.UpsertDevelopmentSessionParams{
+		ID: "sess-old", AppID: app.ID, TargetKind: db.DevelopmentTargetExisting,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EndDevelopmentSession(app.ID, "sess-old", time.Now().UTC().Add(-100*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // maintenance still runs its prompt first pass, then exits.
+	runMaintenance(ctx, store, nil, nil, config.MaintenanceConfig{
+		FleetRunRetentionCount:          1,
+		DevelopmentSessionRetentionDays: 30,
+		Interval:                        time.Hour,
+	}, config.UsageConfig{Enabled: false})
+
+	if _, err := store.GetFleetRun("run-old"); err != db.ErrNotFound {
+		t.Errorf("expected run-old to be pruned, got %v", err)
+	}
+	if _, err := store.GetFleetRun("run-new"); err != nil {
+		t.Errorf("expected run-new to survive prune, got %v", err)
+	}
+	if _, err := store.GetDevelopmentSession(app.ID, "sess-old"); err != db.ErrNotFound {
+		t.Errorf("expected sess-old to be pruned, got %v", err)
+	}
+}

@@ -288,6 +288,28 @@ func (s *Store) EndDevelopmentSession(appID int64, id string, endedAt time.Time)
 	return nil
 }
 
+// PruneDevelopmentSessions deletes ended, non-ephemeral sessions whose
+// ended_at is older than retention. Ephemeral sessions are excluded: they are
+// removed automatically when their app is deleted (development_sessions.app_id
+// cascades from apps), so a surviving ephemeral row means the app is still
+// live and the session record must stay with it. Active sessions are never
+// eligible regardless of age. A non-positive retention is a no-op.
+func (s *Store) PruneDevelopmentSessions(retention time.Duration) (int64, error) {
+	defer s.timed("PruneDevelopmentSessions")()
+	if retention <= 0 {
+		return 0, nil
+	}
+	secs := int(retention.Seconds())
+	res, err := s.db.Exec(`
+		DELETE FROM development_sessions
+		WHERE status = 'ended' AND target_kind != 'ephemeral'
+		  AND ended_at IS NOT NULL AND ended_at < ` + s.d.nowMinusSeconds(secs))
+	if err != nil {
+		return 0, fmt.Errorf("prune development sessions: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) GetDevelopmentSession(appID int64, id string) (*DevelopmentSession, error) {
 	row := s.db.QueryRow(`
 		SELECT id, app_id, target_kind, status, user_id, actor,
