@@ -261,3 +261,43 @@ func TestListAuditEvents_Admin(t *testing.T) {
 		t.Errorf("expected action=deploy, got %v", resp.Events[0]["action"])
 	}
 }
+
+// TestListAuditEvents_LimitIsClamped proves the clamp reaches the real HTTP
+// path, not just the parsing helper in isolation: an admin asking for an
+// enormous page size still gets back at most the server's maximum page.
+func TestListAuditEvents_LimitIsClamped(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "admin", PasswordHash: hash, Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("admin")
+	token, _ := auth.IssueJWT(u.ID, "admin", "admin", "test-secret")
+
+	const seeded = 505
+	for i := 0; i < seeded; i++ {
+		store.LogAuditEvent(db.AuditEventParams{
+			UserID: &u.ID, Action: "deploy", ResourceType: "app", ResourceID: "test-app",
+		})
+	}
+
+	req := authedRequest(t, "GET", "/api/audit?limit=999999999", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Events []map[string]any `json:"events"`
+		Total  int64            `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != seeded {
+		t.Fatalf("total = %d, want %d (the clamp must not affect the reported total)", resp.Total, seeded)
+	}
+	if len(resp.Events) >= seeded {
+		t.Fatalf("an excessive ?limit= returned %d of %d rows in one response, want it capped well below the full set", len(resp.Events), seeded)
+	}
+}
