@@ -904,6 +904,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.With(s.rateLimitByIP(s.tokenLimiter)).Post("/api/auth/invitations/preview", s.handlePublicUserInvitation)
 	r.With(s.rateLimitByIP(s.tokenLimiter)).Post("/api/auth/invitations/accept", s.handlePublicUserInvitation)
 	r.With(s.rateLimitByIP(s.connectLimiter)).Get("/api/auth/cli-connect/status", s.handleCLIConnectStatus)
+	r.With(s.rateLimitByIP(s.connectLimiter)).Post("/api/auth/cli-connect/register", s.handleCLIConnectRegister)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/login", s.handleOIDCLogin)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/callback", s.handleOIDCCallback)
 	r.Get("/api/server-info", s.handleServerInfo)
@@ -1022,7 +1023,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Delete("/api/apps/{slug}/shared-data/{source_slug}", s.handleRevokeSharedData)
 
 		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/tokens", s.handleCreateToken)
-		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/tokens/connect", s.handleConnectCLIToken)
+		r.With(rateLimitByUser(s.tokenLimiter)).Post("/api/auth/cli-connect/approve", s.handleApproveCLIConnect)
 		r.Get("/api/tokens", s.handleListTokens)
 		r.Delete("/api/tokens/{id}", s.handleDeleteToken)
 		r.Get("/api/service-accounts", s.handleListServiceAccounts)

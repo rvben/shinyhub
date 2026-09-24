@@ -7671,32 +7671,56 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
   letter-spacing: -0.015em;
   text-wrap: balance;
 }
-.cli-connect-content > p:not(.cli-connect-context):not(.error):not(.cli-connect-success) {
+.cli-connect-content > p:not(.cli-connect-context):not(.error):not(.cli-connect-success):not(.cli-connect-legacy-notice) {
   max-width: 65ch;
   color: var(--text-soft);
   line-height: 1.55;
 }
-.cli-connect-details {
+.cli-connect-legacy-notice {
+  max-width: 65ch;
+  margin: 0.6rem 0 0;
+  padding: 0.5rem 0.75rem;
+  background: var(--accent-dim);
+  border: 1px solid var(--cyan-bright);
+  border-radius: 8px;
+  color: var(--text-soft);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+.cli-connect-legacy-notice[hidden] { display: none; }
+.cli-connect-form {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.7rem 1.5rem;
-  margin: 0.9rem 0;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.9rem 0 0;
 }
-.cli-connect-details div { display: flex; align-items: baseline; gap: 0.45rem; }
-.cli-connect-details dt { color: var(--text-muted); font-size: 0.78rem; }
-.cli-connect-details dd { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
-.cli-connect-details code {
-  color: var(--cyan);
+.cli-connect-form label { color: var(--text-muted); font-size: 0.78rem; font-weight: 600; }
+.cli-connect-form input {
+  width: 9rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
   font-family: var(--mono);
-  letter-spacing: 0.04em;
+  font-size: 0.9rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  box-sizing: border-box;
+  transition: border-color var(--ease), box-shadow var(--ease);
 }
-.cli-connect-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 1rem; }
-.cli-connect-actions button { min-height: 2.35rem; padding: 0.45rem 0.85rem; }
+.cli-connect-form input:focus {
+  outline: none;
+  border-color: var(--cyan-bright);
+  box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+}
+.cli-connect-form button { min-height: 2.35rem; padding: 0.45rem 0.85rem; }
 .cli-connect-success { color: var(--green); font-weight: 600; }
 @media (max-width: 540px) {
   .cli-connect-panel { flex-direction: column; }
-  .cli-connect-actions { justify-content: stretch; }
-  .cli-connect-actions button { flex: 1; }
+  .cli-connect-form { align-items: stretch; }
+  .cli-connect-form input { width: 100%; }
 }
 
 .tokens-intro {

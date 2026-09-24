@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -740,18 +741,32 @@ type createTokenResponse struct {
 	ExpiresAt *time.Time `json:"expires_at"`
 }
 
-// connectCLITokenRequest completes a browser-approved CLI connection. The CLI
-// creates the raw credential locally and sends only its SHA-256 hash through
-// the browser. This means the secret never appears in a URL, browser history,
-// server response, or application log: after the signed-in user approves this
-// request, the waiting CLI can authenticate with the raw value it alone knows.
-type connectCLITokenRequest struct {
+// cliConnectRegisterRequest is submitted by the CLI itself, before any
+// browser page is involved, and registers the SHA-256 hash of a credential
+// the CLI generated locally. The raw credential never appears in a URL,
+// browser history, server response, or log; the only thing the registering
+// CLI gets back is a short code, which it prints for a human to read and type
+// in by hand on the tokens page.
+type cliConnectRegisterRequest struct {
 	TokenHash string `json:"token_hash"`
 	Name      string `json:"name"`
 }
 
-type connectCLITokenResponse struct {
-	ID        int64     `json:"id"`
+type cliConnectRegisterResponse struct {
+	UserCode  string    `json:"user_code"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// approveCLIConnectRequest carries only the code a signed-in person read off
+// their own terminal and typed into the browser. This is the entire fix for
+// the design it replaces: nothing here can be pre-filled by a link, so a
+// phishing URL has no code to hand the victim and cannot get them to approve
+// an attacker's credential.
+type approveCLIConnectRequest struct {
+	UserCode string `json:"user_code"`
+}
+
+type approveCLIConnectResponse struct {
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -759,35 +774,173 @@ type connectCLITokenResponse struct {
 
 const cliConnectionExpiryDays = 90
 
-// handleCLIConnectStatus lets a waiting CLI observe only whether its random
-// credential hash has been approved. It is public because the CLI has no valid
-// credential yet; a dedicated per-IP limiter bounds database work, and the
-// 256-bit hash makes probing someone else's request infeasible. No identity or
-// token metadata is returned.
-func (s *Server) handleCLIConnectStatus(w http.ResponseWriter, r *http.Request) {
-	hash := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("token_hash")))
-	if len(hash) != sha256.Size*2 {
+// validSHA256Hex reports whether s has the shape of a SHA-256 hex digest.
+// Case is a caller concern; hash comparisons and storage happen lowercased.
+func validSHA256Hex(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+// cliUserCodeAlphabet excludes 0/O and 1/I/L, the pairs people most often
+// misread or mistype when copying a short code off a terminal by eye.
+const cliUserCodeAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+// generateCLIUserCode returns a short code such as "H3PQ-7XMK" for a person
+// to type into the browser. Each character is drawn with crypto/rand.Int
+// against the alphabet's exact length, not a byte-modulo scheme, so the
+// restricted alphabet introduces no bias toward any character.
+func generateCLIUserCode() (string, error) {
+	const halfLen = 4
+	b := make([]byte, halfLen*2)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(cliUserCodeAlphabet))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = cliUserCodeAlphabet[n.Int64()]
+	}
+	return string(b[:halfLen]) + "-" + string(b[halfLen:]), nil
+}
+
+// normalizeCLIUserCode uppercases input and drops everything but letters and
+// digits, then reinserts the separator at the midpoint. This tolerates a
+// pasted code typed with different spacing, case, or dash placement without
+// weakening validation: validCLIUserCode still checks the exact shape after.
+func normalizeCLIUserCode(raw string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(raw) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	s := b.String()
+	if len(s) == 8 {
+		return s[:4] + "-" + s[4:]
+	}
+	return s
+}
+
+func validCLIUserCode(code string) bool {
+	if len(code) != 9 || code[4] != '-' {
+		return false
+	}
+	for i, r := range code {
+		if i == 4 {
+			continue
+		}
+		if !((r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// cliUserCodeMaxAttempts bounds how many times registerCLIConnectRequest
+// retries after a generated user_code collides with another still-pending
+// request (db.ErrCLIUserCodeExists). With 31^8 possible codes a real
+// collision is exceedingly unlikely; failing closed after a handful of
+// attempts turns a stuck generator into a clear error instead of retrying
+// forever.
+const cliUserCodeMaxAttempts = 5
+
+// ErrCLIUserCodeGenerationFailed is returned when registerCLIConnectRequest
+// could not find a user_code that was not already in use for another pending
+// request within cliUserCodeMaxAttempts tries.
+var ErrCLIUserCodeGenerationFailed = errors.New("could not generate a unique cli connect user code")
+
+// registerCLIConnectRequest generates a user_code and stores the pending
+// request, retrying with a freshly generated code whenever the store reports
+// a collision with another still-pending request rather than failing the
+// whole registration on it. generate is injected so a test can force a
+// collision deterministically, without needing a real crypto/rand clash.
+func registerCLIConnectRequest(store *db.Store, tokenHash, name string, generate func() (string, error)) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < cliUserCodeMaxAttempts; attempt++ {
+		userCode, err := generate()
+		if err != nil {
+			return "", err
+		}
+		if err := store.CreateCLIConnectRequest(tokenHash, userCode, name); err != nil {
+			if errors.Is(err, db.ErrCLIUserCodeExists) {
+				lastErr = err
+				continue
+			}
+			return "", err
+		}
+		return userCode, nil
+	}
+	return "", fmt.Errorf("%w: %v", ErrCLIUserCodeGenerationFailed, lastErr)
+}
+
+// handleCLIConnectRegister lets a CLI register the hash of a credential it
+// generated locally, before any browser page is involved, in exchange for a
+// short code that only reaches a person by them reading it off their own
+// terminal. This replaces a design where the browser trusted a hash and code
+// carried entirely as URL query parameters: a phishing link could pre-fill
+// both and get a signed-in victim to approve an attacker's credential with
+// one click. Requiring the code to be retyped by hand removes the URL as a
+// channel for choosing what gets approved. Public and IP rate-limited, like
+// the status endpoint below: the caller has no credential yet.
+func (s *Server) handleCLIConnectRegister(w http.ResponseWriter, r *http.Request) {
+	var req cliConnectRegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" || len(req.Name) > 64 {
+		writeError(w, http.StatusBadRequest, "name must be between 1 and 64 characters")
+		return
+	}
+	if !validSHA256Hex(req.TokenHash) {
 		writeError(w, http.StatusBadRequest, "token_hash must be a SHA-256 hex digest")
 		return
 	}
-	if _, err := hex.DecodeString(hash); err != nil {
-		writeError(w, http.StatusBadRequest, "token_hash must be a SHA-256 hex digest")
-		return
-	}
-	approved, err := s.store.APIKeyHashExists(hash)
+
+	userCode, err := registerCLIConnectRequest(s.store, strings.ToLower(req.TokenHash), req.Name, generateCLIUserCode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	status := "pending"
-	if approved {
-		status = "approved"
+	writeJSON(w, http.StatusCreated, cliConnectRegisterResponse{
+		UserCode:  userCode,
+		ExpiresAt: time.Now().UTC().Add(db.CLIConnectRequestTTL),
+	})
+}
+
+// handleCLIConnectStatus lets a waiting CLI observe only whether its random
+// credential hash has been approved, is still pending, has expired, or was
+// never registered. It is public because the CLI has no valid credential yet;
+// a dedicated per-IP limiter bounds database work, and the 256-bit hash makes
+// probing someone else's request infeasible. No identity, code, or token
+// metadata is returned.
+func (s *Server) handleCLIConnectStatus(w http.ResponseWriter, r *http.Request) {
+	hash := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("token_hash")))
+	if !validSHA256Hex(hash) {
+		writeError(w, http.StatusBadRequest, "token_hash must be a SHA-256 hex digest")
+		return
+	}
+	status, err := s.store.CLIConnectRequestStatus(hash)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]string{"status": status})
 }
 
-func (s *Server) handleConnectCLIToken(w http.ResponseWriter, r *http.Request) {
+// handleApproveCLIConnect completes a browser-approved CLI connection. The
+// only thing trusted from the request body is user_code: a value the CLI
+// never transmits and the browser never receives pre-filled, so it can only
+// reach this handler by a signed-in person having read it off their own
+// terminal and typed it in themselves. A match exchanges the token hash and
+// name the CLI registered for a real API key; the raw credential itself never
+// crosses this boundary, only its hash does, and only the CLI that generated
+// it ever holds the raw value.
+func (s *Server) handleApproveCLIConnect(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -802,53 +955,45 @@ func (s *Server) handleConnectCLIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req connectCLITokenRequest
+	var req approveCLIConnectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" || len(req.Name) > 64 {
-		writeError(w, http.StatusBadRequest, "name must be between 1 and 64 characters")
-		return
-	}
-	if len(req.TokenHash) != sha256.Size*2 {
-		writeError(w, http.StatusBadRequest, "token_hash must be a SHA-256 hex digest")
-		return
-	}
-	if _, err := hex.DecodeString(req.TokenHash); err != nil {
-		writeError(w, http.StatusBadRequest, "token_hash must be a SHA-256 hex digest")
+	code := normalizeCLIUserCode(req.UserCode)
+	if !validCLIUserCode(code) {
+		writeError(w, http.StatusBadRequest, "enter the code exactly as shown in your terminal")
 		return
 	}
 
-	exists, err := s.store.APIKeyNameExists(u.ID, req.Name)
+	tokenHash, name, err := s.store.ConsumeCLIConnectRequest(code)
 	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusBadRequest, "that code is invalid or has expired; run `shinyhub connect` again to get a new one")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	if exists {
-		writeError(w, http.StatusConflict, "token name already in use")
 		return
 	}
 
 	expiresAt := time.Now().UTC().Add(cliConnectionExpiryDays * 24 * time.Hour)
-	keyID, createdAt, err := s.store.CreateAPIKey(db.CreateAPIKeyParams{
-		UserID: u.ID, KeyHash: strings.ToLower(req.TokenHash), Name: req.Name, ExpiresAt: &expiresAt,
+	_, createdAt, err := s.store.CreateAPIKey(db.CreateAPIKeyParams{
+		UserID: u.ID, KeyHash: tokenHash, Name: name, ExpiresAt: &expiresAt,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrAPIKeyNameExists) {
-			writeError(w, http.StatusConflict, "token name already in use")
+			writeError(w, http.StatusConflict, "a token named \""+name+"\" already exists; run `shinyhub connect` again to get a new one")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	s.logAuditEvent(r, db.AuditEventParams{
-		UserID: &u.ID, Action: "connect_cli", ResourceType: "token", ResourceID: req.Name,
+		UserID: &u.ID, Action: "connect_cli", ResourceType: "token", ResourceID: name,
 		Detail: fmt.Sprintf("expires_in_days=%d", cliConnectionExpiryDays), IPAddress: s.ClientIP(r),
 	})
-	writeJSON(w, http.StatusCreated, connectCLITokenResponse{
-		ID: keyID, Name: req.Name, CreatedAt: createdAt, ExpiresAt: expiresAt,
+	writeJSON(w, http.StatusCreated, approveCLIConnectResponse{
+		Name: name, CreatedAt: createdAt, ExpiresAt: expiresAt,
 	})
 }
 

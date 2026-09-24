@@ -384,6 +384,12 @@ func passwordLogin(host, username, password string) (string, error) {
 	return result.Token, nil
 }
 
+// browserAuthorizeCLI registers this CLI's credential hash with the server
+// before opening any browser page, then asks a person to type the returned
+// code into that page. The authorization URL itself carries no query
+// parameters: nothing about which credential to approve is derived from a
+// link, so a phishing URL has no pairing state to hand a victim and cannot
+// get them to approve an attacker's credential by following it.
 func browserAuthorizeCLI(cmd *cobra.Command, host string, f *connectFlags) (string, error) {
 	raw, err := generateLocalAPIKey()
 	if err != nil {
@@ -391,11 +397,13 @@ func browserAuthorizeCLI(cmd *cobra.Command, host string, f *connectFlags) (stri
 	}
 	hash := auth.HashAPIKey(raw)
 	name := cliCredentialName(hash)
-	values := url.Values{}
-	values.Set("connect_hash", hash)
-	values.Set("connect_name", name)
-	values.Set("connect_code", strings.ToUpper(hash[:4]+"-"+hash[4:8]))
-	authorizeURL := host + "/tokens?" + values.Encode()
+
+	userCode, err := registerCLIConnectRequest(host, hash, name)
+	if err != nil {
+		return "", err
+	}
+
+	authorizeURL := host + "/tokens"
 
 	fmt.Fprintln(cmd.ErrOrStderr(), "\nAuthorize this CLI in your browser:")
 	fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", authorizeURL)
@@ -403,10 +411,11 @@ func browserAuthorizeCLI(cmd *cobra.Command, host string, f *connectFlags) (stri
 		if err := openBrowserURL(authorizeURL); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  Browser could not be opened automatically: %v\n", err)
 		} else {
-			fmt.Fprintln(cmd.ErrOrStderr(), "  Browser opened. Sign in and choose “Connect CLI”.")
+			fmt.Fprintln(cmd.ErrOrStderr(), "  Browser opened. Sign in, then enter the code below.")
 		}
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Waiting for approval (code %s)…\n", strings.ToUpper(hash[:4]+"-"+hash[4:8]))
+	fmt.Fprintf(cmd.ErrOrStderr(), "Enter this code when prompted: %s\n", userCode)
+	fmt.Fprintln(cmd.ErrOrStderr(), "Waiting for approval…")
 
 	parent := cmd.Context()
 	if parent == nil {
@@ -423,6 +432,14 @@ func browserAuthorizeCLI(cmd *cobra.Command, host string, f *connectFlags) (stri
 			return raw, nil
 		}
 		if pollErr != nil {
+			// A typed, already-actionable error (expired/not_found, above) is
+			// returned as-is so its message and hint reach the person directly;
+			// only a transport-level failure (network error, non-2xx response)
+			// gets the generic wrap here.
+			var ece *ExitCodeError
+			if errors.As(pollErr, &ece) {
+				return "", pollErr
+			}
 			return "", fmt.Errorf("browser authorization check failed: %w", pollErr)
 		}
 		select {
@@ -434,6 +451,39 @@ func browserAuthorizeCLI(cmd *cobra.Command, host string, f *connectFlags) (stri
 		case <-ticker.C:
 		}
 	}
+}
+
+// registerCLIConnectRequest tells the server about this CLI's credential
+// hash before any browser page is involved, and returns the short code a
+// person must type into that page to approve it. The hash never becomes
+// approvable except through this registration, so guessing or phishing a
+// hash without also registering it server-side (which only this CLI process
+// can do) gets an attacker nothing.
+func registerCLIConnectRequest(host, hash, name string) (string, error) {
+	body, err := json.Marshal(map[string]string{"token_hash": hash, "name": name})
+	if err != nil {
+		return "", err
+	}
+	resp, err := httpClient.Post(host+"/api/auth/cli-connect/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("register CLI connection: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", &httpStatusError{Status: resp.StatusCode,
+			msg: fmt.Sprintf("register CLI connection (%s): %s", resp.Status, unwrapServerError(respBody, "no error body"))}
+	}
+	var result struct {
+		UserCode string `json:"user_code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode CLI connection registration: %w", err)
+	}
+	if result.UserCode == "" {
+		return "", errors.New("server registered the CLI connection but returned no user_code")
+	}
+	return result.UserCode, nil
 }
 
 func cliConnectionApproved(host, hash string) (bool, error) {
@@ -459,6 +509,22 @@ func cliConnectionApproved(host, hash string) (bool, error) {
 		return false, nil
 	case "approved":
 		return true, nil
+	case "expired":
+		// The server keeps a request pending for db.CLIConnectRequestTTL (10
+		// minutes), which is longer than defaultConnectTimeout (5 minutes), so
+		// under default settings the CLI's own ctx.Done() case above fires
+		// first. This is reachable when --timeout is raised past 10 minutes.
+		return false, validationErr(
+			"the verification code expired before it was approved",
+			"run `shinyhub connect "+host+"` again to get a new code")
+	case "not_found":
+		// Also what an old, pre-device-authorization CLI sees forever: it never
+		// calls the register endpoint before polling, so the server has no row
+		// for its hash at all. Those binaries must upgrade; password/token
+		// login is unaffected.
+		return false, validationErr(
+			"the server has no record of this connection request",
+			"run `shinyhub connect "+host+"` again; if this keeps happening, upgrade shinyhub")
 	default:
 		return false, fmt.Errorf("server returned unknown pairing status %q", result.Status)
 	}
