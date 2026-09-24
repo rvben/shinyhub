@@ -333,7 +333,7 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 		}
 	}
 
-	deployments, err := s.store.ListDeployments(app.ID)
+	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
 	if err != nil || len(deployments) == 0 {
 		return false, fmt.Errorf("warm expand %s: no deployments", slug)
 	}

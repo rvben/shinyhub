@@ -1855,7 +1855,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			// recovered replica lands beside the data it mounts.
 			ColocateWorkers: srv.ColocationPins(app),
 		}
-		deps, derr := store.ListDeployments(app.ID)
+		deps, derr := store.ListRecentDeployments(app.ID, 1)
 		if derr != nil {
 			return nil, fmt.Errorf("list deployment for guarded consumer start: %w", derr)
 		}
@@ -1915,7 +1915,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			TierOrder:   cfg.Runtime.TierOrder(),
 			DefaultTier: cfg.Runtime.DefaultTierName(),
 		}
-		if deps, derr := store.ListDeployments(app.ID); derr == nil && len(deps) > 0 {
+		if deps, derr := store.ListRecentDeployments(app.ID, 1); derr == nil && len(deps) > 0 {
 			p.DeploymentID = deps[0].ID
 			p.AppVersion = deps[0].Version
 		}

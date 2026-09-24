@@ -274,7 +274,7 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		return false, err
 	}
 
-	deployments, err := s.store.ListDeployments(app.ID)
+	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
 	if err != nil || len(deployments) == 0 {
 		return false, nil
 	}

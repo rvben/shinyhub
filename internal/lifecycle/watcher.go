@@ -139,6 +139,7 @@ type appStore interface {
 	AbortWake(slug string) error
 	FinishWake(slug string) (bool, error)
 	ListDeployments(appID int64) ([]*db.Deployment, error)
+	ListRecentDeployments(appID int64, n int) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
 	RecordReplicaCrash(p db.UpsertReplicaParams) error
 	// RecordReplicaCrashFromLost is the lost-overwriting variant used only for
@@ -682,7 +683,7 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 			continue
 		}
 
-		deployments, derr := w.store.ListDeployments(app.ID)
+		deployments, derr := w.store.ListRecentDeployments(app.ID, 1)
 		if derr != nil || len(deployments) == 0 {
 			if derr != nil {
 				slog.Warn("warm restore: list deployments failed", "slug", app.Slug, "err", derr)
@@ -1309,7 +1310,7 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int, fromLost bool) {
 	var opErr error
 	defer func() { endSpan(opErr) }()
 
-	deployments, err := w.store.ListDeployments(app.ID)
+	deployments, err := w.store.ListRecentDeployments(app.ID, 1)
 	if err != nil || len(deployments) == 0 {
 		opErr = err
 		return
@@ -2296,7 +2297,7 @@ func (w *Watcher) driveWakingApp(slug string) {
 			opErr = qerr
 			return
 		}
-		deployments, err := w.store.ListDeployments(app.ID)
+		deployments, err := w.store.ListRecentDeployments(app.ID, 1)
 		if err != nil || len(deployments) == 0 {
 			opErr = err
 			return

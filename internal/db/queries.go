@@ -2987,6 +2987,38 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	return ds, rows.Err()
 }
 
+// ListRecentDeployments returns an app's n newest deployments (same shape and
+// ordering as ListDeployments) without materializing the full history. Use it
+// on the hot paths that only ever consult the current bundle (index 0) and/or
+// the rollback target (index 1); callers that need the full history (the
+// deployments tab/API list, or a lookup of an arbitrary historical
+// DeploymentID) stay on ListDeployments. Served by idx_deployments_app_id_desc
+// (migration 086).
+func (s *Store) ListRecentDeployments(appID int64, n int) ([]*Deployment, error) {
+	rows, err := s.db.Query(`
+		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared
+		FROM deployments
+		WHERE app_id = ? AND status NOT IN ('pending', 'failed')
+		ORDER BY id DESC LIMIT ?`, appID, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ds []*Deployment
+	for rows.Next() {
+		var d Deployment
+		var digest sql.NullString
+		var preparedInt int
+		if err := rows.Scan(&d.ID, &d.AppID, &d.Version, &d.BundleDir, &d.Status, &digest, &d.CreatedAt, &preparedInt); err != nil {
+			return nil, err
+		}
+		d.Prepared = preparedInt != 0
+		d.ContentDigest = digest.String
+		ds = append(ds, &d)
+	}
+	return ds, rows.Err()
+}
+
 // HasAnyDeployment reports whether at least one deployment row exists for
 // the given app. Used by the never-deployed gate as the authoritative
 // "first deploy has happened" signal — keying off the durable deployments

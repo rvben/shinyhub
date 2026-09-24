@@ -555,7 +555,7 @@ func (s *Server) redeployApp(slug string) {
 		return
 	}
 
-	deployments, err := s.store.ListDeployments(app.ID)
+	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
 	if err != nil || len(deployments) == 0 {
 		slog.Warn("redeployApp: no deployments", "slug", slug)
 		return

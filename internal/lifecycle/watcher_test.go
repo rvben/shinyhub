@@ -375,6 +375,16 @@ func (f *fakeStore) ListDeployments(_ int64) ([]*db.Deployment, error) {
 	defer f.mu.Unlock()
 	return f.deployments, nil
 }
+func (f *fakeStore) ListRecentDeployments(appID int64, n int) ([]*db.Deployment, error) {
+	all, err := f.ListDeployments(appID)
+	if err != nil {
+		return nil, err
+	}
+	if len(all) > n {
+		all = all[:n]
+	}
+	return all, nil
+}
 func (f *fakeStore) UpsertReplica(p db.UpsertReplicaParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

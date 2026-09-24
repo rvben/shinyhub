@@ -544,7 +544,7 @@ func (m *Manager) runAdmitted(ctx context.Context, scheduleID int64, trigger str
 		gate.RUnlock()
 		return 0, ErrAppDeploying
 	}
-	deployments, err := m.store.ListDeployments(app.ID)
+	deployments, err := m.store.ListRecentDeployments(app.ID, 1)
 	if err != nil {
 		gate.RUnlock()
 		return 0, fmt.Errorf("list deployments for app %d: %w", app.ID, err)
@@ -675,7 +675,7 @@ func (m *Manager) runRequired(sched *db.Schedule, app *db.App, deployment *db.De
 		admission.Unlock()
 		return 0, ErrAppDeploying
 	}
-	current, err := m.store.ListDeployments(app.ID)
+	current, err := m.store.ListRecentDeployments(app.ID, 1)
 	if err != nil {
 		admission.Unlock()
 		return 0, fmt.Errorf("revalidate deployment for app %d: %w", app.ID, err)
@@ -710,7 +710,7 @@ func (m *Manager) runRequired(sched *db.Schedule, app *db.App, deployment *db.De
 			m.finishRun(sched, runID, "failed", nil, "deploy", nil, false)
 			return
 		}
-		current, err := m.store.ListDeployments(app.ID)
+		current, err := m.store.ListRecentDeployments(app.ID, 1)
 		if err != nil || len(current) == 0 || current[0].ID != deployment.ID {
 			m.finishRun(sched, runID, "failed", nil, "deploy", nil, false)
 			return
@@ -1633,7 +1633,7 @@ func (m *Manager) servingRunStillCurrent(sched *db.Schedule, app *db.App, deploy
 	if pending, err := m.store.HasPendingDeployment(app.ID); err != nil || pending {
 		return false
 	}
-	current, err := m.store.ListDeployments(app.ID)
+	current, err := m.store.ListRecentDeployments(app.ID, 1)
 	if err != nil || len(current) == 0 || current[0].ID != deployment.ID {
 		return false
 	}

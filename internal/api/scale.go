@@ -60,7 +60,7 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		return false, nil
 	}
 
-	deployments, err := s.store.ListDeployments(app.ID)
+	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
 	if err != nil || len(deployments) == 0 {
 		return false, fmt.Errorf("scale up %s: no deployments", slug)
 	}

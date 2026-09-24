@@ -8,6 +8,7 @@ type Store interface {
 	GetSchedule(id int64) (*db.Schedule, error)
 	GetAppByID(id int64) (*db.App, error)
 	ListDeployments(appID int64) ([]*db.Deployment, error)
+	ListRecentDeployments(appID int64, n int) ([]*db.Deployment, error)
 	HasPendingDeployment(appID int64) (bool, error)
 	AppCompatibilityQuarantined(appID int64) (bool, error)
 	AppCompatibilityQuarantinedExceptRun(appID, runID int64) (bool, error)

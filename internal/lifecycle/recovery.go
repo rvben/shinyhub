@@ -135,7 +135,7 @@ func validateNativeProcessCWD(pid int, bundleDir string, readCWD func() (string,
 // deployment, or "" if it cannot be resolved (validation then falls back to
 // the port probe only).
 func activeBundleDir(store *db.Store, appID int64) string {
-	deps, err := store.ListDeployments(appID)
+	deps, err := store.ListRecentDeployments(appID, 1)
 	if err != nil || len(deps) == 0 {
 		return ""
 	}
