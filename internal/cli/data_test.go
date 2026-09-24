@@ -29,7 +29,7 @@ func TestDataPush_DefaultDestIsBasename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runDataPush(cfg.Host, cfg.Token, "demo", localFile, "", false, dataPushStallTimeout); err != nil {
+	if err := runDataPush(cfg.Host, cfg.Token, "demo", localFile, "", false, dataStallTimeout); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -66,7 +66,7 @@ func TestDataPush_RestartFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runDataPush(cfg.Host, cfg.Token, "demo", localFile, "subdir/x", true, dataPushStallTimeout); err != nil {
+	if err := runDataPush(cfg.Host, cfg.Token, "demo", localFile, "subdir/x", true, dataStallTimeout); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -108,7 +108,7 @@ func TestDataPush_QuotaError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = runDataPush(cfg.Host, cfg.Token, "demo", localFile, "", false, dataPushStallTimeout)
+	err = runDataPush(cfg.Host, cfg.Token, "demo", localFile, "", false, dataStallTimeout)
 	if err == nil {
 		t.Fatal("expected quota error, got nil")
 	}

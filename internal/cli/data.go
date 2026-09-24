@@ -18,11 +18,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// dataPushStallTimeout is how long an upload may go without progress (no bytes
-// read from the local file, or no response headers after the body is fully
-// sent) before it is aborted. It is a stall timeout, not a total-request
-// deadline: a large upload that keeps making progress can run indefinitely.
-const dataPushStallTimeout = 2 * time.Minute
+// dataStallTimeout is the default duration a data transfer (push or pull) may
+// go without progress - no bytes read from the local file while uploading, no
+// response headers, or no bytes received while downloading - before it is
+// aborted. It is a stall timeout, not a total-request deadline: a large
+// transfer that keeps making progress can run indefinitely.
+const dataStallTimeout = 2 * time.Minute
 
 // newDataCmd builds a fresh data command tree each time it is called.
 func newDataCmd() *cobra.Command {
@@ -47,7 +48,7 @@ func newDataPushCmd() *cobra.Command {
 	pushCmd.Flags().StringVar(&flags.dest, "dest", "", "Destination path inside the data dir (default: basename of local-file)")
 	pushCmd.Flags().BoolVar(&flags.restart, "restart", false, "Restart the app after upload")
 	pushCmd.Flags().BoolVar(&flags.dryRun, "dry-run", false, "Resolve and print the destination and size without uploading")
-	pushCmd.Flags().DurationVar(&flags.timeout, "timeout", dataPushStallTimeout,
+	pushCmd.Flags().DurationVar(&flags.timeout, "timeout", dataStallTimeout,
 		"Abort the upload if it makes no progress for this long (a slow but progressing upload never hits this)")
 	pushCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug := args[0]
@@ -108,8 +109,9 @@ func dataPushSummary(local, dest string, size int64, dryRun bool) string {
 // just writing the file and exiting quietly.
 func newDataPullCmd() *cobra.Command {
 	var flags struct {
-		dest  string
-		force bool
+		dest    string
+		force   bool
+		timeout time.Duration
 	}
 
 	pullCmd := &cobra.Command{
@@ -134,6 +136,8 @@ when the file was pushed to confirm a restore is intact.`,
 	pullCmd.Flags().StringVar(&flags.dest, "dest", "",
 		`Write to this path instead of ./<basename>; "-" streams to stdout`)
 	pullCmd.Flags().BoolVar(&flags.force, "force", false, "Overwrite the local destination if it already exists")
+	pullCmd.Flags().DurationVar(&flags.timeout, "timeout", dataStallTimeout,
+		"Abort the download if it makes no progress for this long (a slow but progressing download never hits this)")
 	pullCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		slug, remotePath := args[0], args[1]
 
@@ -163,7 +167,7 @@ when the file was pushed to confirm a restore is intact.`,
 			}
 		}
 
-		size, sum, err := runDataPull(cfg.Host, cfg.Token, slug, remotePath, dest, cmd.OutOrStdout())
+		size, sum, err := runDataPull(cfg.Host, cfg.Token, slug, remotePath, dest, flags.timeout, cmd.OutOrStdout())
 		if err != nil {
 			return err
 		}
@@ -195,16 +199,30 @@ when the file was pushed to confirm a restore is intact.`,
 // and renamed on success, so an interrupted transfer cannot leave a truncated
 // file sitting where a complete one is expected - which, for a command whose
 // whole job is verifying a restore, would be the worst possible failure mode.
-func runDataPull(host, token, slug, remotePath, dest string, stdout io.Writer) (int64, string, error) {
+//
+// The request goes through its own client rather than the package-global
+// httpClient, whose fixed 30s Client.Timeout would bound the whole body read
+// regardless of progress and kill a large-but-still-arriving download. Instead
+// the transfer is watched by the same stall-timeout mechanism as data push: it
+// is aborted only when no bytes arrive for timeout, so a slow but steady
+// transfer can run indefinitely.
+func runDataPull(host, token, slug, remotePath, dest string, timeout time.Duration, stdout io.Writer) (int64, string, error) {
 	rawURL := host + "/api/apps/" + slug + "/data/" + encodeDataPath(remotePath)
 
-	req, err := http.NewRequest("GET", rawURL, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 	if err != nil {
 		return 0, "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader(token))
 
-	resp, err := httpClient.Do(req)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = timeout
+	client := &apiClient{&http.Client{Transport: transport}}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, "", err
 	}
@@ -215,12 +233,15 @@ func runDataPull(host, token, slug, remotePath, dest string, stdout io.Writer) (
 		return 0, "", httpError(token, "pull data", resp, body)
 	}
 
+	watchdog := newStallWatchdogReader(resp.Body, timeout, cancel)
+	defer watchdog.stop()
+
 	h := sha256.New()
 
 	if dest == "-" {
-		n, err := io.Copy(io.MultiWriter(stdout, h), resp.Body)
+		n, err := io.Copy(io.MultiWriter(stdout, h), watchdog)
 		if err != nil {
-			return 0, "", fmt.Errorf("download: %w", err)
+			return 0, "", dataTransferError("download", timeout, watchdog, err)
 		}
 		return n, hex.EncodeToString(h.Sum(nil)), nil
 	}
@@ -239,9 +260,9 @@ func runDataPull(host, token, slug, remotePath, dest string, stdout io.Writer) (
 		os.Remove(tmpName)
 	}()
 
-	n, err := io.Copy(io.MultiWriter(tmp, h), resp.Body)
+	n, err := io.Copy(io.MultiWriter(tmp, h), watchdog)
 	if err != nil {
-		return 0, "", fmt.Errorf("download: %w", err)
+		return 0, "", dataTransferError("download", timeout, watchdog, err)
 	}
 	// Close before renaming so the rename cannot beat the last buffered write.
 	if err := tmp.Close(); err != nil {
@@ -386,6 +407,29 @@ func (w *stallWatchdogReader) stop() {
 	w.timer.Stop()
 }
 
+// dataStallError reports a data transfer (push or pull) that made no progress
+// for longer than timeout. It carries an explicit KindTimeout rather than
+// letting classify() infer one, because the watchdog aborts the transfer by
+// canceling a context: the resulting error is a plain context.Canceled, which
+// satisfies neither net.Error nor any of classify's other typed cases and
+// would otherwise fall back to KindInternal for an outcome that is, in fact,
+// worth retrying.
+func dataStallError(op string, timeout time.Duration) error {
+	return &ExitCodeError{Code: 3, Kind: KindTimeout,
+		Err: &hintedMsgError{msg: fmt.Sprintf("%s: stalled for more than %s with no progress", op, timeout)}}
+}
+
+// dataTransferError classifies an io.Copy failure that read from a
+// stallWatchdogReader: a stalled reader reports dataStallError, anything else
+// is a genuine transfer failure (a connection reset, a truncated response)
+// wrapped with op for context.
+func dataTransferError(op string, timeout time.Duration, watchdog *stallWatchdogReader, err error) error {
+	if watchdog.stalled.Load() {
+		return dataStallError(op, timeout)
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
 // runDataPush uploads localFile to the app's data dir at dest.
 // If dest is empty, the basename of localFile is used. The client has no total
 // deadline (a legitimate large upload can run indefinitely), but the transfer
@@ -432,7 +476,7 @@ func runDataPush(host, token, slug, localFile, dest string, restart bool, timeou
 	resp, err := client.Do(req)
 	if err != nil {
 		if watchdog.stalled.Load() {
-			return fmt.Errorf("upload: stalled for more than %s with no progress", timeout)
+			return dataStallError("upload", timeout)
 		}
 		return fmt.Errorf("upload: %w", err)
 	}
