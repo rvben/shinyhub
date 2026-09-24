@@ -236,6 +236,7 @@ func unmanagedConfig(app AppEntry, o ObservedApp) []UnmanagedConfigItem {
 	}
 	addInt("worker_grouped_size", c.WorkerGroupedSize, o.WorkerGroupedSize, 0, "0")
 	addInt("worker_max_workers", c.WorkerMaxWorkers, o.WorkerMaxWorkers, 0, "0")
+	addInt("worker_warm_spares", c.WorkerWarmSpares, o.WorkerWarmSpares, 0, "0")
 	addInt("worker_max_session_lifetime_secs", c.WorkerMaxSessionLifetimeSecs, o.WorkerMaxSessionLifetimeSecs, 0, "0")
 	if c.Autoscale == nil && o.Autoscale != nil &&
 		(o.Autoscale.Enabled || o.Autoscale.MinReplicas != 0 || o.Autoscale.MaxReplicas != 0 || o.Autoscale.Target != 0) {
