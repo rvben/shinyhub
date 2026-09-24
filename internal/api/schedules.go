@@ -845,6 +845,9 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	if s.scheduler != nil {
 		_ = s.scheduler.Remove(id)
 	}
+	if s.jobs != nil {
+		s.jobs.ForgetSchedule(id)
+	}
 	// The schedule row is gone by the time anyone reads this event, so the id in
 	// resource_id resolves to nothing. Record what identified it - which app,
 	// what it was called, and when it ran - or the audit trail says only that

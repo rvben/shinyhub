@@ -270,6 +270,44 @@ func (m *Manager) admissionLockFor(scheduleID int64) *sync.Mutex {
 	return lock
 }
 
+// ForgetSchedule drops the per-schedule lock/queue/gate entries lazily created
+// by lockFor, queueChan, admissionLockFor, and producerGateFor. Call it once a
+// schedule is durably deleted (and, by cascade, once for each schedule of a
+// deleted app) so a server that creates and deletes many schedules over its
+// lifetime does not grow these maps without bound.
+//
+// Safe with a concurrent holder: deleting a map entry only stops a FUTURE
+// lookup from finding it. A goroutine that already fetched the *schedLock,
+// channel, or *sync.Mutex/*sync.RWMutex for this ID keeps using that object
+// normally. Go's map delete never invalidates a value already handed out.
+// The caller must ensure the schedule cannot be admitted again under this ID
+// (a deleted schedule row already guarantees that); a stray post-delete
+// lookup would simply recreate an entry that nothing ever unblocks and that
+// is itself later collected the next time this method runs, so it is a
+// bounded, self-correcting leak rather than a hazard.
+func (m *Manager) ForgetSchedule(scheduleID int64) {
+	m.mu.Lock()
+	delete(m.locks, scheduleID)
+	delete(m.queues, scheduleID)
+	delete(m.admissionLocks, scheduleID)
+	delete(m.producerGates, scheduleID)
+	m.mu.Unlock()
+}
+
+// ForgetApp drops the per-app publication gate lazily created by
+// publicationGateFor. Call it once an app is durably deleted, after every
+// publication-gate acquisition made as part of that deletion (e.g.
+// AcquirePublicationRecoveryFences) has already released it. Deleting the
+// map entry does not affect a lock already held by reference, but ordering it
+// last keeps the map free of stale entries rather than one this same
+// deletion promptly recreates. See ForgetSchedule for why this is safe with a
+// concurrent holder.
+func (m *Manager) ForgetApp(appID int64) {
+	m.mu.Lock()
+	delete(m.publicationGates, appID)
+	m.mu.Unlock()
+}
+
 // commitAdmission is the linearization point between run admission and owner
 // handoff/app deletion. WaitGroup.Add and active registration happen while the
 // same mutex guards draining, so InterruptAndDrain can never observe zero and
