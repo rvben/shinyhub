@@ -1306,7 +1306,12 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 			ip, err := r.routeIP(ctx, task)
 			if err != nil {
 				r.metrics.RecordInventoryError()
-				return nil, err
+				// A per-task public-IP lookup failure (EC2 DescribeNetworkInterfaces
+				// throttled or unreachable) is exactly as transient as the DescribeTasks
+				// batch error above, so report it the same way: PartialInventoryError
+				// with the items already resolved, instead of a bare error that would
+				// discard them and skip recovery's indeterminate-worker handling.
+				return items, &process.PartialInventoryError{Workers: []string{r.workerID}}
 			}
 			if ip != "" {
 				if port := labels[process.LabelPort]; port != "" {
