@@ -2256,6 +2256,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// before ownerWork runs, so without this a freshly-acquired owner could admit
 	// deploy-placement / worker mutations against a stale index.
 	var ownerReady atomic.Bool
+	// handoffIncomplete records that an ownership handoff drain gave up with
+	// work still running; see drainOwnershipHandoff.
+	var handoffIncomplete atomic.Bool
 	ownerWork := func(octx context.Context, epoch int64) {
 		ownerReady.Store(false)       // closed at the start of every ownership span
 		defer ownerReady.Store(false) // and on span exit (ownership lost / shutdown)
@@ -2526,24 +2529,18 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// request can hold fleet-SH while waiting for this owner's publication
 		// lock. Drain first, then use fleet-EX to close the remaining HTTP/lifecycle
 		// handoff. Successor startup independently waits physical writer locks.
-		if err := jobsMgr.InterruptAndDrain(context.Background()); err != nil {
-			slog.Error("drain scheduled jobs before ownership release", "err", err)
+		// Both steps share one bounded drainCtx so neither can hang the handoff
+		// indefinitely. The exclusive fleet fence drains requests admitted before
+		// handoff (including uploads not yet at an app lock) while the successor
+		// is still excluded, so their durable terminal state lands before a new
+		// scheduler can reconcile running rows. When either step gives up at the
+		// deadline, the lease is left to expire on its TTL instead of being
+		// released, so a successor never overlaps goroutines still writing.
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), shutdownDrainBudget)
+		defer cancelDrain()
+		if !drainOwnershipHandoff(drainCtx, jobsMgr.InterruptAndDrain, srv.AcquireFleetAppOperations, registryRefreshBackoff, slog.Default()) {
+			handoffIncomplete.Store(true)
 		}
-		// Take the exclusive fleet mutation fence before releasing ownership. It
-		// drains requests admitted before handoff (including uploads not yet at an
-		// app lock), then interrupts scheduled runs while the successor is still
-		// excluded. Their durable terminal state therefore lands before a new
-		// scheduler can reconcile running rows.
-		var releaseHandoffFence func()
-		for releaseHandoffFence == nil {
-			var fenceErr error
-			releaseHandoffFence, fenceErr = srv.AcquireFleetAppOperations()
-			if fenceErr != nil {
-				slog.Error("acquire ownership handoff fence", "err", fenceErr)
-				time.Sleep(registryRefreshBackoff)
-			}
-		}
-		releaseHandoffFence()
 	}
 
 	scope := leader.NewOwnerScope(ownerWork)
@@ -2553,7 +2550,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		RenewEvery: cfg.Server.LeaseRenewEvery,
 		OnAcquire:  scope.Acquire,
 		OnLose:     scope.Lose,
-		Logger:     slog.Default(),
+		// Sticky for the process: a job left running by any failed drain keeps
+		// running until exit, so the final shutdown must not hand it a successor.
+		RetainLeaseOnShutdown: handoffIncomplete.Load,
+		Logger:                slog.Default(),
 	})
 	// Wire the ownership predicate into the watcher's wake trigger so a standby
 	// that wins BeginWake defers to the active's reconciler rather than trying
@@ -2587,7 +2587,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		localLogMaintenanceWG.Wait()
 		scope.Stop()
 	}
-	defer stopOwnership()
+	// stopOwnership can hang (ownerWork's shutdown branch above blocking on
+	// loops.Wait(), a slow drain, or the fence retry), and letting that hang
+	// propagate here would race runServe's deferred store.Close() against a
+	// goroutine still using the store. awaitOwnershipStop is idempotent to call
+	// more than once (scope.Stop() is idempotent) - the explicit call sites
+	// below on error paths use the same watchdog wrapper.
+	defer awaitOwnershipStop(shutdownWatchdogBudget, stopOwnership, slog.Default())
 	if cfg.Maintenance.AppLogRunRetentionCount > 0 {
 		localLogMaintenanceWG.Add(1)
 		go func() {
@@ -2859,7 +2865,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		if metricsSrv != nil {
 			_ = metricsSrv.Close()
 		}
-		stopOwnership()
+		awaitOwnershipStop(shutdownWatchdogBudget, stopOwnership, slog.Default())
 		return fmt.Errorf("upgrade ready: %w", err)
 	}
 	// Tell systemd (Type=notify) we are the live process and retarget MAINPID to
@@ -2873,7 +2879,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		if metricsSrv != nil {
 			_ = metricsSrv.Close()
 		}
-		stopOwnership()
+		awaitOwnershipStop(shutdownWatchdogBudget, stopOwnership, slog.Default())
 		return fmt.Errorf("sd_notify: %w", err)
 	}
 
@@ -2882,7 +2888,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	select {
 	case err := <-serveErr:
 		if err != nil {
-			stopOwnership()
+			awaitOwnershipStop(shutdownWatchdogBudget, stopOwnership, slog.Default())
 			return fmt.Errorf("http server: %w", err)
 		}
 	case <-upg.Exit():
@@ -2909,7 +2915,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Stop and join the Elector. Its synchronous OnLose callback cancels the
 	// owner span and waits for the watcher/scheduler/monitor/autoscaler to exit
 	// before Run returns, so jobs and the store remain valid through handoff.
-	stopOwnership()
+	// Bounded by shutdownWatchdogBudget: a hang here must not block forever,
+	// since the deferred store.Close() below would otherwise race a goroutine
+	// this call left running.
+	awaitOwnershipStop(shutdownWatchdogBudget, stopOwnership, slog.Default())
 	// Stop the session reporter (clustered only). Cancel triggers a final
 	// flush so the last known counts are persisted before the store closes.
 	if reporterCancel != nil {

@@ -287,3 +287,53 @@ func TestElector_RealStoreSingleOwnerHandoff(t *testing.T) {
 		waitFor(t, func() bool { return a.IsOwner() })
 	}
 }
+
+func TestElector_RetainsLeaseOnShutdownWhenHandoffIncomplete(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		retain     bool
+		wantHolder string
+	}{
+		{name: "handoff complete releases", retain: false, wantHolder: ""},
+		{name: "handoff incomplete retains", retain: true, wantHolder: "a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fakeStore{}
+			var onLoseDone atomic.Bool
+			var consultedAfterOnLose atomic.Bool
+			e := New(fs, Config{
+				InstanceID: "a", TTL: time.Second, RenewEvery: time.Millisecond,
+				OnLose: func() { onLoseDone.Store(true) },
+				RetainLeaseOnShutdown: func() bool {
+					consultedAfterOnLose.Store(onLoseDone.Load())
+					return tc.retain
+				},
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				e.Run(ctx)
+				close(done)
+			}()
+			waitFor(t, func() bool { return e.IsOwner() })
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("elector did not return after cancel")
+			}
+			if !consultedAfterOnLose.Load() {
+				t.Fatal("RetainLeaseOnShutdown was not consulted after OnLose finished")
+			}
+			if e.IsOwner() {
+				t.Fatal("local ownership gate still open after shutdown")
+			}
+			fs.mu.Lock()
+			holder := fs.holder
+			fs.mu.Unlock()
+			if holder != tc.wantHolder {
+				t.Fatalf("lease holder after shutdown=%q, want %q", holder, tc.wantHolder)
+			}
+		})
+	}
+}
