@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.17.3](https://github.com/rvben/shinyhub/compare/v0.17.2...v0.17.3) - 2026-09-24
+
+### Fixed
+
+- **Render pacing**: send page loads from exhausted principals to the auto-retrying capacity page, including private and public apps. A first WebSocket failure now retries without claiming an established session was interrupted. ([0f1e38f](https://github.com/rvben/shinyhub/commit/0f1e38f0811ff2ba7db17ca67c4a226fad83da6b))
+- **Configuration**: reject invalid principal divisor and bucket capacity settings during `validate-config`, before they can crash the server at startup. The new `server.render_principal_burst` setting raises the short burst allowance when needed; its default remains 3.
+
 ## [0.17.2](https://github.com/rvben/shinyhub/compare/v0.17.1...v0.17.2) - 2026-09-21
 
 ### Added
