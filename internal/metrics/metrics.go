@@ -468,6 +468,25 @@ func (r *Registry) RecordReject(slug, reason string) {
 	r.admissionRejects.WithLabelValues(slug, reason).Inc()
 }
 
+// ForgetApp removes every retained series keyed by slug across all per-app
+// metrics (admission rejects, schedule runs) when an app is deleted. Without
+// this, a deleted app's slug keeps its series alive in the registry forever -
+// these are persisted CounterVecs, not lazily-sampled collectors, so nothing
+// else ever evicts them. Safe to call even when the app never produced a
+// series for a given metric; DeletePartialMatch is a no-op in that case.
+func (r *Registry) ForgetApp(slug string) {
+	r.admissionRejects.DeletePartialMatch(prometheus.Labels{"slug": slug})
+	r.runs.DeletePartialMatch(prometheus.Labels{"slug": slug})
+}
+
+// ForgetSchedule removes the retained shinyhub_schedule_runs_total series for
+// one schedule of an app, without touching the app's other schedules. Call
+// this when a single schedule is deleted but its app is not (app deletion
+// instead calls ForgetApp, which covers every schedule at once).
+func (r *Registry) ForgetSchedule(slug, schedule string) {
+	r.runs.DeletePartialMatch(prometheus.Labels{"slug": slug, "schedule": schedule})
+}
+
 // RecordRunTask satisfies fargate.FargateMetrics. result is "ok" or "error".
 func (r *Registry) RecordRunTask(result string) {
 	r.fargateRunTaskTotal.WithLabelValues(result).Inc()
