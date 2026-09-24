@@ -497,8 +497,18 @@ func TestUsageRollupPreservesPeakConcurrentSessions(t *testing.T) {
 	store := mustOpenDB(t)
 	owner := mustCreateUser(t, store, "peak-rollup-owner", "developer")
 	app := mustCreateApp(t, store, "usage-peak-rollup", owner.ID)
-	now := time.Now().UTC().Truncate(time.Second)
-	start := now.Add(-100 * 24 * time.Hour)
+	// The fixture's two sessions span at most 2.5 hours (30-minute offset plus
+	// a 2-hour duration). Deriving start from time.Now()'s own time-of-day
+	// made this test flake whenever it ran within that margin of UTC
+	// midnight: the fixture then genuinely straddles two calendar days, and
+	// usage_daily correctly attributes carried-over concurrency to the second
+	// day even though no new session started on it (usageConcurrencyPeaks
+	// walks every UTC day boundary a session's interval touches on purpose).
+	// Pin the time-of-day to noon UTC, far from any boundary, while keeping
+	// the date itself relative to the real clock so the retention math below
+	// still sees a session old enough to roll up.
+	base := time.Now().UTC().AddDate(0, 0, -100)
+	start := time.Date(base.Year(), base.Month(), base.Day(), 12, 0, 0, 0, time.UTC)
 
 	for i, interval := range []struct{ offset, duration time.Duration }{
 		{0, 2 * time.Hour},
