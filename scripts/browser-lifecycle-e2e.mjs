@@ -120,7 +120,7 @@ try {
   await new Promise(resolve => reservation.close(resolve));
   const host = `http://127.0.0.1:${port}`;
   await writeFile(passwordFile, password, { mode: 0o600 });
-  await writeFile(config, `server:\n  host: 127.0.0.1\n  port: ${port}\n  shutdown_apps: stop\n  session_recheck_interval: ${sweepSeconds}s\nauth:\n  secret: ${randomBytes(32).toString('hex')}\ndatabase:\n  dsn: ${JSON.stringify(join(state, 'hub.db'))}\nstorage:\n  apps_dir: ${JSON.stringify(join(state, 'apps'))}\n  app_data_dir: ${JSON.stringify(join(state, 'app-data'))}\nlifecycle:\n  hibernate_timeout: 30m\n`, { mode: 0o600 });
+  await writeFile(config, `server:\n  host: 127.0.0.1\n  port: ${port}\n  render_capacity_cores: 4\n  shutdown_apps: stop\n  session_recheck_interval: ${sweepSeconds}s\nauth:\n  secret: ${randomBytes(32).toString('hex')}\ndatabase:\n  dsn: ${JSON.stringify(join(state, 'hub.db'))}\nstorage:\n  apps_dir: ${JSON.stringify(join(state, 'apps'))}\n  app_data_dir: ${JSON.stringify(join(state, 'app-data'))}\nlifecycle:\n  hibernate_timeout: 30m\n`, { mode: 0o600 });
   await command([binary, 'init', '--config', config, '--admin-user', username, '--admin-password-file', passwordFile], 'init', { cwd: state });
   const log = createWriteStream(join(work, 'server.log'), { mode: 0o600 });
   server = spawn(binary, ['serve', '--config', config, '--no-browser'], { cwd: state, env, detached: true });
@@ -170,7 +170,8 @@ try {
   await request('POST', '/api/users', { username: viewer, password: viewerPassword, role: 'viewer' }, 201);
   await request('POST', '/api/apps/browser/members', { username: viewer, role: 'viewer' }, 204);
 
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true,
+    executablePath: process.env.SHINYHUB_E2E_CHROMIUM || undefined });
   abort.signal.addEventListener('abort', () => { browser?.close().catch(() => {}); }, { once: true });
   report.browser = browser.version();
   context = await browser.newContext({ userAgent: 'shinyhub-lifecycle-test' });
@@ -311,6 +312,32 @@ try {
     await allowed.close();
     await otherTab.close();
     await reduced.close();
+  });
+  await check('principal render pacing defers excess tabs and retries when capacity returns', async () => {
+    const paced = [];
+    try {
+      await request('PATCH', '/api/apps/browser', { render_seconds: 600 });
+      for (let i = 0; i < 3; i++) {
+        const tab = await context.newPage();
+        paced.push(tab);
+        const response = await tab.goto(appURL);
+        assert.equal(response.status(), 200);
+        await output(tab, 'v2', 0);
+      }
+      for (let i = 0; i < 2; i++) {
+        const tab = await context.newPage();
+        paced.push(tab);
+        const response = await tab.goto(appURL);
+        assert.equal(response.status(), 503, 'an exhausted principal gets the wait page');
+        await tab.getByRole('heading', { name: 'Waiting for capacity…' }).waitFor();
+        assert.equal(await tab.locator('#shinyhub-status-overlay').count(), 0);
+      }
+      await request('PATCH', '/api/apps/browser', { render_seconds: 0 });
+      await output(paced[3], 'v2', 0);
+      await output(paced[4], 'v2', 0);
+    } finally {
+      for (const tab of paced) await tab.close().catch(() => {});
+    }
   });
   report.status = 'passed';
   console.log('BROWSER LIFECYCLE E2E PASS');

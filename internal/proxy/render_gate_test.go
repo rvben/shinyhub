@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/admission"
+	"github.com/rvben/shinyhub/internal/auth"
 )
 
 // emptyLimiter builds a limiter whose shared bucket is permanently empty: burst
@@ -114,6 +115,33 @@ func TestRenderGate_PacingDisabledNeverBlocks(t *testing.T) {
 	p := New() // no limiter for the slug: pacing disabled
 	if p.renderGateBlocks(pageLoadRequest("/app/demo/"), "demo") {
 		t.Fatal("with pacing disabled the gate must never block")
+	}
+}
+
+func TestRenderGate_ExhaustedPrincipalGetsWaitPage(t *testing.T) {
+	for _, mode := range []string{"private", "public"} {
+		t.Run(mode, func(t *testing.T) {
+			p, hits := registerGatedApp(t, "demo")
+			p.SetAppAccessLookup(func(string) string { return mode })
+			p.SetAppLimiter("demo", admission.NewAppLimiter(0, 10, 1, 1, 16))
+			ws := renderWSUpgradeRequest("/app/demo/")
+			ws.RemoteAddr = "203.0.113.7:5555"
+			ws = ws.WithContext(auth.WithUser(ws.Context(), &auth.ContextUser{ID: 42}))
+			if !p.chargeRenderAdmission(httptest.NewRecorder(), ws, "demo") {
+				t.Fatal("first session should spend its principal burst")
+			}
+			page := pageLoadRequest("/app/demo/")
+			page.RemoteAddr = ws.RemoteAddr
+			page = page.WithContext(auth.WithUser(page.Context(), &auth.ContextUser{ID: 42}))
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, page)
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("X-Shinyhub-Reject") != string(ReasonRenderDeferred) {
+				t.Fatalf("got status %d, reason %q; want 503 render-deferred", rec.Code, rec.Header().Get("X-Shinyhub-Reject"))
+			}
+			if hits.Load() != 0 {
+				t.Fatal("exhausted principal's page reached the app")
+			}
+		})
 	}
 }
 

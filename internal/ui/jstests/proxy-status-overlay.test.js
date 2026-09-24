@@ -40,7 +40,7 @@ const flush = () => new Promise((r) => setImmediate(r));
 // retry budget be spent in a millisecond.
 function mount({
   statuses = [], pollMs = 3000, maxPolls = 20, attrs = {}, preMarker = false,
-  claimSnapshot = false,
+  claimSnapshot = false, connected = true, connectedViaJQuery = false, expiredCapacity = false,
 } = {}) {
   const jsdomErrors = [];
   const virtualConsole = new VirtualConsole();
@@ -53,6 +53,12 @@ function mount({
   });
   const w = dom.window;
   const d = w.document;
+  let jqueryConnectedHandler;
+  if (connectedViaJQuery) {
+    w.jQuery = () => ({ on: (name, handler) => {
+      if (name === 'shiny:connected') jqueryConnectedHandler = handler;
+    } });
+  }
   const sessionEvents = [];
   w.addEventListener(SESSION_EVENT, (event) => {
     sessionEvents.push(event.detail);
@@ -102,6 +108,13 @@ function mount({
   }
   tag.textContent = source;
   d.body.appendChild(tag);
+  if (connected) {
+    if (connectedViaJQuery) jqueryConnectedHandler();
+    else d.dispatchEvent(new w.Event('shiny:connected'));
+  }
+  if (expiredCapacity) {
+    w.sessionStorage.setItem('shinyhub-capacity:/app/demo/', String(Date.now() - 1));
+  }
 
   const overlay = () => d.getElementById(OWN_ID);
   const el = (sel) => (overlay() ? overlay().querySelector(sel) : null);
@@ -158,6 +171,33 @@ function mount({
     statusDot: () => el(`#${DOT_ID}`),
   };
 }
+
+test('a rejected first connection waits and retries without claiming a session was interrupted', async () => {
+  const h = mount({ connected: false, statuses: [200], attrs: { 'data-retry-seconds': '3' } });
+  await h.disconnect();
+  assert.equal(h.title(), 'App is busy');
+  assert.match(h.message(), /has not started yet/);
+  assert.equal(h.actionVisible(OPEN_ID), false);
+  assert.equal(h.actionVisible(RESTART_ID), false);
+  assert.equal(h.timers.length, 1);
+  assert.ok(h.timers[0].ms >= 3000 && h.timers[0].ms < 3500);
+  assert.ok(Number(h.window.sessionStorage.getItem('shinyhub-capacity:/app/demo/')) > Date.now());
+});
+
+test('first connection retries stop at the capacity budget', async () => {
+  const h = mount({ connected: false, expiredCapacity: true, statuses: [200] });
+  await h.disconnect();
+  assert.equal(h.title(), 'Still at capacity');
+  assert.equal(h.timers.length, 0);
+  assert.equal(h.buttonVisible(), true);
+});
+
+test('a jQuery Shiny connected event preserves the interrupted-session path', async () => {
+  const h = mount({ connectedViaJQuery: true, statuses: [200] });
+  await h.disconnect();
+  assert.equal(h.title(), 'This session was interrupted');
+  assert.equal(h.timers.length, 0);
+});
 
 test('it is inert until the app disconnects', async () => {
   const h = mount();

@@ -51,6 +51,18 @@
   }
   var pollMs = toInt(tag.getAttribute("data-poll-ms"), 3000);
   var maxPolls = toInt(tag.getAttribute("data-max-polls"), 20);
+  // The WebSocket API hides a rejected upgrade's status and Retry-After from
+  // page JavaScript. The proxy supplies its render retry advice here instead.
+  var retryMs = toInt(tag.getAttribute("data-retry-seconds"), 2) * 1000;
+  var capacityKey = "shinyhub-capacity:" + window.location.pathname;
+  var capacityBudgetMs = 60000;
+  try {
+    var nav = (window.performance.getEntriesByType &&
+      window.performance.getEntriesByType("navigation")[0]) || {};
+    if (nav.type !== "reload") window.sessionStorage.removeItem(capacityKey);
+  } catch (e) {
+    // Storage can be disabled by the browser; keep retrying within this page.
+  }
 
   var polls = 0;
   var timer = null;
@@ -58,6 +70,41 @@
   var showing = false;
   var currentState = null;
   var previousFocus = null;
+  var everConnected = false;
+  var memoryDeadline = 0;
+
+  function capacityDeadline() {
+    var deadline = memoryDeadline;
+    try {
+      deadline = parseInt(window.sessionStorage.getItem(capacityKey) || "0", 10) || deadline;
+    } catch (e) {}
+    if (!deadline) {
+      deadline = Date.now() + capacityBudgetMs;
+      try { window.sessionStorage.setItem(capacityKey, String(deadline)); } catch (e) {}
+    }
+    memoryDeadline = deadline;
+    return deadline;
+  }
+
+  function clearCapacityDeadline() {
+    memoryDeadline = 0;
+    try { window.sessionStorage.removeItem(capacityKey); } catch (e) {}
+  }
+
+  function connected() {
+    everConnected = true;
+    clearCapacityDeadline();
+  }
+
+  // R Shiny raises jQuery document events; native listeners also cover hosts
+  // that dispatch the event through the DOM. Register before observing the
+  // disconnect marker so a first-connect failure stays distinct from a drop.
+  document.addEventListener("shiny:connected", guard(connected));
+  guard(function () {
+    if (typeof window.jQuery === "function") {
+      window.jQuery(document).on("shiny:connected", guard(connected));
+    }
+  })();
 
   function toInt(raw, fallback) {
     var n = parseInt(raw, 10);
@@ -413,8 +460,8 @@
     ui.title.textContent = titleText;
     ui.title.style.color = "#E8EEFF";
     ui.msg.textContent = msgText;
-    ui.spinner.style.display = state === "waiting" ? "block" : "none";
-    ui.stateDot.style.display = state === "waiting" ? "none" : "block";
+    ui.spinner.style.display = state === "waiting" || state === "busy" ? "block" : "none";
+    ui.stateDot.style.display = state === "waiting" || state === "busy" ? "none" : "block";
     ui.stateDot.style.background = state === "error" ? "#F87171" : "#FBBF24";
     ui.stateDot.style.animation =
       state === "ready"
@@ -519,6 +566,7 @@
 
   function teardown() {
     stopPolling();
+    connected();
     showing = false;
     polls = 0;
     publishConnected();
@@ -554,6 +602,28 @@
     );
   }
 
+  function busy() {
+    render(
+      "busy",
+      "App is busy",
+      "Your session has not started yet. This page will retry automatically.",
+      null
+    );
+  }
+
+  function retryFirstConnection() {
+    if (Date.now() >= capacityDeadline()) {
+      gaveUp();
+      return;
+    }
+    stopPolling();
+    timer = window.setTimeout(guard(function () {
+      if (showing && !everConnected) {
+        window.location.reload();
+      }
+    }), retryMs + Math.floor(Math.random() * 500));
+  }
+
   // A recovered service is offered, never confused with a recovered session.
   // The safest continuation opens a new tab and turns this one into an offline
   // snapshot. Viewers can also inspect the snapshot first or explicitly choose
@@ -580,6 +650,16 @@
 
   function gaveUp() {
     stopPolling();
+    if (!everConnected) {
+      clearCapacityDeadline();
+      render(
+        "error",
+        "Still at capacity",
+        "Your session did not start within 60 seconds. The app may still be busy.",
+        "Try again"
+      );
+      return;
+    }
     render(
       "error",
       "The app did not come back",
@@ -602,7 +682,8 @@
           return;
         }
         if (res.status === 200) {
-          recovered();
+          if (everConnected) recovered();
+          else retryFirstConnection();
           return;
         }
         // A 404 is the ready probe's deliberate "no such app on this server",
@@ -628,7 +709,7 @@
 
   function schedule() {
     polls += 1;
-    if (polls >= maxPolls) {
+    if (polls >= maxPolls || (!everConnected && Date.now() >= capacityDeadline())) {
       gaveUp();
       return;
     }
@@ -643,7 +724,8 @@
     showing = true;
     polls = 0;
     previousFocus = document.activeElement;
-    waiting();
+    if (everConnected) waiting();
+    else busy();
     poll();
   });
 

@@ -145,13 +145,23 @@ func (a *AppLimiter) TryAdmit(principal string) bool {
 // answers "is this app out of render capacity right now" for advisory callers
 // that must not spend capacity to ask.
 //
-// It deliberately ignores the per-principal stage. A read-only peek at a
-// principal bucket would have to create that bucket to answer, so an advisory
-// caller keyed on client IP would let a scanner mint a bucket per source
-// address and churn the bounded map, turning a read into eviction pressure on
-// the fairness state it is meant to observe.
+// It deliberately ignores the per-principal stage. Call PrincipalAvailable
+// separately when the caller has the same principal key as Admit.
 func (a *AppLimiter) SharedAvailable() bool {
 	return a.shared.Available()
+}
+
+// PrincipalAvailable reports whether principal can take a token without
+// spending one. An absent bucket is available: Admit creates it full. Looking
+// up only existing buckets keeps page-load checks from creating or evicting
+// fairness state, including for IP-keyed public apps.
+func (a *AppLimiter) PrincipalAvailable(principal string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if p, ok := a.buckets[principal]; ok {
+		return p.Available()
+	}
+	return a.principalBurst >= 1
 }
 
 // principalPacerLocked returns the pacer for principal, creating it (and

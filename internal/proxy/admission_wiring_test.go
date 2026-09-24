@@ -24,6 +24,18 @@ func TestBuildAppLimiter_BuildsWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestBuildAppLimiter_UsesPrincipalBurst(t *testing.T) {
+	l := BuildAppLimiter(1, 10, 1, 5, 20, 4096)
+	for i := 0; i < 5; i++ {
+		if got := l.Admit("user-1"); got != admission.Admitted {
+			t.Fatalf("admit %d = %v, want Admitted", i+1, got)
+		}
+	}
+	if got := l.Admit("user-1"); got != admission.PrincipalExhausted {
+		t.Fatalf("sixth admit = %v, want PrincipalExhausted", got)
+	}
+}
+
 func TestProxyAppLimiterRegistry(t *testing.T) {
 	p := New()
 	if p.appLimiter("missing") != nil {

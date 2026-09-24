@@ -2059,9 +2059,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// or clear a limiter live without calling Detect again.
 	headroom := cfg.RenderHeadroom()
 	divisor := cfg.PrincipalShareDivisor()
+	principalBurst := cfg.RenderPrincipalBurst()
 	lru := cfg.PrincipalLRUCapacity()
 	prx.SetRenderLimiterFactory(func(renderSeconds float64) *admission.AppLimiter {
-		return proxy.BuildAppLimiter(renderSeconds, renderCores, headroom, 3, divisor, lru)
+		return proxy.BuildAppLimiter(renderSeconds, renderCores, headroom, float64(principalBurst), divisor, lru)
 	})
 	for _, a := range renderApps {
 		prx.ApplyRenderPacing(a.Slug, a.RenderSeconds)

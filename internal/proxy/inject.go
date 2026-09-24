@@ -60,6 +60,7 @@ func overlaySnippet(slug string) string {
 	return `<script id="shinyhub-status-overlay-loader"` +
 		` data-ready-url="` + html.EscapeString(readyURL) + `"` +
 		` data-poll-ms="` + strconv.Itoa(overlayPollMS) + `"` +
+		` data-retry-seconds="` + renderRetryAfter() + `"` +
 		` data-max-polls="` + strconv.Itoa(overlayMaxPolls) + `">` +
 		overlayScript +
 		`</script>`

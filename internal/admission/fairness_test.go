@@ -25,6 +25,24 @@ func TestAppLimiterRejectsNonPositiveDivisor(t *testing.T) {
 	NewAppLimiter(10, 10, 0, 3, 4096)
 }
 
+func TestPrincipalAvailableDoesNotCreateOrSpendBucket(t *testing.T) {
+	a := NewAppLimiter(0, 10, 1, 1, 1)
+	for i := 0; i < 5; i++ {
+		if !a.PrincipalAvailable("new") {
+			t.Fatal("a missing principal starts with its full burst")
+		}
+	}
+	if len(a.buckets) != 0 {
+		t.Fatal("page checks must not create principal buckets")
+	}
+	if a.Admit("spent") != Admitted || a.PrincipalAvailable("spent") {
+		t.Fatal("an exhausted existing principal must be unavailable")
+	}
+	if !a.PrincipalAvailable("new") || len(a.buckets) != 1 {
+		t.Fatal("checking a new principal must not evict the spent bucket")
+	}
+}
+
 func TestAppLimiterOneFloodDoesNotStarveAnother(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
 	// Shared rate 10/s burst 10, divisor 20 so each principal gets 0.5/s, burst 3.

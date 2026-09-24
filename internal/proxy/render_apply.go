@@ -4,7 +4,7 @@ import "github.com/rvben/shinyhub/internal/admission"
 
 // SetRenderLimiterFactory installs the factory ApplyRenderPacing uses to build a
 // per-app limiter from a render_seconds value, capturing the host sizing (cores,
-// headroom, divisor, LRU) once at startup so Detect is never called on a request
+// headroom, principal burst, divisor, LRU) once at startup so Detect is never called on a request
 // or reconcile path. Call once before serving.
 func (p *Proxy) SetRenderLimiterFactory(f func(renderSeconds float64) *admission.AppLimiter) {
 	p.appLimitersMu.Lock()

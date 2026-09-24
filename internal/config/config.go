@@ -584,6 +584,7 @@ type ServerConfig struct {
 	RenderCapacityCores   *float64 `yaml:"render_capacity_cores"`
 	MaxCPUPercent         *float64 `yaml:"max_cpu_percent"`
 	PrincipalShareDivisor *int     `yaml:"principal_share_divisor"`
+	RenderPrincipalBurst  *int     `yaml:"render_principal_burst"`
 	PrincipalLRUCapacity  *int     `yaml:"principal_lru_capacity"`
 
 	// Render-admission park budget. Bounds how many in-flight requests may
@@ -1606,6 +1607,15 @@ func loadRaw(path string) (*Config, error) {
 	}
 	if err := applyEnv(cfg); err != nil {
 		return nil, err
+	}
+	if cfg.PrincipalShareDivisor() < 1 {
+		return nil, fmt.Errorf("server.principal_share_divisor must be at least 1")
+	}
+	if cfg.RenderPrincipalBurst() < 1 {
+		return nil, fmt.Errorf("server.render_principal_burst must be at least 1")
+	}
+	if cfg.PrincipalLRUCapacity() < cfg.PrincipalShareDivisor() {
+		return nil, fmt.Errorf("server.principal_lru_capacity must be at least server.principal_share_divisor")
 	}
 	if err := trustedpublish.Validate(cfg.Auth.TrustedPublishers); err != nil {
 		return nil, err
@@ -3450,6 +3460,7 @@ func (c *Config) HostCapacityMemoryMB() int {
 const (
 	defaultRenderHeadroomPercent = 75
 	defaultPrincipalShareDivisor = 20
+	defaultRenderPrincipalBurst  = 3
 	defaultPrincipalLRUCapacity  = 4096
 )
 
@@ -3489,6 +3500,15 @@ func (c *Config) PrincipalShareDivisor() int {
 		return *c.Server.PrincipalShareDivisor
 	}
 	return defaultPrincipalShareDivisor
+}
+
+// RenderPrincipalBurst is the number of rapid sessions one principal may
+// start before its slower per-principal refill rate takes effect.
+func (c *Config) RenderPrincipalBurst() int {
+	if c.Server.RenderPrincipalBurst != nil {
+		return *c.Server.RenderPrincipalBurst
+	}
+	return defaultRenderPrincipalBurst
 }
 
 // PrincipalLRUCapacity returns the per-app bound on tracked principals. Default

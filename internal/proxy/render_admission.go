@@ -269,10 +269,9 @@ func isPageLoad(r *http.Request) bool {
 // what makes the gate advisory - it can never refuse a session that the charge
 // point would have admitted.
 //
-// It checks the watermark and the app's shared bucket, in that order, mirroring
-// the charge point. It deliberately does not consult the per-principal bucket:
-// see AppLimiter.SharedAvailable for why a read-only principal peek would be
-// self-defeating.
+// It checks the watermark and both buckets without taking a token. The
+// principal lookup does not create a bucket, so even public page loads cannot
+// churn the bounded fairness map.
 func (p *Proxy) renderGateBlocks(r *http.Request, slug string) bool {
 	if !isPageLoad(r) {
 		return false
@@ -284,7 +283,7 @@ func (p *Proxy) renderGateBlocks(r *http.Request, slug string) bool {
 	if !p.watermarkAdmits() {
 		return true
 	}
-	return !lim.SharedAvailable()
+	return !lim.PrincipalAvailable(p.renderPrincipal(r, slug)) || !lim.SharedAvailable()
 }
 
 // serveRenderWaitPage answers a deferred page load with the capacity wait page.

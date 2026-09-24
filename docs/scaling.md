@@ -142,6 +142,15 @@ The headroom fraction (`server.render_headroom_percent`, default `75`)
 reserves the rest of the host for interaction: renders that established
 sessions trigger while new ones are being admitted.
 
+Each principal also has a short burst allowance. Set
+`server.render_principal_burst` (default `3`) to the number of rapid session
+starts one user may make before waiting for their share to refill. The
+`server.principal_share_divisor` (default `20`) sets that refill rate to
+`rate / divisor`; raising the burst does not raise the sustained rate. The
+principal gate sends an exhausted page load to the auto-refreshing capacity
+page. Public apps use the client IP as the principal; private and shared apps
+use the authenticated user ID.
+
 ### Setting it
 
 **Dashboard**: app detail → **Configuration** → **Render pacing**. Type the
