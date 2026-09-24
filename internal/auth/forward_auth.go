@@ -251,29 +251,41 @@ func delForwardAuthHeader(r *http.Request, name string) {
 	}
 }
 
-// groupsChanged reports whether incoming differs from the stored group snapshot.
-// Returns true (trigger reconcile) when lengths differ or any incoming group is
-// absent from the stored set.
+// groupsChanged reports whether incoming differs from the stored group
+// snapshot, comparing set membership rather than raw slice contents. Both
+// sides are deduplicated first: without that, a proxy repeating one group
+// name (a duplicated header value, or the same group asserted twice) can make
+// the incoming slice's length match the stored count while actually missing a
+// group the user was previously granted through, silently skipping the
+// reconcile that would have revoked it.
 func groupsChanged(store ForwardAuthUserStore, userID int64, incoming []string) (bool, error) {
 	stored, err := store.GetUserGroups(userID)
 	if err != nil {
 		return false, err
 	}
-	// The length check catches removals; the loop below catches additions.
-	// Together they detect any set difference (order-insensitive).
-	if len(stored) != len(incoming) {
+	storedSet := uniqueGroupSet(stored)
+	incomingSet := uniqueGroupSet(incoming)
+	// Equal-sized sets where every incoming member is also stored are, by
+	// pigeonhole, the same set - so one direction of membership checking is
+	// enough once both sides are deduplicated.
+	if len(storedSet) != len(incomingSet) {
 		return true, nil
 	}
-	set := make(map[string]struct{}, len(stored))
-	for _, g := range stored {
-		set[g] = struct{}{}
-	}
-	for _, g := range incoming {
-		if _, ok := set[g]; !ok {
+	for g := range incomingSet {
+		if _, ok := storedSet[g]; !ok {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// uniqueGroupSet dedupes a group name list into a set.
+func uniqueGroupSet(groups []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(groups))
+	for _, g := range groups {
+		set[g] = struct{}{}
+	}
+	return set
 }
 
 // peerInTrustedProxies reports whether r.RemoteAddr's host portion is inside any
