@@ -958,7 +958,7 @@ func (s *Server) buildRouter() chi.Router {
 		// Keep PUT for backwards compatibility.
 		r.With(rateLimitByUser(s.actionLimiter)).Put("/api/apps/{slug}/rollback", s.handleRollbackApp)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/restart", s.handleRestartApp)
-		r.Post("/api/apps/{slug}/stop", s.handleStopApp)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/stop", s.handleStopApp)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/sleep", s.handleSleepApp)
 		r.Get("/api/apps/{slug}/logs/sources", s.handleLogSources)
 		r.Get("/api/apps/{slug}/logs", s.handleLogs)
