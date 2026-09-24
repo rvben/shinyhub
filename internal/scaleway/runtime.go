@@ -125,6 +125,7 @@ type Runtime struct {
 	cfg          Config
 	log          *slog.Logger
 	pollInterval time.Duration
+	readyTimeout time.Duration
 	stateMu      sync.Mutex
 	states       map[string]*runState
 }
@@ -140,6 +141,12 @@ type Option func(*Runtime)
 
 func WithPollInterval(d time.Duration) Option {
 	return func(r *Runtime) { r.pollInterval = d }
+}
+
+// WithReadyTimeout bounds how long Start waits for a container to reach
+// StatusReady. Matches the pattern in internal/fargate (WithStartTimeout).
+func WithReadyTimeout(d time.Duration) Option {
+	return func(r *Runtime) { r.readyTimeout = d }
 }
 
 func New(client Client, cfg Config, log *slog.Logger, opts ...Option) (*Runtime, error) {
@@ -172,7 +179,8 @@ func New(client Client, cfg Config, log *slog.Logger, opts ...Option) (*Runtime,
 	}
 	r := &Runtime{
 		client: client, cfg: cfg, log: log, pollInterval: 2 * time.Second,
-		states: make(map[string]*runState),
+		readyTimeout: 5 * time.Minute,
+		states:       make(map[string]*runState),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -207,10 +215,17 @@ func (r *Runtime) Start(ctx context.Context, p process.StartParams, _ io.Writer)
 		return process.ReplicaEndpoint{}, fmt.Errorf("scaleway: create container returned no id")
 	}
 	if container.Status != StatusReady || container.PublicEndpoint == "" {
-		container, err = r.waitReady(ctx, container.ID)
-		if err != nil {
-			return process.ReplicaEndpoint{}, err
+		id := container.ID
+		ready, waitErr := r.waitReady(ctx, id)
+		if waitErr != nil {
+			if existing != nil {
+				// The retained container predates this Start and may still be
+				// serving; its tags keep it visible to recovery and Inventory.
+				return process.ReplicaEndpoint{}, waitErr
+			}
+			return process.ReplicaEndpoint{}, r.deleteFailedContainer(id, waitErr)
 		}
+		container = ready
 	}
 	r.markStarted(container.ID)
 	return process.ReplicaEndpoint{
@@ -219,6 +234,24 @@ func (r *Runtime) Start(ctx context.Context, p process.StartParams, _ io.Writer)
 		WorkerID: WorkerID,
 		Handle:   process.RunHandle{ContainerID: WorkerID + "/" + container.ID},
 	}, nil
+}
+
+// deleteFailedContainer removes a container that Start just created but that
+// never reached StatusReady, so a failed Start does not leave a
+// billable resource stuck in creating/error that nothing else tracks:
+// markStarted is never reached on this path, so neither the recovery sweep nor
+// Inventory would otherwise find it again. Cleanup runs on a fresh,
+// independently bounded context rather than ctx, because ctx's own
+// cancellation or deadline is frequently the reason waitErr occurred, and
+// reusing it here would make the cleanup call fail before it even starts.
+func (r *Runtime) deleteFailedContainer(id string, waitErr error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if delErr := r.client.DeleteContainer(cleanupCtx, id); delErr != nil && !errors.Is(delErr, ErrNotFound) {
+		r.log.Error("scaleway: cleanup failed container after start error", "container_id", id, "err", delErr)
+		return errors.Join(waitErr, fmt.Errorf("scaleway: cleanup container %s after start failed: %w", id, delErr))
+	}
+	return waitErr
 }
 
 func (r *Runtime) HostPreparesDeps() bool    { return false }
@@ -579,7 +612,14 @@ func labelsFromTags(tags []string) map[string]string {
 	return labels
 }
 
+// waitReady polls GetContainer until the container reaches StatusReady or a
+// terminal StatusError, bounded by both ctx and readyTimeout. The readyTimeout
+// bound matters independently of ctx: Manager.Start calls Runtime.Start with
+// context.Background(), which never cancels, so a container stuck in
+// creating/updating would otherwise hang this call (and the caller's lock)
+// forever.
 func (r *Runtime) waitReady(ctx context.Context, id string) (Container, error) {
+	deadline := time.Now().Add(r.readyTimeout)
 	for {
 		container, err := r.client.GetContainer(ctx, id)
 		if err != nil {
@@ -593,6 +633,9 @@ func (r *Runtime) waitReady(ctx context.Context, id string) (Container, error) {
 			return container, nil
 		case StatusError:
 			return Container{}, fmt.Errorf("scaleway: container %s failed: %s", id, container.ErrorMessage)
+		}
+		if !time.Now().Before(deadline) {
+			return Container{}, fmt.Errorf("scaleway: container %s did not become ready within %s", id, r.readyTimeout)
 		}
 		timer := time.NewTimer(r.pollInterval)
 		select {

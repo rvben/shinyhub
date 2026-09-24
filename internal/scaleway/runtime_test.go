@@ -267,3 +267,185 @@ func TestResourceNamePreservesReplicaIdentityWhenPrefixIsLong(t *testing.T) {
 		t.Fatalf("resource names do not preserve identity: %q, %q", first, second)
 	}
 }
+
+// TestStartFailsWhenContainerNeverBecomesReady reproduces a container stuck in
+// StatusCreating forever (a provider-side hang). Manager.Start calls Runtime.Start
+// with context.Background(), which never cancels, so the only thing that can
+// bound waitReady is the runtime's own configured timeout. Without one, this
+// test would hang forever; the *testing.T deadline (see go test -timeout in the
+// Makefile) is the only thing that stops it, and it fails with "test timed out"
+// rather than a useful assertion.
+func TestStartFailsWhenContainerNeverBecomesReady(t *testing.T) {
+	var deletedID string
+	var deleteCalls int
+	client := &fakeClient{
+		createFn: func(_ context.Context, in CreateContainerInput) (Container, error) {
+			return Container{ID: "container-id", Name: in.Name, Status: StatusCreating}, nil
+		},
+		getFn: func(context.Context, string) (Container, error) {
+			return Container{ID: "container-id", Status: StatusCreating}, nil
+		},
+		deleteFn: func(_ context.Context, id string) error {
+			deleteCalls++
+			deletedID = id
+			return nil
+		},
+	}
+	rt, err := New(client, testConfig(), nil,
+		WithPollInterval(time.Millisecond),
+		WithReadyTimeout(20*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	start := time.Now()
+	_, err = rt.Start(context.Background(), testStartParams(), io.Discard)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Start: want error for a container stuck creating, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not become ready") {
+		t.Fatalf("Start error = %v, want a ready-timeout message", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Start took %s, want it bounded by readyTimeout regardless of ctx", elapsed)
+	}
+	if deleteCalls != 1 || deletedID != "container-id" {
+		t.Fatalf("DeleteContainer calls = %d (id %q), want exactly 1 call for container-id: a container that never became ready must not be left behind", deleteCalls, deletedID)
+	}
+}
+
+// TestStartDeletesContainerWhenStatusReportsError reproduces a container the
+// provider itself reports as StatusError (a failed image pull, a crash-looping
+// entrypoint). Start must clean it up rather than returning the error and
+// leaving a billable, untracked resource behind: markStarted is never reached
+// on this path, so nothing else would ever find it again.
+func TestStartDeletesContainerWhenStatusReportsError(t *testing.T) {
+	var deletedID string
+	var deleteCalls int
+	client := &fakeClient{
+		createFn: func(_ context.Context, in CreateContainerInput) (Container, error) {
+			return Container{ID: "container-id", Name: in.Name, Status: StatusCreating}, nil
+		},
+		getFn: func(context.Context, string) (Container, error) {
+			return Container{ID: "container-id", Status: StatusError, ErrorMessage: "image pull failed"}, nil
+		},
+		deleteFn: func(_ context.Context, id string) error {
+			deleteCalls++
+			deletedID = id
+			return nil
+		},
+	}
+	rt, err := New(client, testConfig(), nil, WithPollInterval(time.Millisecond))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = rt.Start(context.Background(), testStartParams(), io.Discard)
+	if err == nil {
+		t.Fatal("Start: want error for a container reporting StatusError, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed") {
+		t.Fatalf("Start error = %v, want the container failure message", err)
+	}
+	if deleteCalls != 1 || deletedID != "container-id" {
+		t.Fatalf("DeleteContainer calls = %d (id %q), want exactly 1 call for container-id: a container reporting StatusError must not be left behind", deleteCalls, deletedID)
+	}
+}
+
+// TestStartDeletesContainerUsingFreshContextWhenCallerContextIsDone
+// reproduces the caller context itself expiring while waitReady polls (the
+// Manager sets a deadline in some call paths even though the common case is
+// context.Background()). The cleanup delete must still go through: it must
+// not reuse the same context that just caused waitReady to fail.
+func TestStartDeletesContainerUsingFreshContextWhenCallerContextIsDone(t *testing.T) {
+	var deleteCtxErr error
+	var deleteCalls int
+	client := &fakeClient{
+		createFn: func(_ context.Context, in CreateContainerInput) (Container, error) {
+			return Container{ID: "container-id", Name: in.Name, Status: StatusCreating}, nil
+		},
+		getFn: func(context.Context, string) (Container, error) {
+			return Container{ID: "container-id", Status: StatusCreating}, nil
+		},
+		deleteFn: func(ctx context.Context, id string) error {
+			deleteCalls++
+			deleteCtxErr = ctx.Err()
+			return nil
+		},
+	}
+	// readyTimeout is long; the caller's ctx deadline is what actually expires
+	// waitReady's loop first, so this exercises the ctx.Done() branch rather
+	// than the readyTimeout branch.
+	rt, err := New(client, testConfig(), nil,
+		WithPollInterval(time.Millisecond),
+		WithReadyTimeout(time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err = rt.Start(ctx, testStartParams(), io.Discard)
+	if err == nil {
+		t.Fatal("Start: want error when the caller context expires, got nil")
+	}
+	if deleteCalls != 1 {
+		t.Fatalf("DeleteContainer calls = %d, want exactly 1", deleteCalls)
+	}
+	if deleteCtxErr != nil {
+		t.Fatalf("DeleteContainer context.Err() = %v, want nil: cleanup must run on a fresh context, not the expired caller ctx", deleteCtxErr)
+	}
+}
+
+// TestStartKeepsRetainedContainerWhenUpdateNeverBecomesReady covers the
+// in-place redeploy path: Start found the replica's retained container by its
+// tags and updated it rather than creating one. That container predates this
+// Start (an earlier Start marked it started, and it may still be serving), and
+// its tags keep it visible to recovery and Inventory, so a readiness failure
+// after the update must report the error without deleting it.
+func TestStartKeepsRetainedContainerWhenUpdateNeverBecomesReady(t *testing.T) {
+	existing := Container{
+		ID: "stable-id", Name: "demo-a42-r2", Status: StatusReady,
+		PublicEndpoint: "https://stable.functions.fnc.nl-ams.scw.cloud",
+		Tags:           tags(testStartParams()),
+	}
+	var deleteCalls int
+	client := &fakeClient{
+		createFn: func(context.Context, CreateContainerInput) (Container, error) {
+			t.Fatal("Start must update the retained replica resource, not create a duplicate")
+			return Container{}, nil
+		},
+		listFn: func(context.Context, ListContainersInput) ([]Container, error) {
+			return []Container{existing}, nil
+		},
+		updateFn: func(_ context.Context, in UpdateContainerInput) (Container, error) {
+			return Container{ID: in.ID, Name: existing.Name, Status: StatusUpdating}, nil
+		},
+		getFn: func(context.Context, string) (Container, error) {
+			return Container{ID: "stable-id", Status: StatusUpdating}, nil
+		},
+		deleteFn: func(context.Context, string) error {
+			deleteCalls++
+			return nil
+		},
+	}
+	rt, err := New(client, testConfig(), nil,
+		WithPollInterval(time.Millisecond),
+		WithReadyTimeout(20*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = rt.Start(context.Background(), testStartParams(), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
+		t.Fatalf("Start error = %v, want a ready-timeout error", err)
+	}
+	if deleteCalls != 0 {
+		t.Fatalf("DeleteContainer calls = %d, want 0: a retained container updated in place must survive a failed redeploy", deleteCalls)
+	}
+}
