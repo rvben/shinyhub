@@ -160,6 +160,44 @@ func TestBuffer_PerAppIsolation(t *testing.T) {
 	}
 }
 
+func TestBuffer_ForgetRemovesOnlyThatApp(t *testing.T) {
+	buf := NewBuffer(5, 1*time.Second)
+	buf.Record(Span{AppSlug: "a", Status: 500, DurationMS: 1})
+	buf.Record(Span{AppSlug: "b", Status: 500, DurationMS: 2})
+
+	buf.Forget("a")
+
+	if got := buf.Snapshot("a"); got != nil {
+		t.Errorf("forgotten app should yield nil, got %v", got)
+	}
+	if got := buf.Snapshot("b"); len(got) != 1 {
+		t.Errorf("app b: expected 1 span to survive Forget(\"a\"), got %d", len(got))
+	}
+
+	// A deleted app's slug can be redeployed later; it must start with a clean
+	// ring, not resume mid-way through the old one's wraparound state.
+	buf.Record(Span{AppSlug: "a", Status: 500, DurationMS: 99})
+	got := buf.Snapshot("a")
+	if len(got) != 1 || got[0].DurationMS != 99 {
+		t.Errorf("app a after redeploy: got %v, want a single fresh span", got)
+	}
+}
+
+func TestBuffer_ForgetUnknownSlugIsNoop(t *testing.T) {
+	buf := NewBuffer(5, 1*time.Second)
+	buf.Record(Span{AppSlug: "a", Status: 500, DurationMS: 1})
+	buf.Forget("never-recorded")
+	if got := buf.Snapshot("a"); len(got) != 1 {
+		t.Errorf("unrelated Forget must not disturb app a, got %v", got)
+	}
+}
+
+func TestBuffer_ForgetNilReceiver(t *testing.T) {
+	var buf *Buffer
+	// Must not panic.
+	buf.Forget("a")
+}
+
 func TestEnvFor_DisabledReturnsNil(t *testing.T) {
 	cfg := config.TracingConfig{Enabled: false, OTLPEndpoint: "http://collector:4318"}
 	if got := EnvFor(cfg, "myapp", 0); got != nil {
