@@ -3,5 +3,5 @@ name = "shinyhub-preload-memory"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-  "playwright>=1.48",
+  "playwright>=1.62",
 ]

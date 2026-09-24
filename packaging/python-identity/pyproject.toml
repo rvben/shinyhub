@@ -21,7 +21,7 @@ classifiers = [
   "Topic :: Security",
 ]
 dependencies = [
-  "PyJWT>=2.13",
+  "PyJWT>=2.14",
 ]
 
 [project.urls]
