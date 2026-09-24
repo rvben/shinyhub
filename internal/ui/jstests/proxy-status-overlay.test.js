@@ -142,6 +142,21 @@ function mount({
       await flush();
       await flush();
     },
+    // replace reproduces Shiny tearing down and recreating its own marker
+    // node within a single synchronous batch (e.g. a reconnect attempt that
+    // itself fails) instead of simply removing it. The new marker is
+    // appended before the old one is removed so both mutations land in the
+    // DOM before any MutationObserver callback runs, the same as a real
+    // browser batches synchronous script-driven DOM churn.
+    async replace() {
+      const prev = d.getElementById(SHINY_ID);
+      const next = d.createElement('div');
+      next.id = SHINY_ID;
+      d.body.appendChild(next);
+      if (prev) prev.parentNode.removeChild(prev);
+      await flush();
+      await flush();
+    },
     // fireTimer runs the pending poll, the way the clock would.
     async fireTimer() {
       const t = timers.shift();
@@ -261,6 +276,21 @@ test('a reconnect takes the overlay away again', async () => {
   await h.reconnect();
   assert.equal(h.overlay(), null, 'Shiny recovered on its own; nothing to explain');
   assert.equal(h.timers.length, 0, 'and the poll must stop, not keep hitting the server');
+});
+
+test('a same-batch marker replacement does not tear the overlay down while still disconnected', async () => {
+  const h = mount({ statuses: [503] });
+  await h.disconnect();
+  assert.ok(h.overlay(), 'precondition: the overlay is up');
+  assert.equal(h.timers.length, 1, 'precondition: a poll is scheduled');
+
+  // Shiny replaces its own disconnect marker (add-then-remove, in one
+  // synchronous batch) rather than simply removing it. The app was never
+  // actually reachable in between, so the overlay must never disappear.
+  await h.replace();
+
+  assert.ok(h.overlay(), 'a replacement marker means Shiny is still disconnected; the overlay must stay up');
+  assert.equal(h.timers.length, 1, 'polling must keep going since the app never actually reconnected');
 });
 
 test('a recovered app offers a new session while preserving the old results', async () => {
