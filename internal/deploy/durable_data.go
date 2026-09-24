@@ -13,7 +13,10 @@ import (
 // (authored to read/write its data dir) OR data has already been pushed for it
 // (appDataDir/slug is non-empty, excluding the upload temp dir).
 //
-// An empty appDataDir skips the on-disk check, mirroring CheckAppQuota.
+// An empty appDataDir skips the on-disk check, mirroring CheckAppQuota. The
+// on-disk check only needs to know whether any data exists, so it stops at
+// the first file found (data.HasAnyFile) instead of summing every file's size
+// the way data.DirSize does.
 func UsesPersistentData(command []string, appDataDir, slug string) (bool, error) {
 	for _, arg := range command {
 		if strings.Contains(arg, placeholderDataDir) {
@@ -23,11 +26,7 @@ func UsesPersistentData(command []string, appDataDir, slug string) (bool, error)
 	if appDataDir == "" {
 		return false, nil
 	}
-	used, err := data.DirSize(filepath.Join(appDataDir, slug))
-	if err != nil {
-		return false, err
-	}
-	return used > 0, nil
+	return data.HasAnyFile(filepath.Join(appDataDir, slug))
 }
 
 // EphemeralDataBlockedTier decides whether a deploy must be blocked by the

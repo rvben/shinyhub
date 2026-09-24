@@ -63,6 +63,50 @@ func TestUsesPersistentData_EmptyDataDirOnDisk(t *testing.T) {
 	}
 }
 
+// TestUsesPersistentData_StopsAtFirstFile proves the on-disk check answers
+// "does this app have any data at all" without walking the whole data dir the
+// way a full DirSize sum does. The data dir holds one regular file followed,
+// in the directory's own lexical listing order, by a subdirectory the walker
+// has no permission to enter: an implementation that keeps walking past the
+// first file it finds (to keep accumulating a total size it never needs)
+// reaches that subdirectory and surfaces its permission error; a walk that
+// stops as soon as one regular file is found never gets there.
+func TestUsesPersistentData_StopsAtFirstFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions do not deny reads, so the failure cannot be provoked")
+	}
+	appDataDir := t.TempDir()
+	slug := "myapp"
+	dataDir := filepath.Join(appDataDir, slug)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// "a_data.csv" sorts before "z_locked", so a lexical walk reaches it first.
+	if err := os.WriteFile(filepath.Join(dataDir, "a_data.csv"), []byte("a,b\n1,2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lockedDir := filepath.Join(dataDir, "z_locked")
+	if err := os.MkdirAll(lockedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockedDir, "state.bin"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lockedDir, 0o755) })
+	if err := os.Chmod(lockedDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := []string{"uv", "run", "shiny", "run", "--port", "{port}", "app.py"}
+	got, err := UsesPersistentData(cmd, appDataDir, slug)
+	if err != nil {
+		t.Fatalf("want no error (the walk must never reach the unreadable directory), got: %v", err)
+	}
+	if !got {
+		t.Fatal("data present on disk: want true, got false")
+	}
+}
+
 // EphemeralDataBlockedTier decides whether a deploy must be blocked: a data-using
 // app (usesData) with no operator acknowledgement (ack) may not land on any tier
 // whose storage is not durable. Fail-closed across mixed placement.

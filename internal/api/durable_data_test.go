@@ -125,6 +125,75 @@ func TestEphemeralDataBlockForTiers_BlocksDataOnEphemeralNewTiers(t *testing.T) 
 	}
 }
 
+// lockAppDataDir chmods dir/slug to unreadable so any code path that still
+// tries the on-disk persistent-data check errors instead of silently doing
+// the (possibly expensive, or here impossible) walk anyway. Restored via
+// t.Cleanup so the harness can remove the temp dir afterward.
+func lockAppDataDir(t *testing.T, appDataDir, slug string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions do not deny reads, so the failure cannot be provoked")
+	}
+	dir := filepath.Join(appDataDir, slug)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEphemeralDataBlockForTiers_SkipsOnDiskCheckWhenAcked proves the guard
+// never touches the on-disk persistent-data signal once the operator has
+// acknowledged ephemeral storage: the ack alone already settles "not
+// blocked", so the (possibly expensive) UsesPersistentData walk must not run
+// at all. appDataDir/slug is made unreadable so a caller that still runs the
+// walk gets a permission error instead of silently paying for it.
+func TestEphemeralDataBlockForTiers_SkipsOnDiskCheckWhenAcked(t *testing.T) {
+	srv, store := newEphemeralTierServer(t)
+	app := mustGuardApp(t, store)
+	if err := store.UpdateAppEphemeralDataAck(app.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	app, _ = store.GetAppBySlug("myapp")
+	lockAppDataDir(t, srv.cfg.Storage.AppDataDir, app.Slug)
+
+	tier, blocked, err := srv.ephemeralDataBlockForTiers(app, nil, []string{"cloud"})
+	if err != nil {
+		t.Fatalf("want no error (the on-disk check must not run once acked), got: %v", err)
+	}
+	if blocked {
+		t.Fatalf("acknowledged app: want allowed, got blocked on %q", tier)
+	}
+}
+
+// TestEphemeralDataBlockForTiers_SkipsOnDiskCheckWhenAllTiersDurable proves
+// the guard never touches the on-disk persistent-data signal when every
+// placement tier already has durable storage: the outcome cannot change
+// based on the app-side signal, so the walk must not run. Same unreadable
+// appDataDir/slug trick as the ack case.
+func TestEphemeralDataBlockForTiers_SkipsOnDiskCheckWhenAllTiersDurable(t *testing.T) {
+	appsDir := t.TempDir()
+	store := dbtest.New(t)
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: appsDir, AppDataDir: t.TempDir()},
+	}
+	mgr := process.NewManager(appsDir, newManifestFakeRuntime())
+	srv := New(cfg, store, mgr, nil)
+	app := mustGuardApp(t, store)
+	lockAppDataDir(t, srv.cfg.Storage.AppDataDir, app.Slug)
+
+	tier, blocked, err := srv.ephemeralDataBlockForTiers(app, nil, []string{"local"})
+	if err != nil {
+		t.Fatalf("want no error (the on-disk check must not run when every tier is durable), got: %v", err)
+	}
+	if blocked {
+		t.Fatalf("all tiers durable: want allowed, got blocked on %q", tier)
+	}
+}
+
 func TestEphemeralDataPushBlock_BlockedWithoutAck(t *testing.T) {
 	srv, store := newEphemeralTierServer(t)
 	app := mustGuardApp(t, store)
