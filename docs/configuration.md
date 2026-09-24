@@ -406,6 +406,39 @@ Disk cost is bounded by the product of these numbers: at the defaults, at most
 about 200 MiB of logs per replica slot for an application that fills every file,
 and far less in practice, since most runs never approach the cap.
 
+## Fleet run and development session retention
+
+Two more `maintenance:` settings bound history unrelated to application logs,
+pruned on the same schedule:
+
+```yaml
+maintenance:
+  fleet_run_retention_count: 20              # SHINYHUB_FLEET_RUN_RETENTION_COUNT
+  development_session_retention_days: 90     # SHINYHUB_DEVELOPMENT_SESSION_RETENTION_DAYS
+  interval: 1h
+```
+
+`fleet_run_retention_count` keeps this many newest terminal runs per fleet and
+deletes older ones. The default (`0`) keeps every run. A run still recorded as
+an app's latest or last-successful `fleet apply` is kept regardless of its
+rank, since fleet status reads those two rows directly; a run still in
+progress is never removed either.
+
+`development_session_retention_days` deletes ended, non-ephemeral development
+sessions older than this many days. The default (`0`) keeps every session.
+Ephemeral sessions are never affected by this setting: they are removed with
+their app, not by this sweep.
+
+Both settings share `app_log_run_retention_count`'s convention: `0` is the
+default and means keep everything; `-1` also means keep everything, accepted
+explicitly for an operator who copies the sibling setting's `-1` and expects
+the same result; any other negative value is rejected at startup rather than
+silently treated as "keep all", so a typo like `-3` fails loudly instead of
+quietly disabling pruning.
+
+Pruning happens at `maintenance.interval` (and once at startup), same as the
+application log run pruning above.
+
 ## Host capacity
 
 The Overview measures fleet CPU and memory against each application's enforced
