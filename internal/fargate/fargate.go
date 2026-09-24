@@ -748,6 +748,7 @@ func (r *Runtime) CleanupApp(ctx context.Context, appID int64) error {
 		return nil
 	}
 	r.forgetSyncKey(appID)
+	r.appSync.forget(appID)
 
 	if r.secrets != nil {
 		if err := r.secrets.DeleteByPrefix(ctx, appSecretPrefix(r.cfg.SecretNamePrefix, appID)); err != nil {
@@ -839,6 +840,18 @@ func (k *keyedMutex) lock(id int64) func() {
 	k.mu.Unlock()
 	mu.Lock()
 	return mu.Unlock
+}
+
+// forget drops the lock entry for id, if any. Call it once the id is durably
+// gone so a server that creates and deletes many apps over its lifetime does
+// not grow the map without bound. Safe with a concurrent holder: a goroutine
+// that already fetched the *sync.Mutex for this id keeps using that object
+// normally, since deleting the map entry only stops a future lookup from
+// finding it. A lookup after forget simply creates a fresh, independent lock.
+func (k *keyedMutex) forget(id int64) {
+	k.mu.Lock()
+	delete(k.m, id)
+	k.mu.Unlock()
 }
 
 // Start launches one Fargate task for the replica and waits until it acquires a

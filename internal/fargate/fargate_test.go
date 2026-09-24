@@ -580,6 +580,31 @@ func TestCleanupApp_DeletesSecretsAndDeregistersFamily(t *testing.T) {
 	}
 }
 
+// TestCleanupApp_ForgetsAppSyncLock reproduces the unbounded growth: appSync
+// lazily creates a *sync.Mutex per app ID the first time a replica of that app
+// starts (resolveTaskDef's lock(p.AppID) call) and nothing ever removed one, so
+// a server that creates and deletes many apps over its lifetime grows the map
+// forever. CleanupApp must drop the deleted app's entry.
+func TestCleanupApp_ForgetsAppSyncLock(t *testing.T) {
+	store := newFakeSecretsStore()
+	f := &fakeECS{}
+	r := secretsRuntime(f, store)
+
+	unlock := r.appSync.lock(7)
+	unlock()
+	if _, ok := r.appSync.m[7]; !ok {
+		t.Fatal("precondition: appSync must hold an entry for app 7 before cleanup")
+	}
+
+	if err := r.CleanupApp(context.Background(), 7); err != nil {
+		t.Fatalf("CleanupApp: %v", err)
+	}
+
+	if _, ok := r.appSync.m[7]; ok {
+		t.Error("appSync lock for deleted app 7 still present after CleanupApp")
+	}
+}
+
 // TestStart_RoutedCacheInvalidatesOnBaseRevisionChange guards that a
 // secret-bearing app picks up a NEW base task-definition revision (e.g. a new
 // runner image) even when its secrets are unchanged: with an unpinned base
