@@ -1,19 +1,39 @@
 package deploy
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/rvben/shinyhub/internal/fsx"
+	"github.com/rvben/shinyhub/internal/storage"
 )
 
 // PruneOldVersions removes extracted version directories and bundle ZIPs beyond
 // the newest `keep` entries for the given app. The activeDir and every
 // pinnedDir are never deleted, even outside the retention window.
+//
+// Retention is best-effort against a concurrent `shinyhub backup`: pruning
+// takes the backup fence exclusive and non-blocking before touching any file,
+// and skips this round entirely (logging it, returning nil rather than an
+// error) when a backup is mid-walk over appsDir. Blocking here instead would
+// stall the deploy holding this call for as long as the backup's tar walk
+// runs; a skipped round is caught up by the next deploy's prune once the
+// backup releases the fence.
 func PruneOldVersions(appsDir, slug string, keep int, activeDir string, pinnedDirs ...string) error {
 	if keep <= 0 {
 		keep = 5
 	}
+
+	release, ok, err := storage.TryAcquireBackupFence(appsDir)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		slog.Warn("prune_old_versions_skipped_backup_in_progress", "slug", slug)
+		return nil
+	}
+	defer release()
 
 	versionsDir := filepath.Join(appsDir, slug, "versions")
 	bundlesDir := filepath.Join(appsDir, slug, "bundles")

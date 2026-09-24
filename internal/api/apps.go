@@ -4095,6 +4095,16 @@ func (s *Server) deleteAppLocked(ctx context.Context, app *db.App) (string, erro
 	if s.proxy != nil {
 		s.proxy.ForgetRejects(slug)
 	}
+	// This removal does not take the backup fence, unlike version/bundle
+	// pruning: a concurrent backup's DB snapshot either lists this app's
+	// active deployment or it doesn't. If it doesn't (the tombstone above
+	// landed first), a missing app is not a concern for the archive. If it
+	// does (the snapshot ran first), the archive's Verify cross-check
+	// (verifyActiveBundlesArchived) catches a bundle directory this call
+	// removed from under it: it reads as a real corruption to guard against,
+	// not silent data loss, and app deletion is rare enough that a
+	// skip-and-retry model like retention pruning's is not worth the added
+	// state here.
 	if cleanupErr := storage.OnAppDelete(s.cfg, slug); cleanupErr != nil {
 		detail := "deferred cleanup: " + cleanupErr.Error()
 		slog.Error("app delete cleanup failed; tombstone retained for reconcile", "slug", slug, "err", cleanupErr)

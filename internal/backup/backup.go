@@ -6,6 +6,32 @@
 // version, schema version, and DB backend. Postgres backups shell out to
 // pg_dump/pg_restore, which must be on PATH.
 //
+// `shinyhub backup` runs as a process separate from the server, so nothing
+// in-process coordinates its DB snapshot with the deploys, rollbacks, and
+// prunes the server keeps running concurrently. Only one thing actually
+// breaks the archive: a version directory being PRUNED between the DB
+// snapshot and the apps-tree walk, which leaves the archive's database
+// pointing at a bundle_dir the archive never contains. A new deployment
+// committed in that same gap is harmless, because the snapshot still names
+// the OLD bundle_dir, which survives untouched as long as nothing prunes it.
+// Create closes that gap with a dedicated backup fence
+// (storage.AcquireBackupFence), held shared from before the DB snapshot
+// through the end of the apps-tree walk; every prune of old version
+// directories or bundle ZIPs takes that same fence exclusively and
+// non-blocking (deploy.PruneOldVersions), and skips pruning for this round,
+// logging it, when the fence is busy. Retention is best-effort and catches
+// up on the next deploy. This is a fence of its own, deliberately NOT the
+// fleet lifecycle lock internal/api uses to serialize deploys against each
+// other: that lock is taken shared by every mutating API request and by the
+// demand path that wakes a hibernated app, so holding it exclusively for the
+// minutes a large app-data tree can take to walk would freeze the whole
+// control plane for as long as the backup runs. Verify adds a matching
+// belt-and-suspenders check: it cross-references every app's active
+// deployment against the archived apps/ tree and fails loudly if a named
+// bundle directory is missing, so a gap introduced any other way (a bug, a
+// hand-edited archive, a future caller that does not know about the fence)
+// is still caught before a restore is trusted.
+//
 // RPO/RTO: `backup` is point-in-time and safe to run on a live server, so the
 // recovery point objective is "as fresh as your last scheduled backup" (run it
 // from cron as often as your tolerated data loss window). `restore` is offline
@@ -35,6 +61,8 @@ import (
 
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/storage"
+	"golang.org/x/sys/unix"
 )
 
 // Manifest is the metadata header stored at manifest.json inside the archive.
@@ -59,6 +87,14 @@ const (
 
 	backendSQLite   = "sqlite"
 	backendPostgres = "postgres"
+
+	// activeDeploymentSchemaVersion is the schema version that introduced
+	// apps.active_deployment_id (migration 074). An archive from an older
+	// schema predates the column Verify's active-bundle cross-check relies on,
+	// so that check is skipped for it; the archive is not wrong, it is simply
+	// from before there was one authoritative "current" deployment per app to
+	// check against.
+	activeDeploymentSchemaVersion = 74
 )
 
 // dbFilePath extracts the on-disk SQLite file path from a DSN, stripping any
@@ -98,35 +134,31 @@ func pathWithin(base, target string) (bool, error) {
 	return at == ab || strings.HasPrefix(at, ab+string(os.PathSeparator)), nil
 }
 
-// Create writes a consistent backup archive of all durable state to outPath.
-func Create(cfg *config.Config, version, outPath string) error {
-	postgres := db.IsPostgresDSN(cfg.Database.DSN)
+// testHookAfterSnapshot runs (in tests only) right after the DB snapshot has
+// been taken and before the filesystem walk begins, so a test can simulate a
+// concurrent deploy+prune landing exactly in the window Create must fence.
+var testHookAfterSnapshot func(cfg *config.Config)
 
-	// SQLite snapshots write next to the live DB file; Postgres has no local
-	// file, so dbPath stays empty and the pg_dump output lands beside the
-	// archive instead.
-	var dbPath string
-	if !postgres {
-		var ok bool
-		dbPath, ok = dbFilePath(cfg.Database.DSN)
-		if !ok {
-			return fmt.Errorf("database %q is in-memory; nothing to back up", cfg.Database.DSN)
-		}
+// writeDurableState takes the DB snapshot and archives the apps/app-data
+// trees into tw, appending the manifest and DB entry ahead of them.
+//
+// It holds the backup fence (storage.AcquireBackupFence) shared from before
+// the DB snapshot through the end of the apps-tree walk, then releases it
+// before archiving app-data: nothing prunes app-data, only version
+// directories and bundle ZIPs under AppsDir, so the fence only needs to cover
+// the span where a prune could actually invalidate the snapshot. Every prune
+// (deploy.PruneOldVersions) takes the same fence exclusive and non-blocking,
+// and skips this round rather than waiting, so a deploy or rollback landing
+// in the gap between the snapshot and the walk can still commit a new
+// bundle_dir (harmless: the snapshot still names the old one, which survives
+// because nothing prunes it while the fence is held) but cannot delete the
+// version directory the snapshot names as active.
+func writeDurableState(cfg *config.Config, tw *tar.Writer, version string, postgres bool, dbPath, outPath string) error {
+	release, err := storage.AcquireBackupFence(cfg.Storage.AppsDir, unix.LOCK_SH)
+	if err != nil {
+		return fmt.Errorf("acquire backup fence: %w", err)
 	}
-
-	// The output archive must not live inside a tree we are about to walk:
-	// addTree would otherwise capture the partially written .partial file,
-	// producing a self-containing archive that can corrupt or grow until the
-	// disk fills.
-	for _, root := range []string{cfg.Storage.AppsDir, cfg.Storage.AppDataDir} {
-		within, err := pathWithin(root, outPath)
-		if err != nil {
-			return err
-		}
-		if within {
-			return fmt.Errorf("--out %q is inside backed-up dir %q; write the archive elsewhere", outPath, root)
-		}
-	}
+	defer release()
 
 	store, err := db.Open(cfg.Database.DSN)
 	if err != nil {
@@ -162,6 +194,61 @@ func Create(cfg *config.Config, version, outPath string) error {
 		return err
 	}
 	_ = store.Close()
+	if testHookAfterSnapshot != nil {
+		testHookAfterSnapshot(cfg)
+	}
+
+	manifest := Manifest{
+		ShinyHubVersion: version,
+		SchemaVersion:   schemaVer,
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		Backend:         backend,
+	}
+	if err := writeManifest(tw, manifest); err != nil {
+		return err
+	}
+	if err := addFile(tw, snapPath, dbArchiveEntry); err != nil {
+		return err
+	}
+	if err := addTree(tw, cfg.Storage.AppsDir, appsPrefix); err != nil {
+		return err
+	}
+	// The apps-tree walk is done, so the fence's job is done too: release it
+	// before the (potentially much larger) app-data walk instead of holding it
+	// for the rest of the archive, since nothing prunes app-data.
+	release()
+	return addTree(tw, cfg.Storage.AppDataDir, appDataPrefix)
+}
+
+// Create writes a consistent backup archive of all durable state to outPath.
+func Create(cfg *config.Config, version, outPath string) error {
+	postgres := db.IsPostgresDSN(cfg.Database.DSN)
+
+	// SQLite snapshots write next to the live DB file; Postgres has no local
+	// file, so dbPath stays empty and the pg_dump output lands beside the
+	// archive instead.
+	var dbPath string
+	if !postgres {
+		var ok bool
+		dbPath, ok = dbFilePath(cfg.Database.DSN)
+		if !ok {
+			return fmt.Errorf("database %q is in-memory; nothing to back up", cfg.Database.DSN)
+		}
+	}
+
+	// The output archive must not live inside a tree we are about to walk:
+	// addTree would otherwise capture the partially written .partial file,
+	// producing a self-containing archive that can corrupt or grow until the
+	// disk fills.
+	for _, root := range []string{cfg.Storage.AppsDir, cfg.Storage.AppDataDir} {
+		within, err := pathWithin(root, outPath)
+		if err != nil {
+			return err
+		}
+		if within {
+			return fmt.Errorf("--out %q is inside backed-up dir %q; write the archive elsewhere", outPath, root)
+		}
+	}
 
 	tmpOut := outPath + ".partial"
 	// Owner-only: the archive contains the full database (password and API-key
@@ -173,28 +260,7 @@ func Create(cfg *config.Config, version, outPath string) error {
 	gz := gzip.NewWriter(out)
 	tw := tar.NewWriter(gz)
 
-	manifest := Manifest{
-		ShinyHubVersion: version,
-		SchemaVersion:   schemaVer,
-		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
-		Backend:         backend,
-	}
-	if err := writeManifest(tw, manifest); err != nil {
-		closeAll(tw, gz, out)
-		_ = os.Remove(tmpOut)
-		return err
-	}
-	if err := addFile(tw, snapPath, dbArchiveEntry); err != nil {
-		closeAll(tw, gz, out)
-		_ = os.Remove(tmpOut)
-		return err
-	}
-	if err := addTree(tw, cfg.Storage.AppsDir, appsPrefix); err != nil {
-		closeAll(tw, gz, out)
-		_ = os.Remove(tmpOut)
-		return err
-	}
-	if err := addTree(tw, cfg.Storage.AppDataDir, appDataPrefix); err != nil {
+	if err := writeDurableState(cfg, tw, version, postgres, dbPath, outPath); err != nil {
 		closeAll(tw, gz, out)
 		_ = os.Remove(tmpOut)
 		return err
@@ -292,11 +358,15 @@ func ReadManifest(archivePath string) (Manifest, error) {
 // Verify re-opens archivePath and fully decodes it end to end: the gzip
 // trailer plus every tar entry's body, confirming the manifest and the DB
 // snapshot entry its own manifest.Backend declares are both present and
-// readable. Create calls this on every archive it writes, before renaming it
-// into place, so a short write on a flaky filesystem is caught as an error
-// instead of a silently truncated "backup written". It is also safe to call
-// standalone against an existing archive, e.g. before trusting it for a
-// restore drill.
+// readable. It also cross-checks the staged SQLite snapshot against the
+// archived apps/ tree: every app's active deployment names a bundle_dir, and
+// that version directory must actually be in the archive (see
+// verifyActiveBundlesArchived). Create calls this on every archive it writes,
+// before renaming it into place, so a short write on a flaky filesystem, or a
+// deploy+prune that squeezed past the fence in writeDurableState, is caught
+// as an error instead of a silently inconsistent "backup written". It is also
+// safe to call standalone against an existing archive, e.g. before trusting
+// it for a restore drill.
 func Verify(archivePath string) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
@@ -310,8 +380,22 @@ func Verify(archivePath string) error {
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 
+	// The SQLite DB entry is staged to a temp file so the active-bundle
+	// cross-check below can query it once the loop has finished populating
+	// `seen` with every entry name the archive actually contains. Postgres
+	// archives are not staged: verifying pg_dump content would require
+	// pg_restore tooling Verify does not otherwise need, so that backend skips
+	// the cross-check entirely.
+	stageDir, err := os.MkdirTemp("", "shinyhub-verify-")
+	if err != nil {
+		return fmt.Errorf("create verify tmp dir: %w", err)
+	}
+	defer os.RemoveAll(stageDir)
+	stagedDBPath := filepath.Join(stageDir, dbEntry)
+
 	seen := map[string]bool{}
 	var manifest Manifest
+	var stagedDB bool
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -320,12 +404,20 @@ func Verify(archivePath string) error {
 		if err != nil {
 			return fmt.Errorf("read archive structure: %w", err)
 		}
-		if hdr.Name == manifestEntry {
+		switch {
+		case hdr.Name == manifestEntry:
 			if err := json.NewDecoder(tr).Decode(&manifest); err != nil {
 				return fmt.Errorf("read manifest: %w", err)
 			}
-		} else if _, err := io.Copy(io.Discard, tr); err != nil {
-			return fmt.Errorf("read entry %q: %w", hdr.Name, err)
+		case hdr.Name == dbEntry:
+			if err := writeFile(tr, stagedDBPath, 0o600); err != nil {
+				return fmt.Errorf("read entry %q: %w", hdr.Name, err)
+			}
+			stagedDB = true
+		default:
+			if _, err := io.Copy(io.Discard, tr); err != nil {
+				return fmt.Errorf("read entry %q: %w", hdr.Name, err)
+			}
 		}
 		seen[hdr.Name] = true
 	}
@@ -350,6 +442,55 @@ func Verify(archivePath string) error {
 	}
 	if !seen[wantDBEntry] {
 		return fmt.Errorf("archive is missing %s snapshot entry %s", backend, wantDBEntry)
+	}
+
+	if backend == backendSQLite && stagedDB && manifest.SchemaVersion >= activeDeploymentSchemaVersion {
+		if err := verifyActiveBundlesArchived(stagedDBPath, seen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verifyActiveBundlesArchived opens the staged DB snapshot and confirms every
+// app's active deployment's bundle_dir was captured in the archived apps/
+// tree. bundle_dir is always AppsDir/<slug>/versions/<version>, so the
+// expected tar entry name is derived from the slug plus the directory's own
+// base name rather than from AppsDir, which may differ between the machine
+// that produced the archive and the one verifying it.
+func verifyActiveBundlesArchived(dbPath string, seen map[string]bool) error {
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open staged db snapshot: %w", err)
+	}
+	defer store.Close()
+
+	rows, err := store.DB().Query(
+		`SELECT apps.slug, deployments.bundle_dir
+		 FROM apps JOIN deployments ON deployments.id = apps.active_deployment_id`)
+	if err != nil {
+		return fmt.Errorf("query active deployments in staged db snapshot: %w", err)
+	}
+	defer rows.Close()
+
+	var missing []string
+	for rows.Next() {
+		var slug, bundleDir string
+		if err := rows.Scan(&slug, &bundleDir); err != nil {
+			return fmt.Errorf("scan active deployment: %w", err)
+		}
+		want := appsPrefix + slug + "/versions/" + filepath.Base(bundleDir) + "/"
+		if !seen[want] {
+			missing = append(missing, fmt.Sprintf("%s (expected %s)", slug, want))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read active deployments in staged db snapshot: %w", err)
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf(
+			"archive database names an active deployment whose bundle directory is missing from the archive: %s",
+			strings.Join(missing, "; "))
 	}
 	return nil
 }

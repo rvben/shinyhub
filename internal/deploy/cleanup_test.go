@@ -4,8 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/storage"
+	"golang.org/x/sys/unix"
 )
 
 func TestPruneOldVersions_KeepsNewest(t *testing.T) {
@@ -151,6 +154,64 @@ func TestPruneOldVersions_PreservesSchedulePinnedBundle(t *testing.T) {
 	for _, name := range []string{"002", "003"} {
 		if _, err := os.Stat(filepath.Join(versionsDir, name)); !os.IsNotExist(err) {
 			t.Errorf("version %s should have been pruned", name)
+		}
+	}
+}
+
+// TestPruneOldVersions_SkipsAndDoesNotBlockDuringBackup regresses the freeze
+// described in internal/backup's package doc: retention pruning must never
+// wait on a `shinyhub backup` that is mid-walk over AppsDir, because
+// PruneOldVersions runs synchronously while a deploy holds its per-slug
+// lock (see internal/api/apps.go), and a backup's tar walk over a large
+// app-data tree can run for minutes. It simulates a backup mid-walk by
+// holding storage.AcquireBackupFence shared (the same fence backup takes
+// before its DB snapshot and releases only after the apps-tree walk), then
+// proves PruneOldVersions returns quickly, without error, and without
+// deleting anything: retention for this round is skipped, not delayed, and
+// is caught up by the next deploy's prune once the backup releases the
+// fence.
+func TestPruneOldVersions_SkipsAndDoesNotBlockDuringBackup(t *testing.T) {
+	appsDir := t.TempDir()
+	slug := "myapp"
+	versionsDir := filepath.Join(appsDir, slug, "versions")
+	bundlesDir := filepath.Join(appsDir, slug, "bundles")
+	os.MkdirAll(versionsDir, 0755)
+	os.MkdirAll(bundlesDir, 0755)
+
+	for _, name := range []string{"001", "002", "003"} {
+		os.MkdirAll(filepath.Join(versionsDir, name), 0755)
+		os.WriteFile(filepath.Join(bundlesDir, name+".zip"), []byte("x"), 0644)
+	}
+	active := filepath.Join(versionsDir, "003")
+
+	release, err := storage.AcquireBackupFence(appsDir, unix.LOCK_SH)
+	if err != nil {
+		t.Fatalf("simulate backup mid-walk: %v", err)
+	}
+	defer release()
+
+	done := make(chan error, 1)
+	go func() { done <- deploy.PruneOldVersions(appsDir, slug, 1, active) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("PruneOldVersions: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PruneOldVersions blocked while the backup fence was held; retention must skip this " +
+			"round, not wait for the backup to finish")
+	}
+
+	// Retention is best-effort here: the skipped round must leave every
+	// version dir and bundle zip untouched, including ones outside the
+	// keep=1 window that a real prune would otherwise have removed.
+	for _, name := range []string{"001", "002", "003"} {
+		if _, err := os.Stat(filepath.Join(versionsDir, name)); err != nil {
+			t.Errorf("expected %s to survive the skipped prune round: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(bundlesDir, name+".zip")); err != nil {
+			t.Errorf("expected bundle %s.zip to survive the skipped prune round: %v", name, err)
 		}
 	}
 }
