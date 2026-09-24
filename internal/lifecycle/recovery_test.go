@@ -1947,6 +1947,62 @@ func TestWorkerDownMonitor_TransitionsReplicasToLostAndDeregisters(t *testing.T)
 	}
 }
 
+func TestWorkerDownMonitor_RetriesLoseReplicasForAlreadyDownWorker(t *testing.T) {
+	// Reproduces the aftermath of a transient LoseWorkerReplicas failure: a
+	// prior sweep already marked the worker down (so ListWorkersStale
+	// permanently excludes it from now on) but never got to transition its
+	// replicas, leaving one stranded as running. Without a retry path this
+	// worker's row can never be revisited: it is no longer stale, and its
+	// live replica also blocks DeleteStaleWorkers from reaping the row (see
+	// that query's NOT EXISTS clause), so the replica would stay running
+	// forever.
+	store := mustOpenStore(t)
+	prx := proxy.New()
+	app := mustCreateApp(t, store, "wd-stuck-app")
+
+	if err := store.UpsertWorker(db.Worker{
+		NodeID: "node-stuck", AdvertiseAddr: "w:8443", Tier: "remote", Status: "down",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-10 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+	if _, err := store.DB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE node_id = ?`, old, "node-stuck"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: app.ID, Index: 0, Status: db.ReplicaStatusRunning,
+		Provider: "remote_docker", Tier: "remote", WorkerID: "node-stuck",
+		EndpointURL: "https://w:8443/v1/data/tok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prx.SetPoolSize("wd-stuck-app", 1)
+	if err := prx.RegisterReplica("wd-stuck-app", 0, "https://w:8443/v1/data/tok", nil, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	deregistered := false
+	monitor := lifecycle.NewWorkerDownMonitor(store, time.Minute, time.Hour,
+		func(nodeID string) error { return store.SetWorkerStatus(nodeID, "down") },
+		func(slug string, index int, expectURL string) {
+			deregistered = true
+			prx.DeregisterReplicaIfTarget(slug, index, expectURL)
+		},
+		nil, nil)
+	monitor.Sweep(time.Now())
+
+	reps, _ := store.ListReplicas(app.ID)
+	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
+		t.Errorf("replica status = %+v, want lost", reps)
+	}
+	if !deregistered {
+		t.Error("stranded replica was not deregistered from the proxy")
+	}
+	if got := prx.ReplicaTargetURL("wd-stuck-app", 0); got != "" {
+		t.Errorf("replica still routable after deregister: %q", got)
+	}
+}
+
 // TestLoseWorkerReplicas asserts the loss pass transitions the running and
 // crashed replicas genuinely owned by the worker and deregisters exactly those,
 // leaving replicas re-placed onto another worker and replicas already in a

@@ -5670,6 +5670,38 @@ func (s *Store) ListWorkersStale(cutoff time.Time) ([]*Worker, error) {
 	return ws, rows.Err()
 }
 
+// ListDownWorkersWithLiveReplicas returns the node ids of workers already
+// marked down that still own a running or crashed replica: the inverse of
+// DeleteStaleWorkers' NOT EXISTS clause. A worker in this state was marked
+// down by a monitor pass whose subsequent replica-loss transition then
+// failed (e.g. a transient ListReplicasByWorker error), and status = 'down'
+// permanently excludes it from ListWorkersStale, so nothing else ever
+// revisits it. The down-monitor retries the loss transition for every id
+// this returns.
+func (s *Store) ListDownWorkersWithLiveReplicas() ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT node_id FROM workers
+		WHERE status = 'down'
+		  AND EXISTS (
+		      SELECT 1 FROM replicas r
+		      WHERE r.worker_id = workers.node_id
+		        AND r.status IN ('running', 'crashed')
+		  )`)
+	if err != nil {
+		return nil, fmt.Errorf("list down workers with live replicas: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var nodeID string
+		if err := rows.Scan(&nodeID); err != nil {
+			return nil, fmt.Errorf("scan down worker with live replicas: %w", err)
+		}
+		ids = append(ids, nodeID)
+	}
+	return ids, rows.Err()
+}
+
 // ListReplicasByWorker returns the replicas whose worker_id matches nodeID.
 func (s *Store) ListReplicasByWorker(nodeID string) ([]*Replica, error) {
 	rows, err := s.db.Query(`
