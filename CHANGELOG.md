@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [0.17.4](https://github.com/rvben/shinyhub/compare/v0.17.3...v0.17.4) - 2026-09-25
 
+### Breaking Changes
+
+- **cli**: browser authorization for `shinyhub connect` now uses a code the
+  CLI prints and you type into the dashboard, so the CLI and the server must
+  both be 0.17.4 or later for it to complete. The dashboard tells a user who
+  arrives from a 0.17.3-or-older CLI to upgrade it (for example
+  `uv tool upgrade shinyhub`) and run `shinyhub connect` again; a 0.17.4 CLI
+  against an older server fails to register the request. Saved credentials,
+  `shinyhub login` with a password, and `--token-file` connects are
+  unaffected.
+
 ### Added
 
 - **ui**: lead the app Overview with an operational health summary ([8a149f9](https://github.com/rvben/shinyhub/commit/8a149f9ba8f22ecc09f3035ab40effcc4885fb34))
