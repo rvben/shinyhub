@@ -457,7 +457,7 @@
       "  border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg);" +
       "  box-shadow: 0 32px 80px rgba(0,0,0,0.7);" +
       "  opacity: 0; visibility: hidden; transform: translateY(-8px) scale(0.98);" +
-      "  transform-origin: top center; transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 180ms;" +
+      "  transform-origin: top center; transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 0s linear 180ms;" +
       "}",
     ".root[data-position='top-center'] .panel { top: 60px; left: 50%; transform-origin: top center; }",
     ".root[data-position='top-right'] .panel { top: 60px; right: 12px; transform-origin: top right; }",
@@ -467,7 +467,10 @@
     ".root.open[data-position='top-right'] .panel { transform: translateY(0) scale(1); }",
     ".root.open[data-position='left-center'] .panel { transform: translateY(-50%) scale(1); }",
     ".root.open[data-position='right-center'] .panel { transform: translateY(-50%) scale(1); }",
-    ".root.open .panel { opacity: 1; visibility: visible; }",
+    // Visibility flips at once on open and only after the fade on close. An
+    // element still interpolating out of `hidden` refuses focus, so a panel
+    // that eased visibility in would swallow the focus() call that opens it.
+    ".root.open .panel { opacity: 1; visibility: visible; transition-delay: 0s; }",
     // The panel takes focus itself while the list loads, so it needs a ring for
     // the seconds it holds it - otherwise a keyboard visitor is somewhere with
     // nothing on screen saying where. :focus-visible keeps it to the visitors
@@ -510,13 +513,13 @@
       "  border: 1px solid var(--sh-warning); border-radius: var(--sh-r-lg);" +
       "  box-shadow: 0 28px 72px rgba(0,0,0,0.7);" +
       "  opacity: 0; visibility: hidden; transform: translateY(-8px) scale(0.98);" +
-      "  transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 180ms;" +
+      "  transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 0s linear 180ms;" +
       "}",
     ".root[data-position='top-center'] .session-panel { top: 60px; left: 50%; transform: translateX(-50%) translateY(-8px) scale(0.98); }",
     ".root[data-position='top-right'] .session-panel { top: 60px; right: 12px; transform-origin: top right; }",
     ".root[data-position='left-center'] .session-panel { top: 50%; left: 60px; transform: translateY(-50%) translateX(-8px) scale(0.98); transform-origin: left center; }",
     ".root[data-position='right-center'] .session-panel { top: 50%; right: 60px; transform: translateY(-50%) translateX(8px) scale(0.98); transform-origin: right center; }",
-    ".root.session-open .session-panel { opacity: 1; visibility: visible; }",
+    ".root.session-open .session-panel { opacity: 1; visibility: visible; transition-delay: 0s; }",
     ".root.session-open[data-position='top-center'] .session-panel { transform: translateX(-50%) translateY(0) scale(1); }",
     ".root.session-open[data-position='top-right'] .session-panel { transform: translateY(0) scale(1); }",
     ".root.session-open[data-position='left-center'] .session-panel," +
@@ -560,13 +563,13 @@
       "  border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg);" +
       "  box-shadow: 0 32px 80px rgba(0,0,0,0.7);" +
       "  opacity: 0; visibility: hidden; transform: translateY(-8px) scale(0.98);" +
-      "  transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 180ms;" +
+      "  transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 0s linear 180ms;" +
       "}",
     ".root[data-position='top-center'] .bookmark-panel { top: 60px; left: 50%; transform: translateX(-50%) translateY(-8px) scale(0.98); }",
     ".root[data-position='top-right'] .bookmark-panel { top: 60px; right: 12px; transform-origin: top right; }",
     ".root[data-position='left-center'] .bookmark-panel { top: 50%; left: 60px; transform: translateY(-50%) translateX(-8px) scale(0.98); transform-origin: left center; }",
     ".root[data-position='right-center'] .bookmark-panel { top: 50%; right: 60px; transform: translateY(-50%) translateX(8px) scale(0.98); transform-origin: right center; }",
-    ".root.bookmark-open .bookmark-panel { opacity: 1; visibility: visible; }",
+    ".root.bookmark-open .bookmark-panel { opacity: 1; visibility: visible; transition-delay: 0s; }",
     ".root.bookmark-open[data-position='top-center'] .bookmark-panel { transform: translateX(-50%) translateY(0) scale(1); }",
     ".root.bookmark-open[data-position='top-right'] .bookmark-panel { transform: translateY(0) scale(1); }",
     ".root.bookmark-open[data-position='left-center'] .bookmark-panel," +
