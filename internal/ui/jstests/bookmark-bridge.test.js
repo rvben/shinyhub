@@ -213,6 +213,58 @@ test('a legacy empty Shiny input marker is normalized to the app path', async ()
   assert.equal(m.window.location.search, '');
 });
 
+async function syncWith(m, revision, url) {
+  m.handlers['shinyhub-bookmark-capabilities']({
+    version: 1,
+    store: 'url',
+    autoSync: true,
+    syncRevision: revision,
+    syncFields: ['region'],
+    fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+  });
+  await flush(m.window, 350);
+  const request = requests(m).at(-1);
+  assert.equal(request.value.syncRevision, revision);
+  m.handlers['shinyhub-bookmark-result']({
+    version: 1,
+    requestId: request.value.requestId,
+    purpose: 'sync',
+    syncRevision: revision,
+    url,
+  });
+}
+
+test('live sync keeps query parameters the app page was opened with', async () => {
+  const m = mountBridge();
+  // Shiny ignores every pair before its first _inputs_/_values_ marker, so the
+  // page's own parameters survive a restore only in front of the bookmark.
+  m.window.history.replaceState(null, '', '/app/demo/?lang=nl&utm_source=mail#results');
+  m.inputs.length = 0;
+
+  await syncWith(m, 1, 'https://hub.test/app/demo/?_inputs_&region=%22Asia%22');
+  assert.equal(m.window.location.search, '?lang=nl&utm_source=mail&_inputs_&region=%22Asia%22');
+  assert.equal(m.window.location.hash, '#results');
+
+  await syncWith(m, 2, 'https://hub.test/app/demo/?_inputs_&region=%22Americas%22&_values_&theme=%22dark%22');
+  assert.equal(
+    m.window.location.search,
+    '?lang=nl&utm_source=mail&_inputs_&region=%22Americas%22&_values_&theme=%22dark%22',
+    'the previous bookmark segment is replaced, not appended to',
+  );
+
+  await syncWith(m, 3, 'https://hub.test/app/demo/?_inputs_');
+  assert.equal(m.window.location.search, '?lang=nl&utm_source=mail', 'baseline leaves only the page parameters');
+});
+
+test('live sync treats everything from the first bookmark marker onward as bookmark state', async () => {
+  const m = mountBridge();
+  m.window.history.replaceState(null, '', '/app/demo/?embed=1&_values_&theme=%22dark%22&_inputs_&region=%22Asia%22');
+  m.inputs.length = 0;
+
+  await syncWith(m, 1, 'https://hub.test/app/demo/?_inputs_&region=%22Europe%22');
+  assert.equal(m.window.location.search, '?embed=1&_inputs_&region=%22Europe%22');
+});
+
 test('initial capabilities do not rewrite a clean app URL', async () => {
   const m = mountBridge();
   m.inputs.length = 0;
