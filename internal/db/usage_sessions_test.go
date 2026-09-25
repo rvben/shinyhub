@@ -412,7 +412,10 @@ func TestAppUsageReportPeakIntervalEnds(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			report, err := store.AppUsageReport(context.Background(), app.ID, 24*time.Hour, "unattributed", false)
+			// Reports cover whole UTC calendar days, so a one-day window is
+			// only today and excludes sessions an hour old in the first hour
+			// after UTC midnight. Two days always cover start.
+			report, err := store.AppUsageReport(context.Background(), app.ID, 48*time.Hour, "unattributed", false)
 			if err != nil {
 				t.Fatal(err)
 			}
