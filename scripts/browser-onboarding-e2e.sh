@@ -103,9 +103,33 @@ wait_for_pairing_url() {
   local attempt=0
   local pairing_url=""
   while [ "${attempt}" -lt 300 ]; do
-    pairing_url="$(awk '/^  http.*\/tokens\?.*connect_hash=/{print $1; exit}' "${log}" 2>/dev/null || true)"
+    # The device-authorization flow's authorization URL carries no query
+    # parameters at all (that is the point of it: no pairing state is ever
+    # derivable from a link). It is printed on its own line as
+    # "  <host>/tokens", indented exactly two spaces.
+    pairing_url="$(awk '/^  http:\/\/[^[:space:]]*\/tokens$/{print $1; exit}' "${log}" 2>/dev/null || true)"
     if [ -n "${pairing_url}" ]; then
       echo "${pairing_url}"
+      return
+    fi
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  return 1
+}
+
+wait_for_user_code() {
+  local log="$1"
+  local pid="$2"
+  local attempt=0
+  local code=""
+  while [ "${attempt}" -lt 300 ]; do
+    code="$(awk '/^Enter this code when prompted:/{print $NF; exit}' "${log}" 2>/dev/null || true)"
+    if [ -n "${code}" ]; then
+      echo "${code}"
       return
     fi
     if ! kill -0 "${pid}" 2>/dev/null; then
@@ -306,8 +330,10 @@ echo "==> pairing the redirected CLI through real sign-in and approval UI"
 start_connect "${WORK}/connect-first.log"
 PAIRING_URL="$(wait_for_pairing_url "${WORK}/connect-first.log" "${CONNECT_PID}")" \
   || fail "CLI did not print a pairing URL"
+USER_CODE="$(wait_for_user_code "${WORK}/connect-first.log" "${CONNECT_PID}")" \
+  || fail "CLI did not print a verification code"
 TOKEN_NAME="$(node --experimental-websocket "${ROOT}/scripts/browser-onboarding-cdp.mjs" approve \
-  "${DEBUG_URL}" "${PAIRING_URL}" "${ADMIN_USER}" "${ADMIN_PASSWORD}" "${WORK}/paired.png")" \
+  "${DEBUG_URL}" "${PAIRING_URL}" "${USER_CODE}" "${ADMIN_USER}" "${ADMIN_PASSWORD}" "${WORK}/paired.png" check-wrong-code)" \
   || fail "browser sign-in and approval"
 finish_connect "${WORK}/connect-first.log"
 [ -n "${TOKEN_NAME}" ] || fail "browser approval did not identify its token"
@@ -326,7 +352,7 @@ BEFORE_CREDENTIAL_ID="$(
   || fail "idempotent second connect"
 grep -Fq '"status":"current"' "${WORK}/connect-current.json" \
   || fail "second connect did not report status current"
-if grep -Eq '/tokens\?.*connect_hash=|Authorize this CLI|Waiting for approval' \
+if grep -Eq 'Authorize this CLI in your browser:|Enter this code when prompted:|Waiting for approval' \
   "${WORK}/connect-current.log"; then
   fail "second connect unexpectedly entered browser authorization"
 fi
@@ -399,8 +425,10 @@ echo "==> proactively rotating the healthy credential through browser approval"
 start_refresh "${WORK}/connect-refresh.log"
 REFRESH_URL="$(wait_for_pairing_url "${WORK}/connect-refresh.log" "${CONNECT_PID}")" \
   || fail "refresh CLI did not print a pairing URL"
+REFRESH_USER_CODE="$(wait_for_user_code "${WORK}/connect-refresh.log" "${CONNECT_PID}")" \
+  || fail "refresh CLI did not print a verification code"
 REFRESH_TOKEN_NAME="$(node --experimental-websocket "${ROOT}/scripts/browser-onboarding-cdp.mjs" approve \
-  "${DEBUG_URL}" "${REFRESH_URL}" "" "" "${WORK}/refreshed.png")" \
+  "${DEBUG_URL}" "${REFRESH_URL}" "${REFRESH_USER_CODE}" "" "" "${WORK}/refreshed.png")" \
   || fail "returning-browser refresh approval"
 finish_refresh "${WORK}/connect-refresh.log"
 [ -n "${REFRESH_TOKEN_NAME}" ] || fail "refresh approval did not identify its token"
@@ -426,8 +454,10 @@ echo "==> reconnecting in the existing browser session"
 start_connect "${WORK}/connect-recovery.log"
 RECOVERY_URL="$(wait_for_pairing_url "${WORK}/connect-recovery.log" "${CONNECT_PID}")" \
   || fail "recovery CLI did not print a pairing URL"
+RECOVERY_USER_CODE="$(wait_for_user_code "${WORK}/connect-recovery.log" "${CONNECT_PID}")" \
+  || fail "recovery CLI did not print a verification code"
 RECOVERY_TOKEN_NAME="$(node --experimental-websocket "${ROOT}/scripts/browser-onboarding-cdp.mjs" approve \
-  "${DEBUG_URL}" "${RECOVERY_URL}" "" "" "${WORK}/reconnected.png")" \
+  "${DEBUG_URL}" "${RECOVERY_URL}" "${RECOVERY_USER_CODE}" "" "" "${WORK}/reconnected.png")" \
   || fail "returning-browser approval"
 finish_connect "${WORK}/connect-recovery.log"
 [ -n "${RECOVERY_TOKEN_NAME}" ] || fail "recovery approval did not identify its token"
