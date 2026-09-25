@@ -2055,6 +2055,41 @@ func TestWorkersPageWiring(t *testing.T) {
 		"the Workers tab must be admin-gated in showLoggedIn")
 }
 
+// TestAdminRouteGuardWiring pins the direct-URL guard for the admin-only and
+// audit-log pages. The sidebar already hides tab-users/tab-workers/tab-audit
+// from non-privileged roles (TestWorkersPageWiring et al.), but that hides only
+// the link: before this guard existed, a non-admin who typed /users, /workers
+// or /audit-log still got the full page chrome and then failed in whatever way
+// that page's own load call happened to fail. Each route must consult the pure
+// resolveAdminOnlyAccess/resolveAuditLogAccess helpers (views/sidebar-nav.js,
+// see TestAdminOnlyAccessResolverWired's sibling jsdom tests) and
+// replace-redirect home instead of mounting.
+func TestAdminRouteGuardWiring(t *testing.T) {
+	assertContains(t, "app.js", "resolveAdminOnlyAccess,",
+		"app.js must import resolveAdminOnlyAccess from views/sidebar-nav.js")
+	assertContains(t, "app.js", "resolveAuditLogAccess,",
+		"app.js must import resolveAuditLogAccess from views/sidebar-nav.js")
+	assertContains(t, "app.js", "const usersAccess = resolveAdminOnlyAccess(ctx.state.user);",
+		"the /users route must consult resolveAdminOnlyAccess before mounting")
+	assertContains(t, "app.js", "const workersAccess = resolveAdminOnlyAccess(ctx.state.user);",
+		"the /workers route must consult resolveAdminOnlyAccess before mounting")
+	assertContains(t, "app.js", "const auditAccess = resolveAuditLogAccess(ctx.state.canReadAudit);",
+		"the /audit-log route must consult resolveAuditLogAccess before mounting")
+	assertContains(t, "app.js", "if (usersAccess) return ctx.navigate(usersAccess.path, { replace: usersAccess.replace });",
+		"a denied /users visit must replace-redirect rather than mount and fail")
+	assertContains(t, "app.js", "if (workersAccess) return ctx.navigate(workersAccess.path, { replace: workersAccess.replace });",
+		"a denied /workers visit must replace-redirect rather than mount and fail")
+	assertContains(t, "app.js", "if (auditAccess) return ctx.navigate(auditAccess.path, { replace: auditAccess.replace });",
+		"a denied /audit-log visit must replace-redirect rather than mount and fail")
+	// A role revoked mid-session (already on /audit-log when the server starts
+	// 403ing) must leave the same way a direct-URL visit would have been kept
+	// out, not render a generic "failed to load" banner inside the page chrome.
+	assertContains(t, "app.js", `if (resp.status === 403) {`,
+		"loadAuditEvents must treat a 403 as an access change, not a generic load failure")
+	assertContains(t, "app.js", "router.navigate('/', { replace: true });",
+		"a mid-session audit-log 403 must replace-redirect home")
+}
+
 // TestFleetHealthBannerWiring pins the admin fleet-health banner: the helper
 // import, the API call, the admin gate, and the markup element it renders into.
 func TestFleetHealthBannerWiring(t *testing.T) {
