@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.17.6](https://github.com/rvben/shinyhub/compare/v0.17.5...v0.17.6) - 2026-09-25
+
+### Fixed
+
+- **ui**: explain why Copy link is disabled with no values selected ([324c878](https://github.com/rvben/shinyhub/commit/324c878eafe0dfb132de1fb17596450baa48f548))
+- **bookmarks**: answer a queued link request that a newer one replaces ([21cd555](https://github.com/rvben/shinyhub/commit/21cd55526f8e8fe6bd7fbe2b09e967cc96d3a51b))
+- **bookmarks**: resume live URL sync after a Shiny session reconnect ([10f5d1a](https://github.com/rvben/shinyhub/commit/10f5d1a1ae5e8a43b92dda9f7411bbc54c5a090b))
+- **bookmarks**: restore choices in the shape the live control accepts ([2975c24](https://github.com/rvben/shinyhub/commit/2975c24cd8bfa9052ba62968998fa5bc988b4086))
+- **bookmarks**: keep the page's own query parameters during live URL sync ([1f0c19e](https://github.com/rvben/shinyhub/commit/1f0c19e4aadc5cab22d8cd811a9422b3100d81be))
+- **ui**: move focus into app switcher dialogs when they open ([9a947c7](https://github.com/rvben/shinyhub/commit/9a947c7748ab8b94f445ad3f57dfb62380f4f123))
+
 ## [0.17.5](https://github.com/rvben/shinyhub/compare/v0.17.4...v0.17.5) - 2026-09-25
 
 ### Fixed
