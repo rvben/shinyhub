@@ -40,6 +40,7 @@ import {
   isPrimaryNavActive,
 } from '/static/views/sidebar-nav.js';
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
+import { createLogPane } from '/static/views/log-pane.js';
 import { headerStats } from '/static/views/stat-format.js';
 import { appCardFacts } from '/static/views/app-card-facts.js';
 import { renderAppAttention } from '/static/views/app-attention.js';
@@ -280,7 +281,19 @@ document.addEventListener('DOMContentLoaded', () => {
   const logPane = document.getElementById('log-pane');
   const logPaneTitle = document.getElementById('log-pane-title');
   const logPaneBody = document.getElementById('log-pane-body');
+  const logPaneStatus = document.getElementById('log-pane-status');
   const logPaneClose = document.getElementById('log-pane-close');
+  const logPaneController = createLogPane({
+    pane: logPane,
+    title: logPaneTitle,
+    body: logPaneBody,
+    status: logPaneStatus,
+    closeButton: logPaneClose,
+    EventSourceClass: EventSource,
+    createFocusTrap: (el) => modalTrap(el),
+    doc: document,
+    setHidden,
+  });
   const auditView   = document.getElementById('audit-view');
   const auditError  = document.getElementById('audit-error');
   const auditBody   = document.getElementById('audit-body');
@@ -454,7 +467,6 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
 
-  let activeEventSource = null;
   let deployState = null; // { slug, appName, blob, fileCount, rejections: Map<string, string[]>, xhr }
   let slugEdited = false;
 
@@ -3037,37 +3049,11 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openLogs(slug) {
-    closeLogs();
-    logPaneTitle.textContent = `Logs: ${slug}`;
-    logPaneBody.textContent = '';
-    setHidden(logPane, false);
-
-    const es = new EventSource(`/api/apps/${slug}/logs`, {withCredentials: true});
-    activeEventSource = es;
-
-    es.onmessage = (event) => {
-      const atBottom =
-        logPaneBody.scrollHeight - Math.ceil(logPaneBody.scrollTop) <= logPaneBody.clientHeight + 1;
-      logPaneBody.appendChild(document.createTextNode(event.data + '\n'));
-      if (atBottom) {
-        logPaneBody.scrollTop = logPaneBody.scrollHeight;
-      }
-    };
-
-    es.onerror = () => {
-      es.close();
-      activeEventSource = null;
-      logPaneBody.appendChild(document.createTextNode('(log stream disconnected)\n'));
-      logPaneBody.scrollTop = logPaneBody.scrollHeight;
-    };
+    logPaneController.open({ titleText: `Logs: ${slug}`, url: `/api/apps/${slug}/logs`, withCredentials: true });
   }
 
   function closeLogs() {
-    if (activeEventSource) {
-      activeEventSource.close();
-      activeEventSource = null;
-    }
-    setHidden(logPane, true);
+    logPaneController.close();
   }
 
   let settingsSlug = null;
@@ -6249,6 +6235,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // mobile drawer there so a guard-vetoed navigation keeps it open.
     highlightSidebarApp(document.getElementById('sidebar-apps'), pathname);
     if (sidebarDrawer) sidebarDrawer.onNavigated();
+    // Quick-view log pane: same reasoning as the drawer above. A vetoed
+    // navigation never mounts, so a pane the operator is actively reading
+    // stays open; an allowed one closes it (and its EventSource) rather than
+    // leaving it streaming over whatever page comes next.
+    logPaneController.onNavigated();
   }
 
   const ctx = {
@@ -7447,28 +7438,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Stream logs for a specific schedule run into the log pane.
   function openScheduleRunLogs(slug, schedID, runID) {
-    if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
-    logPaneTitle.textContent = `Run #${runID} logs`;
-    logPaneBody.textContent = '';
-    setHidden(logPane, false);
-
     const url = `/api/apps/${encodeURIComponent(slug)}/schedules/${schedID}/runs/${runID}/logs`;
-    const es = new EventSource(url);
-    activeEventSource = es;
-    es.onmessage = e => {
-      const line = document.createElement('div');
-      line.textContent = e.data;
-      logPaneBody.appendChild(line);
-      logPaneBody.scrollTop = logPaneBody.scrollHeight;
-    };
-    es.onerror = () => {
-      es.close();
-      activeEventSource = null;
-      const line = document.createElement('div');
-      line.textContent = '(log stream disconnected)';
-      logPaneBody.appendChild(line);
-      logPaneBody.scrollTop = logPaneBody.scrollHeight;
-    };
+    logPaneController.open({ titleText: `Run #${runID} logs`, url });
   }
 
   // Wire the Schedules and Shared Data buttons.

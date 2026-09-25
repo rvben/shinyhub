@@ -778,7 +778,16 @@
         for (var r = 0; r < rec.removedNodes.length; r++) {
           var node = rec.removedNodes[r];
           if (node && node.nodeType === 1 && node.id === SHINY_OVERLAY_ID) {
-            onBack();
+            // Shiny can replace its marker (remove the old one, add a fresh
+            // one) within a single synchronous batch instead of just
+            // removing it. All mutations in the batch have already landed in
+            // the live document by the time this callback runs, so a live
+            // re-check tells a genuine "gone for good" removal apart from a
+            // same-batch replacement, the same way checkMarker re-checks
+            // document.getElementById for an add.
+            if (!document.getElementById(SHINY_OVERLAY_ID)) {
+              onBack();
+            }
           }
         }
       }
