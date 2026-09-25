@@ -699,6 +699,14 @@ func (r *NativeRuntime) teardownAppCgroupFor(pid int) {
 	if !ok {
 		return
 	}
+	// A replica whose child called setsid() escapes the process group SIGKILL
+	// (killOrphanedProcessGroup signals the PGID; a detached child is not a member
+	// of it) and can outlive its parent, still holding a membership in this
+	// cgroup. Reap any such survivor first, exactly as placeJobInCgroup's teardown
+	// does for one-shot jobs, so rmdir does not EBUSY-leak the cgroup (which would
+	// then also carry a stale memory.max/cpu.max into whatever replica reuses this
+	// directory next).
+	killAppCgroupProcs(dir)
 	if err := teardownAppCgroup(dir); err != nil {
 		slog.Warn("native: app cgroup teardown failed", "pid", pid, "dir", dir, "err", err)
 	}
