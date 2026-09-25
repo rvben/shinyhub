@@ -6,15 +6,22 @@
 
 import fs from 'node:fs/promises';
 
-const [action, debuggerURL, value, username, password, screenshotPath] = process.argv.slice(2);
+const [action, debuggerURL, value, arg1, arg2, arg3, arg4, arg5] = process.argv.slice(2);
 
 if (!['approve', 'revoke', 'logs'].includes(action) || !debuggerURL || !value) {
   console.error(`usage:
-  browser-onboarding-cdp.mjs approve <debugger-url> <pairing-url> [username] [password] [screenshot]
+  browser-onboarding-cdp.mjs approve <debugger-url> <pairing-url> <user-code> [username] [password] [screenshot] [check-wrong-code]
   browser-onboarding-cdp.mjs revoke  <debugger-url> <token-name> [username] [password] [screenshot]
   browser-onboarding-cdp.mjs logs    <debugger-url> <logs-url> <expected-log-line> <live|reconnected|history> [screenshot]`);
   process.exit(2);
 }
+
+// revoke and logs both take their screenshot path as their fourth argument
+// (arg3); approve has one extra positional argument (the user code) ahead of
+// it, so its screenshot path is arg4 instead. revoke() and the logs
+// verification helpers below close over this shared binding rather than
+// threading it through every call.
+const screenshotPath = action === 'approve' ? arg4 : arg3;
 
 class CDPClient {
   constructor(socket) {
@@ -148,12 +155,15 @@ async function screenshot(client, path) {
   await fs.writeFile(path, Buffer.from(result.data, 'base64'));
 }
 
-async function approve(client, pairingURL) {
-  const pairing = new URL(pairingURL);
-  const tokenName = pairing.searchParams.get('connect_name');
-  const expectedCode = pairing.searchParams.get('connect_code');
-  if (!tokenName || !expectedCode || pairingURL.includes('shk_')) {
-    throw new Error('pairing URL is missing bounded public context or contains a raw credential');
+// approve drives the device-authorization flow a real person follows: open
+// the bare (query-string-free) authorization page, sign in if needed, and
+// type the short code the CLI printed in its own terminal. The page never
+// carries the code, the credential hash, or the token name, so the only way
+// to identify the newly created token afterward is to diff the token list
+// against the snapshot taken just before submitting.
+async function approve(client, pairingURL, userCode, username, password, screenshotPath, checkWrongCode) {
+  if (!userCode || pairingURL.includes('?') || pairingURL.includes('shk_')) {
+    throw new Error(`pairing URL unexpectedly carries query parameters, or no user code was supplied: ${JSON.stringify({pairingURL, userCode})}`);
   }
 
   await client.call('Page.navigate', {url: pairingURL});
@@ -167,30 +177,55 @@ async function approve(client, pairingURL) {
     await setInput(client, '#login-username', username);
     await setInput(client, '#login-password', password);
     await click(client, '#login-form button[type="submit"]');
+    await waitFor(client, `document.body.dataset.auth === 'in'`, 'the completed sign-in');
   }
 
-  await waitFor(client, visibleExpression('#cli-connect-panel'), 'the restored CLI approval request');
-  const details = await evaluate(client, `(() => ({
-    heading: document.querySelector('#cli-connect-heading')?.textContent.trim(),
-    user: document.querySelector('#cli-connect-user')?.textContent.trim(),
-    device: document.querySelector('#cli-connect-device')?.textContent.trim(),
-    code: document.querySelector('#cli-connect-code')?.textContent.trim(),
-    labelledBy: document.querySelector('#cli-connect-panel')?.getAttribute('aria-labelledby'),
-  }))()`);
-  if (details.heading !== 'Connect this terminal?' || details.code !== expectedCode ||
-      !details.user || !details.device || details.labelledBy !== 'cli-connect-heading') {
-    throw new Error(`approval context was incomplete: ${JSON.stringify(details)}`);
+  await waitFor(client, visibleExpression('#cli-connect-panel'), 'the CLI connect code form');
+
+  if (checkWrongCode) {
+    // Makes the security property this flow exists for visible: a
+    // syntactically valid but unregistered code must be rejected, and must
+    // not approve anything, before the real code is ever typed.
+    await setInput(client, '#cli-connect-code-input', 'ZZZZ-ZZZZ');
+    await click(client, '#cli-connect-approve');
+    await waitFor(client, visibleExpression('#cli-connect-error'), 'the wrong-code rejection');
+    const rejection = await evaluate(client, `document.querySelector('#cli-connect-error')?.textContent.trim()`);
+    if (!/invalid|expired/i.test(rejection || '')) {
+      throw new Error(`wrong code was not clearly rejected: ${JSON.stringify(rejection)}`);
+    }
+    if (await evaluate(client, visibleExpression('#cli-connect-success'))) {
+      throw new Error('a wrong code unexpectedly showed the connected confirmation');
+    }
   }
 
+  // Read the pre-approval token list through the same API the dashboard
+  // itself calls, not the DOM: the DOM's own initial render is asynchronous
+  // and racy to snapshot reliably, while this fetch is synchronous with the
+  // page's own session.
+  const beforeNames = await evaluate(client, `(async () => {
+    const resp = await fetch('/api/tokens');
+    if (!resp.ok) return {error: 'GET /api/tokens answered ' + resp.status};
+    const body = await resp.json();
+    const items = Array.isArray(body) ? body : body?.items;
+    if (!Array.isArray(items)) return {error: 'GET /api/tokens returned no token list: ' + JSON.stringify(body)};
+    return items.map(item => item.name);
+  })()`);
+  // Without a real snapshot every existing token would look newly created.
+  if (!Array.isArray(beforeNames)) throw new Error(`could not snapshot the token list before approval: ${beforeNames?.error}`);
+
+  await setInput(client, '#cli-connect-code-input', userCode);
   await click(client, '#cli-connect-approve');
   await waitFor(client, visibleExpression('#cli-connect-success'), 'the connected confirmation');
-  await waitFor(
-    client,
-    `Array.from(document.querySelectorAll('[data-token-row] .token-name')).some(element => element.textContent === ${JSON.stringify(tokenName)})`,
-    'the newly created CLI token in the token list',
-  );
   const success = await evaluate(client, `document.querySelector('#cli-connect-success')?.textContent.trim()`);
   if (!success?.includes('return to your terminal')) throw new Error(`unclear success copy: ${JSON.stringify(success)}`);
+
+  await waitFor(
+    client,
+    `Array.from(document.querySelectorAll('[data-token-row] .token-name')).some(element => !${JSON.stringify(beforeNames)}.includes(element.textContent))`,
+    'the newly created CLI token in the token list',
+  );
+  const tokenName = await evaluate(client, `Array.from(document.querySelectorAll('[data-token-row] .token-name')).map(element => element.textContent).find(name => !${JSON.stringify(beforeNames)}.includes(name))`);
+  if (!tokenName) throw new Error('could not identify the newly created token by diffing the token list');
   await screenshot(client, screenshotPath);
   console.log(tokenName);
 }
@@ -455,9 +490,9 @@ try {
   client = await CDPClient.connect(target.webSocketDebuggerUrl);
   await client.call('Page.enable');
   await client.call('Runtime.enable');
-  if (action === 'approve') await approve(client, value);
-  else if (action === 'revoke') await revoke(client, value);
-  else await verifyLogs(client, value, username, password);
+  if (action === 'approve') await approve(client, value, arg1, arg2, arg3, arg4, arg5 === 'check-wrong-code');
+  else if (action === 'revoke') await revoke(client, value, arg1, arg2, arg3);
+  else await verifyLogs(client, value, arg1, arg2);
 } catch (error) {
   console.error(`BROWSER ONBOARDING FAIL: ${error.stack || error.message}`);
   process.exitCode = 1;
