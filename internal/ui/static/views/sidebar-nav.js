@@ -24,6 +24,30 @@ export function homeSurfaceForSession(role) {
   return role === 'admin' || role === 'operator' ? 'overview' : 'apps';
 }
 
+// Guards for pages the sidebar only links to for privileged roles (Identity,
+// Workers), but which a non-privileged visitor can still reach by typing the
+// URL directly or following a stale bookmark. Before this guard existed, each
+// of those routes rendered its full page chrome and then failed in its own
+// way once the API 403'd, instead of leaving. Both return null when the
+// visitor may proceed, or {path, replace: true} - the shape app.js's
+// router.navigate/ctx.navigate already accept - when the caller must redirect
+// home instead of mounting the view. replace is always true so Back does not
+// loop the visitor onto the page they were just bounced from.
+export function resolveAdminOnlyAccess(user) {
+  const role = user && user.role;
+  if (role === 'admin') return null;
+  return { path: '/', replace: true };
+}
+
+// The audit log is admin-only by default but auth.operator_audit_access can
+// extend it to operators (see internal/api/audit.go's canReadAudit), so the
+// route guard takes the server-computed capability rather than re-deriving
+// admin-or-not from the role alone - that would lock out an operator the
+// server would actually let through.
+export function resolveAuditLogAccess(canReadAudit) {
+  return canReadAudit ? null : { path: '/', replace: true };
+}
+
 // Section navigation has a contextual home: operators see Overview at `/`,
 // while viewers and developers land on their role-appropriate Apps surface.
 // `/home` is the stable alias used by branded landing pages. `/launchpad` is a

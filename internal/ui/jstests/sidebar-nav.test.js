@@ -10,6 +10,8 @@ import {
   isPrimaryNavActive,
   appsSurfaceForSession,
   homeSurfaceForSession,
+  resolveAdminOnlyAccess,
+  resolveAuditLogAccess,
 } from '../static/views/sidebar-nav.js';
 import { appCardBadge } from '../static/views/app-card-badge.js';
 
@@ -32,6 +34,26 @@ test('role surfaces: one Apps destination adapts without hiding viewer-managers'
   assert.equal(homeSurfaceForSession('developer'), 'apps');
   assert.equal(homeSurfaceForSession('operator'), 'overview');
   assert.equal(homeSurfaceForSession('admin'), 'overview');
+});
+
+test('resolveAdminOnlyAccess: only role admin passes, everyone else bounces home via replaceState', () => {
+  assert.equal(resolveAdminOnlyAccess({ role: 'admin' }), null);
+  assert.deepEqual(resolveAdminOnlyAccess({ role: 'operator' }), { path: '/', replace: true });
+  assert.deepEqual(resolveAdminOnlyAccess({ role: 'developer' }), { path: '/', replace: true });
+  assert.deepEqual(resolveAdminOnlyAccess({ role: 'viewer' }), { path: '/', replace: true });
+});
+
+test('resolveAdminOnlyAccess: tolerates a missing/null user instead of throwing', () => {
+  assert.deepEqual(resolveAdminOnlyAccess(null), { path: '/', replace: true });
+  assert.deepEqual(resolveAdminOnlyAccess(undefined), { path: '/', replace: true });
+});
+
+test('resolveAuditLogAccess: follows the server-computed capability, not a hardcoded role check', () => {
+  // An operator with auth.operator_audit_access enabled server-side gets in;
+  // the route guard must not re-derive admin-or-not from the role alone.
+  assert.equal(resolveAuditLogAccess(true), null);
+  assert.deepEqual(resolveAuditLogAccess(false), { path: '/', replace: true });
+  assert.deepEqual(resolveAuditLogAccess(undefined), { path: '/', replace: true });
 });
 
 test('isPrimaryNavActive: contextual home and legacy Launchpad alias select Apps', () => {

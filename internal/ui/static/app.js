@@ -35,6 +35,8 @@ import { appCardBadge, applyLiveStatus, paintCardStatusBadge, updateStatusPill }
 import {
   appsSurfaceForSession,
   homeSurfaceForSession,
+  resolveAdminOnlyAccess,
+  resolveAuditLogAccess,
   renderSidebarApps,
   highlightSidebarApp,
   isPrimaryNavActive,
@@ -1609,6 +1611,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (!auditRequests.isCurrent(requestID)) return;
     if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (resp.status === 403) {
+      // A genuine access loss (role changed, or operator_audit_access turned
+      // off, mid-session), not a load failure: rendering the audit chrome
+      // with an error banner would leave a now-unprivileged visitor sitting
+      // on a page they can no longer use. Leave the same way a direct-URL
+      // visit by a non-privileged role would have been kept out in the first
+      // place (see resolveAuditLogAccess).
+      router.navigate('/', { replace: true });
+      return;
+    }
     if (!resp.ok) {
       if (auditLoading) auditLoading.hidden = true;
       if (auditTable) { auditTable.removeAttribute('aria-busy'); auditTable.hidden = true; }
@@ -6495,6 +6507,8 @@ document.addEventListener('DOMContentLoaded', () => {
     return projectDetailMount(params);
   });
   router.register('/users', () => {
+    const usersAccess = resolveAdminOnlyAccess(ctx.state.user);
+    if (usersAccess) return ctx.navigate(usersAccess.path, { replace: usersAccess.replace });
     hideAllPageViews();
     return mountUsers({ ...ctx, loadUsers });
   });
@@ -6508,10 +6522,14 @@ document.addEventListener('DOMContentLoaded', () => {
     return { title: 'API tokens', unmount() { if (tokensView) tokensView.hidden = true; } };
   });
   router.register('/workers', () => {
+    const workersAccess = resolveAdminOnlyAccess(ctx.state.user);
+    if (workersAccess) return ctx.navigate(workersAccess.path, { replace: workersAccess.replace });
     hideAllPageViews();
     return mountWorkers({ ...ctx, loadWorkers });
   });
   router.register('/audit-log', (_, search) => {
+    const auditAccess = resolveAuditLogAccess(ctx.state.canReadAudit);
+    if (auditAccess) return ctx.navigate(auditAccess.path, { replace: auditAccess.replace });
     hideAllPageViews();
     return mountAuditLog({ ...ctx, loadAuditEvents }, search);
   });
