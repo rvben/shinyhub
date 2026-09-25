@@ -202,12 +202,27 @@ def resolve_choice(
     choices = _choice_values(policy.choices)
     if saved is None and current is None:
         return ChoiceResolution(None, None)
-    multiple = isinstance(saved, Sequence) and not isinstance(saved, (str, bytes))
+    saved_multiple = _is_multiple(saved)
+    # The live control decides what it can hold; the saved value only comes
+    # from a URL. A single select always holds one of its choices, and an
+    # input that has not materialized is skipped before this point, so a
+    # select or selectize reading None is an empty multi-select.
+    if policy.control == "radio":
+        multiple = False
+    else:
+        multiple = current is None or _is_multiple(current)
 
     if multiple:
         migrated: list[Any] = []
-        used_alias = False
         lost_value = False
+        # An empty multi-select is bookmarked as null; a lone scalar is one
+        # selection saved before the field accepted several.
+        reshaped = saved is not None and not saved_multiple
+        if saved is None:
+            saved = []
+        elif reshaped:
+            saved = [saved]
+        used_alias = reshaped
         for item in saved:
             candidate, changed = _mapping_value(policy.aliases, item, equal)
             used_alias = used_alias or changed
@@ -232,9 +247,29 @@ def resolve_choice(
             )
         return ChoiceResolution([], "fallback")
 
+    reshaped = False
+    if saved_multiple:
+        # One saved item still names a single choice; several cannot be
+        # narrowed to one without guessing, so they fall back below.
+        if len(saved) != 1:
+            return _single_fallback(choices, policy, current, equal)
+        saved = saved[0]
+        reshaped = True
     candidate, used_alias = _mapping_value(policy.aliases, saved, equal)
     if _contains(choices, candidate, equal):
-        return ChoiceResolution(candidate, "migrated" if used_alias else None)
+        return ChoiceResolution(
+            candidate, "migrated" if used_alias or reshaped else None
+        )
+    return _single_fallback(choices, policy, current, equal)
+
+
+def _is_multiple(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
+def _single_fallback(
+    choices: Sequence[Any], policy: ChoiceRestore, current: Any, equal: ValueEqual
+) -> ChoiceResolution:
     if not isinstance(policy.default, _Missing) and _contains(
         choices, policy.default, equal
     ):
