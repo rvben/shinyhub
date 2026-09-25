@@ -186,6 +186,10 @@ function renderTrendRow(document, row, coverage) {
   const currentDescription = latestAvailable
     ? `Current ${valueText}.`
     : 'Latest sample unavailable.';
+  const firstAvailable = samples.find((sample) => sample !== null);
+  const direction = latestAvailable && firstAvailable !== undefined
+    ? latestSample > firstAvailable ? 'Increased' : latestSample < firstAvailable ? 'Decreased' : 'Unchanged'
+    : '';
   const missingDescription = missingCount > 0
     ? ` ${missingCount} of ${samples.length} samples unavailable.`
     : '';
@@ -197,7 +201,7 @@ function renderTrendRow(document, row, coverage) {
     domainMax: scaleMax,
     grid: true,
     endPoint: true,
-    ariaLabel: `${row.label} over ${coverage}. ${currentDescription} Scale 0 to ${scaleMaxText}.${missingDescription}`,
+    ariaLabel: `${row.label} over ${coverage}. ${currentDescription} ${direction ? `${direction} from ${row.format(firstAvailable)}. ` : ''}Scale 0 to ${scaleMaxText}.${missingDescription}`,
     className: `sparkline sparkline-${row.key}`,
   });
 

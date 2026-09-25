@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import axe from 'axe-core';
 import {
   awaitingFirstDeploy,
   firstDeployFailed,
@@ -73,23 +74,25 @@ const NEW_APP = {
   access: 'private',
 };
 
-function envelopeFor(app) {
+function envelopeFor(app, rejectsByReason) {
   return {
     app,
     replicas_status: [],
     can_manage: true,
     runtime_mode: 'native',
+    rejects_by_reason: rejectsByReason,
   };
 }
 
 // mountDetail builds the real dashboard DOM, installs the browser globals the
 // view modules read off the global scope, and mounts the detail view on the
 // requested tab.
-async function mountDetail({ app, tab }) {
+async function mountDetail({ app, tab, rejectsByReason, detailEnvelope, historyFetch }) {
   const virtualConsole = new VirtualConsole();
   const dom = new JSDOM(INDEX_HTML, {
     url: `https://hub.example.com/apps/${app.slug}${tab === 'overview' ? '' : '/' + tab}`,
     pretendToBeVisual: true,
+    runScripts: 'outside-only',
     virtualConsole,
   });
   const { window } = dom;
@@ -106,7 +109,7 @@ async function mountDetail({ app, tab }) {
     Node: window.Node,
     HTMLElement: window.HTMLElement,
     getComputedStyle: window.getComputedStyle.bind(window),
-    fetch: async () => { throw new Error('unexpected bare fetch'); },
+    fetch: historyFetch || (async () => { throw new Error('unexpected bare fetch'); }),
   };
   for (const [key, value] of Object.entries(globals)) {
     previous[key] = Object.getOwnPropertyDescriptor(globalThis, key);
@@ -128,7 +131,7 @@ async function mountDetail({ app, tab }) {
     state: { user: { username: 'admin', role: 'admin' } },
     api: async (path) => {
       calls.push(path);
-      if (path === `/api/apps/${app.slug}`) return jsonResponse(envelopeFor(app));
+      if (path === `/api/apps/${app.slug}`) return jsonResponse(detailEnvelope ? detailEnvelope() : envelopeFor(app, rejectsByReason));
       // Every other endpoint the panels reach for answers with an empty list
       // envelope, which each renderer tolerates.
       return jsonResponse({ items: [], total: 0, sources: [], entries: [] });
@@ -157,10 +160,132 @@ async function mountDetail({ app, tab }) {
 
   const route = mountAppDetail(ctx);
   const mount = typeof route === 'function' ? route : route.mount;
-  await mount({ slug: app.slug, tab });
+  const mounted = await mount({ slug: app.slug, tab });
   await flush();
-  return { dom, window, doc: window.document, calls, restore };
+  return { dom, window, doc: window.document, calls, route, mounted, restore };
 }
+
+test('Overview distinguishes failed history from collecting and can retry', async () => {
+  let succeed = false;
+  const app = { ...CRASHED_APP, status: 'running', deploy_count: 1, last_deployment_status: 'succeeded' };
+  const h = await mountDetail({ app, tab: 'overview', historyFetch: async () => {
+    if (!succeed) throw new Error('offline');
+    return { ok: true, json: async () => ({ window_seconds: 3600, interval_seconds: 30,
+      series: { ts: [1, 2], cpu: [5, 7], rss: [10, 12], sessions: [1, 2], instances: [1, 1] } }) };
+  } });
+  try {
+    assert.match(h.doc.querySelector('#overview-trends').textContent, /Metrics history is unavailable/);
+    succeed = true;
+    h.doc.querySelector('.trends-load-state button').click();
+    await flush();
+    assert.equal(h.doc.querySelector('.trends-load-state'), null);
+    assert.equal(h.doc.querySelectorAll('#overview-trends .trend-row').length, 4);
+  } finally { h.restore(); }
+});
+
+test('an older history response cannot overwrite a newer chart', async () => {
+  const app = { ...CRASHED_APP, status: 'running', deploy_count: 1, last_deployment_status: 'succeeded' };
+  const pending = [];
+  const h = await mountDetail({ app, tab: 'overview',
+    historyFetch: () => new Promise(resolve => pending.push(resolve)) });
+  const realNow = Date.now;
+  const response = cpu => ({ ok: true, json: async () => ({ window_seconds: 3600, interval_seconds: 30,
+    series: { ts: [1, 2], cpu: [1, cpu], rss: [10, 12], sessions: [1, 2], instances: [1, 1] } }) });
+  try {
+    assert.equal(pending.length, 1);
+    Date.now = () => realNow() + 31000;
+    h.route.onLiveMetrics(app.slug, { status: 'running', replicas: [{ status: 'running' }] });
+    await flush();
+    assert.equal(pending.length, 2);
+    pending[1](response(9));
+    await flush();
+    assert.equal(h.doc.querySelector('[data-metric="cpu"] .trend-value').textContent, '9.0%');
+    pending[0](response(3));
+    await flush();
+    assert.equal(h.doc.querySelector('[data-metric="cpu"] .trend-value').textContent, '9.0%');
+  } finally { Date.now = realNow; h.restore(); }
+});
+
+test('Overview marks failed live metrics and refreshes admission issues after the next check', async () => {
+  const app = { ...CRASHED_APP, status: 'running', deploy_count: 1, last_deployment_status: 'succeeded' };
+  let current = envelopeFor(app, null);
+  let fail = false;
+  const h = await mountDetail({ app, tab: 'overview', detailEnvelope: () => {
+    if (fail) throw new Error('health check failed');
+    return current;
+  } });
+  const realNow = Date.now;
+  try {
+    assert.match(h.doc.querySelector('#overview-health-title').textContent, /serving normally/);
+    h.route.onMetricsError(app.slug);
+    assert.match(h.doc.querySelector('#overview-health-title').textContent, /out of date/);
+    current = envelopeFor(app, { window_seconds: 600, counts: { 'pool-saturated': 3 } });
+    Date.now = () => realNow() + 31000;
+    h.route.onLiveMetrics(app.slug, { status: 'running', replicas: [{ status: 'running' }] });
+    await flush();
+    assert.match(h.doc.querySelector('#overview-health-title').textContent, /admission issues/);
+    assert.equal(h.doc.querySelector('#overview-rejects-by-reason').hidden, false);
+    assert.equal(h.doc.querySelector('#overview-health-action').getAttribute('href'), '#overview-rejects-by-reason');
+    fail = true;
+    Date.now = () => realNow() + 62000;
+    h.route.onLiveMetrics(app.slug, { status: 'running', replicas: [{ status: 'running' }] });
+    await flush();
+    assert.match(h.doc.querySelector('#overview-health-title').textContent, /out of date/);
+    fail = false;
+    Date.now = () => realNow() + 93000;
+    h.route.onLiveMetrics(app.slug, { status: 'running', replicas: [{ status: 'running' }] });
+    await flush();
+    assert.match(h.doc.querySelector('#overview-health-title').textContent, /admission issues/);
+  } finally { Date.now = realNow; h.restore(); }
+});
+
+test('returning to Overview restores the last live health reading', async () => {
+  const app = { ...CRASHED_APP, status: 'running', deploy_count: 1, last_deployment_status: 'succeeded' };
+  const h = await mountDetail({ app, tab: 'overview' });
+  try {
+    h.route.onLiveMetrics(app.slug, { status: 'running', replicas: [{ status: 'running' }] });
+    await h.mounted.update({ slug: app.slug, tab: 'configuration' });
+    await h.mounted.update({ slug: app.slug, tab: 'overview' });
+    assert.match(h.doc.querySelector('#overview-health-detail').textContent, /1 replica running/);
+    assert.equal(h.doc.querySelector('#overview-health-freshness').textContent, 'Live metrics checked recently');
+  } finally { await flush(); h.mounted.unmount(); await flush(); h.restore(); }
+});
+
+test('rendered Overview health and admission controls have no structural WCAG A/AA violations', async () => {
+  const app = { ...CRASHED_APP, status: 'running', deploy_count: 1, last_deployment_status: 'succeeded' };
+  const h = await mountDetail({ app, tab: 'overview',
+    rejectsByReason: { window_seconds: 600, counts: { 'pool-saturated': 2 } } });
+  try {
+    h.window.eval(axe.source);
+    const results = await h.window.axe.run(h.doc.getElementById('detail-overview-panel'), {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] },
+      rules: { 'color-contrast': { enabled: false } },
+    });
+    const findings = Array.from(results.violations, v => `${v.id}: ${Array.from(v.nodes, n => n.target.join(' ')).join(', ')}`);
+    assert.equal(findings.length, 0, findings.join('\n'));
+  } finally { h.restore(); }
+});
+
+test('a saturated app points an admin from the admission signal to capacity settings', async () => {
+  const app = { ...CRASHED_APP, status: 'running', deploy_count: 1, last_deployment_status: 'succeeded' };
+  const h = await mountDetail({
+    app,
+    tab: 'overview',
+    rejectsByReason: { window_seconds: 600, counts: { 'pool-saturated': 3, 'render-deferred': 80 } },
+  });
+  try {
+    const panel = h.doc.getElementById('detail-overview-panel');
+    const action = panel.querySelector('#overview-rejects-action');
+    assert.equal(panel.querySelector('#overview-rejects-by-reason').hidden, false);
+    assert.match(panel.textContent, /Recent admission signals/);
+    assert.match(panel.textContent, /Session cap reached/);
+    assert.equal(action.getAttribute('href'), '/apps/crash-app/configuration');
+    assert.equal(action.textContent, 'Review capacity settings');
+    assert.equal(action.hasAttribute('data-nav'), true);
+  } finally {
+    h.restore();
+  }
+});
 
 test('a failed first deploy does not get the "awaiting first deploy" onboarding on Overview', async () => {
   const h = await mountDetail({ app: CRASHED_APP, tab: 'overview' });

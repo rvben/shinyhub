@@ -6082,6 +6082,9 @@ document.addEventListener('DOMContentLoaded', () => {
       // Detail header (only when the detail view for this slug is visible).
       const detailView = document.getElementById('app-detail-view');
       if (!detailView.hidden && location.pathname.startsWith(`/apps/${slug}`)) {
+        document.querySelector('.app-detail-stats')?.classList.remove('is-stale');
+        const metricsStatus = document.getElementById('app-detail-metrics-status');
+        if (metricsStatus) metricsStatus.hidden = true;
         // Keep the header status pill live too, on the same model merge the
         // card badge uses, so an open detail page flips to "Deploying" and
         // back during a deploy instead of freezing at its load-time state.
@@ -6113,6 +6116,7 @@ document.addEventListener('DOMContentLoaded', () => {
         setStat('app-detail-sessions', stats.sessions, '');
         setStat('app-detail-replicas', stats.replicas, '');
         renderReplicasPanel(m);
+        appDetailMount.onLiveMetrics?.(slug, m);
 
         // Keep the stored envelope in sync with autoscale_status from the poll
         // so renderAutoscaleSummary's cooldown row reflects the latest event
@@ -6135,6 +6139,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // in the background; log the user out instead of polling a dead session
     // forever. metrics-controller.js reports a non-2xx as `Error('status N')`.
     onError: (slug, err) => {
+      if (location.pathname.startsWith(`/apps/${slug}`)) {
+        document.querySelector('.app-detail-stats')?.classList.add('is-stale');
+        const metricsStatus = document.getElementById('app-detail-metrics-status');
+        if (metricsStatus) metricsStatus.hidden = false;
+        appDetailMount.onMetricsError?.(slug);
+      }
       if (err && /status 401/.test(err.message)) {
         handleUnauthorized();
       }

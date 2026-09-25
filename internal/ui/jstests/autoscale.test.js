@@ -4,6 +4,7 @@ import { JSDOM } from 'jsdom';
 import {
   summariseAutoscale,
   formatRejectsByReason,
+  rejectionGuidance,
   renderAutoscaleSummary,
   renderRejectsByReason,
   readAutoscaleForm,
@@ -304,6 +305,30 @@ test('renderRejectsByReason hides the container for an empty rollup', () => {
   // any stale rows) keeps the panel uncluttered for a healthy app.
   assert.equal(section.hidden, true);
   assert.equal(list.querySelectorAll('li').length, 0);
+});
+
+test('admission signals use readable labels and preserve the raw reason for inspection', () => {
+  const dom = new JSDOM('<section><ul id="list"></ul></section>');
+  const list = dom.window.document.getElementById('list');
+  renderRejectsByReason(list.parentElement, list, [{ reason: 'pool-saturated', count: 4 }]);
+  assert.match(list.textContent, /Session cap reached/);
+  assert.equal(list.querySelector('li').title, 'pool-saturated');
+});
+
+test('admission guidance prioritizes failed capacity over repeated wait-page events', () => {
+  const rows = [
+    { reason: 'render-deferred', count: 120 },
+    { reason: 'pool-saturated', count: 2 },
+  ];
+  assert.deepEqual(rejectionGuidance(rows, true), {
+    message: 'All live replicas reached their session cap. Review the cap and scaling policy.',
+    action: 'Review capacity settings',
+    route: 'configuration',
+  });
+  assert.equal(rejectionGuidance(rows, false).route, 'replicas');
+  assert.match(rejectionGuidance([{ reason: 'render-deferred', count: 120 }], true).message,
+    /does not mean sessions failed/);
+  assert.equal(rejectionGuidance([], true), null);
 });
 
 // readAutoscaleForm is the pure validator behind the Configuration tab's

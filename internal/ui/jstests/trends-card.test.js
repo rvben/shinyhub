@@ -88,6 +88,7 @@ test('the cpu sparkline carries an aria-label with the current value', () => {
   const card = renderTrendsCard(doc(), fullHistory());
   const svg = card.querySelector('.trend-row[data-metric="cpu"] svg');
   assert.match(svg.getAttribute('aria-label'), /CPU over 2s\. Current 12\.5%\./);
+  assert.match(svg.getAttribute('aria-label'), /Increased from 10\.0%\./);
 });
 
 test('a missing latest sample is shown as unavailable, never as zero', () => {

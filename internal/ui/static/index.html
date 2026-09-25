@@ -486,6 +486,7 @@
             <dd class="stat-value" id="app-detail-sessions">—</dd>
           </div>
         </dl>
+        <p id="app-detail-metrics-status" class="app-detail-metrics-status" role="status" hidden>Live metrics unavailable. Showing last known values.</p>
       </header>
       <nav class="settings-tabs" role="tablist" aria-label="App sections">
         <a href="" data-nav class="settings-tab" role="tab" data-tab="overview"      id="detail-tab-overview"      aria-controls="detail-overview-panel"      aria-selected="true"  >Overview</a>
@@ -512,7 +513,7 @@
         </select>
       </label>
       <div class="app-detail-panels">
-        <section id="detail-overview-panel"      class="settings-tab-panel" role="tabpanel"></section>
+        <section id="detail-overview-panel"      class="settings-tab-panel" role="tabpanel" aria-labelledby="detail-tab-overview"></section>
         <section id="detail-usage-panel"         class="settings-tab-panel" role="tabpanel" aria-labelledby="detail-tab-usage" hidden></section>
         <section id="detail-logs-panel"          class="settings-tab-panel" role="tabpanel" hidden></section>
         <section id="detail-traces-panel"        class="settings-tab-panel" role="tabpanel" hidden></section>

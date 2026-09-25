@@ -76,6 +76,53 @@ export function formatRejectsByReason(rollup) {
   return rows;
 }
 
+const REJECTION_LABELS = {
+  'pool-saturated': 'Session cap reached',
+  'pool-degraded': 'Replica pool degraded',
+  'app-not-ready': 'App not ready',
+  'memory-pressure': 'Host memory pressure',
+  'render-paced': 'Render capacity reached',
+  'cpu-saturation': 'Host CPU saturation',
+  'render-deferred': 'Waiting for render capacity',
+};
+
+// Prefer the signal with the clearest operational consequence over the largest
+// count: render-deferred can count repeated wait-page polls, not failed sessions.
+const REJECTION_PRIORITY = [
+  'pool-degraded', 'memory-pressure', 'cpu-saturation', 'pool-saturated',
+  'render-paced', 'app-not-ready', 'render-deferred',
+];
+
+export function rejectionGuidance(rows, canManage) {
+  if (!rows || rows.length === 0) return null;
+  const reasons = new Set(rows.map(row => row.reason));
+  const reason = REJECTION_PRIORITY.find(candidate => reasons.has(candidate));
+  switch (reason) {
+    case 'pool-degraded':
+      return { message: 'Fewer replicas are serving than configured. Check process health before adding capacity.', action: 'View logs', route: 'logs' };
+    case 'memory-pressure':
+      return { message: 'The host could not start new capacity because free memory fell below its floor.', action: 'Check host pressure', route: 'fleet' };
+    case 'cpu-saturation':
+      return { message: 'Host CPU reached its protection threshold. Check host pressure before changing replica count.', action: 'Check host pressure', route: 'fleet' };
+    case 'pool-saturated':
+      return canManage
+        ? { message: 'All live replicas reached their session cap. Review the cap and scaling policy.', action: 'Review capacity settings', route: 'configuration' }
+        : { message: 'All live replicas reached their session cap. Inspect current process load.', action: 'Inspect replicas', route: 'replicas' };
+    case 'render-paced':
+      return canManage
+        ? { message: 'Session starts were turned away after waiting for render capacity. Review pacing and host CPU.', action: 'Review pacing settings', route: 'configuration' }
+        : { message: 'Session starts were turned away after waiting for render capacity. Check host CPU.', action: 'Check host pressure', route: 'fleet' };
+    case 'app-not-ready':
+      return { message: 'No replica had completed its readiness handshake. This can happen during cold start; check startup logs if it persists.', action: 'View logs', route: 'logs' };
+    case 'render-deferred':
+      return canManage
+        ? { message: 'Page loads waited for render capacity. This count does not mean sessions failed.', action: 'Review pacing settings', route: 'configuration' }
+        : { message: 'Page loads waited for render capacity. This count does not mean sessions failed.', action: 'Check host pressure', route: 'fleet' };
+    default:
+      return { message: 'Review the app state and logs for this admission signal.', action: 'View logs', route: 'logs' };
+  }
+}
+
 /**
  * formatRelative returns a human-readable relative-time string.
  * nowMs and tsMs are milliseconds since epoch. Returns '' when tsMs is falsy.
@@ -212,7 +259,12 @@ export function renderRejectsByReason(section, list, rows) {
   const doc = list.ownerDocument;
   for (const r of rows) {
     const li = doc.createElement('li');
-    li.textContent = `${r.reason}: ${r.count}`;
+    li.title = r.reason;
+    const label = doc.createElement('span');
+    label.textContent = REJECTION_LABELS[r.reason] || r.reason;
+    const count = doc.createElement('strong');
+    count.textContent = String(r.count);
+    li.append(label, count);
     list.appendChild(li);
   }
   section.hidden = false;

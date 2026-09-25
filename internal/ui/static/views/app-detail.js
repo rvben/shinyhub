@@ -8,6 +8,7 @@ import { makeTraceRow, formatPollStatus } from '/static/views/traces-ui.js';
 import {
   summariseAutoscale,
   formatRejectsByReason,
+  rejectionGuidance,
   renderAutoscaleSummary,
   renderRejectsByReason,
 } from '/static/views/autoscale.js';
@@ -128,6 +129,12 @@ export function mountAppDetail(ctx) {
   const ENVELOPE_MAX_AGE_MS = 10000;
   const freshness = createFreshness({ maxAgeMs: ENVELOPE_MAX_AGE_MS });
   let revalidation = 0;
+  let overviewRefreshAt = 0;
+  let overviewCheckedAt = 0;
+  let overviewEnvelopeError = false;
+  let overviewRefreshPending = false;
+  let liveMetrics = null;
+  let metricsStale = false;
 
   // api() in app.js announces every successful mutating request, so a rollback,
   // a lifecycle action, a config save, or anything added later invalidates this
@@ -166,6 +173,8 @@ export function mountAppDetail(ctx) {
 
     if (tab === 'overview') {
       renderOverview(panels.overview, app, replicasStatus, body, ctx);
+      renderOverviewHealth(panels.overview, app, body, liveMetrics, metricsStale,
+        overviewEnvelopeError || Date.now() - overviewCheckedAt > 60000);
     }
     if (tab === 'usage') {
       tabCleanup = renderUsage(panels.usage, app, ctx);
@@ -254,31 +263,42 @@ export function mountAppDetail(ctx) {
     freshness.adopt(stamp);
     if (ctx.setDetailApp) ctx.setDetailApp(app);
     applyHeader(app, body);
+    if (!panels.overview.hidden) syncOverviewSignals(panels.overview, app, body, ctx);
+    overviewCheckedAt = Date.now();
+    overviewEnvelopeError = false;
+    renderOverviewHealth(panels.overview, app, body, liveMetrics, metricsStale, false);
   }
 
-  // Refresh the cached envelope in the background so a detail page left open
-  // across several tab switches does not drift stale. It only ever re-applies
-  // the header, which is idempotent when nothing changed, and it never blanks,
-  // reflows or refetches a panel. A failed revalidation leaves the page exactly
-  // as it is: the visible data is the data we last confirmed, and the next real
-  // navigation surfaces the error.
-  function revalidate(slug) {
+  // Refresh the envelope in the background. Changed health signals are patched
+  // into Overview without rebuilding the charts or replica list.
+  function revalidate(slug, force = false) {
     if (!showing || showing.slug !== slug) return;
-    if (!freshness.isOld()) return;
+    if (!force && !freshness.isOld()) return;
     const token = ++revalidation;
     const stamp = freshness.begin();
-    Promise.resolve()
+    return Promise.resolve()
       .then(async () => {
         const resp = await ctx.api(`/api/apps/${slug}`);
-        if (!resp.ok) return;
+        if (token !== revalidation || !showing || showing.slug !== slug) return;
+        if (resp.status === 401) { ctx.onUnauthorized(); return; }
+        if (!resp.ok) {
+          overviewEnvelopeError = true;
+          renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, true);
+          return;
+        }
         const body = await resp.json();
         // A newer revalidation, or a move to another app, has superseded us.
         if (token !== revalidation || !showing || showing.slug !== slug) return;
         const unchanged = JSON.stringify(body) === JSON.stringify(showing.body);
         freshness.adopt(stamp);
+        overviewCheckedAt = Date.now();
+        overviewEnvelopeError = false;
         // Nothing changed, so there is nothing to repaint. Writing the same
         // values back would still replace DOM nodes for no reason.
-        if (unchanged) return;
+        if (unchanged) {
+          renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, false);
+          return;
+        }
         const { app, replicasStatus } = normalizeAppEnvelope(body);
         showing = {
           slug, app, body, replicasStatus,
@@ -286,9 +306,47 @@ export function mountAppDetail(ctx) {
         };
         if (ctx.setDetailApp) ctx.setDetailApp(app);
         applyHeader(app, body);
+        if (!panels.overview.hidden) {
+          const normal = !awaitingFirstDeploy(app) && !firstDeployFailed(app);
+          const hasNormalPanel = !!panels.overview.querySelector('#overview-health');
+          if (normal !== hasNormalPanel || (!normal && !!firstDeployFailed(app) !== !!panels.overview.querySelector('#overview-failed-error'))) {
+            renderOverview(panels.overview, app, replicasStatus, body, ctx);
+          } else {
+            syncOverviewSignals(panels.overview, app, body, ctx);
+          }
+          const autoscale = panels.overview.querySelector('#autoscale-summary');
+          if (autoscale) renderAutoscaleSummary(autoscale, summariseAutoscale(app, body));
+          if (ctx.setDetailEnvelope) ctx.setDetailEnvelope(body);
+        }
+        renderOverviewHealth(panels.overview, app, body, liveMetrics, metricsStale, false);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (token !== revalidation || !showing || showing.slug !== slug) return;
+        overviewEnvelopeError = true;
+        renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, true);
+      });
   }
+
+  // A metrics poll is also the cadence for checking the slower envelope-only
+  // health signals. Keep this separate from the 10s live resource measurements.
+  mount.onLiveMetrics = (slug, metrics) => {
+    if (!showing || showing.slug !== slug || panels.overview.hidden) return;
+    const statusChanged = !!metrics.status && metrics.status !== showing.app.status;
+    if (statusChanged) showing.app = { ...showing.app, status: metrics.status };
+    liveMetrics = metrics;
+    metricsStale = false;
+    renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, overviewEnvelopeError || Date.now() - overviewCheckedAt > 60000);
+    if (overviewRefreshPending || (!statusChanged && Date.now() - overviewRefreshAt < 30000)) return;
+    overviewRefreshAt = Date.now();
+    overviewRefreshPending = true;
+    Promise.resolve(revalidate(slug, true)).finally(() => { overviewRefreshPending = false; });
+    refreshTrends(slug);
+  };
+  mount.onMetricsError = (slug) => {
+    if (!showing || showing.slug !== slug || panels.overview.hidden) return;
+    metricsStale = true;
+    renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, overviewEnvelopeError || Date.now() - overviewCheckedAt > 60000);
+  };
 
   // A fresh arrival on this page: fetch the app, build the whole view, reveal it.
   async function mount(params) {
@@ -329,6 +387,11 @@ export function mountAppDetail(ctx) {
     if (redirect) { ctx.navigate(redirect.path, { replace: redirect.replace }); return {}; }
 
     showing = { slug, app, body, replicasStatus, canManage };
+    liveMetrics = null;
+    metricsStale = false;
+    overviewRefreshAt = Date.now();
+    overviewCheckedAt = Date.now();
+    overviewEnvelopeError = false;
     freshness.adopt(stamp);
 
     // Record the app so the static header kebab (wired once in app.js) acts on
@@ -367,6 +430,7 @@ export function mountAppDetail(ctx) {
         // visitor has left.
         revalidation++;
         showing = null;
+        liveMetrics = null;
         freshness.forget();
         view.hidden = true;
         ctx.metrics.setTargets([]);
@@ -424,6 +488,9 @@ export function mountAppDetail(ctx) {
   // tiles already hold live values and blanking them would be a visible flicker
   // with nothing gained.
   function seedStats(app) {
+    document.querySelector('.app-detail-stats')?.classList.remove('is-stale');
+    const metricsStatus = document.getElementById('app-detail-metrics-status');
+    if (metricsStatus) metricsStatus.hidden = true;
     const seedStat = (id, val) => {
       const el = document.getElementById(id);
       if (el) {
@@ -928,56 +995,67 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
     return;
   }
   panel.innerHTML = `
+    <div class="overview-intro">
+      <div>
+        <h2>Operational health</h2>
+        <p>Current signals, scaling, and replica activity for this app.</p>
+      </div>
+      <a href="/apps/${app.slug}/logs" data-nav>View logs <span aria-hidden="true">→</span></a>
+    </div>
+    <div class="overview-health" id="overview-health" role="status" aria-live="polite">
+      <div><strong id="overview-health-title">Checking app health…</strong><p id="overview-health-detail"></p></div>
+      <div class="overview-health-side"><span id="overview-health-freshness"></span><a id="overview-health-action" href="" hidden></a></div>
+    </div>
+    <div class="overview-alerts" id="overview-alerts"></div>
+    <section id="overview-rejects-by-reason" class="overview-card overview-rejects" hidden>
+      <div class="overview-card-heading">
+        <div>
+          <h2>Recent admission signals</h2>
+          <p class="overview-card-description">Capacity and readiness events in the last 10 minutes</p>
+        </div>
+      </div>
+      <ul id="overview-rejects-by-reason-list" class="rejects-list" aria-live="polite"></ul>
+      <div class="overview-rejects-next" id="overview-rejects-next" hidden>
+        <p id="overview-rejects-guidance"></p>
+        <a id="overview-rejects-action" href=""></a>
+      </div>
+    </section>
     <div class="overview-grid">
-      <section class="overview-card overview-autoscale">
-        <h2>Autoscale</h2>
-        <dl id="autoscale-summary" class="overview-dl"></dl>
-      </section>
       <div id="overview-trends" class="overview-card overview-trends">
         <h2>Trends</h2>
-        <p class="trends-empty">Collecting...</p>
+        <p class="trends-empty">Collecting…</p>
       </div>
+      <section class="overview-card overview-autoscale">
+        <div class="overview-card-heading">
+          <div>
+            <h2>Autoscale</h2>
+            <p class="overview-card-description">Pool policy and controller state</p>
+          </div>
+          ${ctx.canManageApp(ctx.state.user, app) ? `<a class="overview-card-link" href="/apps/${app.slug}/configuration" data-nav>Configure <span aria-hidden="true">→</span></a>` : ''}
+        </div>
+        <dl id="autoscale-summary" class="overview-dl"></dl>
+      </section>
       <section class="overview-card overview-replicas">
         <div class="overview-card-heading overview-replicas-heading">
-          <h2>Replicas</h2>
+          <div>
+            <h2>Replicas</h2>
+            <p class="overview-card-description">Live process state and resource use</p>
+          </div>
           <span id="overview-replicas-cap" class="overview-replicas-cap"></span>
         </div>
-        <ul id="overview-replicas-list" class="replicas-list" aria-live="polite">
+        <p class="overview-replica-note">PSS estimates each replica's share of physical memory, including shared pages. It can be unavailable on remote workers.</p>
+        <div class="overview-replica-columns" aria-hidden="true">
+          <span>Process</span>
+          <div><span>Sessions</span><span>CPU</span><span>Memory</span><span>PSS</span></div>
+        </div>
+        <ul id="overview-replicas-list" class="replicas-list">
           <li class="replicas-empty">Waiting for metrics…</li>
         </ul>
-      </section>
-      <section id="overview-rejects-by-reason" class="overview-card overview-rejects" hidden>
-        <h2>Recent rejections <span class="overview-heading-context">Last 10 minutes</span></h2>
-        <ul id="overview-rejects-by-reason-list" class="rejects-list" aria-live="polite"></ul>
       </section>
     </div>
   `;
 
-  const overviewGrid = panel.querySelector('.overview-grid');
-  const fleetCard = makeFleetStateCard(document, envelope && envelope.fleet_state, {
-    configurationHref: `/apps/${app.slug}/configuration`,
-    relativeTime,
-  });
-  if (overviewGrid && fleetCard) {
-    overviewGrid.classList.add('has-fleet-state');
-    overviewGrid.prepend(fleetCard);
-  }
-
-  // A crashed app shows a prominent failure banner (the reason + a Restart) above
-  // the overview cards so the operator immediately sees why it is down and can
-  // recover it, instead of a silent status pill.
-  const crashEl = crashBanner(document, app, {
-    canManage: ctx.canManageApp(ctx.state.user, app),
-    onRestart: () => ctx.restart(app.slug),
-  });
-  if (crashEl) panel.insertBefore(crashEl, panel.firstChild);
-
-  // A running app that is serving pages but whose WebSocket never connects shows
-  // an amber connectivity warning above the overview cards, so an operator sees
-  // "your reverse proxy is likely blocking WebSockets" instead of users silently
-  // hitting "Shiny disconnected". Reads envelope.connectivity.serving_without_ws.
-  const connEl = connectivityBanner(document, envelope || {});
-  if (connEl) panel.insertBefore(connEl, panel.firstChild);
+  syncOverviewSignals(panel, app, envelope, ctx);
 
   // Seed the Replicas list from /api/apps/:slug's replicas_status so the
   // panel shows index + status immediately. Sessions / CPU / RAM stay as
@@ -997,38 +1075,174 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
   // autoscale_status fresh without a full re-fetch of GET /api/apps/:slug.
   if (ctx.setDetailEnvelope) ctx.setDetailEnvelope(envelope || {});
 
-  // Rejects-by-reason is optional in the envelope; the helpers tolerate a
-  // missing/empty rollup and hide the card so a healthy app shows nothing.
-  const rejectsSection = document.getElementById('overview-rejects-by-reason');
-  const rejectsList = document.getElementById('overview-rejects-by-reason-list');
-  if (rejectsSection && rejectsList) {
-    renderRejectsByReason(rejectsSection, rejectsList, formatRejectsByReason(envelope && envelope.rejects_by_reason));
-  }
-
-  // Load the in-memory metrics history into the Trends card. Best-effort: a
-  // failed fetch or disabled history just leaves the Collecting placeholder.
-  loadTrends(app.slug);
+  refreshTrends(app.slug);
 }
 
-// loadTrends fetches the app's metrics history and renders the Trends card. The
-// response is the columnar { window_seconds, interval_seconds, series } payload
-// from GET /api/apps/:slug/metrics/history.
-function loadTrends(slug) {
+function syncOverviewSignals(panel, app, envelope, ctx) {
+  const health = panel.querySelector('#overview-health');
+  if (!health) return;
+  const state = envelope || {};
+  const key = JSON.stringify([app.status, app.last_error, state.fleet_state,
+    state.connectivity, state.rejects_by_reason]);
+  if (panel.dataset.signalsKey === key) return;
+  panel.dataset.signalsKey = key;
+
+  const alerts = panel.querySelector('#overview-alerts');
+  alerts.replaceChildren();
+  const crash = crashBanner(document, app, {
+    canManage: ctx.canManageApp(ctx.state.user, app),
+    onRestart: () => ctx.restart(app.slug),
+  });
+  const connectivity = connectivityBanner(document, state);
+  if (crash) alerts.append(crash);
+  if (connectivity) alerts.append(connectivity);
+
+  const grid = panel.querySelector('.overview-grid');
+  const previousFleet = grid.querySelector('.overview-fleet-state');
+  const nextFleet = makeFleetStateCard(document, state.fleet_state, {
+    configurationHref: `/apps/${app.slug}/configuration`, relativeTime,
+  });
+  if (previousFleet) previousFleet.remove();
+  grid.classList.toggle('has-fleet-state', !!nextFleet);
+  if (nextFleet) grid.prepend(nextFleet);
+
+  const section = panel.querySelector('#overview-rejects-by-reason');
+  const list = panel.querySelector('#overview-rejects-by-reason-list');
+  const nextEl = panel.querySelector('#overview-rejects-next');
+  const rejects = formatRejectsByReason(state.rejects_by_reason).filter(row => row.count > 0);
+  renderRejectsByReason(section, list, rejects);
+  const next = rejectionGuidance(rejects, ctx.canManageApp(ctx.state.user, app));
+  nextEl.hidden = !next;
+  if (next) {
+    panel.querySelector('#overview-rejects-guidance').textContent = next.message;
+    const action = panel.querySelector('#overview-rejects-action');
+    action.textContent = next.action;
+    action.href = next.route === 'fleet' ? '/' : next.route === 'replicas'
+      ? '#overview-replicas-list' : `/apps/${app.slug}/${next.route}`;
+    if (next.route === 'replicas') action.removeAttribute('data-nav');
+    else action.dataset.nav = '';
+  }
+  renderOverviewHealth(panel, app, state, null, false, false);
+}
+
+function renderOverviewHealth(panel, app, envelope, metrics, metricsStale, envelopeStale) {
+  const box = panel.querySelector('#overview-health');
+  if (!box) return;
+  const status = app.status;
+  const signals = formatRejectsByReason(envelope?.rejects_by_reason);
+  const rejects = signals.filter(row => row.count > 0 && row.reason !== 'render-deferred');
+  const count = rejects.reduce((sum, row) => sum + row.count, 0);
+  const deferred = signals.find(row => row.reason === 'render-deferred')?.count || 0;
+  const replicas = Array.isArray(metrics?.replicas) ? metrics.replicas : null;
+  const ready = replicas?.filter(row => row.status === 'running').length;
+  let title = 'App status needs review';
+  let detail = 'Check the process state and recent logs.';
+  let level = 'watch';
+  let action = null;
+  if (metricsStale || envelopeStale) {
+    title = 'Health data may be out of date';
+    detail = 'The latest health check did not complete. The page will check again; use the logs before acting on these values.';
+    action = ['View logs', `/apps/${app.slug}/logs`];
+  } else if (status === 'crashed' || status === 'failed') {
+    title = 'App is unavailable';
+    detail = 'Review the startup error and logs before restarting.';
+    level = 'danger';
+    action = ['View logs', `/apps/${app.slug}/logs`];
+  } else if (status === 'degraded') {
+    title = 'App is degraded';
+    detail = 'Some capacity may be unavailable. Inspect the replicas and recent logs.';
+    level = 'danger';
+    action = ['Inspect replicas', '#overview-replicas-list'];
+  } else if (envelope?.connectivity?.serving_without_ws) {
+    title = 'App is serving, but interactions may fail';
+    detail = 'Realtime connections have not succeeded. Check the reverse proxy warning below.';
+    level = 'danger';
+    action = ['Review warning', '#overview-alerts'];
+  } else if (count > 0) {
+    title = 'App has admission issues';
+    detail = `${count} ${count === 1 ? 'event' : 'events'} in the last 10 minutes. Review the cause and next step below.`;
+    action = ['Review signals', '#overview-rejects-by-reason'];
+  } else if (deferred > 0) {
+    title = 'App is serving with waits';
+    detail = `${deferred} render-capacity wait ${deferred === 1 ? 'signal' : 'signals'} in the last 10 minutes; these do not mean failed sessions.`;
+    action = ['Review signals', '#overview-rejects-by-reason'];
+  } else if (replicas && replicas.length > 0 && ready < replicas.length) {
+    title = 'Some replicas are not serving';
+    detail = `${ready} of ${replicas.length} replicas running. Inspect the process list below.`;
+    action = ['Inspect replicas', '#overview-replicas-list'];
+  } else if (status === 'running') {
+    title = 'App is serving normally';
+    detail = replicas?.length ? `${ready} ${ready === 1 ? 'replica' : 'replicas'} running; no recent admission issue reported.`
+      : 'No recent admission issue reported. Waiting for live replica metrics.';
+    level = 'healthy';
+  } else if (status === 'idle' || status === 'hibernated') {
+    title = 'App is idle';
+    detail = 'It may need time to start when the next visitor opens it.';
+  } else if (status === 'deploying' || status === 'starting' || status === 'waking') {
+    title = 'App is starting';
+    detail = 'Watch replica readiness and startup logs.';
+    action = ['View logs', `/apps/${app.slug}/logs`];
+  } else if (status === 'stopped' || status === 'suspended') {
+    title = 'App is not serving';
+    detail = 'Start the app when it should be available to visitors.';
+  }
+  box.dataset.level = level;
+  setText(box.querySelector('#overview-health-title'), title);
+  setText(box.querySelector('#overview-health-detail'), detail);
+  setText(box.querySelector('#overview-health-freshness'), metricsStale
+    ? 'Live metrics unavailable' : envelopeStale ? 'Health check unavailable'
+      : metrics ? 'Live metrics checked recently' : 'Waiting for live metrics');
+  const actionEl = box.querySelector('#overview-health-action');
+  actionEl.hidden = !action;
+  if (action) {
+    setText(actionEl, action[0]);
+    actionEl.href = action[1];
+    if (action[1].startsWith('#')) actionEl.removeAttribute('data-nav');
+    else actionEl.dataset.nav = '';
+  }
+}
+
+// History is a separate request from live metrics. Preserve the last chart on
+// refresh failure, but say plainly that it is no longer current.
+function refreshTrends(slug) {
   const container = document.getElementById('overview-trends');
-  if (!container) return;
-  fetch(`/api/apps/${slug}/metrics/history`, { credentials: 'include' })
-    .then((r) => (r.ok ? r.json() : null))
+  if (!container || container.closest('.settings-tab-panel')?.hidden) return;
+  const request = Number(container.dataset.historyRequest || 0) + 1;
+  container.dataset.historyRequest = String(request);
+  return Promise.resolve().then(() => fetch(`/api/apps/${slug}/metrics/history`, { credentials: 'include' }))
+    .then((r) => {
+      if (!r.ok) throw new Error(`History request failed (${r.status})`);
+      return r.json();
+    })
     .then((body) => {
-      if (!body) return;
+      if (Number(container.dataset.historyRequest) !== request) return;
       const card = renderTrendsCard(document, body);
       if (!card) {
-        // History disabled server-side: hide the card entirely.
         container.hidden = true;
         return;
       }
+      container.hidden = false;
       container.replaceChildren(card);
     })
-    .catch(() => {});
+    .catch(() => {
+      if (Number(container.dataset.historyRequest) !== request) return;
+      let state = container.querySelector('.trends-load-state');
+      if (!state) {
+        state = document.createElement('div');
+        state.className = 'trends-load-state';
+        state.setAttribute('role', 'status');
+        container.append(state);
+      }
+      state.replaceChildren();
+      const message = document.createElement('p');
+      message.textContent = container.querySelector('.trends-card')
+        ? 'Chart may be out of date.' : 'Metrics history is unavailable.';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.textContent = 'Retry';
+      retry.addEventListener('click', () => refreshTrends(slug));
+      state.append(message, retry);
+    });
 }
 
 function seedReplicasFromStatus(app, replicasStatus) {
