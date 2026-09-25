@@ -264,6 +264,35 @@ func DirSize(dataDir string) (int64, error) {
 	return total, err
 }
 
+// HasAnyFile reports whether dataDir contains at least one regular file,
+// excluding the UploadTempDir subtree, stopping at the first one found instead
+// of visiting every entry the way DirSize does. Callers that only need to know
+// whether an app has any data at all (rather than how much) should use this
+// instead of DirSize(dataDir) > 0: on a data dir with many files, or one
+// holding an entry the walk cannot stat, DirSize pays for (or fails on) every
+// entry even though the answer was already decided by the first regular file
+// found. A missing dataDir is "no data", not an error, matching DirSize.
+func HasAnyFile(dataDir string) (bool, error) {
+	var found bool
+	err := filepath.WalkDir(dataDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == UploadTempDir && p != dataDir {
+			return filepath.SkipDir
+		}
+		if d.Type().IsRegular() {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil && os.IsNotExist(err) {
+		return false, nil
+	}
+	return found, err
+}
+
 // CleanupUploadTemp removes entries inside the UploadTempDir that are older
 // than maxAge. Only immediate children are inspected (no recursion). Errors
 // from individual removals are collected and joined.

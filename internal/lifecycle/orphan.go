@@ -30,6 +30,10 @@ func ReconcileDeletingApps(ctx context.Context, store *db.Store, cfg *config.Con
 		return
 	}
 	for _, app := range apps {
+		// Does not take the backup fence: see the comment on the equivalent
+		// live-delete call in internal/api/apps.go's deleteAppLocked for why
+		// this removal is left unguarded and Verify's cross-check is the
+		// accepted backstop for a backup snapshot racing it.
 		if err := storage.OnAppDelete(cfg, app.Slug); err != nil {
 			slog.Error("reconcile deleting apps: cleanup still failing; tombstone retained",
 				"slug", app.Slug, "err", err)

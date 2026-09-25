@@ -296,6 +296,89 @@ func TestDirSize_ExcludesTempDir(t *testing.T) {
 	}
 }
 
+func TestHasAnyFile_ExcludesTempDir(t *testing.T) {
+	root := t.TempDir()
+	tmpDir := filepath.Join(root, UploadTempDir)
+	_ = os.MkdirAll(tmpDir, 0o750)
+	_ = os.WriteFile(filepath.Join(tmpDir, "scratch"), []byte("x"), 0o640)
+
+	got, err := HasAnyFile(root)
+	if err != nil {
+		t.Fatalf("HasAnyFile: %v", err)
+	}
+	if got {
+		t.Error("only the upload temp dir has content: want false, got true")
+	}
+}
+
+func TestHasAnyFile_EmptyDir(t *testing.T) {
+	got, err := HasAnyFile(t.TempDir())
+	if err != nil {
+		t.Fatalf("HasAnyFile: %v", err)
+	}
+	if got {
+		t.Error("empty dir: want false, got true")
+	}
+}
+
+func TestHasAnyFile_MissingDir(t *testing.T) {
+	got, err := HasAnyFile(filepath.Join(t.TempDir(), "does-not-exist"))
+	if err != nil {
+		t.Fatalf("missing dir should be treated as empty, got: %v", err)
+	}
+	if got {
+		t.Error("missing dir: want false, got true")
+	}
+}
+
+func TestHasAnyFile_OneFile(t *testing.T) {
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "a.txt"), []byte("x"), 0o640)
+
+	got, err := HasAnyFile(root)
+	if err != nil {
+		t.Fatalf("HasAnyFile: %v", err)
+	}
+	if !got {
+		t.Error("one file: want true, got false")
+	}
+}
+
+func TestHasAnyFile_NestedFile(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub", "deep")
+	_ = os.MkdirAll(sub, 0o750)
+	_ = os.WriteFile(filepath.Join(sub, "b.txt"), []byte("x"), 0o640)
+
+	got, err := HasAnyFile(root)
+	if err != nil {
+		t.Fatalf("HasAnyFile: %v", err)
+	}
+	if !got {
+		t.Error("nested file: want true, got false")
+	}
+}
+
+func TestHasAnyFile_IgnoresSymlinks(t *testing.T) {
+	root := t.TempDir()
+	payload := filepath.Join(t.TempDir(), "payload.txt")
+	if err := os.WriteFile(payload, []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "payload.txt")
+	if err := os.Symlink(payload, link); err != nil {
+		t.Skipf("symlinks not supported on this platform: %v", err)
+	}
+
+	got, err := HasAnyFile(root)
+	if err != nil {
+		t.Fatalf("HasAnyFile: %v", err)
+	}
+	if got {
+		t.Error("symlink only, matching DirSize's IsRegular check: want false, got true")
+	}
+}
+
 func TestCleanupUploadTemp_RemovesOldEntries(t *testing.T) {
 	root := t.TempDir()
 	tmpDir := filepath.Join(root, UploadTempDir)

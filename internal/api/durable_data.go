@@ -23,16 +23,31 @@ func (s *Server) ephemeralDataDeployBlock(app *db.App, command []string) (string
 // proposed new tiers so the move is rejected before it is persisted (otherwise
 // `apps set --tier <ephemeral>` and the async redeploy it triggers would move a
 // data-using app onto ephemeral storage unguarded). A nil manager never blocks.
+//
+// The app-side signal (UsesPersistentData) can require an on-disk check, so it
+// is computed only when the answer could actually change the outcome: an ack,
+// or a tier set with no non-durable tier, already decides "not blocked" on
+// its own, independent of whether the app has any data. A hypothetical
+// pre-check with usesData forced true asks exactly that question, reusing
+// EphemeralDataBlockedTier's own tier-iteration order rather than
+// duplicating it, so the two calls can never disagree about which tier would
+// be named.
 func (s *Server) ephemeralDataBlockForTiers(app *db.App, command []string, tiers []string) (string, bool, error) {
 	if s.manager == nil {
+		return "", false, nil
+	}
+	tier, wouldBlock := deploy.EphemeralDataBlockedTier(true, app.EphemeralDataAck, tiers, s.manager.TierHasDurableDataFor)
+	if !wouldBlock {
 		return "", false, nil
 	}
 	uses, err := deploy.UsesPersistentData(command, s.cfg.Storage.AppDataDir, app.Slug)
 	if err != nil {
 		return "", false, err
 	}
-	tier, blocked := deploy.EphemeralDataBlockedTier(uses, app.EphemeralDataAck, tiers, s.manager.TierHasDurableDataFor)
-	return tier, blocked, nil
+	if !uses {
+		return "", false, nil
+	}
+	return tier, true, nil
 }
 
 // ephemeralDataPushBlock reports whether pushing data to app must be blocked
