@@ -422,6 +422,37 @@ test('manual selective links wait for an in-flight URL sync', async () => {
   assert.equal(requests(m)[1].value.requestId, 'request-manual');
 });
 
+test('a queued link request replaced by a newer one is told it was superseded', async () => {
+  const m = mountBridge();
+  m.inputs.length = 0;
+  m.handlers['shinyhub-bookmark-capabilities']({
+    version: 1,
+    store: 'url',
+    autoSync: true,
+    fields: [{ id: 'region', label: 'Region', value: 'Americas' }],
+  });
+  await flush(m.window, 350);
+  const syncRequest = requests(m)[0].value;
+  const errors = [];
+  m.window.addEventListener('shinyhub:bookmark:error', (event) => errors.push(event.detail));
+
+  for (const requestId of ['first-manual', 'second-manual']) {
+    m.window.dispatchEvent(new m.window.CustomEvent('shinyhub:bookmark:create', {
+      detail: { version: 1, requestId, include: ['region'] },
+    }));
+  }
+
+  assert.deepEqual(errors.map((error) => [error.requestId, error.code]), [
+    ['first-manual', 'superseded'],
+  ]);
+  m.handlers['shinyhub-bookmark-result']({
+    version: 1,
+    requestId: syncRequest.requestId,
+    url: 'https://hub.test/app/demo/?_inputs_=synced',
+  });
+  assert.deepEqual(requests(m).slice(1).map((entry) => entry.value.requestId), ['second-manual']);
+});
+
 test('automatic URL sync rejects a different origin or app path', async () => {
   const m = mountBridge();
   m.inputs.length = 0;

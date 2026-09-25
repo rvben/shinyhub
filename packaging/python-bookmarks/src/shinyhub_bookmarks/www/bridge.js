@@ -456,6 +456,16 @@
     };
     clearSyncTimer();
     if (pendingRequest) {
+      // One link request waits at a time; the one it replaces still gets an
+      // answer so its caller does not wait forever.
+      if (queuedCreate) {
+        emit(ERROR, {
+          version: VERSION,
+          requestId: queuedCreate.requestId,
+          code: "superseded",
+          message: "A newer link request replaced this one."
+        });
+      }
       queuedCreate = detail;
       return;
     }
