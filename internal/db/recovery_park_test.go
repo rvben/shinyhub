@@ -214,7 +214,7 @@ func TestParkStrandedReplicas_PreservesExitDiagnostics(t *testing.T) {
 
 	seedReplica(t, s, app.ID, 0, "running", "running")
 	if err := s.RecordReplicaCrash(db.UpsertReplicaParams{
-		AppID: app.ID, Index: 0, Status: "crashed", Reason: "process not alive",
+		AppID: app.ID, Index: 0, Status: "crashed", Reason: "replica exited before this server restarted; exact cause unknown",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -231,8 +231,8 @@ func TestParkStrandedReplicas_PreservesExitDiagnostics(t *testing.T) {
 	if r.LastExit == nil {
 		t.Fatal("last_exit was erased by the repair")
 	}
-	if r.LastExit.Reason != "process not alive" || r.LastExit.CrashCount != 1 {
-		t.Errorf("last_exit = %+v, want reason=%q crash_count=1", r.LastExit, "process not alive")
+	if r.LastExit.Reason != "replica exited before this server restarted; exact cause unknown" || r.LastExit.CrashCount != 1 {
+		t.Errorf("last_exit = %+v, want reason=%q crash_count=1", r.LastExit, "replica exited before this server restarted; exact cause unknown")
 	}
 }
 
