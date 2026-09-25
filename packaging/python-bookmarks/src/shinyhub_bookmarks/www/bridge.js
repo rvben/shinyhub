@@ -27,6 +27,7 @@
   var syncSequence = 0;
   var desiredSyncRevision = 0;
   var syncRetries = 0;
+  var syncSession = null;
   var recentSyncRequests = Object.create(null);
   var recentSyncOrder = [];
   var discoveryRetryTimer = null;
@@ -312,6 +313,31 @@
     );
   }
 
+  // Shiny reconnected this page to a new server session. Its revisions count
+  // from zero again, and nothing sent to the old session will be answered, so
+  // an outstanding request is ended now rather than left to block the queue
+  // until it times out. A queued link request was never sent and goes to the
+  // new session.
+  function startServerSession() {
+    desiredSyncRevision = 0;
+    syncRetries = 0;
+    syncNeeded = false;
+    clearSyncTimer();
+    if (!pendingRequest) return;
+    var orphan = pendingRequest;
+    pendingRequest = null;
+    clearRequestTimer();
+    if (orphan.kind !== "sync") {
+      emit(ERROR, {
+        version: VERSION,
+        requestId: orphan.requestId,
+        code: "session_changed",
+        message: "The app reconnected before this link was ready. Try again."
+      });
+    }
+    drainRequests();
+  }
+
   function scheduleURLSync() {
     if (!syncNeeded || pendingRequest || queuedCreate) return;
     clearSyncTimer();
@@ -336,6 +362,10 @@
       if (!validVersion(message)) return;
       cachedCapabilities = message;
       emit(CAPABILITIES, message);
+      if (typeof message.session === "string" && message.session !== syncSession) {
+        if (syncSession !== null) startServerSession();
+        syncSession = message.session;
+      }
       if (message.autoSync === true) {
         var revision = Number.isInteger(message.syncRevision) && message.syncRevision >= 0
           ? message.syncRevision

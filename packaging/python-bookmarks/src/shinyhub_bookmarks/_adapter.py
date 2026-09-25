@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import secrets
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -480,6 +481,10 @@ def register(
     selected_fields: ContextVar[tuple[str, ...] | None] = ContextVar(
         "shinyhub_bookmark_selected_fields", default=None
     )
+    # Revisions count from zero in each Shiny session. A reconnect gives the
+    # same page a new session, so the browser needs this token to tell a
+    # restarted count apart from a stale message.
+    sync_session = secrets.token_hex(12)
     capability_revision = 0
     acknowledged_revision = 0
     initial_capabilities_observed = False
@@ -616,6 +621,7 @@ def register(
             {
                 "version": PROTOCOL_VERSION,
                 "store": "url",
+                "session": sync_session,
                 "autoSync": capability_revision > acknowledged_revision,
                 "syncRevision": capability_revision,
                 "syncFields": sync_fields,
