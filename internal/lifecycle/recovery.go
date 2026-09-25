@@ -782,7 +782,12 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		return false
 	}
 	if err := syscall.Kill(*r.PID, 0); err != nil {
-		markReplicaCrashed(store, app, r.Index, "process not alive", logRunID)
+		// Nothing in this server ever called wait(2) on this PID, so its exit
+		// code, signal and OOM status are unknowable, unlike the live
+		// crash-monitor path (replicaExitVerdict in internal/process/manager.go),
+		// which observed the exit itself. The reason says so rather than reading
+		// like a diagnosis.
+		markReplicaCrashed(store, app, r.Index, "replica exited before this server restarted; exact cause unknown", logRunID)
 		return false
 	}
 	if err := validateNativeProcessIdentity(*r.PID, bundleDir); err != nil {

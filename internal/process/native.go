@@ -664,6 +664,17 @@ func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 		// Read the OOM counter before teardown removes the cgroup dir.
 		r.recordOOMVerdict(handle.PID)
 		r.teardownAppCgroupFor(handle.PID)
+		// Stats() lazily caches a gops.Process handle per PID for CPU-delta
+		// computation, and the metrics poller calls Stats() for adopted handles
+		// exactly like spawned ones. Without this, a PID that only ever exited
+		// through this branch would keep its stale handle forever; gopsutil
+		// re-reads /proc by PID number with no creation-time identity check, so
+		// a later PID reuse would silently attribute the reused PID's CPU/RSS to
+		// this dead entry's baseline. Mirrors the delete(r.procs, ...) below for
+		// the spawned-process exit path.
+		r.mu.Lock()
+		delete(r.procs, handle.PID)
+		r.mu.Unlock()
 		return err
 	}
 

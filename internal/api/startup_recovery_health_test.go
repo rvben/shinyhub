@@ -102,7 +102,7 @@ func TestStartupRecoveryDeadReplicaIsExposedAsHibernated(t *testing.T) {
 		t.Errorf("durable placement provenance was lost: provider=%q tier=%q version=%q",
 			rep.Provider, rep.Tier, rep.AppVersion)
 	}
-	if rep.LastExit == nil || rep.LastExit.Reason != "process not alive" || rep.LastExit.CrashCount != 1 {
+	if rep.LastExit == nil || rep.LastExit.Reason != "replica exited before this server restarted; exact cause unknown" || rep.LastExit.CrashCount != 1 {
 		t.Errorf("last_exit = %+v, want preserved process-not-alive diagnostic", rep.LastExit)
 	}
 }
@@ -153,7 +153,7 @@ func TestStartupRecoveryRepairsInheritedCrashedReplica(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.RecordReplicaCrash(db.UpsertReplicaParams{
-		AppID: app.ID, Index: 0, Status: "crashed", Reason: "process not alive",
+		AppID: app.ID, Index: 0, Status: "crashed", Reason: "replica exited before this server restarted; exact cause unknown",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestStartupRecoveryRepairsInheritedCrashedReplica(t *testing.T) {
 		t.Errorf("inherited replica = status %q, desired %q, pid %v, port %v; want stopped/stopped with no runtime identity",
 			rep.Status, rep.DesiredState, rep.PID, rep.Port)
 	}
-	if rep.LastExit == nil || rep.LastExit.Reason != "process not alive" || rep.LastExit.CrashCount != 1 {
+	if rep.LastExit == nil || rep.LastExit.Reason != "replica exited before this server restarted; exact cause unknown" || rep.LastExit.CrashCount != 1 {
 		t.Errorf("last_exit = %+v, want preserved process-not-alive diagnostic", rep.LastExit)
 	}
 }
