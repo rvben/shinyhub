@@ -103,6 +103,104 @@ def test_choice_restore_canonicalises_multiple_values_to_display_order():
     assert values_equal(result.value, ("A", "C"))
 
 
+REGIONS = ["Europe", "Americas", "Asia"]
+
+
+def test_a_saved_list_never_becomes_the_value_of_a_single_selection():
+    # A link saved while the field was multi-select, or edited by hand, carries
+    # a list; the live control holds one value and cannot be set to several.
+    result = resolve_choice(
+        ChoiceRestore(choices=REGIONS, default="Europe"),
+        ["Americas", "Asia"],
+        "Americas",
+    )
+
+    assert result.value == "Europe"
+    assert result.kind == "fallback"
+
+
+def test_a_single_selection_without_a_default_keeps_its_current_value_for_a_saved_list():
+    result = resolve_choice(ChoiceRestore(choices=REGIONS), ["Americas", "Asia"], "Asia")
+
+    assert result.value == "Asia"
+    assert result.kind == "fallback"
+
+
+def test_a_one_item_saved_list_restores_into_a_single_selection():
+    result = resolve_choice(
+        ChoiceRestore(choices=REGIONS, default="Europe", control="radio"),
+        ["Asia"],
+        "Europe",
+    )
+
+    assert result.value == "Asia"
+    assert result.kind == "migrated"
+
+
+def test_a_saved_scalar_restores_into_a_multiple_selection_as_a_list():
+    result = resolve_choice(ChoiceRestore(choices=REGIONS), "Asia", ("Europe",))
+
+    assert result.value == ["Asia"]
+    assert result.kind == "migrated"
+
+
+def test_an_empty_saved_multiple_selection_restores_as_empty():
+    result = resolve_choice(ChoiceRestore(choices=REGIONS), None, ("Europe",))
+
+    assert result.value == []
+    assert result.kind is None
+
+
+def test_a_radio_control_is_single_even_before_it_has_a_value():
+    result = resolve_choice(
+        ChoiceRestore(choices=REGIONS, default="Europe", control="radio"),
+        ["Americas", "Asia"],
+        None,
+    )
+
+    assert result.value == "Europe"
+    assert result.kind == "fallback"
+
+
+def test_an_empty_multiple_selection_still_restores_a_saved_list():
+    # Shiny reports an empty multi-select as None.
+    result = resolve_choice(ChoiceRestore(choices=REGIONS), ["Asia", "Europe"], None)
+
+    assert result.value == ["Europe", "Asia"]
+    assert result.kind is None
+
+
+def test_an_empty_multiple_selection_takes_a_saved_single_value_as_a_list():
+    # A select only reads None when it is an empty multi-select, so a scalar
+    # saved before the field accepted several must still arrive as a list.
+    result = resolve_choice(ChoiceRestore(choices=REGIONS), "Asia", None)
+
+    assert result.value == ["Asia"]
+    assert result.kind == "migrated"
+
+
+def test_restore_adjustments_send_a_single_value_update_for_a_single_selection():
+    registered = _normalise_fields(
+        {
+            "region": Field(
+                "Region",
+                restore=ChoiceRestore(choices=REGIONS, default="Europe"),
+            )
+        },
+        resolve=lambda value: value,
+    )
+
+    adjustments, updates = _restore_adjustments(
+        state_input={"region": ["Americas", "Asia"]},
+        registered=registered,
+        current_values={"region": "Americas"},
+        legacy_fields={},
+    )
+
+    assert updates == {"region": "Europe"}
+    assert [adjustment.kind for adjustment in adjustments] == ["fallback"]
+
+
 @pytest.mark.parametrize(
     ("saved", "current"),
     [

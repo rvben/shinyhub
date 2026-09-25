@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race test-race-non-api test-race-api vuln scan-image test-js test-worker test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-browser-lifecycle-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race test-race-non-api test-race-api vuln scan-image test-js test-worker test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-browser-app-nav-e2e test-browser-lifecycle-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -217,6 +217,15 @@ test-browser-logs-e2e:
 	@if [ ! -d node_modules/axe-core ]; then npm install --no-audit --no-fund --silent; fi
 	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm install --no-audit --no-fund --silent; fi
 	SHINYHUB_E2E_BROWSER_CHANNEL="$${SHINYHUB_E2E_BROWSER_CHANNEL:-chrome}" node scripts/logs-browser-e2e.mjs
+
+# test-browser-app-nav-e2e serves the injected app switcher to system Chrome and
+# asserts that each of its dialogs takes keyboard focus the moment it opens and
+# returns it on Escape. jsdom applies no CSS transitions, so it cannot see a
+# panel that is still fading in from visibility:hidden refuse focus.
+test-browser-app-nav-e2e:
+	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required)"; exit 1; }
+	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm install --no-audit --no-fund --silent; fi
+	SHINYHUB_E2E_BROWSER_CHANNEL="$${SHINYHUB_E2E_BROWSER_CHANNEL:-chrome}" node scripts/app-nav-browser-e2e.mjs
 
 # Real Python Shiny lifecycle contract in a disposable, extension-free Chromium.
 # Requires uv and system Python; uses the render driver's locked Playwright.

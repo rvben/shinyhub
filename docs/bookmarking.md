@@ -196,6 +196,13 @@ Live synchronization may select no fields when every value is at baseline; in
 that case the bridge removes Shiny's empty input marker while preserving the
 fragment, if any. If the app adds its own `state.values` in a bookmark callback,
 Shiny's `_values_` query remains because it is application-owned state.
+Query parameters the page was opened with (for example `?lang=nl` or campaign
+tags) stay in the address in front of the bookmark state. Shiny ignores every
+parameter before its first `_inputs_` or `_values_` marker, so they never reach
+the restored inputs. In an app that opts into `session.allow_reconnect()`, a
+reconnect to a new server session keeps the address in step: the bridge
+recognizes the new session and drops the old session's unanswered save
+instead of waiting behind it.
 
 ## Evolving view links safely
 

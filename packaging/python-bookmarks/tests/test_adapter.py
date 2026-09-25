@@ -539,6 +539,47 @@ async def test_registered_input_changes_request_automatic_url_sync(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_capabilities_identify_the_session_that_owns_their_revisions(
+    monkeypatch,
+):
+    # Revisions restart at zero in every Shiny session, and a reconnect gives
+    # the same page a new session. The browser can only tell a restarted count
+    # from a stale message if each session announces itself.
+    from shiny import reactive
+
+    effects = []
+
+    def capture_effect(fn=None, **_kwargs):
+        if fn is None:
+            return capture_effect
+        effects.append(fn)
+        return fn
+
+    monkeypatch.setattr(reactive, "effect", capture_effect)
+    monkeypatch.setattr(
+        reactive, "event", lambda *_args, **_kwargs: lambda callback: callback
+    )
+
+    async def publish_twice(session):
+        effects.clear()
+        register(session=session, input=Inputs({"region": "Europe"}), fields={"region": "Region"})
+        publish = next(
+            callback for callback in effects if callback.__name__ == "_publish_capabilities"
+        )
+        await publish()
+        await publish()
+        return [message["session"] for _kind, message in session.messages]
+
+    first = await publish_twice(Session())
+    second = await publish_twice(Session())
+
+    assert isinstance(first[0], str) and len(first[0]) >= 16
+    assert first[0] == first[1], "the token is stable within one session"
+    assert second[0] == second[1]
+    assert first[0] != second[0], "a new session announces a new token"
+
+
+@pytest.mark.asyncio
 async def test_falsy_values_different_from_baselines_remain_in_live_url(
     monkeypatch,
 ):

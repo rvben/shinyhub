@@ -112,7 +112,11 @@ register(
 `ChoiceRestore` validates the saved value, applies aliases, and updates the
 current Shiny choice input. Supported controls are `select`, `selectize`, and
 `radio`. Multiple selections retain every choice that still exists, use the
-current display order, and preserve an empty selection. A missing declared
+current display order, and preserve an empty selection. Whether a field takes
+one value or several follows the live control, not the saved link: a saved list
+restores into a single choice only when it holds exactly one item (otherwise
+the field falls back), and a saved single value restores into a multiple
+selection as a one-item selection. A missing declared
 default falls back to the valid value Shiny already selected. Dynamically
 rendered choice inputs are validated once they materialize.
 

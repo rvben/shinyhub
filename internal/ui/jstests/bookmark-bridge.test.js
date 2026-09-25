@@ -213,6 +213,146 @@ test('a legacy empty Shiny input marker is normalized to the app path', async ()
   assert.equal(m.window.location.search, '');
 });
 
+function publishSync(m, revision, session) {
+  m.handlers['shinyhub-bookmark-capabilities']({
+    version: 1,
+    store: 'url',
+    ...(session === undefined ? {} : { session }),
+    autoSync: true,
+    syncRevision: revision,
+    syncFields: ['region'],
+    fields: [{ id: 'region', label: 'Region', value: 'Europe' }],
+  });
+}
+
+async function syncWith(m, revision, url, session) {
+  publishSync(m, revision, session);
+  await flush(m.window, 350);
+  const request = requests(m).at(-1);
+  assert.equal(request.value.syncRevision, revision);
+  m.handlers['shinyhub-bookmark-result']({
+    version: 1,
+    requestId: request.value.requestId,
+    purpose: 'sync',
+    syncRevision: revision,
+    url,
+  });
+}
+
+test('live sync keeps query parameters the app page was opened with', async () => {
+  const m = mountBridge();
+  // Shiny ignores every pair before its first _inputs_/_values_ marker, so the
+  // page's own parameters survive a restore only in front of the bookmark.
+  m.window.history.replaceState(null, '', '/app/demo/?lang=nl&utm_source=mail#results');
+  m.inputs.length = 0;
+
+  await syncWith(m, 1, 'https://hub.test/app/demo/?_inputs_&region=%22Asia%22');
+  assert.equal(m.window.location.search, '?lang=nl&utm_source=mail&_inputs_&region=%22Asia%22');
+  assert.equal(m.window.location.hash, '#results');
+
+  await syncWith(m, 2, 'https://hub.test/app/demo/?_inputs_&region=%22Americas%22&_values_&theme=%22dark%22');
+  assert.equal(
+    m.window.location.search,
+    '?lang=nl&utm_source=mail&_inputs_&region=%22Americas%22&_values_&theme=%22dark%22',
+    'the previous bookmark segment is replaced, not appended to',
+  );
+
+  await syncWith(m, 3, 'https://hub.test/app/demo/?_inputs_');
+  assert.equal(m.window.location.search, '?lang=nl&utm_source=mail', 'baseline leaves only the page parameters');
+});
+
+test('live sync treats everything from the first bookmark marker onward as bookmark state', async () => {
+  const m = mountBridge();
+  m.window.history.replaceState(null, '', '/app/demo/?embed=1&_values_&theme=%22dark%22&_inputs_&region=%22Asia%22');
+  m.inputs.length = 0;
+
+  await syncWith(m, 1, 'https://hub.test/app/demo/?_inputs_&region=%22Europe%22');
+  assert.equal(m.window.location.search, '?embed=1&_inputs_&region=%22Europe%22');
+});
+
+const acks = (mounted) => mounted.inputs
+  .filter((entry) => entry.id === '.shinyhub_bookmark_sync_ack')
+  .map((entry) => entry.value.syncRevision);
+
+test('live sync resumes after Shiny reconnects the page to a new session', async () => {
+  const m = mountBridge();
+  m.inputs.length = 0;
+
+  await syncWith(m, 1, 'https://hub.test/app/demo/?_inputs_&region=%22Asia%22', 'session-a');
+  await syncWith(m, 2, 'https://hub.test/app/demo/?_inputs_&region=%22Americas%22', 'session-a');
+  await syncWith(m, 3, 'https://hub.test/app/demo/?_inputs_&region=%22Asia%22', 'session-a');
+  assert.deepEqual(acks(m), [1, 2, 3]);
+
+  // The new session counts from zero again. Its first change is revision 1,
+  // which is below everything the tab saw before and must still be saved.
+  await syncWith(m, 1, 'https://hub.test/app/demo/?_inputs_&region=%22Europe%22', 'session-b');
+  assert.equal(m.window.location.search, '?_inputs_&region=%22Europe%22');
+  assert.deepEqual(acks(m), [1, 2, 3, 1]);
+
+  await syncWith(m, 2, 'https://hub.test/app/demo/?_inputs_&region=%22Asia%22', 'session-b');
+  assert.equal(m.window.location.search, '?_inputs_&region=%22Asia%22');
+  assert.deepEqual(acks(m), [1, 2, 3, 1, 2]);
+});
+
+test('a sync still in flight when the session changes cannot block the new session', async () => {
+  const m = mountBridge();
+  m.inputs.length = 0;
+
+  publishSync(m, 4, 'session-a');
+  await flush(m.window, 350);
+  const orphan = requests(m).at(-1);
+  assert.equal(orphan.value.syncRevision, 4);
+
+  // The old session is gone, so its request will never be answered.
+  await syncWith(m, 1, 'https://hub.test/app/demo/?_inputs_&region=%22Europe%22', 'session-b');
+  assert.equal(requests(m).length, 2);
+  assert.equal(m.window.location.search, '?_inputs_&region=%22Europe%22');
+  assert.deepEqual(acks(m), [1]);
+
+  // A late answer to the orphan must not overwrite the new session's URL.
+  m.handlers['shinyhub-bookmark-result']({
+    version: 1,
+    requestId: orphan.value.requestId,
+    purpose: 'sync',
+    syncRevision: 4,
+    url: 'https://hub.test/app/demo/?_inputs_=orphan',
+  });
+  assert.equal(m.window.location.search, '?_inputs_&region=%22Europe%22');
+  assert.deepEqual(acks(m), [1]);
+});
+
+test('a link request the old session never answered fails at once after a reconnect', async () => {
+  const m = mountBridge();
+  m.inputs.length = 0;
+  const errors = [];
+  m.window.addEventListener('shinyhub:bookmark:error', (event) => errors.push(event.detail));
+
+  publishSync(m, 0, 'session-a');
+  m.window.dispatchEvent(new m.window.CustomEvent('shinyhub:bookmark:create', {
+    detail: { version: 1, requestId: 'copy-1', include: ['region'] },
+  }));
+  assert.equal(requests(m).length, 1);
+
+  await syncWith(m, 1, 'https://hub.test/app/demo/?_inputs_&region=%22Europe%22', 'session-b');
+
+  assert.equal(errors.length, 1, 'the visitor hears about the lost request without waiting it out');
+  assert.equal(errors[0].requestId, 'copy-1');
+  assert.equal(errors[0].code, 'session_changed');
+  assert.equal(requests(m).length, 2, 'the new session syncs without queueing behind it');
+  assert.equal(m.window.location.search, '?_inputs_&region=%22Europe%22');
+});
+
+test('capabilities from the same session still discard a stale revision', async () => {
+  const m = mountBridge();
+  m.inputs.length = 0;
+
+  await syncWith(m, 3, 'https://hub.test/app/demo/?_inputs_&region=%22Asia%22', 'session-a');
+  publishSync(m, 2, 'session-a');
+  await flush(m.window, 350);
+
+  assert.equal(requests(m).length, 1, 'a lower revision from the live session is stale');
+});
+
 test('initial capabilities do not rewrite a clean app URL', async () => {
   const m = mountBridge();
   m.inputs.length = 0;
