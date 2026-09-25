@@ -12,7 +12,9 @@ import (
 	"io/fs"
 	"log/slog"
 	"math/rand/v2"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
 
@@ -104,6 +107,12 @@ type Store struct {
 	// connection (see isMemoryDSN), which is what lets DeserializeSQLite treat
 	// that connection's database as the whole store.
 	memory bool
+
+	// migrateLockPath is the sidecar flock file Migrate() serializes on for a
+	// file-backed SQLite database (see sqliteMigrateLockPath). Empty for
+	// Postgres (which uses a session advisory lock instead) and for in-memory
+	// SQLite (no other process can share the connection).
+	migrateLockPath string
 
 	// appLogFanouts collapses all live readers for a run onto one database
 	// follower. A viewer performs one direct catch-up read before subscribing;
@@ -231,7 +240,51 @@ func openSQLite(dsn string) (*Store, error) {
 		return nil, fmt.Errorf("foreign_keys pragma not enabled (got %d)", fk)
 	}
 	d := sqliteDialect{}
-	return &Store{db: &boundDB{real: raw, d: d}, d: d, memory: memory}, nil
+	return &Store{db: &boundDB{real: raw, d: d}, d: d, memory: memory, migrateLockPath: sqliteMigrateLockPath(dsn)}, nil
+}
+
+// sqliteMigrateLockPath returns the sidecar file used to serialize Migrate()
+// across every process that opens this SQLite database file concurrently, or
+// "" for an in-memory database: each connection to ":memory:" (or a
+// "mode=memory" DSN) is an independent, single-process database, so there is
+// nothing to serialize against another process.
+//
+// dsn is stripped of a leading "file:" scheme and any query string (pragmas,
+// cache mode, ...) and cleaned, so two DSNs that differ only in those
+// parameters but name the same underlying file still resolve to the same lock
+// path.
+func sqliteMigrateLockPath(dsn string) string {
+	if isMemoryDSN(dsn) {
+		return ""
+	}
+	p := strings.TrimPrefix(dsn, "file:")
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		p = p[:i]
+	}
+	if p == "" {
+		return ""
+	}
+	return filepath.Clean(p) + ".migrate.lock"
+}
+
+// acquireMigrateLock blocks until it holds an exclusive flock on path
+// (creating the file if it does not exist yet) and returns a function that
+// releases it. flock ties the lock to the process's open file description, so
+// a holder that crashes or is killed releases it automatically when the
+// descriptor closes; there is no stale-lock file to detect or clean up.
+func acquireMigrateLock(path string) (release func(), err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o640)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("flock %s: %w", path, err)
+	}
+	return func() {
+		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 // pgMaxConns bounds the Postgres pool. The control plane issues a modest query
@@ -308,12 +361,31 @@ func (s *Store) Migrate() error {
 		return fmt.Errorf("no embedded migrations found")
 	}
 
-	// On Postgres, serialize Migrate() across control-plane instances with a
-	// session advisory lock held for the whole migration (acquired before the
-	// applied-set is read, so a waiter sees the winner's completed migrations and
-	// skips them). Without it, two new-version instances booting in the same HA
-	// rolling-upgrade window race and one crashes on a duplicate-key violation.
-	// SQLite is single-node and serializes writes itself, so it needs no lock.
+	// Serialize Migrate() across every process racing to migrate the same
+	// database, so a waiter re-reads the applied set after the winner commits
+	// and finds nothing left to do, rather than racing the ledger itself.
+	//
+	// On Postgres this is a session advisory lock held for the whole migration
+	// (acquired before the applied-set is read, so a waiter sees the winner's
+	// completed migrations and skips them): without it, two new-version
+	// instances booting in the same HA rolling-upgrade window race and one
+	// crashes on a duplicate-key violation.
+	//
+	// SQLite is single-node by design, but two instances can still start
+	// against the same file (an operator accidentally starting a second
+	// `shinyhub serve`, or a systemd restart overlapping the old process).
+	// SQLite serializes individual writes, not this function's read-then-write
+	// sequence, so without a lock of our own both processes read the applied
+	// set as empty, then both try to create the same tables and insert the same
+	// ledger rows: the loser gets a raw "duplicate column name" or "UNIQUE
+	// constraint failed" error instead of a clean no-op. An flock on a sidecar
+	// `<db>.migrate.lock` file (see sqliteMigrateLockPath) closes that window:
+	// held for the whole function, so the loser blocks until the winner
+	// finishes, then re-reads the ledger and finds every migration already
+	// applied. flock is process-scoped, so a killed holder releases it
+	// automatically; there is no stale-lock state to clean up. An in-memory
+	// database needs no lock: each connection is an independent,
+	// single-process database.
 	if s.IsPostgres() {
 		ctx := context.Background()
 		// A session advisory lock must be held on a single dedicated connection;
@@ -331,6 +403,12 @@ func (s *Store) Migrate() error {
 		defer func() {
 			_, _ = conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", migrateAdvisoryLockKey)
 		}()
+	} else if s.migrateLockPath != "" {
+		release, lerr := acquireMigrateLock(s.migrateLockPath)
+		if lerr != nil {
+			return fmt.Errorf("migrate: acquire lock: %w", lerr)
+		}
+		defer release()
 	}
 
 	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
