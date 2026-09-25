@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.17.5](https://github.com/rvben/shinyhub/compare/v0.17.4...v0.17.5) - 2026-09-25
+
+### Fixed
+
+- **lifecycle**: name the restart-discovered crash reason honestly ([009325a](https://github.com/rvben/shinyhub/commit/009325aaf94fec42e6111e9bffcd4ab1db28029e))
+- **process**: delete adopted-process cache entry on exit ([70b8f9d](https://github.com/rvben/shinyhub/commit/70b8f9d54c082c4f13752799507d96766eb2c35c))
+- **process**: reap detached cgroup members before app teardown ([0da719b](https://github.com/rvben/shinyhub/commit/0da719b959bd589aa70a57f21558a93de8095cb2))
+- **process**: reset cgroup memory/cpu limits when lowered to 0 ([06811cb](https://github.com/rvben/shinyhub/commit/06811cbad9308bd58f89219826029b87f8c8a5a5))
+- **db**: serialize SQLite Migrate() across concurrent processes ([b6bec79](https://github.com/rvben/shinyhub/commit/b6bec792a28116bcb8f7e9143876f8e9d3331be9))
+- **cli**: explain a browser connect against a pre-device-code server ([8026041](https://github.com/rvben/shinyhub/commit/802604177509cf444af1f20c9bd9646e540618de))
+
 ## [0.17.4](https://github.com/rvben/shinyhub/compare/v0.17.3...v0.17.4) - 2026-09-25
 
 ### Breaking Changes
