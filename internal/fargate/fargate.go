@@ -748,6 +748,7 @@ func (r *Runtime) CleanupApp(ctx context.Context, appID int64) error {
 		return nil
 	}
 	r.forgetSyncKey(appID)
+	r.appSync.forget(appID)
 
 	if r.secrets != nil {
 		if err := r.secrets.DeleteByPrefix(ctx, appSecretPrefix(r.cfg.SecretNamePrefix, appID)); err != nil {
@@ -839,6 +840,18 @@ func (k *keyedMutex) lock(id int64) func() {
 	k.mu.Unlock()
 	mu.Lock()
 	return mu.Unlock
+}
+
+// forget drops the lock entry for id, if any. Call it once the id is durably
+// gone so a server that creates and deletes many apps over its lifetime does
+// not grow the map without bound. Safe with a concurrent holder: a goroutine
+// that already fetched the *sync.Mutex for this id keeps using that object
+// normally, since deleting the map entry only stops a future lookup from
+// finding it. A lookup after forget simply creates a fresh, independent lock.
+func (k *keyedMutex) forget(id int64) {
+	k.mu.Lock()
+	delete(k.m, id)
+	k.mu.Unlock()
 }
 
 // Start launches one Fargate task for the replica and waits until it acquires a
@@ -1293,7 +1306,12 @@ func (r *Runtime) Inventory(ctx context.Context) ([]process.InventoryItem, error
 			ip, err := r.routeIP(ctx, task)
 			if err != nil {
 				r.metrics.RecordInventoryError()
-				return nil, err
+				// A per-task public-IP lookup failure (EC2 DescribeNetworkInterfaces
+				// throttled or unreachable) is exactly as transient as the DescribeTasks
+				// batch error above, so report it the same way: PartialInventoryError
+				// with the items already resolved, instead of a bare error that would
+				// discard them and skip recovery's indeterminate-worker handling.
+				return items, &process.PartialInventoryError{Workers: []string{r.workerID}}
 			}
 			if ip != "" {
 				if port := labels[process.LabelPort]; port != "" {

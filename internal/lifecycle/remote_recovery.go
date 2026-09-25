@@ -255,6 +255,24 @@ func (m *WorkerDownMonitor) Sweep(now time.Time) {
 		}
 	}
 
+	// Retry the loss transition for workers a previous pass already marked
+	// down but never finished losing: once down, a worker is permanently
+	// excluded from the stale list above, so a failure here (ListReplicasByWorker
+	// erroring) would otherwise strand its replicas as running or crashed
+	// forever. The same live replica also blocks DeleteStaleWorkers below from
+	// ever reaping the row, so without this retry the worker never gets
+	// revisited by any path.
+	stuck, err := m.store.ListDownWorkersWithLiveReplicas()
+	if err != nil {
+		slog.Error("worker monitor: list down workers with live replicas", "err", err)
+	} else {
+		for _, nodeID := range stuck {
+			if err := LoseWorkerReplicas(m.store, nodeID, m.deregister, m.evict); err != nil {
+				slog.Error("worker monitor: retry lose replicas", "node", nodeID, "err", err)
+			}
+		}
+	}
+
 	// Reap rows that have been down past the retention window. The store keeps
 	// revoked rows (audit) and any worker still hosting a running/crashed
 	// replica; here we only drop the reaped nodes from the in-memory index.

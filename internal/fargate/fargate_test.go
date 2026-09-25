@@ -580,6 +580,31 @@ func TestCleanupApp_DeletesSecretsAndDeregistersFamily(t *testing.T) {
 	}
 }
 
+// TestCleanupApp_ForgetsAppSyncLock reproduces the unbounded growth: appSync
+// lazily creates a *sync.Mutex per app ID the first time a replica of that app
+// starts (resolveTaskDef's lock(p.AppID) call) and nothing ever removed one, so
+// a server that creates and deletes many apps over its lifetime grows the map
+// forever. CleanupApp must drop the deleted app's entry.
+func TestCleanupApp_ForgetsAppSyncLock(t *testing.T) {
+	store := newFakeSecretsStore()
+	f := &fakeECS{}
+	r := secretsRuntime(f, store)
+
+	unlock := r.appSync.lock(7)
+	unlock()
+	if _, ok := r.appSync.m[7]; !ok {
+		t.Fatal("precondition: appSync must hold an entry for app 7 before cleanup")
+	}
+
+	if err := r.CleanupApp(context.Background(), 7); err != nil {
+		t.Fatalf("CleanupApp: %v", err)
+	}
+
+	if _, ok := r.appSync.m[7]; ok {
+		t.Error("appSync lock for deleted app 7 still present after CleanupApp")
+	}
+}
+
 // TestStart_RoutedCacheInvalidatesOnBaseRevisionChange guards that a
 // secret-bearing app picks up a NEW base task-definition revision (e.g. a new
 // runner image) even when its secrets are unchanged: with an unpinned base
@@ -2294,6 +2319,88 @@ func TestInventoryReturnsPendingPartialOnBatchError(t *testing.T) {
 	}
 	if len(partial.Workers) != 1 || partial.Workers[0] != WorkerID {
 		t.Errorf("PartialInventoryError.Workers = %v, want [%q]", partial.Workers, WorkerID)
+	}
+}
+
+func TestInventoryReturnsPartialOnRouteIPError(t *testing.T) {
+	// A per-task public-IP lookup failure (EC2 DescribeNetworkInterfaces
+	// throttled or unreachable) is exactly as transient as a DescribeTasks
+	// batch failure and must be reported the same way: wrapped in
+	// PartialInventoryError, not a bare error.
+	task := taskWithENI("arn-1", "eni-1", "192.0.2.5", "RUNNING")
+	task.Tags = []ecstypes.Tag{
+		{Key: aws.String(process.LabelSlug), Value: aws.String("demo")},
+		{Key: aws.String(process.LabelReplicaIndex), Value: aws.String("0")},
+	}
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-1"}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{task}}, nil
+		},
+	}
+	e2 := &fakeEC2{
+		describeFn: func(*ec2.DescribeNetworkInterfacesInput) (*ec2.DescribeNetworkInterfacesOutput, error) {
+			return nil, fmt.Errorf("RequestError: throttled")
+		},
+	}
+	cfg := testCfg()
+	cfg.RouteViaPublicIP = true
+	r := New(f, cfg, nil, WithEC2Client(e2), WithPollInterval(time.Millisecond), WithStartTimeout(50*time.Millisecond))
+
+	_, err := r.Inventory(context.Background())
+	if err == nil {
+		t.Fatal("expected error from Inventory on routeIP failure")
+	}
+	var partial *process.PartialInventoryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected PartialInventoryError, got %T: %v", err, err)
+	}
+	if len(partial.Workers) != 1 || partial.Workers[0] != WorkerID {
+		t.Errorf("PartialInventoryError.Workers = %v, want [%q]", partial.Workers, WorkerID)
+	}
+}
+
+func TestInventoryPreservesItemsCollectedBeforeRouteIPError(t *testing.T) {
+	// A routeIP failure on one task must not discard the items already
+	// resolved for other tasks in the same scan: recovery uses whatever
+	// items come back alongside a PartialInventoryError for workers not in
+	// its Workers list.
+	taskOK := taskWithENI("arn-ok", "eni-ok", "192.0.2.5", "RUNNING")
+	taskOK.Tags = []ecstypes.Tag{{Key: aws.String(process.LabelSlug), Value: aws.String("demo-ok")}}
+	taskBad := taskWithENI("arn-bad", "eni-bad", "192.0.2.6", "RUNNING")
+	taskBad.Tags = []ecstypes.Tag{{Key: aws.String(process.LabelSlug), Value: aws.String("demo-bad")}}
+
+	f := &fakeECS{
+		listTasksFn: func(*ecs.ListTasksInput) (*ecs.ListTasksOutput, error) {
+			return &ecs.ListTasksOutput{TaskArns: []string{"arn-ok", "arn-bad"}}, nil
+		},
+		describeTasksFn: func(*ecs.DescribeTasksInput) (*ecs.DescribeTasksOutput, error) {
+			return &ecs.DescribeTasksOutput{Tasks: []ecstypes.Task{taskOK, taskBad}}, nil
+		},
+	}
+	e2 := &fakeEC2{
+		describeFn: func(in *ec2.DescribeNetworkInterfacesInput) (*ec2.DescribeNetworkInterfacesOutput, error) {
+			if len(in.NetworkInterfaceIds) == 1 && in.NetworkInterfaceIds[0] == "eni-bad" {
+				return nil, fmt.Errorf("RequestError: throttled")
+			}
+			return &ec2.DescribeNetworkInterfacesOutput{NetworkInterfaces: []ec2types.NetworkInterface{{
+				Association: &ec2types.NetworkInterfaceAssociation{PublicIp: aws.String("203.0.113.9")},
+			}}}, nil
+		},
+	}
+	cfg := testCfg()
+	cfg.RouteViaPublicIP = true
+	r := New(f, cfg, nil, WithEC2Client(e2), WithPollInterval(time.Millisecond), WithStartTimeout(50*time.Millisecond))
+
+	items, err := r.Inventory(context.Background())
+	var partial *process.PartialInventoryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected PartialInventoryError, got %T: %v", err, err)
+	}
+	if len(items) != 1 || items[0].Labels[process.LabelSlug] != "demo-ok" {
+		t.Fatalf("items = %+v, want the one item resolved before the routeIP failure", items)
 	}
 }
 

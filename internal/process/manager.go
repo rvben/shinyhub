@@ -1316,8 +1316,13 @@ func (m *Manager) Suspend(slug string) (bool, error) {
 		for _, t := range frozen {
 			// Re-check identity under the lock: a concurrent stop/replace may have
 			// niled or replaced this slot while Suspend ran unlocked. Only flip the
-			// status of the entry we actually froze, never a fresh replacement.
-			if t.index < len(pool) && pool[t.index] != nil && pool[t.index].handle == t.handle {
+			// status of the entry we actually froze, never a fresh replacement, and
+			// only when it is still the pre-freeze StatusRunning we observed: a Stop
+			// that began while Suspend was unlocked (stopped=true) or an unrelated
+			// exit that the exit-monitor already classified (StatusCrashed/Lost)
+			// must not be overwritten back to StatusSuspended.
+			if t.index < len(pool) && pool[t.index] != nil && pool[t.index].handle == t.handle &&
+				!pool[t.index].stopped && pool[t.index].info.Status == StatusRunning {
 				pool[t.index].info.Status = StatusSuspended
 			}
 		}
@@ -1379,8 +1384,13 @@ func (m *Manager) SuspendReplica(slug string, index int) (bool, error) {
 
 	m.mu.Lock()
 	// Re-check identity under the lock: a concurrent stop/replace may have niled or
-	// replaced this slot while Suspend ran unlocked. Only flip the entry we froze.
-	if pool := m.entries[poolKey]; index < len(pool) && pool[index] != nil && pool[index].handle == handle {
+	// replaced this slot while Suspend ran unlocked. Only flip the entry we froze,
+	// and only when it is still the pre-freeze StatusRunning we observed: a Stop
+	// that began while Suspend was unlocked (stopped=true) or an unrelated exit
+	// that the exit-monitor already classified (StatusCrashed/Lost) must not be
+	// overwritten back to StatusSuspended.
+	if pool := m.entries[poolKey]; index < len(pool) && pool[index] != nil && pool[index].handle == handle &&
+		!pool[index].stopped && pool[index].info.Status == StatusRunning {
 		pool[index].info.Status = StatusSuspended
 	}
 	m.mu.Unlock()
@@ -1423,8 +1433,13 @@ func (m *Manager) Resume(slug string, index int) (ReplicaEndpoint, error) {
 	m.mu.Lock()
 	// Re-check identity under the lock: only update the entry we resumed, never a
 	// fresh replacement created by a concurrent stop/start while Resume ran
-	// unlocked (matches the Start/StopReplica handle-equality idiom).
-	if pool := m.entries[poolKey]; index < len(pool) && pool[index] != nil && pool[index].handle == handle {
+	// unlocked (matches the Start/StopReplica handle-equality idiom). Also require
+	// it is still the pre-resume StatusSuspended we observed: a Stop that began
+	// while Resume was unlocked (stopped=true) or an unrelated exit the
+	// exit-monitor already classified (StatusCrashed/Lost) must not be overwritten
+	// back to StatusRunning.
+	if pool := m.entries[poolKey]; index < len(pool) && pool[index] != nil && pool[index].handle == handle &&
+		!pool[index].stopped && pool[index].info.Status == StatusSuspended {
 		if ep.URL == "" {
 			// In-place resume (e.g. docker unpause) preserves the route; keep the
 			// known endpoint URL rather than clobbering it with an empty one. A

@@ -82,3 +82,20 @@ func TestApplyRenderPacing_ConcurrentIsRaceCleanAndFinalWins(t *testing.T) {
 		t.Fatal("after a final ApplyRenderPacing(0), the limiter must be cleared")
 	}
 }
+
+// BenchmarkProxy_ConcurrentAppLimiterReads measures appLimiter under concurrent
+// callers. It runs on the render-admission hot path for every charge/admit
+// decision, while ApplyRenderPacing only writes on a config change, so this is
+// almost entirely concurrent readers: run with -cpu=8 (or higher) to see them
+// contend.
+func BenchmarkProxy_ConcurrentAppLimiterReads(b *testing.B) {
+	p := New()
+	p.SetRenderLimiterFactory(testFactory())
+	p.ApplyRenderPacing("demo", 1.3)
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = p.appLimiter("demo")
+		}
+	})
+}

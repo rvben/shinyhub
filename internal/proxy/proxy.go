@@ -586,7 +586,11 @@ type Proxy struct {
 	// appLimiters holds the per-slug render-admission limiter; a slug with pacing
 	// disabled has no entry. Guarded by appLimitersMu, never p.mu, so the render-
 	// admission path can be extended without interacting with the pool lock.
-	appLimitersMu sync.Mutex
+	// RWMutex, not a plain Mutex: appLimiter is read on every render-admission
+	// decision while writes only happen on a config change (SetAppLimiter,
+	// ApplyRenderPacing), so reads vastly outnumber writes and should not
+	// serialize against each other.
+	appLimitersMu sync.RWMutex
 	appLimiters   map[string]*admission.AppLimiter
 	// appliedRenderSeconds records the render_seconds currently applied for each
 	// paced slug, so ApplyRenderPacing rebuilds the limiter only on a real change
@@ -763,8 +767,8 @@ func (p *Proxy) SetRenderParkBudget(perApp, total int) {
 // appLimiter returns slug's render-admission limiter, or nil when pacing is
 // disabled for the app. Callers must not hold p.mu.
 func (p *Proxy) appLimiter(slug string) *admission.AppLimiter {
-	p.appLimitersMu.Lock()
-	defer p.appLimitersMu.Unlock()
+	p.appLimitersMu.RLock()
+	defer p.appLimitersMu.RUnlock()
 	return p.appLimiters[slug]
 }
 

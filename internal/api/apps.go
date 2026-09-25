@@ -4072,7 +4072,27 @@ func (s *Server) deleteAppLocked(ctx context.Context, app *db.App) (string, erro
 		if err := s.jobs.BlockAndDrainApp(drainCtx, app.ID); err != nil {
 			return "", fmt.Errorf("drain schedules for app deletion: %w", err)
 		}
-		var err error
+		// Captured now, before the DeleteApp cascade below removes the rows: the
+		// caller's deploy lock serializes this against a concurrent schedule
+		// create/delete on the same slug (handleDeleteSchedule takes the same
+		// lock), and BlockAndDrainApp has already closed admission, so this list
+		// is stable for the rest of the deletion.
+		scheduleRows, err := s.store.ListSchedulesByApp(app.ID)
+		if err != nil {
+			slog.Error("app delete: list schedules for lock-map cleanup", "slug", slug, "err", err)
+		}
+		// Forget this app's per-schedule and per-app lock/gate map entries in
+		// jobs.Manager so a server that creates and deletes many apps over its
+		// lifetime does not grow those maps without bound. Deferred so ForgetApp
+		// runs only after AcquirePublicationRecoveryFences' release below (defers
+		// are LIFO): forgetting the app's publication gate while this deletion
+		// still holds it would just recreate the entry being forgotten.
+		defer func() {
+			for _, sc := range scheduleRows {
+				s.jobs.ForgetSchedule(sc.ID)
+			}
+			s.jobs.ForgetApp(app.ID)
+		}()
 		releaseJobFences, err = s.jobs.AcquirePublicationRecoveryFences(drainCtx, []int64{app.ID})
 		if err != nil {
 			return "", fmt.Errorf("fence schedule processes for app deletion: %w", err)

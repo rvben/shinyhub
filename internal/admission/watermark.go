@@ -24,7 +24,11 @@ type Watermark struct {
 	sample     func() (float64, error)
 	nowFn      func() time.Time
 
-	mu       sync.Mutex
+	// mu is a RWMutex, not a plain Mutex: Admit runs on every render-admission
+	// decision while record only runs once a second from the background
+	// sampler, so reads vastly outnumber writes and should not serialize
+	// against each other.
+	mu       sync.RWMutex
 	pct      float64
 	capAt    time.Time
 	hasValue bool
@@ -62,8 +66,8 @@ func (w *Watermark) Admit() bool {
 	if w.maxPercent <= 0 {
 		return true
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	if !w.hasValue {
 		return true
 	}
