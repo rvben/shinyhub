@@ -1070,6 +1070,13 @@ test('deselecting every custom field disables the copy action', () => {
 
   assert.equal(m.q('.bookmark-scope-title').textContent, '0 of 1 values included');
   assert.equal(m.q('button.bookmark-primary').disabled, true);
+  const detail = m.q('.bookmark-scope-detail');
+  assert.equal(detail.textContent, 'Select at least one value to copy a link.');
+  assert.equal(m.q('button.bookmark-primary').getAttribute('aria-describedby'), detail.id);
+
+  m.q('.bookmark-check').click();
+  assert.equal(detail.textContent, "Unchecked values will use the app's defaults.");
+  assert.equal(m.q('button.bookmark-primary').disabled, false);
 });
 
 test('an offline snapshot becomes a compact switcher status with explicit recovery actions', async () => {

@@ -1345,6 +1345,7 @@
   var bookmarkPrimary = document.createElement("button");
   bookmarkPrimary.type = "button";
   bookmarkPrimary.className = "bookmark-primary";
+  bookmarkPrimary.setAttribute("aria-describedby", TAG_ID + "-bookmark-scope-detail");
   setBookmarkPrimary("Copy link", "copy");
   bookmarkActions.appendChild(bookmarkFeedback);
   bookmarkActions.appendChild(bookmarkPrimary);
@@ -1685,9 +1686,11 @@
         ? "1 value included"
         : "All " + total + " values included"
       : selected + " of " + total + " values included";
-    bookmarkScopeDetail.textContent = bookmarkEditing
-      ? "Unchecked values will use the app's defaults."
-      : "Choose which values should follow the link.";
+    bookmarkScopeDetail.textContent = selected === 0
+      ? "Select at least one value to copy a link."
+      : bookmarkEditing
+        ? "Unchecked values will use the app's defaults."
+        : "Choose which values should follow the link.";
     bookmarkChange.textContent = bookmarkEditing ? "Done" : "Change";
     bookmarkChange.setAttribute("aria-expanded", bookmarkEditing ? "true" : "false");
     var primaryLabel = bookmarkPending
