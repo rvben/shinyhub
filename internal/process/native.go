@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -319,6 +320,13 @@ func (r *NativeRuntime) ResourceEnforcement() (memory, cpu bool) {
 	return r.limitsMemoryEnforced, r.limitsCPUEnforced
 }
 
+// unlimitedWithoutController reports whether a failed limit write needs no
+// warning: no limit was requested and the controller's file does not exist, so
+// no limit (stale or otherwise) can be in force.
+func unlimitedWithoutController(limit int, err error) bool {
+	return limit <= 0 && errors.Is(err, fs.ErrNotExist)
+}
+
 // placeInAppCgroup moves a just-started replica process into its own per-app
 // cgroup. The cgroup serves two purposes: isolated memory reclaim on Suspend
 // (warm-wake) and resource enforcement (memory.max / cpu.max) when the app sets
@@ -351,23 +359,23 @@ func (r *NativeRuntime) placeInAppCgroup(p StartParams, pid int) {
 		slog.Warn("native: pids.max not applied; replica runs without a fork-bomb cap (needs Delegate=pids)",
 			"slug", p.Slug, "idx", p.Index, "err", err)
 	}
-	if p.MemoryLimitMB > 0 {
-		if err := setCgroupMemoryMax(dir, p.MemoryLimitMB); err != nil {
-			slog.Warn("native: memory limit not applied; replica runs uncapped",
-				"slug", p.Slug, "idx", p.Index, "limit_mb", p.MemoryLimitMB, "err", err)
-		} else {
-			slog.Info("native: memory limit applied",
-				"slug", p.Slug, "idx", p.Index, "limit_mb", p.MemoryLimitMB)
-		}
+	// Write memory.max and cpu.max on every placement, "max" included.
+	// setupAppCgroup reuses a directory whose previous teardown could not rmdir
+	// it, so skipping the write for "no limit" would leave the previous
+	// occupant's limit in force after the app's limit was lowered to 0.
+	if err := setCgroupMemoryMax(dir, p.MemoryLimitMB); err != nil && !unlimitedWithoutController(p.MemoryLimitMB, err) {
+		slog.Warn("native: memory limit not applied; replica may run uncapped or with a stale limit",
+			"slug", p.Slug, "idx", p.Index, "limit_mb", p.MemoryLimitMB, "err", err)
+	} else if err == nil && p.MemoryLimitMB > 0 {
+		slog.Info("native: memory limit applied",
+			"slug", p.Slug, "idx", p.Index, "limit_mb", p.MemoryLimitMB)
 	}
-	if p.CPUQuotaPercent > 0 {
-		if err := setCgroupCPUMax(dir, p.CPUQuotaPercent); err != nil {
-			slog.Warn("native: cpu limit not applied; replica runs uncapped (needs Delegate=cpu)",
-				"slug", p.Slug, "idx", p.Index, "quota_percent", p.CPUQuotaPercent, "err", err)
-		} else {
-			slog.Info("native: cpu limit applied",
-				"slug", p.Slug, "idx", p.Index, "quota_percent", p.CPUQuotaPercent)
-		}
+	if err := setCgroupCPUMax(dir, p.CPUQuotaPercent); err != nil && !unlimitedWithoutController(p.CPUQuotaPercent, err) {
+		slog.Warn("native: cpu limit not applied; replica may run uncapped or with a stale limit (needs Delegate=cpu)",
+			"slug", p.Slug, "idx", p.Index, "quota_percent", p.CPUQuotaPercent, "err", err)
+	} else if err == nil && p.CPUQuotaPercent > 0 {
+		slog.Info("native: cpu limit applied",
+			"slug", p.Slug, "idx", p.Index, "quota_percent", p.CPUQuotaPercent)
 	}
 	r.mu.Lock()
 	r.appCgroups[pid] = dir
@@ -691,6 +699,14 @@ func (r *NativeRuntime) teardownAppCgroupFor(pid int) {
 	if !ok {
 		return
 	}
+	// A replica whose child called setsid() escapes the process group SIGKILL
+	// (killOrphanedProcessGroup signals the PGID; a detached child is not a member
+	// of it) and can outlive its parent, still holding a membership in this
+	// cgroup. Reap any such survivor first, exactly as placeJobInCgroup's teardown
+	// does for one-shot jobs, so rmdir does not EBUSY-leak the cgroup (which would
+	// then also carry a stale memory.max/cpu.max into whatever replica reuses this
+	// directory next).
+	killAppCgroupProcs(dir)
 	if err := teardownAppCgroup(dir); err != nil {
 		slog.Warn("native: app cgroup teardown failed", "pid", pid, "dir", dir, "err", err)
 	}

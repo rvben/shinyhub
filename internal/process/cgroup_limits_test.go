@@ -1,6 +1,9 @@
 package process
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -211,6 +214,31 @@ func TestCgroupCPUMaxValue(t *testing.T) {
 	for _, c := range cases {
 		if got := cgroupCPUMaxValue(c.cpuPct); got != c.want {
 			t.Errorf("cgroupCPUMaxValue(%d) = %q, want %q", c.cpuPct, got, c.want)
+		}
+	}
+}
+
+// TestUnlimitedWithoutController pins which limit-write failures are silent: only
+// an absent controller file when no limit was asked for. A requested limit that
+// cannot be written, or any other failure, must still warn.
+func TestUnlimitedWithoutController(t *testing.T) {
+	missing := fmt.Errorf("open cpu.max: %w", fs.ErrNotExist)
+	denied := fmt.Errorf("open cpu.max: %w", fs.ErrPermission)
+	cases := []struct {
+		name  string
+		limit int
+		err   error
+		want  bool
+	}{
+		{"no limit, controller absent", 0, missing, true},
+		{"negative limit, controller absent", -1, missing, true},
+		{"limit requested, controller absent", 512, missing, false},
+		{"no limit, write denied", 0, denied, false},
+		{"no limit, other failure", 0, errors.New("device busy"), false},
+	}
+	for _, tc := range cases {
+		if got := unlimitedWithoutController(tc.limit, tc.err); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
