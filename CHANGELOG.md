@@ -6,6 +6,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.17.4](https://github.com/rvben/shinyhub/compare/v0.17.3...v0.17.4) - 2026-09-25
+
+### Added
+
+- **ui**: lead the app Overview with an operational health summary ([8a149f9](https://github.com/rvben/shinyhub/commit/8a149f9ba8f22ecc09f3035ab40effcc4885fb34))
+- **db**: prune stale fleet runs and development sessions ([65312e7](https://github.com/rvben/shinyhub/commit/65312e7a15788f42a0ff28f0c37b81fd0f63a573))
+- **cli**: expose command aliases in the schema document ([89050b4](https://github.com/rvben/shinyhub/commit/89050b48381633f6f44c90d67c6c404a23a7c761))
+- **ui**: state the live release once, in a header strip ([680ba25](https://github.com/rvben/shinyhub/commit/680ba25521c636ace9f29dc0dcd4057bf8885527))
+
+### Fixed
+
+- **db**: pin the Postgres session time zone to UTC ([6823973](https://github.com/rvben/shinyhub/commit/68239736a58c76bab4cbb1b64d6925a490cb1a0d))
+- **shutdown**: bound ownership release with a watchdog and drain deadline ([ee4775e](https://github.com/rvben/shinyhub/commit/ee4775ee06e7ae28103803eebdc17c0e6d314cc7))
+- **config**: reject colliding logo/favicon basenames in branding ([c69be97](https://github.com/rvben/shinyhub/commit/c69be97cecbe1b4b43253291cd01a5af57ea45f9))
+- **metrics**: evict per-app and per-schedule Prometheus series on delete ([e72096b](https://github.com/rvben/shinyhub/commit/e72096bf111cfa078bde891c80d6471b0de4c46f))
+- **tracing**: evict a deleted app's trace ring buffer ([c3dc887](https://github.com/rvben/shinyhub/commit/c3dc887ca091c39b7383ab8c2b0e863cfba5a05f))
+- **backup**: fence Create against concurrent deploy and prune ([77e4019](https://github.com/rvben/shinyhub/commit/77e40191f423b13290deef95e58c7028eafe9bb1))
+- **ui**: redirect non-privileged visitors off admin-only pages ([1932217](https://github.com/rvben/shinyhub/commit/1932217cbccbce29d18e509bd499fb93e676de78))
+- **deploy**: record apps.last_error when a first deploy fails to boot ([3837e21](https://github.com/rvben/shinyhub/commit/3837e21d45e5c3f0f5ee89eac5346f8c4e378521))
+- **ui**: hide elements whose class overrides the UA [hidden] rule ([2be24b5](https://github.com/rvben/shinyhub/commit/2be24b5eb1803610261b3c4e4011d70ebcf93c21))
+- **lifecycle**: retry replica loss for a worker stuck down with live replicas ([08fb4e3](https://github.com/rvben/shinyhub/commit/08fb4e3daa5e9de41a762fd09a8e726bc6a1c0fa))
+- **fargate**: report routeIP failure as partial inventory, not a hard error ([aaabc37](https://github.com/rvben/shinyhub/commit/aaabc37a17788b1b15eb1ec5efefd5d70d1ce06e))
+- **fargate**: forget appSync lock entry on app cleanup ([b1dcb50](https://github.com/rvben/shinyhub/commit/b1dcb509860f7245064bb8d4305c431fbe49dc97))
+- **jobs**: forget per-schedule and per-app lock map entries on delete ([482a0b2](https://github.com/rvben/shinyhub/commit/482a0b23a648c707a21b99d6ffa7fc6cb0c3b975))
+- **process**: stop Suspend/Resume from resurrecting a dead replica ([fad399a](https://github.com/rvben/shinyhub/commit/fad399a0bb962429974c291ce1f41bc25ac81aac))
+- **scaleway**: bound container readiness wait with a timeout ([8b558c8](https://github.com/rvben/shinyhub/commit/8b558c8bf635e95f246d8e681f9db28da4c3b329))
+- **db**: finalize stale usage sessions independent of retention ([0d86a1f](https://github.com/rvben/shinyhub/commit/0d86a1f52fcc7dc6937a0976fcaede5236349075))
+- **security**: require proof of possession for CLI connect approval ([f41c395](https://github.com/rvben/shinyhub/commit/f41c39548b3098608adfb1b10918a9b968952ba5))
+- **auth**: compare deduplicated group sets in forward-auth reconciliation ([dcec8c9](https://github.com/rvben/shinyhub/commit/dcec8c941bfec578a2fcd59997562461a479c495))
+- **api**: clamp pagination limit to a sane maximum ([0bc26ea](https://github.com/rvben/shinyhub/commit/0bc26ea857cb9672e745dd5b7ab4b116d64b936d))
+- **api**: rate limit the app stop endpoint ([66f0b37](https://github.com/rvben/shinyhub/commit/66f0b37f5619221578b93b54020b69971c5103d8))
+- **db**: serialize RotateSecretsTx with beginWrite ([976bdd3](https://github.com/rvben/shinyhub/commit/976bdd341107be2172cc7a083eb4b6f162ba990c))
+- **proxy**: keep the disconnect overlay up through a same-batch marker replacement ([eaebfdb](https://github.com/rvben/shinyhub/commit/eaebfdb86837345c43a1c7638a4f1aebd6af4bc2))
+- **fleet**: report worker_warm_spares as an unmanaged stored override ([0e00fc6](https://github.com/rvben/shinyhub/commit/0e00fc6d8ca93aad7239e54b56dba7f579ab372a))
+- **cli**: bound data pull/cat/get by a stall timeout, not a 30s deadline ([09ac401](https://github.com/rvben/shinyhub/commit/09ac401ac338912d19279d03301c8bf386b66ea5))
+- **ui**: close the quick-view log pane on navigation and bound its stream ([b9bed22](https://github.com/rvben/shinyhub/commit/b9bed226b062cbca1fbbe7876effb4ebd9beef32))
+
+### Performance
+
+- **durable-data**: stop paying for a full dir walk to check for any data ([958208e](https://github.com/rvben/shinyhub/commit/958208e55b56ce827ae48c997f4acca51a83a9b4))
+- **proxy**: use RWMutex for the read-dominated limiter and watermark locks ([00d68a5](https://github.com/rvben/shinyhub/commit/00d68a5406c4d97c2c75d720c01ad8b6678fff39))
+- **db**: index audit_events by action for the audit log filter ([2528788](https://github.com/rvben/shinyhub/commit/2528788780b45a116e7cf13413a2d3dd8ca33d89))
+- **db**: add index and bounded query for deployment history reads ([46f37df](https://github.com/rvben/shinyhub/commit/46f37df6a879c2defd09b0174dd3ad0482fc51b8))
+
 ## [0.17.3](https://github.com/rvben/shinyhub/compare/v0.17.2...v0.17.3) - 2026-09-24
 
 ### Fixed
