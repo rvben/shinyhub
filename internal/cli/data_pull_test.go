@@ -238,8 +238,11 @@ func TestDataPull_GlobalClientTimeoutDoesNotBoundTheTransfer(t *testing.T) {
 // bytes, each gap shorter than the timeout, must succeed even though the
 // whole transfer runs longer than the timeout itself.
 func TestDataPull_SlowButSteadyTransferSucceeds(t *testing.T) {
-	content := []byte("progress")
-	const gap = 70 * time.Millisecond
+	// A 10x margin between gap and timeout keeps this deterministic on a loaded
+	// host, where a scheduled 70ms sleep has been observed to take 150ms; 16
+	// gaps still add up to more than the timeout.
+	content := []byte("steady-progress!")
+	const gap = 100 * time.Millisecond
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		flusher, _ := w.(http.Flusher)
 		for i := range content {
@@ -255,7 +258,7 @@ func TestDataPull_SlowButSteadyTransferSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "out.bin")
 
-	const timeout = 200 * time.Millisecond
+	const timeout = time.Second
 	start := time.Now()
 	size, sum, err := runDataPull(srv.URL, "tok", "demo", "f.bin", dest, timeout, io.Discard)
 	elapsed := time.Since(start)
