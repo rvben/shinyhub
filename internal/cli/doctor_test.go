@@ -394,7 +394,7 @@ func TestRemoteOnboardingJourneyConnectDoctorDeployAndDiagnose(t *testing.T) {
 	failDeploy := false
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/server-info", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true},"runtimes":{"python":true,"r":false}}`)
+		_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true,"cli_connect_device_code":true},"runtimes":{"python":true,"r":false}}`)
 	})
 	mux.HandleFunc("/api/auth/me", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Token shk_journey" {

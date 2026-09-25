@@ -199,6 +199,7 @@ type serverCaps struct {
 	FleetPreconditions        bool `json:"fleet_preconditions"`
 	ContentDigest             bool `json:"content_digest"`
 	CLIConnect                bool `json:"cli_connect"`
+	CLIConnectDeviceCode      bool `json:"cli_connect_device_code"`
 	DeployEvents              bool `json:"deploy_events"`
 	PlanApply                 bool `json:"plan_apply"`
 	FleetProvenance           bool `json:"fleet_provenance"`

@@ -80,7 +80,7 @@ func TestConnectRefreshRotatesAtomicallyAndRevokesPreviousKey(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/server-info":
-			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true},"runtimes":{"python":true}}`)
+			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true,"cli_connect_device_code":true},"runtimes":{"python":true}}`)
 		case "/api/auth/cli-connect/register":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{"user_code":"ABCD-1234","expires_at":"2026-01-01T00:00:00Z"}`)
@@ -145,7 +145,7 @@ func TestConnectRefreshFailureLeavesCredentialsByteExact(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/server-info":
-			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true}}`)
+			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true,"cli_connect_device_code":true}}`)
 		case "/api/auth/me":
 			_, _ = io.WriteString(w, `{"user":{"username":"alice","role":"developer"},"credential":{"type":"api_key","id":9}}`)
 		case "/api/auth/cli-connect/register":
@@ -186,7 +186,7 @@ func TestConnectRefreshRejectsDifferentBrowserIdentity(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/server-info":
-			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true}}`)
+			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true,"cli_connect_device_code":true}}`)
 		case "/api/auth/cli-connect/register":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{"user_code":"ABCD-1234","expires_at":"2026-01-01T00:00:00Z"}`)

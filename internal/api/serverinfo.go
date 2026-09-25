@@ -47,6 +47,7 @@ type serverCapabilities struct {
 	FleetPreconditions        bool `json:"fleet_preconditions"`
 	ContentDigest             bool `json:"content_digest"`
 	CLIConnect                bool `json:"cli_connect"`
+	CLIConnectDeviceCode      bool `json:"cli_connect_device_code"`
 	DeployEvents              bool `json:"deploy_events"`
 	PlanApply                 bool `json:"plan_apply"`
 	FleetProvenance           bool `json:"fleet_provenance"`
@@ -74,6 +75,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			FleetPreconditions:        true,
 			ContentDigest:             true,
 			CLIConnect:                true,
+			CLIConnectDeviceCode:      true,
 			DeployEvents:              true,
 			PlanApply:                 true,
 			FleetProvenance:           true,

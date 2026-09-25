@@ -46,7 +46,7 @@ func TestConnectRejectsNewerProtocolBeforeRequestingAuthorization(t *testing.T) 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/server-info":
-			_, _ = io.WriteString(w, `{"version":"v99.0.0","protocol_version":99,"capabilities":{"cli_connect":true}}`)
+			_, _ = io.WriteString(w, `{"version":"v99.0.0","protocol_version":99,"capabilities":{"cli_connect":true,"cli_connect_device_code":true}}`)
 		case "/api/auth/me":
 			meCalls++
 			w.WriteHeader(http.StatusInternalServerError)

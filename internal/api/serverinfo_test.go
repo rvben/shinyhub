@@ -22,6 +22,7 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 			FleetPreconditions        bool `json:"fleet_preconditions"`
 			ContentDigest             bool `json:"content_digest"`
 			CLIConnect                bool `json:"cli_connect"`
+			CLIConnectDeviceCode      bool `json:"cli_connect_device_code"`
 			DeployEvents              bool `json:"deploy_events"`
 			FleetProvenance           bool `json:"fleet_provenance"`
 			FleetState                bool `json:"fleet_state"`
@@ -45,6 +46,9 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 	if !got.Capabilities.CLIConnect {
 		t.Errorf("cli_connect not advertised")
+	}
+	if !got.Capabilities.CLIConnectDeviceCode {
+		t.Errorf("cli_connect_device_code not advertised")
 	}
 	if !got.Capabilities.DeployEvents {
 		t.Errorf("deploy_events not advertised")

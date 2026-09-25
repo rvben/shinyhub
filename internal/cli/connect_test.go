@@ -190,7 +190,7 @@ func TestConnect_ValidSavedCredentialIsCurrentWithoutRotation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/server-info":
-			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true},"runtimes":{"python":true}}`)
+			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true,"cli_connect_device_code":true},"runtimes":{"python":true}}`)
 		case "/api/auth/me":
 			if r.Header.Get("Authorization") != "Token shk_saved" {
 				t.Fatalf("identity used %q, want the saved credential", r.Header.Get("Authorization"))
@@ -326,7 +326,7 @@ func TestConnect_RejectedSavedCredentialReauthorizes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/server-info":
-			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true}}`)
+			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true,"cli_connect_device_code":true}}`)
 		case "/api/auth/me":
 			if r.Header.Get("Authorization") == "Token shk_rejected" {
 				w.WriteHeader(http.StatusUnauthorized)
@@ -373,7 +373,7 @@ func TestConnect_SavedCredentialServerFailureDoesNotRotate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/server-info":
-			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true}}`)
+			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true,"cli_connect_device_code":true}}`)
 		case "/api/auth/me":
 			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
 		case "/api/auth/cli-connect/status":
@@ -424,7 +424,7 @@ func TestConnect_BrowserFlowKeepsPairingStateOutOfURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/server-info":
-			_, _ = io.WriteString(w, `{"version":"1.4.0","capabilities":{"content_digest":true,"cli_connect":true},"runtimes":{"python":true,"r":true}}`)
+			_, _ = io.WriteString(w, `{"version":"1.4.0","capabilities":{"content_digest":true,"cli_connect":true,"cli_connect_device_code":true},"runtimes":{"python":true,"r":true}}`)
 		case "/api/auth/cli-connect/register":
 			var body struct {
 				TokenHash string `json:"token_hash"`
@@ -539,7 +539,7 @@ func TestConnect_NoBrowserSupportsRedirectedOutput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/server-info":
-			_, _ = io.WriteString(w, `{"version":"1.4.0","capabilities":{"cli_connect":true},"runtimes":{"python":true}}`)
+			_, _ = io.WriteString(w, `{"version":"1.4.0","capabilities":{"cli_connect":true,"cli_connect_device_code":true},"runtimes":{"python":true}}`)
 		case "/api/auth/cli-connect/register":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{"user_code":"ABCD-1234","expires_at":"2026-01-01T00:00:00Z"}`)
@@ -711,5 +711,47 @@ func TestFirstDeployOffersConnectionOnlyInInteractiveTableMode(t *testing.T) {
 	connected, err = offerConnectForFirstDeploy(cmd)
 	if err != nil || connected || progress.Len() != 0 {
 		t.Fatalf("non-interactive offer must be silent: connected=%v err=%v output=%q", connected, err, progress.String())
+	}
+}
+
+// TestConnect_PreDeviceCodeServerExplainsUpgrade pins the new-CLI/old-server
+// case. A server from before the device-code flow advertises cli_connect but
+// has no /api/auth/cli-connect endpoints, so registering would fail with a bare
+// 404. The CLI must recognise that server from its capabilities and stop before
+// any pairing request, naming both ways forward.
+func TestConnect_PreDeviceCodeServerExplainsUpgrade(t *testing.T) {
+	isolatedCredentials(t)
+	var browserCalls, pairingCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/server-info":
+			_, _ = io.WriteString(w, `{"version":"v0.17.3","protocol_version":2,"capabilities":{"cli_connect":true}}`)
+		default:
+			if strings.HasPrefix(r.URL.Path, "/api/auth/cli-connect/") {
+				pairingCalls++
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	origTTY, origOpen := isStdinTTY, openBrowserURL
+	t.Cleanup(func() { isStdinTTY, openBrowserURL = origTTY, origOpen })
+	isStdinTTY = func() bool { return true }
+	openBrowserURL = func(string) error { browserCalls++; return nil }
+
+	cmd, _, _ := connectTestCommand()
+	err := runConnect(cmd, []string{srv.URL}, &connectFlags{timeout: defaultConnectTimeout})
+	if err == nil || !strings.Contains(err.Error(), "older browser authorization flow") {
+		t.Fatalf("error = %v, want the pre-device-code server explanation", err)
+	}
+	if kind, _ := classify(err); kind != KindAuth {
+		t.Errorf("kind = %v, want %v", kind, KindAuth)
+	}
+	hint := hintOf(err)
+	if !strings.Contains(hint, "v0.17.4") || !strings.Contains(hint, "--token-file") {
+		t.Errorf("hint = %q, want the server upgrade and the token-file alternative", hint)
+	}
+	if pairingCalls != 0 || browserCalls != 0 {
+		t.Fatalf("pairing requests=%d browser opens=%d, want none", pairingCalls, browserCalls)
 	}
 }

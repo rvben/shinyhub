@@ -5,6 +5,7 @@
     "fleet_preconditions": true,
     "content_digest": true,
     "cli_connect": true,
+    "cli_connect_device_code": true,
     "schedule_deploy_convergence": true
   },
   "runtimes": {

@@ -257,6 +257,12 @@ func runConnect(cmd *cobra.Command, args []string, f *connectFlags) error {
 			return authErr("this ShinyHub does not support browser CLI authorization",
 				"upgrade the server, or create an API token in the dashboard and rerun with --token-file <path>")
 		}
+		if !info.Capabilities.CLIConnectDeviceCode {
+			// Servers before v0.17.4 advertise cli_connect for the older
+			// link-based flow, whose endpoints no longer exist on either side.
+			return authErr("this ShinyHub uses an older browser authorization flow than this CLI",
+				"upgrade the server to v0.17.4 or later, or create an API token in the dashboard and rerun with --token-file <path>")
+		}
 		token, err = browserAuthorizeCLI(cmd, host, f)
 		if err != nil {
 			return err
