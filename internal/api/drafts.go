@@ -296,7 +296,7 @@ func (s *Server) handlePreviewDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if d.PreviewSlug != "" {
-		deps, err := s.store.ListDeployments(*d.PreviewAppID)
+		deps, err := s.store.ListRecentDeployments(*d.PreviewAppID, 1)
 		if err != nil {
 			writeError(w, 500, "inspect preview")
 			return
@@ -385,7 +385,7 @@ func (s *Server) handlePromoteDraft(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "start and review the draft preview before promotion")
 		return
 	}
-	deps, err := s.store.ListDeployments(*d.PreviewAppID)
+	deps, err := s.store.ListRecentDeployments(*d.PreviewAppID, 1)
 	if err != nil || len(deps) == 0 || deps[0].ContentDigest != d.ContentDigest {
 		writeError(w, 409, "draft preview has not deployed successfully")
 		return

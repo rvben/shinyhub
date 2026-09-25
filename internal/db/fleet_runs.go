@@ -193,6 +193,39 @@ func (s *Store) FinishFleetRun(id, status string, exitCode int, reason string) e
 	return ErrFleetRunFinished
 }
 
+// PruneFleetRuns keeps the newest keepPerFleet terminal runs independently
+// for every fleet_id and deletes older ones. A run still named by
+// app_fleet_state as an app's successful or latest run is preserved
+// regardless of rank: fleet status reads those pointers directly to show the
+// last known apply, and deleting the row would silently blank that out for
+// an app that has not been re-applied recently. Running runs are never
+// removed, mirroring PruneAppLogRuns' treatment of in-progress rows.
+// A non-positive keepPerFleet is a no-op.
+func (s *Store) PruneFleetRuns(keepPerFleet int) (int64, error) {
+	defer s.timed("PruneFleetRuns")()
+	if keepPerFleet <= 0 {
+		return 0, nil
+	}
+	res, err := s.db.Exec(`
+		WITH ranked AS (
+			SELECT id, ROW_NUMBER() OVER (
+				PARTITION BY fleet_id
+				ORDER BY created_at DESC, run_sequence DESC
+			) AS retention_rank
+			FROM fleet_runs
+			WHERE status != 'running'
+		)
+		DELETE FROM fleet_runs
+		WHERE id IN (SELECT id FROM ranked WHERE retention_rank > ?)
+		  AND id NOT IN (SELECT successful_run_id FROM app_fleet_state WHERE successful_run_id IS NOT NULL)
+		  AND id NOT IN (SELECT latest_run_id FROM app_fleet_state WHERE latest_run_id IS NOT NULL)`,
+		keepPerFleet)
+	if err != nil {
+		return 0, fmt.Errorf("prune fleet runs: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 func mustMarshal(v any) string { b, _ := json.Marshal(v); return string(b) }
 func sameNullableID(a, b *int64) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b

@@ -289,6 +289,18 @@ type MaintenanceConfig struct {
 	// replica and deletes older metadata, chunks, and local files. 0 selects the
 	// default (20); -1 keeps every run.
 	AppLogRunRetentionCount int `yaml:"app_log_run_retention_count"`
+	// FleetRunRetentionCount keeps this many newest terminal fleet_runs per
+	// fleet and deletes older ones. 0 (the default) keeps all runs; -1 keeps
+	// all runs explicitly. A run still recorded as an app's successful or
+	// latest apply is kept regardless of rank. Any other negative value is
+	// rejected at load.
+	FleetRunRetentionCount int `yaml:"fleet_run_retention_count"`
+	// DevelopmentSessionRetentionDays deletes ended, non-ephemeral
+	// development_sessions older than this many days. 0 (the default) keeps
+	// them forever; -1 keeps them forever explicitly. Ephemeral sessions are
+	// never affected: they are removed with their app. Any other negative
+	// value is rejected at load.
+	DevelopmentSessionRetentionDays int `yaml:"development_session_retention_days"`
 	// Interval is how often the maintenance loop runs. Defaults to 1h.
 	Interval time.Duration `yaml:"interval"`
 }
@@ -1735,6 +1747,18 @@ func loadRaw(path string) (*Config, error) {
 	if cfg.Maintenance.ScheduleRunRetentionCount < 0 {
 		cfg.Maintenance.ScheduleRunRetentionCount = 0
 	}
+	if cfg.Maintenance.FleetRunRetentionCount < -1 {
+		return nil, fmt.Errorf("maintenance.fleet_run_retention_count must be -1 or greater")
+	}
+	if cfg.Maintenance.FleetRunRetentionCount == -1 {
+		cfg.Maintenance.FleetRunRetentionCount = 0
+	}
+	if cfg.Maintenance.DevelopmentSessionRetentionDays < -1 {
+		return nil, fmt.Errorf("maintenance.development_session_retention_days must be -1 or greater")
+	}
+	if cfg.Maintenance.DevelopmentSessionRetentionDays == -1 {
+		cfg.Maintenance.DevelopmentSessionRetentionDays = 0
+	}
 	if cfg.Maintenance.AppLogRunRetentionCount < -1 {
 		return nil, fmt.Errorf("maintenance.app_log_run_retention_count must be -1 or greater")
 	}
@@ -2854,6 +2878,20 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_APP_LOG_RUN_RETENTION_COUNT: %q is not an integer: %w", v, err)
 		}
 		cfg.Maintenance.AppLogRunRetentionCount = n
+	}
+	if v := os.Getenv("SHINYHUB_FLEET_RUN_RETENTION_COUNT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_FLEET_RUN_RETENTION_COUNT: %q is not an integer: %w", v, err)
+		}
+		cfg.Maintenance.FleetRunRetentionCount = n
+	}
+	if v := os.Getenv("SHINYHUB_DEVELOPMENT_SESSION_RETENTION_DAYS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_DEVELOPMENT_SESSION_RETENTION_DAYS: %q is not an integer: %w", v, err)
+		}
+		cfg.Maintenance.DevelopmentSessionRetentionDays = n
 	}
 	if v := os.Getenv("SHINYHUB_APP_QUOTA_MB"); v != "" {
 		n, err := strconv.Atoi(v)

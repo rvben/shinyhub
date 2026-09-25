@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,5 +96,99 @@ func TestRunMaintenancePrunesDatabaseBeforeLocalLogFiles(t *testing.T) {
 	}
 	if usageRows != 0 {
 		t.Fatalf("disabled usage retained %d expired rows", usageRows)
+	}
+}
+
+// TestRunMaintenancePrunesFleetRunsAndDevelopmentSessions proves runMaintenance
+// actually invokes the fleet run and development session prune knobs when
+// configured, not just that the underlying Store methods work in isolation.
+func TestRunMaintenancePrunesFleetRunsAndDevelopmentSessions(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner2", PasswordHash: "hash", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner2")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "fleet-demo", Name: "Fleet Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("fleet-demo")
+
+	for i, id := range []string{"run-old", "run-new"} {
+		if _, _, err := store.CreateFleetRun(db.CreateFleetRunParams{
+			ID: id, FleetID: "acme", Kind: "fleet_apply",
+		}); err != nil {
+			t.Fatalf("create fleet run %d: %v", i, err)
+		}
+		if err := store.FinishFleetRun(id, "succeeded", 0, ""); err != nil {
+			t.Fatalf("finish fleet run %d: %v", i, err)
+		}
+	}
+
+	if err := store.UpsertDevelopmentSession(db.UpsertDevelopmentSessionParams{
+		ID: "sess-old", AppID: app.ID, TargetKind: db.DevelopmentTargetExisting,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EndDevelopmentSession(app.ID, "sess-old", time.Now().UTC().Add(-100*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // maintenance still runs its prompt first pass, then exits.
+	runMaintenance(ctx, store, nil, nil, config.MaintenanceConfig{
+		FleetRunRetentionCount:          1,
+		DevelopmentSessionRetentionDays: 30,
+		Interval:                        time.Hour,
+	}, config.UsageConfig{Enabled: false})
+
+	if _, err := store.GetFleetRun("run-old"); err != db.ErrNotFound {
+		t.Errorf("expected run-old to be pruned, got %v", err)
+	}
+	if _, err := store.GetFleetRun("run-new"); err != nil {
+		t.Errorf("expected run-new to survive prune, got %v", err)
+	}
+	if _, err := store.GetDevelopmentSession(app.ID, "sess-old"); err != db.ErrNotFound {
+		t.Errorf("expected sess-old to be pruned, got %v", err)
+	}
+}
+
+// TestRunMaintenanceFinalizesStaleUsageSessionsIndependentOfRetention proves
+// runMaintenance closes out a crashed (heartbeat-stale) usage session even
+// when both usage retention knobs are disabled. Without independent
+// finalization, a session that never gets ended_at set stays in the
+// usage_closed_daily fast path's live re-scan forever whenever an operator
+// tracks usage but never enables retention.
+func TestRunMaintenanceFinalizesStaleUsageSessionsIndependentOfRetention(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner3", PasswordHash: "hash", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner3")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "usage-demo", Name: "Usage Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// started_at (and therefore the initial heartbeat_at) is far enough in the
+	// past to be stale, but well inside any retention window would-be enforce -
+	// retention is disabled below, so only heartbeat staleness should matter.
+	if err := store.BeginUsageSession(db.UsageSessionStart{
+		ID: "crashed-1", Slug: "usage-demo", InstanceID: "cp",
+		StartedAt: time.Now().UTC().Add(-5 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // maintenance still runs its prompt first pass, then exits.
+	runMaintenance(ctx, store, nil, nil, config.MaintenanceConfig{
+		Interval: time.Hour,
+	}, config.UsageConfig{Enabled: true, RawRetentionDays: 0, AggregateRetentionDays: 0})
+
+	var endedAt sql.NullTime
+	if err := store.DB().QueryRow(`SELECT ended_at FROM usage_sessions WHERE id = ?`, "crashed-1").Scan(&endedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !endedAt.Valid {
+		t.Fatal("expected crashed-1 to be finalized (ended_at set) despite retention being disabled")
 	}
 }

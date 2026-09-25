@@ -84,7 +84,7 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 		}
 	}
 	surgeIndex := targetReplicas
-	deployments, err := s.store.ListDeployments(app.ID)
+	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
 	if err != nil {
 		return fmt.Errorf("list deployments: %w", err)
 	}

@@ -173,6 +173,17 @@ func (f *fakeStore) ListDeployments(appID int64) ([]*db.Deployment, error) {
 	return out, nil
 }
 
+func (f *fakeStore) ListRecentDeployments(appID int64, n int) ([]*db.Deployment, error) {
+	all, err := f.ListDeployments(appID)
+	if err != nil {
+		return nil, err
+	}
+	if len(all) > n {
+		all = all[:n]
+	}
+	return all, nil
+}
+
 func (f *fakeStore) HasPendingDeployment(appID int64) (bool, error) {
 	return f.pending, nil
 }

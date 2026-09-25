@@ -1,10 +1,21 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 )
+
+// secretRotationLockKey serializes RotateSecretsTx against itself and takes the
+// write lock up front (BEGIN IMMEDIATE on SQLite; a transaction plus
+// pg_advisory_xact_lock on Postgres), the same pattern GrantSharedData uses.
+// Without it, a plain deferred transaction takes no lock until its first
+// write, so a concurrent write to the same row rotation already read can
+// commit in between rotation's read and its own write; on SQLite/WAL that
+// leaves rotation holding a stale snapshot and its UPDATE is rejected outright
+// (SQLITE_BUSY_SNAPSHOT) instead of blocking.
+const secretRotationLockKey int64 = 0x5348524f54 // "SHROT"
 
 // RotateSecretsTx re-encrypts every at-rest secret in a single transaction: each
 // app_env_vars row whose is_secret is true, the worker CA private key if a CA
@@ -17,7 +28,8 @@ import (
 // method only moves bytes atomically. Returns the number of env secrets rotated
 // and whether the singleton keys were rotated.
 func (s *Store) RotateSecretsTx(reencryptEnv, reencryptCA, reencryptUsage func([]byte) ([]byte, error)) (envRotated int, caRotated, usageRotated bool, err error) {
-	tx, err := s.db.Begin()
+	ctx := context.Background()
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), secretRotationLockKey)
 	if err != nil {
 		return 0, false, false, fmt.Errorf("begin: %w", err)
 	}

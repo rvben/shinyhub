@@ -97,7 +97,12 @@ historical app/day peak is finalized once before its first raw batch is deleted,
 preventing repeated full-day scans on busy installations. A genuinely
 live session is retained even if it crosses the cutoff; an abandoned open row
 whose heartbeat has been stale for 90 seconds is finalized at its last observed
-heartbeat before rollup. Daily totals are then removed at the aggregate cutoff.
+heartbeat on every maintenance pass, independently of retention - it is closed
+out even when both raw and aggregate retention are disabled, so a crashed
+replica never leaves a session open indefinitely. When rollup does run,
+finalization happens first, before that day's peak concurrency is computed and
+its raw rows are deleted. Daily totals are then removed at the aggregate
+cutoff.
 Windows containing person-session rollups, deleted-user rows, or identity modes
 from both sides of a prospective upgrade cannot claim an exact distinct-viewer
 count. The session totals remain available; uniqueness is reported as unknown,

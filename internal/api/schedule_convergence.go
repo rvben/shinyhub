@@ -17,7 +17,7 @@ func (s *Server) handleReconcileScheduleConvergence(w http.ResponseWriter, r *ht
 	}
 	release := s.acquireDeployLock(app.Slug)
 	defer release()
-	deployments, err := s.store.ListDeployments(app.ID)
+	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "resolve current deployment")
 		return
@@ -205,7 +205,7 @@ func (s *Server) dispatchScheduleConvergence(appID, deploymentID int64, scoped b
 }
 
 func (s *Server) reconcileCurrentSchedule(appID, scheduleID int64) (*ScheduleConvergenceResult, error) {
-	deployments, err := s.store.ListDeployments(appID)
+	deployments, err := s.store.ListRecentDeployments(appID, 1)
 	if err != nil {
 		return nil, err
 	}

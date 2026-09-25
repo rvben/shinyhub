@@ -2461,7 +2461,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// rows, so recovery/watcher/scheduler/rollback keep pointing at the
 	// previous bundle until PromoteDeployment confirms the new pool is live.
 	var prevActive *db.Deployment
-	if existing, lerr := s.store.ListDeployments(app.ID); lerr == nil && len(existing) > 0 {
+	if existing, lerr := s.store.ListRecentDeployments(app.ID, 1); lerr == nil && len(existing) > 0 {
 		prevActive = existing[0]
 	}
 	preexistingCompatibilityQuarantine, err := s.store.AppCompatibilityQuarantined(app.ID)
@@ -3438,7 +3438,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		prev = dep
 	} else {
 		// Default rollback: use the previous deployment (index 1, newest-first).
-		deployments, err := s.store.ListDeployments(app.ID)
+		deployments, err := s.store.ListRecentDeployments(app.ID, 2)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
@@ -3507,7 +3507,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	// the rollback target as a pending deployment BEFORE tearing down the pool
 	// (same durability contract as a forward deploy).
 	var prevActive *db.Deployment
-	if existing, lerr := s.store.ListDeployments(app.ID); lerr == nil && len(existing) > 0 {
+	if existing, lerr := s.store.ListRecentDeployments(app.ID, 1); lerr == nil && len(existing) > 0 {
 		prevActive = existing[0]
 	}
 	preexistingCompatibilityQuarantine, err := s.store.AppCompatibilityQuarantined(app.ID)
@@ -3856,7 +3856,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deployments, err := s.store.ListDeployments(app.ID)
+	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

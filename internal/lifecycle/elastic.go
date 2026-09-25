@@ -154,7 +154,7 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	}
 
 	// Load the latest ready (non-pending, non-failed) deployment.
-	deps, err := s.Store.ListDeployments(app.ID)
+	deps, err := s.Store.ListRecentDeployments(app.ID, 1)
 	if err != nil || len(deps) == 0 {
 		slog.Warn("elastic spawn: no ready deployments", "slug", slug, "slotID", slotID)
 		s.releaseReservation(slug, slotID)
@@ -560,7 +560,7 @@ func (s *ElasticSpawner) Resume(slug string, slotID int) {
 		s.Terminate(slug, slotID)
 		return
 	}
-	deps, depsErr := s.Store.ListDeployments(app.ID)
+	deps, depsErr := s.Store.ListRecentDeployments(app.ID, 1)
 	if depsErr != nil || len(deps) == 0 {
 		slog.Warn("elastic warm spare: load resume deployment failed", "slug", slug, "slotID", slotID, "err", depsErr)
 		s.Terminate(slug, slotID)
