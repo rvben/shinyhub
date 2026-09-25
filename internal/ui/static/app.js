@@ -97,10 +97,10 @@ import { focusedKey, restoreFocus, siblingKey } from '/static/views/focus-restor
 import { wireKebab } from '/static/views/kebab-menu.js';
 import { buildProjectPatchBody } from '/static/views/project-edit-body.js';
 import {
-  CLI_CONNECT_STORAGE_KEY,
   cliConnectDeviceLabel,
-  cliConnectRequestFromSearch,
-  validCLIConnectRequest,
+  legacyCLIConnectLinkDetected,
+  normalizeCLIUserCode,
+  validCLIUserCode,
 } from '/static/views/cli-connect.js';
 
 function setHidden(element, hidden) {
@@ -361,14 +361,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const tokenRevealDone = document.getElementById('token-reveal-done');
   const tokenRevealStatus = document.getElementById('token-reveal-status');
   const profileTokensLink = document.getElementById('profile-tokens-link');
-  const cliConnectPanel   = document.getElementById('cli-connect-panel');
-  const cliConnectUser    = document.getElementById('cli-connect-user');
-  const cliConnectDevice  = document.getElementById('cli-connect-device');
-  const cliConnectCode    = document.getElementById('cli-connect-code');
-  const cliConnectError   = document.getElementById('cli-connect-error');
-  const cliConnectSuccess = document.getElementById('cli-connect-success');
-  const cliConnectCancel  = document.getElementById('cli-connect-cancel');
-  const cliConnectApprove = document.getElementById('cli-connect-approve');
+  const cliConnectPanel     = document.getElementById('cli-connect-panel');
+  const cliConnectCodeInput = document.getElementById('cli-connect-code-input');
+  const cliConnectError     = document.getElementById('cli-connect-error');
+  const cliConnectSuccess   = document.getElementById('cli-connect-success');
+  const cliConnectApprove   = document.getElementById('cli-connect-approve');
+  const cliConnectLegacyNotice = document.getElementById('cli-connect-legacy-notice');
   const resetPwModal    = document.getElementById('reset-password-modal');
   const resetPwClose    = document.getElementById('reset-password-close');
   const resetPwCancel   = document.getElementById('reset-password-cancel');
@@ -1025,7 +1023,10 @@ document.addEventListener('DOMContentLoaded', () => {
     else supportRecovery.clear();
     const selfService = payload.user.can_manage_self !== false;
     if (newTokenButton) newTokenButton.hidden = !selfService;
-    if (cliConnectPanel && !selfService) cliConnectPanel.hidden = true;
+    // Shared/managed accounts get a 403 from the approve endpoint, so there is
+    // nothing this panel can do for them; every other role can always type a
+    // code, regardless of whether a request happens to be pending right now.
+    if (cliConnectPanel) cliConnectPanel.hidden = !selfService;
     // Apply the new session's sidebar policy before any asynchronous list load
     // so switching identities in one tab cannot flash the previous catalog.
     syncSidebar();
@@ -2710,65 +2711,42 @@ document.addEventListener('DOMContentLoaded', () => {
     renderTokenList(tokensList, tokenListModels(tokens), document, {mutable: selfService});
   }
 
-  function persistCLIConnectRequest() {
-    const request = cliConnectRequestFromSearch(window.location.search);
-    if (!request) return null;
-    try { sessionStorage.setItem(CLI_CONNECT_STORAGE_KEY, JSON.stringify(request)); } catch { /* storage may be blocked */ }
-    return request;
-  }
-
-  function pendingCLIConnectRequest() {
-    const current = cliConnectRequestFromSearch(window.location.search);
-    if (current) return current;
-    try {
-      const saved = JSON.parse(sessionStorage.getItem(CLI_CONNECT_STORAGE_KEY) || 'null');
-      if (validCLIConnectRequest(saved)) return saved;
-    } catch { /* absent, malformed, or blocked storage */ }
-    return null;
-  }
-
-  function clearCLIConnectRequest() {
-    try { sessionStorage.removeItem(CLI_CONNECT_STORAGE_KEY); } catch { /* storage may be blocked */ }
-  }
-
-  function restoreCLIConnectRoute() {
-    const request = pendingCLIConnectRequest();
-    if (!request || cliConnectRequestFromSearch(window.location.search)) return;
-    const params = new URLSearchParams({
-      connect_hash: request.tokenHash,
-      connect_name: request.name,
-      connect_code: request.code,
-    });
-    history.replaceState(null, '', `/tokens?${params}`);
-  }
-
-  function renderCLIConnectRequest() {
+  // The code-entry form has no state carried on the URL or in storage: a
+  // person reads the code off their own terminal and types it here, so
+  // visiting /tokens always shows the same blank form regardless of how they
+  // arrived (including back from an SSO redirect). The one exception is the
+  // legacy-CLI notice below, which only checks whether an old-style link's
+  // query parameters are PRESENT; it never reads their values, so nothing in
+  // the URL can drive an approval.
+  function resetCLIConnectForm() {
     if (!cliConnectPanel) return;
-    const request = pendingCLIConnectRequest();
-    cliConnectPanel.hidden = !request;
-    if (!request) return;
-    cliConnectUser.textContent = (state.user && (state.user.display_name || state.user.username)) || 'your account';
-    cliConnectDevice.textContent = cliConnectDeviceLabel(request.name);
-    cliConnectCode.textContent = request.code;
+    if (cliConnectCodeInput) cliConnectCodeInput.value = '';
     setError(cliConnectError, '');
-    cliConnectSuccess.hidden = true;
-    cliConnectApprove.hidden = false;
-    cliConnectCancel.hidden = false;
-    cliConnectApprove.disabled = false;
-    cliConnectApprove.textContent = 'Connect CLI';
+    if (cliConnectSuccess) cliConnectSuccess.hidden = true;
+    if (cliConnectApprove) {
+      cliConnectApprove.disabled = false;
+      cliConnectApprove.textContent = 'Connect CLI';
+    }
+    if (cliConnectLegacyNotice) {
+      cliConnectLegacyNotice.hidden = !legacyCLIConnectLinkDetected(location.search);
+    }
   }
 
   async function approveCLIConnect() {
-    const request = pendingCLIConnectRequest();
-    if (!request) return;
+    if (!cliConnectApprove) return;
+    const code = normalizeCLIUserCode(cliConnectCodeInput ? cliConnectCodeInput.value : '');
+    setError(cliConnectError, '');
+    if (!validCLIUserCode(code)) {
+      setError(cliConnectError, 'Enter the code exactly as shown in your terminal.');
+      return;
+    }
     cliConnectApprove.disabled = true;
     cliConnectApprove.textContent = 'Connecting…';
-    setError(cliConnectError, '');
     let resp;
     try {
-      resp = await api('/api/tokens/connect', {
+      resp = await api('/api/auth/cli-connect/approve', {
         method: 'POST',
-        body: JSON.stringify({ token_hash: request.tokenHash, name: request.name }),
+        body: JSON.stringify({ user_code: code }),
       });
     } catch {
       setError(cliConnectError, 'Network error. The terminal is still waiting; try again.');
@@ -2785,18 +2763,16 @@ document.addEventListener('DOMContentLoaded', () => {
       cliConnectApprove.textContent = 'Connect CLI';
       return;
     }
-    clearCLIConnectRequest();
-    cliConnectSuccess.hidden = false;
-    cliConnectApprove.hidden = true;
-    cliConnectCancel.textContent = 'Done';
-    history.replaceState(null, '', '/tokens');
+    let body = {};
+    try { body = await resp.json(); } catch {}
+    if (cliConnectCodeInput) cliConnectCodeInput.value = '';
+    if (cliConnectSuccess) {
+      cliConnectSuccess.textContent = `Connected as ${cliConnectDeviceLabel(body.name)}. You can return to your terminal.`;
+      cliConnectSuccess.hidden = false;
+    }
+    cliConnectApprove.disabled = false;
+    cliConnectApprove.textContent = 'Connect CLI';
     loadTokens();
-  }
-
-  function cancelCLIConnect() {
-    clearCLIConnectRequest();
-    if (cliConnectPanel) cliConnectPanel.hidden = true;
-    router.navigate('/tokens', { replace: true });
   }
 
   function openNewTokenModal() {
@@ -4887,7 +4863,9 @@ document.addEventListener('DOMContentLoaded', () => {
     closeProfileModal();
   });
   if (cliConnectApprove) cliConnectApprove.addEventListener('click', approveCLIConnect);
-  if (cliConnectCancel) cliConnectCancel.addEventListener('click', cancelCLIConnect);
+  if (cliConnectCodeInput) cliConnectCodeInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') approveCLIConnect();
+  });
   if (tokenRevealCopy) {
     const copyLabel = tokenRevealCopy.querySelector('.copy-label');
     tokenRevealCopy.addEventListener('click', async () => {
@@ -6501,7 +6479,7 @@ document.addEventListener('DOMContentLoaded', () => {
   router.register('/tokens', () => {
     hideAllPageViews();
     if (tokensView) tokensView.hidden = false;
-    renderCLIConnectRequest();
+    resetCLIConnectForm();
     loadTokens();
     // Matches the page's own <h1>, so a tab, a bookmark and a history entry
     // name this page instead of falling back to the bare product name.
@@ -6540,10 +6518,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // Persist any /#deploy=<slug> hash before the auth check so the slug
     // survives the login redirect in case the user is not authenticated.
     persistDeployHash();
-    // Keep a CLI pairing request in this tab across an OAuth/OIDC redirect.
-    // Those callbacks intentionally return to `/`; the pending request restores
-    // `/tokens` only after the browser session has been verified.
-    persistCLIConnectRequest();
     loadProviders();
     setError(loginError, '');
 
@@ -6568,7 +6542,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const payload = await response.json();
     showLoggedIn(payload);
-    restoreCLIConnectRoute();
     if (await startAuthenticatedRouter(router)) return;
     await handleDeployHash();
     await restorePendingSupportSession();

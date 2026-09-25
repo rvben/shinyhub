@@ -48,7 +48,7 @@ func TestManagedAccountCannotMutateSharedIdentity(t *testing.T) {
 		body   string
 	}{
 		{http.MethodPost, "/api/tokens", `{"name":"escape"}`},
-		{http.MethodPost, "/api/tokens/connect", `{"name":"escape","token_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`},
+		{http.MethodPost, "/api/auth/cli-connect/approve", `{"user_code":"AAAA-1111"}`},
 		{http.MethodDelete, "/api/tokens/1", ""},
 	} {
 		req := httptest.NewRequest(request.method, request.path, strings.NewReader(request.body))

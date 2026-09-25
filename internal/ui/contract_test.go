@@ -4251,34 +4251,64 @@ func TestFirstAppOnboardingAdvancesDirectlyToDeploy(t *testing.T) {
 	}
 }
 
-// Remote CLI onboarding is initiated in the terminal and approved in the
-// signed-in dashboard. The browser receives only a SHA-256 hash, never the raw
-// credential, and the request survives SSO redirects in per-tab storage.
+// Remote CLI onboarding is initiated in the terminal, which registers its
+// credential hash with the server first, and is approved in the signed-in
+// dashboard by typing the short code the terminal printed. The authorization
+// page carries no pairing state of its own: nothing about which credential to
+// approve can be supplied by a link, only by a person reading their own
+// terminal and typing what it shows.
 func TestRemoteCLIConnectionOnboardingContract(t *testing.T) {
 	html := readStatic(t, "index.html")
 	for _, want := range []string{
-		`id="cli-connect-panel"`, `id="cli-connect-code"`,
+		`id="cli-connect-panel"`, `id="cli-connect-code-input"`,
 		`id="cli-connect-approve"`, `id="cli-connect-success"`,
+		`id="cli-connect-error"`, `id="cli-connect-legacy-notice"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("CLI connection onboarding markup missing %q", want)
 		}
 	}
+	// An old, pre-device-authorization CLI binary opens this page with its
+	// pairing state on the URL; the notice element must default to hidden so
+	// an ordinary /tokens visit (or a current CLI's bare-URL link) never shows it.
+	if !strings.Contains(html, `id="cli-connect-legacy-notice" class="cli-connect-legacy-notice" role="status" hidden`) {
+		t.Error("legacy CLI notice must default to hidden")
+	}
+	// The panel is not gated behind any pending-request state: it has no
+	// `hidden` attribute of its own, so it is visible to every self-service
+	// account the moment they open the tokens page.
+	if strings.Contains(html, `id="cli-connect-panel" class="cli-connect-panel" hidden`) {
+		t.Error("CLI connection panel must not default to hidden; it is always available for typing a code")
+	}
 	js := readStatic(t, "app.js")
 	for _, want := range []string{
-		"sessionStorage.setItem(CLI_CONNECT_STORAGE_KEY",
-		"/api/tokens/connect",
-		"token_hash: request.tokenHash",
-		"restoreCLIConnectRoute()",
+		"/api/auth/cli-connect/approve",
+		"user_code: code",
+		"normalizeCLIUserCode(cliConnectCodeInput",
+		"validCLIUserCode(code)",
 		"shinyhub connect ${origin}",
 		"shinyhub deploy . --slug ${slug} --wait",
+		"legacyCLIConnectLinkDetected(location.search)",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("remote CLI onboarding wiring missing %q", want)
 		}
 	}
-	if strings.Contains(js, "connect_hash: raw") || strings.Contains(js, "connect_token") {
-		t.Fatal("browser pairing must never carry the raw CLI credential")
+	// The browser must never hold, transmit, or derive from anything that
+	// identifies which credential to approve other than the code a person
+	// typed: no hash, no pre-approved request carried on the URL or in
+	// storage, and no endpoint that mints a key straight from a hash. The
+	// legacy-link detector itself lives only in cli-connect.js, which reads
+	// query PARAMETER NAMES to decide whether to show a static notice, never
+	// a value; app.js calling it by name (asserted above) without ever
+	// spelling out connect_hash/connect_name/connect_code itself is exactly
+	// what keeps this list meaningful here.
+	for _, forbidden := range []string{
+		"token_hash", "connect_hash", "connect_token", "/api/tokens/connect",
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("browser pairing must not reference %q; approval must be by typed code alone", forbidden)
+		}
 	}
 }
 

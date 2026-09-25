@@ -5485,12 +5485,23 @@ func (s *Server) logQuotaRejected(r *http.Request, slug string, usedBytes int64)
 	})
 }
 
+// maxPaginationLimit bounds an explicit ?limit= value so a single request
+// cannot force a handler to load and serialize an unbounded number of rows.
+// It is applied once here so every caller of parsePagination inherits it.
+const maxPaginationLimit = 500
+
 // parsePagination extracts optional ?limit= and ?offset= query parameters.
 // Returns 0 for both when absent, which callers interpret as "no pagination".
+// A supplied limit above maxPaginationLimit is clamped down to it; an absent
+// or non-positive limit is left at 0 so that existing "no bound" behavior is
+// unaffected.
 func parsePagination(r *http.Request) (limit, offset int) {
 	if s := r.URL.Query().Get("limit"); s != "" {
 		if v, err := strconv.Atoi(s); err == nil && v > 0 {
 			limit = v
+			if limit > maxPaginationLimit {
+				limit = maxPaginationLimit
+			}
 		}
 	}
 	if s := r.URL.Query().Get("offset"); s != "" {

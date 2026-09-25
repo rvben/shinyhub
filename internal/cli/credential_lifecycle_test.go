@@ -81,6 +81,9 @@ func TestConnectRefreshRotatesAtomicallyAndRevokesPreviousKey(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/server-info":
 			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true},"runtimes":{"python":true}}`)
+		case "/api/auth/cli-connect/register":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"user_code":"ABCD-1234","expires_at":"2026-01-01T00:00:00Z"}`)
 		case "/api/auth/cli-connect/status":
 			_, _ = io.WriteString(w, `{"status":"approved"}`)
 		case "/api/auth/me":
@@ -145,6 +148,9 @@ func TestConnectRefreshFailureLeavesCredentialsByteExact(t *testing.T) {
 			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true}}`)
 		case "/api/auth/me":
 			_, _ = io.WriteString(w, `{"user":{"username":"alice","role":"developer"},"credential":{"type":"api_key","id":9}}`)
+		case "/api/auth/cli-connect/register":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"user_code":"ABCD-1234","expires_at":"2026-01-01T00:00:00Z"}`)
 		case "/api/auth/cli-connect/status":
 			http.Error(w, "pairing unavailable", http.StatusServiceUnavailable)
 		default:
@@ -181,6 +187,9 @@ func TestConnectRefreshRejectsDifferentBrowserIdentity(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/server-info":
 			_, _ = io.WriteString(w, `{"version":"1.7.0","capabilities":{"cli_connect":true}}`)
+		case "/api/auth/cli-connect/register":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"user_code":"ABCD-1234","expires_at":"2026-01-01T00:00:00Z"}`)
 		case "/api/auth/cli-connect/status":
 			_, _ = io.WriteString(w, `{"status":"approved"}`)
 		case "/api/auth/me":

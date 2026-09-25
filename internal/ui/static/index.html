@@ -340,22 +340,19 @@
           <button id="tokens-refresh" type="button">Refresh</button>
         </div>
       </div>
-      <section id="cli-connect-panel" class="cli-connect-panel" hidden aria-labelledby="cli-connect-heading">
+      <section id="cli-connect-panel" class="cli-connect-panel" aria-labelledby="cli-connect-heading">
         <div class="cli-connect-icon" aria-hidden="true">›_</div>
         <div class="cli-connect-content">
-          <p class="cli-connect-context">CLI connection request</p>
-          <h2 id="cli-connect-heading">Connect this terminal?</h2>
-          <p>A terminal is waiting to connect as <strong id="cli-connect-user"></strong>. Approving creates a personal token that expires in 90 days. The credential itself stays private in your terminal.</p>
-          <dl class="cli-connect-details">
-            <div><dt>Device</dt><dd id="cli-connect-device"></dd></div>
-            <div><dt>Verification code</dt><dd><code id="cli-connect-code"></code></dd></div>
-          </dl>
-          <p id="cli-connect-error" class="error" hidden></p>
-          <p id="cli-connect-success" class="cli-connect-success" role="status" hidden>Connected. You can return to your terminal.</p>
-          <div class="cli-connect-actions">
-            <button id="cli-connect-cancel" type="button">Not now</button>
+          <h2 id="cli-connect-heading">Connect a CLI</h2>
+          <p>Run <code>shinyhub connect</code> in a terminal, then type the code it prints below. Approving creates a personal token that expires in 90 days; the credential itself stays private in your terminal.</p>
+          <p id="cli-connect-legacy-notice" class="cli-connect-legacy-notice" role="status" hidden>This link came from an older shinyhub CLI; upgrade it and run <code>shinyhub connect</code> again.</p>
+          <div class="cli-connect-form">
+            <label for="cli-connect-code-input">Verification code</label>
+            <input id="cli-connect-code-input" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-1234" maxlength="9">
             <button id="cli-connect-approve" type="button" class="btn-primary">Connect CLI</button>
           </div>
+          <p id="cli-connect-error" class="error" role="alert" hidden></p>
+          <p id="cli-connect-success" class="cli-connect-success" role="status" hidden></p>
         </div>
       </section>
       <p class="tokens-intro">Personal tokens for the CLI and API. Use with <code>Authorization: token &lt;value&gt;</code> or <code>SHINYHUB_TOKEN</code>. A token is shown once at creation, so store it somewhere safe.</p>

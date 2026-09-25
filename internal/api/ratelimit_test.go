@@ -112,6 +112,36 @@ func TestActionRateLimit(t *testing.T) {
 	}
 }
 
+// TestActionRateLimit_StopEndpoint verifies stop is rate limited per-user like
+// its lifecycle siblings (restart/rollback/sleep all share the actionLimiter).
+func TestActionRateLimit_StopEndpoint(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass-" + strings.Repeat("x", 16))
+	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: hash, Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := store.GetUserByUsername("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var last int
+	for i := 0; i < 31; i++ {
+		req := httptest.NewRequest("POST", "/api/apps/missing/stop", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		last = rr.Code
+	}
+	if last != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on 31st stop, got %d", last)
+	}
+}
+
 // TestBearerAuthFailureRateLimit verifies that repeated FAILED bearer
 // authentications from one client IP are throttled: after enough 401s the
 // limiter returns 429 instead of continuing to answer 401. This dampens

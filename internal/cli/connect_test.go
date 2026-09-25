@@ -333,6 +333,9 @@ func TestConnect_RejectedSavedCredentialReauthorizes(t *testing.T) {
 				return
 			}
 			_, _ = io.WriteString(w, `{"user":{"username":"alice","role":"developer"},"can_create_apps":true}`)
+		case "/api/auth/cli-connect/register":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"user_code":"ABCD-1234","expires_at":"2026-01-01T00:00:00Z"}`)
 		case "/api/auth/cli-connect/status":
 			_, _ = io.WriteString(w, `{"status":"approved"}`)
 		default:
@@ -407,14 +410,31 @@ func TestConnect_SavedCredentialServerFailureDoesNotRotate(t *testing.T) {
 	}
 }
 
-func TestConnect_BrowserFlowKeepsRawCredentialOutOfURL(t *testing.T) {
+// TestConnect_BrowserFlowKeepsPairingStateOutOfURL proves the fix for the
+// phishing hole this design replaces: the authorization URL the CLI opens
+// carries no query parameters at all, so nothing about which credential to
+// approve can be pre-filled by a link. The only way to approve the right
+// credential is to read the user_code the CLI prints off this very terminal
+// and type it into the browser, which the CLI verifies by registering the
+// hash first and asserting the server returns a code before polling.
+func TestConnect_BrowserFlowKeepsPairingStateOutOfURL(t *testing.T) {
 	isolatedCredentials(t)
 	var approved atomic.Bool
-	var seenAuthorization string
+	var registeredHash, seenAuthorization string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/server-info":
 			_, _ = io.WriteString(w, `{"version":"1.4.0","capabilities":{"content_digest":true,"cli_connect":true},"runtimes":{"python":true,"r":true}}`)
+		case "/api/auth/cli-connect/register":
+			var body struct {
+				TokenHash string `json:"token_hash"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode register body: %v", err)
+			}
+			registeredHash = body.TokenHash
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"user_code":"ABCD-1234","expires_at":"2026-01-01T00:00:00Z"}`)
 		case "/api/auth/cli-connect/status":
 			status := "pending"
 			if approved.Load() {
@@ -449,11 +469,8 @@ func TestConnect_BrowserFlowKeepsRawCredentialOutOfURL(t *testing.T) {
 		t.Fatalf("runConnect: %v", err)
 	}
 	u, err := url.Parse(opened)
-	if err != nil || u.Path != "/tokens" {
-		t.Fatalf("authorization URL = %q, err=%v", opened, err)
-	}
-	if u.Query().Get("connect_hash") == "" || u.Query().Get("connect_code") == "" {
-		t.Errorf("authorization URL lacks pairing context: %s", opened)
+	if err != nil || u.Path != "/tokens" || u.RawQuery != "" {
+		t.Fatalf("authorization URL = %q, err=%v, want a bare /tokens URL with no query string", opened, err)
 	}
 	raw := strings.TrimPrefix(seenAuthorization, "Token ")
 	if raw == "" || !strings.HasPrefix(raw, "shk_") {
@@ -461,6 +478,9 @@ func TestConnect_BrowserFlowKeepsRawCredentialOutOfURL(t *testing.T) {
 	}
 	if strings.Contains(opened, raw) {
 		t.Fatal("raw CLI credential leaked into browser URL")
+	}
+	if registeredHash == "" {
+		t.Fatal("CLI must register its credential hash with the server before opening any browser page")
 	}
 }
 
@@ -520,6 +540,9 @@ func TestConnect_NoBrowserSupportsRedirectedOutput(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/server-info":
 			_, _ = io.WriteString(w, `{"version":"1.4.0","capabilities":{"cli_connect":true},"runtimes":{"python":true}}`)
+		case "/api/auth/cli-connect/register":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"user_code":"ABCD-1234","expires_at":"2026-01-01T00:00:00Z"}`)
 		case "/api/auth/cli-connect/status":
 			_, _ = io.WriteString(w, `{"status":"approved"}`)
 		case "/api/auth/me":
@@ -542,7 +565,7 @@ func TestConnect_NoBrowserSupportsRedirectedOutput(t *testing.T) {
 	if err := runConnect(cmd, []string{srv.URL}, &connectFlags{noBrowser: true, timeout: defaultConnectTimeout}); err != nil {
 		t.Fatalf("runConnect: %v", err)
 	}
-	if !strings.Contains(progress.String(), srv.URL+"/tokens?") || !strings.Contains(progress.String(), "Browser approval received") {
+	if !strings.Contains(progress.String(), srv.URL+"/tokens") || !strings.Contains(progress.String(), "ABCD-1234") || !strings.Contains(progress.String(), "Browser approval received") {
 		t.Errorf("copy/paste pairing progress = %q", progress.String())
 	}
 	if !strings.Contains(out.String(), `"status":"connected"`) {
@@ -567,6 +590,98 @@ func TestConnect_OlderServerExplainsTokenFallback(t *testing.T) {
 	}
 	if hint := hintOf(err); !strings.Contains(hint, "--token-file") || !strings.Contains(hint, "upgrade") {
 		t.Errorf("fallback hint = %q", hint)
+	}
+}
+
+// TestCLIConnectionApproved_ExpiredIsActionableValidationError proves that
+// the "expired" status the server reports once db.CLIConnectRequestTTL has
+// passed reaches the CLI as a clear, actionable error rather than falling
+// into the catch-all "server returned unknown pairing status" branch.
+func TestCLIConnectionApproved_ExpiredIsActionableValidationError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"expired"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	approved, err := cliConnectionApproved(srv.URL, "somehash")
+	if approved {
+		t.Fatal("an expired request must never report approved")
+	}
+	if err == nil {
+		t.Fatal("expected an error for an expired pairing request")
+	}
+	if strings.Contains(err.Error(), "unknown pairing status") {
+		t.Fatalf("expired status still falls into the unknown-status branch: %v", err)
+	}
+	if kind, code := classify(err); kind != KindValidation || code != 1 {
+		t.Fatalf("classify(err) = (%q, %d), want (%q, 1)", kind, code, KindValidation)
+	}
+	var he hintedError
+	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "shinyhub connect") {
+		t.Fatalf("hint = %v, want it to say to run `shinyhub connect` again", err)
+	}
+}
+
+// TestCLIConnectionApproved_NotFoundIsActionableValidationError covers both
+// an expired-then-cleaned-up request and an old CLI binary polling a new
+// server (which never calls register, so the server has no row for its hash
+// at all): both surface as "not_found" and must not read as an internal
+// "unknown pairing status" error.
+func TestCLIConnectionApproved_NotFoundIsActionableValidationError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"not_found"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	approved, err := cliConnectionApproved(srv.URL, "somehash")
+	if approved {
+		t.Fatal("a not_found request must never report approved")
+	}
+	if err == nil {
+		t.Fatal("expected an error for a not_found pairing request")
+	}
+	if strings.Contains(err.Error(), "unknown pairing status") {
+		t.Fatalf("not_found status still falls into the unknown-status branch: %v", err)
+	}
+	if kind, code := classify(err); kind != KindValidation || code != 1 {
+		t.Fatalf("classify(err) = (%q, %d), want (%q, 1)", kind, code, KindValidation)
+	}
+	var he hintedError
+	if !errors.As(err, &he) || !strings.Contains(he.Hint(), "shinyhub connect") {
+		t.Fatalf("hint = %v, want it to say to run `shinyhub connect` again", err)
+	}
+}
+
+// TestBrowserAuthorizeCLI_ExpiredStatusSurfacesCleanError proves the polling
+// loop in browserAuthorizeCLI passes a validationErr from cliConnectionApproved
+// through unwrapped rather than burying it behind the generic
+// "browser authorization check failed: %w" wrap used for transport-level
+// failures (a network error, a non-2xx response). The generic wrap would
+// otherwise hide the actionable message and hint behind its own text.
+func TestBrowserAuthorizeCLI_ExpiredStatusSurfacesCleanError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth/cli-connect/register":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"user_code":"ABCD-1234","expires_at":"2026-01-01T00:00:00Z"}`)
+		case "/api/auth/cli-connect/status":
+			_, _ = io.WriteString(w, `{"status":"expired"}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cmd, _, _ := connectTestCommand()
+	_, err := browserAuthorizeCLI(cmd, srv.URL, &connectFlags{timeout: defaultConnectTimeout, noBrowser: true})
+	if err == nil {
+		t.Fatal("browserAuthorizeCLI succeeded against an expired pairing request")
+	}
+	if strings.Contains(err.Error(), "browser authorization check failed") {
+		t.Fatalf("expired status was buried behind the generic transport-error wrap: %v", err)
+	}
+	if kind, code := classify(err); kind != KindValidation || code != 1 {
+		t.Fatalf("classify(err) = (%q, %d), want (%q, 1)", kind, code, KindValidation)
 	}
 }
 
