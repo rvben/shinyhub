@@ -16,7 +16,10 @@ retry_delay=${SHINYHUB_DEMO_SMOKE_RETRY_DELAY:-5}
 # container the way a real visitor's navigation does. This sends the exact
 # request wake() already uses for the first start, so any later retry loop can
 # recover from a second one the same way, instead of spinning until it gives
-# up on a container a plain re-open would have fixed in under a minute.
+# up on a container a plain re-open would have fixed in under a minute. The
+# restarted container reports "running" rather than "healthy", and the Worker
+# forwards everything to a running one (gateUnconfirmed), so the next check is
+# what reaches it and marks it healthy.
 nudge() {
   curl --silent --show-error --output /dev/null \
     --connect-timeout 10 --max-time 30 \

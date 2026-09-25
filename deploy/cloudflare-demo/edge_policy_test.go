@@ -80,13 +80,20 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 	for _, required := range []string{
 		`await container.getState()`,
 		`classifyColdRequest({`,
+		// The cold gate holds only while the container is down. A running
+		// one that is not yet confirmed healthy is forwarded, because the
+		// proxied fetch is what confirms it; gated, a client that never loads
+		// the wake page is refused for as long as the container stays up.
+		`const coldVerdict = gateUnconfirmed(classifyColdRequest({`,
+		`}), asleep);`,
 		`secFetchDest: request.headers.get("sec-fetch-dest")`,
 		`accept: request.headers.get("accept")`,
 		`coldVerdict === "refuse"`,
 		`coldVerdict === "redirect-to-entry"`,
-		// Every verdict the policy can return needs a branch here. An
-		// unhandled one falls through to the proxy, which forwards to the
-		// container, which is the wake the gate exists to withhold.
+		// Every verdict the policy can return for a container that is down
+		// needs a branch here. An unhandled one falls through to the proxy,
+		// which forwards to the container, which is the wake the gate exists
+		// to withhold. Only "forward" is meant to fall through.
 		`coldVerdict === "start"`,
 		`demoStartResponse(destination, request.method)`,
 		`coldVerdict === "wake"`,
@@ -330,7 +337,7 @@ func TestDemoWakePageRecoversAContainerThatNeverCameUp(t *testing.T) {
 	pages := string(source)
 
 	readyAt := indexOf(t, worker, "src/index.ts", "url.pathname === DEMO_READY_PATH")
-	coldAt := indexOf(t, worker, "src/index.ts", "const coldVerdict = classifyColdRequest(")
+	coldAt := indexOf(t, worker, "src/index.ts", "const coldVerdict = gateUnconfirmed(classifyColdRequest(")
 	if readyAt > coldAt {
 		t.Fatal("the cold gate is above the ready handler, so the slice below reads the wrong code")
 	}

@@ -219,6 +219,27 @@ export function classifyColdRequest(request: ColdRequest): ColdVerdict {
   return isBrowserNavigation(request) ? "wake" : "start";
 }
 
+// What the edge does with a request while the container is not known healthy:
+// a ColdVerdict, or forward it to the container.
+export type UnconfirmedVerdict = ColdVerdict | "forward";
+
+// gateUnconfirmed narrows the cold gate to a container that is actually down.
+// The gate exists so nothing but a visitor spends a cold start, and only a down
+// container can cost one. A container reporting "running" has already been
+// started (by a wake, by a restart after a rollout swapped its image, or it is
+// still booting), so every request but a wake is forwarded: the proxied fetch
+// waits for the container's port and is what marks it healthy. Gating a running
+// container instead leaves the wake page's readiness probe as the only way it
+// ever becomes healthy, so a client that never loads that page is told the demo
+// is asleep for as long as it stays up. A wake still gets the wake page, which
+// gives a visitor somewhere to wait rather than a blank tab for the whole boot.
+export function gateUnconfirmed(verdict: ColdVerdict, asleep: boolean): UnconfirmedVerdict {
+  if (asleep || verdict === "wake") {
+    return verdict;
+  }
+  return "forward";
+}
+
 // How long the Worker may trust its own observation that the container is
 // healthy. Reading container state costs a round trip to the Durable Object on
 // every request, including each warm app proxy hop.

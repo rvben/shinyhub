@@ -12,6 +12,7 @@ import {
   DEMO_START_PATH,
   demoURL,
   ENTRY_URL,
+  gateUnconfirmed,
   isAsleep,
   mayAssumeAwake,
   requestedDestination,
@@ -413,6 +414,66 @@ test("the whole surface offers exactly two ways to spend a cold start", () => {
     `script: POST ${DEMO_HOST}${DEMO_START_PATH}`,
     `subresource: POST ${DEMO_HOST}${DEMO_START_PATH}`,
   ]);
+});
+
+// Every path, method and sender the surface test below crosses, for the tests
+// that ask what the gate does with each of them.
+function everyColdVerdict(): { label: string; verdict: ReturnType<typeof classifyColdRequest> }[] {
+  const senders = {
+    browser: navigation,
+    offsite: { ...navigation, secFetchSite: "cross-site" },
+    crawler: { secFetchDest: null, secFetchSite: null, accept: "text/html,application/xhtml+xml;q=0.9" },
+    script: programmatic,
+  };
+  const out = [];
+  for (const hostname of [DEMO_HOST, APP_HOST]) {
+    for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"]) {
+      for (const pathname of ["/", "/login", DEMO_START_PATH, "/__demo/session", "/api/server-info", "/apps/x", "/app/streamlit-demo/", "/healthz"]) {
+        for (const [sender, dest] of Object.entries(senders)) {
+          out.push({
+            label: `${sender}: ${method} ${hostname}${pathname}`,
+            verdict: classifyColdRequest({ hostname, method, pathname, ...dest }),
+          });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+test("the gate on a container that is down is exactly the cold policy", () => {
+  for (const { label, verdict } of everyColdVerdict()) {
+    assert.equal(gateUnconfirmed(verdict, true), verdict, label);
+  }
+});
+
+// A rollout that swaps the image kills the running container, and the next
+// navigation's wake starts a new one, which reports "running" until something
+// fetches through it. The deploy smoke test polls /api/server-info from a
+// script, and was refused as asleep for as long as that container stayed up.
+test("a scripted call reaches a container that is up but not yet confirmed", () => {
+  const verdict = classifyColdRequest({
+    hostname: DEMO_HOST,
+    method: "GET",
+    pathname: "/api/server-info",
+    ...programmatic,
+  });
+  assert.equal(verdict, "refuse");
+  assert.equal(gateUnconfirmed(verdict, true), "refuse");
+  assert.equal(gateUnconfirmed(verdict, false), "forward");
+});
+
+test("a container that is up forwards everything but a wake", () => {
+  for (const { label, verdict } of everyColdVerdict()) {
+    assert.equal(gateUnconfirmed(verdict, false), verdict === "wake" ? "wake" : "forward", label);
+  }
+});
+
+// A visitor arriving while the container boots still gets a page to wait on,
+// rather than a tab that hangs on the proxied fetch for the whole boot.
+test("a visitor opening a container that is still booting gets the wake page", () => {
+  const verdict = classifyColdRequest({ hostname: DEMO_HOST, method: "GET", pathname: "/", ...navigation });
+  assert.equal(gateUnconfirmed(verdict, false), "wake");
 });
 
 test("a deep link asks for the page it names", () => {

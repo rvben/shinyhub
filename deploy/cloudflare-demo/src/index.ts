@@ -17,6 +17,7 @@ import {
   DEMO_START_PATH,
   demoURL,
   ENTRY_URL,
+  gateUnconfirmed,
   isAsleep,
   mayAssumeAwake,
   requestedDestination,
@@ -145,16 +146,18 @@ export default {
 
     // Only a visitor opening the demo may spend a cold start. Everything else
     // that arrives while the container is down is answered here, so crawlers and
-    // background probes no longer keep it awake around the clock.
+    // background probes no longer keep it awake around the clock. A container
+    // that is up but not yet confirmed healthy has no cold start left to spend,
+    // so gateUnconfirmed lets all but a wake fall through to the proxy below.
     if (!healthy) {
-      const coldVerdict = classifyColdRequest({
+      const coldVerdict = gateUnconfirmed(classifyColdRequest({
         hostname: url.hostname,
         method: request.method,
         pathname: url.pathname,
         secFetchDest: request.headers.get("sec-fetch-dest"),
         secFetchSite: request.headers.get("sec-fetch-site"),
         accept: request.headers.get("accept"),
-      });
+      }), asleep);
       // The page the visitor came for, which the cold path carries across the
       // wake so a deep link does not decay into the dashboard. It is only ever a
       // path on the control host, so it cannot redirect them off the demo.

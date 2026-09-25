@@ -108,7 +108,8 @@ func newDemoEdgeMock(t *testing.T, version string) (*httptest.Server, *atomic.In
 	// The FIRST call always lands on a container the smoke test already
 	// proved awake in the checks above - this is the drop, not the initial
 	// cold start. Every call after that reads the current state, which only
-	// a fresh navigation-style request (nudge) can flip back to healthy.
+	// a fresh navigation-style request (nudge) can bring back: it restarts the
+	// container, and the Worker forwards the next call to the running one.
 	mux.HandleFunc("/api/server-info", func(w http.ResponseWriter, r *http.Request) {
 		if serverInfoCalls.Add(1) == 1 {
 			healthy.Store(false)
