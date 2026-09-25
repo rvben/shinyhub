@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // pullServer stands up a CLI test harness that serves fixed bytes for any GET.
@@ -48,7 +51,7 @@ func TestDataPull_WritesFileAndReportsDigest(t *testing.T) {
 	dir := chdirTemp(t)
 
 	size, sum, err := runDataPull(mustHost(t), mustToken(t), "demo", "datasets/seed.csv",
-		filepath.Join(dir, "seed.csv"), nil)
+		filepath.Join(dir, "seed.csv"), dataStallTimeout, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -184,6 +187,140 @@ func TestDataPull_LeavesNoFileWhenTheTransferFails(t *testing.T) {
 	}
 	for _, e := range entries {
 		t.Errorf("a failed pull left %q behind; the destination must not exist", e.Name())
+	}
+}
+
+// TestDataPull_GlobalClientTimeoutDoesNotBoundTheTransfer reproduces the
+// original defect at test scale: runDataPull used to stream through the
+// package-global httpClient, whose fixed Client.Timeout bounds the whole
+// response body read regardless of progress, so a download taking longer
+// than that is killed even while still receiving bytes. Shrinking the global
+// client's timeout here makes the bug reproducible in milliseconds: a
+// transfer that keeps making progress every 40ms, for longer than the
+// (shrunk) global timeout but well within the per-call timeout, must still
+// succeed - proof that pull no longer depends on the global client at all.
+func TestDataPull_GlobalClientTimeoutDoesNotBoundTheTransfer(t *testing.T) {
+	prev := httpClient
+	httpClient = &apiClient{&http.Client{Timeout: 100 * time.Millisecond}}
+	t.Cleanup(func() { httpClient = prev })
+
+	content := []byte("stream-me")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, _ := w.(http.Flusher)
+		for i := range content {
+			_, _ = w.Write(content[i : i+1])
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(40 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.bin")
+
+	size, sum, err := runDataPull(srv.URL, "tok", "demo", "f.bin", dest, 5*time.Second, io.Discard)
+	if err != nil {
+		t.Fatalf("a transfer making steady progress must not be bounded by the global httpClient's timeout, got: %v", err)
+	}
+	if size != int64(len(content)) {
+		t.Errorf("size = %d, want %d", size, len(content))
+	}
+	want := sha256.Sum256(content)
+	if sum != hex.EncodeToString(want[:]) {
+		t.Errorf("sha256 = %s, want %s", sum, hex.EncodeToString(want[:]))
+	}
+}
+
+// TestDataPull_SlowButSteadyTransferSucceeds proves --timeout is a stall
+// timeout, not a total-request deadline: a transfer that keeps delivering
+// bytes, each gap shorter than the timeout, must succeed even though the
+// whole transfer runs longer than the timeout itself.
+func TestDataPull_SlowButSteadyTransferSucceeds(t *testing.T) {
+	content := []byte("progress")
+	const gap = 70 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, _ := w.(http.Flusher)
+		for i := range content {
+			_, _ = w.Write(content[i : i+1])
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(gap)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.bin")
+
+	const timeout = 200 * time.Millisecond
+	start := time.Now()
+	size, sum, err := runDataPull(srv.URL, "tok", "demo", "f.bin", dest, timeout, io.Discard)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("a transfer making progress every %s must not be aborted by a %s stall timeout, even though the whole transfer (%s) ran longer than it: %v",
+			gap, timeout, elapsed, err)
+	}
+	if elapsed < timeout {
+		t.Fatalf("test setup is not exercising the total-transfer-exceeds-timeout case: elapsed %s, want > %s", elapsed, timeout)
+	}
+	if size != int64(len(content)) {
+		t.Errorf("size = %d, want %d", size, len(content))
+	}
+	want := sha256.Sum256(content)
+	if sum != hex.EncodeToString(want[:]) {
+		t.Errorf("sha256 = %s, want %s", sum, hex.EncodeToString(want[:]))
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("file contents = %q, want %q", got, content)
+	}
+}
+
+// TestDataPull_StallAbortsWithTimeoutKindAndNoPartialFile mirrors
+// TestDataPush_StallTimeoutAbortsHungServer for the download direction: a
+// server that starts answering and then goes silent must be aborted within
+// the configured stall timeout, classified as KindTimeout (so an operator
+// knows a retry is worth something), and must not leave a partial file at the
+// destination - the same invariant TestDataPull_LeavesNoFileWhenTheTransferFails
+// pins for a connection that closes outright.
+func TestDataPull_StallAbortsWithTimeoutKindAndNoPartialFile(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "4096")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.bin")
+
+	const stallTimeout = 150 * time.Millisecond
+	start := time.Now()
+	_, _, err := runDataPull(srv.URL, "tok", "demo", "f.bin", dest, stallTimeout, io.Discard)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error from a transfer that stalls mid-body, got nil")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("pull took %s to abort a %s stall, want it bounded by the timeout", elapsed, stallTimeout)
+	}
+	if kind, _ := classify(err); kind != KindTimeout {
+		t.Errorf("error kind = %v, want %v: a stalled transfer is retryable, unlike an internal failure", kind, KindTimeout)
+	}
+	if _, statErr := os.Stat(dest); statErr == nil {
+		t.Error("a stalled pull left a partial file at the destination")
 	}
 }
 

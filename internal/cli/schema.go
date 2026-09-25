@@ -54,6 +54,7 @@ func clientEnvVars() []schemaEnvVar {
 
 type schemaCommand struct {
 	Name                  string            `json:"name"`
+	Aliases               []string          `json:"aliases,omitempty"`
 	Description           string            `json:"description"`
 	Effects               string            `json:"effects"`
 	Stability             string            `json:"stability,omitempty"`
@@ -164,6 +165,7 @@ func schemaCommandFor(c *cobra.Command, path string) schemaCommand {
 	}
 	sc := schemaCommand{
 		Name:                path,
+		Aliases:             c.Aliases,
 		Description:         c.Short,
 		Effects:             effects,
 		Stability:           ann.Stability,

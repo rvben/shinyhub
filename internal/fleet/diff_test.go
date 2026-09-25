@@ -5,9 +5,10 @@ import (
 	"testing"
 )
 
-func ptr(i int) *int      { return &i }
-func sp(s string) *string { return &s }
-func bp(b bool) *bool     { return &b }
+func ptr(i int) *int        { return &i }
+func sp(s string) *string   { return &s }
+func bp(b bool) *bool       { return &b }
+func fp(f float64) *float64 { return &f }
 
 func TestConfigDrift_Autoscale(t *testing.T) {
 	on := AppEntry{
@@ -242,6 +243,7 @@ func TestDiff_ReportsUnmanagedStoredOverridesWithoutCreatingDrift(t *testing.T) 
 		WorkerIsolation:         sp("grouped"),
 		WorkerGroupedSize:       ptr(6),
 		WorkerMaxWorkers:        ptr(40),
+		WorkerWarmSpares:        ptr(3),
 	}})[0]
 
 	if got.Action != ActionUnchanged || len(got.ConfigDrift) != 0 {
@@ -249,7 +251,7 @@ func TestDiff_ReportsUnmanagedStoredOverridesWithoutCreatingDrift(t *testing.T) 
 	}
 	want := []string{
 		"hibernate_timeout_minutes", "max_sessions_per_replica", "worker_isolation",
-		"worker_grouped_size", "worker_max_workers",
+		"worker_grouped_size", "worker_max_workers", "worker_warm_spares",
 	}
 	if len(got.Unmanaged) != len(want) {
 		t.Fatalf("unmanaged = %+v, want keys %v", got.Unmanaged, want)
@@ -292,13 +294,108 @@ func TestDiff_DefaultRepresentationsDoNotProduceUnmanagedNoise(t *testing.T) {
 	app := AppEntry{Slug: "dash", Source: "./dash", Visibility: "private"}
 	got := Diff(mani("eu", app), map[string]string{"dash": "sha256:same"}, []ObservedApp{{
 		Slug: "dash", ManagedBy: sp("fleet:eu"), ContentDigest: "sha256:same", Access: "private",
-		MaxSessionsPerReplica: ptr(0), RenderSeconds: func() *float64 { v := 0.0; return &v }(),
+		MaxSessionsPerReplica: ptr(0), RenderSeconds: fp(0),
 		MinWarmReplicas: ptr(0), WorkerIsolation: sp(""), WorkerGroupedSize: ptr(0),
-		WorkerMaxWorkers: ptr(0), WorkerMaxSessionLifetimeSecs: ptr(0),
+		WorkerMaxWorkers: ptr(0), WorkerWarmSpares: ptr(0), WorkerMaxSessionLifetimeSecs: ptr(0),
 		Autoscale: &ObservedAutoscale{},
 	}})[0]
 	if len(got.Unmanaged) != 0 {
 		t.Fatalf("default representations must stay quiet: %+v", got.Unmanaged)
+	}
+}
+
+// TestUnmanagedConfig_CoversEveryConfigDriftKeyExceptDeliberateExclusions
+// derives the key set unmanagedConfig can report directly from configDrift's
+// own key set (via DeclaredState, which asserts every declarable key against
+// an unset server) instead of a hand-maintained list, so a field added to
+// ObservedApp/configDrift without a matching unmanagedConfig case fails this
+// test instead of silently drifting out of sync, the way worker_warm_spares
+// did.
+//
+// visibility, name, description, icon, project, and replicas are the only
+// deliberate exclusions: visibility/name/description/icon/project have no
+// server representation that distinguishes "never touched" from "explicitly
+// set to this value" (every app has SOME name, SOME description, even an
+// empty one), and replicas is always materialized at creation with a
+// server-config-dependent default (see unmanagedConfig's doc comment).
+func TestUnmanagedConfig_CoversEveryConfigDriftKeyExceptDeliberateExclusions(t *testing.T) {
+	fullyDeclared := AppEntry{
+		Slug: "dash", Source: "./dash", Visibility: "public",
+		Config: Config{
+			Name:                    sp("Dashboard"),
+			Description:             sp("A dashboard"),
+			Project:                 sp("analytics"),
+			HibernateTimeoutMinutes: ptr(30),
+			Replicas:                ptr(2),
+			MaxSessionsPerReplica:   ptr(5),
+			Autoscale:               &AutoscaleConfig{Enabled: bp(true), MinReplicas: 1, MaxReplicas: 3, Target: 0.5},
+		},
+		Bundle: Config{
+			Icon:                         sp("chart"),
+			RenderSeconds:                fp(1.5),
+			IdentityHeaders:              bp(true),
+			UsageIdentityMode:            sp("header"),
+			MinWarmReplicas:              ptr(1),
+			MemoryLimitMB:                ptr(512),
+			CPUQuotaPercent:              ptr(100),
+			WorkerIsolation:              sp("grouped"),
+			WorkerGroupedSize:            ptr(4),
+			WorkerMaxWorkers:             ptr(8),
+			WorkerWarmSpares:             ptr(2),
+			WorkerMaxSessionLifetimeSecs: ptr(3600),
+		},
+	}
+	driftKeys := map[string]bool{}
+	for _, item := range DeclaredState(fullyDeclared) {
+		driftKeys[item.Key] = true
+	}
+
+	deliberatelyExcluded := map[string]bool{
+		"visibility": true, "name": true, "description": true,
+		"icon": true, "project": true, "replicas": true,
+	}
+
+	fullyOverridden := ObservedApp{
+		Slug: "dash", Access: "public",
+		HibernateTimeoutMinutes:      ptr(30),
+		Replicas:                     ptr(2),
+		MaxSessionsPerReplica:        ptr(5),
+		RenderSeconds:                fp(1.5),
+		IdentityHeaders:              bp(true),
+		UsageIdentityMode:            sp("header"),
+		MinWarmReplicas:              ptr(1),
+		MemoryLimitMB:                ptr(512),
+		CPUQuotaPercent:              ptr(100),
+		WorkerIsolation:              sp("grouped"),
+		WorkerGroupedSize:            ptr(4),
+		WorkerMaxWorkers:             ptr(8),
+		WorkerWarmSpares:             ptr(2),
+		WorkerMaxSessionLifetimeSecs: ptr(3600),
+		Autoscale:                    &ObservedAutoscale{Enabled: true, MinReplicas: 1, MaxReplicas: 3, Target: 0.5},
+	}
+	// Nothing declared: EffectiveConfig resolves to all-nil, so every observed
+	// value above that differs from its unset sentinel must surface as unmanaged.
+	nothingDeclared := AppEntry{Slug: "dash", Visibility: "public"}
+	unmanagedKeys := map[string]bool{}
+	for _, item := range unmanagedConfig(nothingDeclared, fullyOverridden) {
+		unmanagedKeys[item.Key] = true
+	}
+
+	for key := range driftKeys {
+		if deliberatelyExcluded[key] {
+			if unmanagedKeys[key] {
+				t.Errorf("%q is a deliberate unmanagedConfig exclusion but was reported; update the exclusion list or the doc comment", key)
+			}
+			continue
+		}
+		if !unmanagedKeys[key] {
+			t.Errorf("configDrift handles %q but unmanagedConfig does not report a stored override for it: add an addInt/addFloat/manual case", key)
+		}
+	}
+	for key := range unmanagedKeys {
+		if !driftKeys[key] {
+			t.Errorf("unmanagedConfig reports %q, which configDrift does not know about: keep the two in sync", key)
+		}
 	}
 }
 

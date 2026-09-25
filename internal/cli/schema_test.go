@@ -241,6 +241,33 @@ func TestGenerateSchema_TokensCreateNameRequired(t *testing.T) {
 	t.Error("tokens create --name must have required=true in schema")
 }
 
+// TestGenerateSchema_ExposesCommandAliases asserts that a cobra command's
+// Aliases (e.g. "apps ls" for "apps list") are discoverable in the schema
+// document. Without this, an agent driving the CLI purely from `shinyhub
+// schema` has no way to learn that "apps ls" and "apps list" are the same
+// command, and might treat a successful `apps ls` invocation as an
+// undocumented, unsupported command.
+func TestGenerateSchema_ExposesCommandAliases(t *testing.T) {
+	doc := generateSchema(testRoot())
+	list := findCommand(t, doc.Commands, "apps list")
+	if len(list.Aliases) != 1 || list.Aliases[0] != "ls" {
+		t.Errorf("apps list aliases = %v, want [ls]", list.Aliases)
+	}
+
+	show := findCommand(t, doc.Commands, "apps show")
+	if len(show.Aliases) != 1 || show.Aliases[0] != "get" {
+		t.Errorf("apps show aliases = %v, want [get]", show.Aliases)
+	}
+
+	// A command with no cobra Aliases must not emit an empty array: omitempty
+	// keeps the field absent so "no aliases" and "aliases not yet supported by
+	// this server version" stay distinguishable.
+	deploy := findCommand(t, doc.Commands, "deploy")
+	if deploy.Aliases != nil {
+		t.Errorf("deploy aliases = %v, want nil (omitempty)", deploy.Aliases)
+	}
+}
+
 func findCommand(t *testing.T, cmds []schemaCommand, name string) schemaCommand {
 	t.Helper()
 	for _, c := range cmds {
