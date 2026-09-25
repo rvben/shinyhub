@@ -20,7 +20,8 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
@@ -239,10 +240,17 @@ func openSQLite(dsn string) (*Store, error) {
 const pgMaxConns = 16
 
 func openPostgres(dsn string) (*Store, error) {
-	raw, err := sql.Open("pgx", dsn)
+	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
+	// Every instant the store reads or writes is UTC, the same as SQLite's
+	// zone-less UTC text. Postgres resolves zone-less timestamp literals, ::date
+	// casts and the text form of a timestamptz in the session time zone, so the
+	// session is pinned to UTC and neither the server's TimeZone nor a timezone
+	// in the DSN can shift stored or compared values.
+	cfg.RuntimeParams["timezone"] = "UTC"
+	raw := stdlib.OpenDB(*cfg)
 	raw.SetMaxOpenConns(pgMaxConns)
 	raw.SetMaxIdleConns(pgMaxConns)
 	raw.SetConnMaxIdleTime(5 * time.Minute)
