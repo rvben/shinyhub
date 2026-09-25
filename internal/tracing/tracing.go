@@ -236,6 +236,21 @@ func (b *Buffer) Snapshot(slug string) []Span {
 	return out
 }
 
+// Forget releases the ring buffer retained for slug. Call it when an app is
+// deleted so a one-off or frequently redeployed slug does not keep an entry
+// (and its backing array) alive in byApp forever; the map has no other
+// eviction, so this is the only way an entry ever leaves it. A slug with no
+// buffered spans is a no-op. A later redeploy under the same slug starts with
+// a fresh ring rather than resuming the old one's wraparound state.
+func (b *Buffer) Forget(slug string) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.byApp, slug)
+}
+
 // StartProxySpan derives the trace context for one proxy-handled request.
 // If the incoming `traceparent` header parses, the returned context continues
 // that trace with a fresh span ID; otherwise a new trace is started and the

@@ -4095,6 +4095,12 @@ func (s *Server) deleteAppLocked(ctx context.Context, app *db.App) (string, erro
 	if s.proxy != nil {
 		s.proxy.ForgetRejects(slug)
 	}
+	if s.traceBuffer != nil {
+		s.traceBuffer.Forget(slug)
+	}
+	if s.metrics != nil {
+		s.metrics.ForgetApp(slug)
+	}
 	if cleanupErr := storage.OnAppDelete(s.cfg, slug); cleanupErr != nil {
 		detail := "deferred cleanup: " + cleanupErr.Error()
 		slog.Error("app delete cleanup failed; tombstone retained for reconcile", "slug", slug, "err", cleanupErr)

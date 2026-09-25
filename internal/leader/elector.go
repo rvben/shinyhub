@@ -26,7 +26,12 @@ type Config struct {
 	RenewEvery time.Duration
 	OnAcquire  func(epoch int64) // fired (synchronously) when this instance becomes owner
 	OnLose     func()            // fired (synchronously) when this instance stops being owner
-	Logger     *slog.Logger
+	// RetainLeaseOnShutdown, when set, is consulted after OnLose returns during
+	// shutdown. Returning true skips the explicit release: the lease then expires
+	// on its TTL exactly as a crashed owner's would, so a successor cannot start
+	// reconciling while work the drain failed to stop may still write state.
+	RetainLeaseOnShutdown func() bool
+	Logger                *slog.Logger
 }
 
 // Elector runs the acquire/renew loop for one instance and reports ownership.
@@ -149,6 +154,11 @@ func (e *Elector) Run(ctx context.Context) {
 				e.set(false, 0)
 				if e.cfg.OnLose != nil {
 					e.cfg.OnLose()
+				}
+				if e.cfg.RetainLeaseOnShutdown != nil && e.cfg.RetainLeaseOnShutdown() {
+					e.cfg.Logger.Warn("ownership handoff incomplete; leaving the lease to expire on its TTL",
+						"epoch", epoch, "ttl", e.cfg.TTL)
+					return
 				}
 				if err := e.store.ReleaseOwner(e.cfg.InstanceID, epoch); err != nil {
 					e.cfg.Logger.Warn("release owner on shutdown", "err", err)

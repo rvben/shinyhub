@@ -126,3 +126,67 @@ func TestRecordAuditWriteError(t *testing.T) {
 		t.Fatalf("shinyhub_audit_write_errors_total = %v (ok=%v), want 2", v, ok)
 	}
 }
+
+// TestForgetApp_RemovesAdmissionRejectsAndRunsSeries proves that deleting an
+// app removes every series it produced, on both metrics keyed solely by slug
+// (admission_rejects) and metrics with additional labels (schedule_runs), so a
+// deleted app's slug does not keep accumulating unbounded label cardinality
+// forever. A sibling app's series must survive untouched.
+func TestForgetApp_RemovesAdmissionRejectsAndRunsSeries(t *testing.T) {
+	reg := New("test")
+	reg.RecordReject("gone", "rate_limited")
+	reg.RecordReject("keeper", "rate_limited")
+	reg.RecordScheduleRun("gone", "nightly", "succeeded")
+	reg.RecordScheduleRun("keeper", "nightly", "succeeded")
+
+	if _, ok := sampleValue(t, reg, "shinyhub_admission_rejects_total", map[string]string{"slug": "gone"}); !ok {
+		t.Fatal("precondition: admission_rejects series for slug=gone must exist before Forget")
+	}
+	if _, ok := sampleValue(t, reg, "shinyhub_schedule_runs_total", map[string]string{"slug": "gone"}); !ok {
+		t.Fatal("precondition: schedule_runs series for slug=gone must exist before Forget")
+	}
+
+	reg.ForgetApp("gone")
+
+	if _, ok := sampleValue(t, reg, "shinyhub_admission_rejects_total", map[string]string{"slug": "gone"}); ok {
+		t.Error("admission_rejects series for slug=gone must be gone after ForgetApp")
+	}
+	if _, ok := sampleValue(t, reg, "shinyhub_schedule_runs_total", map[string]string{"slug": "gone"}); ok {
+		t.Error("schedule_runs series for slug=gone must be gone after ForgetApp")
+	}
+	if v, ok := sampleValue(t, reg, "shinyhub_admission_rejects_total", map[string]string{"slug": "keeper"}); !ok || v != 1 {
+		t.Errorf("sibling slug=keeper admission_rejects must survive, got %v (ok=%v)", v, ok)
+	}
+	if v, ok := sampleValue(t, reg, "shinyhub_schedule_runs_total", map[string]string{"slug": "keeper"}); !ok || v != 1 {
+		t.Errorf("sibling slug=keeper schedule_runs must survive, got %v (ok=%v)", v, ok)
+	}
+
+	// A redeploy under the same slug must be able to start a fresh series
+	// rather than resuming a stale, deleted one.
+	reg.RecordReject("gone", "rate_limited")
+	if v, ok := sampleValue(t, reg, "shinyhub_admission_rejects_total", map[string]string{"slug": "gone"}); !ok || v != 1 {
+		t.Errorf("re-recording after ForgetApp must start a fresh series, got %v (ok=%v)", v, ok)
+	}
+}
+
+// TestForgetSchedule_RemovesOnlyThatSchedule proves deleting one schedule of
+// an app removes only that schedule's series, leaving other schedules on the
+// same app (and the same schedule name on a different app) untouched.
+func TestForgetSchedule_RemovesOnlyThatSchedule(t *testing.T) {
+	reg := New("test")
+	reg.RecordScheduleRun("app1", "nightly", "succeeded")
+	reg.RecordScheduleRun("app1", "weekly", "succeeded")
+	reg.RecordScheduleRun("app2", "nightly", "succeeded")
+
+	reg.ForgetSchedule("app1", "nightly")
+
+	if _, ok := sampleValue(t, reg, "shinyhub_schedule_runs_total", map[string]string{"slug": "app1", "schedule": "nightly"}); ok {
+		t.Error("app1/nightly series must be gone after ForgetSchedule")
+	}
+	if v, ok := sampleValue(t, reg, "shinyhub_schedule_runs_total", map[string]string{"slug": "app1", "schedule": "weekly"}); !ok || v != 1 {
+		t.Errorf("app1/weekly must survive ForgetSchedule(app1, nightly), got %v (ok=%v)", v, ok)
+	}
+	if v, ok := sampleValue(t, reg, "shinyhub_schedule_runs_total", map[string]string{"slug": "app2", "schedule": "nightly"}); !ok || v != 1 {
+		t.Errorf("app2/nightly must survive ForgetSchedule(app1, nightly), got %v (ok=%v)", v, ok)
+	}
+}

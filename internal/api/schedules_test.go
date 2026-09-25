@@ -21,6 +21,7 @@ import (
 	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
+	"github.com/rvben/shinyhub/internal/metrics"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/schedulespec"
@@ -1860,5 +1861,63 @@ func TestScheduleWrites_AuditRecordsDetail(t *testing.T) {
 	gone := latestAuditDetail(t, store, "schedule_delete")
 	if gone["app"] != "reports" || gone["name"] != "weekly-purge" || gone["cron"] != "0 4 * * 0" {
 		t.Errorf("schedule_delete detail = %v, want the app, name and cron of the deleted row", gone)
+	}
+}
+
+// TestSchedules_DeleteForgetsOnlyItsOwnMetricsSeries proves that deleting a
+// schedule evicts the shinyhub_schedule_runs_total series for THAT schedule so
+// a deleted schedule's slug/schedule label pair does not keep reporting a
+// stale last-known value forever, while a sibling schedule on the same app
+// keeps its own series untouched.
+func TestSchedules_DeleteForgetsOnlyItsOwnMetricsSeries(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	reg := metrics.New("test")
+	srv.SetMetrics(reg)
+
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "metrics-forget-owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("metrics-forget-owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "metrics-forget", Name: "Metrics forget", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("metrics-forget")
+	token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "nightly", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "none",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate what jobs.Manager records for a terminal run of each schedule.
+	reg.RecordScheduleRun(app.Slug, "nightly", "succeeded")
+	reg.RecordScheduleRun(app.Slug, "weekly", "succeeded")
+
+	scrape := func() string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		reg.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+		return rec.Body.String()
+	}
+	if body := scrape(); !strings.Contains(body, `schedule="nightly"`) {
+		t.Fatalf("precondition: nightly series must exist before delete:\n%s", body)
+	}
+
+	path := fmt.Sprintf("/api/apps/metrics-forget/schedules/%d", scheduleID)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodDelete, path, nil, token))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete schedule status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	body := scrape()
+	if strings.Contains(body, `schedule="nightly"`) {
+		t.Fatalf("deleted schedule's series must be forgotten:\n%s", body)
+	}
+	if !strings.Contains(body, `schedule="weekly"`) {
+		t.Fatalf("sibling schedule's series must survive the delete:\n%s", body)
 	}
 }
