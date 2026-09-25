@@ -6,6 +6,26 @@ app_url=${SHINYHUB_DEMO_APP_URL:-https://apps.demo.shinyhub.dev}
 max_attempts=${SHINYHUB_DEMO_SMOKE_ATTEMPTS:-60}
 retry_delay=${SHINYHUB_DEMO_SMOKE_RETRY_DELAY:-5}
 
+# A container that drops back out of "healthy" once the initial wake has
+# already succeeded - a rollout swap onto a freshly deployed image, a crash, a
+# restart, anything that flips it back to asleep - cannot be polled back to
+# life by any bare status check: every path but the entry pages is refused
+# outright while the container is down (classifyColdRequest in
+# deploy/cloudflare-demo/src/edge-policy.ts only starts it for a browser
+# navigation or the start button's own POST), and a refusal never starts the
+# container the way a real visitor's navigation does. This sends the exact
+# request wake() already uses for the first start, so any later retry loop can
+# recover from a second one the same way, instead of spinning until it gives
+# up on a container a plain re-open would have fixed in under a minute.
+nudge() {
+  curl --silent --show-error --output /dev/null \
+    --connect-timeout 10 --max-time 30 \
+    --header 'Sec-Fetch-Dest: document' \
+    --header 'Sec-Fetch-Mode: navigate' \
+    --header 'Accept: text/html,application/xhtml+xml' \
+    "$base_url/" || true
+}
+
 check() {
   url=$1
   shift
@@ -23,6 +43,7 @@ check() {
       code=000
     fi
     if [ "$attempt" -lt "$max_attempts" ]; then
+      nudge
       sleep "$retry_delay"
     fi
     attempt=$((attempt + 1))
@@ -76,12 +97,7 @@ entry
 wake() {
   attempt=1
   while [ "$attempt" -le "$max_attempts" ]; do
-    curl --silent --show-error --output /dev/null \
-      --connect-timeout 10 --max-time 30 \
-      --header 'Sec-Fetch-Dest: document' \
-      --header 'Sec-Fetch-Mode: navigate' \
-      --header 'Accept: text/html,application/xhtml+xml' \
-      "$base_url/" || true
+    nudge
     if code=$(curl --silent --show-error --output /dev/null \
       --connect-timeout 10 --max-time 30 --write-out '%{http_code}' \
       "$base_url/__demo/ready"); then
@@ -139,6 +155,7 @@ if [ -n "${SHINYHUB_DEMO_EXPECTED_VERSION:-}" ]; then
       echo "$base_url/api/server-info -> expected version $SHINYHUB_DEMO_EXPECTED_VERSION after $max_attempts attempts, got $server_info" >&2
       exit 1
     fi
+    nudge
     sleep "$retry_delay"
     attempt=$((attempt + 1))
   done
