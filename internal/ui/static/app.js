@@ -2667,7 +2667,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const resp = await api('/api/auth/logout', { method: 'POST' });
       if (!resp.ok && resp.status !== 401) throw new Error(`HTTP ${resp.status}`);
       suppressUnloadGuard = true;
-      window.location.assign('/users');
+      window.location.assign('/identity');
     } catch {
       consumeSupportDraft(sessionStorage);
       supportReauth.disabled = false;
@@ -6526,12 +6526,14 @@ document.addEventListener('DOMContentLoaded', () => {
     hideAllPageViews();
     return projectDetailMount(params);
   });
-  router.register('/users', () => {
+  router.register('/identity', () => {
     const usersAccess = resolveAdminOnlyAccess(ctx.state.user);
     if (usersAccess) return ctx.navigate(usersAccess.path, { replace: usersAccess.replace });
     hideAllPageViews();
     return mountUsers({ ...ctx, loadUsers });
   });
+  // Preserve old bookmarks without preserving a second navigation concept.
+  router.register('/users', () => ctx.navigate('/identity', { replace: true }));
   router.register('/tokens', () => {
     hideAllPageViews();
     if (tokensView) tokensView.hidden = false;

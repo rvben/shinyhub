@@ -351,6 +351,7 @@ func TestBrandingRoutes(t *testing.T) {
 		paths := []string{
 			"/apps/replica-smoke",
 			"/apps/replica-smoke/logs",
+			"/identity",
 			"/users",
 			"/workers",
 			"/audit-log",

@@ -17,6 +17,7 @@ function setup(path) {
   const router = createRouter();
   router.register('/', () => { mounted.push('/'); });
   router.register('/apps/:slug', p => { mounted.push(p.slug); });
+  router.register('/identity', () => { mounted.push('/identity'); });
   return { dom, win, router, destinations, mounted };
 }
 
@@ -39,6 +40,16 @@ test('a SPA return path mounts once with query and fragment preserved', async ()
     assert.equal(await startAuthenticatedRouter(t.router, t.win), false);
     assert.deepEqual(t.mounted, ['demo']);
     assert.equal(location.pathname + location.search + location.hash, '/apps/demo?tab=logs#latest');
+    assert.deepEqual(t.destinations, []);
+  } finally { t.dom.window.close(); }
+});
+
+test('a SPA return path to /identity mounts through the router, not a hard redirect', async () => {
+  const t = setup('/login?next=' + encodeURIComponent('/identity'));
+  try {
+    assert.equal(await startAuthenticatedRouter(t.router, t.win), false);
+    assert.deepEqual(t.mounted, ['/identity']);
+    assert.equal(location.pathname, '/identity');
     assert.deepEqual(t.destinations, []);
   } finally { t.dom.window.close(); }
 });

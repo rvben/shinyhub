@@ -2090,7 +2090,7 @@ func TestWorkersPageWiring(t *testing.T) {
 // TestAdminRouteGuardWiring pins the direct-URL guard for the admin-only and
 // audit-log pages. The sidebar already hides tab-users/tab-workers/tab-audit
 // from non-privileged roles (TestWorkersPageWiring et al.), but that hides only
-// the link: before this guard existed, a non-admin who typed /users, /workers
+// the link: before this guard existed, a non-admin who typed /identity, /workers
 // or /audit-log still got the full page chrome and then failed in whatever way
 // that page's own load call happened to fail. Each route must consult the pure
 // resolveAdminOnlyAccess/resolveAuditLogAccess helpers (views/sidebar-nav.js,
@@ -2102,13 +2102,13 @@ func TestAdminRouteGuardWiring(t *testing.T) {
 	assertContains(t, "app.js", "resolveAuditLogAccess,",
 		"app.js must import resolveAuditLogAccess from views/sidebar-nav.js")
 	assertContains(t, "app.js", "const usersAccess = resolveAdminOnlyAccess(ctx.state.user);",
-		"the /users route must consult resolveAdminOnlyAccess before mounting")
+		"the /identity route must consult resolveAdminOnlyAccess before mounting")
 	assertContains(t, "app.js", "const workersAccess = resolveAdminOnlyAccess(ctx.state.user);",
 		"the /workers route must consult resolveAdminOnlyAccess before mounting")
 	assertContains(t, "app.js", "const auditAccess = resolveAuditLogAccess(ctx.state.canReadAudit);",
 		"the /audit-log route must consult resolveAuditLogAccess before mounting")
 	assertContains(t, "app.js", "if (usersAccess) return ctx.navigate(usersAccess.path, { replace: usersAccess.replace });",
-		"a denied /users visit must replace-redirect rather than mount and fail")
+		"a denied /identity visit must replace-redirect rather than mount and fail")
 	assertContains(t, "app.js", "if (workersAccess) return ctx.navigate(workersAccess.path, { replace: workersAccess.replace });",
 		"a denied /workers visit must replace-redirect rather than mount and fail")
 	assertContains(t, "app.js", "if (auditAccess) return ctx.navigate(auditAccess.path, { replace: auditAccess.replace });",
@@ -2120,6 +2120,17 @@ func TestAdminRouteGuardWiring(t *testing.T) {
 		"loadAuditEvents must treat a 403 as an access change, not a generic load failure")
 	assertContains(t, "app.js", "router.navigate('/', { replace: true });",
 		"a mid-session audit-log 403 must replace-redirect home")
+}
+
+// TestIdentityRouteAliasWiring pins the /identity route as canonical (the
+// sidebar link, the page heading and the browser-tab title all already read
+// "Identity") with /users kept as a working alias, following the same
+// replace-redirect pattern TestLaunchpadContract pins for /launchpad -> /apps.
+func TestIdentityRouteAliasWiring(t *testing.T) {
+	assertContains(t, "index.html", `<a href="/identity" data-nav class="nav-item" id="tab-users"`,
+		"the sidebar Identity link must point at the canonical /identity route")
+	assertContains(t, "app.js", "router.register('/users', () => ctx.navigate('/identity', { replace: true }))",
+		"legacy /users bookmarks must replace-redirect to canonical /identity")
 }
 
 // TestFleetHealthBannerWiring pins the admin fleet-health banner: the helper
