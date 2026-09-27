@@ -3110,6 +3110,17 @@ func TestSidebarLayoutCSS(t *testing.T) {
 		"navigation rows must keep the same height when their labels are hidden")
 }
 
+// TestAppDetailHeaderActionsMeetTouchTargetSize pins that the app detail page's
+// header actions (Open app, Deploy, the kebab menu trigger) grow to the 44px
+// touch-target minimum on narrow viewports. Unlike the apps grid card actions
+// (.app-actions), which already had this treatment, the detail page's own
+// .app-detail-actions cluster kept its 36-40px desktop heights at mobile
+// widths, measured at 390px viewport width before the fix.
+func TestAppDetailHeaderActionsMeetTouchTargetSize(t *testing.T) {
+	assertContains(t, "style.css", ".app-detail-actions > a,\n  .app-detail-actions > .btn-primary,\n  .app-detail-actions .kebab-menu > button { min-height: 44px; height: 44px; }",
+		"the app detail header's Open app link, Deploy button, and kebab trigger must meet the 44px touch-target minimum on narrow viewports")
+}
+
 // TestVersionDisplayUsesReleaseNumber pins the human-friendly version display:
 // the release strip shows the server's release_number (vN) and date, the
 // deployments row renders the release label, and the raw epoch is no longer the

@@ -3482,6 +3482,9 @@ fieldset.settings-block { min-width: 0; }
      stat tiles collapse to two columns on narrow screens. */
   .app-detail-header { padding-bottom: 16px; }
   .app-detail-actions { flex-wrap: wrap; }
+  .app-detail-actions > a,
+  .app-detail-actions > .btn-primary,
+  .app-detail-actions .kebab-menu > button { min-height: 44px; height: 44px; }
   /* 2x2 tiles on mobile. The extra .app-detail-header qualifier outranks the
      later base .app-detail-stats .stat rule (media queries add no specificity,
      so source order would otherwise win). */
