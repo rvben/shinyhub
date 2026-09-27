@@ -14,6 +14,7 @@ import { isSingleEmoji, renderEmojiPicker } from '/static/views/emoji-picker.js'
 import { mountUsers } from '/static/views/users.js';
 import { tokenListModels, renderTokenList } from '/static/views/tokens.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
+import { createGETCoalescer } from '/static/views/request-coalesce.js';
 import {
   activationAttentionTooltip,
   degradedTooltip,
@@ -504,6 +505,16 @@ document.addEventListener('DOMContentLoaded', () => {
     return '';
   }
 
+  // A cold dashboard load fires more than one independent caller that wants
+  // the same read-only list at once (showLoggedIn's sidebar index and the
+  // view the router is about to mount both fetch /api/apps on their own,
+  // unaware of each other), so GET requests share one underlying fetch per
+  // URL while one is in flight instead of one each. Only ever applies to a
+  // plain GET with no body and no caller-supplied headers - anything else
+  // (every mutating request, and a GET a caller has customized) always gets
+  // its own fetch, unchanged.
+  const coalescedGET = createGETCoalescer((path, init) => fetch(path, init));
+
   async function api(path, options = {}) {
     const init = {
       credentials: 'same-origin',
@@ -520,7 +531,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const token = readCookie('csrf_token');
       if (token) init.headers['X-CSRF-Token'] = token;
     }
-    const resp = await fetch(path, init);
+    const coalesceable = !mutating && !init.body && Object.keys(init.headers).length === 0;
+    const resp = coalesceable ? await coalescedGET(path, init) : await fetch(path, init);
     // A successful mutating request means anything a view is holding may no
     // longer be true. Announce it here, at the one place every request passes
     // through, rather than asking each call site to remember: a view that caches
