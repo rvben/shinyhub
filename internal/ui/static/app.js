@@ -23,6 +23,7 @@ import {
 import { createFocusTrap } from '/static/views/focus-trap.js';
 import {
   AUDIT_ACTIONS,
+  auditActionLabel,
   auditEmptyMessage,
   auditListPath,
   auditLoadError,
@@ -1741,7 +1742,8 @@ document.addEventListener('DOMContentLoaded', () => {
         ? ` badge-action-${e.action.replace(/\./g, '-')}`
         : '';
       badge.className = `badge badge-action-default${actionClass}`;
-      badge.textContent = e.action;
+      badge.textContent = auditActionLabel(e.action);
+      badge.title = e.action;
       actionCell.appendChild(badge);
       tr.appendChild(actionCell);
 

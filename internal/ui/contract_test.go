@@ -4727,3 +4727,15 @@ func TestFormFieldsAreNotMonospaceByDefault(t *testing.T) {
 			"a free-text display name or description must not be forced back into the monospace face")
 	}
 }
+
+// TestAuditActionBadgeIsHumanReadable pins that the Audit Log's Action column
+// shows a human-readable phrase (auditActionLabel) rather than the raw
+// snake_case or dotted action key the server records, while keeping that raw
+// key available as the badge's title/tooltip for anyone who needs the exact
+// value to search server logs.
+func TestAuditActionBadgeIsHumanReadable(t *testing.T) {
+	assertContains(t, "app.js", "badge.textContent = auditActionLabel(e.action);",
+		"the Action column badge must render a human-readable label, not the raw action key")
+	assertContains(t, "app.js", "badge.title = e.action;",
+		"the raw action key must still be reachable, as the badge's tooltip")
+}

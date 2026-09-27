@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import {
+  auditActionLabel,
   auditEmptyMessage,
   auditListPath,
   auditLoadError,
@@ -166,4 +167,16 @@ test('the audit date range is labelled, and the API contract it queries is the o
   assert.match(html, /id="audit-since"[^>]*aria-label="Show audit events on or after this date \(UTC\)"/);
   assert.match(html, /id="audit-until"[^>]*aria-label="Show audit events on or before this date \(UTC\)"/);
   assert.match(html, /id="audit-range-clear"/);
+});
+
+test('auditActionLabel turns a raw action key into a human-readable phrase', () => {
+  assert.equal(auditActionLabel('delete_service_credential'), 'Delete service credential');
+  assert.equal(auditActionLabel('app.icon.set'), 'App icon set');
+  assert.equal(auditActionLabel('schedule_run_timed_out'), 'Schedule run timed out');
+  assert.equal(auditActionLabel('login_failed'), 'Login failed');
+  // Only the first word is capitalized; the rest read as an ordinary phrase
+  // rather than shouting Every Word Like A Title.
+  assert.equal(auditActionLabel('support_session.start'), 'Support session start');
+  assert.equal(auditActionLabel(''), '');
+  assert.equal(auditActionLabel(undefined), '');
 });
