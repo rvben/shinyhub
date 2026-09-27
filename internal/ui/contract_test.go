@@ -4739,3 +4739,18 @@ func TestAuditActionBadgeIsHumanReadable(t *testing.T) {
 	assertContains(t, "app.js", "badge.title = e.action;",
 		"the raw action key must still be reachable, as the badge's tooltip")
 }
+
+// TestLoginLabelsAreSentenceCase pins that the login form's "Username" and
+// "Password" labels render exactly as written in the markup. The CSS used to
+// force them to uppercase with letter-spacing tracking meant for an all-caps
+// eyebrow label, which fought the sentence-case text already in index.html.
+func TestLoginLabelsAreSentenceCase(t *testing.T) {
+	assertContains(t, "style.css", ".login-box .login-label {\n  font-size: var(--fs-label);\n  font-weight: 600;\n  color: var(--text-muted);\n  margin-bottom: -0.3rem;\n}",
+		"the login label must not transform its text to uppercase or apply uppercase-style letter-spacing")
+	assertNotContains(t, "style.css", "text-transform: uppercase;\n  color: var(--text-muted);\n  margin-bottom: -0.3rem;",
+		"the login label rule must not reintroduce an uppercase transform")
+	assertContains(t, "index.html", `<label for="login-username" class="login-label">Username</label>`,
+		"the username label text must stay sentence case in markup")
+	assertContains(t, "index.html", `<label for="login-password" class="login-label">Password</label>`,
+		"the password label text must stay sentence case in markup")
+}

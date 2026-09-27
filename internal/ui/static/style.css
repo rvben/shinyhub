@@ -850,8 +850,6 @@ body[data-auth="out"] {
 .login-box .login-label {
   font-size: var(--fs-label);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--text-muted);
   margin-bottom: -0.3rem;
 }
