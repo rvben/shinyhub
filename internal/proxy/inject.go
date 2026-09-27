@@ -340,9 +340,9 @@ func hasNoneSource(directive string) bool {
 //
 // It is confined to page loads: sub-resources and WebSocket upgrades are never
 // injected into, and re-encoding their traffic to reach that conclusion would
-// be pure cost. Compression toward the visitor is unaffected for those, and for
-// the shell itself the edge (Caddy in the reference deployment) still
-// compresses on the way out.
+// be pure cost. Compression toward the visitor is unaffected: the server's
+// compression layer (internal/httpcompress) encodes the decorated shell on the
+// way out, as it does every other eligible response.
 //
 // It relaxes whenever any page enhancement is on, because each needs a readable
 // body. Tying it to the overlay alone would leave the switcher or favicon

@@ -630,6 +630,18 @@ type ServerConfig struct {
 	// operator who wants app pages left strictly untouched can say so and be
 	// believed.
 	AppNav *bool `yaml:"app_nav"`
+
+	// Compression controls whether responses are gzip-encoded for clients that
+	// accept it: the dashboard, the API, and everything relayed from apps. Shiny
+	// backends serve their pages and dependencies uncompressed, and a typical
+	// page pulls over a megabyte of JavaScript and CSS that gzip shrinks about
+	// four-fold.
+	//
+	// On by default. A pointer so an operator whose edge already compresses, or
+	// who would rather spend no CPU on it, can turn it off; an edge that
+	// compresses sees Content-Encoding and leaves these responses alone, so
+	// leaving it on behind one costs nothing extra.
+	Compression *bool `yaml:"compression"`
 }
 
 // StatusOverlayEnabled reports whether app page loads get the status overlay.
@@ -642,6 +654,12 @@ func (s *ServerConfig) StatusOverlayEnabled() bool {
 // enabled.
 func (s *ServerConfig) AppNavEnabled() bool {
 	return s.AppNav == nil || *s.AppNav
+}
+
+// CompressionEnabled reports whether responses are gzip-encoded for clients
+// that accept it. Absent means enabled.
+func (s *ServerConfig) CompressionEnabled() bool {
+	return s.Compression == nil || *s.Compression
 }
 
 // defaultSessionRecheckInterval bounds how long a revoked user keeps a session
@@ -2787,6 +2805,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_SERVER_APP_NAV: %w", err)
 		}
 		cfg.Server.AppNav = &b
+	}
+	if v := os.Getenv("SHINYHUB_SERVER_COMPRESSION"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SERVER_COMPRESSION: %w", err)
+		}
+		cfg.Server.Compression = &b
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v

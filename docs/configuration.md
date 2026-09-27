@@ -234,7 +234,8 @@ On by default. What it does, and what it deliberately does not do:
   relaxing the policy.
 - Page loads are fetched from the backend uncompressed so the script can be
   spliced in. The backend hop still negotiates gzip; only the in-process view is
-  plain.
+  plain, and the finished page is compressed on its way to the visitor (see
+  [Response compression](#response-compression)).
 
 Set it to `false` for byte-for-byte untouched application responses. No response
 body is rewritten while it is off.
@@ -277,6 +278,43 @@ On by default. What it does, and what it deliberately does not do:
 Set it to `false` to leave application pages without it. Off is absent rather
 than idle: no page is rewritten, and the endpoint the switcher reads its list
 from is not served at all.
+
+## Response compression
+
+R and Python Shiny serve their pages and dependencies uncompressed. A typical
+application page pulls over a megabyte of JavaScript and CSS (Bootstrap, jQuery,
+`shiny.js`, widget libraries), which gzip shrinks about four-fold. ShinyHub
+gzip-encodes responses for every browser that accepts it: application pages and
+their assets, the dashboard, and the API.
+
+```yaml
+server:
+  compression: false   # SHINYHUB_SERVER_COMPRESSION
+```
+
+On by default. What it compresses, and what it leaves alone:
+
+- Text formats only: `text/*`, JavaScript, JSON, XML, SVG, WebAssembly, and
+  uncompressed font formats. Images, `woff2`, archives and other binary formats
+  are already compressed and pass through untouched.
+- Bodies under 1 KiB, responses the application already encoded, partial
+  (`206`) responses, `HEAD` requests, and `Cache-Control: no-transform`
+  responses are sent as-is.
+- WebSocket connections are never touched. Shiny's WebSocket negotiates its own
+  compression (`permessage-deflate`) between the browser and the application.
+- Server-sent events (`text/event-stream`) are never compressed, so each event
+  is delivered the moment it is written. Other streamed responses stay
+  streamed: every flush from the application reaches the browser immediately.
+- A compressed response turns a strong `ETag` into a weak one, because the
+  encoded bytes differ from the original. Conditional requests keep working,
+  so a returning visitor still gets `304 Not Modified` for unchanged assets.
+- Every response whose encoding depends on the browser carries
+  `Vary: Accept-Encoding`, so a shared cache never serves gzip to a client that
+  did not ask for it.
+
+Behind a reverse proxy that compresses as well, leave it on: the proxy sees
+`Content-Encoding` and passes the response through rather than compressing it
+twice. Turn it off only if you would rather not spend ShinyHub's CPU on it.
 
 ## Environment overrides
 
