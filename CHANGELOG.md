@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.17.8](https://github.com/rvben/shinyhub/compare/v0.17.7...v0.17.8) - 2026-09-27
+
+### Added
+
+- **cache**: keep the result cache beside the app data dir by default ([37de6b0](https://github.com/rvben/shinyhub/commit/37de6b0ffa37db63a1504a79af299bee1f1bd435))
+- **cache**: give each app a shared on-disk result cache ([9119e4d](https://github.com/rvben/shinyhub/commit/9119e4d821dcc4a41d21aefe23a0386f59f2c0a2))
+- **proxy**: compress WebSocket messages for apps whose server does not ([b108519](https://github.com/rvben/shinyhub/commit/b108519807b77213fb2b782b5ee38183e62873af))
+
 ## [0.17.7](https://github.com/rvben/shinyhub/compare/v0.17.6...v0.17.7) - 2026-09-27
 
 ### Added
