@@ -27,11 +27,11 @@
 #   ports on the HOST loopback -- unreachable from inside the server container.
 #   Host networking collapses the boundary and makes the loopback reachable.
 #
-# Path parity (apps / app-data):
+# Path parity (apps / app-data / app-cache):
 #   The docker runtime passes app bundle directories directly to the Docker
 #   daemon as bind-mount sources when starting app containers. The daemon
 #   resolves these paths on the HOST, not inside the shinyhub container.
-#   Therefore the apps_dir and app_data_dir must exist at the SAME absolute
+#   Therefore apps_dir, app_data_dir and app_cache_dir must exist at the SAME absolute
 #   path on both the host and inside the shinyhub container. A named volume
 #   (opaque, daemon-managed) cannot satisfy this: the path the daemon assigns
 #   internally is not the same as what shinyhub sees. The fix is a host bind
@@ -65,10 +65,12 @@ services:
       - -c
       - |
         mkdir -p "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/apps" \
-                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/app-data"
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/app-data" \
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/app-cache"
         chown -R 65532:65532 \
                  "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/apps" \
                  "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/app-data" \
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/app-cache" \
                  /data/db
     environment:
       SHINYHUB_DATA_ROOT: "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}"
@@ -122,9 +124,11 @@ services:
 
       # Storage: pass as env vars (single source of truth; shinyhub.yaml omits
       # these keys so the env override is always authoritative).
-      # SHINYHUB_APPS_DIR and SHINYHUB_APP_DATA_DIR (internal/config applyEnv).
+      # SHINYHUB_APPS_DIR, SHINYHUB_APP_DATA_DIR and SHINYHUB_APP_CACHE_DIR
+      # (internal/config applyEnv).
       SHINYHUB_APPS_DIR: "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/apps"
       SHINYHUB_APP_DATA_DIR: "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/app-data"
+      SHINYHUB_APP_CACHE_DIR: "${SHINYHUB_DATA_ROOT:-/srv/shinyhub}/app-cache"
 
       # Optional: bootstrap an admin account on first start.
       # Comment out after the first run; the env var has no effect once the

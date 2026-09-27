@@ -920,7 +920,8 @@ type StorageConfig struct {
 	// of an app gets <AppCacheDir>/<slug>/d<deploymentID>, exported to the
 	// app as SHINYHUB_CACHE_DIR and shared by all of its processes. Kept out
 	// of AppDataDir on purpose: a cache is disposable, so it must not count
-	// against the app's quota, be backed up, or be shareable as data.
+	// against the app's quota, be backed up, or be shareable as data. Unset
+	// means an app-cache directory beside AppDataDir.
 	AppCacheDir string `yaml:"app_cache_dir"`
 	// AppCacheMaxMB is the size an app's cache library is asked to stay
 	// under, exported as SHINYHUB_CACHE_MAX_MB. Unset means 1024; 0 turns
@@ -1814,7 +1815,10 @@ func loadRaw(path string) (*Config, error) {
 		cfg.Storage.AppDataDir = "./data/app-data"
 	}
 	if cfg.Storage.AppCacheDir == "" {
-		cfg.Storage.AppCacheDir = "./data/app-cache"
+		// Beside the data dir, so an install that moved its data (a service
+		// whose working directory is /, a container bind mount) gets a cache
+		// root it can create without configuring a second path.
+		cfg.Storage.AppCacheDir = filepath.Join(filepath.Dir(filepath.Clean(cfg.Storage.AppDataDir)), "app-cache")
 	}
 	if cfg.Storage.AppCacheMaxMB != nil && *cfg.Storage.AppCacheMaxMB < 0 {
 		return nil, fmt.Errorf("storage.app_cache_max_mb: %d is negative; use 0 to turn the result cache off", *cfg.Storage.AppCacheMaxMB)

@@ -30,8 +30,8 @@ separate trust boundary and is passed into the container by `compose.yaml`.
 
 **2. Set the data root**
 
-The apps and app-data directories must exist at the same absolute path on the
-host and inside the container (see "Path parity" below).
+The apps, app-data and app-cache directories must exist at the same absolute
+path on the host and inside the container (see "Path parity" below).
 
 Linux:
 ```sh
@@ -148,9 +148,9 @@ to host loopback on the port specified in `shinyhub.yaml` (`server.port: 8080`).
 Edit `shinyhub.yaml` in this directory before starting (or restart after
 changes). The file is bind-mounted read-only at `/etc/shinyhub/shinyhub.yaml`.
 
-The storage paths (`apps_dir`, `app_data_dir`) are set via `SHINYHUB_APPS_DIR`
-and `SHINYHUB_APP_DATA_DIR` environment variables in `compose.yaml`, derived
-from `SHINYHUB_DATA_ROOT`. Do not set them in `shinyhub.yaml`.
+The storage paths (`apps_dir`, `app_data_dir`, `app_cache_dir`) are set via
+`SHINYHUB_APPS_DIR`, `SHINYHUB_APP_DATA_DIR` and `SHINYHUB_APP_CACHE_DIR`
+environment variables in `compose.yaml`, derived from `SHINYHUB_DATA_ROOT`. Do not set them in `shinyhub.yaml`.
 
 Other commonly changed settings:
 
@@ -221,6 +221,7 @@ The server adopts running app containers across restarts
 |------|----------|----------------|
 | App bundles | `$SHINYHUB_DATA_ROOT/apps/` | `tar czf apps.tar.gz $SHINYHUB_DATA_ROOT/apps` |
 | Per-app data | `$SHINYHUB_DATA_ROOT/app-data/` | `tar czf app-data.tar.gz $SHINYHUB_DATA_ROOT/app-data` |
+| Result cache | `$SHINYHUB_DATA_ROOT/app-cache/` | Skip it: it is disposable, and results are computed again |
 | SQLite DB | named volume `shinyhub-db` | `docker run --rm -v shinyhub-db:/data -v $(pwd):/backup alpine tar czf /backup/shinyhub-db.tar.gz /data` |
 
 ## Health monitoring

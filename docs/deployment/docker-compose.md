@@ -51,7 +51,7 @@ Application containers publish their allocated ports on host loopback. Host
 networking lets the control-plane container reach those endpoints while keeping
 them inaccessible from external interfaces.
 
-The bundle and app-data directories are mounted at the same absolute path on
+The bundle, app-data and app-cache directories are mounted at the same absolute path on
 the host and inside the control-plane container. Docker resolves sibling
 container bind mounts on the host, so this path parity is required.
 
