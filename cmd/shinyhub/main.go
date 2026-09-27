@@ -52,6 +52,7 @@ import (
 	"github.com/rvben/shinyhub/internal/fargate"
 	"github.com/rvben/shinyhub/internal/favicon"
 	"github.com/rvben/shinyhub/internal/history"
+	"github.com/rvben/shinyhub/internal/httpcompress"
 	"github.com/rvben/shinyhub/internal/identity"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/leader"
@@ -2797,6 +2798,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		rootHandler = auth.ForwardAuthMiddleware(store, faCfg, cfg.TrustedProxyNets)(mux)
 	}
 	rootHandler = appOriginBoundary(rootHandler, parsedAppOrigin, cfg.TrustedProxyNets)
+	if cfg.Server.CompressionEnabled() {
+		rootHandler = httpcompress.Handler(rootHandler)
+	}
 
 	// Branding injects inline <script>/<style> into the SPA shell only when
 	// active; the strict CSP allows exactly those blocks by SHA-256 hash (both
