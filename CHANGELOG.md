@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.17.7](https://github.com/rvben/shinyhub/compare/v0.17.6...v0.17.7) - 2026-09-27
+
+### Added
+
+- **server**: gzip-compress eligible responses ([029051e](https://github.com/rvben/shinyhub/commit/029051e3a70e00fc08b022520e98268690f42f86))
+
+### Fixed
+
+- **demo**: forward requests to a running container the edge has not yet seen healthy ([d756ca4](https://github.com/rvben/shinyhub/commit/d756ca4852a8acec1bebad8905d9946b9dc83d84))
+
 ## [0.17.6](https://github.com/rvben/shinyhub/compare/v0.17.5...v0.17.6) - 2026-09-25
 
 ### Fixed
