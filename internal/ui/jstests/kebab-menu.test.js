@@ -145,3 +145,110 @@ test('wireKebab tolerates missing elements', () => {
   assert.equal(wireKebab(null, el('list'), null), null);
   assert.equal(wireKebab(el('toggle'), null, null), null);
 });
+
+// countDocListeners wraps addEventListener/removeEventListener on doc so a
+// test can assert on how many are actually registered, which is exactly what
+// a grid rebuild leak would grow without bound. It counts per (type, capture)
+// pair rather than a single total: jsdom's own selector engine registers a
+// permanent, never-removed mouseover/mouseout pair on the document the first
+// time anything calls querySelector, which has nothing to do with kebab-menu
+// and would otherwise show up as a permanent "leak" of its own.
+function countDocListeners(doc) {
+  const counts = new Map();
+  const key = (type, capture) => `${type}:${capture}`;
+  const realAdd = doc.addEventListener.bind(doc);
+  const realRemove = doc.removeEventListener.bind(doc);
+  doc.addEventListener = (type, fn, opts) => {
+    const k = key(type, opts === true);
+    counts.set(k, (counts.get(k) || 0) + 1);
+    return realAdd(type, fn, opts);
+  };
+  doc.removeEventListener = (type, fn, opts) => {
+    const k = key(type, opts === true);
+    counts.set(k, (counts.get(k) || 0) - 1);
+    return realRemove(type, fn, opts);
+  };
+  return { count: (type, capture) => counts.get(key(type, capture)) || 0 };
+}
+
+function pressArrowDown(node) {
+  const { KeyboardEvent } = node.ownerDocument.defaultView;
+  node.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+}
+
+test('a menu left open across a rebuild does not leak its document listeners', () => {
+  const dom = new JSDOM(`<!DOCTYPE html>
+    <div id="grid">
+      <div class="app-card">
+        <div class="kebab-menu">
+          <button id="toggle" type="button" aria-haspopup="menu" aria-expanded="false">…</button>
+          <ul id="list" class="kebab-list" role="menu" hidden>
+            <li role="none"><button type="button" role="menuitem">Restart</button></li>
+          </ul>
+        </div>
+      </div>
+    </div>`);
+  const doc = dom.window.document;
+  const grid = doc.getElementById('grid');
+  const counted = countDocListeners(doc);
+
+  // Open a menu, then rebuild the grid (fresh markup, fresh wireKebab call)
+  // WITHOUT closing the old one first, the way a poll-driven refresh would if
+  // it landed while the menu was open. Do this across several rebuilds: a
+  // leak grows with every cycle, a fix stays flat.
+  //
+  // The opening keystroke matters here: opening with a click would also
+  // reach every stale instance's onDocClick as a bystander (document-level
+  // capture-phase listeners fire for any click anywhere in the document),
+  // and that handler already self-closes on an unrecognised target even
+  // without this fix, since a detached list never contains the click's
+  // target. That makes a click-driven rebuild loop pass whether or not the
+  // fix is present, proving nothing. An arrow key does not have that
+  // shortcut: a stale instance's onKey only acts when the document's active
+  // element is inside its own list, which is never true once that list is
+  // detached, so on unfixed code the keydown listener is never removed by
+  // anything short of an Escape, a Tab, or an actual outside click.
+  for (let i = 0; i < 5; i++) {
+    grid.innerHTML = `
+      <div class="app-card">
+        <div class="kebab-menu">
+          <button id="toggle" type="button" aria-haspopup="menu" aria-expanded="false">…</button>
+          <ul id="list" class="kebab-list" role="menu" hidden>
+            <li role="none"><button type="button" role="menuitem">Restart</button></li>
+          </ul>
+        </div>
+      </div>`;
+    const toggle = doc.getElementById('toggle');
+    const list = doc.getElementById('list');
+    wireKebab(toggle, list, doc.querySelector('.app-card'));
+    toggle.focus();
+    pressArrowDown(toggle); // opens it, attaching this instance's document listeners
+    // A real rebuild's next tick replaces grid.innerHTML again on the next
+    // loop iteration without ever calling close() on this instance, and
+    // nobody clicks or presses Escape/Tab in between.
+  }
+
+  // Only the current, still-open instance should have a registered pair; the
+  // previous four rebuilds are stale DOM nobody ever explicitly closed. A fix
+  // means each rebuild's own ArrowDown reaches every prior stale onKey too
+  // (the same capture-phase bystander effect) and detaches it on the spot; a
+  // leak means all five pairs are still sitting there.
+  assert.equal(counted.count('click', true), 1, 'exactly one click listener should remain: the live menu\'s');
+  assert.equal(counted.count('keydown', true), 1, 'exactly one keydown listener should remain: the live menu\'s');
+});
+
+test('a stale kebab instance stops reacting to document clicks after its button is removed', () => {
+  const { doc, el } = fixture();
+  open(el);
+  el('list').remove();
+  el('toggle').remove(); // simulate the card being replaced wholesale
+
+  const other = doc.createElement('button');
+  doc.body.appendChild(other);
+  other.focus();
+  click(doc.body);
+
+  // The stale instance must not have touched focus (or thrown) on behalf of
+  // DOM that no longer exists.
+  assert.equal(doc.activeElement, other);
+});
