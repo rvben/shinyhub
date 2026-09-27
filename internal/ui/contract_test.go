@@ -4767,3 +4767,15 @@ func TestArrowLinksHideTheGlyphFromAssistiveTech(t *testing.T) {
 	assertNotContains(t, "views/app-detail.js", "Deploy from the Overview tab →</a>",
 		"the arrow must not be reintroduced as loose link text")
 }
+
+// TestDeploymentsTableHasALabelledActionsColumn pins that the Deployments
+// table's header row labels its trailing column, matching the Users table's
+// "Actions" header for the same kind of trailing mutate-action column. The
+// column used to render as a blank header cell above a "Roll back" button
+// or a "Live" note, the only column left unlabeled among the four.
+func TestDeploymentsTableHasALabelledActionsColumn(t *testing.T) {
+	assertContains(t, "views/app-detail.js", `<span class="deployment-action">Actions</span>`,
+		"the deployments header's trailing column must carry a visible Actions label, aligned like the body's action cells")
+	assertNotContains(t, "views/app-detail.js", "<span>Deployed</span>\n        <span></span>",
+		"the deployments header must not reintroduce a blank trailing column")
+}

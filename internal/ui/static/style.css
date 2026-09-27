@@ -6828,7 +6828,7 @@ fieldset.settings-block { min-width: 0; }
   grid-template-columns: minmax(9rem, max-content) minmax(14rem, 1fr) minmax(6rem, auto) auto;
   gap: 8px 16px;
   align-items: center;
-  padding: 10px 0;
+  padding: 13px 0;
   border-bottom: 1px solid var(--line);
 }
 .deployments-head {

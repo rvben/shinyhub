@@ -816,7 +816,7 @@ async function renderDeployments(panel, app, ctx) {
         <span>Deployment</span>
         <span>Source</span>
         <span>Deployed</span>
-        <span></span>
+        <span class="deployment-action">Actions</span>
       </li>
     </ul>
     <p id="detail-deployments-empty" class="env-empty" hidden>No deployments yet.</p>
