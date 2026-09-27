@@ -2789,6 +2789,46 @@ func TestListAppsJSONHasFleetFields(t *testing.T) {
 	}
 }
 
+// TestListAppsJSONOmitsUnsetOverrideFields verifies that a plain app, with no
+// hibernate/identity overrides ever set, does not pay for those fields in the
+// response at all: they must be entirely absent, not present as an explicit
+// null. This is the common shape for most apps in a large fleet, so the byte
+// cost of always-present-as-null keys multiplies by the fleet size on every
+// dashboard load.
+//
+// memory_limit_mb, cpu_quota_percent and last_replica_exit are deliberately
+// excluded: they are declared OutputFields for "apps list"/"apps show" in
+// internal/cli/schema_annotations.go, and
+// TestSchema_OutputFieldsAgainstLiveServer (internal/cli) asserts they stay
+// present in a real response even when null. managed_by is excluded for the
+// same reason plus TestListAppsJSONHasFleetFields, above, asserting it.
+func TestListAppsJSONOmitsUnsetOverrideFields(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, userID := seedUserAndJWT(t, store, "plain-app-owner", "admin")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "plain-app", Name: "Plain App", OwnerID: userID, Access: "private"}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	req := authedRequest(t, "GET", "/api/apps", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/apps = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+
+	for _, key := range []string{
+		"hibernate_timeout_minutes",
+		"identity_headers",
+		"usage_identity_mode",
+	} {
+		needle := []byte(`"` + key + `"`)
+		if bytes.Contains(body, needle) {
+			t.Errorf("GET /api/apps must omit %q for an app with no override, got it in body: %s", key, body)
+		}
+	}
+}
+
 func TestSetAppAccessPreconditionMismatch409(t *testing.T) {
 	srv, store := newTestServer(t)
 	token := seedAppWithPromotedDeploy(t, store, "accprecond", "sha256:live")

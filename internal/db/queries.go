@@ -1015,16 +1015,27 @@ type App struct {
 	// EffectiveMaxSessionsPerReplica resolves MaxSessionsPerReplica against the
 	// runtime default. SessionsCeiling is configured admission capacity, computed
 	// consistently for multiplex and elastic isolation.
-	EffectiveMaxSessionsPerReplica int  `json:"effective_max_sessions_per_replica"`
-	SessionsCeiling                int  `json:"sessions_ceiling"`
-	DeployCount                    int  `json:"deploy_count"`
-	HibernateTimeoutMinutes        *int `json:"hibernate_timeout_minutes"`
+	EffectiveMaxSessionsPerReplica int `json:"effective_max_sessions_per_replica"`
+	SessionsCeiling                int `json:"sessions_ceiling"`
+	DeployCount                    int `json:"deploy_count"`
+	// omitempty: no confirmed consumer (internal/ui/static, internal/cli) reads
+	// this as a map key and distinguishes an absent key from an explicit null
+	// (app.js's hibernateModeFromValue treats null and undefined the same).
+	// Omitting a per-app nil saves the key on every app that has not
+	// overridden the default, which is most of a large fleet.
+	HibernateTimeoutMinutes *int `json:"hibernate_timeout_minutes,omitempty"`
 	// EffectiveHibernateTimeoutMinutes is the exact timeout in minutes after
 	// resolving a nil per-app value against lifecycle.hibernate_timeout. A
 	// float preserves duration settings such as 90s as 1.5 minutes.
 	EffectiveHibernateTimeoutMinutes float64 `json:"effective_hibernate_timeout_minutes"`
-	MemoryLimitMB                    *int    `json:"memory_limit_mb"`
-	CPUQuotaPercent                  *int    `json:"cpu_quota_percent"`
+	// MemoryLimitMB and CPUQuotaPercent stay plain null rather than omitempty:
+	// both are declared OutputFields for "apps list"/"apps show" in
+	// internal/cli/schema_annotations.go, and
+	// TestSchema_OutputFieldsAgainstLiveServer asserts every declared field is
+	// present in a real response, null or not. Dropping the key there would be
+	// a schema break for an agent-facing CLI consumer, not just a byte saving.
+	MemoryLimitMB   *int `json:"memory_limit_mb"`
+	CPUQuotaPercent *int `json:"cpu_quota_percent"`
 	// Effective resource fields are presentation-only: the API resolves nullable
 	// app overrides against the placement-aware runtime defaults. Zero means the
 	// platform applies no ShinyHub per-replica limit.
@@ -1104,10 +1115,15 @@ type App struct {
 	// IdentityHeaders is the per-app identity-forwarding override reconciled
 	// from the bundle manifest. nil = inherit the global config flag.
 	// Effective = global && (IdentityHeaders == nil || *IdentityHeaders).
-	IdentityHeaders *bool `json:"identity_headers"`
+	// omitempty: no confirmed consumer reads this key from the app list/detail
+	// response at all (it is only ever written via PATCH), so there is nothing
+	// for the key's mere presence to signal.
+	IdentityHeaders *bool `json:"identity_headers,omitempty"`
 	// UsageIdentityMode is a stricter per-app usage policy. nil inherits the hub
-	// ceiling; "disabled" stops collection for this app.
-	UsageIdentityMode *string `json:"usage_identity_mode"`
+	// ceiling; "disabled" stops collection for this app. omitempty: the one
+	// reader (app.js) does `app.usage_identity_mode || 'inherit'`, which
+	// already treats undefined the same as null.
+	UsageIdentityMode *string `json:"usage_identity_mode,omitempty"`
 	// MinWarmReplicas is the pre-warming floor: replicas kept running
 	// through idle hibernation. 0 = hibernate fully (the default).
 	MinWarmReplicas int `json:"min_warm_replicas"`
@@ -1121,6 +1137,8 @@ type App struct {
 	LastReplicaError string `json:"last_replica_error"`
 	// LastReplicaExit is historical and timestamped. Unlike LastReplicaError it
 	// remains after recovery without making a healthy app look actively failed.
+	// Not omitempty: it is a declared OutputField for "apps list"/"apps show"
+	// (see the MemoryLimitMB comment above for why that rules omitempty out).
 	LastReplicaExit *ReplicaExit `json:"last_replica_exit"`
 	// CrashedAt is the Unix-epoch seconds of the transition into "crashed", or
 	// 0 when the app is not crashed. Cleared alongside LastError on (re)start.
