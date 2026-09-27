@@ -76,6 +76,20 @@ func TestStandalonePageLinksUseTheAccentColor(t *testing.T) {
 	}
 }
 
+// TestArrowLinksKeepTheirSpace pins the gap between an action link's label
+// and its decorative arrow. The links are inline-flex, and a flex container
+// drops the whitespace-only text node between "View logs" and the
+// aria-hidden arrow span, so without a gap the pair renders as "View logs→".
+func TestArrowLinksKeepTheirSpace(t *testing.T) {
+	body := cssRuleBody(t, readStatic(t, "style.css"), "\n.overview-intro > a,\n.overview-card-link {")
+	if !strings.Contains(body, "display: inline-flex") {
+		t.Fatalf("expected the arrow-link rule to be the inline-flex one; got:%s", body)
+	}
+	if !strings.Contains(body, "gap: 0.3em") {
+		t.Fatalf("an inline-flex arrow link must set a gap, or its label and arrow touch; got:%s", body)
+	}
+}
+
 // TestDeployingBadgeWired pins the API/frontend contract for the card's
 // "Deploying" badge. The server computes `deploying` (pending deployment row
 // + held deploy lock; see api.Server.appDeploying) onto the apps-list payload

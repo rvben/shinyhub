@@ -6125,6 +6125,7 @@ fieldset.settings-block { min-width: 0; }
 .overview-card-link {
   display: inline-flex;
   align-items: center;
+  gap: 0.3em;
   flex: none;
   min-height: 44px;
   color: var(--cyan-bright);
