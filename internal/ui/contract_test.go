@@ -4754,3 +4754,16 @@ func TestLoginLabelsAreSentenceCase(t *testing.T) {
 	assertContains(t, "index.html", `<label for="login-password" class="login-label">Password</label>`,
 		"the password label text must stay sentence case in markup")
 }
+
+// TestArrowLinksHideTheGlyphFromAssistiveTech pins that every arrow-suffixed
+// action link wraps the decorative arrow in its own aria-hidden element,
+// matching the established pattern (overview-card-link, launchpad's chevron).
+// The "awaiting first deploy" empty state used to carry the arrow loose in
+// the link's own text, so a screen reader announced "right arrow" after the
+// link's purpose.
+func TestArrowLinksHideTheGlyphFromAssistiveTech(t *testing.T) {
+	assertContains(t, "views/app-detail.js", `Deploy from the Overview tab <span aria-hidden="true">→</span></a>`,
+		"the awaiting-first-deploy empty state's arrow must be hidden from assistive tech, not loose in the link text")
+	assertNotContains(t, "views/app-detail.js", "Deploy from the Overview tab →</a>",
+		"the arrow must not be reintroduced as loose link text")
+}

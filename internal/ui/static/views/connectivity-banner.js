@@ -37,7 +37,11 @@ export function connectivityBanner(doc, envelope) {
   link.href = DOCS_URL;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
-  link.textContent = 'Check your reverse proxy (WebSockets) →';
+  link.appendChild(doc.createTextNode('Check your reverse proxy (WebSockets) '));
+  const arrow = doc.createElement('span');
+  arrow.setAttribute('aria-hidden', 'true');
+  arrow.textContent = '→';
+  link.appendChild(arrow);
   banner.appendChild(link);
 
   return banner;

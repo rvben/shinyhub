@@ -38,4 +38,12 @@ test('serving-without-ws renders the amber warning with a docs link', () => {
   assert.ok(link, 'has a reverse-proxy docs link');
   assert.match(link.getAttribute('href'), /reverse-proxy\/caddy\.md#websockets/);
   assert.equal(link.getAttribute('rel'), 'noopener noreferrer', 'external link is safe');
+
+  // The trailing arrow is decorative, matching every other arrow-suffixed
+  // link in the dashboard (overview-card-link, launchpad's chevron): it must
+  // live in its own aria-hidden element, not loose in the link's own text,
+  // or a screen reader announces "right arrow" after the link's purpose.
+  const arrow = link.querySelector('[aria-hidden="true"]');
+  assert.ok(arrow, 'the arrow glyph is wrapped in an aria-hidden element');
+  assert.equal(arrow.textContent, '→');
 });

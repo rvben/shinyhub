@@ -615,7 +615,7 @@ function renderLogs(panel, app, replicasStatus, ctx) {
         <h2>No logs yet</h2>
         <p>This app is awaiting its first deploy. Output appears here once it's
            deployed and running.</p>
-        <p><a href="/apps/${app.slug}/overview" data-nav>Deploy from the Overview tab →</a></p>
+        <p><a href="/apps/${app.slug}/overview" data-nav>Deploy from the Overview tab <span aria-hidden="true">→</span></a></p>
       </div>
     `;
     return () => {};
