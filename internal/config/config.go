@@ -914,9 +914,19 @@ type ForwardAuthConfig struct {
 }
 
 type StorageConfig struct {
-	AppsDir          string `yaml:"apps_dir"`
-	AppDataDir       string `yaml:"app_data_dir"`
-	VersionRetention int    `yaml:"version_retention"`
+	AppsDir    string `yaml:"apps_dir"`
+	AppDataDir string `yaml:"app_data_dir"`
+	// AppCacheDir is the root of the per-app result caches. Each activation
+	// of an app gets <AppCacheDir>/<slug>/d<deploymentID>, exported to the
+	// app as SHINYHUB_CACHE_DIR and shared by all of its processes. Kept out
+	// of AppDataDir on purpose: a cache is disposable, so it must not count
+	// against the app's quota, be backed up, or be shareable as data.
+	AppCacheDir string `yaml:"app_cache_dir"`
+	// AppCacheMaxMB is the size an app's cache library is asked to stay
+	// under, exported as SHINYHUB_CACHE_MAX_MB. Unset means 1024; 0 turns
+	// the result cache off entirely (no directory, no environment variable).
+	AppCacheMaxMB    *int `yaml:"app_cache_max_mb"`
+	VersionRetention int  `yaml:"version_retention"`
 	// AppQuotaMB caps the total on-disk footprint (bundles + extracted
 	// versions + persistent data dir, excluding .shinyhub-upload-tmp/) of a
 	// single app, in mebibytes. 0 disables the limit.
@@ -1803,6 +1813,12 @@ func loadRaw(path string) (*Config, error) {
 	if cfg.Storage.AppDataDir == "" {
 		cfg.Storage.AppDataDir = "./data/app-data"
 	}
+	if cfg.Storage.AppCacheDir == "" {
+		cfg.Storage.AppCacheDir = "./data/app-cache"
+	}
+	if cfg.Storage.AppCacheMaxMB != nil && *cfg.Storage.AppCacheMaxMB < 0 {
+		return nil, fmt.Errorf("storage.app_cache_max_mb: %d is negative; use 0 to turn the result cache off", *cfg.Storage.AppCacheMaxMB)
+	}
 	if cfg.Storage.MaxBundleMB < 0 {
 		cfg.Storage.MaxBundleMB = 128
 	}
@@ -2040,6 +2056,9 @@ func loadRaw(path string) (*Config, error) {
 	}
 	if abs, err := filepath.Abs(cfg.Storage.AppDataDir); err == nil {
 		cfg.Storage.AppDataDir = abs
+	}
+	if abs, err := filepath.Abs(cfg.Storage.AppCacheDir); err == nil {
+		cfg.Storage.AppCacheDir = abs
 	}
 	if err := resolveAuthSecretFile(&cfg.Auth); err != nil {
 		return nil, err
@@ -2952,6 +2971,16 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("SHINYHUB_APP_DATA_DIR"); v != "" {
 		cfg.Storage.AppDataDir = v
 	}
+	if v := os.Getenv("SHINYHUB_APP_CACHE_DIR"); v != "" {
+		cfg.Storage.AppCacheDir = v
+	}
+	if v := os.Getenv("SHINYHUB_APP_CACHE_MAX_MB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_APP_CACHE_MAX_MB: %q is not an integer: %w", v, err)
+		}
+		cfg.Storage.AppCacheMaxMB = &n
+	}
 	if v := os.Getenv("SHINYHUB_MAX_BUNDLE_MB"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
@@ -3641,3 +3670,19 @@ func (c *Config) RenderParkMaxTotal() int {
 	}
 	return defaultRenderParkMaxTotal
 }
+
+// DefaultAppCacheMaxMB is the result-cache size an unset
+// storage.app_cache_max_mb stands for.
+const DefaultAppCacheMaxMB = 1024
+
+// CacheMaxMB is the configured result-cache size in mebibytes: the default
+// when unset, and 0 when the operator turned the cache off.
+func (s StorageConfig) CacheMaxMB() int {
+	if s.AppCacheMaxMB == nil {
+		return DefaultAppCacheMaxMB
+	}
+	return *s.AppCacheMaxMB
+}
+
+// CacheEnabled reports whether apps get a result cache directory.
+func (s StorageConfig) CacheEnabled() bool { return s.CacheMaxMB() > 0 }

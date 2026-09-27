@@ -2,8 +2,10 @@ package lifecycle_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -49,11 +51,15 @@ type fakeSweeper struct {
 	containers []process.ContainerInfo
 	removed    []string
 	removeErr  error
+	listErr    error
 	listCalls  int
 }
 
 func (f *fakeSweeper) ListByLabel(string) ([]process.ContainerInfo, error) {
 	f.listCalls++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.containers, nil
 }
 
@@ -95,7 +101,9 @@ func TestSweepOrphanContainers(t *testing.T) {
 			"shinyhub.managed": "true", "shinyhub.slug": "live-app", "shinyhub.kind": "schedule-run"}},
 	}}
 
-	lifecycle.SweepOrphanContainers(mgr, sw)
+	if err := lifecycle.SweepOrphanContainers(mgr, sw); err != nil {
+		t.Fatalf("a complete sweep reported %v", err)
+	}
 
 	want := map[string]bool{"c-orphan": true, "c-shrunk": true, "c-sched": true}
 	if len(sw.removed) != len(want) {
@@ -161,5 +169,47 @@ func TestSweepOrphanContainersForTiers_IncludesNonDefaultAndDeduplicatesDaemon(t
 	}
 	if len(sweeper.removed) != 1 || sweeper.removed[0] != "burst-orphan" {
 		t.Fatalf("removed=%v, want [burst-orphan]", sweeper.removed)
+	}
+}
+
+// A sweep that leaves an orphan possibly running says so, because the
+// startup result cache prune must not run under a container it did not see.
+func TestSweepOrphanContainers_ReportsWhatItCouldNotRemove(t *testing.T) {
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	orphan := process.ContainerInfo{ID: "c-orphan", Labels: map[string]string{
+		process.LabelManaged: "true", process.LabelSlug: "gone", process.LabelReplicaIndex: "0"}}
+
+	listFail := &fakeSweeper{listErr: errors.New("daemon unreachable")}
+	if err := lifecycle.SweepOrphanContainers(mgr, listFail); err == nil {
+		t.Error("a failed listing was reported as a complete sweep")
+	}
+	removeFail := &fakeSweeper{containers: []process.ContainerInfo{orphan}, removeErr: errors.New("busy")}
+	if err := lifecycle.SweepOrphanContainers(mgr, removeFail); err == nil || !strings.Contains(err.Error(), "c-orphan") {
+		t.Errorf("err = %v, want one naming the orphan that survived", err)
+	}
+	if err := lifecycle.SweepOrphanContainers(mgr, nil); err != nil {
+		t.Errorf("the native no-op reported %v", err)
+	}
+}
+
+func TestSweepOrphanContainersForTiers_JoinsTierFailures(t *testing.T) {
+	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	bad := &tierSweepRuntime{blockingRuntime: &blockingRuntime{done: make(chan struct{})},
+		fakeSweeper: &fakeSweeper{listErr: errors.New("daemon unreachable")}, scope: "bad"}
+	good := &tierSweepRuntime{blockingRuntime: &blockingRuntime{done: make(chan struct{})},
+		fakeSweeper: &fakeSweeper{}, scope: "good"}
+	t.Cleanup(func() { close(bad.done); close(good.done) })
+	mgr.RegisterRuntime("bad", bad)
+	mgr.RegisterRuntime("good", good)
+
+	if err := lifecycle.SweepOrphanContainersForTiers(mgr, []string{"good"}); err != nil {
+		t.Fatalf("a clean tier reported %v", err)
+	}
+	err := lifecycle.SweepOrphanContainersForTiers(mgr, []string{"good", "bad"})
+	if err == nil || !strings.Contains(err.Error(), `"bad"`) {
+		t.Fatalf("err = %v, want one naming the failed tier", err)
+	}
+	if good.listCalls != 2 {
+		t.Errorf("good tier listed %d times, want 2: one failing tier must not skip the others", good.listCalls)
 	}
 }

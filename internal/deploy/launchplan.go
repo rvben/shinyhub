@@ -191,7 +191,7 @@ func buildRCommandReload(bundleDir string, port int, bindHost string, reload boo
 	expr := fmt.Sprintf(
 		"options(shiny.autoreload=TRUE); shiny::runApp('.', host='%s', port=%d, launch.browser=FALSE)",
 		bindHost, port)
-	return rscriptCommand(bundleDir, expr)
+	return rscriptCommand(bundleDir, RResultCacheExpr+" "+expr)
 }
 
 // Both managed API launchers expose OpenAPI without requiring a root handler.

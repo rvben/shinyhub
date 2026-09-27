@@ -10,6 +10,7 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/lifecycle"
+	"github.com/rvben/shinyhub/internal/storage"
 )
 
 // fakeCleaner records CleanupApp calls and can simulate a failure.
@@ -125,5 +126,49 @@ func TestLogOrphanAppDirs_DoesNotDelete(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cfg.Storage.AppsDir, "real")); err != nil {
 		t.Errorf("owned dir disturbed: %v", err)
+	}
+}
+
+// The startup prune releases what no process or job references, keeps the
+// active activation, and leaves alone a directory whose slug has no app row.
+func TestPruneAppCaches_ReleasesUnreferencedNamespaces(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "demo")
+	old, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(old.ID); err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.BeginDeployment(app.ID, "v2", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(active.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	for _, p := range []string{
+		storage.CacheNamespace(root, "demo", old.ID),
+		storage.CacheNamespace(root, "demo", active.ID),
+		storage.CacheNamespace(root, "unknown", 1),
+	} {
+		if err := os.MkdirAll(p, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	lifecycle.PruneAppCaches(store, root)
+
+	if _, err := os.Stat(storage.CacheNamespace(root, "demo", old.ID)); !os.IsNotExist(err) {
+		t.Error("the superseded activation's namespace survived the startup prune")
+	}
+	if _, err := os.Stat(storage.CacheNamespace(root, "demo", active.ID)); err != nil {
+		t.Errorf("the active activation's namespace was pruned: %v", err)
+	}
+	if _, err := os.Stat(storage.CacheNamespace(root, "unknown", 1)); err != nil {
+		t.Errorf("a slug with no app row was pruned: %v", err)
 	}
 }

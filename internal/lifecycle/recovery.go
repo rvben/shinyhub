@@ -1317,12 +1317,15 @@ func FenceOrphanScheduleContainersForTiers(mgr *process.Manager, tierNames []str
 }
 
 // SweepOrphanContainersForTiers sweeps every registered container-backed tier.
-// It complements durable per-replica recovery; it is not ownership proof.
-func SweepOrphanContainersForTiers(mgr *process.Manager, tierNames []string) {
+// It complements durable per-replica recovery; it is not ownership proof. The
+// error joins every tier's failure, so a caller can tell that an orphan may
+// still be running.
+func SweepOrphanContainersForTiers(mgr *process.Manager, tierNames []string) error {
 	if len(tierNames) == 0 {
 		tierNames = []string{""}
 	}
 	seenScopes := make(map[string]struct{})
+	var errs []error
 	for _, tierName := range tierNames {
 		sweeper, ok := mgr.RuntimeForTier(tierName).(ContainerSweeper)
 		if !ok {
@@ -1336,8 +1339,11 @@ func SweepOrphanContainersForTiers(mgr *process.Manager, tierNames []string) {
 				seenScopes[scope] = struct{}{}
 			}
 		}
-		SweepOrphanContainers(mgr, sweeper)
+		if err := SweepOrphanContainers(mgr, sweeper); err != nil {
+			errs = append(errs, fmt.Errorf("tier %q: %w", tierName, err))
+		}
 	}
+	return errors.Join(errs...)
 }
 
 // SweepOrphanContainers removes ShinyHub-managed containers that no live
@@ -1345,16 +1351,19 @@ func SweepOrphanContainersForTiers(mgr *process.Manager, tierNames []string) {
 // re-adopted are protected. One-shot schedule containers are deliberately
 // never adopted: a successor force-removes them here before opening consumer
 // admission, so an orphan producer cannot keep mutating startup data after
-// failover. A nil sweeper (native runtime) is a no-op.
-func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) {
+// failover. A nil sweeper (native runtime) is a no-op. The error reports a
+// listing failure or any orphan that could not be removed, each of which
+// leaves an unowned container possibly still running.
+func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) error {
 	if sweeper == nil {
-		return
+		return nil
 	}
 	containers, err := sweeper.ListByLabel(process.ManagedContainerFilterJSON)
 	if err != nil {
 		slog.Error("container sweep: list", "err", err)
-		return
+		return fmt.Errorf("list managed containers: %w", err)
 	}
+	var errs []error
 	live := mgr.RunningContainerIDs()
 	removed := 0
 	for _, c := range containers {
@@ -1364,6 +1373,7 @@ func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) {
 		if err := sweeper.RemoveHandle(process.RunHandle{ContainerID: c.ID}); err != nil {
 			slog.Warn("container sweep: remove orphan",
 				"container", c.ID, "slug", c.Labels[process.LabelSlug], "err", err)
+			errs = append(errs, fmt.Errorf("remove orphan container %s: %w", c.ID, err))
 			continue
 		}
 		removed++
@@ -1373,6 +1383,7 @@ func SweepOrphanContainers(mgr *process.Manager, sweeper ContainerSweeper) {
 	if removed > 0 {
 		slog.Info("container sweep: complete", "removed", removed)
 	}
+	return errors.Join(errs...)
 }
 
 func markRecoveryStopped(store *db.Store, slug string) {

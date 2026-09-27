@@ -32,7 +32,7 @@ export const AUDIT_ACTIONS = [
   // Environment (blue - config)
   'env.set', 'env.delete',
   // Data (blue - config)
-  'data.push', 'data.pull', 'data.delete',
+  'data.push', 'data.pull', 'data.delete', 'cache.clear',
   // Schedules (blue - config)
   'schedule_refresh_stale', 'schedule_create', 'schedule_update', 'schedule_delete', 'schedule_run_manual',
   'schedule_run_succeeded', 'schedule_run_failed', 'schedule_run_timed_out',

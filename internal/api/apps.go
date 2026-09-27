@@ -414,6 +414,11 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	if projectCreated {
 		s.audit(r, db.AuditProjectCreate, "project", req.ProjectSlug, `{"implicit":true}`)
 	}
+	// Only now, with the slug's row committed, does the slug provably belong
+	// to this new app, so a cache still on disk is an earlier app's leftover.
+	if err := storage.DiscardLeftoverCache(s.cfg, req.Slug); err != nil {
+		slog.Warn("discard leftover result cache", "slug", req.Slug, "err", err)
+	}
 
 	// Apply the operator-configured default replica count when it exceeds the
 	// SQL DEFAULT of 1. Zero and one are left alone (zero is invalid; one
@@ -2151,6 +2156,9 @@ func (s *Server) retireGenerationWhenIdle(ctx context.Context, slug string, depl
 					}
 				} else {
 					slog.Info("deploy: retired drained generation", "slug", slug, "deployment_id", deploymentID)
+					if app, err := s.store.GetAppBySlug(slug); err == nil {
+						s.pruneAppCache(slug, app.ID)
+					}
 					return
 				}
 			}
@@ -2358,6 +2366,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// the same slug can't tear down the pool we are about to bring up.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	// Runs on every exit, success or failure, while the lock is still held:
+	// a superseded activation, or a candidate that failed and was confirmed
+	// stopped, no longer needs its result cache.
+	defer s.pruneAppCache(slug, app.ID)
 	if err := s.guardActivationLifecycle(app.ID, "deploy "+slug); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -3487,6 +3499,10 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	// Serialize against concurrent deploy/restart/stop on the same slug.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	// Runs on every exit, success or failure, while the lock is still held:
+	// a superseded activation, or a candidate that failed and was confirmed
+	// stopped, no longer needs its result cache.
+	defer s.pruneAppCache(slug, app.ID)
 	if err := s.guardActivationLifecycle(app.ID, "rollback "+slug); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -5620,4 +5636,17 @@ func (s *Server) hasLiveReplica(slug string) bool {
 		}
 	}
 	return false
+}
+
+// pruneAppCache releases the result cache namespaces of slug that no process
+// or job can still be using. A failure only leaves disposable bytes on disk
+// until the next prune, so it is logged rather than failing the caller.
+func (s *Server) pruneAppCache(slug string, appID int64) {
+	removed, err := storage.PruneAppCache(s.cfg.Storage.AppCacheDir, s.store, slug, appID)
+	if err != nil {
+		slog.Warn("result cache: prune failed", "slug", slug, "err", err)
+	}
+	if len(removed) > 0 {
+		slog.Info("result cache: released namespaces", "slug", slug, "deployment_ids", removed)
+	}
 }

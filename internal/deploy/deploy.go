@@ -1949,8 +1949,27 @@ var rLaunchFlags = []string{"--no-save", "--no-restore", "--no-site-file", "--no
 func BuildRCommand(bundleDir string, port int, bindHost string) []string {
 	expr := fmt.Sprintf(
 		`shiny::runApp('.', host='%s', port=%d, launch.browser=FALSE)`, bindHost, port)
-	return rscriptCommand(bundleDir, expr)
+	return rscriptCommand(bundleDir, RResultCacheExpr+" "+expr)
 }
+
+// RResultCacheExpr makes the app's result cache directory Shiny's default
+// cache, so bindCache results are shared across the app's sessions and
+// processes and survive restarts, instead of living in one process's memory.
+//
+// It runs before runApp and only when ShinyHub provided SHINYHUB_CACHE_DIR.
+// A cache the app chose itself wins: its .Rprofile runs before this and is
+// detected by the is.null check, and a shinyOptions(cache = ...) in app.R or
+// global.R runs later, inside runApp, and replaces this one. A directory that
+// is missing or not writable, or a failure to open the cache, leaves the app
+// on Shiny's in-memory cache, because a cache is never worth refusing to serve
+// the app. The writability check matters: cachem opens a read-only directory
+// without complaint and then fails every write, which surfaces in the app as
+// an error from each bindCache.
+const RResultCacheExpr = `local({ d <- Sys.getenv("SHINYHUB_CACHE_DIR"); ` +
+	`if (nzchar(d) && is.null(shiny::getShinyOption("cache"))) ` +
+	`if (!dir.exists(d) || file.access(d, 2) != 0) message("shinyhub: result cache unavailable: ", d, " is not a writable directory") else tryCatch(` +
+	`shiny::shinyOptions(cache = cachem::cache_disk(d, max_size = as.numeric(Sys.getenv("SHINYHUB_CACHE_MAX_MB", "1024")) * 1024^2)), ` +
+	`error = function(e) message("shinyhub: result cache unavailable: ", conditionMessage(e))) });`
 
 // rscriptCommand assembles an Rscript invocation for expr under rLaunchFlags,
 // so every R launch path shares one flag set. When ShinyHub supplied the

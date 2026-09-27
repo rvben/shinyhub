@@ -176,6 +176,40 @@ func hostPublishPort(p StartParams) int {
 	return p.Port
 }
 
+// containerCacheDir is where an activation's result cache namespace is
+// mounted inside its container.
+const containerCacheDir = "/app-cache"
+
+// addCacheMount binds the activation's result cache namespace into the
+// container and points the app at the in-container path. The env is appended
+// after any inherited value, so the host path never reaches the app.
+func addCacheMount(cfg *containerConfig, p StartParams) {
+	if p.AppCachePath == "" {
+		return
+	}
+	cfg.Mounts = append(cfg.Mounts, containerMount{Source: filepath.Clean(p.AppCachePath), Target: containerCacheDir, Mode: "rw"})
+	cfg.Env = append(cfg.Env, cacheEnv(containerCacheDir, p.AppCacheMaxMB)...)
+}
+
+// bundleOwner returns the uid:gid that owns the bundle directory, or "" (the
+// image default) when it cannot be read. Containers run as that owner because
+// they drop all capabilities (no CAP_DAC_OVERRIDE): a root process inside is
+// still bound by file permissions and cannot write a bundle, data dir or
+// result cache the host service created under a different uid. Running as the
+// bundle's owner keeps those mounts writable whether the service runs as root
+// or as an unprivileged user.
+func bundleOwner(dir string) string {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return ""
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", st.Uid, st.Gid)
+}
+
 // dataHostPath returns the host directory that backs /app/data inside the
 // container for the given StartParams. With an explicit AppDataPath that
 // directory is used directly; otherwise /app/data lives inside the bundle dir.
@@ -230,16 +264,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		Labels:      labels,
 		NetworkMode: network,
 	}
-	// Run as the uid:gid that owns the bundle directory. The container drops all
-	// capabilities (no CAP_DAC_OVERRIDE), so a root process inside is still bound
-	// by file permissions and cannot write a bundle the worker created under a
-	// different uid. Running as the bundle's owner lets uv/renv write into the rw
-	// /app mount whether the worker runs as root or an unprivileged service user.
-	if fi, err := os.Stat(p.Dir); err == nil {
-		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-			cfg.User = fmt.Sprintf("%d:%d", st.Uid, st.Gid)
-		}
-	}
+	cfg.User = bundleOwner(p.Dir)
 	if r.networkMode != "host" && p.Port > 0 {
 		// Bridge (or any non-host) network: publish the container's listening
 		// port back to the host's loopback so only local clients (the in-process
@@ -261,6 +286,7 @@ func (r *DockerRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 		// last-occurrence-wins so appending here is sufficient.
 		cfg.Env = append(cfg.Env, "SHINYHUB_APP_DATA=/app-data")
 	}
+	addCacheMount(&cfg, p)
 	if err := addSharedMounts(&cfg, p.SharedMounts, dataHostPath(p)); err != nil {
 		return ReplicaEndpoint{}, err
 	}
@@ -572,6 +598,7 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 		},
 		NetworkMode: network,
 		AutoRemove:  false,
+		User:        bundleOwner(p.Dir),
 	}
 	if p.AppDataPath != "" {
 		cfg.Mounts = append(cfg.Mounts,
@@ -580,6 +607,7 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 		)
 		cfg.Env = append(cfg.Env, "SHINYHUB_APP_DATA=/app-data")
 	}
+	addCacheMount(&cfg, p)
 	if err := addSharedMounts(&cfg, p.SharedMounts, dataHostPath(p)); err != nil {
 		return ExitInfo{}, err
 	}

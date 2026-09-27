@@ -36,11 +36,25 @@ func nativeChildEnv(p StartParams) []string {
 	if p.AppDataPath != "" {
 		env = append(env, "SHINYHUB_APP_DATA="+p.AppDataPath)
 	}
+	env = append(env, cacheEnv(p.AppCachePath, p.AppCacheMaxMB)...)
 	// The host build interpreter policy is authoritative over a per-app UV_PYTHON_*
 	// value, so it goes last (its keys are disjoint from the sandbox redirects the
 	// callers append after this). Native launches only: the Docker path builds its
 	// own env and bakes the interpreter into the image.
 	return WithBuildInterpreterPolicy(env)
+}
+
+// cacheEnv is the platform env that points an app at its result cache
+// namespace. It is empty when the cache is unwired, so a stale value can never
+// reach an app whose cache is off.
+func cacheEnv(dir string, maxMB int) []string {
+	if dir == "" {
+		return nil
+	}
+	return []string{
+		"SHINYHUB_CACHE_DIR=" + dir,
+		"SHINYHUB_CACHE_MAX_MB=" + strconv.Itoa(maxMB),
+	}
 }
 
 // applySharedMounts symlinks each shared mount under p.Dir/data/shared/<slug>.
@@ -196,7 +210,13 @@ func (r *NativeRuntime) sandboxWrap(p StartParams) (argv, extraEnv []string, err
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve command %q: %w", p.Command[0], err)
 	}
-	spec := sandbox.ComputeSpec(r.isolation, appDir, dataDir)
+	cacheDir := p.AppCachePath
+	if cacheDir != "" {
+		if cacheDir, err = filepath.Abs(cacheDir); err != nil {
+			return nil, nil, fmt.Errorf("resolve app cache dir %q: %w", p.AppCachePath, err)
+		}
+	}
+	spec := sandbox.ComputeSpec(r.isolation, appDir, dataDir, cacheDir)
 	enc, err := spec.Encode()
 	if err != nil {
 		return nil, nil, err

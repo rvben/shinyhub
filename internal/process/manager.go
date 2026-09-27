@@ -204,8 +204,13 @@ type StartParams struct {
 	// is kept distinct so the Fargate runtime can later route these values
 	// through the task definition's secrets block instead of plaintext task
 	// overrides; until then secret values are NOT hidden from ecs:DescribeTasks.
-	SecretEnv       []string
-	AppDataPath     string        // host path to per-app data dir; empty disables data-dir wiring in runtime
+	SecretEnv   []string
+	AppDataPath string // host path to per-app data dir; empty disables data-dir wiring in runtime
+	// AppCachePath is the host path of this activation's result cache
+	// namespace, and AppCacheMaxMB its size bound. An empty path leaves the
+	// cache unwired: the app sees no SHINYHUB_CACHE_DIR and caches in memory.
+	AppCachePath    string
+	AppCacheMaxMB   int
 	MemoryLimitMB   int           // 0 = no limit
 	CPUQuotaPercent int           // 0 = no limit; 100 = 1 full core
 	SharedMounts    []SharedMount // resolved by caller before Start/RunOnce
@@ -327,6 +332,8 @@ type Manager struct {
 	platformEnv              PlatformDefaultEnvResolver
 	mountResolver            SharedMountResolver
 	appDataRoot              string
+	appCacheRoot             string
+	appCacheMaxMB            int
 	stopGrace                time.Duration
 	logRunRecorder           LogRunRecorder
 	logSinkFactory           LogRunSinkFactory
@@ -455,6 +462,29 @@ func (m *Manager) AutoInstrumentAppsDefault() bool {
 // Start. Must be called before the manager begins starting processes; not safe
 // to call concurrently with Start.
 func (m *Manager) SetSharedMountResolver(r SharedMountResolver) { m.mountResolver = r }
+
+// SetAppCache sets the root under which each activation's result cache
+// namespace lives and the size bound handed to the app. An empty root or a
+// non-positive size leaves the cache unwired. Must be called before the
+// manager begins starting processes; not safe to call concurrently with Start.
+func (m *Manager) SetAppCache(root string, maxMB int) error {
+	if root == "" || maxMB <= 0 {
+		m.appCacheRoot, m.appCacheMaxMB = "", 0
+		return nil
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve app cache root: %w", err)
+	}
+	m.appCacheRoot, m.appCacheMaxMB = abs, maxMB
+	return nil
+}
+
+// AppCache reports the result cache root and size bound set by SetAppCache.
+// An empty root means the cache is unwired.
+func (m *Manager) AppCache() (root string, maxMB int) {
+	return m.appCacheRoot, m.appCacheMaxMB
+}
 
 // SetAppDataRoot sets the root directory under which per-app persistent data
 // directories live. Each Start resolves <root>/<slug>, ensures it exists,
@@ -649,6 +679,12 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	if len(p.Command) == 0 {
 		return nil, fmt.Errorf("start: command must not be empty")
 	}
+	// Taken before every other manager lock: a cache clear holds the write
+	// side while it asks the manager what is running, so taking it after
+	// m.mu would deadlock against that clear.
+	fence := storage.CacheFence(p.Slug)
+	fence.RLock()
+	defer fence.RUnlock()
 	if !p.LaunchReservationHeld {
 		m.launchMu.Lock()
 		defer m.launchMu.Unlock()
@@ -720,6 +756,15 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 				if err := os.Symlink(appDataPath, linkPath); err != nil {
 					return nil, fmt.Errorf("symlink data: %w", err)
 				}
+			}
+		}
+		if m.appCacheRoot != "" && p.DeploymentID > 0 {
+			// The cache only saves recomputation, so an app that cannot
+			// get one still starts, computing every result itself.
+			if path, err := storage.ProvisionCache(m.appCacheRoot, p.Slug, p.DeploymentID); err != nil {
+				slog.Warn("result cache unavailable; starting without it", "slug", p.Slug, "err", err)
+			} else {
+				p.AppCachePath, p.AppCacheMaxMB = path, m.appCacheMaxMB
 			}
 		}
 	}
@@ -1570,6 +1615,26 @@ func (m *Manager) GetReplica(slug string, index int) (*ProcessInfo, bool) {
 	}
 	snap := *pool[index].info
 	return &snap, true
+}
+
+// HoldsLiveProcess reports whether any process of slug, in any pool (active,
+// staged or draining generation, elastic), may still be alive. A suspended
+// process is alive, and a lost or unknown one is not known to be dead; only
+// stopped and crashed entries count as gone.
+func (m *Manager) HoldsLiveProcess(slug string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, pool := range m.entries {
+		for _, e := range pool {
+			if e == nil || e.info.Slug != slug {
+				continue
+			}
+			if e.info.Status != StatusStopped && e.info.Status != StatusCrashed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // HasRunning reports whether any replica in the slug's selected active pool is

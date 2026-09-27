@@ -1609,6 +1609,22 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		params.MemoryLimitMB, params.CPUQuotaPercent = m.resolveResources(app)
 	}
 
+	// The job shares its activation's result cache, so a refresh job can warm
+	// what the app's sessions will read. Its running row already exists, which
+	// is what a cache clear checks, so the fence only has to cover creating the
+	// directory.
+	if cacheRoot, cacheMaxMB := m.procMgr.AppCache(); cacheRoot != "" && rt.HostProvidesAppData() {
+		fence := storage.CacheFence(app.Slug)
+		fence.RLock()
+		path, err := storage.ProvisionCache(cacheRoot, app.Slug, deployment.ID)
+		fence.RUnlock()
+		if err != nil {
+			fmt.Fprintf(logFile, "shinyhub: result cache unavailable, running without it: %v\n", err)
+		} else {
+			params.AppCachePath, params.AppCacheMaxMB = path, cacheMaxMB
+		}
+	}
+
 	// Remote tiers do not have host-side app data. Drop the host-only paths
 	// so the remote runtime receives only the source slug and can pull data
 	// through its own mechanism.
@@ -1661,6 +1677,15 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	}
 
 	m.finishRun(sched, runID, status, exitCode, trigger, userID, schedulePublishesData(sched, trigger))
+	// A run can pin a deployment the app has since moved past; once it ends,
+	// that activation's cache may have no user left.
+	if cacheRoot, _ := m.procMgr.AppCache(); cacheRoot != "" {
+		if removed, err := storage.PruneAppCache(cacheRoot, m.store, app.Slug, app.ID); err != nil {
+			slog.Warn("result cache: prune after schedule run failed", "slug", app.Slug, "err", err)
+		} else if len(removed) > 0 {
+			slog.Info("result cache: released namespaces", "slug", app.Slug, "deployment_ids", removed)
+		}
+	}
 }
 
 func (m *Manager) servingRunStillCurrent(sched *db.Schedule, app *db.App, deployment *db.Deployment, runID int64, trigger string) bool {

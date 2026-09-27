@@ -3731,6 +3731,7 @@ const (
 	// there to answer who saw an app's data, not only who altered it.
 	AuditDataPull       = "data.pull"
 	AuditDataDelete     = "data.delete"
+	AuditCacheClear     = "cache.clear"
 	AuditAppIconSet     = "app.icon.set"
 	AuditAppIconCleared = "app.icon.clear"
 	AuditAppIconEmoji   = "app.icon.emoji"

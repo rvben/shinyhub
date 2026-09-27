@@ -653,6 +653,14 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "path", Type: "string"},
 	}},
 
+	// ── cache ────────────────────────────────────────────────────────────────
+	"cache": {Mutating: ro},
+
+	"cache clear": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string", Desc: "cleared"},
+		{Name: "slug", Type: "string"},
+	}},
+
 	// ── schedule ─────────────────────────────────────────────────────────────
 	"schedule": {Mutating: ro},
 
