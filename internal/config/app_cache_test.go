@@ -78,3 +78,33 @@ func TestAppCache_InvalidSizesRejected(t *testing.T) {
 		})
 	}
 }
+
+// An unset cache root sits beside the data dir, so an install that moved its
+// data (a service whose working directory is /, a container bind mount) gets a
+// cache it can create without configuring a second path.
+func TestAppCache_DefaultsBesideTheDataDir(t *testing.T) {
+	for name, tc := range map[string]struct{ yaml, env, want string }{
+		"yaml data dir":           {yaml: "storage:\n  app_data_dir: /var/lib/shinyhub/app-data\n", want: "/var/lib/shinyhub/app-cache"},
+		"env data dir":            {env: "/srv/shinyhub/app-data", want: "/srv/shinyhub/app-cache"},
+		"trailing slash":          {yaml: "storage:\n  app_data_dir: /srv/x/app-data/\n", want: "/srv/x/app-cache"},
+		"explicit cache dir wins": {yaml: "storage:\n  app_data_dir: /srv/x/app-data\n  app_cache_dir: /fast/cache\n", want: "/fast/cache"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SHINYHUB_AUTH_SECRET", testSecret)
+			if tc.env != "" {
+				t.Setenv("SHINYHUB_APP_DATA_DIR", tc.env)
+			}
+			path := ""
+			if tc.yaml != "" {
+				path = writeYAML(t, tc.yaml)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Storage.AppCacheDir != tc.want {
+				t.Errorf("AppCacheDir = %q, want %q", cfg.Storage.AppCacheDir, tc.want)
+			}
+		})
+	}
+}

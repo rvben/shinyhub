@@ -121,6 +121,9 @@ session-keyed. Two different users on two different replicas that
 happen to request the same plot will each cause one miss on their
 own replica and then hit for the rest of the session.
 
+To share one cache across replicas, workers, and restarts, use the app's
+[result cache](../result-cache.md) directory with `diskcache` instead.
+
 ## Interaction with schedules
 
 If a [scheduled job](../schedules.md) produces a file that the app

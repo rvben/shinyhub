@@ -11,8 +11,9 @@ export SHINYHUB_DEPLOY_TOKEN="${SHINYHUB_DEPLOY_TOKEN:-shk_$(random_hex 32)}"
 export SHINYHUB_DEPLOY_TOKEN_ROLE=admin
 export SHINYHUB_APPS_DIR=/data/apps
 export SHINYHUB_APP_DATA_DIR=/data/app-data
+export SHINYHUB_APP_CACHE_DIR=/data/app-cache
 
-mkdir -p /data/apps /data/app-data
+mkdir -p /data/apps /data/app-data /data/app-cache
 
 bootstrap_admin="bootstrap-$(random_hex 12)"
 export SHINYHUB_ADMIN_USER="$bootstrap_admin"

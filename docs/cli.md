@@ -57,7 +57,7 @@ Operate what is running:
 | `projects` | Manage app projects (grouping) |
 | `env` | Manage app environment variables |
 | `data` | Manage an app's persistent data dir |
-| `cache` | Clear an app's result cache |
+| `cache` | Clear an app's [result cache](result-cache.md) |
 | `share` | Manage shared-data mounts between apps |
 | `schedule` | Manage scheduled jobs for an app |
 | `top` | Live CPU, memory and session usage for every app |

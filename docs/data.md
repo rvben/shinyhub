@@ -6,8 +6,10 @@ description: "Give each app a persistent directory that survives redeploys, for 
 
 Every deployed app gets its own directory at `<storage.app_data_dir>/<slug>/`.
 Use it for files the app reads (Parquet, DuckDB, SQLite) and for data the app
-writes (uploads, cache, session state). For configuration and secrets, use
-[environment variables](environment.md) instead.
+writes (uploads, session state). For configuration and secrets, use
+[environment variables](environment.md) instead. Computed results that can be
+thrown away belong in the [result cache](result-cache.md), which does not count
+against the quota.
 
 ## How the app sees it
 

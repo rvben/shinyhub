@@ -12,10 +12,12 @@ services:
       - -c
       - |
         mkdir -p "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/apps" \
-                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/app-data"
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/app-data" \
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/app-cache"
         chown -R 65532:65532 \
                  "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/apps" \
                  "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/app-data" \
+                 "${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/app-cache" \
                  /data/db
 
   shinyhub:
@@ -49,6 +51,7 @@ services:
       SHINYHUB_GITHUB_CALLBACK_URL: https://demo.shinyhub.dev/api/auth/github/callback
       SHINYHUB_APPS_DIR: ${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/apps
       SHINYHUB_APP_DATA_DIR: ${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/app-data
+      SHINYHUB_APP_CACHE_DIR: ${SHINYHUB_DATA_ROOT:-/srv/shinyhub-demo}/app-cache
       SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON: ${SHINYHUB_PYTHON_IMAGE:?Pin SHINYHUB_PYTHON_IMAGE in .env}
       SHINYHUB_RUNTIME_DOCKER_IMAGE_R: ${SHINYHUB_R_IMAGE:?Pin SHINYHUB_R_IMAGE in .env}
 

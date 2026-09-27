@@ -347,6 +347,22 @@ On by default. How it works:
 
 Set it to `false` to relay every WebSocket byte-for-byte.
 
+## Result cache
+
+Each app gets a disk directory its replicas, workers, and scheduled jobs share
+for computed results, and R apps use it for `bindCache` automatically. See
+[Result cache](result-cache.md).
+
+```yaml
+storage:
+  app_cache_dir: /var/lib/shinyhub/app-cache   # SHINYHUB_APP_CACHE_DIR
+  app_cache_max_mb: 1024                       # SHINYHUB_APP_CACHE_MAX_MB; 0 turns the cache off
+```
+
+Unset, `app_cache_dir` is an `app-cache` directory beside `app_data_dir`, so
+the minimal server above caches in `/var/lib/shinyhub/app-cache` with no extra
+key. The cache is disposable: leave it out of backups.
+
 ## Environment overrides
 
 Most configuration keys have an environment variable, named
