@@ -457,6 +457,12 @@ type Proxy struct {
 	// enables it for the product server.
 	appFavicon atomic.Bool
 
+	// wsCompression answers a client's permessage-deflate offer on behalf of a
+	// backend that negotiates no WebSocket extension, and translates frames in
+	// both directions. Off by default for embedders and tests; main.go wires
+	// it from config.
+	wsCompression atomic.Bool
+
 	// stickySecret is the HMAC key that signs the per-app sticky-routing cookie.
 	// When set, the cookie value carries a signature bound to the app slug and
 	// replica index, so a client cannot forge or replay it to pin itself to a
@@ -1150,6 +1156,13 @@ func (p *Proxy) AppNavEnabled() bool {
 // elements always win; a missing title receives the app name as a fallback.
 func (p *Proxy) SetAppFavicon(enabled bool) {
 	p.appFavicon.Store(enabled)
+}
+
+// SetWebSocketCompression enables or disables proxy-side permessage-deflate
+// for backends that do not negotiate it. Only upgrades that begin after the
+// change are affected.
+func (p *Proxy) SetWebSocketCompression(enabled bool) {
+	p.wsCompression.Store(enabled)
 }
 
 // getWakeTrigger returns the current wake trigger under the read lock.

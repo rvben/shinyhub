@@ -300,8 +300,8 @@ On by default. What it compresses, and what it leaves alone:
 - Bodies under 1 KiB, responses the application already encoded, partial
   (`206`) responses, `HEAD` requests, and `Cache-Control: no-transform`
   responses are sent as-is.
-- WebSocket connections are never touched. Shiny's WebSocket negotiates its own
-  compression (`permessage-deflate`) between the browser and the application.
+- WebSocket connections are not gzip-encoded; their messages are compressed
+  separately (see [WebSocket compression](#websocket-compression)).
 - Server-sent events (`text/event-stream`) are never compressed, so each event
   is delivered the moment it is written. Other streamed responses stay
   streamed: every flush from the application reaches the browser immediately.
@@ -315,6 +315,37 @@ On by default. What it compresses, and what it leaves alone:
 Behind a reverse proxy that compresses as well, leave it on: the proxy sees
 `Content-Encoding` and passes the response through rather than compressing it
 twice. Turn it off only if you would rather not spend ShinyHub's CPU on it.
+
+## WebSocket compression
+
+A Shiny session sends every rendered output over its WebSocket: a table of a
+few thousand rows is hundreds of kilobytes of JSON per update. R Shiny's server
+(httpuv) never compresses WebSocket messages, so on a slow or metered link each
+update travels at full size. ShinyHub compresses them on the application's
+behalf.
+
+```yaml
+server:
+  websocket_compression: false   # SHINYHUB_SERVER_WEBSOCKET_COMPRESSION
+```
+
+On by default. How it works:
+
+- When the browser offers `permessage-deflate` (every current browser does) and
+  the application answers the upgrade without negotiating any extension,
+  ShinyHub accepts the offer itself. The application keeps sending and
+  receiving plain messages; ShinyHub compresses what it sends and decompresses
+  what the browser sends.
+- An application that negotiates compression itself, such as Python Shiny, is
+  left alone and its WebSocket bytes are relayed untouched.
+- Messages under 256 bytes, messages that do not get smaller, fragmented
+  messages, and messages over 16 MiB are sent uncompressed. Each message is
+  compressed on its own, so ShinyHub keeps no compressor state per connection
+  between messages.
+- A compressed message from the browser may be at most 16 MiB compressed and
+  64 MiB decompressed; a larger one closes the connection with code `1009`.
+
+Set it to `false` to relay every WebSocket byte-for-byte.
 
 ## Environment overrides
 

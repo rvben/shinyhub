@@ -770,7 +770,7 @@ func (p *Proxy) modifyResponseFor(slug string, deploymentIDs ...int64) func(*htt
 	if len(deploymentIDs) > 0 {
 		deploymentID = deploymentIDs[0]
 	}
-	return chainModifyResponse(filterReservedSetCookies, injectPageHTML(
+	return chainModifyResponse(filterReservedSetCookies, p.compressWebSocket, injectPageHTML(
 		func(r *http.Request) []pageScript { return p.pageScriptsFor(r, slug, deploymentID) },
 		func() string {
 			if !p.appFavicon.Load() {
