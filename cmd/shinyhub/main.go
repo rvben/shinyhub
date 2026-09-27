@@ -3125,6 +3125,7 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 	platformFavicon := ui.FaviconHandler(cfg.Branding)
 	mux.Handle("GET "+favicon.RootURL, platformFavicon)
 	mux.Handle("GET "+favicon.PlatformURL, platformFavicon)
+	devStatic := os.Getenv("SHINYHUB_DEV_STATIC") != ""
 	serveShell := func(w http.ResponseWriter, r *http.Request) {
 		// An authenticated request (the request that fetches the shell is itself
 		// behind forward auth or a session) gets the shell pre-marked "in" so the
@@ -3132,7 +3133,23 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 		// the login form. This needs a per-request render, so it leaves the cached
 		// ServeFileFS fast path only when there is a reason to.
 		authed := auth.UserFromContext(r.Context()) != nil
+		// gzip is negotiated only for a plain GET/HEAD with no Range: a Range
+		// request keeps behaving exactly as before (identity bytes), since
+		// neither shell path serves partial content against a compressed
+		// representation.
+		gzipEligible := (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			r.Header.Get("Range") == "" && ui.AcceptsGzip(r)
 		if !brandingActive && !authed {
+			if gzipEligible {
+				if raw, err := fs.ReadFile(ui.Static(), "index.html"); err == nil {
+					key := ""
+					if !devStatic {
+						key = "shell:stock"
+					}
+					ui.ServeHTML(w, r, raw, key)
+					return
+				}
+			}
 			http.ServeFileFS(w, r, ui.Static(), "index.html")
 			return
 		}
@@ -3151,6 +3168,14 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 		}
 		if authed {
 			out = ui.StampAuthenticated(out)
+		}
+		if gzipEligible {
+			key := ""
+			if !devStatic {
+				key = fmt.Sprintf("shell:branded=%t:authed=%t", brandingActive, authed)
+			}
+			ui.ServeHTML(w, r, out, key)
+			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(out)

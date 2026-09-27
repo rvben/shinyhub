@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -73,6 +75,14 @@ func Static() fs.FS {
 // but revalidate (a matching If-None-Match yields a cheap 304), and refetch
 // automatically when a new release changes the assets. In dev-static mode the
 // files change on disk under a running server, so caching is disabled outright.
+//
+// When the request accepts gzip, is a plain GET/HEAD with no Range header,
+// and the asset's extension isn't already-compressed (png, woff2, ...), the
+// handler serves a gzip-compressed copy instead, compressed once per asset
+// and cached for the life of the process (embedded assets never change). A
+// Range request always falls through to the identity path below, so partial
+// content is never served against a compressed representation. A request
+// that doesn't accept gzip takes the exact pre-compression code path.
 func Handler() http.Handler {
 	fileServer := http.StripPrefix("/static/", http.FileServer(http.FS(Static())))
 	dev := os.Getenv("SHINYHUB_DEV_STATIC") != ""
@@ -82,6 +92,29 @@ func Handler() http.Handler {
 			fileServer.ServeHTTP(w, r)
 			return
 		}
+
+		name := strings.TrimPrefix(r.URL.Path, "/static/")
+		gzipEligible := (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			r.Header.Get("Range") == "" && AcceptsGzip(r) && isCompressibleAsset(name)
+		if gzipEligible {
+			if e, ok := gzipStaticAsset(name); ok {
+				addVaryAcceptEncoding(w)
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("ETag", e.etag)
+				if r.Header.Get("If-None-Match") == e.etag {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
+				w.Header().Set("Content-Type", e.contentType)
+				w.Header().Set("Content-Encoding", "gzip")
+				w.Header().Set("Content-Length", strconv.Itoa(len(e.data)))
+				if r.Method != http.MethodHead {
+					_, _ = w.Write(e.data)
+				}
+				return
+			}
+		}
+
 		etag := assetsETag()
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("ETag", etag)
