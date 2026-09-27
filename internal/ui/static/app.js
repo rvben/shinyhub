@@ -92,6 +92,7 @@ import {
   saveSupportDraft,
 } from '/static/views/support-session-modal.js';
 import { createSupportSessionRecovery } from '/static/views/support-session-recovery.js';
+import { shouldShowAppIsolationBanner, wireAppIsolationBanner } from '/static/views/app-isolation-banner.js';
 import { userRowCaps, userRolePresentation, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
@@ -405,6 +406,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const supportAppsRetry = document.getElementById('support-session-apps-retry');
   const supportReauth   = document.getElementById('support-session-reauth');
   const supportRecoveryRoot = document.getElementById('support-session-recovery');
+  const appIsolationBanner = document.getElementById('app-isolation-banner');
+  const appIsolationBannerDismiss = document.getElementById('app-isolation-banner-dismiss');
+  wireAppIsolationBanner({ root: appIsolationBanner, dismissButton: appIsolationBannerDismiss });
   const supportModalLock = supportModal ? createSupportSessionModalLock({
     modal: supportModal, closeButton: supportClose, cancelButton: supportCancel,
   }) : null;
@@ -984,6 +988,8 @@ document.addEventListener('DOMContentLoaded', () => {
     auditRequests.invalidate();
     state.canCreateApps = false;
     state.canManageApps = false;
+    state.appIsolationWarning = false;
+    if (appIsolationBanner) appIsolationBanner.hidden = true;
     supportRecovery.clear();
     appRestartFeedback.clear();
     appCardLifecycleControls.clear();
@@ -1019,6 +1025,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.canCreateApps = !!payload.can_create_apps;
     state.canManageApps = !!payload.can_manage_apps;
     state.canReadAudit = !!payload.can_read_audit;
+    state.appIsolationWarning = !!payload.app_isolation_warning;
     renderIdentity(payload.user);
     setHidden(logoutButton, false);
     setHidden(loginView, true);
@@ -1026,6 +1033,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Audit access is a server-computed capability (admin, or operator when
     // auth.operator_audit_access is on), not a client-side role check.
     tabAudit.hidden = !state.canReadAudit;
+    if (appIsolationBanner) {
+      appIsolationBanner.hidden = !shouldShowAppIsolationBanner(state.appIsolationWarning);
+    }
     tabUsers.hidden = payload.user.role !== 'admin';
     tabWorkers.hidden = payload.user.role !== 'admin';
     // The home (/) is role-adaptive: fleet operators (admin/operator) get the

@@ -218,8 +218,12 @@ type sessionResponse struct {
 	// CanReadAudit advertises audit-log access (admin, or operator behind
 	// auth.operator_audit_access) so the UI shows the Audit tab and the
 	// Overview activity feed to exactly the users who can load them.
-	CanReadAudit bool                `json:"can_read_audit"`
-	Credential   *credentialResponse `json:"credential,omitempty"`
+	CanReadAudit bool `json:"can_read_audit"`
+	// AppIsolationWarning is true only for an admin when server.app_origin is
+	// unset, so the dashboard can surface the same same-origin trust risk the
+	// startup log warns about (see appOriginTrustWarning in cmd/shinyhub).
+	AppIsolationWarning bool                `json:"app_isolation_warning,omitempty"`
+	Credential          *credentialResponse `json:"credential,omitempty"`
 }
 
 // credentialResponse is safe to return to the authenticated caller. It names
@@ -420,11 +424,12 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 	auth.SetSessionCookie(w, r, token, s.cfg.TrustedProxyNets)
 	ctxUser := user.ContextUser()
 	writeJSON(w, http.StatusOK, sessionResponse{
-		User:          newSessionUser(user),
-		CanCreateApps: canCreateApps(ctxUser),
-		CanManageApps: s.canUseAppsManagement(ctxUser),
-		AppScope:      ctxUser.AppScope,
-		CanReadAudit:  s.canReadAudit(ctxUser),
+		User:                newSessionUser(user),
+		CanCreateApps:       canCreateApps(ctxUser),
+		CanManageApps:       s.canUseAppsManagement(ctxUser),
+		AppScope:            ctxUser.AppScope,
+		CanReadAudit:        s.canReadAudit(ctxUser),
+		AppIsolationWarning: s.appIsolationWarning(ctxUser),
 	})
 }
 
@@ -558,12 +563,13 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		su.Role = u.Role
 	}
 	writeJSON(w, http.StatusOK, sessionResponse{
-		User:          su,
-		CanCreateApps: canCreateApps(u),
-		CanManageApps: s.canUseAppsManagement(u),
-		AppScope:      u.AppScope,
-		CanReadAudit:  s.canReadAudit(u),
-		Credential:    requestCredential(r),
+		User:                su,
+		CanCreateApps:       canCreateApps(u),
+		CanManageApps:       s.canUseAppsManagement(u),
+		AppScope:            u.AppScope,
+		CanReadAudit:        s.canReadAudit(u),
+		AppIsolationWarning: s.appIsolationWarning(u),
+		Credential:          requestCredential(r),
 	})
 }
 
@@ -712,11 +718,12 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sessionResponse{
-		User:          newSessionUser(fresh),
-		CanCreateApps: canCreateApps(u),
-		CanManageApps: s.canUseAppsManagement(u),
-		AppScope:      u.AppScope,
-		CanReadAudit:  s.canReadAudit(u),
+		User:                newSessionUser(fresh),
+		CanCreateApps:       canCreateApps(u),
+		CanManageApps:       s.canUseAppsManagement(u),
+		AppScope:            u.AppScope,
+		CanReadAudit:        s.canReadAudit(u),
+		AppIsolationWarning: s.appIsolationWarning(u),
 	})
 }
 

@@ -2704,6 +2704,14 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	proxyEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets, navOpts...)(prx)
 	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, navOpts...)(proxyEmptyState)
 	var parsedAppOrigin *url.URL
+	// With no dedicated app_origin, every deployed app runs same-origin with the
+	// dashboard, so ShinyHub trusts every deployed app with dashboard users'
+	// sessions. Warn loudly so that is a deliberate choice, not an oversight -
+	// the same posture the empty-app_origin admin banner and docs/security.md's
+	// deployment posture section both flag.
+	if msg := appOriginTrustWarning(cfg.Server.AppOrigin); msg != "" {
+		slog.Warn(msg)
+	}
 	if cfg.Server.AppOrigin != "" {
 		parsedAppOrigin, _ = url.Parse(cfg.Server.AppOrigin) // validated by config.Load
 		redirect := appOriginRedirectHandler(store, parsedAppOrigin)

@@ -150,6 +150,14 @@
     </section>
     <p id="support-session-recovery-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
 
+    <section id="app-isolation-banner" class="conn-banner" hidden role="region" aria-labelledby="app-isolation-banner-heading">
+      <p class="conn-banner-title" id="app-isolation-banner-heading">Apps run same-origin with the dashboard</p>
+      <p class="conn-banner-body">No dedicated application origin (<code>server.app_origin</code>) is configured, so every deployed app is trusted with dashboard users' sessions.
+        <a class="conn-banner-link" href="https://github.com/rvben/shinyhub/blob/main/docs/security.md#recommended-deployment-posture" target="_blank" rel="noopener">Learn more</a>
+      </p>
+      <button type="button" class="btn-primary" id="app-isolation-banner-dismiss">Dismiss</button>
+    </section>
+
     <section id="route-error-view" hidden aria-labelledby="route-error-heading">
       <div class="login-box">
         <h1 id="route-error-heading">Something went wrong</h1>

@@ -642,6 +642,27 @@ func TestAuditTabUsesCapability(t *testing.T) {
 		"overview.js must not re-derive audit access from the role")
 }
 
+// TestAppIsolationBannerReadsServerCapability pins the same-origin trust
+// banner's wiring to the server-computed app_isolation_warning flag (admin
+// role, server.app_origin unset - see appIsolationWarning in
+// internal/api/authorization.go), and to the static markup that flag toggles.
+// A silently-undefined field here would leave admins never warned that every
+// deployed app shares the dashboard's origin.
+func TestAppIsolationBannerReadsServerCapability(t *testing.T) {
+	assertContains(t, "index.html", `id="app-isolation-banner"`,
+		"the dashboard must have a same-origin trust banner element")
+	assertContains(t, "index.html", `id="app-isolation-banner-dismiss"`,
+		"the banner must have a dismiss button")
+	assertContains(t, "app.js", "state.appIsolationWarning = !!payload.app_isolation_warning",
+		"showLoggedIn must capture the server-computed isolation-warning capability")
+	assertContains(t, "app.js", "appIsolationBanner.hidden = !shouldShowAppIsolationBanner(state.appIsolationWarning)",
+		"the banner's visibility must follow the capability, not a client-side role check")
+	assertContains(t, "app.js", "state.appIsolationWarning = false",
+		"logging out must clear the isolation-warning capability")
+	assertContains(t, "app.js", "if (appIsolationBanner) appIsolationBanner.hidden = true;",
+		"logging out must hide the banner so the next session's state starts clean")
+}
+
 // TestAccessVisibilityLabelsTeachSemantics pins the corrected visibility copy.
 // "shared" admits every signed-in user (the membership check is bypassed) and
 // "private" is where member/group grants apply; the old copy said "Private is

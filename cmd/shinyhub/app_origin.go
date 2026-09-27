@@ -21,6 +21,16 @@ import (
 
 const appLaunchQueryParam = "__shinyhub_launch"
 
+// appOriginTrustWarning returns the startup warning to log when no dedicated
+// app_origin is configured, or the empty string when appOrigin is set (in
+// which case apps run isolated from the dashboard and no warning applies).
+func appOriginTrustWarning(appOrigin string) string {
+	if appOrigin != "" {
+		return ""
+	}
+	return "app_origin not configured: apps run same-origin with the dashboard, so every deployed app is trusted with dashboard users' sessions; set server.app_origin to isolate application traffic"
+}
+
 type appLaunchStore interface {
 	CreateAppLaunchCode(codeHash string, userID int64, appSlug string) error
 	ConsumeAppLaunchCode(codeHash, appSlug string) (*auth.ContextUser, error)

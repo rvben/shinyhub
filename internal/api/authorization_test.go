@@ -160,6 +160,33 @@ func TestRequireExplicitAppAccess_UnauthenticatedRejected(t *testing.T) {
 	}
 }
 
+// TestAppIsolationWarning pins the exact conditions the dashboard's
+// same-origin trust banner relies on: admin role AND an unset app_origin.
+// Any other combination must stay silent, since the warning is only ever
+// actionable by an admin and only ever true while apps run same-origin with
+// the dashboard.
+func TestAppIsolationWarning(t *testing.T) {
+	srv, _ := newAuthTestServer(t)
+	// newAuthTestServer's cfg leaves Server.AppOrigin unset (its zero value).
+	if got := srv.appIsolationWarning(&auth.ContextUser{Role: "admin"}); !got {
+		t.Error("admin with no app_origin configured must see the warning")
+	}
+	if got := srv.appIsolationWarning(&auth.ContextUser{Role: "developer"}); got {
+		t.Error("a non-admin must never see the isolation warning")
+	}
+	if got := srv.appIsolationWarning(&auth.ContextUser{Role: "operator"}); got {
+		t.Error("operator is not admin and must not see the isolation warning")
+	}
+	if got := srv.appIsolationWarning(nil); got {
+		t.Error("a nil user must not see the isolation warning")
+	}
+
+	srv.cfg.Server.AppOrigin = "https://apps.example.com"
+	if got := srv.appIsolationWarning(&auth.ContextUser{Role: "admin"}); got {
+		t.Error("an admin must not see the warning once app_origin is configured")
+	}
+}
+
 func TestJITOAuthRole_DefaultsToViewer(t *testing.T) {
 	srv, _ := newAuthTestServer(t)
 	// newAuthTestServer leaves Auth.OAuthDefaultRole unset; the helper must

@@ -200,6 +200,17 @@ exposes app proxy traffic and health checks only; it does not expose the
 dashboard, static control-plane assets, or `/api` routes. This prevents
 application JavaScript from sharing an origin with control-plane cookies.
 
+**Without `app_origin`, every deployed app runs same-origin with the dashboard,
+and ShinyHub trusts every deployed app with dashboard users' sessions.** App
+JavaScript shares the dashboard's origin, so a malicious or compromised app can
+attempt to read same-origin state, ride an admin's session for same-origin
+requests, or otherwise act with the authority of whoever is viewing it. The
+CSRF double-submit-cookie check and the `Referer`-based defense in
+`internal/auth/csrf.go` reduce this risk but do not eliminate it - they are a
+mitigation for the same-origin case, not a substitute for isolation. Set
+`app_origin` whenever any deployed app's code is not fully trusted; a server
+started without it logs a startup warning for exactly this reason.
+
 The isolated origin also unlocks optional administrator support sessions. See
 [Support sessions](support-sessions.md) for the opt-in setting and security
 model.

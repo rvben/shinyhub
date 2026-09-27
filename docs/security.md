@@ -26,6 +26,16 @@ history, and optional process or container isolation.
 - Enable metrics, structured logs, and retention appropriate to the installation.
 - Back up the database, bundles, and persistent app-data directory together.
 
+**"Use separate control-plane and application origins" is not a hardening nicety
+- without it, every deployed app is trusted with dashboard users' sessions.**
+With no `server.app_origin` configured, apps run same-origin with the dashboard,
+so a malicious or compromised app's JavaScript shares that origin and can attempt
+to act with the authority of whoever is viewing it. A server started this way
+logs a startup warning, and a signed-in admin sees the same warning as a
+dismissible banner in the dashboard. Configure `app_origin` whenever any
+deployed app's code is not fully trusted; see
+[Dedicated application origin](configuration.md#dedicated-application-origin).
+
 ## People onboarding
 
 Use SSO for organization-managed identities or private, expiring invitations
