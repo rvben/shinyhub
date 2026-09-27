@@ -178,8 +178,12 @@ function renderTrendRow(document, row, coverage) {
   yAxis.setAttribute('aria-hidden', 'true');
   const yMax = document.createElement('span');
   yMax.textContent = scaleMaxText;
+  // The axis floor is always zero, and zero needs no unit: formatting it
+  // through row.format would print "0 KB" under a "256 MB" ceiling on the
+  // same axis, a unit mismatch that formatBytes' KB/MB switch makes visible
+  // in a way fmtPercent and fmtInt do not.
   const yMin = document.createElement('span');
-  yMin.textContent = row.format(0);
+  yMin.textContent = '0';
   yAxis.appendChild(yMax);
   yAxis.appendChild(yMin);
 

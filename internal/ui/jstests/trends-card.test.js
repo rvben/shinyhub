@@ -67,7 +67,7 @@ test('each metric has readable x and y axes', () => {
 test('charts use a zero-based labelled scale instead of rescaling to the data range', () => {
   const card = renderTrendsCard(doc(), fullHistory());
   const cpu = card.querySelector('.trend-row[data-metric="cpu"]');
-  assert.equal(cpu.querySelector('.trend-y-axis').textContent, '25.0%0.0%');
+  assert.equal(cpu.querySelector('.trend-y-axis').textContent, '25.0%0');
   assert.match(cpu.querySelector('svg').getAttribute('aria-label'), /Scale 0 to 25\.0%/);
 });
 
@@ -75,7 +75,11 @@ test('memory and count axes use readable rounded ceilings', () => {
   const card = renderTrendsCard(doc(), fullHistory());
   const memory = card.querySelector('.trend-row[data-metric="memory"] .trend-y-axis');
   const sessions = card.querySelector('.trend-row[data-metric="sessions"] .trend-y-axis');
-  assert.equal(memory.textContent, '256 MB0 KB');
+  // The floor label is a bare "0", not "0 KB": formatting zero through the
+  // memory row's KB/MB-switching formatter would print a smaller unit than
+  // the ceiling above it ("256 MB"), a mismatch that a unitless axis origin
+  // avoids entirely.
+  assert.equal(memory.textContent, '256 MB0');
   assert.equal(sessions.textContent, '50');
 });
 
