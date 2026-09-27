@@ -17,7 +17,7 @@ type appBrief struct {
 	Visibility string `json:"visibility"`
 }
 
-func toBriefs(apps []*db.App) []appBrief {
+func toBriefs(apps []*db.AppSummary) []appBrief {
 	out := make([]appBrief, 0, len(apps))
 	for _, a := range apps {
 		out = append(out, appBrief{Slug: a.Slug, Name: a.Name, Visibility: a.Access})
@@ -36,13 +36,18 @@ func (s *Server) HandleBrandingJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 // listAppsVisibleTo returns exactly the apps a caller may see:
-//   - anonymous -> public apps only (via ListPublicApps, separate query)
-//   - admin/operator -> all apps (via ListApps)
+//   - anonymous -> public apps only (via ListPublicAppSummaries, separate query)
+//   - admin/operator -> all apps (via ListAppSummaries)
 //   - other authenticated users -> public + shared + owned + member apps
 //
 // It is shared by every endpoint that answers "which apps is this caller
 // allowed to know about", so a change to the visibility rule cannot land on one
 // surface and miss another.
+//
+// Its two callers (HandleAppsJSON, HandleAppNavJSON) both reduce each app to a
+// handful of fields and neither reads deployment history, so this draws from
+// the AppSummary query family instead of the full App one: no
+// deploymentSummarySQL subqueries and none of App's other unused columns.
 //
 // A scoped identity (a deploy token carrying an app allowlist) is narrowed to
 // its allowlist last, matching the per-slug gates: the scope binds on every app
@@ -50,18 +55,18 @@ func (s *Server) HandleBrandingJSON(w http.ResponseWriter, r *http.Request) {
 // paging through the list can receive a short page; that is correct for an
 // identity whose whole list is its allowlist, and the alternative is answering
 // with apps it may not touch.
-func (s *Server) listAppsVisibleTo(u *auth.ContextUser, limit, offset int) ([]*db.App, error) {
+func (s *Server) listAppsVisibleTo(u *auth.ContextUser, limit, offset int) ([]*db.AppSummary, error) {
 	var (
-		apps []*db.App
+		apps []*db.AppSummary
 		err  error
 	)
 	switch {
 	case u == nil:
-		apps, err = s.store.ListPublicApps(limit, offset)
+		apps, err = s.store.ListPublicAppSummaries(limit, offset)
 	case isPrivilegedAppOperator(u):
-		apps, err = s.store.ListApps(limit, offset)
+		apps, err = s.store.ListAppSummaries(limit, offset)
 	default:
-		apps, err = s.store.ListAppsVisibleToUser(u.ID, limit, offset)
+		apps, err = s.store.ListAppSummariesVisibleToUser(u.ID, limit, offset)
 	}
 	if err != nil || u == nil || len(u.AppScope) == 0 {
 		return apps, err
@@ -69,7 +74,7 @@ func (s *Server) listAppsVisibleTo(u *auth.ContextUser, limit, offset int) ([]*d
 	// A fresh slice rather than a filter in place: this helper does not own the
 	// slice the store handed back, and reusing its backing array would rewrite
 	// the caller's data for a store that ever returns anything shared.
-	scoped := make([]*db.App, 0, len(apps))
+	scoped := make([]*db.AppSummary, 0, len(apps))
 	for _, a := range apps {
 		if u.AppInScope(a.Slug) {
 			scoped = append(scoped, a)
