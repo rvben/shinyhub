@@ -25,31 +25,33 @@ func TestPruneOldVersions_KeepsNewest(t *testing.T) {
 		os.WriteFile(filepath.Join(bundlesDir, name+".zip"), []byte("x"), 0644)
 	}
 
+	// "007" is both the newest entry and the pinned active dir, so it never
+	// counts against keep=5: 6 unpinned entries (001-006) minus keep=5 leaves
+	// exactly 1 to delete (the oldest, "001").
 	active := filepath.Join(appsDir, slug, "versions", "007")
 	if err := deploy.PruneOldVersions(appsDir, slug, 5, active); err != nil {
 		t.Fatalf("PruneOldVersions: %v", err)
 	}
 
 	entries, _ := os.ReadDir(versionsDir)
-	if len(entries) != 5 {
-		t.Errorf("expected 5 version dirs, got %d", len(entries))
+	if len(entries) != 6 {
+		t.Errorf("expected 6 version dirs, got %d", len(entries))
 	}
-	// Newest 5 (003–007) should remain.
-	for _, name := range []string{"003", "004", "005", "006", "007"} {
+	// Newest 6 (002-007) should remain: the 5 newest unpinned (002-006) plus
+	// the pinned active dir (007), which is kept in addition to keep=5.
+	for _, name := range []string{"002", "003", "004", "005", "006", "007"} {
 		if _, err := os.Stat(filepath.Join(versionsDir, name)); err != nil {
 			t.Errorf("expected %s to exist", name)
 		}
 	}
-	// Oldest 2 (001, 002) should be gone.
-	for _, name := range []string{"001", "002"} {
-		if _, err := os.Stat(filepath.Join(versionsDir, name)); !os.IsNotExist(err) {
-			t.Errorf("expected %s to be deleted", name)
-		}
+	// Only the oldest unpinned entry (001) should be gone.
+	if _, err := os.Stat(filepath.Join(versionsDir, "001")); !os.IsNotExist(err) {
+		t.Errorf("expected 001 to be deleted")
 	}
-	// Bundle zips: should also have 5 remaining.
+	// Bundle zips: same accounting, 6 remaining.
 	bundleEntries, _ := os.ReadDir(bundlesDir)
-	if len(bundleEntries) != 5 {
-		t.Errorf("expected 5 bundle zips, got %d", len(bundleEntries))
+	if len(bundleEntries) != 6 {
+		t.Errorf("expected 6 bundle zips, got %d", len(bundleEntries))
 	}
 }
 
@@ -82,23 +84,24 @@ func TestPruneOldVersions_SkipsActiveDir(t *testing.T) {
 		t.Errorf("active bundle zip should not have been deleted: %v", err)
 	}
 
-	// With keep=5 and 6 entries, 1 must be deleted. Since "001" is skipped,
-	// "002" is deleted instead. Remaining: "001", "003"–"006" = 5 version dirs.
+	// "001" is pinned and does not count against keep=5: the 5 unpinned
+	// entries (002-006) all fit inside keep=5, so nothing is deleted and all
+	// 6 version dirs survive.
 	versionEntries, _ := os.ReadDir(versionsDir)
-	if len(versionEntries) != 5 {
-		t.Errorf("expected 5 version dirs after pruning, got %d", len(versionEntries))
+	if len(versionEntries) != 6 {
+		t.Errorf("expected 6 version dirs after pruning, got %d", len(versionEntries))
 	}
-	if _, err := os.Stat(filepath.Join(versionsDir, "002")); !os.IsNotExist(err) {
-		t.Errorf("expected version 002 to be deleted")
+	if _, err := os.Stat(filepath.Join(versionsDir, "002")); err != nil {
+		t.Errorf("expected version 002 to survive: %v", err)
 	}
 
-	// Bundles: same logic — "001.zip" skipped, "002.zip" deleted, 5 remain.
+	// Bundles: same accounting, nothing deleted.
 	bundleEntries, _ := os.ReadDir(bundlesDir)
-	if len(bundleEntries) != 5 {
-		t.Errorf("expected 5 bundle zips after pruning, got %d", len(bundleEntries))
+	if len(bundleEntries) != 6 {
+		t.Errorf("expected 6 bundle zips after pruning, got %d", len(bundleEntries))
 	}
-	if _, err := os.Stat(filepath.Join(bundlesDir, "002.zip")); !os.IsNotExist(err) {
-		t.Errorf("expected bundle 002.zip to be deleted")
+	if _, err := os.Stat(filepath.Join(bundlesDir, "002.zip")); err != nil {
+		t.Errorf("expected bundle 002.zip to survive: %v", err)
 	}
 }
 
@@ -141,19 +144,20 @@ func TestPruneOldVersions_PreservesSchedulePinnedBundle(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// "001" and "004" are both pinned (schedule-pinned and active) and neither
+	// counts against keep=2. The 2 unpinned entries ("002", "003") fit inside
+	// keep=2, so nothing is deleted and all 4 versions/bundles survive.
 	active := filepath.Join(versionsDir, "004")
 	pinnedProducer := filepath.Join(versionsDir, "001")
 	if err := deploy.PruneOldVersions(appsDir, slug, 2, active, pinnedProducer); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{pinnedProducer, filepath.Join(bundlesDir, "001.zip"), active, filepath.Join(bundlesDir, "004.zip")} {
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("pinned path %s was removed: %v", path, err)
+	for _, name := range []string{"001", "002", "003", "004"} {
+		if _, err := os.Stat(filepath.Join(versionsDir, name)); err != nil {
+			t.Errorf("version %s should not have been pruned: %v", name, err)
 		}
-	}
-	for _, name := range []string{"002", "003"} {
-		if _, err := os.Stat(filepath.Join(versionsDir, name)); !os.IsNotExist(err) {
-			t.Errorf("version %s should have been pruned", name)
+		if _, err := os.Stat(filepath.Join(bundlesDir, name+".zip")); err != nil {
+			t.Errorf("bundle %s.zip should not have been pruned: %v", name, err)
 		}
 	}
 }

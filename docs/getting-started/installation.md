@@ -30,8 +30,11 @@ memory and CPU.
   application whose only dependency is `shiny` occupies about 60 MiB once its
   library is restored, and each application keeps
   `storage.version_retention` deployments (5 by default) plus its logs. A
-  single bundle upload is capped at `storage.max_bundle_mb`, 128 MiB by
-  default.
+  deployment pinned by an active schedule obligation ([Schedules](../schedules.md))
+  is kept in addition to that count for as long as the obligation is active,
+  not in place of one of the retained deployments, so a scheduled app's disk
+  footprint can exceed the plain `version_retention` figure. A single bundle
+  upload is capped at `storage.max_bundle_mb`, 128 MiB by default.
 
 Hibernation is what lets a modest host hold many applications: one that has
 been idle past its timeout (30 minutes by default) is stopped and its memory
