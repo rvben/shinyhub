@@ -6,7 +6,7 @@ const now = Date.parse('2026-08-14T12:00:00Z');
 
 test('a never-deployed card states the missing prerequisite once', () => {
   assert.deepEqual(appCardFacts({ deploy_count: 0 }, null, now), [
-    { text: 'No release deployed', tone: 'attention', title: '' },
+    { text: 'Not deployed yet', tone: 'attention', title: '' },
   ]);
 });
 
@@ -29,7 +29,7 @@ test('a deployed card shows release, recency, and configured instances', () => {
     replicas: 3,
   }, null, now);
   assert.deepEqual(facts.map(item => item.text), [
-    'Release #18', 'Deployed 12 min ago', '3 instances',
+    'v18', 'Deployed 12 min ago', '3 instances',
   ]);
 });
 
@@ -72,5 +72,5 @@ test('operational readiness remains visible for fleet-managed apps', () => {
 
 test('invalid release timestamps do not create misleading recency', () => {
   const facts = appCardFacts({ release_number: 2, released_at: 'not-a-date' }, null, now);
-  assert.deepEqual(facts.map(item => item.text), ['Release #2']);
+  assert.deepEqual(facts.map(item => item.text), ['v2']);
 });

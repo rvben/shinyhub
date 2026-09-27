@@ -97,8 +97,8 @@ test('siblingKey returns null for a key that names no control', () => {
 });
 
 test('a card keeps the keyboard when its own control is the thing that vanished', () => {
-  // "Deploy first release" disappears the moment that deploy succeeds. The
-  // card is still on screen, so focus belongs on it, not on <body>.
+  // "Deploy" disappears the moment that deploy succeeds. The card is still
+  // on screen, so focus belongs on it, not on <body>.
   const { doc, grid } = fixture();
   rebuild(doc, grid, ['app:demo:title', 'app:demo:deploy']);
   grid.querySelector('[data-focus-key="app:demo:deploy"]').focus();

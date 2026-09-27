@@ -25,8 +25,8 @@ export function focusedKey(root) {
 
 // siblingKey rewrites a "<kind>:<subject>:<control>" key to name a different
 // control on the same subject, so a caller whose exact control did not survive
-// the rebuild can fall back to one that did: a card's "Deploy first release"
-// button disappears the moment that deploy succeeds, but the card is still
+// the rebuild can fall back to one that did: a card's "Deploy" button
+// disappears the moment that deploy succeeds, but the card is still
 // there and its title link can hold the focus. Returns null for a key that does
 // not name a control, which restoreFocus treats as "nothing to restore".
 export function siblingKey(key, control) {

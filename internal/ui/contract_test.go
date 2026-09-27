@@ -514,7 +514,7 @@ func TestGridStatusBadgeRefreshesFromMetricsPoll(t *testing.T) {
 }
 
 // TestAppCardHasExplicitManageLink pins the card's two destinations. The app
-// name leads to administration and says so to assistive technology; Open dashboard
+// name leads to administration and says so to assistive technology; Open app
 // launches the active release in a new tab. The rest of the card is not a
 // nested/oversized link, leaving text selectable and actions unambiguous.
 func TestAppCardHasExplicitManageLink(t *testing.T) {
@@ -522,7 +522,7 @@ func TestAppCardHasExplicitManageLink(t *testing.T) {
 		"a manageable app-name link must identify its management destination")
 	assertContains(t, "app.js", ": `View ${app.name}`",
 		"a read-only app-name link must not promise management access")
-	assertContains(t, "app.js", "openLink.setAttribute('aria-label', `Open ${app.name} dashboard in a new tab`)",
+	assertContains(t, "app.js", "openLink.setAttribute('aria-label', `Open ${app.name} in a new tab`)",
 		"the launch action must identify its new-tab destination")
 	assertNotContains(t, "app.js", "app-card-body-link",
 		"the whole card must not be a link when it contains independent actions")
@@ -1731,8 +1731,8 @@ func TestGridRebuildKeepsKeyboardFocus(t *testing.T) {
 	if restoreAt < wipeAt {
 		t.Error("focus must be restored AFTER the grid is rebuilt, not onto the elements about to be discarded")
 	}
-	// "Deploy first release" is gone the moment that deploy succeeds, and the
-	// rebuild that removes it is the same one the operator is watching.
+	// "Deploy" is gone the moment that deploy succeeds, and the rebuild that
+	// removes it is the same one the operator is watching.
 	if !strings.Contains(body, "restoreFocus(gridEl, siblingKey(keepFocus, 'title'))") {
 		t.Error("a control that did not survive the rebuild must fall back to its card's title link,\n" +
 			"or finishing a first deploy drops the keyboard to the top of the page")
@@ -3486,7 +3486,7 @@ func TestAppCardFactsStayOperational(t *testing.T) {
 		"the grid card must derive its concise facts from the shared helper")
 	assertContains(t, "app.js", ".app-card-facts[data-slug=",
 		"the metrics poll must locate and refresh the card facts")
-	assertContains(t, "views/app-card-facts.js", "Release #${releaseNumber}",
+	assertContains(t, "views/app-card-facts.js", "v${releaseNumber}",
 		"cards must expose the current successful release number")
 	assertContains(t, "views/app-card-facts.js", "${ready}/${configured} ready",
 		"scaled cards must expose live replica readiness")

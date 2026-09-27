@@ -868,12 +868,12 @@ document.addEventListener('DOMContentLoaded', () => {
         openLink.target = '_blank';
         openLink.rel = 'noopener noreferrer';
         openLink.dataset.focusKey = `app:${app.slug}:open`;
-        openLink.append(document.createTextNode('Open dashboard'));
+        openLink.append(document.createTextNode('Open app'));
         const externalArrow = document.createElement('span');
         externalArrow.setAttribute('aria-hidden', 'true');
         externalArrow.textContent = '↗';
         openLink.appendChild(externalArrow);
-        openLink.setAttribute('aria-label', `Open ${app.name} dashboard in a new tab`);
+        openLink.setAttribute('aria-label', `Open ${app.name} in a new tab`);
         actions.appendChild(openLink);
       }
 
@@ -884,7 +884,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cardActions.deployIsPrimary) {
           const deployButton = document.createElement('button');
           deployButton.type = 'button';
-          deployButton.textContent = 'Deploy first release';
+          deployButton.textContent = 'Deploy';
           deployButton.className = 'btn-primary';
           deployButton.dataset.focusKey = `app:${app.slug}:deploy`;
           deployButton.setAttribute('aria-label', `Deploy first bundle to ${app.name}`);

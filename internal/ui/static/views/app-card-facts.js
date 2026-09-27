@@ -34,12 +34,12 @@ export function appCardFacts(app, live = null, now = Date.now()) {
   if (!hasRelease) {
     return [latestFailed
       ? fact('Latest deployment failed', 'danger')
-      : fact('No release deployed', 'attention')];
+      : fact('Not deployed yet', 'attention')];
   }
 
   const facts = [];
   if (latestFailed) facts.push(fact('Latest deployment failed', 'danger'));
-  if (releaseNumber > 0) facts.push(fact(`Release #${releaseNumber}`));
+  if (releaseNumber > 0) facts.push(fact(`v${releaseNumber}`));
 
   const relative = compactRelativeTime(releasedAt, now);
   if (relative) {
