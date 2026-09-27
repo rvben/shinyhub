@@ -389,6 +389,58 @@ func TestBrandingRoutes(t *testing.T) {
 				if rr.Code != http.StatusNotFound {
 					t.Errorf("GET %s status = %d, want 404", path, rr.Code)
 				}
+				// The dashboard serves its own styled not-found page, not Go's
+				// plain-text default ("404 page not found").
+				ct := rr.Header().Get("Content-Type")
+				if !strings.HasPrefix(ct, "text/html") {
+					t.Errorf("GET %s Content-Type = %q, want text/html prefix", path, ct)
+				}
+				body := rr.Body.String()
+				if strings.Contains(body, "404 page not found") {
+					t.Errorf("GET %s served Go's plain-text 404, want the styled not-found page", path)
+				}
+				if !strings.Contains(body, "Page not found") {
+					t.Errorf("GET %s body does not contain the not-found page heading", path)
+				}
+			})
+		}
+	})
+
+	t.Run("dashboard_404_leaves_api_and_app_routes_alone", func(t *testing.T) {
+		// registerBrandingRoutes never registers "/api/" or "/app/" itself:
+		// those prefixes are registered elsewhere on the same production mux, by
+		// runServe. Registering stand-ins here for those two prefixes and
+		// confirming they still answer proves that routing unknown dashboard
+		// paths to the styled not-found page cannot also intercept them - Go's
+		// ServeMux always prefers the more specific "/api/" and "/app/" subtree
+		// patterns over the catch-all "/", regardless of what the catch-all does.
+		mux, _ := buildBrandingMux(t, config.BrandingConfig{})
+		mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTeapot)
+			_, _ = w.Write([]byte("api-handler"))
+		}))
+		mux.Handle("/app/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTeapot)
+			_, _ = w.Write([]byte("app-handler"))
+		}))
+
+		cases := []struct {
+			path string
+			body string
+		}{
+			{"/api/does-not-exist", "api-handler"},
+			{"/app/does-not-exist", "app-handler"},
+		}
+		for _, c := range cases {
+			t.Run(c.path, func(t *testing.T) {
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, httptest.NewRequest("GET", c.path, nil))
+				if rr.Code != http.StatusTeapot {
+					t.Fatalf("GET %s status = %d, want %d (the not-found handler intercepted it)", c.path, rr.Code, http.StatusTeapot)
+				}
+				if rr.Body.String() != c.body {
+					t.Errorf("GET %s body = %q, want %q", c.path, rr.Body.String(), c.body)
+				}
 			})
 		}
 	})

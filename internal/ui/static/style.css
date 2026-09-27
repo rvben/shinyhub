@@ -8091,7 +8091,7 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 .invitation-card .profile-hint { font-size: var(--fs-body); }
 
 .invitation-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-#invitation-signin { display: inline-block; margin-top: 1rem; font-weight: 600; }
+#invitation-signin, .notfound-back { display: inline-block; margin-top: 1rem; font-weight: 600; color: var(--cyan-bright); text-underline-offset: 0.2em; }
 #invitation-signin[hidden] { display: none; }
 
 .people-joining { margin-top: 1.5rem; border-top: 1px solid var(--line-2); padding-top: 1rem; font-size: var(--fs-body); color: var(--text-soft); }

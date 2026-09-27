@@ -3189,12 +3189,18 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 		_, _ = w.Write(out)
 	}
 
+	// notFound serves the dashboard's own styled not-found page (instead of
+	// Go's plain-text default) for any path in the dashboard's route space
+	// that matches nothing. /api/ and /app/ are registered as their own,
+	// more specific mux patterns elsewhere and never reach it.
+	notFound := ui.NotFoundHandler()
+
 	// SPA routes: /apps/<slug>..., /users, /audit-log, /login. The handler
 	// 404s anything outside the IsUIPath allowlist, so legitimate unknowns
 	// still return 404 rather than rendering the SPA shell.
 	spa := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !ui.IsUIPath(r.URL.Path) {
-			http.NotFound(w, r)
+			notFound.ServeHTTP(w, r)
 			return
 		}
 		serveShell(w, r)
@@ -3242,7 +3248,7 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
-			http.NotFound(w, r)
+			notFound.ServeHTTP(w, r)
 			return
 		}
 		if landingFile != "" {

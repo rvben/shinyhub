@@ -65,6 +65,17 @@ func TestConnectivityBannerWired(t *testing.T) {
 		"app-detail.js must call connectivityBanner so a WebSocket-blocked app surfaces a warning on the Overview")
 }
 
+// TestStandalonePageLinksUseTheAccentColor pins the link color on the
+// standalone pages (not-found, accept-invitation). They load style.css but
+// carry no app shell, so without an explicit color their one link fell back
+// to the browser's default blue, and to purple once visited.
+func TestStandalonePageLinksUseTheAccentColor(t *testing.T) {
+	body := cssRuleBody(t, readStatic(t, "style.css"), "\n#invitation-signin, .notfound-back {")
+	if !strings.Contains(body, "color: var(--cyan-bright)") {
+		t.Fatalf("the not-found and invitation links must take the accent token, not the browser default; got:%s", body)
+	}
+}
+
 // TestDeployingBadgeWired pins the API/frontend contract for the card's
 // "Deploying" badge. The server computes `deploying` (pending deployment row
 // + held deploy lock; see api.Server.appDeploying) onto the apps-list payload

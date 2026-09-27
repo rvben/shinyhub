@@ -126,6 +126,26 @@ func Handler() http.Handler {
 	})
 }
 
+// NotFoundHandler serves a dashboard-styled not-found page, with a real
+// http.StatusNotFound status, in place of Go's plain-text default. Register it
+// for any path within the dashboard's own route space that does not match a
+// known route; /api/* and /app/* are registered as their own, more specific
+// mux patterns and never reach it.
+func NotFoundHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		file, err := Static().Open("not-found.html")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer file.Close()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.Copy(w, file)
+	})
+}
+
 // InvitationHandler serves the public account-activation page without loading
 // the authenticated SPA or putting the invitation secret in an HTTP URL.
 func InvitationHandler() http.Handler {
