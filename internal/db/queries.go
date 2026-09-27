@@ -1347,6 +1347,15 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// CountApps returns the total number of apps, matching the row set ListApps
+// draws its page from (no WHERE clause). Used to report an accurate "total" in
+// a paginated response without loading every row into memory just to count them.
+func (s *Store) CountApps() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM apps`).Scan(&n)
+	return n, err
+}
+
 // ListWakingApps returns all apps whose status is 'waking'. Used by the
 // active owner's runOnce reconciler to drive apps whose wake was triggered by
 // a standby instance (which issues the BeginWake CAS but cannot deploy).
@@ -1649,6 +1658,18 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 		apps = append(apps, app)
 	}
 	return apps, rows.Err()
+}
+
+// CountAppsVisibleToUser returns the number of apps visible to userID, matching
+// the row set ListAppsVisibleToUser draws its page from (same WHERE clause).
+// Used to report an accurate "total" in a paginated response without loading
+// every visible row into memory just to count them.
+func (s *Store) CountAppsVisibleToUser(userID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM apps
+		WHERE `+appVisibleToUserWhere, userID, userID, userID).Scan(&n)
+	return n, err
 }
 
 // ListPublicApps returns only apps with access = 'public'. It is the ONLY

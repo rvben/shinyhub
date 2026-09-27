@@ -51,39 +51,60 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 
 	limit, offset := parsePagination(r)
 
-	// Fetch visible apps to count and apply token scope before pagination.
-	// Only load replica state and decorate apps on the requested page.
+	// Only load replica state and decorate apps on the requested page: the
+	// page itself, and its total, come from SQL (LIMIT/OFFSET/COUNT) rather
+	// than fetching every app and slicing in Go, since that cost scales with
+	// the fleet size regardless of how small a page was asked for.
 	var (
-		apps []*db.App
-		err  error
+		apps  []*db.App
+		total int
+		err   error
 	)
-	if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
-		apps, err = s.store.ListApps(0, 0)
+	if u.HasAppScopeRestriction() {
+		// A scoped identity (deploy token with an app allowlist, see
+		// auth.deploy_token_apps) sees only its allowlisted apps, matching the
+		// per-slug gates. The allowlist is Go-side, so this branch keeps the
+		// fetch-then-filter shape rather than pushing pagination into SQL: such
+		// a credential's allowlist is inherently small (it names specific apps
+		// by slug), so the cost here does not scale with the whole fleet.
+		var all []*db.App
+		if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
+			all, err = s.store.ListApps(0, 0)
+		} else {
+			all, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		scoped := all[:0]
+		for _, a := range all {
+			if u.AppInScope(a.Slug) {
+				scoped = append(scoped, a)
+			}
+		}
+		total = len(scoped)
+		start := min(offset, total)
+		end := total
+		if limit > 0 && limit < end-start {
+			end = start + limit
+		}
+		apps = scoped[start:end]
+	} else if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
+		apps, err = s.store.ListApps(limit, offset)
+		if err == nil {
+			total, err = s.store.CountApps()
+		}
 	} else {
-		apps, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
+		apps, err = s.store.ListAppsVisibleToUser(u.ID, limit, offset)
+		if err == nil {
+			total, err = s.store.CountAppsVisibleToUser(u.ID)
+		}
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	// A scoped identity (deploy token with an app allowlist) sees only its
-	// allowlisted apps, matching the per-slug gates.
-	if u.HasAppScopeRestriction() {
-		scoped := apps[:0]
-		for _, a := range apps {
-			if u.AppInScope(a.Slug) {
-				scoped = append(scoped, a)
-			}
-		}
-		apps = scoped
-	}
-	total := len(apps)
-	start := min(offset, total)
-	end := total
-	if limit > 0 && limit < end-start {
-		end = start + limit
-	}
-	apps = apps[start:end]
 	if len(apps) == 0 {
 		writeListPage(w, apps, total, limit, offset, nil)
 		return
