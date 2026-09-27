@@ -117,7 +117,21 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	users, err := s.store.ListUsers()
+	// The page and its total come from SQL (LIMIT/OFFSET/COUNT, with service
+	// accounts excluded in the WHERE clause) rather than fetching every user
+	// and slicing/filtering in Go: filtering after paginating would trim a page
+	// below the requested limit whenever a service account fell inside the
+	// requested window, and the cost of fetching everyone would otherwise scale
+	// with the whole user table regardless of how small a page was asked for.
+	// The dashboard's default call asks for no limit, i.e. everyone, so it still
+	// gets the full (human) list - only the mechanism changed.
+	limit, offset := parsePagination(r)
+	users, err := s.store.ListUsersExcludingServiceAccounts(limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	total, err := s.store.CountUsersExcludingServiceAccounts()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -125,9 +139,6 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 
 	resp := make([]userResponse, 0, len(users))
 	for _, u := range users {
-		if u.PrincipalType == "service_account" {
-			continue
-		}
 		resp = append(resp, toUserResponse(u))
 	}
 	providers := []string{}
@@ -147,9 +158,10 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Auth.ForwardAuth.Enabled {
 		providers = append(providers, "your organization’s sign-in gateway")
 	}
-	// ListUsers already orders by username, so the page is stably sorted.
-	limit, offset := parsePagination(r)
-	writeList(w, resp, limit, offset, map[string]any{
+	// ListUsersExcludingServiceAccounts already orders by username and the page
+	// was already selected in SQL, so this writes the page it was handed rather
+	// than re-slicing it.
+	writeListPage(w, resp, total, limit, offset, map[string]any{
 		"onboarding": map[string]any{
 			"local":     s.cfg.Auth.LocalLoginEnabled(),
 			"providers": providers,

@@ -52,7 +52,7 @@ func TestSetEmailFromIdP(t *testing.T) {
 	if got, _ := store.GetUserByUsername("sso"); got.Email != "samuel@watch.example" {
 		t.Errorf("GetUserByUsername email = %q, want %q", got.Email, "samuel@watch.example")
 	}
-	users, _ := store.ListUsers()
+	users, _ := store.ListUsers(0, 0)
 	for _, u := range users {
 		if u.Username == "sso" && u.Email != "samuel@watch.example" {
 			t.Errorf("ListUsers email = %q, want %q", u.Email, "samuel@watch.example")

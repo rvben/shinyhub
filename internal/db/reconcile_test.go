@@ -234,7 +234,7 @@ func TestDeleteUser_ConcurrentDeletesCannotReachZeroAdmins(t *testing.T) {
 		t.Fatalf("want exactly one delete to succeed and one refused, got ok=%d refused=%d", ok, refused)
 	}
 
-	users, err := store.ListUsers()
+	users, err := store.ListUsers(0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestUserRoleProvenanceAcrossReadPaths(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			listed, err := store.ListUsers()
+			listed, err := store.ListUsers(0, 0)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -181,11 +181,19 @@ func (s *Store) LookupContextUser(id int64) (*auth.ContextUser, error) {
 	return u.ContextUser(), nil
 }
 
-// ListUsers returns all users ordered by username.
-func (s *Store) ListUsers() ([]*User, error) {
+// ListUsers returns a page of users ordered by username. limit <= 0 means no
+// cap (every user), matching the callers that scan the whole table (startup
+// admin checks, tests); the paginated admin API passes a real limit/offset so
+// the page is selected in SQL rather than fetched whole and sliced in Go.
+func (s *Store) ListUsers(limit, offset int) ([]*User, error) {
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
 	rows, err := s.db.Query(
 		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
-		        principal_type, service_account_key, managed_by, COALESCE(manual_role, ''), role_source FROM users ORDER BY username`)
+		        principal_type, service_account_key, managed_by, COALESCE(manual_role, ''), role_source FROM users
+		 ORDER BY username
+		 LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -203,6 +211,59 @@ func (s *Store) ListUsers() ([]*User, error) {
 		users = []*User{}
 	}
 	return users, rows.Err()
+}
+
+// CountUsers returns the total number of users, matching the row set
+// ListUsers draws its page from (no WHERE clause). Used to report an accurate
+// "total" in a paginated response without loading every row just to count them.
+func (s *Store) CountUsers() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+// ListUsersExcludingServiceAccounts mirrors ListUsers (same columns, same
+// ORDER BY username) but excludes principal_type = 'service_account' rows in
+// SQL rather than after the page is fetched. The admin users API has always
+// hidden service accounts from the list; filtering post-pagination would trim
+// a page below the requested limit (or shift it) whenever a service account
+// falls inside the requested window, so the exclusion has to be a WHERE
+// clause, not a Go-side skip.
+func (s *Store) ListUsersExcludingServiceAccounts(limit, offset int) ([]*User, error) {
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	rows, err := s.db.Query(
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
+		        principal_type, service_account_key, managed_by, COALESCE(manual_role, ''), role_source FROM users
+		 WHERE principal_type <> 'service_account'
+		 ORDER BY username
+		 LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []*User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
+			&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy, &u.ManualRole, &u.RoleSource); err != nil {
+			return nil, err
+		}
+		users = append(users, &u)
+	}
+	if users == nil {
+		users = []*User{}
+	}
+	return users, rows.Err()
+}
+
+// CountUsersExcludingServiceAccounts returns the total number of users
+// matching ListUsersExcludingServiceAccounts' row set.
+func (s *Store) CountUsersExcludingServiceAccounts() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE principal_type <> 'service_account'`).Scan(&n)
+	return n, err
 }
 
 // BumpTokenEpoch increments the user's session-revocation counter, killing
