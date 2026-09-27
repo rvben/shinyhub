@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -333,6 +334,22 @@ func (s *replicaServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(api.StatsResult{CPUPercent: cpu, RSSBytes: rss})
 }
 
+// handleWait blocks until the named replica exits, then reports the outcome.
+// A replica can run for hours, so the response headers go out immediately
+// (200, flushed before Wait is even called) rather than only once Wait
+// returns: the client's response-header timeout bounds only "did the worker
+// answer at all", never "how long is the replica going to run". The outcome
+// itself - success or the runtime's error - travels afterwards as a single
+// NDJSON frame once the replica actually exits, reusing the same framing
+// handleStart/handleRunOnce use to stream a terminal result over a long-lived
+// response.
+//
+// The streamed form is sent only to a client that asks for it with
+// "Accept: application/x-ndjson". An older control plane reads any 200 from
+// this endpoint as "the replica has exited", so it keeps the original
+// contract: nothing until the replica exits, then 204 (or 500 on a Wait
+// error). The current client (remoteRuntime.waitOnce) always asks, and still
+// accepts a bare 204 from an older worker that ignores the header.
 func (s *replicaServer) handleWait(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "container")
 	rec, ok := s.lookupContainer(id)
@@ -340,18 +357,46 @@ func (s *replicaServer) handleWait(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown container", http.StatusNotFound)
 		return
 	}
+
+	if !strings.Contains(r.Header.Get("Accept"), waitStreamContentType) {
+		if err := s.runtime.Wait(r.Context(), rec.handle); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.forgetReplica(rec)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	w.Header().Set("Content-Type", waitStreamContentType)
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	logw := &frameLogWriter{enc: json.NewEncoder(w), flusher: flusher}
+	defer logw.close()
+
 	// Wait reports completion through error alone; it does not surface an exit
 	// code. The caller uses this purely to detect that the replica has stopped.
 	if err := s.runtime.Wait(r.Context(), rec.handle); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		_ = logw.writeFrame(api.Frame{Kind: api.FrameError, Error: err.Error()})
 		return
 	}
-	// Replica has exited: drop it from the tables.
+	s.forgetReplica(rec)
+	_ = logw.writeFrame(api.Frame{Kind: api.FrameResult})
+}
+
+// waitStreamContentType is the media type a client sends in Accept to opt in
+// to the streamed wait response, and the Content-Type that response carries.
+const waitStreamContentType = "application/x-ndjson"
+
+// forgetReplica drops an exited replica from both lookup tables.
+func (s *replicaServer) forgetReplica(rec *replicaRecord) {
 	s.mu.Lock()
 	delete(s.byContainer, rec.containerID)
 	delete(s.byToken, rec.token)
 	s.mu.Unlock()
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleRunOnce runs a job to completion, streaming logs as NDJSON FrameLog

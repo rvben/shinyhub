@@ -592,3 +592,161 @@ func TestRemoteRuntime_StartDoesNotRetryWorkerError(t *testing.T) {
 		t.Fatalf("worker hit %d times, want 1 (no retry on a worker HTTP error)", hits)
 	}
 }
+
+// slowExitRuntime wraps fakeRuntime, delaying Wait's return so a test can
+// drive a real replicaServer against a replica that stays alive far longer
+// than the client's response-header timeout.
+type slowExitRuntime struct {
+	*fakeRuntime
+	delay   time.Duration
+	waitErr error
+}
+
+func (r *slowExitRuntime) Wait(ctx context.Context, _ process.RunHandle) error {
+	select {
+	case <-time.After(r.delay):
+		return r.waitErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// countingTransport counts round trips so a test can assert a single request
+// was made rather than the retry/re-dial churn a broken protocol would cause.
+type countingTransport struct {
+	http.RoundTripper
+	mu   sync.Mutex
+	hits int
+}
+
+func (c *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.mu.Lock()
+	c.hits++
+	c.mu.Unlock()
+	return c.RoundTripper.RoundTrip(req)
+}
+
+func (c *countingTransport) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hits
+}
+
+// newWaitTestServer starts a real replicaServer with one tracked replica
+// ("c-1") backed by rt, and returns it alongside the server to close.
+func newWaitTestServer(t *testing.T, rt process.Runtime) *httptest.Server {
+	t.Helper()
+	agentSrv := NewReplicaServer(ReplicaServerConfig{
+		Runtime: rt, DataDir: t.TempDir(), NodeID: "node-a", Advertise: "w:8443",
+	})
+	agentSrv.mu.Lock()
+	rec := &replicaRecord{token: "tok", containerID: "c-1"}
+	agentSrv.byContainer["c-1"] = rec
+	agentSrv.byToken["tok"] = rec
+	agentSrv.mu.Unlock()
+	router := chi.NewRouter()
+	agentSrv.Routes(router)
+	ts := httptest.NewServer(router)
+	t.Cleanup(func() { ts.CloseClientConnections(); ts.Close() })
+	return ts
+}
+
+// TestRemoteRuntime_WaitSurvivesShortResponseHeaderTimeout asserts that a
+// replica which stays alive far longer than the client's response-header
+// timeout is not mistaken for an unreachable worker. The worker flushes
+// headers immediately (200) and reports the outcome afterwards in the body,
+// so the header timeout bounds only "did the worker answer", never "how long
+// does the replica run". Before the fix, the worker wrote its answer (204)
+// only once Wait returned, so every real wait longer than the timeout tripped
+// it and the client re-dialled forever without the replica ever exiting.
+func TestRemoteRuntime_WaitSurvivesShortResponseHeaderTimeout(t *testing.T) {
+	ts := newWaitTestServer(t, &slowExitRuntime{fakeRuntime: &fakeRuntime{}, delay: 150 * time.Millisecond})
+
+	transport := &countingTransport{RoundTripper: &http.Transport{ResponseHeaderTimeout: 20 * time.Millisecond}}
+	rt := newRemoteRuntime(
+		newStubLookup(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "w:8443", Status: "up"}),
+		"remote",
+		&stubDialer{client: &http.Client{Transport: transport}, base: ts.URL},
+	)
+	rt.waitRetry = time.Millisecond
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- rt.Wait(context.Background(), process.RunHandle{ContainerID: encodeRemoteHandle("node-a", "c-1")})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Wait = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return within 2s: a response-header timeout shorter than the replica's lifetime is blocking it, which is the bug under test")
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Fatalf("Wait returned after %v, faster than the replica's own exit delay: it did not actually wait for the exit", elapsed)
+	}
+	if hits := transport.count(); hits != 1 {
+		t.Fatalf("worker wait endpoint hit %d times, want 1 (no re-dial churn against a live replica)", hits)
+	}
+}
+
+// TestRemoteRuntime_WaitReportsWorkerFailureWithoutRetry asserts that once a
+// current-protocol worker has flushed its 200 response headers, an explicit
+// error the worker reports afterward (a FrameError frame) is treated as a
+// final answer - not retried like a transport failure, and not silently
+// reduced to a generic "worker wait returned %d" the way a non-2xx status
+// used to be, since headers are already committed to 200 by the time the
+// worker knows the outcome.
+func TestRemoteRuntime_WaitReportsWorkerFailureWithoutRetry(t *testing.T) {
+	ts := newWaitTestServer(t, &slowExitRuntime{fakeRuntime: &fakeRuntime{}, waitErr: errors.New("boom")})
+
+	transport := &countingTransport{RoundTripper: &http.Transport{}}
+	rt := newRemoteRuntime(
+		newStubLookup(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "w:8443", Status: "up"}),
+		"remote",
+		&stubDialer{client: &http.Client{Transport: transport}, base: ts.URL},
+	)
+	rt.waitRetry = time.Millisecond
+
+	done := make(chan error, 1)
+	go func() {
+		done <- rt.Wait(context.Background(), process.RunHandle{ContainerID: encodeRemoteHandle("node-a", "c-1")})
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("Wait = %v, want an error containing the worker's reported failure (\"boom\")", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return within 2s: a worker-reported failure must be final, not retried")
+	}
+	if hits := transport.count(); hits != 1 {
+		t.Fatalf("worker wait endpoint hit %d times, want 1 (a worker-reported failure must not be retried)", hits)
+	}
+}
+
+// TestReplicaServer_WaitKeepsLegacyAnswerForClientsThatDoNotOptIn asserts
+// that a control plane which does not ask for the streamed wait response
+// still gets the original contract: no response at all until the replica
+// exits, then 204. An older control plane treats any 200 from this endpoint
+// as "the replica has exited", so answering it with an immediate 200 would
+// mark every live replica stopped during a rolling upgrade where the worker
+// is upgraded first.
+func TestReplicaServer_WaitKeepsLegacyAnswerForClientsThatDoNotOptIn(t *testing.T) {
+	ts := newWaitTestServer(t, &slowExitRuntime{fakeRuntime: &fakeRuntime{}, delay: 150 * time.Millisecond})
+
+	start := time.Now()
+	resp, err := http.Get(ts.URL + "/v1/replicas/c-1/wait")
+	if err != nil {
+		t.Fatalf("wait request: %v", err)
+	}
+	elapsed := time.Since(start)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("legacy wait status = %d, want 204 (an older control plane reads 200 as an exit)", resp.StatusCode)
+	}
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("legacy wait answered after %v, before the replica's %v exit delay", elapsed, 150*time.Millisecond)
+	}
+}

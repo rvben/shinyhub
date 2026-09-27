@@ -232,6 +232,14 @@ func toStartRequest(p process.StartParams) api.ReplicaStartRequest {
 	}
 }
 
+// errWorkerReportedFailure wraps a FrameError a worker sent explicitly, so a
+// caller can tell that definitive answer apart from a stream that ended
+// without one (EOF, a decode error, a connection reset). The latter means the
+// request's outcome is unknown - a transport failure, not a result - which
+// matters to remoteRuntime.waitOnce: only an explicit FrameError is a final
+// answer, everything else must be retried.
+var errWorkerReportedFailure = errors.New("worker error")
+
 // streamFrames reads NDJSON frames from rc, writing log data to logWriter,
 // returning the first FrameResult data bytes, or an error from a FrameError frame.
 // On a result, it spawns a goroutine to drain remaining log frames until close.
@@ -259,7 +267,7 @@ func streamFrames(rc io.ReadCloser, logWriter io.Writer) (json.RawMessage, error
 			if msg == "" {
 				msg = "unknown worker error"
 			}
-			return nil, fmt.Errorf("worker error: %s", msg)
+			return nil, fmt.Errorf("%w: %s", errWorkerReportedFailure, msg)
 		case api.FrameResult:
 			// Drain remaining log frames in the background so the worker's
 			// streaming write side does not block.
@@ -414,6 +422,16 @@ func (r *remoteRuntime) Wait(ctx context.Context, h process.RunHandle) error {
 // An answer from the worker (an exit, or an error status) and a registry verdict
 // on the worker are both final. A dial or transport failure is not: it leaves
 // the replica's state unknown, which only the registry can resolve.
+//
+// The worker answers one of two ways, distinguished by status code:
+//   - 204: an older worker, which writes headers only once Wait itself
+//     returns. Getting the response at all is therefore the final answer.
+//   - 200: a current worker, which flushes headers immediately and reports
+//     the eventual outcome as a single frame in the body once the replica
+//     exits. A FrameError frame is a final, explicit answer (the worker's
+//     Wait call itself errored); anything else that ends the body early -
+//     EOF, a decode error, a connection reset - is a transport failure, same
+//     as a dial failure, and must not be read as an exit.
 func (r *remoteRuntime) waitOnce(ctx context.Context, h process.RunHandle) (bool, error) {
 	w, containerID, err := r.workerForHandle(h)
 	if err != nil {
@@ -424,15 +442,27 @@ func (r *remoteRuntime) waitOnce(ctx context.Context, h process.RunHandle) (bool
 		return false, err
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/v1/replicas/%s/wait", base, containerID), nil)
+	req.Header.Set("Accept", waitStreamContentType)
 	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		resp.Body.Close()
 		return true, nil
+	case http.StatusOK:
+		if _, err := streamFrames(resp.Body, nil); err != nil {
+			if errors.Is(err, errWorkerReportedFailure) {
+				return true, err
+			}
+			return false, err
+		}
+		return true, nil
+	default:
+		resp.Body.Close()
+		return true, fmt.Errorf("worker wait returned %d", resp.StatusCode)
 	}
-	return true, fmt.Errorf("worker wait returned %d", resp.StatusCode)
 }
 
 func (r *remoteRuntime) Stats(ctx context.Context, h process.RunHandle) (*float64, uint64, error) {
