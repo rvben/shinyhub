@@ -5,6 +5,7 @@
 import { formatFleetValue, makeFleetStateCard, renderFleetBadges } from '/static/views/fleet-ui.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 import { makeTraceRow, formatPollStatus } from '/static/views/traces-ui.js';
+import { startVisiblePoll } from '/static/views/visible-poll.js';
 import {
   summariseAutoscale,
   formatRejectsByReason,
@@ -1527,7 +1528,10 @@ function renderTraces(panel, app, ctx) {
 
   refreshEl.addEventListener('click', load);
   load();
-  const interval = setInterval(load, 5000);
+  // The 5 s network poll pauses while the tab is hidden and catches up with an
+  // immediate reload on return; the 1 s status tick is local-only text (no
+  // request), so it keeps running regardless of visibility.
+  const stopPoll = startVisiblePoll(document, 5000, load);
   const statusTick = setInterval(paintStatus, 1000);
-  return () => { clearInterval(interval); clearInterval(statusTick); };
+  return () => { stopPoll(); clearInterval(statusTick); };
 }

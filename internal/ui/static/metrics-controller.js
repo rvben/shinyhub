@@ -11,9 +11,15 @@
 //   metrics.setTargets(['demo', 'replica-smoke']); // grid view
 //   metrics.setTargets(['replica-smoke']);         // detail view
 //   metrics.setTargets([]);                        // login view / logged out
+import { startVisiblePoll } from './views/visible-poll.js';
+
 export function createMetricsController({ intervalMs = 10000, onMetrics, onError }) {
+  // Guarded rather than a bare reference: this controller is also exercised in
+  // plain-Node unit tests with no DOM at all, where startVisiblePoll's fail-open
+  // path (doc === null never pauses) keeps those tests' behavior unchanged.
+  const doc = typeof document !== 'undefined' ? document : null;
   let targets = [];
-  let timer = null;
+  let stopPoll = null;
 
   async function tick() {
     const snapshot = targets.slice();
@@ -41,18 +47,18 @@ export function createMetricsController({ intervalMs = 10000, onMetrics, onError
   function setTargets(next) {
     targets = Array.isArray(next) ? next.slice() : [];
     if (targets.length === 0) {
-      if (timer) { clearInterval(timer); timer = null; }
+      if (stopPoll) { stopPoll(); stopPoll = null; }
       return;
     }
-    if (!timer) {
-      timer = setInterval(tick, intervalMs);
+    if (!stopPoll) {
+      stopPoll = startVisiblePoll(doc, intervalMs, tick);
       // Immediate fetch so the UI shows values before the first interval tick.
       tick();
     }
   }
 
   function stop() {
-    if (timer) { clearInterval(timer); timer = null; }
+    if (stopPoll) { stopPoll(); stopPoll = null; }
     targets = [];
   }
 

@@ -9,6 +9,7 @@
 import { buildLaunchpadModel } from './launchpad-model.js';
 import { renderAppAvatar } from './app-avatar.js';
 import { createGroupDisclosure } from './group-disclosure.js';
+import { startVisiblePoll } from './visible-poll.js';
 
 const RECENT_KEY = 'shinyhub.recent-apps';
 const RECENT_MAX = 6;
@@ -27,13 +28,13 @@ export function mountLaunchpad(ctx) {
   const recentKey = `${RECENT_KEY}:${(u && (u.id || u.username)) || 'anon'}`;
 
   let disposed = false;
-  let timer = null;
+  let stopPoll = null;
   let query = '';
   let model = null;
 
   function stop() {
     disposed = true;
-    if (timer) { clearInterval(timer); timer = null; }
+    if (stopPoll) { stopPoll(); stopPoll = null; }
   }
 
   body.replaceChildren(skeleton());
@@ -233,7 +234,7 @@ export function mountLaunchpad(ctx) {
   }
 
   load(true);
-  timer = setInterval(() => { if (!disposed) load(false); }, POLL_MS);
+  stopPoll = startVisiblePoll(document, POLL_MS, () => { if (!disposed) load(false); });
 
   return {
     // "Launchpad" is the internal surface name; the visitor sees Apps, both in

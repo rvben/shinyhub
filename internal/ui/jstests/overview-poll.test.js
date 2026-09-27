@@ -10,8 +10,12 @@ let originalSetInterval;
 let originalClearInterval;
 
 beforeEach(() => {
+  // pretendToBeVisual: jsdom otherwise defaults document.hidden to true, which
+  // would make mountOverview's visibility-aware poll (startVisiblePoll) never
+  // arm the stubbed setInterval below, leaving `poll` null.
   dom = new JSDOM('<!doctype html><body><main id="overview-view" hidden><div id="overview-body"></div></main></body>', {
     url: 'http://localhost/',
+    pretendToBeVisual: true,
   });
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
