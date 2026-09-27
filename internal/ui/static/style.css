@@ -5943,11 +5943,10 @@ fieldset.settings-block { min-width: 0; }
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(100deg, transparent 30%, rgba(125,211,252,0.08) 48%, transparent 66%);
-  transform: translateX(-100%);
-  animation: usage-loading 1.25s ease-in-out infinite;
+  background: rgba(125,211,252,0.1);
+  animation: usage-loading 1.8s ease-in-out infinite;
 }
-@keyframes usage-loading { to { transform: translateX(100%); } }
+@keyframes usage-loading { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 
 @media (max-width: 900px) {
   .usage-grid { grid-template-columns: minmax(0, 1fr); }
