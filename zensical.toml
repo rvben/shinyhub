@@ -41,6 +41,7 @@ nav = [
     { "Publish APIs" = "apis.md" },
     { "Environment and secrets" = "environment.md" },
     { "Persistent data" = "data.md" },
+    { "Result cache" = "result-cache.md" },
     { "Scheduled jobs" = "schedules.md" },
     { "Fleet reconciliation" = "fleet.md" },
     { "Bundle filtering" = "recipes/bundle-filtering.md" },

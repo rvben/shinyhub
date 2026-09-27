@@ -93,7 +93,9 @@ server <- function(input, output, session) {
 ```
 
 For input-dependent work, use `bindCache()` (cache a render/reactive keyed by its
-inputs) and `bindEvent()` to control when it invalidates.
+inputs) and `bindEvent()` to control when it invalidates. On ShinyHub,
+`bindCache()` writes to the app's shared [result cache](result-cache.md), so a
+result one replica computes is a hit on every other replica.
 
 ### Render the layout first
 
@@ -101,6 +103,69 @@ If some heavy output is unavoidable, render the page skeleton immediately and le
 that output fill in afterward (a placeholder, a deferred reactive, or an
 `actionButton`-gated compute), so the user sees structure instantly instead of a
 blank panel.
+
+---
+
+## Data formats and loading
+
+Once the load is in the right scope, how the data is stored decides how long
+the load takes and how much memory each process holds.
+
+- **Store tables as Parquet, not CSV or RDS.** A CSV is parsed text on every
+  read, and an RDS file is read whole. Parquet is columnar and compressed:
+  `arrow::read_parquet()` in R, and `pandas.read_parquet()` or `polars` in
+  Python, typically load it several times faster than the equivalent CSV, and
+  the file is a fraction of the size to push with `shinyhub data push`.
+- **Read only the columns you use.** A columnar file lets the reader skip the
+  rest: `arrow::read_parquet(path, col_select = c(region, month, revenue))`,
+  `pandas.read_parquet(path, columns=[...])`.
+- **Filter before loading, not after.** When the app shows one slice at a
+  time, query the file instead of loading all of it. DuckDB and Arrow datasets
+  push the filter down into the scan, so rows outside the slice are never read:
+
+  ```r
+  con <- DBI::dbConnect(duckdb::duckdb())
+  DBI::dbGetQuery(con, "SELECT month, sum(revenue) AS revenue
+                        FROM 'data/sales.parquet'
+                        WHERE region = ? GROUP BY month", params = list(input$region))
+  ```
+
+  ```python
+  import duckdb
+  duckdb.execute(
+      "SELECT month, sum(revenue) AS revenue FROM 'data/sales.parquet' "
+      "WHERE region = ? GROUP BY month",
+      [region],
+  ).df()
+  ```
+
+- **Load once per process.** Whatever the format, a dataset every session needs
+  is read at startup scope (see [The fix](#the-fix)), not in the server
+  function. Keep the parsed object in memory rather than re-reading the file
+  per session.
+
+Push data files with [`shinyhub data push`](data.md) rather than bundling them,
+so a data refresh does not need a redeploy.
+
+---
+
+## Result cache
+
+A computation that depends on the user's inputs cannot move to startup scope,
+but its result can be cached. An in-process cache (`bindCache()` on Shiny's
+default, `functools.lru_cache`) is filled separately by each replica and
+emptied by every restart. ShinyHub gives each app a
+[result cache](result-cache.md) on disk that all of its processes share:
+
+- R apps get it for `bindCache()` automatically.
+- Python apps open it with `diskcache` at `SHINYHUB_CACHE_DIR`.
+
+Include the data's modification time in the cache key, read through a poll, so
+a data push produces new results instead of serving old ones. A new key only
+helps if the computation also reads the new data: a dataset loaded once at
+startup stays the old one until the process restarts, so push with
+`shinyhub data push --restart`. See
+[Keep cached results fresh](result-cache.md#keep-cached-results-fresh).
 
 ---
 
