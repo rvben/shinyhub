@@ -25,9 +25,10 @@ import (
 // the closed default would otherwise block. It is empty unless an operator
 // configures one, and never widens any other directive.
 //
-// frame-ancestors 'self', base-uri 'self', and form-action 'self' are the
-// defensive additions: they block cross-origin framing (clickjacking) and
-// limit where the page can post or rebase to.
+// frame-ancestors 'none', base-uri 'self', and form-action 'self' are the
+// defensive additions: they block ALL framing, same-origin included (the
+// dashboard never embeds itself, and the accept-invitation page already used
+// 'none' for the same reason), and limit where the page can post or rebase to.
 func buildControlPlaneCSP(scriptSources, styleSources, imgSources []string) string {
 	scriptSrc := append([]string{"'self'"}, scriptSources...)
 	styleSrc := append([]string{"'self'"}, styleSources...)
@@ -39,7 +40,7 @@ func buildControlPlaneCSP(scriptSources, styleSources, imgSources []string) stri
 		"style-src " + strings.Join(styleSrc, " ") + "; " +
 		"script-src " + strings.Join(scriptSrc, " ") + "; " +
 		"connect-src 'self'; " +
-		"frame-ancestors 'self'; " +
+		"frame-ancestors 'none'; " +
 		"base-uri 'self'; " +
 		"form-action 'self'"
 }
@@ -62,24 +63,31 @@ const controlPlanePermissionsPolicy = "camera=(), microphone=(), geolocation=(),
 // responses (browsers ignore HSTS received over plain HTTP).
 const hstsValue = "max-age=63072000; includeSubDomains"
 
-// SecurityHeaders sets defensive response headers on control-plane responses.
-// Proxied app responses under /app/ are intentionally left untouched: they are
-// separate, operator-supplied content that may legitimately be embedded in an
-// iframe and run their own inline scripts/styles, so imposing the control-plane
-// CSP/framing policy on them would break working apps. trustedNets is the
-// configured trusted-proxy CIDR list (cfg.TrustedProxyNets), used to decide the
-// request scheme for HSTS the same way session cookies decide their Secure flag.
-// scriptSources/styleSources are the CSP hash allowances for the active
-// branding inline blocks (ui.CSPInlineSources); both empty when branding is off.
-// imgSources are the origins of remotely-hosted branding images
-// (ui.ImageSources), empty unless an operator points logo/favicon at a URL.
+// SecurityHeaders sets defensive response headers on control-plane responses:
+// the dashboard SPA shell, static assets, and the JSON API - collectively
+// "dashboard pages" for the framing policy below. Proxied app responses under
+// /app/ are intentionally left untouched: they are separate, operator-supplied
+// content that may legitimately be embedded in an iframe and run their own
+// inline scripts/styles, so imposing the control-plane CSP/framing policy on
+// them would break working apps. trustedNets is the configured trusted-proxy
+// CIDR list (cfg.TrustedProxyNets), used to decide the request scheme for HSTS
+// the same way session cookies decide their Secure flag. scriptSources/
+// styleSources are the CSP hash allowances for the active branding inline
+// blocks (ui.CSPInlineSources); both empty when branding is off. imgSources
+// are the origins of remotely-hosted branding images (ui.ImageSources), empty
+// unless an operator points logo/favicon at a URL.
+//
+// X-Frame-Options is DENY, not SAMEORIGIN: nothing in the dashboard frames
+// itself (no <iframe> in this codebase targets a control-plane page), so
+// there is no same-origin framing use to preserve, and DENY also covers
+// legacy browsers that ignore the CSP frame-ancestors directive above.
 func SecurityHeaders(trustedNets []*net.IPNet, scriptSources, styleSources, imgSources []string, next http.Handler) http.Handler {
 	csp := buildControlPlaneCSP(scriptSources, styleSources, imgSources)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/app/") {
 			h := w.Header()
 			h.Set("X-Content-Type-Options", "nosniff")
-			h.Set("X-Frame-Options", "SAMEORIGIN")
+			h.Set("X-Frame-Options", "DENY")
 			h.Set("Referrer-Policy", "same-origin")
 			h.Set("Permissions-Policy", controlPlanePermissionsPolicy)
 			h.Set("Content-Security-Policy", csp)
