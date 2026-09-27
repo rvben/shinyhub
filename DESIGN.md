@@ -11,11 +11,12 @@ colors:
   strong-line: "#2B3A63"
   starlight-text: "#E8EEFF"
   soft-starlight: "#A8B4D4"
-  muted-starlight: "#6B7AA3"
+  muted-starlight: "#7E8CAF"
   signal-cyan: "#38BDF8"
   soft-cyan: "#7DD3FC"
   sparkle-blue: "#BAE6FD"
   electric-blue: "#60A5FA"
+  constellation-horizon: "#050B1C"
   running-green: "#4ADE80"
   warning-amber: "#FBBF24"
   safety-amber-action: "#F59E0B"
@@ -38,10 +39,22 @@ colors:
   daylight-text-soft: "#45526E"
   daylight-text-muted: "#5B6784"
   daylight-signal: "#0369A1"
-  daylight-running: "#15803D"
+  daylight-sparkle: "#0284C7"
+  daylight-electric: "#1D4ED8"
+  daylight-running: "#166534"
   daylight-warning: "#B45309"
   daylight-failure: "#DC2626"
   daylight-standby: "#4F46E5"
+  # The three below are deliberate exceptions, not the daylight-warning/
+  # daylight-failure tokens: those two are tuned for UI surfaces (borders,
+  # badge fills, icons) at the 3:1 non-text threshold. Body-weight text set
+  # directly in these colors needs 4.5:1, which daylight-warning/
+  # daylight-failure fall short of, so text-bearing uses (an inline code
+  # snippet, an error paragraph, a filled button label) take a darker or
+  # inverted pairing instead.
+  daylight-warning-text: "#7C2D12"
+  daylight-failure-text: "#991B1B"
+  daylight-warning-surface: "#92400E"
 typography:
   display:
     fontFamily: "Manrope, -apple-system, system-ui, Segoe UI, sans-serif"
@@ -55,12 +68,30 @@ typography:
     fontWeight: 700
     lineHeight: 1.2
     letterSpacing: "-0.02em"
+  section:
+    fontFamily: "Manrope, -apple-system, system-ui, Segoe UI, sans-serif"
+    fontSize: "1.35rem"
+    fontWeight: 700
+    lineHeight: 1.25
+    letterSpacing: "-0.015em"
+  subhead:
+    fontFamily: "Manrope, -apple-system, system-ui, Segoe UI, sans-serif"
+    fontSize: "1.1875rem"
+    fontWeight: 700
+    lineHeight: 1.3
+    letterSpacing: "-0.015em"
   title:
     fontFamily: "Manrope, -apple-system, system-ui, Segoe UI, sans-serif"
     fontSize: "1.05rem"
     fontWeight: 600
     lineHeight: 1.3
     letterSpacing: "-0.01em"
+  subtitle:
+    fontFamily: "Manrope, -apple-system, system-ui, Segoe UI, sans-serif"
+    fontSize: "0.9375rem"
+    fontWeight: 600
+    lineHeight: 1.4
+    letterSpacing: "-0.005em"
   body:
     fontFamily: "Manrope, -apple-system, system-ui, Segoe UI, sans-serif"
     fontSize: "0.875rem"
@@ -70,6 +101,12 @@ typography:
   label:
     fontFamily: "Manrope, -apple-system, system-ui, Segoe UI, sans-serif"
     fontSize: "0.75rem"
+    fontWeight: 600
+    lineHeight: 1.35
+    letterSpacing: "0.02em"
+  meta:
+    fontFamily: "Manrope, -apple-system, system-ui, Segoe UI, sans-serif"
+    fontSize: "0.6875rem"
     fontWeight: 600
     lineHeight: 1.35
     letterSpacing: "0.02em"
@@ -84,7 +121,7 @@ rounded:
   sm: "4px"
   md: "8px"
   lg: "14px"
-  pill: "99px"
+  pill: "999px"
 spacing:
   xs: "4px"
   sm: "8px"
@@ -193,7 +230,7 @@ The Constellation palette is a restrained deep-space neutral system animated by 
 - **Deep Space** (#030510) and **Constellation Canvas** (#060914): the dark inset and page foundations.
 - **Control Surface**, **Raised Control Surface**, and **Hover Control Surface** (#0E1426, #141B32, #1B2444): the dark tonal elevation ladder.
 - **Quiet Line** and **Strong Line** (#1E2A4A, #2B3A63): default and emphasized boundaries.
-- **Starlight Text**, **Soft Starlight**, and **Muted Starlight** (#E8EEFF, #A8B4D4, #6B7AA3): primary, supporting, and tertiary dark-theme text.
+- **Starlight Text**, **Soft Starlight**, and **Muted Starlight** (#E8EEFF, #A8B4D4, #7E8CAF): primary, supporting, and tertiary dark-theme text. Muted Starlight clears WCAG AA at 5.08:1 on Raised Control Surface and 5.46:1 on Control Surface.
 - **Daylight Canvas**, **Daylight Surface**, and **Daylight Raised Surface** (#F4F7FC, #FFFFFF, #F3F6FB): the light-theme foundation and surface ladder.
 - **Daylight Text**, **Daylight Soft Text**, and **Daylight Muted Text** (#16203A, #45526E, #5B6784): primary, supporting, and tertiary light-theme text.
 
@@ -215,9 +252,13 @@ The Constellation palette is a restrained deep-space neutral system animated by 
 
 - **Display** (200, 2.6rem, 1): route-level toolbar headings only; its light weight and tight tracking create one clear visual landmark.
 - **Headline** (700, 1.7rem, 1.2): primary app or overview headings where a route needs more compact authority.
+- **Section** (700, 1.35rem, 1.25): a page's own top-level heading when it sits beside a detail identity rather than a toolbar (the app detail page name), keeping the same weight as Headline at a step down in size.
+- **Subhead** (700, 1.1875rem, 1.3): sub-section headings inside a detail page or panel, between Section and Title.
 - **Title** (600, 1.05rem, 1.3): settings blocks, modal groups, and substantive card sections.
+- **Subtitle** (600, 0.9375rem, 1.4): secondary headings inside a card or panel, between Title and Body.
 - **Body** (400, 0.875rem, 1.55): instructions and explanatory copy; keep prose near 64ch whenever the layout allows.
 - **Label** (600, 0.75rem, 0.02em): compact metadata, badges, and control labels. Uppercase is reserved for exceptional micro-labels, not ordinary navigation.
+- **Meta** (600, 0.6875rem, 0.02em): the smallest in-UI text (timestamps, counters, dense table sub-labels) where Label itself would crowd the layout.
 - **Mono** (400, 0.82rem, 1.5): slugs, command snippets, token values, logs, and tabular technical data.
 
 **The One Sans Rule.** Manrope carries all product hierarchy. Never introduce a display face merely to make an operational screen feel branded.
@@ -241,11 +282,13 @@ ShinyHub uses a hybrid system: tonal layering and hairline borders establish dep
 - **Lifted Card** ("0 24px 60px -20px rgba(0,0,0,0.6)"): dark-theme authentication and other singular elevated cards.
 - **Daylight Lifted Card** ("0 18px 40px -24px rgba(22,32,58,0.28)"): contrast-adjusted light-theme equivalent.
 - **Modal Focus** ("0 32px 80px rgba(0,0,0,0.7)"): focused dialogs above a blurred overlay.
-- **Primary Action** ("0 4px 14px rgba(56,189,248,0.25)"): low cyan lift for decisive actions, strengthened only on hover.
+- **Control Lift** ("0 4px 14px rgba(0,0,0,0.35)" dark, "0 4px 14px rgba(22,32,58,0.18)" light): neutral elevation for a decisive control (primary buttons); hover brightens and translates instead of strengthening the shadow.
 - **Launchpad Hover** ("0 10px 30px -16px rgba(0,0,0,0.8)"): restrained feedback for a launchable dashboard tile.
 - **Safety Rail Separation** ("0 8px 24px rgba(15,9,2,0.28)"): a restrained downward shadow that separates the persistent amber rail from arbitrary app content without making it feel like a detachable overlay.
+- **Tooltip Lift** ("0 8px 24px -14px rgba(0,0,0,0.75)"): the collapsed-sidebar flyout label, floating clear of the rail it names.
+- **Avatar Bevel** ("0 2px 6px rgba(0,0,0,0.35)"): a small glossy rim under an identity/avatar chip, paired with an inset highlight rather than a border.
 
-**The Tonal-First Rule.** A resting surface earns hierarchy with background and border tokens before it earns a shadow.
+**The Tonal-First Rule.** A resting surface earns hierarchy with background and border tokens before it earns a shadow. A surface that earns the shadow (a Lifted Card or a Modal Focus) commits to that one cue and drops its border: pairing a hairline edge with a diffuse ambient shadow reads as an accident, not a decision.
 
 **The One Floating Plane Rule.** Only the active overlay, popover, or decisive control may read as floating. If every card casts a shadow, the hierarchy has failed.
 
@@ -263,7 +306,7 @@ Components are compact, familiar, and confident. Every interactive primitive mus
 
 ### Chips
 
-- **Style:** 99px pill geometry for metadata badges; semantic status badges include a 5px dot and a readable text label.
+- **Style:** 999px pill geometry for metadata badges; semantic status badges include a 5px dot and a readable text label.
 - **State:** running may breathe gently; working, attention, and standby states hold steady; stopped and unknown states remain neutral.
 
 ### Cards / Containers
