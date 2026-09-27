@@ -102,6 +102,52 @@ func TestGetMetrics_NotRunning(t *testing.T) {
 	}
 }
 
+// TestGetMetrics_StoppedAppOmitsLegacyMirrorFields covers the batch metrics
+// endpoint's dominant real-world case: a fleet mostly made of stopped/never-
+// deployed apps, which pay for the legacy top-level cpu/memory mirror fields
+// on every poll even though no replica exists to mirror. cpu_percent,
+// pss_bytes, uss_bytes and swap_pss_bytes must be entirely absent from the
+// JSON (not present-and-null) once there is no running replica, since no
+// confirmed consumer distinguishes "key absent" from "key present but null"
+// for these fields, only "pid" and "rss_bytes" (already omitempty) were ever
+// dropped this way, and "memory_attribution_partial" (a plain bool, not a
+// pointer) is left untouched.
+func TestGetMetrics_StoppedAppOmitsLegacyMirrorFields(t *testing.T) {
+	srv, store, mgr := newMetricsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	// Inject a stopped entry, same shape as TestGetMetrics_NotRunning.
+	mgr.ForceEntry("myapp", process.ProcessInfo{Slug: "myapp", Status: process.StatusStopped})
+
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	req := authedRequest(t, "GET", "/api/apps/myapp/metrics", nil, token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "stopped" {
+		t.Fatalf("expected status=stopped, got %v", resp["status"])
+	}
+	for _, key := range []string{"pid", "rss_bytes", "cpu_percent", "pss_bytes", "uss_bytes", "swap_pss_bytes"} {
+		if _, present := resp[key]; present {
+			t.Errorf("expected %q absent from a stopped app's metrics, got %v (raw body: %s)", key, resp[key], body)
+		}
+	}
+	if _, present := resp["memory_attribution_partial"]; !present {
+		t.Errorf("expected memory_attribution_partial to remain present (not a pointer field), raw body: %s", body)
+	}
+}
+
 func TestGetMetrics_SamplerError(t *testing.T) {
 	srv, store, mgr := newMetricsTestServer(t)
 	hash, _ := testHashPassword("pass")
