@@ -76,6 +76,7 @@ import { auditDetailEntries } from '/static/views/audit-detail.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
 import { workerCapacityLine, keepWarmInertNote } from '/static/views/worker-isolation.js';
 import { parseRenderSeconds, renderPacingAdvice } from '/static/views/render-pacing.js';
+import { runInFlight } from '/static/views/in-flight.js';
 import { initTheme, getThemePreference, setThemePreference } from '/static/views/theme.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 import { formatStatus } from '/static/views/status-label.js';
@@ -368,6 +369,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const newTokenClose   = document.getElementById('new-token-close');
   const newTokenCancel  = document.getElementById('new-token-cancel');
   const newTokenForm    = document.getElementById('new-token-form');
+  const newTokenSubmit  = document.getElementById('new-token-submit');
   const newTokenName    = document.getElementById('new-token-name');
   const newTokenError   = document.getElementById('new-token-error');
   const tokenReveal     = document.getElementById('token-reveal');
@@ -386,6 +388,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const resetPwClose    = document.getElementById('reset-password-close');
   const resetPwCancel   = document.getElementById('reset-password-cancel');
   const resetPwForm     = document.getElementById('reset-password-form');
+  const resetPwSubmit   = document.getElementById('reset-password-submit');
   const resetPwInput    = document.getElementById('reset-password-input');
   const resetPwUsername = document.getElementById('reset-password-username');
   const resetPwError    = document.getElementById('reset-password-error');
@@ -1172,33 +1175,35 @@ document.addEventListener('DOMContentLoaded', () => {
       body.new_password = profileNewPw.value;
     }
 
-    let resp;
-    try {
-      resp = await api('/api/auth/me', { method: 'PATCH', body: JSON.stringify(body) });
-    } catch {
-      setError(profileError, 'Network error');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Failed to save profile';
-      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
-      setError(profileError, msg);
-      return;
-    }
-    let data = null;
-    try { data = await resp.json(); } catch {}
-    if (data && data.user) {
-      state.user = data.user;
-      renderIdentity(data.user);
-    }
-    profileCurrentPw.value = '';
-    profileNewPw.value = '';
-    profileSuccess.textContent = wantsPwChange ? 'Profile and password updated' : 'Profile updated';
-    setHidden(profileSuccess, false);
-    // If the admin Users table is on screen, refresh it so this user's display
-    // name updates there too.
-    if (usersView && !usersView.hidden) loadUsers();
+    await runInFlight(profileSubmit, async () => {
+      let resp;
+      try {
+        resp = await api('/api/auth/me', { method: 'PATCH', body: JSON.stringify(body) });
+      } catch {
+        setError(profileError, 'Network error');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let msg = 'Failed to save profile';
+        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+        setError(profileError, msg);
+        return;
+      }
+      let data = null;
+      try { data = await resp.json(); } catch {}
+      if (data && data.user) {
+        state.user = data.user;
+        renderIdentity(data.user);
+      }
+      profileCurrentPw.value = '';
+      profileNewPw.value = '';
+      profileSuccess.textContent = wantsPwChange ? 'Profile and password updated' : 'Profile updated';
+      setHidden(profileSuccess, false);
+      // If the admin Users table is on screen, refresh it so this user's display
+      // name updates there too.
+      if (usersView && !usersView.hidden) loadUsers();
+    });
   }
 
   async function handleUnauthorized() {
@@ -2675,24 +2680,26 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(resetPwError, 'Password must be at least 15 characters');
       return;
     }
-    let resp;
-    try {
-      resp = await api(`/api/users/${id}/password`, {
-        method: 'PATCH',
-        body: JSON.stringify({password}),
-      });
-    } catch {
-      setError(resetPwError, 'Network error');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Failed to reset password';
-      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
-      setError(resetPwError, msg);
-      return;
-    }
-    closeResetPasswordModal();
+    await runInFlight(resetPwSubmit, async () => {
+      let resp;
+      try {
+        resp = await api(`/api/users/${id}/password`, {
+          method: 'PATCH',
+          body: JSON.stringify({password}),
+        });
+      } catch {
+        setError(resetPwError, 'Network error');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let msg = 'Failed to reset password';
+        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+        setError(resetPwError, msg);
+        return;
+      }
+      closeResetPasswordModal();
+    });
   }
 
   const newPerson = createNewPersonController({
@@ -2829,36 +2836,38 @@ document.addEventListener('DOMContentLoaded', () => {
     event.preventDefault();
     const name = newTokenName.value.trim();
     if (!name) { setError(newTokenError, 'A token name is required'); return; }
-    const payload = { name };
-    const expiryDays = parseInt(document.getElementById('new-token-expiry').value, 10);
-    if (Number.isFinite(expiryDays)) payload.expires_in_days = expiryDays;
-    let resp;
-    try {
-      resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify(payload) });
-    } catch {
-      setError(newTokenError, 'Network error');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Failed to create token';
-      if (resp.status === 409) {
-        msg = 'You already have a token with that name';
-      } else {
-        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+    await runInFlight(newTokenSubmit, async () => {
+      const payload = { name };
+      const expiryDays = parseInt(document.getElementById('new-token-expiry').value, 10);
+      if (Number.isFinite(expiryDays)) payload.expires_in_days = expiryDays;
+      let resp;
+      try {
+        resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify(payload) });
+      } catch {
+        setError(newTokenError, 'Network error');
+        return;
       }
-      setError(newTokenError, msg);
-      return;
-    }
-    let body = {};
-    try { body = await resp.json(); } catch {}
-    // Reveal the raw token ONCE: swap the form for the reveal panel. The value is
-    // never re-fetchable (only the hash is stored server-side).
-    newTokenForm.hidden = true;
-    tokenRevealValue.textContent = body.token || '';
-    tokenReveal.hidden = false;
-    if (tokenRevealDone) tokenRevealDone.focus();
-    loadTokens(); // refresh the list behind the modal
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let msg = 'Failed to create token';
+        if (resp.status === 409) {
+          msg = 'You already have a token with that name';
+        } else {
+          try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+        }
+        setError(newTokenError, msg);
+        return;
+      }
+      let body = {};
+      try { body = await resp.json(); } catch {}
+      // Reveal the raw token ONCE: swap the form for the reveal panel. The value is
+      // never re-fetchable (only the hash is stored server-side).
+      newTokenForm.hidden = true;
+      tokenRevealValue.textContent = body.token || '';
+      tokenReveal.hidden = false;
+      if (tokenRevealDone) tokenRevealDone.focus();
+      loadTokens(); // refresh the list behind the modal
+    });
   }
 
   async function revokeToken(id, name, btn) {
@@ -3505,12 +3514,12 @@ document.addEventListener('DOMContentLoaded', () => {
     fileInput.onchange = () => {
       const f = fileInput.files && fileInput.files[0];
       fileInput.value = ''; // let the same file be re-picked later
-      if (f) uploadIcon(app, f);
+      if (f) uploadIcon(app, f, uploadBtn);
     };
-    removeBtn.onclick = () => removeIcon(app);
+    removeBtn.onclick = () => removeIcon(app, removeBtn);
   }
 
-  async function uploadIcon(app, file) {
+  async function uploadIcon(app, file, btn) {
     const errEl = document.getElementById('general-error');
     const statusEl = document.getElementById('general-icon-status');
     setError(errEl, '');
@@ -3522,49 +3531,53 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(errEl, 'Icon must be a PNG, JPEG, WebP, or SVG image.');
       return;
     }
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, {
-        method: 'PUT',
-        headers: { 'Content-Type': file.type || 'application/octet-stream' },
-        body: file,
-      });
-    } catch {
-      setError(errEl, 'Upload failed. Check your connection.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Upload failed.';
-      try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
-      setError(errEl, msg);
-      return;
-    }
-    let body = {};
-    try { body = await resp.json(); } catch { /* tolerate */ }
-    applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' });
-    statusEl.textContent = 'Icon updated.';
-    setHidden(statusEl, false);
-    await refreshDetailFleetState(app.slug);
+    await runInFlight(btn, async () => {
+      let resp;
+      try {
+        resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, {
+          method: 'PUT',
+          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          body: file,
+        });
+      } catch {
+        setError(errEl, 'Upload failed. Check your connection.');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let msg = 'Upload failed.';
+        try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
+        setError(errEl, msg);
+        return;
+      }
+      let body = {};
+      try { body = await resp.json(); } catch { /* tolerate */ }
+      applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' });
+      statusEl.textContent = 'Icon updated.';
+      setHidden(statusEl, false);
+      await refreshDetailFleetState(app.slug);
+    });
   }
 
-  async function removeIcon(app) {
+  async function removeIcon(app, btn) {
     const errEl = document.getElementById('general-error');
     const statusEl = document.getElementById('general-icon-status');
     setError(errEl, '');
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, { method: 'DELETE' });
-    } catch {
-      setError(errEl, 'Failed to remove icon. Check your connection.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) { setError(errEl, 'Failed to remove icon.'); return; }
-    applyIconChange(app, { mime: '', emoji: '' });
-    statusEl.textContent = 'Icon removed.';
-    setHidden(statusEl, false);
-    await refreshDetailFleetState(app.slug);
+    await runInFlight(btn, async () => {
+      let resp;
+      try {
+        resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, { method: 'DELETE' });
+      } catch {
+        setError(errEl, 'Failed to remove icon. Check your connection.');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) { setError(errEl, 'Failed to remove icon.'); return; }
+      applyIconChange(app, { mime: '', emoji: '' });
+      statusEl.textContent = 'Icon removed.';
+      setHidden(statusEl, false);
+      await refreshDetailFleetState(app.slug);
+    });
   }
 
   // setEmojiIcon PATCHes a single emoji as the app's icon (server-side this
@@ -4370,7 +4383,7 @@ document.addEventListener('DOMContentLoaded', () => {
         delBtn.type = 'button';
         delBtn.className = 'env-btn-danger';
         delBtn.textContent = 'Delete';
-        delBtn.addEventListener('click', () => deleteEnvVar(slug, v.key));
+        delBtn.addEventListener('click', () => deleteEnvVar(slug, v.key, delBtn));
         actTd.append(editBtn, delBtn);
       }
       tr.append(keyTd, valTd, actTd);
@@ -4415,44 +4428,48 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    const url = `/api/apps/${encodeURIComponent(settingsSlug)}/env/${encodeURIComponent(key)}` + (restart ? '?restart=true' : '');
-    let resp;
-    try {
-      resp = await api(url, { method: 'PUT', body: JSON.stringify({ value, secret }) });
-    } catch {
-      setError(errEl, 'Network error.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let message = 'Save failed.';
-      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-      setError(errEl, message);
-      return;
-    }
+    await runInFlight(document.getElementById('env-form-save'), async () => {
+      const url = `/api/apps/${encodeURIComponent(settingsSlug)}/env/${encodeURIComponent(key)}` + (restart ? '?restart=true' : '');
+      let resp;
+      try {
+        resp = await api(url, { method: 'PUT', body: JSON.stringify({ value, secret }) });
+      } catch {
+        setError(errEl, 'Network error.');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let message = 'Save failed.';
+        try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+        setError(errEl, message);
+        return;
+      }
 
-    closeEnvForm();
-    await refreshEnvList(settingsSlug);
+      closeEnvForm();
+      await refreshEnvList(settingsSlug);
+    });
   }
 
-  async function deleteEnvVar(slug, key) {
+  async function deleteEnvVar(slug, key, btn) {
     if (!window.confirm(`Delete environment variable ${key}?`)) return;
     const errEl = document.getElementById('env-form-error');
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}?restart=true`, { method: 'DELETE' });
-    } catch {
-      setError(errEl, 'Network error.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok && resp.status !== 204) {
-      let message = 'Delete failed.';
-      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-      setError(errEl, message);
-      return;
-    }
-    await refreshEnvList(slug);
+    await runInFlight(btn, async () => {
+      let resp;
+      try {
+        resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}?restart=true`, { method: 'DELETE' });
+      } catch {
+        setError(errEl, 'Network error.');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok && resp.status !== 204) {
+        let message = 'Delete failed.';
+        try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+        setError(errEl, message);
+        return;
+      }
+      await refreshEnvList(slug);
+    });
   }
 
   // --- Data tab ---
@@ -4533,7 +4550,7 @@ document.addEventListener('DOMContentLoaded', () => {
         delBtn.type = 'button';
         delBtn.className = 'env-btn-danger';
         delBtn.textContent = 'Delete';
-        delBtn.addEventListener('click', () => deleteDataFile(slug, f.path));
+        delBtn.addEventListener('click', () => deleteDataFile(slug, f.path, delBtn));
         actTd.appendChild(delBtn);
       }
 
@@ -4542,24 +4559,26 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function deleteDataFile(slug, path) {
+  async function deleteDataFile(slug, path, btn) {
     if (!window.confirm(`Delete ${path}?`)) return;
     const errEl = document.getElementById('data-error');
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(path)}`, { method: 'DELETE' });
-    } catch {
-      setError(errEl, 'Network error.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok && resp.status !== 204) {
-      let message = 'Delete failed.';
-      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-      setError(errEl, message);
-      return;
-    }
-    await refreshDataTab(slug);
+    await runInFlight(btn, async () => {
+      let resp;
+      try {
+        resp = await api(`/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(path)}`, { method: 'DELETE' });
+      } catch {
+        setError(errEl, 'Network error.');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok && resp.status !== 204) {
+        let message = 'Delete failed.';
+        try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+        setError(errEl, message);
+        return;
+      }
+      await refreshDataTab(slug);
+    });
   }
 
   function uploadDataFile(event) {
@@ -4660,7 +4679,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const revokeBtn = document.createElement('button');
       revokeBtn.textContent = 'Revoke';
       revokeBtn.setAttribute('aria-label', `Revoke access for ${m.username}`);
-      revokeBtn.addEventListener('click', async () => {
+      revokeBtn.addEventListener('click', () => runInFlight(revokeBtn, async () => {
         const slug = settingsSlug;
         if (!slug) return;
         try {
@@ -4669,8 +4688,8 @@ document.addEventListener('DOMContentLoaded', () => {
             body: JSON.stringify({ user_id: m.user_id }),
           });
           if (r.ok) li.remove();
-        } catch { /* network error — leave row in place */ }
-      });
+        } catch { /* network error, leave row in place */ }
+      }));
       li.appendChild(nameSpan);
       li.appendChild(roleSelect);
       li.appendChild(revokeBtn);
@@ -4713,14 +4732,14 @@ document.addEventListener('DOMContentLoaded', () => {
       const removeBtn = document.createElement('button');
       removeBtn.textContent = 'Remove';
       removeBtn.setAttribute('aria-label', `Remove group rule ${rule.group}`);
-      removeBtn.addEventListener('click', async () => {
+      removeBtn.addEventListener('click', () => runInFlight(removeBtn, async () => {
         const slug = settingsSlug;
         if (!slug) return;
         try {
           const r = await api(`/api/apps/${slug}/group-access/${encodeURIComponent(rule.group)}`, { method: 'DELETE' });
           if (r.ok) li.remove();
-        } catch { /* network error - leave row in place */ }
-      });
+        } catch { /* network error, leave row in place */ }
+      }));
       li.appendChild(nameSpan);
       li.appendChild(roleSpan);
       li.appendChild(removeBtn);
@@ -5174,7 +5193,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Group access: add a group rule (bound once; uses current settingsSlug at call time).
-  document.getElementById('group-access-add-btn')?.addEventListener('click', async () => {
+  document.getElementById('group-access-add-btn')?.addEventListener('click', (event) => runInFlight(event.currentTarget, async () => {
     const nameEl = document.getElementById('group-access-name');
     const roleEl = document.getElementById('group-access-role');
     const errEl = document.getElementById('group-access-error');
@@ -5192,7 +5211,7 @@ document.addEventListener('DOMContentLoaded', () => {
       nameEl.value = '';
       await refreshGroupAccessList();
     } catch { errEl.textContent = 'Network error'; errEl.hidden = false; }
-  });
+  }));
 
   // Danger zone: typed-confirmation unlocks the Delete button.
   document.getElementById('delete-confirm').addEventListener('input', (e) => {
