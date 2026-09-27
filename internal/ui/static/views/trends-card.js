@@ -217,7 +217,7 @@ function renderTrendRow(document, row, coverage) {
   const gapNote = document.createElement('span');
   gapNote.className = 'trend-gap-note';
   if (missingCount > 0) {
-    gapNote.textContent = `${missingCount} missing`;
+    gapNote.textContent = `${missingCount} ${missingCount === 1 ? 'sample' : 'samples'} missing`;
     gapNote.title = `${missingCount} of ${samples.length} samples unavailable`;
   }
   const xEnd = document.createElement('span');

@@ -108,7 +108,17 @@ test('a missing latest sample is shown as unavailable, never as zero', () => {
   assert.match(svg.getAttribute('aria-label'), /Latest sample unavailable\./);
   assert.match(svg.getAttribute('aria-label'), /1 of 3 samples unavailable\./);
   assert.equal(svg.querySelector('.sparkline-endpoint'), null);
-  assert.equal(row.querySelector('.trend-gap-note').textContent, '1 missing');
+  // The axis note names what is missing: a bare "1 missing" under a CPU line
+  // reads as a missing CPU, not a missing sample.
+  assert.equal(row.querySelector('.trend-gap-note').textContent, '1 sample missing');
+});
+
+test('the gap note pluralizes the missing sample count', () => {
+  const history = fullHistory();
+  history.series.cpu = [null, 20, null];
+  const card = renderTrendsCard(doc(), history);
+  const row = card.querySelector('.trend-row[data-metric="cpu"]');
+  assert.equal(row.querySelector('.trend-gap-note').textContent, '2 samples missing');
 });
 
 test('a gap inside a series visibly breaks the trend line', () => {
