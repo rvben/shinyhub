@@ -1446,6 +1446,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// authored itself. The proxy only injects the fallback into HTML pages that
 	// do not already declare rel=icon.
 	prx.SetAppFavicon(true)
+	// Compress WebSocket messages for backends that do not, which is every R
+	// Shiny app: httpuv never negotiates permessage-deflate.
+	prx.SetWebSocketCompression(cfg.Server.WebSocketCompressionEnabled())
 	// Usage analytics run off the WebSocket lifecycle rather than raw request
 	// counts. The recorder's bounded queue keeps database work off the serving
 	// path and is stopped only after upgraded connections have drained, so normal

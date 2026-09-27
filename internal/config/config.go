@@ -642,6 +642,17 @@ type ServerConfig struct {
 	// compresses sees Content-Encoding and leaves these responses alone, so
 	// leaving it on behind one costs nothing extra.
 	Compression *bool `yaml:"compression"`
+
+	// WebSocketCompression controls whether the proxy compresses WebSocket
+	// messages for applications whose server does not. R Shiny's server
+	// (httpuv) never negotiates permessage-deflate, and a Shiny session sends
+	// every rendered output over that socket; a table of a few thousand rows is
+	// hundreds of kilobytes of JSON that deflate shrinks more than tenfold.
+	// Python Shiny negotiates its own, and is left alone.
+	//
+	// On by default. A pointer so an operator who wants WebSocket bytes relayed
+	// untouched, or who would rather spend no CPU on them, can turn it off.
+	WebSocketCompression *bool `yaml:"websocket_compression"`
 }
 
 // StatusOverlayEnabled reports whether app page loads get the status overlay.
@@ -660,6 +671,12 @@ func (s *ServerConfig) AppNavEnabled() bool {
 // that accept it. Absent means enabled.
 func (s *ServerConfig) CompressionEnabled() bool {
 	return s.Compression == nil || *s.Compression
+}
+
+// WebSocketCompressionEnabled reports whether the proxy compresses WebSocket
+// messages for backends that do not. Absent means enabled.
+func (s *ServerConfig) WebSocketCompressionEnabled() bool {
+	return s.WebSocketCompression == nil || *s.WebSocketCompression
 }
 
 // defaultSessionRecheckInterval bounds how long a revoked user keeps a session
@@ -2812,6 +2829,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_SERVER_COMPRESSION: %w", err)
 		}
 		cfg.Server.Compression = &b
+	}
+	if v := os.Getenv("SHINYHUB_SERVER_WEBSOCKET_COMPRESSION"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SERVER_WEBSOCKET_COMPRESSION: %w", err)
+		}
+		cfg.Server.WebSocketCompression = &b
 	}
 	if v := os.Getenv("SHINYHUB_DB_DSN"); v != "" {
 		cfg.Database.DSN = v
