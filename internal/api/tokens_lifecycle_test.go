@@ -246,7 +246,7 @@ func TestConnectCLI_ExpiredRequestCannotBeApproved(t *testing.T) {
 
 	if _, err := store.DB().Exec(
 		`UPDATE cli_connect_requests SET created_at = ? WHERE token_hash = ?`,
-		time.Now().UTC().Add(-(db.CLIConnectRequestTTL+time.Minute)), hash,
+		time.Now().UTC().Add(-(db.CLIConnectRequestTTL + time.Minute)), hash,
 	); err != nil {
 		t.Fatal(err)
 	}
