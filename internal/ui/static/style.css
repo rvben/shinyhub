@@ -3984,7 +3984,7 @@ fieldset.settings-block { min-width: 0; }
 
 .emptystate-card h1 {
   font-size: var(--fs-headline);
-  font-weight: 300;
+  font-weight: 200;
   letter-spacing: -0.03em;
   color: var(--text);
   margin: 0 0 0.55rem;

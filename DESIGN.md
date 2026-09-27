@@ -250,7 +250,7 @@ The Constellation palette is a restrained deep-space neutral system animated by 
 
 ### Hierarchy
 
-- **Display** (200, 2.6rem, 1): route-level toolbar headings only; its light weight and tight tracking create one clear visual landmark.
+- **Display** (200, 2.6rem, 1): route-level toolbar headings only; its light weight and tight tracking create one clear visual landmark. The empty-state lead borrows the Display weight at Headline size, with its emphasized phrase at 700, so every page heading uses one of two weights: 200 or 700.
 - **Headline** (700, 1.7rem, 1.2): primary app or overview headings where a route needs more compact authority.
 - **Section** (700, 1.35rem, 1.25): a page's own top-level heading when it sits beside a detail identity rather than a toolbar (the app detail page name), keeping the same weight as Headline at a step down in size.
 - **Subhead** (700, 1.1875rem, 1.3): sub-section headings inside a detail page or panel, between Section and Title.

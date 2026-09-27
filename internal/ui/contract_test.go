@@ -90,6 +90,26 @@ func TestArrowLinksKeepTheirSpace(t *testing.T) {
 	}
 }
 
+// TestPageHeadingsUseTheTwoDocumentedWeights pins DESIGN.md's heading
+// weights: every h1 rule in style.css sets 200 (Display) or 700 (Headline,
+// Section), or inherits one. A third weight, such as the empty-state lead's
+// former 300, makes page titles look unrelated from one route to the next.
+func TestPageHeadingsUseTheTwoDocumentedWeights(t *testing.T) {
+	css := readStatic(t, "style.css")
+	rule := regexp.MustCompile(`(?m)^([^{}@/]*\bh1)\s*\{([^{}]*)\}`)
+	weight := regexp.MustCompile(`font-weight:\s*([^;]+);`)
+	checked := 0
+	for _, m := range rule.FindAllStringSubmatch(css, -1) {
+		checked++
+		if w := weight.FindStringSubmatch(m[2]); w != nil && w[1] != "200" && w[1] != "700" {
+			t.Errorf("%s sets font-weight %s; page headings use 200 or 700", strings.TrimSpace(m[1]), w[1])
+		}
+	}
+	if checked < 3 {
+		t.Fatalf("expected to find the toolbar, project-detail and empty-state h1 rules, found %d", checked)
+	}
+}
+
 // TestDeployingBadgeWired pins the API/frontend contract for the card's
 // "Deploying" badge. The server computes `deploying` (pending deployment row
 // + held deploy lock; see api.Server.appDeploying) onto the apps-list payload
