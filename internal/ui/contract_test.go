@@ -4790,3 +4790,36 @@ func TestDeploymentsTableHasALabelledActionsColumn(t *testing.T) {
 	assertNotContains(t, "views/app-detail.js", "<span>Deployed</span>\n        <span></span>",
 		"the deployments header must not reintroduce a blank trailing column")
 }
+
+// TestAppListsRenderAWindowNotTheWholeFleet pins that the operator grid, the
+// sidebar and the viewer launchpad render one page per group through
+// render-window.js. The dashboard fetches the whole fleet once, and rendering
+// every app as a card and a sidebar row built an ~84k-node DOM at 2000 apps.
+// The grid wiring lives in the app.js IIFE, which jsdom cannot import, so its
+// position is pinned here with both bounds: inside renderGridVerbatim, before
+// renderApps.
+func TestAppListsRenderAWindowNotTheWholeFleet(t *testing.T) {
+	js := readStatic(t, "app.js")
+	start := strings.Index(js, "function renderGridVerbatim(")
+	end := strings.Index(js, "function renderApps(")
+	if start < 0 || end < 0 || end < start {
+		t.Fatalf("renderGridVerbatim/renderApps not found in order (start=%d end=%d)", start, end)
+	}
+	body := js[start:end]
+	for _, needle := range []string{
+		"windowCount(group.apps.length, gridWindowShown.get(windowKey), GRID_PAGE)",
+		"for (const app of group.apps.slice(0, count))",
+		"createShowMore(document, {",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("renderGridVerbatim must render a window of each group: missing %q", needle)
+		}
+	}
+	if strings.Contains(body, "for (const app of group.apps) {") {
+		t.Error("renderGridVerbatim must not loop over the whole group")
+	}
+	assertContains(t, "app.js", "if (!highlightSidebarApp(document.getElementById('sidebar-apps'), pathname)) {",
+		"navigating to an app beyond the sidebar window must rebuild the sidebar so the active row exists")
+	assertContains(t, "views/launchpad.js", "windowCount(tiles.length, shownTiles.get(key), GRID_PAGE)",
+		"the viewer launchpad must render one page of tiles per section")
+}

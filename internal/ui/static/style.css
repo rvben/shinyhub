@@ -5925,6 +5925,33 @@ fieldset.settings-block { min-width: 0; }
   text-underline-offset: 0.22em;
 }
 .usage-show-more:hover { text-decoration-color: currentColor; }
+
+/* "Show more" under a windowed app list (render-window.js). In the card grid
+   it spans the full row so it reads as the end of the group, not a card. */
+.app-grid-show-more,
+.sidebar-show-more {
+  border: 0;
+  background: transparent;
+  color: var(--cyan-bright);
+  cursor: pointer;
+  font: 600 var(--fs-label)/1.4 var(--font);
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 0.22em;
+}
+.app-grid-show-more:hover,
+.sidebar-show-more:hover { text-decoration-color: currentColor; }
+.app-grid-show-more {
+  grid-column: 1 / -1;
+  justify-self: start;
+  min-height: 44px;
+  padding: 0.5rem 0;
+}
+.sidebar-show-more {
+  min-height: 36px;
+  padding: 0.4rem 0.7rem;
+}
 .usage-empty {
   display: grid;
   justify-items: start;

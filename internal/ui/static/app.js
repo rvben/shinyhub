@@ -99,6 +99,7 @@ import { userRowCaps, userRolePresentation, RESERVED_USER_HINT } from '/static/v
 import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
 import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
+import { GRID_PAGE, windowCount, createShowMore } from '/static/views/render-window.js';
 import { createGroupDisclosure } from '/static/views/group-disclosure.js';
 import { focusedKey, restoreFocus, siblingKey } from '/static/views/focus-restore.js';
 import { wireKebab } from '/static/views/kebab-menu.js';
@@ -703,6 +704,9 @@ document.addEventListener('DOMContentLoaded', () => {
     applyRestartFeedbackToCard(slug, card, control);
   }
 
+  // Cards revealed per `${grid id}:${project}` beyond the first GRID_PAGE.
+  const gridWindowShown = new Map();
+
   function renderGridVerbatim(groups, gridEl, emptyEl, options = {}) {
     // The grid is rebuilt from scratch on every search keystroke, sort change,
     // project save and app reload. Whichever control the keyboard was on is
@@ -778,7 +782,12 @@ document.addEventListener('DOMContentLoaded', () => {
         cardHost = disclosure.body;
       }
 
-    for (const app of group.apps) {
+    // Render one page of cards per group; "Show more" reveals the next page.
+    // The count is remembered per grid and group, so a poll-driven rebuild
+    // keeps what the operator already expanded.
+    const windowKey = `${gridEl.id}:${group.project}`;
+    const count = windowCount(group.apps.length, gridWindowShown.get(windowKey), GRID_PAGE);
+    for (const app of group.apps.slice(0, count)) {
       const card = document.createElement('div');
       card.className = 'app-card';
       card.dataset.slug = app.slug;
@@ -940,6 +949,19 @@ document.addEventListener('DOMContentLoaded', () => {
       applyRestartFeedbackToCard(app.slug, card, lifecycleControl);
       cardHost.appendChild(card);
     }
+    const more = createShowMore(document, {
+      hidden: group.apps.length - count,
+      page: GRID_PAGE,
+      className: 'app-grid-show-more',
+      focusKey: `group:${group.project}:more`,
+      onMore: () => {
+        gridWindowShown.set(windowKey, count + GRID_PAGE);
+        const firstNew = group.apps[count];
+        renderGridVerbatim(groups, gridEl, emptyEl, options);
+        if (firstNew) restoreFocus(gridEl, `app:${firstNew.slug}:title`);
+      },
+    });
+    if (more) cardHost.appendChild(more);
     }
 
     // A control can legitimately vanish across a rebuild: "Deploy first
@@ -6298,7 +6320,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Sidebar app rows own their active state separately (slug-prefix, nested
     // tabs). Runs on every mount (post-allowed-navigation), and also closes the
     // mobile drawer there so a guard-vetoed navigation keeps it open.
-    highlightSidebarApp(document.getElementById('sidebar-apps'), pathname);
+    // A large fleet renders only the first page of each sidebar group, so an
+    // app opened from the grid or search can sit beyond it; rebuilding
+    // renders the window that contains the active row.
+    if (!highlightSidebarApp(document.getElementById('sidebar-apps'), pathname)) {
+      const routeSlug = pathname.match(/^\/apps\/([^/]+)/);
+      if (routeSlug && state.apps && state.apps.some((a) => a.slug === decodeURIComponent(routeSlug[1]))) {
+        syncSidebar();
+      }
+    }
     if (sidebarDrawer) sidebarDrawer.onNavigated();
     // Quick-view log pane: same reasoning as the drawer above. A vetoed
     // navigation never mounts, so a pane the operator is actively reading
