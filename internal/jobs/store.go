@@ -22,4 +22,5 @@ type Store interface {
 	FinishScheduleRun(p db.FinishScheduleRunParams) error
 	CompleteScheduleRunAndEnqueueActivation(p db.CompleteScheduleRunParams) (*db.ScheduleActivation, error)
 	LogAuditEvent(p db.AuditEventParams)
+	CacheRetention(appID int64) (db.CacheRetention, error)
 }

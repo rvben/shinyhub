@@ -51,7 +51,7 @@ func RequireFreeSlug(cfg *config.Config, slug string) error {
 // delete that cannot finish leaves the slug occupied forever.
 func OnAppDelete(cfg *config.Config, slug string) error {
 	var errs []error
-	for _, p := range slugPaths(cfg, slug) {
+	for _, p := range deletePaths(cfg, slug) {
 		if err := fsx.RemoveAll(p); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
 		}
@@ -98,9 +98,32 @@ func SweepOrphanDirs(cfg *config.Config, known map[string]bool) ([]string, error
 	return orphans, errors.Join(errs...)
 }
 
+// slugPaths lists the durable per-app directories: a leftover one blocks
+// reusing the slug, since a new app must not inherit the old one's bytes.
 func slugPaths(cfg *config.Config, slug string) []string {
 	return []string{
 		filepath.Join(cfg.Storage.AppsDir, slug),
 		filepath.Join(cfg.Storage.AppDataDir, slug),
 	}
+}
+
+// deletePaths is everything an app owns on disk. The result cache is not in
+// slugPaths: it is disposable, so a leftover one is discarded when the slug
+// is reused (DiscardLeftoverCache) rather than blocking the new app.
+func deletePaths(cfg *config.Config, slug string) []string {
+	paths := slugPaths(cfg, slug)
+	if cfg.Storage.AppCacheDir != "" {
+		paths = append(paths, filepath.Join(cfg.Storage.AppCacheDir, slug))
+	}
+	return paths
+}
+
+// DiscardLeftoverCache removes a result cache left behind by an earlier app
+// with the same slug, whose delete could not finish. Callers invoke it when
+// creating an app, before any process of the new app can exist.
+func DiscardLeftoverCache(cfg *config.Config, slug string) error {
+	if cfg.Storage.AppCacheDir == "" {
+		return nil
+	}
+	return RemoveAppCache(cfg.Storage.AppCacheDir, slug)
 }

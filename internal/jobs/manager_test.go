@@ -119,6 +119,7 @@ type fakeStore struct {
 	pending        bool
 	quarantined    bool
 	repairRequired bool
+	cacheRetention *db.CacheRetention
 
 	runs             map[int64]*db.ScheduleRun
 	nextRunID        int64
@@ -186,6 +187,15 @@ func (f *fakeStore) ListRecentDeployments(appID int64, n int) ([]*db.Deployment,
 
 func (f *fakeStore) HasPendingDeployment(appID int64) (bool, error) {
 	return f.pending, nil
+}
+
+func (f *fakeStore) CacheRetention(appID int64) (db.CacheRetention, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cacheRetention != nil {
+		return *f.cacheRetention, nil
+	}
+	return db.CacheRetention{Retained: map[int64]bool{}}, nil
 }
 
 func (f *fakeStore) AppCompatibilityQuarantined(appID int64) (bool, error) {
@@ -1994,5 +2004,94 @@ func TestManager_Run_RecordsScheduleMetric(t *testing.T) {
 	c := rec.calls[0]
 	if c.Slug != "test-app" || c.Schedule != "test-schedule" || c.Status != "succeeded" {
 		t.Fatalf("RecordScheduleRun = %+v, want {test-app test-schedule succeeded}", c)
+	}
+}
+
+// A scheduled run shares its activation's result cache, so a refresh job can
+// warm what the app's sessions will read.
+func TestManager_Run_ProvisionsTheActivationCache(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	cacheRoot := t.TempDir()
+	pm := process.NewManager(t.TempDir(), rt)
+	if err := pm.SetAppCache(cacheRoot, 48); err != nil {
+		t.Fatal(err)
+	}
+	m, err := jobs.NewManager(pm, nil, process.DefaultTier, st, nil, t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+
+	rt.mu.Lock()
+	p := rt.lastParams
+	rt.mu.Unlock()
+	want := filepath.Join(cacheRoot, "test-app", "d1")
+	if p.AppCachePath != want || p.AppCacheMaxMB != 48 {
+		t.Fatalf("RunOnce cache = %q/%d MB, want %q/48 MB", p.AppCachePath, p.AppCacheMaxMB, want)
+	}
+	if st, err := os.Stat(want); err != nil || !st.IsDir() {
+		t.Fatalf("namespace not created before the run: %v", err)
+	}
+}
+
+func TestManager_Run_NoCacheWhenUnwired(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	waitForCalls(t, rt, 1, 2*time.Second)
+
+	rt.mu.Lock()
+	p := rt.lastParams
+	rt.mu.Unlock()
+	if p.AppCachePath != "" || p.AppCacheMaxMB != 0 {
+		t.Fatalf("RunOnce cache = %q/%d MB with no cache configured", p.AppCachePath, p.AppCacheMaxMB)
+	}
+}
+
+// A run can pin a deployment the app has moved past; when it ends, namespaces
+// nothing retains are released and the ones still retained survive.
+func TestManager_Run_PrunesReleasedNamespacesWhenItEnds(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	st.deployments[0].ID = 5
+	st.cacheRetention = &db.CacheRetention{Retained: map[int64]bool{5: true}, MaxID: 5}
+	cacheRoot := t.TempDir()
+	released := filepath.Join(cacheRoot, "test-app", "d3")
+	if err := os.MkdirAll(released, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	pm := process.NewManager(t.TempDir(), rt)
+	if err := pm.SetAppCache(cacheRoot, 48); err != nil {
+		t.Fatal(err)
+	}
+	m, err := jobs.NewManager(pm, nil, process.DefaultTier, st, nil, t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if _, err := m.Run(1, "manual", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(released); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the released namespace survived the end of the run")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := os.Stat(filepath.Join(cacheRoot, "test-app", "d5")); err != nil {
+		t.Fatalf("the run's own retained namespace was pruned: %v", err)
 	}
 }

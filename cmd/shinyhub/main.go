@@ -1395,6 +1395,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	if err := mgr.SetAppDataRoot(absAppDataDir); err != nil {
 		return fmt.Errorf("set app data root: %w", err)
 	}
+	if err := mgr.SetAppCache(cfg.Storage.AppCacheDir, cfg.Storage.CacheMaxMB()); err != nil {
+		return fmt.Errorf("set app cache: %w", err)
+	}
 
 	// Tracing: shared ring buffer surfaced by the /traces handler, plus
 	// platform-default OTEL_* env vars injected into every app process so
@@ -2461,7 +2464,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// Remove ShinyHub-managed containers no live replica re-adopted across
 		// every configured local container tier. Shared Docker daemons are
 		// deduplicated by endpoint.
-		lifecycle.SweepOrphanContainersForTiers(mgr, cfg.Runtime.TierOrder())
+		if err := lifecycle.SweepOrphanContainersForTiers(mgr, cfg.Runtime.TierOrder()); err != nil {
+			// An orphan may still hold an old result cache namespace open, so
+			// pruning waits for the next deploy or retirement instead.
+			slog.Warn("container sweep incomplete; skipping startup result cache prune", "err", err)
+		} else {
+			lifecycle.PruneAppCaches(store, cfg.Storage.AppCacheDir)
+		}
 		// Sweep orphan Fargate tasks across ALL registered tiers.
 		sweepCtx, cancelSweep := context.WithTimeout(octx, 60*time.Second)
 		for _, tierName := range cfg.Runtime.TierOrder() {

@@ -1710,3 +1710,79 @@ func TestManagerGroupedGenerationStopCleanupPreservesReplacement(t *testing.T) {
 		t.Fatalf("old stop cleanup removed replacement: %+v", info)
 	}
 }
+
+func TestManager_Start_ProvisionsTheDeploymentCacheNamespace(t *testing.T) {
+	root := t.TempDir()
+	for name, tc := range map[string]struct {
+		wire         bool
+		deploymentID int64
+		wantPath     string
+	}{
+		"wired with deployment":    {wire: true, deploymentID: 7, wantPath: filepath.Join(root, "demo", "d7")},
+		"wired without deployment": {wire: true},
+		"not wired":                {deploymentID: 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			captured := make(chan process.StartParams, 1)
+			m := process.NewManager(t.TempDir(), newCaptureRuntime(func(p process.StartParams) { captured <- p }))
+			if tc.wire {
+				if err := m.SetAppCache(root, 96); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := m.Start(process.StartParams{
+				Slug: "demo", Dir: t.TempDir(), Command: []string{"true"}, DeploymentID: tc.deploymentID,
+			}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			p := <-captured
+			if p.AppCachePath != tc.wantPath {
+				t.Fatalf("AppCachePath = %q, want %q", p.AppCachePath, tc.wantPath)
+			}
+			if tc.wantPath == "" {
+				if p.AppCacheMaxMB != 0 {
+					t.Errorf("AppCacheMaxMB = %d without a namespace", p.AppCacheMaxMB)
+				}
+				return
+			}
+			if p.AppCacheMaxMB != 96 {
+				t.Errorf("AppCacheMaxMB = %d, want 96", p.AppCacheMaxMB)
+			}
+			if st, err := os.Stat(tc.wantPath); err != nil || !st.IsDir() {
+				t.Fatalf("namespace not created before launch: %v", err)
+			}
+		})
+	}
+}
+
+// The cache only saves recomputation: an app whose namespace cannot be
+// created still starts, without the cache.
+func TestManager_Start_RunsWithoutTheCacheWhenProvisioningFails(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	captured := make(chan process.StartParams, 1)
+	m := process.NewManager(t.TempDir(), newCaptureRuntime(func(p process.StartParams) { captured <- p }))
+	if err := m.SetAppCache(blocker, 96); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Start(process.StartParams{
+		Slug: "demo", Dir: t.TempDir(), Command: []string{"true"}, DeploymentID: 7,
+	}); err != nil {
+		t.Fatalf("Start failed because the cache could not be provisioned: %v", err)
+	}
+	if p := <-captured; p.AppCachePath != "" {
+		t.Fatalf("AppCachePath = %q, want none after a failed provision", p.AppCachePath)
+	}
+}
+
+func TestManager_SetAppCache_DisabledSizeUnwires(t *testing.T) {
+	m := process.NewManager(t.TempDir(), newCaptureRuntime(nil))
+	if err := m.SetAppCache(t.TempDir(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if root, _ := m.AppCache(); root != "" {
+		t.Fatalf("a zero size limit left the cache wired at %q", root)
+	}
+}

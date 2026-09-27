@@ -633,3 +633,81 @@ func (s *Store) ListPinnedScheduleDeploymentDirs(appID int64) ([]string, error) 
 	}
 	return dirs, rows.Err()
 }
+
+// CacheRetention is the set of an app's deployments whose result cache
+// namespace may still be in use.
+type CacheRetention struct {
+	// Retained holds every deployment a process or job could be using: the
+	// active one, every pending one (a deploy or rollback runs its candidate
+	// before promotion), every one a replica row or a draining generation
+	// still references (a replica whose stop was unconfirmed, or one recovery
+	// adopted), and every one a running schedule run or an open deploy
+	// obligation pins.
+	Retained map[int64]bool
+	// MaxID is the highest deployment ID the app had before Retained was
+	// read. Deployment IDs only grow, so a namespace above it belongs to an
+	// activation created after the read began and must be left alone; reading
+	// MaxID first means nothing created in between can escape both checks.
+	MaxID int64
+}
+
+// CacheRetention reads the deployments whose result cache namespaces must be
+// kept for appID.
+func (s *Store) CacheRetention(appID int64) (CacheRetention, error) {
+	out := CacheRetention{Retained: map[int64]bool{}}
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM deployments WHERE app_id = ?`, appID).Scan(&out.MaxID); err != nil {
+		return CacheRetention{}, err
+	}
+	rows, err := s.db.Query(`
+		SELECT active_deployment_id FROM apps WHERE id = ? AND active_deployment_id IS NOT NULL
+		UNION
+		SELECT id FROM deployments WHERE app_id = ? AND status = 'pending'
+		UNION
+		SELECT deployment_id FROM replicas WHERE app_id = ? AND deployment_id IS NOT NULL
+		UNION
+		SELECT deployment_id FROM deployment_replicas WHERE app_id = ?
+		UNION
+		SELECT r.deployment_id
+		FROM schedule_runs r
+		JOIN app_schedules sc ON sc.id = r.schedule_id
+		WHERE sc.app_id = ? AND r.status = 'running' AND r.deployment_id IS NOT NULL
+		UNION
+		SELECT o.deployment_id
+		FROM schedule_deploy_obligations o
+		JOIN app_schedules sc ON sc.id = o.schedule_id
+		WHERE sc.app_id = ? AND o.status IN ('pending', 'dispatching', 'running')`,
+		appID, appID, appID, appID, appID, appID)
+	if err != nil {
+		return CacheRetention{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return CacheRetention{}, err
+		}
+		out.Retained[id] = true
+	}
+	return out, rows.Err()
+}
+
+// AppCacheInUse reports whether any process or job of appID may have its
+// result cache open: a replica row not known to be dead, a deployment
+// generation whose processes have not been confirmed stopped, or a running
+// schedule run. A frozen (hibernated) replica still holds its cache, so only
+// stopped and crashed rows count as released.
+func (s *Store) AppCacheInUse(appID int64) (bool, error) {
+	var inUse bool
+	err := s.db.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM replicas WHERE app_id = ? AND status NOT IN ('stopped', 'crashed'))
+		    OR EXISTS(SELECT 1 FROM deployment_replicas WHERE app_id = ?)
+		    OR EXISTS(
+		        SELECT 1 FROM schedule_runs r
+		        JOIN app_schedules sc ON sc.id = r.schedule_id
+		        WHERE sc.app_id = ? AND r.status = 'running')`,
+		appID, appID, appID).Scan(&inUse)
+	if err != nil {
+		return false, fmt.Errorf("app cache in use: %w", err)
+	}
+	return inUse, nil
+}

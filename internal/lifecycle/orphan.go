@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"log/slog"
+	"os"
 
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
@@ -80,5 +81,42 @@ func LogOrphanAppDirs(store *db.Store, cfg *config.Config) {
 	}
 	if len(orphans) > 0 {
 		slog.Warn("orphan dir sweep: complete", "orphans", len(orphans))
+	}
+}
+
+// PruneAppCaches releases, for every app with a result cache on disk, the
+// namespaces no process or job can still be using. Run it only after startup
+// recovery has adopted what survived and the orphan container sweep has
+// removed everything else: before that, an unadopted process may still be
+// writing a namespace the ledger no longer references. A directory whose slug
+// has no app row is left alone, since on a shared store the row may belong to
+// an app another instance is creating right now.
+func PruneAppCaches(store *db.Store, root string) {
+	if root == "" {
+		return
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Error("result cache: startup prune: read root", "root", root, "err", err)
+		}
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		app, err := store.GetAppBySlug(e.Name())
+		if err != nil {
+			continue
+		}
+		removed, err := storage.PruneAppCache(root, store, app.Slug, app.ID)
+		if err != nil {
+			slog.Warn("result cache: startup prune failed", "slug", app.Slug, "err", err)
+			continue
+		}
+		if len(removed) > 0 {
+			slog.Info("result cache: released namespaces", "slug", app.Slug, "deployment_ids", removed)
+		}
 	}
 }

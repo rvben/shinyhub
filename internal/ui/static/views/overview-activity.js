@@ -19,6 +19,7 @@ const ACTION_LABELS = new Map([
   // under the same label would make a read look like a write in the timeline.
   ['data.pull', 'Data read'],
   ['data.delete', 'Data updated'],
+  ['cache.clear', 'Cache cleared'],
   ['schedule_create', 'Schedule created'],
   ['schedule_update', 'Schedule updated'],
   ['schedule_delete', 'Schedule deleted'],
