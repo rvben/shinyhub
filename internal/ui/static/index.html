@@ -605,7 +605,7 @@
                   <span class="scaling-option-title">Project</span>
                   <span class="scaling-option-help">Optional grouping label; apps that share it are grouped on the dashboard.</span>
                 </span>
-                <input id="general-project" type="text" maxlength="63" list="project-slugs"
+                <input id="general-project" type="text" class="field-code" maxlength="63" list="project-slugs"
                        pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
                        autocomplete="off" spellcheck="false" placeholder="(none)" aria-label="Project slug">
               </label>
@@ -1057,7 +1057,7 @@
                    placeholder="My Sales Dashboard">
 
             <label for="new-app-slug">Slug</label>
-            <input id="new-app-slug" type="text" required
+            <input id="new-app-slug" type="text" class="field-code" required
                    maxlength="63"
                    pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
                    placeholder="lowercase-letters-digits-dashes"
@@ -1391,7 +1391,7 @@
             <label class="service-scope-choice"><input type="radio" name="service-scope" value="apps" checked><span><strong>Selected apps</strong><small>Recommended for a team or pipeline</small></span></label>
             <div id="service-credential-app-list" class="service-credential-app-list">
               <label for="service-credential-apps" class="service-field-label">App slugs</label>
-              <input id="service-credential-apps" type="text" placeholder="sales-dashboard, forecasting" aria-describedby="service-credential-apps-help service-credential-error" aria-errormessage="service-credential-error">
+              <input id="service-credential-apps" type="text" class="field-code" placeholder="sales-dashboard, forecasting" aria-describedby="service-credential-apps-help service-credential-error" aria-errormessage="service-credential-error">
               <small id="service-credential-apps-help" class="field-hint">Comma-separated app slugs. Apps may be created later.</small>
             </div>
             <label class="service-scope-choice"><input type="radio" name="service-scope" value="all"><span><strong>All apps</strong><small>Use only for platform-wide automation</small></span></label>
@@ -1487,18 +1487,18 @@
             <legend>Job</legend>
             <p class="schedule-form-intro">Name the job and enter the command exactly as the runtime should execute it.</p>
             <label for="sched-name">Name</label>
-            <input id="sched-name" name="name" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
+            <input id="sched-name" name="name" class="field-code" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
             <label for="sched-command">Command <span>one token per line</span></label>
-            <textarea id="sched-command" name="command" rows="3" required placeholder="python&#10;fetch.py" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea>
+            <textarea id="sched-command" name="command" class="field-code" rows="3" required placeholder="python&#10;fetch.py" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea>
           </fieldset>
 
           <fieldset>
             <legend>Timing</legend>
             <label for="sched-cron">Cron expression</label>
-            <input id="sched-cron" name="cron_expr" required placeholder="0 6 * * *" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="cron-preview">
+            <input id="sched-cron" name="cron_expr" class="field-code" required placeholder="0 6 * * *" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="cron-preview">
             <div id="cron-preview" class="hint">Five-field cron · evaluated in the server timezone</div>
             <label for="sched-timezone">Timezone <span>optional</span></label>
-            <input id="sched-timezone" name="timezone" placeholder="Europe/Amsterdam (empty inherits the server default)" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+            <input id="sched-timezone" name="timezone" class="field-code" placeholder="Europe/Amsterdam (empty inherits the server default)" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
             <label class="schedule-enabled-row"><input type="checkbox" id="sched-enabled" name="enabled" checked><span>Enabled</span></label>
           </fieldset>
 

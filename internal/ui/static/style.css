@@ -3659,10 +3659,21 @@ fieldset.settings-block { min-width: 0; }
   border: 1px solid var(--line);
   border-radius: 8px;
   color: var(--text);
-  font-family: var(--mono);
-  font-size: var(--fs-mono);
+  font-family: var(--font);
+  font-size: var(--fs-body);
   box-sizing: border-box;
   transition: border-color var(--ease), box-shadow var(--ease);
+}
+
+/* A field whose value is itself code (a slug, a cron expression, a shell
+   command) still needs the monospace face so exact characters read
+   unambiguously; everything else in a form reads as prose. */
+.modal-card form input.field-code,
+.modal-card form textarea.field-code,
+.settings-tab-panel input.field-code,
+.settings-tab-panel textarea.field-code {
+  font-family: var(--mono);
+  font-size: var(--fs-mono);
 }
 
 .modal-card form textarea,

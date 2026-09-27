@@ -4699,3 +4699,31 @@ func TestLongDashCheckerDistinguishesCopyFromPlaceholders(t *testing.T) {
 		}
 	}
 }
+
+// TestFormFieldsAreNotMonospaceByDefault pins that a modal/settings form field
+// renders in the UI font by default (prose placeholders like "(optional)" or
+// "Your current password" read as broken in a code font), and that only a
+// field whose value is itself code (a slug, a cron expression, a shell
+// command) opts back into monospace via the .field-code class.
+func TestFormFieldsAreNotMonospaceByDefault(t *testing.T) {
+	assertContains(t, "style.css", ".settings-tab-panel textarea {\n  width: 100%;\n  margin-top: 0.25rem;\n  padding: 0.55rem 0.75rem;\n  background: var(--surface);\n  border: 1px solid var(--line);\n  border-radius: 8px;\n  color: var(--text);\n  font-family: var(--font);\n  font-size: var(--fs-body);",
+		"form fields in a modal or settings tab must default to the UI font, not the monospace face")
+	assertContains(t, "style.css", ".modal-card form input.field-code,\n.modal-card form textarea.field-code,\n.settings-tab-panel input.field-code,\n.settings-tab-panel textarea.field-code {\n  font-family: var(--mono);",
+		"a .field-code override must exist so genuinely code-shaped values (slugs, cron expressions, commands) can still opt into the monospace face")
+	for _, id := range []string{
+		`id="general-project" type="text" class="field-code"`,
+		`id="new-app-slug" type="text" class="field-code"`,
+		`id="service-credential-apps" type="text" class="field-code"`,
+		`id="sched-name" name="name" class="field-code"`,
+		`id="sched-command" name="command" class="field-code"`,
+		`id="sched-cron" name="cron_expr" class="field-code"`,
+		`id="sched-timezone" name="timezone" class="field-code"`,
+	} {
+		assertContains(t, "index.html", id,
+			"a slug, identifier, cron, command or timezone field must carry field-code to stay monospace")
+	}
+	for _, id := range []string{`id="general-description"`, `id="new-app-name"`, `id="service-credential-name"`, `id="group-access-name"`} {
+		assertNotContains(t, "index.html", id+`" type="text" class="field-code"`,
+			"a free-text display name or description must not be forced back into the monospace face")
+	}
+}
