@@ -884,6 +884,7 @@ func (s *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Use(s.accessLog)
 	r.Use(recoverAPI(slog.Default()))
+	r.Use(compressJSON)
 
 	// Public endpoints
 	r.Post("/api/auth/login", s.handleLogin)
