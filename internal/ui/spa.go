@@ -22,8 +22,10 @@ var projectDetailPath = regexp.MustCompile(`^/projects/` + slugpkg.Pattern + `/?
 // Both IsUIPath (the shell-fallback guard) and the server's mux registrations
 // derive from this list so the two cannot drift - a route present in one but not
 // the other silently 404s on deep links/reloads. To add an SPA page, add it here.
+// /identity is the page that covers people, roles and service accounts; /users
+// is kept as a working alias for old bookmarks and links (see app.js's router).
 func ExactUIRoutes() []string {
-	return []string{"/login", "/home", "/launchpad", "/apps", "/users", "/workers", "/audit-log", "/tokens"}
+	return []string{"/login", "/home", "/launchpad", "/apps", "/identity", "/users", "/workers", "/audit-log", "/tokens"}
 }
 
 // IsUIPath reports whether path is a client-side-rendered SPA route that

@@ -51,39 +51,60 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 
 	limit, offset := parsePagination(r)
 
-	// Fetch visible apps to count and apply token scope before pagination.
-	// Only load replica state and decorate apps on the requested page.
+	// Only load replica state and decorate apps on the requested page: the
+	// page itself, and its total, come from SQL (LIMIT/OFFSET/COUNT) rather
+	// than fetching every app and slicing in Go, since that cost scales with
+	// the fleet size regardless of how small a page was asked for.
 	var (
-		apps []*db.App
-		err  error
+		apps  []*db.App
+		total int
+		err   error
 	)
-	if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
-		apps, err = s.store.ListApps(0, 0)
+	if u.HasAppScopeRestriction() {
+		// A scoped identity (deploy token with an app allowlist, see
+		// auth.deploy_token_apps) sees only its allowlisted apps, matching the
+		// per-slug gates. The allowlist is Go-side, so this branch keeps the
+		// fetch-then-filter shape rather than pushing pagination into SQL: such
+		// a credential's allowlist is inherently small (it names specific apps
+		// by slug), so the cost here does not scale with the whole fleet.
+		var all []*db.App
+		if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
+			all, err = s.store.ListApps(0, 0)
+		} else {
+			all, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		scoped := all[:0]
+		for _, a := range all {
+			if u.AppInScope(a.Slug) {
+				scoped = append(scoped, a)
+			}
+		}
+		total = len(scoped)
+		start := min(offset, total)
+		end := total
+		if limit > 0 && limit < end-start {
+			end = start + limit
+		}
+		apps = scoped[start:end]
+	} else if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
+		apps, err = s.store.ListApps(limit, offset)
+		if err == nil {
+			total, err = s.store.CountApps()
+		}
 	} else {
-		apps, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
+		apps, err = s.store.ListAppsVisibleToUser(u.ID, limit, offset)
+		if err == nil {
+			total, err = s.store.CountAppsVisibleToUser(u.ID)
+		}
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	// A scoped identity (deploy token with an app allowlist) sees only its
-	// allowlisted apps, matching the per-slug gates.
-	if u.HasAppScopeRestriction() {
-		scoped := apps[:0]
-		for _, a := range apps {
-			if u.AppInScope(a.Slug) {
-				scoped = append(scoped, a)
-			}
-		}
-		apps = scoped
-	}
-	total := len(apps)
-	start := min(offset, total)
-	end := total
-	if limit > 0 && limit < end-start {
-		end = start + limit
-	}
-	apps = apps[start:end]
 	if len(apps) == 0 {
 		writeListPage(w, apps, total, limit, offset, nil)
 		return
@@ -5032,13 +5053,19 @@ type metricsResponse struct {
 	AutoscaleStatus  *autoscaleStatus `json:"autoscale_status"`
 	// Legacy fields preserved so existing clients (dashboard card poller)
 	// keep working while they adopt the per-replica view. These mirror the
-	// first running replica.
+	// first running replica, and every one of them is meaningless (and
+	// omitted) when there isn't one: no confirmed reader of this response
+	// keys off their presence rather than their value, so omitempty on the
+	// pointer fields collapses "no running replica to mirror" and "mirrored
+	// a running replica with no rate yet" into the one signal both cases
+	// already share, null, instead of paying for the key on every
+	// mostly-stopped app in a batch metrics poll.
 	PID                      int      `json:"pid,omitempty"`
-	CPUPercent               *float64 `json:"cpu_percent"`
+	CPUPercent               *float64 `json:"cpu_percent,omitempty"`
 	RSSBytes                 int64    `json:"rss_bytes,omitempty"`
-	PSSBytes                 *int64   `json:"pss_bytes"`
-	USSBytes                 *int64   `json:"uss_bytes"`
-	SwapPSSBytes             *int64   `json:"swap_pss_bytes"`
+	PSSBytes                 *int64   `json:"pss_bytes,omitempty"`
+	USSBytes                 *int64   `json:"uss_bytes,omitempty"`
+	SwapPSSBytes             *int64   `json:"swap_pss_bytes,omitempty"`
 	MemoryAttributionPartial bool     `json:"memory_attribution_partial"`
 }
 

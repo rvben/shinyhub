@@ -41,6 +41,15 @@ func canCreateApps(u *auth.ContextUser) bool {
 	return isPrivilegedAppOperator(u) || u.Role == "developer"
 }
 
+// appIsolationWarning decides whether the session should see the same-origin
+// trust warning: true only for an admin, and only when server.app_origin is
+// unset. Restricted to admins because they are the only role that can act on
+// it (change server config), and because the isolation posture is otherwise
+// undisclosed to a signed-in user who cannot change it.
+func (s *Server) appIsolationWarning(u *auth.ContextUser) bool {
+	return u != nil && u.Role == "admin" && s.cfg.Server.AppOrigin == ""
+}
+
 // canUseAppsManagement decides whether the session should receive the Apps
 // management surface. Global management roles always do; a viewer may also
 // manage an individual app through ownership, direct membership, or group

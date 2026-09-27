@@ -5,7 +5,7 @@
 //   router.register('/', mountAppsGrid);
 //   router.register('/apps/:slug', mountAppDetail);
 //   router.register('/apps/:slug/:tab', mountAppDetail);
-//   router.register('/users', mountUsers);
+//   router.register('/identity', mountUsers);
 //   router.register('/audit-log', mountAuditLog);
 //   router.start();
 //

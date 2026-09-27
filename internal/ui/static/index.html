@@ -40,7 +40,6 @@
   <script type="module" src="/static/app.js" defer></script>
 </head>
 <body data-auth="loading">
-  <div class="bg-stars" aria-hidden="true"></div>
 
   <!-- Boot splash: shown only while the session check is in flight (data-auth=
        "loading"), so the login form never paints first. Authenticated requests
@@ -80,7 +79,7 @@
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
           <span class="nav-label">Apps</span>
         </a>
-        <a href="/users" data-nav class="nav-item" id="tab-users" aria-label="Identity" data-tooltip="Identity" hidden>
+        <a href="/identity" data-nav class="nav-item" id="tab-users" aria-label="Identity" data-tooltip="Identity" hidden>
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.6 19.2a6 6 0 0 1 10.8 0"/><path d="M16.4 5.4a3 3 0 0 1 0 5.2"/><path d="M18 13.7a6 6 0 0 1 3 4"/></svg>
           <span class="nav-label">Identity</span>
         </a>
@@ -103,7 +102,7 @@
             <span id="identity-name" class="identity-name">&nbsp;</span>
             <span id="identity-role" class="identity-role"></span>
           </span>
-          <svg class="identity-cog" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 4.4v1.8M12 17.8v1.8M4.4 12h1.8M17.8 12h1.8M6.7 6.7l1.3 1.3M16 16l1.3 1.3M17.3 6.7l-1.3 1.3M8 16l-1.3 1.3"/></svg>
+          <svg class="identity-cog" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.4 12 15.7 18.4 8.3 18.4 4.6 12 8.3 5.6 15.7 5.6Z"/><circle cx="12" cy="12" r="3.3"/></svg>
         </button>
         <!-- About: product and server identity, one click from anywhere. The
              explicit product name keeps ShinyHub visible after external auth. -->
@@ -149,6 +148,14 @@
       </div>
     </section>
     <p id="support-session-recovery-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+
+    <section id="app-isolation-banner" class="conn-banner" hidden role="region" aria-labelledby="app-isolation-banner-heading">
+      <p class="conn-banner-title" id="app-isolation-banner-heading">Apps run same-origin with the dashboard</p>
+      <p class="conn-banner-body">No dedicated application origin (<code>server.app_origin</code>) is configured, so every deployed app is trusted with dashboard users' sessions.
+        <a class="conn-banner-link" href="https://github.com/rvben/shinyhub/blob/main/docs/security.md#recommended-deployment-posture" target="_blank" rel="noopener">Learn more</a>
+      </p>
+      <button type="button" class="btn-primary" id="app-isolation-banner-dismiss">Dismiss</button>
+    </section>
 
     <section id="route-error-view" hidden aria-labelledby="route-error-heading">
       <div class="login-box">
@@ -368,7 +375,7 @@
         </div>
       </div>
       <p id="workers-error" class="error" role="alert" hidden></p>
-      <p id="workers-empty" class="env-empty" hidden>No workers have joined. Workers appear here when worker hosting is enabled and a `shinyhub worker` node joins over mTLS.</p>
+      <p id="workers-empty" class="env-empty" hidden>No workers have joined. Workers appear here when worker hosting is enabled and a <code>shinyhub worker</code> node joins over mTLS.</p>
       <table id="workers-table" hidden>
         <thead>
           <tr>
@@ -598,7 +605,7 @@
                   <span class="scaling-option-title">Project</span>
                   <span class="scaling-option-help">Optional grouping label; apps that share it are grouped on the dashboard.</span>
                 </span>
-                <input id="general-project" type="text" maxlength="63" list="project-slugs"
+                <input id="general-project" type="text" class="field-code" maxlength="63" list="project-slugs"
                        pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
                        autocomplete="off" spellcheck="false" placeholder="(none)" aria-label="Project slug">
               </label>
@@ -893,7 +900,7 @@
               </div>
               <p class="error" id="env-form-error" hidden></p>
               <div class="env-form-actions">
-                <button type="submit" class="env-btn-primary">Save</button>
+                <button type="submit" id="env-form-save" class="env-btn-primary">Save</button>
                 <button type="button" id="env-form-cancel" class="env-btn-secondary">Cancel</button>
               </div>
             </form>
@@ -1050,7 +1057,7 @@
                    placeholder="My Sales Dashboard">
 
             <label for="new-app-slug">Slug</label>
-            <input id="new-app-slug" type="text" required
+            <input id="new-app-slug" type="text" class="field-code" required
                    maxlength="63"
                    pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
                    placeholder="lowercase-letters-digits-dashes"
@@ -1384,7 +1391,7 @@
             <label class="service-scope-choice"><input type="radio" name="service-scope" value="apps" checked><span><strong>Selected apps</strong><small>Recommended for a team or pipeline</small></span></label>
             <div id="service-credential-app-list" class="service-credential-app-list">
               <label for="service-credential-apps" class="service-field-label">App slugs</label>
-              <input id="service-credential-apps" type="text" placeholder="sales-dashboard, forecasting" aria-describedby="service-credential-apps-help service-credential-error" aria-errormessage="service-credential-error">
+              <input id="service-credential-apps" type="text" class="field-code" placeholder="sales-dashboard, forecasting" aria-describedby="service-credential-apps-help service-credential-error" aria-errormessage="service-credential-error">
               <small id="service-credential-apps-help" class="field-hint">Comma-separated app slugs. Apps may be created later.</small>
             </div>
             <label class="service-scope-choice"><input type="radio" name="service-scope" value="all"><span><strong>All apps</strong><small>Use only for platform-wide automation</small></span></label>
@@ -1480,18 +1487,18 @@
             <legend>Job</legend>
             <p class="schedule-form-intro">Name the job and enter the command exactly as the runtime should execute it.</p>
             <label for="sched-name">Name</label>
-            <input id="sched-name" name="name" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
+            <input id="sched-name" name="name" class="field-code" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
             <label for="sched-command">Command <span>one token per line</span></label>
-            <textarea id="sched-command" name="command" rows="3" required placeholder="python&#10;fetch.py" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea>
+            <textarea id="sched-command" name="command" class="field-code" rows="3" required placeholder="python&#10;fetch.py" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea>
           </fieldset>
 
           <fieldset>
             <legend>Timing</legend>
             <label for="sched-cron">Cron expression</label>
-            <input id="sched-cron" name="cron_expr" required placeholder="0 6 * * *" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="cron-preview">
+            <input id="sched-cron" name="cron_expr" class="field-code" required placeholder="0 6 * * *" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="cron-preview">
             <div id="cron-preview" class="hint">Five-field cron · evaluated in the server timezone</div>
             <label for="sched-timezone">Timezone <span>optional</span></label>
-            <input id="sched-timezone" name="timezone" placeholder="Europe/Amsterdam (empty inherits the server default)" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+            <input id="sched-timezone" name="timezone" class="field-code" placeholder="Europe/Amsterdam (empty inherits the server default)" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
             <label class="schedule-enabled-row"><input type="checkbox" id="sched-enabled" name="enabled" checked><span>Enabled</span></label>
           </fieldset>
 

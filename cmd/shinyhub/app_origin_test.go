@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,6 +199,17 @@ func TestSameHostUsesBrowserCanonicalization(t *testing.T) {
 	}
 	if sameHost("127.1", "127.0.0.1") {
 		t.Fatal("ambiguous numeric IPv4 spelling must never match a configured host")
+	}
+}
+
+func TestAppOriginTrustWarningFiresOnlyWhenAppOriginUnset(t *testing.T) {
+	if msg := appOriginTrustWarning(""); msg == "" {
+		t.Fatal("an empty app_origin must produce a same-origin trust warning")
+	} else if !strings.Contains(msg, "app_origin") || !strings.Contains(msg, "same-origin") {
+		t.Errorf("warning must name app_origin and the same-origin risk: %q", msg)
+	}
+	if msg := appOriginTrustWarning("https://apps.example.com"); msg != "" {
+		t.Errorf("a configured app_origin must not warn, got %q", msg)
 	}
 }
 

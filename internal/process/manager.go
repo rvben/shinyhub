@@ -1142,6 +1142,23 @@ func (m *Manager) stopReplicaEntry(slug, poolKey string, index int, expected *en
 		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrStopUnconfirmed)
 	}
 
+	// An unconfirmed exit means the process may still be running (e.g. stuck in
+	// uninterruptible sleep past both grace windows). Only requireConfirmed
+	// callers observe that as an error; plain Stop/StopReplica still return nil
+	// here so existing callers are unaffected. But forgetting the entry either
+	// way would be wrong: the still-running exit-monitor goroutine spawned by
+	// Start (see its handle-identity guard) is the only thing that will ever
+	// learn the real outcome, and it can only act on it while the entry is
+	// still in place. Dropping the entry now would silently orphan the log
+	// file (never closed) and the log run (stuck at StatusRunning forever),
+	// and would let a later Start place a second process into a slot this one
+	// may still occupy. So leave the entry tracked exactly as
+	// StopReplicaConfirmed already does, and let the exit monitor reconcile it
+	// once the process actually exits.
+	if !confirmed {
+		return nil
+	}
+
 	m.mu.Lock()
 	pool = m.entries[poolKey]
 	// Start may replace an exited entry after the monitor marks it stopped but

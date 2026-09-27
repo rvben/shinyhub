@@ -11,7 +11,9 @@ import (
 
 // PruneOldVersions removes extracted version directories and bundle ZIPs beyond
 // the newest `keep` entries for the given app. The activeDir and every
-// pinnedDir are never deleted, even outside the retention window.
+// pinnedDir are never deleted, even outside the retention window, and never
+// count against `keep`: a pinned entry is kept in addition to the newest
+// `keep` unpinned ones, not in place of one of them.
 //
 // Retention is best-effort against a concurrent `shinyhub backup`: pruning
 // takes the backup fence exclusive and non-blocking before touching any file,
@@ -54,8 +56,9 @@ func PruneOldVersions(appsDir, slug string, keep int, activeDir string, pinnedDi
 	return pruneDir(bundlesDir, keep, pinnedBundles, true)
 }
 
-// pruneDir removes old entries in dir, keeping the newest `keep` entries.
-// pinned paths are never removed.
+// pruneDir removes old entries in dir, keeping the newest `keep` unpinned
+// entries. pinned paths are never removed and never count against `keep`, so
+// the number of survivors can exceed `keep` when pinned entries exist.
 // isFiles=true treats entries as files (bundles); false treats them as directories (versions).
 func pruneDir(dir string, keep int, pinned map[string]bool, isFiles bool) error {
 	entries, err := os.ReadDir(dir)
@@ -72,6 +75,7 @@ func pruneDir(dir string, keep int, pinned map[string]bool, isFiles bool) error 
 		path string
 	}
 	var all []candidate
+	unpinnedCount := 0
 	for _, e := range entries {
 		if isFiles && e.IsDir() {
 			continue
@@ -79,10 +83,18 @@ func pruneDir(dir string, keep int, pinned map[string]bool, isFiles bool) error 
 		if !isFiles && !e.IsDir() {
 			continue
 		}
-		all = append(all, candidate{e.Name(), filepath.Join(dir, e.Name())})
+		c := candidate{e.Name(), filepath.Join(dir, e.Name())}
+		all = append(all, c)
+		if !pinned[filepath.Clean(c.path)] {
+			unpinnedCount++
+		}
 	}
 
-	toDelete := len(all) - keep
+	// Pinned entries are skipped during deletion below without reducing the
+	// budget, so basing it on len(all) would let each pinned entry force one
+	// extra unpinned deletion beyond keep. Basing it on unpinnedCount keeps
+	// exactly `keep` unpinned entries regardless of how many are pinned.
+	toDelete := unpinnedCount - keep
 	deleted := 0
 	for i := 0; deleted < toDelete && i < len(all); i++ {
 		c := all[i]

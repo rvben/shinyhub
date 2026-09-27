@@ -67,7 +67,7 @@ test('each metric has readable x and y axes', () => {
 test('charts use a zero-based labelled scale instead of rescaling to the data range', () => {
   const card = renderTrendsCard(doc(), fullHistory());
   const cpu = card.querySelector('.trend-row[data-metric="cpu"]');
-  assert.equal(cpu.querySelector('.trend-y-axis').textContent, '25.0%0.0%');
+  assert.equal(cpu.querySelector('.trend-y-axis').textContent, '25.0%0');
   assert.match(cpu.querySelector('svg').getAttribute('aria-label'), /Scale 0 to 25\.0%/);
 });
 
@@ -75,7 +75,11 @@ test('memory and count axes use readable rounded ceilings', () => {
   const card = renderTrendsCard(doc(), fullHistory());
   const memory = card.querySelector('.trend-row[data-metric="memory"] .trend-y-axis');
   const sessions = card.querySelector('.trend-row[data-metric="sessions"] .trend-y-axis');
-  assert.equal(memory.textContent, '256 MB0 KB');
+  // The floor label is a bare "0", not "0 KB": formatting zero through the
+  // memory row's KB/MB-switching formatter would print a smaller unit than
+  // the ceiling above it ("256 MB"), a mismatch that a unitless axis origin
+  // avoids entirely.
+  assert.equal(memory.textContent, '256 MB0');
   assert.equal(sessions.textContent, '50');
 });
 
@@ -104,7 +108,17 @@ test('a missing latest sample is shown as unavailable, never as zero', () => {
   assert.match(svg.getAttribute('aria-label'), /Latest sample unavailable\./);
   assert.match(svg.getAttribute('aria-label'), /1 of 3 samples unavailable\./);
   assert.equal(svg.querySelector('.sparkline-endpoint'), null);
-  assert.equal(row.querySelector('.trend-gap-note').textContent, '1 missing');
+  // The axis note names what is missing: a bare "1 missing" under a CPU line
+  // reads as a missing CPU, not a missing sample.
+  assert.equal(row.querySelector('.trend-gap-note').textContent, '1 sample missing');
+});
+
+test('the gap note pluralizes the missing sample count', () => {
+  const history = fullHistory();
+  history.series.cpu = [null, 20, null];
+  const card = renderTrendsCard(doc(), history);
+  const row = card.querySelector('.trend-row[data-metric="cpu"]');
+  assert.equal(row.querySelector('.trend-gap-note').textContent, '2 samples missing');
 });
 
 test('a gap inside a series visibly breaks the trend line', () => {

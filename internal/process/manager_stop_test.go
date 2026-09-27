@@ -35,6 +35,39 @@ func TestStopReplica_BoundedWaitOnWedgedProcess(t *testing.T) {
 	}
 }
 
+// TestStopReplica_WedgedProcessIsForgottenDespiteUnconfirmedExit reproduces a
+// bug distinct from the bounded-wait guarantee above: when neither SIGTERM nor
+// SIGKILL produces an observed exit, plain StopReplica (unlike
+// StopReplicaConfirmed) drops the manager's entry anyway and returns nil, even
+// though the process was never confirmed dead. The replica may still be
+// running (e.g. genuinely wedged in D-state), but nothing tracks it any
+// longer: its log file is never closed, its log run is never finished, and a
+// later Start at the same slug+index would place a new process into a slot
+// the old one may still occupy.
+func TestStopReplica_WedgedProcessIsForgottenDespiteUnconfirmedExit(t *testing.T) {
+	rt := &captureRuntime{} // Signal is a no-op, Wait blocks forever: the process never confirms exit.
+	m := NewManager(t.TempDir(), rt)
+	m.SetStopGrace(20 * time.Millisecond)
+
+	if _, err := m.Start(StartParams{
+		Slug:    "wedged-forgotten",
+		Dir:     t.TempDir(),
+		Command: []string{"true"},
+		Port:    19953,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if err := m.StopReplica("wedged-forgotten", 0); err != nil {
+		t.Fatalf("StopReplica: %v", err)
+	}
+
+	if _, ok := m.GetReplica("wedged-forgotten", 0); !ok {
+		t.Error("StopReplica forgot a replica whose exit was never confirmed: " +
+			"the process may still be running, untracked, and its log run is never finished")
+	}
+}
+
 func TestStopReplicaConfirmed_LeavesWedgedReplicaTracked(t *testing.T) {
 	rt := &captureRuntime{}
 	m := NewManager(t.TempDir(), rt)

@@ -55,6 +55,22 @@ export const AUDIT_ACTIONS = [
   'deploy_rejected_quota',
 ];
 
+// auditActionLabel turns a raw action key (snake_case, or dotted like
+// "app.icon.set") into a human-readable phrase for the Action column's badge,
+// so the pill reads as prose instead of an internal event name. It is a
+// generic word-split-and-capitalize transform rather than a per-action lookup
+// table: a hand-maintained map would need a new entry every time
+// AUDIT_ACTIONS gains one (the exact drift TestAuditActionListCoversEvery-
+// ServerAction exists to catch for the filter dropdown), where this covers a
+// new action for free. The raw key is kept alongside it (as the badge's
+// title/tooltip) for anyone who needs the exact value, e.g. to grep server
+// logs.
+export function auditActionLabel(action) {
+  const words = String(action || '').split(/[._]+/).filter(Boolean);
+  if (words.length === 0) return '';
+  return words.map((w, i) => (i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w)).join(' ');
+}
+
 // The date range the API accepts, and the value an <input type="date"> emits.
 // Anything else is dropped rather than sent, so a hand-edited URL cannot make
 // the page ask for a range the server will reject.

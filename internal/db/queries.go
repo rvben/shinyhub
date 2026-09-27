@@ -181,11 +181,19 @@ func (s *Store) LookupContextUser(id int64) (*auth.ContextUser, error) {
 	return u.ContextUser(), nil
 }
 
-// ListUsers returns all users ordered by username.
-func (s *Store) ListUsers() ([]*User, error) {
+// ListUsers returns a page of users ordered by username. limit <= 0 means no
+// cap (every user), matching the callers that scan the whole table (startup
+// admin checks, tests); the paginated admin API passes a real limit/offset so
+// the page is selected in SQL rather than fetched whole and sliced in Go.
+func (s *Store) ListUsers(limit, offset int) ([]*User, error) {
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
 	rows, err := s.db.Query(
 		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
-		        principal_type, service_account_key, managed_by, COALESCE(manual_role, ''), role_source FROM users ORDER BY username`)
+		        principal_type, service_account_key, managed_by, COALESCE(manual_role, ''), role_source FROM users
+		 ORDER BY username
+		 LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -203,6 +211,59 @@ func (s *Store) ListUsers() ([]*User, error) {
 		users = []*User{}
 	}
 	return users, rows.Err()
+}
+
+// CountUsers returns the total number of users, matching the row set
+// ListUsers draws its page from (no WHERE clause). Used to report an accurate
+// "total" in a paginated response without loading every row just to count them.
+func (s *Store) CountUsers() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+// ListUsersExcludingServiceAccounts mirrors ListUsers (same columns, same
+// ORDER BY username) but excludes principal_type = 'service_account' rows in
+// SQL rather than after the page is fetched. The admin users API has always
+// hidden service accounts from the list; filtering post-pagination would trim
+// a page below the requested limit (or shift it) whenever a service account
+// falls inside the requested window, so the exclusion has to be a WHERE
+// clause, not a Go-side skip.
+func (s *Store) ListUsersExcludingServiceAccounts(limit, offset int) ([]*User, error) {
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	rows, err := s.db.Query(
+		`SELECT id, username, password_hash, role, display_name, email, created_at, token_epoch,
+		        principal_type, service_account_key, managed_by, COALESCE(manual_role, ''), role_source FROM users
+		 WHERE principal_type <> 'service_account'
+		 ORDER BY username
+		 LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []*User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName, &u.Email, &u.CreatedAt, &u.TokenEpoch,
+			&u.PrincipalType, &u.ServiceAccountKey, &u.ManagedBy, &u.ManualRole, &u.RoleSource); err != nil {
+			return nil, err
+		}
+		users = append(users, &u)
+	}
+	if users == nil {
+		users = []*User{}
+	}
+	return users, rows.Err()
+}
+
+// CountUsersExcludingServiceAccounts returns the total number of users
+// matching ListUsersExcludingServiceAccounts' row set.
+func (s *Store) CountUsersExcludingServiceAccounts() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE principal_type <> 'service_account'`).Scan(&n)
+	return n, err
 }
 
 // BumpTokenEpoch increments the user's session-revocation counter, killing
@@ -954,16 +1015,27 @@ type App struct {
 	// EffectiveMaxSessionsPerReplica resolves MaxSessionsPerReplica against the
 	// runtime default. SessionsCeiling is configured admission capacity, computed
 	// consistently for multiplex and elastic isolation.
-	EffectiveMaxSessionsPerReplica int  `json:"effective_max_sessions_per_replica"`
-	SessionsCeiling                int  `json:"sessions_ceiling"`
-	DeployCount                    int  `json:"deploy_count"`
-	HibernateTimeoutMinutes        *int `json:"hibernate_timeout_minutes"`
+	EffectiveMaxSessionsPerReplica int `json:"effective_max_sessions_per_replica"`
+	SessionsCeiling                int `json:"sessions_ceiling"`
+	DeployCount                    int `json:"deploy_count"`
+	// omitempty: no confirmed consumer (internal/ui/static, internal/cli) reads
+	// this as a map key and distinguishes an absent key from an explicit null
+	// (app.js's hibernateModeFromValue treats null and undefined the same).
+	// Omitting a per-app nil saves the key on every app that has not
+	// overridden the default, which is most of a large fleet.
+	HibernateTimeoutMinutes *int `json:"hibernate_timeout_minutes,omitempty"`
 	// EffectiveHibernateTimeoutMinutes is the exact timeout in minutes after
 	// resolving a nil per-app value against lifecycle.hibernate_timeout. A
 	// float preserves duration settings such as 90s as 1.5 minutes.
 	EffectiveHibernateTimeoutMinutes float64 `json:"effective_hibernate_timeout_minutes"`
-	MemoryLimitMB                    *int    `json:"memory_limit_mb"`
-	CPUQuotaPercent                  *int    `json:"cpu_quota_percent"`
+	// MemoryLimitMB and CPUQuotaPercent stay plain null rather than omitempty:
+	// both are declared OutputFields for "apps list"/"apps show" in
+	// internal/cli/schema_annotations.go, and
+	// TestSchema_OutputFieldsAgainstLiveServer asserts every declared field is
+	// present in a real response, null or not. Dropping the key there would be
+	// a schema break for an agent-facing CLI consumer, not just a byte saving.
+	MemoryLimitMB   *int `json:"memory_limit_mb"`
+	CPUQuotaPercent *int `json:"cpu_quota_percent"`
 	// Effective resource fields are presentation-only: the API resolves nullable
 	// app overrides against the placement-aware runtime defaults. Zero means the
 	// platform applies no ShinyHub per-replica limit.
@@ -1043,10 +1115,15 @@ type App struct {
 	// IdentityHeaders is the per-app identity-forwarding override reconciled
 	// from the bundle manifest. nil = inherit the global config flag.
 	// Effective = global && (IdentityHeaders == nil || *IdentityHeaders).
-	IdentityHeaders *bool `json:"identity_headers"`
+	// omitempty: no confirmed consumer reads this key from the app list/detail
+	// response at all (it is only ever written via PATCH), so there is nothing
+	// for the key's mere presence to signal.
+	IdentityHeaders *bool `json:"identity_headers,omitempty"`
 	// UsageIdentityMode is a stricter per-app usage policy. nil inherits the hub
-	// ceiling; "disabled" stops collection for this app.
-	UsageIdentityMode *string `json:"usage_identity_mode"`
+	// ceiling; "disabled" stops collection for this app. omitempty: the one
+	// reader (app.js) does `app.usage_identity_mode || 'inherit'`, which
+	// already treats undefined the same as null.
+	UsageIdentityMode *string `json:"usage_identity_mode,omitempty"`
 	// MinWarmReplicas is the pre-warming floor: replicas kept running
 	// through idle hibernation. 0 = hibernate fully (the default).
 	MinWarmReplicas int `json:"min_warm_replicas"`
@@ -1060,6 +1137,8 @@ type App struct {
 	LastReplicaError string `json:"last_replica_error"`
 	// LastReplicaExit is historical and timestamped. Unlike LastReplicaError it
 	// remains after recovery without making a healthy app look actively failed.
+	// Not omitempty: it is a declared OutputField for "apps list"/"apps show"
+	// (see the MemoryLimitMB comment above for why that rules omitempty out).
 	LastReplicaExit *ReplicaExit `json:"last_replica_exit"`
 	// CrashedAt is the Unix-epoch seconds of the transition into "crashed", or
 	// 0 when the app is not crashed. Cleared alongside LastError on (re)start.
@@ -1345,6 +1424,15 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 		apps = append(apps, app)
 	}
 	return apps, rows.Err()
+}
+
+// CountApps returns the total number of apps, matching the row set ListApps
+// draws its page from (no WHERE clause). Used to report an accurate "total" in
+// a paginated response without loading every row into memory just to count them.
+func (s *Store) CountApps() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM apps`).Scan(&n)
+	return n, err
 }
 
 // ListWakingApps returns all apps whose status is 'waking'. Used by the
@@ -1649,6 +1737,18 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 		apps = append(apps, app)
 	}
 	return apps, rows.Err()
+}
+
+// CountAppsVisibleToUser returns the number of apps visible to userID, matching
+// the row set ListAppsVisibleToUser draws its page from (same WHERE clause).
+// Used to report an accurate "total" in a paginated response without loading
+// every visible row into memory just to count them.
+func (s *Store) CountAppsVisibleToUser(userID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM apps
+		WHERE `+appVisibleToUserWhere, userID, userID, userID).Scan(&n)
+	return n, err
 }
 
 // ListPublicApps returns only apps with access = 'public'. It is the ONLY

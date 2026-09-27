@@ -2717,6 +2717,14 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	proxyEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets, navOpts...)(prx)
 	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, navOpts...)(proxyEmptyState)
 	var parsedAppOrigin *url.URL
+	// With no dedicated app_origin, every deployed app runs same-origin with the
+	// dashboard, so ShinyHub trusts every deployed app with dashboard users'
+	// sessions. Warn loudly so that is a deliberate choice, not an oversight -
+	// the same posture the empty-app_origin admin banner and docs/security.md's
+	// deployment posture section both flag.
+	if msg := appOriginTrustWarning(cfg.Server.AppOrigin); msg != "" {
+		slog.Warn(msg)
+	}
 	if cfg.Server.AppOrigin != "" {
 		parsedAppOrigin, _ = url.Parse(cfg.Server.AppOrigin) // validated by config.Load
 		redirect := appOriginRedirectHandler(store, parsedAppOrigin)
@@ -3141,6 +3149,7 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 	platformFavicon := ui.FaviconHandler(cfg.Branding)
 	mux.Handle("GET "+favicon.RootURL, platformFavicon)
 	mux.Handle("GET "+favicon.PlatformURL, platformFavicon)
+	devStatic := os.Getenv("SHINYHUB_DEV_STATIC") != ""
 	serveShell := func(w http.ResponseWriter, r *http.Request) {
 		// An authenticated request (the request that fetches the shell is itself
 		// behind forward auth or a session) gets the shell pre-marked "in" so the
@@ -3148,7 +3157,23 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 		// the login form. This needs a per-request render, so it leaves the cached
 		// ServeFileFS fast path only when there is a reason to.
 		authed := auth.UserFromContext(r.Context()) != nil
+		// gzip is negotiated only for a plain GET/HEAD with no Range: a Range
+		// request keeps behaving exactly as before (identity bytes), since
+		// neither shell path serves partial content against a compressed
+		// representation.
+		gzipEligible := (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			r.Header.Get("Range") == "" && ui.AcceptsGzip(r)
 		if !brandingActive && !authed {
+			if gzipEligible {
+				if raw, err := fs.ReadFile(ui.Static(), "index.html"); err == nil {
+					key := ""
+					if !devStatic {
+						key = "shell:stock"
+					}
+					ui.ServeHTML(w, r, raw, key)
+					return
+				}
+			}
 			http.ServeFileFS(w, r, ui.Static(), "index.html")
 			return
 		}
@@ -3168,16 +3193,30 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 		if authed {
 			out = ui.StampAuthenticated(out)
 		}
+		if gzipEligible {
+			key := ""
+			if !devStatic {
+				key = fmt.Sprintf("shell:branded=%t:authed=%t", brandingActive, authed)
+			}
+			ui.ServeHTML(w, r, out, key)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(out)
 	}
+
+	// notFound serves the dashboard's own styled not-found page (instead of
+	// Go's plain-text default) for any path in the dashboard's route space
+	// that matches nothing. /api/ and /app/ are registered as their own,
+	// more specific mux patterns elsewhere and never reach it.
+	notFound := ui.NotFoundHandler()
 
 	// SPA routes: /apps/<slug>..., /users, /audit-log, /login. The handler
 	// 404s anything outside the IsUIPath allowlist, so legitimate unknowns
 	// still return 404 rather than rendering the SPA shell.
 	spa := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !ui.IsUIPath(r.URL.Path) {
-			http.NotFound(w, r)
+			notFound.ServeHTTP(w, r)
 			return
 		}
 		serveShell(w, r)
@@ -3225,7 +3264,7 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
-			http.NotFound(w, r)
+			notFound.ServeHTTP(w, r)
 			return
 		}
 		if landingFile != "" {

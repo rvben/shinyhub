@@ -2086,7 +2086,15 @@ func (p *Proxy) AbortGeneration(slug string, deploymentID int64) bool {
 
 // RevertGeneration restores a previous draining generation after a control-
 // plane commit step fails. It is target-gated so a stale rollback cannot undo
-// a newer activation.
+// a newer activation. The failed generation is demoted into draining exactly
+// as ActivateGeneration demotes an outgoing generation on an ordinary
+// handoff, not moved to pool.candidates: candidates are unpublished and
+// invisible to BeginHibernate, TryRetireGeneration and cookie-pinned
+// reconnects, so putting a generation that was just live and may still hold
+// open requests or grouped client bindings there would drop them silently.
+// Natural idle retirement (TryRetireGeneration / RetireGeneration) cleans it
+// up once its sessions actually end, the same as any other draining
+// generation.
 func (p *Proxy) RevertGeneration(slug string, failedDeploymentID, previousDeploymentID int64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -2098,45 +2106,43 @@ func (p *Proxy) RevertGeneration(slug string, failedDeploymentID, previousDeploy
 	if !ok {
 		return fmt.Errorf("revert %s: previous deployment %d is not draining", slug, previousDeploymentID)
 	}
+	if pool.drainingGenerations == nil {
+		pool.drainingGenerations = make(map[int64][]*replicaBackend)
+	}
 	if pool.mode == config.IsolationGrouped {
-		// Move only the failed generation out of routing. Its unique slots
-		// remain reserved, and old client bindings continue to name old slots.
-		failed := make([]*replicaBackend, pool.nextSlotID)
-		for slot, worker := range pool.workers {
+		// Mark the failed generation's workers draining in place. Their slots
+		// stay in pool.workers and their client bindings are left alone, so an
+		// open request keeps its route and a reconnect still finds its own
+		// worker; removeGroupedGenerationLocked (via RetireGeneration /
+		// TryRetireGeneration) is what eventually clears both once idle.
+		failed := make([]*replicaBackend, 0, len(pool.workers))
+		for _, worker := range pool.workers {
 			if worker.deploymentID == failedDeploymentID {
-				failed[slot] = worker
-				delete(pool.workers, slot)
-				for cid, cs := range p.clients[slug] {
-					if cs.slotID == slot {
-						if cs.releaseTimer != nil {
-							cs.releaseTimer.Stop()
-						}
-						delete(p.clients[slug], cid)
-					}
-				}
+				worker.draining.Store(true)
+				failed = append(failed, worker)
 			}
 		}
 		for _, worker := range previous {
 			worker.draining.Store(false)
 		}
 		delete(pool.drainingGenerations, previousDeploymentID)
-		if pool.candidates == nil {
-			pool.candidates = make(map[int64][]*replicaBackend)
-		}
-		pool.candidates[failedDeploymentID] = failed
+		pool.drainingGenerations[failedDeploymentID] = failed
 		pool.activeDeploymentID = previousDeploymentID
 		return nil
 	}
+	for _, rep := range pool.replicas {
+		if rep != nil {
+			rep.draining.Store(true)
+		}
+	}
+	failed := pool.replicas
 	for _, rep := range previous {
 		if rep != nil {
 			rep.draining.Store(false)
 		}
 	}
 	delete(pool.drainingGenerations, previousDeploymentID)
-	if pool.candidates == nil {
-		pool.candidates = make(map[int64][]*replicaBackend)
-	}
-	pool.candidates[failedDeploymentID] = pool.replicas
+	pool.drainingGenerations[failedDeploymentID] = failed
 	pool.replicas = previous
 	pool.size = len(previous)
 	pool.activeDeploymentID = previousDeploymentID

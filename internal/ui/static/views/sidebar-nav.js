@@ -12,6 +12,7 @@
 // deploy" - never mislabelled.
 import { groupApps, UNGROUPED } from './project-groups.js';
 import { createGroupDisclosure } from './group-disclosure.js';
+import { SIDEBAR_PAGE, windowCount, createShowMore } from './render-window.js';
 
 // The server computes canManageApps because a global viewer can still manage an
 // individual app through ownership, direct membership, or an IdP group grant.
@@ -105,11 +106,19 @@ export function sidebarAppModel(app, currentPath, badgeFor) {
   };
 }
 
+// Rows revealed per group via "Show more", kept per container so a periodic
+// rebuild (app reload, status change) keeps what the user already expanded.
+const shownByContainer = new WeakMap();
+
 // Render the grouped app list into container. The renderer OWNS the initial
 // active state (marked from currentPath) so a deep-link load highlights the
-// right row even when the list arrives after the route has mounted.
+// right row even when the list arrives after the route has mounted. Each group
+// renders SIDEBAR_PAGE rows at a time (plus whatever row is active), so a
+// large fleet does not become thousands of links.
 export function renderSidebarApps(container, apps, currentPath, badgeFor, doc) {
   const d = doc || (typeof document !== 'undefined' ? document : null);
+  if (!shownByContainer.has(container)) shownByContainer.set(container, new Map());
+  const shown = shownByContainer.get(container);
   container.textContent = '';
   const list = (apps || []).filter(Boolean);
   if (!list.length) {
@@ -155,7 +164,11 @@ export function renderSidebarApps(container, apps, currentPath, badgeFor, doc) {
       container.appendChild(disclosure.root);
       groupBody = disclosure.body;
     }
-    for (const app of group.apps) {
+    const groupKey = String(group.project || UNGROUPED);
+    const activeIndex = group.apps.findIndex((app) =>
+      isSidebarAppActive(`/apps/${app.slug}`, currentPath || ''));
+    const count = windowCount(group.apps.length, shown.get(groupKey), SIDEBAR_PAGE, activeIndex);
+    for (const app of group.apps.slice(0, count)) {
       const m = sidebarAppModel(app, currentPath, badgeFor);
       const a = d.createElement('a');
       a.setAttribute('href', m.href);
@@ -183,14 +196,32 @@ export function renderSidebarApps(container, apps, currentPath, badgeFor, doc) {
       a.appendChild(name);
       groupBody.appendChild(a);
     }
+    const more = createShowMore(d, {
+      hidden: group.apps.length - count,
+      page: SIDEBAR_PAGE,
+      className: 'sidebar-show-more',
+      compact: true,
+      onMore: () => {
+        shown.set(groupKey, count + SIDEBAR_PAGE);
+        const firstNew = group.apps[count];
+        renderSidebarApps(container, apps, currentPath, badgeFor, d);
+        const link = firstNew && container.querySelector(`a.sidebar-app[data-app-slug="${firstNew.slug}"]`);
+        if (link) link.focus();
+      },
+    });
+    if (more) groupBody.appendChild(more);
   }
 }
 
 // Update the active row in place on navigation (no rebuild). Scoped to the
 // container's own app links so it never touches section nav, cards, or folder
 // tabs.
+//
+// Returns whether any row matched, so a caller can rebuild the list when the
+// route points at an app beyond the rendered window.
 export function highlightSidebarApp(container, currentPath) {
-  if (!container) return;
+  if (!container) return false;
+  let found = false;
   for (const a of container.querySelectorAll('a[data-nav]')) {
     const href = a.getAttribute('href') || '';
     const active = isSidebarAppActive(href, currentPath || '');
@@ -198,6 +229,7 @@ export function highlightSidebarApp(container, currentPath) {
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
     if (active) {
+      found = true;
       const group = a.closest('.group-disclosure');
       if (group) {
         const body = group.querySelector('.group-disclosure-body');
@@ -208,4 +240,5 @@ export function highlightSidebarApp(container, currentPath) {
       }
     }
   }
+  return found;
 }

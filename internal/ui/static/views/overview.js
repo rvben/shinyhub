@@ -10,6 +10,7 @@ import { formatStatus } from './status-label.js';
 import { appCardBadge } from './app-card-badge.js';
 import { activityTime, buildActivityBrief } from './overview-activity.js';
 import { focusedKey, restoreFocus } from './focus-restore.js';
+import { startVisiblePoll } from './visible-poll.js';
 
 const POLL_MS = 10000;
 const REQUEST_TIMEOUT_MS = 8000;
@@ -21,7 +22,7 @@ export function mountOverview(ctx) {
   ctx.updateActiveNav(location.pathname);
 
   let disposed = false;
-  let timer = null;
+  let stopPoll = null;
   let loadInFlight = false;
   let lastMetricsSnapshot = null;
   let lastLiveSignature = '';
@@ -49,7 +50,7 @@ export function mountOverview(ctx) {
   // navigated-away Overview never keeps fetching in the background.
   function stop() {
     disposed = true;
-    if (timer) { clearInterval(timer); timer = null; }
+    if (stopPoll) { stopPoll(); stopPoll = null; }
     for (const controller of pendingControllers) controller.abort();
     pendingControllers.clear();
   }
@@ -359,7 +360,7 @@ export function mountOverview(ctx) {
   }
 
   load(true);
-  timer = setInterval(() => { if (!disposed) load(false); }, POLL_MS);
+  stopPoll = startVisiblePoll(document, POLL_MS, () => { if (!disposed) load(false); });
 
   return {
     title: 'Overview',

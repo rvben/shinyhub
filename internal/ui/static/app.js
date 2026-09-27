@@ -14,6 +14,7 @@ import { isSingleEmoji, renderEmojiPicker } from '/static/views/emoji-picker.js'
 import { mountUsers } from '/static/views/users.js';
 import { tokenListModels, renderTokenList } from '/static/views/tokens.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
+import { createGETCoalescer } from '/static/views/request-coalesce.js';
 import {
   activationAttentionTooltip,
   degradedTooltip,
@@ -22,6 +23,7 @@ import {
 import { createFocusTrap } from '/static/views/focus-trap.js';
 import {
   AUDIT_ACTIONS,
+  auditActionLabel,
   auditEmptyMessage,
   auditListPath,
   auditLoadError,
@@ -76,6 +78,7 @@ import { auditDetailEntries } from '/static/views/audit-detail.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
 import { workerCapacityLine, keepWarmInertNote } from '/static/views/worker-isolation.js';
 import { parseRenderSeconds, renderPacingAdvice } from '/static/views/render-pacing.js';
+import { runInFlight } from '/static/views/in-flight.js';
 import { initTheme, getThemePreference, setThemePreference } from '/static/views/theme.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
 import { formatStatus } from '/static/views/status-label.js';
@@ -91,10 +94,12 @@ import {
   saveSupportDraft,
 } from '/static/views/support-session-modal.js';
 import { createSupportSessionRecovery } from '/static/views/support-session-recovery.js';
+import { shouldShowAppIsolationBanner, wireAppIsolationBanner } from '/static/views/app-isolation-banner.js';
 import { userRowCaps, userRolePresentation, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
 import { groupAppsForGrid } from '/static/views/app-grid-groups.js';
+import { GRID_PAGE, windowCount, createShowMore } from '/static/views/render-window.js';
 import { createGroupDisclosure } from '/static/views/group-disclosure.js';
 import { focusedKey, restoreFocus, siblingKey } from '/static/views/focus-restore.js';
 import { wireKebab } from '/static/views/kebab-menu.js';
@@ -368,6 +373,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const newTokenClose   = document.getElementById('new-token-close');
   const newTokenCancel  = document.getElementById('new-token-cancel');
   const newTokenForm    = document.getElementById('new-token-form');
+  const newTokenSubmit  = document.getElementById('new-token-submit');
   const newTokenName    = document.getElementById('new-token-name');
   const newTokenError   = document.getElementById('new-token-error');
   const tokenReveal     = document.getElementById('token-reveal');
@@ -386,6 +392,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const resetPwClose    = document.getElementById('reset-password-close');
   const resetPwCancel   = document.getElementById('reset-password-cancel');
   const resetPwForm     = document.getElementById('reset-password-form');
+  const resetPwSubmit   = document.getElementById('reset-password-submit');
   const resetPwInput    = document.getElementById('reset-password-input');
   const resetPwUsername = document.getElementById('reset-password-username');
   const resetPwError    = document.getElementById('reset-password-error');
@@ -402,6 +409,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const supportAppsRetry = document.getElementById('support-session-apps-retry');
   const supportReauth   = document.getElementById('support-session-reauth');
   const supportRecoveryRoot = document.getElementById('support-session-recovery');
+  const appIsolationBanner = document.getElementById('app-isolation-banner');
+  const appIsolationBannerDismiss = document.getElementById('app-isolation-banner-dismiss');
+  wireAppIsolationBanner({ root: appIsolationBanner, dismissButton: appIsolationBannerDismiss });
   const supportModalLock = supportModal ? createSupportSessionModalLock({
     modal: supportModal, closeButton: supportClose, cancelButton: supportCancel,
   }) : null;
@@ -497,6 +507,16 @@ document.addEventListener('DOMContentLoaded', () => {
     return '';
   }
 
+  // A cold dashboard load fires more than one independent caller that wants
+  // the same read-only list at once (showLoggedIn's sidebar index and the
+  // view the router is about to mount both fetch /api/apps on their own,
+  // unaware of each other), so GET requests share one underlying fetch per
+  // URL while one is in flight instead of one each. Only ever applies to a
+  // plain GET with no body and no caller-supplied headers - anything else
+  // (every mutating request, and a GET a caller has customized) always gets
+  // its own fetch, unchanged.
+  const coalescedGET = createGETCoalescer((path, init) => fetch(path, init));
+
   async function api(path, options = {}) {
     const init = {
       credentials: 'same-origin',
@@ -513,7 +533,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const token = readCookie('csrf_token');
       if (token) init.headers['X-CSRF-Token'] = token;
     }
-    const resp = await fetch(path, init);
+    const coalesceable = !mutating && !init.body && Object.keys(init.headers).length === 0;
+    const resp = coalesceable ? await coalescedGET(path, init) : await fetch(path, init);
     // A successful mutating request means anything a view is holding may no
     // longer be true. Announce it here, at the one place every request passes
     // through, rather than asking each call site to remember: a view that caches
@@ -683,6 +704,9 @@ document.addEventListener('DOMContentLoaded', () => {
     applyRestartFeedbackToCard(slug, card, control);
   }
 
+  // Cards revealed per `${grid id}:${project}` beyond the first GRID_PAGE.
+  const gridWindowShown = new Map();
+
   function renderGridVerbatim(groups, gridEl, emptyEl, options = {}) {
     // The grid is rebuilt from scratch on every search keystroke, sort change,
     // project save and app reload. Whichever control the keyboard was on is
@@ -758,7 +782,12 @@ document.addEventListener('DOMContentLoaded', () => {
         cardHost = disclosure.body;
       }
 
-    for (const app of group.apps) {
+    // Render one page of cards per group; "Show more" reveals the next page.
+    // The count is remembered per grid and group, so a poll-driven rebuild
+    // keeps what the operator already expanded.
+    const windowKey = `${gridEl.id}:${group.project}`;
+    const count = windowCount(group.apps.length, gridWindowShown.get(windowKey), GRID_PAGE);
+    for (const app of group.apps.slice(0, count)) {
       const card = document.createElement('div');
       card.className = 'app-card';
       card.dataset.slug = app.slug;
@@ -849,12 +878,12 @@ document.addEventListener('DOMContentLoaded', () => {
         openLink.target = '_blank';
         openLink.rel = 'noopener noreferrer';
         openLink.dataset.focusKey = `app:${app.slug}:open`;
-        openLink.append(document.createTextNode('Open dashboard'));
+        openLink.append(document.createTextNode('Open app'));
         const externalArrow = document.createElement('span');
         externalArrow.setAttribute('aria-hidden', 'true');
         externalArrow.textContent = '↗';
         openLink.appendChild(externalArrow);
-        openLink.setAttribute('aria-label', `Open ${app.name} dashboard in a new tab`);
+        openLink.setAttribute('aria-label', `Open ${app.name} in a new tab`);
         actions.appendChild(openLink);
       }
 
@@ -865,7 +894,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cardActions.deployIsPrimary) {
           const deployButton = document.createElement('button');
           deployButton.type = 'button';
-          deployButton.textContent = 'Deploy first release';
+          deployButton.textContent = 'Deploy';
           deployButton.className = 'btn-primary';
           deployButton.dataset.focusKey = `app:${app.slug}:deploy`;
           deployButton.setAttribute('aria-label', `Deploy first bundle to ${app.name}`);
@@ -920,6 +949,19 @@ document.addEventListener('DOMContentLoaded', () => {
       applyRestartFeedbackToCard(app.slug, card, lifecycleControl);
       cardHost.appendChild(card);
     }
+    const more = createShowMore(document, {
+      hidden: group.apps.length - count,
+      page: GRID_PAGE,
+      className: 'app-grid-show-more',
+      focusKey: `group:${group.project}:more`,
+      onMore: () => {
+        gridWindowShown.set(windowKey, count + GRID_PAGE);
+        const firstNew = group.apps[count];
+        renderGridVerbatim(groups, gridEl, emptyEl, options);
+        if (firstNew) restoreFocus(gridEl, `app:${firstNew.slug}:title`);
+      },
+    });
+    if (more) cardHost.appendChild(more);
     }
 
     // A control can legitimately vanish across a rebuild: "Deploy first
@@ -981,6 +1023,8 @@ document.addEventListener('DOMContentLoaded', () => {
     auditRequests.invalidate();
     state.canCreateApps = false;
     state.canManageApps = false;
+    state.appIsolationWarning = false;
+    if (appIsolationBanner) appIsolationBanner.hidden = true;
     supportRecovery.clear();
     appRestartFeedback.clear();
     appCardLifecycleControls.clear();
@@ -1016,6 +1060,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.canCreateApps = !!payload.can_create_apps;
     state.canManageApps = !!payload.can_manage_apps;
     state.canReadAudit = !!payload.can_read_audit;
+    state.appIsolationWarning = !!payload.app_isolation_warning;
     renderIdentity(payload.user);
     setHidden(logoutButton, false);
     setHidden(loginView, true);
@@ -1023,6 +1068,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Audit access is a server-computed capability (admin, or operator when
     // auth.operator_audit_access is on), not a client-side role check.
     tabAudit.hidden = !state.canReadAudit;
+    if (appIsolationBanner) {
+      appIsolationBanner.hidden = !shouldShowAppIsolationBanner(state.appIsolationWarning);
+    }
     tabUsers.hidden = payload.user.role !== 'admin';
     tabWorkers.hidden = payload.user.role !== 'admin';
     // The home (/) is role-adaptive: fleet operators (admin/operator) get the
@@ -1172,33 +1220,35 @@ document.addEventListener('DOMContentLoaded', () => {
       body.new_password = profileNewPw.value;
     }
 
-    let resp;
-    try {
-      resp = await api('/api/auth/me', { method: 'PATCH', body: JSON.stringify(body) });
-    } catch {
-      setError(profileError, 'Network error');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Failed to save profile';
-      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
-      setError(profileError, msg);
-      return;
-    }
-    let data = null;
-    try { data = await resp.json(); } catch {}
-    if (data && data.user) {
-      state.user = data.user;
-      renderIdentity(data.user);
-    }
-    profileCurrentPw.value = '';
-    profileNewPw.value = '';
-    profileSuccess.textContent = wantsPwChange ? 'Profile and password updated' : 'Profile updated';
-    setHidden(profileSuccess, false);
-    // If the admin Users table is on screen, refresh it so this user's display
-    // name updates there too.
-    if (usersView && !usersView.hidden) loadUsers();
+    await runInFlight(profileSubmit, async () => {
+      let resp;
+      try {
+        resp = await api('/api/auth/me', { method: 'PATCH', body: JSON.stringify(body) });
+      } catch {
+        setError(profileError, 'Network error');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let msg = 'Failed to save profile';
+        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+        setError(profileError, msg);
+        return;
+      }
+      let data = null;
+      try { data = await resp.json(); } catch {}
+      if (data && data.user) {
+        state.user = data.user;
+        renderIdentity(data.user);
+      }
+      profileCurrentPw.value = '';
+      profileNewPw.value = '';
+      profileSuccess.textContent = wantsPwChange ? 'Profile and password updated' : 'Profile updated';
+      setHidden(profileSuccess, false);
+      // If the admin Users table is on screen, refresh it so this user's display
+      // name updates there too.
+      if (usersView && !usersView.hidden) loadUsers();
+    });
   }
 
   async function handleUnauthorized() {
@@ -1714,7 +1764,8 @@ document.addEventListener('DOMContentLoaded', () => {
         ? ` badge-action-${e.action.replace(/\./g, '-')}`
         : '';
       badge.className = `badge badge-action-default${actionClass}`;
-      badge.textContent = e.action;
+      badge.textContent = auditActionLabel(e.action);
+      badge.title = e.action;
       actionCell.appendChild(badge);
       tr.appendChild(actionCell);
 
@@ -2640,7 +2691,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const resp = await api('/api/auth/logout', { method: 'POST' });
       if (!resp.ok && resp.status !== 401) throw new Error(`HTTP ${resp.status}`);
       suppressUnloadGuard = true;
-      window.location.assign('/users');
+      window.location.assign('/identity');
     } catch {
       consumeSupportDraft(sessionStorage);
       supportReauth.disabled = false;
@@ -2675,24 +2726,26 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(resetPwError, 'Password must be at least 15 characters');
       return;
     }
-    let resp;
-    try {
-      resp = await api(`/api/users/${id}/password`, {
-        method: 'PATCH',
-        body: JSON.stringify({password}),
-      });
-    } catch {
-      setError(resetPwError, 'Network error');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Failed to reset password';
-      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
-      setError(resetPwError, msg);
-      return;
-    }
-    closeResetPasswordModal();
+    await runInFlight(resetPwSubmit, async () => {
+      let resp;
+      try {
+        resp = await api(`/api/users/${id}/password`, {
+          method: 'PATCH',
+          body: JSON.stringify({password}),
+        });
+      } catch {
+        setError(resetPwError, 'Network error');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let msg = 'Failed to reset password';
+        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+        setError(resetPwError, msg);
+        return;
+      }
+      closeResetPasswordModal();
+    });
   }
 
   const newPerson = createNewPersonController({
@@ -2829,36 +2882,38 @@ document.addEventListener('DOMContentLoaded', () => {
     event.preventDefault();
     const name = newTokenName.value.trim();
     if (!name) { setError(newTokenError, 'A token name is required'); return; }
-    const payload = { name };
-    const expiryDays = parseInt(document.getElementById('new-token-expiry').value, 10);
-    if (Number.isFinite(expiryDays)) payload.expires_in_days = expiryDays;
-    let resp;
-    try {
-      resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify(payload) });
-    } catch {
-      setError(newTokenError, 'Network error');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Failed to create token';
-      if (resp.status === 409) {
-        msg = 'You already have a token with that name';
-      } else {
-        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+    await runInFlight(newTokenSubmit, async () => {
+      const payload = { name };
+      const expiryDays = parseInt(document.getElementById('new-token-expiry').value, 10);
+      if (Number.isFinite(expiryDays)) payload.expires_in_days = expiryDays;
+      let resp;
+      try {
+        resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify(payload) });
+      } catch {
+        setError(newTokenError, 'Network error');
+        return;
       }
-      setError(newTokenError, msg);
-      return;
-    }
-    let body = {};
-    try { body = await resp.json(); } catch {}
-    // Reveal the raw token ONCE: swap the form for the reveal panel. The value is
-    // never re-fetchable (only the hash is stored server-side).
-    newTokenForm.hidden = true;
-    tokenRevealValue.textContent = body.token || '';
-    tokenReveal.hidden = false;
-    if (tokenRevealDone) tokenRevealDone.focus();
-    loadTokens(); // refresh the list behind the modal
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let msg = 'Failed to create token';
+        if (resp.status === 409) {
+          msg = 'You already have a token with that name';
+        } else {
+          try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
+        }
+        setError(newTokenError, msg);
+        return;
+      }
+      let body = {};
+      try { body = await resp.json(); } catch {}
+      // Reveal the raw token ONCE: swap the form for the reveal panel. The value is
+      // never re-fetchable (only the hash is stored server-side).
+      newTokenForm.hidden = true;
+      tokenRevealValue.textContent = body.token || '';
+      tokenReveal.hidden = false;
+      if (tokenRevealDone) tokenRevealDone.focus();
+      loadTokens(); // refresh the list behind the modal
+    });
   }
 
   async function revokeToken(id, name, btn) {
@@ -3505,12 +3560,12 @@ document.addEventListener('DOMContentLoaded', () => {
     fileInput.onchange = () => {
       const f = fileInput.files && fileInput.files[0];
       fileInput.value = ''; // let the same file be re-picked later
-      if (f) uploadIcon(app, f);
+      if (f) uploadIcon(app, f, uploadBtn);
     };
-    removeBtn.onclick = () => removeIcon(app);
+    removeBtn.onclick = () => removeIcon(app, removeBtn);
   }
 
-  async function uploadIcon(app, file) {
+  async function uploadIcon(app, file, btn) {
     const errEl = document.getElementById('general-error');
     const statusEl = document.getElementById('general-icon-status');
     setError(errEl, '');
@@ -3522,49 +3577,53 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(errEl, 'Icon must be a PNG, JPEG, WebP, or SVG image.');
       return;
     }
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, {
-        method: 'PUT',
-        headers: { 'Content-Type': file.type || 'application/octet-stream' },
-        body: file,
-      });
-    } catch {
-      setError(errEl, 'Upload failed. Check your connection.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Upload failed.';
-      try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
-      setError(errEl, msg);
-      return;
-    }
-    let body = {};
-    try { body = await resp.json(); } catch { /* tolerate */ }
-    applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' });
-    statusEl.textContent = 'Icon updated.';
-    setHidden(statusEl, false);
-    await refreshDetailFleetState(app.slug);
+    await runInFlight(btn, async () => {
+      let resp;
+      try {
+        resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, {
+          method: 'PUT',
+          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          body: file,
+        });
+      } catch {
+        setError(errEl, 'Upload failed. Check your connection.');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let msg = 'Upload failed.';
+        try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
+        setError(errEl, msg);
+        return;
+      }
+      let body = {};
+      try { body = await resp.json(); } catch { /* tolerate */ }
+      applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' });
+      statusEl.textContent = 'Icon updated.';
+      setHidden(statusEl, false);
+      await refreshDetailFleetState(app.slug);
+    });
   }
 
-  async function removeIcon(app) {
+  async function removeIcon(app, btn) {
     const errEl = document.getElementById('general-error');
     const statusEl = document.getElementById('general-icon-status');
     setError(errEl, '');
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, { method: 'DELETE' });
-    } catch {
-      setError(errEl, 'Failed to remove icon. Check your connection.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) { setError(errEl, 'Failed to remove icon.'); return; }
-    applyIconChange(app, { mime: '', emoji: '' });
-    statusEl.textContent = 'Icon removed.';
-    setHidden(statusEl, false);
-    await refreshDetailFleetState(app.slug);
+    await runInFlight(btn, async () => {
+      let resp;
+      try {
+        resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, { method: 'DELETE' });
+      } catch {
+        setError(errEl, 'Failed to remove icon. Check your connection.');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) { setError(errEl, 'Failed to remove icon.'); return; }
+      applyIconChange(app, { mime: '', emoji: '' });
+      statusEl.textContent = 'Icon removed.';
+      setHidden(statusEl, false);
+      await refreshDetailFleetState(app.slug);
+    });
   }
 
   // setEmojiIcon PATCHes a single emoji as the app's icon (server-side this
@@ -4370,7 +4429,7 @@ document.addEventListener('DOMContentLoaded', () => {
         delBtn.type = 'button';
         delBtn.className = 'env-btn-danger';
         delBtn.textContent = 'Delete';
-        delBtn.addEventListener('click', () => deleteEnvVar(slug, v.key));
+        delBtn.addEventListener('click', () => deleteEnvVar(slug, v.key, delBtn));
         actTd.append(editBtn, delBtn);
       }
       tr.append(keyTd, valTd, actTd);
@@ -4415,44 +4474,48 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    const url = `/api/apps/${encodeURIComponent(settingsSlug)}/env/${encodeURIComponent(key)}` + (restart ? '?restart=true' : '');
-    let resp;
-    try {
-      resp = await api(url, { method: 'PUT', body: JSON.stringify({ value, secret }) });
-    } catch {
-      setError(errEl, 'Network error.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let message = 'Save failed.';
-      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-      setError(errEl, message);
-      return;
-    }
+    await runInFlight(document.getElementById('env-form-save'), async () => {
+      const url = `/api/apps/${encodeURIComponent(settingsSlug)}/env/${encodeURIComponent(key)}` + (restart ? '?restart=true' : '');
+      let resp;
+      try {
+        resp = await api(url, { method: 'PUT', body: JSON.stringify({ value, secret }) });
+      } catch {
+        setError(errEl, 'Network error.');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let message = 'Save failed.';
+        try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+        setError(errEl, message);
+        return;
+      }
 
-    closeEnvForm();
-    await refreshEnvList(settingsSlug);
+      closeEnvForm();
+      await refreshEnvList(settingsSlug);
+    });
   }
 
-  async function deleteEnvVar(slug, key) {
+  async function deleteEnvVar(slug, key, btn) {
     if (!window.confirm(`Delete environment variable ${key}?`)) return;
     const errEl = document.getElementById('env-form-error');
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}?restart=true`, { method: 'DELETE' });
-    } catch {
-      setError(errEl, 'Network error.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok && resp.status !== 204) {
-      let message = 'Delete failed.';
-      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-      setError(errEl, message);
-      return;
-    }
-    await refreshEnvList(slug);
+    await runInFlight(btn, async () => {
+      let resp;
+      try {
+        resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}?restart=true`, { method: 'DELETE' });
+      } catch {
+        setError(errEl, 'Network error.');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok && resp.status !== 204) {
+        let message = 'Delete failed.';
+        try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+        setError(errEl, message);
+        return;
+      }
+      await refreshEnvList(slug);
+    });
   }
 
   // --- Data tab ---
@@ -4533,7 +4596,7 @@ document.addEventListener('DOMContentLoaded', () => {
         delBtn.type = 'button';
         delBtn.className = 'env-btn-danger';
         delBtn.textContent = 'Delete';
-        delBtn.addEventListener('click', () => deleteDataFile(slug, f.path));
+        delBtn.addEventListener('click', () => deleteDataFile(slug, f.path, delBtn));
         actTd.appendChild(delBtn);
       }
 
@@ -4542,24 +4605,26 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function deleteDataFile(slug, path) {
+  async function deleteDataFile(slug, path, btn) {
     if (!window.confirm(`Delete ${path}?`)) return;
     const errEl = document.getElementById('data-error');
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(path)}`, { method: 'DELETE' });
-    } catch {
-      setError(errEl, 'Network error.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok && resp.status !== 204) {
-      let message = 'Delete failed.';
-      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-      setError(errEl, message);
-      return;
-    }
-    await refreshDataTab(slug);
+    await runInFlight(btn, async () => {
+      let resp;
+      try {
+        resp = await api(`/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(path)}`, { method: 'DELETE' });
+      } catch {
+        setError(errEl, 'Network error.');
+        return;
+      }
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok && resp.status !== 204) {
+        let message = 'Delete failed.';
+        try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+        setError(errEl, message);
+        return;
+      }
+      await refreshDataTab(slug);
+    });
   }
 
   function uploadDataFile(event) {
@@ -4660,7 +4725,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const revokeBtn = document.createElement('button');
       revokeBtn.textContent = 'Revoke';
       revokeBtn.setAttribute('aria-label', `Revoke access for ${m.username}`);
-      revokeBtn.addEventListener('click', async () => {
+      revokeBtn.addEventListener('click', () => runInFlight(revokeBtn, async () => {
         const slug = settingsSlug;
         if (!slug) return;
         try {
@@ -4669,8 +4734,8 @@ document.addEventListener('DOMContentLoaded', () => {
             body: JSON.stringify({ user_id: m.user_id }),
           });
           if (r.ok) li.remove();
-        } catch { /* network error — leave row in place */ }
-      });
+        } catch { /* network error, leave row in place */ }
+      }));
       li.appendChild(nameSpan);
       li.appendChild(roleSelect);
       li.appendChild(revokeBtn);
@@ -4713,14 +4778,14 @@ document.addEventListener('DOMContentLoaded', () => {
       const removeBtn = document.createElement('button');
       removeBtn.textContent = 'Remove';
       removeBtn.setAttribute('aria-label', `Remove group rule ${rule.group}`);
-      removeBtn.addEventListener('click', async () => {
+      removeBtn.addEventListener('click', () => runInFlight(removeBtn, async () => {
         const slug = settingsSlug;
         if (!slug) return;
         try {
           const r = await api(`/api/apps/${slug}/group-access/${encodeURIComponent(rule.group)}`, { method: 'DELETE' });
           if (r.ok) li.remove();
-        } catch { /* network error - leave row in place */ }
-      });
+        } catch { /* network error, leave row in place */ }
+      }));
       li.appendChild(nameSpan);
       li.appendChild(roleSpan);
       li.appendChild(removeBtn);
@@ -5174,7 +5239,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Group access: add a group rule (bound once; uses current settingsSlug at call time).
-  document.getElementById('group-access-add-btn')?.addEventListener('click', async () => {
+  document.getElementById('group-access-add-btn')?.addEventListener('click', (event) => runInFlight(event.currentTarget, async () => {
     const nameEl = document.getElementById('group-access-name');
     const roleEl = document.getElementById('group-access-role');
     const errEl = document.getElementById('group-access-error');
@@ -5192,7 +5257,7 @@ document.addEventListener('DOMContentLoaded', () => {
       nameEl.value = '';
       await refreshGroupAccessList();
     } catch { errEl.textContent = 'Network error'; errEl.hidden = false; }
-  });
+  }));
 
   // Danger zone: typed-confirmation unlocks the Delete button.
   document.getElementById('delete-confirm').addEventListener('input', (e) => {
@@ -6255,7 +6320,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Sidebar app rows own their active state separately (slug-prefix, nested
     // tabs). Runs on every mount (post-allowed-navigation), and also closes the
     // mobile drawer there so a guard-vetoed navigation keeps it open.
-    highlightSidebarApp(document.getElementById('sidebar-apps'), pathname);
+    // A large fleet renders only the first page of each sidebar group, so an
+    // app opened from the grid or search can sit beyond it; rebuilding
+    // renders the window that contains the active row.
+    if (!highlightSidebarApp(document.getElementById('sidebar-apps'), pathname)) {
+      const routeSlug = pathname.match(/^\/apps\/([^/]+)/);
+      if (routeSlug && state.apps && state.apps.some((a) => a.slug === decodeURIComponent(routeSlug[1]))) {
+        syncSidebar();
+      }
+    }
     if (sidebarDrawer) sidebarDrawer.onNavigated();
     // Quick-view log pane: same reasoning as the drawer above. A vetoed
     // navigation never mounts, so a pane the operator is actively reading
@@ -6485,12 +6558,14 @@ document.addEventListener('DOMContentLoaded', () => {
     hideAllPageViews();
     return projectDetailMount(params);
   });
-  router.register('/users', () => {
+  router.register('/identity', () => {
     const usersAccess = resolveAdminOnlyAccess(ctx.state.user);
     if (usersAccess) return ctx.navigate(usersAccess.path, { replace: usersAccess.replace });
     hideAllPageViews();
     return mountUsers({ ...ctx, loadUsers });
   });
+  // Preserve old bookmarks without preserving a second navigation concept.
+  router.register('/users', () => ctx.navigate('/identity', { replace: true }));
   router.register('/tokens', () => {
     hideAllPageViews();
     if (tokensView) tokensView.hidden = false;

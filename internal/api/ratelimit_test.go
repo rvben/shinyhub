@@ -250,6 +250,27 @@ func TestBearerAuthFailure_NoAuthHeaderNotCounted(t *testing.T) {
 	}
 }
 
+// TestPatchMeRateLimit verifies PATCH /api/auth/me is rate limited per-user
+// (shares the 5/min userLimiter with user-creation/invitation). The handler
+// verifies the caller's current password before accepting a change, so
+// without a limit it is an unthrottled guessing oracle against a
+// bearer-authenticated session.
+func TestPatchMeRateLimit(t *testing.T) {
+	srv, store := newTestServer(t)
+	token, _ := seedUserAndJWT(t, store, "alice", "admin")
+
+	var last int
+	for i := 0; i < 6; i++ {
+		rec := patchMe(t, srv, token, map[string]any{
+			"current_password": "wrong-password", "new_password": "irrelevant-but-long",
+		})
+		last = rec.Code
+	}
+	if last != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on 6th PATCH /api/auth/me, got %d", last)
+	}
+}
+
 // TestOAuthLoginRateLimitByIP verifies the OAuth login-start endpoint is rate
 // limited per client IP (20/min) even without an authenticated user.
 func TestOAuthLoginRateLimitByIP(t *testing.T) {

@@ -35,10 +35,34 @@ export function wireKebab(button, list, container) {
   const doc = button.ownerDocument;
   const availableItems = () => [...list.querySelectorAll('button:not([disabled])')]
     .filter(item => !item.closest('[hidden]'));
+  // The dashboard grid (and the schedule rows, and the detail header) replace
+  // this button and list with fresh markup on every rebuild, including one
+  // that lands while the menu is open, and nothing calls setOpen(false) on
+  // the old instance first since it is simply discarded along with its DOM.
+  // An outside click already self-closes a stale instance (list.contains
+  // returns false for a detached list, so onDocClick falls through to
+  // setOpen(false) below), but an arrow key does not: it only acts when the
+  // active element is inside the list, so on stale, detached DOM it just
+  // returns without ever removing the listeners. Without this guard, a menu
+  // left open and then only ever navigated with arrow keys (never clicked,
+  // never dismissed with Escape or Tab) would keep every stale instance's
+  // listeners registered forever, each pinning a detached button/list/
+  // container in memory and doing a wasted check on every future click and
+  // keydown anywhere on the page. Once the button is no longer in the
+  // document, the first such event unregisters both listeners instead of
+  // acting on them.
+  function detachIfStale() {
+    if (button.isConnected) return false;
+    doc.removeEventListener('click', onDocClick, true);
+    doc.removeEventListener('keydown', onKey, true);
+    return true;
+  }
   function onDocClick(e) {
+    if (detachIfStale()) return;
     if (!list.contains(e.target) && !button.contains(e.target)) setOpen(false);
   }
   function onKey(e) {
+    if (detachIfStale()) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       setOpen(false);

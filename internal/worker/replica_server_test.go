@@ -234,11 +234,22 @@ func TestReplicaServer_SignalWaitStats(t *testing.T) {
 	srv.mu.Unlock()
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/replicas/c-2/wait", nil)
+	req.Header.Set("Accept", waitStreamContentType)
 	req = withURLParam(req, "container", "c-2")
 	rec = httptest.NewRecorder()
 	srv.handleWait(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("wait status = %d, want 204", rec.Code)
+	// The response headers are 200, flushed before Wait is even called, so a
+	// long-running replica cannot trip a client's response-header timeout; the
+	// outcome travels afterwards as a single NDJSON frame in the body.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("wait status = %d, want 200", rec.Code)
+	}
+	var waitFrame api.Frame
+	if err := json.Unmarshal(rec.Body.Bytes(), &waitFrame); err != nil {
+		t.Fatalf("decode wait frame: %v", err)
+	}
+	if waitFrame.Kind != api.FrameResult {
+		t.Errorf("wait frame kind = %q, want %q", waitFrame.Kind, api.FrameResult)
 	}
 	srv.mu.RLock()
 	_, okC := srv.byContainer["c-2"]

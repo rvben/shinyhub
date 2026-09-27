@@ -9,6 +9,8 @@
 import { buildLaunchpadModel } from './launchpad-model.js';
 import { renderAppAvatar } from './app-avatar.js';
 import { createGroupDisclosure } from './group-disclosure.js';
+import { startVisiblePoll } from './visible-poll.js';
+import { GRID_PAGE, windowCount, createShowMore } from './render-window.js';
 
 const RECENT_KEY = 'shinyhub.recent-apps';
 const RECENT_MAX = 6;
@@ -27,13 +29,14 @@ export function mountLaunchpad(ctx) {
   const recentKey = `${RECENT_KEY}:${(u && (u.id || u.username)) || 'anon'}`;
 
   let disposed = false;
-  let timer = null;
+  let stopPoll = null;
   let query = '';
+  const shownTiles = new Map();
   let model = null;
 
   function stop() {
     disposed = true;
-    if (timer) { clearInterval(timer); timer = null; }
+    if (stopPoll) { stopPoll(); stopPoll = null; }
   }
 
   body.replaceChildren(skeleton());
@@ -118,13 +121,13 @@ export function mountLaunchpad(ctx) {
         container.appendChild(el('p', 'lp-noresults', `No apps match "${query.trim()}".`));
         return;
       }
-      container.appendChild(grid(matches));
+      container.appendChild(grid(matches, 'search'));
       return;
     }
 
     if (model.recent.length > 0) {
       container.appendChild(sectionHead('Recently opened'));
-      container.appendChild(grid(model.recent));
+      container.appendChild(grid(model.recent, 'recent'));
     }
     for (const g of model.groups) {
       if (g.showHeading) {
@@ -136,7 +139,7 @@ export function mountLaunchpad(ctx) {
           iconEmoji: g.iconEmoji,
           classPrefix: 'lp',
         });
-        disclosure.body.appendChild(grid(g.apps));
+        disclosure.body.appendChild(grid(g.apps, `group:${g.project}`));
         container.appendChild(disclosure.root);
       } else if (model.recent.length > 0) {
         // The lone ungrouped group needs no name of its own, but with a
@@ -144,13 +147,32 @@ export function mountLaunchpad(ctx) {
         // on with no label saying what they are.
         container.appendChild(sectionHead('All apps'));
       }
-      if (!g.showHeading) container.appendChild(grid(g.apps));
+      if (!g.showHeading) container.appendChild(grid(g.apps, `group:${g.project}`));
     }
   }
 
-  function grid(tiles) {
+  // One page of tiles per section; "Show more" reveals the next page in place.
+  // The count is remembered per section so the 20 s refresh keeps it.
+  function grid(tiles, key) {
     const g = el('div', 'lp-grid');
-    for (const t of tiles) g.appendChild(tile(t));
+    const fill = () => {
+      g.replaceChildren();
+      const count = windowCount(tiles.length, shownTiles.get(key), GRID_PAGE);
+      for (const t of tiles.slice(0, count)) g.appendChild(tile(t));
+      const more = createShowMore(document, {
+        hidden: tiles.length - count,
+        page: GRID_PAGE,
+        className: 'app-grid-show-more',
+        onMore: () => {
+          shownTiles.set(key, count + GRID_PAGE);
+          fill();
+          const next = g.children[count];
+          if (next && next.tagName === 'A') next.focus();
+        },
+      });
+      if (more) g.appendChild(more);
+    };
+    fill();
     return g;
   }
 
@@ -233,7 +255,7 @@ export function mountLaunchpad(ctx) {
   }
 
   load(true);
-  timer = setInterval(() => { if (!disposed) load(false); }, POLL_MS);
+  stopPoll = startVisiblePoll(document, POLL_MS, () => { if (!disposed) load(false); });
 
   return {
     // "Launchpad" is the internal surface name; the visitor sees Apps, both in

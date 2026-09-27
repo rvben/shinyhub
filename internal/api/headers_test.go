@@ -18,8 +18,8 @@ func TestSecurityHeaders_ControlPlane(t *testing.T) {
 		if hd.Get("X-Content-Type-Options") != "nosniff" {
 			t.Errorf("%s: missing X-Content-Type-Options=nosniff", path)
 		}
-		if hd.Get("X-Frame-Options") != "SAMEORIGIN" {
-			t.Errorf("%s: missing X-Frame-Options=SAMEORIGIN (clickjacking)", path)
+		if hd.Get("X-Frame-Options") != "DENY" {
+			t.Errorf("%s: missing X-Frame-Options=DENY (clickjacking)", path)
 		}
 		if hd.Get("Referrer-Policy") != "same-origin" {
 			t.Errorf("%s: missing Referrer-Policy=same-origin", path)
@@ -33,8 +33,8 @@ func TestSecurityHeaders_ControlPlane(t *testing.T) {
 			t.Errorf("%s: HSTS sent over plain HTTP: %q", path, hd.Get("Strict-Transport-Security"))
 		}
 		csp := hd.Get("Content-Security-Policy")
-		if !strings.Contains(csp, "frame-ancestors 'self'") {
-			t.Errorf("%s: CSP missing frame-ancestors 'self': %q", path, csp)
+		if !strings.Contains(csp, "frame-ancestors 'none'") {
+			t.Errorf("%s: CSP missing frame-ancestors 'none': %q", path, csp)
 		}
 		if !strings.Contains(csp, "default-src 'self'") {
 			t.Errorf("%s: CSP missing default-src 'self': %q", path, csp)

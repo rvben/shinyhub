@@ -31,7 +31,7 @@ func TestUserDisplayName_SelfEditPersists(t *testing.T) {
 	if got, _ := store.GetUserByID(alice.ID); got.DisplayName != "Alice Liddell" {
 		t.Errorf("GetUserByID display name = %q, want %q", got.DisplayName, "Alice Liddell")
 	}
-	users, _ := store.ListUsers()
+	users, _ := store.ListUsers(0, 0)
 	for _, u := range users {
 		if u.Username == "alice" && u.DisplayName != "Alice Liddell" {
 			t.Errorf("ListUsers display name = %q, want %q", u.DisplayName, "Alice Liddell")

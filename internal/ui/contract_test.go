@@ -65,6 +65,51 @@ func TestConnectivityBannerWired(t *testing.T) {
 		"app-detail.js must call connectivityBanner so a WebSocket-blocked app surfaces a warning on the Overview")
 }
 
+// TestStandalonePageLinksUseTheAccentColor pins the link color on the
+// standalone pages (not-found, accept-invitation). They load style.css but
+// carry no app shell, so without an explicit color their one link fell back
+// to the browser's default blue, and to purple once visited.
+func TestStandalonePageLinksUseTheAccentColor(t *testing.T) {
+	body := cssRuleBody(t, readStatic(t, "style.css"), "\n#invitation-signin, .notfound-back {")
+	if !strings.Contains(body, "color: var(--cyan-bright)") {
+		t.Fatalf("the not-found and invitation links must take the accent token, not the browser default; got:%s", body)
+	}
+}
+
+// TestArrowLinksKeepTheirSpace pins the gap between an action link's label
+// and its decorative arrow. The links are inline-flex, and a flex container
+// drops the whitespace-only text node between "View logs" and the
+// aria-hidden arrow span, so without a gap the pair renders as "View logs→".
+func TestArrowLinksKeepTheirSpace(t *testing.T) {
+	body := cssRuleBody(t, readStatic(t, "style.css"), "\n.overview-intro > a,\n.overview-card-link {")
+	if !strings.Contains(body, "display: inline-flex") {
+		t.Fatalf("expected the arrow-link rule to be the inline-flex one; got:%s", body)
+	}
+	if !strings.Contains(body, "gap: 0.3em") {
+		t.Fatalf("an inline-flex arrow link must set a gap, or its label and arrow touch; got:%s", body)
+	}
+}
+
+// TestPageHeadingsUseTheTwoDocumentedWeights pins DESIGN.md's heading
+// weights: every h1 rule in style.css sets 200 (Display) or 700 (Headline,
+// Section), or inherits one. A third weight, such as the empty-state lead's
+// former 300, makes page titles look unrelated from one route to the next.
+func TestPageHeadingsUseTheTwoDocumentedWeights(t *testing.T) {
+	css := readStatic(t, "style.css")
+	rule := regexp.MustCompile(`(?m)^([^{}@/]*\bh1)\s*\{([^{}]*)\}`)
+	weight := regexp.MustCompile(`font-weight:\s*([^;]+);`)
+	checked := 0
+	for _, m := range rule.FindAllStringSubmatch(css, -1) {
+		checked++
+		if w := weight.FindStringSubmatch(m[2]); w != nil && w[1] != "200" && w[1] != "700" {
+			t.Errorf("%s sets font-weight %s; page headings use 200 or 700", strings.TrimSpace(m[1]), w[1])
+		}
+	}
+	if checked < 3 {
+		t.Fatalf("expected to find the toolbar, project-detail and empty-state h1 rules, found %d", checked)
+	}
+}
+
 // TestDeployingBadgeWired pins the API/frontend contract for the card's
 // "Deploying" badge. The server computes `deploying` (pending deployment row
 // + held deploy lock; see api.Server.appDeploying) onto the apps-list payload
@@ -514,7 +559,7 @@ func TestGridStatusBadgeRefreshesFromMetricsPoll(t *testing.T) {
 }
 
 // TestAppCardHasExplicitManageLink pins the card's two destinations. The app
-// name leads to administration and says so to assistive technology; Open dashboard
+// name leads to administration and says so to assistive technology; Open app
 // launches the active release in a new tab. The rest of the card is not a
 // nested/oversized link, leaving text selectable and actions unambiguous.
 func TestAppCardHasExplicitManageLink(t *testing.T) {
@@ -522,7 +567,7 @@ func TestAppCardHasExplicitManageLink(t *testing.T) {
 		"a manageable app-name link must identify its management destination")
 	assertContains(t, "app.js", ": `View ${app.name}`",
 		"a read-only app-name link must not promise management access")
-	assertContains(t, "app.js", "openLink.setAttribute('aria-label', `Open ${app.name} dashboard in a new tab`)",
+	assertContains(t, "app.js", "openLink.setAttribute('aria-label', `Open ${app.name} in a new tab`)",
 		"the launch action must identify its new-tab destination")
 	assertNotContains(t, "app.js", "app-card-body-link",
 		"the whole card must not be a link when it contains independent actions")
@@ -640,6 +685,27 @@ func TestAuditTabUsesCapability(t *testing.T) {
 		"the Overview activity feed must be gated on the capability")
 	assertNotContains(t, "views/overview.js", "role === 'admin'",
 		"overview.js must not re-derive audit access from the role")
+}
+
+// TestAppIsolationBannerReadsServerCapability pins the same-origin trust
+// banner's wiring to the server-computed app_isolation_warning flag (admin
+// role, server.app_origin unset - see appIsolationWarning in
+// internal/api/authorization.go), and to the static markup that flag toggles.
+// A silently-undefined field here would leave admins never warned that every
+// deployed app shares the dashboard's origin.
+func TestAppIsolationBannerReadsServerCapability(t *testing.T) {
+	assertContains(t, "index.html", `id="app-isolation-banner"`,
+		"the dashboard must have a same-origin trust banner element")
+	assertContains(t, "index.html", `id="app-isolation-banner-dismiss"`,
+		"the banner must have a dismiss button")
+	assertContains(t, "app.js", "state.appIsolationWarning = !!payload.app_isolation_warning",
+		"showLoggedIn must capture the server-computed isolation-warning capability")
+	assertContains(t, "app.js", "appIsolationBanner.hidden = !shouldShowAppIsolationBanner(state.appIsolationWarning)",
+		"the banner's visibility must follow the capability, not a client-side role check")
+	assertContains(t, "app.js", "state.appIsolationWarning = false",
+		"logging out must clear the isolation-warning capability")
+	assertContains(t, "app.js", "if (appIsolationBanner) appIsolationBanner.hidden = true;",
+		"logging out must hide the banner so the next session's state starts clean")
 }
 
 // TestAccessVisibilityLabelsTeachSemantics pins the corrected visibility copy.
@@ -1710,8 +1776,8 @@ func TestGridRebuildKeepsKeyboardFocus(t *testing.T) {
 	if restoreAt < wipeAt {
 		t.Error("focus must be restored AFTER the grid is rebuilt, not onto the elements about to be discarded")
 	}
-	// "Deploy first release" is gone the moment that deploy succeeds, and the
-	// rebuild that removes it is the same one the operator is watching.
+	// "Deploy" is gone the moment that deploy succeeds, and the rebuild that
+	// removes it is the same one the operator is watching.
 	if !strings.Contains(body, "restoreFocus(gridEl, siblingKey(keepFocus, 'title'))") {
 		t.Error("a control that did not survive the rebuild must fall back to its card's title link,\n" +
 			"or finishing a first deploy drops the keyboard to the top of the page")
@@ -2058,7 +2124,7 @@ func TestWorkersPageWiring(t *testing.T) {
 // TestAdminRouteGuardWiring pins the direct-URL guard for the admin-only and
 // audit-log pages. The sidebar already hides tab-users/tab-workers/tab-audit
 // from non-privileged roles (TestWorkersPageWiring et al.), but that hides only
-// the link: before this guard existed, a non-admin who typed /users, /workers
+// the link: before this guard existed, a non-admin who typed /identity, /workers
 // or /audit-log still got the full page chrome and then failed in whatever way
 // that page's own load call happened to fail. Each route must consult the pure
 // resolveAdminOnlyAccess/resolveAuditLogAccess helpers (views/sidebar-nav.js,
@@ -2070,13 +2136,13 @@ func TestAdminRouteGuardWiring(t *testing.T) {
 	assertContains(t, "app.js", "resolveAuditLogAccess,",
 		"app.js must import resolveAuditLogAccess from views/sidebar-nav.js")
 	assertContains(t, "app.js", "const usersAccess = resolveAdminOnlyAccess(ctx.state.user);",
-		"the /users route must consult resolveAdminOnlyAccess before mounting")
+		"the /identity route must consult resolveAdminOnlyAccess before mounting")
 	assertContains(t, "app.js", "const workersAccess = resolveAdminOnlyAccess(ctx.state.user);",
 		"the /workers route must consult resolveAdminOnlyAccess before mounting")
 	assertContains(t, "app.js", "const auditAccess = resolveAuditLogAccess(ctx.state.canReadAudit);",
 		"the /audit-log route must consult resolveAuditLogAccess before mounting")
 	assertContains(t, "app.js", "if (usersAccess) return ctx.navigate(usersAccess.path, { replace: usersAccess.replace });",
-		"a denied /users visit must replace-redirect rather than mount and fail")
+		"a denied /identity visit must replace-redirect rather than mount and fail")
 	assertContains(t, "app.js", "if (workersAccess) return ctx.navigate(workersAccess.path, { replace: workersAccess.replace });",
 		"a denied /workers visit must replace-redirect rather than mount and fail")
 	assertContains(t, "app.js", "if (auditAccess) return ctx.navigate(auditAccess.path, { replace: auditAccess.replace });",
@@ -2088,6 +2154,17 @@ func TestAdminRouteGuardWiring(t *testing.T) {
 		"loadAuditEvents must treat a 403 as an access change, not a generic load failure")
 	assertContains(t, "app.js", "router.navigate('/', { replace: true });",
 		"a mid-session audit-log 403 must replace-redirect home")
+}
+
+// TestIdentityRouteAliasWiring pins the /identity route as canonical (the
+// sidebar link, the page heading and the browser-tab title all already read
+// "Identity") with /users kept as a working alias, following the same
+// replace-redirect pattern TestLaunchpadContract pins for /launchpad -> /apps.
+func TestIdentityRouteAliasWiring(t *testing.T) {
+	assertContains(t, "index.html", `<a href="/identity" data-nav class="nav-item" id="tab-users"`,
+		"the sidebar Identity link must point at the canonical /identity route")
+	assertContains(t, "app.js", "router.register('/users', () => ctx.navigate('/identity', { replace: true }))",
+		"legacy /users bookmarks must replace-redirect to canonical /identity")
 }
 
 // TestFleetHealthBannerWiring pins the admin fleet-health banner: the helper
@@ -3067,6 +3144,17 @@ func TestSidebarLayoutCSS(t *testing.T) {
 		"navigation rows must keep the same height when their labels are hidden")
 }
 
+// TestAppDetailHeaderActionsMeetTouchTargetSize pins that the app detail page's
+// header actions (Open app, Deploy, the kebab menu trigger) grow to the 44px
+// touch-target minimum on narrow viewports. Unlike the apps grid card actions
+// (.app-actions), which already had this treatment, the detail page's own
+// .app-detail-actions cluster kept its 36-40px desktop heights at mobile
+// widths, measured at 390px viewport width before the fix.
+func TestAppDetailHeaderActionsMeetTouchTargetSize(t *testing.T) {
+	assertContains(t, "style.css", ".app-detail-actions > a,\n  .app-detail-actions > .btn-primary,\n  .app-detail-actions .kebab-menu > button { min-height: 44px; height: 44px; }",
+		"the app detail header's Open app link, Deploy button, and kebab trigger must meet the 44px touch-target minimum on narrow viewports")
+}
+
 // TestVersionDisplayUsesReleaseNumber pins the human-friendly version display:
 // the release strip shows the server's release_number (vN) and date, the
 // deployments row renders the release label, and the raw epoch is no longer the
@@ -3465,7 +3553,7 @@ func TestAppCardFactsStayOperational(t *testing.T) {
 		"the grid card must derive its concise facts from the shared helper")
 	assertContains(t, "app.js", ".app-card-facts[data-slug=",
 		"the metrics poll must locate and refresh the card facts")
-	assertContains(t, "views/app-card-facts.js", "Release #${releaseNumber}",
+	assertContains(t, "views/app-card-facts.js", "v${releaseNumber}",
 		"cards must expose the current successful release number")
 	assertContains(t, "views/app-card-facts.js", "${ready}/${configured} ready",
 		"scaled cards must expose live replica readiness")
@@ -4655,4 +4743,117 @@ func TestLongDashCheckerDistinguishesCopyFromPlaceholders(t *testing.T) {
 			t.Errorf("%s: expected no finding, got %v for %q", c.name, got, c.line)
 		}
 	}
+}
+
+// TestFormFieldsAreNotMonospaceByDefault pins that a modal/settings form field
+// renders in the UI font by default (prose placeholders like "(optional)" or
+// "Your current password" read as broken in a code font), and that only a
+// field whose value is itself code (a slug, a cron expression, a shell
+// command) opts back into monospace via the .field-code class.
+func TestFormFieldsAreNotMonospaceByDefault(t *testing.T) {
+	assertContains(t, "style.css", ".settings-tab-panel textarea {\n  width: 100%;\n  margin-top: 0.25rem;\n  padding: 0.55rem 0.75rem;\n  background: var(--surface);\n  border: 1px solid var(--line);\n  border-radius: 8px;\n  color: var(--text);\n  font-family: var(--font);\n  font-size: var(--fs-body);",
+		"form fields in a modal or settings tab must default to the UI font, not the monospace face")
+	assertContains(t, "style.css", ".modal-card form input.field-code,\n.modal-card form textarea.field-code,\n.settings-tab-panel input.field-code,\n.settings-tab-panel textarea.field-code {\n  font-family: var(--mono);",
+		"a .field-code override must exist so genuinely code-shaped values (slugs, cron expressions, commands) can still opt into the monospace face")
+	for _, id := range []string{
+		`id="general-project" type="text" class="field-code"`,
+		`id="new-app-slug" type="text" class="field-code"`,
+		`id="service-credential-apps" type="text" class="field-code"`,
+		`id="sched-name" name="name" class="field-code"`,
+		`id="sched-command" name="command" class="field-code"`,
+		`id="sched-cron" name="cron_expr" class="field-code"`,
+		`id="sched-timezone" name="timezone" class="field-code"`,
+	} {
+		assertContains(t, "index.html", id,
+			"a slug, identifier, cron, command or timezone field must carry field-code to stay monospace")
+	}
+	for _, id := range []string{`id="general-description"`, `id="new-app-name"`, `id="service-credential-name"`, `id="group-access-name"`} {
+		assertNotContains(t, "index.html", id+`" type="text" class="field-code"`,
+			"a free-text display name or description must not be forced back into the monospace face")
+	}
+}
+
+// TestAuditActionBadgeIsHumanReadable pins that the Audit Log's Action column
+// shows a human-readable phrase (auditActionLabel) rather than the raw
+// snake_case or dotted action key the server records, while keeping that raw
+// key available as the badge's title/tooltip for anyone who needs the exact
+// value to search server logs.
+func TestAuditActionBadgeIsHumanReadable(t *testing.T) {
+	assertContains(t, "app.js", "badge.textContent = auditActionLabel(e.action);",
+		"the Action column badge must render a human-readable label, not the raw action key")
+	assertContains(t, "app.js", "badge.title = e.action;",
+		"the raw action key must still be reachable, as the badge's tooltip")
+}
+
+// TestLoginLabelsAreSentenceCase pins that the login form's "Username" and
+// "Password" labels render exactly as written in the markup. The CSS used to
+// force them to uppercase with letter-spacing tracking meant for an all-caps
+// eyebrow label, which fought the sentence-case text already in index.html.
+func TestLoginLabelsAreSentenceCase(t *testing.T) {
+	assertContains(t, "style.css", ".login-box .login-label {\n  font-size: var(--fs-label);\n  font-weight: 600;\n  color: var(--text-muted);\n  margin-bottom: -0.3rem;\n}",
+		"the login label must not transform its text to uppercase or apply uppercase-style letter-spacing")
+	assertNotContains(t, "style.css", "text-transform: uppercase;\n  color: var(--text-muted);\n  margin-bottom: -0.3rem;",
+		"the login label rule must not reintroduce an uppercase transform")
+	assertContains(t, "index.html", `<label for="login-username" class="login-label">Username</label>`,
+		"the username label text must stay sentence case in markup")
+	assertContains(t, "index.html", `<label for="login-password" class="login-label">Password</label>`,
+		"the password label text must stay sentence case in markup")
+}
+
+// TestArrowLinksHideTheGlyphFromAssistiveTech pins that every arrow-suffixed
+// action link wraps the decorative arrow in its own aria-hidden element,
+// matching the established pattern (overview-card-link, launchpad's chevron).
+// The "awaiting first deploy" empty state used to carry the arrow loose in
+// the link's own text, so a screen reader announced "right arrow" after the
+// link's purpose.
+func TestArrowLinksHideTheGlyphFromAssistiveTech(t *testing.T) {
+	assertContains(t, "views/app-detail.js", `Deploy from the Overview tab <span aria-hidden="true">→</span></a>`,
+		"the awaiting-first-deploy empty state's arrow must be hidden from assistive tech, not loose in the link text")
+	assertNotContains(t, "views/app-detail.js", "Deploy from the Overview tab →</a>",
+		"the arrow must not be reintroduced as loose link text")
+}
+
+// TestDeploymentsTableHasALabelledActionsColumn pins that the Deployments
+// table's header row labels its trailing column, matching the Users table's
+// "Actions" header for the same kind of trailing mutate-action column. The
+// column used to render as a blank header cell above a "Roll back" button
+// or a "Live" note, the only column left unlabeled among the four.
+func TestDeploymentsTableHasALabelledActionsColumn(t *testing.T) {
+	assertContains(t, "views/app-detail.js", `<span class="deployment-action">Actions</span>`,
+		"the deployments header's trailing column must carry a visible Actions label, aligned like the body's action cells")
+	assertNotContains(t, "views/app-detail.js", "<span>Deployed</span>\n        <span></span>",
+		"the deployments header must not reintroduce a blank trailing column")
+}
+
+// TestAppListsRenderAWindowNotTheWholeFleet pins that the operator grid, the
+// sidebar and the viewer launchpad render one page per group through
+// render-window.js. The dashboard fetches the whole fleet once, and rendering
+// every app as a card and a sidebar row built an ~84k-node DOM at 2000 apps.
+// The grid wiring lives in the app.js IIFE, which jsdom cannot import, so its
+// position is pinned here with both bounds: inside renderGridVerbatim, before
+// renderApps.
+func TestAppListsRenderAWindowNotTheWholeFleet(t *testing.T) {
+	js := readStatic(t, "app.js")
+	start := strings.Index(js, "function renderGridVerbatim(")
+	end := strings.Index(js, "function renderApps(")
+	if start < 0 || end < 0 || end < start {
+		t.Fatalf("renderGridVerbatim/renderApps not found in order (start=%d end=%d)", start, end)
+	}
+	body := js[start:end]
+	for _, needle := range []string{
+		"windowCount(group.apps.length, gridWindowShown.get(windowKey), GRID_PAGE)",
+		"for (const app of group.apps.slice(0, count))",
+		"createShowMore(document, {",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("renderGridVerbatim must render a window of each group: missing %q", needle)
+		}
+	}
+	if strings.Contains(body, "for (const app of group.apps) {") {
+		t.Error("renderGridVerbatim must not loop over the whole group")
+	}
+	assertContains(t, "app.js", "if (!highlightSidebarApp(document.getElementById('sidebar-apps'), pathname)) {",
+		"navigating to an app beyond the sidebar window must rebuild the sidebar so the active row exists")
+	assertContains(t, "views/launchpad.js", "windowCount(tiles.length, shownTiles.get(key), GRID_PAGE)",
+		"the viewer launchpad must render one page of tiles per section")
 }

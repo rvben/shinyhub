@@ -96,7 +96,13 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apps, err := s.store.ListApps(1_000_000, 0)
+	// Fleet health is a whole-fleet aggregate (running/idle/stopped/degraded
+	// counts, per-tier totals), not a paginated view, so it legitimately needs
+	// every app rather than a page of them. limit<=0 is ListApps' own "no
+	// limit" convention (see queries.go), already used the same way by every
+	// other whole-fleet caller in this codebase; a literal like 1_000_000
+	// would silently under-count past that many apps instead of failing loudly.
+	apps, err := s.store.ListApps(0, 0)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

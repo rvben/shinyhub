@@ -209,7 +209,7 @@ func runSetup(cmd *cobra.Command, f *setupFlags) (setupResult, error) {
 		}
 	}
 
-	users, err := store.ListUsers()
+	users, err := store.ListUsers(0, 0)
 	if err != nil {
 		return result, fmt.Errorf("inspect users: %w", err)
 	}
@@ -388,7 +388,7 @@ func bootstrapAdminFromEnv(store *db.Store, localLoginEnabled bool, logger *slog
 }
 
 func ensureUsableFirstLogin(cfg *config.Config, store *db.Store, configPath string) error {
-	users, err := store.ListUsers()
+	users, err := store.ListUsers(0, 0)
 	if err != nil {
 		return fmt.Errorf("inspect users: %w", err)
 	}
