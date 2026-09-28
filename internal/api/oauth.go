@@ -42,7 +42,7 @@ func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	state := hex.EncodeToString(stateBytes)
 
-	if err := s.store.CreateOAuthState(state); err != nil {
+	if err := s.store.CreateOAuthState(state, providerGitHub); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -73,7 +73,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
-	if err := s.store.ConsumeOAuthState(state); err != nil {
+	if err := s.store.ConsumeOAuthState(state, providerGitHub); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
@@ -163,7 +163,7 @@ func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	state := hex.EncodeToString(stateBytes)
 
-	if err := s.store.CreateOAuthState(state); err != nil {
+	if err := s.store.CreateOAuthState(state, providerGoogle); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -191,7 +191,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
-	if err := s.store.ConsumeOAuthState(state); err != nil {
+	if err := s.store.ConsumeOAuthState(state, providerGoogle); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}

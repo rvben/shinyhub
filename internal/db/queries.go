@@ -3756,8 +3756,8 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 // --- OAuth State (CSRF nonce) ---
 
-func (s *Store) CreateOAuthState(state string) error {
-	_, err := s.db.Exec(`INSERT INTO oauth_states (state) VALUES (?)`, state)
+func (s *Store) CreateOAuthState(state, provider string) error {
+	_, err := s.db.Exec(`INSERT INTO oauth_states (state, provider) VALUES (?, ?)`, state, provider)
 	if err != nil {
 		return fmt.Errorf("create oauth state: %w", err)
 	}
@@ -3765,12 +3765,15 @@ func (s *Store) CreateOAuthState(state string) error {
 }
 
 // ConsumeOAuthState validates the state nonce and deletes it (one-time use).
-// Returns an error if the state does not exist or has expired (>10 minutes old).
-// Also sweeps all expired states to prevent unbounded table growth.
-func (s *Store) ConsumeOAuthState(state string) error {
+// Returns an error if the state does not exist for this provider or has
+// expired (>10 minutes old). Binding the delete to provider prevents a state
+// minted for one provider's login flow from being accepted by a different
+// provider's callback. Also sweeps all expired states to prevent unbounded
+// table growth.
+func (s *Store) ConsumeOAuthState(state, provider string) error {
 	// Sweep stale nonces — ignore errors; this is best-effort cleanup.
 	s.db.Exec(`DELETE FROM oauth_states WHERE created_at < ` + s.d.nowMinusSeconds(600)) //nolint:errcheck
-	res, err := s.db.Exec(`DELETE FROM oauth_states WHERE state = ?`, state)
+	res, err := s.db.Exec(`DELETE FROM oauth_states WHERE state = ? AND provider = ?`, state, provider)
 	if err != nil {
 		return fmt.Errorf("consume oauth state: %w", err)
 	}
