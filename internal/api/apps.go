@@ -5472,6 +5472,14 @@ func (s *Server) metricAppsForUser(u *auth.ContextUser, rawSlugs string) ([]*db.
 		// same rule keeps a card and its metrics from disagreeing about which
 		// apps exist, and keeps this branch consistent with ?slugs=, where an
 		// admin naming an app it does not own has always been answered.
+		// Deliberately NOT ListAppsLean: buildAppMetricsFrom (below, shared with
+		// handleBatchMetrics) sets resp.LastDeploymentStatus from app, so this
+		// path genuinely reads a deployment-derived field. handleBatchMetricsHistory
+		// does not need it, but it shares this function precisely so the two
+		// endpoints cannot drift about which apps exist (see the doc comment
+		// above); splitting the query per caller would reintroduce that drift
+		// risk to save a per-row subquery on a request that is not the
+		// whole-fleet listing hot path this change targets.
 		var (
 			visible []*db.App
 			err     error

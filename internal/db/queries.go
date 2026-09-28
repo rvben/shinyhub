@@ -1290,6 +1290,11 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       worker_isolation, worker_grouped_size, worker_max_workers, worker_warm_spares,
 		       worker_max_session_lifetime_secs, ephemeral_data_ack, render_seconds,`
 
+// appColumnsLean is appColumns without its trailing comma, for queries that
+// select only the plain apps.* columns and never append deploymentSummarySQL.
+// Derived rather than duplicated so the two column lists can never drift.
+var appColumnsLean = strings.TrimSuffix(appColumns, ",")
+
 type CreateAppParams struct {
 	Slug        string
 	Name        string
@@ -1423,6 +1428,36 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	var apps []*App
 	for rows.Next() {
 		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// ListAppsLean is ListApps without deploymentSummarySQL: it returns the same
+// rows in the same order with every plain apps.* field populated, but leaves
+// the six deployment-derived fields (LastDeployedAt, ReleaseNumber,
+// ReleasedAt, CurrentVersion, ContentDigest, LastDeploymentStatus) at their
+// zero value. deploymentSummarySQL runs six correlated subqueries against
+// deployments per row; use this for a caller that never reads any of those
+// six fields, to skip that cost on a whole-fleet listing.
+func (s *Store) ListAppsLean(limit, offset int) ([]*App, error) {
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	rows, err := s.db.Query(`
+		SELECT `+appColumnsLean+`
+		FROM apps ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanAppLean(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -1795,6 +1830,33 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 	var apps []*App
 	for rows.Next() {
 		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// ListAppsVisibleToUserLean is ListAppsVisibleToUser without
+// deploymentSummarySQL; see ListAppsLean for what that skips and why.
+func (s *Store) ListAppsVisibleToUserLean(userID int64, limit, offset int) ([]*App, error) {
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	rows, err := s.db.Query(`
+		SELECT `+appColumnsLean+`
+		FROM apps
+		WHERE `+appVisibleToUserWhere+`
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, userID, userID, userID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanAppLean(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -5744,6 +5806,43 @@ func scanApp(s scanner) (*App, error) {
 	}
 	if lastDeploymentStatus.Valid {
 		a.LastDeploymentStatus = lastDeploymentStatus.String
+	}
+	return &a, nil
+}
+
+// scanAppLean scans a row selected with appColumnsLean: the same 37 plain
+// apps.* fields scanApp reads, in the same order, but none of the six
+// deployment-derived fields scanApp reads afterward (those stay at their zero
+// value on the returned App). Keep the field list and order here identical to
+// scanApp's leading block; a query using appColumnsLean and a scan using
+// scanApp (or vice versa) would misalign silently.
+func scanAppLean(s scanner) (*App, error) {
+	var a App
+	var projectSlug sql.NullString
+	var autoscaleEnabledInt int
+	var ephemeralDataAckInt int
+	err := s.Scan(
+		&a.ID, &a.Slug, &a.Name, &projectSlug, &a.OwnerID, &a.Access,
+		&a.Status, &a.Replicas, &a.MaxSessionsPerReplica, &a.DeployCount,
+		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
+		&a.CreatedAt, &a.UpdatedAt,
+		&a.ManagedBy, &a.ReplicaPlacement,
+		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
+		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.UsageIdentityMode, &a.MinWarmReplicas,
+		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime, &a.IconEmoji,
+		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
+		&a.WorkerWarmSpares, &a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	a.AutoscaleEnabled = autoscaleEnabledInt != 0
+	a.EphemeralDataAck = ephemeralDataAckInt != 0
+	if projectSlug.Valid {
+		a.ProjectSlug = projectSlug.String
 	}
 	return &a, nil
 }

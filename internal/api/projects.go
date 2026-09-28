@@ -77,10 +77,12 @@ func (s *Server) scopedProjects(u *auth.ContextUser) ([]*db.ProjectListItem, err
 		apps []*db.App
 		err  error
 	)
+	// ListAppsLean: the loop below reads only a.ProjectSlug and a.Slug, never a
+	// deployment-derived field.
 	if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
-		apps, err = s.store.ListApps(0, 0)
+		apps, err = s.store.ListAppsLean(0, 0)
 	} else {
-		apps, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
+		apps, err = s.store.ListAppsVisibleToUserLean(u.ID, 0, 0)
 	}
 	if err != nil {
 		return nil, err

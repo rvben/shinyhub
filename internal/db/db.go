@@ -143,6 +143,28 @@ func (s *Store) SetAuditErrorHook(hook func()) {
 	s.auditErrHook = hook
 }
 
+// ObserveQueries installs fn to receive the rebound SQL text of every query
+// issued directly through the store's connection pool (Exec/Query/QueryRow
+// and their Context variants), and returns a restore func that puts back
+// whatever observer was installed before this call (nil if there was none).
+// It is test-only: production code never calls it. Queries run inside a
+// transaction (boundTx) or a dedicated write connection (boundConn) are not
+// observed, since no listing query in this codebase runs inside either.
+//
+// fn may be called concurrently with itself from multiple goroutines; callers
+// that mutate shared state from fn must synchronize it themselves.
+func (s *Store) ObserveQueries(fn func(sql string)) (restore func()) {
+	prev := s.db.observer.Load()
+	if fn == nil {
+		s.db.observer.Store(nil)
+	} else {
+		s.db.observer.Store(&fn)
+	}
+	return func() {
+		s.db.observer.Store(prev)
+	}
+}
+
 // SetAppLogMetrics registers instrumentation for subsequently created shared
 // app-log writers and followers. Existing pipelines retain the recorder they
 // were created with, so callers should wire this once during startup.
