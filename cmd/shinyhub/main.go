@@ -2225,6 +2225,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		return deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem),
 			deploy.ResolveCPUQuotaPercent(app.CPUQuotaPercent, defaultCPU)
 	})
+	// Trace scheduled runs with the server's tracer so each run's
+	// schedule.run span and the job's own spans share one trace.
+	if tracer != nil {
+		jobsMgr.SetTracing(cfg.Tracing, tracer.Tracer())
+	}
 	sched := scheduler.New(jobsMgr, store, cfg.Scheduler.Location)
 	srv.SetJobs(jobsMgr, sched)
 	activationCoordinator := activation.New(store, srv, 2*time.Second)
@@ -2962,11 +2967,6 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			slog.Warn("metrics shutdown", "err", err)
 		}
 	}
-	if tracer != nil {
-		if err := tracer.Shutdown(shutdownCtx); err != nil {
-			slog.Warn("tracer shutdown", "err", err)
-		}
-	}
 	// Stop and join the Elector. Its synchronous OnLose callback cancels the
 	// owner span and waits for the watcher/scheduler/monitor/autoscaler to exit
 	// before Run returns, so jobs and the store remain valid through handoff.
@@ -3014,6 +3014,17 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		} else {
 			slog.Info("upgraded connections drained cleanly")
 		}
+	}
+	// The tracer closes after every span producer (lifecycle watcher, job
+	// runs, proxied requests and upgraded sessions) has stopped, so spans
+	// ended during shutdown are exported. The flush gets its own bounded
+	// context because the steps above may have spent shutdownCtx.
+	if tracer != nil {
+		flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := tracer.Shutdown(flushCtx); err != nil {
+			slog.Warn("tracer shutdown", "err", err)
+		}
+		cancelFlush()
 	}
 	if stopUsage != nil {
 		stopUsage()

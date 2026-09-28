@@ -9,15 +9,24 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/appenv"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/schedulespec"
+	"github.com/rvben/shinyhub/internal/spanerr"
 	"github.com/rvben/shinyhub/internal/storage"
+	"github.com/rvben/shinyhub/internal/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sys/unix"
 )
 
@@ -141,6 +150,15 @@ type Manager struct {
 	// arbitrarily long without turning a successful run into lost activation.
 	terminalCtx    context.Context
 	terminalCancel context.CancelFunc
+
+	// traceCfg and tracer enable per-run tracing; set once via SetTracing
+	// before any run. A nil tracer or a disabled config means no OTEL_* env,
+	// no TRACEPARENT and no span.
+	traceCfg config.TracingConfig
+	tracer   trace.Tracer
+	// runSpans holds the open schedule.run span per run id from row
+	// insertion to finishRun, the terminal point every running row reaches.
+	runSpans sync.Map // int64 -> trace.Span
 }
 
 // ErrManagerStopped is returned by Run once Stop has been called.
@@ -218,6 +236,75 @@ func NewManager(procMgr *process.Manager, tierOrder []string, defaultTier string
 // app's replicas. Call once at startup before any run is dispatched.
 func (m *Manager) SetResourceResolver(fn func(app *db.App) (memoryMB, cpuPct int)) {
 	m.resolveResources = fn
+}
+
+// SetTracing enables per-run tracing: each run gets the fleet OTEL_* env
+// (service name = app slug, tagged with the schedule and run id) and a
+// schedule.run root span whose context reaches the process as TRACEPARENT,
+// so job code that extracts it nests its spans under the run. Call before
+// any run; not safe concurrently with runs.
+func (m *Manager) SetTracing(cfg config.TracingConfig, tr trace.Tracer) {
+	m.traceCfg, m.tracer = cfg, tr
+}
+
+// startRunSpan opens runID's schedule.run span. It is called right after the
+// running row is inserted, so the span covers the whole admitted lifetime,
+// including time spent waiting on the per-schedule lock or execution fences.
+func (m *Manager) startRunSpan(sched *db.Schedule, app *db.App, deploymentID, runID int64, trigger string) {
+	if m.tracer == nil || !m.traceCfg.Enabled {
+		return
+	}
+	_, span := m.tracer.Start(context.Background(), "schedule.run",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("shinyhub.app.slug", app.Slug),
+			attribute.String("shinyhub.schedule.name", sched.Name),
+			attribute.Int64("shinyhub.schedule.id", sched.ID),
+			attribute.Int64("shinyhub.schedule.run_id", runID),
+			attribute.String("shinyhub.schedule.trigger", trigger),
+			attribute.Int64("shinyhub.deployment.id", deploymentID),
+		))
+	m.runSpans.Store(runID, span)
+}
+
+// endRunSpan ends runID's span once; later calls are no-ops. persistErr is
+// nil when the terminal row was written; otherwise the span records that the
+// row was not (it disappeared, or shutdown abandoned the write), so a trace
+// never claims a terminal state the database does not hold. The store error is
+// reduced by spanerr first, since database error text can carry a connection
+// string and run long.
+func (m *Manager) endRunSpan(runID int64, status string, exitCode *int, persistErr error) {
+	v, ok := m.runSpans.LoadAndDelete(runID)
+	if !ok {
+		return
+	}
+	span := v.(trace.Span)
+	span.SetAttributes(
+		attribute.String("shinyhub.schedule.status", status),
+		attribute.Bool("shinyhub.schedule.persisted", persistErr == nil),
+	)
+	if exitCode != nil {
+		span.SetAttributes(attribute.Int("process.exit.code", *exitCode))
+	}
+	switch {
+	case persistErr != nil:
+		span.SetStatus(codes.Error, spanerr.Text("terminal status not persisted: "+persistErr.Error()))
+	case status != "succeeded":
+		span.SetStatus(codes.Error, status)
+	}
+	span.End()
+}
+
+// dropEnvKeys returns env without entries whose key is one of keys.
+func dropEnvKeys(env []string, keys ...string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		if !slices.Contains(keys, k) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // SetScheduleMetrics wires the metrics recorder that finishRun pushes terminal
@@ -722,7 +809,7 @@ func (m *Manager) runRequired(sched *db.Schedule, app *db.App, deployment *db.De
 		admission.Unlock()
 		return 0, fmt.Errorf("deployment %d is no longer current", deployment.ID)
 	}
-	runID, err := m.insertDeployRunRow(sched, deployment, obligation)
+	runID, err := m.insertDeployRunRow(sched, app, deployment, obligation)
 	if err != nil {
 		admission.Unlock()
 		return 0, err
@@ -795,7 +882,7 @@ func (m *Manager) runWithSkip(sched *db.Schedule, app *db.App, deployment *db.De
 // runWithOwnedSlot transfers an already-acquired execution slot to the run.
 func (m *Manager) runWithOwnedSlot(sched *db.Schedule, app *db.App, deployment *db.Deployment, trigger string, userID *int64, gate *sync.RWMutex, slot *schedLock) (int64, error) {
 
-	runID, err := m.insertRunRow(sched, deployment, trigger, userID)
+	runID, err := m.insertRunRow(sched, app, deployment, trigger, userID)
 	if err != nil {
 		slot.unlock()
 		gate.RUnlock()
@@ -849,7 +936,7 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, deployment *db.D
 	// here in the caller's goroutine. This locks in admission order before
 	// any goroutine is launched.
 	if slot.tryLock() {
-		runID, err := m.insertRunRow(sched, deployment, trigger, userID)
+		runID, err := m.insertRunRow(sched, app, deployment, trigger, userID)
 		if err != nil {
 			slot.unlock()
 			gate.RUnlock()
@@ -882,7 +969,7 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, deployment *db.D
 		return m.recordSkipped(sched, deployment, trigger, userID)
 	}
 
-	runID, err := m.insertRunRow(sched, deployment, trigger, userID)
+	runID, err := m.insertRunRow(sched, app, deployment, trigger, userID)
 	if err != nil {
 		<-sem
 		gate.RUnlock()
@@ -927,7 +1014,7 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, deployment *db.D
 // runConcurrent allows ordinary runs to overlap one another; the shared
 // producer gate still excludes required convergence work.
 func (m *Manager) runConcurrent(sched *db.Schedule, app *db.App, deployment *db.Deployment, trigger string, userID *int64, gate *sync.RWMutex) (int64, error) {
-	runID, err := m.insertRunRow(sched, deployment, trigger, userID)
+	runID, err := m.insertRunRow(sched, app, deployment, trigger, userID)
 	if err != nil {
 		gate.RUnlock()
 		return 0, err
@@ -1268,7 +1355,7 @@ func (m *Manager) RunCandidateProducerLocked(sched *db.Schedule, app *db.App, de
 	// live. The normal policy remains on the persisted declaration for later
 	// cron/manual runs.
 	snapshot.OnSuccess = "none"
-	runID, err := m.insertRunRow(&snapshot, deployment, "deploy", nil)
+	runID, err := m.insertRunRow(&snapshot, app, deployment, "deploy", nil)
 	if err != nil {
 		return 0, err
 	}
@@ -1303,14 +1390,15 @@ func (m *Manager) buildRunContext() (context.Context, context.CancelFunc) {
 	return context.WithCancel(context.Background())
 }
 
-// insertRunRow creates a schedule_runs row with status "running" and returns its ID.
-func (m *Manager) insertRunRow(sched *db.Schedule, deployment *db.Deployment, trigger string, userID *int64) (int64, error) {
+// insertRunRow creates a schedule_runs row with status "running", opens the
+// run's span, and returns its ID.
+func (m *Manager) insertRunRow(sched *db.Schedule, app *db.App, deployment *db.Deployment, trigger string, userID *int64) (int64, error) {
 	canonical, fingerprint, err := schedulespec.ProducerIdentity(sched.CommandJSON)
 	if err != nil {
 		return 0, err
 	}
 	deploymentID := deployment.ID
-	return m.store.InsertScheduleRun(db.InsertScheduleRunParams{
+	runID, err := m.store.InsertScheduleRun(db.InsertScheduleRunParams{
 		ScheduleID:             sched.ID,
 		Status:                 "running",
 		Trigger:                trigger,
@@ -1328,12 +1416,19 @@ func (m *Manager) insertRunRow(sched *db.Schedule, deployment *db.Deployment, tr
 		ProducerCommandJSON:    canonical,
 		PublishesData:          schedulePublishesData(sched, trigger),
 	})
+	if err != nil {
+		return 0, err
+	}
+	m.startRunSpan(sched, app, deployment.ID, runID, trigger)
+	return runID, nil
 }
 
-func (m *Manager) insertDeployRunRow(sched *db.Schedule, deployment *db.Deployment, obligation *db.ScheduleDeployObligation) (int64, error) {
+// insertDeployRunRow creates the running row for a deploy obligation, opens
+// the run's span, and returns its ID.
+func (m *Manager) insertDeployRunRow(sched *db.Schedule, app *db.App, deployment *db.Deployment, obligation *db.ScheduleDeployObligation) (int64, error) {
 	deploymentID := deployment.ID
 	obligationID := obligation.ID
-	return m.store.InsertDeployScheduleRun(db.InsertScheduleRunParams{
+	runID, err := m.store.InsertDeployScheduleRun(db.InsertScheduleRunParams{
 		ScheduleID:             sched.ID,
 		Status:                 "running",
 		Trigger:                "deploy",
@@ -1350,6 +1445,11 @@ func (m *Manager) insertDeployRunRow(sched *db.Schedule, deployment *db.Deployme
 		PublishesData:          true,
 		DeployObligationID:     &obligationID,
 	})
+	if err != nil {
+		return 0, err
+	}
+	m.startRunSpan(sched, app, deployment.ID, runID, "deploy")
+	return runID, nil
 }
 
 // recordSkipped inserts a run row and immediately finishes it with
@@ -1516,6 +1616,26 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		slog.Error("schedule run: secret decrypt failed", "schedule", sched.ID, "run", runID, "err", err)
 		m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
 		return
+	}
+	if v, ok := m.runSpans.Load(runID); ok {
+		// Platform OTEL_* defaults go first so per-app values win under
+		// last-occurrence-wins.
+		env = append(tracing.JobEnvFor(m.traceCfg, app.Slug, sched.Name, runID), env...)
+		carrier := propagation.MapCarrier{}
+		propagation.TraceContext{}.Inject(trace.ContextWithSpan(context.Background(), v.(trace.Span)), carrier)
+		// TRACEPARENT goes last: it identifies this run, so a static per-app
+		// value would be wrong.
+		if tp := carrier.Get("traceparent"); tp != "" {
+			env = append(env, "TRACEPARENT="+tp)
+		}
+		// An empty TRACESTATE overrides a static per-app value, which would
+		// otherwise pair a foreign vendor state with this run's trace.
+		env = append(env, "TRACESTATE="+carrier.Get("tracestate"))
+		// Runtimes inject SecretEnv after Env (native.go, docker.go), so a
+		// per-app secret named TRACEPARENT or TRACESTATE would shadow the
+		// run's values under last-occurrence-wins. Drop them, mirroring
+		// dropReservedKeys in process.Manager.Start, which jobs bypass.
+		secretEnv = dropEnvKeys(secretEnv, "TRACEPARENT", "TRACESTATE")
 	}
 
 	// Build shared mounts.
@@ -1738,6 +1858,7 @@ func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exit
 		// retrying ErrNotFound would hang scheduler shutdown forever.
 		if errors.Is(err, db.ErrNotFound) {
 			slog.Info("schedule run: terminal target disappeared", "schedule_id", sched.ID, "run_id", runID)
+			m.endRunSpan(runID, status, exitCode, err)
 			return
 		}
 		timer := time.NewTimer(retryDelay)
@@ -1758,9 +1879,13 @@ func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exit
 			}
 			slog.Error("schedule run: terminal persistence abandoned at shutdown",
 				"schedule_id", sched.ID, "run_id", runID, "status", status, "error", err)
+			m.endRunSpan(runID, status, exitCode, err)
 			return
 		}
 	}
+	// Ended here, not earlier, so the span's end time is the moment the row
+	// turned terminal.
+	m.endRunSpan(runID, status, exitCode, nil)
 	if dataWriteAttempted && status != "succeeded" && m.onUnsafePublication != nil {
 		if app, appErr := m.store.GetAppByID(sched.AppID); appErr == nil {
 			m.onUnsafePublication(app.ID, app.Slug, status)
