@@ -649,6 +649,96 @@ func (s *ElasticSpawner) Terminate(slug string, slotID int) {
 	s.Proxy.ReconcileElasticWarmSpares(slug)
 }
 
+// ElasticTerminateResult reports the outcome of TerminateConfirmed for one
+// elastic worker slot, plus the identity captured before the stop was
+// attempted. A caller that could not finish (Stopped or IdentityCleared
+// false) needs these fields to retry: once the stop is confirmed the manager
+// entry is removed, so a retry can no longer discover them via GetReplica.
+type ElasticTerminateResult struct {
+	Slug         string
+	SlotID       int
+	AppID        int64
+	DeploymentID int64
+	PID          int
+	// Incarnation is the manager occupancy the stop targeted, so a retry of
+	// an unconfirmed stop signals that exact process and never a later
+	// occupant of the same slot. Zero when the slot was already empty.
+	Incarnation     uint64
+	Native          bool
+	Stopped         bool
+	IdentityCleared bool
+	Err             error
+}
+
+// TerminateConfirmed stops the elastic worker at slug/slotID the way
+// Terminate does (cancel its lifetime timer, deregister it from the proxy,
+// reconcile warm spares), but unlike Terminate it blocks for a CONFIRMED exit
+// on every tier and reports the outcome instead of swallowing it. Terminate's
+// stopWorker only confirms native workers - a non-native StopReplica can
+// return nil before the process has actually exited - so a caller that must
+// know the worker is truly gone before proceeding (hibernation, which is
+// about to let the pool it belonged to be torn down) cannot use it.
+//
+// The worker's identity is captured from GetReplica before the stop is
+// attempted: once the stop is confirmed the manager entry is
+// gone, so a caller retrying an incomplete result must carry the identity
+// forward itself rather than looking it up again.
+func (s *ElasticSpawner) TerminateConfirmed(slug string, slotID int) ElasticTerminateResult {
+	result := ElasticTerminateResult{Slug: slug, SlotID: slotID}
+
+	info, ok := s.Manager.GetReplica(slug, slotID)
+	if !ok {
+		// Nothing to stop and nothing to clear: either the slot was never
+		// occupied, or a previous call already finished both halves.
+		result.Stopped = true
+		result.IdentityCleared = true
+		return result
+	}
+	result.AppID = info.AppID
+	result.DeploymentID = info.DeploymentID
+	result.PID = info.PID
+	_, result.Native = s.Manager.RuntimeForTier(info.Tier).(*process.NativeRuntime)
+
+	if s.TerminateHook != nil {
+		s.TerminateHook(slug, slotID)
+	}
+	s.CancelLifetime(slug, slotID)
+
+	// The stop, and any retry of it, targets the exact incarnation GetReplica
+	// saw. A slot that is empty or holds a different process by now means that
+	// one already left it, so there is nothing of ours to signal.
+	if gen, pid, ok := s.Manager.ReplicaIncarnation(slug, slotID); !ok || pid != info.PID {
+		result.Stopped = true
+	} else {
+		result.Incarnation = gen
+		switch err := s.Manager.StopReplicaIncarnation(slug, slotID, gen); {
+		case err == nil, errors.Is(err, process.ErrIncarnationGone):
+			result.Stopped = true
+		default:
+			result.Err = err
+		}
+	}
+
+	if result.Stopped {
+		if result.Native {
+			if derr := s.Store.DeleteDeploymentReplicaIdentity(result.AppID, result.DeploymentID, slotID, result.PID); derr != nil {
+				result.Err = derr
+			} else {
+				result.IdentityCleared = true
+			}
+		} else {
+			// Non-native (Docker/Fargate) workers carry no deployment replica
+			// identity row by design; their restart durability is the
+			// startup orphan sweep, not this row.
+			result.IdentityCleared = true
+		}
+	}
+
+	s.Proxy.DeregisterElasticWorker(slug, slotID)
+	s.Proxy.ReconcileElasticWarmSpares(slug)
+	return result
+}
+
 // ReapElasticOrphans stops any processes the Manager knows about that belong
 // to elastic-mode apps. Elastic workers are ephemeral and are not persisted to
 // the replicas table, so on a restart the new Manager starts fresh. If any

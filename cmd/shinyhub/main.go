@@ -2021,6 +2021,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	prx.SetWarmSpareConsumedFunc(elasticSpawner.WarmSpareConsumed)
 	prx.SetTerminateFunc(elasticSpawner.Terminate)
 	prx.SetCancelElasticLifetimeFunc(elasticSpawner.CancelLifetime)
+	// The watcher's hibernation sweep stops elastic worker slots through the
+	// same confirmed-exit path as a demand-driven terminate, so it needs the
+	// spawner too. Wired here because elasticSpawner does not exist yet when
+	// the watcher is constructed above.
+	watcher.SetElasticTerminator(elasticSpawner)
 
 	// Host-memory admission floor for elastic pools: while MemAvailable is
 	// below the configured floor, new worker allocation is shed (503) instead

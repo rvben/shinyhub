@@ -121,3 +121,50 @@ func TestGroupedRetirementCancelsLifetimeBeforeSlotReuse(t *testing.T) {
 		})
 	}
 }
+
+// TestElasticHibernate_OldLifetimeBackstopDoesNotTerminateNewWorker covers
+// the hibernate/wake counterpart of TestGroupedRetirementCancelsLifetime
+// BeforeSlotReuse's epoch-fence case: a lifetime timer armed before hibernate
+// that is never explicitly cancelled (the watcher's real hibernate path does
+// cancel it via TerminateConfirmed, but this proves the fence holds even when
+// that does not happen, e.g. a stop that raced the timer) must not reach past
+// BeginHibernate's epoch bump and terminate a worker that starts after wake.
+// Before that bump, BeginHibernate left the pool epoch unchanged across
+// hibernate/wake, so a stale backstop's epoch check passed and it tore down
+// whatever now occupied its slot.
+func TestElasticHibernate_OldLifetimeBackstopDoesNotTerminateNewWorker(t *testing.T) {
+	p := proxy.New()
+	p.SetPoolMode("app", config.IsolationGrouped, 4, 4)
+	if err := p.RegisterElasticWorker("app", 0, "http://old/", nil, 10); err != nil {
+		t.Fatal(err)
+	}
+	s := &ElasticSpawner{Proxy: p, Manager: process.NewManager(t.TempDir(), process.NewNativeRuntime())}
+	s.armLifetime(&db.App{WorkerMaxSessionLifetimeSecs: 3600}, "app", 0)
+	defer s.CancelLifetime("app", 0)
+	v, ok := s.lifetimeTimers.Load("app/0")
+	if !ok {
+		t.Fatal("old worker has no lifetime timer")
+	}
+	old := v.(*elasticLifetime)
+	// Trigger expiration deterministically instead of waiting out the real
+	// AfterFunc: stop the timer and invoke its callback body directly.
+	old.timer.Stop()
+
+	if !p.BeginHibernate("app", time.Now()) {
+		t.Fatal("BeginHibernate refused to hibernate a genuinely idle elastic pool")
+	}
+	// Wake and spawn: the watcher rebuilds the pool via SetPoolMode and a
+	// fresh worker registers into it, the way a demand spawn does.
+	p.SetPoolMode("app", config.IsolationGrouped, 4, 4)
+	if err := p.RegisterElasticWorker("app", 0, "http://new/", nil, 20); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pre-hibernate backstop fires late, landing after wake and the new
+	// worker's registration.
+	s.expireLifetime("app", 0, old)
+
+	if p.ElasticWorkerCount("app") != 1 {
+		t.Fatal("stale lifetime backstop from the pre-hibernate generation terminated the post-wake worker")
+	}
+}

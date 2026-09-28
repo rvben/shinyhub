@@ -330,3 +330,57 @@ func TestWatcher_RunOnce_PendingStopFencesReconcileReplicas(t *testing.T) {
 		t.Fatalf("StopReplicaIncarnation called %d times, want 1 (runOnce must still retry the pending stop this tick)", calls)
 	}
 }
+
+// TestWatcher_RetryPendingStop_FailedLogRunCloseIsRetriedWithoutFencing pins
+// that a confirmed stop whose terminal log-run write fails is not lost: the
+// slot is released at once (the exit is proven and recorded on the replica
+// row), and the run verdict alone is retried on the next tick. The release
+// must also precede the write, because releasing lets the manager re-persist
+// its own failed run record, which would otherwise overwrite this verdict.
+func TestWatcher_RetryPendingStop_FailedLogRunCloseIsRetriedWithoutFencing(t *testing.T) {
+	mgr := &fakeManager{}
+	st := newFakeStore(map[string]*db.App{"myapp": {ID: 1, Slug: "myapp", Status: "running", Replicas: 1}}, nil)
+	pid := 4242
+	st.replicas = map[int64][]*db.Replica{
+		1: {{AppID: 1, Index: 0, PID: &pid, Status: "running"}},
+	}
+	st.finishLogRunErr = errors.New("database unavailable")
+	var releasesAtFinish []int
+	st.onFinishLogRun = func(string) {
+		mgr.mu.Lock()
+		releasesAtFinish = append(releasesAtFinish, len(mgr.releaseStopPendingCalls))
+		mgr.mu.Unlock()
+	}
+	w := newTestWatcher(Config{}, mgr, newFakeProxy(), st, nil)
+
+	w.QueuePendingStop(PendingStopEntry{Slug: "myapp", Index: 0, AppID: 1, PID: pid, Incarnation: 3, Reason: "r", LogRunID: "run-1"})
+
+	w.processPendingStops()
+
+	if w.isPendingStop(replicaKey{"myapp", 0}) {
+		t.Fatal("entry still queued after a confirmed, recorded stop; a log-run write failure must not fence the slot")
+	}
+	if len(releasesAtFinish) != 1 || releasesAtFinish[0] != 1 {
+		t.Fatalf("ReleaseStopPending calls seen at each log-run write = %v, want [1] (release before the verdict write)", releasesAtFinish)
+	}
+
+	st.mu.Lock()
+	st.finishLogRunErr = nil
+	st.mu.Unlock()
+	w.processPendingStops()
+
+	st.mu.Lock()
+	finished := append([]string(nil), st.finishedLogRuns...)
+	st.mu.Unlock()
+	if len(finished) != 1 || finished[0] != "run-1" {
+		t.Fatalf("FinishAppLogRunWithExit successes = %v, want exactly [run-1] once the store recovered", finished)
+	}
+
+	w.processPendingStops()
+	st.mu.Lock()
+	finished = append([]string(nil), st.finishedLogRuns...)
+	st.mu.Unlock()
+	if len(finished) != 1 {
+		t.Fatalf("FinishAppLogRunWithExit successes = %v, want the retry dropped after it succeeded", finished)
+	}
+}

@@ -33,7 +33,7 @@ func (p *Proxy) SetPoolIdentityHeaders(slug string, enabled bool) {
 	p.mu.Lock()
 	pool, ok := p.pools[slug]
 	if !ok {
-		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		pool = p.newBackendPoolLocked(slug, 1)
 		p.pools[slug] = pool
 	}
 	p.mu.Unlock()

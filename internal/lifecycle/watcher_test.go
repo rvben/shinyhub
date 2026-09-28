@@ -1,12 +1,16 @@
 package lifecycle
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -49,8 +53,40 @@ type fakeManager struct {
 	stopIncarnationErrs map[replicaKey][]error
 	// stopIncarnationCalls records every StopReplicaIncarnation call.
 	stopIncarnationCalls []stopIncarnationCall
+	// stopIncarnationBudgets records the budget of every
+	// StopReplicaIncarnationWithin call; those calls are also recorded in
+	// stopIncarnationCalls and consume stopIncarnationErrs.
+	stopIncarnationBudgets []time.Duration
+	// stopIncarnationDelay makes every StopReplicaIncarnationWithin call
+	// take this long, standing in for a retry that spends its whole budget.
+	stopIncarnationDelay time.Duration
 	// releaseStopPendingCalls records every ReleaseStopPending call.
 	releaseStopPendingCalls []stopIncarnationCall
+
+	// stopConfirmedErrs scripts StopReplicaConfirmed(slug,index) by call order
+	// per key, same convention as stopIncarnationErrs. On a nil (unscripted or
+	// exhausted) result, the matching entry is removed from entries, modeling
+	// a real confirmed stop; a later call for the same key then finds no entry
+	// and returns process.ErrReplicaNotFound, matching stopReplicaEntryImpl's
+	// "already gone" path.
+	stopConfirmedErrs map[replicaKey][]error
+	// stopConfirmedCalls records every StopReplicaConfirmed call.
+	stopConfirmedCalls []replicaKey
+	// nativeTiers marks which Tier values RuntimeForTier reports as backed by
+	// *process.NativeRuntime, so a caller doing the same type assertion
+	// TerminateConfirmed does (RuntimeForTier(tier).(*process.NativeRuntime))
+	// gets a real *process.NativeRuntime instance for a "native" tier and
+	// something else otherwise. Defaults (nil map) to every tier being native,
+	// matching the common single-tier native test setup.
+	nativeTiers map[string]bool
+
+	// incarnations optionally scripts the generation ReplicaIncarnation
+	// reports for a key; an unset (zero-value) key defaults to generation 1,
+	// matching a freshly started replica in the real manager. A test that
+	// wants ReplicaIncarnation to report no live entry (ok=false) simply
+	// leaves that key out of entries, exactly like the real manager's
+	// empty-slot case.
+	incarnations map[replicaKey]uint64
 
 	// claimStopPendingFails optionally scripts ClaimStopPending(slug,index,gen)
 	// to report false (the fence resolved some other way between the failed
@@ -131,6 +167,17 @@ func (f *fakeManager) StopReplicaIncarnation(slug string, index int, gen uint64)
 	return err
 }
 
+func (f *fakeManager) StopReplicaIncarnationWithin(slug string, index int, gen uint64, budget time.Duration) error {
+	f.mu.Lock()
+	delay := f.stopIncarnationDelay
+	f.stopIncarnationBudgets = append(f.stopIncarnationBudgets, budget)
+	f.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	return f.StopReplicaIncarnation(slug, index, gen)
+}
+
 func (f *fakeManager) ReleaseStopPending(slug string, index int, gen uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -143,6 +190,104 @@ func (f *fakeManager) ClaimStopPending(slug string, index int, gen uint64) bool 
 	k := replicaKey{slug, index}
 	f.claimStopPendingCalls = append(f.claimStopPendingCalls, stopIncarnationCall{slug, index, gen})
 	return !f.claimStopPendingFails[k]
+}
+
+func (f *fakeManager) AllForSlug(slug string) []*process.ProcessInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*process.ProcessInfo
+	for _, e := range f.entries {
+		if e != nil && e.Slug == slug {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (f *fakeManager) StopReplicaConfirmed(slug string, index int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := replicaKey{slug, index}
+	f.stopConfirmedCalls = append(f.stopConfirmedCalls, k)
+
+	pos := -1
+	for i, e := range f.entries {
+		if e != nil && e.Slug == slug && e.Index == index {
+			pos = i
+			break
+		}
+	}
+	if pos == -1 {
+		return process.ErrReplicaNotFound
+	}
+
+	errs := f.stopConfirmedErrs[k]
+	if len(errs) > 0 {
+		err := errs[0]
+		f.stopConfirmedErrs[k] = errs[1:]
+		return err
+	}
+	f.entries = append(f.entries[:pos], f.entries[pos+1:]...)
+	return nil
+}
+
+// fakeNativeRuntime is returned by RuntimeForTier for a tier marked native in
+// nativeTiers (or every tier, absent an explicit map): a real
+// *process.NativeRuntime so a caller's own type assertion against that
+// concrete type behaves as it would against the production manager.
+var fakeNativeRuntime = process.NewNativeRuntime()
+
+// stubNonNativeRuntime is a minimal process.Runtime whose only purpose is to
+// be a concrete type other than *process.NativeRuntime, so RuntimeForTier can
+// report a tier as non-native to a caller doing the same
+// RuntimeForTier(tier).(*process.NativeRuntime) assertion TerminateConfirmed
+// does. None of its methods are exercised by these tests.
+type stubNonNativeRuntime struct{}
+
+func (stubNonNativeRuntime) Start(context.Context, process.StartParams, io.Writer) (process.ReplicaEndpoint, error) {
+	return process.ReplicaEndpoint{}, nil
+}
+func (stubNonNativeRuntime) Signal(process.RunHandle, syscall.Signal) error { return nil }
+func (stubNonNativeRuntime) Wait(context.Context, process.RunHandle) error  { return nil }
+func (stubNonNativeRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
+	return nil, 0, nil
+}
+func (stubNonNativeRuntime) RunOnce(context.Context, process.StartParams, io.Writer) (process.ExitInfo, error) {
+	return process.ExitInfo{}, nil
+}
+func (stubNonNativeRuntime) HostPreparesDeps() bool    { return false }
+func (stubNonNativeRuntime) AppBindHost() string       { return "0.0.0.0" }
+func (stubNonNativeRuntime) HostProvidesAppData() bool { return true }
+
+// fakeNonNativeRuntime is returned by RuntimeForTier for a tier explicitly
+// marked non-native in nativeTiers.
+var fakeNonNativeRuntime process.Runtime = stubNonNativeRuntime{}
+
+func (f *fakeManager) RuntimeForTier(tier string) process.Runtime {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nativeTiers == nil {
+		return fakeNativeRuntime
+	}
+	if f.nativeTiers[tier] {
+		return fakeNativeRuntime
+	}
+	return fakeNonNativeRuntime
+}
+
+func (f *fakeManager) ReplicaIncarnation(slug string, index int) (gen uint64, pid int, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, e := range f.entries {
+		if e != nil && e.Slug == slug && e.Index == index {
+			gen := f.incarnations[replicaKey{slug, index}]
+			if gen == 0 {
+				gen = 1
+			}
+			return gen, e.PID, true
+		}
+	}
+	return 0, 0, false
 }
 
 // registeredBackend records one RegisterReplica call: which slot's route was
@@ -310,6 +455,41 @@ type fakeStore struct {
 	finishedLogRuns []string
 	// finishLogRunErr, when set, is returned by FinishAppLogRunWithExit.
 	finishLogRunErr error
+	// onFinishLogRun, when set, is called (outside mu) at the start of every
+	// FinishAppLogRunWithExit, so a test can observe call ordering.
+	onFinishLogRun func(runID string)
+
+	// deleteDeploymentReplicaIdentityErr, when set, is returned by
+	// DeleteDeploymentReplicaIdentity without recording the call as applied.
+	deleteDeploymentReplicaIdentityErr error
+	// deletedDeploymentReplicaIdentities records every DeleteDeploymentReplicaIdentity
+	// call that did not error.
+	deletedDeploymentReplicaIdentities []deleteDeploymentReplicaIdentityCall
+}
+
+// deleteDeploymentReplicaIdentityCall records one
+// DeleteDeploymentReplicaIdentity invocation for assertions.
+type deleteDeploymentReplicaIdentityCall struct {
+	appID        int64
+	deploymentID int64
+	index        int
+	pid          int
+}
+
+// DeleteDeploymentReplicaIdentity mirrors the real store's idempotent,
+// PID-conditional delete: it is safe to call repeatedly (already-deleted or
+// never-existed rows are not errors), so this fake only records successful
+// calls rather than modelling row state.
+func (f *fakeStore) DeleteDeploymentReplicaIdentity(appID, deploymentID int64, index, pid int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteDeploymentReplicaIdentityErr != nil {
+		return f.deleteDeploymentReplicaIdentityErr
+	}
+	f.deletedDeploymentReplicaIdentities = append(f.deletedDeploymentReplicaIdentities, deleteDeploymentReplicaIdentityCall{
+		appID: appID, deploymentID: deploymentID, index: index, pid: pid,
+	})
+	return nil
 }
 
 // markCrashedClearingIdentityCall records one
@@ -359,6 +539,12 @@ func (f *fakeStore) MarkReplicaCrashedClearingIdentityIfCurrent(p db.UpsertRepli
 // FinishAppLogRunWithExit records the call; fakeStore has no app_log_runs
 // table so it does not otherwise track terminal state.
 func (f *fakeStore) FinishAppLogRunWithExit(runID, _ string, _ time.Time, _ bool, _ *int, _, _ string) error {
+	f.mu.Lock()
+	hook := f.onFinishLogRun
+	f.mu.Unlock()
+	if hook != nil {
+		hook(runID)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.finishLogRunErr != nil {
@@ -509,6 +695,16 @@ func (f *fakeStore) ListRecentDeployments(appID int64, n int) ([]*db.Deployment,
 		all = all[:n]
 	}
 	return all, nil
+}
+func (f *fakeStore) GetDeploymentByID(id int64) (*db.Deployment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, d := range f.deployments {
+		if d.ID == id {
+			return d, nil
+		}
+	}
+	return nil, db.ErrNotFound
 }
 func (f *fakeStore) UpsertReplica(p db.UpsertReplicaParams) error {
 	f.mu.Lock()
@@ -1285,6 +1481,342 @@ func TestHibernation_StopFailureDoesNotPersistHibernatedStatus(t *testing.T) {
 	for _, ur := range st.upsertedReplicas {
 		if ur.Status == "stopped" {
 			t.Errorf("expected no replica persisted as stopped after a failed Stop, got %+v", ur)
+		}
+	}
+}
+
+// fakeElasticTerminator scripts ElasticSpawner.TerminateConfirmed for the
+// elastic-hibernate tests. results queues one ElasticTerminateResult per call
+// for a given slug/slotID, popped front-to-back; once the queue for a key is
+// exhausted, calls to that key default to a confirmed, identity-cleared stop.
+type fakeElasticTerminator struct {
+	mu      sync.Mutex
+	calls   []replicaKey
+	results map[replicaKey][]ElasticTerminateResult
+	// during, when set, runs (outside mu) at the start of every call, so a
+	// test can hold a stop open or make it panic.
+	during func(slug string, slotID int)
+}
+
+func (f *fakeElasticTerminator) TerminateConfirmed(slug string, slotID int) ElasticTerminateResult {
+	if f.during != nil {
+		f.during(slug, slotID)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := replicaKey{slug, slotID}
+	f.calls = append(f.calls, k)
+	q := f.results[k]
+	if len(q) == 0 {
+		return ElasticTerminateResult{Slug: slug, SlotID: slotID, Stopped: true, IdentityCleared: true}
+	}
+	r := q[0]
+	f.results[k] = q[1:]
+	return r
+}
+
+// TestHibernation_ElasticPoolStopsWorkersConfirmedNoSuspendNoReplicaRows
+// covers hibernatePool's elastic branch: an app resolved to grouped/
+// per_session isolation with two live worker slots must never reach the
+// multiplex Suspend/replica-row path (a manager freeze/replica-row write
+// makes no sense for slots with no fixed index), and must stop every slot
+// through TerminateConfirmed instead.
+func TestHibernation_ElasticPoolStopsWorkersConfirmedNoSuspendNoReplicaRows(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "app", Index: 0, Status: process.StatusRunning, AppID: 1, DeploymentID: 5, PID: 111, Tier: "python"},
+		{Slug: "app", Index: 1, Status: process.StatusRunning, AppID: 1, DeploymentID: 5, PID: 112, Tier: "python"},
+	}}
+	prx := newFakeProxy()
+	prx.seen["app"] = time.Now().Add(-2 * time.Hour)
+	st := newFakeStore(
+		map[string]*db.App{"app": {
+			ID:              1,
+			Slug:            "app",
+			Status:          "running",
+			WorkerIsolation: string(config.IsolationGrouped),
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+	term := &fakeElasticTerminator{}
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetElasticTerminator(term)
+
+	w.runOnce()
+
+	if mgr.suspendCalls != 0 {
+		t.Errorf("expected Suspend not to be called for an elastic pool, got %d calls", mgr.suspendCalls)
+	}
+	wantCalls := map[replicaKey]bool{{"app", 0}: false, {"app", 1}: false}
+	for _, c := range term.calls {
+		if _, ok := wantCalls[c]; !ok {
+			t.Errorf("unexpected TerminateConfirmed call: %+v", c)
+			continue
+		}
+		wantCalls[c] = true
+	}
+	for k, seen := range wantCalls {
+		if !seen {
+			t.Errorf("expected TerminateConfirmed(%v), got none", k)
+		}
+	}
+	if len(st.upsertedReplicas) != 0 {
+		t.Errorf("expected no replica rows written for an elastic pool, got %+v", st.upsertedReplicas)
+	}
+	if got := st.appStatus["app"]; got != "hibernated" {
+		t.Errorf("app status = %q, want hibernated", got)
+	}
+	if len(w.pendingStops) != 0 {
+		t.Errorf("expected no pending stops when every TerminateConfirmed call reports done, got %v", w.pendingStops)
+	}
+}
+
+// TestHibernation_ElasticPoolQueuesUnconfirmedStopAndClearsOnRetry covers
+// Round 9 of the plan: a slot whose TerminateConfirmed call cannot confirm
+// the stop inline must not block the app's transition to hibernated (the
+// pool was already removed from routing by BeginHibernate, so leaving the
+// app "running" would strand it unroutable with nothing to trigger a retry).
+// Instead the slot is queued and the next tick's processPendingStops retries
+// it via the manager's StopReplicaIncarnation, clearing the deployment
+// replica identity row once the retry confirms.
+func TestHibernation_ElasticPoolQueuesUnconfirmedStopAndClearsOnRetry(t *testing.T) {
+	mgr := &fakeManager{entries: []*process.ProcessInfo{
+		{Slug: "app", Index: 0, Status: process.StatusRunning, AppID: 1, DeploymentID: 5, PID: 111, Tier: "python"},
+		{Slug: "app", Index: 1, Status: process.StatusRunning, AppID: 1, DeploymentID: 5, PID: 112, Tier: "python"},
+	}}
+	prx := newFakeProxy()
+	prx.seen["app"] = time.Now().Add(-2 * time.Hour)
+	st := newFakeStore(
+		map[string]*db.App{"app": {
+			ID:              1,
+			Slug:            "app",
+			Status:          "running",
+			WorkerIsolation: string(config.IsolationGrouped),
+			UpdatedAt:       time.Now().Add(-3 * time.Hour),
+		}},
+		nil,
+	)
+	term := &fakeElasticTerminator{
+		results: map[replicaKey][]ElasticTerminateResult{
+			{"app", 1}: {{
+				Slug: "app", SlotID: 1, AppID: 1, DeploymentID: 5, PID: 112, Native: true,
+				Stopped: false, IdentityCleared: false,
+			}},
+		},
+	}
+	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
+		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	w.SetElasticTerminator(term)
+
+	w.runOnce()
+
+	if got := st.appStatus["app"]; got != "hibernated" {
+		t.Errorf("app status = %q, want hibernated even with an unconfirmed slot still queued", got)
+	}
+	key := pendingStopKey{slug: "app", index: 1}
+	entry, queued := w.pendingStops[key]
+	if !queued {
+		t.Fatal("expected slot 1's unconfirmed stop to be queued in pendingStops")
+	}
+	if entry.Kind != pendingStopElasticHibernate || entry.AppID != 1 || entry.DeploymentID != 5 || entry.PID != 112 || !entry.Native {
+		t.Errorf("unexpected queued entry: %+v", entry)
+	}
+	st.mu.Lock()
+	if len(st.deletedDeploymentReplicaIdentities) != 0 {
+		st.mu.Unlock()
+		t.Fatalf("identity delete ran before the stop was confirmed: %+v", st.deletedDeploymentReplicaIdentities)
+	}
+	st.mu.Unlock()
+
+	// Next tick: the manager's StopReplicaIncarnation now finds the entry
+	// (still present in mgr.entries, since the terminator's unconfirmed result
+	// never removed it) and confirms it, so the retry clears both halves.
+	w.processPendingStops()
+
+	if _, stillQueued := w.pendingStops[key]; stillQueued {
+		t.Error("expected slot 1 to be dequeued once the retry confirmed the stop")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	found := false
+	for _, d := range st.deletedDeploymentReplicaIdentities {
+		if d.appID == 1 && d.deploymentID == 5 && d.index == 1 && d.pid == 112 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected DeleteDeploymentReplicaIdentity(1, 5, 1, 112) after the retry confirmed, got %+v", st.deletedDeploymentReplicaIdentities)
+	}
+}
+
+// startTestNativeProcess launches a real process-group leader so a
+// pendingStopElasticRecovery retry has an actual PID to signal and confirm
+// against, rather than a synthetic one. The caller kills it directly (via its
+// process group) once the "already stopped" half of the test needs a real
+// exit to observe.
+func startTestNativeProcess(t *testing.T) (int, <-chan error) {
+	t.Helper()
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skipf("sleep unavailable: %v", err)
+	}
+	cmd := exec.Command(sleep, "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start native test process: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Errorf("native test process %d did not exit", cmd.Process.Pid)
+		}
+	})
+	return cmd.Process.Pid, done
+}
+
+// TestWatcher_ElasticRecoveryPendingStopRetriesUntilConfirmed drives a
+// pendingStopElasticRecovery entry (queued by startup recovery for a native
+// elastic worker identity it could not confirm stopped) through the
+// watcher's own retry loop, independent of RecoverProcesses. The first tick
+// must not touch the still-live process at all - here the entry's recorded
+// deployment cannot be looked up, so stopRecordedNativeReplica fails closed
+// before ever sending a signal - and the entry must stay queued. Only after
+// the process is actually gone does the same retry path confirm it and
+// delete the identity row.
+func TestWatcher_ElasticRecoveryPendingStopRetriesUntilConfirmed(t *testing.T) {
+	pid, done := startTestNativeProcess(t)
+
+	mgr := &fakeManager{}
+	prx := newFakeProxy()
+	st := newFakeStore(map[string]*db.App{}, nil) // no deployments: GetDeploymentByID always misses.
+	w := newTestWatcher(Config{}, mgr, prx, st,
+		func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+
+	w.QueuePendingStop(PendingStopEntry{
+		Kind: pendingStopElasticRecovery, Slug: "app", Index: 3,
+		AppID: 1, DeploymentID: 7, PID: pid,
+		Reason: "recorded native worker identity did not stop during recovery",
+	})
+
+	w.processPendingStops()
+
+	key := pendingStopKey{slug: "app", index: 3, deploymentID: 7}
+	if _, queued := w.pendingStops[key]; !queued {
+		t.Fatal("expected the entry to stay queued: its deployment cannot be looked up, so the stop is unconfirmable")
+	}
+	st.mu.Lock()
+	if len(st.deletedDeploymentReplicaIdentities) != 0 {
+		st.mu.Unlock()
+		t.Fatalf("identity delete ran before the stop was confirmed: %+v", st.deletedDeploymentReplicaIdentities)
+	}
+	st.mu.Unlock()
+	select {
+	case <-done:
+		t.Fatal("the unconfirmable first attempt must never signal the process")
+	default:
+	}
+
+	// The process actually exits now (unrelated to the retry, which never
+	// touched it), so the next attempt's liveness check alone confirms the
+	// stop without needing the recorded deployment at all.
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill test process: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("test process did not exit after SIGKILL")
+	}
+
+	w.processPendingStops()
+
+	if _, stillQueued := w.pendingStops[key]; stillQueued {
+		t.Error("expected the entry to be dequeued once the process was confirmed gone")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	found := false
+	for _, d := range st.deletedDeploymentReplicaIdentities {
+		if d.appID == 1 && d.deploymentID == 7 && d.index == 3 && d.pid == pid {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected DeleteDeploymentReplicaIdentity(1, 7, 3, %d) after confirmation, got %+v", pid, st.deletedDeploymentReplicaIdentities)
+	}
+}
+
+// TestWatcher_ElasticRecoveryPendingStopsKeepEveryGeneration queues two
+// unconfirmed elastic worker identities that share a slot index but belong to
+// different deployment generations, as recovery does when several retained
+// generations each recorded a worker at that index. Both must stay queued and
+// both identity rows must be deleted once their stops are confirmed; keying
+// the queue on the slot alone would let the second entry silently replace
+// the first, leaving that worker unretried and its row behind.
+func TestWatcher_ElasticRecoveryPendingStopsKeepEveryGeneration(t *testing.T) {
+	pidA, doneA := startTestNativeProcess(t)
+	pidB, doneB := startTestNativeProcess(t)
+	for _, p := range []struct {
+		pid  int
+		done <-chan error
+	}{{pidA, doneA}, {pidB, doneB}} {
+		if err := syscall.Kill(-p.pid, syscall.SIGKILL); err != nil {
+			t.Fatalf("kill test process: %v", err)
+		}
+		select {
+		case <-p.done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("test process did not exit after SIGKILL")
+		}
+	}
+
+	st := newFakeStore(map[string]*db.App{}, nil)
+	w := newTestWatcher(Config{}, &fakeManager{}, newFakeProxy(), st,
+		func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	for _, e := range []struct {
+		deploymentID int64
+		pid          int
+	}{{7, pidA}, {8, pidB}} {
+		w.QueuePendingStop(PendingStopEntry{
+			Kind: pendingStopElasticRecovery, Slug: "app", Index: 3,
+			AppID: 1, DeploymentID: e.deploymentID, PID: e.pid,
+			Reason: "recorded native worker identity did not stop during recovery",
+		})
+	}
+	if n := len(w.pendingStops); n != 2 {
+		t.Fatalf("queued entries = %d, want 2 (one per deployment generation)", n)
+	}
+	if !w.isPendingStop(replicaKey{"app", 3}) {
+		t.Fatal("expected slot 3 to be fenced while its stops are queued")
+	}
+
+	w.processPendingStops()
+
+	if n := len(w.pendingStops); n != 0 {
+		t.Errorf("queued entries after confirmation = %d, want 0", n)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, want := range []struct {
+		deploymentID int64
+		pid          int
+	}{{7, pidA}, {8, pidB}} {
+		found := false
+		for _, d := range st.deletedDeploymentReplicaIdentities {
+			if d.appID == 1 && d.deploymentID == want.deploymentID && d.index == 3 && d.pid == want.pid {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected DeleteDeploymentReplicaIdentity(1, %d, 3, %d), got %+v", want.deploymentID, want.pid, st.deletedDeploymentReplicaIdentities)
 		}
 	}
 }
@@ -2404,8 +2936,20 @@ func (m *orderCheckingManager) TransportForWorker(tier, nodeID string) http.Roun
 func (m *orderCheckingManager) StopReplicaIncarnation(slug string, index int, gen uint64) error {
 	return m.inner.StopReplicaIncarnation(slug, index, gen)
 }
+func (m *orderCheckingManager) StopReplicaIncarnationWithin(slug string, index int, gen uint64, budget time.Duration) error {
+	return m.inner.StopReplicaIncarnationWithin(slug, index, gen, budget)
+}
 func (m *orderCheckingManager) ReleaseStopPending(slug string, index int, gen uint64) {
 	m.inner.ReleaseStopPending(slug, index, gen)
+}
+func (m *orderCheckingManager) AllForSlug(slug string) []*process.ProcessInfo {
+	return m.inner.AllForSlug(slug)
+}
+func (m *orderCheckingManager) RuntimeForTier(tier string) process.Runtime {
+	return m.inner.RuntimeForTier(tier)
+}
+func (m *orderCheckingManager) ReplicaIncarnation(slug string, index int) (gen uint64, pid int, ok bool) {
+	return m.inner.ReplicaIncarnation(slug, index)
 }
 func (m *orderCheckingManager) ClaimStopPending(slug string, index int, gen uint64) bool {
 	return m.inner.ClaimStopPending(slug, index, gen)

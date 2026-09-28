@@ -413,7 +413,15 @@ type Proxy struct {
 	mu                    poolMutex
 	pools                 map[string]*backendPool
 	poolEpoch             map[string]uint64 // incremented whenever Deregister invalidates a pool generation
-	wakeTrigger           func(slug string)
+	// slotSeq records, per slug, the lowest elastic slot ID a freshly created
+	// pool must start from. Deregister and BeginHibernate raise it to the
+	// retiring pool's nextSlotID before dropping the pool, and recovery can
+	// raise it further from durable state (SeedSlotSeq), so a pool recreated
+	// later for the same slug never reissues a slot ID a prior generation
+	// (still draining, still hibernating, or not yet confirmed stopped after
+	// a restart) might still be using.
+	slotSeq     map[string]int
+	wakeTrigger func(slug string)
 	// appStatusFn reports an app's lifecycle status and (for a crashed app) its
 	// failure reason. When set, a no-backend miss for a "crashed" or "stopped"
 	// app serves a clear status page instead of the endlessly-retrying loading
@@ -634,6 +642,7 @@ func New() *Proxy {
 	return &Proxy{
 		pools:                make(map[string]*backendPool),
 		poolEpoch:            make(map[string]uint64),
+		slotSeq:              make(map[string]int),
 		lastSeen:             make(map[string]time.Time),
 		wsReady:              make(map[string]struct{}),
 		firstServedAt:        make(map[string]time.Time),
@@ -653,6 +662,40 @@ func (p *Proxy) PoolEpoch(slug string) uint64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.poolEpoch[slug]
+}
+
+// newBackendPoolLocked constructs a fresh pool for slug, seeding nextSlotID
+// from the slug's recorded slot high-water mark (slotSeq) instead of always
+// starting at 0. Every site that creates a *backendPool for a slug goes
+// through this constructor, so a pool recreated after Deregister or
+// BeginHibernate cannot reissue a slot ID a prior generation used. A no-op
+// for multiplex pools, which never read nextSlotID. Callers hold p.mu for
+// writing.
+func (p *Proxy) newBackendPoolLocked(slug string, size int) *backendPool {
+	return &backendPool{
+		size:       size,
+		replicas:   make([]*replicaBackend, size),
+		nextSlotID: p.slotSeq[slug],
+	}
+}
+
+// SeedSlotSeq raises the recorded slot high-water mark for slug to at least
+// min; it never lowers it. Process recovery uses this to fold in slot IDs
+// recorded durably (deployment replica rows) that predate any in-memory
+// pool, so a worker started after a hub restart cannot collide with a
+// pre-restart worker whose stop has not yet been confirmed.
+func (p *Proxy) SeedSlotSeq(slug string, min int) {
+	if min <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.slotSeq == nil {
+		p.slotSeq = make(map[string]int)
+	}
+	if min > p.slotSeq[slug] {
+		p.slotSeq[slug] = min
+	}
 }
 
 // SetTerminateFunc registers the callback invoked (via a goroutine, never
@@ -1478,7 +1521,7 @@ func (p *Proxy) SetPoolSize(slug string, size int) {
 	defer p.mu.Unlock()
 	pool, ok := p.pools[slug]
 	if !ok {
-		p.pools[slug] = &backendPool{size: size, replicas: make([]*replicaBackend, size)}
+		p.pools[slug] = p.newBackendPoolLocked(slug, size)
 		return
 	}
 	if size < len(pool.replicas) {
@@ -1503,7 +1546,7 @@ func (p *Proxy) SetPoolCap(slug string, max int) {
 	defer p.mu.Unlock()
 	pool, ok := p.pools[slug]
 	if !ok {
-		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		pool = p.newBackendPoolLocked(slug, 1)
 		p.pools[slug] = pool
 	}
 	pool.maxSessions = max
@@ -1519,7 +1562,7 @@ func (p *Proxy) SetPoolMode(slug string, mode config.WorkerIsolationMode, groupe
 	defer p.mu.Unlock()
 	pool, ok := p.pools[slug]
 	if !ok {
-		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		pool = p.newBackendPoolLocked(slug, 1)
 		p.pools[slug] = pool
 	}
 	pool.mode = mode
@@ -1549,7 +1592,7 @@ func (p *Proxy) SetPoolWarmSpares(slug string, warmSpares int) {
 	defer p.mu.Unlock()
 	pool, ok := p.pools[slug]
 	if !ok {
-		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		pool = p.newBackendPoolLocked(slug, 1)
 		p.pools[slug] = pool
 	}
 	if pool.maxWorkers > 0 && warmSpares > pool.maxWorkers {
@@ -1571,7 +1614,7 @@ func (p *Proxy) SetPoolAppID(slug string, appID int64) {
 	p.mu.Lock()
 	pool, ok := p.pools[slug]
 	if !ok {
-		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		pool = p.newBackendPoolLocked(slug, 1)
 		p.pools[slug] = pool
 	}
 	var terminate func(string, int)
@@ -1810,7 +1853,7 @@ func (p *Proxy) SetGenerationActivationToken(slug string, deploymentID int64, to
 	defer p.mu.Unlock()
 	pool := p.pools[slug]
 	if pool == nil {
-		pool = &backendPool{size: 1, replicas: make([]*replicaBackend, 1)}
+		pool = p.newBackendPoolLocked(slug, 1)
 		p.pools[slug] = pool
 	}
 	if pool.generationTokens == nil {
@@ -2465,6 +2508,30 @@ func (p *Proxy) ReplicaDeploymentID(slug string, index int) int64 {
 	return pool.replicas[index].deploymentID
 }
 
+// dropElasticStateLocked releases the per-slug elastic bookkeeping that must
+// not survive pool's removal from p.pools: every pending client grace timer
+// is stopped so it cannot fire after clients[slug] is gone, and the slot
+// high-water mark is raised to pool.nextSlotID so a pool recreated later for
+// the same slug (redeploy, or wake after a hibernate) never reissues a slot
+// ID this generation already used. Callers hold p.mu for writing, have
+// already confirmed pool is elastic (poolIsElastic), and remain responsible
+// for bumping p.poolEpoch[slug] and for stopping the pool's workers.
+func (p *Proxy) dropElasticStateLocked(slug string, pool *backendPool) {
+	for _, cs := range p.clients[slug] {
+		if cs.releaseTimer != nil {
+			cs.releaseTimer.Stop()
+			cs.releaseTimer = nil
+		}
+	}
+	delete(p.clients, slug)
+	if p.slotSeq == nil {
+		p.slotSeq = make(map[string]int)
+	}
+	if pool.nextSlotID > p.slotSeq[slug] {
+		p.slotSeq[slug] = pool.nextSlotID
+	}
+}
+
 // Deregister removes the entire pool for slug from the routing table.
 // For elastic pools it dispatches the terminate callback (if set) for every
 // worker in the pool and stops pending client release timers for the slug
@@ -2478,15 +2545,7 @@ func (p *Proxy) Deregister(slug string) {
 	p.poolEpoch[slug]++
 	pool := p.pools[slug]
 	if pool != nil && poolIsElastic(pool) {
-		// Stop all pending client grace timers for this slug so they do not
-		// fire after the pool is gone and attempt to look up a removed worker.
-		for _, cs := range p.clients[slug] {
-			if cs.releaseTimer != nil {
-				cs.releaseTimer.Stop()
-				cs.releaseTimer = nil
-			}
-		}
-		delete(p.clients, slug)
+		p.dropElasticStateLocked(slug, pool)
 		// Dispatch terminate for each worker. The callback is captured before
 		// the loop so it is read once under the lock; goroutines run outside it.
 		if term := p.terminate; term != nil {
@@ -2558,6 +2617,23 @@ func (p *Proxy) BeginHibernate(slug string, since time.Time) bool {
 					return false
 				}
 			}
+		}
+		if poolIsElastic(pool) {
+			// Elastic workers are not stopped here; the caller (the
+			// hibernation watcher) does that once BeginHibernate returns,
+			// then retries until every slot confirms. Fence the generation
+			// now, before the caller's teardown even starts: bump the epoch
+			// so a stale lifetime timer's epoch check (armed against the
+			// generation being removed) rejects it, drop the pending client
+			// grace timers and clients[slug] so none can route or fire
+			// against a pool that no longer exists, and raise the slot
+			// high-water mark so a worker woken into a fresh pool for this
+			// slug never reuses a slot ID this generation held.
+			if p.poolEpoch == nil {
+				p.poolEpoch = make(map[string]uint64)
+			}
+			p.poolEpoch[slug]++
+			p.dropElasticStateLocked(slug, pool)
 		}
 		delete(p.pools, slug)
 	}

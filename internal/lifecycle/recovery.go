@@ -160,6 +160,13 @@ type RecoveryInputs struct {
 	// BundleDir maps app ID to the bundle directory of its most recent
 	// deployment ("" for an app with none). Every app in Apps has an entry.
 	BundleDir map[int64]string
+	// ElasticOrphans are apps that still have deployment_replicas rows (a
+	// durable native elastic worker identity) but are not in Apps: they fell
+	// out of the running/degraded set - hibernated, crashed, or otherwise -
+	// before this restart while a worker was still recorded live for them.
+	// RecoverProcesses reconciles each one's leftover identities without
+	// touching its app status.
+	ElasticOrphans []*db.App
 }
 
 // PrepareRecovery resolves every app RecoverProcesses will process and the
@@ -173,14 +180,37 @@ func PrepareRecovery(store *db.Store) (*RecoveryInputs, error) {
 		return nil, fmt.Errorf("prepare recovery: list running apps: %w", err)
 	}
 	bundleDirs := make(map[int64]string, len(apps))
+	running := make(map[int64]bool, len(apps))
 	for _, app := range apps {
+		running[app.ID] = true
 		dir, err := activeBundleDir(store, app.ID)
 		if err != nil {
 			return nil, fmt.Errorf("prepare recovery: active bundle dir for app %q: %w", app.Slug, err)
 		}
 		bundleDirs[app.ID] = dir
 	}
-	return &RecoveryInputs{Apps: apps, BundleDir: bundleDirs}, nil
+	orphanIDs, err := store.ListAppIDsWithDeploymentReplicas()
+	if err != nil {
+		return nil, fmt.Errorf("prepare recovery: list apps with deployment replicas: %w", err)
+	}
+	var orphans []*db.App
+	for _, id := range orphanIDs {
+		if running[id] {
+			continue
+		}
+		app, err := store.GetAppByID(id)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				// The app row was deleted mid-restart while a worker identity
+				// row survived it; nothing left to reconcile the identity
+				// against.
+				continue
+			}
+			return nil, fmt.Errorf("prepare recovery: load elastic orphan app %d: %w", id, err)
+		}
+		orphans = append(orphans, app)
+	}
+	return &RecoveryInputs{Apps: apps, BundleDir: bundleDirs, ElasticOrphans: orphans}, nil
 }
 
 // ContainerLister is implemented by DockerRuntime to support recovery.
@@ -307,7 +337,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		if isElasticIsolation(resolvedIso) {
 			// Client bindings are process-local. After a hub restart, elastic
 			// generations must be stopped, never adopted as fixed replicas.
-			generationOK = cleanupElasticDeploymentGenerations(store, mgr, app)
+			generationOK = cleanupElasticDeploymentGenerations(store, mgr, prx, app, queue)
 		} else {
 			generationOK = reconcileDeploymentGenerationProjection(store, app)
 		}
@@ -516,6 +546,23 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 	}
 
 	parkStrandedReplicas(store)
+
+	// Elastic orphans: apps outside the running/degraded set that still carry
+	// a durable native worker identity from before this restart. They are
+	// reconciled the same way a running elastic app's leftover generations
+	// are, but their app status is never touched here - a hibernated app
+	// stays hibernated and wakeable, a crashed app stays crashed for its own
+	// recovery path, and this pass only clears (or re-queues) the identity
+	// row.
+	for _, app := range inputs.ElasticOrphans {
+		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, defaultWorkerIsolation)
+		if !isElasticIsolation(resolvedIso) {
+			// No longer (or never) elastic - e.g. a mode switch away from
+			// elastic left rows behind. Not this pass's to reconcile.
+			continue
+		}
+		cleanupElasticDeploymentGenerations(store, mgr, prx, app, queue)
+	}
 }
 
 // parkStrandedReplicas repairs replica rows that contradict an app the loop
@@ -643,59 +690,132 @@ func cleanupObsoleteDeploymentGenerations(store *db.Store, app *db.App) {
 	}
 }
 
-func stopRecordedNativeReplica(store *db.Store, app *db.App, pid *int, provider string, deploymentID *int64) bool {
+// nativeReplicaStopper is the minimal read stopRecordedNativeReplica needs:
+// the deployment's bundle directory, to prove a live PID is actually the
+// recorded process rather than a reused PID number. *db.Store satisfies it
+// trivially; the watcher's pendingStops retry loop holds only its narrower
+// appStore interface, which also declares this method so it can call
+// stepRecordedNativeStop too.
+type nativeReplicaStopper interface {
+	GetDeploymentByID(id int64) (*db.Deployment, error)
+}
+
+// recordedNativeStopGrace is how long a recorded native process group gets
+// after each signal before the stop escalates (SIGTERM to SIGKILL) or, after
+// SIGKILL, is reported as having survived.
+const recordedNativeStopGrace = 10 * time.Second
+
+// recordedNativeStopProbeFloor is the shortest exit-proof wait one step
+// makes, so a tiny budget still observes a process that exits promptly on
+// the signal that step just sent.
+const recordedNativeStopProbeFloor = 250 * time.Millisecond
+
+// nativeStopProgress records which signals a bounded stop of a recorded
+// native process has already sent, and when, so the next step continues the
+// escalation instead of starting over.
+type nativeStopProgress struct {
+	termSentAt time.Time
+	killSentAt time.Time
+}
+
+// nativeStopResult is the outcome of one stepRecordedNativeStop call.
+type nativeStopResult int
+
+const (
+	// nativeStopConfirmed: the process and its group are gone.
+	nativeStopConfirmed nativeStopResult = iota
+	// nativeStopPending: the due signal was sent (or none was due yet) but
+	// no exit was observed within the step's budget.
+	nativeStopPending
+	// nativeStopRefused: signalling was refused (identity unproven or
+	// changed) or failed. Progress is unchanged, so a later step retries the
+	// same signal.
+	nativeStopRefused
+)
+
+func recordedNativeGroupGone(pid int) bool {
+	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) && errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH)
+}
+
+// stepRecordedNativeStop advances a confirmed stop of a recorded native
+// process group by at most one signal and one bounded wait. It sends SIGTERM
+// if none was sent yet, SIGKILL once the TERM grace has elapsed, and nothing
+// otherwise; every signal is preceded by a fresh bundle-identity check, so a
+// recycled PID is never signalled. It then waits up to budget (never less
+// than recordedNativeStopProbeFloor) for the process and its group to exit.
+func stepRecordedNativeStop(store nativeReplicaStopper, app *db.App, pid *int, provider string, deploymentID *int64, progress *nativeStopProgress, budget time.Duration) nativeStopResult {
 	if pid == nil || *pid <= 0 || (provider != "" && provider != "native") {
-		return true
+		return nativeStopConfirmed
 	}
-	pidGone := errors.Is(syscall.Kill(*pid, 0), syscall.ESRCH)
-	groupGone := errors.Is(syscall.Kill(-*pid, 0), syscall.ESRCH)
-	if pidGone && groupGone {
-		return true
+	if recordedNativeGroupGone(*pid) {
+		return nativeStopConfirmed
 	}
-	if deploymentID == nil {
-		slog.Error("generation recovery: refusing to signal native process without deployment identity", "slug", app.Slug, "pid", *pid)
-		return false
+
+	var sig syscall.Signal
+	switch {
+	case progress.termSentAt.IsZero():
+		sig = syscall.SIGTERM
+	case progress.killSentAt.IsZero() && time.Since(progress.termSentAt) >= recordedNativeStopGrace:
+		sig = syscall.SIGKILL
 	}
-	deployment, err := store.GetDeploymentByID(*deploymentID)
-	if err != nil || deployment.BundleDir == "" || validateNativeProcessIdentity(*pid, deployment.BundleDir) != nil {
-		slog.Error("generation recovery: refusing to signal native process whose bundle identity cannot be proven", "slug", app.Slug, "pid", *pid, "deployment_id", *deploymentID, "err", err)
-		return false
-	}
-	if err := syscall.Kill(-*pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		slog.Error("generation recovery: terminate old native generation", "slug", app.Slug, "pid", *pid, "err", err)
-		return false
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		pidGone = errors.Is(syscall.Kill(*pid, 0), syscall.ESRCH)
-		groupGone = errors.Is(syscall.Kill(-*pid, 0), syscall.ESRCH)
-		if pidGone && groupGone {
-			return true
+	if sig != 0 {
+		if deploymentID == nil {
+			slog.Error("generation recovery: refusing to signal native process without deployment identity", "slug", app.Slug, "pid", *pid)
+			return nativeStopRefused
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	// The numeric PID/PGID may have been recycled during the TERM grace. Never
-	// escalate to SIGKILL unless the leader still exists and its bundle identity
-	// is revalidated immediately before the signal.
-	if pidGone || validateNativeProcessIdentity(*pid, deployment.BundleDir) != nil {
-		slog.Error("generation recovery: refusing SIGKILL after native process identity changed", "slug", app.Slug, "pid", *pid)
-		return false
-	}
-	if err := syscall.Kill(-*pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		slog.Error("generation recovery: kill old native generation", "slug", app.Slug, "pid", *pid, "err", err)
-		return false
-	}
-	deadline = time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		pidGone = errors.Is(syscall.Kill(*pid, 0), syscall.ESRCH)
-		groupGone = errors.Is(syscall.Kill(-*pid, 0), syscall.ESRCH)
-		if pidGone && groupGone {
-			return true
+		deployment, err := store.GetDeploymentByID(*deploymentID)
+		if err != nil || deployment.BundleDir == "" {
+			slog.Error("generation recovery: refusing to signal native process whose bundle identity cannot be proven", "slug", app.Slug, "pid", *pid, "deployment_id", *deploymentID, "err", err)
+			return nativeStopRefused
 		}
-		time.Sleep(100 * time.Millisecond)
+		// The numeric PID/PGID may have been recycled since the process was
+		// recorded or since the previous signal, so the leader must still
+		// exist and carry the recorded bundle identity right before each one.
+		if ierr := validateNativeProcessIdentity(*pid, deployment.BundleDir); ierr != nil {
+			slog.Error("generation recovery: refusing to signal native process whose bundle identity cannot be proven", "slug", app.Slug, "pid", *pid, "deployment_id", *deploymentID, "signal", sig, "err", ierr)
+			return nativeStopRefused
+		}
+		if err := syscall.Kill(-*pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+			slog.Error("generation recovery: signal old native generation", "slug", app.Slug, "pid", *pid, "signal", sig, "err", err)
+			return nativeStopRefused
+		}
+		if sig == syscall.SIGTERM {
+			progress.termSentAt = time.Now()
+		} else {
+			progress.killSentAt = time.Now()
+		}
 	}
-	slog.Error("generation recovery: native process group survived SIGKILL", "slug", app.Slug, "pid", *pid)
-	return false
+
+	deadline := time.Now().Add(max(budget, recordedNativeStopProbeFloor))
+	for {
+		if recordedNativeGroupGone(*pid) {
+			return nativeStopConfirmed
+		}
+		if !time.Now().Before(deadline) {
+			return nativeStopPending
+		}
+		time.Sleep(min(100*time.Millisecond, time.Until(deadline)))
+	}
+}
+
+// stopRecordedNativeReplica stops a recorded native process group with
+// confirmed semantics, blocking through the whole escalation: SIGTERM, up to
+// recordedNativeStopGrace for an exit, an identity-revalidated SIGKILL, and
+// up to the same grace again. It reports whether the exit was confirmed.
+func stopRecordedNativeReplica(store nativeReplicaStopper, app *db.App, pid *int, provider string, deploymentID *int64) bool {
+	var progress nativeStopProgress
+	for {
+		switch stepRecordedNativeStop(store, app, pid, provider, deploymentID, &progress, time.Second) {
+		case nativeStopConfirmed:
+			return true
+		case nativeStopRefused:
+			return false
+		}
+		if !progress.killSentAt.IsZero() && time.Since(progress.killSentAt) >= recordedNativeStopGrace {
+			slog.Error("generation recovery: native process group survived SIGKILL", "slug", app.Slug, "pid", *pid)
+			return false
+		}
+	}
 }
 
 func stopNativeActivationReplica(mgr *process.Manager, app *db.App, r *db.Replica, bundleDir, logRunID string) bool {
@@ -1491,37 +1611,70 @@ func markRecoveryDown(store *db.Store, slug string) {
 	}
 }
 
-// cleanupElasticDeploymentGenerations retains every ledger whose process
-// identity could not be safely stopped. That failure blocks fresh workers.
-func cleanupElasticDeploymentGenerations(store *db.Store, mgr *process.Manager, app *db.App) bool {
+// cleanupElasticDeploymentGenerations stops every native worker identity
+// recorded for app's elastic deployment generations and deletes each row as
+// its own stop is confirmed, at per-worker rather than per-deployment
+// granularity: one worker in a generation failing to stop no longer blocks
+// deleting the others that did. Client bindings are process-local, so a
+// recovered elastic worker is torn down here rather than adopted as a fixed
+// replica. A row this pass cannot confirm stopped is queued onto the
+// watcher's pendingStops retry loop when it names a local native process
+// (kind pendingStopElasticRecovery); a remote or container-backed row is left
+// alone instead, since its durability is the container/tier sweep, not this
+// queue. Before touching anything, it raises the proxy's per-app slot
+// sequence past every recorded index, so a demand spawn after recovery can
+// never reuse a slot ID still named by a row this pass could not clear.
+func cleanupElasticDeploymentGenerations(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, queue pendingStopQueue) bool {
 	rows, err := store.ListDeploymentReplicas(app.ID)
 	if err != nil {
 		return false
 	}
-	stopped := make(map[int64]bool)
-	for _, row := range rows {
-		if _, seen := stopped[row.DeploymentID]; !seen {
-			stopped[row.DeploymentID] = true
+	if prx != nil {
+		maxIndex := -1
+		for _, row := range rows {
+			if row.Index > maxIndex {
+				maxIndex = row.Index
+			}
 		}
+		if maxIndex >= 0 {
+			prx.SeedSlotSeq(app.Slug, maxIndex+1)
+		}
+	}
+	ok := true
+	for _, row := range rows {
 		id := row.DeploymentID
 		_, nativeTier := mgr.RuntimeForTier(row.Tier).(*process.NativeRuntime)
 		localWorkerID := row.WorkerID == "" || (row.PID != nil && row.WorkerID == strconv.Itoa(*row.PID))
 		if !nativeTier || !localWorkerID || (row.Provider != "" && row.Provider != "native") {
+			// Not this pass's to confirm: a remote or container-backed
+			// identity is reconciled by the tier's own inventory or the
+			// container sweep, neither of which this loop can perform.
 			slog.Error("elastic recovery: cannot confirm remote worker termination", "slug", app.Slug, "worker_id", row.WorkerID, "provider", row.Provider)
-			stopped[id] = false
-			continue
-		}
-		if !stopRecordedNativeReplica(store, app, row.PID, row.Provider, &id) {
-			stopped[id] = false
-		}
-	}
-	ok := true
-	for id, gone := range stopped {
-		if !gone {
 			ok = false
 			continue
 		}
-		if err := store.DeleteDeploymentReplicas(id); err != nil {
+		if !stopRecordedNativeReplica(store, app, row.PID, row.Provider, &id) {
+			ok = false
+			if row.PID != nil && queue != nil {
+				queue.QueuePendingStop(PendingStopEntry{
+					Kind: pendingStopElasticRecovery, Slug: app.Slug, Index: row.Index,
+					AppID: app.ID, DeploymentID: row.DeploymentID, PID: *row.PID,
+					Reason: "recorded native worker identity did not stop during recovery",
+				})
+			}
+			continue
+		}
+		if row.PID == nil {
+			// No PID was ever recorded for this row, so there is no process to
+			// stop; the row itself is all that is left to clear.
+			if derr := store.DeletePIDlessDeploymentReplica(app.ID, row.DeploymentID, row.Index); derr != nil {
+				slog.Error("elastic recovery: delete pid-less worker identity", "slug", app.Slug, "deployment_id", row.DeploymentID, "index", row.Index, "err", derr)
+				ok = false
+			}
+			continue
+		}
+		if derr := store.DeleteDeploymentReplicaIdentity(app.ID, row.DeploymentID, row.Index, *row.PID); derr != nil {
+			slog.Error("elastic recovery: delete confirmed worker identity", "slug", app.Slug, "deployment_id", row.DeploymentID, "index", row.Index, "err", derr)
 			ok = false
 		}
 	}
