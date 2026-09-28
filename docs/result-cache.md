@@ -1,5 +1,5 @@
 ---
-description: "Give an app's replicas, workers, and scheduled jobs one shared disk cache for computed results, so an expensive output is computed once instead of once per process."
+description: "Give an app's replicas, workers and scheduled jobs one shared disk cache for results, so an expensive output is computed once, not once per process."
 ---
 
 # Result cache
