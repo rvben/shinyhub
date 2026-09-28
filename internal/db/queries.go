@@ -1372,7 +1372,12 @@ func inPlaceholders[T any](items []T) (string, []any) {
 
 // GetAppsBySlugs returns the apps for the given slugs in one query (unknown
 // slugs are simply absent), so the batch metrics endpoint need not call
-// GetAppBySlug per card.
+// GetAppBySlug per card. It applies no visibility predicate and returns rows
+// in no defined order: a caller scoping a listing by an app allowlist wants
+// ListAppsInSlugs or ListAppsVisibleToUserInSlugs instead. It keeps a
+// per-slug placeholder rather than the single-parameter allowlist those use
+// because its slugs come from a caller-supplied ?slugs= query parameter, not
+// an allowlist that can be configured arbitrarily large.
 func (s *Store) GetAppsBySlugs(slugs []string) ([]*App, error) {
 	ph, args := inPlaceholders(slugs)
 	if ph == "" {
@@ -1432,6 +1437,65 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 func (s *Store) CountApps() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM apps`).Scan(&n)
+	return n, err
+}
+
+// ListAppsInSlugs returns the page of apps whose slug is in the allowlist,
+// for a scoped identity (a deploy token or service account restricted to a
+// fixed set of apps, see auth.ContextUser.AppScope) whose role would
+// otherwise see the whole fleet. The allowlist is bound as a single
+// parameter regardless of size (see dialect.slugAllowlistClause), so it never
+// approaches the backend's per-statement bind-variable limit the way an
+// "IN (?,?,...)" placeholder per slug would. An empty allowlist means "no
+// apps" (AppScopeRestricted with no slugs) and returns immediately without
+// touching the database.
+func (s *Store) ListAppsInSlugs(slugs []string, limit, offset int) ([]*App, error) {
+	if len(slugs) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	arg, err := s.d.slugAllowlistArg(slugs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+		SELECT `+appColumns+deploymentSummarySQL+`
+		FROM apps
+		WHERE `+s.d.slugAllowlistClause()+`
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, arg, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// CountAppsInSlugs returns the number of apps in the allowlist, matching the
+// row set ListAppsInSlugs draws its page from. An empty allowlist returns 0
+// without touching the database, matching ListAppsInSlugs.
+func (s *Store) CountAppsInSlugs(slugs []string) (int, error) {
+	if len(slugs) == 0 {
+		return 0, nil
+	}
+	arg, err := s.d.slugAllowlistArg(slugs)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = s.db.QueryRow(`
+		SELECT COUNT(*) FROM apps
+		WHERE `+s.d.slugAllowlistClause(), arg).Scan(&n)
 	return n, err
 }
 
@@ -1748,6 +1812,67 @@ func (s *Store) CountAppsVisibleToUser(userID int64) (int, error) {
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM apps
 		WHERE `+appVisibleToUserWhere, userID, userID, userID).Scan(&n)
+	return n, err
+}
+
+// ListAppsVisibleToUserInSlugs returns the page of apps visible to userID
+// that are also in the allowlist, for a scoped identity whose role still
+// limits visibility by ownership, membership, or sharing on top of the
+// allowlist (see auth.ContextUser.AppScope). The allowlist is bound as a
+// single parameter regardless of size, exactly as ListAppsInSlugs. An empty
+// allowlist means "no apps" and returns immediately without touching the
+// database.
+func (s *Store) ListAppsVisibleToUserInSlugs(userID int64, slugs []string, limit, offset int) ([]*App, error) {
+	if len(slugs) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	arg, err := s.d.slugAllowlistArg(slugs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+		SELECT `+appColumns+deploymentSummarySQL+`
+		FROM apps
+		WHERE (`+appVisibleToUserWhere+`)
+		  AND `+s.d.slugAllowlistClause()+`
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, userID, userID, userID, arg, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// CountAppsVisibleToUserInSlugs returns the number of apps visible to userID
+// that are also in the allowlist, matching the row set
+// ListAppsVisibleToUserInSlugs draws its page from. An empty allowlist
+// returns 0 without touching the database, matching
+// ListAppsVisibleToUserInSlugs.
+func (s *Store) CountAppsVisibleToUserInSlugs(userID int64, slugs []string) (int, error) {
+	if len(slugs) == 0 {
+		return 0, nil
+	}
+	arg, err := s.d.slugAllowlistArg(slugs)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = s.db.QueryRow(`
+		SELECT COUNT(*) FROM apps
+		WHERE (`+appVisibleToUserWhere+`)
+		  AND `+s.d.slugAllowlistClause(), userID, userID, userID, arg).Scan(&n)
 	return n, err
 }
 

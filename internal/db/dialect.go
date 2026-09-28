@@ -3,7 +3,9 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -62,6 +64,17 @@ type dialect interface {
 	// server running in Europe/Amsterdam would silently shift every bound by an
 	// hour or two.
 	utcTimestampArg(t time.Time) string
+	// slugAllowlistClause renders the "apps.slug is in the allowlist" predicate
+	// against the single bound argument slugAllowlistArg produces. Unlike an
+	// "IN (?,?,...)" fragment, it takes exactly one placeholder no matter how
+	// many slugs the allowlist holds, so a large allowlist never approaches the
+	// backend's per-statement bind-variable limit. Combine with AND/parentheses
+	// as needed; callers must not call this for an empty allowlist (which means
+	// "no apps") and should short-circuit before reaching SQL instead.
+	slugAllowlistClause() string
+	// slugAllowlistArg encodes a non-empty slug list into the single bound
+	// argument slugAllowlistClause expects.
+	slugAllowlistArg(slugs []string) (any, error)
 }
 
 type sqliteDialect struct{}
@@ -98,6 +111,21 @@ func (sqliteDialect) noLimit() int { return -1 }
 
 func (sqliteDialect) utcTimestampArg(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// json_each is a SQLite table-valued function that expands a JSON array bound
+// as a single text argument into one row per element, so the allowlist stays
+// a single placeholder regardless of length.
+func (sqliteDialect) slugAllowlistClause() string {
+	return "apps.slug IN (SELECT value FROM json_each(?))"
+}
+
+func (sqliteDialect) slugAllowlistArg(slugs []string) (any, error) {
+	b, err := json.Marshal(slugs)
+	if err != nil {
+		return nil, fmt.Errorf("encode slug allowlist: %w", err)
+	}
+	return string(b), nil
 }
 
 type pgDialect struct{}
@@ -148,4 +176,15 @@ func (pgDialect) noLimit() int { return 1<<31 - 1 }
 
 func (pgDialect) utcTimestampArg(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05+00:00")
+}
+
+// ANY over a bound array is Postgres's native membership test; the pgx stdlib
+// driver encodes a []string argument as a Postgres array directly, so no
+// pq.Array-style wrapping is needed.
+func (pgDialect) slugAllowlistClause() string {
+	return "apps.slug = ANY(?)"
+}
+
+func (pgDialect) slugAllowlistArg(slugs []string) (any, error) {
+	return slugs, nil
 }

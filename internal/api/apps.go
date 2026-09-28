@@ -63,33 +63,22 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	if u.HasAppScopeRestriction() {
 		// A scoped identity (deploy token with an app allowlist, see
 		// auth.deploy_token_apps) sees only its allowlisted apps, matching the
-		// per-slug gates. The allowlist is Go-side, so this branch keeps the
-		// fetch-then-filter shape rather than pushing pagination into SQL: such
-		// a credential's allowlist is inherently small (it names specific apps
-		// by slug), so the cost here does not scale with the whole fleet.
-		var all []*db.App
+		// per-slug gates. The allowlist is pushed into the query as a single
+		// bound parameter (see Store.ListAppsInSlugs), so this scales with the
+		// requested page size, not with the allowlist length or the fleet
+		// size. An intentionally empty allowlist means "no apps" and the store
+		// methods return that without issuing any query.
 		if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
-			all, err = s.store.ListApps(0, 0)
+			apps, err = s.store.ListAppsInSlugs(u.AppScope, limit, offset)
+			if err == nil {
+				total, err = s.store.CountAppsInSlugs(u.AppScope)
+			}
 		} else {
-			all, err = s.store.ListAppsVisibleToUser(u.ID, 0, 0)
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		scoped := all[:0]
-		for _, a := range all {
-			if u.AppInScope(a.Slug) {
-				scoped = append(scoped, a)
+			apps, err = s.store.ListAppsVisibleToUserInSlugs(u.ID, u.AppScope, limit, offset)
+			if err == nil {
+				total, err = s.store.CountAppsVisibleToUserInSlugs(u.ID, u.AppScope)
 			}
 		}
-		total = len(scoped)
-		start := min(offset, total)
-		end := total
-		if limit > 0 && limit < end-start {
-			end = start + limit
-		}
-		apps = scoped[start:end]
 	} else if u.IsServiceAccount() || isPrivilegedAppOperator(u) {
 		apps, err = s.store.ListApps(limit, offset)
 		if err == nil {
