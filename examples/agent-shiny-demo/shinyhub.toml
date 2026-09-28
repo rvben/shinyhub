@@ -1,0 +1,3 @@
+[app]
+name = "Operations pulse · agent tools"
+description = "A real Shiny session with typed agent tools and a reactive period filter."

@@ -1,0 +1,4 @@
+shiny>=1.8,<2
+jsonschema>=4.20,<5
+httpx>=0.27,<1
+# Install the local packaging/python-agent wheel when preparing this bundle.

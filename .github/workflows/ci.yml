@@ -50,6 +50,9 @@ jobs:
       - name: Test (Python bookmarks)
         run: make test-py-bookmarks
 
+      - name: Test (Python agent tools)
+        run: make test-py-agent
+
       - name: Vulnerability scan
         run: make vuln
 

@@ -49,6 +49,7 @@ nav = [
   ]},
   { "Framework recipes" = [
     { "R Shiny" = "recipes/r-shiny.md" },
+    { "Agent tools in Python Shiny" = "recipes/agent-tools.md" },
     { "Dash" = "recipes/dash.md" },
     { "Streamlit" = "recipes/streamlit.md" },
     { "Output caching" = "recipes/output-caching.md" },
