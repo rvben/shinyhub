@@ -220,7 +220,9 @@ You do not have to guess which output is slow.
 
 - **Trace it.** Enable `tracing.auto_instrument_apps` (see [Tracing](tracing.md))
   to get per-request spans propagated into the app, so you can attribute the time
-  precisely rather than guessing.
+  precisely rather than guessing. ShinyHub's own proxy hop is traced too (the
+  `/app/{slug}` span), so a slow request shows whether the time was spent in
+  the proxy, in a cold-start wake, or inside the app.
 
 ---
 
