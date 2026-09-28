@@ -1,6 +1,7 @@
 package proxy_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -659,7 +660,7 @@ func TestProxy_ReturnsNotFoundForUnknownSlug(t *testing.T) {
 	p := proxy.New()
 	p.SetSlugExists(func(slug string) (bool, error) { return slug == "known", nil })
 	var wakeTriggerCalled bool
-	p.SetWakeTrigger(func(string) { wakeTriggerCalled = true })
+	p.SetWakeTrigger(func(context.Context, string) { wakeTriggerCalled = true })
 
 	req := httptest.NewRequest("GET", "/app/typo/", nil)
 	rec := httptest.NewRecorder()
@@ -685,7 +686,7 @@ func TestProxy_LookupErrorFallsThroughToLoadingPage(t *testing.T) {
 		return false, errors.New("database is locked")
 	})
 	done := make(chan struct{})
-	p.SetWakeTrigger(func(string) { close(done) })
+	p.SetWakeTrigger(func(context.Context, string) { close(done) })
 
 	req := httptest.NewRequest("GET", "/app/maybe-real/", nil)
 	rec := httptest.NewRecorder()
@@ -708,7 +709,7 @@ func TestProxy_ServesLoadingPageWhenSlugKnown(t *testing.T) {
 	p := proxy.New()
 	p.SetSlugExists(func(slug string) (bool, error) { return true, nil })
 	done := make(chan struct{})
-	p.SetWakeTrigger(func(string) { close(done) })
+	p.SetWakeTrigger(func(context.Context, string) { close(done) })
 
 	req := httptest.NewRequest("GET", "/app/sleeping/", nil)
 	rec := httptest.NewRecorder()
@@ -732,7 +733,7 @@ func TestProxy_CallsWakeTriggerCallback(t *testing.T) {
 	var mu sync.Mutex
 	var called []string
 	done := make(chan struct{})
-	p.SetWakeTrigger(func(slug string) {
+	p.SetWakeTrigger(func(_ context.Context, slug string) {
 		mu.Lock()
 		called = append(called, slug)
 		mu.Unlock()
@@ -1378,7 +1379,7 @@ func TestProxy_PoolDegraded_FiresWakeTrigger(t *testing.T) {
 	waitForCount(p, "demo", func(c []int64) bool { return len(c) > 0 && c[0] >= 1 })
 
 	done := make(chan string, 1)
-	p.SetWakeTrigger(func(slug string) { done <- slug })
+	p.SetWakeTrigger(func(_ context.Context, slug string) { done <- slug })
 
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
 	rec := httptest.NewRecorder()
@@ -1435,7 +1436,7 @@ func TestProxy_PoolSaturated_DoesNotFireWakeTrigger(t *testing.T) {
 	})
 
 	var triggerFired bool
-	p.SetWakeTrigger(func(string) { triggerFired = true })
+	p.SetWakeTrigger(func(context.Context, string) { triggerFired = true })
 
 	req := httptest.NewRequest(http.MethodGet, "/app/demo/", nil)
 	rec := httptest.NewRecorder()

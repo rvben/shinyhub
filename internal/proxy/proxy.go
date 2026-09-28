@@ -419,7 +419,7 @@ type Proxy struct {
 	mu                    poolMutex
 	pools                 map[string]*backendPool
 	poolEpoch             map[string]uint64 // incremented whenever Deregister invalidates a pool generation
-	wakeTrigger           func(slug string)
+	wakeTrigger           func(ctx context.Context, slug string)
 	// appStatusFn reports an app's lifecycle status and (for a crashed app) its
 	// failure reason. When set, a no-backend miss for a "crashed" or "stopped"
 	// app serves a clear status page instead of the endlessly-retrying loading
@@ -816,7 +816,7 @@ func (p *Proxy) SetWakeHoldTimeout(d time.Duration) {
 // disconnected, or the app is down (the caller serves the miss page). A
 // crashed/stopped app is never held. ctx is the request context, so a client
 // that gives up frees the hold immediately rather than polling to the deadline.
-func (p *Proxy) holdForWake(ctx context.Context, slug string, trigger func(string)) bool {
+func (p *Proxy) holdForWake(ctx context.Context, slug string, trigger func(context.Context, string)) bool {
 	syncSuppressed := false
 	if fn := p.getAppStatusLookup(); fn != nil {
 		switch status, _ := fn(slug); status {
@@ -839,7 +839,7 @@ func (p *Proxy) holdForWake(ctx context.Context, slug string, trigger func(strin
 	}
 	hold := time.Duration(p.wakeHoldNanos.Load())
 	if trigger != nil {
-		go trigger(slug)
+		go trigger(wakeContext(ctx), slug)
 	}
 	syncFn := p.onMissSync.Load()
 	if syncSuppressed {
@@ -1134,8 +1134,10 @@ func (p *Proxy) loadSpanTracer() trace.Tracer {
 // occurs in clustered mode. The callback issues the BeginWake CAS and, if this
 // instance is the active owner, drives the wake inline. Called at startup on
 // EVERY instance (not owner-gated) so a standby can arm the DB waking transition
-// even though only the active executes the deploy.
-func (p *Proxy) SetWakeTrigger(fn func(string)) {
+// even though only the active executes the deploy. ctx carries the triggering
+// request's /app span (when a span tracer is wired) so the wake can nest under
+// it; it is never cancelled, because the wake outlives the request.
+func (p *Proxy) SetWakeTrigger(fn func(ctx context.Context, slug string)) {
 	p.mu.Lock()
 	p.wakeTrigger = fn
 	p.mu.Unlock()
@@ -1200,8 +1202,24 @@ func (p *Proxy) SetWebSocketCompression(enabled bool) {
 	p.wsCompression.Store(enabled)
 }
 
+// wakeContext is the context a wake trigger receives for a request whose
+// context is ctx: only the request's span context, so the wake parents on the
+// request's span. It carries neither the request's cancellation or deadline
+// (the wake keeps running after the client has gone) nor its other values (the
+// authenticated user, the response recorder), which a long-running wake must
+// not retain. Without a span on ctx (no span tracer wired) the wake has nothing
+// to inherit, so it gets context.Background() and the request path pays no
+// allocation for it.
+func wakeContext(ctx context.Context) context.Context {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return context.Background()
+	}
+	return trace.ContextWithSpanContext(context.Background(), sc)
+}
+
 // getWakeTrigger returns the current wake trigger under the read lock.
-func (p *Proxy) getWakeTrigger() func(string) {
+func (p *Proxy) getWakeTrigger() func(context.Context, string) {
 	p.mu.RLock()
 	fn := p.wakeTrigger
 	p.mu.RUnlock()
@@ -1312,7 +1330,7 @@ func writeWaitPage(w http.ResponseWriter, status int, body string) {
 // it is unavailable; an app with a deployment in flight gets the deploying
 // wait page (auto-refresh, no give-up, no wake); anything else fires the wake
 // trigger and gets the auto-retrying loading page (the normal cold-start path).
-func (p *Proxy) serveMissPage(w http.ResponseWriter, r *http.Request, slug string, trigger func(string)) {
+func (p *Proxy) serveMissPage(w http.ResponseWriter, r *http.Request, slug string, trigger func(context.Context, string)) {
 	if fn := p.getAppStatusLookup(); fn != nil {
 		switch status, reason := fn(slug); status {
 		case "crashed":
@@ -1339,7 +1357,7 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, r *http.Request, slug strin
 		}
 	}
 	if trigger != nil {
-		go trigger(slug)
+		go trigger(wakeContext(r.Context()), slug)
 	}
 	writeWaitPage(w, http.StatusOK, p.decorateAppPage(loadingPage, slug, r))
 }
@@ -3275,7 +3293,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// rather than waiting for the next watcher tick. Duplicate triggers are
 		// safe: warm expansion is idempotent and deploy-lock-guarded.
 		if trigger != nil {
-			go trigger(slug)
+			go trigger(wakeContext(r.Context()), slug)
 		}
 		rec.Header().Set("Retry-After", "5")
 		http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
@@ -3306,7 +3324,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// degraded branch fires. Duplicate triggers are safe: expansion is
 		// idempotent and deploy-lock-guarded.
 		if reason == ReasonPoolDegraded && trigger != nil {
-			go trigger(slug)
+			go trigger(wakeContext(r.Context()), slug)
 		}
 		rec.Header().Set("Retry-After", "5")
 		http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)

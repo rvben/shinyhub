@@ -954,13 +954,15 @@ func (w *Watcher) enforceSuspendedCap() {
 // traceOp starts an internal span named op for slug and returns a derived
 // context plus an end func that records the operation's error (if any) and ends
 // the span. A no-op when tracing is disabled. Background operations are
-// unparented, so the returned context carries a root span.
-func (w *Watcher) traceOp(ctx context.Context, op, slug string) (context.Context, func(err error)) {
+// unparented unless the caller supplies a parent in ctx, so without one the
+// returned context carries a root span. attrs are added beside the slug.
+func (w *Watcher) traceOp(ctx context.Context, op, slug string, attrs ...attribute.KeyValue) (context.Context, func(err error)) {
 	if w.tracer == nil {
 		return ctx, func(error) {}
 	}
 	ctx, span := w.tracer.Start(ctx, op, trace.WithSpanKind(trace.SpanKindInternal))
 	span.SetAttributes(attribute.String("shinyhub.app.slug", slug))
+	span.SetAttributes(attrs...)
 	return ctx, func(err error) {
 		if err != nil {
 			span.RecordError(err)
@@ -1079,7 +1081,7 @@ func (w *Watcher) runOnce() {
 			if w.appOperationInFlight(app.Slug) {
 				continue
 			}
-			w.driveWakingApp(app.Slug)
+			w.driveWakingApp(context.Background(), app.Slug, "reconcile")
 		}
 	}
 }
@@ -2126,7 +2128,12 @@ func (w *Watcher) handleWarmExpand(apps []*db.App, repMap map[int64][]*db.Replic
 // shed with ReasonPoolDegraded fires this trigger so the warm-shrunk pool is
 // restored without waiting for the next tick. Duplicate triggers are safe
 // because warmExpand is idempotent and deploy-lock-guarded.
-func (w *Watcher) WakeTrigger(slug string) {
+//
+// ctx is the triggering request's context; only its span context is used, so
+// the lifecycle.wake span nests under the request's /app span. A standby only
+// records the intent, so a wake the active later drives is not parented on the
+// standby's request.
+func (w *Watcher) WakeTrigger(ctx context.Context, slug string) {
 	if w.appOperationInFlight(slug) {
 		return
 	}
@@ -2191,7 +2198,14 @@ func (w *Watcher) WakeTrigger(slug string) {
 	if !owner {
 		return
 	}
-	w.driveWakingApp(slug)
+	w.driveWakingApp(spanParent(ctx), slug, "request")
+}
+
+// spanParent keeps only ctx's span context: a wake outlives the request that
+// triggered it, so it must never inherit that request's cancellation or
+// deadline, only its place in the trace.
+func spanParent(ctx context.Context) context.Context {
+	return trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
 }
 
 // driveWakingApp deploys all replicas for a slug that is already in the
@@ -2199,7 +2213,11 @@ func (w *Watcher) WakeTrigger(slug string) {
 // It MUST NOT call BeginWake itself. An in-memory guard prevents two concurrent
 // calls from spawning duplicate deploys for the same slug within this process;
 // the DB BeginWake CAS guards across processes.
-func (w *Watcher) driveWakingApp(slug string) {
+//
+// parent positions the lifecycle.wake span in a trace (it must carry no
+// cancellation); trigger names what started the wake ("request" or
+// "reconcile") and is recorded as shinyhub.wake.trigger.
+func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) {
 	w.mu.Lock()
 	if w.stopping {
 		w.mu.Unlock()
@@ -2235,7 +2253,7 @@ func (w *Watcher) driveWakingApp(slug string) {
 		}
 		defer release()
 
-		_, endSpan := w.traceOp(context.Background(), "lifecycle.wake", slug)
+		_, endSpan := w.traceOp(parent, "lifecycle.wake", slug, attribute.String("shinyhub.wake.trigger", trigger))
 		var opErr error
 		defer func() { endSpan(opErr) }()
 

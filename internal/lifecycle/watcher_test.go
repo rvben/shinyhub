@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -1330,7 +1331,7 @@ func TestWake_TriggeredOnWakeTrigger(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
 		})
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	waitNotWaking(t, st, "app")
 
 	mu.Lock()
@@ -1375,7 +1376,7 @@ func TestWake_AllReplicasFailMarksAppCrashed(t *testing.T) {
 			return nil, bootErr
 		})
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	waitNotWaking(t, st, "app")
 
 	st.mu.Lock()
@@ -1414,7 +1415,7 @@ func TestWake_ProvenancePersistenceFailureStopsUntrackedConsumers(t *testing.T) 
 			return &deploy.Result{Index: idx, PID: 40 + idx, Port: 20040 + idx, EndpointURL: fmt.Sprintf("http://replica-%d", idx)}, nil
 		})
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	w.wakeWG.Wait()
 	st.mu.Lock()
 	status := st.apps["app"].Status
@@ -1451,8 +1452,8 @@ func TestWake_NoConcurrentWakes(t *testing.T) {
 		})
 
 	// Two concurrent WakeTrigger calls should result in exactly one deploy.
-	w.WakeTrigger("app")
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
+	w.WakeTrigger(context.Background(), "app")
 	waitNotWaking(t, st, "app")
 
 	if n := atomic.LoadInt32(&deployCount); n != 1 {
@@ -1478,7 +1479,7 @@ func TestWake_SupersededByStopTearsDownReplicas(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
 		})
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	w.wakeWG.Wait() // deterministic: blocks until the wake goroutine fully exits
 
 	if got := st.apps["app"].Status; got != "stopped" {
@@ -1518,7 +1519,7 @@ func TestWake_SupersededByDeleteTearsDownReplicas(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
 		})
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	w.wakeWG.Wait()
 
 	mgr.mu.Lock()
@@ -1574,7 +1575,7 @@ func TestWake_NonHibernatedAppNotRedeployed(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 55, Port: 20055}, nil
 		})
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	waitNotWaking(t, st, "app")
 
 	if n := atomic.LoadInt32(&deployCount); n != 0 {
@@ -1773,7 +1774,7 @@ func TestWatcher_WakeTriggerWakesAllReplicas(t *testing.T) {
 			mu.Unlock()
 			return &deploy.Result{Index: idx, PID: 100 + idx, Port: 20000 + idx}, nil
 		})
-	w.WakeTrigger("demo")
+	w.WakeTrigger(context.Background(), "demo")
 	waitNotWaking(t, st, "demo")
 
 	mu.Lock()
@@ -1798,7 +1799,7 @@ func TestWake_AllReplicasFailKeepsHibernated(t *testing.T) {
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
 		func(slug, dir string, idx int) (*deploy.Result, error) { return nil, fmt.Errorf("boom") })
 
-	w.WakeTrigger("demo")
+	w.WakeTrigger(context.Background(), "demo")
 	waitNotWaking(t, st, "demo")
 
 	st.mu.Lock()
@@ -2836,7 +2837,7 @@ func TestWakeTrigger_RunningAppWithWarmRows_CallsWarmExpand(t *testing.T) {
 		},
 	)
 
-	w.WakeTrigger("warm")
+	w.WakeTrigger(context.Background(), "warm")
 
 	// WakeTrigger may call warmExpand synchronously or via a goroutine.
 	// Give it a short window.
@@ -2890,7 +2891,7 @@ func TestWakeTrigger_RunningAppWithoutWarmRows_DoesNothing(t *testing.T) {
 		func(slug string) (bool, error) { expandCalled = true; return false, nil },
 	)
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	// Give any async paths time to run.
 	time.Sleep(20 * time.Millisecond)
 
@@ -2920,7 +2921,7 @@ func TestWakeTrigger_SkipsWarmExpansionDuringAppOperation(t *testing.T) {
 	w.SetWarmOps(nil, func(string) (bool, error) { expanded = true; return true, nil })
 	w.SetOperationInFlight(func(slug string) bool { return slug == "app" })
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	if expanded {
 		t.Fatal("warm expansion raced an in-flight app operation")
 	}
@@ -2948,7 +2949,7 @@ func TestWakeTrigger_HibernatedApp_PerformsWakeFlowNotWarmExpand(t *testing.T) {
 		func(slug string) (bool, error) { expandCalled = true; return false, nil },
 	)
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	waitNotWaking(t, st, "app")
 
 	if expandCalled {
@@ -3027,7 +3028,7 @@ func TestWakeTrigger_BurstOnWarmApp_OnlyOneExpand(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-gate
-			w.WakeTrigger("warm")
+			w.WakeTrigger(context.Background(), "warm")
 			// Signal completion to warmExpand (the winning goroutine reads these).
 			othersFinished <- struct{}{}
 		}()

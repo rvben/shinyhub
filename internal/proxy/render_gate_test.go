@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -381,7 +382,7 @@ func TestServeHTTP_GateDoesNotPreemptColdStart(t *testing.T) {
 	p.SetAppLimiter("demo", emptyLimiter())
 	p.SetSlugExists(func(string) (bool, error) { return true, nil })
 	woke := make(chan string, 1)
-	p.SetWakeTrigger(func(slug string) { woke <- slug })
+	p.SetWakeTrigger(func(_ context.Context, slug string) { woke <- slug })
 	p.SetWakeHoldTimeout(10 * time.Millisecond)
 
 	rec := httptest.NewRecorder()

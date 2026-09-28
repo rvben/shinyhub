@@ -120,7 +120,7 @@ func TestWake_ElasticPerSession_SkipsReplicaBoot(t *testing.T) {
 		},
 	)
 
-	w.WakeTrigger("elastic-app")
+	w.WakeTrigger(context.Background(), "elastic-app")
 	waitNotWaking(t, st, "elastic-app")
 
 	// The deploy function must NOT have been called: elastic apps have no fixed replicas.
@@ -175,7 +175,7 @@ func TestWake_Multiplex_StillBootsReplicas(t *testing.T) {
 		},
 	)
 
-	w.WakeTrigger("mp-app")
+	w.WakeTrigger(context.Background(), "mp-app")
 	waitNotWaking(t, st, "mp-app")
 
 	if deployCount == 0 {
@@ -226,7 +226,7 @@ func TestWake_FleetDefaultElastic_SkipsReplicaBoot(t *testing.T) {
 		},
 	)
 
-	w.WakeTrigger("inherit-app")
+	w.WakeTrigger(context.Background(), "inherit-app")
 	waitNotWaking(t, st, "inherit-app")
 
 	// The deploy function must NOT have been called: resolved isolation is elastic.

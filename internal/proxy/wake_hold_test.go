@@ -23,7 +23,7 @@ func TestWakeHold_ServesInlineWhenReplicaRegistersDuringHold(t *testing.T) {
 	p := proxy.New()
 	p.SetWakeHoldTimeout(3 * time.Second)
 	p.SetPoolSize("demo", 1) // pool exists but empty -> a miss until the wake registers a replica
-	p.SetWakeTrigger(func(slug string) {
+	p.SetWakeTrigger(func(_ context.Context, slug string) {
 		time.Sleep(100 * time.Millisecond) // simulate the resume latency
 		_ = p.RegisterReplica(slug, 0, backend.URL, nil, 0)
 	})

@@ -1,6 +1,7 @@
 package proxy_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -172,7 +173,7 @@ func TestServeMissPage_DeployingStillFiresWake(t *testing.T) {
 	p.SetPoolSize("ship", 1)
 	p.SetAppStatusLookup(func(_ string) (string, string) { return "deploying", "" })
 	fired := make(chan string, 1)
-	p.SetWakeTrigger(func(slug string) { fired <- slug })
+	p.SetWakeTrigger(func(_ context.Context, slug string) { fired <- slug })
 
 	req := httptest.NewRequest(http.MethodGet, "/app/ship/", nil)
 	rec := httptest.NewRecorder()
@@ -192,7 +193,7 @@ func TestServeMissPage_HibernatedStillFiresWake(t *testing.T) {
 	p.SetPoolSize("warm", 1)
 	p.SetAppStatusLookup(func(_ string) (string, string) { return "hibernated", "" })
 	fired := make(chan string, 1)
-	p.SetWakeTrigger(func(slug string) { fired <- slug })
+	p.SetWakeTrigger(func(_ context.Context, slug string) { fired <- slug })
 
 	req := httptest.NewRequest(http.MethodGet, "/app/warm/", nil)
 	rec := httptest.NewRecorder()

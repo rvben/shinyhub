@@ -1,6 +1,7 @@
 package proxy_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,7 +31,7 @@ func TestProxy_UpstreamErrorWakesAndServesLoadingPage(t *testing.T) {
 	p := proxy.New() // no clustered wiring: this is the single-node default
 
 	woke := make(chan string, 1)
-	p.SetWakeTrigger(func(slug string) { woke <- slug })
+	p.SetWakeTrigger(func(_ context.Context, slug string) { woke <- slug })
 
 	if err := p.Register("errapp", closedURL); err != nil {
 		t.Fatalf("Register: %v", err)

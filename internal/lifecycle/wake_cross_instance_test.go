@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,7 +35,7 @@ func TestWakeTrigger_StandbyBeginsWakeButDoesNotDrive(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 99, Port: 20099}, nil
 		})
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 
 	// DB state must be "waking": BeginWake was issued.
 	st.mu.Lock()
@@ -65,7 +66,7 @@ func TestWakeTrigger_ActiveDrivesInline(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
 		})
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	waitNotWaking(t, st, "app")
 
 	// Replica deployed exactly once.
@@ -131,7 +132,7 @@ func TestDriveWakingApp_DeploymentIDSet(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 55, Port: 20055}, nil
 		})
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	waitNotWaking(t, st, "app")
 
 	st.mu.Lock()
@@ -172,11 +173,11 @@ func TestDriveWakingApp_DoubleDriveDedup(t *testing.T) {
 		})
 
 	// First call: wins the driving guard.
-	w.driveWakingApp("app")
+	w.driveWakingApp(context.Background(), "app", "reconcile")
 	// Wait until the first call's goroutine has started deploying.
 	<-canProceed
 	// Second call: should be deduplicated by the in-memory guard.
-	w.driveWakingApp("app")
+	w.driveWakingApp(context.Background(), "app", "reconcile")
 
 	waitNotWaking(t, st, "app")
 
@@ -202,7 +203,7 @@ func TestWakeTrigger_SingleNodeIsOwnerByDefault(t *testing.T) {
 			return &deploy.Result{Index: idx, PID: 11, Port: 20011}, nil
 		})
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	waitNotWaking(t, st, "app")
 
 	if n := atomic.LoadInt32(&deployCount); n != 1 {

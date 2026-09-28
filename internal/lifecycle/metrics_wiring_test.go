@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -77,7 +78,7 @@ func TestMetrics_WakeRecordsTransition(t *testing.T) {
 	rec := &fakeRecorder{}
 	w.SetMetrics(rec)
 
-	w.WakeTrigger("app")
+	w.WakeTrigger(context.Background(), "app")
 	waitNotWaking(t, st, "app")
 
 	if !rec.hasTransition("wake") {
