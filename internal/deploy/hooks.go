@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -292,6 +293,13 @@ type Manifest struct {
 // forever.
 const defaultHookTimeout = 5 * time.Minute
 
+// hookWaitDelay bounds how long runHookExec keeps draining a hook's
+// stdout/stderr pipe after its process group has been signalled to exit.
+// Without it, a killed leader that leaves a backgrounded grandchild holding
+// the pipe's write end blocks Wait forever even though every relevant
+// process has been told to die.
+const hookWaitDelay = 10 * time.Second
+
 // LoadManifest reads shinyhub.toml from bundleDir. Returns (nil, nil) when
 // no manifest is present so callers can treat the file as optional. A
 // malformed manifest is fatal: deploys must not silently skip declared
@@ -373,6 +381,9 @@ func validateHook(h Hook) error {
 	}
 	if h.Timeout < 0 {
 		return fmt.Errorf("negative timeout %s", h.Timeout)
+	}
+	if h.Timeout > time.Hour {
+		return fmt.Errorf("timeout %s exceeds the 1h maximum", h.Timeout)
 	}
 	return nil
 }
@@ -683,5 +694,48 @@ func runHookExec(ctx context.Context, bundleDir string, argv []string, extraEnv 
 	cmd.Env = process.WithBuildInterpreterPolicy(append(append(process.SanitizedEnv(), extraEnv...), sandboxEnv...))
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
-	return cmd.Run()
+
+	// Run the hook as the leader of its own process group so the whole
+	// group, not just the leader, can be killed in one signal. Without this,
+	// a leader that backgrounds a step (`migrate.sh &`) and returns leaves
+	// that grandchild attached to no process this code controls once the
+	// leader exits or is killed.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// WaitDelay bounds how long Wait keeps draining the hook's stdout/stderr
+	// pipe once the group has been told to exit. Stdout/Stderr are an
+	// io.Writer here, not an *os.File, so os/exec routes them through its own
+	// pipe; a backgrounded grandchild inherits the write end and, without a
+	// bound, Wait would block forever on a handle nothing here still tracks.
+	cmd.WaitDelay = hookWaitDelay
+	// Cancel runs when ctx is done. The default (*Cmd).Kill only signals the
+	// leader, which does nothing for a backgrounded grandchild running under
+	// the same group.
+	cmd.Cancel = func() error {
+		return killProcessGroup(cmd.Process.Pid)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	waitErr := waitKillingGroup(cmd)
+	if waitErr != nil && ctx.Err() != nil {
+		// The group was killed because the hook overran its timeout. Wait's
+		// own error describes how the process died (e.g. "signal: killed"),
+		// which alone doesn't satisfy errors.Is(err, context.DeadlineExceeded);
+		// wrap ctx.Err() alongside it so runPostDeployHooks still reports
+		// this as a timeout rather than an opaque exec failure.
+		return fmt.Errorf("%w: %w", ctx.Err(), waitErr)
+	}
+	return waitErr
+}
+
+// killProcessGroup sends SIGKILL to every process in the group led by pid.
+// pid must be a process group leader (its process group ID equals its own
+// PID), which runHookExec guarantees via Setpgid. ESRCH means every process
+// in the group has already exited, which is not an error here.
+func killProcessGroup(pid int) error {
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("kill process group %d: %w", pid, err)
+	}
+	return nil
 }
