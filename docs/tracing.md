@@ -199,8 +199,12 @@ uv run [--with-requirements requirements.txt] \
   --with opentelemetry-instrumentation-requests \
   --with opentelemetry-instrumentation-httpx \
   [--with <tracing.auto_instrument_extra_packages>] \
-  opentelemetry-instrument shiny run app.py --host ... --port ...
+  opentelemetry-instrument python -m shiny run app.py --host ... --port ...
 ```
+
+The entrypoint runs as `python -m shiny` so it executes under the overlay's
+interpreter; the app's own `shiny` console script would run under its own
+environment's interpreter, which cannot see the overlay packages.
 
 uv's `--with` overlay resolves these packages alongside the app's own
 dependencies without modifying its venv or lockfile; turn the flag off and

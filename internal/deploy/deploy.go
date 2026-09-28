@@ -2149,7 +2149,15 @@ func pythonCommandPrefix(bundleDir string, overlay []string, hostDeps bool) []st
 		for _, pkg := range overlay {
 			base = append(base, "--with", pkg)
 		}
-		base = append(base, "opentelemetry-instrument")
+		// The entrypoint runs as `python -m <module>` rather than as a
+		// console script. uv layers the overlay as a separate environment
+		// over the app's own, and a console script's shebang names the
+		// interpreter of the environment that installed it: in project mode
+		// that is the .venv, which cannot import the overlay, so the
+		// instrumentation would fail to load and the app would run
+		// uninstrumented. `python` resolves to the overlay's interpreter,
+		// which sees both environments.
+		base = append(base, "opentelemetry-instrument", "python", "-m")
 	}
 	return base
 }

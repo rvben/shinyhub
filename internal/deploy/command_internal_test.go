@@ -23,7 +23,7 @@ func TestBuildCommand_AutoInstrumentWrapsRequirementsMode(t *testing.T) {
 		"--with", "opentelemetry-instrumentation-starlette",
 		"--with", "opentelemetry-instrumentation-requests",
 		"--with", "opentelemetry-instrumentation-httpx",
-		"opentelemetry-instrument",
+		"opentelemetry-instrument", "python", "-m",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -31,6 +31,12 @@ func TestBuildCommand_AutoInstrumentWrapsRequirementsMode(t *testing.T) {
 	}
 }
 
+// In project mode the overlay is a separate environment layered over the
+// app's .venv. The .venv's `shiny` console script is first on PATH but its
+// shebang names the .venv interpreter, which cannot import the overlay, so
+// opentelemetry-instrument's sitecustomize fails and the app runs silently
+// uninstrumented. `python -m` resolves to the overlay interpreter, which sees
+// both the overlay and the .venv.
 func TestBuildCommand_AutoInstrumentWrapsProjectMode(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname='x'\n"), 0o644); err != nil {
@@ -44,11 +50,23 @@ func TestBuildCommand_AutoInstrumentWrapsProjectMode(t *testing.T) {
 		"--with", "opentelemetry-instrumentation-starlette",
 		"--with", "opentelemetry-instrumentation-requests",
 		"--with", "opentelemetry-instrumentation-httpx",
-		"opentelemetry-instrument",
+		"opentelemetry-instrument", "python", "-m",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildCommand =\n  %q\nwant\n  %q", got, want)
+	}
+}
+
+// The FastAPI launcher shares the prefix, so an instrumented uvicorn also runs
+// under the overlay interpreter rather than the .venv's console script.
+func TestBuildFastAPICommand_AutoInstrumentRunsUnderOverlayInterpreter(t *testing.T) {
+	dir := t.TempDir()
+	synthProject(t, dir)
+	got := buildFastAPICommand(dir, 41000, "127.0.0.1", "", instrumentOverlay(true, nil), true, false)
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "opentelemetry-instrument python -m uvicorn app:app") {
+		t.Fatalf("instrumented FastAPI command must run uvicorn under the overlay interpreter: %s", joined)
 	}
 }
 
@@ -256,7 +274,7 @@ func TestBuildCommand_AutoInstrumentAddsExtraPackagesAfterBuiltins(t *testing.T)
 	joined := strings.Join(cmd, " ")
 	iBuiltin := strings.Index(joined, "--with opentelemetry-instrumentation-httpx")
 	iExtra := strings.Index(joined, "--with opentelemetry-instrumentation-botocore")
-	iWrap := strings.Index(joined, "opentelemetry-instrument shiny run")
+	iWrap := strings.Index(joined, "opentelemetry-instrument python -m shiny run")
 	if iBuiltin < 0 || iExtra < 0 || iWrap < 0 || !(iBuiltin < iExtra && iExtra < iWrap) {
 		t.Fatalf("order wrong: %s", joined)
 	}

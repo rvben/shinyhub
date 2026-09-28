@@ -186,7 +186,7 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 
 // withPythonReload appends `--reload` to an inferred `shiny run` command when
 // reload is requested. The flag targets `shiny run` even when the entrypoint is
-// wrapped by opentelemetry-instrument (the wrapper execs shiny run).
+// wrapped by opentelemetry-instrument (the wrapper execs python -m shiny run).
 func withPythonReload(cmd []string, reload bool) []string {
 	if !reload {
 		return cmd
