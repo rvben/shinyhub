@@ -1727,6 +1727,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			return fmt.Errorf("server tracing setup: %w", err)
 		}
 		srv.SetTracer(tracer)
+		if tracer != nil {
+			// /app/* proxy spans export through the same provider, so the
+			// traceparent an app receives names a span the backend has.
+			prx.SetSpanTracer(tracer.Tracer())
+		}
 		slog.Info("server tracing enabled", "endpoint", cfg.Tracing.OTLPEndpoint, "protocol", cfg.Tracing.OTLPProtocol)
 		// Tear down the tracer on any early error return below (idempotent with
 		// the ordered shutdown path).

@@ -20,10 +20,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/rvben/shinyhub/internal/admission"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/proxytrust"
+	"github.com/rvben/shinyhub/internal/spanerr"
 	"github.com/rvben/shinyhub/internal/supportui"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
@@ -485,12 +491,18 @@ type Proxy struct {
 	identityProvider atomic.Pointer[identityProviderFn]
 	usageRecorder    atomic.Pointer[usageRecorderCallbacks]
 
-	// tracing holds the active tracing config + ring buffer. When traceBuffer
-	// is nil the proxy is a no-op for trace propagation: no traceparent header
-	// is set, no spans are recorded. The config is read-only after SetTracing
+	// tracing holds the active tracing config + ring buffer. traceCfg.Enabled
+	// gates tracing on the /app/* path; traceBuffer only controls the in-UI
+	// ring buffer. A nil traceBuffer records nothing for the UI, while
+	// traceparent propagation to the app and OTLP export (via spanTracer)
+	// carry on independently of it. The config is read-only after SetTracing
 	// and copied by value here so we don't need a lock on the hot path.
 	traceCfg    config.TracingConfig
 	traceBuffer *tracing.Buffer
+	// spanTracer, when set, is the OTel SDK tracer every /app/* span is
+	// started from, so the IDs sent to the app are the exported span's own.
+	// Nil means the dependency-free StartProxySpan path.
+	spanTracer atomic.Pointer[tracerHolder]
 
 	seenMu   sync.RWMutex
 	lastSeen map[string]time.Time
@@ -1092,6 +1104,29 @@ func (p *Proxy) SetTracing(cfg config.TracingConfig, buf *tracing.Buffer) {
 	p.traceCfg = cfg
 	p.traceBuffer = buf
 	p.mu.Unlock()
+}
+
+// tracerHolder boxes a trace.Tracer interface so it can live in an
+// atomic.Pointer.
+type tracerHolder struct{ tracer trace.Tracer }
+
+// SetSpanTracer makes t the source of every /app/* proxy span while tracing
+// is enabled: the span is exported through t's provider and its IDs and
+// sampled flag are what the app receives in traceparent. A nil t restores the
+// dependency-free path that only feeds the ring buffer.
+func (p *Proxy) SetSpanTracer(t trace.Tracer) {
+	if t == nil {
+		p.spanTracer.Store(nil)
+		return
+	}
+	p.spanTracer.Store(&tracerHolder{tracer: t})
+}
+
+func (p *Proxy) loadSpanTracer() trace.Tracer {
+	if h := p.spanTracer.Load(); h != nil {
+		return h.tracer
+	}
+	return nil
 }
 
 // SetWakeTrigger registers a callback invoked (in a goroutine) when a request
@@ -2778,20 +2813,48 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// traceparent (or start a new trace), generate a fresh span ID for this
 	// proxy hop, and overwrite the header so the upstream Shiny process sees
 	// ShinyHub's span as its parent. The captured span info is recorded in the
-	// ring buffer after the response completes (in the defer below).
+	// ring buffer after the response completes (in the defer below), and, with
+	// an SDK tracer wired, the same span is exported over OTLP.
 	var (
 		traceEnabled = p.traceCfg.Enabled
 		traceCtx     tracing.TraceContext
 		traceParent  string
 		traceSampled bool
+		otelSpan     trace.Span
 	)
 	if traceEnabled {
 		// tracestate is a W3C list header that MAY be split across multiple
 		// header field-values; combine them so vendor entries past the first
 		// split are not dropped (Header.Get would read only the first).
 		incomingState := strings.Join(r.Header.Values("tracestate"), ",")
-		traceCtx, traceParent, traceSampled = tracing.StartProxySpan(
-			r.Header.Get("traceparent"), incomingState, p.traceCfg)
+		if tr := p.loadSpanTracer(); tr != nil {
+			// The SDK span is the single source of this hop's identity: the
+			// IDs and sampled flag sent to the app are the exported span's
+			// own, so an app span always has its parent in the backend. The
+			// span rides on the request context so everything downstream of
+			// this point (wake triggers, the transport) can parent on it.
+			parent := propagation.TraceContext{}.Extract(r.Context(), propagation.MapCarrier{
+				"traceparent": r.Header.Get("traceparent"),
+				"tracestate":  incomingState,
+			})
+			if remote := trace.SpanContextFromContext(parent); remote.IsValid() {
+				traceParent = remote.SpanID().String()
+			}
+			ctx, span := tr.Start(parent, r.Method+" /app/{slug}", trace.WithSpanKind(trace.SpanKindServer))
+			otelSpan = span
+			sc := span.SpanContext()
+			traceCtx = tracing.TraceContext{
+				TraceID:    [16]byte(sc.TraceID()),
+				SpanID:     [8]byte(sc.SpanID()),
+				Flags:      byte(sc.TraceFlags()),
+				TraceState: sc.TraceState().String(),
+			}
+			traceSampled = sc.IsSampled()
+			r = r.WithContext(ctx)
+		} else {
+			traceCtx, traceParent, traceSampled = tracing.StartProxySpan(
+				r.Header.Get("traceparent"), incomingState, p.traceCfg)
+		}
 		r.Header.Set("traceparent", traceCtx.TraceparentHeader())
 		// Propagate vendor tracestate only when continuing a trace; on a fresh
 		// trace TraceState is empty and any stray inbound header is dropped so
@@ -2804,8 +2867,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer func() {
-		if traceEnabled && p.traceBuffer != nil {
-			path := r.URL.Path
+		// The buffer and the exported span are independent sinks: a nil buffer
+		// must not suppress the export, and no tracer must not suppress the
+		// buffer.
+		var (
+			path    string
+			spanErr string
+		)
+		if traceEnabled && (p.traceBuffer != nil || otelSpan != nil) {
+			path = r.URL.Path
 			prefix := "/app/" + slug
 			if trimmed := strings.TrimPrefix(path, prefix); trimmed != path {
 				if trimmed == "" {
@@ -2813,10 +2883,44 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				path = trimmed
 			}
-			var spanErr string
 			if rec.proxyErr != nil {
 				spanErr = rec.proxyErr.Error()
 			}
+		}
+		// A sampled-out span is non-recording: attributes and status would be
+		// discarded, so only End it.
+		if otelSpan != nil && otelSpan.IsRecording() {
+			attrs := []attribute.KeyValue{
+				attribute.String("http.request.method", r.Method),
+				attribute.String("http.route", "/app/{slug}"),
+				attribute.String("url.path", path),
+				attribute.Int("http.response.status_code", rec.status),
+				attribute.String("shinyhub.app.slug", slug),
+			}
+			if replicaIndex >= 0 {
+				attrs = append(attrs, attribute.Int("shinyhub.replica", replicaIndex))
+			}
+			if deploymentID > 0 {
+				attrs = append(attrs, attribute.Int64("shinyhub.deployment.id", deploymentID))
+			}
+			if rec.rejectReason != "" {
+				attrs = append(attrs, attribute.String("shinyhub.proxy.reject_reason", string(rec.rejectReason)))
+			}
+			otelSpan.SetAttributes(attrs...)
+			if spanErr != "" || rec.status >= 500 {
+				// The exported copy is reduced by spanerr: a replica
+				// transport error can quote a credentialed URL and run long.
+				msg := spanerr.Text(spanErr)
+				if msg == "" {
+					msg = http.StatusText(rec.status)
+				}
+				otelSpan.SetStatus(codes.Error, msg)
+			}
+		}
+		if otelSpan != nil {
+			otelSpan.End()
+		}
+		if traceEnabled && p.traceBuffer != nil {
 			p.traceBuffer.Record(tracing.Span{
 				TraceID:      traceCtx.TraceIDHex(),
 				SpanID:       hex.EncodeToString(traceCtx.SpanID[:]),

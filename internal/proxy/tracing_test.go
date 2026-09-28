@@ -2,18 +2,59 @@ package proxy_test
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/spanerr"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
+
+// bothTracingPaths runs fn once on the dependency-free span path and once with
+// an SDK tracer wired, so every propagation and ring buffer contract holds on
+// both. The recorder is nil on the path without a tracer.
+func bothTracingPaths(t *testing.T, fn func(t *testing.T, wire func(*proxy.Proxy) *tracetest.SpanRecorder)) {
+	for _, withTracer := range []bool{false, true} {
+		name := "fallback"
+		if withTracer {
+			name = "sdk_tracer"
+		}
+		t.Run(name, func(t *testing.T) {
+			fn(t, func(p *proxy.Proxy) *tracetest.SpanRecorder {
+				if !withTracer {
+					return nil
+				}
+				rec := tracetest.NewSpanRecorder()
+				tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()), sdktrace.WithSpanProcessor(rec))
+				t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+				p.SetSpanTracer(tp.Tracer("test"))
+				return rec
+			})
+		})
+	}
+}
+
+func attrMap(kvs []attribute.KeyValue) map[string]string {
+	out := make(map[string]string, len(kvs))
+	for _, kv := range kvs {
+		out[string(kv.Key)] = kv.Value.Emit()
+	}
+	return out
+}
 
 // TestProxy_InjectsTraceparent verifies that an upstream Shiny process
 // receives ShinyHub's span as its parent (continuing the incoming trace ID).
@@ -79,28 +120,31 @@ func TestProxy_DisabledTracingLeavesHeaderAlone(t *testing.T) {
 // etc.). When ShinyHub continues an incoming trace it must propagate tracestate
 // downstream unchanged, otherwise the vendor span graph breaks at the proxy hop.
 func TestProxy_PropagatesTracestate(t *testing.T) {
-	var gotState string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotState = r.Header.Get("tracestate")
-	}))
-	defer backend.Close()
+	bothTracingPaths(t, func(t *testing.T, wire func(*proxy.Proxy) *tracetest.SpanRecorder) {
+		var gotState string
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotState = r.Header.Get("tracestate")
+		}))
+		defer backend.Close()
 
-	p := proxy.New()
-	if err := p.Register("app", backend.URL); err != nil {
-		t.Fatal(err)
-	}
-	buf := tracing.NewBuffer(10, time.Second)
-	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+		p := proxy.New()
+		if err := p.Register("app", backend.URL); err != nil {
+			t.Fatal(err)
+		}
+		buf := tracing.NewBuffer(10, time.Second)
+		p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+		wire(p)
 
-	req := httptest.NewRequest("GET", "/app/app/", nil)
-	req.Header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
-	req.Header.Set("tracestate", "dd=s:1;o:rum,congo=t61rcWkgMzE")
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, req)
+		req := httptest.NewRequest("GET", "/app/app/", nil)
+		req.Header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+		req.Header.Set("tracestate", "dd=s:1;o:rum,congo=t61rcWkgMzE")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
 
-	if gotState != "dd=s:1;o:rum,congo=t61rcWkgMzE" {
-		t.Errorf("tracestate not propagated downstream: got %q", gotState)
-	}
+		if gotState != "dd=s:1;o:rum,congo=t61rcWkgMzE" {
+			t.Errorf("tracestate not propagated downstream: got %q", gotState)
+		}
+	})
 }
 
 // TRC-4: tracestate is a W3C list header that a client or edge proxy MAY split
@@ -108,60 +152,66 @@ func TestProxy_PropagatesTracestate(t *testing.T) {
 // only the first (Header.Get) silently drops every vendor entry after the first
 // split. ShinyHub must join all inbound Tracestate values before propagating.
 func TestProxy_CombinesSplitTracestate(t *testing.T) {
-	var gotState string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotState = r.Header.Get("tracestate")
-	}))
-	defer backend.Close()
+	bothTracingPaths(t, func(t *testing.T, wire func(*proxy.Proxy) *tracetest.SpanRecorder) {
+		var gotState string
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotState = r.Header.Get("tracestate")
+		}))
+		defer backend.Close()
 
-	p := proxy.New()
-	if err := p.Register("app", backend.URL); err != nil {
-		t.Fatal(err)
-	}
-	buf := tracing.NewBuffer(10, time.Second)
-	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+		p := proxy.New()
+		if err := p.Register("app", backend.URL); err != nil {
+			t.Fatal(err)
+		}
+		buf := tracing.NewBuffer(10, time.Second)
+		p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+		wire(p)
 
-	req := httptest.NewRequest("GET", "/app/app/", nil)
-	req.Header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
-	req.Header.Add("tracestate", "dd=s:1;o:rum")
-	req.Header.Add("tracestate", "congo=t61rcWkgMzE")
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, req)
+		req := httptest.NewRequest("GET", "/app/app/", nil)
+		req.Header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+		req.Header.Add("tracestate", "dd=s:1;o:rum")
+		req.Header.Add("tracestate", "congo=t61rcWkgMzE")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
 
-	want := "dd=s:1;o:rum,congo=t61rcWkgMzE"
-	if gotState != want {
-		t.Errorf("split tracestate not combined downstream: got %q, want %q", gotState, want)
-	}
+		want := "dd=s:1;o:rum,congo=t61rcWkgMzE"
+		if gotState != want {
+			t.Errorf("split tracestate not combined downstream: got %q, want %q", gotState, want)
+		}
+	})
 }
 
 // TRC-4: when no valid upstream traceparent is present a fresh trace is started,
 // so any inbound tracestate references a different (or no) trace and MUST NOT be
 // forwarded — that would attach stale vendor context to a brand-new trace.
 func TestProxy_DropsTracestateOnNewTrace(t *testing.T) {
-	var gotState string
-	var sawHeader bool
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotState = r.Header.Get("tracestate")
-		_, sawHeader = r.Header["Tracestate"]
-	}))
-	defer backend.Close()
+	bothTracingPaths(t, func(t *testing.T, wire func(*proxy.Proxy) *tracetest.SpanRecorder) {
+		var gotState string
+		var sawHeader bool
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotState = r.Header.Get("tracestate")
+			_, sawHeader = r.Header["Tracestate"]
+		}))
+		defer backend.Close()
 
-	p := proxy.New()
-	if err := p.Register("app", backend.URL); err != nil {
-		t.Fatal(err)
-	}
-	buf := tracing.NewBuffer(10, time.Second)
-	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+		p := proxy.New()
+		if err := p.Register("app", backend.URL); err != nil {
+			t.Fatal(err)
+		}
+		buf := tracing.NewBuffer(10, time.Second)
+		p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+		wire(p)
 
-	req := httptest.NewRequest("GET", "/app/app/", nil)
-	// No traceparent: a new trace is started. The stray tracestate must be dropped.
-	req.Header.Set("tracestate", "dd=s:1;o:rum")
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, req)
+		req := httptest.NewRequest("GET", "/app/app/", nil)
+		// No traceparent: a new trace is started. The stray tracestate must be dropped.
+		req.Header.Set("tracestate", "dd=s:1;o:rum")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
 
-	if sawHeader || gotState != "" {
-		t.Errorf("stale tracestate must be dropped on a new trace, got %q (present=%v)", gotState, sawHeader)
-	}
+		if sawHeader || gotState != "" {
+			t.Errorf("stale tracestate must be dropped on a new trace, got %q (present=%v)", gotState, sawHeader)
+		}
+	})
 }
 
 // TRC-1: an upstream connection failure (the ReverseProxy ErrorHandler path)
@@ -244,111 +294,280 @@ func TestProxy_RecordsMidStreamErrorMessage(t *testing.T) {
 // Shiny/Streamlit apps whenever tracing is on. This drives a raw WS-style
 // upgrade through the proxy and asserts the handshake and byte tunnel succeed.
 func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-			http.Error(w, "expected websocket upgrade", http.StatusBadRequest)
-			return
+	bothTracingPaths(t, func(t *testing.T, wire func(*proxy.Proxy) *tracetest.SpanRecorder) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+				http.Error(w, "expected websocket upgrade", http.StatusBadRequest)
+				return
+			}
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				http.Error(w, "no hijack", http.StatusInternalServerError)
+				return
+			}
+			conn, brw, err := hj.Hijack()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+			_ = brw.Flush()
+			// Echo one client line back so the test confirms the tunnel is live.
+			line, err := brw.ReadString('\n')
+			if err != nil {
+				return
+			}
+			_, _ = brw.WriteString("echo:" + line)
+			_ = brw.Flush()
+		}))
+		defer backend.Close()
+
+		p := proxy.New()
+		if err := p.Register("app", backend.URL); err != nil {
+			t.Fatal(err)
 		}
-		hj, ok := w.(http.Hijacker)
-		if !ok {
-			http.Error(w, "no hijack", http.StatusInternalServerError)
-			return
-		}
-		conn, brw, err := hj.Hijack()
+		buf := tracing.NewBuffer(10, time.Second)
+		p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+		spans := wire(p)
+
+		front := httptest.NewServer(p)
+		defer front.Close()
+
+		conn, err := net.Dial("tcp", strings.TrimPrefix(front.URL, "http://"))
 		if err != nil {
-			return
+			t.Fatalf("dial frontend: %v", err)
 		}
 		defer conn.Close()
-		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
-		_ = brw.Flush()
-		// Echo one client line back so the test confirms the tunnel is live.
-		line, err := brw.ReadString('\n')
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+		fmt.Fprintf(conn, "GET /app/app/ws HTTP/1.1\r\nHost: example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		r := bufio.NewReader(conn)
+		statusLine, err := r.ReadString('\n')
 		if err != nil {
+			t.Fatalf("read status line: %v", err)
+		}
+		if !strings.Contains(statusLine, "101") {
+			t.Fatalf("traced WebSocket upgrade failed: status line = %q (want 101)", strings.TrimSpace(statusLine))
+		}
+		// Drain the rest of the response headers.
+		for {
+			l, err := r.ReadString('\n')
+			if err != nil {
+				t.Fatalf("read headers: %v", err)
+			}
+			if strings.TrimSpace(l) == "" {
+				break
+			}
+		}
+		// Confirm the byte tunnel actually carries traffic both ways.
+		fmt.Fprintf(conn, "hello\n")
+		echo, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read echo: %v", err)
+		}
+		if strings.TrimSpace(echo) != "echo:hello" {
+			t.Fatalf("tunnel echo = %q, want %q", strings.TrimSpace(echo), "echo:hello")
+		}
+		if spans == nil {
 			return
 		}
-		_, _ = brw.WriteString("echo:" + line)
-		_ = brw.Flush()
-	}))
-	defer backend.Close()
-
-	p := proxy.New()
-	if err := p.Register("app", backend.URL); err != nil {
-		t.Fatal(err)
-	}
-	buf := tracing.NewBuffer(10, time.Second)
-	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
-
-	front := httptest.NewServer(p)
-	defer front.Close()
-
-	conn, err := net.Dial("tcp", strings.TrimPrefix(front.URL, "http://"))
-	if err != nil {
-		t.Fatalf("dial frontend: %v", err)
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-	fmt.Fprintf(conn, "GET /app/app/ws HTTP/1.1\r\nHost: example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
-	r := bufio.NewReader(conn)
-	statusLine, err := r.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read status line: %v", err)
-	}
-	if !strings.Contains(statusLine, "101") {
-		t.Fatalf("traced WebSocket upgrade failed: status line = %q (want 101)", strings.TrimSpace(statusLine))
-	}
-	// Drain the rest of the response headers.
-	for {
-		l, err := r.ReadString('\n')
-		if err != nil {
-			t.Fatalf("read headers: %v", err)
+		// The backend closes the tunnel after the echo, which ends the proxy
+		// request and with it the one span covering the whole upgrade.
+		deadline := time.Now().Add(5 * time.Second)
+		for len(spans.Ended()) == 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
 		}
-		if strings.TrimSpace(l) == "" {
-			break
+		if n := len(spans.Ended()); n != 1 {
+			t.Fatalf("want 1 span covering the upgrade, got %d", n)
 		}
-	}
-	// Confirm the byte tunnel actually carries traffic both ways.
-	fmt.Fprintf(conn, "hello\n")
-	echo, err := r.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read echo: %v", err)
-	}
-	if strings.TrimSpace(echo) != "echo:hello" {
-		t.Fatalf("tunnel echo = %q, want %q", strings.TrimSpace(echo), "echo:hello")
-	}
+	})
 }
 
 // TestProxy_RecordsErrorToBuffer verifies that a 5xx response is admitted to
 // the ring buffer with method, path, status, and replica information.
 func TestProxy_RecordsErrorToBuffer(t *testing.T) {
+	bothTracingPaths(t, func(t *testing.T, wire func(*proxy.Proxy) *tracetest.SpanRecorder) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		defer backend.Close()
+
+		p := proxy.New()
+		if err := p.Register("app", backend.URL); err != nil {
+			t.Fatal(err)
+		}
+		buf := tracing.NewBuffer(10, time.Hour) // slow threshold huge so only error path admits
+		p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
+		wire(p)
+
+		req := httptest.NewRequest("GET", "/app/app/page", nil)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+
+		spans := buf.Snapshot("app")
+		if len(spans) != 1 {
+			t.Fatalf("expected one buffered span, got %d", len(spans))
+		}
+		s := spans[0]
+		if s.Status != http.StatusBadGateway {
+			t.Errorf("status = %d, want 502", s.Status)
+		}
+		if s.Method != "GET" {
+			t.Errorf("method = %q", s.Method)
+		}
+		if s.Path != "/page" {
+			t.Errorf("path = %q, want /page (stripped /app/<slug> prefix)", s.Path)
+		}
+	})
+}
+
+func tracedProxy(t *testing.T, sampler sdktrace.Sampler) (*proxy.Proxy, *tracetest.SpanRecorder, *httptest.Server, *atomic.Value) {
+	t.Helper()
+	got := &atomic.Value{}
+	got.Store("")
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Get("traceparent"))
+	}))
+	t.Cleanup(backend.Close)
+	p := proxy.New()
+	if err := p.Register("demo", backend.URL); err != nil {
+		t.Fatal(err)
+	}
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, tracing.NewBuffer(10, time.Hour))
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sampler), sdktrace.WithSpanProcessor(rec))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	p.SetSpanTracer(tp.Tracer("test"))
+	return p, rec, backend, got
+}
+
+func TestProxy_ExportsSpanWhoseIDsTheAppReceives(t *testing.T) {
+	p, rec, _, got := tracedProxy(t, sdktrace.AlwaysSample())
+	req := httptest.NewRequest("GET", "/app/demo/page?x=1", nil)
+	upstream := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	req.Header.Set("traceparent", upstream)
+	p.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := rec.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("want 1 span, got %d", len(spans))
+	}
+	s := spans[0]
+	tp, ok := tracing.ParseTraceparent(got.Load().(string))
+	if !ok || trace.TraceID(tp.TraceID) != s.SpanContext().TraceID() || trace.SpanID(tp.SpanID) != s.SpanContext().SpanID() {
+		t.Fatalf("app got %q, exported %s/%s", got.Load(), s.SpanContext().TraceID(), s.SpanContext().SpanID())
+	}
+	if s.Parent().SpanID().String() != "b7ad6b7169203331" || !s.Parent().IsRemote() {
+		t.Fatalf("parent: %v", s.Parent())
+	}
+	if s.Name() != "GET /app/{slug}" || s.SpanKind() != trace.SpanKindServer {
+		t.Fatalf("name/kind: %s %v", s.Name(), s.SpanKind())
+	}
+	a := attrMap(s.Attributes())
+	if a["shinyhub.app.slug"] != "demo" || a["url.path"] != "/page" || a["http.response.status_code"] != "200" || a["shinyhub.replica"] != "0" {
+		t.Fatalf("attrs: %v", a)
+	}
+}
+
+// Review Focus 2: the flag the app sees equals whether the span was exported.
+func TestProxy_TraceparentFlagMatchesExportDecision(t *testing.T) {
+	for _, tc := range []struct {
+		sampler sdktrace.Sampler
+		flag    string
+		n       int
+	}{{sdktrace.NeverSample(), "00", 0}, {sdktrace.AlwaysSample(), "01", 1}} {
+		p, rec, _, got := tracedProxy(t, sdktrace.ParentBased(tc.sampler))
+		p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/app/demo/", nil))
+		if !strings.HasSuffix(got.Load().(string), "-"+tc.flag) || len(rec.Ended()) != tc.n {
+			t.Fatalf("flag %q spans %d, want %s/%d", got.Load(), len(rec.Ended()), tc.flag, tc.n)
+		}
+	}
+}
+
+func TestProxy_SpanMarksUpstreamErrors(t *testing.T) {
+	// A dead backend does NOT produce a 502: the ErrorHandler serves the
+	// loading page with 200 so the client retries while the wake runs. The
+	// span must still carry the transport error, recorded via proxyErr.
+	p, rec, backend, _ := tracedProxy(t, sdktrace.AlwaysSample())
+	backend.Close()
+	resp := httptest.NewRecorder()
+	p.ServeHTTP(resp, httptest.NewRequest("GET", "/app/demo/page", nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200 (loading page)", resp.Code)
+	}
+	spans := rec.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("want 1 span, got %d", len(spans))
+	}
+	st := spans[0].Status()
+	if st.Code != codes.Error || !strings.Contains(st.Description, "connect") {
+		t.Fatalf("span status = %v %q, want Error mentioning the dial failure", st.Code, st.Description)
+	}
+}
+
+// failingTransport fails every round trip with err, standing in for a replica
+// transport whose errors carry arbitrary text.
+type failingTransport struct{ err error }
+
+func (f failingTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, f.err }
+
+// The exported span carries a reduced copy of the upstream error: a replica
+// transport error can quote a URL with credentials and run long, and neither
+// may leave the process on a span.
+func TestProxy_SpanUpstreamErrorIsRedactedAndBounded(t *testing.T) {
+	const secret = "tok-s3cret"
+	p := proxy.New()
+	p.SetPoolSize("demo", 1)
+	transportErr := fmt.Errorf("dial via https://svc:%s@gw.example/replica: %s\ndetail: %s",
+		secret, strings.Repeat("x", 4000), secret)
+	if err := p.RegisterReplica("demo", 0, "http://127.0.0.1:1", failingTransport{err: transportErr}, 0); err != nil {
+		t.Fatal(err)
+	}
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, tracing.NewBuffer(10, time.Hour))
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()), sdktrace.WithSpanProcessor(rec))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	p.SetSpanTracer(tp.Tracer("test"))
+
+	p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/app/demo/page", nil))
+
+	spans := rec.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("want 1 span, got %d", len(spans))
+	}
+	st := spans[0].Status()
+	if st.Code != codes.Error || !strings.Contains(st.Description, "dial via") {
+		t.Fatalf("status code %v, want Error carrying the transport error: %.120q", st.Code, st.Description)
+	}
+	if strings.Contains(st.Description, secret) {
+		t.Errorf("secret exported (%d bytes): %.120q", len(st.Description), st.Description)
+	}
+	if strings.ContainsAny(st.Description, "\r\n") {
+		t.Errorf("newline exported (%d bytes): %.120q", len(st.Description), st.Description)
+	}
+	if len(st.Description) > spanerr.MaxBytes {
+		t.Errorf("exported %d bytes, want <= %d", len(st.Description), spanerr.MaxBytes)
+	}
+}
+
+func TestProxy_SpanMarks5xxAsError(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer backend.Close()
-
 	p := proxy.New()
-	if err := p.Register("app", backend.URL); err != nil {
+	if err := p.Register("demo", backend.URL); err != nil {
 		t.Fatal(err)
 	}
-	buf := tracing.NewBuffer(10, time.Hour) // slow threshold huge so only error path admits
-	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
-
-	req := httptest.NewRequest("GET", "/app/app/page", nil)
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, req)
-
-	spans := buf.Snapshot("app")
-	if len(spans) != 1 {
-		t.Fatalf("expected one buffered span, got %d", len(spans))
+	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, tracing.NewBuffer(10, time.Hour))
+	rec := tracetest.NewSpanRecorder()
+	p.SetSpanTracer(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)).Tracer("test"))
+	p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/app/demo/", nil))
+	spans := rec.Ended()
+	if len(spans) != 1 || spans[0].Status().Code != codes.Error {
+		t.Fatalf("want 1 Error span, got %d", len(spans))
 	}
-	s := spans[0]
-	if s.Status != http.StatusBadGateway {
-		t.Errorf("status = %d, want 502", s.Status)
-	}
-	if s.Method != "GET" {
-		t.Errorf("method = %q", s.Method)
-	}
-	if s.Path != "/page" {
-		t.Errorf("path = %q, want /page (stripped /app/<slug> prefix)", s.Path)
+	if a := attrMap(spans[0].Attributes()); a["http.response.status_code"] != "502" {
+		t.Fatalf("status attr = %q", a["http.response.status_code"])
 	}
 }
