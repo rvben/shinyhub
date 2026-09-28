@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -61,8 +60,8 @@ func TestNativeWaitKeepsTheWholeLogOnAnOrdinaryExit(t *testing.T) {
 	err = rt.Wait(context.Background(), ep.Handle)
 	elapsed := time.Since(start)
 
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 3 {
 		t.Fatalf("Wait must report the real exit status, got %v", err)
 	}
 	if elapsed >= leaderExitPipeGrace {
@@ -153,11 +152,11 @@ func TestNativeWaitReapsTheGroupWhenTheLeaderIsKilledDirectly(t *testing.T) {
 	// The manager builds its crash verdict from this error, so bounding the
 	// pipe wait must not replace the signal that explains the exit. ErrWaitDelay
 	// would erase "killed" and the replica's recorded cause with it.
-	var exitErr *exec.ExitError
+	var exitErr *ProcessExitError
 	if !errors.As(err2, &exitErr) {
 		t.Fatalf("Wait must still report how the leader died, got %v", err2)
 	}
-	if status, ok := exitErr.Sys().(syscall.WaitStatus); !ok || status.Signal() != syscall.SIGKILL {
+	if exitErr.Signal != syscall.SIGKILL {
 		t.Fatalf("exit verdict lost the signal that caused it: %v", err2)
 	}
 

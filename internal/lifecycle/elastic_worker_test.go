@@ -700,7 +700,7 @@ func TestRecoverProcesses_ElasticAppSetsUpPoolAndStaysRunning(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), rt)
 	prx := proxy.New()
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
 
 	// App must still be "running" - an empty elastic pool is a valid running state.
 	got, err := store.GetAppBySlug("elasticpool")
@@ -738,7 +738,7 @@ func TestRecoverProcesses_FleetDefaultElastic_SetsUpPoolAndStaysRunning(t *testi
 	prx := proxy.New()
 
 	// Pass "per_session" as the fleet default; the per-app field is empty.
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "per_session")
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "per_session", nil)
 
 	// App must still be "running": the elastic pool is ready, no replicas needed.
 	got, err := store.GetAppBySlug("inheritpool")

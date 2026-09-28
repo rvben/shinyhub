@@ -40,6 +40,35 @@ type fakeManager struct {
 	// lastExit scripts LastExit(slug,index): the most recent exit verdict per
 	// replica, used to surface an OOM-kill reason.
 	lastExit map[replicaKey]process.ExitVerdict
+
+	// stopIncarnationErrs scripts StopReplicaIncarnation(slug,index,gen) by
+	// call order per key: the first call pops errs[0], the next pops errs[1],
+	// and so on; once exhausted (or never scripted for that key) it returns
+	// nil. Lets a test model "still unconfirmed" retries before an eventual
+	// confirmed exit.
+	stopIncarnationErrs map[replicaKey][]error
+	// stopIncarnationCalls records every StopReplicaIncarnation call.
+	stopIncarnationCalls []stopIncarnationCall
+	// releaseStopPendingCalls records every ReleaseStopPending call.
+	releaseStopPendingCalls []stopIncarnationCall
+
+	// claimStopPendingFails optionally scripts ClaimStopPending(slug,index,gen)
+	// to report false (the fence resolved some other way between the failed
+	// stop and this claim) for a specific key; an unscripted key defaults to
+	// true, matching the real manager's behaviour right after
+	// StopReplicaIncarnation/StopReplicaConfirmed set the fence for the same
+	// incarnation.
+	claimStopPendingFails map[replicaKey]bool
+	// claimStopPendingCalls records every ClaimStopPending invocation.
+	claimStopPendingCalls []stopIncarnationCall
+}
+
+// stopIncarnationCall records one StopReplicaIncarnation/ReleaseStopPending
+// invocation for assertions.
+type stopIncarnationCall struct {
+	slug  string
+	index int
+	gen   uint64
 }
 
 func (f *fakeManager) LogTail(_ string, _, _ int) string {
@@ -87,6 +116,34 @@ func (f *fakeManager) StopReplica(slug string, index int) error {
 }
 
 func (f *fakeManager) TransportForWorker(_, _ string) http.RoundTripper { return nil }
+
+func (f *fakeManager) StopReplicaIncarnation(slug string, index int, gen uint64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopIncarnationCalls = append(f.stopIncarnationCalls, stopIncarnationCall{slug, index, gen})
+	k := replicaKey{slug, index}
+	errs := f.stopIncarnationErrs[k]
+	if len(errs) == 0 {
+		return nil
+	}
+	err := errs[0]
+	f.stopIncarnationErrs[k] = errs[1:]
+	return err
+}
+
+func (f *fakeManager) ReleaseStopPending(slug string, index int, gen uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.releaseStopPendingCalls = append(f.releaseStopPendingCalls, stopIncarnationCall{slug, index, gen})
+}
+
+func (f *fakeManager) ClaimStopPending(slug string, index int, gen uint64) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := replicaKey{slug, index}
+	f.claimStopPendingCalls = append(f.claimStopPendingCalls, stopIncarnationCall{slug, index, gen})
+	return !f.claimStopPendingFails[k]
+}
 
 // registeredBackend records one RegisterReplica call: which slot's route was
 // installed, pointing where, under which app identity.
@@ -241,6 +298,74 @@ type fakeStore struct {
 
 	activationInFlight    bool
 	activationInFlightErr error
+
+	// markCrashedClearingIdentityErr, when set, is returned by
+	// MarkReplicaCrashedClearingIdentityIfCurrent without writing.
+	markCrashedClearingIdentityErr error
+	// markCrashedClearingIdentityCalls records every
+	// MarkReplicaCrashedClearingIdentityIfCurrent call (params, expect).
+	markCrashedClearingIdentityCalls []markCrashedClearingIdentityCall
+
+	// finishedLogRuns records every FinishAppLogRunWithExit call's runID.
+	finishedLogRuns []string
+	// finishLogRunErr, when set, is returned by FinishAppLogRunWithExit.
+	finishLogRunErr error
+}
+
+// markCrashedClearingIdentityCall records one
+// MarkReplicaCrashedClearingIdentityIfCurrent invocation for assertions.
+type markCrashedClearingIdentityCall struct {
+	params db.UpsertReplicaParams
+	expect db.ReplicaRuntimeIdentity
+}
+
+// MarkReplicaCrashedClearingIdentityIfCurrent mirrors the real store's
+// atomic, identity-conditional write: it only applies when the row still
+// carries exactly expect, modelling a fast restart that has since reused the
+// row.
+func (f *fakeStore) MarkReplicaCrashedClearingIdentityIfCurrent(p db.UpsertReplicaParams, expect db.ReplicaRuntimeIdentity) (bool, error) {
+	f.mu.Lock()
+	f.markCrashedClearingIdentityCalls = append(f.markCrashedClearingIdentityCalls, markCrashedClearingIdentityCall{params: p, expect: expect})
+	if f.markCrashedClearingIdentityErr != nil {
+		err := f.markCrashedClearingIdentityErr
+		f.mu.Unlock()
+		return false, err
+	}
+	var match *db.Replica
+	for _, r := range f.replicas[p.AppID] {
+		if r.Index == p.Index {
+			if r.PID == nil || *r.PID != expect.PID || derefInt(r.Port) != expect.Port ||
+				r.EndpointURL != expect.EndpointURL || r.WorkerID != expect.WorkerID ||
+				derefInt64(r.DeploymentID) != expect.DeploymentID {
+				f.mu.Unlock()
+				return false, nil
+			}
+			match = r
+			break
+		}
+	}
+	if match == nil {
+		f.mu.Unlock()
+		return false, nil
+	}
+	match.Status = "crashed"
+	match.PID, match.Port = nil, nil
+	match.EndpointURL, match.WorkerID = "", ""
+	match.Reason = p.Reason
+	f.mu.Unlock()
+	return true, nil
+}
+
+// FinishAppLogRunWithExit records the call; fakeStore has no app_log_runs
+// table so it does not otherwise track terminal state.
+func (f *fakeStore) FinishAppLogRunWithExit(runID, _ string, _ time.Time, _ bool, _ *int, _, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.finishLogRunErr != nil {
+		return f.finishLogRunErr
+	}
+	f.finishedLogRuns = append(f.finishedLogRuns, runID)
+	return nil
 }
 
 func (f *fakeStore) AppCompatibilityQuarantined(_ int64) (bool, error) {
@@ -2275,6 +2400,15 @@ func (m *orderCheckingManager) StopReplica(slug string, index int) error {
 }
 func (m *orderCheckingManager) TransportForWorker(tier, nodeID string) http.RoundTripper {
 	return m.inner.TransportForWorker(tier, nodeID)
+}
+func (m *orderCheckingManager) StopReplicaIncarnation(slug string, index int, gen uint64) error {
+	return m.inner.StopReplicaIncarnation(slug, index, gen)
+}
+func (m *orderCheckingManager) ReleaseStopPending(slug string, index int, gen uint64) {
+	m.inner.ReleaseStopPending(slug, index, gen)
+}
+func (m *orderCheckingManager) ClaimStopPending(slug string, index int, gen uint64) bool {
+	return m.inner.ClaimStopPending(slug, index, gen)
 }
 
 // --- warm-shrink replaces hibernation tests ---

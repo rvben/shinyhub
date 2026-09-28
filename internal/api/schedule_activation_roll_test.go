@@ -1195,7 +1195,7 @@ func TestScheduleActivationRoll_DockerContractRecoversSurgeSweepsOrphansAndCompl
 
 	recoveredManager := process.NewManager(t.TempDir(), runtime)
 	recoveredProxy := proxy.New()
-	lifecycle.RecoverProcesses(srv.store, recoveredManager, recoveredProxy, 0, false, "")
+	lifecycle.RecoverProcesses(srv.store, recoveredManager, recoveredProxy, 0, false, "", nil)
 	if _, ok := recoveredManager.GetReplica(app.Slug, 0); !ok {
 		t.Fatal("Docker canonical replica was not adopted during recovery")
 	}

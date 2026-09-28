@@ -22,7 +22,7 @@ func TestRecoverProcesses_ClearsRecoveryPending(t *testing.T) {
 		t.Fatal("fixture is not in the startup window; the test below would pass vacuously")
 	}
 
-	lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "")
+	lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "", nil)
 
 	if mgr.RecoveryPending() {
 		t.Error("recovery finished but the manager still reports a pass outstanding; every unadopted replica would read as reconciling forever")
@@ -41,7 +41,7 @@ func TestRecoverProcesses_ClearsRecoveryPendingOnFailure(t *testing.T) {
 	mgr.MarkRecoveryPending()
 	store.Close() // ListRunningApps now fails, taking recovery's early return
 
-	lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "")
+	lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "", nil)
 
 	if mgr.RecoveryPending() {
 		t.Error("recovery bailed out and left the startup window open; the clear must cover every exit path, not just the successful one")

@@ -146,3 +146,57 @@ func TestDockerStartupGuardRejectsInvalidAcknowledgement(t *testing.T) {
 		t.Fatal("invalid acknowledgement armed launch")
 	}
 }
+
+// TestDockerRuntime_WaitTreatsARemovedContainerAsExited covers a guarded
+// launch that is aborted: Close removes the never-started container, so
+// Docker answers every later wait with 404. A container Docker no longer has
+// cannot be running, so Wait must report an exit instead of an error that
+// leaves a stop unconfirmable forever. Any other wait failure proves nothing.
+func TestDockerRuntime_WaitTreatsARemovedContainerAsExited(t *testing.T) {
+	var removed atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/create", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		io.WriteString(w, `{"Id":"guarded"}`)
+	})
+	mux.HandleFunc("/containers/guarded", func(w http.ResponseWriter, r *http.Request) {
+		removed.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/containers/guarded/wait", func(w http.ResponseWriter, r *http.Request) {
+		if removed.Load() {
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"message":"No such container: guarded"}`)
+			return
+		}
+		http.Error(w, `{"message":"daemon busy"}`, http.StatusInternalServerError)
+	})
+	rt := newDockerRuntimeWithServer(t, mux)
+	ep, err := rt.Start(context.Background(), StartParams{Slug: "app", Dir: t.TempDir(), Command: []string{"python", "app.py"}, Port: 8123, GuardUntilAcknowledged: true, LaunchID: "launch-1"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- rt.Wait(context.Background(), ep.Handle) }()
+	if err := ep.StartupGuard.Close(); err != nil {
+		t.Fatalf("abort close = %v", err)
+	}
+	var exit *ProcessExitError
+	select {
+	case err := <-waitResult:
+		if !errors.As(err, &exit) {
+			t.Fatalf("wait across an aborted launch = %v, want a ProcessExitError", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait across an aborted launch never returned")
+	}
+	if err := rt.Wait(context.Background(), ep.Handle); !errors.As(err, &exit) {
+		t.Fatalf("wait after the container was removed = %v, want a ProcessExitError", err)
+	}
+
+	removed.Store(false)
+	if err := rt.Wait(context.Background(), ep.Handle); err == nil || errors.As(err, &exit) {
+		t.Fatalf("wait on a daemon error = %v, want a non-exit error", err)
+	}
+}

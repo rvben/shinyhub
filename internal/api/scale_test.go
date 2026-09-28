@@ -40,7 +40,15 @@ func (r *stopFailRuntime) Start(_ context.Context, p process.StartParams, _ io.W
 func (r *stopFailRuntime) Signal(process.RunHandle, syscall.Signal) error {
 	return errors.New("worker refused SIGTERM")
 }
-func (r *stopFailRuntime) Wait(context.Context, process.RunHandle) error { return nil }
+func (r *stopFailRuntime) Wait(context.Context, process.RunHandle) error {
+	// Block until the test ends. A real runtime's Wait never returns before
+	// the process actually exits, and this fake's whole premise is a process
+	// that keeps running because its SIGTERM is refused; returning early here
+	// would race the exit-monitor goroutine against the test's explicit stop
+	// call. The manager's monitor goroutine leaks, which is acceptable in
+	// tests (mirrors process.captureRuntime).
+	select {}
+}
 func (r *stopFailRuntime) Stats(context.Context, process.RunHandle) (*float64, uint64, error) {
 	return nil, 0, nil
 }

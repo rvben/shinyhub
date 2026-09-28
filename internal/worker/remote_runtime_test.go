@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/worker/api"
 )
 
 // stubLookup is a test-only WorkerLookup backed by a slice. PlanPlacementForTier
@@ -726,6 +729,93 @@ func TestRemoteRuntime_WaitReportsWorkerFailureWithoutRetry(t *testing.T) {
 	}
 }
 
+// TestRemoteRuntime_WaitPreservesProcessExitErrorAcrossTheWire asserts that a
+// genuine *process.ProcessExitError from the worker's local Wait survives the
+// NDJSON round trip: the control plane's Wait must be able to prove the exit
+// itself (errors.As(err, *process.ProcessExitError)), not merely see an
+// opaque worker-reported failure string. A caller that cannot recover the
+// typed error treats a real exit the same as a transport failure that proves
+// nothing, which is exactly the ambiguity exitObserved exists to remove.
+func TestRemoteRuntime_WaitPreservesProcessExitErrorAcrossTheWire(t *testing.T) {
+	ts := newWaitTestServer(t, &slowExitRuntime{fakeRuntime: &fakeRuntime{}, waitErr: &process.ProcessExitError{Code: 7}})
+
+	transport := &countingTransport{RoundTripper: &http.Transport{}}
+	rt := newRemoteRuntime(
+		newStubLookup(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "w:8443", Status: "up"}),
+		"remote",
+		&stubDialer{client: &http.Client{Transport: transport}, base: ts.URL},
+	)
+	rt.waitRetry = time.Millisecond
+
+	done := make(chan error, 1)
+	go func() {
+		done <- rt.Wait(context.Background(), process.RunHandle{ContainerID: encodeRemoteHandle("node-a", "c-1")})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Wait on a reported exit = nil, want the worker's ProcessExitError")
+		}
+		var exitErr *process.ProcessExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("Wait = %v, want errors.As to recover a *process.ProcessExitError; the exit proof was lost crossing the wire", err)
+		}
+		if exitErr.Code != 7 {
+			t.Fatalf("recovered ProcessExitError.Code = %d, want 7", exitErr.Code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return within 2s")
+	}
+	if hits := transport.count(); hits != 1 {
+		t.Fatalf("worker wait endpoint hit %d times, want 1", hits)
+	}
+}
+
+// TestRemoteRuntime_WaitPreservesSignalAcrossTheWire asserts that a
+// *process.ProcessExitError carrying a Signal (a native replica killed by a
+// signal rather than exiting with a code) survives the same NDJSON round
+// trip: the control plane's Wait must recover both Code and Signal, not just
+// Code. Losing Signal makes a signal-killed remote replica indistinguishable
+// from an ordinary exit code -1, discarding the crash reason the local
+// runtime already preserves.
+func TestRemoteRuntime_WaitPreservesSignalAcrossTheWire(t *testing.T) {
+	ts := newWaitTestServer(t, &slowExitRuntime{fakeRuntime: &fakeRuntime{}, waitErr: &process.ProcessExitError{Code: -1, Signal: syscall.SIGKILL}})
+
+	transport := &countingTransport{RoundTripper: &http.Transport{}}
+	rt := newRemoteRuntime(
+		newStubLookup(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "w:8443", Status: "up"}),
+		"remote",
+		&stubDialer{client: &http.Client{Transport: transport}, base: ts.URL},
+	)
+	rt.waitRetry = time.Millisecond
+
+	done := make(chan error, 1)
+	go func() {
+		done <- rt.Wait(context.Background(), process.RunHandle{ContainerID: encodeRemoteHandle("node-a", "c-1")})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Wait on a signal-killed exit = nil, want the worker's ProcessExitError")
+		}
+		var exitErr *process.ProcessExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("Wait = %v, want errors.As to recover a *process.ProcessExitError; the exit proof was lost crossing the wire", err)
+		}
+		if exitErr.Signal != syscall.SIGKILL {
+			t.Fatalf("recovered ProcessExitError.Signal = %v, want SIGKILL: the signal was dropped crossing the worker wire", exitErr.Signal)
+		}
+		if exitErr.Code != -1 {
+			t.Fatalf("recovered ProcessExitError.Code = %d, want -1", exitErr.Code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return within 2s")
+	}
+	if hits := transport.count(); hits != 1 {
+		t.Fatalf("worker wait endpoint hit %d times, want 1", hits)
+	}
+}
+
 // TestReplicaServer_WaitKeepsLegacyAnswerForClientsThatDoNotOptIn asserts
 // that a control plane which does not ask for the streamed wait response
 // still gets the original contract: no response at all until the replica
@@ -748,5 +838,86 @@ func TestReplicaServer_WaitKeepsLegacyAnswerForClientsThatDoNotOptIn(t *testing.
 	}
 	if elapsed < 100*time.Millisecond {
 		t.Fatalf("legacy wait answered after %v, before the replica's %v exit delay", elapsed, 150*time.Millisecond)
+	}
+}
+
+// TestRemoteRuntime_WaitTreatsALegacyWorkerFailureAsExit pins compatibility
+// with a worker that predates exit reporting. Such a worker streams a bare
+// FrameError when its Wait returns with an error, carrying neither an exit
+// code nor the exit_proven marker. Its Wait returning was always the signal
+// that the replica stopped, so the control plane must keep reading it that
+// way; otherwise a stop through an older worker can never be confirmed and
+// the replica's slot stays fenced until the worker is upgraded. A current
+// worker's failure that it does not mark as an exit proves nothing.
+func TestRemoteRuntime_WaitTreatsALegacyWorkerFailureAsExit(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		frame    string
+		wantExit bool
+	}{
+		{name: "legacy worker", frame: `{"kind":"error","error":"wait: exit status 1"}`, wantExit: true},
+		{name: "current worker, unproven", frame: `{"kind":"error","error":"wait: boom","exit_proven":false}`, wantExit: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", waitStreamContentType)
+				w.WriteHeader(http.StatusOK)
+				io.WriteString(w, tc.frame+"\n")
+			}))
+			t.Cleanup(ts.Close)
+			rt := newRemoteRuntime(
+				newStubLookup(db.Worker{NodeID: "node-a", Tier: "remote", AdvertiseAddr: "w:8443", Status: "up"}),
+				"remote",
+				&stubDialer{client: ts.Client(), base: ts.URL},
+			)
+			rt.waitRetry = time.Millisecond
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err := rt.Wait(ctx, process.RunHandle{ContainerID: encodeRemoteHandle("node-a", "c-1")})
+			if err == nil {
+				t.Fatal("Wait on a worker-reported failure = nil")
+			}
+			var exitErr *process.ProcessExitError
+			if got := errors.As(err, &exitErr); got != tc.wantExit {
+				t.Fatalf("Wait = %v: exit proven = %v, want %v", err, got, tc.wantExit)
+			}
+		})
+	}
+}
+
+// TestReplicaServer_WaitFrameMarksExitProof pins the worker's side of the
+// same contract: every FrameError from the streamed wait states whether it
+// proves an exit, so the control plane can tell it apart from an older
+// worker that says nothing.
+func TestReplicaServer_WaitFrameMarksExitProof(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		waitErr error
+		want    bool
+	}{
+		{name: "exit", waitErr: &process.ProcessExitError{Code: 3}, want: true},
+		{name: "other failure", waitErr: errors.New("boom"), want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newWaitTestServer(t, &slowExitRuntime{fakeRuntime: &fakeRuntime{}, waitErr: tc.waitErr})
+			req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/replicas/c-1/wait", nil)
+			req.Header.Set("Accept", waitStreamContentType)
+			resp, err := ts.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			var fr api.Frame
+			if err := json.NewDecoder(resp.Body).Decode(&fr); err != nil {
+				t.Fatalf("decode frame: %v", err)
+			}
+			if fr.Kind != api.FrameError {
+				t.Fatalf("frame kind = %q, want error", fr.Kind)
+			}
+			if fr.ExitProven == nil || *fr.ExitProven != tc.want {
+				t.Fatalf("exit_proven = %v, want %v", fr.ExitProven, tc.want)
+			}
+		})
 	}
 }

@@ -138,8 +138,12 @@ func replicaExitVerdict(waitErr error, oom bool, memoryLimitMB int, prior ExitVe
 			v.ExitCode = &code
 		}
 	case errors.As(waitErr, &runtimeErr):
-		code := runtimeErr.Code
-		v.ExitCode = &code
+		if runtimeErr.Signal != 0 {
+			v.Signal = exitSignalName(runtimeErr.Signal)
+		} else {
+			code := runtimeErr.Code
+			v.ExitCode = &code
+		}
 	case waitErr == nil:
 		code := 0
 		v.ExitCode = &code
@@ -304,6 +308,46 @@ type entry struct {
 	done         chan struct{}
 	stopped      bool
 	startupGuard io.WriteCloser
+	// incarnation identifies this exact occupancy of the slot, assigned
+	// monotonically by the Manager when Start or Adopt creates the entry. It
+	// disambiguates the slot across PID reuse and lets a queued stop retry
+	// target the process it originally meant to stop, never a replacement that
+	// has since taken the slot.
+	incarnation uint64
+	// exitObserved is set by the exit-monitor goroutine only once rt.Wait has
+	// genuinely proven the process gone (returned nil or a *ProcessExitError),
+	// never merely because done closed - done also closes when the monitor
+	// itself panics, which proves nothing. Every point that reports a confirmed
+	// stop requires this, not just a closed done.
+	exitObserved bool
+	// stopPending marks an entry whose confirmed stop could not prove the
+	// process exited. While set, Start refuses to replace this slot and the
+	// watcher skips it for both crash-restart and reconcile driving, so
+	// nothing double-starts while the original may still be alive. A claimed
+	// fence (stopPendingClaimed) is cleared only by the claiming queue's
+	// ReleaseStopPending, once it has durably recorded the exit. An unclaimed
+	// fence has no queue watching it, so the exit monitor clears it itself as
+	// soon as it proves the process gone - otherwise nothing ever would, and
+	// the slot would be fenced forever.
+	stopPending bool
+	// stopPendingClaimed marks that a retry queue took ownership of this
+	// stopPending fence via ClaimStopPending, keyed to this exact incarnation.
+	// It only has meaning while stopPending is also set; see stopPending for
+	// what it changes.
+	stopPendingClaimed bool
+	// termSentAt and killSentAt record when a stop of this entry last had
+	// SIGTERM and SIGKILL delivered. A bounded retry
+	// (StopReplicaIncarnationWithin) reads them to continue the escalation
+	// where an earlier attempt left off instead of restarting it. Guarded by
+	// Manager.mu.
+	termSentAt time.Time
+	killSentAt time.Time
+	// signalInFlight is set while a bounded stop's signal call is still
+	// running, including after the step that issued it gave up waiting, so
+	// a retry does not send a second signal on top of one that may yet land.
+	// The call records its own delivery when it returns. Guarded by
+	// Manager.mu.
+	signalInFlight bool
 }
 
 // replicaKey identifies a specific replica by slug and index.
@@ -339,6 +383,13 @@ type Manager struct {
 	logSinkFactory           LogRunSinkFactory
 	consumerLifetimeResolver ConsumerLifetimeResolver
 	logMaxSize               int64
+
+	// nextIncarnation assigns a monotonic generation number to every entry
+	// Start or Adopt places in a slot, so a queued stop retry (or a stale
+	// duplicate of one) can tell the process it targeted apart from whatever
+	// later replaced it. Zero is never assigned, so the zero value never reads
+	// as a valid incarnation.
+	nextIncarnation atomic.Uint64
 
 	autoInstrumentApps bool
 
@@ -711,8 +762,13 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	for len(pool) <= p.Index {
 		pool = append(pool, nil)
 	}
-	if existing := pool[p.Index]; existing != nil && existing.info.Status == StatusRunning {
-		return nil, fmt.Errorf("app %s replica %d: %w", p.Slug, p.Index, ErrReplicaAlreadyRunning)
+	if existing := pool[p.Index]; existing != nil {
+		if existing.info.Status == StatusRunning {
+			return nil, fmt.Errorf("app %s replica %d: %w", p.Slug, p.Index, ErrReplicaAlreadyRunning)
+		}
+		if existing.stopPending {
+			return nil, fmt.Errorf("app %s replica %d: %w", p.Slug, p.Index, ErrReplicaStopPending)
+		}
 	}
 
 	key := replicaKey{poolKey, p.Index}
@@ -889,7 +945,7 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	done := make(chan struct{})
 	pool[p.Index] = &entry{
 		info: info, handle: handle, tier: tier, logRun: &run, done: done,
-		startupGuard: ep.StartupGuard,
+		startupGuard: ep.StartupGuard, incarnation: m.nextIncarnation.Add(1),
 	}
 	m.entries[poolKey] = pool
 
@@ -907,6 +963,11 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 			}
 		}()
 		waitErr := rt.Wait(context.Background(), handle)
+		// A proven exit is nil or *ProcessExitError; anything else (a transport
+		// error, a lost worker) proves nothing about whether the process is
+		// still alive, so it must not be treated as an observed exit.
+		var exitErr *ProcessExitError
+		exitObserved := waitErr == nil || errors.As(waitErr, &exitErr)
 		// Consume the OOM verdict from the runtime BEFORE taking m.mu: the
 		// runtime read takes its own lock, and the verdict was stashed by Wait
 		// before it tore the cgroup down.
@@ -919,6 +980,14 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		// close the replacement replica's log out from under it.
 		if pool := m.entries[poolKey]; p.Index < len(pool) {
 			if e := pool[p.Index]; e != nil && e.handle == handle {
+				e.exitObserved = exitObserved
+				// An unclaimed stopPending fence has no retry queue watching it, so
+				// once the exit is proven, clear it here - nothing else ever will,
+				// and the slot would otherwise stay fenced forever. A claimed fence
+				// is left alone for its owner's ReleaseStopPending.
+				if exitObserved && e.stopPending && !e.stopPendingClaimed {
+					e.stopPending = false
+				}
 				key := replicaKey{poolKey, p.Index}
 				if e.startupGuard != nil {
 					_ = e.startupGuard.Close()
@@ -1070,19 +1139,47 @@ func (m *Manager) stopReplicaByPoolKey(slug, poolKey string, index int, requireC
 // deployment can reuse their indices while an older retirement is queued.
 // A nil expected entry retains ordinary current-slot stop semantics.
 func (m *Manager) stopReplicaEntry(slug, poolKey string, index int, expected *entry, requireConfirmed bool) error {
+	return m.stopReplicaEntryImpl(slug, poolKey, index, expected, requireConfirmed, false)
+}
+
+// stopReplicaEntryImpl is stopReplicaEntry's implementation. viaIncarnation
+// reports a stale or already-vacated slot as ErrIncarnationGone instead of
+// ErrReplicaNotFound: StopReplicaIncarnation targets one exact incarnation,
+// and a mismatch there is itself a real proof of exit (see ErrIncarnationGone),
+// not an ordinary not-found.
+func (m *Manager) stopReplicaEntryImpl(slug, poolKey string, index int, expected *entry, requireConfirmed, viaIncarnation bool) error {
 	m.mu.Lock()
 	pool := m.entries[poolKey]
 	if index < 0 || index >= len(pool) || pool[index] == nil || (expected != nil && pool[index] != expected) {
 		m.mu.Unlock()
+		if viaIncarnation {
+			return fmt.Errorf("app %s replica %d: %w", slug, index, ErrIncarnationGone)
+		}
 		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrReplicaNotFound)
 	}
 	e := pool[index]
+	tier := e.tier
+
+	// Non-blocking pre-check: an earlier attempt (this call's own caller
+	// retrying, or an unrelated stop) may already have signalled and observed
+	// the exit while nobody collected the result. done closing alone is not
+	// proof - a monitor panic also closes it without the exit ever being
+	// observed - so this only fires once exitObserved is set too.
+	select {
+	case <-e.done:
+		if e.exitObserved {
+			m.mu.Unlock()
+			m.finalizeConfirmedStop(m.runtimeFor(tier), slug, poolKey, index, e)
+			return nil
+		}
+	default:
+	}
+
 	done := e.done
 	handle := e.handle
 	startupGuard := e.startupGuard
 	e.startupGuard = nil
 	e.stopped = true
-	tier := e.tier
 	m.mu.Unlock()
 	if startupGuard != nil {
 		// Close without acknowledgement: the pre-exec supervisor exits and app
@@ -1102,32 +1199,51 @@ func (m *Manager) stopReplicaEntry(slug, poolKey string, index int, expected *en
 			slog.Warn("manager: unfreeze before stop failed", "slug", slug, "idx", index, "err", err)
 		}
 	}
-	if err := rt.Signal(handle, syscall.SIGTERM); err != nil {
-		// The signal was not delivered, so this replica is still running. Undo
-		// the intentional-stop mark set above so that if it later exits on its
-		// own the monitor classifies it as crashed (and the watchdog restarts
-		// it) rather than as an intentional stop left dead.
-		m.mu.Lock()
-		e.stopped = false
-		m.mu.Unlock()
-		return fmt.Errorf("sigterm: %w", err)
-	}
 	grace := m.stopGrace
 	if grace <= 0 {
 		grace = defaultStopGrace
 	}
-	confirmed := false
-	select {
-	case <-done:
-		confirmed = true
-	case <-time.After(grace):
+	if err := rt.Signal(handle, syscall.SIGTERM); err != nil {
+		// A monitor that already finished without proof will never report
+		// this exit, and a signal that cannot be delivered may mean the
+		// process is simply gone, so ask the runtime before fencing.
+		if requireConfirmed && monitorDone(done) && m.awaitExitProof(rt, handle, done, e, grace) {
+			m.finalizeConfirmedStop(rt, slug, poolKey, index, e)
+			return nil
+		}
+		// The signal was not delivered, so this replica is still running. Undo
+		// the intentional-stop mark set above so that if it later exits on its
+		// own the monitor classifies it as crashed (and the watchdog restarts
+		// it) rather than as an intentional stop left dead. A requireConfirmed
+		// caller also gets stopPending: the process is provably still there, so
+		// nothing may replace this slot until a retry actually observes it exit.
+		// The exception is an exit the monitor already observed between the
+		// pre-check and the signal: the signal failed because the process is
+		// gone, the monitor will not run again to clear a fence set now, so the
+		// stop is confirmed instead.
+		m.mu.Lock()
+		if requireConfirmed && e.exitObserved {
+			m.mu.Unlock()
+			m.finalizeConfirmedStop(rt, slug, poolKey, index, e)
+			return nil
+		}
+		e.stopped = false
+		if requireConfirmed {
+			e.stopPending = true
+		}
+		m.mu.Unlock()
+		return fmt.Errorf("sigterm: %w", err)
+	}
+	m.recordSignal(e, syscall.SIGTERM)
+	confirmed := m.awaitExitProof(rt, handle, done, e, grace)
+	if !confirmed {
 		slog.Warn("manager: replica did not exit within grace; sending SIGKILL",
 			"slug", slug, "idx", index, "grace", grace)
-		rt.Signal(handle, syscall.SIGKILL) //nolint:errcheck
-		select {
-		case <-done:
-			confirmed = true
-		case <-time.After(grace):
+		if err := rt.Signal(handle, syscall.SIGKILL); err == nil {
+			m.recordSignal(e, syscall.SIGKILL)
+		}
+		confirmed = m.awaitExitProof(rt, handle, done, e, grace)
+		if !confirmed {
 			// SIGKILL did not take effect within a second grace window: the
 			// process is likely in uninterruptible sleep (e.g. a hung NFS /
 			// shared-mount app-data backend). Proceed instead of blocking the
@@ -1139,11 +1255,25 @@ func (m *Manager) stopReplicaEntry(slug, poolKey string, index int, expected *en
 		}
 	}
 	if requireConfirmed && !confirmed {
+		m.mu.Lock()
+		if e.exitObserved {
+			// The exit landed after the last grace window elapsed but before
+			// this lock: the monitor has already run and would never clear a
+			// fence set now, so the stop is confirmed after all.
+			m.mu.Unlock()
+			m.finalizeConfirmedStop(rt, slug, poolKey, index, e)
+			return nil
+		}
+		if pool := m.entries[poolKey]; index < len(pool) && pool[index] == e {
+			e.stopPending = true
+		}
+		m.mu.Unlock()
 		return fmt.Errorf("app %s replica %d: %w", slug, index, ErrStopUnconfirmed)
 	}
 
 	// An unconfirmed exit means the process may still be running (e.g. stuck in
-	// uninterruptible sleep past both grace windows). Only requireConfirmed
+	// uninterruptible sleep past both grace windows, or a done that closed
+	// without the monitor ever proving the exit). Only requireConfirmed
 	// callers observe that as an error; plain Stop/StopReplica still return nil
 	// here so existing callers are unaffected. But forgetting the entry either
 	// way would be wrong: the still-running exit-monitor goroutine spawned by
@@ -1153,18 +1283,278 @@ func (m *Manager) stopReplicaEntry(slug, poolKey string, index int, expected *en
 	// file (never closed) and the log run (stuck at StatusRunning forever),
 	// and would let a later Start place a second process into a slot this one
 	// may still occupy. So leave the entry tracked exactly as
-	// StopReplicaConfirmed already does, and let the exit monitor reconcile it
-	// once the process actually exits.
+	// StopReplicaConfirmed already does, and let the exit monitor (or a later
+	// retry's pre-check) reconcile it once the process actually exits.
 	if !confirmed {
 		return nil
 	}
 
+	m.finalizeConfirmedStop(rt, slug, poolKey, index, e)
+	return nil
+}
+
+// recordSignal notes that sig was delivered to e's process, so a later bounded
+// retry continues the escalation from here.
+func (m *Manager) recordSignal(e *entry, sig syscall.Signal) {
 	m.mu.Lock()
-	pool = m.entries[poolKey]
+	defer m.mu.Unlock()
+	m.recordSignalLocked(e, sig)
+}
+
+// recordSignalLocked is recordSignal for a caller holding Manager.mu.
+func (m *Manager) recordSignalLocked(e *entry, sig syscall.Signal) {
+	now := time.Now()
+	switch sig {
+	case syscall.SIGTERM:
+		e.termSentAt = now
+	case syscall.SIGKILL:
+		e.killSentAt = now
+	}
+}
+
+// minExitProofWait is the floor on a bounded stop's wait for exit proof. A
+// nearly spent budget must still leave the runtime a real chance to answer,
+// or an entry whose exit monitor finished without proof could never be
+// proven gone and would stay fenced forever.
+const minExitProofWait = 250 * time.Millisecond
+
+// StopReplicaIncarnationWithin is the bounded form of StopReplicaIncarnation
+// for a retry queue that runs on the watcher tick and must not stall it. It
+// advances the stop by at most one step - SIGTERM if none was delivered yet,
+// SIGKILL once the stop grace has passed since SIGTERM, otherwise no signal -
+// and then waits for exit proof only for what remains of budget (never less
+// than minExitProofWait). The runtime calls it makes (thaw, signal, container
+// removal) are bounded by the same budget. An unproven exit leaves the entry
+// fenced stopPending and returns ErrStopUnconfirmed, so the caller retries on
+// a later tick; the targeting and gone semantics match StopReplicaIncarnation.
+func (m *Manager) StopReplicaIncarnationWithin(slug string, index int, gen uint64, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	m.mu.Lock()
+	poolKey, ok := m.incarnationSlotLocked(slug, index, gen)
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("app %s replica %d incarnation %d: %w", slug, index, gen, ErrIncarnationGone)
+	}
+	e := m.entries[poolKey][index]
+	rt := m.runtimeFor(e.tier)
+	if monitorDone(e.done) && e.exitObserved {
+		m.mu.Unlock()
+		m.finalizeConfirmedStopWithin(rt, slug, poolKey, index, e, time.Until(deadline))
+		return nil
+	}
+	grace := m.stopGrace
+	if grace <= 0 {
+		grace = defaultStopGrace
+	}
+	var sig syscall.Signal
+	switch {
+	case e.signalInFlight:
+	case e.termSentAt.IsZero():
+		sig = syscall.SIGTERM
+	case e.killSentAt.IsZero() && time.Since(e.termSentAt) >= grace:
+		sig = syscall.SIGKILL
+	}
+	done := e.done
+	handle := e.handle
+	startupGuard := e.startupGuard
+	e.startupGuard = nil
+	e.stopped = true
+	if sig != 0 {
+		e.signalInFlight = true
+	}
+	m.mu.Unlock()
+	if startupGuard != nil {
+		_ = startupGuard.Close()
+	}
+
+	var sigErr error
+	if sig != 0 {
+		// Thaw first for the same reason the unbounded stop does: a frozen
+		// container does not receive the signal.
+		if sn, ok := rt.(Snapshotter); ok {
+			ctx, cancel := context.WithDeadline(context.Background(), deadline)
+			_, err := runWithin(time.Until(deadline), func() error {
+				_, err := sn.Resume(ctx, handle)
+				return err
+			})
+			cancel()
+			if err != nil {
+				slog.Warn("manager: unfreeze before bounded stop failed", "slug", slug, "idx", index, "err", err)
+			}
+		}
+		sigErr = m.signalEntryWithin(rt, handle, e, sig, time.Until(deadline))
+		if sigErr != nil {
+			slog.Warn("manager: bounded stop signal failed", "slug", slug, "idx", index, "signal", sig, "err", sigErr)
+		}
+	}
+
+	wait := time.Until(deadline)
+	if wait < minExitProofWait {
+		wait = minExitProofWait
+	}
+	if m.awaitExitProof(rt, handle, done, e, wait) {
+		m.finalizeConfirmedStopWithin(rt, slug, poolKey, index, e, time.Until(deadline))
+		return nil
+	}
+
+	m.mu.Lock()
+	if e.exitObserved {
+		m.mu.Unlock()
+		m.finalizeConfirmedStopWithin(rt, slug, poolKey, index, e, time.Until(deadline))
+		return nil
+	}
+	if pool := m.entries[poolKey]; index < len(pool) && pool[index] == e {
+		e.stopPending = true
+		if e.termSentAt.IsZero() && !e.signalInFlight {
+			// No signal has reached the process yet, nor can one still
+			// land, so an exit of its own is a crash, not this stop's doing
+			// (see stopReplicaEntryImpl).
+			e.stopped = false
+		}
+	}
+	m.mu.Unlock()
+	if sigErr != nil {
+		return fmt.Errorf("app %s replica %d: %w (signal: %v)", slug, index, ErrStopUnconfirmed, sigErr)
+	}
+	return fmt.Errorf("app %s replica %d: %w", slug, index, ErrStopUnconfirmed)
+}
+
+// errRuntimeCallTimedOut reports a runtime call that did not return within
+// its bound. It proves nothing about the process; the call may still land.
+var errRuntimeCallTimedOut = errors.New("runtime call timed out")
+
+// runWithin runs fn on its own goroutine and waits at most d for it. A call
+// still running at the bound is abandoned, not cancelled: it runs to
+// completion in the background with its result discarded and any panic
+// recovered, so an abandoned container removal still happens. A d of zero or
+// less still starts fn. finished reports whether fn returned in time.
+func runWithin(d time.Duration, fn func() error) (finished bool, err error) {
+	result := make(chan error, 1)
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				result <- fmt.Errorf("runtime call panicked: %v", rec)
+			}
+		}()
+		result <- fn()
+	}()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case err := <-result:
+		return true, err
+	case <-timer.C:
+		return false, errRuntimeCallTimedOut
+	}
+}
+
+// signalEntryWithin delivers sig to e's process through rt, bounded by d. The
+// caller has set e.signalInFlight; the call clears it when it returns, and
+// records sig as delivered if it succeeded, even when that happens after d
+// has run out and the caller has moved on.
+func (m *Manager) signalEntryWithin(rt Runtime, handle RunHandle, e *entry, sig syscall.Signal, d time.Duration) error {
+	_, err := runWithin(d, func() error {
+		delivered := false
+		defer func() {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			e.signalInFlight = false
+			if delivered {
+				m.recordSignalLocked(e, sig)
+			}
+		}()
+		if err := rt.Signal(handle, sig); err != nil {
+			return err
+		}
+		delivered = true
+		return nil
+	})
+	return err
+}
+
+// monitorDone reports whether the exit monitor has finished, without waiting.
+func monitorDone(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+// awaitExitProof waits up to d for proof that the process behind e exited.
+// The exit monitor's verdict is preferred; once the monitor has finished
+// without proof (its Wait failed transiently, or it panicked) it will never
+// run again, so the runtime is asked directly for the rest of the window. A
+// nil or *ProcessExitError result is proof and is recorded on the entry; any
+// other outcome, a timeout included, proves nothing.
+func (m *Manager) awaitExitProof(rt Runtime, handle RunHandle, done <-chan struct{}, e *entry, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		return false
+	}
+	if m.exitObservedLocked(e) {
+		return true
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	// Bounded as well as cancellable: a runtime's Wait may not honour ctx
+	// promptly (the native adopted-process sweep runs its own grace).
+	_, waitErr := runWithin(time.Until(deadline), func() error { return waitRecovered(ctx, rt, handle) })
+	var exitErr *ProcessExitError
+	if waitErr != nil && !errors.As(waitErr, &exitErr) {
+		return false
+	}
+	m.mu.Lock()
+	e.exitObserved = true
+	m.mu.Unlock()
+	return true
+}
+
+// waitRecovered calls rt.Wait, turning a panic into an error so a faulty
+// runtime fails the stop's proof instead of crashing the caller, matching the
+// exit monitor's own recover.
+func waitRecovered(ctx context.Context, rt Runtime, handle RunHandle) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.Error("manager: runtime Wait panicked during stop", "pid", handle.PID, "panic", rec)
+			err = fmt.Errorf("runtime wait panicked: %v", rec)
+		}
+	}()
+	return rt.Wait(ctx, handle)
+}
+
+// exitObservedLocked reads e.exitObserved under the manager lock, right after
+// a signalled done has closed. The exit monitor is the only writer and always
+// sets it (or not) under the same lock before done closes, so this cannot race
+// ahead of that write.
+func (m *Manager) exitObservedLocked(e *entry) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return e.exitObserved
+}
+
+// finalizeConfirmedStop runs once a stop is confirmed, whether by the
+// non-blocking pre-check or after signalling. It removes the entry from its
+// slot unless the entry is stopPending AND its fence is claimed, in which
+// case only the claiming queue's ReleaseStopPending may remove it: the entry
+// staying in place is what keeps Start and the watcher away from the slot
+// until the queue has durably recorded the exit. An unclaimed stopPending
+// entry is removed here like any other confirmed stop - no queue owns its
+// fence, so there is nothing left to protect once the stop is confirmed. The
+// backing container, if any, is always removed - the process is confirmed
+// gone either way.
+func (m *Manager) finalizeConfirmedStop(rt Runtime, slug, poolKey string, index int, e *entry) {
+	m.mu.Lock()
+	pool := m.entries[poolKey]
 	// Start may replace an exited entry after the monitor marks it stopped but
 	// before this waiter reacquires m.mu. Only clear the incarnation we actually
 	// signalled; stale cleanup must never orphan a live replacement.
-	if index < len(pool) && pool[index] == e {
+	if index < len(pool) && pool[index] == e && (!e.stopPending || !e.stopPendingClaimed) {
 		// A clean stop is not a crash: drop only this incarnation's exit verdict.
 		delete(m.lastExit, replicaKey{poolKey, index})
 		pool[index] = nil
@@ -1185,11 +1575,153 @@ func (m *Manager) stopReplicaEntry(slug, poolKey string, index int, expected *en
 	// it so stopped containers do not accumulate. Native runtime does not
 	// implement this capability; the assertion simply fails and is skipped.
 	if cr, ok := rt.(containerRemover); ok {
-		if err := cr.RemoveHandle(handle); err != nil {
+		if err := cr.RemoveHandle(e.handle); err != nil {
 			slog.Warn("manager: remove container after stop", "slug", slug, "idx", index, "err", err)
 		}
 	}
-	return nil
+}
+
+// finalizeConfirmedStopWithin is finalizeConfirmedStop for a bounded stop:
+// the container removal waits at most d and otherwise finishes in the
+// background, so a hung runtime cannot hold the caller past its budget.
+func (m *Manager) finalizeConfirmedStopWithin(rt Runtime, slug, poolKey string, index int, e *entry, d time.Duration) {
+	m.finalizeConfirmedStop(withoutRemoval{rt}, slug, poolKey, index, e)
+	cr, ok := rt.(containerRemover)
+	if !ok {
+		return
+	}
+	finished, err := runWithin(d, func() error { return cr.RemoveHandle(e.handle) })
+	switch {
+	case !finished:
+		slog.Warn("manager: container removal after bounded stop still running; continuing in background", "slug", slug, "idx", index)
+	case err != nil:
+		slog.Warn("manager: remove container after stop", "slug", slug, "idx", index, "err", err)
+	}
+}
+
+// withoutRemoval hides a runtime's containerRemover capability, so
+// finalizeConfirmedStop skips its inline removal and the caller can bound it.
+type withoutRemoval struct{ Runtime }
+
+// ReplicaIncarnation returns the current occupant's incarnation and PID for
+// slug/index, or ok=false when the slot is empty. A caller queueing a stop
+// retry captures this at enqueue time so the retry can target exactly the
+// process it meant to stop, never a replacement that has since taken the slot.
+func (m *Manager) ReplicaIncarnation(slug string, index int) (gen uint64, pid int, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pool := m.entries[m.activePoolKeyLocked(slug)]
+	if index < 0 || index >= len(pool) || pool[index] == nil {
+		return 0, 0, false
+	}
+	e := pool[index]
+	return e.incarnation, e.handle.PID, true
+}
+
+// incarnationSlotLocked finds the pool holding slug/index's incarnation gen.
+// It looks in the active pool first and then in every other generation pool
+// of the slug: an activation moves a still-running previous generation out of
+// the active pool without stopping it, so a stop queued before the activation
+// must still reach that exact process. Incarnations are unique per Manager, so
+// a match in any pool is the queued process and never a replacement.
+func (m *Manager) incarnationSlotLocked(slug string, index int, gen uint64) (string, bool) {
+	holds := func(key string) bool {
+		pool := m.entries[key]
+		return index >= 0 && index < len(pool) && pool[index] != nil &&
+			pool[index].incarnation == gen && pool[index].info.Slug == slug
+	}
+	active := m.activePoolKeyLocked(slug)
+	if holds(active) {
+		return active, true
+	}
+	for key := range m.entries {
+		if key != active && holds(key) {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+// ClaimStopPending marks a stopPending entry's fence as claimed by a retry
+// queue, keyed to the exact incarnation gen identifies. Once claimed, the
+// exit monitor preserves the fence instead of auto-clearing it when it proves
+// the process gone, so only the claiming queue's ReleaseStopPending (once it
+// has durably recorded that exit) may then remove the entry. gen must be the
+// incarnation ReplicaIncarnation returned for this slot; a mismatch (the slot
+// emptied or changed hands between that lookup and this call) is a no-op
+// returning false, since there is then no longer an entry for this queue to
+// own - the incarnation it meant to fence already left the slot some other,
+// safe way (see StopReplicaIncarnation).
+func (m *Manager) ClaimStopPending(slug string, index int, gen uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	poolKey, ok := m.incarnationSlotLocked(slug, index, gen)
+	if !ok {
+		return false
+	}
+	// Set both: an exit the monitor proved after the unconfirmed stop and
+	// before this claim has already cleared the then-unclaimed stopPending,
+	// and the fence is what keeps Start off the slot until the queue's
+	// ReleaseStopPending.
+	e := m.entries[poolKey][index]
+	e.stopPending = true
+	e.stopPendingClaimed = true
+	return true
+}
+
+// StopReplicaIncarnation retries a confirmed stop against exactly the
+// incarnation gen identifies, never a replacement that has since taken the
+// slot. It returns ErrIncarnationGone when the slot no longer holds that
+// incarnation. An entry leaves its slot only once its exit was observed (by
+// the exit monitor, this call's own pre-check, or an earlier confirmed stop)
+// or through an owning teardown such as app delete or eviction; a replacement
+// Start refuses a slot still running or fenced stopPending, and a claimed
+// fence is removed only by a confirmed stop or ReleaseStopPending. So
+// ErrIncarnationGone is itself proof the process is gone; it is not a failure
+// to retry.
+func (m *Manager) StopReplicaIncarnation(slug string, index int, gen uint64) error {
+	m.mu.Lock()
+	poolKey, ok := m.incarnationSlotLocked(slug, index, gen)
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("app %s replica %d incarnation %d: %w", slug, index, gen, ErrIncarnationGone)
+	}
+	expected := m.entries[poolKey][index]
+	m.mu.Unlock()
+	return m.stopReplicaEntryImpl(slug, poolKey, index, expected, true, true)
+}
+
+// ReleaseStopPending removes a claimed stopPending entry once its owning
+// queue has durably recorded its exit, clearing the fence that kept Start and
+// a slot-driving pass away from it. A mismatched or already-cleared
+// incarnation is a no-op: an owning teardown (app delete, eviction) may have
+// removed the entry first, which is fine since that path leaves no
+// stopPending entry for the caller's DB write to correspond to.
+func (m *Manager) ReleaseStopPending(slug string, index int, gen uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	poolKey, ok := m.incarnationSlotLocked(slug, index, gen)
+	if !ok {
+		return
+	}
+	pool := m.entries[poolKey]
+	// The exit monitor's terminal log-run record lives only on this entry
+	// when its persist failed, so retry it before the entry is dropped, as
+	// eviction does. A run the monitor never finished is left to the caller,
+	// which holds the confirmed exit and writes its own terminal verdict.
+	if lr := pool[index].logRun; lr != nil && pool[index].finishFailed {
+		m.finishLogRun(*lr)
+	}
+	delete(m.lastExit, replicaKey{poolKey, index})
+	pool[index] = nil
+	for len(pool) > 0 && pool[len(pool)-1] == nil {
+		pool = pool[:len(pool)-1]
+	}
+	if len(pool) == 0 {
+		delete(m.entries, poolKey)
+	} else {
+		m.entries[poolKey] = pool
+	}
 }
 
 // containerRemover is the optional capability a container Runtime implements
@@ -1833,7 +2365,10 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 		for len(pool) <= info.Index {
 			pool = append(pool, nil)
 		}
-		pool[info.Index] = &entry{info: &info, handle: handle, tier: tier, logRun: adoptedRun, done: done}
+		pool[info.Index] = &entry{
+			info: &info, handle: handle, tier: tier, logRun: adoptedRun, done: done,
+			incarnation: m.nextIncarnation.Add(1),
+		}
 		m.entries[slug] = pool
 	}()
 
@@ -1881,11 +2416,19 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 			}
 		}()
 		waitErr := rt.Wait(context.Background(), handle)
+		var exitErr *ProcessExitError
+		exitObserved := waitErr == nil || errors.As(waitErr, &exitErr)
 		oom := consumeOOM(rt, handle.PID)
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if p := m.entries[slug]; info.Index < len(p) {
 			if e := p[info.Index]; e != nil && e.handle == handle {
+				e.exitObserved = exitObserved
+				// See the Start monitor: an unclaimed stopPending fence is cleared
+				// here once the exit is proven, since no retry queue owns it.
+				if exitObserved && e.stopPending && !e.stopPendingClaimed {
+					e.stopPending = false
+				}
 				key := replicaKey{slug, info.Index}
 				e.info.OOMKilled = oom
 				switch {

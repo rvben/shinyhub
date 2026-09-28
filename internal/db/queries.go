@@ -4596,6 +4596,59 @@ func (s *Store) recordReplicaCrash(p UpsertReplicaParams, overwriteLost bool) er
 	}
 }
 
+// ReplicaRuntimeIdentity is the runtime identity a replica row carried when
+// a caller captured it: every column a replacement placement rewrites. A
+// zero Port or DeploymentID stands for a NULL column.
+type ReplicaRuntimeIdentity struct {
+	PID          int
+	Port         int
+	EndpointURL  string
+	WorkerID     string
+	DeploymentID int64
+}
+
+// MarkReplicaCrashedClearingIdentityIfCurrent atomically marks a replica
+// crashed and clears its runtime identity (pid, port, endpoint, worker), but
+// only when the row still carries exactly the identity in expect. This is
+// how a confirmed-stop retry (the watcher's pending-stop queue) durably
+// records an exit it finally proved: recovery adopted the row without being
+// able to confirm the old process had stopped, so a fast restart may already
+// have written a replacement into the same row by the time the retry
+// succeeds. The guard makes the write a no-op in that case instead of
+// crash-marking a placement the retry never meant to touch. PID alone cannot
+// tell them apart: container and remote runtimes persist pid 0 for every
+// placement, so the endpoint, worker and deployment are compared too. Zero
+// rows affected (ok=false) means the row already moved on; the caller treats
+// it as an obsolete queue entry, not an error.
+func (s *Store) MarkReplicaCrashedClearingIdentityIfCurrent(p UpsertReplicaParams, expect ReplicaRuntimeIdentity) (bool, error) {
+	if p.Reason == "" {
+		p.Reason = "replica process exited unexpectedly"
+	}
+	if p.ExitObservedAt.IsZero() {
+		p.ExitObservedAt = time.Now().UTC()
+	}
+	res, err := s.db.Exec(`
+		UPDATE replicas
+		   SET status = 'crashed', exit_code = ?, exit_signal = ?, exit_reason = ?,
+		       exit_observed_at = ?, exit_oom_killed = ?, exit_run_id = ?,
+		       restart_count = restart_count + 1, updated_at = `+s.d.nowEpoch()+`,
+		       pid = NULL, port = NULL, endpoint_url = '', worker_id = ''
+		 WHERE app_id = ? AND idx = ? AND pid = ?
+		   AND COALESCE(port, 0) = ? AND endpoint_url = ? AND worker_id = ?
+		   AND COALESCE(deployment_id, 0) = ?`,
+		p.ExitCode, p.Signal, p.Reason, p.ExitObservedAt.Unix(), boolToInt(p.ExitOOMKilled),
+		p.ExitRunID, p.AppID, p.Index, expect.PID,
+		expect.Port, expect.EndpointURL, expect.WorkerID, expect.DeploymentID)
+	if err != nil {
+		return false, fmt.Errorf("mark replica crashed clearing identity: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("mark replica crashed clearing identity: %w", err)
+	}
+	return n > 0, nil
+}
+
 // ListReplicas returns all replicas for the given app, ordered by index.
 // Returns an empty (non-nil) slice when no replicas exist.
 func (s *Store) ListReplicas(appID int64) ([]*Replica, error) {

@@ -60,7 +60,7 @@ func TestStartupRecoveryDeadReplicaIsExposedAsHibernated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
 
 	token, err := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
 	if err != nil {
@@ -167,7 +167,7 @@ func TestStartupRecoveryRepairsInheritedCrashedReplica(t *testing.T) {
 		t.Fatalf("precondition: inherited state reports %q, want crashed - the fixture no longer reproduces the bug", before)
 	}
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
 
 	if got := statusOfApp(t, srv, owner, "inherited"); got != "hibernated" {
 		t.Errorf("status after recovery = %q, want hibernated", got)

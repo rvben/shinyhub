@@ -169,7 +169,7 @@ type ContainerLister interface {
 // dialer's ~120s header timeout: a hung worker must not stall fleet recovery.
 const inventoryRecoveryTimeout = 15 * time.Second
 
-func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, defaultMaxSessions int, identityGlobal bool, defaultWorkerIsolation string) {
+func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, defaultMaxSessions int, identityGlobal bool, defaultWorkerIsolation string, queue pendingStopQueue) {
 	// Deferred, and on every exit path including the early returns: until this
 	// pass ends, an app whose process survived the restart has no Manager entry
 	// and readers must not conclude it is down. Once the pass is over the Manager
@@ -446,8 +446,10 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 				}
 				continue
 			}
-			if recoverNativeReplica(store, mgr, prx, app, r, bundleDir, logRunID) {
+			if replicaAlive, replicaIndeterminate := recoverNativeReplica(store, mgr, prx, app, r, bundleDir, logRunID, queue); replicaAlive {
 				anyAlive = true
+			} else if replicaIndeterminate {
+				indeterminate = true
 			}
 		}
 		// Keep the app reconcilable when a slot was queued for lost-replica
@@ -750,10 +752,21 @@ func workerDeclaredGone(store *db.Store, workerID string) bool {
 	return w.Status == "down"
 }
 
-// recoverNativeReplica re-adopts a single PID-backed replica. It returns true
-// when the replica was adopted, and marks crashed (so the watcher restarts it)
-// when the PID is missing, dead, or fails the stale-process identity check.
-func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, bundleDir, logRunID string) bool {
+// pendingStopQueue lets recovery hand a replica whose stop could not be
+// confirmed off to the watcher's background confirmed-stop retry loop,
+// instead of guessing at the outcome by crash-marking a process that may
+// still be running. *Watcher satisfies this narrow interface.
+type pendingStopQueue interface {
+	QueuePendingStop(entry PendingStopEntry)
+}
+
+// recoverNativeReplica re-adopts a single PID-backed replica. It returns
+// alive=true when the replica was adopted and serving, and
+// indeterminate=true when the slot's fate is not yet known (the caller must
+// not drive the app to stopped). It marks crashed (so the watcher restarts
+// it) when the PID is missing, dead, or fails the stale-process identity
+// check.
+func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, bundleDir, logRunID string, queue pendingStopQueue) (alive, indeterminate bool) {
 	if r.DesiredState == db.ReplicaDesiredWarm {
 		// Warm-parked by the idle shrink: expansion boots it, not recovery. A
 		// 'suspended' warm row is a frozen (SIGSTOP'd) process that survived this
@@ -765,21 +778,21 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		// back to cold-boot if the resume ever fails.
 		if r.Status == "suspended" {
 			if reAdoptFrozenWarmReplica(mgr, app, r, bundleDir, logRunID) {
-				return true
+				return true, false
 			}
 			cleanupFrozenWarmReplica(store, app, r, bundleDir)
 		}
-		return false
+		return false, false
 	}
 	if r.PID == nil {
 		// No PID recorded → treat as crashed so the watcher can restart it.
 		markReplicaCrashed(store, app, r.Index, "no PID recorded", logRunID)
-		return false
+		return false, false
 	}
 	if r.Port == nil {
 		// PID but no port → corrupted row. Log and skip without status change.
 		slog.Warn("recovery: replica has PID but no port", "slug", app.Slug, "idx", r.Index)
-		return false
+		return false, false
 	}
 	if err := syscall.Kill(*r.PID, 0); err != nil {
 		// Nothing in this server ever called wait(2) on this PID, so its exit
@@ -788,13 +801,13 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 		// which observed the exit itself. The reason says so rather than reading
 		// like a diagnosis.
 		markReplicaCrashed(store, app, r.Index, "replica exited before this server restarted; exact cause unknown", logRunID)
-		return false
+		return false, false
 	}
 	if err := validateNativeProcessIdentity(*r.PID, bundleDir); err != nil {
 		slog.Warn("recovery: rejected stale/mismatched process identity; retaining durable identity",
 			"slug", app.Slug, "idx", r.Index, "pid", *r.PID, "err", err)
 		markReplicaCrashed(store, app, r.Index, "stale/mismatched process identity", logRunID)
-		return false
+		return false, false
 	}
 	if err := validateNativeProcess(*r.PID, *r.Port, bundleDir); err != nil {
 		// The PID was proved to belong to this bundle, but it has not reached
@@ -808,15 +821,36 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 			DeploymentID: derefInt64(r.DeploymentID), LogRunID: logRunID,
 		}, process.RunHandle{PID: *r.PID})
 		stopErr := mgr.StopReplicaConfirmed(app.Slug, r.Index)
-		if stopErr == nil {
-			if clearErr := store.ClearReplicaRuntimeIdentity(app.ID, r.Index); clearErr != nil && !errors.Is(clearErr, db.ErrNotFound) {
-				slog.Error("recovery: clear stopped pre-health replica identity", "slug", app.Slug, "idx", r.Index, "err", clearErr)
+		if stopErr != nil {
+			// The stop could not be proven (a failed SIGTERM delivery, or a
+			// Wait that never confirmed the exit within grace): the process
+			// this row names may still be running. Crash-marking here would
+			// be a guess, so the row and the adopted manager entry (already
+			// fenced stopPending by StopReplicaConfirmed) are both left in
+			// place, and a background retry is queued to keep confirming
+			// until the exit is proven or the incarnation is proven gone.
+			slog.Warn("recovery: could not confirm the unready process stopped; queued for retry",
+				"slug", app.Slug, "idx", r.Index, "pid", *r.PID, "port", *r.Port, "err", stopErr)
+			if queue != nil {
+				if gen, _, ok := mgr.ReplicaIncarnation(app.Slug, r.Index); ok && mgr.ClaimStopPending(app.Slug, r.Index, gen) {
+					queue.QueuePendingStop(PendingStopEntry{
+						Kind: pendingStopRecoveryUnready, Slug: app.Slug, Index: r.Index,
+						AppID: app.ID, PID: *r.PID, Port: derefInt(r.Port),
+						EndpointURL: r.EndpointURL, WorkerID: r.WorkerID,
+						DeploymentID: derefInt64(r.DeploymentID), Incarnation: gen,
+						Reason: "process did not recover ready", LogRunID: logRunID,
+					})
+				}
 			}
+			return false, true
+		}
+		if clearErr := store.ClearReplicaRuntimeIdentity(app.ID, r.Index); clearErr != nil && !errors.Is(clearErr, db.ErrNotFound) {
+			slog.Error("recovery: clear stopped pre-health replica identity", "slug", app.Slug, "idx", r.Index, "err", clearErr)
 		}
 		slog.Warn("recovery: stopped unready process before allowing restart",
 			"slug", app.Slug, "idx", r.Index, "pid", *r.PID, "port", *r.Port, "err", err)
 		markReplicaCrashed(store, app, r.Index, "process did not recover ready", logRunID)
-		return false
+		return false, false
 	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
 		Slug:         app.Slug,
@@ -839,10 +873,10 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	}
 	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID), app.ID); err != nil {
 		slog.Error("process recovery: register proxy", "slug", app.Slug, "idx", r.Index, "err", err)
-		return false
+		return false, false
 	}
 	slog.Info("process recovery: re-adopted process", "slug", app.Slug, "idx", r.Index, "pid", *r.PID, "log_run_id", logRunID)
-	return true
+	return true, false
 }
 
 // reAdoptFrozenWarmReplica re-adopts a SIGSTOP-frozen warm replica that survived
@@ -984,6 +1018,13 @@ func markReplicaCrashed(store *db.Store, app *db.App, index int, reason, logRunI
 
 // derefInt64 dereferences a nullable int64 pointer, returning 0 for nil.
 func derefInt64(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func derefInt(p *int) int {
 	if p == nil {
 		return 0
 	}

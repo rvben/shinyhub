@@ -60,6 +60,57 @@ type replicaKey struct {
 	index int
 }
 
+// pendingStopKind distinguishes why a replica was queued for a confirmed-stop
+// retry, since different origins may need different bookkeeping once the
+// retry succeeds. Only one origin exists today.
+type pendingStopKind int
+
+const (
+	// pendingStopRecoveryUnready queues a replica that startup recovery
+	// adopted but could not confirm-stop before it was about to be restarted
+	// (an unconfirmed SIGTERM/SIGKILL, or a Wait that proved nothing). Once
+	// the retry confirms the exit (or the incarnation is gone, itself proof
+	// of exit), the row is marked crashed and its runtime identity cleared.
+	pendingStopRecoveryUnready pendingStopKind = iota
+)
+
+// PendingStopEntry queues one replica whose confirmed stop could not be
+// proven at the time it was requested. The watcher retries
+// StopReplicaIncarnation against Incarnation every tick until the exit is
+// confirmed, or the incarnation is gone (which is itself proof the process
+// exited), and then durably records the outcome via
+// MarkReplicaCrashedClearingIdentityIfCurrent, conditioned on the runtime
+// identity the entry was queued with (replicaIdentity), so a fast restart
+// that has since reused the row can never be mistaken for the placement this
+// entry meant to stop.
+type PendingStopEntry struct {
+	Kind         pendingStopKind
+	Slug         string
+	Index        int
+	AppID        int64
+	PID          int
+	Incarnation  uint64
+	Reason       string
+	LogRunID     string
+	DeploymentID int64
+	// Port, EndpointURL and WorkerID complete, with PID and DeploymentID,
+	// the replica row identity a pendingStopRecoveryUnready entry was queued
+	// for (see replicaIdentity). Container and remote runtimes persist pid 0
+	// for every placement, so PID alone cannot tell a replacement apart.
+	Port        int
+	EndpointURL string
+	WorkerID    string
+}
+
+// replicaIdentity is the replica row identity a pendingStopRecoveryUnready
+// entry may crash-mark once its stop is confirmed.
+func (e PendingStopEntry) replicaIdentity() db.ReplicaRuntimeIdentity {
+	return db.ReplicaRuntimeIdentity{
+		PID: e.PID, Port: e.Port, EndpointURL: e.EndpointURL,
+		WorkerID: e.WorkerID, DeploymentID: e.DeploymentID,
+	}
+}
+
 // manager is the subset of *process.Manager used by the Watcher.
 // The interface enables testing with fakes without starting real processes.
 type manager interface {
@@ -82,6 +133,21 @@ type manager interface {
 	// the given tier/worker (nil selects the default local transport). Used
 	// when re-registering a still-live replica's proxy route after a revive.
 	TransportForWorker(tier, nodeID string) http.RoundTripper
+	// StopReplicaIncarnation retries a confirmed stop against exactly the
+	// incarnation gen identifies, never a replacement that has since taken
+	// the slot. Used by the pending-stop retry loop.
+	StopReplicaIncarnation(slug string, index int, gen uint64) error
+	// ReleaseStopPending removes a stopPending entry once its exit has been
+	// durably recorded, clearing the fence that kept Start and the watchdog
+	// away from the slot. Used by the pending-stop retry loop once its DB
+	// write succeeds.
+	ReleaseStopPending(slug string, index int, gen uint64)
+	// ClaimStopPending marks a stopPending entry's fence as claimed by a retry
+	// queue, keyed to the exact incarnation gen identifies; a mismatch is a
+	// no-op returning false. Used by the pending-stop retry loop's callers so
+	// the exit monitor leaves the fence for ReleaseStopPending instead of
+	// clearing it once the process's exit is proven.
+	ClaimStopPending(slug string, index int, gen uint64) bool
 }
 
 // proxyBackend is the subset of *proxy.Proxy used by the Watcher.
@@ -146,6 +212,15 @@ type appStore interface {
 	// the failure of a restart launched from a lost row; RecordReplicaCrash
 	// leaves lost rows untouched.
 	RecordReplicaCrashFromLost(p db.UpsertReplicaParams) error
+	// MarkReplicaCrashedClearingIdentityIfCurrent atomically marks a
+	// replica crashed and clears its runtime identity, conditioned on the row
+	// still carrying expect. Used by the pending-stop retry loop once a
+	// queued unconfirmed stop is finally confirmed (or proven gone).
+	MarkReplicaCrashedClearingIdentityIfCurrent(p db.UpsertReplicaParams, expect db.ReplicaRuntimeIdentity) (bool, error)
+	// FinishAppLogRunWithExit closes an app log run with its terminal exit
+	// verdict. Used by the pending-stop retry loop to close the log run of a
+	// replica whose stop it just confirmed.
+	FinishAppLogRunWithExit(runID, status string, finishedAt time.Time, oomKilled bool, exitCode *int, signal, reason string) error
 	ListReconcilableApps() ([]*db.App, error)
 	// ListCrashedAppsWithLostReplicas returns crashed apps that still have at
 	// least one lost replica - apps terminalized by budget spent against a dead
@@ -260,6 +335,14 @@ type Watcher struct {
 	// seenExitSequence prevents a crashed manager entry from being counted again
 	// on every watchdog tick while its restart is still inside backoff.
 	seenExitSequence map[replicaKey]int
+	// pendingStops holds replicas whose confirmed stop could not be proven
+	// when it was requested (currently: recovery adopting a not-yet-healthy
+	// process it then failed to confirm-stop). Each tick retries the stop
+	// against the exact incarnation queued; see processPendingStops. Entries
+	// fence both the crash dispatch loop and reconcileReplicas so nothing
+	// else drives the slot while a retry might still be racing the old
+	// process. Guarded by mu like the other per-replica maps above.
+	pendingStops map[replicaKey]PendingStopEntry
 	// driving tracks slugs currently being driven by driveWakingApp so a
 	// concurrent trigger (e.g. inline from the miss path and from the reconciler)
 	// does not spawn two parallel deploys for the same wake. The guard is
@@ -319,6 +402,7 @@ func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 		seenExitSequence: make(map[replicaKey]int),
 		driving:          make(map[string]bool),
 		expandingWarm:    make(map[string]bool),
+		pendingStops:     make(map[replicaKey]PendingStopEntry),
 	}
 }
 
@@ -485,6 +569,112 @@ func (w *Watcher) consumerBootGate(appID int64) (func(), error) {
 		return func() {}, nil
 	}
 	return w.acquireConsumerBootGate(appID)
+}
+
+// QueuePendingStop registers a replica whose confirmed stop could not be
+// proven, so the watchdog retries it every tick instead of driving a slot
+// that may still be occupied by the process the caller meant to stop. Safe
+// to call before Start: recovery calls it during startup, before the
+// watchdog loop begins, and the queue is drained by the first tick.
+func (w *Watcher) QueuePendingStop(e PendingStopEntry) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pendingStops == nil {
+		w.pendingStops = make(map[replicaKey]PendingStopEntry)
+	}
+	w.pendingStops[replicaKey{e.Slug, e.Index}] = e
+}
+
+// isPendingStop reports whether a replica is currently queued for a
+// confirmed-stop retry. Callers use it to fence the slot away from every
+// other path that would otherwise drive or crash-record it.
+func (w *Watcher) isPendingStop(key replicaKey) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, ok := w.pendingStops[key]
+	return ok
+}
+
+// processPendingStops retries every queued unconfirmed stop, at most once per
+// tick each. Run at the start of runOnce, before the manager snapshot is
+// taken, so an entry confirmed this tick never appears in that snapshot as
+// StatusCrashed and never needs the runOnce/reconcileReplicas fencing at all.
+func (w *Watcher) processPendingStops() {
+	w.mu.Lock()
+	entries := make([]PendingStopEntry, 0, len(w.pendingStops))
+	for _, e := range w.pendingStops {
+		entries = append(entries, e)
+	}
+	w.mu.Unlock()
+
+	for _, e := range entries {
+		w.retryPendingStop(e)
+	}
+}
+
+// retryPendingStop makes one confirmed-stop attempt for a queued entry. A
+// confirmed exit (nil error) or ErrIncarnationGone (itself proof the process
+// is gone - see StopReplicaIncarnation) is recorded via
+// MarkReplicaCrashedClearingIdentityIfCurrent, conditioned on the replica
+// identity the entry was queued with, and the manager's stopPending fence is
+// then released. Any other error (still unconfirmed) leaves the entry queued
+// for the next tick.
+func (w *Watcher) retryPendingStop(e PendingStopEntry) {
+	key := replicaKey{e.Slug, e.Index}
+	err := w.mgr.StopReplicaIncarnation(e.Slug, e.Index, e.Incarnation)
+	if err != nil && !errors.Is(err, process.ErrIncarnationGone) {
+		// Still unconfirmed (another sigterm failed, or the grace window
+		// elapsed without proof). Retry on the next tick.
+		return
+	}
+
+	reason := e.Reason
+	runID := e.LogRunID
+	observedAt := time.Now().UTC()
+	var exitCode *int
+	var signal string
+	var oomKilled bool
+	if err == nil {
+		// A confirmed exit: prefer the exit monitor's own verdict, computed
+		// from the runtime's Wait result, over the reason recorded at queue
+		// time.
+		if v, ok := w.mgr.LastExit(e.Slug, e.Index); ok {
+			exitCode, signal = v.ExitCode, v.Signal
+			oomKilled = v.OOMKilled
+			if !v.At.IsZero() {
+				observedAt = v.At
+			}
+			if v.Reason != "" {
+				reason = v.Reason
+			}
+			if v.RunID != "" {
+				runID = v.RunID
+			}
+		}
+	}
+
+	wrote, werr := w.store.MarkReplicaCrashedClearingIdentityIfCurrent(db.UpsertReplicaParams{
+		AppID: e.AppID, Index: e.Index, Reason: reason,
+		ExitCode: exitCode, Signal: signal, ExitObservedAt: observedAt,
+		ExitOOMKilled: oomKilled, ExitRunID: runID,
+	}, e.replicaIdentity())
+	if werr != nil {
+		slog.Warn("watcher: persist pending-stop outcome failed", "slug", e.Slug, "index", e.Index, "err", werr)
+		return // retry next tick; the manager entry stays fenced either way
+	}
+	if wrote && runID != "" {
+		if ferr := w.store.FinishAppLogRunWithExit(runID, "crashed", observedAt, oomKilled, exitCode, signal, reason); ferr != nil && !errors.Is(ferr, db.ErrNotFound) {
+			slog.Warn("watcher: close pending-stop log run failed", "slug", e.Slug, "index", e.Index, "err", ferr)
+		}
+	}
+
+	// Release the manager's fence and drop the queue entry regardless of
+	// wrote: false means the row already moved on (an identity mismatch), which is
+	// just as much a reason to stop retrying as a successful write.
+	w.mgr.ReleaseStopPending(e.Slug, e.Index, e.Incarnation)
+	w.mu.Lock()
+	delete(w.pendingStops, key)
+	w.mu.Unlock()
 }
 
 // hibernatePool removes a slug's replicas from host resources on hibernate,
@@ -976,6 +1166,12 @@ func (w *Watcher) traceOp(ctx context.Context, op, slug string) (context.Context
 // As the active (owner) instance it also reaps stale replica_sessions rows so
 // counts from crashed or restarted peers do not linger in the fleet view.
 func (w *Watcher) runOnce() {
+	// Retry any queued confirmed-stop entries first, before the manager
+	// snapshot below. An entry confirmed this call is fully removed from the
+	// manager (ReleaseStopPending) and the queue, so it never appears in that
+	// snapshot as StatusCrashed and never needs the fencing further down.
+	w.processPendingStops()
+
 	// Snapshot the manager once and derive both the crash set and the per-slug
 	// running count in a single pass. runningCounts feeds the warm-shrink floor
 	// guard in handleIdle: when runningCount <= app.MinWarmReplicas the app is
@@ -994,9 +1190,19 @@ func (w *Watcher) runOnce() {
 		if w.appOperationInFlight(info.Slug) {
 			continue
 		}
+		key := replicaKey{info.Slug, info.Index}
+		if w.isPendingStop(key) {
+			// A confirmed-stop retry owns this slot until it durably records
+			// the outcome (processPendingStops above already made this
+			// tick's attempt). Driving it here would race
+			// handleCrashedLocked's unconditional RecordReplicaCrash write
+			// against the retry's own atomic, PID-conditional write.
+			handled[key] = true
+			continue
+		}
 		switch info.Status {
 		case process.StatusCrashed:
-			handled[replicaKey{info.Slug, info.Index}] = true
+			handled[key] = true
 			w.handleCrashed(info.Slug, info.Index)
 		case process.StatusRunning:
 			if !idleChecked[info.Slug] {
@@ -1094,7 +1300,8 @@ func (w *Watcher) runOnce() {
 func (w *Watcher) reconcileReplicas(apps []*db.App, repMap map[int64][]*db.Replica, handled map[replicaKey]bool) {
 	for _, app := range apps {
 		for _, r := range repMap[app.ID] {
-			if r.Index >= app.Replicas || handled[replicaKey{app.Slug, r.Index}] {
+			key := replicaKey{app.Slug, r.Index}
+			if r.Index >= app.Replicas || handled[key] || w.isPendingStop(key) {
 				continue
 			}
 			switch r.Status {

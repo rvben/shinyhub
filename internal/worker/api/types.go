@@ -72,8 +72,20 @@ const (
 
 // Frame is one NDJSON line in a streamed response. Exactly one of the payload
 // fields is meaningful per Kind; Data carries log bytes for FrameLog.
+//
+// A FrameError from a replica wait states whether it proves the replica
+// exited. ExitProven is set on every such frame: true when the worker's local
+// Wait proved a genuine process exit, false for a failure that proves nothing
+// (a transport or timeout error). Code and Signal accompany a proven exit;
+// Signal is the signal number when the exit was a signal kill (Code is then
+// -1) and omitted otherwise. A worker that predates these fields sends a
+// FrameError with none of them, and the client reads that as its Wait having
+// returned, which is how such a worker always reported a stopped replica.
 type Frame struct {
-	Kind  FrameKind `json:"kind"`
-	Data  []byte    `json:"data,omitempty"`
-	Error string    `json:"error,omitempty"`
+	Kind       FrameKind `json:"kind"`
+	Data       []byte    `json:"data,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	ExitProven *bool     `json:"exit_proven,omitempty"`
+	Code       *int      `json:"code,omitempty"`
+	Signal     int       `json:"signal,omitempty"`
 }
