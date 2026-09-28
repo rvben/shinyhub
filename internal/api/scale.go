@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -176,6 +177,7 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		return false, fmt.Errorf("scale up %s: acquire startup-data compatibility fence: %w", slug, gateErr)
 	}
 	defer releaseConsumerBoot()
+	p = s.traceDeploy(context.Background(), p)
 	r, err := s.deployReplica(p, newIndex)
 	if err != nil {
 		// Roll back the optimistic pool growth so a failed boot does not leave a

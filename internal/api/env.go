@@ -313,6 +313,7 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		AppVersion:            current.Version,
 	}, app)
 	restartParams = s.guardDeploymentConsumerStart(app, current, restartParams)
+	restartParams = s.traceDeploy(r.Context(), restartParams)
 	result, runErr := s.deployRun(restartParams)
 	if runErr != nil {
 		// The old process is gone; reflect that in the DB so callers don't

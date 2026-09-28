@@ -607,6 +607,7 @@ func (s *Server) redeployApp(slug string) {
 		Preparation: activationPreparation(current.Prepared),
 	}, app)
 	redeployParams = s.guardDeploymentConsumerStart(app, current, redeployParams)
+	redeployParams = s.traceDeploy(context.Background(), redeployParams)
 	result, err := s.deployRun(redeployParams)
 	if err != nil {
 		slog.Error("redeployApp: deploy failed", "slug", slug, "err", err)

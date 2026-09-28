@@ -164,7 +164,7 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 		return activation.ErrNotNeeded
 	}
 
-	params := s.activationDeployParams(app, current)
+	params := s.traceDeploy(ctx, s.activationDeployParams(app, current))
 	var releaseLaunch func()
 	releaseLaunchReservation := func() {
 		if releaseLaunch != nil {
@@ -389,6 +389,7 @@ func (s *Server) restartActivationPool(ctx context.Context, app *db.App, current
 	params.ReplicaStarted = func(result deploy.Result) error {
 		return s.persistStartingActivationReplica(app, current, &result, a)
 	}
+	params = s.traceDeploy(ctx, params)
 	result, err := s.deployRun(params)
 	if err != nil {
 		return s.activationRepairError(fmt.Errorf("start pool after restart fallback: %w", err))

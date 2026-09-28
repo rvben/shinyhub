@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -203,6 +204,7 @@ func (s *Server) bootWarmVictims(
 		return 0, fmt.Errorf("%s: acquire startup-data compatibility fence: %w", callerName, gateErr)
 	}
 	defer releaseConsumerBoot()
+	p = s.traceDeploy(context.Background(), p)
 	for _, v := range victims {
 		idx := v.index
 		var r *deploy.Result

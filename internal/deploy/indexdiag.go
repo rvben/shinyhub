@@ -3,6 +3,8 @@ package deploy
 import (
 	"fmt"
 	"strings"
+
+	"github.com/rvben/shinyhub/internal/spanerr"
 )
 
 // indexEnvExact are the package-index configuration variables recognized for
@@ -44,34 +46,9 @@ func collectIndexEnv(env []string) []string {
 		if _, ok := indexEnvExact[key]; !ok {
 			continue
 		}
-		out = append(out, key+"="+redactURLUserinfo(val))
+		out = append(out, key+"="+spanerr.RedactURLUserinfo(val))
 	}
 	return out
-}
-
-// redactURLUserinfo masks the userinfo component of every URL in a
-// (possibly space-separated, e.g. UV_INDEX) value: "https://u:p@host/x"
-// becomes "https://***@host/x". Tokens without userinfo pass unchanged.
-func redactURLUserinfo(val string) string {
-	tokens := strings.Fields(val)
-	for i, tok := range tokens {
-		scheme, rest, ok := strings.Cut(tok, "://")
-		if !ok {
-			continue
-		}
-		// Userinfo ends at the first "@" before the first "/" of the authority.
-		authorityEnd := len(rest)
-		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
-			authorityEnd = slash
-		}
-		if at := strings.LastIndexByte(rest[:authorityEnd], '@'); at >= 0 {
-			tokens[i] = scheme + "://***@" + rest[at+1:]
-		}
-	}
-	if len(tokens) == 0 {
-		return val
-	}
-	return strings.Join(tokens, " ")
 }
 
 // indexResolutionHint annotates a failed build step whose output carries uv's

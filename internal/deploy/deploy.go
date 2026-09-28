@@ -26,6 +26,8 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/sandbox"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var portCounter atomic.Int64
@@ -548,6 +550,19 @@ type Params struct {
 	// ReplicaStarted persists its runtime identity. See process.StartParams.
 	LaunchReservationHeld  bool
 	GuardUntilAcknowledged bool
+	// Tracer records the deploy's phase spans (deploy.run, deploy.build,
+	// deploy.post_deploy_hooks, deploy.replica and its start/health children).
+	// Nil records nothing and adds no work.
+	Tracer trace.Tracer
+	// TraceCtx carries the span the phase spans parent under, typically the
+	// deploy request's server span. It is read for span parentage only, never
+	// for cancellation: every phase keeps deriving its own deadline from
+	// context.Background(), so a client that disconnects cannot abort a deploy.
+	// Nil makes deploy.run a root span.
+	TraceCtx context.Context
+	// runSpan is the deploy.run span while Run executes, so a decision made deep
+	// in the boot path (reusing a prepared environment) is recorded on it.
+	runSpan trace.Span
 }
 
 func (p Params) report(event deployevent.Event) {
@@ -726,7 +741,18 @@ func resolveBuildTimeout(m *Manifest) time.Duration {
 // renv restore: error prefix that deployfail.Classify keys on, so a build failure
 // (including project preparation or a timeout) is reported build_failed before
 // any candidate replicas are started.
-func buildEnvironment(p Params, appType string, buildTimeout time.Duration) error {
+func buildEnvironment(p Params, appType string, buildTimeout time.Duration) (err error) {
+	buildTool := "uv sync"
+	if appType == "r" {
+		buildTool = "renv::restore"
+	}
+	p, end := p.startPhase("deploy.build",
+		attribute.String("shinyhub.deploy.app_type", appType),
+		attribute.String("shinyhub.deploy.build_tool", buildTool))
+	defer func() { end(err) }()
+
+	// The build deadline is its own, never TraceCtx's: a deploy outlives the
+	// request that started it.
 	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
 	defer cancel()
 
@@ -1094,10 +1120,14 @@ func resolveBundleCommand(p Params, m *Manifest, hostDeps bool) (baseCmd []strin
 			// The recovery build is never fatal: the boot health check is the real
 			// gate, and making it fatal would re-break the unattended restore path
 			// this mode exists to protect.
-			if hostDeps && !build && !hostEnvironmentPresent(p.BundleDir, appType) {
-				slog.Warn("activation: prepared environment is missing; rebuilding it",
-					"slug", p.Slug, "deployment_id", p.DeploymentID, "version", p.AppVersion)
-				build, fatal = true, false
+			if hostDeps && !build {
+				if hostEnvironmentPresent(p.BundleDir, appType) {
+					p.markBuildReused()
+				} else {
+					slog.Warn("activation: prepared environment is missing; rebuilding it",
+						"slug", p.Slug, "deployment_id", p.DeploymentID, "version", p.AppVersion)
+					build, fatal = true, false
+				}
 			}
 			if hostDeps && build {
 				if berr := buildEnvironment(p, appType, resolveBuildTimeout(m)); berr != nil {
@@ -1184,12 +1214,19 @@ func resolveAutoInstrument(p Params, m *Manifest) bool {
 // health-checks each, and registers surviving replicas with the reverse proxy.
 // Partial failure (some replicas healthy, some not) is accepted and logged.
 // All-fail returns an error.
-func Run(p Params) (*PoolResult, error) {
+func Run(p Params) (res *PoolResult, err error) {
 	asn, err := p.assignments()
 	if err != nil {
 		return nil, fmt.Errorf("expand placement: %w", err)
 	}
 	total := len(asn)
+	p, end := p.startPhase("deploy.run",
+		attribute.Int("shinyhub.deploy.replicas", total),
+		attribute.Bool("shinyhub.deploy.prepare_only", p.PrepareOnly))
+	if p.Tracer != nil {
+		p.runSpan = trace.SpanFromContext(p.TraceCtx)
+	}
+	defer func() { end(err) }()
 
 	// A prepare-only deploy stops here: build the bundle, run its hooks, boot
 	// nothing. The proxy pool is deliberately left as the caller deregistered
@@ -1216,6 +1253,7 @@ func Run(p Params) (*PoolResult, error) {
 		}
 		asn = []process.TierAssignment{{Index: slot, Tier: p.effectiveDefaultTier()}}
 		total = 1
+		p.annotate(attribute.Int("shinyhub.deploy.replicas", total))
 	} else if p.GenerationScoped {
 		if err := p.Proxy.StageGeneration(p.Slug, p.DeploymentID, total); err != nil {
 			return nil, err
@@ -1362,6 +1400,16 @@ func Run(p Params) (*PoolResult, error) {
 // skipped is non-zero only under a container runtime; a returned error means
 // an executed hook failed.
 func runManifestPostDeployHooks(p Params, hostDeps bool) (declared, run, skipped int, err error) {
+	p, end := p.startPhase("deploy.post_deploy_hooks")
+	defer func() {
+		if p.Tracer != nil {
+			p.annotate(
+				attribute.Int("shinyhub.deploy.hooks.declared", declared),
+				attribute.Int("shinyhub.deploy.hooks.run", run),
+				attribute.Int("shinyhub.deploy.hooks.skipped", skipped))
+		}
+		end(err)
+	}()
 	manifest, err := LoadManifest(p.BundleDir)
 	if err != nil {
 		return 0, 0, 0, err
@@ -1486,14 +1534,17 @@ func planPoolWorkers(p Params, asn []process.TierAssignment) map[int]string {
 // Each attempt obtains its launch command via bootReplicaAttempt, which calls the
 // shared ResolveLaunch seam. The retry passes AutoInstrumentDefault:false to get
 // the uninstrumented command, re-deriving it cleanly through the seam.
-func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string, appType string, autoInstrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
-	res, err := bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, autoInstrument, hc, timeout)
+func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string, appType string, autoInstrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (res Result, err error) {
+	p, end := p.startPhase("deploy.replica", attribute.Int("shinyhub.replica", idx))
+	defer func() { end(err) }()
+	res, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, autoInstrument, hc, timeout)
 	if err != nil && autoInstrument && baseCmd == nil && appType == "python" {
 		// The instrumented launch failed; retry with the uninstrumented fallback.
 		// bootReplicaAttempt calls ResolveLaunch with AutoInstrumentDefault:false,
 		// re-deriving the uninstrumented command through the shared seam.
 		slog.Warn("deploy: instrumented launch failed; retrying without auto-instrumentation",
 			"slug", p.Slug, "index", idx, "err", err)
+		p.annotate(attribute.Bool("shinyhub.deploy.instrumented_fallback", true))
 		res, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, false, hc, timeout)
 	}
 	return res, err
@@ -1549,6 +1600,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	// elastic spawner and `shinyhub run`, which consume plan.Env directly.
 	env := append(append([]string{}, p.Env...), plan.Env...)
 
+	_, endStart := p.startPhase("deploy.replica.start")
 	info, err := p.Manager.Start(process.StartParams{
 		Slug:                   p.Slug,
 		AppID:                  p.AppID,
@@ -1569,6 +1621,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		LaunchReservationHeld:  p.LaunchReservationHeld,
 		GuardUntilAcknowledged: p.GuardUntilAcknowledged,
 	})
+	endStart(err)
 	if err != nil {
 		return Result{}, fmt.Errorf("start: %w", err)
 	}
@@ -1614,6 +1667,8 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	// burning the full health timeout polling a dead endpoint. A custom hc
 	// (injected in tests) is used as-is.
 	var healthErr error
+	_, endHealth := p.startPhase("deploy.replica.health",
+		attribute.Int64("shinyhub.deploy.health_timeout_ms", timeout.Milliseconds()))
 	if p.HealthCheck != nil {
 		healthErr = hc(info.EndpointURL, timeout, transport)
 	} else {
@@ -1622,6 +1677,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 			return ok && i.Status == process.StatusRunning
 		})
 	}
+	endHealth(healthErr)
 	startupPeakRSSBytes := finishStartupRSSObservation()
 	startupRSSObservationFinished = true
 	if healthErr != nil {
@@ -1810,9 +1866,27 @@ const resumeProbeTimeout = 15 * time.Second
 // cold boot and dependency prep. It returns a wrapped sentinel
 // (ErrRuntimeNotSnapshotter / ErrReplicaNotSuspended / ErrReplicaNotFound) when
 // the slot cannot be resumed, so the caller falls back to RunReplica.
-func ResumeReplica(p Params, index int) (*Result, error) {
+func ResumeReplica(p Params, index int) (res *Result, err error) {
+	p, end := p.startPhase("deploy.replica",
+		attribute.Int("shinyhub.replica", index),
+		attribute.Bool("shinyhub.deploy.resume", true))
+	unavailable := false
+	defer func() {
+		if unavailable {
+			end(nil)
+			return
+		}
+		end(err)
+	}()
 	ep, err := p.Manager.Resume(p.Slug, index)
 	if err != nil {
+		if resumeUnavailable(err) {
+			// Nothing to resume, so the caller falls back to a cold boot: an
+			// expected outcome, recorded on the span but not as an error. The
+			// caller still receives err to choose that fallback.
+			unavailable = true
+			p.annotate(attribute.Bool("shinyhub.deploy.resume_unavailable", true))
+		}
 		return nil, err
 	}
 	// Prefer the tier the replica actually runs on (from the live entry) over the
@@ -1867,6 +1941,15 @@ func ResumeReplica(p Params, index int) (*Result, error) {
 		Provider:    ep.Provider,
 		WorkerID:    ep.WorkerID,
 	}, nil
+}
+
+// resumeUnavailable reports whether a Manager.Resume error only means there is
+// nothing to resume (no replica, a replica that is not suspended, or a runtime
+// without snapshots), as opposed to a resume that was attempted and failed.
+func resumeUnavailable(err error) bool {
+	return errors.Is(err, process.ErrReplicaNotSuspended) ||
+		errors.Is(err, process.ErrRuntimeNotSnapshotter) ||
+		errors.Is(err, process.ErrReplicaNotFound)
 }
 
 // DetectAppType returns the runtime a bundle launches under: "python" for
