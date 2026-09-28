@@ -5024,11 +5024,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  document.addEventListener('click', () => {
-    for (const el of document.querySelectorAll('.kebab-list')) el.hidden = true;
-    for (const el of document.querySelectorAll('.kebab-menu [aria-expanded]')) el.setAttribute('aria-expanded', 'false');
-  });
-
   newUserModal.addEventListener('click', e => {
     if (e.target === e.currentTarget) closeNewUserModal();
   });

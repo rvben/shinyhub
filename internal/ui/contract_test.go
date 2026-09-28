@@ -2624,6 +2624,13 @@ func TestKebabMenusAreWired(t *testing.T) {
 		"Tab must close an open role=menu while allowing focus to continue")
 	assertContains(t, "app.js", `role="menuitem" data-kebab`,
 		"card action buttons, not their list wrappers, must own menuitem semantics")
+	// wireKebab owns every menu's open state, including the container's
+	// kebab-open class and its document listeners. A second closer that hides
+	// lists directly bypasses setOpen: a click on an open list's padding (which
+	// wireKebab deliberately ignores) would hide the list while wireKebab still
+	// thinks it is open, so the next toggle click "closes" an invisible menu.
+	assertNotContains(t, "app.js", "querySelectorAll('.kebab-list')",
+		"menus must be closed only through wireKebab's setOpen, never by force-hiding every .kebab-list")
 	// The header kebab's items are all manager actions, so the whole menu must be
 	// hidden for viewers (mirrors the card). That is one of the things
 	// syncDetailHeaderActions decides, from the same appCardActions helper the
