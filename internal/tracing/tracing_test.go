@@ -1,6 +1,7 @@
 package tracing
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -252,13 +253,14 @@ func TestEnvFor_EnabledFull(t *testing.T) {
 	}
 	env := EnvFor(cfg, "my-app", 2)
 	want := map[string]string{
-		"OTEL_SERVICE_NAME":           "my-app",
-		"OTEL_RESOURCE_ATTRIBUTES":    "shinyhub.app=my-app,shinyhub.replica=2",
-		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
-		"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-		"OTEL_EXPORTER_OTLP_HEADERS":  "x-key=secret",
-		"OTEL_TRACES_SAMPLER":         "parentbased_traceidratio",
-		"OTEL_TRACES_SAMPLER_ARG":     "0.25",
+		"OTEL_SERVICE_NAME":                   "my-app",
+		"OTEL_RESOURCE_ATTRIBUTES":            "shinyhub.app=my-app,shinyhub.replica=2",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://collector:4318",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":         "http/protobuf",
+		"OTEL_EXPORTER_OTLP_HEADERS":          "x-key=secret",
+		"OTEL_TRACES_SAMPLER":                 "parentbased_traceidratio",
+		"OTEL_TRACES_SAMPLER_ARG":             "0.25",
+		"OTEL_PYTHON_STARLETTE_EXCLUDED_URLS": StarletteExcludedURLs,
 	}
 	got := envToMap(env)
 	for k, v := range want {
@@ -339,4 +341,92 @@ func envToMap(env []string) map[string]string {
 		}
 	}
 	return m
+}
+
+// envValue returns the value of the last "key=" entry in env, failing the
+// test if key is absent (last-occurrence-wins mirrors how the process
+// manager applies these to a command's environment).
+func envValue(t *testing.T, env []string, key string) string {
+	t.Helper()
+	prefix := key + "="
+	found := false
+	var out string
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			out = strings.TrimPrefix(e, prefix)
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("env missing key %q: %v", key, env)
+	}
+	return out
+}
+
+// enabledCfg returns a minimal TracingConfig with tracing enabled and an
+// endpoint set, the common starting point for EnvFor/JobEnvFor tests.
+func enabledCfg() config.TracingConfig {
+	return config.TracingConfig{
+		Enabled:      true,
+		OTLPEndpoint: "http://c:4318",
+		OTLPProtocol: "http/protobuf",
+		SampleRatio:  1,
+	}
+}
+
+func TestEnvFor_AppendsResourceAttributesSortedAndEncoded(t *testing.T) {
+	cfg := enabledCfg()
+	cfg.ResourceAttributes = map[string]string{"team": "data, eng", "deployment.environment.name": "prd", "owner": "Zoë=x%"}
+	got := envValue(t, EnvFor(cfg, "a", 0), "OTEL_RESOURCE_ATTRIBUTES")
+	want := "shinyhub.app=a,shinyhub.replica=0,deployment.environment.name=prd,owner=Zo%C3%AB%3Dx%25,team=data%2C%20eng"
+	if got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+}
+
+func TestEnvFor_NoResourceAttributesUnchanged(t *testing.T) {
+	got := envValue(t, EnvFor(enabledCfg(), "a", 0), "OTEL_RESOURCE_ATTRIBUTES")
+	if got != "shinyhub.app=a,shinyhub.replica=0" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestEncodeResourceAttributes_RoundTripsThroughGoSDKDecoding(t *testing.T) {
+	vals := []string{"prd", "data, eng", "a=b", "100%", "Zoë", " lead", "tab\there", "x/y:z"}
+	for _, v := range vals {
+		enc := EncodeResourceAttributes([][2]string{{"k", v}})
+		_, raw, _ := strings.Cut(enc, "=")
+		if strings.ContainsAny(raw, ",= \t") {
+			t.Fatalf("%q encoded to %q, which still contains a separator", v, raw)
+		}
+		dec, err := url.PathUnescape(raw) // what go.opentelemetry.io/otel/sdk/resource env detection applies
+		if err != nil || dec != v {
+			t.Fatalf("%q -> %q -> %q (%v)", v, raw, dec, err)
+		}
+	}
+}
+
+func TestEnvFor_ExcludesStarletteWebsocket(t *testing.T) {
+	if got := envValue(t, EnvFor(enabledCfg(), "a", 0), "OTEL_PYTHON_STARLETTE_EXCLUDED_URLS"); got != StarletteExcludedURLs {
+		t.Fatalf("got %q", got)
+	}
+	if EnvFor(config.TracingConfig{}, "a", 0) != nil {
+		t.Fatal("disabled tracing must inject nothing")
+	}
+}
+
+func TestJobEnvFor(t *testing.T) {
+	cfg := enabledCfg()
+	cfg.ResourceAttributes = map[string]string{"deployment.environment.name": "prd"}
+	env := JobEnvFor(cfg, "sales", "nightly refresh", 42)
+	if envValue(t, env, "OTEL_SERVICE_NAME") != "sales" {
+		t.Fatal("service name must be the app slug")
+	}
+	want := "shinyhub.app=sales,shinyhub.schedule=nightly%20refresh,shinyhub.schedule.run_id=42,deployment.environment.name=prd"
+	if got := envValue(t, env, "OTEL_RESOURCE_ATTRIBUTES"); got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if JobEnvFor(config.TracingConfig{}, "sales", "n", 1) != nil {
+		t.Fatal("disabled tracing must inject nothing")
+	}
 }

@@ -17,6 +17,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -291,6 +294,38 @@ func StartProxySpan(incoming, incomingState string, cfg config.TracingConfig) (T
 	}, parentID, sampled
 }
 
+// StarletteExcludedURLs keeps the Starlette instrumentor from wrapping Shiny's
+// session websocket, which would otherwise be one span lasting the whole
+// session with a child per message, one ever-growing trace per visitor.
+// Anchored to the path end so a route merely containing "websocket" is still
+// traced. Apps override it per app like any OTEL_* default.
+const StarletteExcludedURLs = "/websocket/?$"
+
+// EncodeResourceAttributes renders pairs in the OTEL_RESOURCE_ATTRIBUTES wire
+// form, percent-encoding every value byte outside the RFC 3986 unreserved set
+// so separators, spaces and non-ASCII survive the OTel SDKs' percent-decoding
+// (e.g. the Go SDK's resource.WithFromEnv, which applies url.PathUnescape).
+// Keys are emitted as-is; config validation restricts them.
+func EncodeResourceAttributes(pairs [][2]string) string {
+	var b strings.Builder
+	for i, kv := range pairs {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(kv[0])
+		b.WriteByte('=')
+		for j := 0; j < len(kv[1]); j++ {
+			c := kv[1][j]
+			if c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~' {
+				b.WriteByte(c)
+			} else {
+				fmt.Fprintf(&b, "%%%02X", c)
+			}
+		}
+	}
+	return b.String()
+}
+
 // EnvFor returns the OTEL_* environment variables ShinyHub injects into one
 // app replica's process. The returned slice is in "KEY=VALUE" form and is
 // empty when tracing is disabled or has no endpoint configured.
@@ -298,19 +333,46 @@ func StartProxySpan(incoming, incomingState string, cfg config.TracingConfig) (T
 // These are platform DEFAULTS: callers (the process manager) append them
 // before the user's per-app env so user-supplied OTEL_* values win on last-
 // occurrence-wins semantics. The reserved-prefix rule in the env-var API
-// excludes the OTEL_ prefix so users can override per app.
+// excludes the OTEL_ prefix so users can override per app. Operator resource
+// attributes (cfg.ResourceAttributes) follow the built-in shinyhub.* pair,
+// keys sorted for a deterministic value.
 func EnvFor(cfg config.TracingConfig, slug string, replica int) []string {
+	return otelEnv(cfg, slug, [][2]string{
+		{"shinyhub.app", slug},
+		{"shinyhub.replica", strconv.Itoa(replica)},
+	})
+}
+
+// JobEnvFor returns the OTEL_* defaults for one scheduled job run. The
+// service name stays the app slug so a job's spans sit beside the app's; the
+// schedule and run id distinguish them.
+func JobEnvFor(cfg config.TracingConfig, slug, schedule string, runID int64) []string {
+	return otelEnv(cfg, slug, [][2]string{
+		{"shinyhub.app", slug},
+		{"shinyhub.schedule", schedule},
+		{"shinyhub.schedule.run_id", strconv.FormatInt(runID, 10)},
+	})
+}
+
+// otelEnv builds the OTEL_* defaults shared by app replicas and job runs: the
+// built-in identifying pairs followed by the operator's resource attributes,
+// sorted by key so the value is deterministic across runs.
+func otelEnv(cfg config.TracingConfig, service string, builtin [][2]string) []string {
 	if !cfg.Enabled || cfg.OTLPEndpoint == "" {
 		return nil
 	}
-	resource := fmt.Sprintf("shinyhub.app=%s,shinyhub.replica=%d", slug, replica)
+	pairs := builtin
+	for _, k := range slices.Sorted(maps.Keys(cfg.ResourceAttributes)) {
+		pairs = append(pairs, [2]string{k, cfg.ResourceAttributes[k]})
+	}
 	env := []string{
-		"OTEL_SERVICE_NAME=" + slug,
-		"OTEL_RESOURCE_ATTRIBUTES=" + resource,
+		"OTEL_SERVICE_NAME=" + service,
+		"OTEL_RESOURCE_ATTRIBUTES=" + EncodeResourceAttributes(pairs),
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" + cfg.OTLPEndpoint,
 		"OTEL_EXPORTER_OTLP_PROTOCOL=" + cfg.OTLPProtocol,
 		"OTEL_TRACES_SAMPLER=parentbased_traceidratio",
 		fmt.Sprintf("OTEL_TRACES_SAMPLER_ARG=%g", cfg.SampleRatio),
+		"OTEL_PYTHON_STARLETTE_EXCLUDED_URLS=" + StarletteExcludedURLs,
 	}
 	if cfg.OTLPHeaders != "" {
 		env = append(env, "OTEL_EXPORTER_OTLP_HEADERS="+cfg.OTLPHeaders)
