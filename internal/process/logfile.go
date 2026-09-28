@@ -279,7 +279,7 @@ func parseLogRunFile(name string) (index int, runID string, backup bool, ok bool
 	}
 	index, err := strconv.Atoi(body[:cut])
 	runID = body[cut+1:]
-	if err != nil || index < 0 || index > 255 || !validLogRunID(runID) {
+	if err != nil || index < 0 || !validLogRunID(runID) {
 		return 0, "", false, false
 	}
 	return index, runID, backup, true
@@ -414,7 +414,7 @@ func ListLogSources(appsDir, slug string) ([]LogSource, error) {
 		}
 		raw := strings.TrimSuffix(strings.TrimPrefix(name, "app-"), ".log")
 		index, err := strconv.Atoi(raw)
-		if err != nil || index < 0 || index > 255 {
+		if err != nil || index < 0 {
 			continue
 		}
 		info, err := entry.Info()
