@@ -39,7 +39,7 @@ func TestBuildEnvironment_ResolvesAppEnvIntoSync(t *testing.T) {
 		func(ctx context.Context, dir string, appEnv []string) error { return nil },
 	)
 	defer restore()
-	defer SetEnsureProjectForTest(func(context.Context, string) error { return nil })()
+	defer SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })()
 
 	p := Params{
 		Slug:      "demo",
@@ -71,7 +71,7 @@ func TestBuildEnvironment_NoManagerAndResolverError(t *testing.T) {
 		func(ctx context.Context, dir string, appEnv []string) error { return nil },
 	)
 	defer restore()
-	defer SetEnsureProjectForTest(func(context.Context, string) error { return nil })()
+	defer SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })()
 
 	if err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir()}, "python", time.Second); err != nil {
 		t.Fatalf("nil-Manager build: %v", err)

@@ -238,7 +238,9 @@ func runSandboxedBuildStep(ctx context.Context, dir string, argv []string, appEn
 	if len(writePaths) > 0 {
 		err = sandboxDenialHint(out, err, writePaths)
 	}
-	err = indexResolutionHint(out, err, cmd.Env)
+	if err != nil {
+		err = indexResolutionHint(out, err, cmd.Env, requirementsRedactor(dir, cmd.Env))
+	}
 	err = interpreterResolutionHint(out, err)
 	return out, err
 }
@@ -254,7 +256,9 @@ func runSandboxedBuildStep(ctx context.Context, dir string, argv []string, appEn
 //
 // This duplicates process.Sync rather than adding a seam there because
 // process.uvSyncCmd builds its own unwrapped *exec.Cmd with no injectable
-// hook, and internal/process is outside this fix's edit scope.
+// hook. Both apply the package-index options of a synthesized project's
+// requirements.txt through process.ReadRequirementsBuild, since `uv sync`
+// does not read that file, and mask the values it expanded in uv's output.
 //
 // Residual gap: ensureProjectFn (process.EnsureProject — the uv-init/uv-add
 // project-conversion step that runs before this for a requirements.txt-only
@@ -270,7 +274,11 @@ func sandboxedPythonSync(ctx context.Context, dir string, appEnv []string) error
 	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); os.IsNotExist(err) {
 		return nil
 	}
-	out, err := buildStepRunner(ctx, dir, []string{"uv", "sync"}, appEnv)
+	build, err := process.ReadRequirementsBuild(dir, appEnv)
+	if err != nil {
+		return err
+	}
+	out, err := buildStepRunner(ctx, dir, append([]string{"uv", "sync"}, build.Flags...), build.Env)
 	if err != nil {
 		switch ctx.Err() {
 		case context.DeadlineExceeded:
@@ -278,7 +286,7 @@ func sandboxedPythonSync(ctx context.Context, dir string, appEnv []string) error
 		case context.Canceled:
 			return fmt.Errorf("build canceled: %w", ctx.Err())
 		}
-		return fmt.Errorf("%w\n%s", err, out)
+		return fmt.Errorf("%w\n%s", err, build.Output(out))
 	}
 	return nil
 }
@@ -775,7 +783,20 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) (err
 	// the build log answers "which indexes did this build see" - the silent
 	// absence of an expected index var is otherwise diagnosable only from a
 	// downstream "not found in the package registry".
-	if indexes := collectIndexEnv(append(process.SanitizedEnv(), appEnv...)); len(indexes) > 0 {
+	// A Python bundle's requirements.txt index options are part of that
+	// configuration; an unreadable file is left for the build step to report.
+	logEnv := appEnv
+	var redact func(string) string
+	if appType == "python" {
+		redact = requirementsRedactor(p.BundleDir, append(process.SanitizedEnv(), appEnv...))
+		if build, err := process.ReadRequirementsBuild(p.BundleDir, appEnv); err == nil {
+			logEnv = build.Env
+			if len(build.Flags) > 0 {
+				slog.Info("deploy: requirements.txt disables package indexes", "slug", p.Slug, "flags", strings.Join(build.Flags, " "))
+			}
+		}
+	}
+	if indexes := collectIndexEnv(effectiveEnv(append(process.SanitizedEnv(), logEnv...)), redact); len(indexes) > 0 {
 		slog.Info("deploy: package index configuration", "slug", p.Slug, "indexes", strings.Join(indexes, ", "))
 	}
 	stop := startBuildProgress(p, start)
@@ -783,7 +804,7 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) (err
 
 	switch appType {
 	case "python":
-		if cerr := ensureProjectFn(ctx, p.BundleDir); cerr != nil {
+		if cerr := ensureProjectFn(ctx, p.BundleDir, appEnv); cerr != nil {
 			p.report(deployevent.Phase("dependencies", deployevent.StatusFailed, "Python project preparation failed"))
 			return fmt.Errorf("uv sync: prepare Python project: %w", cerr)
 		}
@@ -1090,6 +1111,9 @@ func resolveBundleCommand(p Params, m *Manifest, hostDeps bool) (baseCmd []strin
 		for _, warning := range AppTypeWarnings(p.BundleDir) {
 			slog.Warn("deploy: ambiguous app type", "slug", p.Slug, "detail", warning)
 			p.report(deployevent.Phase("bundle", deployevent.StatusWarning, warning))
+		}
+		if appType == "python" {
+			reportRequirementsIndexOverride(p)
 		}
 		// Container runtimes prepare dependencies inside the image/container, so
 		// running uv sync / renv::restore on the host would leak host state into
@@ -2143,7 +2167,12 @@ func pythonCommandPrefix(bundleDir string, overlay []string, hostDeps bool) []st
 			base = []string{"uv", "run"}
 		}
 	} else if _, err := os.Stat(filepath.Join(bundleDir, "requirements.txt")); err == nil {
-		base = append(base, "--with-requirements", "requirements.txt")
+		// `uv run --with-requirements` ignores the file's index options. The
+		// indexes arrive as env at process start; --no-index has no variable,
+		// so it goes here. A file that cannot be read safely fails the launch
+		// in process.Manager.Start, so an error is not handled twice.
+		idx, _ := process.ReadRequirementsIndex(bundleDir, nil)
+		base = append(append(base, idx.Args()...), "--with-requirements", "requirements.txt")
 	}
 	if len(overlay) > 0 {
 		for _, pkg := range overlay {

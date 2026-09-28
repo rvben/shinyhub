@@ -12,6 +12,7 @@ package spanerr
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -83,4 +84,38 @@ func RedactURLUserinfo(val string) string {
 		return val
 	}
 	return strings.Join(tokens, " ")
+}
+
+// urlPattern matches a URL in free-form text, stopping at whitespace and the
+// quotes and brackets tools wrap URLs in. A comma does not end it: a query
+// value may contain one, so a comma-separated list is split before redaction.
+var urlPattern = regexp.MustCompile("[A-Za-z][A-Za-z0-9+.-]*://[^\\s'\"`<>()]+")
+
+// RedactURLs masks, in every URL of s, the userinfo and each query value:
+// "https://u:p@host/x?token=t" becomes "https://***@host/x?token=***". A
+// registry token commonly travels in the query string, where userinfo
+// redaction cannot reach it; parameter names and fragments stay, so the URL
+// remains recognizable.
+func RedactURLs(s string) string {
+	return urlPattern.ReplaceAllStringFunc(s, func(u string) string {
+		u = RedactURLUserinfo(u)
+		base, query, ok := strings.Cut(u, "?")
+		if !ok {
+			return u
+		}
+		query, frag, hasFrag := strings.Cut(query, "#")
+		params := strings.Split(query, "&")
+		for i, param := range params {
+			if name, _, ok := strings.Cut(param, "="); ok {
+				params[i] = name + "=***"
+			} else if param != "" {
+				params[i] = "***"
+			}
+		}
+		u = base + "?" + strings.Join(params, "&")
+		if hasFrag {
+			u += "#" + frag
+		}
+		return u
+	})
 }

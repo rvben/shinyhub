@@ -109,7 +109,7 @@ func TestDependencySetupCmdsScrubServerSecrets(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 
 	cmds := map[string]*exec.Cmd{
-		"uv sync":           uvSyncCmd(context.Background(), t.TempDir()),
+		"uv sync":           uvSyncCmd(context.Background(), t.TempDir(), nil, nil),
 		"uv python install": uvPythonInstallCmd("3.12"),
 		"renv::restore":     renvRestoreCmd(context.Background(), t.TempDir(), RProjectLibraryDir),
 	}

@@ -45,7 +45,7 @@ func prepProbes(t *testing.T, syncErr error) (built, hooked *atomic.Bool) {
 		func(context.Context, string, []string) error { built.Store(true); return syncErr },
 		func(context.Context, string, []string) error { built.Store(true); return syncErr },
 	)
-	restoreProject := deploy.SetEnsureProjectForTest(func(context.Context, string) error { return nil })
+	restoreProject := deploy.SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })
 	restoreHook := deploy.SetHookRunnerForTest(func(context.Context, string, []string, []string, io.Writer) error {
 		hooked.Store(true)
 		return nil
@@ -138,7 +138,7 @@ func TestPrepareRequired_StillFailsOnBuildAndHook(t *testing.T) {
 			func(context.Context, string, []string) error { return nil },
 			func(context.Context, string, []string) error { return nil },
 		)()
-		defer deploy.SetEnsureProjectForTest(func(context.Context, string) error { return nil })()
+		defer deploy.SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })()
 		defer deploy.SetHookRunnerForTest(func(context.Context, string, []string, []string, io.Writer) error {
 			return errors.New("asset build crashed")
 		})()

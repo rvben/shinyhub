@@ -47,7 +47,7 @@ func stubBundleBuild(t *testing.T) func() {
 		func(context.Context, string, []string) error { return nil },
 		func(context.Context, string, []string) error { return nil },
 	)
-	restoreProject := deploy.SetEnsureProjectForTest(func(context.Context, string) error { return nil })
+	restoreProject := deploy.SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })
 	return func() { restoreProject(); restoreSync() }
 }
 
@@ -144,7 +144,7 @@ func TestRun_ElasticBuildsEnvironmentBeforeWorkers(t *testing.T) {
 		func(context.Context, string, []string) error { synced.Store(true); return nil },
 		func(context.Context, string, []string) error { return nil },
 	)()
-	defer deploy.SetEnsureProjectForTest(func(context.Context, string) error { return nil })()
+	defer deploy.SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })()
 
 	if _, err := deploy.Run(elasticParams(t, "elastic-build", bundle, process.NewNativeRuntime())); err != nil {
 		t.Fatalf("deploy.Run: %v", err)
@@ -164,7 +164,7 @@ func TestRun_ElasticBuildFailureFailsDeploy(t *testing.T) {
 		func(context.Context, string, []string) error { return errors.New("no matching distribution") },
 		func(context.Context, string, []string) error { return nil },
 	)()
-	defer deploy.SetEnsureProjectForTest(func(context.Context, string) error { return nil })()
+	defer deploy.SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })()
 
 	_, err := deploy.Run(elasticParams(t, "elastic-build-fail", bundle, process.NewNativeRuntime()))
 	if err == nil {
@@ -298,7 +298,7 @@ command = ["make", "assets"]
 		func(context.Context, string, []string) error { synced.Store(true); return nil },
 		func(context.Context, string, []string) error { return nil },
 	)()
-	defer deploy.SetEnsureProjectForTest(func(context.Context, string) error { return nil })()
+	defer deploy.SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })()
 	defer deploy.SetHookRunnerForTest(func(context.Context, string, []string, []string, io.Writer) error {
 		hooked.Store(true)
 		return nil

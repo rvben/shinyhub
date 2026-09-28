@@ -452,7 +452,12 @@ func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []st
 		"SHINYHUB_APP_DATA="+w.DataDir,
 		"SHINYHUB_APP_SLUG="+slug,
 	)
-	c := exec.CommandContext(ctx, plan.Command[0], plan.Command[1:]...) //nolint:gosec
+	command, indexEnv, err := process.RequirementsLaunch(w.BundleDir, plan.Command, childEnv)
+	if err != nil {
+		return nil, err
+	}
+	childEnv = append(childEnv, indexEnv...)
+	c := exec.CommandContext(ctx, command[0], command[1:]...) //nolint:gosec
 	c.Dir = w.BundleDir
 	c.Env = childEnv
 	c.Stdout = stdout

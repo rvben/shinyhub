@@ -64,3 +64,20 @@ func TestRedactURLUserinfo(t *testing.T) {
 		}
 	}
 }
+
+// A registry token often travels in a URL query string, where userinfo
+// redaction cannot reach it; RedactURLs masks both in every URL of free-form
+// text, keeping the surrounding punctuation and the parameter names.
+func TestRedactURLs(t *testing.T) {
+	cases := map[string]string{
+		"error: Failed to fetch: `http://127.0.0.1:9/simple/six/?token=lit-a1`":  "error: Failed to fetch: `http://127.0.0.1:9/simple/six/?token=***`",
+		"(https://u:lit-b2@idx.example/simple?k=lit-c3&x=lit-d4#top)":            "(https://***@idx.example/simple?k=***&x=***#top)",
+		"https://one.example/s?lit-e5 https://two.example/s?token=lit-f6,lit-g7": "https://one.example/s?*** https://two.example/s?token=***",
+		"./wheels and https://plain.example/simple stay as they are":             "./wheels and https://plain.example/simple stay as they are",
+	}
+	for in, want := range cases {
+		if got := spanerr.RedactURLs(in); got != want {
+			t.Errorf("RedactURLs(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -816,6 +816,9 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 			p.Env = append(defaults, p.Env...)
 		}
 	}
+	if err := applyRequirementsLaunchEnv(&p); err != nil {
+		return nil, err
+	}
 
 	if m.mountResolver != nil {
 		mounts, err := m.mountResolver(p.Slug)

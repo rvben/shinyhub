@@ -27,7 +27,7 @@ func TestUVAvailable(t *testing.T) {
 func TestEnsureProject_NoOpPaths(t *testing.T) {
 	t.Run("no requirements.txt", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := process.EnsureProject(context.Background(), dir); err != nil {
+		if err := process.EnsureProject(context.Background(), dir, nil); err != nil {
 			t.Fatalf("EnsureProject: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); !os.IsNotExist(err) {
@@ -45,7 +45,7 @@ func TestEnsureProject_NoOpPaths(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(authored), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := process.EnsureProject(context.Background(), dir); err != nil {
+		if err := process.EnsureProject(context.Background(), dir, nil); err != nil {
 			t.Fatalf("EnsureProject: %v", err)
 		}
 		got, _ := os.ReadFile(filepath.Join(dir, "pyproject.toml"))

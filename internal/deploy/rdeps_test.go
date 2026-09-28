@@ -241,7 +241,7 @@ func TestResolveBundleCommand_ReportsAmbiguityToTheDeployStream(t *testing.T) {
 		func(context.Context, string, []string) error { return nil },
 	)
 	defer restore()
-	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string) error { return nil })
+	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })
 	defer restoreEnsure()
 
 	sink, events := collectEvents()

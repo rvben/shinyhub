@@ -191,7 +191,7 @@ func TestResolveLaunch_PrepHostDeps_GatesDepPrep(t *testing.T) {
 func TestResolveLaunch_ProjectPreparationFailureStopsLocalRun(t *testing.T) {
 	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny==\n"})
 	cause := errors.New("uv add requirements: invalid version specifier")
-	restore := SetEnsureProjectForTest(func(context.Context, string) error { return cause })
+	restore := SetEnsureProjectForTest(func(context.Context, string, []string) error { return cause })
 	defer restore()
 	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 9100, PrepHostDeps: true})
 	if err != nil {

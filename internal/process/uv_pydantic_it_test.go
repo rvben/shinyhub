@@ -29,7 +29,7 @@ func TestEnsureProject_ShinyAppGetsPydantic(t *testing.T) {
 	write("requirements.txt", "shiny>=1.2\n")
 	write("app.py", "from shiny import App, ui\n")
 
-	if err := EnsureProject(context.Background(), dir); err != nil {
+	if err := EnsureProject(context.Background(), dir, nil); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 

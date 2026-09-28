@@ -38,7 +38,7 @@ func SetRShinyInstalledForTest(installed bool) (restore func()) {
 
 // SetEnsureProjectForTest swaps the ensure-project hook. Returns a restore
 // func — pair with defer. Test use only.
-func SetEnsureProjectForTest(fn func(context.Context, string) error) (restore func()) {
+func SetEnsureProjectForTest(fn func(context.Context, string, []string) error) (restore func()) {
 	orig := ensureProjectFn
 	ensureProjectFn = fn
 	return func() { ensureProjectFn = orig }

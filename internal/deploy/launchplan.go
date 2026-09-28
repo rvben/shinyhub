@@ -145,7 +145,7 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 					Label: "ensure project",
 
 					Run: func(ctx context.Context, bundleDir string) error {
-						if err := ensureProjectFn(ctx, bundleDir); err != nil {
+						if err := ensureProjectFn(ctx, bundleDir, opts.AppEnv); err != nil {
 							return fmt.Errorf("uv sync: prepare Python project: %w", err)
 						}
 						return nil

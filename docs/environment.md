@@ -100,7 +100,63 @@ A bundle can also declare its index self-contained in `pyproject.toml` with
 `[[tool.uv.index]]`; the build sandbox does not restrict network egress, so
 either approach reaches the index directly or via the configured proxy.
 
-Each build logs its effective index configuration (credentials redacted), and
+### Index options in `requirements.txt`
+
+A `requirements.txt`-only bundle can name its index the way pip reads it:
+
+```text
+--index-url https://__token__:${PRIVATE_INDEX_TOKEN}@pypi.corp.example/simple
+--extra-index-url https://mirror.corp.example/simple
+--find-links ./wheels
+internal-package==2.1
+```
+
+ShinyHub honours `-i`/`--index-url`, `--extra-index-url`, `-f`/`--find-links`
+and `--no-index`, including in files pulled in with `-r`/`-c`, at every step
+that installs the bundle's dependencies: the conversion into a uv project, the
+`uv sync` that installs it, and a launch that installs dependencies itself
+(`uv run --with-requirements`, used off-host). The uv commands involved ignore
+these lines on their own, so without this a private package name would resolve
+from PyPI.
+
+- **Precedence:** the bundle's `--index-url` replaces the server's and the
+  app's default index (`UV_DEFAULT_INDEX` / `UV_INDEX_URL`), as it would for
+  pip. The deploy reports that as a warning naming the replaced setting, with
+  the URL redacted. `--extra-index-url` and `--find-links` entries are added
+  after the configured ones, so those keep their priority: extra indexes go
+  last in `UV_EXTRA_INDEX_URL`, which uv consults after `UV_INDEX`. A relative
+  `--find-links` path is relative to the bundle root, where uv runs, even in
+  an included file. `UV_FIND_LINKS` is comma-separated, so a find-links URL
+  containing a comma fails the build; percent-encode it as `%2C`.
+- **Credentials:** `${NAME}` references (upper-case names) expand from the
+  app's env vars, so a token stored with `shinyhub env set --secret` never
+  needs to be in the bundle. The resolved options reach uv as environment
+  variables, never as command-line arguments, so they do not appear in process
+  listings or traces. uv writes the index into the generated `pyproject.toml`
+  and `uv.lock` without the credential. When a dependency step fails, the
+  uv output the deploy error quotes has every URL's credentials and query
+  values masked, along with the expanded values.
+- **Launch-time secrets:** at launch, an index setting is delivered as a
+  secret env var when any part of it may be secret: URL credentials, a query
+  string (a signed URL's token, even one written literally in the file), the
+  expanded value of a secret env var, or a
+  same-named variable that was itself stored as a secret. On Fargate that requires
+  `runtime.fargate.secrets`; without it the replica fails to start rather than
+  exposing the credential as a plaintext task override.
+- **Fail closed:** a `-r`/`-c` include that resolves outside the bundle, or
+  that names a URL, stops the build and the launch, rather than reading host
+  files or silently dropping the index options it may carry. Ship included
+  files inside the bundle.
+- **Custom launch commands:** a manifest command that starts with `uv` gets
+  the same treatment. `--no-index` has no environment variable, so it is
+  added after `run`, including when uv's global options such as `--offline`
+  or `--directory <dir>` come first; a `uv` command other than `uv run` fails
+  to start when the requirements set `--no-index`.
+- A bundle that ships its own `pyproject.toml` owns its index configuration
+  there; a `requirements.txt` beside it is not read for index options.
+
+Each build logs its effective index configuration (URL credentials and query
+values redacted), and
 a "not found in the package registry" failure is annotated with the index
 configuration the build actually saw - or with a pointer to this page when
 none reached it.

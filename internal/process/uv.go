@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/rvben/shinyhub/internal/fsx"
+	"github.com/rvben/shinyhub/internal/spanerr"
 )
 
 // CheckUV verifies that the uv binary is available in PATH.
@@ -19,14 +20,59 @@ func CheckUV() error {
 	return nil
 }
 
-// uvSyncCmd builds the `uv sync` command. uv runs the project's build
-// backend, which is deployer-controlled code, so the env is scrubbed of
-// server secrets via SanitizedEnv.
-func uvSyncCmd(ctx context.Context, dir string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "uv", "sync")
+// uvBuildCmd builds a uv command for a dependency step in dir. uv runs the
+// project's build backend, which is deployer-controlled code, so the env base
+// is scrubbed of server secrets via SanitizedEnv; env (the app's own variables
+// and its requirements index configuration, see ReadRequirementsBuild) is
+// layered on top, and the host build interpreter policy stays authoritative.
+func uvBuildCmd(ctx context.Context, dir string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "uv", args...)
 	cmd.Dir = dir
-	cmd.Env = WithBuildInterpreterPolicy(SanitizedEnv())
+	cmd.Env = WithBuildInterpreterPolicy(append(SanitizedEnv(), env...))
 	return cmd
+}
+
+// uvSyncCmd builds the `uv sync` command.
+func uvSyncCmd(ctx context.Context, dir string, env, flags []string) *exec.Cmd {
+	return uvBuildCmd(ctx, dir, env, append([]string{"sync"}, flags...)...)
+}
+
+// RequirementsBuild is what a uv dependency step in a bundle needs beyond the
+// SanitizedEnv base, derived from the bundle's requirements.txt (see
+// RequirementsIndex).
+type RequirementsBuild struct {
+	// Env is the app's env followed by the package-index configuration the
+	// requirements declare, resolved against the server and app environment.
+	Env []string
+	// Flags are the uv options that configuration needs on the command line.
+	Flags []string
+	index RequirementsIndex
+}
+
+// Output prepares a step's captured output for embedding in an error, as
+// uvBuildOutput does, and masks credentials in it: uv hides URL userinfo in
+// its errors but quotes an index URL's query string and path verbatim. Every
+// URL's query values are masked, which covers a token written literally into
+// the requirements, and so is every value a ${NAME} reference expanded,
+// wherever it sits.
+func (b RequirementsBuild) Output(out []byte) []byte {
+	return []byte(b.index.Redact(spanerr.RedactURLs(string(uvBuildOutput(out)))))
+}
+
+// ReadRequirementsBuild resolves the RequirementsBuild for dir. It fails when
+// the requirements cannot be read safely (an include outside the bundle), so
+// a build never resolves without an index its bundle names.
+func ReadRequirementsBuild(dir string, appEnv []string) (RequirementsBuild, error) {
+	base := append(SanitizedEnv(), appEnv...)
+	idx, err := ReadRequirementsIndex(dir, base)
+	if err != nil {
+		return RequirementsBuild{}, fmt.Errorf("read package-index options from requirements.txt: %w", err)
+	}
+	return RequirementsBuild{
+		Env:   append(append([]string{}, appEnv...), idx.Env(base)...),
+		Flags: idx.Args(),
+		index: idx,
+	}, nil
 }
 
 // uvBuildOutput prepares captured build output for embedding in an error that
@@ -51,7 +97,11 @@ func Sync(ctx context.Context, dir string) error {
 	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); os.IsNotExist(err) {
 		return nil
 	}
-	out, err := uvSyncCmd(ctx, dir).CombinedOutput()
+	build, err := ReadRequirementsBuild(dir, nil)
+	if err != nil {
+		return err
+	}
+	out, err := uvSyncCmd(ctx, dir, build.Env, build.Flags).CombinedOutput()
 	if err != nil {
 		switch ctx.Err() {
 		case context.DeadlineExceeded:
@@ -59,7 +109,7 @@ func Sync(ctx context.Context, dir string) error {
 		case context.Canceled:
 			return fmt.Errorf("build canceled: %w", ctx.Err())
 		}
-		return fmt.Errorf("%w\n%s", err, uvBuildOutput(out))
+		return fmt.Errorf("%w\n%s", err, build.Output(out))
 	}
 	return nil
 }
@@ -70,32 +120,24 @@ func Sync(ctx context.Context, dir string) error {
 // the .venv) from one the author shipped (valid everywhere).
 const SynthesizedProjectMarker = ".shinyhub-synthesized-project"
 
-func uvInitCmd(ctx context.Context, dir string) *exec.Cmd {
+func uvInitCmd(ctx context.Context, dir string, env []string) *exec.Cmd {
 	// --bare yields a non-package project (no [build-system]), so `uv sync`
 	// installs only the dependencies, never the app directory itself. --name is
 	// explicit because the version dir is an all-digits timestamp, which uv
 	// would otherwise use as the project name.
-	cmd := exec.CommandContext(ctx, "uv", "init", "--bare", "--name", "shinyhub-app")
-	cmd.Dir = dir
-	cmd.Env = WithBuildInterpreterPolicy(SanitizedEnv())
-	return cmd
+	return uvBuildCmd(ctx, dir, env, "init", "--bare", "--name", "shinyhub-app")
 }
 
-func uvAddRequirementsCmd(ctx context.Context, dir string) *exec.Cmd {
+func uvAddRequirementsCmd(ctx context.Context, dir string, env, flags []string) *exec.Cmd {
 	// uv parses the requirements file (including its grammar) and writes the
-	// resolved deps into pyproject.toml plus a native uv.lock.
-	cmd := exec.CommandContext(ctx, "uv", "add", "--requirements", "requirements.txt")
-	cmd.Dir = dir
-	cmd.Env = WithBuildInterpreterPolicy(SanitizedEnv())
-	return cmd
+	// resolved deps into pyproject.toml plus a native uv.lock. It does not
+	// apply the file's index options, which arrive through env and flags.
+	return uvBuildCmd(ctx, dir, env, append([]string{"add", "--requirements", "requirements.txt"}, flags...)...)
 }
 
-// uvAddCmd builds a `uv add <pkgs...>` command with a scrubbed env.
-func uvAddCmd(ctx context.Context, dir string, pkgs ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "uv", append([]string{"add"}, pkgs...)...)
-	cmd.Dir = dir
-	cmd.Env = WithBuildInterpreterPolicy(SanitizedEnv())
-	return cmd
+// uvAddCmd builds a `uv add <pkgs...>` command.
+func uvAddCmd(ctx context.Context, dir string, env, flags []string, pkgs ...string) *exec.Cmd {
+	return uvBuildCmd(ctx, dir, env, append(append([]string{"add"}, flags...), pkgs...)...)
 }
 
 // requirementDistName extracts the lowercased distribution name from one
@@ -140,31 +182,40 @@ func requirementsImplyPydantic(requirements string) bool {
 // prior conversion) or when there is no requirements.txt to convert. On a failed
 // `uv add` it removes the half-built project so the app falls back cleanly to
 // requirements mode rather than launching against an incomplete environment.
-func EnsureProject(ctx context.Context, dir string) error {
+//
+// appEnv is the app's own environment, which the conversion sees as the app
+// process does (private index credentials are commonly stored there). The
+// package-index options in requirements.txt are applied explicitly, since
+// `uv add --requirements` ignores them; see ReadRequirementsBuild.
+func EnsureProject(ctx context.Context, dir string, appEnv []string) error {
 	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); err == nil {
 		return nil
 	}
 	if _, err := os.Stat(filepath.Join(dir, "requirements.txt")); err != nil {
 		return nil
 	}
-	if out, err := uvInitCmd(ctx, dir).CombinedOutput(); err != nil {
-		return fmt.Errorf("uv init: %w\n%s", err, uvBuildOutput(out))
+	build, err := ReadRequirementsBuild(dir, appEnv)
+	if err != nil {
+		return err
 	}
-	if out, err := uvAddRequirementsCmd(ctx, dir).CombinedOutput(); err != nil {
+	if out, err := uvInitCmd(ctx, dir, build.Env).CombinedOutput(); err != nil {
+		return fmt.Errorf("uv init: %w\n%s", err, build.Output(out))
+	}
+	if out, err := uvAddRequirementsCmd(ctx, dir, build.Env, build.Flags).CombinedOutput(); err != nil {
 		_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
 		_ = os.Remove(filepath.Join(dir, "uv.lock"))
 		_ = fsx.RemoveAll(filepath.Join(dir, ".venv"))
-		return fmt.Errorf("uv add requirements: %w\n%s", err, uvBuildOutput(out))
+		return fmt.Errorf("uv add requirements: %w\n%s", err, build.Output(out))
 	}
 	// shiny's UI imports shinychat, which imports pydantic unconditionally while
 	// declaring it optional (shinychat 0.5.0). Add pydantic for shiny apps so they
 	// do not crash on `import shiny.ui`. See requirementsImplyPydantic.
 	if reqs, rerr := os.ReadFile(filepath.Join(dir, "requirements.txt")); rerr == nil && requirementsImplyPydantic(string(reqs)) {
-		if out, err := uvAddCmd(ctx, dir, "pydantic").CombinedOutput(); err != nil {
+		if out, err := uvAddCmd(ctx, dir, build.Env, build.Flags, "pydantic").CombinedOutput(); err != nil {
 			_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
 			_ = os.Remove(filepath.Join(dir, "uv.lock"))
 			_ = fsx.RemoveAll(filepath.Join(dir, ".venv"))
-			return fmt.Errorf("uv add pydantic (shiny chat dependency): %w\n%s", err, uvBuildOutput(out))
+			return fmt.Errorf("uv add pydantic (shiny chat dependency): %w\n%s", err, build.Output(out))
 		}
 	}
 	_ = os.WriteFile(filepath.Join(dir, SynthesizedProjectMarker), []byte("1\n"), 0o644)

@@ -56,7 +56,7 @@ func poolParamsWithHook(t *testing.T, slug string, replicas int, hook deploy.Hoo
 		func(context.Context, string, []string) error { return nil },
 		func(context.Context, string, []string) error { return nil },
 	))
-	t.Cleanup(deploy.SetEnsureProjectForTest(func(context.Context, string) error { return nil }))
+	t.Cleanup(deploy.SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil }))
 	t.Cleanup(deploy.SetBuildCommandForTest(func(string, int, int, string, []string, bool) []string {
 		return []string{"sleep", "30"}
 	}))

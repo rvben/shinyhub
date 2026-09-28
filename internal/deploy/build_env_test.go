@@ -42,7 +42,7 @@ func TestBuildEnvironment_TimesOutAsBuildFailed(t *testing.T) {
 		func(ctx context.Context, _ string, _ []string) error { <-ctx.Done(); return ctx.Err() },
 	)
 	defer restore()
-	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string) error { return nil })
+	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })
 	defer restoreEnsure()
 
 	err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir()}, "python", 30*time.Millisecond)
@@ -66,7 +66,7 @@ func TestBuildEnvironment_ProjectPreparationFailsInDependencies(t *testing.T) {
 				return nil
 			}, nil)
 			defer restore()
-			restoreEnsure := SetEnsureProjectForTest(func(context.Context, string) error { return cause })
+			restoreEnsure := SetEnsureProjectForTest(func(context.Context, string, []string) error { return cause })
 			defer restoreEnsure()
 			var events []deployevent.Event
 			err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir(), Progress: func(e deployevent.Event) { events = append(events, e) }}, "python", time.Second)
@@ -119,7 +119,7 @@ func TestBuildEnvironment_LogsProgress(t *testing.T) {
 		func(context.Context, string, []string) error { return nil },
 	)
 	defer restore()
-	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string) error { return nil })
+	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })
 	defer restoreEnsure()
 
 	if err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir()}, "python", time.Second); err != nil {

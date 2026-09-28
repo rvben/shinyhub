@@ -23,7 +23,7 @@ func TestCollectIndexEnv_Redaction(t *testing.T) {
 		"PATH=/usr/bin",
 		"SHINYHUB_AUTH_SECRET=nope",
 	}
-	got := strings.Join(collectIndexEnv(env), " ")
+	got := strings.Join(collectIndexEnv(env, nil), " ")
 	for _, want := range []string{
 		"UV_EXTRA_INDEX_URL=https://***@nexus.example.com/repository/pypi/simple",
 		"UV_INDEX=https://***@one.example.com/simple https://two.example.com/simple",
@@ -42,6 +42,32 @@ func TestCollectIndexEnv_Redaction(t *testing.T) {
 	}
 }
 
+// A registry token can sit in a URL's query string, written literally into a
+// requirements file or the service environment, so every query value is
+// masked in each URL of a list-valued variable.
+func TestCollectIndexEnv_MasksQueryValues(t *testing.T) {
+	env := []string{
+		"UV_DEFAULT_INDEX=https://registry.example/simple?token=lit-a1&region=eu#frag",
+		"UV_INDEX=https://one.example/simple?key=lit-b2 https://two.example/simple",
+		"UV_FIND_LINKS=https://three.example/w?sig=lit-c3,lit-c5,https://five.example/w,./wheels",
+		"PIP_INDEX_URL=https://four.example/simple?lit-d4",
+	}
+	got := strings.Join(collectIndexEnv(env, nil), " ")
+	for _, want := range []string{
+		"UV_DEFAULT_INDEX=https://registry.example/simple?token=***&region=***#frag",
+		"UV_INDEX=https://one.example/simple?key=*** https://two.example/simple",
+		"UV_FIND_LINKS=https://three.example/w?sig=***,https://five.example/w,./wheels",
+		"PIP_INDEX_URL=https://four.example/simple?***",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "lit-") {
+		t.Errorf("leaked a query value in %q", got)
+	}
+}
+
 // A uv "not found in the package registry" failure is annotated so an
 // operator learns whether any private-index configuration reached the build
 // at all - the difference between "package name typo" and "the index var was
@@ -50,15 +76,15 @@ func TestCollectIndexEnv_Redaction(t *testing.T) {
 func TestIndexResolutionHint(t *testing.T) {
 	notFound := []byte("x  No solution found: because private-package was not found in the package registry and ...")
 
-	if err := indexResolutionHint(notFound, nil, nil); err != nil {
+	if err := indexResolutionHint(notFound, nil, nil, nil); err != nil {
 		t.Errorf("nil error must pass through, got %v", err)
 	}
 	base := fmt.Errorf("exit status 1")
-	if err := indexResolutionHint([]byte("some unrelated failure"), base, nil); err != base {
+	if err := indexResolutionHint([]byte("some unrelated failure"), base, nil, nil); err != base {
 		t.Errorf("unrelated output must pass the error through unchanged, got %v", err)
 	}
 
-	err := indexResolutionHint(notFound, base, []string{"PATH=/usr/bin"})
+	err := indexResolutionHint(notFound, base, []string{"PATH=/usr/bin"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "no package-index configuration reached this build") ||
 		!strings.Contains(err.Error(), "docs/environment.md") {
 		t.Errorf("no-index hint missing or wrong: %v", err)
@@ -66,7 +92,7 @@ func TestIndexResolutionHint(t *testing.T) {
 
 	err = indexResolutionHint(notFound, base, []string{
 		"UV_EXTRA_INDEX_URL=https://user:pass@nexus.example.com/simple",
-	})
+	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "UV_EXTRA_INDEX_URL=https://***@nexus.example.com/simple") {
 		t.Errorf("with-index hint missing redacted config: %v", err)
 	}
@@ -102,7 +128,7 @@ func TestBuildEnvironment_LogsIndexConfiguration(t *testing.T) {
 		func(context.Context, string, []string) error { return nil },
 	)
 	defer restore()
-	defer SetEnsureProjectForTest(func(context.Context, string) error { return nil })()
+	defer SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })()
 
 	p := Params{Slug: "demo", BundleDir: t.TempDir(),
 		Manager: managerWithEnv(t, []string{"UV_EXTRA_INDEX_URL=https://nexus.example.com/simple"}, nil, nil)}
