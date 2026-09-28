@@ -1428,6 +1428,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// The Enabled conjunct is belt-and-braces on top of config validation:
 	// wrapping apps that would export nowhere must be impossible.
 	mgr.SetAutoInstrumentAppsDefault(cfg.Tracing.Enabled && cfg.Tracing.AutoInstrumentApps)
+	mgr.SetAutoInstrumentExtraPackages(cfg.Tracing.AutoInstrumentExtraPackages)
 
 	prx := proxy.New()
 	prx.SetTracing(cfg.Tracing, traceBuffer)

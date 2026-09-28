@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1513,10 +1512,10 @@ func TestRun_AutoInstrumentResolution(t *testing.T) {
 			defer restoreSync()
 
 			var mu sync.Mutex
-			var autos []bool
-			restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, auto, _ bool) []string {
+			var overlays [][]string
+			restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, overlay []string, _ bool) []string {
 				mu.Lock()
-				autos = append(autos, auto)
+				overlays = append(overlays, overlay)
 				mu.Unlock()
 				return []string{"sleep", "30"}
 			})
@@ -1537,8 +1536,8 @@ func TestRun_AutoInstrumentResolution(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			if len(autos) != 1 || autos[0] != tc.want {
-				t.Errorf("builder calls = %v, want one call with %v", autos, tc.want)
+			if len(overlays) != 1 || (len(overlays[0]) > 0) != tc.want {
+				t.Errorf("builder calls = %v, want one call with non-empty overlay = %v", overlays, tc.want)
 			}
 		})
 	}
@@ -1548,7 +1547,7 @@ func TestRun_AutoInstrumentResolution(t *testing.T) {
 // must never be applied to user-supplied commands.
 func TestRun_AutoInstrumentSkipsCustomCommand(t *testing.T) {
 	bundle := t.TempDir()
-	restoreCmd := deploy.SetBuildCommandForTest(func(string, int, int, string, bool, bool) []string {
+	restoreCmd := deploy.SetBuildCommandForTest(func(string, int, int, string, []string, bool) []string {
 		t.Error("buildCommand must not be called for a custom Command")
 		return nil
 	})
@@ -1755,10 +1754,10 @@ func TestRun_InstrumentedFailureFallsBackUninstrumented(t *testing.T) {
 	defer restoreSync()
 
 	var mu sync.Mutex
-	var autos []bool
-	restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, auto, _ bool) []string {
+	var overlays [][]string
+	restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, overlay []string, _ bool) []string {
 		mu.Lock()
-		autos = append(autos, auto)
+		overlays = append(overlays, overlay)
 		mu.Unlock()
 		return []string{"sleep", "30"}
 	})
@@ -1791,8 +1790,14 @@ func TestRun_InstrumentedFailureFallsBackUninstrumented(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if want := []bool{true, false}; !reflect.DeepEqual(autos, want) {
-		t.Errorf("builder calls = %v, want %v (instrumented then fallback)", autos, want)
+	if len(overlays) != 2 {
+		t.Fatalf("builder calls = %v, want 2 (instrumented then fallback)", overlays)
+	}
+	if len(overlays[0]) == 0 {
+		t.Errorf("first attempt overlay should be non-empty (instrumented), got %v", overlays[0])
+	}
+	if len(overlays[1]) != 0 {
+		t.Errorf("fallback attempt overlay should be empty (uninstrumented), got %v", overlays[1])
 	}
 }
 

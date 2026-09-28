@@ -1544,6 +1544,32 @@ func TestManager_AutoInstrumentAppsDefault(t *testing.T) {
 	}
 }
 
+// The fleet-wide extra packages ride on the Manager the same way the
+// auto-instrument default does, and AutoInstrumentExtraPackages must hand
+// back a copy so a caller mutating the result cannot corrupt the Manager's
+// state, nor can the Manager's state be corrupted by mutating the slice
+// after it was passed to Set.
+func TestManager_AutoInstrumentExtraPackages(t *testing.T) {
+	m := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+	if got := m.AutoInstrumentExtraPackages(); len(got) != 0 {
+		t.Errorf("extra packages should be empty on a fresh manager, got %v", got)
+	}
+
+	in := []string{"opentelemetry-instrumentation-botocore"}
+	m.SetAutoInstrumentExtraPackages(in)
+	in[0] = "mutated"
+	got := m.AutoInstrumentExtraPackages()
+	if len(got) != 1 || got[0] != "opentelemetry-instrumentation-botocore" {
+		t.Errorf("SetAutoInstrumentExtraPackages must copy its input, got %v", got)
+	}
+
+	got[0] = "mutated-again"
+	got2 := m.AutoInstrumentExtraPackages()
+	if len(got2) != 1 || got2[0] != "opentelemetry-instrumentation-botocore" {
+		t.Errorf("AutoInstrumentExtraPackages must return a copy, got %v", got2)
+	}
+}
+
 // panicWaitRuntime panics inside Wait, simulating a runtime or bookkeeping fault
 // in the exit-monitoring goroutine.
 type panicWaitRuntime struct{ *fakeRuntime }

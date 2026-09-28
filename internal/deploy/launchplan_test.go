@@ -76,21 +76,39 @@ func TestResolveLaunch_NoAppType_Errors(t *testing.T) {
 
 func TestResolveLaunch_AutoInstrument_BuildsFallback(t *testing.T) {
 	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
-	// With auto-instrument: Command contains opentelemetry-instrument.
-	instrumented, err := ResolveLaunch(dir, LaunchOptions{Port: 9006, BindHost: "127.0.0.1", AutoInstrumentDefault: true, HonorManifestTracing: true})
+	// With auto-instrument: Command contains opentelemetry-instrument and the
+	// operator-configured extra package.
+	instrumented, err := ResolveLaunch(dir, LaunchOptions{
+		Port: 9006, BindHost: "127.0.0.1",
+		AutoInstrumentDefault:       true,
+		HonorManifestTracing:        true,
+		AutoInstrumentExtraPackages: []string{"opentelemetry-instrumentation-botocore"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Contains(instrumented.Command, "opentelemetry-instrument") {
 		t.Fatalf("instrumented command must wrap with opentelemetry-instrument: %v", instrumented.Command)
 	}
-	// Re-resolving with AutoInstrumentDefault:false produces the uninstrumented fallback (the server retry path).
-	fallback, err := ResolveLaunch(dir, LaunchOptions{Port: 9006, BindHost: "127.0.0.1", AutoInstrumentDefault: false})
+	if !slices.Contains(instrumented.Command, "opentelemetry-instrumentation-botocore") {
+		t.Fatalf("instrumented command must include the extra package: %v", instrumented.Command)
+	}
+	// Re-resolving with AutoInstrumentDefault:false produces the uninstrumented
+	// fallback (the server retry path): neither the built-in overlay nor the
+	// extra package survive.
+	fallback, err := ResolveLaunch(dir, LaunchOptions{
+		Port: 9006, BindHost: "127.0.0.1",
+		AutoInstrumentDefault:       false,
+		AutoInstrumentExtraPackages: []string{"opentelemetry-instrumentation-botocore"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if slices.Contains(fallback.Command, "opentelemetry-instrument") {
 		t.Fatalf("uninstrumented fallback must NOT contain opentelemetry-instrument: %v", fallback.Command)
+	}
+	if slices.Contains(fallback.Command, "opentelemetry-instrumentation-botocore") {
+		t.Fatalf("uninstrumented fallback must NOT contain the extra package: %v", fallback.Command)
 	}
 }
 

@@ -45,9 +45,9 @@ func SetEnsureProjectForTest(fn func(context.Context, string) error) (restore fu
 }
 
 // SetBuildCommandForTest swaps the package's python launch-command builder so
-// tests can observe the auto-instrument decision and substitute runnable
+// tests can observe the auto-instrument overlay and substitute runnable
 // commands. Returns a restore func — pair with defer. Test use only.
-func SetBuildCommandForTest(f func(bundleDir string, port, workers int, bindHost string, autoInstrument, hostDeps bool) []string) (restore func()) {
+func SetBuildCommandForTest(f func(bundleDir string, port, workers int, bindHost string, overlay []string, hostDeps bool) []string) (restore func()) {
 	orig := buildCommandFn
 	buildCommandFn = f
 	return func() { buildCommandFn = orig }

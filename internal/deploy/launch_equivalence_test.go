@@ -11,7 +11,7 @@ import (
 func TestServerBootUsesResolveLaunch_Python(t *testing.T) {
 	dir := writeRunBundle(t, map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"})
 	// The server's inferred python command for one replica.
-	got := buildCommand(dir, 7000, 1, "127.0.0.1", false, true)
+	got := buildCommand(dir, 7000, 1, "127.0.0.1", instrumentOverlay(false, nil), true)
 	plan, err := ResolveLaunch(dir, LaunchOptions{Port: 7000, Workers: 1, BindHost: "127.0.0.1", CommandHostDeps: true})
 	if err != nil {
 		t.Fatal(err)

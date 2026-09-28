@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/process"
@@ -14,7 +15,7 @@ func TestBuildCommand_AutoInstrumentWrapsRequirementsMode(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("shiny\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := buildCommand(dir, 41000, 1, "127.0.0.1", true, true)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", instrumentOverlay(true, nil), true)
 	want := []string{
 		"uv", "run", "--no-project", "--with-requirements", "requirements.txt",
 		"--with", "opentelemetry-distro",
@@ -35,7 +36,7 @@ func TestBuildCommand_AutoInstrumentWrapsProjectMode(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname='x'\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := buildCommand(dir, 41000, 1, "127.0.0.1", true, true)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", instrumentOverlay(true, nil), true)
 	want := []string{
 		"uv", "run", "--frozen", "--no-sync",
 		"--with", "opentelemetry-distro",
@@ -57,7 +58,7 @@ func TestBuildCommand_NoInstrumentUnchanged(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("shiny\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, true)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", instrumentOverlay(false, nil), true)
 	want := []string{
 		"uv", "run", "--no-project", "--with-requirements", "requirements.txt",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
@@ -87,7 +88,7 @@ func synthProject(t *testing.T, dir string) {
 func TestBuildCommand_SynthesizedProjectRunsInProjectModeOnHost(t *testing.T) {
 	dir := t.TempDir()
 	synthProject(t, dir)
-	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, true)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", instrumentOverlay(false, nil), true)
 	want := []string{
 		"uv", "run", "--frozen", "--no-sync",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
@@ -102,7 +103,7 @@ func TestBuildCommand_SynthesizedProjectRunsInProjectModeOnHost(t *testing.T) {
 func TestBuildCommand_SynthesizedProjectFallsBackOffHost(t *testing.T) {
 	dir := t.TempDir()
 	synthProject(t, dir)
-	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, false)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", instrumentOverlay(false, nil), false)
 	want := []string{
 		"uv", "run", "--no-project", "--with-requirements", "requirements.txt",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
@@ -127,7 +128,7 @@ func TestBuildCommand_AuthorProjectOffHostSyncsFromShippedLock(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, false)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", instrumentOverlay(false, nil), false)
 	want := []string{
 		"uv", "run", "--frozen",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
@@ -144,7 +145,7 @@ func TestBuildCommand_AuthorProjectOffHostWithoutLockResolvesAtLaunch(t *testing
 	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname='x'\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := buildCommand(dir, 41000, 1, "127.0.0.1", false, false)
+	got := buildCommand(dir, 41000, 1, "127.0.0.1", instrumentOverlay(false, nil), false)
 	want := []string{
 		"uv", "run",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
@@ -181,7 +182,7 @@ func TestBuildCommand_ProjectModeLaunchDoesNoDependencyWork(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildCommand(tc.mkDir(t), 41000, 1, "127.0.0.1", false, true)
+			got := buildCommand(tc.mkDir(t), 41000, 1, "127.0.0.1", instrumentOverlay(false, nil), true)
 			if len(got) < 4 || got[0] != "uv" || got[1] != "run" || got[2] != "--frozen" || got[3] != "--no-sync" {
 				t.Fatalf("on-host project-mode launch must start with `uv run --frozen --no-sync`, got %q", got)
 			}
@@ -242,5 +243,29 @@ func TestResolveAutoInstrument_NilManifestUsesFleetDefault(t *testing.T) {
 	mgr.SetAutoInstrumentAppsDefault(true)
 	if got := resolveAutoInstrument(Params{Slug: "x", Manager: mgr}, nil); !got {
 		t.Error("nil manifest should use fleet default true")
+	}
+}
+
+// Operator-configured extra packages land after the built-in overlay and
+// before the opentelemetry-instrument wrapper, so the built-ins still load
+// first.
+func TestBuildCommand_AutoInstrumentAddsExtraPackagesAfterBuiltins(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "requirements.txt", "shiny\n")
+	cmd := buildCommand(dir, 20001, 1, "127.0.0.1", instrumentOverlay(true, []string{"opentelemetry-instrumentation-botocore"}), false)
+	joined := strings.Join(cmd, " ")
+	iBuiltin := strings.Index(joined, "--with opentelemetry-instrumentation-httpx")
+	iExtra := strings.Index(joined, "--with opentelemetry-instrumentation-botocore")
+	iWrap := strings.Index(joined, "opentelemetry-instrument shiny run")
+	if iBuiltin < 0 || iExtra < 0 || iWrap < 0 || !(iBuiltin < iExtra && iExtra < iWrap) {
+		t.Fatalf("order wrong: %s", joined)
+	}
+}
+
+// With auto-instrumentation off, extras never reach the command line: a nil
+// overlay means an uninstrumented launch regardless of configured extras.
+func TestInstrumentOverlay_OffIgnoresExtras(t *testing.T) {
+	if got := instrumentOverlay(false, []string{"x"}); got != nil {
+		t.Fatalf("got %v", got)
 	}
 }

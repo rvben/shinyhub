@@ -43,8 +43,14 @@ type LaunchOptions struct {
 	PrepHostDeps          bool // include dep-prep steps (pool-wide decision)
 	CommandHostDeps       bool // per-tier project-mode flag for buildCommand
 	AutoInstrumentDefault bool
-	HonorManifestTracing  bool // apply manifest [tracing] auto override? server true, run false
-	Reload                bool
+	// AutoInstrumentExtraPackages are operator-configured PEP 508-ish extras
+	// (tracing.auto_instrument_extra_packages) layered into the overlay after
+	// the built-in set. Only reaches the command when auto-instrumentation
+	// (AutoInstrumentDefault, as overridden by manifest [tracing] auto when
+	// HonorManifestTracing) resolves true; see instrumentOverlay.
+	AutoInstrumentExtraPackages []string
+	HonorManifestTracing        bool // apply manifest [tracing] auto override? server true, run false
+	Reload                      bool
 	// AppEnv is the per-app env layered into dep-prep builds on top of the
 	// sanitized server base (the same variables the app process will see at
 	// start, e.g. private package-index credentials). The server deploy path
@@ -150,10 +156,11 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 		if opts.HonorManifestTracing && m != nil && m.Tracing.Auto != nil {
 			auto = *m.Tracing.Auto
 		}
+		overlay := instrumentOverlay(auto, opts.AutoInstrumentExtraPackages)
 		if m != nil && m.App.Framework == "fastapi" {
-			plan.Command = buildFastAPICommand(bundleDir, opts.Port, bindHost, opts.AppPath, auto, opts.CommandHostDeps, opts.Reload)
+			plan.Command = buildFastAPICommand(bundleDir, opts.Port, bindHost, opts.AppPath, overlay, opts.CommandHostDeps, opts.Reload)
 		} else {
-			plan.Command = withPythonReload(buildCommandFn(bundleDir, opts.Port, opts.Workers, bindHost, auto, opts.CommandHostDeps), opts.Reload)
+			plan.Command = withPythonReload(buildCommandFn(bundleDir, opts.Port, opts.Workers, bindHost, overlay, opts.CommandHostDeps), opts.Reload)
 		}
 	case "r":
 		if opts.PrepHostDeps {
@@ -202,8 +209,8 @@ func defaultReadinessPath(m *Manifest) string {
 	return "/"
 }
 
-func buildFastAPICommand(bundleDir string, port int, bindHost, appPath string, autoInstrument, hostDeps, reload bool) []string {
-	base := pythonCommandPrefix(bundleDir, autoInstrument, hostDeps)
+func buildFastAPICommand(bundleDir string, port int, bindHost, appPath string, overlay []string, hostDeps, reload bool) []string {
+	base := pythonCommandPrefix(bundleDir, overlay, hostDeps)
 	cmd := append(base, "uvicorn", "app:app", "--host", bindHost, "--port", fmt.Sprint(port))
 	if appPath != "" {
 		cmd = append(cmd, "--root-path", appPath)

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -328,20 +329,31 @@ var (
 	buildStepRunner = runSandboxedBuildStep
 )
 
-// autoInstrumentPackages is the overlay layered into a Python app's
+// autoInstrumentPackages is the built-in overlay layered into a Python app's
 // environment (uv run --with) when auto-instrumentation is on. distro wires
 // the SDK and OTLP auto-configuration from the injected OTEL_* env;
 // opentelemetry-instrument activates the installed instrumentors at startup.
 // Coverage is the transport layer: inbound ASGI requests (Shiny for Python
-// runs on Starlette) and outbound requests/httpx calls. The reactive graph is
-// not a library boundary and is not covered; apps add manual spans for that
-// (docs/tracing.md). The overlay never touches the app's venv or lockfile.
+// runs on Starlette) and outbound requests/httpx calls. Shiny for Python 1.6+
+// emits its own session, reactive and output spans (scope
+// co.posit.python-package.shiny) through the same SDK. The overlay never
+// touches the app's venv or lockfile.
 var autoInstrumentPackages = []string{
 	"opentelemetry-distro",
 	"opentelemetry-exporter-otlp",
 	"opentelemetry-instrumentation-starlette",
 	"opentelemetry-instrumentation-requests",
 	"opentelemetry-instrumentation-httpx",
+}
+
+// instrumentOverlay returns the packages layered into the app's environment
+// when auto-instrumentation is on (the built-in set, then operator extras),
+// or nil when it is off. A nil overlay means an uninstrumented launch.
+func instrumentOverlay(auto bool, extra []string) []string {
+	if !auto {
+		return nil
+	}
+	return append(slices.Clone(autoInstrumentPackages), extra...)
 }
 
 // buildCommandFn is a package-level indirection so tests can observe the
@@ -1499,8 +1511,10 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	port := AllocatePort()
 
 	bindHost := "127.0.0.1"
+	var extraPackages []string
 	if p.Manager != nil {
 		bindHost = p.Manager.AppBindHostFor(tier)
+		extraPackages = p.Manager.AutoInstrumentExtraPackages()
 	}
 
 	// Build the launch command via the shared ResolveLaunch seam. Dep-prep
@@ -1509,16 +1523,20 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 	// autoInstrument carries the per-attempt value (false on the retry).
 	// HonorManifestTracing is false: resolveBootParams already applied the
 	// manifest [tracing] override when computing autoInstrument.
+	// AutoInstrumentExtraPackages rides the fleet-wide config regardless of
+	// the per-attempt instrument value: instrumentOverlay drops it anyway
+	// when auto resolves false.
 	plan, err := ResolveLaunch(p.BundleDir, LaunchOptions{
-		AppPath:               "/app/" + p.Slug,
-		CommandOverride:       baseCmd,
-		Port:                  port,
-		Workers:               p.Workers,
-		BindHost:              bindHost,
-		PrepHostDeps:          false,
-		CommandHostDeps:       p.hostPreparesDeps(tier),
-		AutoInstrumentDefault: instrument,
-		HonorManifestTracing:  false,
+		AppPath:                     "/app/" + p.Slug,
+		CommandOverride:             baseCmd,
+		Port:                        port,
+		Workers:                     p.Workers,
+		BindHost:                    bindHost,
+		AutoInstrumentExtraPackages: extraPackages,
+		PrepHostDeps:                false,
+		CommandHostDeps:             p.hostPreparesDeps(tier),
+		AutoInstrumentDefault:       instrument,
+		HonorManifestTracing:        false,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve launch: %w", err)
@@ -2020,17 +2038,17 @@ func useProjectMode(bundleDir string, hostDeps bool) bool {
 // the existing off-host contract (the requirements path below behaves the same).
 //
 // Otherwise we pass --with-requirements so uv installs deps into an ephemeral
-// environment. When autoInstrument is set, the OTEL overlay is layered in via
+// environment. When overlay is non-empty, its packages are layered in via
 // --with and the entrypoint is wrapped with opentelemetry-instrument; the app's
 // own environment is never modified. bindHost has the same meaning as in
 // BuildRCommand. hostDeps gates project mode for a synthesized project (see
 // useProjectMode).
-func buildCommand(bundleDir string, port, workers int, bindHost string, autoInstrument, hostDeps bool) []string {
-	return append(pythonCommandPrefix(bundleDir, autoInstrument, hostDeps),
+func buildCommand(bundleDir string, port, workers int, bindHost string, overlay []string, hostDeps bool) []string {
+	return append(pythonCommandPrefix(bundleDir, overlay, hostDeps),
 		"shiny", "run", "app.py", "--host", bindHost, "--port", fmt.Sprintf("%d", port))
 }
 
-func pythonCommandPrefix(bundleDir string, autoInstrument, hostDeps bool) []string {
+func pythonCommandPrefix(bundleDir string, overlay []string, hostDeps bool) []string {
 	base := []string{"uv", "run", "--no-project"}
 	if useProjectMode(bundleDir, hostDeps) {
 		switch _, lockErr := os.Stat(filepath.Join(bundleDir, "uv.lock")); {
@@ -2044,8 +2062,8 @@ func pythonCommandPrefix(bundleDir string, autoInstrument, hostDeps bool) []stri
 	} else if _, err := os.Stat(filepath.Join(bundleDir, "requirements.txt")); err == nil {
 		base = append(base, "--with-requirements", "requirements.txt")
 	}
-	if autoInstrument {
-		for _, pkg := range autoInstrumentPackages {
+	if len(overlay) > 0 {
+		for _, pkg := range overlay {
 			base = append(base, "--with", pkg)
 		}
 		base = append(base, "opentelemetry-instrument")

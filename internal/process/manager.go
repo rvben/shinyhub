@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -340,7 +341,8 @@ type Manager struct {
 	consumerLifetimeResolver ConsumerLifetimeResolver
 	logMaxSize               int64
 
-	autoInstrumentApps bool
+	autoInstrumentApps          bool
+	autoInstrumentExtraPackages []string
 
 	// recoveryPending marks the startup window in which processes that survived
 	// a restart have not been re-adopted yet. Until it clears, an absent entry
@@ -456,6 +458,21 @@ func (m *Manager) SetAutoInstrumentAppsDefault(v bool) {
 // default. Per-app shinyhub.toml [tracing] auto overrides it at boot time.
 func (m *Manager) AutoInstrumentAppsDefault() bool {
 	return m.autoInstrumentApps
+}
+
+// SetAutoInstrumentExtraPackages sets the fleet-wide extra packages layered
+// into the auto-instrument overlay after the built-in set, from
+// tracing.auto_instrument_extra_packages. Wired once at startup, before any
+// deploys run, like SetAutoInstrumentAppsDefault. Must be called before
+// Start; not safe to call concurrently with boots.
+func (m *Manager) SetAutoInstrumentExtraPackages(pkgs []string) {
+	m.autoInstrumentExtraPackages = slices.Clone(pkgs)
+}
+
+// AutoInstrumentExtraPackages returns a copy of the fleet-wide extra
+// packages layered into the auto-instrument overlay.
+func (m *Manager) AutoInstrumentExtraPackages() []string {
+	return slices.Clone(m.autoInstrumentExtraPackages)
 }
 
 // SetSharedMountResolver sets the function used to resolve shared mounts during
