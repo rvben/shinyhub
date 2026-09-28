@@ -2448,10 +2448,24 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// Report (do not delete) slug dirs with no owning row. Run AFTER
 		// ReconcileDeletingApps so freshly-cleaned slugs are not reported.
 		lifecycle.LogOrphanAppDirs(store, cfg)
+		// Resolve every running app and its active bundle directory before
+		// recovery mutates anything. Fail closed and retry: a mid-scan database
+		// error must never fall through as an unresolved bundle directory, which
+		// would let validateNativeProcessIdentity skip its cwd check and adopt a
+		// reused PID on port evidence alone, or make reAdoptFrozenWarmReplica fail
+		// closed and rewrite a still-SIGSTOPped frozen-warm row to stopped.
+		var recoveryInputs *lifecycle.RecoveryInputs
+		if !retryOwnerStep("prepare process recovery", func() error {
+			var err error
+			recoveryInputs, err = lifecycle.PrepareRecovery(store)
+			return err
+		}) {
+			return
+		}
 		// Re-adopt any processes that survived a server restart. Must run after
 		// ReconcileInflightDeployments so recovery adopts the last-good deployment,
 		// not a half-applied one.
-		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled(), cfg.Runtime.DefaultWorkerIsolation, watcher)
+		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled(), cfg.Runtime.DefaultWorkerIsolation, watcher, recoveryInputs)
 		// Stop any native processes in the Manager that belong to elastic-mode
 		// apps. Elastic workers are ephemeral and must not be re-adopted; the
 		// pool starts empty and clients trigger fresh spawns on next request.

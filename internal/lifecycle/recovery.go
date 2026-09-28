@@ -132,14 +132,55 @@ func validateNativeProcessCWD(pid int, bundleDir string, readCWD func() (string,
 }
 
 // activeBundleDir returns the bundle directory of the app's most recent
-// deployment, or "" if it cannot be resolved (validation then falls back to
-// the port probe only).
-func activeBundleDir(store *db.Store, appID int64) string {
+// deployment, or "" with a nil error if the app genuinely has no deployment
+// yet. A lookup error is returned rather than swallowed: a caller that turned
+// it into "" would make validateNativeProcessIdentity skip its cwd check and
+// adopt a reused PID on port evidence alone, and would make
+// reAdoptFrozenWarmReplica fail closed and rewrite a still-SIGSTOPped
+// frozen-warm row to stopped. See PrepareRecovery, which resolves this for
+// every app before recovery is allowed to mutate anything.
+func activeBundleDir(store *db.Store, appID int64) (string, error) {
 	deps, err := store.ListRecentDeployments(appID, 1)
-	if err != nil || len(deps) == 0 {
-		return ""
+	if err != nil {
+		return "", err
 	}
-	return deps[0].BundleDir
+	if len(deps) == 0 {
+		return "", nil
+	}
+	return deps[0].BundleDir, nil
+}
+
+// RecoveryInputs is the read-only snapshot RecoverProcesses needs, resolved
+// as a single all-or-nothing owner step (PrepareRecovery) before recovery
+// mutates anything.
+type RecoveryInputs struct {
+	// Apps are the running/degraded apps recovery will process, exactly as
+	// ListRunningApps returned them.
+	Apps []*db.App
+	// BundleDir maps app ID to the bundle directory of its most recent
+	// deployment ("" for an app with none). Every app in Apps has an entry.
+	BundleDir map[int64]string
+}
+
+// PrepareRecovery resolves every app RecoverProcesses will process and the
+// active bundle directory each one needs for identity verification. It is
+// read-only: no row, process, or proxy state is touched. Any lookup error
+// fails the whole step so the caller can retry rather than let RecoverProcesses
+// run with an incomplete or stale bundle directory for some app.
+func PrepareRecovery(store *db.Store) (*RecoveryInputs, error) {
+	apps, err := store.ListRunningApps()
+	if err != nil {
+		return nil, fmt.Errorf("prepare recovery: list running apps: %w", err)
+	}
+	bundleDirs := make(map[int64]string, len(apps))
+	for _, app := range apps {
+		dir, err := activeBundleDir(store, app.ID)
+		if err != nil {
+			return nil, fmt.Errorf("prepare recovery: active bundle dir for app %q: %w", app.Slug, err)
+		}
+		bundleDirs[app.ID] = dir
+	}
+	return &RecoveryInputs{Apps: apps, BundleDir: bundleDirs}, nil
 }
 
 // ContainerLister is implemented by DockerRuntime to support recovery.
@@ -162,14 +203,18 @@ type ContainerLister interface {
 // the runtime-wide session-cap fallback applied when an app has
 // max_sessions_per_replica == 0. identityGlobal is the global
 // auth.identity_headers enabled flag used to resolve each app's effective
-// identity-forwarding setting.
+// identity-forwarding setting. inputs is the read-only snapshot from
+// PrepareRecovery: the apps to process and each one's active bundle directory
+// are taken from it rather than looked up here, so a caller that only got this
+// far after PrepareRecovery succeeded never adopts on an unresolved bundle
+// directory.
 // inventoryRecoveryTimeout bounds how long recovery waits for an off-host
 // tier's worker inventory. Inventory fans out to the tier's workers
 // concurrently, so this caps the whole per-tier fetch. Well under the worker
 // dialer's ~120s header timeout: a hung worker must not stall fleet recovery.
 const inventoryRecoveryTimeout = 15 * time.Second
 
-func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, defaultMaxSessions int, identityGlobal bool, defaultWorkerIsolation string, queue pendingStopQueue) {
+func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, defaultMaxSessions int, identityGlobal bool, defaultWorkerIsolation string, queue pendingStopQueue, inputs *RecoveryInputs) {
 	// Deferred, and on every exit path including the early returns: until this
 	// pass ends, an app whose process survived the restart has no Manager entry
 	// and readers must not conclude it is down. Once the pass is over the Manager
@@ -178,11 +223,11 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 	if mgr != nil {
 		defer mgr.ClearRecoveryPending()
 	}
-	apps, err := store.ListRunningApps()
-	if err != nil {
-		slog.Error("process recovery: list running apps", "err", err)
+	if inputs == nil {
+		slog.Error("process recovery: no recovery inputs")
 		return
 	}
+	apps := inputs.Apps
 
 	// Query each container-backed runtime at most once, even when several tiers
 	// or apps share the same daemon, by caching its container list keyed on the
@@ -347,7 +392,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		prx.SetPoolSize(app.Slug, poolSize)
 		prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, defaultMaxSessions))
 		prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, identityGlobal))
-		bundleDir := activeBundleDir(store, app.ID)
+		bundleDir := inputs.BundleDir[app.ID]
 
 		anyAlive := false
 		indeterminate := false

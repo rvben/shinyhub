@@ -159,6 +159,19 @@ func mustOpenStore(t *testing.T) *db.Store {
 	return dbtest.New(t)
 }
 
+// mustPrepareRecovery resolves the inputs RecoverProcesses now requires,
+// failing the test if the read-only prepare step itself errors. Tests that
+// need to exercise a failing prepare step call lifecycle.PrepareRecovery
+// directly instead of this helper.
+func mustPrepareRecovery(t *testing.T, store *db.Store) *lifecycle.RecoveryInputs {
+	t.Helper()
+	inputs, err := lifecycle.PrepareRecovery(store)
+	if err != nil {
+		t.Fatalf("PrepareRecovery: %v", err)
+	}
+	return inputs
+}
+
 func seedRecoveryReplica(t *testing.T, store *db.Store, app *db.App, deployment *db.Deployment) {
 	t.Helper()
 	deploymentID := deployment.ID
@@ -196,7 +209,7 @@ func TestRecoverProcesses_GenerationCrashBeforePromotePreservesActiveProjection(
 	}
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	replicas, err := store.ListReplicas(app.ID)
 	if err != nil || len(replicas) != 1 {
@@ -239,7 +252,7 @@ func TestRecoverProcesses_GenerationCrashAfterPromotePublishesCandidateProjectio
 	}
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	replicas, err := store.ListReplicas(app.ID)
 	if err != nil || len(replicas) != 1 {
@@ -302,7 +315,7 @@ func TestRecoverProcesses_GenerationCrashAfterPromoteStopsRealOldProcessAndAdopt
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 	t.Cleanup(func() { _ = mgr.Stop(app.Slug) })
 
 	select {
@@ -367,7 +380,7 @@ func TestRecoverProcesses_PreCommitCleanupFailureStillRoutesAuthoritativeGenerat
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 	t.Cleanup(func() { _ = mgr.Stop(app.Slug) })
 	if info, ok := mgr.GetReplica(app.Slug, 0); !ok || info.PID != oldPID || info.DeploymentID != old.ID {
 		t.Fatalf("authoritative old generation not adopted: info=%+v ok=%v", info, ok)
@@ -422,7 +435,7 @@ func TestRecoverProcesses_PostCommitCleanupFailureStillRoutesAuthoritativeGenera
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 	t.Cleanup(func() { _ = mgr.Stop(app.Slug) })
 	if info, ok := mgr.GetReplica(app.Slug, 0); !ok || info.PID != candidatePID || info.DeploymentID != candidate.ID {
 		t.Fatalf("authoritative candidate not adopted: info=%+v ok=%v", info, ok)
@@ -478,7 +491,7 @@ func TestRecoverProcesses_DeferredRetirementStopsOldAfterRoutingCandidate(t *tes
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 	t.Cleanup(func() { _ = mgr.Stop(app.Slug) })
 	if info, ok := mgr.GetReplica(app.Slug, 0); !ok || info.PID != candidatePID {
 		t.Fatalf("candidate not adopted before cleanup: info=%+v ok=%v", info, ok)
@@ -512,7 +525,7 @@ func TestRecoverProcesses_DeadPID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	// A running app whose process did not survive the restart is marked
 	// "hibernated" (not "stopped") so the warm-restore pass re-boots it - it
@@ -596,7 +609,7 @@ func TestRecoverProcesses_DockerActivationSurgeRealDaemon(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), runtime)
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 	info, ok := mgr.GetReplica(slug, 1)
 	if !ok || info.WorkerID != owned.WorkerID || info.DeploymentID != dep.ID || info.AppVersion != dep.Version {
 		t.Fatalf("recovered Docker surge=%+v ok=%v, want exact owned container %s", info, ok, owned.WorkerID)
@@ -635,7 +648,7 @@ func TestRecoverProcesses_QuarantinesActivationPIDWithMismatchedBundleIdentity(t
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 	rows, err := store.ListReplicas(app.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -663,7 +676,7 @@ func TestRecoverProcesses_NoPID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil) // must not panic
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store)) // must not panic
 
 	a, err := store.GetAppBySlug("myapp")
 	if err != nil {
@@ -695,7 +708,7 @@ func TestRecoverProcesses_AlivePID(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	// App should still be running in the DB.
 	a, err := store.GetAppBySlug("myapp")
@@ -742,7 +755,7 @@ func TestRecovery_PartialPool(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	// Replica 0 adopted, replica 1 not.
 	if _, ok := mgr.GetReplica("partial-pool", 0); !ok {
@@ -800,7 +813,7 @@ func TestRecoverDockerProcesses(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), rt)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	info, ok := mgr.GetReplica("docker-app", 0)
 	if !ok {
@@ -838,7 +851,7 @@ func TestRecoverDockerProcesses_ExitedContainerIsRejectedThenSwept(t *testing.T)
 	}
 	mgr := process.NewManager(t.TempDir(), rt)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 	if _, adopted := mgr.GetReplica("docker-exited", 0); adopted {
 		t.Fatal("exited container was adopted and exposed as running")
 	}
@@ -880,7 +893,7 @@ func TestRecoverProcesses_ReapsFrozenWarmContainer(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), rt)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	if len(rt.removed) != 1 || rt.removed[0] != "cont-abc" {
 		t.Fatalf("removed = %v, want [cont-abc] (paused container reaped)", rt.removed)
@@ -938,7 +951,7 @@ func TestRecoverDockerProcesses_OrphanMarkedStopped(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), rt)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	// "alive-app" should be adopted.
 	if _, ok := mgr.GetReplica("alive-app", 0); !ok {
@@ -984,7 +997,7 @@ func TestRecoverDockerProcesses_MultiReplica(t *testing.T) {
 		pids: map[string]int{"c0": pid0, "c1": pid1},
 	}
 	mgr := process.NewManager(t.TempDir(), rt)
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	if _, ok := mgr.GetReplica("multi-docker", 0); !ok {
 		t.Error("want replica 0 adopted")
@@ -1008,7 +1021,7 @@ func TestRecovery_NilPIDBecomesWakeable(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	reps, err := store.ListReplicas(app.ID)
 	if err != nil {
@@ -1056,7 +1069,7 @@ func TestRecoverDockerProcesses_IdxBeyondPool(t *testing.T) {
 		pids: map[string]int{"c0": pid0, "c1": pid1},
 	}
 	mgr := process.NewManager(t.TempDir(), rt)
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	// idx 0 is within the pool of 1 → adopted.
 	if _, ok := mgr.GetReplica("shrunk-docker", 0); !ok {
@@ -1108,7 +1121,7 @@ func TestRecoverProcesses_MixedTier(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("burst", burst)
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	if info, ok := mgr.GetReplica("mixed-tier", 0); !ok {
 		t.Error("expected native replica 0 to be adopted")
@@ -1184,7 +1197,7 @@ func TestRecoverProcesses_MixedTierStartingActivationPreservesDockerIdentityUnti
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("burst", burst)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 	rows, err := store.ListReplicas(app.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -1259,7 +1272,7 @@ func TestRecoveryRegistersPersistedEndpointURL(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	if got := prx.ReplicaTargetURL("rec-endpoint", 0); got != endpoint {
 		t.Fatalf("recovered replica registered %q; want stored endpoint %q", got, endpoint)
@@ -1317,7 +1330,7 @@ func TestRecoverProcesses_RemoteTierAdoptsByDeploymentID(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	info, ok := mgr.GetReplica("remote-app", 0)
 	if !ok {
@@ -1375,7 +1388,7 @@ func TestRecoverProcesses_UnreachableUpWorkerLeavesReplicaRunning(t *testing.T) 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	a, _ := store.GetAppBySlug("partial-app")
 	if a.Status == "stopped" {
@@ -1420,7 +1433,7 @@ func TestRecoverProcesses_UnreachableDownWorkerMarksReplicaLost(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	a, _ := store.GetAppBySlug("down-worker-app")
 	if a.Status == "stopped" {
@@ -1471,7 +1484,7 @@ func TestRecoverProcesses_TotalInventoryOutageLeavesUpWorkerRunning(t *testing.T
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	a, _ := store.GetAppBySlug("outage-app")
 	if a.Status == "stopped" {
@@ -1522,7 +1535,7 @@ func TestRecoverProcesses_DownSiblingWorkerReplicaMarkedLost(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	reps, _ := store.ListReplicas(app.ID)
 	if len(reps) != 1 || reps[0].Status != db.ReplicaStatusLost {
@@ -1577,7 +1590,7 @@ func TestRecoverProcesses_RemoteStaleDeploymentNotAdopted(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	if _, ok := mgr.GetReplica("stale-app", 0); ok {
 		t.Error("stale-deployment container must not be adopted as current")
@@ -1610,7 +1623,7 @@ func TestRecoverProcesses_RemoteLostReplicaSkipped(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	mgr.RegisterRuntime("remote", remote)
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	if _, ok := mgr.GetReplica("lost-app", 0); ok {
 		t.Error("lost replica must not be adopted")
@@ -1651,7 +1664,7 @@ func TestRecoverProcesses_SkipsWarmRows(t *testing.T) {
 
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil)
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	// Only replica 0 should be adopted by the manager.
 	if _, ok := mgr.GetReplica("warm-shrunk", 0); !ok {
@@ -2250,7 +2263,7 @@ func TestRecoverProcesses_ElasticGenerationsAreReapedWithoutFixedReplicaAdoption
 				}
 				mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 				defer mgr.StopAll()
-				lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, isolation, nil)
+				lifecycle.RecoverProcesses(store, mgr, proxy.New(), 0, false, isolation, nil, mustPrepareRecovery(t, store))
 				for _, done := range exits {
 					select {
 					case <-done:
@@ -2271,5 +2284,74 @@ func TestRecoverProcesses_ElasticGenerationsAreReapedWithoutFixedReplicaAdoption
 				}
 			})
 		}
+	}
+}
+
+// TestPrepareRecovery_FailsClosedOnCorruptedDeploymentRow is the recovery-level
+// regression guard: PrepareRecovery must fail the whole snapshot when even one
+// app's bundle-directory lookup errors, rather than resolving that app to an
+// unset bundle directory while the rest of the snapshot looks complete. A
+// caller that got a snapshot with an unresolved bundle dir for this app would
+// hand RecoverProcesses exactly the input that lets validateNativeProcessIdentity
+// skip its cwd check and adopt a reused PID on port evidence alone (a real,
+// still-running, wrong-cwd process is seeded below to make that concrete).
+func TestPrepareRecovery_FailsClosedOnCorruptedDeploymentRow(t *testing.T) {
+	store := mustOpenStore(t)
+
+	// A second, healthy app confirms the failure is attributable to the
+	// corrupted app and is not just "the store has no running apps at all".
+	healthy := mustCreateApp(t, store, "prepare-recovery-healthy")
+	healthyDep, err := store.BeginDeployment(healthy.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(healthyDep.ID); err != nil {
+		t.Fatal(err)
+	}
+	seedRecoveryReplica(t, store, healthy, healthyDep)
+
+	corrupt := mustCreateApp(t, store, "prepare-recovery-corrupt")
+	trueBundleDir := t.TempDir()
+	corruptDep, err := store.BeginDeployment(corrupt.ID, "v1", trueBundleDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(corruptDep.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A process whose cwd does NOT match the recorded bundle dir, with a live
+	// port: exactly the PID-reuse shape validateNativeProcessIdentity exists
+	// to reject, and exactly what an unresolved ("") bundle dir would wave
+	// through on port evidence alone.
+	mismatchedDir := t.TempDir()
+	pid, _ := startNativeProcess(t, mismatchedDir)
+	port := liveListener(t)
+	if err := store.UpsertReplica(db.UpsertReplicaParams{
+		AppID: corrupt.ID, Index: 0, PID: &pid, Port: &port,
+		Status: "running", DesiredState: "running", Provider: "native",
+		AppVersion: corruptDep.Version,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE apps SET status='running', replicas=1 WHERE id=?`, corrupt.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// SQLite's type affinity lets an INTEGER column hold non-numeric TEXT: the
+	// write below succeeds, but ListRecentDeployments's later Scan of that
+	// column into a Go int fails for this app only.
+	if _, err := store.DB().Exec(`UPDATE deployments SET prepared = 'not-a-number' WHERE id = ?`, corruptDep.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	inputs, err := lifecycle.PrepareRecovery(store)
+	if err == nil {
+		t.Fatalf("PrepareRecovery: want error because app %q has a corrupted deployment row, got nil error and inputs=%+v - "+
+			"a lookup failure must fail the whole recovery snapshot, not silently resolve this app to an unset bundle dir",
+			corrupt.Slug, inputs)
+	}
+	if inputs != nil {
+		t.Fatalf("PrepareRecovery: want nil inputs on error, got %+v", inputs)
 	}
 }
