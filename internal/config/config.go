@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -173,6 +174,18 @@ type TracingConfig struct {
 	// directions. Requires Enabled; R apps and custom-command apps are
 	// never wrapped.
 	AutoInstrumentApps bool
+	// ResourceAttributes are operator-chosen OpenTelemetry resource
+	// attributes (e.g. deployment.environment.name) added to every span this
+	// instance emits and to every app and job process's
+	// OTEL_RESOURCE_ATTRIBUTES, so several instances can share one backend.
+	// Keys naming the service identity or the shinyhub. namespace are
+	// reserved; see validateResourceAttributes.
+	ResourceAttributes map[string]string
+	// AutoInstrumentExtraPackages are extra PEP 508 requirements layered into
+	// the auto-instrument overlay (uv run --with) after the built-in set, for
+	// instrumentors such as opentelemetry-instrumentation-botocore. Requires
+	// AutoInstrumentApps.
+	AutoInstrumentExtraPackages []string
 }
 
 // MetricsConfig controls the Prometheus scrape endpoint for the ShinyHub server
@@ -1380,11 +1393,13 @@ type rawTracingConfig struct {
 	// Pointers so an explicit 0 (a documented, meaningful value: 0 disables
 	// sampling / disables the ring buffer / retains only error spans) is
 	// distinguishable from the key being absent (apply the safe default).
-	SampleRatio        *float64 `yaml:"sample_ratio"`
-	SlowRequestMS      *int     `yaml:"slow_request_ms"`
-	RingBufferSize     *int     `yaml:"ring_buffer_size"`
-	TraceLinkTemplate  string   `yaml:"trace_link_template"`
-	AutoInstrumentApps bool     `yaml:"auto_instrument_apps"`
+	SampleRatio                 *float64          `yaml:"sample_ratio"`
+	SlowRequestMS               *int              `yaml:"slow_request_ms"`
+	RingBufferSize              *int              `yaml:"ring_buffer_size"`
+	TraceLinkTemplate           string            `yaml:"trace_link_template"`
+	AutoInstrumentApps          bool              `yaml:"auto_instrument_apps"`
+	ResourceAttributes          map[string]string `yaml:"resource_attributes"`
+	AutoInstrumentExtraPackages []string          `yaml:"auto_instrument_extra_packages"`
 }
 
 type rawLifecycleConfig struct {
@@ -1618,11 +1633,13 @@ func loadRaw(path string) (*Config, error) {
 			OTLPHeaders:  raw.Tracing.OTLPHeaders,
 			// Defaults applied here (not in normalizeTracing) so an explicit 0
 			// from YAML survives; an env override is layered on top afterwards.
-			SampleRatio:        derefOr(raw.Tracing.SampleRatio, 0.1),
-			SlowRequestMS:      derefOr(raw.Tracing.SlowRequestMS, 1000),
-			RingBufferSize:     derefOr(raw.Tracing.RingBufferSize, 200),
-			TraceLinkTemplate:  raw.Tracing.TraceLinkTemplate,
-			AutoInstrumentApps: raw.Tracing.AutoInstrumentApps,
+			SampleRatio:                 derefOr(raw.Tracing.SampleRatio, 0.1),
+			SlowRequestMS:               derefOr(raw.Tracing.SlowRequestMS, 1000),
+			RingBufferSize:              derefOr(raw.Tracing.RingBufferSize, 200),
+			TraceLinkTemplate:           raw.Tracing.TraceLinkTemplate,
+			AutoInstrumentApps:          raw.Tracing.AutoInstrumentApps,
+			ResourceAttributes:          raw.Tracing.ResourceAttributes,
+			AutoInstrumentExtraPackages: raw.Tracing.AutoInstrumentExtraPackages,
 		},
 		Metrics: MetricsConfig{
 			Enabled:         raw.Metrics.Enabled,
@@ -2128,6 +2145,11 @@ func normalizeTracing(t *TracingConfig) error {
 	if t.AutoInstrumentApps && !t.Enabled {
 		return fmt.Errorf("tracing.auto_instrument_apps requires tracing.enabled (SHINYHUB_TRACING_ENABLED)")
 	}
+	// Extra packages without auto-instrumentation is a broken half-mode: uv's
+	// --with overlay is only built when AutoInstrumentApps wraps the app.
+	if len(t.AutoInstrumentExtraPackages) > 0 && !t.AutoInstrumentApps {
+		return fmt.Errorf("tracing.auto_instrument_extra_packages requires tracing.auto_instrument_apps (SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS)")
+	}
 	if !t.Enabled {
 		return nil
 	}
@@ -2161,8 +2183,70 @@ func normalizeTracing(t *TracingConfig) error {
 	if t.TraceLinkTemplate != "" && !strings.Contains(t.TraceLinkTemplate, "{trace_id}") {
 		return fmt.Errorf("tracing.trace_link_template: %q is missing the {trace_id} placeholder; links would be broken", t.TraceLinkTemplate)
 	}
+	if err := validateResourceAttributes(t.ResourceAttributes); err != nil {
+		return err
+	}
+	for _, p := range t.AutoInstrumentExtraPackages {
+		if !extraPackageSpec.MatchString(p) {
+			return fmt.Errorf("tracing.auto_instrument_extra_packages: %q is not a package requirement (name, optional [extras], optional version specifiers, no spaces or URLs)", p)
+		}
+	}
 	return nil
 }
+
+// resourceAttrKey bounds keys to the characters OTel attribute names use in
+// practice and that need no escaping in OTEL_RESOURCE_ATTRIBUTES, whose
+// keys, unlike its values, are not percent-encoded.
+var resourceAttrKey = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,127}$`)
+
+var reservedResourceAttrKeys = map[string]bool{
+	"service.name": true, "service.version": true, "service.instance.id": true,
+}
+
+// parseResourceAttributesEnv parses the OTEL_RESOURCE_ATTRIBUTES wire form
+// ("k=v,k2=v2", values percent-encoded) into a map.
+func parseResourceAttributesEnv(s string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(pair, "=")
+		if !ok {
+			return nil, fmt.Errorf("%q is not a key=value pair", pair)
+		}
+		dv, err := url.PathUnescape(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", k, err)
+		}
+		out[strings.TrimSpace(k)] = dv
+	}
+	return out, nil
+}
+
+// validateResourceAttributes rejects keys that collide with attributes
+// ShinyHub sets itself (service identity and the shinyhub. namespace) and
+// keys or values that cannot survive the OTEL_RESOURCE_ATTRIBUTES wire form.
+func validateResourceAttributes(attrs map[string]string) error {
+	keys := slices.Sorted(maps.Keys(attrs))
+	for _, k := range keys {
+		switch {
+		case reservedResourceAttrKeys[k] || strings.HasPrefix(k, "shinyhub."):
+			return fmt.Errorf("tracing.resource_attributes: %q is reserved; ShinyHub sets it", k)
+		case !resourceAttrKey.MatchString(k):
+			return fmt.Errorf("tracing.resource_attributes: invalid key %q; use letters, digits, '.', '_' or '-'", k)
+		case attrs[k] == "":
+			return fmt.Errorf("tracing.resource_attributes: %s: value is empty", k)
+		}
+	}
+	return nil
+}
+
+// extraPackageSpec accepts a bare PEP 508 name, optional extras and
+// comparison specifiers. It rejects URLs, markers, whitespace and anything
+// starting with '-', so a value can never be read by uv as an option.
+var extraPackageSpec = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?((==|!=|<=|>=|~=|<|>)[A-Za-z0-9.*+!_-]+(,(==|!=|<=|>=|~=|<|>)[A-Za-z0-9.*+!_-]+)*)?$`)
 
 // normalizeMetrics applies the loopback default and validates the listen
 // address. When Enabled is false the block is left untouched so a malformed
@@ -3461,6 +3545,16 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_TRACING_TRACE_LINK_TEMPLATE"); v != "" {
 		cfg.Tracing.TraceLinkTemplate = v
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_RESOURCE_ATTRIBUTES"); v != "" {
+		attrs, err := parseResourceAttributesEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_TRACING_RESOURCE_ATTRIBUTES: %w", err)
+		}
+		cfg.Tracing.ResourceAttributes = attrs
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_AUTO_INSTRUMENT_EXTRA_PACKAGES"); v != "" {
+		cfg.Tracing.AutoInstrumentExtraPackages = strings.Fields(v)
 	}
 	if v := os.Getenv("SHINYHUB_SCHEDULER_TIMEZONE"); v != "" {
 		cfg.Scheduler.DefaultTimezone = v

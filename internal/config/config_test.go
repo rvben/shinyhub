@@ -3,6 +3,7 @@ package config_test
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -2051,6 +2052,96 @@ func loadFromString(t *testing.T, yaml string) (*config.Config, error) {
 	f.WriteString(yaml)
 	f.Close()
 	return config.Load(f.Name())
+}
+
+func TestTracing_ResourceAttributes_YAMLAndValidation(t *testing.T) {
+	base := "auth:\n  secret: 0123456789abcdef0123456789abcdef\ntracing:\n  enabled: true\n  otlp_endpoint: http://c:4318\n"
+	cases := []struct {
+		name, yaml string
+		want       map[string]string
+		errSub     string
+	}{
+		{"absent", base, nil, ""},
+		{"ok", base + "  resource_attributes:\n    deployment.environment.name: prd\n    service.namespace: team-a\n",
+			map[string]string{"deployment.environment.name": "prd", "service.namespace": "team-a"}, ""},
+		{"scalar coerced", base + "  resource_attributes:\n    build: 2\n", map[string]string{"build": "2"}, ""},
+		{"empty value", base + "  resource_attributes:\n    env:\n", nil, "resource_attributes: env: value is empty"},
+		{"reserved service.name", base + "  resource_attributes:\n    service.name: x\n", nil, "reserved"},
+		{"reserved service.version", base + "  resource_attributes:\n    service.version: x\n", nil, "reserved"},
+		{"reserved instance", base + "  resource_attributes:\n    service.instance.id: x\n", nil, "reserved"},
+		{"reserved prefix", base + "  resource_attributes:\n    shinyhub.app: x\n", nil, "reserved"},
+		{"bad key", base + "  resource_attributes:\n    \"a b\": x\n", nil, "invalid key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadFromString(t, tc.yaml)
+			if tc.errSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.errSub) {
+					t.Fatalf("want error containing %q, got %v", tc.errSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !maps.Equal(cfg.Tracing.ResourceAttributes, tc.want) {
+				t.Fatalf("got %v want %v", cfg.Tracing.ResourceAttributes, tc.want)
+			}
+		})
+	}
+}
+
+func TestTracing_ResourceAttributes_EnvReplacesYAMLAndDecodes(t *testing.T) {
+	t.Setenv("SHINYHUB_TRACING_RESOURCE_ATTRIBUTES", "deployment.environment.name=acc,team=data%2C%20eng")
+	cfg, err := loadFromString(t, "auth:\n  secret: 0123456789abcdef0123456789abcdef\ntracing:\n  enabled: true\n  otlp_endpoint: http://c:4318\n  resource_attributes:\n    other: gone\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"deployment.environment.name": "acc", "team": "data, eng"}
+	if !maps.Equal(cfg.Tracing.ResourceAttributes, want) {
+		t.Fatalf("got %v want %v", cfg.Tracing.ResourceAttributes, want)
+	}
+}
+
+func TestTracing_ResourceAttributes_EnvMalformedPairFails(t *testing.T) {
+	t.Setenv("SHINYHUB_TRACING_RESOURCE_ATTRIBUTES", "novalue")
+	_, err := loadFromString(t, "auth:\n  secret: 0123456789abcdef0123456789abcdef\ntracing:\n  enabled: true\n  otlp_endpoint: http://c:4318\n")
+	if err == nil || !strings.Contains(err.Error(), "SHINYHUB_TRACING_RESOURCE_ATTRIBUTES") {
+		t.Fatalf("want env-named error, got %v", err)
+	}
+}
+
+func TestTracing_ExtraPackages(t *testing.T) {
+	base := "auth:\n  secret: 0123456789abcdef0123456789abcdef\ntracing:\n  enabled: true\n  otlp_endpoint: http://c:4318\n  auto_instrument_apps: true\n"
+	cfg, err := loadFromString(t, base+"  auto_instrument_extra_packages:\n    - opentelemetry-instrumentation-botocore\n    - opentelemetry-instrumentation-sqlalchemy>=0.48b0,<1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Tracing.AutoInstrumentExtraPackages; len(got) != 2 || got[1] != "opentelemetry-instrumentation-sqlalchemy>=0.48b0,<1" {
+		t.Fatalf("got %v", got)
+	}
+	for _, bad := range []string{"--index-url=http://evil", "a b", "", "pkg; os_name=='nt'", "git+https://x/y"} {
+		_, err := loadFromString(t, base+"  auto_instrument_extra_packages:\n    - \""+bad+"\"\n")
+		if err == nil || !strings.Contains(err.Error(), "auto_instrument_extra_packages") {
+			t.Fatalf("%q: want rejection, got %v", bad, err)
+		}
+	}
+	// Extra packages without auto-instrumentation is a broken half-mode.
+	_, err = loadFromString(t, "auth:\n  secret: 0123456789abcdef0123456789abcdef\ntracing:\n  enabled: true\n  otlp_endpoint: http://c:4318\n  auto_instrument_extra_packages: [opentelemetry-instrumentation-botocore]\n")
+	if err == nil || !strings.Contains(err.Error(), "requires tracing.auto_instrument_apps") {
+		t.Fatalf("want half-mode rejection, got %v", err)
+	}
+}
+
+func TestTracing_ExtraPackages_EnvWhitespaceSplit(t *testing.T) {
+	t.Setenv("SHINYHUB_TRACING_AUTO_INSTRUMENT_EXTRA_PACKAGES", "opentelemetry-instrumentation-botocore  opentelemetry-instrumentation-sqlalchemy>=0.48b0,<1")
+	cfg, err := loadFromString(t, "auth:\n  secret: 0123456789abcdef0123456789abcdef\ntracing:\n  enabled: true\n  otlp_endpoint: http://c:4318\n  auto_instrument_apps: true\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Tracing.AutoInstrumentExtraPackages) != 2 {
+		t.Fatalf("got %v", cfg.Tracing.AutoInstrumentExtraPackages)
+	}
 }
 
 func TestFargateConfig_ControlPlaneURLRequired(t *testing.T) {
