@@ -11,6 +11,6 @@
     "test": "node --test detect.test.js"
   },
   "dependencies": {
-    "playwright": "1.50.1"
+    "playwright": "1.63.0"
   }
 }
