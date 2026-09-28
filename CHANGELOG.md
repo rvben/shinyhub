@@ -6,6 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/rvben/shinyhub/compare/v0.17.8...v0.18.0) - 2026-09-28
+
+### Added
+
+- **tracing**: nest wake and restart replica boots under their lifecycle span ([dbf7b1c](https://github.com/rvben/shinyhub/commit/dbf7b1cbf18e2654df247fe3181c09dd9caab572))
+- **tracing**: emit deploy phase spans under the deploy request ([78a4daf](https://github.com/rvben/shinyhub/commit/78a4daff7bf874c1beb9880ad5a76aeb9bd7f2b2))
+- **tracing**: nest a request-triggered wake under the request's proxy span ([0a8de56](https://github.com/rvben/shinyhub/commit/0a8de567cfefea4b70866d2edac6f860e01c0dfd))
+- **tracing**: export /app proxy spans over OTLP with the IDs propagated to apps ([24a4546](https://github.com/rvben/shinyhub/commit/24a4546673c31d60c9c0bc3835a70258a5d1fa73))
+- **tracing**: trace scheduled job runs and pass the run context as TRACEPARENT ([c40f99d](https://github.com/rvben/shinyhub/commit/c40f99daa763f42770c8e3aefd5339870bb0bf43))
+- **tracing**: layer auto_instrument_extra_packages into the instrument overlay ([154442e](https://github.com/rvben/shinyhub/commit/154442e383419596c00cd19444bdc7759921e47c))
+- **tracing**: add resource_attributes to server spans and key the instance by server.instance_id ([a53c35d](https://github.com/rvben/shinyhub/commit/a53c35da928150b034bbdc8c8aaa590aabd92d03))
+- **tracing**: tag app telemetry with resource_attributes and exclude the Shiny websocket span ([44274f9](https://github.com/rvben/shinyhub/commit/44274f92309a3ba14752f4b39d92c51cb9bebc70))
+- **tracing**: add resource_attributes and auto_instrument_extra_packages config ([8af3a1a](https://github.com/rvben/shinyhub/commit/8af3a1a1bfb6370b6d8a56b9cce98003ee738b57))
+- **agent**: add Python Shiny agent integration ([0cb0b3a](https://github.com/rvben/shinyhub/commit/0cb0b3a57164c6524e5d0301e929b570e43aef82))
+- **security**: warn when apps run same-origin with the dashboard ([59a1509](https://github.com/rvben/shinyhub/commit/59a1509d093aba73ad14dc56c8b04af135dd3915))
+
+### Fixed
+
+- **deploy**: honour package-index options in requirements.txt ([c46d571](https://github.com/rvben/shinyhub/commit/c46d571eded13971ca798af7ba8a909ab644bae7))
+- **deploy**: run auto-instrumented Python entrypoints under the overlay interpreter ([5305ca1](https://github.com/rvben/shinyhub/commit/5305ca1b92a70f9cd6ce44f068ecc7d035b06fc6))
+- **tracing**: auto-instrument elastic workers like pool replicas ([ceabcb6](https://github.com/rvben/shinyhub/commit/ceabcb6e94955883ea4524d821f703e95af08c97))
+- **tracing**: sample proxy traces with the OTel TraceIDRatioBased algorithm ([dde804c](https://github.com/rvben/shinyhub/commit/dde804cd182d168e25e817ee8d1d0b18f34b881f))
+- **agent**: prepare 0.1.1 publication ([855539a](https://github.com/rvben/shinyhub/commit/855539a4bdac414e0eef1c7faf18bb4d8c9ea247))
+- **ui**: keep a kebab menu open when its padding is clicked ([bdd625a](https://github.com/rvben/shinyhub/commit/bdd625aadc649c5a480ac66f57f8513245f8e255))
+- **ui**: set the empty-state heading in the documented Display weight ([dae4d4e](https://github.com/rvben/shinyhub/commit/dae4d4ecf9a267db0fbb29692b94474362e4c57d))
+- **ui**: keep the space between action links and their arrows ([3b97592](https://github.com/rvben/shinyhub/commit/3b97592a009bbd985c59e7db87d67a57be1b74cd))
+- **ui**: say what the Trends gap note counts ([9d22d26](https://github.com/rvben/shinyhub/commit/9d22d26e24240ea8d56444023896d6f1c68f0abe))
+- **ui**: render large app lists one page at a time ([1a207d3](https://github.com/rvben/shinyhub/commit/1a207d3f4e7042c8279baecaf787f783238fd687))
+- **ui**: meet 44px touch target on app detail header actions ([f1788a1](https://github.com/rvben/shinyhub/commit/f1788a1ce0928dc7c15c8614e0d1b43ea62dc19e))
+- **ui**: label the Deployments table's action column and even out its row padding ([a3ba542](https://github.com/rvben/shinyhub/commit/a3ba54241f1c60d73bab10aae12cb241596aec0d))
+- **ui**: show the Trends memory axis floor without a mismatched unit ([a1a56a7](https://github.com/rvben/shinyhub/commit/a1a56a77bae1ff83b9ba72a47fce21c6668f769d))
+- **ui**: hide decorative arrows on action links from assistive tech ([916b468](https://github.com/rvben/shinyhub/commit/916b46834427691322d2adfdb957188486213b4c))
+- **ui**: render login form labels in sentence case ([47b682e](https://github.com/rvben/shinyhub/commit/47b682ebf9b6c4d52ac62146c5d633300ce9dca0))
+- **ui**: show a human-readable label on the Audit Log action badge ([10fec63](https://github.com/rvben/shinyhub/commit/10fec63b361d07fcf713d32c3e932d9496374c5a))
+- **ui**: use the UI font for form fields, monospace only where the value is code ([337beba](https://github.com/rvben/shinyhub/commit/337bebaeb866c74cbb5c7c90a5652d6d7315fee2))
+- **ui**: render the Workers empty-state code span as markup, not literal backticks ([2620ad0](https://github.com/rvben/shinyhub/commit/2620ad07b82a99fa83db74819b4012e1bfbbaaa7))
+- **ui**: route the identity page at /identity, keep /users as an alias ([186f27d](https://github.com/rvben/shinyhub/commit/186f27dccce0c4f1c446116c5ca1a579bc5d9676))
+- **ui**: replace the usage loading sweep with a calm opacity pulse ([77e8fe3](https://github.com/rvben/shinyhub/commit/77e8fe3f3eaab51a3f181c09b33a4044fa712115))
+- **ui**: serve a styled not-found page for unknown dashboard routes ([f222f7b](https://github.com/rvben/shinyhub/commit/f222f7b2c693dc2118289203349f6c4a8fb4876c))
+- **ui**: consolidate CSS onto the documented design tokens ([bbc6c55](https://github.com/rvben/shinyhub/commit/bbc6c5588183a8118c9daef8734492b4ab2148fe))
+- **ui**: use one term per concept for release and action labels ([3555ca7](https://github.com/rvben/shinyhub/commit/3555ca7c266125e4092a1744f1c6e6b7604e3b8d))
+- **ui**: replace sun-shaped settings icon with a hexagonal gear glyph ([8867dd1](https://github.com/rvben/shinyhub/commit/8867dd159467f921e239dab5b2287d5cf49c6987))
+- **ui**: remove decorative star-field overlay from dashboard shell ([2d8ffa2](https://github.com/rvben/shinyhub/commit/2d8ffa22e9fe81e68be0d46f046cfe47dd04ba0b))
+- **security**: deny all framing of the dashboard, not just cross-origin ([794c2ec](https://github.com/rvben/shinyhub/commit/794c2ec18696e04268e9557df8180ab74a5ddf1e))
+- **ui**: pause background pollers while their tab is hidden ([6b47ef9](https://github.com/rvben/shinyhub/commit/6b47ef9e6055ee51ed46c0dc7481c0da65d69608))
+- **ui**: guard mutating buttons against double-submit ([bbc2898](https://github.com/rvben/shinyhub/commit/bbc28986d4fc6e8257c9346c1643837ce9657592))
+- **ui**: stop kebab menu document listeners from leaking across grid rebuilds ([6e746c0](https://github.com/rvben/shinyhub/commit/6e746c0eb0d263dc804f99d06890f6df18675b98))
+- **api**: stop fleet health from truncating apps past a fixed cap ([bd74db1](https://github.com/rvben/shinyhub/commit/bd74db16aaab87fb40ec818cb156edca97787f0c))
+- **api**: rate limit self-service password changes ([c495155](https://github.com/rvben/shinyhub/commit/c495155a6a934ccf8aef56daca19c0b34281aeae))
+- **process**: keep replica entry tracked when stop exit is unconfirmed ([e04b588](https://github.com/rvben/shinyhub/commit/e04b588c4076fc1872852541e63442edd9a54c08))
+- **deploy**: stop pinned versions from eating into retention count ([19f25ca](https://github.com/rvben/shinyhub/commit/19f25ca6910377b44a2664fa1a4791aef6ee46a0))
+- **proxy**: drain the failed generation on RevertGeneration instead of dropping it ([806ac13](https://github.com/rvben/shinyhub/commit/806ac136f127f416f45fe2472156580a8cf2c324))
+- **worker**: flush wait headers immediately so long-lived replicas do not time out ([977c00a](https://github.com/rvben/shinyhub/commit/977c00a6c81912043732fe39a96451a1c78d13d6))
+
+### Performance
+
+- **api**: omit unset override fields from GET /api/apps ([9a114e0](https://github.com/rvben/shinyhub/commit/9a114e0e4f421dafb3b7f8e6e86688ba80b07f03))
+- **api**: omit legacy metric mirror fields when no replica is running ([e3141ba](https://github.com/rvben/shinyhub/commit/e3141ba67ac837f693266373bd0be7072cedc18b))
+- **api**: gzip-compress JSON API responses ([280435f](https://github.com/rvben/shinyhub/commit/280435fa0cd8f24c17926e77c83998477fe57d05))
+- **ui**: coalesce the duplicate /api/apps request on a cold dashboard load ([53d57a0](https://github.com/rvben/shinyhub/commit/53d57a0ed77cd671f5ed46bb8207643e0a31e64f))
+- **api**: paginate the admin users list in SQL ([77fb577](https://github.com/rvben/shinyhub/commit/77fb577edd85879993322010667d2a292e31a007))
+- **api**: serve nav.json and apps.json from a lean per-app projection ([d08095b](https://github.com/rvben/shinyhub/commit/d08095b136c4ba6b9e52c178f09c203bda317354))
+- **api**: push /api/apps pagination into SQL ([c451088](https://github.com/rvben/shinyhub/commit/c4510886c4e940950c7c7421cef799fd539d6015))
+- **ui**: serve gzip-compressed static assets and SPA shell ([10ad012](https://github.com/rvben/shinyhub/commit/10ad012b4a46d9b00c76618c3eb4d0e1cda4056b))
+
 ## [0.17.8](https://github.com/rvben/shinyhub/compare/v0.17.7...v0.17.8) - 2026-09-27
 
 ### Added
