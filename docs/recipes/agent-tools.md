@@ -9,10 +9,15 @@ tools for each viewer's Shiny session. The same tools are available to a chat
 agent and, where supported by the browser, a visitor's WebMCP agent. The app
 keeps control of what data can be read and what state can change.
 
+Install the [published `shinyhub-agent` package](https://pypi.org/project/shinyhub-agent/)
+in a Python Shiny app:
+
+```text
+shinyhub-agent==0.1.1
+```
+
 The repository contains a [runnable example](https://github.com/rvben/shinyhub/tree/main/examples/agent-shiny-demo)
-and the [helper API and security notes](https://github.com/rvben/shinyhub/tree/main/packaging/python-agent). The
-helper is currently built from this repository; it has not been published as a
-separate package.
+and the [helper API and security notes](https://github.com/rvben/shinyhub/tree/main/packaging/python-agent).
 
 ## Add tools to an app
 

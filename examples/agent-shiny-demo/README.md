@@ -9,9 +9,7 @@ still works and the chat panel stays hidden.
 To run from this repository:
 
 ```bash
-UV_CACHE_DIR=/tmp/shinyhub-uv-cache uv run --no-project \
-  --with ./packaging/python-agent \
-  --with shiny \
+uv run --no-project --with shinyhub-agent==0.1.1 \
   shiny run examples/agent-shiny-demo/app.py
 ```
 
@@ -23,7 +21,6 @@ has an independent conversation and approval flow. The agent can read metrics
 and propose a period change; a visitor must choose **Apply change** before the
 Shiny server executes it.
 
-The `shinyhub-agent` package is currently local to this repository. To deploy
-this example, build its wheel, place the wheel in the app bundle, add that wheel
-to `requirements.txt`, and then deploy. Do not publish the package or deploy
-this example until its release and integration gates are reviewed.
+The app's `requirements.txt` pins the published package. Set the desired chat
+secret in ShinyHub's app environment settings, then deploy this directory with
+`shinyhub deploy examples/agent-shiny-demo --slug agent-shiny-demo`.
