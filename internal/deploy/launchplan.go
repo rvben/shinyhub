@@ -30,6 +30,10 @@ type LaunchPlan struct {
 	ReadyStatus int
 	DepPrep     []DepPrepStep
 	Timeout     time.Duration
+	// Instrumented reports whether Command carries the opentelemetry-instrument
+	// overlay. Callers use it to decide whether a failed boot is worth retrying
+	// uninstrumented; explicit and R commands are never instrumented.
+	Instrumented bool
 }
 
 // LaunchOptions are the Manager-free inputs both consumers supply. See the
@@ -157,6 +161,7 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 			auto = *m.Tracing.Auto
 		}
 		overlay := instrumentOverlay(auto, opts.AutoInstrumentExtraPackages)
+		plan.Instrumented = len(overlay) > 0
 		if m != nil && m.App.Framework == "fastapi" {
 			plan.Command = buildFastAPICommand(bundleDir, opts.Port, bindHost, opts.AppPath, overlay, opts.CommandHostDeps, opts.Reload)
 		} else {

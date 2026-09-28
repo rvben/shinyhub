@@ -175,15 +175,25 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	}
 	bindHost := s.Manager.AppBindHostFor(tier)
 
-	plan, err := deploy.ResolveLaunch(dep.BundleDir, deploy.LaunchOptions{
-		AppPath:  "/app/" + slug,
-		Port:     port,
-		BindHost: bindHost,
-		// Do not re-run host dep-prep: the venv was built during the initial
-		// deploy and the bundle dir is unchanged between elastic spawns.
-		PrepHostDeps:    false,
-		CommandHostDeps: s.Manager.HostPreparesDepsFor(tier),
-	})
+	// instrument selects the tracing overlay exactly as a pool replica boot
+	// does: the fleet default, overridden by the manifest's [tracing] auto. The
+	// uninstrumented fallback (instrument=false) ignores the manifest too, so a
+	// bundle whose instrumentation breaks its boot still gets a worker.
+	resolve := func(instrument bool) (*deploy.LaunchPlan, error) {
+		return deploy.ResolveLaunch(dep.BundleDir, deploy.LaunchOptions{
+			AppPath:  "/app/" + slug,
+			Port:     port,
+			BindHost: bindHost,
+			// Do not re-run host dep-prep: the venv was built during the initial
+			// deploy and the bundle dir is unchanged between elastic spawns.
+			PrepHostDeps:                false,
+			CommandHostDeps:             s.Manager.HostPreparesDepsFor(tier),
+			AutoInstrumentDefault:       instrument && s.Manager.AutoInstrumentAppsDefault(),
+			HonorManifestTracing:        instrument,
+			AutoInstrumentExtraPackages: s.Manager.AutoInstrumentExtraPackages(),
+		})
+	}
+	plan, err := resolve(true)
 	if err != nil {
 		slog.Warn("elastic spawn: resolve launch", "slug", slug, "slotID", slotID, "err", err)
 		s.releaseReservation(slug, slotID)
@@ -241,74 +251,24 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		}
 	}
 
-	// Start the worker process. slotID is the replica index so the cgroup is
-	// named app-<slug>-<slotID> and the Manager's entry is keyed by it.
-	info, err := s.Manager.Start(process.StartParams{
-		GuardUntilAcknowledged: guarded,
-		Slug:                   slug,
-		AppID:                  app.ID,
-		Index:                  slotID,
-		Tier:                   tier,
-		Dir:                    dep.BundleDir,
-		Command:                plan.Command,
-		Port:                   port,
-		Env:                    plan.Env, // launch-coupled only (PORT, the renv policy) - per-app env added by Manager's envResolver
-		MemoryLimitMB:          memMB,
-		CPUQuotaPercent:        cpuPct,
-		AppVersion:             dep.Version,
-		DeploymentID:           dep.ID,
-		ContentDigest:          dep.ContentDigest,
-	})
-	if err != nil {
-		slog.Warn("elastic spawn: start process", "slug", slug, "slotID", slotID, "err", err)
+	// A failed instrumented boot is retried once without the overlay, on the
+	// same slot and port, mirroring bootReplicaAttempt's fallback for pool
+	// replicas. The reservation stays held across both attempts and is released
+	// exactly once, here, after the final failure.
+	info, ok, retryable := s.startAndCheck(app, dep, slug, slotID, tier, port, guarded, memMB, cpuPct, plan)
+	if !ok && retryable && plan.Instrumented {
+		slog.Warn("elastic spawn: instrumented launch failed; retrying without auto-instrumentation", "slug", slug, "slotID", slotID)
+		if plan, err = resolve(false); err == nil {
+			info, ok, _ = s.startAndCheck(app, dep, slug, slotID, tier, port, guarded, memMB, cpuPct, plan)
+		} else {
+			slog.Warn("elastic spawn: resolve uninstrumented launch", "slug", slug, "slotID", slotID, "err", err)
+		}
+	}
+	if !ok {
 		s.releaseReservation(slug, slotID)
 		return
 	}
-
-	if guarded {
-		if err := s.Store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
-			AppID: app.ID, DeploymentID: dep.ID, Index: slotID,
-			PID: &info.PID, Port: &info.Port, Status: "starting",
-			Provider: info.Provider, Tier: tier, EndpointURL: info.EndpointURL,
-			WorkerID: info.WorkerID,
-		}); err != nil {
-			slog.Error("elastic spawn: record guarded worker", "slug", slug, "slotID", slotID, "err", err)
-			_ = s.stopWorker(slug, slotID)
-			s.releaseReservation(slug, slotID)
-			return
-		}
-		if err := s.Manager.AcknowledgeReplicaStart(slug, slotID); err != nil {
-			slog.Error("elastic spawn: acknowledge durable worker", "slug", slug, "slotID", slotID, "err", err)
-			_ = s.stopWorker(slug, slotID)
-			s.releaseReservation(slug, slotID)
-			return
-		}
-	}
-
 	transport := s.Manager.TransportForWorker(tier, info.WorkerID)
-
-	// Health-check the started process (fast-fail on crash, bounded timeout).
-	healthTimeout := defaultElasticHealthTimeout
-	if plan.Manifest != nil && plan.Manifest.App.StartupTimeoutSeconds != nil {
-		healthTimeout = plan.Timeout
-	}
-	hc := s.HealthCheck
-	if hc == nil {
-		hc = func(url string, timeout time.Duration, tr http.RoundTripper) error {
-			return waitElasticHealthy(url, plan.ReadyPath, plan.ReadyStatus, timeout, tr, func() bool {
-				inf, ok := s.Manager.GetReplica(slug, slotID)
-				return ok && inf.Status == process.StatusRunning
-			})
-		}
-	}
-	if healthErr := hc(info.EndpointURL, healthTimeout, transport); healthErr != nil {
-		slog.Warn("elastic spawn: health check failed", "slug", slug, "slotID", slotID, "err", healthErr)
-		if stopErr := s.stopWorker(slug, slotID); stopErr != nil {
-			slog.Warn("elastic spawn: stop after health failure", "slug", slug, "slotID", slotID, "err", stopErr)
-		}
-		s.releaseReservation(slug, slotID)
-		return
-	}
 	// Ownership may be lost while a slow worker boots. A new owner cannot begin
 	// a deploy until the lease changes hands, so checking immediately before
 	// publication keeps this worker out of the proxy after handoff.
@@ -386,6 +346,87 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	if !s.Proxy.IsUnassignedElasticWarmSpare(slug, slotID) {
 		s.armLifetime(app, slug, slotID)
 	}
+}
+
+// startAndCheck starts one worker for plan at slotID, records and acknowledges
+// its durable identity when guarded, and waits for readiness. ok reports a
+// healthy worker. On failure, retryable reports whether the slot is provably
+// empty again: true when Start itself failed or the failed worker's stop
+// succeeded, false when the stop failed and the worker may still hold the
+// port. It never releases the proxy reservation; Spawn owns that.
+func (s *ElasticSpawner) startAndCheck(app *db.App, dep *db.Deployment, slug string, slotID int, tier string, port int, guarded bool, memMB, cpuPct int, plan *deploy.LaunchPlan) (info *process.ProcessInfo, ok, retryable bool) {
+	// Start the worker process. slotID is the replica index so the cgroup is
+	// named app-<slug>-<slotID> and the Manager's entry is keyed by it.
+	info, err := s.Manager.Start(process.StartParams{
+		GuardUntilAcknowledged: guarded,
+		Slug:                   slug,
+		AppID:                  app.ID,
+		Index:                  slotID,
+		Tier:                   tier,
+		Dir:                    dep.BundleDir,
+		Command:                plan.Command,
+		Port:                   port,
+		Env:                    plan.Env, // launch-coupled only (PORT, the renv policy) - per-app env added by Manager's envResolver
+		MemoryLimitMB:          memMB,
+		CPUQuotaPercent:        cpuPct,
+		AppVersion:             dep.Version,
+		DeploymentID:           dep.ID,
+		ContentDigest:          dep.ContentDigest,
+	})
+	if err != nil {
+		slog.Warn("elastic spawn: start process", "slug", slug, "slotID", slotID, "err", err)
+		return nil, false, true
+	}
+
+	if guarded {
+		if err := s.Store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+			AppID: app.ID, DeploymentID: dep.ID, Index: slotID,
+			PID: &info.PID, Port: &info.Port, Status: "starting",
+			Provider: info.Provider, Tier: tier, EndpointURL: info.EndpointURL,
+			WorkerID: info.WorkerID,
+		}); err != nil {
+			slog.Error("elastic spawn: record guarded worker", "slug", slug, "slotID", slotID, "err", err)
+			stopErr := s.stopWorker(slug, slotID)
+			if stopErr != nil {
+				slog.Warn("elastic spawn: stop after record failure", "slug", slug, "slotID", slotID, "err", stopErr)
+			}
+			return nil, false, stopErr == nil
+		}
+		if err := s.Manager.AcknowledgeReplicaStart(slug, slotID); err != nil {
+			slog.Error("elastic spawn: acknowledge durable worker", "slug", slug, "slotID", slotID, "err", err)
+			stopErr := s.stopWorker(slug, slotID)
+			if stopErr != nil {
+				slog.Warn("elastic spawn: stop after acknowledge failure", "slug", slug, "slotID", slotID, "err", stopErr)
+			}
+			return nil, false, stopErr == nil
+		}
+	}
+
+	transport := s.Manager.TransportForWorker(tier, info.WorkerID)
+
+	// Health-check the started process (fast-fail on crash, bounded timeout).
+	healthTimeout := defaultElasticHealthTimeout
+	if plan.Manifest != nil && plan.Manifest.App.StartupTimeoutSeconds != nil {
+		healthTimeout = plan.Timeout
+	}
+	hc := s.HealthCheck
+	if hc == nil {
+		hc = func(url string, timeout time.Duration, tr http.RoundTripper) error {
+			return waitElasticHealthy(url, plan.ReadyPath, plan.ReadyStatus, timeout, tr, func() bool {
+				inf, ok := s.Manager.GetReplica(slug, slotID)
+				return ok && inf.Status == process.StatusRunning
+			})
+		}
+	}
+	if healthErr := hc(info.EndpointURL, healthTimeout, transport); healthErr != nil {
+		slog.Warn("elastic spawn: health check failed", "slug", slug, "slotID", slotID, "err", healthErr)
+		stopErr := s.stopWorker(slug, slotID)
+		if stopErr != nil {
+			slog.Warn("elastic spawn: stop after health failure", "slug", slug, "slotID", slotID, "err", stopErr)
+		}
+		return nil, false, stopErr == nil
+	}
+	return info, true, false
 }
 
 // releaseReservation preserves the demand-driven failure behavior for ordinary

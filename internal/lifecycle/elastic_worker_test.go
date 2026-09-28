@@ -2,11 +2,15 @@ package lifecycle_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -32,12 +36,24 @@ type recordingRuntime struct {
 	suspendCalls int
 	resumeCalls  int
 	waitCh       chan struct{}
+	// signalErr, when set, is returned by Signal so a stop cannot be delivered.
+	signalErr error
+	signals   []syscall.Signal
+	// onStart, when set, runs after each Start is recorded with the 1-based
+	// call number; a non-nil return fails that Start.
+	onStart func(call int) error
 }
 
 func (r *recordingRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
 	r.mu.Lock()
 	r.started = append(r.started, p)
+	call, onStart := len(r.started), r.onStart
 	r.mu.Unlock()
+	if onStart != nil {
+		if err := onStart(call); err != nil {
+			return process.ReplicaEndpoint{}, err
+		}
+	}
 	if r.startErr != nil {
 		return process.ReplicaEndpoint{}, r.startErr
 	}
@@ -53,7 +69,12 @@ func (r *recordingRuntime) Start(_ context.Context, p process.StartParams, _ io.
 	}, nil
 }
 
-func (r *recordingRuntime) Signal(_ process.RunHandle, _ syscall.Signal) error { return nil }
+func (r *recordingRuntime) Signal(_ process.RunHandle, sig syscall.Signal) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.signals = append(r.signals, sig)
+	return r.signalErr
+}
 func (r *recordingRuntime) Wait(ctx context.Context, _ process.RunHandle) error {
 	if r.waitCh == nil {
 		return nil
@@ -842,5 +863,258 @@ func TestSpawnElasticWorker_StartsWhenEnvironmentIsPresent(t *testing.T) {
 	rt.mu.Unlock()
 	if started != 1 {
 		t.Errorf("started %d worker(s) with a present environment; want 1", started)
+	}
+}
+
+// elasticTracingFixture wires a per_session app whose latest deployment is the
+// given bundle, a recording runtime and a proxy pool for it.
+type elasticTracingFixture struct {
+	store *db.Store
+	rt    *recordingRuntime
+	mgr   *process.Manager
+	prx   *proxy.Proxy
+}
+
+func newElasticTracingFixture(t *testing.T, slug, bundleDir string, rt *recordingRuntime) *elasticTracingFixture {
+	t.Helper()
+	store := mustOpenStore(t)
+	app := mustCreateElasticApp(t, store, slug)
+	_ = mustCreateDeploymentInDir(t, store, app.ID, bundleDir)
+	prx := proxy.New()
+	prx.SetPoolAppID(slug, app.ID)
+	prx.SetPoolMode(slug, config.IsolationPerSession, 1, 5)
+	return &elasticTracingFixture{store: store, rt: rt, mgr: process.NewManager(t.TempDir(), rt), prx: prx}
+}
+
+// reserveWarmSlot creates a real proxy reservation (a booting warm-spare slot)
+// and returns its slot ID, so tests can observe the reservation being held and
+// released through Proxy.ElasticWorkerCount.
+func (f *elasticTracingFixture) reserveWarmSlot(t *testing.T, slug string) int {
+	t.Helper()
+	f.prx.SetPoolWarmSpares(slug, 1)
+	reserved := make(chan int, 1)
+	f.prx.SetSpawnFunc(func(_ string, slotID int) { reserved <- slotID })
+	f.prx.ReconcileElasticWarmSpares(slug)
+	select {
+	case slotID := <-reserved:
+		// A later reconcile must not reserve behind the test's back.
+		f.prx.SetSpawnFunc(func(string, int) {})
+		return slotID
+	case <-time.After(time.Second):
+		t.Fatal("warm-spare reservation was not dispatched")
+		return -1
+	}
+}
+
+func (f *elasticTracingFixture) startedCommands() []string {
+	f.rt.mu.Lock()
+	defer f.rt.mu.Unlock()
+	cmds := make([]string, len(f.rt.started))
+	for i, p := range f.rt.started {
+		cmds[i] = strings.Join(p.Command, " ")
+	}
+	return cmds
+}
+
+// failingThenPassingHealth fails its first `failures` calls and passes after.
+func failingThenPassingHealth(failures int) func(string, time.Duration, http.RoundTripper) error {
+	var calls atomic.Int32
+	return func(string, time.Duration, http.RoundTripper) error {
+		if int(calls.Add(1)) <= failures {
+			return errors.New("not ready")
+		}
+		return nil
+	}
+}
+
+func alwaysFailingHealth(string, time.Duration, http.RoundTripper) error {
+	return errors.New("not ready")
+}
+
+func isInstrumented(cmd string) bool {
+	return strings.Contains(cmd, "opentelemetry-instrument ")
+}
+
+func TestSpawnElasticWorker_AutoInstrumentsWhenFleetDefaultOn(t *testing.T) {
+	f := newElasticTracingFixture(t, "inst", mustMinimalBundle(t), &recordingRuntime{})
+	f.mgr.SetAutoInstrumentAppsDefault(true)
+	f.mgr.SetAutoInstrumentExtraPackages([]string{"opentelemetry-instrumentation-botocore"})
+	(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: noopHealthCheck}).Spawn("inst", 1)
+
+	cmds := f.startedCommands()
+	if len(cmds) != 1 {
+		t.Fatalf("started %d, want 1", len(cmds))
+	}
+	if !isInstrumented(cmds[0]) || !strings.Contains(cmds[0], "--with opentelemetry-instrumentation-botocore") {
+		t.Fatalf("elastic worker not instrumented: %s", cmds[0])
+	}
+}
+
+func TestSpawnElasticWorker_FleetDefaultOffStaysUninstrumented(t *testing.T) {
+	f := newElasticTracingFixture(t, "plain", mustMinimalBundle(t), &recordingRuntime{})
+	f.mgr.SetAutoInstrumentExtraPackages([]string{"opentelemetry-instrumentation-botocore"})
+	(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: noopHealthCheck}).Spawn("plain", 1)
+
+	cmds := f.startedCommands()
+	if len(cmds) != 1 {
+		t.Fatalf("started %d, want 1", len(cmds))
+	}
+	if strings.Contains(cmds[0], "opentelemetry") {
+		t.Fatalf("fleet default off must launch uninstrumented: %s", cmds[0])
+	}
+}
+
+func TestSpawnElasticWorker_ManifestTracingAutoOverridesFleet(t *testing.T) {
+	cases := []struct {
+		name     string
+		manifest string
+		fleet    bool
+		want     bool
+	}{
+		{"manifest off beats fleet on", "[tracing]\nauto = false\n", true, false},
+		{"manifest on beats fleet off", "[tracing]\nauto = true\n", false, true},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bundle := mustMinimalBundle(t)
+			if err := os.WriteFile(filepath.Join(bundle, "shinyhub.toml"), []byte(tc.manifest), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			slug := "manifest-" + strconv.Itoa(i)
+			f := newElasticTracingFixture(t, slug, bundle, &recordingRuntime{})
+			f.mgr.SetAutoInstrumentAppsDefault(tc.fleet)
+			(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: noopHealthCheck}).Spawn(slug, 1)
+
+			cmds := f.startedCommands()
+			if len(cmds) != 1 {
+				t.Fatalf("started %d, want 1", len(cmds))
+			}
+			if got := isInstrumented(cmds[0]); got != tc.want {
+				t.Fatalf("instrumented = %v, want %v: %s", got, tc.want, cmds[0])
+			}
+		})
+	}
+}
+
+func TestSpawnElasticWorker_InstrumentedHealthFailureRetriesUninstrumented(t *testing.T) {
+	const slotID = 2
+	f := newElasticTracingFixture(t, "retry", mustMinimalBundle(t), &recordingRuntime{})
+	f.mgr.SetAutoInstrumentAppsDefault(true)
+	(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: failingThenPassingHealth(1)}).Spawn("retry", slotID)
+
+	cmds := f.startedCommands()
+	if len(cmds) != 2 {
+		t.Fatalf("started %d, want 2 (instrumented then uninstrumented): %v", len(cmds), cmds)
+	}
+	if !isInstrumented(cmds[0]) {
+		t.Fatalf("first launch must be instrumented: %s", cmds[0])
+	}
+	if strings.Contains(cmds[1], "opentelemetry") {
+		t.Fatalf("retry must be uninstrumented: %s", cmds[1])
+	}
+	f.rt.mu.Lock()
+	indices := []int{f.rt.started[0].Index, f.rt.started[1].Index}
+	signals := slices.Clone(f.rt.signals)
+	f.rt.mu.Unlock()
+	if indices[0] != slotID || indices[1] != slotID {
+		t.Fatalf("start indices = %v, want both %d", indices, slotID)
+	}
+	if !slices.Contains(signals, syscall.SIGTERM) {
+		t.Fatalf("first worker was not stopped before the retry (signals %v)", signals)
+	}
+	snap, _ := f.prx.ElasticWorkersSnapshot("retry")
+	registered := false
+	for _, w := range snap.Workers {
+		if w.SlotID == slotID && w.Status == "running" {
+			registered = true
+		}
+	}
+	if !registered {
+		t.Fatalf("no running worker registered at slot %d: %+v", slotID, snap.Workers)
+	}
+}
+
+func TestSpawnElasticWorker_UninstrumentedHealthFailureDoesNotRetry(t *testing.T) {
+	f := newElasticTracingFixture(t, "noretry", mustMinimalBundle(t), &recordingRuntime{})
+	(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: failingThenPassingHealth(1)}).Spawn("noretry", 2)
+
+	if cmds := f.startedCommands(); len(cmds) != 1 {
+		t.Fatalf("started %d, want 1 (nothing instrumented, nothing to retry): %v", len(cmds), cmds)
+	}
+	if n := f.prx.ElasticWorkerCount("noretry"); n != 0 {
+		t.Fatalf("ElasticWorkerCount = %d, want 0 after a failed uninstrumented spawn", n)
+	}
+}
+
+func TestSpawnElasticWorker_StopFailureAfterInstrumentedHealthFailureDoesNotRetry(t *testing.T) {
+	rt := &recordingRuntime{waitCh: make(chan struct{}), signalErr: errors.New("signal refused")}
+	t.Cleanup(func() { close(rt.waitCh) })
+	f := newElasticTracingFixture(t, "stuck", mustMinimalBundle(t), rt)
+	f.mgr.SetAutoInstrumentAppsDefault(true)
+	// Manager.Start consults the lifetime resolver before its own
+	// already-running guard, so this counts every Start attempt, including a
+	// second one the guard would refuse before the runtime ever saw it.
+	lifetimeFile, err := os.CreateTemp(t.TempDir(), "lifetime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lifetimeFile.Close() })
+	var startAttempts atomic.Int32
+	f.mgr.SetConsumerLifetimeResolver(func(int64) (func(), *os.File, error) {
+		startAttempts.Add(1)
+		return func() {}, lifetimeFile, nil
+	})
+	before := f.prx.ElasticWorkerCount("stuck")
+	slotID := f.reserveWarmSlot(t, "stuck")
+	if n := f.prx.ElasticWorkerCount("stuck"); n != before+1 {
+		t.Fatalf("reservation not visible: count %d, want %d", n, before+1)
+	}
+	(&lifecycle.ElasticSpawner{
+		Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: alwaysFailingHealth,
+		WarmRetryDelay: func(int) time.Duration { return time.Hour },
+	}).Spawn("stuck", slotID)
+
+	if n := startAttempts.Load(); n != 1 {
+		t.Fatalf("Manager.Start attempts = %d, want 1 (a worker that may still hold the port must not be joined)", n)
+	}
+	if cmds := f.startedCommands(); len(cmds) != 1 {
+		t.Fatalf("runtime starts = %d, want 1: %v", len(cmds), cmds)
+	}
+	if n := f.prx.ElasticWorkerCount("stuck"); n != before {
+		t.Fatalf("ElasticWorkerCount = %d after failed spawn, want %d (reservation released)", n, before)
+	}
+}
+
+func TestSpawnElasticWorker_RetryHoldsReservationAndReleasesOnceOnFinalFailure(t *testing.T) {
+	var countAtRetry atomic.Int32
+	countAtRetry.Store(-1)
+	rt := &recordingRuntime{}
+	f := newElasticTracingFixture(t, "held", mustMinimalBundle(t), rt)
+	rt.onStart = func(call int) error {
+		if call == 2 {
+			countAtRetry.Store(int32(f.prx.ElasticWorkerCount("held")))
+		}
+		return nil
+	}
+	f.mgr.SetAutoInstrumentAppsDefault(true)
+	before := f.prx.ElasticWorkerCount("held")
+	slotID := f.reserveWarmSlot(t, "held")
+	(&lifecycle.ElasticSpawner{
+		Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: alwaysFailingHealth,
+		WarmRetryDelay: func(int) time.Duration { return time.Hour },
+	}).Spawn("held", slotID)
+
+	cmds := f.startedCommands()
+	if len(cmds) != 2 {
+		t.Fatalf("started %d, want 2: %v", len(cmds), cmds)
+	}
+	if !isInstrumented(cmds[0]) || strings.Contains(cmds[1], "opentelemetry") {
+		t.Fatalf("want instrumented then uninstrumented, got %v", cmds)
+	}
+	if got := int(countAtRetry.Load()); got != before+1 {
+		t.Fatalf("ElasticWorkerCount during retry Start = %d, want %d (reservation held across the retry)", got, before+1)
+	}
+	if n := f.prx.ElasticWorkerCount("held"); n != before {
+		t.Fatalf("ElasticWorkerCount = %d after final failure, want %d", n, before)
 	}
 }

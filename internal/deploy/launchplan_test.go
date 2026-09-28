@@ -112,6 +112,41 @@ func TestResolveLaunch_AutoInstrument_BuildsFallback(t *testing.T) {
 	}
 }
 
+func TestResolveLaunch_InstrumentedReportsOverlay(t *testing.T) {
+	python := map[string]string{"app.py": "x=1\n", "requirements.txt": "shiny\n"}
+	cases := []struct {
+		name  string
+		files map[string]string
+		opts  LaunchOptions
+		want  bool
+	}{
+		{"python auto on", python, LaunchOptions{AutoInstrumentDefault: true, HonorManifestTracing: true}, true},
+		{"python auto off", python, LaunchOptions{AutoInstrumentDefault: false, HonorManifestTracing: true}, false},
+		{"r app auto on", map[string]string{"app.R": "x <- 1\n"}, LaunchOptions{AutoInstrumentDefault: true, HonorManifestTracing: true}, false},
+		{"manifest command auto on", map[string]string{
+			"app.py":        "x=1\n",
+			"shinyhub.toml": "[app]\ncommand = [\"streamlit\", \"run\", \"app.py\", \"--server.port\", \"{port}\"]\n",
+		}, LaunchOptions{AutoInstrumentDefault: true, HonorManifestTracing: true}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeRunBundle(t, tc.files)
+			opts := tc.opts
+			opts.Port, opts.BindHost = 9010, "127.0.0.1"
+			plan, err := ResolveLaunch(dir, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Instrumented != tc.want {
+				t.Fatalf("Instrumented = %v, want %v (command %v)", plan.Instrumented, tc.want, plan.Command)
+			}
+			if got := slices.Contains(plan.Command, "opentelemetry-instrument"); got != tc.want {
+				t.Fatalf("command carries overlay = %v, want %v: %v", got, tc.want, plan.Command)
+			}
+		})
+	}
+}
+
 func TestResolveLaunch_RunSuppressesManifestTracing(t *testing.T) {
 	dir := writeRunBundle(t, map[string]string{
 		"app.py": "x=1\n", "requirements.txt": "shiny\n",
