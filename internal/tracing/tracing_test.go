@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/config"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestParseTraceparent_Valid(t *testing.T) {
@@ -63,20 +65,48 @@ func TestSampleByTraceID_Boundaries(t *testing.T) {
 		t.Errorf("ratio>1 should always sample")
 	}
 
-	// Deterministic per-ID: trace IDs whose first byte is 0x00 should fall
-	// well below the 10% threshold; trace IDs starting with 0xFF should be
-	// well above.
-	var lo [16]byte
-	lo[15] = 1 // non-zero to satisfy isZero
-	if !SampleByTraceID(lo, 0.1) {
-		t.Errorf("trace ID with leading 0x00 should sample at ratio=0.1")
+	// Deterministic per-ID: the decision is made from the low 8 bytes (as the
+	// OTel SDK's TraceIDRatioBased does), not the high 8 bytes. An ID with a
+	// high first half and a zero second half must sample; its byte-reversal
+	// must not. The old first-bytes algorithm got both of these backwards.
+	var lowHalfZero [16]byte
+	for i := 0; i < 8; i++ {
+		lowHalfZero[i] = 0xFF
 	}
-	var hi [16]byte
-	for i := range hi {
-		hi[i] = 0xFF
+	if !SampleByTraceID(lowHalfZero, 0.5) {
+		t.Errorf("trace ID with zero low half should sample at ratio=0.5")
 	}
-	if SampleByTraceID(hi, 0.1) {
-		t.Errorf("trace ID with leading 0xFF should not sample at ratio=0.1")
+	var highHalfZero [16]byte
+	for i := 8; i < 16; i++ {
+		highHalfZero[i] = 0xFF
+	}
+	if SampleByTraceID(highHalfZero, 0.5) {
+		t.Errorf("trace ID with 0xFF low half should not sample at ratio=0.5")
+	}
+}
+
+// TestSampleByTraceID_MatchesSDKTraceIDRatioBased pins agreement with the
+// OTel SDK's TraceIDRatioBased decision, which the server tracer uses, so the
+// proxy fallback path and the server tracer agree on every trace ID.
+func TestSampleByTraceID_MatchesSDKTraceIDRatioBased(t *testing.T) {
+	for _, ratio := range []float64{0.1, 0.5, 0.9} {
+		sdk := sdktrace.TraceIDRatioBased(ratio)
+		var agreeTrue, agreeFalse int
+		for i := 0; i < 5000; i++ {
+			id := NewTraceID()
+			want := sdk.ShouldSample(sdktrace.SamplingParameters{TraceID: trace.TraceID(id)}).Decision == sdktrace.RecordAndSample
+			if got := SampleByTraceID(id, ratio); got != want {
+				t.Fatalf("ratio %g id %x: proxy=%v sdk=%v", ratio, id, got, want)
+			}
+			if want {
+				agreeTrue++
+			} else {
+				agreeFalse++
+			}
+		}
+		if agreeTrue == 0 || agreeFalse == 0 {
+			t.Fatalf("ratio %g: degenerate sample (%d/%d), test proves nothing", ratio, agreeTrue, agreeFalse)
+		}
 	}
 }
 

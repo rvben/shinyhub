@@ -119,9 +119,10 @@ func NewSpanID() [8]byte {
 	}
 }
 
-// SampleByTraceID returns true when the trace ID's leading bits, interpreted as
-// a uint64, fall below ratio*2^64. This is the standard OTel traceidratio
-// algorithm: a deterministic decision so distributed components agree.
+// SampleByTraceID implements the OpenTelemetry TraceIDRatioBased decision
+// exactly as the Go SDK does (the low 8 bytes, shifted right by one, against
+// ratio*2^63), so the proxy's fallback path and the server tracer agree on
+// every trace ID.
 func SampleByTraceID(id [16]byte, ratio float64) bool {
 	if ratio <= 0 {
 		return false
@@ -129,10 +130,7 @@ func SampleByTraceID(id [16]byte, ratio float64) bool {
 	if ratio >= 1 {
 		return true
 	}
-	// First 8 bytes interpreted big-endian as a uint64.
-	v := binary.BigEndian.Uint64(id[:8])
-	threshold := uint64(ratio * (1 << 63) * 2)
-	return v < threshold
+	return binary.BigEndian.Uint64(id[8:16])>>1 < uint64(ratio*(1<<63))
 }
 
 // Span is a record of one proxy-handled request retained in the ring buffer.
