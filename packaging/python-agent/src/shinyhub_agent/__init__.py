@@ -6,5 +6,5 @@ from ._agui import AGUIChat
 from ._chat import ChatAgent
 from ._shiny import agent_dependency, chat_dependency, register
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = ["AGUIChat", "AgentTool", "ChatAgent", "OpenAIChat", "ToolError", "ToolRegistry", "agent_dependency", "chat_dependency", "register"]
