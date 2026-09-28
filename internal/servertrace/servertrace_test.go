@@ -133,7 +133,7 @@ func TestMiddleware_5xxSetsErrorStatus(t *testing.T) {
 // TestResource_CarriesServiceIdentity proves the exported resource identifies
 // the ShinyHub server by name and build version in the trace backend.
 func TestResource_CarriesServiceIdentity(t *testing.T) {
-	res := buildResource("v7.7.7")
+	res := buildResource("v7.7.7", "i", nil)
 	var name, version string
 	for _, kv := range res.Attributes() {
 		switch string(kv.Key) {
@@ -155,7 +155,7 @@ func TestResource_CarriesServiceIdentity(t *testing.T) {
 // non-empty service.instance.id so multiple ShinyHub instances exporting to the
 // same backend are distinguishable per the OTel service semantic conventions.
 func TestResource_CarriesServiceInstanceID(t *testing.T) {
-	res := buildResource("v1")
+	res := buildResource("v1", "i", nil)
 	var instance string
 	for _, kv := range res.Attributes() {
 		if string(kv.Key) == "service.instance.id" {
@@ -164,6 +164,73 @@ func TestResource_CarriesServiceInstanceID(t *testing.T) {
 	}
 	if instance == "" {
 		t.Fatal("service.instance.id is empty; instances are indistinguishable in the backend")
+	}
+}
+
+// TestBuildResource_MergesOperatorAttributesAndUsesInstanceID proves the
+// resource carries the operator's resource_attributes alongside the three
+// built-in identity keys, and that service.instance.id is the caller-supplied
+// instance id rather than the bare hostname (two processes on one host must
+// export as distinct instances).
+func TestBuildResource_MergesOperatorAttributesAndUsesInstanceID(t *testing.T) {
+	res := buildResource("1.2.3", "host-a-4242", map[string]string{"deployment.environment.name": "prd", "service.namespace": "team-a"})
+	got := map[string]string{}
+	for _, kv := range res.Attributes() {
+		got[string(kv.Key)] = kv.Value.Emit()
+	}
+	if got["service.name"] != "shinyhub" || got["service.version"] != "1.2.3" || got["service.instance.id"] != "host-a-4242" {
+		t.Fatalf("built-ins wrong: %v", got)
+	}
+	if got["deployment.environment.name"] != "prd" || got["service.namespace"] != "team-a" {
+		t.Fatalf("operator attrs missing: %v", got)
+	}
+	if n := len(buildResource("1.2.3", "host-a-4242", nil).Attributes()); n != 3 {
+		t.Fatalf("no extras must leave exactly the 3 built-ins, got %d", n)
+	}
+}
+
+// TestBuildResource_EmptyInstanceIDFallsBack proves an empty instance id (a
+// caller that has none) still yields a non-empty service.instance.id, via the
+// hostname/random-token fallback.
+func TestBuildResource_EmptyInstanceIDFallsBack(t *testing.T) {
+	var id string
+	for _, kv := range buildResource("1", "", nil).Attributes() {
+		if kv.Key == "service.instance.id" {
+			id = kv.Value.AsString()
+		}
+	}
+	if id == "" {
+		t.Fatal("service.instance.id must never be empty")
+	}
+}
+
+// TestBuildResource_BuiltInsWinOverReservedExtras proves an extra carrying one
+// of the three identity keys cannot rename the service or merge two instances,
+// even when it bypasses config validation.
+func TestBuildResource_BuiltInsWinOverReservedExtras(t *testing.T) {
+	res := buildResource("1.2.3", "host-a-4242", map[string]string{
+		"service.name":        "impostor",
+		"service.version":     "0.0.0",
+		"service.instance.id": "shared",
+		"service.namespace":   "team-a",
+	})
+	got := map[string]string{}
+	for _, kv := range res.Attributes() {
+		got[string(kv.Key)] = kv.Value.Emit()
+	}
+	want := map[string]string{
+		"service.name":        "shinyhub",
+		"service.version":     "1.2.3",
+		"service.instance.id": "host-a-4242",
+		"service.namespace":   "team-a",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("%s = %q, want %q (resource %v)", k, got[k], v, got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("resource has %d attributes, want %d: %v", len(got), len(want), got)
 	}
 }
 
@@ -299,7 +366,7 @@ func TestSetup_BuildsExporterPerProtocol(t *testing.T) {
 				OTLPProtocol: proto,
 				SampleRatio:  1,
 			}
-			tr, err := Setup(context.Background(), cfg, "v1")
+			tr, err := Setup(context.Background(), cfg, "v1", "host-a-1")
 			if err != nil {
 				t.Fatalf("Setup(%s): %v", proto, err)
 			}

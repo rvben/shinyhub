@@ -14,9 +14,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -53,14 +55,16 @@ func NewFromProvider(tp *sdktrace.TracerProvider, prop propagation.TextMapPropag
 // Setup builds a Tracer that exports to the configured OTLP endpoint and
 // registers it as the global OpenTelemetry provider + propagator. The exporter
 // connects lazily, so Setup does not block on the collector being reachable.
-func Setup(ctx context.Context, cfg config.TracingConfig, serviceVersion string) (*Tracer, error) {
+// instanceID identifies this control-plane process uniquely among several
+// (see buildResource); an empty instanceID falls back to the hostname.
+func Setup(ctx context.Context, cfg config.TracingConfig, serviceVersion, instanceID string) (*Tracer, error) {
 	exp, err := newExporter(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exp),
-		sdktrace.WithResource(buildResource(serviceVersion)),
+		sdktrace.WithResource(buildResource(serviceVersion, instanceID, cfg.ResourceAttributes)),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SampleRatio))),
 	)
 	prop := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
@@ -123,15 +127,26 @@ func (t *Tracer) Middleware(next http.Handler) http.Handler {
 }
 
 // buildResource identifies the ShinyHub server process in the trace backend.
-// service.instance.id distinguishes multiple instances exporting to the same
-// backend; the hostname is used, falling back to a random token when it is
-// unavailable so the attribute is never empty.
-func buildResource(version string) *resource.Resource {
-	return resource.NewSchemaless(
+// service.instance.id is the control-plane instance id, unique per process
+// even when several instances share a host; the hostname fallback only
+// covers callers that pass none. Operator resource attributes come first, keys
+// sorted, and the identity keys last: a resource keeps the last value of a
+// repeated key, so the built-ins win even over an extra that bypassed the
+// config validation keeping operators off them.
+func buildResource(version, instanceID string, extra map[string]string) *resource.Resource {
+	if instanceID == "" {
+		instanceID = serviceInstanceID()
+	}
+	attrs := make([]attribute.KeyValue, 0, len(extra)+3)
+	for _, k := range slices.Sorted(maps.Keys(extra)) {
+		attrs = append(attrs, attribute.String(k, extra[k]))
+	}
+	attrs = append(attrs,
 		attribute.String("service.name", "shinyhub"),
 		attribute.String("service.version", version),
-		attribute.String("service.instance.id", serviceInstanceID()),
+		attribute.String("service.instance.id", instanceID),
 	)
+	return resource.NewSchemaless(attrs...)
 }
 
 // serviceInstanceID returns the host's name, or a random hex token when the

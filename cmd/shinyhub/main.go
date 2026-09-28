@@ -1721,7 +1721,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// on the collector being reachable.
 	var tracer *servertrace.Tracer
 	if cfg.Tracing.Enabled {
-		tracer, err = servertrace.Setup(ctx, cfg.Tracing, version)
+		tracer, err = servertrace.Setup(ctx, cfg.Tracing, version, cfg.Server.InstanceID)
 		if err != nil {
 			return fmt.Errorf("server tracing setup: %w", err)
 		}
