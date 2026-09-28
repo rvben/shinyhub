@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"strings"
@@ -38,7 +39,9 @@ func idleHibernationWatcher(mgr *fakeManager, st *fakeStore) *Watcher {
 	prx := newFakeProxy()
 	prx.seen["app"] = time.Now().Add(-2 * time.Hour)
 	return newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 }
 
 // idleApp is a running app with one running replica row, so reconcileStatuses
@@ -140,7 +143,9 @@ func TestReconcile_LogsStatusUpdateFailure(t *testing.T) {
 	st.updateStatusErr = errors.New("db locked")
 	mgr := &fakeManager{entries: []*process.ProcessInfo{{Slug: "app", Index: 0, Status: process.StatusRunning}}}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	buf, restore := captureWarnings(t)
 	defer restore()

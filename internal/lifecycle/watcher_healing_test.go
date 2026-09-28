@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -14,8 +15,8 @@ import (
 
 // healingDeploy returns a deploy func that records the indices it was asked to
 // deploy and returns a fresh remote endpoint/worker on success.
-func healingDeploy(calls *[]int) func(slug, dir string, idx int) (*deploy.Result, error) {
-	return func(slug, dir string, idx int) (*deploy.Result, error) {
+func healingDeploy(calls *[]int) func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+	return func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
 		*calls = append(*calls, idx)
 		return &deploy.Result{
 			Index: idx, PID: 500 + idx, Port: 9000 + idx,
@@ -88,7 +89,7 @@ func TestReconcileLostReplicas_NoWorkerIsZeroCost(t *testing.T) {
 	}
 	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, dir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			return &deploy.Result{}, nil
 		})
@@ -134,7 +135,7 @@ func assertZeroCostError(t *testing.T, deployErr error) {
 		[]*db.Deployment{{ID: 7, BundleDir: "/bundles/v1"}},
 	)
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, dir string, idx int) (*deploy.Result, error) { return nil, deployErr })
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) { return nil, deployErr })
 
 	w.restartSlot(st.apps["app"], 0, false)
 
@@ -378,7 +379,7 @@ func TestReconcileReplicas_NeverRestartsWarm(t *testing.T) {
 	}
 	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, dir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			return &deploy.Result{Index: idx, PID: 100, Port: 9000}, nil
 		})
@@ -556,7 +557,7 @@ func TestRestartSlot_LostRestartFailureRecordsCrash(t *testing.T) {
 		1: {{AppID: 1, Index: 0, Status: db.ReplicaStatusLost, Tier: "remote", WorkerID: "node-a"}},
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, dir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
 			return nil, fmt.Errorf("bundle install failed")
 		})
 	w.EnableLostReplicaHealing(func(tier string) bool { return true })
@@ -582,7 +583,7 @@ func TestRestartSlot_CrashRestartFailureCannotUndoLoss(t *testing.T) {
 		1: {{AppID: 1, Index: 0, Status: "crashed", Tier: "remote", WorkerID: "node-a"}},
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, dir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
 			// The sweep wins the race while the restart deploy is in flight.
 			st.mu.Lock()
 			st.replicas[1][0].Status = db.ReplicaStatusLost
@@ -731,7 +732,7 @@ func TestRestartSlot_LostForgivenessOncePerEpisode(t *testing.T) {
 	var deployFails atomic.Bool
 	deployFails.Store(true)
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, dir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
 			deploys.Add(1)
 			if deployFails.Load() {
 				return nil, errors.New("bundle boot failed")
@@ -969,7 +970,7 @@ func TestRunOnce_ReviveRestoresProxyPoolBeforeHeal(t *testing.T) {
 	prx := newFakeProxy()
 	var sizeAtDeploy []int
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, dir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
 			prx.mu.Lock()
 			sizeAtDeploy = append(sizeAtDeploy, prx.poolSizes[slug])
 			prx.mu.Unlock()

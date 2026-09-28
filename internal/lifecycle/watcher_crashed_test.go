@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +20,7 @@ func TestHandleCrashed_RuntimeCrashLoopMarksCrashed(t *testing.T) {
 	st := newFakeStore(map[string]*db.App{"loopy": app}, []*db.Deployment{{AppID: 1, BundleDir: "/tmp/loopy"}})
 	mgr := &fakeManager{logTail: "RuntimeError: simulated runtime failure"}
 	boots := 0
-	deployFn := func(_, _ string, idx int) (*deploy.Result, error) {
+	deployFn := func(_ context.Context, _, _ string, idx int) (*deploy.Result, error) {
 		boots++
 		return &deploy.Result{Index: idx, PID: 100 + boots, Port: 20000 + boots}, nil
 	}
@@ -51,7 +52,7 @@ func TestHandleCrashed_WritesAuditEvent(t *testing.T) {
 	app := &db.App{ID: 1, Slug: "loopy", Status: "running", Replicas: 1}
 	st := newFakeStore(map[string]*db.App{"loopy": app}, []*db.Deployment{{AppID: 1, BundleDir: "/tmp/loopy"}})
 	mgr := &fakeManager{logTail: "RuntimeError: simulated runtime failure"}
-	deployFn := func(_, _ string, idx int) (*deploy.Result, error) {
+	deployFn := func(_ context.Context, _, _ string, idx int) (*deploy.Result, error) {
 		return &deploy.Result{Index: idx, PID: 1, Port: 2}, nil
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 2}, mgr, newFakeProxy(), st, deployFn)
@@ -106,7 +107,7 @@ func TestHandleCrashed_OOMKillNamesMemoryLimit(t *testing.T) {
 			{"hungry", 0}: {OOMKilled: true, MemoryLimitMB: 2048, At: time.Now()},
 		},
 	}
-	deployFn := func(_, _ string, idx int) (*deploy.Result, error) {
+	deployFn := func(_ context.Context, _, _ string, idx int) (*deploy.Result, error) {
 		return &deploy.Result{Index: idx, PID: 1, Port: 2}, nil
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 2}, mgr, newFakeProxy(), st, deployFn)
@@ -131,7 +132,7 @@ func TestHandleCrashed_OOMKillNamesMemoryLimit(t *testing.T) {
 func TestHandleCrashed_StableBetweenCrashesDoesNotLoop(t *testing.T) {
 	app := &db.App{ID: 1, Slug: "occasional", Status: "running", Replicas: 1}
 	st := newFakeStore(map[string]*db.App{"occasional": app}, []*db.Deployment{{AppID: 1, BundleDir: "/tmp/x"}})
-	deployFn := func(_, _ string, idx int) (*deploy.Result, error) {
+	deployFn := func(_ context.Context, _, _ string, idx int) (*deploy.Result, error) {
 		return &deploy.Result{Index: idx, PID: 1, Port: 2}, nil
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 2}, &fakeManager{}, newFakeProxy(), st, deployFn)
@@ -149,7 +150,7 @@ func TestHandleCrashed_StableBetweenCrashesDoesNotLoop(t *testing.T) {
 	}
 }
 
-func noopDeploy(_, _ string, idx int) (*deploy.Result, error) {
+func noopDeploy(_ context.Context, _, _ string, idx int) (*deploy.Result, error) {
 	return &deploy.Result{Index: idx}, nil
 }
 

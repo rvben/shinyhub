@@ -70,7 +70,7 @@ func (p *modeRecordingProxy) RegisterReplica(string, int, string, http.RoundTrip
 }
 
 func newPoolModeWatcher(cfg Config, prx *modeRecordingProxy, st *fakeStore,
-	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
+	deployFn func(_ context.Context, slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
 		cfg:           cfg,
 		mgr:           &fakeManager{},
@@ -112,7 +112,7 @@ func TestWake_ElasticPerSession_SkipsReplicaBoot(t *testing.T) {
 		},
 		prx,
 		st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			deployMu.Lock()
 			deployCount++
 			deployMu.Unlock()
@@ -169,7 +169,7 @@ func TestWake_Multiplex_StillBootsReplicas(t *testing.T) {
 		Config{RestartMaxAttempts: 5},
 		prx,
 		st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			deployCount++
 			return &deploy.Result{Index: idx, PID: 55, Port: 20055}, nil
 		},
@@ -218,7 +218,7 @@ func TestWake_FleetDefaultElastic_SkipsReplicaBoot(t *testing.T) {
 		},
 		prx,
 		st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			deployMu.Lock()
 			deployCount++
 			deployMu.Unlock()
@@ -282,7 +282,7 @@ func TestRestoreWarm_FleetDefaultElastic_Skipped(t *testing.T) {
 		},
 		prx,
 		st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			deployCount++
 			return &deploy.Result{Index: idx, PID: 77, Port: 20077}, nil
 		},
@@ -328,7 +328,7 @@ func TestRestoreWarm_ElasticSkipped(t *testing.T) {
 		Config{RestartMaxAttempts: 5},
 		prx,
 		st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			deployCount++
 			return &deploy.Result{Index: idx, PID: 77, Port: 20077}, nil
 		},

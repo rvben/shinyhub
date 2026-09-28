@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -35,7 +36,7 @@ func TestWatchdog_LostReplicaIsNotCrashed(t *testing.T) {
 	var mu sync.Mutex
 	var deployed []string
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, _ string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, _ string, idx int) (*deploy.Result, error) {
 			mu.Lock()
 			deployed = append(deployed, slug)
 			mu.Unlock()

@@ -72,7 +72,7 @@ func TestMetrics_WakeRecordsTransition(t *testing.T) {
 		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
 	)
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
 		})
 	rec := &fakeRecorder{}
@@ -98,7 +98,7 @@ func TestMetrics_RestartRecordsReplicaRestart(t *testing.T) {
 		[]*db.Deployment{{BundleDir: "/bundles/v1"}},
 	)
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
 		})
 	rec := &fakeRecorder{}

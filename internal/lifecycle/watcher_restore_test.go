@@ -26,7 +26,7 @@ func TestRestoreWarm_BootsThenFreezesHibernatedApps(t *testing.T) {
 
 	var booted sync.Map
 	var bootCount int32
-	deployFn := func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+	deployFn := func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 		// Mirror production's proxy.RegisterReplica contract: the pool must be
 		// sized before a replica boots, otherwise registration fails with
 		// "pool size not set or index out of range". Recovery only sizes
@@ -103,7 +103,7 @@ func TestRestoreWarm_SkipsWhenClaimLost(t *testing.T) {
 	st.forceHibernatedList = []*db.App{apps["warm"]}
 	mgr := &fakeManager{suspendFreed: true}
 	var bootCount int32
-	deployFn := func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+	deployFn := func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 		atomic.AddInt32(&bootCount, 1)
 		return &deploy.Result{Index: idx}, nil
 	}
@@ -131,7 +131,7 @@ func TestRestoreWarm_RequestDuringRestoreLeavesRunning(t *testing.T) {
 	mgr := &fakeManager{suspendFreed: true}
 	prx := newFakeProxy()
 	prx.hibernateNever = true // simulate an in-flight request: BeginHibernate aborts
-	deployFn := func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+	deployFn := func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 		return &deploy.Result{Index: idx, PID: 99, Port: 20099}, nil
 	}
 	w := newTestWatcher(Config{DefaultMaxSessionsPerReplica: 5}, mgr, prx, st, deployFn)
@@ -154,7 +154,7 @@ func TestRestoreWarm_SkipsAppWithoutDeployment(t *testing.T) {
 	st := newFakeStore(apps, nil) // no deployments
 	mgr := &fakeManager{suspendFreed: true}
 	var bootCount int32
-	deployFn := func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+	deployFn := func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 		atomic.AddInt32(&bootCount, 1)
 		return &deploy.Result{Index: idx}, nil
 	}
@@ -179,7 +179,7 @@ func TestRestoreWarm_BootFailureLeavesCold(t *testing.T) {
 	st := newFakeStore(apps, []*db.Deployment{{AppID: 1, BundleDir: "/tmp/warm"}})
 	mgr := &fakeManager{suspendFreed: true}
 	prx := newFakeProxy()
-	deployFn := func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+	deployFn := func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 		return nil, errors.New("health check failed")
 	}
 	w := newTestWatcher(Config{}, mgr, prx, st, deployFn)
@@ -203,7 +203,7 @@ func TestRestoreWarm_PartialBootCleansUp(t *testing.T) {
 	st := newFakeStore(apps, []*db.Deployment{{AppID: 1, BundleDir: "/tmp/warm"}})
 	mgr := &fakeManager{suspendFreed: true}
 	prx := newFakeProxy()
-	deployFn := func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+	deployFn := func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 		if idx == 1 {
 			return nil, errors.New("port exhausted on replica 1")
 		}

@@ -13,7 +13,7 @@ import (
 // newTestWatcherWithOwner builds a Watcher with a configurable isOwner predicate.
 func newTestWatcherWithOwner(cfg Config, mgr *fakeManager, prx *fakeProxy, st *fakeStore,
 	isOwner func() bool,
-	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
+	deployFn func(_ context.Context, slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	w := newTestWatcher(cfg, mgr, prx, st, deployFn)
 	w.isOwner = isOwner
 	return w
@@ -30,7 +30,7 @@ func TestWakeTrigger_StandbyBeginsWakeButDoesNotDrive(t *testing.T) {
 	var deployCount int32
 	w := newTestWatcherWithOwner(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
 		func() bool { return false }, // standby
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			return &deploy.Result{Index: idx, PID: 99, Port: 20099}, nil
 		})
@@ -61,7 +61,7 @@ func TestWakeTrigger_ActiveDrivesInline(t *testing.T) {
 	var deployCount int32
 	w := newTestWatcherWithOwner(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
 		func() bool { return true }, // active owner
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
 		})
@@ -94,7 +94,7 @@ func TestReconciler_DrivesWakingAppsInClusteredMode(t *testing.T) {
 	)
 	var deployCount int32
 	w := newTestWatcher(Config{Clustered: true, RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			return &deploy.Result{Index: idx, PID: 77, Port: 20077}, nil
 		})
@@ -128,7 +128,7 @@ func TestDriveWakingApp_DeploymentIDSet(t *testing.T) {
 		[]*db.Deployment{{ID: deploymentID, BundleDir: "/bundles/v1", Version: "v1"}},
 	)
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			return &deploy.Result{Index: idx, PID: 55, Port: 20055}, nil
 		})
 
@@ -166,7 +166,7 @@ func TestDriveWakingApp_DoubleDriveDedup(t *testing.T) {
 	var once sync.Once
 	canProceed := make(chan struct{})
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			once.Do(func() { close(canProceed) })
 			atomic.AddInt32(&deployCount, 1)
 			return &deploy.Result{Index: idx, PID: 66, Port: 20066}, nil
@@ -198,7 +198,7 @@ func TestWakeTrigger_SingleNodeIsOwnerByDefault(t *testing.T) {
 	var deployCount int32
 	// isOwner left nil - the default for single-node (not calling SetIsOwner).
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			return &deploy.Result{Index: idx, PID: 11, Port: 20011}, nil
 		})

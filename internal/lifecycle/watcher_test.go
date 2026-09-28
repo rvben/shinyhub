@@ -634,7 +634,7 @@ func (f *fakeStore) ListHibernatedApps() ([]*db.App, error) {
 // newTestWatcher builds a Watcher with fakes. Tests in the same package can
 // call runOnce() directly without starting the background goroutine.
 func newTestWatcher(cfg Config, mgr *fakeManager, prx *fakeProxy, st *fakeStore,
-	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
+	deployFn func(_ context.Context, slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
 		cfg:           cfg,
 		mgr:           mgr,
@@ -664,7 +664,7 @@ func TestWatchdog_RestartsOnCrash(t *testing.T) {
 	var deployed []string
 	var mu sync.Mutex
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			mu.Lock()
 			deployed = append(deployed, slug)
 			mu.Unlock()
@@ -724,7 +724,7 @@ func TestWatcher_ActivationFenceBlocksRuntimeMutationBetweenRepairAttempts(t *te
 	prx.seen["myapp"] = time.Now().Add(-2 * time.Hour)
 	deployCalls := 0
 	w := newTestWatcher(Config{HibernateTimeout: time.Minute, RestartMaxAttempts: 5}, mgr, prx, st,
-		func(string, string, int) (*deploy.Result, error) {
+		func(context.Context, string, string, int) (*deploy.Result, error) {
 			deployCalls++
 			return &deploy.Result{}, nil
 		})
@@ -754,7 +754,7 @@ func TestWatcher_ActivationFenceFailsClosedWhenStoreUnavailable(t *testing.T) {
 	deployCalls := 0
 	w := newTestWatcher(Config{RestartMaxAttempts: 5},
 		&fakeManager{}, newFakeProxy(), st,
-		func(string, string, int) (*deploy.Result, error) {
+		func(context.Context, string, string, int) (*deploy.Result, error) {
 			deployCalls++
 			return &deploy.Result{}, nil
 		})
@@ -789,7 +789,7 @@ func TestWatchdog_ReconcilesCrashedReplicaSlot(t *testing.T) {
 	var deployedIdx []int
 	var mu sync.Mutex
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			mu.Lock()
 			deployedIdx = append(deployedIdx, idx)
 			mu.Unlock()
@@ -831,7 +831,7 @@ func TestWatchdog_IgnoresCrashedSlotAboveReplicaCount(t *testing.T) {
 	}
 	var calls int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&calls, 1)
 			return &deploy.Result{Index: idx, PID: 1, Port: 1}, nil
 		})
@@ -871,7 +871,9 @@ func TestRunOnce_BatchesReconcileQueries(t *testing.T) {
 		3: {{AppID: 3, Index: 0, Status: db.ReplicaStatusRunning, DesiredState: "running"}},
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	w.runOnce()
 
@@ -917,7 +919,7 @@ func TestRunOnce_ReconcileStatusesSeesSameTickReplicaRestart(t *testing.T) {
 		},
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			return &deploy.Result{Index: idx, PID: 11, Port: 20011}, nil
 		})
 
@@ -938,7 +940,7 @@ func TestWatchdog_ExponentialBackoff(t *testing.T) {
 	)
 	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			return nil, fmt.Errorf("still crashed")
 		})
@@ -981,7 +983,7 @@ func TestWatchdog_GivesUpAfterMaxAttempts(t *testing.T) {
 	st.replicas = map[int64][]*db.Replica{1: {{AppID: 1, Index: 0, Status: "crashed"}}}
 	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 3}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			return nil, fmt.Errorf("always fails")
 		})
@@ -1017,7 +1019,7 @@ func TestWatchdog_ResetsAttemptsOnSuccess(t *testing.T) {
 	st.replicas = map[int64][]*db.Replica{1: {{AppID: 1, Index: 0, Status: "crashed"}}}
 	var callCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, newFakeProxy(), st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			n := atomic.AddInt32(&callCount, 1)
 			if n < 2 {
 				return nil, fmt.Errorf("fail once")
@@ -1081,7 +1083,9 @@ func TestHibernation_StopsIdleApp(t *testing.T) {
 		nil,
 	)
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	w.runOnce()
 
@@ -1141,7 +1145,9 @@ func TestHibernation_StopFailureDoesNotPersistHibernatedStatus(t *testing.T) {
 		1: {{AppID: 1, Index: 0, Status: db.ReplicaStatusRunning, DesiredState: "running"}},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	w.runOnce()
 
@@ -1190,7 +1196,9 @@ func TestHibernation_AbortsWhenActivityRacesIn(t *testing.T) {
 		nil,
 	)
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	// Race the activity in: bump lastSeen so BeginHibernate's CAS check fails.
 	// (The fake's BeginHibernate compares against its `seen` map.)
@@ -1233,7 +1241,9 @@ func TestHibernation_RespectsPerAppDisable(t *testing.T) {
 		nil,
 	)
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	w.runOnce()
 
@@ -1262,7 +1272,9 @@ func TestHibernation_RespectsPerAppCustomTimeout(t *testing.T) {
 		nil,
 	)
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	w.runOnce()
 
@@ -1283,7 +1295,9 @@ func TestHibernation_GloballyDisabled(t *testing.T) {
 		nil,
 	)
 	w := newTestWatcher(Config{HibernateTimeout: 0, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	w.runOnce()
 
@@ -1324,7 +1338,7 @@ func TestWake_TriggeredOnWakeTrigger(t *testing.T) {
 	var deployed []string
 	var mu sync.Mutex
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			mu.Lock()
 			deployed = append(deployed, slug)
 			mu.Unlock()
@@ -1372,7 +1386,7 @@ func TestWake_AllReplicasFailMarksAppCrashed(t *testing.T) {
 	)
 	bootErr := errors.New("exec: \"python\": executable file not found in $PATH")
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(_, _ string, _ int) (*deploy.Result, error) {
+		func(_ context.Context, _, _ string, _ int) (*deploy.Result, error) {
 			return nil, bootErr
 		})
 
@@ -1411,7 +1425,7 @@ func TestWake_ProvenancePersistenceFailureStopsUntrackedConsumers(t *testing.T) 
 	st.upsertErr = errors.New("database unavailable")
 	mgr := &fakeManager{}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, prx, st,
-		func(_ string, _ string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, _ string, _ string, idx int) (*deploy.Result, error) {
 			return &deploy.Result{Index: idx, PID: 40 + idx, Port: 20040 + idx, EndpointURL: fmt.Sprintf("http://replica-%d", idx)}, nil
 		})
 
@@ -1445,7 +1459,7 @@ func TestWake_NoConcurrentWakes(t *testing.T) {
 	)
 	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			time.Sleep(30 * time.Millisecond) // slow to create race window
 			return &deploy.Result{Index: idx, PID: 44, Port: 20044}, nil
@@ -1473,7 +1487,7 @@ func TestWake_SupersededByStopTearsDownReplicas(t *testing.T) {
 	)
 	mgr := &fakeManager{}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, prx, st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			// Simulate a concurrent stop landing mid-deploy: move off "waking".
 			_ = st.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "app", Status: "stopped"})
 			return &deploy.Result{Index: idx, PID: 33, Port: 20033}, nil
@@ -1511,7 +1525,7 @@ func TestWake_SupersededByDeleteTearsDownReplicas(t *testing.T) {
 	)
 	mgr := &fakeManager{}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, prx, st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			// Simulate a concurrent delete removing the row mid-deploy.
 			st.mu.Lock()
 			delete(st.apps, "app")
@@ -1553,7 +1567,9 @@ func TestHibernation_ActiveAppNotStopped(t *testing.T) {
 		nil,
 	)
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	w.runOnce()
 
@@ -1570,7 +1586,7 @@ func TestWake_NonHibernatedAppNotRedeployed(t *testing.T) {
 	)
 	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			return &deploy.Result{Index: idx, PID: 55, Port: 20055}, nil
 		})
@@ -1605,7 +1621,7 @@ func TestWatcher_OneReplicaCrashesOtherStays(t *testing.T) {
 	var restartedIndex int = -1
 	w := newTestWatcher(Config{WatchInterval: time.Millisecond, RestartMaxAttempts: 3},
 		mgr, newFakeProxy(), st,
-		func(slug, dir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
 			restartedIndex = idx
 			return &deploy.Result{Index: idx, PID: 42, Port: 20002}, nil
 		})
@@ -1634,7 +1650,7 @@ func TestWatcher_RestartHoldsConsumerGateThroughReplicaProvenanceWrite(t *testin
 		}
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 3}, &fakeManager{}, newFakeProxy(), st,
-		func(_ string, _ string, index int) (*deploy.Result, error) {
+		func(_ context.Context, _ string, _ string, index int) (*deploy.Result, error) {
 			if gateHeld.Load() != 1 {
 				t.Error("consumer publication gate was not held during process boot")
 			}
@@ -1668,7 +1684,7 @@ func TestWatcher_RestartRefusesCompatibilityQuarantine(t *testing.T) {
 	st.quarantined = true
 	var deployCalls atomic.Int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 3}, &fakeManager{}, newFakeProxy(), st,
-		func(_ string, _ string, _ int) (*deploy.Result, error) {
+		func(_ context.Context, _ string, _ string, _ int) (*deploy.Result, error) {
 			deployCalls.Add(1)
 			return &deploy.Result{}, nil
 		})
@@ -1697,7 +1713,9 @@ func TestWatcher_AllReplicasCrashed(t *testing.T) {
 	}
 	w := newTestWatcher(Config{WatchInterval: time.Millisecond, RestartMaxAttempts: 1},
 		mgr, newFakeProxy(), st,
-		func(slug, dir string, idx int) (*deploy.Result, error) { return nil, fmt.Errorf("boom") })
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return nil, fmt.Errorf("boom")
+		})
 	// exhaust attempts for both replicas
 	w.runOnce()
 	// advance nextRetry for both replicas so the second round fires
@@ -1734,7 +1752,9 @@ func TestHibernation_DrainsPool(t *testing.T) {
 		nil,
 	)
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	w.runOnce()
 
@@ -1768,7 +1788,7 @@ func TestWatcher_WakeTriggerWakesAllReplicas(t *testing.T) {
 	var mu sync.Mutex
 	started := map[int]bool{}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, dir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
 			mu.Lock()
 			started[idx] = true
 			mu.Unlock()
@@ -1797,7 +1817,9 @@ func TestWake_AllReplicasFailKeepsHibernated(t *testing.T) {
 		deployments: []*db.Deployment{{BundleDir: "/tmp/demo"}},
 	}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, dir string, idx int) (*deploy.Result, error) { return nil, fmt.Errorf("boom") })
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return nil, fmt.Errorf("boom")
+		})
 
 	w.WakeTrigger(context.Background(), "demo")
 	waitNotWaking(t, st, "demo")
@@ -1871,7 +1893,7 @@ func TestWakingReconcile_SingleNodeDrivesStuckWake(t *testing.T) {
 		RestartMaxAttempts: 5,
 		Clustered:          false, // single-node
 	}, &fakeManager{}, prx, st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			mu.Lock()
 			deployed = append(deployed, slug)
 			mu.Unlock()
@@ -1915,7 +1937,7 @@ func TestWakingReconcile_ClusteredBehaviorUnchanged(t *testing.T) {
 		RestartMaxAttempts: 5,
 		Clustered:          true, // clustered
 	}, &fakeManager{}, prx, st,
-		func(slug, bundleDir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, bundleDir string, idx int) (*deploy.Result, error) {
 			mu.Lock()
 			deployed = append(deployed, slug)
 			mu.Unlock()
@@ -1977,7 +1999,9 @@ func TestClusteredHibernation_OtherInstanceActiveBlocksHibernation(t *testing.T)
 		RestartMaxAttempts: 5,
 		Clustered:          true,
 		InstanceID:         "self",
-	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	}, mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+		return &deploy.Result{}, nil
+	})
 
 	w.runOnce()
 
@@ -2031,7 +2055,9 @@ func TestClusteredHibernation_LocalRaceBlocksDBCAS(t *testing.T) {
 		RestartMaxAttempts: 5,
 		Clustered:          true,
 		InstanceID:         "self",
-	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	}, mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+		return &deploy.Result{}, nil
+	})
 
 	w.runOnce()
 
@@ -2076,7 +2102,9 @@ func TestClusteredHibernation_FleetIdleButLocalRecentlyActivePreventsHibernation
 		RestartMaxAttempts: 5,
 		Clustered:          true,
 		InstanceID:         "self",
-	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	}, mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+		return &deploy.Result{}, nil
+	})
 
 	w.runOnce()
 
@@ -2108,7 +2136,9 @@ func TestClusteredHibernation_FleetIdleAndLocalIdleHibernates(t *testing.T) {
 		RestartMaxAttempts: 5,
 		Clustered:          true,
 		InstanceID:         "self",
-	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	}, mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+		return &deploy.Result{}, nil
+	})
 
 	// Patch mgr.Stop to record that HibernateApp was already called before Stop.
 	// We verify order by inspecting hibernateAppCalls at Stop time.
@@ -2192,7 +2222,9 @@ func TestClusteredHibernation_SingleNodeUnchanged(t *testing.T) {
 		HibernateTimeout:   30 * time.Minute,
 		RestartMaxAttempts: 5,
 		Clustered:          false,
-	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	}, mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+		return &deploy.Result{}, nil
+	})
 
 	w.runOnce()
 
@@ -2239,7 +2271,9 @@ func TestClusteredHibernation_OtherInstanceRecentActivityBlocksHibernation(t *te
 		RestartMaxAttempts: 5,
 		Clustered:          true,
 		InstanceID:         "self",
-	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	}, mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+		return &deploy.Result{}, nil
+	})
 
 	w.runOnce()
 
@@ -2310,7 +2344,9 @@ func TestHandleIdle_WarmShrinkReplacesHibernate(t *testing.T) {
 	}
 	var mu sync.Mutex
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 	w.SetWarmOps(
 		func(slug string, floor int) (bool, error) {
 			mu.Lock()
@@ -2388,7 +2424,9 @@ func TestHandleIdle_ZeroFloorHibernatesExactlyAsToday(t *testing.T) {
 
 	var shrinkCalled bool
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 	w.SetWarmOps(
 		func(slug string, floor int) (bool, error) { shrinkCalled = true; return false, nil },
 		func(slug string) (bool, error) { return false, nil },
@@ -2441,7 +2479,9 @@ func TestHandleIdle_NotIdleNoShrink(t *testing.T) {
 
 	var shrinkCalled, hibernateCalled bool
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 	w.SetWarmOps(
 		func(slug string, floor int) (bool, error) { shrinkCalled = true; return false, nil },
 		func(slug string) (bool, error) { return false, nil },
@@ -2484,7 +2524,9 @@ func TestHandleIdle_NilWarmOpsFallsBackToHibernate(t *testing.T) {
 
 	// No SetWarmOps call: warmShrink remains nil.
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 
 	w.runOnce()
 
@@ -2545,7 +2587,9 @@ func TestHandleIdle_ClusteredWarmShrinkReplacesHibernate(t *testing.T) {
 		RestartMaxAttempts: 5,
 		Clustered:          true,
 		InstanceID:         "self",
-	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	}, mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+		return &deploy.Result{}, nil
+	})
 	w.SetWarmOps(
 		func(slug string, floor int) (bool, error) {
 			mu.Lock()
@@ -2621,7 +2665,9 @@ func warmExpandSetup(t *testing.T, shrinkTime time.Time) (*fakeManager, *fakePro
 		},
 	}
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 	return mgr, prx, st, w
 }
 
@@ -2940,7 +2986,7 @@ func TestWakeTrigger_HibernatedApp_PerformsWakeFlowNotWarmExpand(t *testing.T) {
 	var expandCalled bool
 	var deployCount int32
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, &fakeManager{}, prx, st,
-		func(slug, dir string, idx int) (*deploy.Result, error) {
+		func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
 			atomic.AddInt32(&deployCount, 1)
 			return &deploy.Result{Index: idx, PID: 42, Port: 20042}, nil
 		})
@@ -3074,7 +3120,9 @@ func TestHandleIdle_AlreadyAtFloorSkipsWarmShrink(t *testing.T) {
 
 	var shrinkCalled bool
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 	w.SetWarmOps(
 		func(slug string, floor int) (bool, error) { shrinkCalled = true; return false, nil },
 		func(slug string) (bool, error) { return false, nil },
@@ -3120,7 +3168,9 @@ func TestHandleIdle_AboveFloorCallsWarmShrink(t *testing.T) {
 
 	var shrinkCalled bool
 	w := newTestWatcher(Config{HibernateTimeout: 30 * time.Minute, RestartMaxAttempts: 5},
-		mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+		mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+			return &deploy.Result{}, nil
+		})
 	w.SetWarmOps(
 		func(slug string, floor int) (bool, error) { shrinkCalled = true; return true, nil },
 		func(slug string) (bool, error) { return false, nil },
@@ -3162,7 +3212,9 @@ func TestHandleIdle_ClusteredAlreadyAtFloorSkipsWarmShrink(t *testing.T) {
 		RestartMaxAttempts: 5,
 		Clustered:          true,
 		InstanceID:         "self",
-	}, mgr, prx, st, func(slug, dir string, idx int) (*deploy.Result, error) { return &deploy.Result{}, nil })
+	}, mgr, prx, st, func(_ context.Context, slug, dir string, idx int) (*deploy.Result, error) {
+		return &deploy.Result{}, nil
+	})
 	w.SetWarmOps(
 		func(slug string, floor int) (bool, error) { shrinkCalled = true; return false, nil },
 		func(slug string) (bool, error) { return false, nil },

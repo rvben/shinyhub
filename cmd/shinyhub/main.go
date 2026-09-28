@@ -1872,7 +1872,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		)
 	}
 
-	deployFn := func(slug, bundleDir string, index int) (*deploy.Result, error) {
+	deployFn := func(ctx context.Context, slug, bundleDir string, index int) (*deploy.Result, error) {
 		app, err := store.GetApp(slug)
 		if err != nil {
 			return nil, fmt.Errorf("get app for deploy: %w", err)
@@ -1937,12 +1937,12 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 				DesiredState: "running", DeploymentID: &deploymentID, ConsumerBooted: true,
 			})
 		}
-		return deploy.RunReplica(p, index)
+		return deploy.RunReplica(traceReplica(ctx, tracer, p), index)
 	}
 
 	// resumeFn restores a suspended replica via the Snapshotter path, mirroring
 	// deployFn's Params shape (placement/tier so the route transport resolves).
-	resumeFn := func(slug, bundleDir string, index int) (*deploy.Result, error) {
+	resumeFn := func(ctx context.Context, slug, bundleDir string, index int) (*deploy.Result, error) {
 		app, err := store.GetApp(slug)
 		if err != nil {
 			return nil, fmt.Errorf("get app for resume: %w", err)
@@ -1962,7 +1962,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			p.DeploymentID = deps[0].ID
 			p.AppVersion = deps[0].Version
 		}
-		return deploy.ResumeReplica(p, index)
+		return deploy.ResumeReplica(traceReplica(ctx, tracer, p), index)
 	}
 
 	lcCfg := lifecycle.Config{

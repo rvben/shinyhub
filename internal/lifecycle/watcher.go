@@ -16,8 +16,8 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/spanerr"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -206,7 +206,7 @@ type Watcher struct {
 	mgr    manager
 	prx    proxyBackend
 	store  appStore
-	deploy func(slug, bundleDir string, index int) (*deploy.Result, error)
+	deploy func(ctx context.Context, slug, bundleDir string, index int) (*deploy.Result, error)
 
 	// tierHealthy reports whether a healthy worker exists for a tier. It gates
 	// re-placement of lost replicas: nil disables lost-replica healing entirely;
@@ -289,7 +289,7 @@ type Watcher struct {
 	// resume restores a suspended replica via deploy.ResumeReplica. nil disables
 	// the warm-wake path: every wake cold-boots (safe default for unconfigured
 	// setups). Set once at startup via SetResume before Start.
-	resume func(slug, bundleDir string, index int) (*deploy.Result, error)
+	resume func(ctx context.Context, slug, bundleDir string, index int) (*deploy.Result, error)
 	// acquireConsumerBootGate serializes fresh consumer startup with serving-data
 	// publishers. nil is safe when no jobs manager is configured.
 	acquireConsumerBootGate func(appID int64) (func(), error)
@@ -302,9 +302,12 @@ const wakeDrainTimeout = 15 * time.Second
 
 // New constructs a Watcher. deployFn encapsulates deploy.RunReplica with the
 // shared Manager and Proxy so wake/restart paths can persist the resulting PID
-// and port on a per-replica basis.
+// and port on a per-replica basis. Its ctx carries the lifecycle span
+// (lifecycle.wake or lifecycle.restart) the boot runs under, for trace
+// parentage only: it is never cancelled, and callers without a span pass
+// context.Background().
 func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
-	deployFn func(slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
+	deployFn func(ctx context.Context, slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
 		cfg:              cfg,
 		mgr:              mgr,
@@ -471,7 +474,7 @@ func (w *Watcher) SetWarmOps(shrink func(slug string, floor int) (bool, error), 
 
 // SetResume wires the warm-wake executor (deploy.ResumeReplica). nil leaves the
 // warm-wake path disabled: every wake cold-boots. Call once at startup before Start.
-func (w *Watcher) SetResume(fn func(slug, bundleDir string, index int) (*deploy.Result, error)) {
+func (w *Watcher) SetResume(fn func(ctx context.Context, slug, bundleDir string, index int) (*deploy.Result, error)) {
 	w.resume = fn
 }
 
@@ -727,7 +730,7 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 				booted = false
 				break
 			}
-			result, derr := w.deploy(app.Slug, bundleDir, i)
+			result, derr := w.deploy(context.Background(), app.Slug, bundleDir, i)
 			if derr != nil {
 				slog.Warn("warm restore: boot failed; leaving app cold", "slug", app.Slug, "idx", i, "err", derr)
 				booted = false
@@ -884,15 +887,15 @@ type wakeReplicaFailure struct {
 // tries the warm Resume path first; on any resume error (or when resume is
 // unconfigured / the replica was not suspended) it falls back to the existing
 // cold RunReplica boot. The fallback guarantees wake is never worse than today.
-func (w *Watcher) wakeReplica(slug, bundleDir string, index int, suspended bool) (*deploy.Result, bool, error) {
+func (w *Watcher) wakeReplica(ctx context.Context, slug, bundleDir string, index int, suspended bool) (*deploy.Result, bool, error) {
 	if suspended && w.resume != nil {
-		res, err := w.resume(slug, bundleDir, index)
+		res, err := w.resume(ctx, slug, bundleDir, index)
 		if err == nil {
 			return res, false, nil
 		}
 		slog.Warn("watcher: resume failed; cold-booting", "slug", slug, "idx", index, "err", err)
 	}
-	res, err := w.deploy(slug, bundleDir, index)
+	res, err := w.deploy(ctx, slug, bundleDir, index)
 	return res, err == nil, err
 }
 
@@ -953,9 +956,11 @@ func (w *Watcher) enforceSuspendedCap() {
 
 // traceOp starts an internal span named op for slug and returns a derived
 // context plus an end func that records the operation's error (if any) and ends
-// the span. A no-op when tracing is disabled. Background operations are
-// unparented unless the caller supplies a parent in ctx, so without one the
-// returned context carries a root span. attrs are added beside the slug.
+// the span. The span carries the error reduced by spanerr (first line,
+// credentials masked, bounded), since a boot error can wrap build output. A
+// no-op when tracing is disabled. Background operations are unparented unless
+// the caller supplies a parent in ctx, so without one the returned context
+// carries a root span. attrs are added beside the slug.
 func (w *Watcher) traceOp(ctx context.Context, op, slug string, attrs ...attribute.KeyValue) (context.Context, func(err error)) {
 	if w.tracer == nil {
 		return ctx, func(error) {}
@@ -965,8 +970,7 @@ func (w *Watcher) traceOp(ctx context.Context, op, slug string, attrs ...attribu
 	span.SetAttributes(attrs...)
 	return ctx, func(err error) {
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			spanerr.Record(span, err)
 		}
 		span.End()
 	}
@@ -1294,7 +1298,7 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int, fromLost bool) {
 	}
 	w.mu.Unlock()
 
-	_, endSpan := w.traceOp(context.Background(), "lifecycle.restart", app.Slug)
+	ctx, endSpan := w.traceOp(context.Background(), "lifecycle.restart", app.Slug)
 	var opErr error
 	defer func() { endSpan(opErr) }()
 
@@ -1320,7 +1324,7 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int, fromLost bool) {
 		opErr = qerr
 		return
 	}
-	res, err := w.deploy(app.Slug, deployments[0].BundleDir, index)
+	res, err := w.deploy(ctx, app.Slug, deployments[0].BundleDir, index)
 	if err != nil {
 		if errors.Is(err, process.ErrNoLiveWorker) || errors.Is(err, process.ErrReplicaAlreadyRunning) {
 			return // not the app's fault: retry next tick at zero cost
@@ -2253,7 +2257,7 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) {
 		}
 		defer release()
 
-		_, endSpan := w.traceOp(parent, "lifecycle.wake", slug, attribute.String("shinyhub.wake.trigger", trigger))
+		ctx, endSpan := w.traceOp(parent, "lifecycle.wake", slug, attribute.String("shinyhub.wake.trigger", trigger))
 		var opErr error
 		defer func() { endSpan(opErr) }()
 
@@ -2347,7 +2351,7 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) {
 				wg.Add(1)
 				go func(idx int) {
 					defer wg.Done()
-					res, consumerBooted, err := w.wakeReplica(slug, deployments[0].BundleDir, idx, suspendedByIdx[idx])
+					res, consumerBooted, err := w.wakeReplica(ctx, slug, deployments[0].BundleDir, idx, suspendedByIdx[idx])
 					if err != nil {
 						slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
 						firstFailure.CompareAndSwap(nil, &wakeReplicaFailure{index: idx, err: err})
