@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/storage"
 )
 
@@ -906,6 +908,19 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		}
 	}
 	m.logFiles[key] = logWriter
+
+	// From here through publishing the entry below, a launched process can
+	// exist with nothing in m.entries pointing at it if this goroutine
+	// panics: only the next startup's recovery scan would ever reap it. So,
+	// unlike a background task recovered by safego, a panic in this window
+	// re-panics wrapped in safego.Fatal instead of being absorbed, so it
+	// still crashes the process the way an unrecovered panic would today,
+	// even when Start is called from underneath a safego-recovered goroutine.
+	defer func() {
+		if r := recover(); r != nil {
+			panic(safego.Fatal{Value: r, Stack: debug.Stack()})
+		}
+	}()
 
 	ep, err := rt.Start(context.Background(), p, logWriter)
 	if err != nil {
@@ -1830,6 +1845,16 @@ func (m *Manager) stop(slug string, requireConfirmed bool) error {
 		wg.Add(1)
 		go func(target stopTarget) {
 			defer wg.Done()
+			// A panic here must not vanish silently: the caller would see a
+			// false success (nil combined error) for a replica that never
+			// actually stopped. Converting it into an error keeps the fan-out
+			// pattern below intact instead of crashing the process.
+			defer func() {
+				if r := recover(); r != nil {
+					safego.RepanicFatal(r)
+					errs <- fmt.Errorf("replica %d: panic: %v", target.index, r)
+				}
+			}()
 			if err := m.stopReplicaByPoolKey(slug, target.poolKey, target.index, requireConfirmed); err != nil {
 				errs <- fmt.Errorf("replica %d: %w", target.index, err)
 			}
@@ -2076,6 +2101,14 @@ func (m *Manager) StopAll() error {
 		wg.Add(1)
 		go func(slug string) {
 			defer wg.Done()
+			// See the matching recover in stop(): a panic must become an
+			// error on errs, never a silently-false-successful join.
+			defer func() {
+				if r := recover(); r != nil {
+					safego.RepanicFatal(r)
+					errs <- fmt.Errorf("%s: panic: %v", slug, r)
+				}
+			}()
 			if err := m.Stop(slug); err != nil {
 				errs <- fmt.Errorf("%s: %w", slug, err)
 			}

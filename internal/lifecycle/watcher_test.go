@@ -2068,6 +2068,12 @@ func TestWake_ProvenancePersistenceFailureStopsUntrackedConsumers(t *testing.T) 
 	mgr := &fakeManager{}
 	w := newTestWatcher(Config{RestartMaxAttempts: 5}, mgr, prx, st,
 		func(_ string, _ string, idx int) (*deploy.Result, error) {
+			// Registers the manager entry the real deploy path (mgr.Start) would
+			// have created before persistence runs, so the wake cleanup below has
+			// something to find via ReplicaIncarnation.
+			mgr.mu.Lock()
+			mgr.entries = append(mgr.entries, &process.ProcessInfo{Slug: "app", Index: idx, PID: 40 + idx, Status: process.StatusRunning})
+			mgr.mu.Unlock()
 			return &deploy.Result{Index: idx, PID: 40 + idx, Port: 20040 + idx, EndpointURL: fmt.Sprintf("http://replica-%d", idx)}, nil
 		})
 
@@ -2080,10 +2086,21 @@ func TestWake_ProvenancePersistenceFailureStopsUntrackedConsumers(t *testing.T) 
 		t.Fatalf("app status=%q, want fail-closed hibernated", status)
 	}
 	mgr.mu.Lock()
-	stopped := append([]string(nil), mgr.stopped...)
+	stopCalls := append([]stopIncarnationCall(nil), mgr.stopIncarnationCalls...)
 	mgr.mu.Unlock()
-	if len(stopped) == 0 || stopped[len(stopped)-1] != "app" {
-		t.Fatalf("unpersisted consumers were not stopped: %v", stopped)
+	if len(stopCalls) != 2 {
+		t.Fatalf("unpersisted consumers were not stopped with confirmed semantics: %v", stopCalls)
+	}
+	for _, idx := range []int{0, 1} {
+		var found bool
+		for _, c := range stopCalls {
+			if c.slug == "app" && c.index == idx {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no StopReplicaIncarnation call for replica %d: %v", idx, stopCalls)
+		}
 	}
 	prx.mu.Lock()
 	deregistered := append([]string(nil), prx.deregistered...)

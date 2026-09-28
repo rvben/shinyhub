@@ -75,3 +75,33 @@ func TestHibernateElasticPool_StopsWorkersConcurrently(t *testing.T) {
 		t.Fatalf("pending stops = %v, want none when every stop confirms", w.pendingStops)
 	}
 }
+
+// TestHibernateElasticPool_PanickingStopQueuesThatSlot asserts a panic in one
+// worker's stop neither crashes the server (the stop runs on its own
+// goroutine, where no caller's recover reaches) nor drops the slot: with no
+// result to say otherwise, the stop is unconfirmed, so the slot is queued for
+// retry under the identity captured from the manager, while its siblings
+// finish normally.
+func TestHibernateElasticPool_PanickingStopQueuesThatSlot(t *testing.T) {
+	term := &fakeElasticTerminator{during: func(_ string, slotID int) {
+		if slotID == 1 {
+			panic("boom-in-terminate")
+		}
+	}}
+	w, app := newElasticHibernateConcurrencyFixture(term, 3)
+
+	if !w.hibernateElasticPool(app) {
+		t.Fatal("hibernateElasticPool returned false, want true")
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.pendingStops) != 1 {
+		t.Fatalf("pending stops = %v, want exactly the panicked slot", w.pendingStops)
+	}
+	for _, e := range w.pendingStops {
+		if e.Kind != pendingStopElasticHibernate || e.Index != 1 || e.PID != 301 || e.AppID != 1 || e.DeploymentID != 5 || e.Stopped {
+			t.Fatalf("queued entry = %+v, want an unconfirmed elastic-hibernate retry for slot 1 (pid 301, app 1, deployment 5)", e)
+		}
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/proxytrust"
+	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/supportui"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
@@ -870,7 +871,7 @@ func (p *Proxy) holdForWake(ctx context.Context, slug string, trigger func(strin
 	}
 	hold := time.Duration(p.wakeHoldNanos.Load())
 	if trigger != nil {
-		go trigger(slug)
+		safego.Go("proxy wake trigger", func() { trigger(slug) })
 	}
 	syncFn := p.onMissSync.Load()
 	if syncSuppressed {
@@ -1347,7 +1348,7 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, r *http.Request, slug strin
 		}
 	}
 	if trigger != nil {
-		go trigger(slug)
+		safego.Go("proxy wake trigger", func() { trigger(slug) })
 	}
 	writeWaitPage(w, http.StatusOK, p.decorateAppPage(loadingPage, slug, r))
 }
@@ -1652,7 +1653,7 @@ func (p *Proxy) SetPoolAppID(slug string, appID int64) {
 	}
 	for _, slotID := range staleSlots {
 		sid := slotID
-		go terminate(slug, sid)
+		safego.Go("proxy stale worker terminate", func() { terminate(slug, sid) })
 	}
 }
 
@@ -2551,7 +2552,7 @@ func (p *Proxy) Deregister(slug string) {
 		if term := p.terminate; term != nil {
 			for slotID := range pool.workers {
 				sid := slotID
-				go term(slug, sid)
+				safego.Go("proxy deregister worker terminate", func() { term(slug, sid) })
 			}
 		}
 	}
@@ -3122,9 +3123,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					wkr.spare = false
 					if wasSpare {
 						if warmSpareConsumedFn != nil {
-							go warmSpareConsumedFn(slug, d.slotID, p.poolEpoch[slug])
+							epoch := p.poolEpoch[slug]
+							safego.Go("proxy warm spare consumed", func() { warmSpareConsumedFn(slug, d.slotID, epoch) })
 						}
-						go p.ReconcileElasticWarmSpares(slug)
+						safego.Go("proxy reconcile warm spares", func() { p.ReconcileElasticWarmSpares(slug) })
 					}
 				}
 				wkr.activeConns.Add(1)
@@ -3202,12 +3204,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
 				})
 				if pl.spawned && spawnFn != nil {
-					go spawnFn(slug, pl.slotID)
+					safego.Go("proxy elastic spawn", func() { spawnFn(slug, pl.slotID) })
 				}
 				if pl.resume && resumeFn != nil {
-					go resumeFn(slug, pl.slotID)
+					safego.Go("proxy elastic resume", func() { resumeFn(slug, pl.slotID) })
 				}
-				go p.ReconcileElasticWarmSpares(slug)
+				safego.Go("proxy reconcile warm spares", func() { p.ReconcileElasticWarmSpares(slug) })
 				p.serveMissPage(rec, r, slug, nil)
 			case placedMemoryPressure:
 				p.recordReject(rec, slug, ReasonMemoryPressure, true)
@@ -3247,7 +3249,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// rather than waiting for the next watcher tick. Duplicate triggers are
 		// safe: warm expansion is idempotent and deploy-lock-guarded.
 		if trigger != nil {
-			go trigger(slug)
+			safego.Go("proxy wake trigger", func() { trigger(slug) })
 		}
 		rec.Header().Set("Retry-After", "5")
 		http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)
@@ -3278,7 +3280,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// degraded branch fires. Duplicate triggers are safe: expansion is
 		// idempotent and deploy-lock-guarded.
 		if reason == ReasonPoolDegraded && trigger != nil {
-			go trigger(slug)
+			safego.Go("proxy wake trigger", func() { trigger(slug) })
 		}
 		rec.Header().Set("Retry-After", "5")
 		http.Error(rec, MsgPoolSaturated, http.StatusServiceUnavailable)

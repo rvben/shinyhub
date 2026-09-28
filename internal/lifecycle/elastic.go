@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 // defaultElasticHealthTimeout is the readiness deadline allowed for a
@@ -57,6 +59,18 @@ type ElasticSpawner struct {
 	// process-local and therefore must never be created or resumed by a standby
 	// (including a ZDT successor that is already serving but not yet owner).
 	CanMutate func() bool
+	// EnqueuePendingStop, when set, queues a replica whose confirmed stop or
+	// identity cleanup could not be finished inline (recoverSpawn's panic
+	// cleanup) so the watcher's pending-stop retry loop completes it. Nil in
+	// tests that do not exercise that path; production wires it to
+	// (*Watcher).QueuePendingStop.
+	EnqueuePendingStop func(PendingStopEntry)
+
+	// testPanicAfterReserve, when set, is called at the start of the fenced
+	// spawn body (after the CanMutate/AcquireAppOperation checks, before
+	// anything is started) so tests can exercise recoverSpawn's cleanup
+	// without a real runtime panicking mid-launch. Nil in production.
+	testPanicAfterReserve func()
 
 	// lifetimeTimers holds the armed max_session_lifetime backstop timers,
 	// keyed by "slug/slotID". Terminate cancels the timer via Stop so that
@@ -87,6 +101,23 @@ type elasticWarmRetry struct {
 // goroutine - the proxy's spawn callback dispatches it with
 // `go spawn(slug, slotID)`.
 func (s *ElasticSpawner) Spawn(slug string, slotID int) {
+	// This deferred recover is Spawn's first statement so it also covers a
+	// panic inside CanMutate or AcquireAppOperation, before any fence is
+	// held. Nothing can have been started or registered yet at that point, so
+	// releasing the workerBooting reservation is the only cleanup needed; the
+	// fuller recoverSpawn cleanup below covers the fenced body, where a
+	// process may already be running.
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		safego.RepanicFatal(r)
+		slog.Error("elastic spawn: recovered panic before app-operation fence",
+			"slug", slug, "slotID", slotID, "panic", r, "stack", debug.Stack())
+		s.releaseReservation(slug, slotID)
+	}()
+
 	if s.CanMutate != nil && !s.CanMutate() {
 		s.releaseReservation(slug, slotID)
 		return
@@ -102,6 +133,21 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 		}
 	}
 	defer releaseAppOperation()
+	s.spawnFenced(slug, slotID)
+}
+
+// spawnFenced runs the rest of Spawn once the app-operation fence is held.
+// Its first statement defers recoverSpawn so a panic anywhere in this body -
+// including inside Manager.Start's own launch-to-publish window, which
+// re-panics wrapped as safego.Fatal and is deliberately NOT absorbed here -
+// stops and deregisters whatever was started and releases the reservation,
+// instead of leaving an orphaned process or a workerBooting slot with
+// nothing running it down.
+func (s *ElasticSpawner) spawnFenced(slug string, slotID int) {
+	defer s.recoverSpawn(slug, slotID)
+	if s.testPanicAfterReserve != nil {
+		s.testPanicAfterReserve()
+	}
 	if !s.Proxy.ElasticSlotCanStart(slug, slotID) {
 		s.releaseReservation(slug, slotID)
 		return
@@ -388,6 +434,51 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	}
 }
 
+// recoverSpawn is deferred as the first statement of Spawn's and Resume's
+// fenced inner bodies (and used directly as Resume's own pre-fence recover,
+// since a slot Resume is asked to wake already owns a process, unlike a
+// fresh Spawn's still-booting reservation). A panic past that point must not
+// leave a started or suspended process with nothing tracking it, so recovery
+// stops it with confirmed semantics, queues any unfinished half for retry,
+// and releases the reservation so pool capacity is restored.
+func (s *ElasticSpawner) recoverSpawn(slug string, slotID int) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	safego.RepanicFatal(r)
+	slog.Error("elastic worker: recovered panic", "slug", slug, "slotID", slotID, "panic", r, "stack", debug.Stack())
+	result := s.TerminateConfirmed(slug, slotID)
+	s.enqueuePendingStopIfUnconfirmed(result, "elastic worker: recovered panic; stop or identity cleanup unconfirmed")
+	s.releaseReservation(slug, slotID)
+}
+
+// enqueuePendingStopIfUnconfirmed queues a TerminateConfirmed result that did
+// not finish both halves (confirmed stop and identity clear) so the
+// watcher's pending-stop retry loop completes it. A fully-confirmed result,
+// or a nil EnqueuePendingStop (tests that do not exercise this path), is a
+// no-op.
+func (s *ElasticSpawner) enqueuePendingStopIfUnconfirmed(result ElasticTerminateResult, reason string) {
+	if result.Stopped && result.IdentityCleared {
+		return
+	}
+	if s.EnqueuePendingStop == nil {
+		return
+	}
+	s.EnqueuePendingStop(PendingStopEntry{
+		Kind:         pendingStopElasticHibernate,
+		Slug:         result.Slug,
+		Index:        result.SlotID,
+		AppID:        result.AppID,
+		PID:          result.PID,
+		Incarnation:  result.Incarnation,
+		DeploymentID: result.DeploymentID,
+		Native:       result.Native,
+		Stopped:      result.Stopped,
+		Reason:       reason,
+	})
+}
+
 // releaseReservation preserves the demand-driven failure behavior for ordinary
 // workers, while making a configured warm floor self-healing. At most one retry
 // timer exists per app; repeated failures back off to one minute so a broken
@@ -418,7 +509,7 @@ func (s *ElasticSpawner) releaseReservation(slug string, slotID int) {
 	state.attempt++
 	attempt := state.attempt
 	delay := s.warmRetryBackoff(attempt)
-	state.timer = time.AfterFunc(delay, func() {
+	state.timer = safego.AfterFunc(delay, "elastic warm spare retry", func() {
 		s.warmRetryMu.Lock()
 		if current := s.warmRetries[slug]; current == state {
 			state.timer = nil
@@ -456,7 +547,7 @@ func (s *ElasticSpawner) armLifetime(app *db.App, slug string, slotID int) {
 	// runs immediately. Old callbacks cannot consume a replacement backstop.
 	s.lifetimeMu.Lock()
 	defer s.lifetimeMu.Unlock()
-	backstop.timer = time.AfterFunc(lifetime, func() {
+	backstop.timer = safego.AfterFunc(lifetime, "elastic lifetime backstop", func() {
 		s.expireLifetime(slug, slotID, backstop)
 	})
 	if prior, loaded := s.lifetimeTimers.Swap(key, backstop); loaded {
@@ -524,6 +615,14 @@ func (s *ElasticSpawner) WarmSpareConsumed(slug string, slotID int, epoch uint64
 // a cold elastic start, and only then makes it routable. A failed resume removes
 // the client binding and slot so the next request can allocate clean capacity.
 func (s *ElasticSpawner) Resume(slug string, slotID int) {
+	// This deferred recover is Resume's first statement so it also covers a
+	// panic inside CanMutate or AcquireAppOperation, before any fence is
+	// held. Unlike Spawn's equivalent, the slot Resume is asked to wake
+	// already owns a suspended process at that point (the proxy only calls
+	// Resume when one exists), so cleanup uses the same confirmed-stop
+	// recovery as the fenced body below rather than a plain releaseReservation.
+	defer s.recoverSpawn(slug, slotID)
+
 	if s.CanMutate != nil && !s.CanMutate() {
 		s.Terminate(slug, slotID)
 		return
@@ -539,6 +638,16 @@ func (s *ElasticSpawner) Resume(slug string, slotID int) {
 		}
 	}
 	defer releaseAppOperation()
+	s.resumeFenced(slug, slotID)
+}
+
+// resumeFenced runs the rest of Resume once the app-operation fence is held.
+// Its first statement defers recoverSpawn (the same cleanup used by Resume's
+// own pre-fence recover above and by spawnFenced) so a panic anywhere in
+// this body stops the worker with confirmed semantics instead of leaving it
+// suspended and unreachable with nothing to wake or reclaim it.
+func (s *ElasticSpawner) resumeFenced(slug string, slotID int) {
+	defer s.recoverSpawn(slug, slotID)
 	if s.CanMutate != nil && !s.CanMutate() {
 		s.Terminate(slug, slotID)
 		return

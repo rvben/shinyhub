@@ -63,6 +63,7 @@ import (
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/sandbox"
 	scalewayruntime "github.com/rvben/shinyhub/internal/scaleway"
 	"github.com/rvben/shinyhub/internal/schedulespec"
@@ -2011,12 +2012,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		Proxy:               prx,
 		RuntimeCfg:          cfg.Runtime,
 		AcquireAppOperation: srv.AcquireAppOperation,
+		EnqueuePendingStop:  watcher.QueuePendingStop,
 	}
 	prx.SetSpawnFunc(func(slug string, slotID int) {
-		go elasticSpawner.Spawn(slug, slotID)
+		safego.Go("elastic spawn", func() { elasticSpawner.Spawn(slug, slotID) })
 	})
 	prx.SetResumeFunc(func(slug string, slotID int) {
-		go elasticSpawner.Resume(slug, slotID)
+		safego.Go("elastic resume", func() { elasticSpawner.Resume(slug, slotID) })
 	})
 	prx.SetWarmSpareConsumedFunc(elasticSpawner.WarmSpareConsumed)
 	prx.SetTerminateFunc(elasticSpawner.Terminate)

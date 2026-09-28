@@ -17,6 +17,7 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/safego"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -530,6 +531,13 @@ type Watcher struct {
 	// terminated inline); production always wires it via
 	// SetElasticTerminator. Set once at startup before Start.
 	elasticTerm elasticTerminator
+
+	// testPanicAfterWakeStart, when set, is called with a started replica's
+	// index from inside the wake per-replica goroutine, after the replica's
+	// incarnation is captured but before it is persisted. Test-only hook for
+	// exercising the wake panic-recovery path without a runtime that actually
+	// crashes mid-launch.
+	testPanicAfterWakeStart func(idx int)
 }
 
 // wakeDrainTimeout bounds how long Start waits for outstanding wake
@@ -631,9 +639,13 @@ func (w *Watcher) Start(ctx context.Context) {
 // runGuarded runs fn, recovering and logging any panic so a bug in one
 // background loop iteration cannot crash the whole process and take down every
 // app's routing and self-healing. The caller's loop continues on the next tick.
+// A watchdog restart reaches Manager.Start's launch-to-publish window, so a
+// safego.Fatal panic from there is re-panicked instead of absorbed: swallowing
+// it would leave a launched process with no entry tracking it.
 func runGuarded(name string, fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
+			safego.RepanicFatal(r)
 			slog.Error("lifecycle: recovered panic in background loop",
 				"loop", name, "panic", r, "stack", string(debug.Stack()))
 		}
@@ -1143,6 +1155,7 @@ func (w *Watcher) hibernateElasticPool(app *db.App) bool {
 		wg.Add(1)
 		go func(i, slotID int) {
 			defer wg.Done()
+			defer safego.Recover("elastic hibernate stop")()
 			results[i] = w.elasticTerm.TerminateConfirmed(app.Slug, slotID)
 		}(i, info.Index)
 	}
@@ -1516,6 +1529,79 @@ func derefIntOr0(p *int) int {
 type wakeReplicaFailure struct {
 	index int
 	err   error
+}
+
+// startedWakeReplica captures one replica's identity from the moment a wake
+// attempt started it: its manager incarnation and PID, plus the row identity
+// the wake persists for it (row), so a later failure
+// elsewhere in the same wake attempt (a sibling replica's persistence
+// failure, or a panic) can stop it with confirmed semantics even when the
+// replica's row was never - or not yet - persisted as running.
+type startedWakeReplica struct {
+	index       int
+	incarnation uint64
+	pid         int
+	row         db.ReplicaRuntimeIdentity
+	logRunID    string
+}
+
+// replicaLogRunID returns the log run ID of the replica at slug/index when it
+// is still the process with pid, or "" when the manager no longer holds it.
+func (w *Watcher) replicaLogRunID(slug string, index, pid int) string {
+	for _, info := range w.mgr.AllForSlug(slug) {
+		if info != nil && info.Index == index && info.PID == pid {
+			return info.LogRunID
+		}
+	}
+	return ""
+}
+
+// stopStartedWakeReplicas stops every replica a wake attempt started before
+// the attempt was aborted. mgr.Stop(slug) alone is not enough here: it can
+// return nil on an unconfirmed exit, after which the wake guard's deferred
+// AbortWake would revert the app to hibernated with the process still alive.
+// So each replica is stopped individually against the exact incarnation
+// captured when it started; a confirmed exit (or an incarnation already gone,
+// itself proof of exit) marks its row crashed and clears its identity, the
+// same write the pendingStops retry loop performs on its own confirmed
+// branch (retryRecoveryUnreadyStop). One that cannot be confirmed is queued
+// into pendingStops instead, so isPendingStop keeps both the crash dispatch
+// loop and the next wake's boot loop off that index until a later tick
+// proves the exit.
+func (w *Watcher) stopStartedWakeReplicas(slug string, appID int64, started []startedWakeReplica) {
+	for _, sr := range started {
+		err := w.mgr.StopReplicaIncarnation(slug, sr.index, sr.incarnation)
+		if err != nil && !errors.Is(err, process.ErrIncarnationGone) {
+			slog.Warn("watcher: wake cleanup stop unconfirmed; queuing retry",
+				"slug", slug, "index", sr.index, "err", err)
+			if !w.mgr.ClaimStopPending(slug, sr.index, sr.incarnation) {
+				// The slot no longer holds this incarnation - it left some other,
+				// safe way between the failed stop above and this claim, so there
+				// is nothing left to queue a retry for.
+				continue
+			}
+			w.QueuePendingStop(PendingStopEntry{
+				Kind:         pendingStopRecoveryUnready,
+				Slug:         slug,
+				Index:        sr.index,
+				AppID:        appID,
+				PID:          sr.row.PID,
+				Port:         sr.row.Port,
+				EndpointURL:  sr.row.EndpointURL,
+				WorkerID:     sr.row.WorkerID,
+				DeploymentID: sr.row.DeploymentID,
+				Incarnation:  sr.incarnation,
+				Reason:       "wake aborted: replica stop could not be confirmed",
+				LogRunID:     sr.logRunID,
+			})
+			continue
+		}
+		if _, werr := w.store.MarkReplicaCrashedClearingIdentityIfCurrent(db.UpsertReplicaParams{
+			AppID: appID, Index: sr.index, Reason: "wake aborted after starting this replica",
+		}, sr.row); werr != nil {
+			slog.Warn("watcher: persist wake cleanup stop failed", "slug", slug, "index", sr.index, "err", werr)
+		}
+	}
 }
 
 // wakeReplica brings one replica back up. For a replica persisted as suspended it
@@ -2979,8 +3065,21 @@ func (w *Watcher) driveWakingApp(slug string) {
 			var wg sync.WaitGroup
 			var started atomic.Int32
 			var persistenceFailed atomic.Bool
+			var cleanupNeeded atomic.Bool
 			var firstFailure atomic.Pointer[wakeReplicaFailure]
+			var startedMu sync.Mutex
+			var startedReplicas []startedWakeReplica
+			fenced := 0
 			for i := 0; i < app.Replicas; i++ {
+				if w.isPendingStop(replicaKey{slug, i}) {
+					fenced++
+					// A confirmed-stop retry still owns this slot (queued by an
+					// earlier crash, or by this same cleanup below on a previous
+					// wake attempt); starting a new process here could race the
+					// retry and double-run the index. The retry loop dequeues it
+					// once confirmed, and a later wake tick picks the index back up.
+					continue
+				}
 				wg.Add(1)
 				go func(idx int) {
 					defer wg.Done()
@@ -2989,6 +3088,36 @@ func (w *Watcher) driveWakingApp(slug string) {
 						slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
 						firstFailure.CompareAndSwap(nil, &wakeReplicaFailure{index: idx, err: err})
 						return
+					}
+					// The replica is now live in the manager. A panic anywhere
+					// from here through started.Add(1) below must not leave it
+					// untracked: recover before anything else, and capture enough
+					// identity up front (incarnation + PID) that cleanup can stop
+					// it with confirmed semantics even if the panic lands before
+					// persistence below ever runs.
+					defer func() {
+						if r := recover(); r != nil {
+							safego.RepanicFatal(r)
+							slog.Error("watcher: wake replica panicked after start",
+								"slug", slug, "idx", idx, "panic", r, "stack", string(debug.Stack()))
+							firstFailure.CompareAndSwap(nil, &wakeReplicaFailure{index: idx, err: fmt.Errorf("panic: %v", r)})
+							cleanupNeeded.Store(true)
+						}
+					}()
+					if gen, pid, ok := w.mgr.ReplicaIncarnation(slug, idx); ok {
+						runID := w.replicaLogRunID(slug, idx, pid)
+						startedMu.Lock()
+						startedReplicas = append(startedReplicas, startedWakeReplica{
+							index: idx, incarnation: gen, pid: pid, logRunID: runID,
+							row: db.ReplicaRuntimeIdentity{
+								PID: res.PID, Port: res.Port, EndpointURL: res.EndpointURL,
+								WorkerID: res.WorkerID, DeploymentID: deploymentID,
+							},
+						})
+						startedMu.Unlock()
+					}
+					if w.testPanicAfterWakeStart != nil {
+						w.testPanicAfterWakeStart(idx)
 					}
 					pid, port := res.PID, res.Port
 					if err := w.store.UpsertReplica(db.UpsertReplicaParams{
@@ -3015,12 +3144,24 @@ func (w *Watcher) driveWakingApp(slug string) {
 				}(i)
 			}
 			wg.Wait()
-			if persistenceFailed.Load() {
-				opErr = errors.New("persist woken consumer provenance")
-				w.prx.Deregister(slug)
-				if err := w.mgr.Stop(slug); err != nil {
-					slog.Warn("watcher: stop wake after provenance persistence failure", "slug", slug, "err", err)
+			if persistenceFailed.Load() || cleanupNeeded.Load() {
+				if persistenceFailed.Load() {
+					opErr = errors.New("persist woken consumer provenance")
+				} else {
+					opErr = errors.New("wake panicked after starting a replica")
 				}
+				w.prx.Deregister(slug)
+				w.stopStartedWakeReplicas(slug, app.ID, startedReplicas)
+				return
+			}
+			if started.Load() == 0 && fenced > 0 && firstFailure.Load() == nil {
+				// Every slot this wake could try is fenced by a pending stop, so
+				// nothing booted but nothing failed either. Leave the wake
+				// unfinalized: the deferred guard reverts the app to hibernated,
+				// and a later wake boots the slots once the retry loop confirms
+				// the stops.
+				opErr = errors.New("wake deferred: every replica slot has a stop pending confirmation")
+				slog.Info("watcher: wake deferred; replica stops pending confirmation", "slug", slug, "fenced", fenced)
 				return
 			}
 			if started.Load() == 0 {
