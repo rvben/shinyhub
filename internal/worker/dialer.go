@@ -100,6 +100,39 @@ func (r *rotatingCert) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, e
 type mtlsDialer struct {
 	clientCert *rotatingCert
 	caPool     *x509.CertPool
+
+	mu    sync.Mutex
+	cache map[string]cachedTransport // keyed by worker node id; one live entry per worker
+	now   func() time.Time
+}
+
+// transportCacheIdleTTL is how long a cached worker transport may go unused
+// before a later cache miss evicts it. Workers that leave the fleet are never
+// announced to the dialer, so idleness is the only signal that an entry is
+// dead; without it the cache would grow with every node ID ever dialed. It is
+// well above IdleConnTimeout, so an evicted transport holds no idle
+// connections worth keeping, and an active worker is never evicted.
+const transportCacheIdleTTL = 10 * time.Minute
+
+// transportKey identifies the worker a cached transport was built for. A
+// transport stays valid for as long as the worker's advertise address and the
+// dialer's CA pool stay the same: the client certificate rotates through
+// GetClientCertificate without needing a new transport, but a different
+// address or CA pool means the cached transport no longer belongs to the same
+// peer.
+type transportKey struct {
+	nodeID string
+	addr   string
+	ca     *x509.CertPool
+}
+
+// cachedTransport pairs a built transport with the key it was built for, so a
+// lookup can detect that the worker's identity moved on without a second map
+// lookup.
+type cachedTransport struct {
+	key      transportKey
+	tr       *http.Transport
+	lastUsed time.Time
 }
 
 // NewMTLSDialer constructs the default control-plane-to-worker dialer. mintClient
@@ -112,7 +145,7 @@ func NewMTLSDialer(mintClient func() (tls.Certificate, error), caPool *x509.Cert
 	if err != nil {
 		return nil, err
 	}
-	return &mtlsDialer{clientCert: rc, caPool: caPool}, nil
+	return &mtlsDialer{clientCert: rc, caPool: caPool, cache: make(map[string]cachedTransport), now: time.Now}, nil
 }
 
 func (d *mtlsDialer) tlsConfig(w db.Worker) *tls.Config {
@@ -149,14 +182,69 @@ func (d *mtlsDialer) transport(w db.Worker) *http.Transport {
 	}
 }
 
+// transportFor returns the cached *http.Transport for w, building and caching
+// one on a cache miss. It is safe to share the returned transport across every
+// call for the same worker identity: its connection pool and TLS session cache
+// are only useful if kept alive between calls, and the client certificate
+// rotates through GetClientCertificate without needing a new transport. When
+// the worker's advertise address or the dialer's CA pool has changed since the
+// cached entry was built, the stale transport is retired (its idle connections
+// closed, since nothing will address them again) and a fresh one replaces it.
+// A cache miss also evicts every other entry unused for transportCacheIdleTTL,
+// so the cache tracks the workers currently being dialed rather than every
+// worker ever seen.
+func (d *mtlsDialer) transportFor(w db.Worker) *http.Transport {
+	key := transportKey{nodeID: w.NodeID, addr: w.AdvertiseAddr, ca: d.caPool}
+	now := d.now()
+
+	d.mu.Lock()
+	if entry, ok := d.cache[w.NodeID]; ok && entry.key == key {
+		entry.lastUsed = now
+		d.cache[w.NodeID] = entry
+		d.mu.Unlock()
+		return entry.tr
+	}
+	var retired []*http.Transport
+	if stale, ok := d.cache[w.NodeID]; ok {
+		retired = append(retired, stale.tr)
+	}
+	for id, entry := range d.cache {
+		if id != w.NodeID && now.Sub(entry.lastUsed) >= transportCacheIdleTTL {
+			retired = append(retired, entry.tr)
+			delete(d.cache, id)
+		}
+	}
+	tr := d.transport(w)
+	d.cache[w.NodeID] = cachedTransport{key: key, tr: tr, lastUsed: now}
+	d.mu.Unlock()
+
+	for _, old := range retired {
+		old.CloseIdleConnections()
+	}
+	return tr
+}
+
+// forget drops the cached transport for nodeID, closing its idle connections,
+// so a worker that can no longer be dialed does not keep one alive.
+func (d *mtlsDialer) forget(nodeID string) {
+	d.mu.Lock()
+	entry, ok := d.cache[nodeID]
+	delete(d.cache, nodeID)
+	d.mu.Unlock()
+	if ok {
+		entry.tr.CloseIdleConnections()
+	}
+}
+
 func (d *mtlsDialer) DialWorker(w db.Worker) (*http.Client, string, error) {
 	if w.Revoked() {
+		d.forget(w.NodeID)
 		return nil, "", fmt.Errorf("worker %q is revoked", w.NodeID)
 	}
 	if w.AdvertiseAddr == "" {
 		return nil, "", fmt.Errorf("worker %q has no advertise address", w.NodeID)
 	}
-	client := &http.Client{Transport: d.transport(w)}
+	client := &http.Client{Transport: d.transportFor(w)}
 	return client, "https://" + w.AdvertiseAddr, nil
 }
 
