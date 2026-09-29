@@ -30,6 +30,7 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 			FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
 			ServiceAccountCredentials bool `json:"service_account_credentials"`
 			ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
+			StaleUVLockRefusal        bool `json:"stale_uv_lock_refusal"`
 		} `json:"capabilities"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
@@ -70,6 +71,9 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 	if !got.Capabilities.ScheduleDeployConvergence {
 		t.Errorf("schedule_deploy_convergence not advertised")
+	}
+	if !got.Capabilities.StaleUVLockRefusal {
+		t.Errorf("stale_uv_lock_refusal not advertised")
 	}
 }
 

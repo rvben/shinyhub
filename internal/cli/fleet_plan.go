@@ -209,6 +209,7 @@ type serverCaps struct {
 	ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
 	ScheduleRefreshStale      bool `json:"schedule_refresh_stale"`
 	DeployPreflight           bool `json:"deploy_preflight"`
+	StaleUVLockRefusal        bool `json:"stale_uv_lock_refusal"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just

@@ -58,6 +58,10 @@ type serverCapabilities struct {
 	ScheduleRefreshStale      bool `json:"schedule_refresh_stale"`
 	ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
 	DeployPreflight           bool `json:"deploy_preflight"`
+	// StaleUVLockRefusal: a deploy whose uv.lock no longer records what its
+	// pyproject.toml declares is refused with 422, so a CLI can run the same
+	// check on the archive it is about to upload and report it at plan time.
+	StaleUVLockRefusal bool `json:"stale_uv_lock_refusal"`
 }
 
 // handleServerInfo advertises server capability flags so a fleet-aware CLI
@@ -86,6 +90,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			ScheduleDeployConvergence: true,
 			ScheduleRefreshStale:      true,
 			DeployPreflight:           true,
+			StaleUVLockRefusal:        true,
 		},
 		Runtimes: detectRuntimes(),
 	})

@@ -202,7 +202,20 @@ uploaded bundle, whatever the runtime or launch command. It never runs when an
 already-accepted deployment comes back up (a restart, rollback, restore,
 replica recovery or scale-up), so a deployment accepted with a stale lock
 before this check existed keeps working: when its environment has to be
-rebuilt, a plain `uv sync` re-resolves it as it did at the time.
+rebuilt, a plain `uv sync` re-resolves it as it did at the time. That holds on
+managed container runtimes too (Fargate, Scaleway), where the control plane
+tells the runner image to resolve such a lock again (see the
+[managed runner contract](fargate-runner-contract.md#python-apps)).
+
+The same check runs before anything is uploaded, on the archive a deploy would
+send, so `.shinyhubignore` and fleet `[[bundle_file]]` inputs count exactly as
+they will at deploy. `shinyhub run --check` and `shinyhub doctor` fail with the
+upload's own message. A plain `shinyhub run` or `shinyhub dev` warns and keeps
+serving, because the local sync still resolves the lock; each reload checks
+again and warns when an edit makes the lock stale. `shinyhub fleet
+plan` and `apply` report it before the first change, against servers that
+advertise `stale_uv_lock_refusal`; an older server accepts such an upload, so
+the plan does not refuse it there.
 
 The lock records absolute download URLs, so every replica must be able to reach
 the index the lock was made against. To install through a different index, lock

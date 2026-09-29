@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/process"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/spf13/cobra"
 )
@@ -226,7 +227,8 @@ func runLocalDoctor(rawDir, requestedSlug string, checks []doctorCheck) (doctorL
 		return ctx, appendLocalSkipped(checks, "the app directory is unavailable")
 	}
 	checks = append(checks, doctorPass("app-directory", ctx.dir))
-	checks = append(checks, doctorBundleContents(ctx.dir))
+	bundleCheck, preview := doctorBundleContents(ctx.dir)
+	checks = append(checks, bundleCheck, doctorUVLock(preview))
 
 	ctx.slug = requestedSlug
 	if ctx.slug == "" {
@@ -301,6 +303,7 @@ func runLocalDoctor(rawDir, requestedSlug string, checks []doctorCheck) (doctorL
 func appendLocalSkipped(checks []doctorCheck, reason string) []doctorCheck {
 	return append(checks,
 		doctorSkip("bundle-contents", reason),
+		doctorSkip("uv-lock", reason),
 		doctorSkip("app-slug", reason),
 		doctorSkip("manifest", reason),
 		doctorSkip("entrypoint", reason),
@@ -311,17 +314,39 @@ func appendLocalSkipped(checks []doctorCheck, reason string) []doctorCheck {
 // (oversized files, protected data/dataset directories). It runs regardless
 // of app type, right after the directory itself is confirmed readable, so a
 // bundle that would deploy incompletely is flagged before anything else.
-func doctorBundleContents(dir string) doctorCheck {
+// The preview it built is returned for the checks that judge the archive
+// itself; it is nil when the bundle could not be built.
+func doctorBundleContents(dir string) (doctorCheck, *bundlePreview) {
 	preview, err := buildBundlePreview(dir)
 	if err != nil {
-		return doctorFail("bundle-contents", err.Error(), "Fix the error preventing the bundle from being built.", KindValidation, 1)
+		return doctorFail("bundle-contents", err.Error(), "Fix the error preventing the bundle from being built.", KindValidation, 1), nil
 	}
 	rejections := contentRejections(preview.ProtectedPaths)
 	if len(rejections) == 0 {
-		return doctorPass("bundle-contents", fmt.Sprintf("%d file(s) ready to deploy", preview.FileCount))
+		return doctorPass("bundle-contents", fmt.Sprintf("%d file(s) ready to deploy", preview.FileCount)), preview
 	}
 	return doctorWarn("bundle-contents", summarizeSkippedPaths(rejections),
-		"Push large or protected data separately with `shinyhub data push`, or adjust .shinyhubignore.")
+		"Push large or protected data separately with `shinyhub data push`, or adjust .shinyhubignore."), preview
+}
+
+// doctorUVLock runs the server's upload-time stale-lock check on the archive a
+// deploy would send, so a uv.lock the server would refuse with 422 fails here
+// with the same message. The check is one-sided: a lock it cannot judge
+// (dynamic dependencies, an unfamiliar lock format) passes, exactly as the
+// server accepts it.
+func doctorUVLock(preview *bundlePreview) doctorCheck {
+	if preview == nil {
+		return doctorSkip("uv-lock", "the bundle could not be built")
+	}
+	err := checkBundleLock(preview)
+	switch {
+	case err == nil:
+		return doctorPass("uv-lock", "no stale uv.lock in the bundle")
+	case errors.Is(err, process.ErrStaleLock):
+		return doctorFail("uv-lock", err.Error(), "Run `uv lock` in the app directory and commit the updated uv.lock.", KindValidation, 1)
+	default:
+		return doctorWarn("uv-lock", fmt.Sprintf("could not check uv.lock: %v", err), "Fix the bundle, then run `shinyhub doctor` again.")
+	}
 }
 
 // doctorPythonDependencies catches the CLI's most common Python deploy

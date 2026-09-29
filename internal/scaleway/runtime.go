@@ -520,6 +520,9 @@ func (r *Runtime) replicaEnv(p process.StartParams) (map[string]string, map[stri
 	if p.AppVersion != "" {
 		env["SHINYHUB_APP_VERSION"] = p.AppVersion
 	}
+	if mode := process.RunnerLockMode(p.Dir); mode != "" {
+		env[process.UVLockModeEnv] = mode
+	}
 	env["SHINYHUB_CONTROL_PLANE_URL"] = r.cfg.ControlPlaneURL
 	if p.ContentDigest != "" {
 		secret["SHINYHUB_BUNDLE_TOKEN"] = bundletoken.Mint(

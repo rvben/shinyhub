@@ -34,7 +34,8 @@ var ErrStaleLock = errors.New("uv.lock is out of date with pyproject.toml")
 // before any build runs. A stale lock that still reaches a build (an
 // activation of a deployment accepted before that check existed, or a local
 // run) gets a plain `uv sync`, which re-resolves and installs what
-// pyproject.toml declares instead of the lock's outdated set.
+// pyproject.toml declares instead of the lock's outdated set. RunnerLockMode
+// carries the same decision to a managed-container runner.
 //
 // Without a uv.lock there is nothing to preserve, and a plain `uv sync` creates
 // one (nil flags).
@@ -46,6 +47,39 @@ func LockSyncFlags(dir string) []string {
 		return nil
 	}
 	return []string{"--frozen"}
+}
+
+// UVLockModeEnv names the variable a managed-container runtime (Fargate,
+// Scaleway) sets in the replica environment to tell the runner image how to
+// install a shipped uv.lock. The runner installs the lock with --frozen unless
+// the variable is UVLockModeResolve.
+const UVLockModeEnv = "SHINYHUB_UV_LOCK"
+
+// UVLockModeResolve tells the runner to install with a plain `uv sync`, which
+// re-resolves pyproject.toml, instead of installing the shipped lock as-is.
+const UVLockModeResolve = "resolve"
+
+// RunnerLockMode returns the SHINYHUB_UV_LOCK value for the bundle in dir, or
+// "" when the variable is to be left unset. It gives a managed-container runner
+// the fallback LockSyncFlags gives a host build: a stale uv.lock is resolved
+// again instead of installed without the requirements pyproject.toml adds.
+//
+// Only a lock CheckLockCurrent can show is stale yields UVLockModeResolve. A
+// bundle directory that is missing on the control plane, or a lock the check
+// cannot judge, leaves the variable unset, so the runner keeps its default of
+// installing the lock as recorded, which is also all a runner image that
+// predates the variable does.
+func RunnerLockMode(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(dir, "uv.lock")); err != nil {
+		return ""
+	}
+	if CheckLockCurrent(dir) == nil {
+		return ""
+	}
+	return UVLockModeResolve
 }
 
 // CheckLockCurrent reports ErrStaleLock when dir's uv.lock records a different
@@ -71,6 +105,21 @@ func LockSyncFlags(dir string) []string {
 // verdict to uv. It rejects only a lock it can show is stale. Dependency groups
 // it cannot resolve are left out of the comparison rather than failing it.
 func CheckLockCurrent(dir string) error {
+	pyproject, err := os.ReadFile(filepath.Join(dir, "pyproject.toml"))
+	if err != nil {
+		return nil
+	}
+	lock, err := os.ReadFile(filepath.Join(dir, "uv.lock"))
+	if err != nil {
+		return nil
+	}
+	return CheckLockFiles(pyproject, lock)
+}
+
+// CheckLockFiles is CheckLockCurrent over the contents of a project's
+// pyproject.toml and uv.lock, for a caller that holds them outside a
+// directory, such as the archive a deploy is about to upload.
+func CheckLockFiles(pyproject, lock []byte) error {
 	var project struct {
 		Project *struct {
 			Name                 string              `toml:"name"`
@@ -85,7 +134,7 @@ func CheckLockCurrent(dir string) error {
 			} `toml:"uv"`
 		} `toml:"tool"`
 	}
-	if _, err := toml.DecodeFile(filepath.Join(dir, "pyproject.toml"), &project); err != nil {
+	if _, err := toml.Decode(string(pyproject), &project); err != nil {
 		return nil
 	}
 	p := project.Project
@@ -114,20 +163,20 @@ func CheckLockCurrent(dir string) error {
 	}
 	declaredGroups, groupsKnown := resolveDependencyGroups(project.DependencyGroups, project.Tool.UV.DevDependencies)
 
-	var lock struct {
+	var lockFile struct {
 		Package []uvLockPackage `toml:"package"`
 	}
-	if _, err := toml.DecodeFile(filepath.Join(dir, "uv.lock"), &lock); err != nil {
+	if _, err := toml.Decode(string(lock), &lockFile); err != nil {
 		return nil
 	}
 	root := normalizePackageName(p.Name)
-	idx := slices.IndexFunc(lock.Package, func(pkg uvLockPackage) bool {
+	idx := slices.IndexFunc(lockFile.Package, func(pkg uvLockPackage) bool {
 		return normalizePackageName(pkg.Name) == root && (pkg.Source["virtual"] == "." || pkg.Source["editable"] == ".")
 	})
 	if idx < 0 {
 		return nil
 	}
-	pkg := lock.Package[idx]
+	pkg := lockFile.Package[idx]
 	locked := map[string]bool{}
 	lockedGroups := map[string]bool{}
 	if pkg.Metadata == nil {

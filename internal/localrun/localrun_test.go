@@ -11,12 +11,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 func skipIfNoPython3(t *testing.T) {
@@ -630,4 +632,202 @@ time.sleep(0.1)  # let the grandchild start
 		t.Errorf("grandchild (pid %d) is still alive after Run returned; subprocess group was not killed", grandchildPID)
 	}
 	// If sigErr != nil, the process is gone - correct behaviour.
+}
+
+func TestRun_CheckBundle(t *testing.T) {
+	stale := fmt.Errorf("%w: pyproject.toml declares six, which uv.lock does not record. Run `uv lock` and deploy again", process.ErrStaleLock)
+
+	t.Run("check refuses a stale lock before creating state", func(t *testing.T) {
+		dir := writeHealthyFixture(t)
+		stateDir := filepath.Join(t.TempDir(), "state")
+		var gotDir string
+		err := Run(context.Background(), Options{
+			BundleDir: dir, StateDir: stateDir, Check: true, NoReload: true,
+			CheckBundle: func(sourceDir string, _ []bundle.FileInputSnapshot) error {
+				gotDir = sourceDir
+				return stale
+			},
+		}, io.Discard, io.Discard)
+		var validationErr *ValidationError
+		if !errors.As(err, &validationErr) || err.Error() != stale.Error() {
+			t.Fatalf("error = %v, want ValidationError %q", err, stale)
+		}
+		if resolved, _ := filepath.EvalSymlinks(dir); gotDir != resolved {
+			t.Fatalf("CheckBundle got %q, want the resolved source %q", gotDir, resolved)
+		}
+		if _, statErr := os.Stat(stateDir); !os.IsNotExist(statErr) {
+			t.Fatalf("state dir created before the refusal: %v", statErr)
+		}
+	})
+
+	t.Run("a normal run warns once and keeps going", func(t *testing.T) {
+		dir := writeHealthyFixture(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var stderr bytes.Buffer
+		err := Run(ctx, Options{
+			BundleDir: dir, StateDir: t.TempDir(),
+			CheckBundle: func(string, []bundle.FileInputSnapshot) error {
+				// Cancelling here stops the run at its first ctx check after
+				// the workspace is prepared, which proves it went past the
+				// verdict instead of returning it.
+				cancel()
+				return stale
+			},
+		}, io.Discard, &stderr)
+		if err != nil {
+			t.Fatalf("a normal run must continue past a stale lock, got %v", err)
+		}
+		want := "Warning: a deploy of this bundle will be refused: " + stale.Error() + "\n"
+		if stderr.String() != want {
+			t.Fatalf("stderr = %q, want exactly one warning %q", stderr.String(), want)
+		}
+	})
+
+	t.Run("an unrelated failure only warns, even under check", func(t *testing.T) {
+		dir := writeHealthyFixture(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var stderr bytes.Buffer
+		err := Run(ctx, Options{
+			BundleDir: dir, StateDir: t.TempDir(), Check: true, NoReload: true,
+			CheckBundle: func(string, []bundle.FileInputSnapshot) error {
+				return errors.New("bundle exceeds the size limit")
+			},
+		}, io.Discard, &stderr)
+		if err != nil {
+			t.Fatalf("a check that could not run must not fail the preflight: %v", err)
+		}
+		if !strings.Contains(stderr.String(), "Warning: could not check uv.lock against pyproject.toml: bundle exceeds the size limit") {
+			t.Fatalf("stderr = %q, want the could-not-check warning", stderr.String())
+		}
+	})
+}
+
+// lockedBuffer is a bytes.Buffer a running Run may write while the test reads.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+type lockSave struct {
+	lock, version string
+	wantWarnings  int
+}
+
+func TestRun_ReloadWarnsWhenTheLockVerdictChanges(t *testing.T) {
+	skipIfNoPython3(t)
+	t.Run("current at startup", func(t *testing.T) {
+		runLockReloads(t, "current", 0, []lockSave{
+			{"current", "v2", 0},
+			{"stale", "v3", 1},
+			{"stale", "v4", 1}, // still stale: not repeated
+			{"current", "v5", 1},
+			{"stale", "v6", 2}, // stale again after being fixed: reported again
+		})
+	})
+	t.Run("stale at startup", func(t *testing.T) {
+		// The startup warning already reported this verdict.
+		runLockReloads(t, "stale", 1, []lockSave{{"stale", "v2", 1}})
+	})
+}
+
+// runLockReloads runs an app whose CheckBundle verdict follows lock.txt,
+// starting from startLock, and applies each save in turn, asserting how many
+// refusal warnings stderr holds once that save's reload is serving.
+func runLockReloads(t *testing.T, startLock string, startWarnings int, saves []lockSave) {
+	t.Helper()
+	source := t.TempDir()
+	server := `import http.server, os
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = open("version.txt").read().strip().encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, fmt, *args): pass
+http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
+`
+	for name, body := range map[string]string{
+		"server.py":     server,
+		"version.txt":   "v1\n",
+		"lock.txt":      startLock + "\n",
+		"shinyhub.toml": "[app]\ncommand = [\"python3\", \"server.py\"]\n",
+	} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := fmt.Errorf("%w: pyproject.toml declares six, which uv.lock does not record. Run `uv lock` and deploy again", process.ErrStaleLock)
+	// The verdict follows lock.txt in the source the check is handed, so each
+	// save below decides what that reload's check reports.
+	checkBundle := func(sourceDir string, _ []bundle.FileInputSnapshot) error {
+		raw, err := os.ReadFile(filepath.Join(sourceDir, "lock.txt"))
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(string(raw)) == "stale" {
+			return stale
+		}
+		return nil
+	}
+
+	port := deploy.AllocatePort()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stderr := &lockedBuffer{}
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			BundleDir: source, StateDir: t.TempDir(), Slug: "lock-reload", Port: port,
+			CheckBundle: checkBundle,
+		}, io.Discard, stderr)
+	}()
+	url := fmt.Sprintf("http://127.0.0.1:%d/app/lock-reload/", port)
+	waitForBody(t, url, "v1", 5*time.Second)
+
+	warning := "Warning: a deploy of this bundle will be refused: " + stale.Error() + "\n"
+	save := func(lock, version string, wantWarnings int) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(source, "lock.txt"), []byte(lock+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(source, "version.txt"), []byte(version+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// The reload serving this version judged the source after both saves.
+		waitForBody(t, url, version, 6*time.Second)
+		if got := strings.Count(stderr.String(), warning); got != wantWarnings {
+			t.Fatalf("after saving lock=%s version=%s: %d refusal warnings, want %d; stderr:\n%s", lock, version, got, wantWarnings, stderr.String())
+		}
+	}
+	if got := strings.Count(stderr.String(), warning); got != startWarnings {
+		t.Fatalf("at startup: %d refusal warnings, want %d; stderr:\n%s", got, startWarnings, stderr.String())
+	}
+	for _, s := range saves {
+		save(s.lock, s.version, s.wantWarnings)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runner shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not stop")
+	}
 }

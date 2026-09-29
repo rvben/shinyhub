@@ -142,6 +142,9 @@ func executeLocalRun(cmd *cobra.Command, dir, slug string, f *localRunFlags, con
 		Fresh:     f.fresh,
 		Open:      f.open,
 		Check:     f.check,
+		// The server refuses a stale uv.lock on upload; judging the exact
+		// archive a deploy would send makes --check fail the same way.
+		CheckBundle: checkSourceLock,
 	}
 	if configure != nil {
 		configure(&opts)

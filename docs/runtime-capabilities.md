@@ -71,7 +71,11 @@ an existing app, or app-creation rights for a new slug, and writes nothing.
 Servers that offer it advertise `deploy_preflight` in `GET /api/server-info`
 capabilities; `shinyhub fleet plan` and `apply` use it to rehearse every
 create, adopt, and redeploy before the first change, falling back to the
-runtime-capabilities probe above on servers that predate it.
+runtime-capabilities probe above on servers that predate it. The endpoint
+does not see the bundle's files, so a stale `uv.lock` is judged by the CLI on
+the archive it would upload, against servers that advertise
+`stale_uv_lock_refusal` (see
+[shipped `uv.lock` files](environment.md#shipped-uvlock-files)).
 
 For topology changes, see [worker isolation](isolation.md),
 [scheduled jobs](schedules.md), and [clustered HA](deployment/ha-data-plane.md).
