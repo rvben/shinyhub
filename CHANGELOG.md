@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.18.3](https://github.com/rvben/shinyhub/compare/v0.18.2...v0.18.3) - 2026-09-29
+
+### Fixed
+
+- **fleet**: report a stale uv.lock at plan time against servers that refuse it ([7396928](https://github.com/rvben/shinyhub/commit/7396928421bbf8dc78ac2be59bbd498fff04d614))
+- **cli**: refuse a stale uv.lock in run --check and doctor as the upload does ([545e689](https://github.com/rvben/shinyhub/commit/545e6897d96f6e0715f7022d0217a3e2a7aa636d))
+- **runtime**: resolve a stale uv.lock again on managed container runners ([bf62013](https://github.com/rvben/shinyhub/commit/bf620134382194c3d0c55134882d92095ab17c25))
+
 ## [0.18.2](https://github.com/rvben/shinyhub/compare/v0.18.1...v0.18.2) - 2026-09-29
 
 ### Fixed
